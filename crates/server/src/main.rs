@@ -1,5 +1,7 @@
-use crossbeam::channel::{Receiver, Sender};
-use game::{ClientPacket, Region, RegionPacket};
+//! Server
+#![deny(missing_docs)]
+use crossbeam::channel::Sender;
+use game::{ClientPacket, GameInstance};
 
 /// Represents a region of the world. After going though ingress, the client
 /// connects to this instance directly to download game data and send / receive
@@ -20,15 +22,8 @@ use game::{ClientPacket, Region, RegionPacket};
 /// - Execute game tick.
 /// - If the loop didn't take a full TICK_TIME, wait until full TICK_TIME has passed.
 pub struct ServerInstance {
-    game: Region,
+    game: GameInstance,
     client_sender: Sender<ClientPacket>,
-    region_sender: Sender<RegionPacket>,
-    receiver: Receiver<RegionPacket>,
-}
-
-enum GamePacket {
-    RegionPacket(RegionPacket),
-    ClientPacket(ClientPacket),
 }
 
 /// ## Network Loop

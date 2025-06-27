@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/client", "crates/game",  "crates/server"
+    "crates/client", "crates/game",  "crates/server", #"crates/rusqlite"
 ]
 
 [profile.wasm-release]
