@@ -1,14 +1,27 @@
 //! Server
 #![deny(missing_docs)]
-use crossbeam::channel::Sender;
-use game::{ClientPacket, GameInstance};
+use std::{fmt::Debug, sync::Arc, thread, time::Duration};
 
-/// Represents a region of the world. After going though ingress, the client
-/// connects to this instance directly to download game data and send / receive
-/// events.
-///
-/// Server instances communicate with one another on behalf of the player when
-/// moving between regions.
+use crossbeam::{
+    channel::{Receiver, Sender},
+    epoch::Pointable,
+};
+use dashmap::{mapref::entry, DashMap, Entry};
+use game::{ClientPacket, GameEvent, RegionGroup, ServerPacket};
+use log::{debug, error, info, LevelFilter};
+use quinn::{
+    crypto::rustls::QuicServerConfig,
+    rustls::{
+        self,
+        pki_types::{CertificateDer, PrivatePkcs8KeyDer},
+        ConfigBuilder,
+    },
+    ClientConfig, ConnectError, Connecting, Connection, ConnectionError, Endpoint,
+};
+use simplelog::{ColorChoice, Config, SimpleLogger, TermLogger, TerminalMode};
+
+/// Wrapper around RegionGroup with additional bookeeping / networking
+/// to make it work as a server. Acts only as a dumb router of game event packets.
 ///
 /// ## Initial Setup
 ///
@@ -21,20 +34,168 @@ use game::{ClientPacket, GameInstance};
 ///   if so.
 /// - Execute game tick.
 /// - If the loop didn't take a full TICK_TIME, wait until full TICK_TIME has passed.
-pub struct ServerInstance {
-    game: GameInstance,
-    client_sender: Sender<ClientPacket>,
+pub struct RegionGroupInstance {
+    rg: RegionGroup,
 }
 
-/// ## Network Loop
-/// - Process incoming client packets and send them to the game loop
-/// - Receive server packets from game loop and send them out to connected
-///   clients. Maintain a buffer of events for each client and drop the client
-///   if the buffer grows too large.
-/// - Recieve region packets from game loop and send them to their assorted
-///   regions.
-pub struct Network {}
+impl RegionGroupInstance {
+    /// Create new RegionGroupInstance
+    pub fn new() -> Self {
+        return Self {
+            rg: RegionGroup::new(),
+        };
+    }
+
+    /// ## Network Loop
+    /// - Process incoming client packets and send them to the game loop
+    /// - Receive server packets from game loop and send them out to connected
+    ///   clients. Maintain a buffer of events for each client and drop the client
+    ///   if the buffer grows too large.
+    /// - Recieve region packets from game loop and send them to their assorted
+    ///   regions.
+    pub async fn listen(&mut self, send: Sender<ServerEvent>, server_recv: Receiver<ServerPacket>) {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert_der = CertificateDer::from(cert.cert);
+        let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], priv_key.into())
+            .unwrap();
+
+        let endpoint = Endpoint::server(
+            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto).unwrap())),
+            "127.0.0.1:6466".parse().unwrap(),
+        )
+        .unwrap();
+
+        let connections: Arc<DashMap<usize, Connection>> = Arc::new(DashMap::new());
+        let conns = connections.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = server_recv.recv() {
+                let packet = bincode::serialize(&event).unwrap();
+                for entry in conns.iter() {
+                    let mut stream = entry.value().open_uni().await.unwrap();
+                    stream.write_all(&packet).await.unwrap();
+                    stream.finish().unwrap();
+                    stream.stopped().await.unwrap();
+                }
+            }
+        });
+
+        while let Some(conn) = endpoint.accept().await {
+            let send = send.clone();
+            let conns = connections.clone();
+            tokio::spawn(async move {
+                info!("accepting connection");
+                let connection = conn.await.unwrap();
+                conns.insert(connection.stable_id(), connection.clone());
+
+                let fut = handle_connection(connection, send);
+                tokio::spawn(async move {
+                    if let Err(e) = fut.await {
+                        error!("connection failed: {reason}", reason = e.to_string())
+                    }
+                });
+            });
+        }
+    }
+}
+
+#[derive(Debug)]
+/// Internal event that is handled by the server.
+pub enum ServerEvent {
+    /// Recieved a packet from a client that needs to be handled.
+    ClientPacket(ClientPacket),
+    /// Internal timer for generated game ticks.
+    ServerTickTimer(usize),
+}
 
 fn main() {
-    println!("Hello, Server!");
+    let config = simplelog::ConfigBuilder::new().build();
+    SimpleLogger::init(LevelFilter::Info, config).unwrap();
+
+    let (client_packet_send, client_packet_recv) = crossbeam::channel::unbounded();
+    let (server_send, server_recv) = crossbeam::channel::unbounded();
+
+    let mut rgi = RegionGroupInstance::new();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let cps = client_packet_send.clone();
+    std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
+
+    // Handle game loop
+    let mut tick = 0;
+    // Generate ticks
+    std::thread::spawn(move || loop {
+        // TODO: Sync ticks with server.
+        client_packet_send
+            .send(ServerEvent::ServerTickTimer(tick))
+            .unwrap();
+        tick += 1;
+        std::thread::sleep(Duration::from_millis(1000));
+    });
+
+    // handle game events on server and send successfull events to connected clients.
+    while let Ok(event) = client_packet_recv.recv() {
+        match event {
+            ServerEvent::ClientPacket(client_packet) => {
+                // do something
+                match client_packet {
+                    ClientPacket::SyncClock => todo!(),
+                    ClientPacket::GameEvent(game_event) => match game_event.kind {
+                        game::GameEventKind::Quit | game::GameEventKind::Tick(_) => (),
+                        _ => {
+                            server_send
+                                .send(ServerPacket::GameEvent(game_event))
+                                .unwrap();
+                        }
+                    },
+                }
+            }
+            ServerEvent::ServerTickTimer(tick) => {
+                // do something
+                server_send
+                    .send(ServerPacket::GameEvent(GameEvent::new(
+                        game::GameEventKind::Tick(tick),
+                    )))
+                    .unwrap();
+            }
+        }
+    }
+}
+
+async fn handle_connection(
+    connection: quinn::Connection,
+    send: Sender<ServerEvent>,
+) -> Result<(), ConnectionError> {
+    loop {
+        let send = send.clone();
+        let stream = connection.accept_uni().await;
+
+        let mut stream = match stream {
+            Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
+                info!("connection closed");
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(e);
+            }
+            Ok(s) => s,
+        };
+
+        tokio::spawn(async move {
+            let req = stream.read_to_end(usize::MAX).await.unwrap();
+            let packet = bincode::deserialize_from(&req[..]);
+            let packet: ClientPacket = match packet {
+                Ok(e) => e,
+                Err(e) => {
+                    info!("Failed deserializing packet {:?}", e);
+                    return ();
+                }
+            };
+            send.send(ServerEvent::ClientPacket(packet));
+        });
+    }
 }

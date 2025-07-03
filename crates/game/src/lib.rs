@@ -3,19 +3,20 @@
 
 mod game_data;
 mod models;
-pub(crate) mod sql;
 
-use std::collections::VecDeque;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    process::exit,
+};
 
 pub use game_data::GameData;
 use log::info;
 pub(crate) use models::*;
 use serde::{Deserialize, Serialize};
-pub(crate) use sql::*;
 
-/// Event ID
+/// Game Tick
 pub type Tick = usize;
-/// Event ID
+/// Game Event ID
 pub type EventId = usize;
 
 /// An error encountered in the game sim.
@@ -61,14 +62,14 @@ pub enum GameEventKind {
     Tick(Tick),
     /// Change the players direction. Speed should be internal to the game logic
     /// and not set here.
-    PlayerChangeDirection(i32, i8, i8),
+    PlayerChangeDirection(i32, i32, i32),
     /// Stop the game and cleanup.
     Quit,
 }
 
-/// A region represents an portion of the world that processes game events
-/// at its own rate, without any data dependancies to other parts of the world.
-pub struct GameInstance {
+/// A region represents an portion of the world that processes game events at
+/// its own tick rate separately from other regions.
+pub struct Region {
     data: GameData,
     log: VecDeque<GameData>,
 }
@@ -77,6 +78,12 @@ pub struct GameInstance {
 pub struct GameSnapshot {
     /// Player
     pub player: Option<Player>,
+}
+
+/// A Region group is a collection of regions that communicate with one another
+/// via IPC.
+pub struct RegionGroup {
+    regions: BTreeMap<usize, Region>,
 }
 
 impl GameSnapshot {
@@ -100,10 +107,10 @@ impl GameEvent {
     }
 }
 
-impl GameInstance {
+impl Region {
     /// Create new region
-    pub fn new(id: WorldId, inital_tick: Tick) -> Self {
-        let data = GameData::new(inital_tick);
+    pub fn new() -> Self {
+        let data = GameData::new();
         Self {
             data,
             log: VecDeque::new(),
@@ -115,10 +122,9 @@ impl GameInstance {
     }
     /// Handle a client event.
     pub fn handle_event(&mut self, event: GameEvent) -> Result<(), GameError> {
-        info!("Handling: {:?}", event);
         match event.kind {
-            GameEventKind::Tick(tick) => {
-                let mut t = self.data.transaction(tick);
+            GameEventKind::Tick(_) => {
+                let mut t = self.data.transaction(event);
                 t.step_physics().unwrap();
                 drop(t);
             }
@@ -129,5 +135,14 @@ impl GameInstance {
     }
     fn rollback(&mut self, tick: Tick) -> Result<(), String> {
         Ok(())
+    }
+}
+
+impl RegionGroup {
+    /// Create new RegionGroup
+    pub fn new() -> Self {
+        return Self {
+            regions: BTreeMap::from([(0, Region::new())]),
+        };
     }
 }

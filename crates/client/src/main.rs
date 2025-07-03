@@ -1,24 +1,33 @@
 //! Game client
 #![deny(missing_docs)]
-use crossbeam::channel::{Receiver, Sender};
-use game::{GameError, GameEvent, GameEventKind, GameInstance, GameSnapshotUpdate};
+use crossbeam::{
+    channel::{Receiver, Sender},
+    select,
+};
+use game::{GameError, GameEvent, GameEventKind, GameSnapshotUpdate, Region};
 use log::{info, trace, warn};
 use quinn::rustls::{
     self,
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
-use simple_log::LogConfigBuilder;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
-use window::{GameEventSource, Window};
+use simplelog::SimpleLogger;
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use weldr::{parse, FileRefResolver, ResolveError, SourceMap};
+use window::Window;
 
 mod netcode;
 mod window;
 
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
-    world: GameInstance,
-    game_event_send: Sender<GameEventSource>,
-    game_event_recv: Receiver<GameEventSource>,
+    world: Region,
+    game_event_send: Sender<GameEvent>,
+    game_event_recv: Receiver<GameEvent>,
     client_event_send: Sender<ClientEvent>,
     server: SocketAddr,
 }
@@ -32,13 +41,13 @@ impl GameInstanceManager {
     /// - Re-simulate game based on logged events.
     /// - Send spawn player event and enter main loop
     pub fn new(
-        game_event_send: Sender<GameEventSource>,
-        game_event_recv: Receiver<GameEventSource>,
+        game_event_send: Sender<GameEvent>,
+        game_event_recv: Receiver<GameEvent>,
         client_event_send: Sender<ClientEvent>,
         server: SocketAddr,
     ) -> Self {
         Self {
-            world: GameInstance::new(game::WorldId::StarterArea, 0),
+            world: Region::new(),
             game_event_recv,
             game_event_send,
             client_event_send,
@@ -70,38 +79,44 @@ impl GameInstanceManager {
         std::thread::spawn(move || loop {
             // TODO: Sync ticks with server.
             tick_sender
-                .send(GameEventSource::Client(GameEvent::new(
-                    GameEventKind::Tick(tick),
-                )))
+                .send(GameEvent::new(GameEventKind::Tick(tick)))
                 .unwrap();
             tick += 1;
             std::thread::sleep(Duration::from_millis(1000));
         });
 
-        let mut conn = netcode::ServerConnection::new(
-            self.game_event_send.clone(),
-            self.game_event_recv.clone(),
-            self.server,
-        );
-        std::thread::spawn(move || loop {
-            let rt = tokio::runtime::Builder::new_current_thread()
+        let (server_send, server_recv) = crossbeam::channel::unbounded();
+        let (server_game_send, server_game_recv) = crossbeam::channel::unbounded();
+        let mut conn = netcode::ServerConnection::new(server_send, server_game_recv, self.server);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .unwrap();
             rt.block_on(async { conn.connect_and_handle().await.unwrap() });
         });
 
-        Ok(while let Ok(source) = self.game_event_recv.recv() {
-            match source {
-                GameEventSource::Client(game_event) => match game_event.kind {
-                    GameEventKind::Quit => return Ok(()),
-                    _ => self.world.handle_event(game_event)?,
+        loop {
+            select! {
+                recv(server_recv) -> server_msg => {
+                    // info!("Recieved server packet: {:?}", server_msg.unwrap());
                 },
-                GameEventSource::Network(packet) => {
-                    info!("[client] RECIEVE SUCCESS");
+                recv(self.game_event_recv) -> game_event => {
+                    match game_event {
+                        Ok(game_event) => {
+                            match game_event.kind {
+                                GameEventKind::Quit => return Ok(()),
+                                _ => {
+                                    self.world.handle_event(game_event)?;
+                                    server_game_send.send(game_event).unwrap();
+                                }
+                            }
+                        },
+                        Err(e) => panic!("{}", e),
+                    }
                 }
             }
-        })
+        }
     }
 }
 
@@ -124,8 +139,8 @@ pub enum ClientEvent {
 pub enum Command {
     /// Connect to a server, sync and start running game sim.
     LaunchGame(
-        Sender<GameEventSource>,
-        Receiver<GameEventSource>,
+        Sender<GameEvent>,
+        Receiver<GameEvent>,
         Sender<ClientEvent>,
         SocketAddr,
     ),
@@ -134,15 +149,8 @@ pub enum Command {
 }
 
 fn main() {
-    let config = LogConfigBuilder::builder()
-        .size(1 * 100)
-        .roll_count(10)
-        .time_format("%M:%S")
-        .level("debug")
-        .unwrap()
-        .output_console()
-        .build();
-    simple_log::new(config).unwrap();
+    let config = simplelog::ConfigBuilder::new().build();
+    SimpleLogger::init(log::LevelFilter::Info, config).unwrap();
 
     let (command_send, command_recv) = crossbeam::channel::unbounded();
     std::thread::spawn(move || loop {
@@ -171,61 +179,37 @@ fn main() {
         }
     });
 
-    let mut window = Window::new(command_send);
+    let mut window = Window::new();
     window.run();
 }
-/// Dummy certificate verifier that treats any certificate as valid.
-/// NOTE, such verification is vulnerable to MITM attacks, but convenient for testing.
-#[derive(Debug)]
-struct SkipServerVerification(Arc<rustls::crypto::CryptoProvider>);
 
-impl SkipServerVerification {
-    fn new() -> Arc<Self> {
-        Arc::new(Self(Arc::new(rustls::crypto::ring::default_provider())))
+struct MyCustomResolver {}
+
+fn try_get(filename: &PathBuf) -> Option<Vec<u8>> {
+    match std::fs::read_to_string(filename) {
+        Ok(data) => Some(data.as_bytes().to_vec()),
+        Err(_) => None,
     }
 }
 
-impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp: &[u8],
-        _now: UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
+impl FileRefResolver for MyCustomResolver {
+    fn resolve<P: AsRef<Path>>(&self, filename: P) -> Result<Vec<u8>, ResolveError> {
+        let filename = filename.as_ref().to_string_lossy().to_string();
+        let filename = filename.replace("\\", "/");
+        let dir = std::env::current_dir().unwrap().to_path_buf().join("ldraw");
+        let data = if let Some(data) = try_get(&dir.join("models").join(&filename)) {
+            data
+        } else if let Some(data) = try_get(&dir.join("p").join(&filename)) {
+            data
+        } else if let Some(data) = try_get(&dir.join("p/48").join(&filename)) {
+            data
+        } else if let Some(data) = try_get(&dir.join("parts").join(&filename)) {
+            data
+        } else if let Some(data) = try_get(&dir.join("parts/s").join(&filename)) {
+            data
+        } else {
+            panic!("Could not find file {} in ldraw.", filename);
+        };
+        Ok(data)
     }
 }
