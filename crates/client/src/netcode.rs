@@ -14,12 +14,16 @@ use quinn::{
 
 pub struct ServerConnection {
     send: Sender<ServerPacket>,
-    recv: Receiver<GameEvent>,
+    recv: Receiver<ClientPacket>,
     server: SocketAddr,
 }
 
 impl ServerConnection {
-    pub fn new(send: Sender<ServerPacket>, recv: Receiver<GameEvent>, server: SocketAddr) -> Self {
+    pub fn new(
+        send: Sender<ServerPacket>,
+        recv: Receiver<ClientPacket>,
+        server: SocketAddr,
+    ) -> Self {
         Self { send, recv, server }
     }
 
@@ -70,7 +74,7 @@ impl ServerConnection {
             }
             connection.handshake_data().unwrap();
             let mut send = connection.open_uni().await.unwrap();
-            let payload = &bincode::serialize(&ClientPacket::GameEvent(e)).unwrap()[..];
+            let payload = &bincode::serialize(&e).unwrap()[..];
             send.write_all(payload).await.unwrap();
             send.finish().unwrap();
             send.stopped().await.unwrap();

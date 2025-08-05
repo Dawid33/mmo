@@ -1,26 +1,39 @@
-use std::collections::{BinaryHeap, VecDeque};
-
-use bones_ecs::World;
-use log::info;
-use rapier3d::prelude::*;
+use cosmic_text::Buffer;
+use rapier3d::{na::Vector3, prelude::*};
 use serde::{Deserialize, Serialize};
 
-use crate::{EventId, GameEvent, Player, Tick};
+use crate::Tick;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EntityType {
+    TaffyTree,
+    Text(String),
+    Default,
+}
+
+impl Default for EntityType {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Entity {
+    pub kind: EntityType,
+    pub position: Vector3<f32>,
+}
 
 /// A representation of a regions game state with the required booking to peform
 /// delta-based rollback.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GameData {
-    tick: Tick,
-    last_game_event_id: EventId,
-    physics: PhysicsState,
-    world: World,
-    rollback_log: VecDeque<GameEventRollback>,
-    event_log: VecDeque<(EventId, GameEvent)>,
+    pub tick: Tick,
+    pub entities: Vec<Entity>,
+    pub physics: PhysicsState,
 }
 
-// Use serde derives for our wrapper struct.
-#[derive(Serialize, Deserialize)]
-struct PhysicsState {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PhysicsState {
     bodies: RigidBodySet,
     broad_phase: DefaultBroadPhase,
     ccd_solver: CCDSolver,
@@ -32,65 +45,12 @@ struct PhysicsState {
     query_pipeline: QueryPipeline,
 }
 
-/// A
-pub struct Transaction<'a> {
-    data: &'a mut GameData,
-}
-
-impl<'a> Drop for Transaction<'a> {
-    fn drop(&mut self) {}
-}
-
-struct GameEventRollback {
-    game_event_id: usize,
-    rollback: Rollback,
-}
-
-enum Rollback {
-    AddEntity { id: usize },
-}
-
 impl GameData {
-    /// Create a new game data instance.
     pub fn new() -> Self {
         Self {
             tick: 0,
-            last_game_event_id: 0,
             physics: PhysicsState::new(),
-            rollback_log: VecDeque::new(),
-            world: World::new(),
-            event_log: VecDeque::new(),
-        }
-    }
-
-    /// Create a new transaction per game event.
-    pub fn transaction(&mut self, event: GameEvent) -> Transaction {
-        self.event_log.push_back((self.last_game_event_id, event));
-        self.last_game_event_id += 1;
-        Transaction { data: self }
-    }
-}
-
-impl<'a> Transaction<'a> {
-    pub fn log(&mut self, rollback: Rollback) {
-        self.data.rollback_log.push_back(GameEventRollback {
-            rollback,
-            game_event_id: self.data.last_game_event_id - 1,
-        });
-    }
-    pub fn step_physics(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-    pub fn spawn_player(&mut self, entity: Player) -> Result<(), String> {
-        self.log(Rollback::AddEntity { id: 0 });
-        Ok(())
-    }
-}
-
-impl Rollback {
-    pub fn rollback(&self, data: &mut GameData) -> Result<(), String> {
-        match self {
-            Rollback::AddEntity { id } => todo!(),
+            entities: Vec::new(),
         }
     }
 }

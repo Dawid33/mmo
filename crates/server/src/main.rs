@@ -1,5 +1,5 @@
 //! Server
-#![deny(missing_docs)]
+// #![deny(missing_docs)]
 use std::{fmt::Debug, sync::Arc, thread, time::Duration};
 
 use crossbeam::{
@@ -7,7 +7,7 @@ use crossbeam::{
     epoch::Pointable,
 };
 use dashmap::{mapref::entry, DashMap, Entry};
-use game::{ClientPacket, GameEvent, RegionGroup, ServerPacket};
+use game::{ClientPacket, GameEvent, GameEventKind, ServerPacket, World};
 use log::{debug, error, info, LevelFilter};
 use quinn::{
     crypto::rustls::QuicServerConfig,
@@ -18,14 +18,16 @@ use quinn::{
     },
     ClientConfig, ConnectError, Connecting, Connection, ConnectionError, Endpoint,
 };
-use simplelog::{ColorChoice, Config, SimpleLogger, TermLogger, TerminalMode};
+use simplelog::{
+    format_description, ColorChoice, Config, FormatItem, SimpleLogger, TermLogger, TerminalMode,
+};
 
 /// Wrapper around RegionGroup with additional bookeeping / networking
 /// to make it work as a server. Acts only as a dumb router of game event packets.
 ///
 /// ## Initial Setup
 ///
-/// - Load world from SQLite database or generate from file.
+/// - Load world from file or generate from scene.
 /// - Enter main loop
 ///
 /// ## Game Loop
@@ -34,16 +36,11 @@ use simplelog::{ColorChoice, Config, SimpleLogger, TermLogger, TerminalMode};
 ///   if so.
 /// - Execute game tick.
 /// - If the loop didn't take a full TICK_TIME, wait until full TICK_TIME has passed.
-pub struct RegionGroupInstance {
-    rg: RegionGroup,
-}
+pub struct WorldIngress {}
 
-impl RegionGroupInstance {
-    /// Create new RegionGroupInstance
+impl WorldIngress {
     pub fn new() -> Self {
-        return Self {
-            rg: RegionGroup::new(),
-        };
+        Self {}
     }
 
     /// ## Network Loop
@@ -107,17 +104,21 @@ pub enum ServerEvent {
     /// Recieved a packet from a client that needs to be handled.
     ClientPacket(ClientPacket),
     /// Internal timer for generated game ticks.
-    ServerTickTimer(usize),
+    ServerTickTimer,
 }
 
+const FORMAT: &'static [FormatItem] = &[FormatItem::Literal("server".as_bytes())];
+
 fn main() {
-    let config = simplelog::ConfigBuilder::new().build();
+    let config = simplelog::ConfigBuilder::new()
+        .set_time_format_custom(FORMAT)
+        .build();
     SimpleLogger::init(LevelFilter::Info, config).unwrap();
 
     let (client_packet_send, client_packet_recv) = crossbeam::channel::unbounded();
     let (server_send, server_recv) = crossbeam::channel::unbounded();
 
-    let mut rgi = RegionGroupInstance::new();
+    let mut rgi = WorldIngress::new();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -126,41 +127,46 @@ fn main() {
     std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
 
     // Handle game loop
-    let mut tick = 0;
-    // Generate ticks
     std::thread::spawn(move || loop {
         // TODO: Sync ticks with server.
         client_packet_send
-            .send(ServerEvent::ServerTickTimer(tick))
+            .send(ServerEvent::ServerTickTimer)
             .unwrap();
-        tick += 1;
         std::thread::sleep(Duration::from_millis(1000));
     });
+
+    let mut world = World::editor();
+    // TODO: send region once to all new connections.
+    // TODO: send region on request to a connection.
 
     // handle game events on server and send successfull events to connected clients.
     while let Ok(event) = client_packet_recv.recv() {
         match event {
-            ServerEvent::ClientPacket(client_packet) => {
-                // do something
-                match client_packet {
-                    ClientPacket::SyncClock => todo!(),
-                    ClientPacket::GameEvent(game_event) => match game_event.kind {
-                        game::GameEventKind::Quit | game::GameEventKind::Tick(_) => (),
-                        _ => {
-                            server_send
-                                .send(ServerPacket::GameEvent(game_event))
-                                .unwrap();
-                        }
-                    },
+            ServerEvent::ClientPacket(client_packet) => match client_packet {
+                ClientPacket::RequestRegion => {
+                    server_send
+                        .send(world.build_region_server_packet(0))
+                        .unwrap();
                 }
-            }
-            ServerEvent::ServerTickTimer(tick) => {
-                // do something
-                server_send
-                    .send(ServerPacket::GameEvent(GameEvent::new(
-                        game::GameEventKind::Tick(tick),
-                    )))
-                    .unwrap();
+                ClientPacket::SyncClock => todo!(),
+                ClientPacket::GameEvent(game_event) => match game_event.kind {
+                    game::GameEventKind::Quit | game::GameEventKind::Tick => (),
+                    _ => {
+                        let event = match world.handle_event(game_event.kind, game_event._region_id)
+                        {
+                            Ok(e) => e,
+                            Err(e) => panic!("Server crashed {:?}", e),
+                        };
+                        server_send.send(ServerPacket::GameEvent(event)).unwrap();
+                    }
+                },
+            },
+            ServerEvent::ServerTickTimer => {
+                let event = match world.handle_event(GameEventKind::Tick, 0) {
+                    Ok(e) => e,
+                    Err(e) => panic!("Server crashed {:?}", e),
+                };
+                server_send.send(ServerPacket::GameEvent(event)).unwrap();
             }
         }
     }
@@ -195,7 +201,7 @@ async fn handle_connection(
                     return ();
                 }
             };
-            send.send(ServerEvent::ClientPacket(packet));
+            send.send(ServerEvent::ClientPacket(packet)).unwrap();
         });
     }
 }

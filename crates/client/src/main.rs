@@ -1,34 +1,30 @@
 //! Game client
-#![deny(missing_docs)]
+use cosmic_text::FontSystem;
+// #![deny(missing_docs)]
 use crossbeam::{
     channel::{Receiver, Sender},
     select,
 };
-use game::{GameError, GameEvent, GameEventKind, GameSnapshotUpdate, Region};
-use log::{info, trace, warn};
-use quinn::rustls::{
-    self,
-    pki_types::{CertificateDer, ServerName, UnixTime},
-};
-use simplelog::SimpleLogger;
+use game::{ClientUpdateEvent, GameError, GameEventKind, Region, World};
+use log::{info, trace, warn, LevelFilter};
+use simplelog::{FormatItem, SimpleLogger};
 use std::{
     net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
-use weldr::{parse, FileRefResolver, ResolveError, SourceMap};
-use window::Window;
 
+// use weldr::{parse, FileRefResolver, ResolveError, SourceMap};
+
+mod editor;
 mod netcode;
 mod window;
 
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
-    world: Region,
-    game_event_send: Sender<GameEvent>,
-    game_event_recv: Receiver<GameEvent>,
-    client_event_send: Sender<ClientEvent>,
+    game_event_send: Sender<GameEventKind>,
+    game_event_recv: Receiver<GameEventKind>,
+    client_event_send: Sender<ClientUpdateEvent>,
     server: SocketAddr,
 }
 
@@ -41,13 +37,12 @@ impl GameInstanceManager {
     /// - Re-simulate game based on logged events.
     /// - Send spawn player event and enter main loop
     pub fn new(
-        game_event_send: Sender<GameEvent>,
-        game_event_recv: Receiver<GameEvent>,
-        client_event_send: Sender<ClientEvent>,
+        game_event_send: Sender<GameEventKind>,
+        game_event_recv: Receiver<GameEventKind>,
+        client_event_send: Sender<ClientUpdateEvent>,
         server: SocketAddr,
     ) -> Self {
         Self {
-            world: Region::new(),
             game_event_recv,
             game_event_send,
             client_event_send,
@@ -73,15 +68,11 @@ impl GameInstanceManager {
     /// If sync clock event: send client update to window with desired input delay
     /// and update tick time.
     pub fn connect_and_run(&mut self) -> Result<(), GameError> {
-        let mut tick = 0;
         let tick_sender = self.game_event_send.clone();
         // Generate ticks
         std::thread::spawn(move || loop {
             // TODO: Sync ticks with server.
-            tick_sender
-                .send(GameEvent::new(GameEventKind::Tick(tick)))
-                .unwrap();
-            tick += 1;
+            tick_sender.send(GameEventKind::Tick).unwrap();
             std::thread::sleep(Duration::from_millis(1000));
         });
 
@@ -96,23 +87,47 @@ impl GameInstanceManager {
             rt.block_on(async { conn.connect_and_handle().await.unwrap() });
         });
 
+        server_game_send
+            .send(game::ClientPacket::RequestRegion)
+            .unwrap();
+
+        let mut world: Option<World> = None;
         loop {
             select! {
                 recv(server_recv) -> server_msg => {
-                    // info!("Recieved server packet: {:?}", server_msg.unwrap());
+                    match server_msg.unwrap() {
+                        game::ServerPacket::SyncClock => trace!("Recieved syncclock packet"),
+                        // TODO: buffer incoming game events until region / world is loaded, then handle all at once
+                        // and enable client game events.
+                        game::ServerPacket::GameEvent(game_event) => {
+                            if let Some(ref mut world) = world {
+                                world.reconcile_event(game_event).unwrap();
+                            }
+                        }
+                        game::ServerPacket::Region(id, game_data, last_id) => {
+                            let data = Arc::new(Mutex::new(game_data));
+                            self.client_event_send.send(ClientUpdateEvent::Region(data.clone())).unwrap();
+                            let mut w = World::new();
+                            w.load(&id, Region::new(data), last_id);
+                            world = Some(w);
+                            info!("Region recieved and loaded!");
+                        }
+                    }
                 },
                 recv(self.game_event_recv) -> game_event => {
-                    match game_event {
-                        Ok(game_event) => {
-                            match game_event.kind {
-                                GameEventKind::Quit => return Ok(()),
-                                _ => {
-                                    self.world.handle_event(game_event)?;
-                                    server_game_send.send(game_event).unwrap();
+                    if let Some(ref mut world) = world {
+                         match game_event {
+                            Ok(event) => {
+                                match event {
+                                    GameEventKind::Quit => return Ok(()),
+                                    _ => {
+                                        let event = world.handle_event(game_event.unwrap(), 0)?;
+                                        server_game_send.send(game::ClientPacket::GameEvent(event)).unwrap();
+                                    }
                                 }
-                            }
-                        },
-                        Err(e) => panic!("{}", e),
+                            },
+                            Err(e) => panic!("{}", e),
+                        }
                     }
                 }
             }
@@ -120,43 +135,25 @@ impl GameInstanceManager {
     }
 }
 
-#[derive(Debug)]
-enum Origin {
-    Client,
-    Server,
-}
-
-/// Event sent from game to client
-#[derive(Debug)]
-pub enum ClientEvent {
-    /// Update the game client with new sim info.
-    Update(GameSnapshotUpdate),
-    /// Notify client of game crashing.
-    GameCrash(Origin, GameError),
-}
-
 /// Event sent from client to game thread.
 pub enum Command {
     /// Connect to a server, sync and start running game sim.
-    LaunchGame(
-        Sender<GameEvent>,
-        Receiver<GameEvent>,
-        Sender<ClientEvent>,
+    ConnectToServerAndScene(
+        Sender<GameEventKind>,
+        Receiver<GameEventKind>,
+        Sender<ClientUpdateEvent>,
         SocketAddr,
     ),
     /// Quit the game thread. Should only be send when quitting the application.
     Quit,
 }
 
-fn main() {
-    let config = simplelog::ConfigBuilder::new().build();
-    SimpleLogger::init(log::LevelFilter::Info, config).unwrap();
-
+fn start_game_thread() -> Sender<Command> {
     let (command_send, command_recv) = crossbeam::channel::unbounded();
     std::thread::spawn(move || loop {
         match command_recv.recv() {
             Ok(command) => match command {
-                Command::LaunchGame(sender, receiver, client_sender, server) => {
+                Command::ConnectToServerAndScene(sender, receiver, client_sender, server) => {
                     let mut manager =
                         GameInstanceManager::new(sender, receiver, client_sender, server);
                     loop {
@@ -178,38 +175,29 @@ fn main() {
             }
         }
     });
-
-    let mut window = Window::new();
-    window.run();
+    return command_send;
 }
 
-struct MyCustomResolver {}
+// WINDOW:
+// - Render game sim based on received client events.
+// - Accept user input and send it to game sim.
+// GAMESIM:
+// - Simulate scene based on user input.
+// - Send data for visual updates to window.
 
-fn try_get(filename: &PathBuf) -> Option<Vec<u8>> {
-    match std::fs::read_to_string(filename) {
-        Ok(data) => Some(data.as_bytes().to_vec()),
-        Err(_) => None,
-    }
-}
+// UI code is part of game simulation, try make editor into a loadable game sim.
+// So editor UI code is hardcoded in rust but as a game scene and it is also
+// launched like a game scene.
+const FORMAT: &'static [FormatItem] = &[FormatItem::Literal("client".as_bytes())];
 
-impl FileRefResolver for MyCustomResolver {
-    fn resolve<P: AsRef<Path>>(&self, filename: P) -> Result<Vec<u8>, ResolveError> {
-        let filename = filename.as_ref().to_string_lossy().to_string();
-        let filename = filename.replace("\\", "/");
-        let dir = std::env::current_dir().unwrap().to_path_buf().join("ldraw");
-        let data = if let Some(data) = try_get(&dir.join("models").join(&filename)) {
-            data
-        } else if let Some(data) = try_get(&dir.join("p").join(&filename)) {
-            data
-        } else if let Some(data) = try_get(&dir.join("p/48").join(&filename)) {
-            data
-        } else if let Some(data) = try_get(&dir.join("parts").join(&filename)) {
-            data
-        } else if let Some(data) = try_get(&dir.join("parts/s").join(&filename)) {
-            data
-        } else {
-            panic!("Could not find file {} in ldraw.", filename);
-        };
-        Ok(data)
-    }
+fn main() {
+    let config = simplelog::ConfigBuilder::new()
+        .set_time_format_custom(FORMAT)
+        .build();
+    SimpleLogger::init(LevelFilter::Info, config).unwrap();
+    let sender = start_game_thread();
+
+    // Pass scene to window to start game scene or edior scene .
+    let mut w = window::Window::new(sender);
+    w.run();
 }

@@ -8,10 +8,9 @@ game = { path = "../game" }
 simplelog = "0.12.2"
 raylib = "5.5.1"
 log = "0.4.22"
-weldr = { path = "../weldr/lib" }
 crossbeam = "0.8.4"
 bincode = "1.3.3"
-
+cosmic-text = "0.14.2"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 rapier3d = { version = "0.22.0", features = [ "enhanced-determinism", "serde-serialize" ] }
