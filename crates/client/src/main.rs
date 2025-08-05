@@ -1,5 +1,4 @@
 //! Game client
-use cosmic_text::FontSystem;
 // #![deny(missing_docs)]
 use crossbeam::{
     channel::{Receiver, Sender},
@@ -13,6 +12,9 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use winit::event_loop::{ControlFlow, EventLoop};
+
+use crate::window::App;
 
 // use weldr::{parse, FileRefResolver, ResolveError, SourceMap};
 
@@ -198,6 +200,21 @@ fn main() {
     let sender = start_game_thread();
 
     // Pass scene to window to start game scene or edior scene .
-    let mut w = window::Window::new(sender);
-    w.run();
+    //
+    let event_loop = EventLoop::new().unwrap();
+
+    // When the current loop iteration finishes, immediately begin a new
+    // iteration regardless of whether or not new events are available to
+    // process. Preferred for applications that want to render as fast as
+    // possible, like games.
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    // When the current loop iteration finishes, suspend the thread until
+    // another event arrives. Helps keeping CPU utilization low if nothing
+    // is happening, which is preferred if the application might be idling in
+    // the background.
+    // event_loop.set_control_flow(ControlFlow::Wait);
+
+    let mut app = App::default();
+    event_loop.run_app(&mut app).unwrap();
 }

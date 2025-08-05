@@ -6,8 +6,10 @@ edition = "2021"
 [dependencies]
 game = { path = "../game" }
 simplelog = "0.12.2"
-raylib = "5.5.1"
 log = "0.4.22"
+winit = "0.30.12"
+wgpu = "26.0.1"
+pollster = "0.4"
 crossbeam = "0.8.4"
 bincode = "1.3.3"
 cosmic-text = "0.14.2"
