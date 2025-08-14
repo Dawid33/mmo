@@ -4,8 +4,9 @@ use crossbeam::{
     channel::{Receiver, Sender},
     select,
 };
-use game::{ClientUpdateEvent, GameError, GameEventKind, Region, World};
+use game::{ClientUpdateEvent, GameError, GameEventKind, Region, RegionData, World};
 use log::{info, trace, warn, LevelFilter};
+use parley::FontContext;
 use simplelog::{FormatItem, SimpleLogger};
 use std::{
     net::SocketAddr,
@@ -107,7 +108,7 @@ impl GameInstanceManager {
                             }
                         }
                         game::ServerPacket::Region(id, game_data, last_id) => {
-                            let data = Arc::new(Mutex::new(game_data));
+                            let data = Arc::new(Mutex::new(RegionData::new(game_data, FontContext::new())));
                             self.client_event_send.send(ClientUpdateEvent::Region(data.clone())).unwrap();
                             let mut w = World::new();
                             w.load(&id, Region::new(data), last_id);
@@ -180,13 +181,16 @@ fn start_game_thread() -> Sender<Command> {
     return command_send;
 }
 
-// WINDOW:
-// - Render game sim based on received client events.
-// - Accept user input and send it to game sim.
-// GAMESIM:
-// - Simulate scene based on user input.
-// - Send data for visual updates to window.
+// TODO: Incorporate parley text stuff into game data.
 
+// WINDOW:
+// - Update world data based on recieved events.
+// - Update GPU buffers based on changes to world data.
+// - Accept user input and send it to game simulation.
+// GAMESIM:
+// - Take in user input and game ticks, resulting in executing code.
+// - Executing code causes change events to world data.
+// - Send world data change updates to window.
 // UI code is part of game simulation, try make editor into a loadable game sim.
 // So editor UI code is hardcoded in rust but as a game scene and it is also
 // launched like a game scene.
@@ -215,6 +219,6 @@ fn main() {
     // the background.
     // event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::default();
+    let mut app = App::new(sender);
     event_loop.run_app(&mut app).unwrap();
 }

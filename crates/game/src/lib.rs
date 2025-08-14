@@ -10,14 +10,15 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use cosmic_text::{Attrs, AttrsList, Buffer, FontSystem, Metrics};
 use log::info;
+use parley::{FontContext, LayoutContext};
 use rapier3d::na::Vector3;
 use serde::{Deserialize, Serialize};
 
+use crate::game_data::text_layout;
 pub use crate::game_data::Entity;
 pub use crate::game_data::EntityType;
-pub use game_data::GameData;
+pub use game_data::{GameData, RegionData};
 
 /// Game Tick
 pub type Tick = usize;
@@ -29,7 +30,7 @@ pub type EntityId = usize;
 /// Event sent from game to client
 pub enum ClientUpdateEvent {
     /// Update the game client with new sim info.
-    Region(Arc<Mutex<GameData>>),
+    Region(Arc<Mutex<RegionData>>),
     /// Notify client of game crashing.
     GameCrash(GameError),
 }
@@ -121,11 +122,9 @@ pub enum GameEventKind {
 /// A region represents an portion of the world that processes game events at
 /// its own tick rate separately from other regions.
 pub struct Region {
-    pub event_log: VecDeque<(GameEvent, Box<dyn Fn(&mut GameData)>)>,
+    pub event_log: VecDeque<(GameEvent, Box<dyn Fn(&mut RegionData)>)>,
     input_buffer: BinaryHeap<Reverse<GameEvent>>,
-    data: Arc<Mutex<GameData>>,
-    taffy_trees: BTreeMap<EntityId, taffy::TaffyTree>,
-    font_system: FontSystem,
+    data: Arc<Mutex<RegionData>>,
 }
 
 #[derive(Debug)]
@@ -176,14 +175,11 @@ impl GameEvent {
 
 impl Region {
     /// Create new region
-    pub fn new(data: Arc<Mutex<GameData>>) -> Self {
-        // TODO: Generate TaffyTree's and text_buffers based on data.
+    pub fn new(data: Arc<Mutex<RegionData>>) -> Self {
         Self {
             data,
             event_log: VecDeque::new(),
             input_buffer: BinaryHeap::new(),
-            taffy_trees: BTreeMap::new(),
-            font_system: FontSystem::new(),
         }
     }
 
@@ -245,20 +241,9 @@ impl Region {
         let mut t = Transaction::new(event, &mut self.event_log, self.data.lock().unwrap());
         match event.kind {
             GameEventKind::Tick => {
-                info!("tick {:?}", t.data.tick);
-                if t.data.entities.is_empty() {
-                    let mut e = Entity::default();
-                    let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(28.0, 40.0));
-                    let mut buf = buffer.borrow_with(&mut self.font_system);
-                    buf.set_size(Some(200.0), Some(25.0));
-                    buf.set_text(
-                        "Hello, World!",
-                        &Attrs::new(),
-                        cosmic_text::Shaping::Advanced,
-                    );
-                    buf.shape_until_scroll(true);
-                    e.kind = EntityType::Text(String::new());
-                    t.add_entity(e);
+                info!("tick {:?}", t.r.data.tick);
+                if t.r.data.entities.is_empty() {
+                    t.create_text_entity("Hello, World!");
                 }
                 t.tick();
             }
@@ -278,40 +263,58 @@ impl Region {
 
 struct Transaction<'a> {
     event: GameEvent,
-    pub event_log: &'a mut VecDeque<(GameEvent, Box<dyn Fn(&mut GameData)>)>,
-    data: MutexGuard<'a, GameData>,
+    pub event_log: &'a mut VecDeque<(GameEvent, Box<dyn Fn(&mut RegionData)>)>,
+    r: MutexGuard<'a, RegionData>,
 }
 
 impl<'a> Transaction<'a> {
     pub fn new(
         event: GameEvent,
-        event_log: &'a mut VecDeque<(GameEvent, Box<dyn Fn(&mut GameData)>)>,
-        data: MutexGuard<'a, GameData>,
+        event_log: &'a mut VecDeque<(GameEvent, Box<dyn Fn(&mut RegionData)>)>,
+        r: MutexGuard<'a, RegionData>,
     ) -> Self {
         Self {
             event,
             event_log,
-            data,
+            r,
         }
     }
 
     pub fn tick(&mut self) {
         self.event_log.push_back((
             self.event,
-            Box::new(move |data| {
-                data.tick -= 1;
+            Box::new(move |d| {
+                d.data.tick -= 1;
             }),
         ));
-        self.data.tick += 1;
+        self.r.data.tick += 1;
     }
 
-    pub fn add_entity(&mut self, e: Entity) {
-        let index = self.data.entities.len();
-        self.data.entities.insert(index, e);
+    pub fn create_text_entity(&mut self, text: &str) {
+        let layout = text_layout(&mut self.r.font_context, text);
+        let mut e = Entity::default();
+        e.kind = EntityType::Text {
+            content: text.to_string(),
+        };
+        let index = self.r.data.entities.len();
+        self.r.data.entities.insert(index, e);
+        self.r.text_layouts.insert(index, layout);
         self.event_log.push_back((
             self.event,
-            Box::new(move |data| {
-                data.entities.remove(index);
+            Box::new(move |r| {
+                r.text_layouts.remove(&index).unwrap();
+                r.data.entities.remove(index);
+            }),
+        ));
+    }
+
+    pub fn _add_entity(&mut self, e: Entity) {
+        let index = self.r.data.entities.len();
+        self.r.data.entities.insert(index, e);
+        self.event_log.push_back((
+            self.event,
+            Box::new(move |r| {
+                r.data.entities.remove(index);
             }),
         ));
     }
@@ -326,15 +329,26 @@ impl World {
     }
 
     pub fn editor() -> Self {
-        let data = Arc::new(Mutex::new(GameData::new()));
+        let data = Arc::new(Mutex::new(RegionData::new(
+            GameData::new(),
+            FontContext::new(),
+        )));
         return Self {
             regions: BTreeMap::from([(0, Region::new(data))]),
             last_game_event_id: 0,
         };
     }
 
-    pub fn region_data(&self, id: &usize) -> Arc<Mutex<GameData>> {
-        self.regions.get(id).unwrap().data.clone()
+    pub fn clone_game_data(&self, id: &usize) -> GameData {
+        self.regions
+            .get(id)
+            .unwrap()
+            .data
+            .clone()
+            .try_lock()
+            .unwrap()
+            .data
+            .clone()
     }
 
     pub fn load(&mut self, id: &usize, region: Region, last_game_event_id: usize) {
@@ -365,7 +379,7 @@ impl World {
     pub fn build_region_server_packet(&self, region_id: usize) -> ServerPacket {
         ServerPacket::Region(
             region_id,
-            self.region_data(&region_id).try_lock().unwrap().clone(),
+            self.clone_game_data(&region_id),
             self.last_game_event_id,
         )
     }
