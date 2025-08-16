@@ -177,8 +177,6 @@ fn start_game_thread() -> Sender<Command> {
     return command_send;
 }
 
-// TODO: Create RenderData to encapsulate GPU state.
-// TODO: Think about and improve GameData -> RenderData connection.
 // TODO: Make it possible to pan camera with middle mouse button.
 // TODO: Create mesh from from world representation
 // TODO: Render mesh

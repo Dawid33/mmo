@@ -71,9 +71,9 @@ impl ApplicationHandler for App {
                             self.regions.insert(id, data);
                         }
                         ClientUpdateEvent::GameCrash(_) => todo!(),
-                        ClientUpdateEvent::UpdateRegion(id, event) => {
+                        ClientUpdateEvent::UpdateRegion(id, event, kind) => {
                             let data = self.regions.get_mut(&id).unwrap();
-                            state.update(event, data);
+                            state.update(event, data, kind);
                         }
                     }
                 }
@@ -89,6 +89,14 @@ impl ApplicationHandler for App {
                     event.physical_key,
                     event.state,
                 ))
+                .unwrap(),
+            WindowEvent::MouseInput {
+                device_id,
+                state: button_state,
+                button,
+            } => state
+                .game_send
+                .send(GameEventKind::MouseEvent(button, button_state))
                 .unwrap(),
             _ => (),
         }

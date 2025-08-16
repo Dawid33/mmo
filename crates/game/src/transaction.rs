@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use crate::{
     common::{EntityId, GameEvent},
+    data::GameDataTransactionKind,
     region::text_layout,
     Camera, Entity, EntityType, RegionData,
 };
@@ -59,32 +60,44 @@ impl<'a> Transaction<'a> {
 
     pub fn update_camera(&mut self) {
         if let Some(cam_id) = self.get_camera_id() {
-            self.r.data.update_camera(cam_id);
+            let old = self.r.data.change().update_camera(cam_id);
+            undo!(self, move |r| {
+                r.data.undo().set_camera_uniform(old, cam_id);
+            });
         }
     }
 
-    pub fn set_camera_speed(&mut self, x: f32, y: f32, z: f32) {
-        let id = self.get_camera_id().unwrap();
-        let old = self.get_camera(id).velocity;
-        self.r.data.set_camera_velocity(id, x, y, z);
-        undo!(self, move |r| {
-            r.data.set_camera_velocity(id, old.x, old.y, old.z);
-        });
+    pub fn set_camera_velocity(&mut self, x: f32, y: f32, z: f32) {
+        // let id = self.get_camera_id().unwrap();
+        // let old = self.get_camera(id).velocity;
+        // self.r.data.change().set_camera_velocity(id, x, y, z);
+        // undo!(self, move |r| {
+        //     r.data.undo().set_camera_velocity(id, old.x, old.y, old.z);
+        // });
+    }
+
+    pub fn set_camera_angular_velocity(&mut self, x: f32, y: f32, z: f32) {
+        // let id = self.get_camera_id().unwrap();
+        // let old = self.get_camera(id).velocity;
+        // self.r.data.change().set_camera_velocity(id, x, y, z);
+        // undo!(self, move |r| {
+        //     r.data.undo().set_camera_velocity(id, old.x, old.y, old.z);
+        // });
     }
 
     pub fn tick(&mut self) {
-        self.r.data.tick();
+        self.r.data.change().tick();
         undo!(self, |d| {
-            d.data.untick();
+            d.data.undo().untick();
         });
     }
 
     pub fn create_camera(&mut self) {
         let mut e = Entity::default();
         e.kind = EntityType::Camera(Camera::new());
-        let index = self.r.data.create_entity(e);
+        let index = self.r.data.change().create_entity(e);
         undo!(self, move |d| {
-            d.data.remove_entity(index);
+            d.data.undo().remove_entity(index);
         });
     }
 
@@ -94,11 +107,11 @@ impl<'a> Transaction<'a> {
         e.kind = EntityType::Text {
             content: text.to_string(),
         };
-        let index = self.r.data.create_entity(e);
+        let index = self.r.data.change().create_entity(e);
         self.r.text_layouts.insert(index, layout);
         undo!(self, move |d| {
             d.text_layouts.remove(&index).unwrap();
-            d.data.remove_entity(index);
+            d.data.undo().remove_entity(index);
         });
     }
 

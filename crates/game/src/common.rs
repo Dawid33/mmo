@@ -1,6 +1,9 @@
-use winit::{event::ElementState, keyboard::PhysicalKey};
+use winit::{
+    event::{ElementState, MouseButton},
+    keyboard::PhysicalKey,
+};
 
-use crate::{GameDataRaw, UpdateGameData};
+use crate::{GameDataRaw, GameDataTransactionKind, UpdateGameData};
 
 pub type Tick = usize;
 pub type EventId = usize;
@@ -10,7 +13,7 @@ pub type LastGameEventId = usize;
 
 pub enum ClientUpdateEvent {
     NewRegion(GameDataRaw),
-    UpdateRegion(RegionId, UpdateGameData),
+    UpdateRegion(RegionId, UpdateGameData, GameDataTransactionKind),
     GameCrash(GameError),
 }
 
@@ -75,7 +78,7 @@ impl GameEvent {
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum GameEventKind {
     Tick,
-    MouseEvent,
+    MouseEvent(MouseButton, ElementState),
     KeyboardEvent(PhysicalKey, ElementState),
     Quit,
 }

@@ -28,8 +28,6 @@ pub struct Camera {
     pub znear: f32,
     pub zfar: f32,
     pub uniform: CameraUniform,
-    pub velocity: cgmath::Vector3<f32>,
-    pub position: cgmath::Vector3<f32>,
 }
 
 // TODO: Pass in aspect ration from user.
@@ -51,21 +49,21 @@ impl Camera {
             uniform: CameraUniform {
                 view_proj: cgmath::Matrix4::identity().into(),
             },
-            velocity: cgmath::Vector3::zero(),
-            position: cgmath::Vector3::zero(),
         }
     }
 
     fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
         let proj = cgmath::perspective(cgmath::Deg(self.fovy), ASPECT, self.znear, self.zfar);
-        let position = cgmath::Matrix4::from_translation(self.position);
+        // let position = cgmath::Matrix4::from_translation(self.position);
 
-        return (OPENGL_TO_WGPU_MATRIX * proj * view) * position;
+        return (OPENGL_TO_WGPU_MATRIX * proj * view)/* * position*/;
     }
 
-    pub fn update_view_proj(&mut self) {
+    pub fn update_view_proj(&mut self) -> CameraUniform {
+        let old = self.uniform;
         self.uniform.view_proj = self.build_view_projection_matrix().into();
+        return old;
     }
 }
 
@@ -82,36 +80,44 @@ impl Controller for CameraController {
         key: PhysicalKey,
         state: ElementState,
     ) {
-        let cid = t.get_camera_id().unwrap();
-        let mut v = t.get_camera(cid).velocity.clone();
-        if state.is_pressed() {
-            match key {
-                PhysicalKey::Code(key_code) => match key_code {
-                    winit::keyboard::KeyCode::KeyW => v.z = 0.1,
-                    winit::keyboard::KeyCode::KeyS => v.z = -0.1,
-                    winit::keyboard::KeyCode::KeyA => v.x = 0.1,
-                    winit::keyboard::KeyCode::KeyD => v.x = -0.1,
-                    winit::keyboard::KeyCode::Space => v.y = -0.1,
-                    winit::keyboard::KeyCode::ControlLeft => v.y = 0.1,
-                    _ => (),
-                },
-                _ => (),
-            }
-        } else {
-            match key {
-                PhysicalKey::Code(key_code) => match key_code {
-                    winit::keyboard::KeyCode::KeyW => v.z = 0.0,
-                    winit::keyboard::KeyCode::KeyS => v.z = 0.0,
-                    winit::keyboard::KeyCode::KeyA => v.x = 0.0,
-                    winit::keyboard::KeyCode::KeyD => v.x = 0.0,
-                    winit::keyboard::KeyCode::Space => v.y = 0.0,
-                    winit::keyboard::KeyCode::ControlLeft => v.y = 0.0,
-                    _ => (),
-                },
-                _ => (),
-            }
-        }
-        t.set_camera_speed(v.x, v.y, v.z);
+        // let cid = t.get_camera_id().unwrap();
+        // let mut v = t.get_camera(cid).velocity.clone();
+        // if state.is_pressed() {
+        //     match key {
+        //         PhysicalKey::Code(key_code) => match key_code {
+        //             winit::keyboard::KeyCode::KeyW => v.z = 0.1,
+        //             winit::keyboard::KeyCode::KeyS => v.z = -0.1,
+        //             winit::keyboard::KeyCode::KeyA => v.x = 0.1,
+        //             winit::keyboard::KeyCode::KeyD => v.x = -0.1,
+        //             winit::keyboard::KeyCode::Space => v.y = -0.1,
+        //             winit::keyboard::KeyCode::ControlLeft => v.y = 0.1,
+        //             _ => (),
+        //         },
+        //         _ => (),
+        //     }
+        // } else {
+        //     match key {
+        //         PhysicalKey::Code(key_code) => match key_code {
+        //             winit::keyboard::KeyCode::KeyW => v.z = 0.0,
+        //             winit::keyboard::KeyCode::KeyS => v.z = 0.0,
+        //             winit::keyboard::KeyCode::KeyA => v.x = 0.0,
+        //             winit::keyboard::KeyCode::KeyD => v.x = 0.0,
+        //             winit::keyboard::KeyCode::Space => v.y = 0.0,
+        //             winit::keyboard::KeyCode::ControlLeft => v.y = 0.0,
+        //             _ => (),
+        //         },
+        //         _ => (),
+        //     }
+        // }
+        // t.set_camera_velocity(v.x, v.y, v.z);
+    }
+
+    fn on_mouse_event<'a>(
+        &mut self,
+        t: &mut Transaction<'a>,
+        key: winit::event::MouseButton,
+        state: ElementState,
+    ) {
     }
 }
 

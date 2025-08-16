@@ -2,7 +2,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crossbeam::channel::{Receiver, Sender};
 use game::{
-    CameraUniform, ClientUpdateEvent, EntityId, EntityType, GameData, GameEventKind, UpdateGameData,
+    CameraUniform, ClientUpdateEvent, EntityId, EntityType, GameData, GameDataTransactionKind,
+    GameEventKind, UpdateGameData,
 };
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
@@ -36,15 +37,11 @@ impl State {
         client_recv: Receiver<ClientUpdateEvent>,
         game_send: Sender<GameEventKind>,
     ) -> State {
-        // let mut desc = wgpu::InstanceDescriptor::default();
-        // desc.backends = Backends::VULKAN;
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
             .unwrap();
-        // let mut desc = wgpu::DeviceDescriptor::default();
-        // desc.required_features.insert(Features::BGRA8UNORM_STORAGE);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default(), None)
             .await
@@ -84,11 +81,9 @@ impl State {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                // 3.
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    // 4.
                     format: surface_format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
@@ -104,14 +99,14 @@ impl State {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None, // 1.
+            depth_stencil: None,
             multisample: wgpu::MultisampleState {
-                count: 1,                         // 2.
-                mask: !0,                         // 3.
-                alpha_to_coverage_enabled: false, // 4.
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
             },
-            multiview: None, // 5.
-            cache: None,     // 6.
+            multiview: None,
+            cache: None,
         });
 
         let mut cam = game::Camera::new();
@@ -188,7 +183,7 @@ impl State {
     }
 
     pub fn render(&mut self, regions: &BTreeMap<usize, GameData>) {
-        let data = if let Some(data) = regions.get(&0) {
+        let _data = if let Some(data) = regions.get(&0) {
             data
         } else {
             return;
@@ -274,10 +269,15 @@ impl State {
         self.set_chunk(ChunkMesh::new(data.raw()));
     }
 
-    pub fn update(&mut self, event: UpdateGameData, data: &mut GameData) {
+    pub fn update(
+        &mut self,
+        event: UpdateGameData,
+        data: &mut GameData,
+        kind: GameDataTransactionKind,
+    ) {
         match event {
             game::UpdateGameData::CreateEntity(e) => {
-                let index = data.create_entity(e.clone());
+                let index = data.change().create_entity(e.clone());
                 match &e.kind {
                     game::EntityType::Camera(camera) => {
                         self.create_camera(index, camera.uniform);
@@ -293,17 +293,23 @@ impl State {
                     }
                     _ => (),
                 }
-                data.remove_entity(i);
+                data.change().remove_entity(i);
             }
             game::UpdateGameData::UpdateCamera(e) => {
-                data.update_camera(e);
+                data.change().update_camera(e);
                 let cam = data.raw().entities.get(e).unwrap().kind.as_camera();
                 let buf = &self.cameras.get(&e).unwrap().0;
                 self.queue
                     .write_buffer(buf, 0, bytemuck::cast_slice(&[cam.uniform]));
             }
             game::UpdateGameData::SetCameraVelocity(e, x, y, z) => {
-                data.set_camera_velocity(e, x, y, z);
+                data.change().set_camera_velocity(e, x, y, z);
+            }
+            game::UpdateGameData::SetCameraAngularVelocity(e, x, y, z) => {
+                data.change().set_camera_angular_velocity(e, x, y, z);
+            }
+            game::UpdateGameData::SetCameraUniform(id, uniform) => {
+                data.change().set_camera_uniform(uniform, id);
             }
         }
     }
