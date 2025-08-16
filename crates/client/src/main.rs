@@ -4,23 +4,19 @@ use crossbeam::{
     channel::{Receiver, Sender},
     select,
 };
-use game::{ClientUpdateEvent, GameError, GameEventKind, Region, RegionData, World};
+use game::{ClientUpdateEvent, GameData, GameError, GameEventKind, Region, RegionData, World};
 use log::{info, trace, warn, LevelFilter};
 use parley::FontContext;
 use simplelog::{FormatItem, SimpleLogger};
-use std::{
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{net::SocketAddr, time::Duration};
 use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::window::App;
 
-// use weldr::{parse, FileRefResolver, ResolveError, SourceMap};
-
-mod editor;
+mod layout;
+mod mesh;
 mod netcode;
+mod state;
 mod window;
 
 /// Wrapper struct for coordinating networking / rollback for the game.
@@ -76,7 +72,7 @@ impl GameInstanceManager {
         std::thread::spawn(move || loop {
             // TODO: Sync ticks with server.
             tick_sender.send(GameEventKind::Tick).unwrap();
-            std::thread::sleep(Duration::from_millis(1000));
+            std::thread::sleep(Duration::from_millis(30));
         });
 
         let (server_send, server_recv) = crossbeam::channel::unbounded();
@@ -107,9 +103,9 @@ impl GameInstanceManager {
                                 world.reconcile_event(game_event).unwrap();
                             }
                         }
-                        game::ServerPacket::Region(id, game_data, last_id) => {
-                            let data = Arc::new(Mutex::new(RegionData::new(game_data, FontContext::new())));
-                            self.client_event_send.send(ClientUpdateEvent::Region(data.clone())).unwrap();
+                        game::ServerPacket::Region(id, raw_game_data, last_id) => {
+                            let data = RegionData::new(GameData::new(raw_game_data.clone(), Some(self.client_event_send.clone()), id), FontContext::new());
+                            self.client_event_send.send(ClientUpdateEvent::NewRegion(raw_game_data)).unwrap();
                             let mut w = World::new();
                             w.load(&id, Region::new(data), last_id);
                             world = Some(w);
@@ -181,7 +177,12 @@ fn start_game_thread() -> Sender<Command> {
     return command_send;
 }
 
-// TODO: Incorporate parley text stuff into game data.
+// TODO: Create RenderData to encapsulate GPU state.
+// TODO: Think about and improve GameData -> RenderData connection.
+// TODO: Make it possible to pan camera with middle mouse button.
+// TODO: Create mesh from from world representation
+// TODO: Render mesh
+// TODO: Profit???
 
 // WINDOW:
 // - Update world data based on recieved events.

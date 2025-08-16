@@ -132,7 +132,7 @@ fn main() {
         client_packet_send
             .send(ServerEvent::ServerTickTimer)
             .unwrap();
-        std::thread::sleep(Duration::from_millis(1000));
+        std::thread::sleep(Duration::from_millis(100));
     });
 
     let mut world = World::editor();
