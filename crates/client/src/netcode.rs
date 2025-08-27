@@ -1,7 +1,7 @@
-use std::{net::SocketAddr, sync::Arc, thread::sleep, time::Duration};
+use std::{net::SocketAddr, sync::Arc};
 
 use crossbeam::channel::{Receiver, Sender};
-use game::{ClientPacket, GameEvent, ServerPacket};
+use game::{ClientPacket, ServerPacket};
 use log::{error, info, warn};
 use quinn::{
     crypto::rustls::QuicClientConfig,

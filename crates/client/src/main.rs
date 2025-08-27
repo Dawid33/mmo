@@ -1,12 +1,12 @@
+#![allow(unused)]
 //! Game client
 // #![deny(missing_docs)]
 use crossbeam::{
     channel::{Receiver, Sender},
     select,
 };
-use game::{ClientUpdateEvent, GameData, GameError, GameEventKind, Region, RegionData, World};
+use game::{ClientUpdateEvent, GameError, GameEventKind, Region, World};
 use log::{info, trace, warn, LevelFilter};
-use parley::FontContext;
 use simplelog::{FormatItem, SimpleLogger};
 use std::{net::SocketAddr, time::Duration};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -16,6 +16,7 @@ use crate::window::App;
 mod layout;
 mod mesh;
 mod netcode;
+mod render_state;
 mod state;
 mod window;
 
@@ -72,7 +73,7 @@ impl GameInstanceManager {
         std::thread::spawn(move || loop {
             // TODO: Sync ticks with server.
             tick_sender.send(GameEventKind::Tick).unwrap();
-            std::thread::sleep(Duration::from_millis(30));
+            std::thread::sleep(Duration::from_millis(50));
         });
 
         let (server_send, server_recv) = crossbeam::channel::unbounded();
@@ -103,11 +104,12 @@ impl GameInstanceManager {
                                 world.reconcile_event(game_event).unwrap();
                             }
                         }
-                        game::ServerPacket::Region(id, raw_game_data, last_id) => {
-                            let data = RegionData::new(GameData::new(raw_game_data.clone(), Some(self.client_event_send.clone()), id), FontContext::new());
-                            self.client_event_send.send(ClientUpdateEvent::NewRegion(raw_game_data)).unwrap();
+                        game::ServerPacket::Region(id, mut raw_game_data, last_id, key) => {
+                            raw_game_data.set_log();
+                            let data = Region::new(raw_game_data.clone(), Some(self.client_event_send.clone()), id);
+                            self.client_event_send.send(ClientUpdateEvent::NewRegion(raw_game_data, key)).unwrap();
                             let mut w = World::new();
-                            w.load(&id, Region::new(data), last_id);
+                            w.load(&id, data, last_id);
                             world = Some(w);
                             info!("Region recieved and loaded!");
                         }
@@ -115,7 +117,7 @@ impl GameInstanceManager {
                 },
                 recv(self.game_event_recv) -> game_event => {
                     if let Some(ref mut world) = world {
-                         match game_event {
+                         match game_event.clone() {
                             Ok(event) => {
                                 match event {
                                     GameEventKind::Quit => return Ok(()),
@@ -177,6 +179,12 @@ fn start_game_thread() -> Sender<Command> {
     return command_send;
 }
 
+// TODO:
+//
+//
+// - make rollback ipmlementors also implement new so that they can be set when used as an Undo<T>
+// ... profit?
+
 // TODO: Make it possible to pan camera with middle mouse button.
 // TODO: Create mesh from from world representation
 // TODO: Render mesh
@@ -198,6 +206,7 @@ const FORMAT: &'static [FormatItem] = &[FormatItem::Literal("client".as_bytes())
 fn main() {
     let config = simplelog::ConfigBuilder::new()
         .set_time_format_custom(FORMAT)
+        .add_filter_ignore_str("wgpu")
         .build();
     SimpleLogger::init(LevelFilter::Info, config).unwrap();
     let sender = start_game_thread();

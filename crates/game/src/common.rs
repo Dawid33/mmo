@@ -1,18 +1,39 @@
+use std::{any::TypeId, collections::BTreeMap, path::PathBuf};
+
+use macros::undo_skip;
 use winit::{
-    event::{ElementState, MouseButton},
-    keyboard::PhysicalKey,
+    dpi::{PhysicalPosition, PhysicalSize},
+    event::{
+        AxisId, ButtonId, ElementState, MouseButton, MouseScrollDelta, RawKeyEvent, TouchPhase,
+    },
+    keyboard::{self, PhysicalKey},
 };
 
-use crate::{GameDataRaw, GameDataTransactionKind, UpdateGameData};
+use crate::{data::PlayerKey, transaction::GameDataTransactionKind, GameData, UpdateGameData};
+use derive_more::Debug;
+use log::info;
 
-pub type Tick = usize;
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Usize {
+    data: usize,
+}
+
+impl From<usize> for Usize {
+    fn from(value: usize) -> Self {
+        let mut temp = Self::default();
+        temp.data = value;
+        temp
+    }
+}
+
+pub type Tick = Usize;
 pub type EventId = usize;
 pub type EntityId = usize;
 pub type RegionId = usize;
 pub type LastGameEventId = usize;
 
 pub enum ClientUpdateEvent {
-    NewRegion(GameDataRaw),
+    NewRegion(GameData, Option<PlayerKey>),
     UpdateRegion(RegionId, UpdateGameData, GameDataTransactionKind),
     GameCrash(GameError),
 }
@@ -39,11 +60,13 @@ pub enum ServerPacket {
     SyncClock,
     /// Game event that was proccessed by the server.
     GameEvent(GameEvent),
-    Region(RegionId, GameDataRaw, LastGameEventId),
+    // TODO: Create player serverside and add player id here to let client know
+    // who he is.
+    Region(RegionId, GameData, LastGameEventId, Option<PlayerKey>),
 }
 
 /// A Game event
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct GameEvent {
     /// Type of game event.
     pub kind: GameEventKind,
@@ -75,10 +98,85 @@ impl GameEvent {
     }
 }
 
-#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum WindowEvent {
+    KeyboardInput {
+        physical_key: PhysicalKey,
+        logical_key: keyboard::Key,
+        location: keyboard::KeyLocation,
+        state: ElementState,
+        repeat: bool,
+        is_synthetic: bool,
+    },
+    CursorMoved {
+        position: PhysicalPosition<f64>,
+    },
+    MouseInput {
+        state: ElementState,
+        button: MouseButton,
+    },
+    MouseWheel {
+        delta: MouseScrollDelta,
+        phase: TouchPhase,
+    },
+    Focused(bool),
+    ScaleFactorChanged {
+        scale_factor: f64,
+    },
+    DroppedFile(PathBuf),
+    Resized(PhysicalSize<u32>),
+    CloseRequested,
+    Destroyed,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum DeviceEvent {
+    Added,
+    Removed,
+
+    /// Change in physical position of a pointing device.
+    ///
+    /// This represents raw, unfiltered physical motion. Not to be confused with
+    /// [`WindowEvent::CursorMoved`].
+    MouseMotion {
+        /// (x, y) change in position in unspecified units.
+        ///
+        /// Different devices may use different units.
+        delta: (f64, f64),
+    },
+
+    /// Physical scroll event
+    MouseWheel {
+        delta: MouseScrollDelta,
+    },
+
+    /// Motion on some analog axis. This event will be reported for all arbitrary input devices
+    /// that winit supports on this platform, including mouse devices.  If the device is a mouse
+    /// device then this will be reported alongside the MouseMotion event.
+    Motion {
+        axis: AxisId,
+        value: f64,
+    },
+
+    Button {
+        button: ButtonId,
+        state: ElementState,
+    },
+
+    Key(RawKeyEvent),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum WinitEvent {
+    WindowEvent(WindowEvent),
+    DeviceEvent(DeviceEvent),
+    NewEvents,
+    AboutToWait,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum GameEventKind {
     Tick,
-    MouseEvent(MouseButton, ElementState),
-    KeyboardEvent(PhysicalKey, ElementState),
+    PlayerWinitEvent(PlayerKey, WinitEvent),
     Quit,
 }

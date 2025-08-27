@@ -1,16 +1,19 @@
 use std::{
+    any::Any,
     cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap, VecDeque},
+    collections::{BinaryHeap, VecDeque},
 };
 
+use crossbeam::channel::Sender;
 use log::info;
 use parley::{Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, StyleProperty};
 
 use crate::{
-    camera::CameraController, transaction::Transaction, Controller, EntityId, EntityType, GameData,
-    GameError, GameEvent, GameEventKind,
+    camera::CameraController, data::GameData, physics::PhysicsController, ClientUpdateEvent,
+    Controller, GameDataTransaction, GameError, GameEvent, GameEventKind, RegionId,
 };
 
+#[allow(unused)]
 pub fn text_layout<'a>(fctx: &mut FontContext, text: &str) -> Layout<()> {
     let mut l: LayoutContext<()> = LayoutContext::new();
     let mut l = l.ranged_builder(fctx, &text, 1.0, true);
@@ -21,50 +24,34 @@ pub fn text_layout<'a>(fctx: &mut FontContext, text: &str) -> Layout<()> {
     layout
 }
 
-pub struct RegionData {
-    pub data: GameData,
-    pub font_context: FontContext,
-    pub text_layouts: BTreeMap<EntityId, Layout<()>>,
-}
-
-impl RegionData {
-    pub fn new(data: GameData, mut font_context: FontContext) -> Self {
-        let mut text_layouts = BTreeMap::new();
-        for (i, e) in data.raw().entities.iter().enumerate() {
-            match &e.kind {
-                EntityType::Text { content } => {
-                    let l = text_layout(&mut font_context, &content);
-                    text_layouts.insert(i, l);
-                }
-
-                _ => (),
-            }
-        }
-        Self {
-            text_layouts,
-            font_context,
-            data,
-        }
-    }
-}
-
 /// A region represents an portion of the world that processes game events at
 /// its own tick rate separately from other regions.
+#[allow(unused)]
 pub struct Region {
-    pub event_log: VecDeque<(GameEvent, Box<dyn Fn(&mut RegionData)>)>,
-    pub data: RegionData,
+    pub event_log: VecDeque<(GameEvent, Box<dyn Fn(&mut GameData)>)>,
+    pub data: GameData,
+    id: RegionId,
     input_buffer: BinaryHeap<Reverse<GameEvent>>,
     controllers: Vec<Box<dyn Controller>>,
+    font_context: FontContext,
+    client_event_send: Option<Sender<ClientUpdateEvent>>,
 }
 
 impl Region {
     /// Create new region
-    pub fn new(data: RegionData) -> Self {
+    pub fn new(
+        data: GameData,
+        client_event_send: Option<Sender<ClientUpdateEvent>>,
+        id: RegionId,
+    ) -> Self {
         Self {
             data,
             event_log: VecDeque::new(),
             input_buffer: BinaryHeap::new(),
-            controllers: Vec::from([CameraController::new()]),
+            controllers: Vec::from([CameraController::new(), PhysicsController::new()]),
+            font_context: FontContext::new(),
+            client_event_send,
+            id,
         }
     }
 
@@ -73,7 +60,7 @@ impl Region {
     pub fn reconcile(&mut self, server_event: GameEvent) -> Result<(), GameError> {
         info!("input buffer {:?}", self.input_buffer);
         info!("incoming server event {:?}", server_event);
-        self.input_buffer.push(Reverse(server_event));
+        self.input_buffer.push(Reverse(server_event.clone()));
 
         if self.input_buffer.len() > 10 {
             panic!("Server event input buffer too big.");
@@ -122,7 +109,7 @@ impl Region {
 
     /// Handle a client event.
     pub fn handle_event(&mut self, event: GameEvent) -> Result<(), GameError> {
-        let mut t = Transaction::new(event, &mut self.event_log, &mut self.data);
+        let mut t = GameDataTransaction::new(&mut self.data, &self.client_event_send, self.id);
         match event.kind {
             GameEventKind::Tick => {
                 for c in self.controllers.iter_mut() {
@@ -130,20 +117,17 @@ impl Region {
                 }
                 t.tick();
             }
-            GameEventKind::Quit => todo!(),
-            GameEventKind::MouseEvent(button, state) => {
+            GameEventKind::PlayerWinitEvent(player, event) => {
                 for c in self.controllers.iter_mut() {
-                    c.on_mouse_event(&mut t, button, state);
+                    c.on_player_event(&mut t, player, &event);
                 }
+                t.update_player_input(player, &event);
             }
-            GameEventKind::KeyboardEvent(id, state) => {
-                for c in self.controllers.iter_mut() {
-                    c.on_keyboard_event(&mut t, id, state);
-                }
-            }
+            GameEventKind::Quit => (),
         }
-        //TODO: Temporary while reconciliation is off.
-        t.event_log.clear();
+
+        // let log = t.data.log.lock().unwrap();
+        // info!("{:?}", log.all.get(0).unwrap());
         Ok(())
     }
 }

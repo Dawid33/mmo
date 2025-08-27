@@ -1,26 +1,20 @@
 //! Server
 // #![deny(missing_docs)]
-use std::{fmt::Debug, sync::Arc, thread, time::Duration};
+use std::{fmt::Debug, sync::Arc, time::Duration};
 
-use crossbeam::{
-    channel::{Receiver, Sender},
-    epoch::Pointable,
-};
-use dashmap::{mapref::entry, DashMap, Entry};
-use game::{ClientPacket, GameEvent, GameEventKind, ServerPacket, World};
-use log::{debug, error, info, LevelFilter};
+use crossbeam::channel::{Receiver, Sender};
+use dashmap::DashMap;
+use game::{ClientPacket, GameEventKind, ServerPacket, World};
+use log::{error, info, LevelFilter};
 use quinn::{
     crypto::rustls::QuicServerConfig,
     rustls::{
         self,
         pki_types::{CertificateDer, PrivatePkcs8KeyDer},
-        ConfigBuilder,
     },
-    ClientConfig, ConnectError, Connecting, Connection, ConnectionError, Endpoint,
+    Connection, ConnectionError, Endpoint,
 };
-use simplelog::{
-    format_description, ColorChoice, Config, FormatItem, SimpleLogger, TermLogger, TerminalMode,
-};
+use simplelog::{FormatItem, SimpleLogger};
 
 /// Wrapper around RegionGroup with additional bookeeping / networking
 /// to make it work as a server. Acts only as a dumb router of game event packets.
@@ -132,10 +126,10 @@ fn main() {
         client_packet_send
             .send(ServerEvent::ServerTickTimer)
             .unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(10));
     });
 
-    let mut world = World::editor();
+    let (mut world, player) = World::editor();
     // TODO: send region once to all new connections.
     // TODO: send region on request to a connection.
 
@@ -145,7 +139,7 @@ fn main() {
             ServerEvent::ClientPacket(client_packet) => match client_packet {
                 ClientPacket::RequestRegion => {
                     server_send
-                        .send(world.build_region_server_packet(0))
+                        .send(world.build_region_server_packet(0, Some(player)))
                         .unwrap();
                 }
                 ClientPacket::SyncClock => todo!(),

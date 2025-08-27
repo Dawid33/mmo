@@ -1,231 +1,160 @@
-use crossbeam::channel::Sender;
-use rapier3d::{na::Vector3, prelude::RigidBodyHandle};
+use std::sync::{Arc, Mutex};
+
+use rapier3d::{
+    na::{Matrix4, Vector4},
+    prelude::{RigidBody, RigidBodyHandle},
+};
 use serde::{Deserialize, Serialize};
+use slotmap::{new_key_type, SlotMap};
 
 use crate::{
-    camera::Camera,
-    common::{ClientUpdateEvent, RegionId, Tick},
-    physics::PhysicsState,
-    CameraUniform, EntityId,
+    common::Tick, input::WinitInputHelper, physics::PhysicsState, EntityId, IsometryReal, Usize,
 };
+use derive_more::Debug;
+use log::info;
 
-#[derive(Copy, Clone)]
-pub enum GameDataTransactionKind {
-    Do,
-    Undo,
-}
-
-pub struct GameDataTransaction<'a> {
-    d: &'a mut GameData,
-    kind: GameDataTransactionKind,
-}
-
-impl<'a> GameDataTransaction<'a> {
-    pub fn new(data: &'a mut GameData, kind: GameDataTransactionKind) -> Self {
-        Self { d: data, kind }
-    }
-
-    pub fn raw(&'a self) -> &'a GameDataRaw {
-        &self.d.raw
-    }
-
-    fn send(&mut self, e: UpdateGameData) {
-        self.d.client.as_ref().inspect(|c| {
-            c.send(ClientUpdateEvent::UpdateRegion(self.d.id, e, self.kind))
-                .unwrap()
-        });
-    }
-
-    pub fn tick(&mut self) {
-        self.d.raw.tick += 1;
-    }
-
-    pub fn untick(&mut self) {
-        self.d.raw.tick -= 1;
-    }
-
-    pub fn set_camera_uniform(&mut self, uniform: CameraUniform, cam_id: usize) {
-        let camera = &mut self
-            .d
-            .raw
-            .entities
-            .get_mut(cam_id)
-            .unwrap()
-            .kind
-            .as_camera_mut();
-        camera.uniform = uniform;
-        self.send(UpdateGameData::SetCameraUniform(cam_id, uniform));
-    }
-
-    pub fn update_camera(&mut self, e: EntityId) -> CameraUniform {
-        let camera = match &mut self.d.raw.entities.get_mut(e).unwrap().kind {
-            EntityType::Camera(camera) => camera,
-            _ => panic!("Tried to translate camera but entity isn't a camera"),
-        };
-
-        // use cgmath::InnerSpace;
-        // camera.position += camera.velocity;
-        // let forward = camera.target - camera.eye;
-        // let forward_norm = forward.normalize();
-
-        // camera.eye += forward_norm * camera.velocity.x;
-        // let right = forward_norm.cross(camera.up);
-        // camera.eye += right * camera.velocity.z;
-
-        // Redo radius calc in case the forward/backward is pressed.
-        // let forward = camera.target - camera.eye;
-        // let forward_mag = forward.magnitude();
-
-        // if camera.velocity.z > 0.0 {
-        //     camera.eye =
-        //         camera.target - (forward + right * camera.velocity.z).normalize() * forward_mag;
-        // } else {
-        //     camera.eye =
-        //         camera.target - (forward - right * camera.velocity.z).normalize() * forward_mag;
-        // }
-        let old = camera.update_view_proj();
-        self.send(UpdateGameData::UpdateCamera(e));
-        return old;
-    }
-
-    pub fn create_entity(&mut self, e: Entity) -> EntityId {
-        let index = self.d.raw.entities.len();
-        self.d.raw.entities.insert(index, e.clone());
-        self.send(UpdateGameData::CreateEntity(e));
-        index
-    }
-
-    pub fn remove_entity(&mut self, e: EntityId) {
-        self.d.raw.entities.remove(e);
-        self.send(UpdateGameData::RemoveEntity(e));
-    }
-
-    pub fn set_camera_velocity(&mut self, e: EntityId, x: f32, y: f32, z: f32) {
-        // let camera = self.d.raw.entities.get_mut(e).unwrap();
-        // camera.velocity = cgmath::Vector3::new(x, y, z);
-        self.send(UpdateGameData::SetCameraVelocity(e, x, y, z));
-    }
-    pub fn set_camera_angular_velocity(&mut self, e: EntityId, x: f32, y: f32, z: f32) {
-        // let camera = self.d.raw.entities.get_mut(e).unwrap().kind.as_camera_mut();
-        // camera = cgmath::Vector3::new(x, y, z);
-        self.send(UpdateGameData::SetCameraVelocity(e, x, y, z));
-    }
-}
-
-pub struct GameData {
-    raw: GameDataRaw,
-    id: RegionId,
-    client: Option<Sender<ClientUpdateEvent>>,
-}
-
+#[derive(Clone, Debug)]
 pub enum UpdateGameData {
-    CreateEntity(Entity),
-    UpdateCamera(EntityId),
-    SetCameraUniform(EntityId, CameraUniform),
+    AddRigidBody(RigidBody),
+    RemoveRigidBody(RigidBodyHandle),
+    SetEntityRenderTransform(EntityId, IsometryReal),
     RemoveEntity(EntityId),
-    SetCameraVelocity(EntityId, f32, f32, f32),
-    SetCameraAngularVelocity(EntityId, f32, f32, f32),
+    SetCameraUniform(EntityId, IsometryReal),
+    SetEntityPosition(EntityId, IsometryReal),
+    UpdateEntityIsometry(EntityId, IsometryReal),
+    SetTick(Tick),
+}
+
+#[derive(Debug, Default, Copy, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Camera {
+    fovy: f32,
+    znear: f32,
+    zfar: f32,
+    opengl_to_wgpu_matrix: Matrix4<f32>,
+    pub proj_matrix: Matrix4<f32>,
+}
+impl Camera {
+    pub fn new() -> Self {
+        Camera {
+            fovy: 90.0,
+            znear: 0.1,
+            zfar: 100.0,
+            proj_matrix: Matrix4::<f32>::identity(),
+            opengl_to_wgpu_matrix: Matrix4::from_columns(&[
+                Vector4::new(1.0, 0.0, 0.0, 0.0),
+                Vector4::new(0.0, 1.0, 0.0, 0.0),
+                Vector4::new(0.0, 0.0, 0.5, 0.0),
+                Vector4::new(0.0, 0.0, 0.5, 1.0),
+            ]),
+        }
+    }
+    pub fn build_projection(&mut self) -> Matrix4<f32> {
+        let proj =
+            rapier3d::na::Perspective3::new(self.fovy * 0.01745329, ASPECT, self.znear, self.zfar);
+        let new = self.opengl_to_wgpu_matrix * proj.as_matrix();
+        self.proj_matrix = new;
+        return new;
+    }
+}
+
+// TODO: Pass in aspect ration from user.
+const ASPECT: f32 = (16 / 9) as f32;
+
+new_key_type! { pub struct EntityKey; }
+new_key_type! { pub struct PlayerKey; }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Player {
+    pub input: WinitInputHelper,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Mesh {}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Component<T> {
+    list: SlotMap<EntityKey, Option<T>>,
+}
+
+impl<T> Component<T> {
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    pub fn insert(&mut self, item: Option<T>) -> EntityKey {
+        self.list.insert(item)
+    }
+
+    pub fn remove(&mut self, item: EntityKey) -> Option<T> {
+        self.list.remove(item).unwrap()
+    }
+
+    pub fn set(&mut self, key: EntityKey, item: Option<T>) -> Option<T> {
+        if let Some(item) = item {
+            self.list.get_mut(key).unwrap().replace(item)
+        } else {
+            self.list.get_mut(key).unwrap().take()
+        }
+    }
+
+    pub fn get(&self, key: EntityKey) -> &T {
+        self.list.get(key).unwrap().as_ref().unwrap()
+    }
+
+    pub fn get_mut(&mut self, key: EntityKey) -> &mut T {
+        self.list.get_mut(key).unwrap().as_mut().unwrap()
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Ecs {
+    pub camera: Component<Camera>,
+    pub isometry: Component<IsometryReal>,
+    pub rigidbody: Component<RigidBodyHandle>,
+    pub player: Component<Player>,
+    pub mesh: Component<Mesh>,
+}
+
+impl Ecs {
+    pub fn add<'a>(&'a mut self) -> EntityKey {
+        self.camera.insert(None);
+        self.isometry.insert(None);
+        self.rigidbody.insert(None);
+        self.player.insert(None)
+    }
+
+    pub fn remove(&mut self, key: EntityKey) {
+        self.camera.remove(key);
+        self.isometry.remove(key);
+        self.rigidbody.remove(key);
+        self.player.remove(key);
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GameData {
+    #[serde(skip)]
+    #[debug(skip)]
+    // pub log: Arc<Mutex<UndoLog>>,
+    // #[debug(skip)]
+    pub ecs: Ecs,
+    #[debug(skip)]
+    pub physics: PhysicsState,
+    pub tick: Usize,
+    pub players: SlotMap<PlayerKey, EntityKey>,
 }
 
 impl GameData {
-    pub fn new(data: GameDataRaw, client: Option<Sender<ClientUpdateEvent>>, id: RegionId) -> Self {
-        Self {
-            raw: data,
-            client,
-            id,
-        }
-    }
-
-    pub fn change(&mut self) -> GameDataTransaction<'_> {
-        GameDataTransaction {
-            d: self,
-            kind: GameDataTransactionKind::Do,
-        }
-    }
-
-    pub fn undo(&mut self) -> GameDataTransaction<'_> {
-        GameDataTransaction {
-            d: self,
-            kind: GameDataTransactionKind::Undo,
-        }
-    }
-
-    pub fn raw<'a>(&'a self) -> &'a GameDataRaw {
-        &self.raw
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Entity {
-    pub kind: EntityType,
-    pub handle: Option<RigidBodyHandle>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EntityType {
-    Layout,
-    Camera(Camera),
-    Text { content: String },
-    Default,
-}
-
-impl Default for EntityType {
-    fn default() -> Self {
-        Self::Default
-    }
-}
-
-impl EntityType {
-    pub fn as_camera(&self) -> &Camera {
-        match self {
-            EntityType::Camera(camera) => camera,
-            _ => panic!("Entity not camera"),
-        }
-    }
-    pub fn as_camera_mut(&mut self) -> &mut Camera {
-        match self {
-            EntityType::Camera(camera) => camera,
-            _ => panic!("Entity not camera"),
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub enum VoxelKind {
-    Empty,
-}
-
-impl Default for VoxelKind {
-    fn default() -> Self {
-        VoxelKind::Empty
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, Default)]
-pub struct Voxel {
-    kind: VoxelKind,
-}
-
-#[derive(Clone, Serialize, Deserialize, Default)]
-pub struct SimulationChunk {
-    pub voxels: [[[Voxel; 4]; 4]; 4],
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct GameDataRaw {
-    pub tick: Tick,
-    pub chunk: SimulationChunk,
-    pub entities: Vec<Entity>,
-    pub physics: PhysicsState,
-}
-
-impl GameDataRaw {
     pub fn new() -> Self {
-        Self {
-            tick: 0,
-            physics: PhysicsState::new(),
-            entities: Vec::new(),
-            chunk: SimulationChunk::default(),
-        }
+        let mut data = Self::default();
+        data.set_log();
+        data
+    }
+    pub fn set_log(&mut self) {
+        // let mut fields = Vec::new();
+        // self.__fields(&mut fields);
+        // let log = Arc::new(Mutex::new(UndoLog::new(fields)));
+        // self.set_undo_log(log.clone());
+        // self.log = log;
     }
 }

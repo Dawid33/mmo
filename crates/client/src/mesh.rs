@@ -1,6 +1,5 @@
 use bytemuck::NoUninit;
-use game::GameDataRaw;
-use log::info;
+use game::GameData;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, NoUninit)]
@@ -27,7 +26,7 @@ pub struct ChunkMesh {
 }
 
 impl ChunkMesh {
-    pub fn new(data: &GameDataRaw) -> Self {
+    pub fn new(_data: &GameData) -> Self {
         // TODO: Meshing algorithm
         // for (x, length) in data.chunk.voxels.iter().enumerate() {
         //     for (y, width) in length.iter().enumerate() {

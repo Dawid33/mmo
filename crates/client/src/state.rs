@@ -1,34 +1,153 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crossbeam::channel::{Receiver, Sender};
 use game::{
-    CameraUniform, ClientUpdateEvent, EntityId, EntityType, GameData, GameDataTransactionKind,
-    GameEventKind, UpdateGameData,
+    ClientUpdateEvent, EntityId, GameData, GameDataTransactionKind, GameEventKind, IsometryReal,
+    PlayerKey, UpdateGameData,
 };
+#[allow(unused)]
+use log::info;
+use rapier3d::na::Matrix4;
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
-    BufferUsages, TextureFormat,
+    BufferUsages, Device, Queue, TextureFormat,
 };
 use winit::window::Window;
 
 use crate::{
     layout::CAMERA_LAYOUT_DESC,
     mesh::{ChunkMesh, Vertex},
+    render_state::TrueRenderWorld,
 };
+
+// Contain copy of render world that can be displayed to the screen.
+pub struct RenderWorld {
+    _translate: BTreeSet<EntityId>,
+    lerp_set: BTreeSet<EntityId>,
+    device: Device,
+    buffer: Option<(wgpu::Buffer, usize)>,
+    cameras: BTreeMap<EntityId, (wgpu::Buffer, wgpu::BindGroup, IsometryReal)>,
+    default_camera: (wgpu::Buffer, wgpu::BindGroup),
+}
+
+impl RenderWorld {
+    // upload generated mesh to buffer
+    pub fn set_chunk(&mut self, m: ChunkMesh) {
+        self.buffer = Some((
+            self.device.create_buffer_init(&BufferInitDescriptor {
+                label: Some("Chunk Buffer 0"),
+                contents: &bytemuck::cast_slice(&m.vertices[..]),
+                usage: BufferUsages::VERTEX,
+            }),
+            m.vertices.len(),
+        ));
+    }
+
+    pub fn add_region(&mut self, _id: usize, data: &GameData) {
+        // for (i, e) in data.raw().entities.iter().enumerate() {
+        //     match &e.kind {
+        //         EntityType::Camera(c) => {
+        //             // self.create_camera(
+        //             //     i,
+        //             //     c.build_view_projection_matrix(&IsometryReal::identity()),
+        //             // );
+        //         }
+        //         _ => (),
+        //     }
+        // }
+        self.set_chunk(ChunkMesh::new(&data));
+    }
+
+    pub fn new(device: Device) -> Self {
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::cast_slice(Matrix4::<f32>::identity().as_slice()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &device.create_bind_group_layout(CAMERA_LAYOUT_DESC),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+            label: Some("camera_bind_group"),
+        });
+        Self {
+            cameras: BTreeMap::new(),
+            default_camera: (camera_buffer, camera_bind_group),
+            device,
+            buffer: None,
+            lerp_set: BTreeSet::new(),
+            _translate: BTreeSet::new(),
+        }
+    }
+
+    #[allow(unused)]
+    pub fn create_camera(&mut self, index: usize, view_proj: Matrix4<f32>) {
+        let buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Camera Buffer"),
+                contents: bytemuck::cast_slice(view_proj.as_slice()),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let camera_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.device.create_bind_group_layout(CAMERA_LAYOUT_DESC),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+            label: Some("camera_bind_group"),
+        });
+        self.cameras
+            .insert(index, (buffer, camera_bind_group, IsometryReal::identity()));
+    }
+
+    pub fn _translate(&mut self, _data: &GameData) {}
+
+    #[allow(unused)]
+    pub fn lerp(&mut self, data: &TrueRenderWorld, queue: &Queue) {
+        self.lerp_set.retain(|l| {
+            // let e = data.raw().entities.get(*l).unwrap();
+            false
+            // match &e.kind {
+            //     EntityType::Camera(c) => {
+            //         let (buf, _, current_iso) = self.cameras.get_mut(l).unwrap();
+            //         *current_iso = current_iso.lerp_slerp(&e.physics_isometry, 0.05);
+            //         // queue.write_buffer(
+            //         //     buf,
+            //         //     0,
+            //         //     bytemuck::cast_slice(
+            //         //         (c.build_view_projection_matrix(&current_iso)).as_slice(),
+            //         //     ),
+            //         // );
+            //         if *current_iso == e.physics_isometry {
+            //             false
+            //         } else {
+            //             true
+            //         }
+            //     }
+            //     _ => false,
+            // }
+        });
+    }
+}
 
 pub struct State {
     pub client_recv: Receiver<ClientUpdateEvent>,
     pub game_send: Sender<GameEventKind>,
+    pub player: Option<PlayerKey>,
     window: Arc<Window>,
-    device: wgpu::Device,
     queue: wgpu::Queue,
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
-    buffer: Option<(wgpu::Buffer, usize)>,
-    cameras: BTreeMap<EntityId, (wgpu::Buffer, wgpu::BindGroup)>,
-    default_camera: (wgpu::Buffer, wgpu::BindGroup),
+    world: RenderWorld,
+    regions: BTreeMap<usize, TrueRenderWorld>,
 }
 
 impl State {
@@ -109,24 +228,9 @@ impl State {
             cache: None,
         });
 
-        let mut cam = game::Camera::new();
-        cam.update_view_proj();
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera Buffer"),
-            contents: bytemuck::cast_slice(&[cam.uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &device.create_bind_group_layout(CAMERA_LAYOUT_DESC),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-            label: Some("camera_bind_group"),
-        });
         let state = State {
             window,
-            device,
+            world: RenderWorld::new(device),
             queue,
             size,
             surface,
@@ -134,15 +238,20 @@ impl State {
             client_recv,
             game_send,
             render_pipeline,
-            buffer: None,
-            cameras: BTreeMap::new(),
-            default_camera: (camera_buffer, camera_bind_group),
+            regions: BTreeMap::new(),
+            player: None,
         };
 
         // Configure surface for the first time
         state.configure_surface();
 
         state
+    }
+
+    pub fn add_region(&mut self, id: usize, data: GameData) {
+        self.world.add_region(id, &data);
+        self.regions
+            .insert(id, TrueRenderWorld::new(&data, &mut self.world));
     }
 
     pub fn get_window(&self) -> &Window {
@@ -158,9 +267,9 @@ impl State {
             width: self.size.width,
             height: self.size.height,
             desired_maximum_frame_latency: 2,
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode: wgpu::PresentMode::FifoRelaxed,
         };
-        self.surface.configure(&self.device, &surface_config);
+        self.surface.configure(&self.world.device, &surface_config);
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -170,20 +279,8 @@ impl State {
         self.configure_surface();
     }
 
-    // upload generated mesh to buffer
-    pub fn set_chunk(&mut self, m: ChunkMesh) {
-        self.buffer = Some((
-            self.device.create_buffer_init(&BufferInitDescriptor {
-                label: Some("Chunk Buffer 0"),
-                contents: &bytemuck::cast_slice(&m.vertices[..]),
-                usage: BufferUsages::VERTEX,
-            }),
-            m.vertices.len(),
-        ));
-    }
-
-    pub fn render(&mut self, regions: &BTreeMap<usize, GameData>) {
-        let _data = if let Some(data) = regions.get(&0) {
+    pub fn render(&mut self) {
+        let _data = if let Some(data) = self.regions.get(&0) {
             data
         } else {
             return;
@@ -201,7 +298,10 @@ impl State {
                     ..Default::default()
                 });
 
-        let mut background = self.device.create_command_encoder(&Default::default());
+        let mut background = self
+            .world
+            .device
+            .create_command_encoder(&Default::default());
         let mut renderpass = background.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -218,13 +318,13 @@ impl State {
         });
         renderpass.set_pipeline(&self.render_pipeline); // 2.
 
-        let (_, cam_bind_group) = if let Some(cam) = self.cameras.get(&0) {
-            cam
+        let cam_bind_group = if let Some(cam) = self.world.cameras.get(&0) {
+            &cam.1
         } else {
-            &self.default_camera
+            &self.world.default_camera.1
         };
 
-        if let Some((buf, size)) = &self.buffer {
+        if let Some((buf, size)) = &self.world.buffer {
             renderpass.set_bind_group(0, cam_bind_group, &[]);
             renderpass.set_vertex_buffer(0, buf.slice(..));
             renderpass.draw(0..*size as u32, 0..1);
@@ -238,79 +338,18 @@ impl State {
         surface_texture.present();
     }
 
-    pub fn create_camera(&mut self, index: usize, uniform: CameraUniform) {
-        let buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Camera Buffer"),
-                contents: bytemuck::cast_slice(&[uniform]),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-        let camera_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &self.device.create_bind_group_layout(CAMERA_LAYOUT_DESC),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-            label: Some("camera_bind_group"),
-        });
-        self.cameras.insert(index, (buffer, camera_bind_group));
+    /// Lerp game data from previous value (if applicable) to current value
+    /// every frame to get smooth movement.
+    pub fn lerp(&mut self) {
+        for (_, data) in self.regions.iter() {
+            self.world.lerp(data, &self.queue);
+        }
     }
 
-    pub fn add_region(&mut self, data: &GameData) {
-        for (i, e) in data.raw().entities.iter().enumerate() {
-            match &e.kind {
-                EntityType::Camera(camera) => {
-                    self.create_camera(i, camera.uniform);
-                }
-                _ => (),
-            }
-        }
-        self.set_chunk(ChunkMesh::new(data.raw()));
-    }
-
-    pub fn update(
-        &mut self,
-        event: UpdateGameData,
-        data: &mut GameData,
-        kind: GameDataTransactionKind,
-    ) {
-        match event {
-            game::UpdateGameData::CreateEntity(e) => {
-                let index = data.change().create_entity(e.clone());
-                match &e.kind {
-                    game::EntityType::Camera(camera) => {
-                        self.create_camera(index, camera.uniform);
-                    }
-                    _ => (),
-                }
-            }
-            game::UpdateGameData::RemoveEntity(i) => {
-                let e = data.raw().entities.get(i).unwrap();
-                match e.kind {
-                    EntityType::Camera(_) => {
-                        self.cameras.remove(&i);
-                    }
-                    _ => (),
-                }
-                data.change().remove_entity(i);
-            }
-            game::UpdateGameData::UpdateCamera(e) => {
-                data.change().update_camera(e);
-                let cam = data.raw().entities.get(e).unwrap().kind.as_camera();
-                let buf = &self.cameras.get(&e).unwrap().0;
-                self.queue
-                    .write_buffer(buf, 0, bytemuck::cast_slice(&[cam.uniform]));
-            }
-            game::UpdateGameData::SetCameraVelocity(e, x, y, z) => {
-                data.change().set_camera_velocity(e, x, y, z);
-            }
-            game::UpdateGameData::SetCameraAngularVelocity(e, x, y, z) => {
-                data.change().set_camera_angular_velocity(e, x, y, z);
-            }
-            game::UpdateGameData::SetCameraUniform(id, uniform) => {
-                data.change().set_camera_uniform(uniform, id);
-            }
-        }
+    /// Update render threads representations of game state.
+    #[allow(unused)]
+    pub fn update(&mut self, id: usize, event: UpdateGameData, _kind: GameDataTransactionKind) {
+        let data = self.regions.get_mut(&id).unwrap();
+        // info!("{:?}", event);
     }
 }
