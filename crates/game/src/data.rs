@@ -1,31 +1,30 @@
-use std::sync::{Arc, Mutex};
+use std::ops::DerefMut;
 
-use rapier3d::{
-    na::{Matrix4, Vector4},
-    prelude::{RigidBody, RigidBodyHandle},
+use crate::{IsometryReal, Usize};
+pub use game_data::*;
+use rapier3d::math::Vector;
+use rapier3d::na::{Matrix4, Vector4};
+use rapier3d::prelude::{
+    CCDSolver, ColliderSet, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters,
+    IslandManager, MultibodyJointSet, NarrowPhase, QueryPipeline, RigidBodyHandle, RigidBodySet,
 };
-use serde::{Deserialize, Serialize};
+use rollback::rollback;
 use slotmap::{new_key_type, SlotMap};
 
-use crate::{
-    common::Tick, input::WinitInputHelper, physics::PhysicsState, EntityId, IsometryReal, Usize,
-};
-use derive_more::Debug;
-use log::info;
+new_key_type! { pub struct EntityKey; }
+new_key_type! { pub struct PlayerKey; }
 
-#[derive(Clone, Debug)]
-pub enum UpdateGameData {
-    AddRigidBody(RigidBody),
-    RemoveRigidBody(RigidBodyHandle),
-    SetEntityRenderTransform(EntityId, IsometryReal),
-    RemoveEntity(EntityId),
-    SetCameraUniform(EntityId, IsometryReal),
-    SetEntityPosition(EntityId, IsometryReal),
-    UpdateEntityIsometry(EntityId, IsometryReal),
-    SetTick(Tick),
-}
+const ASPECT: f32 = (16 / 9) as f32;
 
-#[derive(Debug, Default, Copy, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Default,
+    Debug,
+    rollback::serde::Serialize,
+    rollback::serde::Deserialize,
+    Clone,
+    ::borrow::Partial,
+)]
+#[module(crate)]
 pub struct Camera {
     fovy: f32,
     znear: f32,
@@ -33,6 +32,52 @@ pub struct Camera {
     opengl_to_wgpu_matrix: Matrix4<f32>,
     pub proj_matrix: Matrix4<f32>,
 }
+
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial)]
+#[module(crate)]
+pub struct Player {
+    pub input: usize,
+}
+
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial)]
+#[module(crate)]
+pub struct Mesh {}
+
+#[rollback(GameData)]
+mod game_data {
+    use super::*;
+    use std::ops::Deref;
+
+    pub struct GameData {
+        ecs: Ecs,
+        physics: PhysicsState,
+        tick: usize,
+        players: SlotMap<PlayerKey, EntityKey>,
+    }
+
+    pub struct Ecs {
+        camera: Component<Camera>,
+        isometry: Component<IsometryReal>,
+        rigidbody: Component<RigidBodyHandle>,
+        player: Component<Player>,
+        mesh: Component<Mesh>,
+    }
+
+    pub struct PhysicsState {
+        bodies: RigidBodySet,
+        broad_phase: DefaultBroadPhase,
+        implules_joint_set: ImpulseJointSet,
+        multi_body_joint_set: MultibodyJointSet,
+        ccd_solver: CCDSolver,
+        colliders: ColliderSet,
+        gravity: Vector<f32>,
+        integration_parameters: IntegrationParameters,
+        islands: IslandManager,
+        narrow_phase: NarrowPhase,
+        query_pipeline: QueryPipeline,
+    }
+}
+
 impl Camera {
     pub fn new() -> Self {
         Camera {
@@ -57,26 +102,56 @@ impl Camera {
     }
 }
 
-// TODO: Pass in aspect ration from user.
-const ASPECT: f32 = (16 / 9) as f32;
-
-new_key_type! { pub struct EntityKey; }
-new_key_type! { pub struct PlayerKey; }
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Player {
-    pub input: WinitInputHelper,
+impl Undo<Ecs> {
+    pub fn create_entity_safe(&mut self) -> EntityKey {
+        self.camera.insert(None);
+        self.isometry.insert(None);
+        self.rigidbody.insert(None);
+        self.player.insert(None);
+        let key = self.mesh.insert(None);
+        self.undo(move |d| {
+            d.camera.remove(key);
+            d.isometry.remove(key);
+            d.rigidbody.remove(key);
+            d.player.remove(key);
+        });
+        key
+    }
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct Mesh {}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct Component<T> {
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Component<T>
+where
+    T: 'static + Default,
+{
     list: SlotMap<EntityKey, Option<T>>,
 }
 
-impl<T> Component<T> {
+impl<T> Undo<Component<T>>
+where
+    T: 'static
+        + Default
+        + Clone
+        + Send
+        + ::rollback::serde::Serialize
+        + for<'a> ::rollback::serde::Deserialize<'a>,
+{
+    pub fn set_safe(&mut self, key: EntityKey, item: Option<T>) {
+        let old = self.list.get(key).cloned().unwrap();
+        self.undo(move |d| *d.list.get_mut(key).unwrap() = old.clone());
+
+        if let Some(item) = item {
+            self.list.get_mut(key).unwrap().replace(item);
+        } else {
+            self.list.get_mut(key).unwrap().take();
+        }
+    }
+}
+
+impl<T> Component<T>
+where
+    T: 'static + Default + Clone + Send,
+{
     pub fn len(&self) -> usize {
         self.list.len()
     }
@@ -89,72 +164,11 @@ impl<T> Component<T> {
         self.list.remove(item).unwrap()
     }
 
-    pub fn set(&mut self, key: EntityKey, item: Option<T>) -> Option<T> {
-        if let Some(item) = item {
-            self.list.get_mut(key).unwrap().replace(item)
-        } else {
-            self.list.get_mut(key).unwrap().take()
-        }
-    }
-
     pub fn get(&self, key: EntityKey) -> &T {
         self.list.get(key).unwrap().as_ref().unwrap()
     }
 
     pub fn get_mut(&mut self, key: EntityKey) -> &mut T {
         self.list.get_mut(key).unwrap().as_mut().unwrap()
-    }
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct Ecs {
-    pub camera: Component<Camera>,
-    pub isometry: Component<IsometryReal>,
-    pub rigidbody: Component<RigidBodyHandle>,
-    pub player: Component<Player>,
-    pub mesh: Component<Mesh>,
-}
-
-impl Ecs {
-    pub fn add<'a>(&'a mut self) -> EntityKey {
-        self.camera.insert(None);
-        self.isometry.insert(None);
-        self.rigidbody.insert(None);
-        self.player.insert(None)
-    }
-
-    pub fn remove(&mut self, key: EntityKey) {
-        self.camera.remove(key);
-        self.isometry.remove(key);
-        self.rigidbody.remove(key);
-        self.player.remove(key);
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GameData {
-    #[serde(skip)]
-    #[debug(skip)]
-    // pub log: Arc<Mutex<UndoLog>>,
-    // #[debug(skip)]
-    pub ecs: Ecs,
-    #[debug(skip)]
-    pub physics: PhysicsState,
-    pub tick: Usize,
-    pub players: SlotMap<PlayerKey, EntityKey>,
-}
-
-impl GameData {
-    pub fn new() -> Self {
-        let mut data = Self::default();
-        data.set_log();
-        data
-    }
-    pub fn set_log(&mut self) {
-        // let mut fields = Vec::new();
-        // self.__fields(&mut fields);
-        // let log = Arc::new(Mutex::new(UndoLog::new(fields)));
-        // self.set_undo_log(log.clone());
-        // self.log = log;
     }
 }

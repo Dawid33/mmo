@@ -1,7 +1,9 @@
 use std::{
     any::Any,
+    borrow::BorrowMut,
     cmp::Reverse,
     collections::{BinaryHeap, VecDeque},
+    ops::DerefMut,
 };
 
 use crossbeam::channel::Sender;
@@ -9,8 +11,11 @@ use log::info;
 use parley::{Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, StyleProperty};
 
 use crate::{
-    camera::CameraController, data::GameData, physics::PhysicsController, ClientUpdateEvent,
-    Controller, GameDataTransaction, GameError, GameEvent, GameEventKind, RegionId,
+    camera::CameraController,
+    data::{Ecs, GameData, Rollback},
+    physics::PhysicsController,
+    ClientUpdateEvent, Controller, GameDataTransaction, GameError, GameEvent, GameEventKind,
+    RegionId,
 };
 
 #[allow(unused)]
@@ -29,27 +34,28 @@ pub fn text_layout<'a>(fctx: &mut FontContext, text: &str) -> Layout<()> {
 #[allow(unused)]
 pub struct Region {
     pub event_log: VecDeque<(GameEvent, Box<dyn Fn(&mut GameData)>)>,
-    pub data: GameData,
+    pub data: Rollback,
     id: RegionId,
     input_buffer: BinaryHeap<Reverse<GameEvent>>,
     controllers: Vec<Box<dyn Controller>>,
-    font_context: FontContext,
+    // font_context: FontContext,
     client_event_send: Option<Sender<ClientUpdateEvent>>,
 }
 
 impl Region {
     /// Create new region
     pub fn new(
-        data: GameData,
+        mut data: Rollback,
         client_event_send: Option<Sender<ClientUpdateEvent>>,
         id: RegionId,
     ) -> Self {
+        data.reinitialize();
         Self {
             data,
             event_log: VecDeque::new(),
             input_buffer: BinaryHeap::new(),
             controllers: Vec::from([CameraController::new(), PhysicsController::new()]),
-            font_context: FontContext::new(),
+            // font_context: FontContext::new(),
             client_event_send,
             id,
         }
@@ -109,25 +115,35 @@ impl Region {
 
     /// Handle a client event.
     pub fn handle_event(&mut self, event: GameEvent) -> Result<(), GameError> {
-        let mut t = GameDataTransaction::new(&mut self.data, &self.client_event_send, self.id);
+        self.data.new_transaction();
         match event.kind {
             GameEventKind::Tick => {
                 for c in self.controllers.iter_mut() {
-                    c.on_tick(&mut t);
+                    c.on_tick(&mut self.data);
                 }
-                t.tick();
+                *self.data.tick += 1;
+                self.data.tick.undo(|d| *d -= 1);
             }
             GameEventKind::PlayerWinitEvent(player, event) => {
-                for c in self.controllers.iter_mut() {
-                    c.on_player_event(&mut t, player, &event);
+                let data: &mut GameData = self.data.deref_mut();
+                if let Some((p, e)) = data.players.iter().next() {
+                    let e = e.clone();
+                    let p = data.ecs.player.get_mut(e);
+                    let old = p.input.clone();
+                    // p.input.update(&event);
+                    data.ecs.player.undo(move |d| {
+                        d.get_mut(e).input = old.clone();
+                    });
+                } else {
+                    println!("NONE");
                 }
-                t.update_player_input(player, &event);
+                for c in self.controllers.iter_mut() {
+                    c.on_player_event(&mut self.data, player, &event);
+                }
             }
             GameEventKind::Quit => (),
         }
-
-        // let log = t.data.log.lock().unwrap();
-        // info!("{:?}", log.all.get(0).unwrap());
+        self.data.forget();
         Ok(())
     }
 }

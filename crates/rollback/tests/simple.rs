@@ -1,13 +1,18 @@
-use rollback::{Rollback, rollback};
+#![allow(unused)]
+use rollback::rollback;
 
-#[rollback]
-pub struct Test {
-    tick: usize,
+use crate::mod_test::Test;
+
+#[rollback(Test)]
+mod mod_test {
+    pub struct Test {
+        tick: usize,
+    }
 }
 
 #[test]
 pub fn transaction_increments() {
-    let mut test: Test = Test::default();
+    let mut test = mod_test::Rollback::default();
     assert_eq!(test.current(), 0);
     test.new_transaction();
     assert_eq!(test.current(), 1);
@@ -16,10 +21,12 @@ pub fn transaction_increments() {
 }
 
 #[test]
-pub fn simple() {
-    let mut test: Test = Test::default();
+pub fn as_mut() {
+    let mut test = mod_test::Rollback::default();
     test.new_transaction();
-    test.tick.set(1);
+    let old = test.tick.as_ref().clone();
+    *test.tick += 1;
+    test.tick.undo(move |d| *d = old);
     assert_eq!(test.tick.as_ref(), &1);
     test.rollback();
     assert_eq!(test.tick.as_ref(), &0);
@@ -27,58 +34,63 @@ pub fn simple() {
 
 #[test]
 pub fn two() {
-    let mut test: Test = Test::default();
+    let mut test = mod_test::Rollback::default();
     test.new_transaction();
-    test.tick.set(1);
+    let old = test.tick.as_ref().clone();
+    *test.tick += 1;
+    test.tick.undo(move |d| *d = old);
     test.new_transaction();
-    test.tick.set(2);
+    let old = test.tick.as_ref().clone();
+    *test.tick += 1;
+    test.tick.undo(move |d| *d = old);
     assert_eq!(test.tick.as_ref(), &2);
     test.rollback();
     assert_eq!(test.tick.as_ref(), &1);
 }
 
 #[test]
-pub fn two_in_one() {
-    let mut test: Test = Test::default();
-    test.new_transaction();
-    test.tick.set(1);
-    test.tick.set(2);
-    assert_eq!(test.tick.as_ref(), &2);
-    test.rollback();
-    assert_eq!(test.tick.as_ref(), &0);
+pub fn forget_basic() {
+    let mut test = mod_test::Rollback::default();
+    assert_eq!(test.oldest(), 0);
+    assert_eq!(test.current(), 0);
+    test.forget();
+    assert_eq!(test.oldest(), 0);
+    assert_eq!(test.current(), 0);
 }
 
-// #[test]
-// pub fn forget_basic() {
-//     let mut test: Test = Test::default();
-//     assert_eq!(test.oldest(), 0);
-//     assert_eq!(test.current(), 0);
-//     test.forget();
-//     assert_eq!(test.oldest(), 1);
-//     test.forget();
-//     assert_eq!(test.current(), 1);
-// }
+#[test]
+pub fn forget() {
+    let mut test = mod_test::Rollback::default();
+    assert_eq!(test.oldest(), 0);
+    assert_eq!(test.current(), 0);
+    test.new_transaction();
+    test.forget();
+    assert_eq!(test.oldest(), 1);
+    assert_eq!(test.current(), 1);
+}
 
-// #[test]
-// pub fn forget() {
-//     let mut test: Test = Test::default();
-//     assert_eq!(test.oldest_transaction(), 0);
-//     assert_eq!(test.current_transaction(), 0);
-//     test.new_transaction();
-//     test.forget();
-//     assert_eq!(test.oldest_transaction(), 1);
-//     assert_eq!(test.current_transaction(), 1);
-// }
+#[test]
+pub fn rollback_forgotten() {
+    let mut test = mod_test::Rollback::default();
 
-// #[test]
-// pub fn rollback_forgotten() {
-//     let mut test: Test = Test::default();
-//     assert_eq!(test.oldest_transaction(), 0);
-//     assert_eq!(test.current_transaction(), 0);
-//     test.tick.set(1);
-//     test.forget();
-//     test.rollback();
-//     assert_eq!(test.oldest_transaction(), 1);
-//     assert_eq!(test.current_transaction(), 0);
-//     assert_eq!(test.tick.as_ref(), &1);
-// }
+    let old = test.tick.as_ref().clone();
+    *test.tick += 1;
+    test.tick.undo(move |d| *d = old);
+
+    // Create new transaction
+    assert_eq!(test.oldest(), 0);
+    assert_eq!(test.current(), 0);
+    test.new_transaction();
+    // Forget the the 1 that was set to tick
+    assert_eq!(test.oldest(), 0);
+    assert_eq!(test.current(), 1);
+    test.forget();
+    // roll back the current transaction which has no changes, meaning changes
+    // to tick will persist.
+    assert_eq!(test.oldest(), 1);
+    assert_eq!(test.current(), 1);
+    test.rollback();
+    assert_eq!(test.oldest(), 0);
+    assert_eq!(test.current(), 0);
+    assert_eq!(test.tick.as_ref(), &1);
+}

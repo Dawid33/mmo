@@ -3,43 +3,51 @@
 // #![deny(missing_docs)]
 //! Game simulation code that is shared between client and server.
 
+use rapier3d::prelude::{RigidBody, RigidBodyHandle};
+use rollback::rollback;
+use slotmap::new_key_type;
 use std::{
     any::{Any, TypeId},
     collections::BTreeMap,
     rc::Rc,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 mod camera;
 mod common;
 mod data;
-mod input;
 mod physics;
 mod region;
 mod transaction;
 
+pub use crate::data::{PlayerKey, Rollback};
 pub use crate::{
-    data::Camera, data::GameData, data::PlayerKey, transaction::GameDataTransaction,
-    transaction::GameDataTransactionKind,
+    data::GameData, transaction::GameDataTransaction, transaction::GameDataTransactionKind,
 };
 
 pub use common::*;
-pub use data::UpdateGameData;
 use log::info;
 pub use region::Region;
+
+#[derive(Clone, Debug)]
+pub enum UpdateGameData {
+    AddRigidBody(RigidBody),
+    RemoveRigidBody(RigidBodyHandle),
+    SetEntityRenderTransform(EntityId, IsometryReal),
+    RemoveEntity(EntityId),
+    SetCameraUniform(EntityId, IsometryReal),
+    SetEntityPosition(EntityId, IsometryReal),
+    UpdateEntityIsometry(EntityId, IsometryReal),
+    SetTick(Tick),
+}
 
 pub type IsometryReal =
     rapier3d::na::Isometry<f32, rapier3d::na::Unit<rapier3d::na::Quaternion<f32>>, 3>;
 
 trait Controller {
-    fn on_tick<'a>(&mut self, _t: &mut GameDataTransaction) {}
-    fn on_player_event<'a>(
-        &mut self,
-        _t: &mut GameDataTransaction,
-        _player: PlayerKey,
-        _event: &WinitEvent,
-    ) {
-    }
+    fn on_tick<'a>(&mut self, _t: &mut GameData) {}
+    fn on_player_event<'a>(&mut self, _t: &mut GameData, _player: PlayerKey, _event: &WinitEvent) {}
 }
 
 /// A word is a collection of regions that communicate with one another
@@ -59,7 +67,7 @@ impl World {
 
     pub fn editor() -> (Self, PlayerKey) {
         let id = 0;
-        let mut raw = GameData::new();
+        let mut raw = Rollback::default();
         let mut t = GameDataTransaction::new(&mut raw, &None, id);
         let key = t.create_player();
         let data = Region::new(raw, None, id);
@@ -72,7 +80,7 @@ impl World {
         );
     }
 
-    pub fn clone_game_data(&self, id: &usize) -> GameData {
+    pub fn clone_game_data(&self, id: &usize) -> Rollback {
         self.regions.get(id).unwrap().data.clone()
     }
 
@@ -89,7 +97,9 @@ impl World {
         let event = GameEvent::new(event, self.last_game_event_id, region_id);
         self.last_game_event_id += 1;
         let region = self.regions.get_mut(&event._region_id).unwrap();
+        let mut time = Instant::now();
         region.handle_event(event.clone())?;
+        // println!("elapsed {:?}", time.elapsed());
         Ok(event)
     }
 

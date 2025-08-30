@@ -12,10 +12,11 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::{state::State, Command};
+use crate::{input::WinitInputHelper, state::State, Command};
 
 pub struct App {
     state: Option<State>,
+    helper: WinitInputHelper,
     command_sender: Sender<Command>,
 }
 
@@ -24,6 +25,7 @@ impl App {
         Self {
             state: None,
             command_sender,
+            helper: WinitInputHelper::new(),
         }
     }
 }

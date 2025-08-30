@@ -1,6 +1,5 @@
 use std::{any::TypeId, collections::BTreeMap, path::PathBuf};
 
-use macros::undo_skip;
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::{
@@ -9,7 +8,9 @@ use winit::{
     keyboard::{self, PhysicalKey},
 };
 
-use crate::{data::PlayerKey, transaction::GameDataTransactionKind, GameData, UpdateGameData};
+use crate::{
+    data::PlayerKey, transaction::GameDataTransactionKind, GameData, Rollback, UpdateGameData,
+};
 use derive_more::Debug;
 use log::info;
 
@@ -33,7 +34,7 @@ pub type RegionId = usize;
 pub type LastGameEventId = usize;
 
 pub enum ClientUpdateEvent {
-    NewRegion(GameData, Option<PlayerKey>),
+    NewRegion(Rollback, Option<PlayerKey>),
     UpdateRegion(RegionId, UpdateGameData, GameDataTransactionKind),
     GameCrash(GameError),
 }
@@ -62,7 +63,7 @@ pub enum ServerPacket {
     GameEvent(GameEvent),
     // TODO: Create player serverside and add player id here to let client know
     // who he is.
-    Region(RegionId, GameData, LastGameEventId, Option<PlayerKey>),
+    Region(RegionId, Rollback, LastGameEventId, Option<PlayerKey>),
 }
 
 /// A Game event

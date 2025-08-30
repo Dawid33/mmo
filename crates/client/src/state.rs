@@ -6,7 +6,7 @@ use std::{
 use crossbeam::channel::{Receiver, Sender};
 use game::{
     ClientUpdateEvent, EntityId, GameData, GameDataTransactionKind, GameEventKind, IsometryReal,
-    PlayerKey, UpdateGameData,
+    PlayerKey, Rollback, UpdateGameData,
 };
 #[allow(unused)]
 use log::info;
@@ -248,7 +248,7 @@ impl State {
         state
     }
 
-    pub fn add_region(&mut self, id: usize, data: GameData) {
+    pub fn add_region(&mut self, id: usize, data: Rollback) {
         self.world.add_region(id, &data);
         self.regions
             .insert(id, TrueRenderWorld::new(&data, &mut self.world));

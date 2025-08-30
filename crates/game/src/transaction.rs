@@ -3,6 +3,7 @@ use std::{
     rc::Rc,
 };
 
+use borrow::PartialHelper;
 use crossbeam::channel::Sender;
 #[allow(unused)]
 use log::info;
@@ -11,12 +12,11 @@ use rapier3d::{
     prelude::{RigidBody, RigidBodyBuilder, RigidBodyHandle},
 };
 use serde::{Deserialize, Serialize};
-use slotmap::{basic::Iter, Key};
+use slotmap::{basic::Iter, Key, SlotMap};
 
 use crate::{
-    data::{EntityKey, GameData, Player, PlayerKey},
-    input::WinitInputHelper,
-    Camera, ClientUpdateEvent, RegionId, UpdateGameData, WinitEvent,
+    data::{Camera, EntityKey, GameData, Player, PlayerKey},
+    ClientUpdateEvent, RegionId, UpdateGameData, WinitEvent,
 };
 
 #[derive(Copy, Clone)]
@@ -79,18 +79,19 @@ impl<'a> GameDataTransaction<'a> {
     }
 
     pub fn count(&self) -> usize {
-        self.data.ecs.camera.len()
+        // self.data.ecs.camera.len()
+        0
     }
 
-    pub fn add(&mut self) -> EntityKey {
-        self.data.ecs.add()
+    pub fn add(&mut self) {
+        // self.data.ecs.add()
     }
 
     pub fn set_camera(&mut self, key: EntityKey, camera: Camera) {
-        let old = self.data.ecs.camera.set(key, Some(camera.clone()));
-        undo!(self, move |data| {
-            data.ecs.camera.set(key, old);
-        });
+        // let old = self.data.ecs.camera.set(key, Some(camera.clone()));
+        // undo!(self, move |data| {
+        //     data.ecs.camera.set(key, old);
+        // });
     }
 
     pub fn set_player(&mut self, _key: EntityKey, _player: Player) {
@@ -100,10 +101,10 @@ impl<'a> GameDataTransaction<'a> {
         // });
     }
 
-    pub fn get_body(&self, key: EntityKey) -> &RigidBody {
-        let handle = self.data.ecs.rigidbody.get(key);
-        self.data.physics.bodies.get(*handle).unwrap()
-    }
+    // pub fn get_body(&self, key: EntityKey) -> &RigidBody {
+    //     let handle = self.data.ecs.rigidbody.get(key);
+    //     self.data.physics.bodies.get(*handle).unwrap()
+    // }
 
     pub fn set_linvel(&self, _key: EntityKey, _linvel: Vector3<f32>) {
         // let handle = self.data.ecs.get_body(key);
@@ -113,9 +114,9 @@ impl<'a> GameDataTransaction<'a> {
         // });
     }
 
-    pub fn get_body_handle(&self, key: EntityKey) -> &RigidBodyHandle {
-        self.data.ecs.rigidbody.get(key)
-    }
+    // pub fn get_body_handle(&self, key: EntityKey) -> &RigidBodyHandle {
+    //     self.data.ecs.rigidbody.get(key)
+    // }
 
     pub fn set_body_handle(&mut self, _key: EntityKey, _body: RigidBodyHandle) {
         // let old = self.data.ecs.rigidbody.set(key, Some(body.clone()));
@@ -124,17 +125,17 @@ impl<'a> GameDataTransaction<'a> {
         // });
     }
 
-    pub fn set_body(&mut self, key: RigidBodyHandle, new_body: RigidBody) {
-        let body = self.data.physics.bodies.get_mut(key).unwrap();
-        let old = body.clone();
-        *body = new_body;
-        undo!(self, move |data| {
-            *data.physics.bodies.get_mut(key).unwrap() = old.clone();
-        });
-    }
+    // pub fn set_body(&mut self, key: RigidBodyHandle, new_body: RigidBody) {
+    //     let body = self.data.physics.bodies.get_mut(key).unwrap();
+    //     let old = body.clone();
+    //     *body = new_body;
+    //     undo!(self, move |data| {
+    //         *data.physics.bodies.get_mut(key).unwrap() = old.clone();
+    //     });
+    // }
 
     pub fn update_player_input(&mut self, player: PlayerKey, _event: &WinitEvent) {
-        let _key = self.data.players.get(player).unwrap();
+        // let _key = self.data.players.get(player).unwrap();
         // let player = self.data.ecs.get_player_mut(*key);
         // let old = (*player).clone();
         // let key = key.clone();
@@ -144,29 +145,38 @@ impl<'a> GameDataTransaction<'a> {
         // });
     }
 
-    pub fn get_player(&self, player: PlayerKey) -> &Player {
-        let key = self.data.players.get(player).unwrap();
-        self.data.ecs.player.get(*key)
-    }
+    // pub fn get_player(&self, player: PlayerKey) -> &Player {
+    //     let key = self.data.players.get(player).unwrap();
+    //     self.data.ecs.player.get(*key)
+    // }
 
     pub fn create_player(&mut self) -> PlayerKey {
-        let id = self.add();
-        self.set_camera(id, Camera::new());
+        let e = self.data.ecs.create_entity_safe();
         let body = RigidBodyBuilder::kinematic_velocity_based()
             .gravity_scale(0.0)
             .can_sleep(true)
             .ccd_enabled(false)
-            .user_data(id.data().as_ffi() as u128)
+            .user_data(e.data().as_ffi() as u128)
             .build();
-        let handle = self.insert_rigid_body(body);
-        self.set_body_handle(id, handle);
-        self.set_player(
-            id,
-            Player {
-                input: WinitInputHelper::new(),
-            },
-        );
-        self.data.players.insert(id)
+        let handle = self.data.physics.bodies.insert(body);
+        self.data.physics.undo(move |d| {
+            d.bodies.remove(
+                handle,
+                &mut d.islands,
+                &mut d.colliders,
+                &mut d.implules_joint_set,
+                &mut d.multi_body_joint_set,
+                true,
+            );
+        });
+        self.data.ecs.rigidbody.set_safe(e, Some(handle));
+        self.data.ecs.camera.set_safe(e, Some(Camera::new()));
+        self.data.ecs.player.set_safe(e, Some(Player { input: 0 }));
+        let key = self.data.players.insert(e);
+        self.data.players.undo(move |d| {
+            d.remove(key);
+        });
+        key
     }
 
     // // pub fn builder(&'a mut self) -> {
@@ -210,10 +220,10 @@ impl<'a> GameDataTransaction<'a> {
     //     self.send(UpdateGameData::SetEntityRenderTransform(cam_id, transform));
     // }
 
-    pub fn insert_rigid_body(&mut self, b: RigidBody) -> RigidBodyHandle {
-        let handle = self.data.physics.bodies.insert(b.clone());
-        handle
-    }
+    // pub fn insert_rigid_body(&mut self, b: RigidBody) -> RigidBodyHandle {
+    //     let handle = self.data.physics.bodies.insert(b.clone());
+    //     handle
+    // }
 
     // pub fn remove_rigid_body(&mut self, b: RigidBodyHandle) {
     //     self.data.physics.bodies.remove(

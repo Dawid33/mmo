@@ -13,6 +13,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::window::App;
 
+pub mod input;
 mod layout;
 mod mesh;
 mod netcode;
@@ -105,7 +106,6 @@ impl GameInstanceManager {
                             }
                         }
                         game::ServerPacket::Region(id, mut raw_game_data, last_id, key) => {
-                            raw_game_data.set_log();
                             let data = Region::new(raw_game_data.clone(), Some(self.client_event_send.clone()), id);
                             self.client_event_send.send(ClientUpdateEvent::NewRegion(raw_game_data, key)).unwrap();
                             let mut w = World::new();
@@ -179,12 +179,9 @@ fn start_game_thread() -> Sender<Command> {
     return command_send;
 }
 
-// TODO:
-//
-//
-// - make rollback ipmlementors also implement new so that they can be set when used as an Undo<T>
-// ... profit?
-
+// TODO: Update camera position representation on render thread.
+// TODO: Make reconcile actually work, like cmon don't be lazy.
+// TODO: Move winitinputhelper into window thread and make specific game events for inputs.
 // TODO: Make it possible to pan camera with middle mouse button.
 // TODO: Create mesh from from world representation
 // TODO: Render mesh
