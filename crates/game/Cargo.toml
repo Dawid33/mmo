@@ -10,15 +10,49 @@ rapier3d = { version = "0.22.0", features = [ "enhanced-determinism", "serde-ser
 crossbeam = "0.8.4"
 serde = "1.0.216"
 parley = "0.5.0"
-taffy = { version = "0.8.3", features = ["serde"] }
 bytemuck = "1.23.2"
 winit = { version = "0.30.12", features = ["serde"] }
-slotmap = { version = "1.0.7", features = ["serde"] }
+slotmapd = { path = "../slotmapd", features = ["serde"] }
 rollback = { path = "../rollback" }
 borrow = "1.3.0"
+float-derive = "0.1.0"
 derive_more = { version = "2.0.1", features = ["full"] }
+wgpu = "24.0.5"
+crc32fast = "1.5.0"
+
+arrayvec = { version = "0.7", default-features = false }
+document-features = { version = "0.2.7", optional = true }
+grid = { version = "1.0.0", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 rapier3d = { version = "0.22.0", features = [ "enhanced-determinism", "wasm-bindgen", "serde-serialize" ] }
+
+[dev-dependencies]
+serde_json = "1.0.93"
+
+[features]
+default = [
+    "taffy_tree",
+    "flexbox",
+    "grid",
+    "std",
+    "block_layout",
+    "calc",
+    "content_size",
+    "detailed_layout_info",
+]
+debug = []
+profile = []
+serde = []
+alloc = []
+std = []
+block_layout = []
+flexbox = []
+grid = []
+calc = []
+content_size = []
+detailed_layout_info = []
+strict_provenance = []
+taffy_tree = []
 
 

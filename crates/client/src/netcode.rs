@@ -55,7 +55,7 @@ impl ServerConnection {
         tokio::spawn(async move {
             while let Ok(mut recv) = recv_conn.accept_uni().await {
                 let bytes = recv.read_to_end(usize::MAX).await.unwrap();
-                let packet = bincode::deserialize_from(&bytes[..]);
+                let packet = bincode::deserialize(&bytes[..]);
                 let packet: ServerPacket = match packet {
                     Ok(e) => e,
                     Err(e) => {
@@ -63,7 +63,8 @@ impl ServerConnection {
                         continue;
                     }
                 };
-                sender.send(packet).unwrap()
+                sender.send(packet).unwrap();
+                recv.received_reset().await.unwrap();
             }
         });
 
@@ -74,10 +75,12 @@ impl ServerConnection {
             }
             connection.handshake_data().unwrap();
             let mut send = connection.open_uni().await.unwrap();
-            let payload = &bincode::serialize(&e).unwrap()[..];
-            send.write_all(payload).await.unwrap();
+            let payload = bincode::serialize(&e).unwrap();
+            send.write_all(&payload).await.unwrap();
             send.finish().unwrap();
-            send.stopped().await.unwrap();
+            tokio::spawn(async move {
+                send.stopped().await.unwrap();
+            });
         }
         Ok(())
     }

@@ -5,19 +5,26 @@ use crossbeam::{
     channel::{Receiver, Sender},
     select,
 };
-use game::{ClientUpdateEvent, GameError, GameEventKind, Region, World};
+use game::{
+    ClientPacket, ClientUpdateEvent, GameError, GameEventKind, Region, World, DEFAULT_EVENT_BUFFER,
+};
 use log::{info, trace, warn, LevelFilter};
 use simplelog::{FormatItem, SimpleLogger};
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 use winit::event_loop::{ControlFlow, EventLoop};
 
 use crate::window::App;
 
-pub mod input;
 mod layout;
-mod mesh;
 mod netcode;
-mod render_state;
+mod render_world;
 mod state;
 mod window;
 
@@ -70,11 +77,14 @@ impl GameInstanceManager {
     /// and update tick time.
     pub fn connect_and_run(&mut self) -> Result<(), GameError> {
         let tick_sender = self.game_event_send.clone();
+        let tick_rate = Arc::new(AtomicU64::new(game::TICK_RATE));
+        let tick_thread_tick_rate = tick_rate.clone();
         // Generate ticks
         std::thread::spawn(move || loop {
             // TODO: Sync ticks with server.
             tick_sender.send(GameEventKind::Tick).unwrap();
-            std::thread::sleep(Duration::from_millis(50));
+            let rate = tick_thread_tick_rate.load(Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(rate));
         });
 
         let (server_send, server_recv) = crossbeam::channel::unbounded();
@@ -93,21 +103,41 @@ impl GameInstanceManager {
             .unwrap();
 
         let mut world: Option<World> = None;
+        let mut now = Instant::now();
+        let mut ready = false;
         loop {
             select! {
                 recv(server_recv) -> server_msg => {
                     match server_msg.unwrap() {
-                        game::ServerPacket::SyncClock => trace!("Recieved syncclock packet"),
+                        game::ServerPacket::SyncClock(region_id, server_tick_rate, server_tick) => {
+                            if let Some(ref mut world) = world {
+                                let client_tick = world.next_game_id(&region_id);
+                                let diff: isize = client_tick as isize - server_tick as isize;
+                                if diff < DEFAULT_EVENT_BUFFER {
+                                    tick_rate.store((server_tick_rate as f32 * 0.2) as u64, Ordering::SeqCst);
+                                } else if diff > DEFAULT_EVENT_BUFFER {
+                                    ready = true;
+                                    tick_rate.store((server_tick_rate as f32 * 1.2) as u64, Ordering::SeqCst);
+                                } else {
+                                    ready = true;
+                                    tick_rate.store(server_tick_rate, Ordering::SeqCst);
+                                }
+                                // println!("tick rate {:?}", tick_rate);
+                            }
+                        },
                         // TODO: buffer incoming game events until region / world is loaded, then handle all at once
                         // and enable client game events.
                         game::ServerPacket::GameEvent(game_event) => {
+                            // info!("{:?}", now.elapsed());
+                            // now = Instant::now();
                             if let Some(ref mut world) = world {
                                 world.reconcile_event(game_event).unwrap();
                             }
                         }
                         game::ServerPacket::Region(id, mut raw_game_data, last_id, key) => {
-                            let data = Region::new(raw_game_data.clone(), Some(self.client_event_send.clone()), id);
-                            self.client_event_send.send(ClientUpdateEvent::NewRegion(raw_game_data, key)).unwrap();
+                            let (send, recv) = crossbeam::channel::unbounded();
+                            let mut data = Region::new(raw_game_data.clone(), Some(send), id);
+                            self.client_event_send.send(ClientUpdateEvent::NewRegion(raw_game_data, key, recv)).unwrap();
                             let mut w = World::new();
                             w.load(&id, data, last_id);
                             world = Some(w);
@@ -121,7 +151,13 @@ impl GameInstanceManager {
                             Ok(event) => {
                                 match event {
                                     GameEventKind::Quit => return Ok(()),
-                                    _ => {
+                                    e => {
+                                        if let GameEventKind::PlayerWinitEvent(_,_) = e {
+                                            // don't handle player events until sim has caught up with server.
+                                            if !ready {
+                                                continue;
+                                            }
+                                        }
                                         let event = world.handle_event(game_event.unwrap(), 0)?;
                                         server_game_send.send(game::ClientPacket::GameEvent(event)).unwrap();
                                     }
@@ -178,14 +214,6 @@ fn start_game_thread() -> Sender<Command> {
     });
     return command_send;
 }
-
-// TODO: Update camera position representation on render thread.
-// TODO: Make reconcile actually work, like cmon don't be lazy.
-// TODO: Move winitinputhelper into window thread and make specific game events for inputs.
-// TODO: Make it possible to pan camera with middle mouse button.
-// TODO: Create mesh from from world representation
-// TODO: Render mesh
-// TODO: Profit???
 
 // WINDOW:
 // - Update world data based on recieved events.

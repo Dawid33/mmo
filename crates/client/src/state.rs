@@ -5,8 +5,8 @@ use std::{
 
 use crossbeam::channel::{Receiver, Sender};
 use game::{
-    ClientUpdateEvent, EntityId, GameData, GameDataTransactionKind, GameEventKind, IsometryReal,
-    PlayerKey, Rollback, UpdateGameData,
+    ClientUpdateEvent, EntityId, EntityKey, GameData, GameDataTransactionKind, GameDataUpdate,
+    GameEventKind, IsometryReal, PlayerKey, RegionId, Rollback, Vertex,
 };
 #[allow(unused)]
 use log::info;
@@ -15,142 +15,82 @@ use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     BufferUsages, Device, Queue, TextureFormat,
 };
-use winit::window::Window;
+use winit::window::{CursorGrabMode, Window};
 
 use crate::{
     layout::CAMERA_LAYOUT_DESC,
-    mesh::{ChunkMesh, Vertex},
-    render_state::TrueRenderWorld,
+    render_world::{GpuEntity, RenderWorld},
 };
-
-// Contain copy of render world that can be displayed to the screen.
-pub struct RenderWorld {
-    _translate: BTreeSet<EntityId>,
-    lerp_set: BTreeSet<EntityId>,
-    device: Device,
-    buffer: Option<(wgpu::Buffer, usize)>,
-    cameras: BTreeMap<EntityId, (wgpu::Buffer, wgpu::BindGroup, IsometryReal)>,
-    default_camera: (wgpu::Buffer, wgpu::BindGroup),
-}
-
-impl RenderWorld {
-    // upload generated mesh to buffer
-    pub fn set_chunk(&mut self, m: ChunkMesh) {
-        self.buffer = Some((
-            self.device.create_buffer_init(&BufferInitDescriptor {
-                label: Some("Chunk Buffer 0"),
-                contents: &bytemuck::cast_slice(&m.vertices[..]),
-                usage: BufferUsages::VERTEX,
-            }),
-            m.vertices.len(),
-        ));
-    }
-
-    pub fn add_region(&mut self, _id: usize, data: &GameData) {
-        // for (i, e) in data.raw().entities.iter().enumerate() {
-        //     match &e.kind {
-        //         EntityType::Camera(c) => {
-        //             // self.create_camera(
-        //             //     i,
-        //             //     c.build_view_projection_matrix(&IsometryReal::identity()),
-        //             // );
-        //         }
-        //         _ => (),
-        //     }
-        // }
-        self.set_chunk(ChunkMesh::new(&data));
-    }
-
-    pub fn new(device: Device) -> Self {
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Camera Buffer"),
-            contents: bytemuck::cast_slice(Matrix4::<f32>::identity().as_slice()),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &device.create_bind_group_layout(CAMERA_LAYOUT_DESC),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-            label: Some("camera_bind_group"),
-        });
-        Self {
-            cameras: BTreeMap::new(),
-            default_camera: (camera_buffer, camera_bind_group),
-            device,
-            buffer: None,
-            lerp_set: BTreeSet::new(),
-            _translate: BTreeSet::new(),
-        }
-    }
-
-    #[allow(unused)]
-    pub fn create_camera(&mut self, index: usize, view_proj: Matrix4<f32>) {
-        let buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Camera Buffer"),
-                contents: bytemuck::cast_slice(view_proj.as_slice()),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-        let camera_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &self.device.create_bind_group_layout(CAMERA_LAYOUT_DESC),
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-            label: Some("camera_bind_group"),
-        });
-        self.cameras
-            .insert(index, (buffer, camera_bind_group, IsometryReal::identity()));
-    }
-
-    pub fn _translate(&mut self, _data: &GameData) {}
-
-    #[allow(unused)]
-    pub fn lerp(&mut self, data: &TrueRenderWorld, queue: &Queue) {
-        self.lerp_set.retain(|l| {
-            // let e = data.raw().entities.get(*l).unwrap();
-            false
-            // match &e.kind {
-            //     EntityType::Camera(c) => {
-            //         let (buf, _, current_iso) = self.cameras.get_mut(l).unwrap();
-            //         *current_iso = current_iso.lerp_slerp(&e.physics_isometry, 0.05);
-            //         // queue.write_buffer(
-            //         //     buf,
-            //         //     0,
-            //         //     bytemuck::cast_slice(
-            //         //         (c.build_view_projection_matrix(&current_iso)).as_slice(),
-            //         //     ),
-            //         // );
-            //         if *current_iso == e.physics_isometry {
-            //             false
-            //         } else {
-            //             true
-            //         }
-            //     }
-            //     _ => false,
-            // }
-        });
-    }
-}
 
 pub struct State {
     pub client_recv: Receiver<ClientUpdateEvent>,
     pub game_send: Sender<GameEventKind>,
     pub player: Option<PlayerKey>,
-    window: Arc<Window>,
+    pub window: Arc<Window>,
     queue: wgpu::Queue,
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
+    surface_config: wgpu::SurfaceConfiguration,
+    alpha_mode: wgpu::CompositeAlphaMode,
+    depth_texture: DepthTexture,
     surface_format: wgpu::TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
-    world: RenderWorld,
-    regions: BTreeMap<usize, TrueRenderWorld>,
+    render_world: RenderWorld,
+}
+
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+pub struct DepthTexture {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
 }
 
 impl State {
+    pub fn create_depth_texture(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        label: &str,
+        size: &winit::dpi::PhysicalSize<u32>,
+    ) -> DepthTexture {
+        info!("resizing: {:?}", size);
+        let depth_texture_size = wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        };
+        let desc = wgpu::TextureDescriptor {
+            label: Some("depth_texture"),
+            size: depth_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        };
+        let texture = device.create_texture(&desc);
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 100.0,
+            ..Default::default()
+        });
+        DepthTexture {
+            texture,
+            view,
+            sampler,
+        }
+    }
+
     pub async fn new(
         window: Arc<Window>,
         client_recv: Receiver<ClientUpdateEvent>,
@@ -184,11 +124,24 @@ impl State {
             .into_iter()
             .find(|it| matches!(it, TextureFormat::Rgba8Unorm | TextureFormat::Bgra8Unorm))
             .unwrap();
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            view_formats: vec![],
+            alpha_mode: cap.alpha_modes[0],
+            width: size.width,
+            height: size.height,
+            desired_maximum_frame_latency: 2,
+            present_mode: wgpu::PresentMode::FifoRelaxed,
+        };
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
+
+        let depth_texture =
+            Self::create_depth_texture(&device, &surface_config, "depth_texture", &size);
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -218,7 +171,13 @@ impl State {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -230,7 +189,7 @@ impl State {
 
         let state = State {
             window,
-            world: RenderWorld::new(device),
+            render_world: RenderWorld::new(device),
             queue,
             size,
             surface,
@@ -238,8 +197,10 @@ impl State {
             client_recv,
             game_send,
             render_pipeline,
-            regions: BTreeMap::new(),
             player: None,
+            depth_texture,
+            surface_config,
+            alpha_mode: cap.alpha_modes[0],
         };
 
         // Configure surface for the first time
@@ -248,10 +209,8 @@ impl State {
         state
     }
 
-    pub fn add_region(&mut self, id: usize, data: Rollback) {
-        self.world.add_region(id, &data);
-        self.regions
-            .insert(id, TrueRenderWorld::new(&data, &mut self.world));
+    pub fn add_region(&mut self, id: usize, data: Rollback, receiver: Receiver<GameDataUpdate>) {
+        self.render_world.add_region(id, &data, receiver);
     }
 
     pub fn get_window(&self) -> &Window {
@@ -259,33 +218,32 @@ impl State {
     }
 
     pub fn configure_surface(&self) {
-        let surface_config = wgpu::SurfaceConfiguration {
+        self.surface
+            .configure(self.render_world.device(), &self.surface_config);
+    }
+
+    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        self.size = new_size;
+        self.surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: self.surface_format,
             view_formats: vec![],
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            alpha_mode: self.alpha_mode,
             width: self.size.width,
             height: self.size.height,
             desired_maximum_frame_latency: 2,
             present_mode: wgpu::PresentMode::FifoRelaxed,
         };
-        self.surface.configure(&self.world.device, &surface_config);
-    }
-
-    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        self.size = new_size;
-
-        // reconfigure the surface
         self.configure_surface();
+        self.depth_texture = Self::create_depth_texture(
+            &self.render_world.device(),
+            &self.surface_config,
+            "depth_texture",
+            &self.size,
+        );
     }
 
     pub fn render(&mut self) {
-        let _data = if let Some(data) = self.regions.get(&0) {
-            data
-        } else {
-            return;
-        };
-
         let surface_texture = self
             .surface
             .get_current_texture()
@@ -299,8 +257,8 @@ impl State {
                 });
 
         let mut background = self
-            .world
-            .device
+            .render_world
+            .device()
             .create_command_encoder(&Default::default());
         let mut renderpass = background.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: None,
@@ -312,44 +270,26 @@ impl State {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_texture.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
         });
-        renderpass.set_pipeline(&self.render_pipeline); // 2.
-
-        let cam_bind_group = if let Some(cam) = self.world.cameras.get(&0) {
-            &cam.1
-        } else {
-            &self.world.default_camera.1
-        };
-
-        if let Some((buf, size)) = &self.world.buffer {
-            renderpass.set_bind_group(0, cam_bind_group, &[]);
-            renderpass.set_vertex_buffer(0, buf.slice(..));
-            renderpass.draw(0..*size as u32, 0..1);
-        }
-
-        drop(renderpass);
-
+        renderpass.set_pipeline(&self.render_pipeline);
+        self.render_world.draw(renderpass);
         self.queue.submit([background.finish()]);
         drop(surface_texture_view);
         self.window.pre_present_notify();
         surface_texture.present();
     }
 
-    /// Lerp game data from previous value (if applicable) to current value
-    /// every frame to get smooth movement.
-    pub fn lerp(&mut self) {
-        for (_, data) in self.regions.iter() {
-            self.world.lerp(data, &self.queue);
-        }
-    }
-
-    /// Update render threads representations of game state.
-    #[allow(unused)]
-    pub fn update(&mut self, id: usize, event: UpdateGameData, _kind: GameDataTransactionKind) {
-        let data = self.regions.get_mut(&id).unwrap();
-        // info!("{:?}", event);
+    pub fn update(&mut self) {
+        self.render_world.update(&self.queue, &self.window);
     }
 }

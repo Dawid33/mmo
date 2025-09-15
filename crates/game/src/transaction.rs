@@ -12,14 +12,15 @@ use rapier3d::{
     prelude::{RigidBody, RigidBodyBuilder, RigidBodyHandle},
 };
 use serde::{Deserialize, Serialize};
-use slotmap::{basic::Iter, Key, SlotMap};
+use slotmapd::{basic::Iter, Key, SlotMap};
 
 use crate::{
     data::{Camera, EntityKey, GameData, Player, PlayerKey},
-    ClientUpdateEvent, RegionId, UpdateGameData, WinitEvent,
+    input::WinitInputHelper,
+    ClientUpdateEvent, GameDataUpdate, RegionId, WinitEvent,
 };
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum GameDataTransactionKind {
     Do,
     Undo,
@@ -28,7 +29,6 @@ pub enum GameDataTransactionKind {
 #[allow(unused)]
 pub struct GameDataTransaction<'a> {
     id: RegionId,
-    client: &'a Option<Sender<ClientUpdateEvent>>,
     pub data: &'a mut GameData,
     event_log: Vec<Box<dyn Fn(&mut GameData)>>,
 }
@@ -41,16 +41,11 @@ macro_rules! undo {
 pub(crate) use undo;
 
 impl<'a> GameDataTransaction<'a> {
-    pub fn new(
-        data: &'a mut GameData,
-        client: &'a Option<Sender<ClientUpdateEvent>>,
-        id: RegionId,
-    ) -> Self {
+    pub fn new(data: &'a mut GameData, id: RegionId) -> Self {
         Self {
             data,
             event_log: Vec::new(),
             id,
-            client,
         }
     }
 
@@ -63,11 +58,11 @@ impl<'a> GameDataTransaction<'a> {
     }
 
     #[allow(unused)]
-    fn client(&mut self, e: UpdateGameData, kind: GameDataTransactionKind) {
-        self.client.as_ref().inspect(|c| {
-            c.send(ClientUpdateEvent::UpdateRegion(self.id, e, kind))
-                .unwrap()
-        });
+    fn client(&mut self, e: GameDataUpdate, kind: GameDataTransactionKind) {
+        // self.client.as_ref().inspect(|c| {
+        //     c.send(ClientUpdateEvent::UpdateRegion(self.id, e, kind))
+        //         .unwrap()
+        // });
     }
 
     pub fn tick(&mut self) {
@@ -149,35 +144,6 @@ impl<'a> GameDataTransaction<'a> {
     //     let key = self.data.players.get(player).unwrap();
     //     self.data.ecs.player.get(*key)
     // }
-
-    pub fn create_player(&mut self) -> PlayerKey {
-        let e = self.data.ecs.create_entity_safe();
-        let body = RigidBodyBuilder::kinematic_velocity_based()
-            .gravity_scale(0.0)
-            .can_sleep(true)
-            .ccd_enabled(false)
-            .user_data(e.data().as_ffi() as u128)
-            .build();
-        let handle = self.data.physics.bodies.insert(body);
-        self.data.physics.undo(move |d| {
-            d.bodies.remove(
-                handle,
-                &mut d.islands,
-                &mut d.colliders,
-                &mut d.implules_joint_set,
-                &mut d.multi_body_joint_set,
-                true,
-            );
-        });
-        self.data.ecs.rigidbody.set_safe(e, Some(handle));
-        self.data.ecs.camera.set_safe(e, Some(Camera::new()));
-        self.data.ecs.player.set_safe(e, Some(Player { input: 0 }));
-        let key = self.data.players.insert(e);
-        self.data.players.undo(move |d| {
-            d.remove(key);
-        });
-        key
-    }
 
     // // pub fn builder(&'a mut self) -> {
     // //     let key = self.data.ecs.add();

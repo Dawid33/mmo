@@ -1,8 +1,12 @@
-use std::time::Instant;
-use std::{path::PathBuf, time::Duration};
+use log::info;
 use winit::dpi::PhysicalSize;
-use winit::event::Event;
-use winit::keyboard::KeyCode;
+use winit::event::MouseButton;
+use winit::event::{ElementState, MouseScrollDelta};
+use winit::keyboard::{Key, KeyCode, PhysicalKey};
+
+use std::path::PathBuf;
+
+use crate::{DeviceEvent, WindowEvent, WinitEvent};
 /// The main struct of the API.
 ///
 /// Create with `WinitInputHelper::new`.
@@ -16,18 +20,15 @@ use winit::keyboard::KeyCode;
 ///
 /// Do not mix usages of `WinitInputHelper::update` and `WinitInputHelper::step_with_window_events`.
 /// You should stick to one or the other.
-#[derive(Clone)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct WinitInputHelper {
     current: Option<CurrentInput>,
-    dropped_file: Option<PathBuf>,
     window_resized: Option<PhysicalSize<u32>>,
     window_size: Option<(u32, u32)>,
     scale_factor_changed: Option<f64>,
     scale_factor: Option<f64>,
     destroyed: bool,
     close_requested: bool,
-    step_start: Option<Instant>,
-    step_duration: Option<Duration>,
 }
 
 impl Default for WinitInputHelper {
@@ -40,15 +41,12 @@ impl WinitInputHelper {
     pub fn new() -> WinitInputHelper {
         WinitInputHelper {
             current: Some(CurrentInput::new()),
-            dropped_file: None,
             window_resized: None,
             window_size: None,
             scale_factor_changed: None,
             scale_factor: None,
             destroyed: false,
             close_requested: false,
-            step_start: None,
-            step_duration: None,
         }
     }
 
@@ -59,58 +57,33 @@ impl WinitInputHelper {
     /// *   `Event::MainEventsCleared` causes this function to return true, signifying a "step" has completed.
     /// *   `Event::WindowEvent` updates internal state, this will affect the result of accessor methods immediately.
     /// *   `Event::DeviceEvent` updates value of `mouse_diff()`
-    pub fn update<T>(&mut self, event: &Event<T>) -> bool {
+    pub fn update(
+        &mut self,
+        event: &WinitEvent,
+    ) -> Option<Box<dyn Fn(&mut WinitInputHelper) + 'static + Send>> {
         match &event {
-            Event::NewEvents(_) => {
-                self.step();
-                false
-            }
-            Event::WindowEvent { event, .. } => {
-                self.process_window_event(event);
-                false
-            }
-            Event::DeviceEvent { event, .. } => {
-                self.process_device_event(event);
-                false
-            }
-            Event::AboutToWait => {
-                self.end_step();
-                true
-            }
-            _ => false,
+            crate::common::WinitEvent::WindowEvent(event) => self.process_window_event(event),
+            crate::common::WinitEvent::DeviceEvent(event) => self.process_device_event(event),
+            crate::common::WinitEvent::NewEvents => None,
+            crate::common::WinitEvent::AboutToWait => None,
         }
     }
 
-    /// Pass a slice containing every winit event that occured within the step to this function.
-    /// Ensure this method is only called once per application main loop.
-    /// Ensure every event since the last `WinitInputHelper::step_with_window_events` call is included in the `events` argument.
-    ///
-    /// `WinitInputHelper::Update` is easier to use.
-    /// But this method is useful when your application logic steps dont line up with winit's event loop.
-    /// e.g. you have a seperate thread for application logic using WinitInputHelper that constantly
-    /// runs regardless of winit's event loop and you need to send events to it directly.
-    pub fn step_with_window_events(&mut self, events: &[WindowEvent]) {
-        self.step();
-        for event in events {
-            self.process_window_event(event);
-        }
-        self.end_step();
-    }
-
-    fn step(&mut self) {
-        self.dropped_file = None;
+    pub fn step(&mut self) -> Option<Box<dyn Fn(&mut WinitInputHelper) + 'static + Send>> {
         self.window_resized = None;
         self.scale_factor_changed = None;
         self.close_requested = false;
-        // Set the start time on the first event to avoid the first step appearing too long
-        self.step_start.get_or_insert(Instant::now());
-        self.step_duration = None;
         if let Some(current) = &mut self.current {
-            current.step();
+            current.step()
+        } else {
+            None
         }
     }
 
-    fn process_window_event(&mut self, event: &WindowEvent) {
+    fn process_window_event(
+        &mut self,
+        event: &WindowEvent,
+    ) -> Option<Box<dyn Fn(&mut WinitInputHelper) + 'static + Send>> {
         match event {
             WindowEvent::CloseRequested => self.close_requested = true,
             WindowEvent::Destroyed => self.destroyed = true,
@@ -120,7 +93,6 @@ impl WinitInputHelper {
                     self.current = Some(CurrentInput::new())
                 }
             }
-            WindowEvent::DroppedFile(path) => self.dropped_file = Some(path.clone()),
             WindowEvent::Resized(size) => {
                 self.window_resized = Some(*size);
                 self.window_size = Some((*size).into());
@@ -132,19 +104,21 @@ impl WinitInputHelper {
             _ => {}
         }
         if let Some(current) = &mut self.current {
-            current.handle_event(event);
+            current.handle_event(event)
+        } else {
+            None
         }
     }
 
-    fn process_device_event(&mut self, event: &DeviceEvent) {
+    fn process_device_event(
+        &mut self,
+        event: &DeviceEvent,
+    ) -> Option<Box<dyn Fn(&mut WinitInputHelper) + 'static + Send>> {
         if let Some(ref mut current) = self.current {
-            current.handle_device_event(event);
+            current.handle_device_event(event)
+        } else {
+            None
         }
-    }
-
-    fn end_step(&mut self) {
-        self.step_duration = self.step_start.map(|start| start.elapsed());
-        self.step_start = Some(Instant::now());
     }
 
     /// Returns true when the key with the specified keycode goes from "not pressed" to "pressed".
@@ -394,11 +368,6 @@ impl WinitInputHelper {
         }
     }
 
-    /// Returns the path to a file that has been drag-and-dropped onto the window.
-    pub fn dropped_file(&self) -> Option<PathBuf> {
-        self.dropped_file.clone()
-    }
-
     /// Returns the current window size if it was resized during the last step.
     /// Otherwise returns `None`.
     pub fn window_resized(&self) -> Option<PhysicalSize<u32>> {
@@ -435,25 +404,16 @@ impl WinitInputHelper {
     pub fn close_requested(&self) -> bool {
         self.close_requested
     }
-
-    /// Returns the `std::time::Duration` elapsed since the last step.
-    /// Returns `None` if the step is still in progress.
-    pub fn delta_time(&self) -> Option<Duration> {
-        self.step_duration
-    }
 }
 
-use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::keyboard::{Key, PhysicalKey};
-
-#[derive(Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CurrentInput {
     pub mouse_actions: Vec<MouseAction>,
     pub key_actions: Vec<KeyAction>,
     pub scancode_actions: Vec<ScanCodeAction>,
     pub key_held: Vec<Key>,
     pub scancode_held: Vec<PhysicalKey>, // some scan codes are higher than 255 so using an array may be dangerous
-    pub mouse_held: [bool; 255],
+    pub mouse_held: Vec<bool>,
     pub cursor_point: Option<(f32, f32)>,
     pub cursor_point_prev: Option<(f32, f32)>,
     pub mouse_diff: Option<(f32, f32)>,
@@ -470,7 +430,7 @@ impl CurrentInput {
             scancode_actions: vec![],
             key_held: vec![],
             scancode_held: vec![],
-            mouse_held: [false; 255],
+            mouse_held: Vec::from([false; 255]),
             cursor_point: None,
             cursor_point_prev: None,
             mouse_diff: None,
@@ -480,7 +440,7 @@ impl CurrentInput {
         }
     }
 
-    pub fn step(&mut self) {
+    pub fn step(&mut self) -> Option<Box<dyn Fn(&mut WinitInputHelper) + 'static + Send>> {
         self.mouse_actions.clear();
         self.key_actions.clear();
         self.scancode_actions.clear();
@@ -489,13 +449,21 @@ impl CurrentInput {
         self.y_scroll_diff = 0.0;
         self.x_scroll_diff = 0.0;
         self.text.clear();
+        None
     }
 
-    pub fn handle_event(&mut self, event: &WindowEvent) {
+    pub fn handle_event(
+        &mut self,
+        event: &WindowEvent,
+    ) -> Option<Box<dyn Fn(&mut WinitInputHelper) + 'static + Send>> {
         match event {
-            WindowEvent::KeyboardInput { event, .. } => match event.state {
+            WindowEvent::KeyboardInput {
+                physical_key,
+                logical_key,
+                state,
+                ..
+            } => match state {
                 ElementState::Pressed => {
-                    let logical_key = &event.logical_key;
                     if !self.key_held.contains(logical_key) {
                         self.key_actions
                             .push(KeyAction::Pressed(logical_key.clone()));
@@ -506,7 +474,6 @@ impl CurrentInput {
                         .push(KeyAction::PressedOs(logical_key.clone()));
                     self.text.push(logical_key.clone());
 
-                    let physical_key = &event.physical_key;
                     if !self.scancode_held.contains(physical_key) {
                         self.scancode_actions
                             .push(ScanCodeAction::Pressed(*physical_key));
@@ -517,12 +484,10 @@ impl CurrentInput {
                         .push(ScanCodeAction::PressedOs(*physical_key));
                 }
                 ElementState::Released => {
-                    let logical_key = &event.logical_key;
                     self.key_held.retain(|x| x != logical_key);
                     self.key_actions
                         .push(KeyAction::Released(logical_key.clone()));
 
-                    let physical_key = &event.physical_key;
                     self.scancode_held.retain(|x| x != physical_key);
                     self.scancode_actions
                         .push(ScanCodeAction::Released(*physical_key));
@@ -566,33 +531,38 @@ impl CurrentInput {
             }
             _ => {}
         }
+        None
     }
 
-    pub fn handle_device_event(&mut self, event: &DeviceEvent) {
+    pub fn handle_device_event(
+        &mut self,
+        event: &DeviceEvent,
+    ) -> Option<Box<dyn Fn(&mut WinitInputHelper) + 'static + Send>> {
         if let DeviceEvent::MouseMotion { delta, .. } = event {
             match self.mouse_diff {
                 Some((x, y)) => self.mouse_diff = Some((x + delta.0 as f32, y + delta.1 as f32)),
                 None => self.mouse_diff = Some((delta.0 as f32, delta.1 as f32)),
             }
         }
+        None
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum KeyAction {
     Pressed(Key),
     PressedOs(Key),
     Released(Key),
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum ScanCodeAction {
     Pressed(PhysicalKey),
     PressedOs(PhysicalKey),
     Released(PhysicalKey),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum MouseAction {
     Pressed(MouseButton),
     Released(MouseButton),

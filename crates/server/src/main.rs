@@ -1,6 +1,13 @@
 //! Server
 // #![deny(missing_docs)]
-use std::{fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    fmt::Debug,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use crossbeam::channel::{Receiver, Sender};
 use dashmap::DashMap;
@@ -12,7 +19,7 @@ use quinn::{
         self,
         pki_types::{CertificateDer, PrivatePkcs8KeyDer},
     },
-    Connection, ConnectionError, Endpoint,
+    Connection, ConnectionError, Endpoint, TransportConfig,
 };
 use simplelog::{FormatItem, SimpleLogger};
 
@@ -53,11 +60,11 @@ impl WorldIngress {
             .with_single_cert(vec![cert_der], priv_key.into())
             .unwrap();
 
-        let endpoint = Endpoint::server(
-            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto).unwrap())),
-            "127.0.0.1:6466".parse().unwrap(),
-        )
-        .unwrap();
+        let mut config =
+            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto).unwrap()));
+        let t_config = TransportConfig::default();
+        config.transport_config(Arc::new(t_config));
+        let endpoint = Endpoint::server(config, "127.0.0.1:6466".parse().unwrap()).unwrap();
 
         let connections: Arc<DashMap<usize, Connection>> = Arc::new(DashMap::new());
         let conns = connections.clone();
@@ -68,7 +75,9 @@ impl WorldIngress {
                     let mut stream = entry.value().open_uni().await.unwrap();
                     stream.write_all(&packet).await.unwrap();
                     stream.finish().unwrap();
-                    stream.stopped().await.unwrap();
+                    tokio::spawn(async move {
+                        stream.stopped().await.unwrap();
+                    });
                 }
             }
         });
@@ -107,7 +116,7 @@ fn main() {
     let config = simplelog::ConfigBuilder::new()
         .set_time_format_custom(FORMAT)
         .build();
-    SimpleLogger::init(LevelFilter::Info, config).unwrap();
+    // SimpleLogger::init(LevelFilter::Info, config).unwrap();
 
     let (client_packet_send, client_packet_recv) = crossbeam::channel::unbounded();
     let (server_send, server_recv) = crossbeam::channel::unbounded();
@@ -120,21 +129,27 @@ fn main() {
     let cps = client_packet_send.clone();
     std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
 
+    let tick_rate = Arc::new(AtomicU64::new(game::TICK_RATE));
+    let tick_thread_tick_rate = tick_rate.clone();
     // Handle game loop
     std::thread::spawn(move || loop {
         // TODO: Sync ticks with server.
         client_packet_send
             .send(ServerEvent::ServerTickTimer)
             .unwrap();
-        std::thread::sleep(Duration::from_millis(10));
+        let rate = tick_thread_tick_rate.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(rate));
     });
 
     let (mut world, player) = World::editor();
-    // TODO: send region once to all new connections.
-    // TODO: send region on request to a connection.
-
     // handle game events on server and send successfull events to connected clients.
     while let Ok(event) = client_packet_recv.recv() {
+        let count = client_packet_recv.len();
+        if count > 2 {
+            tick_rate.store(game::TICK_RATE + count as u64, Ordering::SeqCst);
+        } else {
+            tick_rate.store(game::TICK_RATE, Ordering::SeqCst);
+        }
         match event {
             ServerEvent::ClientPacket(client_packet) => match client_packet {
                 ClientPacket::RequestRegion => {
@@ -142,11 +157,11 @@ fn main() {
                         .send(world.build_region_server_packet(0, Some(player)))
                         .unwrap();
                 }
-                ClientPacket::SyncClock => todo!(),
                 ClientPacket::GameEvent(game_event) => match game_event.kind {
                     game::GameEventKind::Quit | game::GameEventKind::Tick => (),
                     _ => {
-                        let event = match world.handle_event(game_event.kind, game_event._region_id)
+                        let event = match world
+                            .handle_event_server(game_event.kind, game_event.region_id)
                         {
                             Ok(e) => e,
                             Err(e) => panic!("Server crashed {:?}", e),
@@ -156,11 +171,19 @@ fn main() {
                 },
             },
             ServerEvent::ServerTickTimer => {
-                let event = match world.handle_event(GameEventKind::Tick, 0) {
+                let region = 0;
+                let event = match world.handle_event_server(GameEventKind::Tick, region) {
                     Ok(e) => e,
                     Err(e) => panic!("Server crashed {:?}", e),
                 };
                 server_send.send(ServerPacket::GameEvent(event)).unwrap();
+                server_send
+                    .send(ServerPacket::SyncClock(
+                        region,
+                        tick_rate.load(Ordering::SeqCst),
+                        world.next_game_id(&region),
+                    ))
+                    .unwrap();
             }
         }
     }
@@ -187,7 +210,7 @@ async fn handle_connection(
 
         tokio::spawn(async move {
             let req = stream.read_to_end(usize::MAX).await.unwrap();
-            let packet = bincode::deserialize_from(&req[..]);
+            let packet = bincode::deserialize(&req[..]);
             let packet: ClientPacket = match packet {
                 Ok(e) => e,
                 Err(e) => {

@@ -8,16 +8,21 @@ use std::{
 };
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalSize,
     event_loop::ActiveEventLoop,
-    window::{Window, WindowId},
+    window::{CursorGrabMode, Window, WindowId},
 };
 
-use crate::{input::WinitInputHelper, state::State, Command};
+use crate::{state::State, Command};
 
 pub struct App {
     state: Option<State>,
-    helper: WinitInputHelper,
     command_sender: Sender<Command>,
+    last_mouse_delta: (f32, f32),
+    last_event_was_new_events: bool,
+    mouse_motion_buffer: Option<(f64, f64)>,
+    mouse_motion_buffer_sent: bool,
+    cursor_on_window: bool,
 }
 
 impl App {
@@ -25,7 +30,11 @@ impl App {
         Self {
             state: None,
             command_sender,
-            helper: WinitInputHelper::new(),
+            last_mouse_delta: (0.0, 0.0),
+            last_event_was_new_events: false,
+            mouse_motion_buffer: None,
+            cursor_on_window: false,
+            mouse_motion_buffer_sent: false,
         }
     }
 }
@@ -64,26 +73,37 @@ impl ApplicationHandler for App {
 
         match event {
             winit::event::WindowEvent::RedrawRequested => {
+                // Send accumulated mouse motion events.
+                if let Some(player) = &state.player {
+                    if let Some(buf) = self.mouse_motion_buffer.take() {
+                        state
+                            .game_send
+                            .send(GameEventKind::PlayerWinitEvent(
+                                *player,
+                                WinitEvent::DeviceEvent(game::DeviceEvent::MouseMotion {
+                                    delta: buf,
+                                }),
+                            ))
+                            .unwrap();
+                    }
+                }
+
                 while let Ok(event) = state.client_recv.try_recv() {
                     match event {
-                        ClientUpdateEvent::NewRegion(data, player) => {
+                        ClientUpdateEvent::NewRegion(data, player, receiver) => {
                             let id = 0;
                             if player.is_some() {
                                 state.player = player;
                             }
-                            state.add_region(id, data);
+                            state.add_region(id, data, receiver);
                         }
                         ClientUpdateEvent::GameCrash(_) => todo!(),
-                        ClientUpdateEvent::UpdateRegion(id, event, kind) => {
-                            // let now = std::time::Instant::now();
-                            state.update(id, event, kind);
-                            // info!("{:?}", now.elapsed());
-                        }
                     }
                 }
+                state.update();
                 state.render();
                 state.get_window().request_redraw();
-                state.lerp();
+                return;
             }
             _ => (),
         }
@@ -94,9 +114,11 @@ impl ApplicationHandler for App {
             return;
         };
 
+        let mut sent_event = true;
         match event {
             winit::event::WindowEvent::Resized(size) => {
                 state.resize(size);
+                self.last_event_was_new_events = false;
                 state
                     .game_send
                     .send(GameEventKind::PlayerWinitEvent(
@@ -109,69 +131,97 @@ impl ApplicationHandler for App {
                 state: button_state,
                 button,
                 ..
-            } => state
-                .game_send
-                .send(GameEventKind::PlayerWinitEvent(
-                    player,
-                    WinitEvent::WindowEvent(WindowEvent::MouseInput {
-                        state: button_state,
-                        button: button,
-                    }),
-                ))
-                .unwrap(),
-            winit::event::WindowEvent::MouseWheel { delta, phase, .. } => state
-                .game_send
-                .send(GameEventKind::PlayerWinitEvent(
-                    player,
-                    WinitEvent::WindowEvent(WindowEvent::MouseWheel { delta, phase }),
-                ))
-                .unwrap(),
+            } => {
+                self.last_event_was_new_events = false;
+                if self.cursor_on_window {
+                    state.window.focus_window();
+                }
+                state
+                    .game_send
+                    .send(GameEventKind::PlayerWinitEvent(
+                        player,
+                        WinitEvent::WindowEvent(WindowEvent::MouseInput {
+                            state: button_state,
+                            button: button,
+                        }),
+                    ))
+                    .unwrap()
+            }
+            winit::event::WindowEvent::MouseWheel { delta, phase, .. } => {
+                self.last_event_was_new_events = false;
+                state
+                    .game_send
+                    .send(GameEventKind::PlayerWinitEvent(
+                        player,
+                        WinitEvent::WindowEvent(WindowEvent::MouseWheel { delta, phase }),
+                    ))
+                    .unwrap()
+            }
             winit::event::WindowEvent::KeyboardInput {
                 event,
                 is_synthetic,
                 ..
-            } => state
-                .game_send
-                .send(GameEventKind::PlayerWinitEvent(
-                    player,
-                    WinitEvent::WindowEvent(WindowEvent::KeyboardInput {
-                        physical_key: event.physical_key,
-                        logical_key: event.logical_key,
-                        location: event.location,
-                        state: event.state,
-                        repeat: event.repeat,
-                        is_synthetic,
-                    }),
-                ))
-                .unwrap(),
-            winit::event::WindowEvent::Focused(focused) => state
-                .game_send
-                .send(GameEventKind::PlayerWinitEvent(
-                    player,
-                    WinitEvent::WindowEvent(game::WindowEvent::Focused(focused)),
-                ))
-                .unwrap(),
-            winit::event::WindowEvent::ScaleFactorChanged { scale_factor, .. } => state
-                .game_send
-                .send(GameEventKind::PlayerWinitEvent(
-                    player,
-                    WinitEvent::WindowEvent(game::WindowEvent::ScaleFactorChanged { scale_factor }),
-                ))
-                .unwrap(),
-            winit::event::WindowEvent::DroppedFile(path) => state
-                .game_send
-                .send(GameEventKind::PlayerWinitEvent(
-                    player,
-                    WinitEvent::WindowEvent(game::WindowEvent::DroppedFile(path)),
-                ))
-                .unwrap(),
-            winit::event::WindowEvent::Destroyed => state
-                .game_send
-                .send(GameEventKind::PlayerWinitEvent(
-                    player,
-                    WinitEvent::WindowEvent(game::WindowEvent::Destroyed),
-                ))
-                .unwrap(),
+            } => {
+                self.last_event_was_new_events = false;
+                if !event.repeat {
+                    state
+                        .game_send
+                        .send(GameEventKind::PlayerWinitEvent(
+                            player,
+                            WinitEvent::WindowEvent(WindowEvent::KeyboardInput {
+                                physical_key: event.physical_key,
+                                logical_key: event.logical_key,
+                                location: event.location,
+                                state: event.state,
+                                repeat: event.repeat,
+                                is_synthetic,
+                            }),
+                        ))
+                        .unwrap()
+                }
+            }
+            winit::event::WindowEvent::Focused(focused) => {
+                self.last_event_was_new_events = false;
+                state
+                    .game_send
+                    .send(GameEventKind::PlayerWinitEvent(
+                        player,
+                        WinitEvent::WindowEvent(game::WindowEvent::Focused(focused)),
+                    ))
+                    .unwrap();
+            }
+            winit::event::WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.last_event_was_new_events = false;
+                state
+                    .game_send
+                    .send(GameEventKind::PlayerWinitEvent(
+                        player,
+                        WinitEvent::WindowEvent(game::WindowEvent::ScaleFactorChanged {
+                            scale_factor,
+                        }),
+                    ))
+                    .unwrap()
+            }
+            winit::event::WindowEvent::DroppedFile(path) => {
+                self.last_event_was_new_events = false;
+                state
+                    .game_send
+                    .send(GameEventKind::PlayerWinitEvent(
+                        player,
+                        WinitEvent::WindowEvent(game::WindowEvent::DroppedFile(path)),
+                    ))
+                    .unwrap()
+            }
+            winit::event::WindowEvent::Destroyed => {
+                self.last_event_was_new_events = false;
+                state
+                    .game_send
+                    .send(GameEventKind::PlayerWinitEvent(
+                        player,
+                        WinitEvent::WindowEvent(game::WindowEvent::Destroyed),
+                    ))
+                    .unwrap()
+            }
             winit::event::WindowEvent::CloseRequested => {
                 state
                     .game_send
@@ -180,23 +230,13 @@ impl ApplicationHandler for App {
                         WinitEvent::WindowEvent(game::WindowEvent::CloseRequested),
                     ))
                     .unwrap();
+                self.last_event_was_new_events = false;
                 event_loop.exit();
             }
-            _ => (),
-        }
-    }
-
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
-        if let Some(state) = self.state.as_mut() {
-            if let Some(player) = state.player {
-                state
-                    .game_send
-                    .send(GameEventKind::PlayerWinitEvent(
-                        player,
-                        WinitEvent::NewEvents,
-                    ))
-                    .unwrap();
-            }
+            winit::event::WindowEvent::Moved(_) => self.cursor_on_window = true,
+            winit::event::WindowEvent::CursorEntered { device_id } => self.cursor_on_window = true,
+            winit::event::WindowEvent::CursorLeft { device_id } => self.cursor_on_window = false,
+            _ => sent_event = false,
         }
     }
 
@@ -222,36 +262,48 @@ impl ApplicationHandler for App {
                 .unwrap();
         };
         match event {
-            winit::event::DeviceEvent::Added => send(game::DeviceEvent::Added),
-            winit::event::DeviceEvent::Removed => send(game::DeviceEvent::Removed),
+            winit::event::DeviceEvent::Added => {
+                self.last_event_was_new_events = false;
+                send(game::DeviceEvent::Added)
+            }
+            winit::event::DeviceEvent::Removed => {
+                self.last_event_was_new_events = false;
+                send(game::DeviceEvent::Removed)
+            }
             winit::event::DeviceEvent::MouseMotion { delta } => {
-                send(game::DeviceEvent::MouseMotion { delta })
+                self.last_event_was_new_events = false;
+                if let Some(buf) = &mut self.mouse_motion_buffer {
+                    buf.0 += delta.0;
+                    buf.1 += delta.1;
+                } else {
+                    self.mouse_motion_buffer = Some(delta);
+                }
             }
             winit::event::DeviceEvent::MouseWheel { delta } => {
+                self.last_event_was_new_events = false;
                 send(game::DeviceEvent::MouseWheel { delta })
             }
-            winit::event::DeviceEvent::Motion { axis, value } => {
-                send(game::DeviceEvent::Motion { axis, value })
-            }
-            winit::event::DeviceEvent::Button { button, state } => {
-                send(game::DeviceEvent::Button { button, state })
-            }
-            winit::event::DeviceEvent::Key(raw_key_event) => {
-                send(game::DeviceEvent::Key(raw_key_event))
-            }
+            _ => (),
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        let state = self.state.as_mut().unwrap();
-        if let Some(player) = state.player {
-            state
-                .game_send
-                .send(GameEventKind::PlayerWinitEvent(
-                    player,
-                    WinitEvent::AboutToWait,
-                ))
-                .unwrap();
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        if let Some(state) = self.state.as_mut() {
+            let player = if let Some(player) = state.player {
+                player
+            } else {
+                return;
+            };
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(state) = self.state.as_mut() {
+            let player = if let Some(player) = state.player {
+                player
+            } else {
+                return;
+            };
         }
     }
 }

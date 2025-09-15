@@ -3,6 +3,8 @@ use rollback::rollback;
 
 use crate::mod_test::Test;
 
+pub enum ClientUpdateEvent {}
+
 #[rollback(Test)]
 mod mod_test {
     pub struct Test {
@@ -25,8 +27,8 @@ pub fn as_mut() {
     let mut test = mod_test::Rollback::default();
     test.new_transaction();
     let old = test.tick.as_ref().clone();
-    *test.tick += 1;
     test.tick.undo(move |d| *d = old);
+    *test.tick += 1;
     assert_eq!(test.tick.as_ref(), &1);
     test.rollback();
     assert_eq!(test.tick.as_ref(), &0);
@@ -37,12 +39,12 @@ pub fn two() {
     let mut test = mod_test::Rollback::default();
     test.new_transaction();
     let old = test.tick.as_ref().clone();
-    *test.tick += 1;
     test.tick.undo(move |d| *d = old);
+    *test.tick += 1;
     test.new_transaction();
     let old = test.tick.as_ref().clone();
-    *test.tick += 1;
     test.tick.undo(move |d| *d = old);
+    *test.tick += 1;
     assert_eq!(test.tick.as_ref(), &2);
     test.rollback();
     assert_eq!(test.tick.as_ref(), &1);
@@ -74,8 +76,8 @@ pub fn rollback_forgotten() {
     let mut test = mod_test::Rollback::default();
 
     let old = test.tick.as_ref().clone();
-    *test.tick += 1;
     test.tick.undo(move |d| *d = old);
+    *test.tick += 1;
 
     // Create new transaction
     assert_eq!(test.oldest(), 0);

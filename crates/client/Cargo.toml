@@ -12,10 +12,12 @@ wgpu = "24.0.5"
 pollster = "0.4"
 crossbeam = "0.8.4"
 bincode = "1.3.3"
+crc32fast = "1.5.0"
+derive_more = { version = "2.0.1", features = ["full"] }
 parley = "0.5.0"
 vello = "0.5.0"
 bytemuck = "1.23.2"
-slotmap = { version = "1.0.7", features = ["serde"] }
+slotmapd = { path = "../slotmapd", features = ["serde"] }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 rapier3d = { version = "0.22.0", features = [ "enhanced-determinism", "serde-serialize" ] }

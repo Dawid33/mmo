@@ -3,19 +3,22 @@ use std::{
     borrow::BorrowMut,
     cmp::Reverse,
     collections::{BinaryHeap, VecDeque},
-    ops::DerefMut,
+    hash::{Hash, Hasher},
+    ops::{Deref, DerefMut},
+    time::Instant,
 };
 
+use borrow::RefCast;
 use crossbeam::channel::Sender;
-use log::info;
+use log::{info, warn};
 use parley::{Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, StyleProperty};
 
 use crate::{
     camera::CameraController,
-    data::{Ecs, GameData, Rollback},
+    data::{Ecs, GameData, Rollback, Undo},
     physics::PhysicsController,
-    ClientUpdateEvent, Controller, GameDataTransaction, GameError, GameEvent, GameEventKind,
-    RegionId,
+    ClientUpdateEvent, Controller, GameDataTransaction, GameDataUpdate, GameError, GameEvent,
+    GameEventKind, RegionId, DEFAULT_EVENT_BUFFER,
 };
 
 #[allow(unused)]
@@ -33,39 +36,40 @@ pub fn text_layout<'a>(fctx: &mut FontContext, text: &str) -> Layout<()> {
 /// its own tick rate separately from other regions.
 #[allow(unused)]
 pub struct Region {
-    pub event_log: VecDeque<(GameEvent, Box<dyn Fn(&mut GameData)>)>,
+    pub event_log: VecDeque<GameEvent>,
     pub data: Rollback,
+    pub next_game_event_id: usize,
     id: RegionId,
     input_buffer: BinaryHeap<Reverse<GameEvent>>,
     controllers: Vec<Box<dyn Controller>>,
+    synchronized: bool,
     // font_context: FontContext,
-    client_event_send: Option<Sender<ClientUpdateEvent>>,
 }
 
 impl Region {
     /// Create new region
     pub fn new(
         mut data: Rollback,
-        client_event_send: Option<Sender<ClientUpdateEvent>>,
+        game_update_send: Option<Sender<GameDataUpdate>>,
         id: RegionId,
     ) -> Self {
-        data.reinitialize();
+        data.reinitialize(game_update_send);
+        // data.data.client().as_ref().unwrap();
         Self {
             data,
             event_log: VecDeque::new(),
             input_buffer: BinaryHeap::new(),
             controllers: Vec::from([CameraController::new(), PhysicsController::new()]),
             // font_context: FontContext::new(),
-            client_event_send,
             id,
+            synchronized: false,
+            next_game_event_id: 0,
         }
     }
 
     /// Check if event from network matches client event history. rollback the
     /// game state as neccessary and re-simulate to current time.
     pub fn reconcile(&mut self, server_event: GameEvent) -> Result<(), GameError> {
-        info!("input buffer {:?}", self.input_buffer);
-        info!("incoming server event {:?}", server_event);
         self.input_buffer.push(Reverse(server_event.clone()));
 
         if self.input_buffer.len() > 10 {
@@ -73,43 +77,67 @@ impl Region {
         }
 
         if self.event_log.len() == 0 {
-            info!("adding to buffer {:?}", server_event);
             return Ok(());
         }
 
-        'outer: while let Some(server_event) = self.input_buffer.pop() {
-            info!("comparing server event {:?}", server_event);
-            while let Some((event, rollback)) = self.event_log.pop_front() {
-                self.event_log.iter().for_each(|e| {
-                    info!("rollback log: {:?}", e.0);
-                });
-                info!("popped event {:?}", event);
-                if event.id == server_event.0.id {
-                    // Events have the same ID, meaning this event is correctly
-                    // next in order.
-                    if event == server_event.0 {
-                        // Incoming event is the same as event that was
-                        // executed. Pure bliss.
-                        info!("BLISS");
-                        break;
+        'outer: while !self.input_buffer.is_empty() && !self.event_log.is_empty() {
+            if let Some(server_event) = self.input_buffer.pop() {
+                if let Some(event) = self.event_log.pop_front() {
+                    if event.id == server_event.0.id {
+                        if event != server_event.0 {
+                            self.event_log.push_front(event);
+                            let mut temp_log = self.event_log.clone();
+
+                            // rollback whole event log
+                            // info!("rolled back len {}", self.event_log.len() + 1);
+                            while let Some(e) = self.event_log.pop_back() {
+                                self.data.rollback();
+                            }
+
+                            // apply server event that was different from expected.
+                            self.handle_event(server_event.clone().0)?;
+                            self.data.forget();
+
+                            // Remove the corresponding event from event log, it must
+                            // have happened later.
+                            // TODO: DO NOT DO THIS FOR EVENTS THAT ORIGINATE FROM
+                            // OTHER CLIENTS
+                            {
+                                let mut len = temp_log.len();
+                                let mut iter = temp_log.iter_mut().enumerate();
+                                while let Some((i, event)) = iter.next() {
+                                    if event.kind == server_event.0.kind {
+                                        drop(iter);
+                                        temp_log.remove(i);
+                                        break;
+                                    }
+                                    event.id += 1;
+                                }
+                                if len == temp_log.len() {
+                                    panic!(
+                                        "Client didn't have event recieved from server. Client must be behind."
+                                    );
+                                }
+                            }
+
+                            // TODO: if from other client, increase event id' as well as self.next_game_event_id
+                            for event in &mut temp_log {
+                                self.handle_event(event.clone());
+                            }
+                            self.event_log = temp_log;
+                        } else {
+                            self.data.forget();
+                        }
                     } else {
-                        rollback(&mut self.data);
-                        // TODO: Discrepency detected.
-                        // - store all events in rollback log into temp buffer
-                        // - must rollback whole log
-                        // - handle server event
-                        // - re-apply all events from temp buffer.
-                        todo!("Rollback is not implemented.");
+                        // IDs are incorrect, game event arrived out of order.
+                        info!("Arrived out of order, Adding to input buffer.");
+                        self.input_buffer.push(server_event);
+                        self.event_log.push_front(event);
+                        break 'outer;
                     }
-                } else {
-                    // IDs are incorrect, game event arrived out of order.
-                    info!("Adding to input buffer.");
-                    self.input_buffer.push(server_event);
-                    break 'outer;
                 }
             }
         }
-        info!("FINISHED RECONCILING");
         Ok(())
     }
 
@@ -119,31 +147,73 @@ impl Region {
         match event.kind {
             GameEventKind::Tick => {
                 for c in self.controllers.iter_mut() {
-                    c.on_tick(&mut self.data);
+                    let data = self.data.as_refs_mut();
+                    c.on_tick(data.data);
                 }
+                let data: &mut GameData = self.data.deref_mut();
+                if let Some((p, e)) = data.players.iter().next() {
+                    let e = *e;
+                    let old = data.ecs.player.get_mut(e).input.clone();
+                    data.ecs.player.undo(move |d, _| {
+                        d.get_mut(e).input = old.clone();
+                    });
+                    let p = data.ecs.player.get_mut(e);
+                    p.input.step();
+                }
+                self.data.tick.undo(|d, _| *d -= 1);
                 *self.data.tick += 1;
-                self.data.tick.undo(|d| *d -= 1);
             }
             GameEventKind::PlayerWinitEvent(player, event) => {
                 let data: &mut GameData = self.data.deref_mut();
                 if let Some((p, e)) = data.players.iter().next() {
                     let e = e.clone();
-                    let p = data.ecs.player.get_mut(e);
-                    let old = p.input.clone();
-                    // p.input.update(&event);
-                    data.ecs.player.undo(move |d| {
-                        d.get_mut(e).input = old.clone();
+                    let mut old = data.ecs.player.deref_mut().clone();
+                    let old_hasher = unsafe { data.ecs.player.hash_data() };
+                    data.ecs.player.undo(move |d, _| {
+                        *d = old.clone();
                     });
+                    let p = data.ecs.player.get_mut(e);
+                    p.input.update(&event);
+
+                    match &event {
+                        crate::WinitEvent::WindowEvent(window_event) => match &window_event {
+                            crate::WindowEvent::KeyboardInput {
+                                physical_key,
+                                logical_key,
+                                location,
+                                state,
+                                repeat,
+                                is_synthetic,
+                            } => match physical_key {
+                                winit::keyboard::PhysicalKey::Code(key_code) => {
+                                    if state.is_pressed() {
+                                        match key_code {
+                                            winit::keyboard::KeyCode::KeyE
+                                            | winit::keyboard::KeyCode::Escape => {
+                                                let p = data.ecs.player.get_mut(e);
+                                                p.fps_cam_mode = !p.fps_cam_mode;
+                                                let mode = p.fps_cam_mode;
+                                                data.ecs.send(GameDataUpdate::new(
+                                                    crate::GameDataTransactionKind::Do,
+                                                    crate::GameDataUpdateKind::SetFreeCam(mode),
+                                                ));
+                                            }
+                                            _ => (),
+                                        }
+                                    }
+                                }
+                                _ => (),
+                            },
+                            _ => (),
+                        },
+                        _ => (),
+                    }
                 } else {
-                    println!("NONE");
-                }
-                for c in self.controllers.iter_mut() {
-                    c.on_player_event(&mut self.data, player, &event);
+                    println!("No Players.");
                 }
             }
             GameEventKind::Quit => (),
         }
-        self.data.forget();
         Ok(())
     }
 }
