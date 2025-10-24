@@ -1,4 +1,6 @@
 //! A cache for storing the results of layout computation
+use serde::{Deserialize, Serialize};
+
 use crate::taffy::geometry::Size;
 use crate::taffy::style::AvailableSpace;
 use crate::taffy::tree::{LayoutOutput, RunMode};
@@ -8,7 +10,7 @@ const CACHE_SIZE: usize = 9;
 
 /// Cached intermediate layout results
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub(crate) struct CacheEntry<T> {
     /// The initial cached size of the node itself
     known_dimensions: Size<Option<f32>>,
@@ -20,12 +22,12 @@ pub(crate) struct CacheEntry<T> {
 
 /// A cache for caching the results of a sizing a Grid Item or Flexbox Item
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Cache {
     /// The cache entry for the node's final layout
     final_layout_entry: Option<CacheEntry<LayoutOutput>>,
     /// The cache entries for the node's preliminary size measurements
-    measure_entries: [Option<CacheEntry<Size<f32>>>; CACHE_SIZE],
+    measure_entries: Vec<Option<CacheEntry<Size<f32>>>>,
     /// Tracks if all cache entries are empty
     is_empty: bool,
 }
@@ -38,10 +40,12 @@ impl Default for Cache {
 
 impl Cache {
     /// Create a new empty cache
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        let mut measure_entries = Vec::with_capacity(CACHE_SIZE);
+        measure_entries.iter_mut().for_each(|x| *x = None);
         Self {
             final_layout_entry: None,
-            measure_entries: [None; CACHE_SIZE],
+            measure_entries,
             is_empty: true,
         }
     }
@@ -208,7 +212,8 @@ impl Cache {
         }
         self.is_empty = true;
         self.final_layout_entry = None;
-        self.measure_entries = [None; CACHE_SIZE];
+        self.measure_entries = Vec::with_capacity(CACHE_SIZE);
+        self.measure_entries.iter_mut().for_each(|x| *x = None);
         ClearState::Cleared
     }
 

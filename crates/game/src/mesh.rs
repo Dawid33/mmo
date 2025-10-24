@@ -1,10 +1,47 @@
-use crate::data::{Mesh, VoxelType};
 use bytemuck::NoUninit;
 use log::info;
-use rapier3d::prelude::InverseKinematicsOption;
+use rapier3d::prelude::{
+    CCDSolver, ColliderBuilder, ColliderHandle, ColliderSet, InverseKinematicsOption,
+};
+
+pub type ChunkVoxels = [[[Voxel; 2]; 2]; 2];
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq)]
+pub enum VoxelType {
+    Blue,
+    Air,
+}
+
+impl Default for VoxelType {
+    fn default() -> Self {
+        VoxelType::Air
+    }
+}
+
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone)]
+pub struct Voxel {
+    pub kind: VoxelType,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial)]
+#[module(crate)]
+pub struct Chunk {
+    pub voxels: ChunkVoxels,
+    pub collider: Vec<ColliderHandle>,
+}
+
+impl Default for Chunk {
+    fn default() -> Self {
+        let voxels: [[[Voxel; 2]; 2]; 2] = Default::default();
+        Self {
+            collider: Vec::new(),
+            voxels,
+        }
+    }
+}
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, NoUninit)]
+#[derive(Copy, Clone, Debug, NoUninit, serde::Serialize, serde::Deserialize)]
 pub struct Vertex {
     position: [f32; 3],
     color: [f32; 3],
@@ -23,7 +60,7 @@ impl Vertex {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ChunkMesh {
     pub vertices: Vec<Vertex>,
 }
@@ -31,9 +68,9 @@ pub struct ChunkMesh {
 const HALF_VOXEL_SIZE: f32 = 1.0 / 2.0;
 
 impl ChunkMesh {
-    pub fn new(data: &Mesh) -> Self {
+    pub fn new(data: &[[[Voxel; 2]; 2]; 2]) -> Self {
         let mut vertices: Vec<Vertex> = Vec::new();
-        for (x_usize, length) in data.voxels.iter().enumerate() {
+        for (x_usize, length) in data.iter().enumerate() {
             for (y_usize, width) in length.iter().enumerate() {
                 for (z_usize, v) in width.iter().enumerate() {
                     let x = x_usize as f32;
@@ -101,7 +138,6 @@ impl ChunkMesh {
                     if (x_usize + 1 < length.len()
                         && VoxelType::Air
                             == data
-                                .voxels
                                 .get(x_usize + 1)
                                 .unwrap()
                                 .get(y_usize)
@@ -124,7 +160,6 @@ impl ChunkMesh {
                     if (x_usize > 0
                         && VoxelType::Air
                             == data
-                                .voxels
                                 .get(x_usize - 1)
                                 .unwrap()
                                 .get(y_usize)

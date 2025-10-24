@@ -1,4 +1,6 @@
 //! Taffy uses two coordinate systems to refer to grid lines (the gaps/gutters between rows/columns):
+use serde::{Deserialize, Serialize};
+
 use super::super::types::TrackCounts;
 use crate::taffy::geometry::Line;
 use core::cmp::{max, Ordering};
@@ -47,7 +49,7 @@ impl GridLine {
 ///   - The line at left hand (or top) edge of the explicit grid is line 0
 ///   - The next line to the right (or down) is 1, and so on
 ///   - The next line to the left (or up) is -1, and so on
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct OriginZeroLine(pub i16);
 

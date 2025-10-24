@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 use std::ops::{BitAndAssign, DerefMut};
 
-use crate::input::WinitInputHelper;
-use crate::mesh::ChunkMesh;
+use crate::input::BevyInput;
+use crate::mesh::{Chunk, VoxelType};
 use crate::taffy::style::BlockItemStyle;
-use crate::ClientUpdateEvent;
+use crate::taffy::TaffyTree;
+use crate::{ChunkMesh, ClientUpdateEvent};
 use crate::{GameDataTransactionKind, GameDataUpdate, GameError, IsometryReal, RegionId, Usize};
 use borrow::Partial;
 use crossbeam::channel::Sender;
@@ -21,12 +22,18 @@ use rapier3d::prelude::{
     RigidBodyHandle, RigidBodySet,
 };
 use rollback::rollback;
-use slotmapd::basic::Iter;
-use slotmapd::{new_key_type, Key, KeyData, SlotMap};
+use slotmapd::secondary::Iter;
+use slotmapd::{new_key_type, Key, KeyData, SecondaryMap, SlotMap, SparseSecondaryMap};
 use winit::keyboard::KeyCode;
 
 new_key_type! { pub struct EntityKey; }
 new_key_type! { pub struct PlayerKey; }
+
+#[derive(Debug, Default, Clone)]
+pub struct UIElement {
+    style: crate::taffy::Style,
+    content: Option<String>,
+}
 
 pub const ASPECT: f32 = (16 / 9) as f32;
 
@@ -51,31 +58,8 @@ impl Default for Camera {
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial)]
 #[module(crate)]
 pub struct Player {
-    pub input: WinitInputHelper,
+    pub bevy: BevyInput,
     pub fps_cam_mode: bool,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq)]
-pub enum VoxelType {
-    Blue,
-    Air,
-}
-
-impl Default for VoxelType {
-    fn default() -> Self {
-        VoxelType::Air
-    }
-}
-
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone)]
-pub struct Voxel {
-    pub kind: VoxelType,
-}
-
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone, ::borrow::Partial)]
-#[module(crate)]
-pub struct Mesh {
-    pub voxels: [[[Voxel; 2]; 2]; 2],
 }
 
 #[rollback(GameData)]
@@ -87,16 +71,18 @@ mod game_data {
         ecs: Ecs,
         physics: PhysicsState,
         tick: usize,
+        menu: TaffyTree<()>,
+        gui: TaffyTree<()>,
         players: SlotMap<PlayerKey, EntityKey>,
     }
 
     pub struct Ecs {
-        empty: Component<()>,
+        entities: SlotMap<EntityKey, ()>,
         camera: Component<Camera>,
         isometry: Component<IsometryReal>,
         rigidbody: Component<RigidBodyHandle>,
         player: Component<Player>,
-        mesh: Component<Mesh>,
+        mesh: Component<Chunk>,
     }
 
     pub struct PhysicsState {
@@ -140,14 +126,14 @@ impl Camera {
 
 impl Undo<Ecs> {
     pub fn create_entity_safe(&mut self) -> EntityKey {
-        self.camera.insert(None);
-        self.isometry.insert(None);
-        self.rigidbody.insert(None);
-        self.player.insert(None);
-        self.mesh.insert(None);
-        let key = self.empty.insert(None);
+        let key = self.entities.deref_mut().insert(());
+        self.camera.insert(key, None);
+        self.isometry.insert(key, None);
+        self.rigidbody.insert(key, None);
+        self.player.insert(key, None);
+        self.mesh.insert(key, None);
         self.undo(move |d, s| {
-            d.empty.remove(key);
+            d.entities.remove(key);
             d.camera.remove(key);
             d.isometry.remove(key);
             d.rigidbody.remove(key);
@@ -170,7 +156,7 @@ pub struct Component<T>
 where
     T: 'static + Default,
 {
-    list: SlotMap<EntityKey, Option<T>>,
+    list: SparseSecondaryMap<EntityKey, Option<T>>,
 }
 
 impl<T> Undo<Component<T>>
@@ -198,15 +184,15 @@ impl<T> Component<T>
 where
     T: 'static + Default + Clone + Send,
 {
-    pub fn iter(&self) -> Iter<'_, EntityKey, Option<T>> {
+    pub fn iter(&self) -> slotmapd::sparse_secondary::Iter<'_, EntityKey, Option<T>> {
         self.list.iter()
     }
     pub fn len(&self) -> usize {
         self.list.len()
     }
 
-    pub fn insert(&mut self, item: Option<T>) -> EntityKey {
-        self.list.insert(item)
+    pub fn insert(&mut self, e: EntityKey, item: Option<T>) {
+        self.list.insert(e, item);
     }
 
     pub fn remove(&mut self, item: EntityKey) -> Option<T> {
@@ -230,7 +216,7 @@ impl Rollback {
     pub fn create_mesh(&mut self) -> EntityKey {
         let e = self.ecs.create_entity_safe();
 
-        let mut mesh = Mesh::default();
+        let mut mesh = Chunk::default();
         for x in &mut mesh.voxels {
             for y in x {
                 for z in y {
@@ -246,18 +232,13 @@ impl Rollback {
             .get_mut(0)
             .unwrap()
             .kind = VoxelType::Air;
-        self.ecs.mesh.set_safe(e, Some(mesh));
-        self.data.send(GameDataUpdate::new(
-            GameDataTransactionKind::Do,
-            crate::GameDataUpdateKind::SetVoxelMesh(e, Some(ChunkMesh::new(self.ecs.mesh.get(e)))),
-        ));
         e
     }
 
     pub fn create_player_safe(&mut self) -> PlayerKey {
         let e = self.ecs.create_entity_safe();
         let position = IsometryReal::from_parts(
-            Translation3::new(0.0, 0.0, 5.0),
+            Translation3::new(0.0, 40.0, 5.0),
             Unit::<Quaternion<f32>>::identity(),
         );
         let body = RigidBodyBuilder::kinematic_position_based()
@@ -285,8 +266,8 @@ impl Rollback {
         self.data.ecs.player.set_safe(
             e,
             Some(Player {
-                input: WinitInputHelper::default(),
                 fps_cam_mode: false,
+                bevy: BevyInput::default(),
             }),
         );
         let key = self.data.players.insert(e);

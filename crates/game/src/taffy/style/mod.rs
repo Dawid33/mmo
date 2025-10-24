@@ -11,6 +11,8 @@ mod flex;
 #[cfg(feature = "grid")]
 mod grid;
 
+use serde::{Deserialize, Serialize};
+
 pub use self::alignment::{
     AlignContent, AlignItems, AlignSelf, JustifyContent, JustifyItems, JustifySelf,
 };
@@ -41,10 +43,10 @@ use crate::taffy::geometry::{Point, Rect, Size};
 use crate::taffy::style_helpers::TaffyAuto as _;
 use core::fmt::Debug;
 
-#[cfg(feature = "serde")]
-use crate::style_helpers;
 #[cfg(feature = "grid")]
 use crate::taffy::geometry::Line;
+#[cfg(feature = "serde")]
+use crate::taffy::style_helpers;
 #[cfg(feature = "grid")]
 use crate::taffy::util::sys::GridTrackVec;
 

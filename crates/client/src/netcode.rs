@@ -63,6 +63,19 @@ impl ServerConnection {
                         continue;
                     }
                 };
+
+                let packet = match packet {
+                    ServerPacket::SyncClock(region_id, server_tick_rate, server_tick, _) => {
+                        ServerPacket::SyncClock(
+                            region_id,
+                            server_tick_rate,
+                            server_tick,
+                            recv_conn.rtt(),
+                        )
+                    }
+                    p => p,
+                };
+
                 sender.send(packet).unwrap();
                 recv.received_reset().await.unwrap();
             }

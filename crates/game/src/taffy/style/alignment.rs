@@ -1,5 +1,7 @@
 //! Style types for controlling alignment
 
+use serde::{Deserialize, Serialize};
+
 /// Used to control how child nodes are aligned.
 /// For Flexbox it controls alignment in the cross axis
 /// For Grid it controls alignment in the block axis

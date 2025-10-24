@@ -18,21 +18,6 @@ pub struct PhysicsController {
     pipeline: PhysicsPipeline,
 }
 
-// impl GameData {
-//     pub fn update_physics_client(&self) {
-//         for handle in self.physics.islands.active_kinematic_bodies() {
-//             let b = self.physics.bodies.get(*handle).unwrap();
-//             let e_id = EntityKey::from(KeyData::from_ffi(b.user_data as u64));
-//             if let Some(c) = self.ecs.camera.try_get(e_id) {
-//                 self.ecs.send(GameDataUpdate::new(
-//                     crate::GameDataTransactionKind::Undo,
-//                     crate::GameDataUpdateKind::UpdateCameraViewMatrix(e_id, *b.position()),
-//                 ));
-//             }
-//         }
-//     }
-// }
-
 impl Controller for PhysicsController {
     fn on_tick<'a>(&mut self, data: &mut Undo<crate::GameData>) {
         let old = data.physics.deref().clone();

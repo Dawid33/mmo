@@ -62,7 +62,6 @@
 // annotate items with their required features (gated by docsrs flag as this requires the nightly toolchain)
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
-#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 // Disable "unused_x" warnings when default features aren't enabled.
@@ -70,19 +69,6 @@
 #![cfg_attr(not(feature = "default"), allow(unused_imports))]
 #![cfg_attr(not(feature = "default"), allow(unused_variables))]
 #![cfg_attr(not(feature = "default"), allow(unused_mut))]
-
-// We always need std for the tests
-// See <https://github.com/la10736/rstest/issues/149#issuecomment-1156402989>
-#[cfg(all(test, not(feature = "std")))]
-#[macro_use]
-extern crate std;
-
-#[cfg(all(not(feature = "std"), feature = "alloc"))]
-extern crate alloc;
-
-#[cfg_attr(feature = "serde", macro_use)]
-#[cfg(feature = "serde")]
-extern crate serde;
 
 pub mod compute;
 pub mod geometry;

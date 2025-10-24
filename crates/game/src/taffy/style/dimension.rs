@@ -1,4 +1,6 @@
 //! Style types for representing lengths / sizes
+use serde::Serialize;
+
 use super::CompactLength;
 use crate::taffy::geometry::Rect;
 use crate::taffy::style_helpers::{FromLength, FromPercent, TaffyAuto, TaffyZero};

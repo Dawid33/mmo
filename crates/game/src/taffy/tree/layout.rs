@@ -1,4 +1,6 @@
 //! Final data structures that represent the high-level UI layout
+use serde::{Deserialize, Serialize};
+
 use crate::taffy::geometry::{AbsoluteAxis, Line, Point, Rect, Size};
 use crate::taffy::style::AvailableSpace;
 use crate::taffy::style_helpers::TaffyMaxContent;
@@ -6,7 +8,7 @@ use crate::taffy::util::sys::{f32_max, f32_min};
 
 /// Whether we are performing a full layout, or we merely need to size the node
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum RunMode {
     /// A full layout for this node and all children should be computed
     PerformLayout,
@@ -19,7 +21,7 @@ pub enum RunMode {
 
 /// Whether styles should be taken into account when computing size
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum SizingMode {
     /// Only content contributions should be taken into account
     ContentSize,
@@ -29,7 +31,7 @@ pub enum SizingMode {
 
 /// A set of margins that are available for collapsing with for block layout's margin collapsing
 #[derive(Copy, Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct CollapsibleMarginSet {
     /// The largest positive margin
     positive: f32,
@@ -85,7 +87,7 @@ impl CollapsibleMarginSet {
 
 /// An axis that layout algorithms can be requested to compute a size for
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum RequestedAxis {
     /// The horizontal axis
     Horizontal,
@@ -116,7 +118,7 @@ impl TryFrom<RequestedAxis> for AbsoluteAxis {
 
 /// A struct containing the inputs constraints/hints for laying out a node, which are passed in by the parent
 #[derive(Debug, Copy, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct LayoutInput {
     /// Whether we only need to know the Node's size, or whe
     pub run_mode: RunMode,
@@ -166,7 +168,7 @@ impl LayoutInput {
 /// If your node does not have a baseline (or you are unsure how to compute it), then simply return `Point::NONE`
 /// for the first_baselines field
 #[derive(Debug, Copy, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct LayoutOutput {
     /// The size of the node
     pub size: Size<f32>,
@@ -230,8 +232,7 @@ impl LayoutOutput {
 }
 
 /// The final result of a layout algorithm for a single node.
-#[derive(Debug, Copy, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Copy, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Layout {
     /// The relative ordering of the node
     ///
@@ -369,10 +370,9 @@ impl Layout {
 
 /// The additional information from layout algorithm
 #[cfg(feature = "detailed_layout_info")]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DetailedLayoutInfo {
     /// Enum variant for [`DetailedGridInfo`](crate::compute::grid::DetailedGridInfo)
-    #[cfg(feature = "grid")]
     Grid(Box<crate::taffy::compute::grid::DetailedGridInfo>),
     /// For node that hasn't had any detailed information yet
     None,

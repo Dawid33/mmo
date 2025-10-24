@@ -1,4 +1,6 @@
 //! Style types for CSS Grid layout
+use serde::{Deserialize, Serialize};
+
 use super::{
     AlignContent, AlignItems, AlignSelf, CheapCloneStr, CompactLength, CoreStyle, Dimension,
     JustifyContent, LengthPercentage, LengthPercentageAuto, Style,
@@ -17,7 +19,7 @@ pub struct GridTemplateArea<CustomIdent: CheapCloneStr> {
     /// The name of the grid area which
     #[cfg_attr(
         feature = "serde",
-        serde(deserialize_with = "crate::util::deserialize_from_str")
+        serde(deserialize_with = "crate::taffy::util::deserialize_from_str")
     )]
     pub name: CustomIdent,
     /// The index of the row at which the grid area starts in grid coordinates.
@@ -37,7 +39,7 @@ pub struct NamedGridLine<CustomIdent: CheapCloneStr> {
     /// The name of the grid area which
     #[cfg_attr(
         feature = "serde",
-        serde(deserialize_with = "crate::util::deserialize_from_str")
+        serde(deserialize_with = "crate::taffy::util::deserialize_from_str")
     )]
     pub name: CustomIdent,
     /// The index of the row at which the grid area starts in grid coordinates.
@@ -352,8 +354,7 @@ pub(crate) type NonNamedGridPlacement = GenericGridPlacement<GridLine>;
 /// Defaults to `GridPlacement::Auto`
 ///
 /// [Specification](https://www.w3.org/TR/css3-grid-layout/#typedef-grid-row-start-grid-line)
-#[derive(Clone, PartialEq, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum GridPlacement<S: CheapCloneStr = DefaultCheapStr> {
     /// Place item according to the auto-placement algorithm, and the parent's grid_auto_flow property
     Auto,

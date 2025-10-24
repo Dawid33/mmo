@@ -16,7 +16,6 @@ use slotmapd::{basic::Iter, Key, SlotMap};
 
 use crate::{
     data::{Camera, EntityKey, GameData, Player, PlayerKey},
-    input::WinitInputHelper,
     ClientUpdateEvent, GameDataUpdate, RegionId, WinitEvent,
 };
 

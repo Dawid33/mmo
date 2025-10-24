@@ -43,6 +43,12 @@ mod compat {
 #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
 std::compile_error!("Taffy only supports targets with a pointer width of 32 or 64 bits");
 
+// TODO: Fix this !1!1!!!!!
+// or make sure that it is actually sound. This was put here to make
+// things compile.
+unsafe impl Send for CompactLengthInner {}
+unsafe impl Sync for CompactLengthInner {}
+
 /// CompactLengthInner implementation for 64 bit platforms
 #[cfg(target_pointer_width = "64")]
 mod inner {

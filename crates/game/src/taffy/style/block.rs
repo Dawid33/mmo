@@ -1,4 +1,6 @@
 //! Style types for Block layout
+use serde::{Deserialize, Serialize};
+
 use crate::taffy::{style::CoreStyle, Style};
 
 /// The set of styles required for a Block layout container

@@ -1,4 +1,6 @@
 //! Style type for representing available space as a sizing constraint
+use serde::{Deserialize, Serialize};
+
 use crate::taffy::{
     prelude::{FromLength, TaffyMaxContent, TaffyMinContent, TaffyZero},
     style::Size,
@@ -8,7 +10,7 @@ use crate::taffy::{
 /// The amount of space available to a node in a given axis
 /// <https://www.w3.org/TR/css-sizing-3/#available>
 #[derive(Copy, Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum AvailableSpace {
     /// The amount of space available is the specified number of pixels
     Definite(f32),

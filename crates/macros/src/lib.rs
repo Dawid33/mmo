@@ -57,6 +57,32 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
     ));
 
     items.push(item(
+        "DelayedUndo Deref",
+        quote! {
+            impl<T, 'a> ::std::ops::Deref for DelayedUndo<T, 'a>
+            where T: Default {
+                type Target = T;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.value
+                }
+            }
+        },
+    ));
+
+    items.push(item(
+        "DelayedUndo DerefMut",
+        quote! {
+            impl<T, 'a> ::std::ops::DerefMut for DelayedUndo<T, 'a>
+            where T: Default {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    &mut self.value
+                }
+            }
+        },
+    ));
+
+    items.push(item(
         "Rollback Deref",
         quote! {
             impl ::std::ops::Deref for Rollback {
@@ -233,9 +259,35 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
 
     boilerplate(items, root_struct_ident);
     items.push(item(
+        "struct Delayed Undo<T>",
+        quote! {
+            pub struct DelayedUndo<T, 'a> where T: Default + 'static {
+                hash: u32,
+                value: &'a mut Undo<T>
+            }
+        },
+    ));
+
+    items.push(item(
+        "impl DelayedUndo<T>",
+        quote! {
+            impl<T, 'a> DelayedUndo<T, 'a> where T: Default + 'static {
+                pub fn undo(&mut self, undo: impl Fn(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
+                    let mut global = self.value.global_log.lock().unwrap();
+                    let mut local = self.value.log.lock().unwrap();
+                    let trans = self.value.info.current.load(::std::sync::atomic::Ordering::SeqCst);
+                    local.push_back(Box::new(undo));
+                    global.log.push_back((trans, self.value.field, self.hash));
+                }
+            }
+        },
+    ));
+
+    items.push(item(
         "struct Undo<T>",
         quote! {
             #[derive(::core::default::Default, ::rollback::Debug, ::serde::Serialize, ::serde::Deserialize, ::core::clone::Clone)]
+
             pub struct Undo<T> where T: Default + 'static {
                 #[serde(skip)]
                 #[debug(skip)]
@@ -266,6 +318,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     local.push_back(Box::new(undo));
                     let hash = unsafe {self.hash_data()};
                     global.log.push_back((trans, self.field, hash));
+                }
+
+                pub fn delayed_undo(&mut self) -> DelayedUndo<T, '_> {
+                    DelayedUndo {
+                        hash: unsafe { self.hash_data() },
+                        value: self
+                    }
                 }
 
                 pub unsafe fn hash_data(&self) -> u32 {
@@ -304,11 +363,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "Rollback",
         quote! {
-            #[derive(::serde::Serialize, ::serde::Deserialize, ::core::clone::Clone, ::borrow::Partial)]
+            #[derive(::serde::Serialize, ::serde::Deserialize, ::core::clone::Clone, ::borrow::Partial, ::rollback::Debug)]
             #[module(crate)]
             pub struct Rollback {
                 #[serde(skip)]
+                #[debug(skip)]
                 pub log: ::std::sync::Arc<::std::sync::Mutex<RollbackLog>>,
+                #[debug(skip)]
                 pub data: Undo<#root_struct_ident>,
             }
         },

@@ -1,8 +1,9 @@
-use std::{any::TypeId, collections::BTreeMap, path::PathBuf};
+use std::{any::TypeId, collections::BTreeMap, path::PathBuf, time::Duration};
 
 use crate::{
-    data::PlayerKey, transaction::GameDataTransactionKind, GameData, Rollback, GameDataUpdate,
+    data::PlayerKey, transaction::GameDataTransactionKind, GameData, GameDataUpdate, Rollback,
 };
+use bevy::math::Vec2;
 use derive_more::Debug;
 use log::info;
 use winit::{
@@ -33,7 +34,9 @@ pub type RegionId = usize;
 pub type LastGameEventId = usize;
 
 #[derive(Debug)]
-pub enum GameError {}
+pub enum GameError {
+    CrashedOnServerEvent,
+}
 
 pub enum WorldId {
     Default = 0,
@@ -50,12 +53,12 @@ type CurrentTickRate = u64;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum ServerPacket {
-    SyncClock(RegionId, CurrentTickRate, Tick),
+    SyncClock(RegionId, CurrentTickRate, Tick, Duration),
     /// Game event that was proccessed by the server.
     GameEvent(GameEvent),
     // TODO: Create player serverside and add player id here to let client know
     // who he is.
-    Region(RegionId, Rollback, LastGameEventId, Option<PlayerKey>),
+    Region(RegionId, Rollback, LastGameEventId, PlayerKey),
 }
 
 /// A Game event
@@ -168,8 +171,15 @@ pub enum WinitEvent {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum BevyEvent {
+    KeyboardInput(bevy::input::keyboard::KeyboardInput),
+    MouseButtonInput(bevy::input::mouse::MouseButtonInput),
+    MouseMotionInput(Vec2),
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum GameEventKind {
     Tick,
     PlayerWinitEvent(PlayerKey, WinitEvent),
+    PlayerBevyEvent(PlayerKey, BevyEvent),
     Quit,
 }

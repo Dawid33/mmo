@@ -1,4 +1,7 @@
 //! Style types for Flexbox layout
+use serde::Deserialize;
+use serde::Serialize;
+
 use super::{
     AlignContent, AlignItems, AlignSelf, CoreStyle, Dimension, JustifyContent, LengthPercentage,
     Style,

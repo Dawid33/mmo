@@ -1,4 +1,5 @@
 //! Contains [TaffyTree](crate::tree::TaffyTree): the default implementation of [LayoutTree](crate::tree::LayoutTree), and the error type for Taffy.
+use serde::{Deserialize, Serialize};
 use slotmapd::SecondaryMap;
 use slotmapd::{DefaultKey, SlotMap};
 
@@ -79,7 +80,7 @@ impl core::fmt::Display for TaffyError {
 impl std::error::Error for TaffyError {}
 
 /// Global configuration values for a TaffyTree instance
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct TaffyConfig {
     /// Whether to round layout values
     pub(crate) use_rounding: bool,
@@ -94,7 +95,7 @@ impl Default for TaffyConfig {
 /// Layout information for a given [`Node`](crate::node::Node)
 ///
 /// Stored in a [`TaffyTree`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct NodeData {
     /// The layout strategy used by this node
     pub(crate) style: Style,
@@ -121,7 +122,7 @@ struct NodeData {
 impl NodeData {
     /// Create the data for a new node
     #[must_use]
-    pub const fn new(style: Style) -> Self {
+    pub fn new(style: Style) -> Self {
         Self {
             style,
             cache: Cache::new(),
@@ -146,8 +147,8 @@ impl NodeData {
 /// An entire tree of UI nodes. The entry point to Taffy's high-level API.
 ///
 /// Allows you to build a tree of UI nodes, run Taffy's layout algorithms over that tree, and then access the resultant layout.]
-#[derive(Debug, Clone)]
-pub struct TaffyTree<NodeContext = ()> {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TaffyTree<NodeContext> {
     /// The [`NodeData`] for each node stored in this tree
     nodes: SlotMap<DefaultKey, NodeData>,
 
@@ -168,8 +169,8 @@ pub struct TaffyTree<NodeContext = ()> {
     config: TaffyConfig,
 }
 
-impl Default for TaffyTree {
-    fn default() -> TaffyTree<()> {
+impl<T> Default for TaffyTree<T> {
+    fn default() -> TaffyTree<T> {
         TaffyTree::new()
     }
 }
@@ -257,9 +258,7 @@ impl<NodeContext> PrintTree for TaffyTree<NodeContext> {
         match (num_children, display) {
             (_, Display::None) => "NONE",
             (0, _) => "LEAF",
-            #[cfg(feature = "block_layout")]
             (_, Display::Block) => "BLOCK",
-            #[cfg(feature = "flexbox")]
             (_, Display::Flex) => {
                 use crate::taffy::FlexDirection;
                 match node.style.flex_direction {
@@ -1074,9 +1073,9 @@ impl<NodeContext> TaffyTree<NodeContext> {
 mod tests {
 
     use super::*;
-    use crate::style::{Dimension, Display, FlexDirection};
-    use crate::style_helpers::*;
-    use crate::util::sys;
+    use crate::taffy::style::{Dimension, Display, FlexDirection};
+    use crate::taffy::style_helpers::*;
+    use crate::taffy::util::sys;
 
     fn size_measure_function(
         known_dimensions: Size<Option<f32>>,
@@ -1562,7 +1561,7 @@ mod tests {
 
     #[test]
     fn make_sure_layout_location_is_top_left() {
-        use crate::prelude::*;
+        use crate::taffy::prelude::*;
 
         let mut taffy: TaffyTree<()> = TaffyTree::new();
 

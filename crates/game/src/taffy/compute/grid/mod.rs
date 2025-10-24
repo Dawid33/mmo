@@ -22,6 +22,8 @@ use explicit_grid::{
 };
 use implicit_grid::compute_grid_size_estimate;
 use placement::place_grid_items;
+#[cfg(feature = "detailed_layout_info")]
+use serde::{Deserialize, Serialize};
 use track_sizing::{
     determine_if_item_crosses_flexible_or_intrinsic_tracks, resolve_item_track_indexes,
     track_sizing_algorithm,
@@ -766,7 +768,7 @@ pub fn compute_grid_layout<Tree: LayoutGridContainer>(
 }
 
 /// Information from the computation of grid
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg(feature = "detailed_layout_info")]
 pub struct DetailedGridInfo {
     /// <https://drafts.csswg.org/css-grid-1/#grid-row>
@@ -778,7 +780,7 @@ pub struct DetailedGridInfo {
 }
 
 /// Information from the computation of grids tracks
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg(feature = "detailed_layout_info")]
 pub struct DetailedGridTracksInfo {
     /// Number of leading implicit grid tracks
@@ -837,7 +839,7 @@ impl DetailedGridTracksInfo {
 ///
 /// The values is 1-indexed grid line numbers bounding the area.
 /// This matches the Chrome and Firefox's format as of 2nd Jan 2024.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg(feature = "detailed_layout_info")]
 pub struct DetailedGridItemsInfo {
     /// row-start with 1-indexed grid line numbers

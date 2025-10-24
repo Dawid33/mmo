@@ -2,13 +2,14 @@
 //!
 //! Layouts are composed of multiple nodes, which live in a tree-like data structure.
 
+use serde::{Deserialize, Serialize};
 use slotmapd::{DefaultKey, Key, KeyData};
 
 /// A type representing the id of a single node in a tree of nodes
 ///
 /// Internally it is a wrapper around a u64 and a `NodeId` can be converted to and from
 /// and u64 if needed.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(u64);
 impl NodeId {
     /// Create a new NodeId from a u64 value

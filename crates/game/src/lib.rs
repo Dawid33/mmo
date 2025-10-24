@@ -10,10 +10,11 @@ use rapier3d::{
     prelude::{RigidBody, RigidBodyHandle},
 };
 use rollback::rollback;
-use slotmapd::new_key_type;
+use slotmapd::{new_key_type, DefaultKey};
 use std::{
     any::{Any, TypeId},
     collections::BTreeMap,
+    ops::Deref,
     rc::Rc,
     sync::{Arc, Mutex},
     time::Instant,
@@ -26,29 +27,27 @@ mod input;
 mod mesh;
 mod physics;
 mod region;
-pub(crate) mod taffy;
+pub mod taffy;
 mod transaction;
 
-use crate::data::Undo;
+pub use crate::data::{EntityKey, GameData, PlayerKey, Rollback, UIElement, Undo, ASPECT};
+use crate::mesh::ChunkVoxels;
+pub use crate::mesh::{ChunkMesh, Vertex};
+pub use crate::taffy::Style;
+pub use crate::{transaction::GameDataTransaction, transaction::GameDataTransactionKind};
 
 pub const TICK_RATE: u64 = 50;
-pub const DEFAULT_EVENT_BUFFER: isize = 5;
+pub const INDUCED_LATENCY: isize = 0;
 
-pub use crate::data::EntityKey;
-pub use crate::data::ASPECT;
-pub use crate::data::{PlayerKey, Rollback};
-pub use crate::mesh::{ChunkMesh, Vertex};
-pub use crate::{
-    data::GameData, transaction::GameDataTransaction, transaction::GameDataTransactionKind,
-};
-
+#[derive(Debug)]
 pub enum ClientUpdateEvent {
     NewRegion(
-        Rollback,
-        Option<PlayerKey>,
+        usize,
+        GameData,
         crossbeam::channel::Receiver<GameDataUpdate>,
     ),
     GameCrash(GameError),
+    SetPlayer(PlayerKey),
 }
 
 pub use common::*;
@@ -57,13 +56,17 @@ pub use region::Region;
 
 #[derive(Clone, Debug)]
 pub enum GameDataUpdateKind {
-    SetVoxelMesh(EntityKey, Option<ChunkMesh>),
+    CreateUIElement(DefaultKey, UIElement, IsometryReal),
+    SetUIElementStyle(DefaultKey, Style),
+    SetUIElementContent(DefaultKey, Option<String>),
+    RemoveUIElement(DefaultKey),
+    SetVoxelComponent(EntityKey, Option<ChunkVoxels>),
     SetEntityPosition(EntityKey, IsometryReal),
     UpdateCameraViewProj(EntityKey, Perspective3<f32>),
     UpdateCameraViewMatrix(EntityKey, IsometryReal),
     CreateEntity(EntityKey),
     RemoveEntity(EntityKey),
-    SetFreeCam(bool),
+    SetFreeCam(EntityKey, bool),
 }
 
 #[derive(Clone, Debug)]
@@ -115,8 +118,8 @@ impl World {
         );
     }
 
-    pub fn next_game_id(&self, id: &usize) -> usize {
-        self.regions.get(id).unwrap().next_game_event_id
+    pub fn current_tick(&self, id: &usize) -> usize {
+        *self.regions.get(id).unwrap().data.tick.deref()
     }
 
     pub fn clone_game_data(&self, id: &usize) -> Rollback {
@@ -148,18 +151,10 @@ impl World {
         Ok(event)
     }
 
-    pub fn handle_event_server(
-        &mut self,
-        event: GameEventKind,
-        region_id: usize,
-    ) -> Result<GameEvent, GameError> {
-        // TODO: Move this code into region impl
+    /// Used by server
+    pub fn forget_last_event(&mut self, region_id: usize) {
         let region = self.regions.get_mut(&region_id).unwrap();
-        let event = GameEvent::new(event, region.next_game_event_id, region_id);
-        region.next_game_event_id += 1;
-        region.handle_event(event.clone())?;
         region.data.forget();
-        Ok(event)
     }
 
     pub fn reconcile_event(&mut self, event: GameEvent) -> Result<(), GameError> {
@@ -173,11 +168,7 @@ impl World {
         result
     }
 
-    pub fn build_region_server_packet(
-        &self,
-        region_id: usize,
-        player: Option<PlayerKey>,
-    ) -> ServerPacket {
+    pub fn build_region_server_packet(&self, region_id: usize, player: PlayerKey) -> ServerPacket {
         let id = self.regions.get(&region_id).unwrap().next_game_event_id;
         let data = self.clone_game_data(&region_id);
         ServerPacket::Region(region_id, data, id, player)

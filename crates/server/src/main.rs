@@ -12,7 +12,9 @@ use std::{
 use crossbeam::channel::{Receiver, Sender};
 use dashmap::DashMap;
 use game::{ClientPacket, GameEventKind, ServerPacket, World};
-use log::{error, info, LevelFilter};
+use log::{error, info};
+use pyroscope::PyroscopeAgent;
+use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 use quinn::{
     crypto::rustls::QuicServerConfig,
     rustls::{
@@ -21,7 +23,7 @@ use quinn::{
     },
     Connection, ConnectionError, Endpoint, TransportConfig,
 };
-use simplelog::{FormatItem, SimpleLogger};
+use simplelog::FormatItem;
 
 /// Wrapper around RegionGroup with additional bookeeping / networking
 /// to make it work as a server. Acts only as a dumb router of game event packets.
@@ -113,9 +115,16 @@ pub enum ServerEvent {
 const FORMAT: &'static [FormatItem] = &[FormatItem::Literal("server".as_bytes())];
 
 fn main() {
-    let config = simplelog::ConfigBuilder::new()
-        .set_time_format_custom(FORMAT)
-        .build();
+    let agent = PyroscopeAgent::builder("http://localhost:4040", "rust-app")
+        .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
+        .tags(vec![("kind", "server")])
+        .build()
+        .unwrap();
+
+    let agent_running = agent.start().unwrap();
+    // let config = simplelog::ConfigBuilder::new()
+    //     .set_time_format_custom(FORMAT)
+    //     .build();
     // SimpleLogger::init(LevelFilter::Info, config).unwrap();
 
     let (client_packet_send, client_packet_recv) = crossbeam::channel::unbounded();
@@ -154,16 +163,18 @@ fn main() {
             ServerEvent::ClientPacket(client_packet) => match client_packet {
                 ClientPacket::RequestRegion => {
                     server_send
-                        .send(world.build_region_server_packet(0, Some(player)))
+                        .send(world.build_region_server_packet(0, player))
                         .unwrap();
                 }
                 ClientPacket::GameEvent(game_event) => match game_event.kind {
                     game::GameEventKind::Quit | game::GameEventKind::Tick => (),
                     _ => {
-                        let event = match world
-                            .handle_event_server(game_event.kind, game_event.region_id)
+                        let event = match world.handle_event(game_event.kind, game_event.region_id)
                         {
-                            Ok(e) => e,
+                            Ok(e) => {
+                                world.forget_last_event(game_event.region_id);
+                                e
+                            }
                             Err(e) => panic!("Server crashed {:?}", e),
                         };
                         server_send.send(ServerPacket::GameEvent(event)).unwrap();
@@ -172,7 +183,7 @@ fn main() {
             },
             ServerEvent::ServerTickTimer => {
                 let region = 0;
-                let event = match world.handle_event_server(GameEventKind::Tick, region) {
+                let event = match world.handle_event(GameEventKind::Tick, region) {
                     Ok(e) => e,
                     Err(e) => panic!("Server crashed {:?}", e),
                 };
@@ -181,12 +192,15 @@ fn main() {
                     .send(ServerPacket::SyncClock(
                         region,
                         tick_rate.load(Ordering::SeqCst),
-                        world.next_game_id(&region),
+                        world.current_tick(&region),
+                        Duration::new(0, 0),
                     ))
                     .unwrap();
             }
         }
     }
+    let agent_ready = agent_running.stop().unwrap();
+    agent_ready.shutdown();
 }
 
 async fn handle_connection(

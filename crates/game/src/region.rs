@@ -8,6 +8,7 @@ use std::{
     time::Instant,
 };
 
+use bevy::input::keyboard::KeyCode;
 use borrow::RefCast;
 use crossbeam::channel::Sender;
 use log::{info, warn};
@@ -18,7 +19,7 @@ use crate::{
     data::{Ecs, GameData, Rollback, Undo},
     physics::PhysicsController,
     ClientUpdateEvent, Controller, GameDataTransaction, GameDataUpdate, GameError, GameEvent,
-    GameEventKind, RegionId, DEFAULT_EVENT_BUFFER,
+    GameEventKind, RegionId, INDUCED_LATENCY,
 };
 
 #[allow(unused)]
@@ -54,7 +55,6 @@ impl Region {
         id: RegionId,
     ) -> Self {
         data.reinitialize(game_update_send);
-        // data.data.client().as_ref().unwrap();
         Self {
             data,
             event_log: VecDeque::new(),
@@ -72,7 +72,7 @@ impl Region {
     pub fn reconcile(&mut self, server_event: GameEvent) -> Result<(), GameError> {
         self.input_buffer.push(Reverse(server_event.clone()));
 
-        if self.input_buffer.len() > 10 {
+        if self.input_buffer.len() > 1000 {
             panic!("Server event input buffer too big.");
         }
 
@@ -114,7 +114,7 @@ impl Region {
                                     event.id += 1;
                                 }
                                 if len == temp_log.len() {
-                                    panic!(
+                                    info!(
                                         "Client didn't have event recieved from server. Client must be behind."
                                     );
                                 }
@@ -151,14 +151,32 @@ impl Region {
                     c.on_tick(data.data);
                 }
                 let data: &mut GameData = self.data.deref_mut();
+
                 if let Some((p, e)) = data.players.iter().next() {
-                    let e = *e;
-                    let old = data.ecs.player.get_mut(e).input.clone();
-                    data.ecs.player.undo(move |d, _| {
-                        d.get_mut(e).input = old.clone();
-                    });
+                    let e = e.clone();
                     let p = data.ecs.player.get_mut(e);
-                    p.input.step();
+                    if p.bevy.key_pressed(&KeyCode::KeyE) {
+                        let old = p.fps_cam_mode;
+                        data.ecs.player.undo(move |p, _| {
+                            p.get_mut(e).fps_cam_mode = old;
+                        });
+                        let p = data.ecs.player.get_mut(e);
+                        p.fps_cam_mode = !p.fps_cam_mode;
+                        let mode = p.fps_cam_mode;
+                        data.ecs.send(GameDataUpdate::new(
+                            crate::GameDataTransactionKind::Do,
+                            crate::GameDataUpdateKind::SetFreeCam(e, mode),
+                        ));
+                    }
+
+                    let mut players = data.ecs.player.delayed_undo();
+                    let p = players.get_mut(e);
+                    if let Some(undo_func) = p.bevy.step() {
+                        players.undo(move |player, _| {
+                            let p = &mut player.get_mut(e).bevy;
+                            undo_func(p);
+                        })
+                    }
                 }
                 self.data.tick.undo(|d, _| *d -= 1);
                 *self.data.tick += 1;
@@ -166,53 +184,25 @@ impl Region {
             GameEventKind::PlayerWinitEvent(player, event) => {
                 let data: &mut GameData = self.data.deref_mut();
                 if let Some((p, e)) = data.players.iter().next() {
-                    let e = e.clone();
-                    let mut old = data.ecs.player.deref_mut().clone();
-                    let old_hasher = unsafe { data.ecs.player.hash_data() };
-                    data.ecs.player.undo(move |d, _| {
-                        *d = old.clone();
-                    });
-                    let p = data.ecs.player.get_mut(e);
-                    p.input.update(&event);
-
-                    match &event {
-                        crate::WinitEvent::WindowEvent(window_event) => match &window_event {
-                            crate::WindowEvent::KeyboardInput {
-                                physical_key,
-                                logical_key,
-                                location,
-                                state,
-                                repeat,
-                                is_synthetic,
-                            } => match physical_key {
-                                winit::keyboard::PhysicalKey::Code(key_code) => {
-                                    if state.is_pressed() {
-                                        match key_code {
-                                            winit::keyboard::KeyCode::KeyE
-                                            | winit::keyboard::KeyCode::Escape => {
-                                                let p = data.ecs.player.get_mut(e);
-                                                p.fps_cam_mode = !p.fps_cam_mode;
-                                                let mode = p.fps_cam_mode;
-                                                data.ecs.send(GameDataUpdate::new(
-                                                    crate::GameDataTransactionKind::Do,
-                                                    crate::GameDataUpdateKind::SetFreeCam(mode),
-                                                ));
-                                            }
-                                            _ => (),
-                                        }
-                                    }
-                                }
-                                _ => (),
-                            },
-                            _ => (),
-                        },
-                        _ => (),
-                    }
                 } else {
                     println!("No Players.");
                 }
             }
             GameEventKind::Quit => (),
+            GameEventKind::PlayerBevyEvent(player_key, event) => {
+                let data: &mut GameData = self.data.deref_mut();
+                if let Some((p, e)) = data.players.iter().next() {
+                    let e = e.clone();
+                    let mut players = data.ecs.player.delayed_undo();
+                    let p = players.get_mut(e);
+                    if let Some(undo_func) = p.bevy.update(event) {
+                        players.undo(move |player, _| {
+                            let p = &mut player.get_mut(e).bevy;
+                            undo_func(p);
+                        })
+                    }
+                }
+            }
         }
         Ok(())
     }

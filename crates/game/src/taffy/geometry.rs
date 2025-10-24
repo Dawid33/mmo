@@ -1,5 +1,7 @@
 //! Geometric primitives useful for layout
 
+use serde::{Deserialize, Serialize};
+
 use crate::taffy::style::CompactLength;
 use crate::taffy::util::sys::f32_max;
 use crate::taffy::{style::Dimension, util::sys::f32_min};
@@ -322,9 +324,7 @@ impl Rect<f32> {
 }
 
 /// An abstract "line". Represents any type that has a start and an end
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "serde", serde(default))]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Line<T> {
     /// The start position of a line
     pub start: T,
