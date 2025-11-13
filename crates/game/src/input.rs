@@ -1,5 +1,5 @@
-use bevy::math::Vec2;
 use log::info;
+use crate::rapier::prelude::PhysicsHooks;
 use serde::{Deserialize, Serialize};
 use winit::dpi::PhysicalSize;
 use winit::event::MouseButton;
@@ -17,81 +17,99 @@ enum KeyState {
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct BevyInput {
-    keyboard_state: BTreeMap<bevy::input::keyboard::KeyCode, KeyState>,
-    mouse_diff: Option<Vec2>,
+pub struct WinitInput {
+    keyboard_state: BTreeMap<winit::keyboard::KeyCode, KeyState>,
+    mouse_diff: Option<(f64, f64)>,
 }
 
-impl BevyInput {
+impl WinitInput {
     pub fn update(
         &mut self,
-        event: crate::common::BevyEvent,
-    ) -> Option<Box<dyn Fn(&mut BevyInput) + 'static + Send + Sync>> {
+        event: crate::common::WinitEvent,
+    ) -> Option<Box<dyn Fn(&mut WinitInput) + 'static + Send + Sync>> {
         match event {
-            crate::BevyEvent::MouseMotionInput(input) => {
-                let old = self.mouse_diff;
-                if let Some(m) = &mut self.mouse_diff {
-                    *m += input;
-                } else {
-                    self.mouse_diff = Some(input);
-                }
-                Some(Box::new(move |s: &mut Self| {
-                    s.mouse_diff = old;
-                }))
-            }
-            crate::BevyEvent::KeyboardInput(input) => {
-                info!("{:?}", input);
-                if let Some(k) = self.keyboard_state.get_mut(&input.key_code) {
-                    match k {
-                        KeyState::Released => {
-                            if !input.state.is_pressed() {
-                                None
-                            } else {
-                                *k = KeyState::Pressed;
-                                Some(Box::new(move |s| {
-                                    *s.keyboard_state.get_mut(&input.key_code).unwrap() =
-                                        KeyState::Released;
-                                }))
-                            }
-                        }
-                        KeyState::Held | KeyState::Pressed => {
-                            if input.state.is_pressed() {
-                                None
-                            } else {
-                                let old = k.clone();
-                                *k = KeyState::Released;
-                                Some(Box::new(move |s| {
-                                    *s.keyboard_state.get_mut(&input.key_code).unwrap() =
-                                        old.clone();
-                                }))
-                            }
-                        }
-                    }
-                } else {
-                    let state = if input.state.is_pressed() {
-                        KeyState::Pressed
+            crate::WinitEvent::WindowEvent(window_event) => match window_event {
+                crate::WindowEvent::KeyboardInput {
+                    physical_key,
+                    logical_key,
+                    location,
+                    state,
+                    repeat,
+                    is_synthetic,
+                } => {
+                    let physical_key = if let PhysicalKey::Code(key) = physical_key {
+                        key
                     } else {
-                        KeyState::Released
+                        return None;
                     };
-                    self.keyboard_state.insert(input.key_code.clone(), state);
-                    Some(Box::new(move |s| {
-                        s.keyboard_state.remove(&input.key_code);
+                    if let Some(k) = self.keyboard_state.get_mut(&physical_key) {
+                        match k {
+                            KeyState::Released => {
+                                if !state.is_pressed() {
+                                    None
+                                } else {
+                                    *k = KeyState::Pressed;
+                                    Some(Box::new(move |s| {
+                                        *s.keyboard_state.get_mut(&physical_key).unwrap() =
+                                            KeyState::Released;
+                                    }))
+                                }
+                            }
+                            KeyState::Held | KeyState::Pressed => {
+                                if state.is_pressed() {
+                                    None
+                                } else {
+                                    let old = k.clone();
+                                    *k = KeyState::Released;
+                                    Some(Box::new(move |s| {
+                                        *s.keyboard_state.get_mut(&physical_key).unwrap() =
+                                            old.clone();
+                                    }))
+                                }
+                            }
+                        }
+                    } else {
+                        let state = if state.is_pressed() {
+                            KeyState::Pressed
+                        } else {
+                            KeyState::Released
+                        };
+                        self.keyboard_state.insert(physical_key.clone(), state);
+                        Some(Box::new(move |s| {
+                            s.keyboard_state.remove(&physical_key);
+                        }))
+                    }
+                }
+                _ => None,
+            },
+            crate::WinitEvent::DeviceEvent(device_event) => match device_event {
+                crate::DeviceEvent::MouseMotion { delta } => {
+                    let old = self.mouse_diff;
+                    if let Some(m) = &mut self.mouse_diff {
+                        m.0 += delta.0;
+                        m.1 += delta.1;
+                    } else {
+                        self.mouse_diff = Some(delta);
+                    }
+                    Some(Box::new(move |s: &mut Self| {
+                        s.mouse_diff = old;
                     }))
                 }
-            }
-            crate::BevyEvent::MouseButtonInput(mouse_button_input) => None,
-            crate::BevyEvent::MouseMotionInput(mouse_motion) => None,
+                _ => None,
+            },
+            crate::WinitEvent::NewEvents => return None,
+            crate::WinitEvent::AboutToWait => return None,
         }
     }
 
-    pub fn step(&mut self) -> Option<Box<dyn Fn(&mut BevyInput) + 'static + Send + Sync>> {
+    pub fn step(&mut self) -> Option<Box<dyn Fn(&mut WinitInput) + 'static + Send + Sync>> {
         let old_mouse_diff = self.mouse_diff;
         self.mouse_diff = None;
         let mut changed = Vec::new();
         for (key, state) in &mut self.keyboard_state {
             if KeyState::Pressed == *state {
                 *state = KeyState::Held;
-                changed.push(*key);
+                changed.push(key.clone());
             }
         }
         Some(Box::new(move |s: &mut Self| {
@@ -102,15 +120,15 @@ impl BevyInput {
         }))
     }
 
-    pub fn mouse_diff(&mut self) -> (f32, f32) {
+    pub fn mouse_diff(&mut self) -> (f64, f64) {
         if let Some(m) = self.mouse_diff {
-            (m.x, m.y)
+            (m.0, m.1)
         } else {
             (0.0, 0.0)
         }
     }
 
-    pub fn key_pressed(&self, key: &bevy::input::keyboard::KeyCode) -> bool {
+    pub fn key_pressed(&self, key: &winit::keyboard::KeyCode) -> bool {
         if let Some(key) = self.keyboard_state.get(key) {
             match key {
                 KeyState::Pressed => return true,
@@ -119,7 +137,7 @@ impl BevyInput {
         }
         false
     }
-    pub fn key_held(&self, key: &bevy::input::keyboard::KeyCode) -> bool {
+    pub fn key_held(&self, key: &winit::keyboard::KeyCode) -> bool {
         if let Some(key) = self.keyboard_state.get(key) {
             match key {
                 KeyState::Held | KeyState::Pressed => return true,

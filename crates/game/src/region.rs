@@ -8,11 +8,11 @@ use std::{
     time::Instant,
 };
 
-use bevy::input::keyboard::KeyCode;
 use borrow::RefCast;
 use crossbeam::channel::Sender;
 use log::{info, warn};
 use parley::{Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, StyleProperty};
+use winit::keyboard::{KeyCode, SmolStr};
 
 use crate::{
     camera::CameraController,
@@ -89,7 +89,6 @@ impl Region {
                             let mut temp_log = self.event_log.clone();
 
                             // rollback whole event log
-                            // info!("rolled back len {}", self.event_log.len() + 1);
                             while let Some(e) = self.event_log.pop_back() {
                                 self.data.rollback();
                             }
@@ -155,7 +154,7 @@ impl Region {
                 if let Some((p, e)) = data.players.iter().next() {
                     let e = e.clone();
                     let p = data.ecs.player.get_mut(e);
-                    if p.bevy.key_pressed(&KeyCode::KeyE) {
+                    if p.input.key_pressed(&winit::keyboard::KeyCode::KeyE) {
                         let old = p.fps_cam_mode;
                         data.ecs.player.undo(move |p, _| {
                             p.get_mut(e).fps_cam_mode = old;
@@ -171,9 +170,9 @@ impl Region {
 
                     let mut players = data.ecs.player.delayed_undo();
                     let p = players.get_mut(e);
-                    if let Some(undo_func) = p.bevy.step() {
+                    if let Some(undo_func) = p.input.step() {
                         players.undo(move |player, _| {
-                            let p = &mut player.get_mut(e).bevy;
+                            let p = &mut player.get_mut(e).input;
                             undo_func(p);
                         })
                     }
@@ -181,28 +180,21 @@ impl Region {
                 self.data.tick.undo(|d, _| *d -= 1);
                 *self.data.tick += 1;
             }
-            GameEventKind::PlayerWinitEvent(player, event) => {
-                let data: &mut GameData = self.data.deref_mut();
-                if let Some((p, e)) = data.players.iter().next() {
-                } else {
-                    println!("No Players.");
-                }
-            }
-            GameEventKind::Quit => (),
-            GameEventKind::PlayerBevyEvent(player_key, event) => {
+            GameEventKind::PlayerWinitEvent(player_key, event) => {
                 let data: &mut GameData = self.data.deref_mut();
                 if let Some((p, e)) = data.players.iter().next() {
                     let e = e.clone();
                     let mut players = data.ecs.player.delayed_undo();
                     let p = players.get_mut(e);
-                    if let Some(undo_func) = p.bevy.update(event) {
+                    if let Some(undo_func) = p.input.update(event) {
                         players.undo(move |player, _| {
-                            let p = &mut player.get_mut(e).bevy;
+                            let p = &mut player.get_mut(e).input;
                             undo_func(p);
                         })
                     }
                 }
             }
+            GameEventKind::Quit => return Err(GameError::QuitRequested),
         }
         Ok(())
     }

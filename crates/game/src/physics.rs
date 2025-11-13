@@ -1,10 +1,10 @@
 use std::ops::{Deref, DerefMut};
 
+use crate::na::Vector3;
+use crate::rapier::prelude::*;
 use borrow::PartialHelper;
 use crossbeam::channel::Sender;
 use log::info;
-use rapier3d::na::Vector3;
-use rapier3d::prelude::*;
 use slotmapd::KeyData;
 use winit::dpi::PhysicalInsets;
 
@@ -37,12 +37,11 @@ impl Controller for PhysicsController {
             physics.implules_joint_set,
             physics.multi_body_joint_set,
             physics.ccd_solver,
-            Some(physics.query_pipeline),
             &(),
             &(),
         );
 
-        for handle in data.physics.islands.active_kinematic_bodies() {
+        for handle in data.physics.islands.active_bodies() {
             let b = data.physics.bodies.get(*handle).unwrap();
             let e_id = EntityKey::from(KeyData::from_ffi(b.user_data as u64));
             if let Some(c) = data.ecs.camera.try_get(e_id) {

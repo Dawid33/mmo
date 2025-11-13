@@ -3,12 +3,25 @@
 // #![deny(missing_docs)]
 //! Game simulation code that is shared between client and server.
 
+#[macro_use]
+extern crate serde;
+
+pub extern crate nalgebra as na;
+extern crate num_traits as num;
+#[cfg(feature = "std")]
+extern crate std;
+
+#[cfg(feature = "alloc")]
+#[cfg_attr(test, macro_use)]
+extern crate alloc;
+
+#[macro_use]
+extern crate approx;
+
+pub extern crate simba;
+
 use borrow::AsRefsHelper;
 use crossbeam::channel::Sender;
-use rapier3d::{
-    na::{Matrix4, Matrix4x2, Perspective3},
-    prelude::{RigidBody, RigidBodyHandle},
-};
 use rollback::rollback;
 use slotmapd::{new_key_type, DefaultKey};
 use std::{
@@ -25,7 +38,10 @@ mod common;
 mod data;
 mod input;
 mod mesh;
+pub mod parry;
+pub(crate) use parry as parry3d;
 mod physics;
+pub mod rapier;
 mod region;
 pub mod taffy;
 mod transaction;
@@ -35,6 +51,8 @@ use crate::mesh::ChunkVoxels;
 pub use crate::mesh::{ChunkMesh, Vertex};
 pub use crate::taffy::Style;
 pub use crate::{transaction::GameDataTransaction, transaction::GameDataTransactionKind};
+use na::{Matrix4, Matrix4x2, Perspective3};
+use rapier::prelude::{RigidBody, RigidBodyHandle};
 
 pub const TICK_RATE: u64 = 50;
 pub const INDUCED_LATENCY: isize = 0;
@@ -84,8 +102,7 @@ impl GameDataUpdate {
     }
 }
 
-pub type IsometryReal =
-    rapier3d::na::Isometry<f32, rapier3d::na::Unit<rapier3d::na::Quaternion<f32>>, 3>;
+pub type IsometryReal = na::Isometry<f32, na::Unit<na::Quaternion<f32>>, 3>;
 
 trait Controller {
     fn on_tick<'a>(&mut self, t: &mut Undo<GameData>) {}

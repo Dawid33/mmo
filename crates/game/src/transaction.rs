@@ -7,8 +7,8 @@ use borrow::PartialHelper;
 use crossbeam::channel::Sender;
 #[allow(unused)]
 use log::info;
-use rapier3d::{
-    na::Vector3,
+use crate::na::Vector3;
+use crate::rapier::{
     prelude::{RigidBody, RigidBodyBuilder, RigidBodyHandle},
 };
 use serde::{Deserialize, Serialize};
@@ -231,8 +231,8 @@ impl<'a> GameDataTransaction<'a> {
     // pub fn set_velocity(
     //     &mut self,
     //     e: EntityId,
-    //     vel: Vector<rapier3d::math::Real>,
-    // ) -> Vector<rapier3d::math::Real> {
+    //     vel: Vector<crate::rapier::math::Real>,
+    // ) -> Vector<crate::rapier::math::Real> {
     //     let entity = self.data.raw.entities.get_mut(e).unwrap();
     //     let body = self
     //         .data
@@ -250,7 +250,7 @@ impl<'a> GameDataTransaction<'a> {
     //     &mut self,
     //     e: EntityId,
     //     ang: Vector<f32>,
-    // ) -> Vector<rapier3d::math::Real> {
+    // ) -> Vector<crate::rapier::math::Real> {
     //     let camera = self.data.raw.entities.get_mut(e).unwrap();
     //     let body = self
     //         .data
@@ -350,14 +350,14 @@ impl<'a> GameDataTransaction<'a> {
 //     //     }
 //     // }
 
-//     // pub fn set_entity_velocity(&mut self, e: EntityId, v: Vector<rapier3d::math::Real>) {
+//     // pub fn set_entity_velocity(&mut self, e: EntityId, v: Vector<crate::rapier::math::Real>) {
 //     //     let old = self.r.data.change().set_velocity(e, v);
 //     //     undo!(self, move |r| {
 //     //         r.data.change().set_velocity(e, old);
 //     //     });
 //     // }
 
-//     // pub fn set_entity_angular_velocity(&mut self, e: EntityId, v: Vector<rapier3d::math::Real>) {
+//     // pub fn set_entity_angular_velocity(&mut self, e: EntityId, v: Vector<crate::rapier::math::Real>) {
 //     //     let old = self.r.data.change().set_ang_velocity(e, v);
 //     //     undo!(self, move |r| {
 //     //         r.data.change().set_ang_velocity(e, old);

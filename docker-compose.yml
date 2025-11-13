@@ -13,6 +13,6 @@ services:
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_AUTH_DISABLE_LOGIN_FORM=true
     volumes:
-      - ./provisioning:/etc/grafana/provisioning
+      - ./scripts/provisioning:/etc/grafana/provisioning
     ports:
       - 3000:3000

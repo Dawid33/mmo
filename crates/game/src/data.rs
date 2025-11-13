@@ -1,8 +1,18 @@
 use std::collections::BTreeSet;
 use std::ops::{BitAndAssign, DerefMut};
 
-use crate::input::BevyInput;
+use crate::input::WinitInput;
 use crate::mesh::{Chunk, VoxelType};
+use crate::na::{
+    Complex, ComplexField, Isometry3, Matrix4, OPoint, Perspective3, Point3, Quaternion, RealField,
+    Rotation, Rotation3, Translation3, Unit, Vector3, Vector4,
+};
+use crate::rapier::math::Vector;
+use crate::rapier::prelude::{
+    CCDSolver, ColliderSet, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters,
+    IslandManager, LockedAxes, MultibodyJointSet, NarrowPhase, QueryPipeline, RigidBodyBuilder,
+    RigidBodyHandle, RigidBodySet,
+};
 use crate::taffy::style::BlockItemStyle;
 use crate::taffy::TaffyTree;
 use crate::{ChunkMesh, ClientUpdateEvent};
@@ -11,16 +21,6 @@ use borrow::Partial;
 use crossbeam::channel::Sender;
 pub use game_data::*;
 use log::info;
-use rapier3d::math::Vector;
-use rapier3d::na::{
-    Complex, ComplexField, Isometry3, Matrix4, OPoint, Perspective3, Point3, Quaternion, RealField,
-    Rotation, Rotation3, Translation3, Unit, Vector3, Vector4,
-};
-use rapier3d::prelude::{
-    CCDSolver, ColliderSet, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters,
-    IslandManager, LockedAxes, MultibodyJointSet, NarrowPhase, QueryPipeline, RigidBodyBuilder,
-    RigidBodyHandle, RigidBodySet,
-};
 use rollback::rollback;
 use slotmapd::secondary::Iter;
 use slotmapd::{new_key_type, Key, KeyData, SecondaryMap, SlotMap, SparseSecondaryMap};
@@ -58,7 +58,7 @@ impl Default for Camera {
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial)]
 #[module(crate)]
 pub struct Player {
-    pub bevy: BevyInput,
+    pub input: WinitInput,
     pub fps_cam_mode: bool,
 }
 
@@ -82,7 +82,7 @@ mod game_data {
         isometry: Component<IsometryReal>,
         rigidbody: Component<RigidBodyHandle>,
         player: Component<Player>,
-        mesh: Component<Chunk>,
+        chunk: Component<Chunk>,
     }
 
     pub struct PhysicsState {
@@ -96,7 +96,6 @@ mod game_data {
         integration_parameters: IntegrationParameters,
         islands: IslandManager,
         narrow_phase: NarrowPhase,
-        query_pipeline: QueryPipeline,
     }
 }
 
@@ -131,7 +130,7 @@ impl Undo<Ecs> {
         self.isometry.insert(key, None);
         self.rigidbody.insert(key, None);
         self.player.insert(key, None);
-        self.mesh.insert(key, None);
+        self.chunk.insert(key, None);
         self.undo(move |d, s| {
             d.entities.remove(key);
             d.camera.remove(key);
@@ -216,37 +215,26 @@ impl Rollback {
     pub fn create_mesh(&mut self) -> EntityKey {
         let e = self.ecs.create_entity_safe();
 
-        let mut mesh = Chunk::default();
-        for x in &mut mesh.voxels {
-            for y in x {
-                for z in y {
-                    z.kind = VoxelType::Blue;
-                }
-            }
-        }
-        mesh.voxels
-            .get_mut(0)
-            .unwrap()
-            .get_mut(0)
-            .unwrap()
-            .get_mut(0)
-            .unwrap()
-            .kind = VoxelType::Air;
+        let mut chunk = Chunk::default();
+        // for x in &mut chunk.voxels {
+        //     *x = VoxelType::Blue;
+        // }
+        self.ecs.chunk.set_safe(e, Some(chunk));
         e
     }
 
     pub fn create_player_safe(&mut self) -> PlayerKey {
         let e = self.ecs.create_entity_safe();
         let position = IsometryReal::from_parts(
-            Translation3::new(0.0, 40.0, 5.0),
+            Translation3::new(0.0, 1.0, 5.0),
             Unit::<Quaternion<f32>>::identity(),
         );
-        let body = RigidBodyBuilder::kinematic_position_based()
-            .position(position)
+        let body = RigidBodyBuilder::dynamic()
+            .pose(position)
+            .additional_mass(1.0)
             .gravity_scale(0.0)
-            .can_sleep(true)
-            .enabled_rotations(true, true, true)
-            .ccd_enabled(false)
+            .can_sleep(false)
+            .ccd_enabled(true)
             .angular_damping(1.0)
             .user_data(e.data().as_ffi() as u128)
             .build();
@@ -267,7 +255,7 @@ impl Rollback {
             e,
             Some(Player {
                 fps_cam_mode: false,
-                bevy: BevyInput::default(),
+                input: WinitInput::default(),
             }),
         );
         let key = self.data.players.insert(e);

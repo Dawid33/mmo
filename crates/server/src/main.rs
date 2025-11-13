@@ -12,9 +12,7 @@ use std::{
 use crossbeam::channel::{Receiver, Sender};
 use dashmap::DashMap;
 use game::{ClientPacket, GameEventKind, ServerPacket, World};
-use log::{error, info};
-use pyroscope::PyroscopeAgent;
-use pyroscope_pprofrs::{pprof_backend, PprofConfig};
+use log::{error, info, LevelFilter};
 use quinn::{
     crypto::rustls::QuicServerConfig,
     rustls::{
@@ -23,7 +21,6 @@ use quinn::{
     },
     Connection, ConnectionError, Endpoint, TransportConfig,
 };
-use simplelog::FormatItem;
 
 /// Wrapper around RegionGroup with additional bookeeping / networking
 /// to make it work as a server. Acts only as a dumb router of game event packets.
@@ -112,16 +109,18 @@ pub enum ServerEvent {
     ServerTickTimer,
 }
 
+use simplelog::{FormatItem, SimpleLogger};
 const FORMAT: &'static [FormatItem] = &[FormatItem::Literal("server".as_bytes())];
 
 fn main() {
-    let agent = PyroscopeAgent::builder("http://localhost:4040", "rust-app")
-        .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
-        .tags(vec![("kind", "server")])
-        .build()
-        .unwrap();
+    // use pyroscope::PyroscopeAgent;
+    // use pyroscope_pprofrs::{pprof_backend, PprofConfig};
+    // let agent = PyroscopeAgent::builder("http://localhost:4040", "server")
+    //     .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
+    //     .build()
+    //     .unwrap();
+    // let agent_running = agent.start().unwrap();
 
-    let agent_running = agent.start().unwrap();
     // let config = simplelog::ConfigBuilder::new()
     //     .set_time_format_custom(FORMAT)
     //     .build();
@@ -167,7 +166,10 @@ fn main() {
                         .unwrap();
                 }
                 ClientPacket::GameEvent(game_event) => match game_event.kind {
-                    game::GameEventKind::Quit | game::GameEventKind::Tick => (),
+                    game::GameEventKind::Tick => (),
+                    game::GameEventKind::Quit => {
+                        break;
+                    }
                     _ => {
                         let event = match world.handle_event(game_event.kind, game_event.region_id)
                         {
@@ -199,8 +201,8 @@ fn main() {
             }
         }
     }
-    let agent_ready = agent_running.stop().unwrap();
-    agent_ready.shutdown();
+    // let agent_ready = agent_running.stop().unwrap();
+    // agent_ready.shutdown();
 }
 
 async fn handle_connection(

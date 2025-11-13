@@ -1,10 +1,20 @@
-use bytemuck::NoUninit;
-use log::info;
-use rapier3d::prelude::{
+use std::slice::ChunksExactMut;
+
+use crate::parry::transformation::voxelization::VoxelSet;
+use crate::rapier::prelude::{
     CCDSolver, ColliderBuilder, ColliderHandle, ColliderSet, InverseKinematicsOption,
 };
+use block_mesh::ndshape::{ConstShape, ConstShape3u32};
+use block_mesh::{
+    greedy_quads, GreedyQuadsBuffer, MergeVoxel, VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG,
+};
+use bytemuck::NoUninit;
+use log::info;
 
-pub type ChunkVoxels = [[[Voxel; 2]; 2]; 2];
+const HALF_VOXEL_SIZE: f32 = 1.0 / 2.0;
+type ChunkShape = ConstShape3u32<100, 100, 100>;
+
+pub type ChunkVoxels = [Voxel; 2 * 2 * 2];
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq)]
 pub enum VoxelType {
@@ -23,6 +33,29 @@ pub struct Voxel {
     pub kind: VoxelType,
 }
 
+impl block_mesh::Voxel for VoxelType {
+    fn get_visibility(&self) -> VoxelVisibility {
+        if *self == VoxelType::Air {
+            VoxelVisibility::Empty
+        } else {
+            VoxelVisibility::Opaque
+        }
+    }
+}
+
+impl MergeVoxel for VoxelType {
+    type MergeValue = Self;
+    type MergeValueFacingNeighbour = VoxelType;
+
+    fn merge_value(&self) -> Self::MergeValue {
+        *self
+    }
+
+    fn merge_value_facing_neighbour(&self) -> Self::MergeValueFacingNeighbour {
+        *self
+    }
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial)]
 #[module(crate)]
 pub struct Chunk {
@@ -32,10 +65,9 @@ pub struct Chunk {
 
 impl Default for Chunk {
     fn default() -> Self {
-        let voxels: [[[Voxel; 2]; 2]; 2] = Default::default();
         Self {
             collider: Vec::new(),
-            voxels,
+            voxels: Default::default(),
         }
     }
 }
@@ -62,156 +94,66 @@ impl Vertex {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ChunkMesh {
+    buffer: GreedyQuadsBuffer,
+    pub indices: Vec<u32>,
     pub vertices: Vec<Vertex>,
+    pub normals: Vec<[f32; 3]>,
 }
 
-const HALF_VOXEL_SIZE: f32 = 1.0 / 2.0;
-
 impl ChunkMesh {
-    pub fn new(data: &[[[Voxel; 2]; 2]; 2]) -> Self {
-        let mut vertices: Vec<Vertex> = Vec::new();
-        for (x_usize, length) in data.iter().enumerate() {
-            for (y_usize, width) in length.iter().enumerate() {
-                for (z_usize, v) in width.iter().enumerate() {
-                    let x = x_usize as f32;
-                    let y = y_usize as f32;
-                    let z = z_usize as f32;
-                    if v.kind == VoxelType::Air {
-                        info!("air: {:?}, {:?}, {:?}, {:?}", x, y, z, v);
-                        continue;
-                    }
+    pub fn new(data: &ChunkVoxels) -> Self {
+        let mut voxels = [VoxelType::Air; ChunkShape::SIZE as usize];
+        for i in 0..ChunkShape::SIZE {
+            let [mut x, mut y, mut z] = ChunkShape::delinearize(i);
 
-                    info!("{:?}, {:?}, {:?}, {:?}", x, y, z, v);
-                    let face = [
-                        Vertex {
-                            position: [-HALF_VOXEL_SIZE, HALF_VOXEL_SIZE, 0.0],
-                            color: [0.0, 0.0, 1.0],
-                        },
-                        Vertex {
-                            position: [-HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE, 0.0],
-                            color: [0.0, 0.0, 1.0],
-                        },
-                        Vertex {
-                            position: [HALF_VOXEL_SIZE, HALF_VOXEL_SIZE, 0.0],
-                            color: [0.0, 0.0, 1.0],
-                        },
-                        Vertex {
-                            position: [-HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE, 0.0],
-                            color: [0.0, 0.0, 1.0],
-                        },
-                        Vertex {
-                            position: [HALF_VOXEL_SIZE, -HALF_VOXEL_SIZE, 0.0],
-                            color: [0.0, 0.0, 1.0],
-                        },
-                        Vertex {
-                            position: [HALF_VOXEL_SIZE, HALF_VOXEL_SIZE, 0.0],
-                            color: [0.0, 0.0, 1.0],
-                        },
-                    ];
-
-                    // Front
-                    if (z_usize + 1 < length.len()
-                        && VoxelType::Air == width.get(z_usize + 1).unwrap().kind)
-                        || z_usize == length.len() - 1
-                    {
-                        for mut v in face.clone() {
-                            v.position[0] += x;
-                            v.position[1] += y;
-                            v.position[2] = HALF_VOXEL_SIZE + z;
-                            vertices.push(v);
-                        }
-                    }
-
-                    // Back
-                    if (z_usize > 0 && VoxelType::Air == width.get(z_usize - 1).unwrap().kind)
-                        || z_usize == 0
-                    {
-                        for mut v in face.clone().into_iter().rev() {
-                            v.position[0] += x;
-                            v.position[1] += y;
-                            v.position[2] = -HALF_VOXEL_SIZE + z;
-                            vertices.push(v);
-                        }
-                    }
-
-                    // Right
-                    if (x_usize + 1 < length.len()
-                        && VoxelType::Air
-                            == data
-                                .get(x_usize + 1)
-                                .unwrap()
-                                .get(y_usize)
-                                .unwrap()
-                                .get(z_usize)
-                                .unwrap()
-                                .kind)
-                        || x_usize == length.len() - 1
-                    {
-                        for mut v in face.clone().into_iter().rev() {
-                            v.position[2] = v.position[0] + z;
-                            v.position[0] = HALF_VOXEL_SIZE + x;
-                            v.position[1] += y;
-                            v.color = [1.0, 0.0, 0.0];
-                            vertices.push(v);
-                        }
-                    }
-
-                    // Left
-                    if (x_usize > 0
-                        && VoxelType::Air
-                            == data
-                                .get(x_usize - 1)
-                                .unwrap()
-                                .get(y_usize)
-                                .unwrap()
-                                .get(z_usize)
-                                .unwrap()
-                                .kind)
-                        || x_usize == 0
-                    {
-                        for mut v in face.clone() {
-                            v.position[2] = v.position[0] + z;
-                            v.position[0] = -HALF_VOXEL_SIZE + x;
-                            v.position[1] += y;
-                            v.color = [1.0, 0.0, 0.0];
-                            vertices.push(v);
-                        }
-                    }
-
-                    // Top
-                    if (y_usize + 1 < length.len()
-                        && VoxelType::Air
-                            == length.get(y_usize + 1).unwrap().get(z_usize).unwrap().kind)
-                        || y_usize == length.len() - 1
-                    {
-                        info!("making top1, {:?}", y_usize);
-                        for mut v in face.clone().into_iter().rev() {
-                            v.position[2] = v.position[1] + z;
-                            v.position[1] = HALF_VOXEL_SIZE + y;
-                            v.position[0] += x;
-                            v.color = [0.0, 1.0, 0.0];
-                            vertices.push(v);
-                        }
-                    }
-
-                    // Bottom
-                    if (y_usize > 0
-                        && VoxelType::Air
-                            == length.get(y_usize - 1).unwrap().get(z_usize).unwrap().kind)
-                        || y_usize == 0
-                    {
-                        for mut v in face.clone() {
-                            v.position[2] = v.position[1] + z;
-                            v.position[1] = -HALF_VOXEL_SIZE + y;
-                            v.position[0] += x;
-                            v.color = [0.0, 1.0, 0.0];
-                            vertices.push(v);
-                        }
-                    }
+            voxels[i as usize] = if x > 0 && y > 0 && z > 0 && y < 99 && z < 99 && x < 99 {
+                if y == 1 {
+                    VoxelType::Blue
+                } else {
+                    VoxelType::Air
                 }
+            } else {
+                VoxelType::Air
             }
         }
 
-        Self { vertices }
+        let mut buffer = GreedyQuadsBuffer::new(voxels.len());
+        greedy_quads(
+            &voxels,
+            &ChunkShape {},
+            [0; 3],
+            [99, 9, 99],
+            &RIGHT_HANDED_Y_UP_CONFIG.faces,
+            &mut buffer,
+        );
+        let num_indices = buffer.quads.num_quads() * 6;
+        let num_vertices = buffer.quads.num_quads() * 4;
+        let mut indices = Vec::with_capacity(num_indices);
+        let mut vertices = Vec::with_capacity(num_vertices);
+        let mut normals = Vec::with_capacity(num_vertices);
+        for (group, face) in buffer
+            .quads
+            .groups
+            .iter()
+            .zip(RIGHT_HANDED_Y_UP_CONFIG.faces.into_iter())
+        {
+            for quad in group.into_iter() {
+                indices.extend_from_slice(&face.quad_mesh_indices(vertices.len() as u32));
+                vertices.extend_from_slice(&face.quad_mesh_positions(&quad, 0.1).map(|position| {
+                    Vertex {
+                        position,
+                        color: [0.0, 0.0, 0.0],
+                    }
+                }));
+                normals.extend_from_slice(&face.quad_mesh_normals());
+            }
+        }
+
+        Self {
+            buffer,
+            indices,
+            vertices,
+            normals,
+        }
     }
 }

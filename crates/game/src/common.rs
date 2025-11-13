@@ -3,7 +3,6 @@ use std::{any::TypeId, collections::BTreeMap, path::PathBuf, time::Duration};
 use crate::{
     data::PlayerKey, transaction::GameDataTransactionKind, GameData, GameDataUpdate, Rollback,
 };
-use bevy::math::Vec2;
 use derive_more::Debug;
 use log::info;
 use winit::{
@@ -36,6 +35,7 @@ pub type LastGameEventId = usize;
 #[derive(Debug)]
 pub enum GameError {
     CrashedOnServerEvent,
+    QuitRequested,
 }
 
 pub enum WorldId {
@@ -171,15 +171,8 @@ pub enum WinitEvent {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub enum BevyEvent {
-    KeyboardInput(bevy::input::keyboard::KeyboardInput),
-    MouseButtonInput(bevy::input::mouse::MouseButtonInput),
-    MouseMotionInput(Vec2),
-}
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum GameEventKind {
     Tick,
     PlayerWinitEvent(PlayerKey, WinitEvent),
-    PlayerBevyEvent(PlayerKey, BevyEvent),
     Quit,
 }
