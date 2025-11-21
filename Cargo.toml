@@ -31,7 +31,7 @@ block-mesh = { path = "crates/block-mesh", default-features = false }
 log = { version = "0.4.22", default-features = false }
 bincode = { version = "1.3.3", default-features = false }
 crossbeam = {version = "0.8.4", features = ["std", "alloc", "crossbeam-channel"], default-features = false }
-serde = {version = "1.0.216", default-features = false }
+serde = {version = "1.0.216", features = ["derive"], default-features = false }
 parley = {version = "0.5.0", features = ["std"], default-features = false }
 bytemuck = {version = "1.23.2", default-features = false }
 winit = { version = "0.30.12", features = [
@@ -44,7 +44,7 @@ float-derive = { version = "0.1.0", default-features = false }
 derive_more = { version = "2.0.1", features = [
   "debug",
 ], default-features = false }
-wgpu = { version = "26.0.1", features=["std", "vulkan"], default-features = false }
+wgpu = { version = "26.0.1", features=["std", "vulkan", "wgsl"], default-features = false }
 crc32fast = { version = "1.5.0", default-features = false }
 simplelog = { version = "0.12.2", default-features = false }
 pollster = { version = "0.4", default-features = false }

@@ -30,7 +30,7 @@ impl Controller for PhysicsController {
             physics.gravity,
             physics.integration_parameters,
             physics.islands,
-            physics.broad_phase.deref_mut(),
+            physics.broad_phase,
             physics.narrow_phase,
             physics.bodies,
             physics.colliders,

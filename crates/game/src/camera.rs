@@ -1,11 +1,16 @@
 use std::{fmt::Debug, ops::DerefMut, sync::Arc, time::Instant};
 
+use crate::data::Camera;
 use crate::rapier::math::Vector;
+use crate::rapier::prelude::RigidBodyHandle;
 use borrow::PartialHelper;
 use crossbeam::channel::Sender;
 #[allow(unused)]
 use log::info;
-use na::{clamp, AbstractRotation, ComplexField, Quaternion, UnitQuaternion, Vector2, Vector3};
+use na::{
+    clamp, AbstractRotation, ComplexField, Matrix4, Perspective3, Quaternion, UnitQuaternion,
+    Vector2, Vector3, Vector4,
+};
 use parley::swash::shape::Direction;
 use simba::scalar::{SubsetOf, SupersetOf};
 use winit::event::MouseButton;
@@ -14,6 +19,42 @@ use crate::{
     data::Undo, transaction::GameDataTransaction, ClientPacket, ClientUpdateEvent, Controller,
     GameData, GameDataUpdate,
 };
+
+pub const ASPECT: f32 = (16 / 9) as f32;
+
+impl Camera {
+    pub fn new(handle: RigidBodyHandle) -> Self {
+        let m = Matrix4::from_columns(&[
+            Vector4::new(1.0, 0.0, 0.0, 0.0),
+            Vector4::new(0.0, 1.0, 0.0, 0.0),
+            Vector4::new(0.0, 0.0, 0.5, 0.0),
+            Vector4::new(0.0, 0.0, 0.5, 1.0),
+        ]);
+        Camera {
+            proj_matrix: Perspective3::from_matrix_unchecked(
+                Perspective3::new(ASPECT, 90.0, 0.1, 100.0).as_matrix() * m,
+            ),
+            opengl_to_wgpu_matrix: m,
+            view_matrix: Some(handle),
+        }
+    }
+}
+
+impl Camera {
+    pub fn build_projection(&self) -> Matrix4<f32> {
+        *self.proj_matrix.as_matrix()
+    }
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            opengl_to_wgpu_matrix: Default::default(),
+            proj_matrix: Perspective3::new(ASPECT, 90.0, 0.1, 100.0),
+            view_matrix: Default::default(),
+        }
+    }
+}
 
 pub struct CameraController {}
 
@@ -75,16 +116,18 @@ impl Controller for CameraController {
                 linvel.y = -0.1 * SPEED
             }
             if linvel != Vector3::zeros() {
-                let old_translation = b.position().translation.clone().vector;
-                let old_linvel = *b.linvel();
+                let t = b.translation().clone();
+                let old = b.next_position().translation.clone().vector;
                 data.physics.bodies.undo(move |d, _| {
-                    d.get_mut(handle).unwrap().set_linvel(old_linvel, true);
+                    d.get_mut(handle)
+                        .unwrap()
+                        .set_next_kinematic_translation(old);
                 });
                 data.physics
                     .bodies
                     .get_mut(handle)
                     .unwrap()
-                    .add_force(linvel, true);
+                    .set_next_kinematic_translation(t + linvel);
             }
 
             let b = data.physics.bodies.get_mut(handle).unwrap();

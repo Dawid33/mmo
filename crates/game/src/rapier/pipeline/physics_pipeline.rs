@@ -2,6 +2,7 @@
 
 use crate::rapier::counters::Counters;
 // #[cfg(not(feature = "parallel"))]
+use crate::data::Undo;
 use crate::rapier::dynamics::IslandSolver;
 #[cfg(feature = "parallel")]
 use crate::rapier::dynamics::JointGraphEdge;

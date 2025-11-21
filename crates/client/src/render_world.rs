@@ -17,19 +17,19 @@ use game::{
 use log::info;
 use parley::LayoutContext;
 use rand::seq::IndexedRandom;
-use vello::{
-    kurbo::{self, Affine, Rect},
-    peniko::{
-        color::{
-            palette::{self, css::TRANSPARENT},
-            AlphaColor,
-        },
-        Fill,
-    },
-    AaConfig, Renderer, RendererOptions, Scene,
-};
+// use vello::{
+//     kurbo::{self, Affine, Rect},
+//     peniko::{
+//         color::{
+//             palette::{self, css::TRANSPARENT},
+//             AlphaColor,
+//         },
+//         Fill,
+//     },
+//     AaConfig, Renderer, RendererOptions, Scene,
+// };
 use wgpu::{
-    util::{BufferInitDescriptor, DeviceExt, TextureBlitter},
+    util::{BufferInitDescriptor, DeviceExt},
     BindGroup, BlendComponent, BlendFactor, BlendOperation, BufferUsages, CommandBuffer,
     CommandEncoder, Device, Queue, RenderPass, RenderPipeline, Surface, TextureFormat, TextureView,
 };
@@ -261,7 +261,7 @@ pub struct RenderWorld {
     data: GpuData,
     lerp_set: BTreeMap<RegionId, BTreeSet<EntityKey>>,
     regions: BTreeMap<RegionId, TrueWorld>,
-    vello_render: Renderer,
+    // vello_render: Renderer,
     pub in_freecam: bool,
 }
 
@@ -282,23 +282,23 @@ impl RenderWorld {
     }
 
     pub fn new(device: Device) -> Self {
-        let vello_render = vello::Renderer::new(
-            &device,
-            RendererOptions {
-                use_cpu: true,
-                antialiasing_support: vello::AaSupport::all(),
-                num_init_threads: NonZeroUsize::new(1),
-                pipeline_cache: None,
-            },
-        )
-        .unwrap();
+        // let vello_render = vello::Renderer::new(
+        //     &device,
+        //     RendererOptions {
+        //         use_cpu: true,
+        //         antialiasing_support: vello::AaSupport::all(),
+        //         num_init_threads: NonZeroUsize::new(1),
+        //         pipeline_cache: None,
+        //     },
+        // )
+        // .unwrap();
 
         Self {
             data: GpuData::new(device),
             lerp_set: BTreeMap::new(),
             regions: BTreeMap::new(),
             in_freecam: false,
-            vello_render,
+            // vello_render,
         }
     }
 
@@ -447,7 +447,7 @@ impl RenderWorld {
         surface_format: &wgpu::TextureFormat,
         size: &winit::dpi::PhysicalSize<u32>,
         // ui_texture: &UITexture,
-        blitter: &TextureBlitter,
+        // blitter: &TextureBlitter,
     ) -> Vec<CommandBuffer> {
         let mut background = self.device().create_command_encoder(&Default::default());
         let mut renderpass = background.begin_render_pass(&wgpu::RenderPassDescriptor {

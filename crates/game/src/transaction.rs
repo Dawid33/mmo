@@ -3,14 +3,12 @@ use std::{
     rc::Rc,
 };
 
+use crate::na::Vector3;
+use crate::rapier::prelude::{RigidBody, RigidBodyBuilder, RigidBodyHandle};
 use borrow::PartialHelper;
 use crossbeam::channel::Sender;
 #[allow(unused)]
 use log::info;
-use crate::na::Vector3;
-use crate::rapier::{
-    prelude::{RigidBody, RigidBodyBuilder, RigidBodyHandle},
-};
 use serde::{Deserialize, Serialize};
 use slotmapd::{basic::Iter, Key, SlotMap};
 

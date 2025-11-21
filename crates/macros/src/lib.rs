@@ -22,7 +22,8 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
     items.push(item(
         "Undo AsRef",
         quote! {
-            impl<T: ::core::default::Default> AsRef<T> for Undo<T> {
+            impl<T> AsRef<T> for Undo<T>
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
                 fn as_ref(&self) -> &T {
                     &self.data
                 }
@@ -34,7 +35,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "Undo Deref",
         quote! {
             impl<T> ::std::ops::Deref for Undo<T>
-            where T: Default {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
                 type Target = T;
 
                 fn deref(&self) -> &Self::Target {
@@ -45,11 +46,26 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
     ));
 
     items.push(item(
-        "Undo DerefMut",
+        "Undo DerefMut Clone",
         quote! {
             impl<T> ::std::ops::DerefMut for Undo<T>
-            where T: Default {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
                 fn deref_mut(&mut self) -> &mut Self::Target {
+                    println!("calling derefmut");
+                    let old = self.data.clone();
+                    self.undo(move |mut d, s| *d = old);
+                    &mut self.data
+                }
+            }
+        },
+    ));
+
+    items.push(item(
+        "Undo DerefMut Raw",
+        quote! {
+            impl<T> Undo<T>
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
+                fn deref_mut_raw(&mut self) -> &mut T {
                     &mut self.data
                 }
             }
@@ -60,7 +76,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "DelayedUndo Deref",
         quote! {
             impl<T, 'a> ::std::ops::Deref for DelayedUndo<T, 'a>
-            where T: Default {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
                 type Target = T;
 
                 fn deref(&self) -> &Self::Target {
@@ -74,7 +90,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "DelayedUndo DerefMut",
         quote! {
             impl<T, 'a> ::std::ops::DerefMut for DelayedUndo<T, 'a>
-            where T: Default {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
                 fn deref_mut(&mut self) -> &mut Self::Target {
                     &mut self.value
                 }
@@ -168,6 +184,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut struct_stack: Vec<(&ItemStruct, usize)> =
         Vec::from([(find(&root_struct_ident_string).unwrap(), 0)]);
     let mut paths: Vec<(proc_macro2::TokenStream, syn::Field)> = Vec::new();
+    let mut paths_raw: Vec<(proc_macro2::TokenStream, syn::Field)> = Vec::new();
     while let Some((s, current)) = struct_stack.pop() {
         match &s.fields {
             syn::Fields::Named(fields_named) => {
@@ -176,6 +193,11 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let ident = f.ident.as_ref().unwrap();
                     let stack = path_stack.iter();
                     paths.push((quote! { #(#stack.)*#ident }, f.to_owned().clone()));
+                    let stack = path_stack.iter();
+                    paths_raw.push((
+                        quote! { data.#(#stack.)*deref_mut_raw().#ident },
+                        f.to_owned().clone(),
+                    ));
                     if let Some(s) = find(&f.ty.to_token_stream().to_string()) {
                         path_stack.push(ident);
                         struct_stack.push((s, 0));
@@ -197,7 +219,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         match &mut i {
             Item::Struct(item_struct) => {
                 item_struct.attrs.push(
-                    parse_quote! {#[derive(::core::default::Default, ::rollback::Debug, ::rollback::serde::Serialize, ::rollback::serde::Deserialize, ::core::clone::Clone, ::borrow::Partial)] },
+                    parse_quote! {#[derive(::core::default::Default, ::rollback::Debug, ::rollback::serde::Serialize, ::rollback::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial)] },
                 );
                 item_struct.attrs.push(parse_quote! {#[module(crate)]});
 
@@ -246,7 +268,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         .map(|f| f.1.ty.clone())
         .collect::<Vec<_>>()
         .into_iter();
-    let iter_path = paths
+    let iter_path = paths_raw
+        .iter()
+        .map(|f| f.0.clone())
+        .collect::<Vec<proc_macro2::TokenStream>>()
+        .into_iter();
+    let iter_path_raw = paths_raw
         .iter()
         .map(|f| f.0.clone())
         .collect::<Vec<proc_macro2::TokenStream>>()
@@ -261,7 +288,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "struct Delayed Undo<T>",
         quote! {
-            pub struct DelayedUndo<T, 'a> where T: Default + 'static {
+            pub struct DelayedUndo<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
                 hash: u32,
                 value: &'a mut Undo<T>
             }
@@ -271,8 +298,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "impl DelayedUndo<T>",
         quote! {
-            impl<T, 'a> DelayedUndo<T, 'a> where T: Default + 'static {
-                pub fn undo(&mut self, undo: impl Fn(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
+            impl<T, 'a> DelayedUndo<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
+                pub fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
                     let mut global = self.value.global_log.lock().unwrap();
                     let mut local = self.value.log.lock().unwrap();
                     let trans = self.value.info.current.load(::std::sync::atomic::Ordering::SeqCst);
@@ -286,12 +313,11 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "struct Undo<T>",
         quote! {
-            #[derive(::core::default::Default, ::rollback::Debug, ::serde::Serialize, ::serde::Deserialize, ::core::clone::Clone)]
-
-            pub struct Undo<T> where T: Default + 'static {
+            #[derive(::core::default::Default, ::rollback::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
+            pub struct Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static {
                 #[serde(skip)]
                 #[debug(skip)]
-                log: ::std::sync::Arc<::std::sync::Mutex<::std::collections::VecDeque<Box<dyn Fn(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>>>>,
+                log: ::std::sync::Arc<::std::sync::Mutex<::std::collections::VecDeque<Box<dyn FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>>>>,
                 #[serde(skip)]
                 #[debug(skip)]
                 global_log: ::std::sync::Arc<::std::sync::Mutex<RollbackLog>>,
@@ -310,8 +336,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "impl Undo<T>",
         quote! {
-            impl<T> Undo<T> where T: Default + 'static + ::rollback::serde::Serialize + Sized {
-                pub fn undo(&mut self, undo: impl Fn(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
+            impl<T> Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + Sized {
+                pub fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
                     let mut global = self.global_log.lock().unwrap();
                     let mut local = self.log.lock().unwrap();
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
@@ -332,10 +358,10 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
 
                 pub fn print_log(&mut self) {
-                    info!("{:?}", self.global_log.lock().unwrap().log);
+                    ::log::info!("{:?}", self.global_log.lock().unwrap().log);
                 }
 
-                pub fn send(&self, value: GameDataUpdate) {
+                pub fn send(&self, value: crate::GameDataUpdate) {
                     let mut global = self.global_log.lock().unwrap();
                     global.client.as_ref().inspect(move |s| {
                         s.send(value).unwrap();
@@ -355,7 +381,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub log: ::std::collections::VecDeque<(usize, usize, u32)>,
                 pub client: ::std::option::Option<::crossbeam::channel::Sender<crate::GameDataUpdate>>,
                 info: ::rollback::RollbackInfo,
-                #(#iter_log_ident1 : ::std::sync::Arc<::std::sync::Mutex<::std::collections::VecDeque<Box<dyn Fn(&mut #iter_ty1, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>>>>,)*
+                #(#iter_log_ident1 : ::std::sync::Arc<::std::sync::Mutex<::std::collections::VecDeque<Box<dyn FnOnce(&mut #iter_ty1, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>>>>,)*
             }
         },
     ));
@@ -363,7 +389,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "Rollback",
         quote! {
-            #[derive(::serde::Serialize, ::serde::Deserialize, ::core::clone::Clone, ::borrow::Partial, ::rollback::Debug)]
+            #[derive(::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial, ::rollback::Debug)]
             #[module(crate)]
             pub struct Rollback {
                 #[serde(skip)]
@@ -411,7 +437,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                 #(#iter_log_ident_index1 => {
                                     let func = rollback_log.#iter_log_ident1.lock().unwrap().pop_back().unwrap();
                                     let previous = unsafe { self.#iter_path4.hash_data() };
-                                    func(&mut self.data.#iter_path1.data, rollback_log.client.as_ref().unwrap());
+                                    func(&mut self.#iter_path1.data, rollback_log.client.as_ref().unwrap());
                                     let new_hash = unsafe { self.#iter_path4.hash_data() };
                                     if new_hash != hash {
                                         panic!("Hash verification failed for self.{}.hash_data() in transaction {:?} with new_hash != hash: {:?} != {:?}\n hash before undo = {:?} \nlog: {:?}", #iter_path_string1, transaction, new_hash, hash, previous, rollback_log.log);
@@ -429,7 +455,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub fn forget(&mut self) {
                     use ::std::hash::{Hash, Hasher};
                     let rollback_log = self.log.clone();
+                    println!("before first lock");
                     let mut rollback_log = rollback_log.lock().unwrap();
+                    println!("after first lock");
                     let oldest = rollback_log.info.oldest.load(::std::sync::atomic::Ordering::SeqCst).clone();
                     let current = rollback_log.info.current.load(::std::sync::atomic::Ordering::SeqCst).clone();
                     if oldest >= current {
@@ -444,7 +472,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         forgot = true;
                         match field {
                             #(#iter_log_ident_index2 => {
+                                println!("before second lock");
                                 rollback_log.#iter_log_ident2.lock().unwrap().pop_front().unwrap();
+                                println!("second lock");
                             })*
                             _ => panic!("Tried to forget field that doesn't exist.")
                         }
@@ -455,10 +485,10 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         },
     ));
 
-    let iter_path1 = iter_path.clone();
-    let iter_path2 = iter_path.clone();
-    let iter_path3 = iter_path.clone();
-    let iter_path4 = iter_path.clone();
+    let iter_path_raw1 = iter_path_raw.clone();
+    let iter_path_raw2 = iter_path_raw.clone();
+    let iter_path_raw3 = iter_path_raw.clone();
+    let iter_path_raw4 = iter_path_raw.clone();
     let iter_log_ident1 = iter_log_ident.clone();
     let iter_log_ident_index1 = iter_log_ident_index.clone();
     items.push(item(
@@ -466,7 +496,6 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             impl Rollback {
                 pub fn new(client: ::std::option::Option<::crossbeam::channel::Sender<crate::GameDataUpdate>>) -> Self {
-                    use ::std::ops::DerefMut;
                     let mut log = RollbackLog::default();
                     log.client = client;
                     let log = ::std::sync::Arc::new(::std::sync::Mutex::new(log));
@@ -475,11 +504,11 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         data: Undo::default(),
                     };
                     r.data.global_log = log.clone();
-                    #(r.#iter_path2.global_log = log.clone();)*
+                    #(r.#iter_path_raw2.global_log = log.clone();)*
                     let mut log = log.lock().unwrap();
-                    #(r.#iter_path1.log = log.#iter_log_ident1.clone();)*
-                    #(r.#iter_path3.info = log.info.clone();)*
-                    #(r.#iter_path4.field = #iter_log_ident_index1;)*
+                    #(r.#iter_path_raw1.log = log.#iter_log_ident1.clone();)*
+                    #(r.#iter_path_raw3.info = log.info.clone();)*
+                    #(r.#iter_path_raw4.field = #iter_log_ident_index1;)*
                     drop(log);
                     r
                 }
@@ -487,10 +516,10 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         },
     ));
 
-    let iter_path1 = iter_path.clone();
-    let iter_path2 = iter_path.clone();
-    let iter_path3 = iter_path.clone();
-    let iter_path4 = iter_path.clone();
+    let iter_path_raw1 = iter_path_raw.clone();
+    let iter_path_raw2 = iter_path_raw.clone();
+    let iter_path_raw3 = iter_path_raw.clone();
+    let iter_path_raw4 = iter_path_raw.clone();
     let iter_log_ident1 = iter_log_ident.clone();
     let iter_log_ident_index1 = iter_log_ident_index.clone();
     items.push(item(
@@ -498,17 +527,16 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             impl Rollback {
                 pub fn reinitialize(&mut self, client: ::std::option::Option<::crossbeam::channel::Sender<crate::GameDataUpdate>>) {
-                    use ::std::ops::DerefMut;
                     let mut log = RollbackLog::default();
                     log.client = client;
                     let log = ::std::sync::Arc::new(::std::sync::Mutex::new(log));
                     self.log = log.clone();
                     self.data.global_log = log.clone();
-                    #(self.#iter_path2.global_log = log.clone();)*
+                    #(self.#iter_path_raw2.global_log = log.clone();)*
                     let mut log = log.lock().unwrap();
-                    #(self.#iter_path1.log = log.#iter_log_ident1.clone();)*
-                    #(self.#iter_path3.info = log.info.clone();)*
-                    #(self.#iter_path4.field = #iter_log_ident_index1;)*
+                    #(self.#iter_path_raw1.log = log.#iter_log_ident1.clone();)*
+                    #(self.#iter_path_raw3.info = log.info.clone();)*
+                    #(self.#iter_path_raw4.field = #iter_log_ident_index1;)*
                 }
             }
         },

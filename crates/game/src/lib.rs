@@ -5,20 +5,15 @@
 
 #[macro_use]
 extern crate serde;
-
-pub extern crate nalgebra as na;
-extern crate num_traits as num;
-#[cfg(feature = "std")]
-extern crate std;
-
-#[cfg(feature = "alloc")]
-#[cfg_attr(test, macro_use)]
-extern crate alloc;
-
 #[macro_use]
 extern crate approx;
 
+#[cfg_attr(test, macro_use)]
+extern crate alloc;
+pub extern crate nalgebra as na;
+extern crate num_traits as num;
 pub extern crate simba;
+extern crate std;
 
 use borrow::AsRefsHelper;
 use crossbeam::channel::Sender;
@@ -46,7 +41,8 @@ mod region;
 pub mod taffy;
 mod transaction;
 
-pub use crate::data::{EntityKey, GameData, PlayerKey, Rollback, UIElement, Undo, ASPECT};
+pub use crate::camera::ASPECT;
+pub use crate::data::{EntityKey, GameData, PlayerKey, Rollback, UIElement, Undo};
 use crate::mesh::ChunkVoxels;
 pub use crate::mesh::{ChunkMesh, Vertex};
 pub use crate::taffy::Style;
@@ -55,7 +51,7 @@ use na::{Matrix4, Matrix4x2, Perspective3};
 use rapier::prelude::{RigidBody, RigidBodyHandle};
 
 pub const TICK_RATE: u64 = 50;
-pub const INDUCED_LATENCY: isize = 0;
+pub const INDUCED_LATENCY: isize = 10;
 
 #[derive(Debug)]
 pub enum ClientUpdateEvent {
@@ -108,8 +104,6 @@ trait Controller {
     fn on_tick<'a>(&mut self, t: &mut Undo<GameData>) {}
 }
 
-/// A word is a collection of regions that communicate with one another
-/// via IPC.
 pub struct World {
     regions: BTreeMap<usize, Region>,
 }

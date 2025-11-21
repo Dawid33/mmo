@@ -5,15 +5,15 @@ use std::{
 };
 
 use crossbeam::channel::{Receiver, Sender};
+use game::na::Matrix4;
 use game::{
     ClientUpdateEvent, EntityId, EntityKey, GameData, GameDataTransactionKind, GameDataUpdate,
     GameEventKind, IsometryReal, PlayerKey, RegionId, Rollback, Vertex,
 };
 #[allow(unused)]
 use log::info;
-use game::na::Matrix4;
 use wgpu::{
-    util::{BufferInitDescriptor, DeviceExt, TextureBlitter, TextureBlitterBuilder},
+    util::{BufferInitDescriptor, DeviceExt},
     BlendComponent, BlendFactor, BlendOperation, BlendState, BufferUsages, Device, Features, Queue,
     TextureFormat,
 };
@@ -36,7 +36,7 @@ pub struct State {
     alpha_mode: wgpu::CompositeAlphaMode,
     depth_texture: DepthTexture,
     // ui_texture: UITexture,
-    blitter: TextureBlitter,
+    // blitter: TextureBlitter,
     surface_format: wgpu::TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
     render_world: RenderWorld,
@@ -221,16 +221,16 @@ impl State {
             cache: None,
         });
 
-        let blitter = TextureBlitterBuilder::new(&device, surface_format)
-            .blend_state(BlendState {
-                alpha: BlendComponent::REPLACE,
-                color: BlendComponent {
-                    src_factor: BlendFactor::SrcAlpha,
-                    dst_factor: BlendFactor::Zero,
-                    operation: BlendOperation::Add,
-                },
-            })
-            .build();
+        // let blitter = TextureBlitterBuilder::new(&device, surface_format)
+        //     .blend_state(BlendState {
+        //         alpha: BlendComponent::REPLACE,
+        //         color: BlendComponent {
+        //             src_factor: BlendFactor::SrcAlpha,
+        //             dst_factor: BlendFactor::Zero,
+        //             operation: BlendOperation::Add,
+        //         },
+        //     })
+        //     .build();
         let state = State {
             window,
             render_world: RenderWorld::new(device),
@@ -246,7 +246,7 @@ impl State {
             surface_config,
             alpha_mode: cap.alpha_modes[0],
             // ui_texture,
-            blitter,
+            // blitter,
         };
 
         // Configure surface for the first time
@@ -310,7 +310,7 @@ impl State {
             &self.surface_format,
             &self.size,
             // &self.ui_texture,
-            &self.blitter,
+            // &self.blitter,
         ));
         drop(surface_texture_view);
         self.window.pre_present_notify();

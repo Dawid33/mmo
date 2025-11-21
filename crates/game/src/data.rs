@@ -35,24 +35,12 @@ pub struct UIElement {
     content: Option<String>,
 }
 
-pub const ASPECT: f32 = (16 / 9) as f32;
-
 #[derive(Debug, rollback::serde::Serialize, rollback::serde::Deserialize, Clone, Partial)]
 #[module(crate)]
 pub struct Camera {
     pub opengl_to_wgpu_matrix: Matrix4<f32>,
     pub proj_matrix: Perspective3<f32>,
     pub view_matrix: Option<RigidBodyHandle>,
-}
-
-impl Default for Camera {
-    fn default() -> Self {
-        Self {
-            opengl_to_wgpu_matrix: Default::default(),
-            proj_matrix: Perspective3::new(ASPECT, 90.0, 0.1, 100.0),
-            view_matrix: Default::default(),
-        }
-    }
 }
 
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial)]
@@ -96,30 +84,6 @@ mod game_data {
         integration_parameters: IntegrationParameters,
         islands: IslandManager,
         narrow_phase: NarrowPhase,
-    }
-}
-
-impl Camera {
-    fn new(handle: RigidBodyHandle) -> Self {
-        let m = Matrix4::from_columns(&[
-            Vector4::new(1.0, 0.0, 0.0, 0.0),
-            Vector4::new(0.0, 1.0, 0.0, 0.0),
-            Vector4::new(0.0, 0.0, 0.5, 0.0),
-            Vector4::new(0.0, 0.0, 0.5, 1.0),
-        ]);
-        Camera {
-            proj_matrix: Perspective3::from_matrix_unchecked(
-                Perspective3::new(ASPECT, 90.0, 0.1, 100.0).as_matrix() * m,
-            ),
-            opengl_to_wgpu_matrix: m,
-            view_matrix: Some(handle),
-        }
-    }
-}
-
-impl Camera {
-    pub fn build_projection(&self) -> Matrix4<f32> {
-        *self.proj_matrix.as_matrix()
     }
 }
 
@@ -229,12 +193,12 @@ impl Rollback {
             Translation3::new(0.0, 1.0, 5.0),
             Unit::<Quaternion<f32>>::identity(),
         );
-        let body = RigidBodyBuilder::dynamic()
+        let body = RigidBodyBuilder::kinematic_position_based()
             .pose(position)
-            .additional_mass(1.0)
             .gravity_scale(0.0)
             .can_sleep(false)
-            .ccd_enabled(true)
+            .enabled_rotations(true, true, true)
+            .ccd_enabled(false)
             .angular_damping(1.0)
             .user_data(e.data().as_ffi() as u128)
             .build();
