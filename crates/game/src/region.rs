@@ -18,8 +18,8 @@ use crate::{
     camera::CameraController,
     data::{Ecs, GameData, Rollback, Undo},
     physics::PhysicsController,
-    ClientUpdateEvent, Controller, GameDataTransaction, GameDataUpdate, GameError, GameEvent,
-    GameEventKind, RegionId, INDUCED_LATENCY,
+    ClientUpdateEvent, Controller, GameDataUpdate, GameError, GameEvent, GameEventKind, RegionId,
+    INDUCED_LATENCY,
 };
 
 #[allow(unused)]
@@ -55,6 +55,8 @@ impl Region {
         id: RegionId,
     ) -> Self {
         data.reinitialize(game_update_send);
+        // let hasher = ::crc32fast::Hasher::new();
+        // println!("{:?}", hasher.finish());
         Self {
             data,
             event_log: VecDeque::new(),
@@ -137,11 +139,13 @@ impl Region {
                 }
             }
         }
+
         Ok(())
     }
 
     /// Handle a client event.
     pub fn handle_event(&mut self, event: GameEvent) -> Result<(), GameError> {
+        // println!("{:?}", event);
         self.data.new_transaction();
         match event.kind {
             GameEventKind::Tick => {

@@ -9,9 +9,9 @@ use crate::rapier::dynamics::{GenericJoint, ImpulseJoint, IntegrationParameters,
 use crate::rapier::math::{ANG_DIM, AngVector, DIM, Isometry, Matrix, Point, Real, Rotation, Vector};
 use crate::rapier::prelude::RigidBodySet;
 use crate::rapier::utils;
-use crate::rapier::utils::{IndexMut2, SimdCrossMatrix, SimdDot, SimdRealCopy};
+use crate::rapier::utils::{IndexMut2, SimdCrossMatrix, SimdDot};
 #[cfg(feature = "dim3")]
-use crate::rapier::utils::{SimdBasis, SimdQuat};
+use crate::rapier::utils::{SimdBasis, SimdQuat, SimdRealCopy};
 use na::SMatrix;
 
 #[cfg(feature = "simd-is-enabled")]

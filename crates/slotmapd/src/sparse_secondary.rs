@@ -11,7 +11,7 @@ use std::ops::{Index, IndexMut};
 use super::{Key, KeyData};
 use crate::util::{is_older_version, UnwrapUnchecked};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Slot<T> {
     version: u32,
@@ -66,7 +66,7 @@ struct Slot<T> {
 /// ammo[alice] = 0;
 /// ```
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SparseSecondaryMap<K: Key, V> {
     slots: BTreeMap<u32, Slot<V>>,

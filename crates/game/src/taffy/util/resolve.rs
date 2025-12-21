@@ -172,7 +172,7 @@ impl<Out: TaffyZero, T: ResolveOrZero<Option<f32>, Out>> ResolveOrZero<Option<f3
 #[cfg(test)]
 mod tests {
     use super::{MaybeResolve, ResolveOrZero};
-    use crate::style_helpers::TaffyZero;
+    use crate::taffy::style_helpers::TaffyZero;
     use core::fmt::Debug;
 
     // MaybeResolve test runner
@@ -195,8 +195,8 @@ mod tests {
 
     mod maybe_resolve_dimension {
         use super::mr_case;
-        use crate::style::Dimension;
-        use crate::style_helpers::*;
+        use crate::taffy::style::Dimension;
+        use crate::taffy::style_helpers::*;
 
         /// `Dimension::Auto` should always return `None`
         ///
@@ -237,8 +237,8 @@ mod tests {
 
     mod maybe_resolve_size_dimension {
         use super::mr_case;
-        use crate::geometry::Size;
-        use crate::style::Dimension;
+        use crate::taffy::geometry::Size;
+        use crate::taffy::style::Dimension;
 
         /// Size<Dimension::Auto> should always return Size<None>
         ///
@@ -307,8 +307,8 @@ mod tests {
 
     mod resolve_or_zero_dimension_to_option_f32 {
         use super::roz_case;
-        use crate::style::Dimension;
-        use crate::style_helpers::*;
+        use crate::taffy::style::Dimension;
+        use crate::taffy::style_helpers::*;
 
         #[test]
         fn resolve_or_zero_auto() {
@@ -335,8 +335,8 @@ mod tests {
 
     mod resolve_or_zero_rect_dimension_to_rect {
         use super::roz_case;
-        use crate::geometry::{Rect, Size};
-        use crate::style::Dimension;
+        use crate::taffy::geometry::{Rect, Size};
+        use crate::taffy::style::Dimension;
 
         #[test]
         fn resolve_or_zero_auto() {
@@ -401,8 +401,8 @@ mod tests {
 
     mod resolve_or_zero_rect_dimension_to_rect_f32_via_option {
         use super::roz_case;
-        use crate::geometry::Rect;
-        use crate::style::Dimension;
+        use crate::taffy::geometry::Rect;
+        use crate::taffy::style::Dimension;
 
         #[test]
         fn resolve_or_zero_auto() {

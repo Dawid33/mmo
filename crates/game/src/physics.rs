@@ -9,9 +9,8 @@ use slotmapd::KeyData;
 use winit::dpi::PhysicalInsets;
 
 use crate::data::{EntityKey, PhysicsState, Undo};
-use crate::transaction::undo;
 
-use crate::{ClientUpdateEvent, Controller, GameData, GameDataTransaction, GameDataUpdate};
+use crate::{ClientUpdateEvent, Controller, GameData, GameDataUpdate};
 
 #[derive(Default)]
 pub struct PhysicsController {
@@ -20,12 +19,7 @@ pub struct PhysicsController {
 
 impl Controller for PhysicsController {
     fn on_tick<'a>(&mut self, data: &mut Undo<crate::GameData>) {
-        let old = data.physics.deref().clone();
-        data.physics.undo(move |d, _| {
-            *d = old.clone();
-        });
-
-        let physics = data.physics.as_refs_mut();
+        let physics = data.physics.change().as_refs_mut();
         self.pipeline.step(
             physics.gravity,
             physics.integration_parameters,

@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    num::{NonZeroU32, NonZeroU64},
     ops::BitAnd,
     sync::Arc,
 };
@@ -10,8 +11,11 @@ use game::{
     ClientUpdateEvent, EntityId, EntityKey, GameData, GameDataTransactionKind, GameDataUpdate,
     GameEventKind, IsometryReal, PlayerKey, RegionId, Rollback, Vertex,
 };
+use image::EncodableLayout;
 #[allow(unused)]
 use log::info;
+use log::warn;
+use rand::seq::IndexedRandom;
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     BlendComponent, BlendFactor, BlendOperation, BlendState, BufferUsages, Device, Features, Queue,
@@ -40,6 +44,7 @@ pub struct State {
     surface_format: wgpu::TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
     render_world: RenderWorld,
+    texture_array_bind_group: wgpu::BindGroup,
 }
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -106,6 +111,30 @@ impl State {
         client_recv: Receiver<ClientUpdateEvent>,
         game_send: Sender<GameEventKind>,
     ) -> State {
+        let assets = std::fs::read_dir("assets/blocks").unwrap();
+        let mut images = BTreeMap::new();
+        for file in assets {
+            let file = match file {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+
+            if let Some(extension) = file.path().extension() {
+                if extension != "png" {
+                    continue;
+                }
+                match image::ImageReader::open(file.path()) {
+                    Ok(image) => match image.decode() {
+                        Ok(image) => {
+                            images.insert(file.file_name(), image.to_rgba8());
+                        }
+                        Err(e) => warn!("failed to decode {:?}, {:?}", file.path(), e),
+                    },
+                    Err(e) => warn!("failed to read {:?}, {:?}", file.path(), e),
+                }
+            }
+        }
+
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -113,18 +142,132 @@ impl State {
             .unwrap();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::POLYGON_MODE_LINE,
+                required_limits: wgpu::Limits {
+                    max_binding_array_elements_per_shader_stage: 6,
+                    max_binding_array_sampler_elements_per_shader_stage: 2,
+                    ..wgpu::Limits::downlevel_defaults()
+                },
+
+                required_features: wgpu::Features::POLYGON_MODE_LINE
+                    | wgpu::Features::TEXTURE_BINDING_ARRAY,
                 ..Default::default()
             })
             .await
             .unwrap();
+
+        let mut tile_views = Vec::new();
+        let mut mapping: BTreeMap<String, usize> = BTreeMap::new();
+        for (name, tile) in images {
+            use image::GenericImageView;
+            let dimensions = tile.dimensions();
+            let texture_size = wgpu::Extent3d {
+                width: dimensions.0,
+                height: dimensions.1,
+                depth_or_array_layers: 1,
+            };
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                size: texture_size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                label: Some(&format!("texure_{}", name.to_string_lossy())),
+                view_formats: &[],
+            });
+            tile_views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+            mapping.insert(name.to_string_lossy().to_string(), tile_views.len() - 1);
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &tile,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * dimensions.0),
+                    rows_per_image: Some(dimensions.1),
+                },
+                texture_size,
+            );
+        }
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let texture_array_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("texture array bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: NonZeroU32::new(tile_views.len() as u32),
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: NonZeroU32::new(1),
+                    },
+                ],
+            });
+
+        let temp_tile_views: Vec<&wgpu::TextureView> = tile_views.iter().map(|x| x).collect();
+        let texture_array_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureViewArray(&temp_tile_views[..]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::SamplerArray(&[&sampler]),
+                },
+            ],
+            layout: &texture_array_bind_group_layout,
+            label: Some("texture array bind group"),
+        });
+
+        // let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        //     entries: &[wgpu::BindGroupEntry {
+        //         binding: 0,
+        //         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+        //             buffer: &texture_index_buffer,
+        //             offset: 0,
+        //             size: Some(NonZeroU64::new(4).unwrap()),
+        //         }),
+        //     }],
+        //     layout: &uniform_bind_group_layout,
+        //     label: Some("texture array index uniform bind group"),
+        // });
+
+        // let mut texture_index_buffer_contents: Vec<u32> = Vec::with_capacity(384);
+        // let texture_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        //     label: Some("Texture Index Buffer"),
+        //     contents: bytemuck::cast_slice(&texture_index_buffer_contents),
+        //     usage: wgpu::BufferUsages::UNIFORM,
+        // });
 
         let camera_bind_group_layout = device.create_bind_group_layout(CAMERA_LAYOUT_DESC);
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout],
+                bind_group_layouts: &[&camera_bind_group_layout, &texture_array_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -245,6 +388,7 @@ impl State {
             depth_texture,
             surface_config,
             alpha_mode: cap.alpha_modes[0],
+            texture_array_bind_group,
             // ui_texture,
             // blitter,
         };
@@ -309,8 +453,7 @@ impl State {
             &self.render_pipeline,
             &self.surface_format,
             &self.size,
-            // &self.ui_texture,
-            // &self.blitter,
+            &self.texture_array_bind_group,
         ));
         drop(surface_texture_view);
         self.window.pre_present_notify();

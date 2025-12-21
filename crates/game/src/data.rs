@@ -7,7 +7,8 @@ use crate::na::{
     Complex, ComplexField, Isometry3, Matrix4, OPoint, Perspective3, Point3, Quaternion, RealField,
     Rotation, Rotation3, Translation3, Unit, Vector3, Vector4,
 };
-use crate::rapier::math::Vector;
+use crate::parry::math::HashableReal;
+use crate::rapier::math::{Real, Vector};
 use crate::rapier::prelude::{
     CCDSolver, ColliderSet, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters,
     IslandManager, LockedAxes, MultibodyJointSet, NarrowPhase, QueryPipeline, RigidBodyBuilder,
@@ -35,15 +36,15 @@ pub struct UIElement {
     content: Option<String>,
 }
 
-#[derive(Debug, rollback::serde::Serialize, rollback::serde::Deserialize, Clone, Partial)]
+#[derive(Debug, rollback::serde::Serialize, rollback::serde::Deserialize, Clone, Partial, Hash)]
 #[module(crate)]
 pub struct Camera {
-    pub opengl_to_wgpu_matrix: Matrix4<f32>,
-    pub proj_matrix: Perspective3<f32>,
+    pub opengl_to_wgpu_matrix: Matrix4<HashableReal>,
+    pub proj_matrix: Perspective3<HashableReal>,
     pub view_matrix: Option<RigidBodyHandle>,
 }
 
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
 #[module(crate)]
 pub struct Player {
     pub input: WinitInput,
@@ -59,8 +60,8 @@ mod game_data {
         ecs: Ecs,
         physics: PhysicsState,
         tick: usize,
-        menu: TaffyTree<()>,
-        gui: TaffyTree<()>,
+        // menu: TaffyTree<()>,
+        // gui: TaffyTree<()>,
         players: SlotMap<PlayerKey, EntityKey>,
     }
 
@@ -114,7 +115,7 @@ impl Undo<Ecs> {
     }
 }
 
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, Hash)]
 pub struct Component<T>
 where
     T: 'static + Default,
@@ -128,6 +129,7 @@ where
         + Default
         + Clone
         + Send
+        + std::hash::Hash
         + ::rollback::serde::Serialize
         + for<'a> ::rollback::serde::Deserialize<'a>,
 {
@@ -196,10 +198,10 @@ impl Rollback {
         let body = RigidBodyBuilder::kinematic_position_based()
             .pose(position)
             .gravity_scale(0.0)
-            .can_sleep(false)
             .enabled_rotations(true, true, true)
             .ccd_enabled(false)
             .angular_damping(1.0)
+            .can_sleep(false)
             .user_data(e.data().as_ffi() as u128)
             .build();
         let handle = self.data.physics.bodies.insert(body);

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-game = { path = "../game" }
+game = { workspace = true }
 slotmapd = { path = "../slotmapd", features = ["serde"] }
 simplelog = { workspace = true }
 log = { workspace = true }
@@ -18,8 +18,8 @@ derive_more = { workspace = true }
 weak-table = { workspace = true }
 bytemuck = { workspace = true }
 futures-lite = { workspace = true }
-# pyroscope = { workspace = true }
-# pyroscope_pprofrs = { workspace = true }
+pyroscope = { workspace = true }
+pyroscope_pprofrs = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 winit = { workspace = true }
@@ -28,3 +28,4 @@ parley = { workspace = true }
 # kurbo = { workspace = true }
 quinn = "0.11.6"
 tokio = { version = "1.42.0", features = ["rt-multi-thread"] }
+image = { workspace = true }

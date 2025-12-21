@@ -67,6 +67,12 @@ mod real {
     /// The scalar type used throughout this crate.
     #[cfg(feature = "f32")]
     pub use f32 as Real;
+
+    #[cfg(feature = "f32")]
+    pub type OrderedFloatF32 = ordered_float::OrderedFloat<f32>;
+
+    #[cfg(feature = "f32")]
+    pub use OrderedFloatF32 as HashableReal;
 }
 
 /// Compilation flags dependent aliases for mathematical types.

@@ -175,7 +175,7 @@ impl FlexDirection {
 #[cfg(test)]
 mod tests {
     mod test_flex_direction {
-        use crate::style::*;
+        use crate::taffy::style::*;
 
         #[test]
         fn flex_direction_is_row() {

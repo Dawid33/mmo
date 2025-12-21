@@ -12,11 +12,11 @@ extern crate approx;
 extern crate alloc;
 pub extern crate nalgebra as na;
 extern crate num_traits as num;
-pub extern crate simba;
 extern crate std;
 
 use borrow::AsRefsHelper;
 use crossbeam::channel::Sender;
+use ordered_float::OrderedFloat;
 use rollback::rollback;
 use slotmapd::{new_key_type, DefaultKey};
 use std::{
@@ -39,19 +39,23 @@ mod physics;
 pub mod rapier;
 mod region;
 pub mod taffy;
-mod transaction;
 
 pub use crate::camera::ASPECT;
 pub use crate::data::{EntityKey, GameData, PlayerKey, Rollback, UIElement, Undo};
-use crate::mesh::ChunkVoxels;
 pub use crate::mesh::{ChunkMesh, Vertex};
 pub use crate::taffy::Style;
-pub use crate::{transaction::GameDataTransaction, transaction::GameDataTransactionKind};
-use na::{Matrix4, Matrix4x2, Perspective3};
+use crate::{mesh::ChunkVoxels, parry::math::{HashableReal, Real}};
+use na::{Matrix4, Matrix4x2, Perspective3, RealField};
 use rapier::prelude::{RigidBody, RigidBodyHandle};
 
+#[derive(Copy, Clone, Debug)]
+pub enum GameDataTransactionKind {
+    Do,
+    Undo,
+}
+
 pub const TICK_RATE: u64 = 50;
-pub const INDUCED_LATENCY: isize = 10;
+pub const INDUCED_LATENCY: isize = 0;
 
 #[derive(Debug)]
 pub enum ClientUpdateEvent {
@@ -76,7 +80,7 @@ pub enum GameDataUpdateKind {
     RemoveUIElement(DefaultKey),
     SetVoxelComponent(EntityKey, Option<ChunkVoxels>),
     SetEntityPosition(EntityKey, IsometryReal),
-    UpdateCameraViewProj(EntityKey, Perspective3<f32>),
+    UpdateCameraViewProj(EntityKey, Perspective3<HashableReal>),
     UpdateCameraViewMatrix(EntityKey, IsometryReal),
     CreateEntity(EntityKey),
     RemoveEntity(EntityKey),
@@ -98,7 +102,7 @@ impl GameDataUpdate {
     }
 }
 
-pub type IsometryReal = na::Isometry<f32, na::Unit<na::Quaternion<f32>>, 3>;
+pub type IsometryReal = na::Isometry<Real, na::Unit<na::Quaternion<Real>>, 3>;
 
 trait Controller {
     fn on_tick<'a>(&mut self, t: &mut Undo<GameData>) {}
@@ -169,13 +173,11 @@ impl World {
     }
 
     pub fn reconcile_event(&mut self, event: GameEvent) -> Result<(), GameError> {
-        let t = Instant::now();
         let result = self
             .regions
             .get_mut(&event.region_id)
             .unwrap()
             .reconcile(event);
-        // info!("{:?}", t.elapsed());
         result
     }
 

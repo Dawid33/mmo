@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-game = { path = "../game" }
+game = { workspace = true }
 slotmapd = { path = "../slotmapd", features = ["serde"] }
 crossbeam = { workspace = true }
 simplelog = { workspace = true }

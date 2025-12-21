@@ -1,8 +1,7 @@
 services:
   pyroscope:
     image: grafana/pyroscope
-    command:
-      - -self-profiling.disable-push=true
+    command: ["-self-profiling.disable-push=true"]
     ports:
       - 4040:4040
   grafana:

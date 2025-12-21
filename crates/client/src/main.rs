@@ -5,12 +5,14 @@ use crossbeam::{
     channel::{Receiver, Sender},
     select,
 };
-use game::{na::Perspective3, rapier::math::Isometry, simba::scalar::SupersetOf};
+use game::{na::Perspective3, rapier::math::Isometry};
 use game::{
     ClientPacket, ClientUpdateEvent, EntityKey, GameDataTransactionKind, GameDataUpdate, GameError,
     GameEvent, GameEventKind, PlayerKey, Region, INDUCED_LATENCY,
 };
 use log::{info, trace, warn, LevelFilter};
+use pyroscope::PyroscopeAgent;
+use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 use simplelog::{FormatItem, SimpleLogger};
 use std::{
     collections::BTreeMap,
@@ -112,6 +114,8 @@ impl GameInstanceManager {
         let mut world: Option<game::World> = None;
         let mut now = Instant::now();
         let mut ready = false;
+        let mut is_caught_up = false;
+        let mut buffer = Vec::new();
         loop {
             select! {
                 recv(server_recv) -> server_msg => {
@@ -137,16 +141,22 @@ impl GameInstanceManager {
                                 }
                             }
                         },
-                        // TODO: buffer incoming game events until region / world is loaded, then handle all at once
-                        // and enable client game events.
                         game::ServerPacket::GameEvent(game_event) => {
-                            // info!("{:?}", now.elapsed());
-                            // now = Instant::now();
                             if let Some(ref mut world) = world {
+                                for event in buffer.drain(..) {
+                                    match world.reconcile_event(event) {
+                                        Ok(_) => (),
+                                        Err(e) => {warn!("Failed in catch up. {:?}", e); return Err(e)},
+                                    };
+                                }
                                 match world.reconcile_event(game_event) {
                                     Ok(_) => (),
                                     Err(e) => {warn!("{:?}", e); return Err(e)},
                                 };
+                                is_caught_up = true;
+                            } else {
+                                buffer.push(game_event);
+                                is_caught_up = false;
                             }
                         }
                         game::ServerPacket::Region(id, mut raw_game_data, last_id, key) => {
@@ -170,7 +180,7 @@ impl GameInstanceManager {
                                     e => {
                                         if let GameEventKind::PlayerWinitEvent(_,_) = e {
                                             // don't handle player events until sim has caught up with server.
-                                            if !ready {
+                                            if !ready && is_caught_up {
                                                 continue;
                                             }
                                         }
@@ -239,13 +249,15 @@ fn main() {
         .build();
     SimpleLogger::init(LevelFilter::Info, config).unwrap();
 
-    // use pyroscope::PyroscopeAgent;
-    // use pyroscope_pprofrs::{pprof_backend, PprofConfig};
-    // let agent = PyroscopeAgent::builder("http://localhost:4040", "client")
-    //     .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
-    //     .build()
-    //     .unwrap();
-    // let agent_running = agent.start().unwrap();
+    let agent_running = if let Ok(p) = std::env::var("PYROSCOPE") {
+        let agent = PyroscopeAgent::builder("http://localhost:4040", "client")
+            .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
+            .build()
+            .unwrap();
+        Some(agent.start().unwrap())
+    } else {
+        None
+    };
 
     let sender = start_game_thread();
     let event_loop = EventLoop::new().unwrap();
@@ -253,6 +265,8 @@ fn main() {
     let mut app = App::new(sender);
     event_loop.run_app(&mut app).unwrap();
 
-    // let agent_ready = agent_running.stop().unwrap();
-    // agent_ready.shutdown();
+    if let Some(a) = agent_running {
+        let agent_ready = a.stop().unwrap();
+        agent_ready.shutdown();
+    }
 }

@@ -1134,8 +1134,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::Style;
-    use crate::sys::DefaultCheapStr;
-    use crate::{geometry::*, style_helpers::TaffyAuto as _};
+    use crate::taffy::sys::DefaultCheapStr;
+    use crate::taffy::{geometry::*, style_helpers::TaffyAuto as _};
 
     #[test]
     fn defaults_match() {
@@ -1221,7 +1221,7 @@ mod tests {
     #[test]
     fn style_sizes() {
         use super::*;
-        type S = crate::sys::DefaultCheapStr;
+        type S = crate::taffy::sys::DefaultCheapStr;
 
         fn assert_type_size<T>(expected_size: usize) {
             let name = ::core::any::type_name::<T>();

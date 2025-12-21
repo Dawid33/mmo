@@ -610,7 +610,7 @@ pub trait FromFr {
 #[cfg(feature = "grid")]
 #[cfg(test)]
 mod repeat_fn_tests {
-    type S = crate::sys::DefaultCheapStr;
+    type S = crate::taffy::sys::DefaultCheapStr;
     use super::repeat;
     use crate::taffy::style::{
         GridTemplateComponent, GridTemplateRepetition, RepetitionCount, TrackSizingFunction,

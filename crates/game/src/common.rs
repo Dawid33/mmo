@@ -1,8 +1,6 @@
 use std::{any::TypeId, collections::BTreeMap, path::PathBuf, time::Duration};
 
-use crate::{
-    data::PlayerKey, transaction::GameDataTransactionKind, GameData, GameDataUpdate, Rollback,
-};
+use crate::{data::PlayerKey, GameData, GameDataUpdate, Rollback};
 use derive_more::Debug;
 use log::info;
 use winit::{

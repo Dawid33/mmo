@@ -66,7 +66,7 @@ fn bvh_build_and_removal() {
                     removal_pattern,
                     len
                 );
-                let leaves: vec::Vec<_> = (0..len).map(make_test_aabb).collect();
+                let leaves: ::std::vec::Vec<_> = (0..len).map(make_test_aabb).collect();
 
                 let mut bvh = match build_pattern {
                     BuildPattern::Binned => Bvh::from_leaves(BvhBuildStrategy::Binned, &leaves),

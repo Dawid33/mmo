@@ -3,7 +3,7 @@
 use crate::rapier::math::Real;
 use na::{
     Matrix1, Matrix2, Matrix3, RowVector2, Scalar, SimdRealField, UnitComplex, UnitQuaternion,
-    Vector1, Vector2, Vector3,
+    Vector1, Vector2, Vector3, SimdSigned, RealField
 };
 use crate::parry::utils::SdpMatrix3;
 use std::ops::IndexMut;

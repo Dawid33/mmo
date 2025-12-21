@@ -51,9 +51,6 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
             impl<T> ::std::ops::DerefMut for Undo<T>
             where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
                 fn deref_mut(&mut self) -> &mut Self::Target {
-                    println!("calling derefmut");
-                    let old = self.data.clone();
-                    self.undo(move |mut d, s| *d = old);
                     &mut self.data
                 }
             }
@@ -61,11 +58,13 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
     ));
 
     items.push(item(
-        "Undo DerefMut Raw",
+        "mut access",
         quote! {
             impl<T> Undo<T>
             where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
-                fn deref_mut_raw(&mut self) -> &mut T {
+                pub fn change(&mut self) -> &mut T {
+                    let old = self.data.clone();
+                    self.undo(move |mut d, s| *d = old);
                     &mut self.data
                 }
             }
@@ -184,7 +183,6 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut struct_stack: Vec<(&ItemStruct, usize)> =
         Vec::from([(find(&root_struct_ident_string).unwrap(), 0)]);
     let mut paths: Vec<(proc_macro2::TokenStream, syn::Field)> = Vec::new();
-    let mut paths_raw: Vec<(proc_macro2::TokenStream, syn::Field)> = Vec::new();
     while let Some((s, current)) = struct_stack.pop() {
         match &s.fields {
             syn::Fields::Named(fields_named) => {
@@ -194,10 +192,6 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let stack = path_stack.iter();
                     paths.push((quote! { #(#stack.)*#ident }, f.to_owned().clone()));
                     let stack = path_stack.iter();
-                    paths_raw.push((
-                        quote! { data.#(#stack.)*deref_mut_raw().#ident },
-                        f.to_owned().clone(),
-                    ));
                     if let Some(s) = find(&f.ty.to_token_stream().to_string()) {
                         path_stack.push(ident);
                         struct_stack.push((s, 0));
@@ -219,7 +213,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         match &mut i {
             Item::Struct(item_struct) => {
                 item_struct.attrs.push(
-                    parse_quote! {#[derive(::core::default::Default, ::rollback::Debug, ::rollback::serde::Serialize, ::rollback::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial)] },
+                    parse_quote! {#[derive(::core::default::Default, ::rollback::Debug, ::rollback::serde::Serialize, ::rollback::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial/*, ::std::hash::Hash*/)] },
                 );
                 item_struct.attrs.push(parse_quote! {#[module(crate)]});
 
@@ -268,12 +262,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         .map(|f| f.1.ty.clone())
         .collect::<Vec<_>>()
         .into_iter();
-    let iter_path = paths_raw
-        .iter()
-        .map(|f| f.0.clone())
-        .collect::<Vec<proc_macro2::TokenStream>>()
-        .into_iter();
-    let iter_path_raw = paths_raw
+    let iter_path = paths
         .iter()
         .map(|f| f.0.clone())
         .collect::<Vec<proc_macro2::TokenStream>>()
@@ -314,7 +303,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         "struct Undo<T>",
         quote! {
             #[derive(::core::default::Default, ::rollback::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
-            pub struct Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static {
+            pub struct Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send /*+ ::std::hash::Hash*/ + 'static {
                 #[serde(skip)]
                 #[debug(skip)]
                 log: ::std::sync::Arc<::std::sync::Mutex<::std::collections::VecDeque<Box<dyn FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>>>>,
@@ -332,6 +321,19 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             }
         },
     ));
+
+    // items.push(item(
+    //     "impl hash Undo<T>",
+    //     quote! {
+    //         impl<T> ::std::hash::Hash for Undo<T>
+    //             where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static
+    //         {
+    //             fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+    //                 self.data.hash(state);
+    //             }
+    //         }
+    //     },
+    // ));
 
     items.push(item(
         "impl Undo<T>",
@@ -411,6 +413,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let iter_path2 = iter_path.clone();
     let iter_path3 = iter_path.clone();
     let iter_path4 = iter_path.clone();
+    let iter_path5 = iter_path.clone();
+    let iter_path6 = iter_path.clone();
+    let iter_path7 = iter_path.clone();
     let iter_path_string1 = iter_path_string.clone();
     items.push(item(
         "impl Rollback",
@@ -437,10 +442,15 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                 #(#iter_log_ident_index1 => {
                                     let func = rollback_log.#iter_log_ident1.lock().unwrap().pop_back().unwrap();
                                     let previous = unsafe { self.#iter_path4.hash_data() };
+                                    let previous_data = self.#iter_path5.data.clone();
                                     func(&mut self.#iter_path1.data, rollback_log.client.as_ref().unwrap());
-                                    let new_hash = unsafe { self.#iter_path4.hash_data() };
+                                    let new_hash = unsafe { self.#iter_path6.hash_data() };
                                     if new_hash != hash {
-                                        panic!("Hash verification failed for self.{}.hash_data() in transaction {:?} with new_hash != hash: {:?} != {:?}\n hash before undo = {:?} \nlog: {:?}", #iter_path_string1, transaction, new_hash, hash, previous, rollback_log.log);
+                                        println!("Hash verification failed for self.{}.hash_data() in transaction {:?} with new_hash != hash: {:?} != {:?}\n hash before undo = {:?} \nlog: {:?}", #iter_path_string1, transaction, new_hash, hash, previous, rollback_log.log);
+                                        match ::assert_json_diff::assert_json_matches_no_panic(&self.#iter_path7.data, &previous_data, ::assert_json_diff::Config::new(::assert_json_diff::CompareMode::Strict)) {
+                                            Ok(()) => panic!("Before and after is equal via serde_json"),
+                                            Err(e) => panic!("lhs: new, rhs: old. {}", e),
+                                        }
                                     }
                                 })*
                                 _ => panic!("Tried to undo field that doesn't exist.")
@@ -455,9 +465,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub fn forget(&mut self) {
                     use ::std::hash::{Hash, Hasher};
                     let rollback_log = self.log.clone();
-                    println!("before first lock");
                     let mut rollback_log = rollback_log.lock().unwrap();
-                    println!("after first lock");
                     let oldest = rollback_log.info.oldest.load(::std::sync::atomic::Ordering::SeqCst).clone();
                     let current = rollback_log.info.current.load(::std::sync::atomic::Ordering::SeqCst).clone();
                     if oldest >= current {
@@ -472,9 +480,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         forgot = true;
                         match field {
                             #(#iter_log_ident_index2 => {
-                                println!("before second lock");
                                 rollback_log.#iter_log_ident2.lock().unwrap().pop_front().unwrap();
-                                println!("second lock");
                             })*
                             _ => panic!("Tried to forget field that doesn't exist.")
                         }
@@ -485,10 +491,10 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         },
     ));
 
-    let iter_path_raw1 = iter_path_raw.clone();
-    let iter_path_raw2 = iter_path_raw.clone();
-    let iter_path_raw3 = iter_path_raw.clone();
-    let iter_path_raw4 = iter_path_raw.clone();
+    let iter_path1 = iter_path.clone();
+    let iter_path2 = iter_path.clone();
+    let iter_path3 = iter_path.clone();
+    let iter_path4 = iter_path.clone();
     let iter_log_ident1 = iter_log_ident.clone();
     let iter_log_ident_index1 = iter_log_ident_index.clone();
     items.push(item(
@@ -504,11 +510,11 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         data: Undo::default(),
                     };
                     r.data.global_log = log.clone();
-                    #(r.#iter_path_raw2.global_log = log.clone();)*
+                    #(r.#iter_path2.global_log = log.clone();)*
                     let mut log = log.lock().unwrap();
-                    #(r.#iter_path_raw1.log = log.#iter_log_ident1.clone();)*
-                    #(r.#iter_path_raw3.info = log.info.clone();)*
-                    #(r.#iter_path_raw4.field = #iter_log_ident_index1;)*
+                    #(r.#iter_path1.log = log.#iter_log_ident1.clone();)*
+                    #(r.#iter_path3.info = log.info.clone();)*
+                    #(r.#iter_path4.field = #iter_log_ident_index1;)*
                     drop(log);
                     r
                 }
@@ -516,10 +522,10 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         },
     ));
 
-    let iter_path_raw1 = iter_path_raw.clone();
-    let iter_path_raw2 = iter_path_raw.clone();
-    let iter_path_raw3 = iter_path_raw.clone();
-    let iter_path_raw4 = iter_path_raw.clone();
+    let iter_path1 = iter_path.clone();
+    let iter_path2 = iter_path.clone();
+    let iter_path3 = iter_path.clone();
+    let iter_path4 = iter_path.clone();
     let iter_log_ident1 = iter_log_ident.clone();
     let iter_log_ident_index1 = iter_log_ident_index.clone();
     items.push(item(
@@ -532,11 +538,11 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let log = ::std::sync::Arc::new(::std::sync::Mutex::new(log));
                     self.log = log.clone();
                     self.data.global_log = log.clone();
-                    #(self.#iter_path_raw2.global_log = log.clone();)*
+                    #(self.#iter_path2.global_log = log.clone();)*
                     let mut log = log.lock().unwrap();
-                    #(self.#iter_path_raw1.log = log.#iter_log_ident1.clone();)*
-                    #(self.#iter_path_raw3.info = log.info.clone();)*
-                    #(self.#iter_path_raw4.field = #iter_log_ident_index1;)*
+                    #(self.#iter_path1.log = log.#iter_log_ident1.clone();)*
+                    #(self.#iter_path3.info = log.info.clone();)*
+                    #(self.#iter_path4.field = #iter_log_ident_index1;)*
                 }
             }
         },

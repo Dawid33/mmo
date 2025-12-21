@@ -269,7 +269,7 @@ impl<In, Out, T: MaybeMath<In, Out>> MaybeMath<Size<In>, Size<Out>> for Size<T> 
 #[cfg(test)]
 mod tests {
     mod lhs_option_f32_rhs_option_f32 {
-        use crate::util::MaybeMath;
+        use crate::taffy::util::MaybeMath;
 
         #[test]
         fn test_maybe_min() {
@@ -309,7 +309,7 @@ mod tests {
     }
 
     mod lhs_option_f32_rhs_f32 {
-        use crate::util::MaybeMath;
+        use crate::taffy::util::MaybeMath;
 
         #[test]
         fn test_maybe_min() {
@@ -341,7 +341,7 @@ mod tests {
     }
 
     mod lhs_f32_rhs_option_f32 {
-        use crate::util::MaybeMath;
+        use crate::taffy::util::MaybeMath;
 
         #[test]
         fn test_maybe_min() {

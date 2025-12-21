@@ -364,9 +364,9 @@ pub mod detailed_info {
 #[cfg(test)]
 mod tests {
     use super::compute_hidden_layout;
-    use crate::geometry::{Point, Size};
-    use crate::style::{Display, Style};
-    use crate::TaffyTree;
+    use crate::taffy::geometry::{Point, Size};
+    use crate::taffy::style::{Display, Style};
+    use crate::taffy::TaffyTree;
 
     #[test]
     fn hidden_layout_should_hide_recursively() {

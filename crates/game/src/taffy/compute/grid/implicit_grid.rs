@@ -204,8 +204,8 @@ mod tests {
         type S = String;
         use super::super::child_min_line_max_line_span;
         use super::super::OriginZeroLine;
-        use crate::geometry::Line;
-        use crate::style_helpers::*;
+        use crate::taffy::geometry::Line;
+        use crate::taffy::style_helpers::*;
 
         #[test]
         fn child_min_max_line_auto() {
@@ -238,8 +238,8 @@ mod tests {
 
     mod test_initial_grid_sizing {
         use super::super::compute_grid_size_estimate;
-        use crate::compute::grid::util::test_helpers::*;
-        use crate::style_helpers::*;
+        use crate::taffy::compute::grid::util::test_helpers::*;
+        use crate::taffy::style_helpers::*;
 
         #[test]
         fn explicit_grid_sizing_with_children() {

@@ -16,9 +16,9 @@ type ChunkShape = ConstShape3u32<100, 100, 100>;
 
 pub type ChunkVoxels = [Voxel; 2 * 2 * 2];
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum VoxelType {
-    Blue,
+    Black,
     Air,
 }
 
@@ -28,7 +28,7 @@ impl Default for VoxelType {
     }
 }
 
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone, Hash)]
 pub struct Voxel {
     pub kind: VoxelType,
 }
@@ -56,7 +56,7 @@ impl MergeVoxel for VoxelType {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
 #[module(crate)]
 pub struct Chunk {
     pub voxels: ChunkVoxels,
@@ -76,12 +76,13 @@ impl Default for Chunk {
 #[derive(Copy, Clone, Debug, NoUninit, serde::Serialize, serde::Deserialize)]
 pub struct Vertex {
     position: [f32; 3],
+    tex_coord: [f32; 2],
     color: [f32; 3],
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+    const ATTRIBS: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x3];
 
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -108,7 +109,7 @@ impl ChunkMesh {
 
             voxels[i as usize] = if x > 0 && y > 0 && z > 0 && y < 99 && z < 99 && x < 99 {
                 if y == 1 {
-                    VoxelType::Blue
+                    VoxelType::Black
                 } else {
                     VoxelType::Air
                 }
@@ -137,14 +138,19 @@ impl ChunkMesh {
             .iter()
             .zip(RIGHT_HANDED_Y_UP_CONFIG.faces.into_iter())
         {
+            let quad_tex_coords = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
             for quad in group.into_iter() {
                 indices.extend_from_slice(&face.quad_mesh_indices(vertices.len() as u32));
-                vertices.extend_from_slice(&face.quad_mesh_positions(&quad, 0.1).map(|position| {
-                    Vertex {
-                        position,
+                for (i, position) in face.quad_mesh_positions(&quad, 1.0).iter().enumerate() {
+                    vertices.push(Vertex {
+                        position: *position,
                         color: [0.0, 0.0, 0.0],
-                    }
-                }));
+                        tex_coord: [
+                            quad_tex_coords[i][0] * quad.width as f32,
+                            quad_tex_coords[i][1] * quad.height as f32,
+                        ],
+                    });
+                }
                 normals.extend_from_slice(&face.quad_mesh_normals());
             }
         }

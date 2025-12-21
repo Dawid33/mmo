@@ -7,8 +7,7 @@ use std::{
 use crossbeam::{channel::Receiver, utils::Backoff};
 use derive_more::Debug;
 use game::{
-    na::{Matrix4, Perspective3},
-    simba::scalar::SupersetOf,
+    na::{Matrix4, Perspective3}, parry::math::HashableReal
 };
 use game::{
     ChunkMesh, EntityId, EntityKey, GameData, GameDataUpdate, IsometryReal, RegionId, UIElement,
@@ -31,7 +30,8 @@ use rand::seq::IndexedRandom;
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     BindGroup, BlendComponent, BlendFactor, BlendOperation, BufferUsages, CommandBuffer,
-    CommandEncoder, Device, Queue, RenderPass, RenderPipeline, Surface, TextureFormat, TextureView,
+    CommandEncoder, Device, Queue, RenderPass, RenderPipeline, Surface, Texture, TextureFormat,
+    TextureView,
 };
 use winit::{
     dpi::PhysicalPosition,
@@ -59,7 +59,7 @@ impl Default for RenderEntityType {
 pub struct RenderEntity {
     kind: RenderEntityType,
     position: Option<IsometryReal>,
-    camera: Option<(Perspective3<f32>, IsometryReal)>,
+    camera: Option<(Perspective3<HashableReal>, IsometryReal)>,
     voxel_mesh: Option<ChunkMesh>,
 }
 
@@ -169,7 +169,7 @@ impl GpuData {
         &mut self,
         region: RegionId,
         entity_key: EntityKey,
-        view_proj: Perspective3<f32>,
+        view_proj: Perspective3<HashableReal>,
         view_matrix: IsometryReal,
     ) -> (wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup, IsometryReal) {
         let proj_matrix = self
@@ -412,11 +412,11 @@ impl RenderWorld {
                         .vector
                         .metric_distance(&cam.1.translation.vector)
                         <= 0.0005
-                        && cam_bufs.3.rotation.angle_to(&cam.1.rotation) < 0.0001
+                        && cam_bufs.3.rotation.angle_to(&cam.1.rotation) < 0.001
                     {
                         cam_bufs.3 = cam.1;
                     } else {
-                        cam_bufs.3 = cam_bufs.3.lerp_slerp(&cam.1, 0.05);
+                        cam_bufs.3 = cam_bufs.3.lerp_slerp(&cam.1, 0.1);
                     }
                     queue.write_buffer(
                         &cam_bufs.1,
@@ -446,8 +446,7 @@ impl RenderWorld {
         render_pipeline: &RenderPipeline,
         surface_format: &wgpu::TextureFormat,
         size: &winit::dpi::PhysicalSize<u32>,
-        // ui_texture: &UITexture,
-        // blitter: &TextureBlitter,
+        texture_array_bind_group: &BindGroup,
     ) -> Vec<CommandBuffer> {
         let mut background = self.device().create_command_encoder(&Default::default());
         let mut renderpass = background.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -493,6 +492,7 @@ impl RenderWorld {
             for (_, e) in region {
                 if let Some(mesh) = &e.voxel_mesh {
                     renderpass.set_bind_group(0, cam_bind_group, &[]);
+                    renderpass.set_bind_group(1, texture_array_bind_group, &[]);
                     renderpass.set_vertex_buffer(0, mesh.vertices.slice(..));
                     renderpass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                     renderpass.draw_indexed(0..mesh.num_indices, 0, 0..1);

@@ -1,5 +1,7 @@
-use log::info;
+use crate::parry::math::{HashableReal, Real};
 use crate::rapier::prelude::PhysicsHooks;
+use log::info;
+use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use winit::dpi::PhysicalSize;
 use winit::event::MouseButton;
@@ -9,17 +11,18 @@ use winit::keyboard::{Key, KeyCode, PhysicalKey};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 enum KeyState {
     Released,
     Pressed,
     Held,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Hash)]
 pub struct WinitInput {
+    window_resized: Option<PhysicalSize<u32>>,
     keyboard_state: BTreeMap<winit::keyboard::KeyCode, KeyState>,
-    mouse_diff: Option<(f64, f64)>,
+    mouse_diff: Option<(HashableReal, HashableReal)>,
 }
 
 impl WinitInput {
@@ -29,6 +32,13 @@ impl WinitInput {
     ) -> Option<Box<dyn Fn(&mut WinitInput) + 'static + Send + Sync>> {
         match event {
             crate::WinitEvent::WindowEvent(window_event) => match window_event {
+                crate::WindowEvent::Resized(size) => {
+                    let old = self.window_resized.take();
+                    self.window_resized = Some(size);
+                    Some(Box::new(move |s| {
+                        s.window_resized = old;
+                    }))
+                }
                 crate::WindowEvent::KeyboardInput {
                     physical_key,
                     logical_key,
@@ -86,10 +96,10 @@ impl WinitInput {
                 crate::DeviceEvent::MouseMotion { delta } => {
                     let old = self.mouse_diff;
                     if let Some(m) = &mut self.mouse_diff {
-                        m.0 += delta.0;
-                        m.1 += delta.1;
+                        m.0 += delta.0 as f32;
+                        m.1 += delta.1 as f32;
                     } else {
-                        self.mouse_diff = Some(delta);
+                        self.mouse_diff = Some((OrderedFloat(delta.0 as f32), OrderedFloat(delta.1 as f32)));
                     }
                     Some(Box::new(move |s: &mut Self| {
                         s.mouse_diff = old;
@@ -120,12 +130,16 @@ impl WinitInput {
         }))
     }
 
-    pub fn mouse_diff(&mut self) -> (f64, f64) {
+    pub fn mouse_diff(&mut self) -> (f32, f32) {
         if let Some(m) = self.mouse_diff {
-            (m.0, m.1)
+            (*m.0, *m.1)
         } else {
             (0.0, 0.0)
         }
+    }
+
+    pub fn window_resized(&self) -> &Option<PhysicalSize<u32>> {
+        &self.window_resized
     }
 
     pub fn key_pressed(&self, key: &winit::keyboard::KeyCode) -> bool {

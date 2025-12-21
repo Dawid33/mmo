@@ -395,13 +395,13 @@ fn record_grid_placement<S: GridItemStyle>(
 mod tests {
 
     mod test_placement_algorithm {
-        use crate::compute::grid::implicit_grid::compute_grid_size_estimate;
-        use crate::compute::grid::types::TrackCounts;
-        use crate::compute::grid::util::*;
-        use crate::compute::grid::CellOccupancyMatrix;
-        use crate::compute::grid::NamedLineResolver;
-        use crate::prelude::*;
-        use crate::style::GridAutoFlow;
+        use crate::taffy::compute::grid::implicit_grid::compute_grid_size_estimate;
+        use crate::taffy::compute::grid::types::TrackCounts;
+        use crate::taffy::compute::grid::util::*;
+        use crate::taffy::compute::grid::CellOccupancyMatrix;
+        use crate::taffy::compute::grid::NamedLineResolver;
+        use crate::taffy::prelude::*;
+        use crate::taffy::style::GridAutoFlow;
 
         use super::super::place_grid_items;
 
@@ -468,10 +468,10 @@ mod tests {
 
             // Assert that the correct number of implicit rows have been generated
             let actual_row_counts =
-                *cell_occupancy_matrix.track_counts(crate::compute::grid::AbsoluteAxis::Vertical);
+                *cell_occupancy_matrix.track_counts(crate::taffy::compute::grid::AbsoluteAxis::Vertical);
             assert_eq!(actual_row_counts, expected_row_counts, "row track counts");
             let actual_col_counts =
-                *cell_occupancy_matrix.track_counts(crate::compute::grid::AbsoluteAxis::Horizontal);
+                *cell_occupancy_matrix.track_counts(crate::taffy::compute::grid::AbsoluteAxis::Horizontal);
             assert_eq!(
                 actual_col_counts, expected_col_counts,
                 "column track counts"

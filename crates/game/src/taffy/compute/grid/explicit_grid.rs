@@ -368,13 +368,13 @@ fn create_implicit_tracks(
 mod test {
     use super::compute_explicit_grid_size_in_axis;
     use super::initialize_grid_tracks;
-    use crate::compute::grid::explicit_grid::AutoRepeatStrategy;
-    use crate::compute::grid::types::GridTrackKind;
-    use crate::compute::grid::types::TrackCounts;
-    use crate::compute::grid::util::*;
-    use crate::geometry::AbsoluteAxis;
-    use crate::prelude::*;
-    use crate::sys::DefaultCheapStr;
+    use crate::taffy::compute::grid::explicit_grid::AutoRepeatStrategy;
+    use crate::taffy::compute::grid::types::GridTrackKind;
+    use crate::taffy::compute::grid::types::TrackCounts;
+    use crate::taffy::compute::grid::util::*;
+    use crate::taffy::geometry::AbsoluteAxis;
+    use crate::taffy::prelude::*;
+    use crate::taffy::sys::DefaultCheapStr;
 
     #[test]
     fn explicit_grid_sizing_no_repeats() {
