@@ -1,5 +1,6 @@
 #[cfg(doc)]
 use super::IntegrationParameters;
+use crate::parry::math::HashableReal;
 use crate::rapier::dynamics::{
     LockedAxes, MassProperties, RigidBodyActivation, RigidBodyAdditionalMassProps, RigidBodyCcd,
     RigidBodyChanges, RigidBodyColliders, RigidBodyDamping, RigidBodyDominance, RigidBodyForces,
@@ -42,12 +43,12 @@ use num::Zero;
 pub struct RigidBody {
     pub(crate) ids: RigidBodyIds,
     pub(crate) pos: RigidBodyPosition,
-    pub(crate) damping: RigidBodyDamping<Real>,
-    pub(crate) vels: RigidBodyVelocity<Real>,
+    pub(crate) damping: RigidBodyDamping<HashableReal>,
+    pub(crate) vels: RigidBodyVelocity<HashableReal>,
     pub(crate) forces: RigidBodyForces,
     pub(crate) mprops: RigidBodyMassProps,
 
-    pub(crate) ccd_vels: RigidBodyVelocity<Real>,
+    pub(crate) ccd_vels: RigidBodyVelocity<HashableReal>,
     pub(crate) ccd: RigidBodyCcd,
     pub(crate) colliders: RigidBodyColliders,
     /// Whether or not this rigid-body is sleeping.
@@ -702,7 +703,7 @@ impl RigidBody {
     /// - `0.0` = no gravity (floating)
     /// - `2.0` = double gravity (heavy/fast falling)
     /// - Negative values = reverse gravity (objects fall upward!)
-    pub fn gravity_scale(&self) -> Real {
+    pub fn gravity_scale(&self) -> HashableReal {
         self.forces.gravity_scale
     }
 
@@ -717,7 +718,7 @@ impl RigidBody {
     /// bodies[body].set_gravity_scale(0.1, true);  // Moon gravity
     /// bodies[body].set_gravity_scale(2.0, true);  // Extra heavy
     /// ```
-    pub fn set_gravity_scale(&mut self, scale: Real, wake_up: bool) {
+    pub fn set_gravity_scale(&mut self, scale: HashableReal, wake_up: bool) {
         if self.forces.gravity_scale != scale {
             if wake_up && self.activation.sleeping {
                 self.changes.insert(RigidBodyChanges::SLEEP);
@@ -1159,7 +1160,7 @@ impl RigidBody {
     /// ```
     ///
     /// Only affects dynamic bodies (does nothing for kinematic/fixed bodies).
-    pub fn add_force(&mut self, force: Vector<Real>, wake_up: bool) {
+    pub fn add_force(&mut self, force: Vector<HashableReal>, wake_up: bool) {
         if !force.is_zero() && self.body_type == RigidBodyType::Dynamic {
             self.forces.user_force += force;
 
@@ -1215,7 +1216,12 @@ impl RigidBody {
     /// * `point` - Where to apply the force (world coordinates)
     ///
     /// Only affects dynamic bodies.
-    pub fn add_force_at_point(&mut self, force: Vector<Real>, point: Point<Real>, wake_up: bool) {
+    pub fn add_force_at_point(
+        &mut self,
+        force: Vector<HashableReal>,
+        point: Point<HashableReal>,
+        wake_up: bool,
+    ) {
         if !force.is_zero() && self.body_type == RigidBodyType::Dynamic {
             self.forces.user_force += force;
             self.forces.user_torque += (point - self.mprops.world_com).gcross(force);
@@ -1253,7 +1259,7 @@ impl RigidBody {
     ///
     /// Only affects dynamic bodies (does nothing for kinematic/fixed bodies).
     #[profiling::function]
-    pub fn apply_impulse(&mut self, impulse: Vector<Real>, wake_up: bool) {
+    pub fn apply_impulse(&mut self, impulse: Vector<HashableReal>, wake_up: bool) {
         if !impulse.is_zero() && self.body_type == RigidBodyType::Dynamic {
             self.vels.linvel += impulse.component_mul(&self.mprops.effective_inv_mass);
 
@@ -1329,7 +1335,7 @@ impl RigidBody {
     ///
     /// This is the sum of all `add_force()` calls since the last physics step.
     /// Returns zero for non-dynamic bodies.
-    pub fn user_force(&self) -> Vector<Real> {
+    pub fn user_force(&self) -> Vector<HashableReal> {
         if self.body_type == RigidBodyType::Dynamic {
             self.forces.user_force
         } else {
@@ -1608,7 +1614,7 @@ impl RigidBodyBuilder {
 
     /// Sets the scale applied to the gravity force affecting the rigid-body to be created.
     pub fn gravity_scale(mut self, scale_factor: Real) -> Self {
-        self.gravity_scale = scale_factor;
+        *self.gravity_scale = scale_factor;
         self
     }
 

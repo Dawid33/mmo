@@ -1,6 +1,6 @@
 //! Miscellaneous utilities.
 
-use crate::parry::math::Real;
+use crate::parry::math::{Real, RawReal};
 use na::{Scalar, SimdRealField, Vector2, Vector3};
 
 #[cfg(feature = "simd-is-enabled")]
@@ -29,9 +29,9 @@ pub trait WSign<Rhs>: Sized {
 
 impl WSign<Real> for Real {
     fn copy_sign_to(self, to: Self) -> Self {
-        let minus_zero: Real = -0.0;
+        let minus_zero: Real = Real::from(-0.0);
         let signbit = minus_zero.to_bits();
-        Real::from_bits((signbit & self.to_bits()) | ((!signbit) & to.to_bits()))
+        Real::from(RawReal::from_bits((signbit & self.to_bits()) | ((!signbit) & to.to_bits())))
     }
 }
 

@@ -1,4 +1,6 @@
-use crate::parry::math::{Matrix, Point, Real};
+use ordered_float::OrderedFloat;
+
+use crate::parry::math::{Matrix, Point, Real, RawReal};
 
 /// Computes the covariance matrix of a set of points.
 pub fn cov(pts: &[Point<Real>]) -> Matrix<Real> {
@@ -9,7 +11,7 @@ pub fn cov(pts: &[Point<Real>]) -> Matrix<Real> {
 pub fn center_cov(pts: &[Point<Real>]) -> (Point<Real>, Matrix<Real>) {
     let center = crate::parry::utils::center(pts);
     let mut cov: Matrix<Real> = na::zero();
-    let normalizer: Real = 1.0 / (pts.len() as Real);
+    let normalizer: Real = OrderedFloat(1.0 as RawReal) / OrderedFloat(pts.len() as RawReal);
 
     for p in pts.iter() {
         let cp = *p - center;

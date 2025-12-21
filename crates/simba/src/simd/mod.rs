@@ -15,7 +15,7 @@ pub use self::simd_value::{PrimitiveSimdValue, SimdValue};
 //     WideBoolF32x4, WideBoolF32x8, WideBoolF64x4, WideF32x4, WideF32x8, WideF64x4,
 // };
 
-mod auto_simd_impl;
+// mod auto_simd_impl;
 #[cfg(feature = "portable_simd")]
 mod portable_simd_impl;
 #[cfg(feature = "rand")]

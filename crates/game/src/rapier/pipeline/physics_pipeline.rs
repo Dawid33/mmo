@@ -16,6 +16,7 @@ use crate::rapier::geometry::{
 use crate::rapier::math::{Real, Vector};
 use crate::rapier::pipeline::{EventHandler, PhysicsHooks};
 use crate::rapier::prelude::ModifiedRigidBodies;
+use crate::HashableReal;
 use {crate::rapier::dynamics::RigidBodySet, crate::rapier::geometry::ColliderSet};
 
 /// The main physics simulation engine that runs your physics world forward in time.
@@ -178,7 +179,7 @@ impl PhysicsPipeline {
 
     fn build_islands_and_solve_velocity_constraints(
         &mut self,
-        gravity: &Vector<Real>,
+        gravity: &Vector<HashableReal>,
         integration_parameters: &IntegrationParameters,
         islands: &mut IslandManager,
         narrow_phase: &mut NarrowPhase,
@@ -470,7 +471,7 @@ impl PhysicsPipeline {
     /// ```
     pub fn step(
         &mut self,
-        gravity: &Vector<Real>,
+        gravity: &Vector<HashableReal>,
         integration_parameters: &IntegrationParameters,
         islands: &mut IslandManager,
         broad_phase: &mut BroadPhaseBvh,

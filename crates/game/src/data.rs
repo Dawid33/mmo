@@ -81,7 +81,7 @@ mod game_data {
         multi_body_joint_set: MultibodyJointSet,
         ccd_solver: CCDSolver,
         colliders: ColliderSet,
-        gravity: Vector<f32>,
+        gravity: Vector<HashableReal>,
         integration_parameters: IntegrationParameters,
         islands: IslandManager,
         narrow_phase: NarrowPhase,

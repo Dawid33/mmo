@@ -1,3 +1,5 @@
+#[cfg(feature = "dim3")]
+use crate::parry::math::HashableReal;
 use crate::parry::math::{AngVector, AngularInertia, Isometry, Point, Real, Rotation, Vector};
 use crate::parry::utils;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
@@ -112,7 +114,7 @@ pub struct MassProperties {
     ///
     /// This is the balance point of the object. For symmetric shapes, it's typically
     /// at the geometric center. All angular inertia calculations are relative to this point.
-    pub local_com: Point<Real>,
+    pub local_com: Point<HashableReal>,
 
     /// The inverse of the mass (1 / mass).
     ///
@@ -130,14 +132,14 @@ pub struct MassProperties {
     ///
     /// Angular inertia relative to the center of mass (`local_com`).
     /// Zero components indicate infinite inertia (no rotation) along that axis.
-    pub inv_principal_inertia: AngVector<Real>,
+    pub inv_principal_inertia: AngVector<HashableReal>,
 
     #[cfg(feature = "dim3")]
     /// The rotation from local coordinates to principal inertia axes (3D only).
     ///
     /// This rotation aligns the object's coordinate system with its principal
     /// axes of inertia, where the inertia tensor is diagonal.
-    pub principal_inertia_local_frame: Rotation<Real>,
+    pub principal_inertia_local_frame: Rotation<HashableReal>,
 }
 
 impl MassProperties {

@@ -66,11 +66,12 @@ mod real {
 
     /// The scalar type used throughout this crate.
     #[cfg(feature = "f32")]
-    pub use f32 as Real;
+    pub use f32 as RawReal;
 
-    #[cfg(feature = "f32")]
     pub type OrderedFloatF32 = ordered_float::OrderedFloat<f32>;
 
+    #[cfg(feature = "f32")]
+    pub use OrderedFloatF32 as Real;
     #[cfg(feature = "f32")]
     pub use OrderedFloatF32 as HashableReal;
 }
@@ -84,9 +85,10 @@ pub mod math {
         Isometry3, Matrix3, Point3, Translation3, UnitQuaternion, UnitVector3, Vector3, Vector6,
         U3, U6,
     };
+    use ordered_float::OrderedFloat;
 
     /// The default tolerance used for geometric operations.
-    pub const DEFAULT_EPSILON: Real = Real::EPSILON;
+    pub const DEFAULT_EPSILON: Real = OrderedFloat(RawReal::EPSILON);
 
     /// The dimension of the space.
     pub const DIM: usize = 3;

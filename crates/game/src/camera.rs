@@ -91,7 +91,7 @@ impl Controller for CameraController {
             let b = data.physics.bodies.get_mut(handle).unwrap();
             let rotation = b.rotation();
             let mut linvel = Vector::zeros();
-            const SPEED: f32 = 5.0;
+            const SPEED: crate::parry::Real = 5.0.into();
 
             if p.input.key_held(&winit::keyboard::KeyCode::KeyW) {
                 linvel.z = -0.1 * SPEED

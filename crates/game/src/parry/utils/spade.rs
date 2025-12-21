@@ -9,7 +9,7 @@ pub fn sanitize_spade_coord(coord: Real) -> Real {
 
     #[allow(clippy::unnecessary_cast)]
     if abs as f64 <= spade::MIN_ALLOWED_VALUE {
-        return 0.0;
+        return 0.0.into();
     }
 
     #[cfg(feature = "f64")]

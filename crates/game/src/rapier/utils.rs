@@ -1,16 +1,17 @@
 //! Miscellaneous utilities.
 
-use crate::rapier::math::Real;
-use na::{
-    Matrix1, Matrix2, Matrix3, RowVector2, Scalar, SimdRealField, UnitComplex, UnitQuaternion,
-    Vector1, Vector2, Vector3, SimdSigned, RealField
-};
 use crate::parry::utils::SdpMatrix3;
+use crate::rapier::math::Real;
+use crate::HashableReal;
+use na::{
+    Matrix1, Matrix2, Matrix3, RealField, RowVector2, Scalar, SimdRealField, SimdSigned,
+    UnitComplex, UnitQuaternion, Vector1, Vector2, Vector3,
+};
 use std::ops::IndexMut;
 
 #[cfg(feature = "simd-is-enabled")]
 use crate::rapier::{
-    math::{SIMD_WIDTH, SimdReal},
+    math::{SimdReal, SIMD_WIDTH},
     num::Zero,
 };
 
@@ -19,16 +20,17 @@ use crate::rapier::{
 /// This includes `f32`, `f64` and their related SIMD types.
 pub trait SimdRealCopy: SimdRealField<Element = Real> + Copy {}
 impl SimdRealCopy for Real {}
+impl SimdRealCopy for HashableReal {}
 #[cfg(feature = "simd-is-enabled")]
 impl SimdRealCopy for SimdReal {}
 
 const INV_EPSILON: Real = 1.0e-20;
 
-pub(crate) fn inv(val: Real) -> Real {
+pub(crate) fn inv(val: HashableReal) -> HashableReal {
     if (-INV_EPSILON..=INV_EPSILON).contains(&val) {
-        0.0
+        ordered_float::OrderedFloat(0.0)
     } else {
-        1.0 / val
+        ordered_float::OrderedFloat(1.0 / *val)
     }
 }
 
@@ -448,9 +450,9 @@ impl FlushToZeroDenormalsAreZeroFlags {
     pub fn flush_denormal_to_zero() -> Self {
         unsafe {
             #[cfg(target_arch = "x86")]
-            use std::arch::x86::{_MM_FLUSH_ZERO_ON, _mm_getcsr, _mm_setcsr};
+            use std::arch::x86::{_mm_getcsr, _mm_setcsr, _MM_FLUSH_ZERO_ON};
             #[cfg(target_arch = "x86_64")]
-            use std::arch::x86_64::{_MM_FLUSH_ZERO_ON, _mm_getcsr, _mm_setcsr};
+            use std::arch::x86_64::{_mm_getcsr, _mm_setcsr, _MM_FLUSH_ZERO_ON};
 
             // Flush denormals & underflows to zero as this as a significant impact on the solver's performances.
             // To enable this we need to set the bit 15 (given by _MM_FLUSH_ZERO_ON) and the bit 6 (for denormals-are-zero).
@@ -531,7 +533,11 @@ impl Drop for DisableFloatingPointExceptionsFlags {
 }
 
 pub(crate) fn select_other<T: PartialEq>(pair: (T, T), elt: T) -> T {
-    if pair.0 == elt { pair.1 } else { pair.0 }
+    if pair.0 == elt {
+        pair.1
+    } else {
+        pair.0
+    }
 }
 
 /// Methods for simultaneously indexing a container with two distinct indices.

@@ -1,5 +1,6 @@
 #[cfg(doc)]
 use super::IntegrationParameters;
+use crate::parry::math::HashableReal;
 use crate::rapier::control::PdErrors;
 #[cfg(doc)]
 use crate::rapier::control::PidController;
@@ -28,7 +29,9 @@ impl RigidBodyHandle {
 
     /// Reconstructs an handle from its (index, generation) components.
     pub fn from_raw_parts(id: u32, generation: u32) -> Self {
-        Self(crate::rapier::data::arena::Index::from_raw_parts(id, generation))
+        Self(crate::rapier::data::arena::Index::from_raw_parts(
+            id, generation,
+        ))
     }
 
     /// An always-invalid rigid-body handle.
@@ -141,7 +144,7 @@ impl Default for RigidBodyChanges {
 /// The position of this rigid-body.
 pub struct RigidBodyPosition {
     /// The world-space position of the rigid-body.
-    pub position: Isometry<Real>,
+    pub position: Isometry<HashableReal>,
     /// The next position of the rigid-body.
     ///
     /// At the beginning of the timestep, and when the
@@ -151,7 +154,7 @@ pub struct RigidBodyPosition {
     /// The next_position is updated after the velocity and position
     /// resolution. Then it is either validated (ie. we set position := set_position)
     /// or clamped by CCD.
-    pub next_position: Isometry<Real>,
+    pub next_position: Isometry<HashableReal>,
 }
 
 impl Default for RigidBodyPosition {
@@ -185,11 +188,11 @@ impl RigidBodyPosition {
     #[must_use]
     pub fn integrate_forces_and_velocities(
         &self,
-        dt: Real,
+        dt: HashableReal,
         forces: &RigidBodyForces,
-        vels: &RigidBodyVelocity<Real>,
+        vels: &RigidBodyVelocity<HashableReal>,
         mprops: &RigidBodyMassProps,
-    ) -> Isometry<Real> {
+    ) -> Isometry<HashableReal> {
         let new_vels = forces.integrate(dt, vels, mprops);
         new_vels.integrate(dt, &self.position, &mprops.local_mprops.local_com)
     }
@@ -201,7 +204,7 @@ impl RigidBodyPosition {
     ///
     /// Note that interpolating the velocity can be done more conveniently with
     /// [`Self::interpolate_velocity`].
-    pub fn pose_errors(&self, local_com: &Point<Real>) -> PdErrors {
+    pub fn pose_errors(&self, local_com: &Point<HashableReal>) -> PdErrors {
         let com = self.position * local_com;
         let shift = Translation::from(com.coords);
         let dpos = shift.inverse() * self.next_position * self.position.inverse() * shift;
@@ -337,12 +340,12 @@ impl Default for RigidBodyAdditionalMassProps {
 /// The mass properties of a rigid-body.
 pub struct RigidBodyMassProps {
     /// The world-space center of mass of the rigid-body.
-    pub world_com: Point<Real>,
+    pub world_com: Point<HashableReal>,
     /// The inverse mass taking into account translation locking.
-    pub effective_inv_mass: Vector<Real>,
+    pub effective_inv_mass: Vector<HashableReal>,
     /// The square-root of the world-space inverse angular inertia tensor of the rigid-body,
     /// taking into account rotation locking.
-    pub effective_world_inv_inertia: AngularInertia<Real>,
+    pub effective_world_inv_inertia: AngularInertia<HashableReal>,
     /// The local mass properties of the rigid-body.
     pub local_mprops: MassProperties,
     /// Flags for locking rotation and translation.
@@ -392,7 +395,7 @@ impl RigidBodyMassProps {
     /// The effective mass (that takes the potential translation locking into account) of
     /// this rigid-body.
     #[must_use]
-    pub fn effective_mass(&self) -> Vector<Real> {
+    pub fn effective_mass(&self) -> Vector<HashableReal> {
         self.effective_inv_mass.map(crate::rapier::utils::inv)
     }
 
@@ -492,16 +495,16 @@ impl RigidBodyMassProps {
 
         // Take into account translation/rotation locking.
         if !body_type.is_dynamic() || self.flags.contains(LockedAxes::TRANSLATION_LOCKED_X) {
-            self.effective_inv_mass.x = 0.0;
+            self.effective_inv_mass.x = 0.0.into();
         }
 
         if !body_type.is_dynamic() || self.flags.contains(LockedAxes::TRANSLATION_LOCKED_Y) {
-            self.effective_inv_mass.y = 0.0;
+            self.effective_inv_mass.y = 0.0.into();
         }
 
         #[cfg(feature = "dim3")]
         if !body_type.is_dynamic() || self.flags.contains(LockedAxes::TRANSLATION_LOCKED_Z) {
-            self.effective_inv_mass.z = 0.0;
+            self.effective_inv_mass.z = 0.0.into();
         }
 
         #[cfg(feature = "dim2")]
@@ -513,20 +516,20 @@ impl RigidBodyMassProps {
         #[cfg(feature = "dim3")]
         {
             if !body_type.is_dynamic() || self.flags.contains(LockedAxes::ROTATION_LOCKED_X) {
-                self.effective_world_inv_inertia.m11 = 0.0;
-                self.effective_world_inv_inertia.m12 = 0.0;
-                self.effective_world_inv_inertia.m13 = 0.0;
+                self.effective_world_inv_inertia.m11 = 0.0.into();
+                self.effective_world_inv_inertia.m12 = 0.0.into();
+                self.effective_world_inv_inertia.m13 = 0.0.into();
             }
 
             if !body_type.is_dynamic() || self.flags.contains(LockedAxes::ROTATION_LOCKED_Y) {
-                self.effective_world_inv_inertia.m22 = 0.0;
-                self.effective_world_inv_inertia.m12 = 0.0;
-                self.effective_world_inv_inertia.m23 = 0.0;
+                self.effective_world_inv_inertia.m22 = 0.0.into();
+                self.effective_world_inv_inertia.m12 = 0.0.into();
+                self.effective_world_inv_inertia.m23 = 0.0.into();
             }
             if !body_type.is_dynamic() || self.flags.contains(LockedAxes::ROTATION_LOCKED_Z) {
-                self.effective_world_inv_inertia.m33 = 0.0;
-                self.effective_world_inv_inertia.m13 = 0.0;
-                self.effective_world_inv_inertia.m23 = 0.0;
+                self.effective_world_inv_inertia.m33 = 0.0.into();
+                self.effective_world_inv_inertia.m13 = 0.0.into();
+                self.effective_world_inv_inertia.m23 = 0.0.into();
             }
         }
     }
@@ -878,16 +881,16 @@ impl<T: SimdRealCopy> Default for RigidBodyDamping<T> {
 /// The user-defined external forces applied to this rigid-body.
 pub struct RigidBodyForces {
     /// Accumulation of external forces (only for dynamic bodies).
-    pub force: Vector<Real>,
+    pub force: Vector<HashableReal>,
     /// Accumulation of external torques (only for dynamic bodies).
-    pub torque: AngVector<Real>,
+    pub torque: AngVector<HashableReal>,
     /// Gravity is multiplied by this scaling factor before it's
     /// applied to this rigid-body.
-    pub gravity_scale: Real,
+    pub gravity_scale: HashableReal,
     /// Forces applied by the user.
-    pub user_force: Vector<Real>,
+    pub user_force: Vector<HashableReal>,
     /// Torque applied by the user.
-    pub user_torque: AngVector<Real>,
+    pub user_torque: AngVector<HashableReal>,
     /// Are gyroscopic forces enabled for this rigid-body?
     #[cfg(feature = "dim3")]
     pub gyroscopic_forces_enabled: bool,
@@ -898,7 +901,7 @@ impl Default for RigidBodyForces {
         Self {
             force: na::zero(),
             torque: na::zero(),
-            gravity_scale: 1.0,
+            gravity_scale: ordered_float::OrderedFloat(1.0),
             user_force: na::zero(),
             user_torque: na::zero(),
             #[cfg(feature = "dim3")]
@@ -912,10 +915,10 @@ impl RigidBodyForces {
     #[must_use]
     pub fn integrate(
         &self,
-        dt: Real,
-        init_vels: &RigidBodyVelocity<Real>,
+        dt: HashableReal,
+        init_vels: &RigidBodyVelocity<HashableReal>,
         mprops: &RigidBodyMassProps,
-    ) -> RigidBodyVelocity<Real> {
+    ) -> RigidBodyVelocity<HashableReal> {
         let linear_acc = self.force.component_mul(&mprops.effective_inv_mass);
         let angular_acc = mprops.effective_world_inv_inertia * self.torque;
 
@@ -929,8 +932,8 @@ impl RigidBodyForces {
     /// equal to `gravity`.
     pub fn compute_effective_force_and_torque(
         &mut self,
-        gravity: &Vector<Real>,
-        mass: &Vector<Real>,
+        gravity: &Vector<HashableReal>,
+        mass: &Vector<HashableReal>,
     ) {
         self.force = self.user_force + gravity.component_mul(mass) * self.gravity_scale;
         self.torque = self.user_torque;
@@ -995,8 +998,8 @@ impl RigidBodyCcd {
     /// Is this rigid-body moving fast enough so that it may cause a tunneling problem?
     pub fn is_moving_fast(
         &self,
-        dt: Real,
-        vels: &RigidBodyVelocity<Real>,
+        dt: HashableReal,
+        vels: &RigidBodyVelocity<HashableReal>,
         forces: Option<&RigidBodyForces>,
     ) -> bool {
         // NOTE: for the threshold we don't use the exact CCD thickness. Theoretically, we
@@ -1310,8 +1313,8 @@ mod tests {
 
             let dt = 0.016;
             let rb_pos = RigidBodyPosition {
-                position: curr_pos,
-                next_position: next_pos,
+                position: curr_pos.into(),
+                next_position: next_pos.into(),
             };
             let vel = rb_pos.interpolate_velocity(1.0 / dt, &local_com);
             let interp_pos = vel.integrate(dt, &curr_pos, &local_com);

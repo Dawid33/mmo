@@ -2,8 +2,8 @@ use crate::parry::math::Real;
 
 pub fn inv(val: Real) -> Real {
     if val == 0.0 {
-        0.0
+        0.0.into()
     } else {
-        1.0 / val
+        Real::from(1.0) / val
     }
 }

@@ -39,7 +39,7 @@ pub fn segments_intersection2d(
     let denom = a.x * (d.y - c.y) + b.x * (c.y - d.y) + d.x * (b.y - a.y) + c.x * (a.y - b.y);
 
     // If denom is zero, then segments are parallel: handle separately.
-    if denom.abs() < epsilon || ulps_eq!(denom, 0.0) {
+    if denom.abs() < *epsilon || ulps_eq!(denom, 0.0) {
         return parallel_intersection(a, b, c, d, epsilon);
     }
 
@@ -49,7 +49,7 @@ pub fn segments_intersection2d(
     let num = -(a.x * (c.y - b.y) + b.x * (a.y - c.y) + c.x * (b.y - a.y));
     let t = num / denom;
 
-    if 0.0 > s || s > 1.0 || 0.0 > t || t > 1.0 {
+    if 0.0 > *s || *s > 1.0 || 0.0 > *t || *t > 1.0 {
         None
     } else {
         let loc1 = if s == 0.0 {
@@ -57,7 +57,7 @@ pub fn segments_intersection2d(
         } else if s == denom {
             SegmentPointLocation::OnVertex(1)
         } else {
-            SegmentPointLocation::OnEdge([1.0 - s, s])
+            SegmentPointLocation::OnEdge([Real::from(1.0) - s, s])
         };
 
         let loc2 = if t == 0.0 {
@@ -65,7 +65,7 @@ pub fn segments_intersection2d(
         } else if t == denom {
             SegmentPointLocation::OnVertex(1)
         } else {
-            SegmentPointLocation::OnEdge([1.0 - t, t])
+            SegmentPointLocation::OnEdge([Real::from(1.0) - t, t])
         };
 
         Some(SegmentsIntersection::Point { loc1, loc2 })
@@ -152,18 +152,18 @@ fn between(a: &Point2<Real>, b: &Point2<Real>, c: &Point2<Real>) -> Option<Segme
     if a.x != b.x {
         if a.x <= c.x && c.x <= b.x {
             let bcoord = (c.x - a.x) / (b.x - a.x);
-            return Some(SegmentPointLocation::OnEdge([1.0 - bcoord, bcoord]));
+            return Some(SegmentPointLocation::OnEdge([Real::from(1.0) - bcoord, bcoord]));
         } else if a.x >= c.x && c.x >= b.x {
             let bcoord = (c.x - b.x) / (a.x - b.x);
-            return Some(SegmentPointLocation::OnEdge([bcoord, 1.0 - bcoord]));
+            return Some(SegmentPointLocation::OnEdge([bcoord, Real::from(1.0) - bcoord]));
         }
     } else if a.y != b.y {
         if a.y <= c.y && c.y <= b.y {
             let bcoord = (c.y - a.y) / (b.y - a.y);
-            return Some(SegmentPointLocation::OnEdge([1.0 - bcoord, bcoord]));
+            return Some(SegmentPointLocation::OnEdge([Real::from(1.0) - bcoord, bcoord]));
         } else if a.y >= c.y && c.y >= b.y {
             let bcoord = (c.y - b.y) / (a.y - b.y);
-            return Some(SegmentPointLocation::OnEdge([bcoord, 1.0 - bcoord]));
+            return Some(SegmentPointLocation::OnEdge([bcoord, Real::from(1.0) - bcoord]));
         }
     } else if a.x == c.x && a.y == c.y {
         return Some(SegmentPointLocation::OnVertex(0));
