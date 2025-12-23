@@ -28,7 +28,7 @@ use crate::rapier::math::Real;
 ///
 /// ## Priority System
 /// If colliders disagree on rules, the "higher" one wins: ClampedSum > Max > Multiply > Min > Average
-#[derive(Default, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub enum CoefficientCombineRule {
     /// Average the two values (default, most common).
@@ -59,11 +59,11 @@ impl CoefficientCombineRule {
                 // Even though coeffs are meant to be positive, godot use-case has negative values.
                 // We're following their logic here.
                 // Context: https://github.com/dimforge/rapier/pull/741#discussion_r1862402948
-                coeff1.min(coeff2).abs()
+                Real::from(coeff1.min(coeff2).abs())
             }
             CoefficientCombineRule::Multiply => coeff1 * coeff2,
             CoefficientCombineRule::Max => coeff1.max(coeff2),
-            CoefficientCombineRule::ClampedSum => (coeff1 + coeff2).clamp(0.0, 1.0),
+            CoefficientCombineRule::ClampedSum => (coeff1 + coeff2).clamp(Real::from(0.0), Real::from(1.0)),
         }
     }
 }

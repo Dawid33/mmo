@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use crate::parry::query::details::NormalConstraints;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -763,18 +763,18 @@ impl Polyline {
                     //       We did encounter some cases where this was needed, but perhaps the
                     //       actual problem was an issue with the SegmentPointLocation (which should
                     //       perhaps have been Edge instead of Vertex)?
-                    let threshold = 1.0e-3 * dir2.norm();
-                    if dot.abs() > threshold {
+                    let threshold = Real::from(1.0e-3) * dir2.norm();
+                    if dot.abs() > *threshold {
                         // If the vertex is a reentrant vertex, then the point is
                         // inside. Otherwise, it is outside.
-                        dot >= 0.0
+                        dot >= Real::from(0.0)
                     } else {
                         // If the two edges are collinear, we can’t classify the vertex.
                         // So check against the edge’s normal instead.
-                        (point - proj.0.point).dot(&normal1) <= 0.0
+                        (point - proj.0.point).dot(&normal1) <= Real::from(0.0)
                     }
                 }
-                SegmentPointLocation::OnEdge(_) => (point - proj.0.point).dot(&normal1) <= 0.0,
+                SegmentPointLocation::OnEdge(_) => (point - proj.0.point).dot(&normal1) <= Real::from(0.0),
             };
         }
 

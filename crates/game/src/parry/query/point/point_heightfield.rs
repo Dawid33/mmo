@@ -1,5 +1,5 @@
 use crate::parry::bounding_volume::Aabb;
-use crate::parry::math::{Point, Real, Vector};
+use crate::parry::math::{Point, Real, RawReal, Vector};
 use crate::parry::query::{PointProjection, PointQuery, PointQueryWithLocation};
 use crate::parry::shape::{FeatureId, HeightField, TrianglePointLocation};
 #[cfg(not(feature = "std"))]
@@ -13,7 +13,7 @@ impl PointQuery for HeightField {
         max_dist: Real,
     ) -> Option<PointProjection> {
         let aabb = Aabb::new(pt - Vector::repeat(max_dist), pt + Vector::repeat(max_dist));
-        let mut sq_smallest_dist = Real::MAX;
+        let mut sq_smallest_dist = Real::from(RawReal::MAX);
         let mut best_proj = None;
 
         self.map_elements_in_local_aabb(&aabb, &mut |_, triangle| {
@@ -23,7 +23,7 @@ impl PointQuery for HeightField {
             if sq_dist < sq_smallest_dist {
                 sq_smallest_dist = sq_dist;
 
-                if sq_dist.sqrt() <= max_dist {
+                if sq_dist.sqrt() <= *max_dist {
                     best_proj = Some(proj);
                 }
             }
@@ -34,7 +34,7 @@ impl PointQuery for HeightField {
 
     #[inline]
     fn project_local_point(&self, point: &Point<Real>, _: bool) -> PointProjection {
-        let mut smallest_dist = Real::MAX;
+        let mut smallest_dist = Real::from(RawReal::MAX);
         let mut best_proj = PointProjection::new(false, *point);
 
         #[cfg(feature = "dim2")]

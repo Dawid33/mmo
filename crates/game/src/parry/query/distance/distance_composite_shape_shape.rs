@@ -1,5 +1,5 @@
 use crate::parry::bounding_volume::Aabb;
-use crate::parry::math::{Isometry, Real};
+use crate::parry::math::{Isometry, Real, RawReal};
 use crate::parry::partitioning::BvhNode;
 use crate::parry::query::QueryDispatcher;
 use crate::parry::shape::{CompositeShapeRef, Shape, TypedCompositeShape};
@@ -21,7 +21,7 @@ impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
         let msum_margin = ls_aabb2.half_extents();
 
         self.0.bvh().find_best(
-            Real::MAX,
+            Real::from(RawReal::MAX),
             |node: &BvhNode, _| {
                 // Compute the minkowski sum of the two Aabbs.
                 let msum = Aabb {
@@ -54,7 +54,7 @@ where
 {
     CompositeShapeRef(g1)
         .distance_to_shape(dispatcher, pos12, g2)
-        .unwrap_or((u32::MAX, Real::MAX))
+        .unwrap_or((u32::MAX, Real::from(RawReal::MAX)))
         .1
 }
 

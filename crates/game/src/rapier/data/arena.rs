@@ -14,7 +14,7 @@ use std::vec;
 /// `Index`.
 ///
 /// [See the module-level documentation for example usage and motivation.](./index.html)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct Arena<T> {
     items: Vec<Entry<T>>,
@@ -23,7 +23,7 @@ pub struct Arena<T> {
     len: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 enum Entry<T> {
     Free { next_free: Option<u32> },

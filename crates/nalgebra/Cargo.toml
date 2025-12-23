@@ -138,6 +138,7 @@ pest = { version = "2", optional = true }
 pest_derive = { version = "2", optional = true }
 bytemuck = { version = "1.5", optional = true }
 matrixcompare-core = { version = "0.1", optional = true }
+ordered-float = {workspace = true}
 proptest = { version = "1", optional = true, default-features = false, features = ["std"] }
 glam014 = { package = "glam", version = "0.14", optional = true, default-features = false }
 glam015 = { package = "glam", version = "0.15", optional = true, default-features = false }

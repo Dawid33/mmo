@@ -1,5 +1,5 @@
 use crate::rapier::geometry::{ColliderHandle, ContactManifold, Shape, ShapeCastHit};
-use crate::rapier::math::{Isometry, Point, Real, UnitVector, Vector};
+use crate::rapier::math::{Isometry, Point, Real, RawReal, UnitVector, Vector};
 use crate::rapier::pipeline::{QueryFilterFlags, QueryPipeline, QueryPipelineMut};
 use crate::rapier::utils;
 use na::{RealField, Vector2};
@@ -77,8 +77,8 @@ pub struct CharacterAutostep {
 impl Default for CharacterAutostep {
     fn default() -> Self {
         Self {
-            max_height: CharacterLength::Relative(0.25),
-            min_width: CharacterLength::Relative(0.5),
+            max_height: CharacterLength::Relative(Real::from(0.25)),
+            min_width: CharacterLength::Relative(Real::from(0.5)),
             include_dynamic_bodies: true,
         }
     }
@@ -210,13 +210,13 @@ impl Default for KinematicCharacterController {
     fn default() -> Self {
         Self {
             up: Vector::y_axis(),
-            offset: CharacterLength::Relative(0.01),
+            offset: CharacterLength::Relative(Real::from(0.01)),
             slide: true,
             autostep: None,
             max_slope_climb_angle: Real::frac_pi_4(),
             min_slope_slide_angle: Real::frac_pi_4(),
-            snap_to_ground: Some(CharacterLength::Relative(0.2)),
-            normal_nudge_factor: 1.0e-4,
+            snap_to_ground: Some(CharacterLength::Relative(Real::from(0.2))),
+            normal_nudge_factor: Real::from(1.0e-4),
         }
     }
 }
@@ -302,7 +302,7 @@ impl KinematicCharacterController {
         let mut is_moving = false;
 
         while let Some((translation_dir, translation_dist)) =
-            UnitVector::try_new_and_get(translation_remaining, 1.0e-5)
+            UnitVector::try_new_and_get(translation_remaining, Real::from(1.0e-5))
         {
             if max_iters == 0 {
                 break;
@@ -362,7 +362,7 @@ impl KinematicCharacterController {
             } else {
                 // No interference along the path.
                 result.translation += translation_remaining;
-                translation_remaining.fill(0.0);
+                translation_remaining.fill(Real::from(0.0));
                 result.grounded = self.detect_grounded_status_and_apply_friction(
                     dt,
                     queries,
@@ -425,7 +425,7 @@ impl KinematicCharacterController {
         result: &mut EffectiveCharacterMovement,
     ) -> Option<(ColliderHandle, ShapeCastHit)> {
         if let Some(snap_distance) = self.snap_to_ground {
-            if result.translation.dot(&self.up) < -1.0e-5 {
+            if result.translation.dot(&self.up) < Real::from(-1.0e-5) {
                 let snap_distance = snap_distance.eval(dims.y);
                 let offset = self.offset.eval(dims.y);
                 if let Some((hit_handle, hit)) = queries.cast_shape(
@@ -526,7 +526,7 @@ impl KinematicCharacterController {
 
                         if num_active_contacts > 0 {
                             let target_vel = kinematic_parent.velocity_at_point(
-                                &(manifold_center / num_active_contacts as Real),
+                                &(manifold_center / Real::from(num_active_contacts as RawReal)),
                             );
                             let tangent_platform_mvt =
                                 (target_vel - normal * target_vel.dot(&normal)) * dt;
@@ -566,7 +566,7 @@ impl KinematicCharacterController {
 
         // For the controller to be grounded, the angle between the contact normal and the up vector
         // has to be smaller than acos(1.0e-3) = 89.94 degrees.
-        if normal.dot(&self.up) >= 1.0e-3 {
+        if normal.dot(&self.up) >= Real::from(1.0e-3) {
             let prediction = self.predict_ground(dims.y);
             for contact in &manifold.points {
                 if contact.dist <= prediction {
@@ -591,14 +591,14 @@ impl KinematicCharacterController {
 
         // An object is trying to slip if the tangential movement induced by its vertical movement
         // points downward.
-        let slipping_intent = self.up.dot(&horiz_input_decomp.vertical_tangent) < 0.0;
+        let slipping_intent = self.up.dot(&horiz_input_decomp.vertical_tangent) < Real::from(0.0);
         // An object is slipping if its vertical movement points downward.
-        let slipping = self.up.dot(&decomp.vertical_tangent) < 0.0;
+        let slipping = self.up.dot(&decomp.vertical_tangent) < Real::from(0.0);
 
         // An object is trying to climb if its vertical input motion points upward.
-        let climbing_intent = self.up.dot(&_vertical_input) > 0.0;
+        let climbing_intent = self.up.dot(&_vertical_input) > Real::from(0.0);
         // An object is climbing if the tangential movement induced by its vertical movement points upward.
-        let climbing = self.up.dot(&decomp.vertical_tangent) > 0.0;
+        let climbing = self.up.dot(&decomp.vertical_tangent) > Real::from(0.0);
 
         let allowed_movement = if hit.is_wall && climbing && !climbing_intent {
             // Can’t climb the slope, remove the vertical tangent motion induced by the forward motion.
@@ -623,7 +623,7 @@ impl KinematicCharacterController {
 
     fn compute_hit_info(&self, toi: ShapeCastHit) -> HitInfo {
         let angle_with_floor = self.up.angle(&toi.normal1);
-        let is_ceiling = self.up.dot(&toi.normal1) < 0.0;
+        let is_ceiling = self.up.dot(&toi.normal1) < Real::from(0.0);
         let is_wall = angle_with_floor >= self.max_slope_climb_angle && !is_ceiling;
         let is_nonslip_slope = angle_with_floor <= self.min_slope_slide_angle;
 
@@ -639,7 +639,7 @@ impl KinematicCharacterController {
         let normal_part;
         let penetration_part;
 
-        if dist_to_surface < 0.0 {
+        if dist_to_surface < Real::from(0.0) {
             normal_part = Vector::zeros();
             penetration_part = dist_to_surface * *hit.normal1;
         } else {
@@ -654,7 +654,7 @@ impl KinematicCharacterController {
         let horizontal_tangent_dir = Vector::zeros();
 
         let horizontal_tangent_dir = horizontal_tangent_dir
-            .try_normalize(1.0e-5)
+            .try_normalize(Real::from(1.0e-5))
             .unwrap_or_default();
         let horizontal_tangent = tangent.dot(&horizontal_tangent_dir) * horizontal_tangent_dir;
         let vertical_tangent = tangent - horizontal_tangent;
@@ -718,7 +718,7 @@ impl KinematicCharacterController {
 
         let Some(horizontal_dir) = (*translation_remaining
             - *self.up * translation_remaining.dot(&self.up))
-        .try_normalize(1.0e-5) else {
+        .try_normalize(Real::from(1.0e-5)) else {
             return false;
         };
 
@@ -778,7 +778,7 @@ impl KinematicCharacterController {
             let slope_translation = horizontal_slope_translation + vertical_slope_translation;
 
             let angle_with_floor = self.up.angle(&hit.normal1);
-            let climbing = self.up.dot(&slope_translation) >= 0.0;
+            let climbing = self.up.dot(&slope_translation) >= Real::from(0.0);
 
             if climbing && angle_with_floor > self.max_slope_climb_angle {
                 return false; // The target ramp is too steep.
@@ -908,7 +908,7 @@ impl KinematicCharacterController {
                     let mass_ratio = body_mass * character_mass / (body_mass + character_mass);
 
                     body.apply_impulse_at_point(
-                        manifold.data.normal * delta_vel_per_contact.max(0.0) * mass_ratio,
+                        manifold.data.normal * delta_vel_per_contact.max(Real::from(0.0)) * mass_ratio,
                         contact_point,
                         true,
                     );
@@ -919,9 +919,9 @@ impl KinematicCharacterController {
 }
 
 fn subtract_hit(translation: Vector<Real>, hit: &ShapeCastHit) -> Vector<Real> {
-    let surface_correction = (-translation).dot(&hit.normal1).max(0.0);
+    let surface_correction = (-translation).dot(&hit.normal1).max(Real::from(0.0));
     // This fixes some instances of moving through walls
-    let surface_correction = surface_correction * (1.0 + 1.0e-5);
+    let surface_correction = surface_correction * Real::from(1.0 + 1.0e-5);
     translation + *hit.normal1 * surface_correction
 }
 
@@ -945,14 +945,14 @@ mod test {
 
         let mut bodies = RigidBodySet::new();
 
-        let gravity = Vector::y() * -9.81;
+        let gravity = Vector::y() * Real::from(-9.81);
 
-        let ground_size = 100.0;
-        let ground_height = 0.1;
+        let ground_size = Real::from(100.0);
+        let ground_height = Real::from(0.1);
         /*
          * Create a flat ground
          */
-        let rigid_body = RigidBodyBuilder::fixed().translation(vector![0.0, -ground_height, 0.0]);
+        let rigid_body = RigidBodyBuilder::fixed().translation(vector![Real::from(0.0), -ground_height, Real::from(0.0)]);
         let floor_handle = bodies.insert(rigid_body);
         let collider = ColliderBuilder::cuboid(ground_size, ground_height, ground_size);
         colliders.insert_with_parent(collider, floor_handle, &mut bodies);
@@ -960,23 +960,23 @@ mod test {
         /*
          * Create a slope we can climb.
          */
-        let slope_angle = 0.2;
-        let slope_size = 2.0;
+        let slope_angle = Real::from(0.2);
+        let slope_size = Real::from(2.0);
         let collider = ColliderBuilder::cuboid(slope_size, ground_height, slope_size)
-            .translation(vector![0.1 + slope_size, -ground_height + 0.4, 0.0])
+            .translation(vector![Real::from(Real::from(0.1) + slope_size), -ground_height + Real::from(0.4), Real::from(0.0)])
             .rotation(Vector::z() * slope_angle);
         colliders.insert(collider);
 
         /*
          * Create a slope we can’t climb.
          */
-        let impossible_slope_angle = 0.6;
-        let impossible_slope_size = 2.0;
+        let impossible_slope_angle = Real::from(0.6);
+        let impossible_slope_size = Real::from(2.0);
         let collider = ColliderBuilder::cuboid(slope_size, ground_height, ground_size)
             .translation(vector![
-                0.1 + slope_size * 2.0 + impossible_slope_size - 0.9,
-                -ground_height + 1.7,
-                0.0
+                Real::from(0.1) + slope_size * Real::from(2.0) + impossible_slope_size - Real::from(0.9),
+                -ground_height + Real::from(1.7),
+                Real::from(0.0)
             ])
             .rotation(Vector::z() * impossible_slope_angle);
         colliders.insert(collider);
@@ -985,22 +985,22 @@ mod test {
 
         // Initialize character which can climb
         let mut character_body_can_climb = RigidBodyBuilder::kinematic_position_based()
-            .additional_mass(1.0)
+            .additional_mass(Real::from(1.0))
             .build();
-        character_body_can_climb.set_translation(Vector::new(0.6, 0.5, 0.0), false);
+        character_body_can_climb.set_translation(Vector::new(Real::from(0.6), Real::from(0.5), Real::from(0.0)), false);
         let character_handle_can_climb = bodies.insert(character_body_can_climb);
 
-        let collider = ColliderBuilder::ball(0.5).build();
+        let collider = ColliderBuilder::ball(Real::from(0.5)).build();
         colliders.insert_with_parent(collider.clone(), character_handle_can_climb, &mut bodies);
 
         // Initialize character which cannot climb
         let mut character_body_cannot_climb = RigidBodyBuilder::kinematic_position_based()
-            .additional_mass(1.0)
+            .additional_mass(Real::from(1.0))
             .build();
-        character_body_cannot_climb.set_translation(Vector::new(-0.6, 0.5, 0.0), false);
+        character_body_cannot_climb.set_translation(Vector::new(Real::from(-0.6), Real::from(0.5), Real::from(0.0)), false);
         let character_handle_cannot_climb = bodies.insert(character_body_cannot_climb);
 
-        let collider = ColliderBuilder::ball(0.5).build();
+        let collider = ColliderBuilder::ball(Real::from(0.5)).build();
         let character_shape = collider.shape();
         colliders.insert_with_parent(collider.clone(), character_handle_cannot_climb, &mut bodies);
 
@@ -1039,7 +1039,7 @@ mod test {
                         &query_pipeline,
                         character_shape,
                         character_body.position(),
-                        Vector::new(0.1, -0.1, 0.0),
+                        Vector::new(Real::from(0.1), Real::from(-0.1), Real::from(0.0)),
                         |collision| collisions.push(collision),
                     );
                     let character_body = bodies.get_mut(handle).unwrap();
@@ -1070,11 +1070,11 @@ mod test {
             update_character_controller(character_controller_can_climb, character_handle_can_climb);
         }
         let character_body = bodies.get(character_handle_can_climb).unwrap();
-        assert!(character_body.translation().x > 6.0);
-        assert!(character_body.translation().y > 3.0);
+        assert!(character_body.translation().x > Real::from(6.0));
+        assert!(character_body.translation().y > Real::from(3.0));
         let character_body = bodies.get(character_handle_cannot_climb).unwrap();
-        assert!(character_body.translation().x < 4.0);
-        assert!(dbg!(character_body.translation().y) < 2.0);
+        assert!(character_body.translation().x < Real::from(4.0));
+        assert!(dbg!(character_body.translation().y) < Real::from(2.0));
     }
 
     #[test]
@@ -1089,15 +1089,15 @@ mod test {
 
         let mut bodies = RigidBodySet::new();
 
-        let gravity = Vector::y() * -9.81;
+        let gravity = Vector::y() * Real::from(-9.81);
 
-        let ground_size = 1001.0;
-        let ground_height = 1.0;
+        let ground_size = Real::from(1001.0);
+        let ground_height = Real::from(1.0);
         /*
          * Create a flat ground
          */
         let rigid_body =
-            RigidBodyBuilder::fixed().translation(vector![0.0, -ground_height / 2f32, 0.0]);
+            RigidBodyBuilder::fixed().translation(vector![Real::from(0.0), -ground_height / Real::from(2f32), Real::from(0.0)]);
         let floor_handle = bodies.insert(rigid_body);
         let collider = ColliderBuilder::cuboid(ground_size, ground_height, ground_size);
         colliders.insert_with_parent(collider, floor_handle, &mut bodies);
@@ -1106,16 +1106,16 @@ mod test {
 
         // Initialize character with snap to ground
         let character_controller_snap = KinematicCharacterController {
-            snap_to_ground: Some(CharacterLength::Relative(0.2)),
+            snap_to_ground: Some(CharacterLength::Relative(Real::from(0.2))),
             ..Default::default()
         };
         let mut character_body_snap = RigidBodyBuilder::kinematic_position_based()
-            .additional_mass(1.0)
+            .additional_mass(Real::from(1.0))
             .build();
-        character_body_snap.set_translation(Vector::new(0.6, 0.5, 0.0), false);
+        character_body_snap.set_translation(Vector::new(Real::from(0.6), Real::from(0.5), Real::from(0.0)), false);
         let character_handle_snap = bodies.insert(character_body_snap);
 
-        let collider = ColliderBuilder::ball(0.5).build();
+        let collider = ColliderBuilder::ball(Real::from(0.5)).build();
         colliders.insert_with_parent(collider.clone(), character_handle_snap, &mut bodies);
 
         // Initialize character without snap to ground
@@ -1124,12 +1124,12 @@ mod test {
             ..Default::default()
         };
         let mut character_body_no_snap = RigidBodyBuilder::kinematic_position_based()
-            .additional_mass(1.0)
+            .additional_mass(Real::from(1.0))
             .build();
-        character_body_no_snap.set_translation(Vector::new(-0.6, 0.5, 0.0), false);
+        character_body_no_snap.set_translation(Vector::new(Real::from(-0.6), Real::from(0.5), Real::from(0.0)), false);
         let character_handle_no_snap = bodies.insert(character_body_no_snap);
 
-        let collider = ColliderBuilder::ball(0.5).build();
+        let collider = ColliderBuilder::ball(Real::from(0.5)).build();
         let character_shape = collider.shape();
         colliders.insert_with_parent(collider.clone(), character_handle_no_snap, &mut bodies);
 
@@ -1168,7 +1168,7 @@ mod test {
                         &query_pipeline,
                         character_shape,
                         character_body.position(),
-                        Vector::new(0.1, -0.1, 0.1),
+                        Vector::new(Real::from(0.1), Real::from(-0.1), Real::from(0.1)),
                         |collision| collisions.push(collision),
                     );
                     let character_body = bodies.get_mut(handle).unwrap();
@@ -1194,12 +1194,12 @@ mod test {
         // accumulated numerical errors make the test go less far than it should,
         // but it's expected.
         assert!(
-            translation.x >= 997.0,
+            translation.x >= Real::from(997.0),
             "actual translation.x:{}",
             translation.x
         );
         assert!(
-            translation.z >= 997.0,
+            translation.z >= Real::from(997.0),
             "actual translation.z:{}",
             translation.z
         );
@@ -1207,12 +1207,12 @@ mod test {
         let character_body = bodies.get_mut(character_handle_snap).unwrap();
         let translation = character_body.translation();
         assert!(
-            translation.x >= 997.0,
+            translation.x >= Real::from(997.0),
             "actual translation.x:{}",
             translation.x
         );
         assert!(
-            translation.z >= 997.0,
+            translation.z >= Real::from(997.0),
             "actual translation.z:{}",
             translation.z
         );

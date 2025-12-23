@@ -41,7 +41,7 @@ impl HasModifiedFlag for RigidBody {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, Hash)]
 /// The collection that stores all rigid bodies in your physics world.
 ///
 /// This is where you add, remove, and access all your physics objects. Think of it as

@@ -10,4 +10,4 @@ mod mesh_intersection;
 mod mesh_intersection_error;
 mod triangle_triangle_intersection;
 
-const EPS: Real = 1.0e-6;
+const EPS: Real = ordered_float::OrderedFloat(1.0e-6);

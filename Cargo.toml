@@ -85,16 +85,22 @@ pyroscope = "0.5.8"
 pyroscope_pprofrs = "0.2.10"
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 ordered-float = { path = "crates/ordered-float", default-features = false, features = [
-  "serde", "bytemuck",
+  "serde", "bytemuck", "spade"
 ] }
+spade = { version = "2.9", default-features = false, features = ["serde"] }
 nalgebra = { path = "crates/nalgebra", default-features = false, features = [
   "alloc",
   "convert-bytemuck",
   "serde-serialize",
   "std",
+  "macros"
 ] }
 simba = { path = "crates/simba", default-features = false, features = [
   "libm_force",
 ] }
 approx = { path = "crates/approx", default-features = false }
 oorandom = "11.1.5"
+ordermap = { version = "1.0.0", features = ["serde"] }
+hashbrown = { version = "0.16", default-features = false, features = [
+  "default-hasher",
+] }

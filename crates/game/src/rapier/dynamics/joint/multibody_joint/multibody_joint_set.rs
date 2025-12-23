@@ -44,7 +44,7 @@ impl Default for MultibodyJointHandle {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 /// Indexes usable to get a multibody link from a `MultibodyJointSet`.
 ///
 /// ```
@@ -84,7 +84,7 @@ impl Default for MultibodyLinkId {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Hash)]
 /// A set of rigid bodies that can be handled by a physics pipeline.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
@@ -104,7 +104,7 @@ impl MultibodyJointSet {
             multibodies: Arena::new(),
             rb2mb: Coarena::new(),
             connectivity_graph: InteractionGraph::new(),
-            to_wake_up: HashSet::default(),
+            to_wake_up: Default::default(),
         }
     }
 
@@ -425,7 +425,7 @@ impl MultibodyJointSet {
             .flat_map(move |link| self.connectivity_graph.interactions_with(link.graph_id))
             .map(|inter| {
                 // NOTE: the joint handle is always equal to the handle of the second rigid-body.
-                (inter.0, inter.1, MultibodyJointHandle(inter.1.0))
+                (inter.0, inter.1, MultibodyJointHandle(inter.1 .0))
             })
     }
 

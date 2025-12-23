@@ -76,16 +76,16 @@ impl<'a> RayCast for VoxelsChunkRef<'a> {
              * Find the next voxel to cast the ray on.
              */
             let toi = ii.map(|i| {
-                if ray.dir[i] > 0.0 {
+                if ray.dir[i] > Real::from(0.0) {
                     let t = (aabb.maxs[i] - ray.origin[i]) / ray.dir[i];
-                    if t < 0.0 {
+                    if t < Real::from(0.0) {
                         (Real::max_value(), true)
                     } else {
                         (t, true)
                     }
-                } else if ray.dir[i] < 0.0 {
+                } else if ray.dir[i] < Real::from(0.0) {
                     let t = (aabb.mins[i] - ray.origin[i]) / ray.dir[i];
-                    if t < 0.0 {
+                    if t < Real::from(0.0) {
                         (Real::max_value(), false)
                     } else {
                         (t, false)

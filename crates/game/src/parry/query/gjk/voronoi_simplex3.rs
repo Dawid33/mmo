@@ -32,10 +32,10 @@ impl VoronoiSimplex {
     pub fn new() -> VoronoiSimplex {
         VoronoiSimplex {
             prev_vertices: [0, 1, 2, 3],
-            prev_proj: [0.0; 3],
+            prev_proj: [Real::from(0.0); 3],
             prev_dim: 0,
             vertices: [CSOPoint::origin(); 4],
-            proj: [0.0; 3],
+            proj: [Real::from(0.0); 3],
             dim: 0,
         }
     }
@@ -79,7 +79,7 @@ impl VoronoiSimplex {
                 let ap = pt - self.vertices[0];
                 let n = ab.cross(&ac).normalize();
 
-                if n.dot(&ap).abs() < gjk::eps_tol() {
+                if n.dot(&ap).abs() < *gjk::eps_tol() {
                     return false;
                 }
             }
@@ -122,7 +122,7 @@ impl VoronoiSimplex {
     /// by `prev_`.
     pub fn project_origin_and_reduce(&mut self) -> Point<Real> {
         if self.dim == 0 {
-            self.proj[0] = 1.0;
+            self.proj[0] = Real::from(1.0);
             self.vertices[0].point
         } else if self.dim == 1 {
             let (proj, location) = Segment::new(self.vertices[0].point, self.vertices[1].point)
@@ -130,12 +130,12 @@ impl VoronoiSimplex {
 
             match location {
                 SegmentPointLocation::OnVertex(0) => {
-                    self.proj[0] = 1.0;
+                    self.proj[0] = Real::from(1.0);
                     self.dim = 0;
                 }
                 SegmentPointLocation::OnVertex(1) => {
                     self.swap(0, 1);
-                    self.proj[0] = 1.0;
+                    self.proj[0] = Real::from(1.0);
                     self.dim = 0;
                 }
                 SegmentPointLocation::OnEdge(coords) => {
@@ -157,7 +157,7 @@ impl VoronoiSimplex {
             match location {
                 TrianglePointLocation::OnVertex(i) => {
                     self.swap(0, i as usize);
-                    self.proj[0] = 1.0;
+                    self.proj[0] = Real::from(1.0);
                     self.dim = 0;
                 }
                 TrianglePointLocation::OnEdge(0, coords) => {
@@ -197,7 +197,7 @@ impl VoronoiSimplex {
             match location {
                 TetrahedronPointLocation::OnVertex(i) => {
                     self.swap(0, i as usize);
-                    self.proj[0] = 1.0;
+                    self.proj[0] = Real::from(1.0);
                     self.dim = 0;
                 }
                 TetrahedronPointLocation::OnEdge(i, coords) => {
@@ -329,7 +329,7 @@ impl VoronoiSimplex {
 
     /// The maximum squared length of the vertices of this simplex.
     pub fn max_sq_len(&self) -> Real {
-        let mut max_sq_len = 0.0;
+        let mut max_sq_len = Real::from(0.0);
 
         for i in 0..self.dim + 1 {
             let norm = self.vertices[i].point.coords.norm_squared();

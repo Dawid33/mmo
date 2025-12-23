@@ -1,4 +1,4 @@
-use crate::rapier::math::Real;
+use crate::rapier::math::{RawReal, Real};
 use na::RealField;
 
 #[cfg(doc)]
@@ -12,7 +12,7 @@ pub(crate) static BLOCK_SOLVER_ENABLED: bool = cfg!(feature = "dim2");
 ///
 /// This selection does not apply to multibodies that always rely on the [`FrictionModel::Coulomb`].
 #[cfg(feature = "dim3")]
-#[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub enum FrictionModel {
     /// A simplified friction model significantly faster to solve than [`Self::Coulomb`]
@@ -57,7 +57,7 @@ pub enum FrictionModel {
 /// ```
 ///
 /// Most other parameters are advanced settings for fine-tuning stability and performance.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct IntegrationParameters {
     /// The timestep length - how much simulated time passes per physics step (default: `1.0 / 60.0`).
@@ -170,14 +170,21 @@ impl IntegrationParameters {
     /// This is zero if `self.dt` is zero.
     #[inline]
     pub fn inv_dt(&self) -> Real {
-        if self.dt == 0.0 { 0.0 } else { 1.0 / self.dt }
+        if self.dt == 0.0 {
+            Real::from(0.0)
+        } else {
+            Real::from(1.0) / self.dt
+        }
     }
 
     /// Sets the time-stepping length.
     #[inline]
     #[deprecated = "You can just set the `IntegrationParams::dt` value directly"]
     pub fn set_dt(&mut self, dt: Real) {
-        assert!(dt >= 0.0, "The time-stepping length cannot be negative.");
+        assert!(
+            dt >= Real::from(0.0),
+            "The time-stepping length cannot be negative."
+        );
         self.dt = dt;
     }
 
@@ -187,9 +194,9 @@ impl IntegrationParameters {
     #[inline]
     pub fn set_inv_dt(&mut self, inv_dt: Real) {
         if inv_dt == 0.0 {
-            self.dt = 0.0
+            self.dt = Real::from(0.0)
         } else {
-            self.dt = 1.0 / inv_dt
+            self.dt = Real::from(1.0) / inv_dt
         }
     }
 
@@ -201,7 +208,7 @@ impl IntegrationParameters {
     /// The [`Self::contact_erp`] coefficient, multiplied by the inverse timestep length.
     pub fn contact_erp_inv_dt(&self) -> Real {
         let ang_freq = self.contact_angular_frequency();
-        ang_freq / (self.dt * ang_freq + 2.0 * self.contact_damping_ratio)
+        ang_freq / (self.dt * ang_freq + Real::from(2.0) * self.contact_damping_ratio)
     }
 
     /// The effective Error Reduction Parameter applied for calculating regularization forces
@@ -221,7 +228,7 @@ impl IntegrationParameters {
     /// The [`Self::joint_erp`] coefficient, multiplied by the inverse timestep length.
     pub fn joint_erp_inv_dt(&self) -> Real {
         let ang_freq = self.joint_angular_frequency();
-        ang_freq / (self.dt * ang_freq + 2.0 * self.joint_damping_ratio)
+        ang_freq / (self.dt * ang_freq + Real::from(2.0) * self.joint_damping_ratio)
     }
 
     /// The effective Error Reduction Parameter applied for calculating regularization forces
@@ -242,9 +249,9 @@ impl IntegrationParameters {
         // The logic is similar to [`Self::joint_cfm_coeff`].
         let contact_erp = self.contact_erp();
         if contact_erp == 0.0 {
-            return 0.0;
+            return Real::from(0.0);
         }
-        let inv_erp_minus_one = 1.0 / contact_erp - 1.0;
+        let inv_erp_minus_one = Real::from(1.0) / contact_erp - Real::from(1.0);
 
         // let stiffness = 4.0 * damping_ratio * damping_ratio * projected_mass
         //     / (dt * dt * inv_erp_minus_one * inv_erp_minus_one);
@@ -253,8 +260,8 @@ impl IntegrationParameters {
         // let cfm = 1.0 / (dt * dt * stiffness + dt * damping);
         // NOTE: This simplifies to cfm = cfm_coeff / projected_mass:
         let cfm_coeff = inv_erp_minus_one * inv_erp_minus_one
-            / ((1.0 + inv_erp_minus_one)
-                * 4.0
+            / ((Real::from(1.0) + inv_erp_minus_one)
+                * Real::from(4.0)
                 * self.contact_damping_ratio
                 * self.contact_damping_ratio);
 
@@ -274,7 +281,7 @@ impl IntegrationParameters {
         //
         // The value returned by this function is this cfm_factor that can be used directly
         // in the constraint solver.
-        1.0 / (1.0 + cfm_coeff)
+        Real::from(1.0) / (Real::from(1.0) + cfm_coeff)
     }
 
     /// The CFM (constraints force mixing) coefficient applied to all joints for constraints regularization.
@@ -286,12 +293,12 @@ impl IntegrationParameters {
         // The logic is similar to `Self::contact_cfm_factor`.
         let joint_erp = self.joint_erp();
         if joint_erp == 0.0 {
-            return 0.0;
+            return Real::from(0.0);
         }
-        let inv_erp_minus_one = 1.0 / joint_erp - 1.0;
+        let inv_erp_minus_one = Real::from(1.0) / joint_erp - Real::from(1.0);
         inv_erp_minus_one * inv_erp_minus_one
-            / ((1.0 + inv_erp_minus_one)
-                * 4.0
+            / ((Real::from(1.0) + inv_erp_minus_one)
+                * Real::from(4.0)
                 * self.joint_damping_ratio
                 * self.joint_damping_ratio)
     }
@@ -307,10 +314,10 @@ impl IntegrationParameters {
     /// This is equal to [`Self::normalized_max_corrective_velocity`] multiplied by
     /// [`Self::length_unit`].
     pub fn max_corrective_velocity(&self) -> Real {
-        if self.normalized_max_corrective_velocity != Real::MAX {
+        if self.normalized_max_corrective_velocity != Real::from(RawReal::MAX) {
             self.normalized_max_corrective_velocity * self.length_unit
         } else {
-            Real::MAX
+            Real::from(RawReal::MAX)
         }
     }
 
@@ -324,13 +331,13 @@ impl IntegrationParameters {
 impl Default for IntegrationParameters {
     fn default() -> Self {
         Self {
-            dt: 1.0 / 60.0,
-            min_ccd_dt: 1.0 / 60.0 / 100.0,
-            contact_natural_frequency: 30.0,
-            contact_damping_ratio: 5.0,
-            joint_natural_frequency: 1.0e6,
-            joint_damping_ratio: 1.0,
-            warmstart_coefficient: 1.0,
+            dt: Real::from(1.0 / 60.0),
+            min_ccd_dt: Real::from(1.0 / 60.0 / 100.0),
+            contact_natural_frequency: Real::from(30.0),
+            contact_damping_ratio: Real::from(5.0),
+            joint_natural_frequency: Real::from(1.0e6),
+            joint_damping_ratio: Real::from(1.0),
+            warmstart_coefficient: Real::from(1.0),
             num_internal_pgs_iterations: 1,
             num_internal_stabilization_iterations: 1,
             num_solver_iterations: 4,
@@ -340,11 +347,11 @@ impl Default for IntegrationParameters {
             // However we don't want it to be too small and end up with
             // tons of islands, reducing SIMD parallelism opportunities.
             min_island_size: 128,
-            normalized_allowed_linear_error: 0.001,
-            normalized_max_corrective_velocity: 10.0,
-            normalized_prediction_distance: 0.002,
+            normalized_allowed_linear_error: Real::from(0.001),
+            normalized_max_corrective_velocity: Real::from(10.0),
+            normalized_prediction_distance: Real::from(0.002),
             max_ccd_substeps: 1,
-            length_unit: 1.0,
+            length_unit: Real::from(1.0),
             #[cfg(feature = "dim3")]
             friction_model: FrictionModel::default(),
         }

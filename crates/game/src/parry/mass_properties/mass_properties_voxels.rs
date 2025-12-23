@@ -1,5 +1,5 @@
 use crate::parry::mass_properties::MassProperties;
-use crate::parry::math::{Point, Real};
+use crate::parry::math::{Point, Real, RawReal};
 use crate::parry::shape::Voxels;
 
 impl MassProperties {
@@ -173,7 +173,7 @@ impl MassProperties {
         let mut com = Point::origin();
         let mut num_not_empty = 0;
         let mut angular_inertia = na::zero();
-        let block_ref_mprops = MassProperties::from_cuboid(density, voxels.voxel_size() / 2.0);
+        let block_ref_mprops = MassProperties::from_cuboid(density, voxels.voxel_size() / Real::from(2.0));
 
         for vox in voxels.voxels() {
             if !vox.state.is_empty() {
@@ -182,7 +182,7 @@ impl MassProperties {
             }
         }
 
-        com.coords /= num_not_empty as Real;
+        com.coords /= Real::from(num_not_empty as RawReal);
 
         for vox in voxels.voxels() {
             if !vox.state.is_empty() {
@@ -191,7 +191,7 @@ impl MassProperties {
             }
         }
 
-        let mass = block_ref_mprops.mass() * num_not_empty as Real;
+        let mass = block_ref_mprops.mass() * Real::from(num_not_empty as RawReal);
 
         #[cfg(feature = "dim2")]
         return Self::new(com, mass, angular_inertia);

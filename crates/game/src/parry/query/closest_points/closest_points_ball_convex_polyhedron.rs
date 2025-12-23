@@ -15,7 +15,7 @@ pub fn closest_points_ball_convex_polyhedron(
 ) -> ClosestPoints {
     match crate::parry::query::details::contact_ball_convex_polyhedron(pos12, ball1, shape2, prediction) {
         Some(contact) => {
-            if contact.dist <= 0.0 {
+            if contact.dist <= Real::from(0.0) {
                 ClosestPoints::Intersecting
             } else {
                 ClosestPoints::WithinMargin(contact.point1, contact.point2)
@@ -38,7 +38,7 @@ pub fn closest_points_convex_polyhedron_ball(
 ) -> ClosestPoints {
     match crate::parry::query::details::contact_convex_polyhedron_ball(pos12, shape1, ball2, prediction) {
         Some(contact) => {
-            if contact.dist <= 0.0 {
+            if contact.dist <= Real::from(0.0) {
                 ClosestPoints::Intersecting
             } else {
                 ClosestPoints::WithinMargin(contact.point1, contact.point2)

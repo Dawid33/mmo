@@ -7,7 +7,7 @@ impl<S: TypedCompositeShape> CompositeShapeRef<'_, S> {
     /// Casts a ray on this composite shape.
     ///
     /// The ray is effectively limited to a segment that starts at `Ray::origin` and ends at
-    /// `Ray::origin + Ray::direction * max_time_of_impact`. Set `max_time_of_impact` to `Real::MAX`
+    /// `Ray::origin + Ray::direction * max_time_of_impact`. Set `max_time_of_impact` to `RawReal::MAX`
     /// for an unbounded ray.
     ///
     /// If `solid` is `false`, then the sub-shapes of `self` are seen as hollow and the ray won’t

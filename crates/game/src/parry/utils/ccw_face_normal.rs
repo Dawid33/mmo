@@ -23,5 +23,5 @@ pub fn ccw_face_normal(pts: [&Point<Real>; 3]) -> Option<Unit<Vector<Real>>> {
     let ac = pts[2] - pts[0];
     let res = ab.cross(&ac);
 
-    Unit::try_new(res, crate::parry::math::DEFAULT_EPSILON)
+    Unit::try_new(res, Real::from(crate::parry::math::DEFAULT_EPSILON))
 }

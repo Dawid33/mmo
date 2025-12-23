@@ -34,13 +34,13 @@ impl TriangleFacet {
             pts: [p1, p2, p3],
             visible_points: Vec::new(),
             furthest_point: Bounded::max_value(),
-            furthest_distance: 0.0,
+            furthest_distance: Real::from(0.0),
         }
     }
 
     pub fn add_visible_point(&mut self, pid: usize, points: &[Point3<Real>]) {
         let distance = self.distance_to_point(pid, points);
-        assert!(distance > crate::parry::math::DEFAULT_EPSILON);
+        assert!(distance > Real::from(crate::parry::math::DEFAULT_EPSILON));
 
         if distance > self.furthest_distance {
             self.furthest_distance = distance;
@@ -89,7 +89,7 @@ impl TriangleFacet {
         let p0 = points[self.pts[0]];
         let pt = points[point];
 
-        if (pt - p0).dot(&self.normal) < crate::parry::math::DEFAULT_EPSILON * 100.0 {
+        if (pt - p0).dot(&self.normal) < Real::from(crate::parry::math::DEFAULT_EPSILON) * 100.0 {
             return false;
         }
 
@@ -113,7 +113,7 @@ impl TriangleFacet {
             let p0 = points[self.pts[i]];
             let pt = points[point];
 
-            if (pt - p0).dot(&self.normal) >= 0.0 {
+            if (pt - p0).dot(&self.normal) >= 0.0.into() {
                 return true;
             }
         }

@@ -1,5 +1,5 @@
 use crate::parry::bounding_volume::BoundingVolume;
-use crate::parry::math::{Point, Real, Vector};
+use crate::parry::math::{Point, Real, RawReal, Vector};
 use crate::parry::query::{NonlinearRigidMotion, QueryDispatcher, ShapeCastHit};
 use crate::parry::shape::{Cuboid, Shape, Voxels};
 
@@ -61,7 +61,7 @@ where
             if !vox.state.is_empty() {
                 // PERF: could we check the canonical shape instead, and deduplicate accordingly?
                 let center = g1.voxel_center(vox.grid_coords);
-                let cuboid = Cuboid::new(g1.voxel_size() / 2.0);
+                let cuboid = Cuboid::new(g1.voxel_size() / Real::from(2.0));
                 let vox_motion1 = motion1.prepend_translation(center.coords);
                 if let Some(new_hit) = dispatcher
                     .cast_shapes_nonlinear(
@@ -101,16 +101,16 @@ where
         let ii = [0, 1, 2];
 
         let toi = ii.map(|i| {
-            if motion2.linvel[i] > 0.0 {
+            if motion2.linvel[i] > Real::from(0.0) {
                 let t = (search_domain_aabb.maxs[i] - start_aabb2_1.maxs[i]) / motion2.linvel[i];
-                if t < 0.0 {
+                if t < Real::from(0.0) {
                     (Real::max_value(), true)
                 } else {
                     (t, true)
                 }
-            } else if motion2.linvel[i] < 0.0 {
+            } else if motion2.linvel[i] < Real::from(0.0) {
                 let t = (search_domain_aabb.mins[i] - start_aabb2_1.mins[i]) / motion2.linvel[i];
-                if t < 0.0 {
+                if t < Real::from(0.0) {
                     (Real::max_value(), false)
                 } else {
                     (t, false)

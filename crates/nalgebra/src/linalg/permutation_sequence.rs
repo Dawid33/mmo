@@ -24,7 +24,7 @@ use crate::storage::StorageMut;
          OVector<(usize, usize), D>: Deserialize<'de>"))
 )]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub struct PermutationSequence<D: Dim>
 where
     DefaultAllocator: Allocator<D>,

@@ -1,9 +1,9 @@
 use crate::parry::bounding_volume::Aabb;
-use crate::parry::math::{Real, Vector};
+use crate::parry::math::{Real, RawReal, Vector};
 use crate::parry::partitioning::{Bvh, BvhBuildStrategy};
 
 fn make_test_aabb(i: usize) -> Aabb {
-    Aabb::from_half_extents(Vector::repeat(i as Real).into(), Vector::repeat(1.0))
+    Aabb::from_half_extents(Vector::repeat(Real::from(i as RawReal)).into(), Vector::repeat(1.0.into()))
 }
 
 #[test]
@@ -15,7 +15,7 @@ fn test_leaves_iteration() {
     let bvh = Bvh::from_leaves(BvhBuildStrategy::Binned, &leaves);
 
     // Only allow nodes with mins.x <= 3.0 (should only pass leaf 0)
-    let check = |node: &crate::parry::partitioning::BvhNode| -> bool { node.mins.x <= 3.0 };
+    let check = |node: &crate::parry::partitioning::BvhNode| -> bool { node.mins.x <= 3.0.into() };
 
     let mut found_invalid_leaf = false;
     for leaf_index in bvh.leaves(check) {

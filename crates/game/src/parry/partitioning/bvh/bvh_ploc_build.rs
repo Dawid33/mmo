@@ -1,7 +1,7 @@
 use super::bvh_tree::{BvhNodeIndex, BvhNodeWide};
 use super::BvhNode;
 use crate::parry::bounding_volume::{Aabb, BoundingVolume};
-use crate::parry::math::Real;
+use crate::parry::math::{Real, RawReal};
 use crate::parry::partitioning::Bvh;
 use crate::parry::utils::morton;
 use alloc::{vec, vec::Vec};
@@ -10,7 +10,7 @@ impl Bvh {
     pub(crate) fn rebuild_range_ploc(&mut self, target_node_id: u32, leaves: &mut Vec<BvhNode>) {
         // Compute the centroids aabb.
         let aabb = Aabb::from_points(leaves.iter().map(|l| l.center()));
-        let inv_extents = aabb.extents().map(|e| 1.0 / e);
+        let inv_extents = aabb.extents().map(|e| Real::from(1.0) / e);
 
         // Sort the leaves.
         leaves.sort_by_cached_key(|node| {
@@ -26,7 +26,7 @@ impl Bvh {
         while leaves.len() > 1 {
             // Find merge candidates.
             for i in 0..leaves.len() {
-                let mut best_sah = Real::MAX;
+                let mut best_sah = Real::from(RawReal::MAX);
                 let mut best_candidate = usize::MAX;
                 for k in i.saturating_sub(SEARCH_RADIUS)..=(i + SEARCH_RADIUS).min(leaves.len() - 1)
                 {

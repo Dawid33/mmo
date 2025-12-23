@@ -88,7 +88,7 @@ pub mod math {
     use ordered_float::OrderedFloat;
 
     /// The default tolerance used for geometric operations.
-    pub const DEFAULT_EPSILON: Real = OrderedFloat(RawReal::EPSILON);
+    pub const DEFAULT_EPSILON: RawReal = RawReal::EPSILON;
 
     /// The dimension of the space.
     pub const DIM: usize = 3;
@@ -228,7 +228,7 @@ mod simd {
 
     /// A SIMD float with SIMD_WIDTH lanes.
     #[cfg(feature = "f32")]
-    pub type SimdReal = f32;
+    pub type SimdReal = super::math::Real;
 
     /// A SIMD float with SIMD_WIDTH lanes.
     #[cfg(feature = "f64")]

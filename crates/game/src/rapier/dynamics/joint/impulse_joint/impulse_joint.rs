@@ -2,7 +2,7 @@ use crate::rapier::dynamics::{GenericJoint, ImpulseJointHandle, RigidBodyHandle}
 use crate::rapier::math::{Real, SpacialVector};
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 /// An impulse-based joint attached to two bodies.
 pub struct ImpulseJoint {
     /// Handle to the first body attached to this joint.

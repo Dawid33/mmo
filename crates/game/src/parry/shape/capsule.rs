@@ -8,7 +8,7 @@ use either::Either;
 #[cfg(feature = "rkyv")]
 use rkyv::{bytecheck, CheckBytes};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "bytemuck", derive(bytemuck::Pod, bytemuck::Zeroable))]
 #[cfg_attr(feature = "encase", derive(encase::ShaderType))]
@@ -321,7 +321,7 @@ impl Capsule {
     /// The rotation `r` such that `r * Y` is collinear with `b - a`.
     pub fn rotation_wrt_y(&self) -> Rotation<Real> {
         let mut dir = self.segment.b - self.segment.a;
-        if dir.y < 0.0 {
+        if dir.y < 0.0.into() {
             dir = -dir;
         }
 
@@ -405,7 +405,7 @@ impl Capsule {
 
 impl SupportMap for Capsule {
     fn local_support_point(&self, dir: &Vector<Real>) -> Point<Real> {
-        let dir = Unit::try_new(*dir, 0.0).unwrap_or(Vector::y_axis());
+        let dir = Unit::try_new(*dir, 0.0.into()).unwrap_or(Vector::y_axis());
         self.local_support_point_toward(&dir)
     }
 

@@ -13,11 +13,11 @@ pub fn cast_shapes_halfspace_support_map<G: ?Sized + SupportMap>(
 ) -> Option<ShapeCastHit> {
     // TODO: add method to get only the local support point.
     // This would avoid the `inverse_transform_point` later.
-    if !options.stop_at_penetration && vel12.dot(&halfspace.normal) > 0.0 {
+    if !options.stop_at_penetration && vel12.dot(&halfspace.normal) > Real::from(0.0) {
         return None;
     }
 
-    let support_point = if options.target_distance > 0.0 {
+    let support_point = if options.target_distance > Real::from(0.0) {
         let round_other = RoundShapeRef {
             inner_shape: other,
             border_radius: options.target_distance,
@@ -40,7 +40,7 @@ pub fn cast_shapes_halfspace_support_map<G: ?Sized + SupportMap>(
         // Note that witness1 is already in the halfspace's local-space.
         witness1 -= *halfspace.normal * witness1.coords.dot(&halfspace.normal);
 
-        let status = if support_point.coords.dot(&halfspace.normal) < 0.0 {
+        let status = if support_point.coords.dot(&halfspace.normal) < Real::from(0.0) {
             ShapeCastStatus::PenetratingOrWithinTargetDist
         } else {
             ShapeCastStatus::Converged

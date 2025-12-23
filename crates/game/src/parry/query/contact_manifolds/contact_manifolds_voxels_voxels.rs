@@ -64,11 +64,11 @@ pub fn contact_manifolds_voxels_voxels<'a, ManifoldData, ContactData>(
     // TODO: avoid reallocating the new `manifolds` vec at each step.
     let mut old_manifolds = core::mem::take(manifolds);
 
-    let radius1 = voxels1.voxel_size() / 2.0;
-    let radius2 = voxels2.voxel_size() / 2.0;
+    let radius1 = voxels1.voxel_size() / Real::from(2.0);
+    let radius2 = voxels2.voxel_size() / Real::from(2.0);
 
-    let aabb1 = voxels1.local_aabb().loosened(prediction / 2.0);
-    let aabb2 = voxels2.local_aabb().loosened(prediction / 2.0);
+    let aabb1 = voxels1.local_aabb().loosened(prediction / Real::from(2.0));
+    let aabb2 = voxels2.local_aabb().loosened(prediction / Real::from(2.0));
 
     let pos21 = pos12.inverse();
 
@@ -77,7 +77,7 @@ pub fn contact_manifolds_voxels_voxels<'a, ManifoldData, ContactData>(
     if let Some((intersection_aabb1, intersection_aabb2)) =
         aabb1.aligned_intersections(pos12, &aabb2)
     {
-        let domain_margin = (radius1 + radius2) * 10.0;
+        let domain_margin = (radius1 + radius2) * Real::from(10.0);
         let full_domain2_1 = voxels2.compute_aabb(pos12).add_half_extents(&domain_margin);
         let domain2_1 = full_domain2_1
             .intersection(&aabb1.add_half_extents(&domain_margin))
@@ -196,12 +196,12 @@ pub fn contact_manifolds_voxels_voxels<'a, ManifoldData, ContactData>(
             /*
              * Filter-out points that don’t belong to this block.
              */
-            let test_voxel1 = Cuboid::new(radius1 + Vector::repeat(1.0e-2));
-            let test_voxel2 = Cuboid::new(radius2 + Vector::repeat(1.0e-2));
+            let test_voxel1 = Cuboid::new(radius1 + Vector::repeat(Real::from(1.0e-2)));
+            let test_voxel2 = Cuboid::new(radius2 + Vector::repeat(Real::from(1.0e-2)));
             let penetration_dir1 = manifold.local_n1;
 
             for (i, pt) in manifold.points.iter().enumerate() {
-                if pt.dist < 0.0 {
+                if pt.dist < Real::from(0.0) {
                     // If this is a penetration, double-check that we are not hitting the
                     // interior of the infinitely expanded canonical shape by checking if
                     // the opposite normal had led to a better vector.

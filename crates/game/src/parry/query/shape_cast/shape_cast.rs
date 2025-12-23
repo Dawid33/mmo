@@ -1,6 +1,6 @@
 use na::Unit;
 
-use crate::parry::math::{Isometry, Point, Real, Vector};
+use crate::parry::math::{Isometry, Point, Real, RawReal, Vector};
 use crate::parry::query::{DefaultQueryDispatcher, QueryDispatcher, Unsupported};
 use crate::parry::shape::Shape;
 
@@ -136,8 +136,8 @@ impl ShapeCastOptions {
 impl Default for ShapeCastOptions {
     fn default() -> Self {
         Self {
-            max_time_of_impact: Real::MAX,
-            target_distance: 0.0,
+            max_time_of_impact: Real::from(RawReal::MAX),
+            target_distance: Real::from(0.0),
             stop_at_penetration: true,
             compute_impact_geometry_on_penetration: true,
         }

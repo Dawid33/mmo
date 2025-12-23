@@ -10,13 +10,13 @@ use crate::rapier::geometry::{
     ColliderSet, ColliderShape, ModifiedColliders,
 };
 use crate::rapier::math::{
-    AngVector, AngularInertia, Isometry, Point, Real, Rotation, Translation, Vector,
+    AngVector, AngularInertia, Isometry, Point, RawReal, Real, Rotation, Translation, Vector,
 };
 use crate::rapier::utils::{SimdAngularInertia, SimdCross, SimdDot, SimdRealCopy};
 use num::Zero;
 
 /// The unique handle of a rigid body added to a `RigidBodySet`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default, Ord, PartialOrd)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[repr(transparent)]
 pub struct RigidBodyHandle(pub crate::rapier::data::arena::Index);
@@ -47,7 +47,7 @@ impl RigidBodyHandle {
 #[deprecated(note = "renamed as RigidBodyType")]
 pub type BodyStatus = RigidBodyType;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The type of a rigid body, determining how it responds to forces and movement.
 pub enum RigidBodyType {
@@ -111,7 +111,7 @@ impl RigidBodyType {
 
 bitflags::bitflags! {
     #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
     /// Flags describing how the rigid-body has been modified by the user.
     pub struct RigidBodyChanges: u32 {
         /// Flag indicating that any component of this rigid-body has been modified.
@@ -140,7 +140,7 @@ impl Default for RigidBodyChanges {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, Hash)]
 /// The position of this rigid-body.
 pub struct RigidBodyPosition {
     /// The world-space position of the rigid-body.
@@ -268,7 +268,7 @@ impl Default for AxesMask {
 
 bitflags::bitflags! {
     #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
     /// Flags that lock specific movement axes to prevent translation or rotation.
     ///
     /// Use this to constrain body movement to specific directions/axes. Common uses:
@@ -319,7 +319,7 @@ bitflags::bitflags! {
 
 /// Mass and angular inertia added to a rigid-body on top of its attached colliders’ contributions.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash)]
 pub enum RigidBodyAdditionalMassProps {
     /// Mass properties to be added as-is.
     MassProps(MassProperties),
@@ -335,17 +335,17 @@ impl Default for RigidBodyAdditionalMassProps {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 // #[repr(C)]
 /// The mass properties of a rigid-body.
 pub struct RigidBodyMassProps {
     /// The world-space center of mass of the rigid-body.
-    pub world_com: Point<HashableReal>,
+    pub world_com: Point<Real>,
     /// The inverse mass taking into account translation locking.
-    pub effective_inv_mass: Vector<HashableReal>,
+    pub effective_inv_mass: Vector<Real>,
     /// The square-root of the world-space inverse angular inertia tensor of the rigid-body,
     /// taking into account rotation locking.
-    pub effective_world_inv_inertia: AngularInertia<HashableReal>,
+    pub effective_world_inv_inertia: AngularInertia<Real>,
     /// The local mass properties of the rigid-body.
     pub local_mprops: MassProperties,
     /// Flags for locking rotation and translation.
@@ -410,13 +410,13 @@ impl RigidBodyMassProps {
         #[cfg(feature = "dim3")]
         {
             if self.flags.contains(LockedAxes::ROTATION_LOCKED_X) {
-                ang_inertia.m11 = 1.0;
+                ang_inertia.m11 = Real::from(1.0);
             }
             if self.flags.contains(LockedAxes::ROTATION_LOCKED_Y) {
-                ang_inertia.m22 = 1.0;
+                ang_inertia.m22 = Real::from(1.0);
             }
             if self.flags.contains(LockedAxes::ROTATION_LOCKED_Z) {
-                ang_inertia.m33 = 1.0;
+                ang_inertia.m33 = Real::from(1.0);
             }
         }
 
@@ -427,13 +427,13 @@ impl RigidBodyMassProps {
         #[cfg(feature = "dim3")]
         {
             if self.flags.contains(LockedAxes::ROTATION_LOCKED_X) {
-                result.m11 = 0.0;
+                result.m11 = Real::from(0.0);
             }
             if self.flags.contains(LockedAxes::ROTATION_LOCKED_Y) {
-                result.m22 = 0.0;
+                result.m22 = Real::from(0.0);
             }
             if self.flags.contains(LockedAxes::ROTATION_LOCKED_Z) {
-                result.m33 = 0.0;
+                result.m33 = Real::from(0.0);
             }
         }
 
@@ -536,7 +536,7 @@ impl RigidBodyMassProps {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, Hash)]
 /// The velocities of this rigid-body.
 pub struct RigidBodyVelocity<T: SimdRealCopy> {
     /// The linear velocity of the rigid-body.
@@ -664,7 +664,7 @@ impl RigidBodyVelocity<Real> {
     /// energy".
     #[must_use]
     pub fn pseudo_kinetic_energy(&self) -> Real {
-        0.5 * (self.linvel.norm_squared() + self.angvel.gdot(self.angvel))
+        Real::from(0.5) * (self.linvel.norm_squared() + self.angvel.gdot(self.angvel))
     }
 
     /// The velocity of the given world-space point on this rigid-body.
@@ -799,7 +799,7 @@ impl<T: SimdRealCopy> RigidBodyVelocity<T> {
     pub fn integrate_linearized(&self, dt: T, pose: &mut Isometry<T>) {
         // Rotations linearization is inspired from
         // https://ahrs.readthedocs.io/en/latest/filters/angular.html (not using the matrix form).
-        let hang = self.angvel * (dt * T::splat(0.5));
+        let hang = self.angvel * (dt * T::splat(Real::from(0.5)));
         // Quaternion identity + `hang` seen as a quaternion.
         let id_plus_hang = na::Quaternion::new(T::one(), hang.x, hang.y, hang.z);
         pose.rotation = Rotation::new_unchecked(id_plus_hang * pose.rotation.into_inner());
@@ -858,7 +858,7 @@ impl std::ops::SubAssign<RigidBodyVelocity<Real>> for RigidBodyVelocity<Real> {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, Hash)]
 /// Damping factors to progressively slow down a rigid-body.
 pub struct RigidBodyDamping<T> {
     /// Damping factor for gradually slowing down the translational motion of the rigid-body.
@@ -877,7 +877,7 @@ impl<T: SimdRealCopy> Default for RigidBodyDamping<T> {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, Hash)]
 /// The user-defined external forces applied to this rigid-body.
 pub struct RigidBodyForces {
     /// Accumulation of external forces (only for dynamic bodies).
@@ -952,7 +952,7 @@ impl RigidBodyForces {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, Copy, PartialEq)]
+#[derive(Clone, Debug, Copy, PartialEq, Hash)]
 /// Information used for Continuous-Collision-Detection.
 pub struct RigidBodyCcd {
     /// The distance used by the CCD solver to decide if a movement would
@@ -976,11 +976,11 @@ pub struct RigidBodyCcd {
 impl Default for RigidBodyCcd {
     fn default() -> Self {
         Self {
-            ccd_thickness: Real::MAX,
-            ccd_max_dist: 0.0,
+            ccd_thickness: Real::from(RawReal::MAX),
+            ccd_max_dist: Real::from(0.0),
             ccd_active: false,
             ccd_enabled: false,
-            soft_ccd_prediction: 0.0,
+            soft_ccd_prediction: Real::from(0.0),
         }
     }
 }
@@ -1048,7 +1048,7 @@ impl Default for RigidBodyIds {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Default, Clone, Debug, PartialEq, Eq)]
+#[derive(Default, Clone, Debug, PartialEq, Eq, Hash)]
 /// The set of colliders attached to this rigid-bodies.
 ///
 /// This should not be modified manually unless you really know what
@@ -1167,7 +1167,7 @@ impl RigidBodyDominance {
 /// - Bodies with time-based behaviors while stationary
 ///
 /// Use `RigidBodyBuilder::can_sleep(false)` or `RigidBodyActivation::cannot_sleep()`.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct RigidBodyActivation {
     /// Linear velocity threshold for sleeping (scaled by `length_unit`).
@@ -1201,18 +1201,18 @@ impl Default for RigidBodyActivation {
 impl RigidBodyActivation {
     /// The default linear velocity below which a body can be put to sleep.
     pub fn default_normalized_linear_threshold() -> Real {
-        0.4
+        Real::from(0.4)
     }
 
     /// The default angular velocity below which a body can be put to sleep.
     pub fn default_angular_threshold() -> Real {
-        0.5
+        Real::from(0.5)
     }
 
     /// The amount of time the rigid-body must remain below it’s linear and angular velocity
     /// threshold before falling to sleep.
     pub fn default_time_until_sleep() -> Real {
-        2.0
+        Real::from(2.0)
     }
 
     /// Create a new rb_activation status initialised with the default rb_activation threshold and is active.
@@ -1221,7 +1221,7 @@ impl RigidBodyActivation {
             normalized_linear_threshold: Self::default_normalized_linear_threshold(),
             angular_threshold: Self::default_angular_threshold(),
             time_until_sleep: Self::default_time_until_sleep(),
-            time_since_can_sleep: 0.0,
+            time_since_can_sleep: Real::from(0.0),
             sleeping: false,
         }
     }
@@ -1240,8 +1240,8 @@ impl RigidBodyActivation {
     /// Create a new activation status that prevents the rigid-body from sleeping.
     pub fn cannot_sleep() -> Self {
         RigidBodyActivation {
-            normalized_linear_threshold: -1.0,
-            angular_threshold: -1.0,
+            normalized_linear_threshold: Real::from(-1.0),
+            angular_threshold: Real::from(-1.0),
             ..Self::active()
         }
     }
@@ -1257,7 +1257,7 @@ impl RigidBodyActivation {
     pub fn wake_up(&mut self, strong: bool) {
         self.sleeping = false;
         if strong {
-            self.time_since_can_sleep = 0.0;
+            self.time_since_can_sleep = Real::from(0.0);
         }
     }
 
@@ -1284,7 +1284,7 @@ mod tests {
         let mut rng = oorandom::Rand64::new(0);
 
         for i in -10..=10 {
-            let mult = i as Real;
+            let mult = Real::from(i as RawReal);
             let (local_com, curr_pos, next_pos);
             #[cfg(feature = "dim2")]
             {
@@ -1300,25 +1300,45 @@ mod tests {
             }
             #[cfg(feature = "dim3")]
             {
-                local_com = Point::new(rng.rand_float(), rng.rand_float(), rng.rand_float());
+                local_com = Point::new(
+                    Real::from(rng.rand_float()),
+                    Real::from(rng.rand_float()),
+                    Real::from(rng.rand_float()),
+                );
                 curr_pos = Isometry::new(
-                    Vector::new(rng.rand_float(), rng.rand_float(), rng.rand_float()) * mult,
-                    Vector::new(rng.rand_float(), rng.rand_float(), rng.rand_float()),
+                    Vector::new(
+                        Real::from(rng.rand_float()),
+                        Real::from(rng.rand_float()),
+                        Real::from(rng.rand_float()),
+                    ) * mult,
+                    Vector::new(
+                        Real::from(rng.rand_float()),
+                        Real::from(rng.rand_float()),
+                        Real::from(rng.rand_float()),
+                    ),
                 );
                 next_pos = Isometry::new(
-                    Vector::new(rng.rand_float(), rng.rand_float(), rng.rand_float()) * mult,
-                    Vector::new(rng.rand_float(), rng.rand_float(), rng.rand_float()),
+                    Vector::new(
+                        Real::from(rng.rand_float()),
+                        Real::from(rng.rand_float()),
+                        Real::from(rng.rand_float()),
+                    ) * mult,
+                    Vector::new(
+                        Real::from(rng.rand_float()),
+                        Real::from(rng.rand_float()),
+                        Real::from(rng.rand_float()),
+                    ),
                 );
             }
 
-            let dt = 0.016;
+            let dt = Real::from(0.016);
             let rb_pos = RigidBodyPosition {
                 position: curr_pos.into(),
                 next_position: next_pos.into(),
             };
-            let vel = rb_pos.interpolate_velocity(1.0 / dt, &local_com);
+            let vel = rb_pos.interpolate_velocity(Real::from(1.0) / dt, &local_com);
             let interp_pos = vel.integrate(dt, &curr_pos, &local_com);
-            approx::assert_relative_eq!(interp_pos, next_pos, epsilon = 1.0e-5);
+            approx::assert_relative_eq!(interp_pos, next_pos, epsilon = Real::from(1.0e-5));
         }
     }
 }

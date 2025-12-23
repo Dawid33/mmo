@@ -1,4 +1,4 @@
-use crate::parry::math::{Isometry, Real, Vector};
+use crate::parry::math::{Isometry, Real, RawReal, Vector};
 use crate::parry::query::sat;
 use crate::parry::shape::{Segment, SupportMap, Triangle};
 use na::Unit;
@@ -31,7 +31,7 @@ use na::Unit;
 /// # Degenerate Triangles
 ///
 /// If the triangle is degenerate (all three points are collinear), it has no valid normal.
-/// In this case, the function returns `-Real::MAX` for separation and a zero vector for the normal.
+/// In this case, the function returns `-RawReal::MAX` for separation and a zero vector for the normal.
 ///
 /// # Example
 ///
@@ -91,7 +91,7 @@ pub fn triangle_segment_find_local_separating_normal_oneway(
             (sep_b, -*dir)
         }
     } else {
-        (-Real::MAX, Vector::zeros())
+        (Real::from(-RawReal::MAX), Vector::zeros())
     }
 }
 
@@ -189,11 +189,11 @@ pub fn segment_triangle_find_local_separating_edge_twoway(
         -crosses1[1],
         -crosses1[2],
     ];
-    let mut max_separation = -Real::MAX;
+    let mut max_separation = Real::from(-RawReal::MAX);
     let mut sep_dir = axes1[0];
 
     for axis1 in &axes1 {
-        if let Some(axis1) = Unit::try_new(*axis1, 0.0) {
+        if let Some(axis1) = Unit::try_new(*axis1, Real::from(0.0)) {
             let sep =
                 sat::support_map_support_map_compute_separation(segment1, triangle2, pos12, &axis1);
 

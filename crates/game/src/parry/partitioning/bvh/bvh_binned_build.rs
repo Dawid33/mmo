@@ -1,7 +1,7 @@
 use super::bvh_tree::{BvhBuildStrategy, BvhNodeIndex, BvhNodeWide};
 use super::{Bvh, BvhNode, BvhWorkspace};
 use crate::parry::bounding_volume::{Aabb, BoundingVolume};
-use crate::parry::math::Real;
+use crate::parry::math::{Real, RawReal};
 
 impl Bvh {
     /// Fully rebuilds this BVH using the given strategy.
@@ -40,7 +40,7 @@ impl Bvh {
         // PERF: calculate an optimal bin count dynamically based on the number of leaves to split?
         //       The paper suggests (4 + 2 * sqrt(num_leaves).floor()).min(16)
         const NUM_BINS: usize = 8;
-        const BIN_EPSILON: Real = 1.0e-5;
+        const BIN_EPSILON: RawReal = 1.0e-5;
 
         let mut bins = [BvhBin::default(); NUM_BINS];
 
@@ -51,10 +51,10 @@ impl Bvh {
         let bins_range = [centroid_aabb.mins[bins_axis], centroid_aabb.maxs[bins_axis]];
 
         // Compute bins characteristics.
-        let k1 = NUM_BINS as Real * (1.0 - BIN_EPSILON) / (bins_range[1] - bins_range[0]);
+        let k1 = NUM_BINS as RawReal * (1.0 - BIN_EPSILON) / (*bins_range[1] - *bins_range[0]);
         let k0 = bins_range[0];
         for leaf in &*leaves {
-            let bin_id = (k1 * (leaf.center()[bins_axis] - k0)) as usize;
+            let bin_id: usize = (k1 * (*leaf.center()[bins_axis] - *k0)) as usize;
             let bin = &mut bins[bin_id];
             bin.aabb.merge(&leaf.aabb());
             bin.leaf_count += 1;
@@ -70,7 +70,7 @@ impl Bvh {
             right_merges[NUM_BINS - 1 - i] = right_acc;
         }
 
-        let mut best_cost = Real::MAX;
+        let mut best_cost: Real = RawReal::MAX.into();
         let mut best_plane = 0;
         let mut left_merge = bins[0];
         let mut best_leaf_count = bins[0].leaf_count;
@@ -78,8 +78,8 @@ impl Bvh {
         for i in 0..NUM_BINS - 1 {
             let right = &right_merges[i + 1];
 
-            let cost = left_merge.aabb.volume() * left_merge.leaf_count as Real
-                + right.aabb.volume() * right.leaf_count as Real;
+            let cost = left_merge.aabb.volume() * Real::from(left_merge.leaf_count as RawReal)
+                + right.aabb.volume() * Real::from(right.leaf_count as RawReal);
             if cost < best_cost {
                 best_cost = cost;
                 best_plane = i;
@@ -102,7 +102,7 @@ impl Bvh {
             // TODO PERF: try with using teh leaves_tmp instead of in-place sorting.
             let bin = |leaves: &mut [BvhNode], id: usize| {
                 let node = &leaves[id];
-                (k1 * (node.center()[bins_axis] - k0)) as usize
+                (k1 * (*node.center()[bins_axis] - *k0)) as usize
             };
 
             let mut left_id = 0;

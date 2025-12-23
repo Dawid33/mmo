@@ -15,6 +15,7 @@ use na::{
 use ordered_float::OrderedFloat;
 use parley::swash::shape::Direction;
 use winit::event::MouseButton;
+use crate::parry::math::Real;
 
 use crate::{data::Undo, ClientPacket, ClientUpdateEvent, Controller, GameData, GameDataUpdate};
 
@@ -91,28 +92,28 @@ impl Controller for CameraController {
             let b = data.physics.bodies.get_mut(handle).unwrap();
             let rotation = b.rotation();
             let mut linvel = Vector::zeros();
-            const SPEED: crate::parry::Real = 5.0.into();
+            const SPEED: Real = OrderedFloat(5.0);
 
             if p.input.key_held(&winit::keyboard::KeyCode::KeyW) {
-                linvel.z = -0.1 * SPEED
+                linvel.z = Real::from(-0.1) * SPEED
             }
             if p.input.key_held(&winit::keyboard::KeyCode::KeyS) {
-                linvel.z = 0.1 * SPEED
+                linvel.z = Real::from(0.1) * SPEED
             }
             if p.input.key_held(&winit::keyboard::KeyCode::KeyA) {
-                linvel.x = -0.1 * SPEED
+                linvel.x = Real::from(-0.1) * SPEED
             }
             if p.input.key_held(&winit::keyboard::KeyCode::KeyD) {
-                linvel.x = 0.1 * SPEED
+                linvel.x = Real::from(0.1) * SPEED
             }
             let mut linvel = rotation.transform_vector(&linvel);
-            linvel.y = 0.0;
+            linvel.y = Real::from(0.0);
 
             if p.input.key_held(&winit::keyboard::KeyCode::Space) {
-                linvel.y = 0.1 * SPEED
+                linvel.y = Real::from(0.1) * SPEED
             }
             if p.input.key_held(&winit::keyboard::KeyCode::ControlLeft) {
-                linvel.y = -0.1 * SPEED
+                linvel.y = Real::from(-0.1) * SPEED
             }
             if linvel != Vector3::zeros() {
                 let t = b.translation().clone();
@@ -142,7 +143,7 @@ impl Controller for CameraController {
                 if !diff.0.is_nan() {
                     r = UnitQuaternion::from_axis_angle(
                         &Vector3::y_axis(),
-                        -clamp(diff.0 as f32 * (0.00136 + SENSITIVITIY), -0.2, 0.2),
+                        -clamp(Real::from(diff.0 as f32 * (0.00136 + SENSITIVITIY)), Real::from(-0.2), Real::from(0.2)),
                     ) * rotation;
                 }
             }
@@ -150,7 +151,7 @@ impl Controller for CameraController {
                 if !diff.1.is_nan() {
                     r = r * UnitQuaternion::from_axis_angle(
                         &Vector3::x_axis(),
-                        -clamp(diff.1 as f32 * (0.0008 + SENSITIVITIY), -0.2, 0.2),
+                        -clamp(Real::from(diff.1 as f32 * (0.0008 + SENSITIVITIY)), Real::from(-0.2), Real::from(0.2)),
                     );
                 }
             }

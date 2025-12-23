@@ -40,7 +40,7 @@ pub enum TypedWorkspaceData<'a> {
 
 // NOTE: must match the TypedWorkspaceData enum.
 #[cfg(feature = "serde-serialize")]
-#[derive(Deserialize)]
+#[derive(Deserialize, Hash)]
 enum DeserializableWorkspaceData {
     TriMeshShapeContactManifoldsWorkspace(TriMeshShapeContactManifoldsWorkspace),
     HeightfieldShapeContactManifoldsWorkspace(HeightFieldShapeContactManifoldsWorkspace),
@@ -92,7 +92,7 @@ impl DeserializableWorkspaceData {
 }
 
 /// Data from a [`ContactManifoldsWorkspace`].
-pub trait WorkspaceData: DowncastSync {
+pub trait WorkspaceData: DowncastSync + crate::DynHash {
     /// Gets the underlying workspace as an enum.
     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_>;
 
@@ -102,8 +102,17 @@ pub trait WorkspaceData: DowncastSync {
 
 impl_downcast!(sync WorkspaceData);
 
+impl std::hash::Hash for dyn WorkspaceData {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: std::hash::Hasher {
+        self.dyn_hash(state);
+    }
+}
+
 // Note we have this newtype because it simplifies the serialization/deserialization code.
 /// A serializable workspace used by some contact-manifolds computation algorithms.
+#[derive(Hash)]
 pub struct ContactManifoldsWorkspace(pub Box<dyn WorkspaceData>);
 
 impl Clone for ContactManifoldsWorkspace {

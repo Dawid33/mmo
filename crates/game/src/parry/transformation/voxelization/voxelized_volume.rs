@@ -17,7 +17,7 @@
 // > THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use crate::parry::bounding_volume::Aabb;
-use crate::parry::math::{Point, Real, Vector, DIM};
+use crate::parry::math::{Point, Real, RawReal, Vector, DIM};
 use crate::parry::query;
 use crate::parry::transformation::voxelization::{Voxel, VoxelSet};
 use alloc::sync::Arc;
@@ -438,7 +438,7 @@ impl VoxelizedVolume {
         let mut result = VoxelizedVolume {
             resolution: [0; DIM],
             origin: Point::origin(),
-            scale: 1.0,
+            scale: 1.0.into(),
             values: Vec::new(),
             data: Vec::new(),
             primitive_intersections: Vec::new(),
@@ -469,21 +469,21 @@ impl VoxelizedVolume {
         if d[0] >= d[1] && d[0] >= d[2] {
             r = d[0];
             result.resolution[0] = resolution;
-            result.resolution[1] = 2 + (resolution as Real * d[1] / d[0]) as u32;
-            result.resolution[2] = 2 + (resolution as Real * d[2] / d[0]) as u32;
+            result.resolution[1] = 2 + *(Real::from(resolution as RawReal) * d[1] / d[0]) as u32;
+            result.resolution[2] = 2 + *(Real::from(resolution as RawReal) * d[2] / d[0]) as u32;
         } else if d[1] >= d[0] && d[1] >= d[2] {
             r = d[1];
             result.resolution[1] = resolution;
-            result.resolution[0] = 2 + (resolution as Real * d[0] / d[1]) as u32;
-            result.resolution[2] = 2 + (resolution as Real * d[2] / d[1]) as u32;
+            result.resolution[0] = 2 + *(Real::from(resolution as RawReal) * d[0] / d[1]) as u32;
+            result.resolution[2] = 2 + *(Real::from(resolution as RawReal) * d[2] / d[1]) as u32;
         } else {
             r = d[2];
             result.resolution[2] = resolution;
-            result.resolution[0] = 2 + (resolution as Real * d[0] / d[2]) as u32;
-            result.resolution[1] = 2 + (resolution as Real * d[1] / d[2]) as u32;
+            result.resolution[0] = 2 + *(Real::from(resolution as RawReal) * d[0] / d[2]) as u32;
+            result.resolution[1] = 2 + *(Real::from(resolution as RawReal) * d[1] / d[2]) as u32;
         }
 
-        result.scale = r / (resolution as Real - 1.0);
+        result.scale = r / (resolution as RawReal - 1.0);
         result.do_voxelize(points, indices, fill_mode, keep_voxel_to_primitives_map);
         result
     }
@@ -495,11 +495,11 @@ impl VoxelizedVolume {
         fill_mode: FillMode,
         keep_voxel_to_primitives_map: bool,
     ) {
-        let inv_scale = 1.0 / self.scale;
+        let inv_scale = Real::from(1.0) / self.scale;
         self.allocate();
 
         let mut tri_pts = [Point::origin(); DIM];
-        let box_half_size = Vector::repeat(0.5);
+        let box_half_size = Vector::repeat(Real::from(0.5));
         let mut ijk0 = Vector::repeat(0u32);
         let mut ijk1 = Vector::repeat(0u32);
 
@@ -514,10 +514,10 @@ impl VoxelizedVolume {
                 let pt = points[tri[c] as usize];
                 tri_pts[c] = (pt - self.origin.coords) * inv_scale;
 
-                let i = (tri_pts[c].x + 0.5) as u32;
-                let j = (tri_pts[c].y + 0.5) as u32;
+                let i = *(tri_pts[c].x + 0.5) as u32;
+                let j = *(tri_pts[c].y + 0.5) as u32;
                 #[cfg(feature = "dim3")]
-                let k = (tri_pts[c].z + 0.5) as u32;
+                let k = *(tri_pts[c].z + 0.5) as u32;
 
                 assert!(i < self.resolution[0] && j < self.resolution[1]);
                 #[cfg(feature = "dim3")]
@@ -554,7 +554,7 @@ impl VoxelizedVolume {
                         #[cfg(feature = "dim2")]
                         let pt = Point::new(i as Real, j as Real);
                         #[cfg(feature = "dim3")]
-                        let pt = Point::new(i as Real, j as Real, k as Real);
+                        let pt = Point::new(Real::from(i as RawReal), Real::from(j as RawReal), Real::from(k as RawReal));
 
                         let id = self.voxel_index(i, j, k);
                         let value = &mut self.values[id as usize];
@@ -1027,17 +1027,17 @@ impl VoxelizedVolume {
                     let voxel = self.voxel(i, j, k);
 
                     if voxel == value {
-                        let ijk = Vector::new(i as Real, j as Real, k as Real);
+                        let ijk = Vector::new(Real::from(i as RawReal), Real::from(j as RawReal), Real::from(k as RawReal));
 
                         let shifts = [
-                            Vector::new(-0.5, -0.5, -0.5),
-                            Vector::new(0.5, -0.5, -0.5),
-                            Vector::new(0.5, 0.5, -0.5),
-                            Vector::new(-0.5, 0.5, -0.5),
-                            Vector::new(-0.5, -0.5, 0.5),
-                            Vector::new(0.5, -0.5, 0.5),
-                            Vector::new(0.5, 0.5, 0.5),
-                            Vector::new(-0.5, 0.5, 0.5),
+                            Vector::new(Real::from(-0.5), Real::from(-0.5),Real::from( -0.5)),
+                            Vector::new(Real::from(0.5), Real::from(-0.5),Real::from( -0.5)),
+                            Vector::new(Real::from(0.5), Real::from(0.5), Real::from(-0.5)),
+                            Vector::new(Real::from(-0.5), Real::from(0.5), Real::from(-0.5)),
+                            Vector::new(Real::from(-0.5), Real::from(-0.5), Real::from(0.5)),
+                            Vector::new(Real::from(0.5), Real::from(-0.5), Real::from(0.5)),
+                            Vector::new(Real::from(0.5), Real::from(0.5), Real::from(0.5)),
+                            Vector::new(Real::from(-0.5), Real::from(0.5),Real::from( 0.5)),
                         ];
 
                         for shift in &shifts {

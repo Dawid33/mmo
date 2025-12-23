@@ -87,7 +87,7 @@ impl ContactModificationContext<'_> {
                     // So in this case we can't really conclude.
                     // If the norm is non-zero, then we can tell we need to forbid
                     // further contacts. Otherwise we have to wait for the next frame.
-                    if self.manifold.local_n1.norm_squared() > 0.1 {
+                    if self.manifold.local_n1.norm_squared() > 0.1.into() {
                         *self.user_data = CONTACT_CURRENTLY_FORBIDDEN;
                     }
                 }
@@ -97,7 +97,7 @@ impl ContactModificationContext<'_> {
                 // until all the contacts are non-penetrating again. In that case, if
                 // the contacts are OK with respect to the contact normal, then we can
                 // mark them as allowed.
-                if contact_is_ok && self.solver_contacts.iter().all(|c| c.dist > 0.0) {
+                if contact_is_ok && self.solver_contacts.iter().all(|c| c.dist > 0.0.into()) {
                     *self.user_data = CONTACT_CURRENTLY_ALLOWED;
                 } else {
                     // Discard all the contacts.

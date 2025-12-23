@@ -57,7 +57,7 @@ impl GenericRhs {
                 let rhs = solver_vels.rows(*solver_vel as usize, ndofs);
                 j.dot(&rhs)
             }
-            GenericRhs::Fixed => 0.0,
+            GenericRhs::Fixed => Real::from(0.0),
         }
     }
 
@@ -82,7 +82,7 @@ impl GenericRhs {
                 let wj_id = j_id + ndofs;
                 let wj = jacobians.rows(wj_id, ndofs);
                 let mut rhs = solver_vels.rows_mut(*solver_vel as usize, ndofs);
-                rhs.axpy(impulse, &wj, 1.0);
+                rhs.axpy(impulse, &wj, Real::from(1.0));
             }
             GenericRhs::Fixed => {}
         }
@@ -404,7 +404,7 @@ impl ContactConstraintNormalPart<Real> {
             solver_vels,
         ) + self.rhs;
 
-        let new_impulse = cfm_factor * (self.impulse - self.r * dvel).max(0.0);
+        let new_impulse = cfm_factor * (self.impulse - self.r * dvel).max(Real::from(0.0));
         let dlambda = new_impulse - self.impulse;
         self.impulse = new_impulse;
 

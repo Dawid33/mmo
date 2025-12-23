@@ -7,12 +7,12 @@ use crate::rapier::math::{Point, Real, TangentImpulse, Vector};
 use crate::rapier::pipeline::EventHandler;
 use crate::rapier::prelude::CollisionEventFlags;
 use crate::rapier::utils::SimdRealCopy;
-use crate::parry::math::{SIMD_WIDTH, SimdReal};
+use crate::parry::math::{SIMD_WIDTH, SimdReal, RawReal};
 use crate::parry::query::ContactManifoldsWorkspace;
 
 bitflags::bitflags! {
     #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
     /// Flags affecting the behavior of the constraints solver for a given contact manifold.
     pub struct SolverFlags: u32 {
         /// The constraint solver will take this contact manifold into
@@ -27,7 +27,7 @@ impl Default for SolverFlags {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// A single contact between two collider.
 pub struct ContactData {
@@ -50,18 +50,18 @@ pub struct ContactData {
 impl Default for ContactData {
     fn default() -> Self {
         Self {
-            impulse: 0.0,
+            impulse: Real::from(0.0),
             tangent_impulse: na::zero(),
-            warmstart_impulse: 0.0,
+            warmstart_impulse: Real::from(0.0),
             warmstart_tangent_impulse: na::zero(),
             #[cfg(feature = "dim3")]
-            warmstart_twist_impulse: 0.0,
+            warmstart_twist_impulse: Real::from(0.0),
         }
     }
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash)]
 /// The description of all the contacts between a pair of colliders.
 pub struct IntersectionPair {
     /// Are the colliders intersecting?
@@ -114,7 +114,7 @@ impl IntersectionPair {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 /// All contact information between two colliding colliders.
 ///
 /// When two colliders are touching, a ContactPair stores all the contact points, normals,
@@ -204,14 +204,14 @@ impl ContactPair {
     pub fn total_impulse_magnitude(&self) -> Real {
         self.manifolds
             .iter()
-            .fold(0.0, |a, m| a + m.total_impulse())
+            .fold(Real::from(0.0), |a, m| a + m.total_impulse())
     }
 
     /// Finds the strongest contact impulse and its direction.
     ///
     /// Returns `(magnitude, normal_direction)` of the strongest individual contact.
     pub fn max_impulse(&self) -> (Real, Vector<Real>) {
-        let mut result = (0.0, Vector::zeros());
+        let mut result = (Real::from(0.0), Vector::zeros());
 
         for m in &self.manifolds {
             let impulse = m.total_impulse();
@@ -300,7 +300,7 @@ impl ContactPair {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// A contact manifold between two colliders.
 ///
@@ -350,7 +350,7 @@ pub type SolverContact = SolverContactGeneric<Real, 1>;
 pub type SimdSolverContact = SolverContactGeneric<SimdReal, SIMD_WIDTH>;
 
 /// A contact seen by the constraints solver for computing forces.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "serde-serialize",
@@ -416,12 +416,14 @@ static_assertions::const_assert_eq!(
 );
 #[cfg(feature = "simd-is-enabled")]
 static_assertions::assert_eq_size!(SimdSolverContactRepr, SolverContact);
+
 static_assertions::const_assert_eq!(
     align_of::<SimdSolverContact>(),
     align_of::<[SolverContact; SIMD_WIDTH]>()
 );
 #[cfg(feature = "simd-is-enabled")]
 static_assertions::assert_eq_size!(SimdSolverContact, [SolverContact; SIMD_WIDTH]);
+
 
 impl SimdSolverContact {
     #[cfg(not(feature = "simd-is-enabled"))]
@@ -570,11 +572,11 @@ impl SolverContact {
     pub fn is_bouncy(&self) -> Real {
         if self.is_new != 0.0 {
             // Treat new collisions as bouncing at first, unless we have zero restitution.
-            (self.restitution > 0.0) as u32 as Real
+            Real::from((self.restitution > Real::from(0.0)) as u32 as RawReal)
         } else {
             // If the contact is still here one step later, it is now a resting contact.
             // The exception is very high restitutions, which can never rest
-            (self.restitution >= 1.0) as u32 as Real
+            Real::from((self.restitution >= Real::from(1.0)) as u32 as RawReal)
         }
     }
 }

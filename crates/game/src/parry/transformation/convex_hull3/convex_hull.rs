@@ -452,7 +452,7 @@ fn attach_and_push_facets(
             }
 
             let mut furthest = usize::MAX;
-            let mut furthest_dist = 0.0;
+            let mut furthest_dist = Real::from(0.0);
 
             for (i, curr_facet) in new_facets.iter_mut().enumerate() {
                 if !curr_facet.affinely_dependent {
@@ -480,7 +480,7 @@ fn attach_and_push_facets(
 
     while i != undecidable.len() {
         let mut furthest = usize::MAX;
-        let mut furthest_dist = 0.0;
+        let mut furthest_dist = Real::from(0.0);
         let undecidable_point = undecidable[i];
 
         for (j, curr_facet) in new_facets.iter_mut().enumerate() {
@@ -531,9 +531,10 @@ mod test {
     #[test]
     fn test_ball_convex_hull() {
         use crate::parry::shape::Ball;
+        use crate::parry::math::Real;
 
         // This triggered a failure to an affinely dependent facet.
-        let (points, _) = Ball::new(0.4).to_trimesh(20, 20);
+        let (points, _) = Ball::new(Real::from(0.4)).to_trimesh(20, 20);
         let (vertices, _) = transformation::convex_hull(points.as_slice());
 
         // dummy test, we are just checking that the construction did not fail.

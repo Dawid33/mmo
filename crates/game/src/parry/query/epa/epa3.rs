@@ -103,7 +103,7 @@ impl Face {
 
         match loc {
             TrianglePointLocation::OnVertex(_) | TrianglePointLocation::OnEdge(_, _) => {
-                let eps_tol = crate::parry::math::DEFAULT_EPSILON * 100.0; // Same as in closest_points
+                let eps_tol = Real::from(crate::parry::math::DEFAULT_EPSILON * 100.0); // Same as in closest_points
                 (
                     // barycentric_coordinates is guaranteed to work in OnVertex and OnEdge locations
                     Self::new_with_proj(vertices, loc.barycentric_coordinates().unwrap(), pts, adj),
@@ -113,7 +113,7 @@ impl Face {
             TrianglePointLocation::OnFace(_, bcoords) => {
                 (Self::new_with_proj(vertices, bcoords, pts, adj), true)
             }
-            _ => (Self::new_with_proj(vertices, [0.0; 3], pts, adj), false),
+            _ => (Self::new_with_proj(vertices, [Real::from(0.0); 3], pts, adj), false),
         }
     }
 
@@ -437,7 +437,7 @@ impl EPA {
         G2: ?Sized + SupportMap,
     {
         let _eps = crate::parry::math::DEFAULT_EPSILON;
-        let _eps_tol = _eps * 100.0;
+        let _eps_tol = Real::from(_eps * 100.0);
 
         self.reset();
 
@@ -450,14 +450,14 @@ impl EPA {
 
         if simplex.dimension() == 0 {
             let mut n: Vector<Real> = na::zero();
-            n[1] = 1.0;
+            n[1] = Real::from(1.0);
             return Some((Point::origin(), Point::origin(), Unit::new_unchecked(n)));
         } else if simplex.dimension() == 3 {
             let dp1 = self.vertices[1] - self.vertices[0];
             let dp2 = self.vertices[2] - self.vertices[0];
             let dp3 = self.vertices[3] - self.vertices[0];
 
-            if dp1.cross(&dp2).dot(&dp3) > 0.0 {
+            if dp1.cross(&dp2).dot(&dp3) > Real::from(0.0) {
                 self.vertices.swap(1, 2)
             }
 
@@ -532,14 +532,14 @@ impl EPA {
             self.faces.push(face1);
             self.faces.push(face2);
 
-            self.heap.push(FaceId::new(0, 0.0)?);
-            self.heap.push(FaceId::new(1, 0.0)?);
+            self.heap.push(FaceId::new(0, Real::from(0.0))?);
+            self.heap.push(FaceId::new(1, Real::from(0.0))?);
         }
 
         let mut niter = 0;
         let mut max_dist = Real::max_value();
         let mut best_face_id = *self.heap.peek()?;
-        let mut old_dist = 0.0;
+        let mut old_dist = Real::from(0.0);
 
         /*
          * Run the expansion.

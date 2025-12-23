@@ -19,7 +19,7 @@ impl Cuboid {
     /// Outlines this cuboid’s shape using polylines.
     pub fn to_outline(&self) -> (Vec<Point<Real>>, Vec<[u32; 2]>) {
         let (vtx, idx) = unit_cuboid_outline();
-        (utils::scaled(vtx, self.half_extents * 2.0), idx)
+        (utils::scaled(vtx, self.half_extents * Real::from(2.0)), idx)
     }
 }
 
@@ -29,7 +29,7 @@ impl Cuboid {
  * The cuboid is centered at the origin, and has its half extents set to 0.5.
  */
 fn unit_cuboid_outline() -> (Vec<Point<Real>>, Vec<[u32; 2]>) {
-    let aabb = Aabb::from_half_extents(Point::origin(), Vector::repeat(0.5));
+    let aabb = Aabb::from_half_extents(Point::origin(), Vector::repeat(0.5.into()));
     (
         aabb.vertices().to_vec(),
         vec![

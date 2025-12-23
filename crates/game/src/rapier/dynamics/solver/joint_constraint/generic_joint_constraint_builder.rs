@@ -6,7 +6,7 @@ use crate::rapier::dynamics::{
     GenericJoint, ImpulseJoint, IntegrationParameters, JointIndex, Multibody, MultibodyJointSet,
     MultibodyLinkId, RigidBodySet,
 };
-use crate::rapier::math::{ANG_DIM, DIM, Real, SPATIAL_DIM, Vector};
+use crate::rapier::math::{ANG_DIM, DIM, Real, RawReal, SPATIAL_DIM, Vector};
 use crate::rapier::utils;
 use crate::rapier::utils::IndexMut2;
 use na::{DVector, SVector};
@@ -124,7 +124,7 @@ impl JointGenericExternalConstraintBuilder {
         *j_id += multibodies_ndof * 2 * SPATIAL_DIM;
 
         if jacobians.nrows() < required_jacobian_len && !cfg!(feature = "parallel") {
-            jacobians.resize_vertically_mut(required_jacobian_len, 0.0);
+            jacobians.resize_vertically_mut(required_jacobian_len, Real::from(0.0));
         }
 
         let mut joint_data = joint.data;
@@ -264,7 +264,7 @@ impl JointGenericInternalConstraintBuilder {
 
         *j_id += num_constraints * multibody.ndofs() * 2;
         if jacobians.nrows() < *j_id {
-            jacobians.resize_vertically_mut(*j_id, 0.0);
+            jacobians.resize_vertically_mut(*j_id, Real::from(0.0));
         }
 
         *out_constraint_id += num_constraints;
@@ -319,10 +319,10 @@ impl JointSolverBody<Real, 1> {
             #[cfg(feature = "dim3")]
             {
                 out_invm_j.fixed_rows_mut::<ANG_DIM>(DIM).gemv(
-                    1.0,
+                    Real::from(1.0),
                     &self.ii.into_matrix(),
                     &unit_torque,
-                    0.0,
+                    Real::from(0.0),
                 );
             }
         }
@@ -372,7 +372,7 @@ impl JointConstraintHelper<Real> {
             LinkOrBodyRef::Fixed => (0, u32::MAX, true),
         };
 
-        let rhs_wo_bias = 0.0;
+        let rhs_wo_bias =Real::from(0.0);
 
         GenericJointConstraint {
             is_rigid_body1,
@@ -384,13 +384,13 @@ impl JointConstraintHelper<Real> {
             ndofs2,
             j_id2,
             joint_id,
-            impulse: 0.0,
-            impulse_bounds: [-Real::MAX, Real::MAX],
-            inv_lhs: 0.0,
+            impulse: Real::from(0.0),
+            impulse_bounds: [Real::from(-RawReal::MAX), Real::from(RawReal::MAX)],
+            inv_lhs: Real::from(0.0),
             rhs: rhs_wo_bias,
             rhs_wo_bias,
-            cfm_coeff: 0.0,
-            cfm_gain: 0.0,
+            cfm_coeff: Real::from(0.0),
+            cfm_gain: Real::from(0.0),
             writeback_id,
         }
     }
@@ -469,11 +469,11 @@ impl JointConstraintHelper<Real> {
         let max_enabled = limits[1] <= dist;
 
         let erp_inv_dt = params.joint_erp_inv_dt();
-        let rhs_bias = ((dist - limits[1]).max(0.0) - (limits[0] - dist).max(0.0)) * erp_inv_dt;
+        let rhs_bias = ((dist - limits[1]).max(Real::from(0.0)) - (limits[0] - dist).max(Real::from(0.0))) * erp_inv_dt;
         constraint.rhs += rhs_bias;
         constraint.impulse_bounds = [
-            min_enabled as u32 as Real * -Real::MAX,
-            max_enabled as u32 as Real * Real::MAX,
+            Real::from(min_enabled as u32 as RawReal) * Real::from(-RawReal::MAX),
+            Real::from(max_enabled as u32 as RawReal) * Real::from(RawReal::MAX),
         ];
 
         constraint
@@ -518,8 +518,8 @@ impl JointConstraintHelper<Real> {
             ang_jac2,
         );
 
-        let mut rhs_wo_bias = 0.0;
-        if motor_params.erp_inv_dt != 0.0 {
+        let mut rhs_wo_bias = Real::from(0.0);
+        if motor_params.erp_inv_dt != Real::from(0.0) {
             let dist = self.lin_err.dot(&lin_jac);
             rhs_wo_bias += (dist - motor_params.target_pos) * motor_params.erp_inv_dt;
         }
@@ -608,7 +608,7 @@ impl JointConstraintHelper<Real> {
             ang_jac,
         );
 
-        let s_limits = [(limits[0] / 2.0).sin(), (limits[1] / 2.0).sin()];
+        let s_limits = [Real::from((limits[0] / 2.0).sin()), Real::from((limits[1] / 2.0).sin())];
         #[cfg(feature = "dim2")]
         let s_ang = (self.ang_err.angle() / 2.0).sin();
         #[cfg(feature = "dim3")]
@@ -616,13 +616,13 @@ impl JointConstraintHelper<Real> {
         let min_enabled = s_ang <= s_limits[0];
         let max_enabled = s_limits[1] <= s_ang;
         let impulse_bounds = [
-            min_enabled as u32 as Real * -Real::MAX,
-            max_enabled as u32 as Real * Real::MAX,
+            Real::from(min_enabled as u32 as RawReal) * Real::from(-RawReal::MAX),
+            Real::from(max_enabled as u32 as RawReal) * Real::from(RawReal::MAX),
         ];
 
         let erp_inv_dt = params.joint_erp_inv_dt();
         let rhs_bias =
-            ((s_ang - s_limits[1]).max(0.0) - (s_limits[0] - s_ang).max(0.0)) * erp_inv_dt;
+            ((s_ang - s_limits[1]).max(Real::from(0.0)) - (s_limits[0] - s_ang).max(Real::from(0.0))) * erp_inv_dt;
 
         constraint.rhs += rhs_bias;
         constraint.impulse_bounds = impulse_bounds;
@@ -661,13 +661,13 @@ impl JointConstraintHelper<Real> {
             ang_jac,
         );
 
-        let mut rhs_wo_bias = 0.0;
-        if motor_params.erp_inv_dt != 0.0 {
+        let mut rhs_wo_bias = Real::from(0.0);
+        if motor_params.erp_inv_dt != Real::from(0.0) {
             #[cfg(feature = "dim2")]
             let s_ang_dist = (self.ang_err.angle() / 2.0).sin();
             #[cfg(feature = "dim3")]
             let s_ang_dist = self.ang_err.imag()[_motor_axis];
-            let s_target_ang = (motor_params.target_pos / 2.0).sin();
+            let s_target_ang = Real::from((motor_params.target_pos / 2.0).sin());
             rhs_wo_bias += utils::smallest_abs_diff_between_sin_angles(s_ang_dist, s_target_ang)
                 * motor_params.erp_inv_dt;
         }
@@ -712,7 +712,7 @@ impl JointConstraintHelper<Real> {
             c_j.inv_lhs = crate::rapier::utils::simd_inv(dot_jj + cfm_gain); // Don’t forget to update the inv_lhs.
             c_j.cfm_gain = cfm_gain;
 
-            if c_j.impulse_bounds != [-Real::MAX, Real::MAX] {
+            if c_j.impulse_bounds != [Real::from(-RawReal::MAX), Real::from(RawReal::MAX)] {
                 // Don't remove constraints with limited forces from the others
                 // because they may not deliver the necessary forces to fulfill
                 // the removed parts of other constraints.
@@ -739,7 +739,7 @@ impl JointConstraintHelper<Real> {
                     c_j.j_id1..c_j.j_id1 + 2 * (ndofs1 + ndofs2),
                 );
 
-                jac_i.axpy(-coeff, &jac_j, 1.0);
+                jac_i.axpy(-coeff, &jac_j, Real::from(1.0));
 
                 c_i.rhs_wo_bias -= c_j.rhs_wo_bias * coeff;
                 c_i.rhs -= c_j.rhs * coeff;

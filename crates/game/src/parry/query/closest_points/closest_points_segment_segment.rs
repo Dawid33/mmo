@@ -54,18 +54,18 @@ pub fn closest_points_segment_segment_with_locations_nD<const D: usize>(
     let mut s;
     let mut t;
 
-    let _eps = crate::parry::math::DEFAULT_EPSILON;
+    let _eps = Real::from(crate::parry::math::DEFAULT_EPSILON);
     if a <= _eps && e <= _eps {
-        s = 0.0;
-        t = 0.0;
+        s = Real::from(0.0);
+        t = Real::from(0.0);
     } else if a <= _eps {
-        s = 0.0;
-        t = na::clamp(f / e, 0.0, 1.0);
+        s = Real::from(0.0);
+        t = na::clamp(f / e, Real::from(0.0), Real::from(1.0));
     } else {
         let c = d1.dot(&r);
         if e <= _eps {
-            t = 0.0;
-            s = na::clamp(-c / a, 0.0, 1.0);
+            t = Real::from(0.0);
+            s = na::clamp(-c / a, Real::from(0.0), Real::from(1.0));
         } else {
             let b = d1.dot(&d2);
             let ae = a * e;
@@ -74,19 +74,19 @@ pub fn closest_points_segment_segment_with_locations_nD<const D: usize>(
 
             // Use absolute and ulps error to test collinearity.
             if denom > _eps && !ulps_eq!(ae, bb) {
-                s = na::clamp((b * f - c * e) / denom, 0.0, 1.0);
+                s = na::clamp((b * f - c * e) / denom, Real::from(0.0),Real::from(1.0));
             } else {
-                s = 0.0;
+                s = Real::from(0.0);
             }
 
             t = (b * s + f) / e;
 
-            if t < 0.0 {
-                t = 0.0;
-                s = na::clamp(-c / a, 0.0, 1.0);
-            } else if t > 1.0 {
-                t = 1.0;
-                s = na::clamp((b - c) / a, 0.0, 1.0);
+            if t < Real::from(0.0) {
+                t = Real::from(0.0);
+                s = na::clamp(-c / a, Real::from(0.0), Real::from(1.0));
+            } else if t > Real::from(1.0) {
+                t = Real::from(1.0);
+                s = na::clamp((b - c) / a, Real::from(0.0), Real::from(1.0));
             }
         }
     }
@@ -96,7 +96,7 @@ pub fn closest_points_segment_segment_with_locations_nD<const D: usize>(
     } else if s == 1.0 {
         SegmentPointLocation::OnVertex(1)
     } else {
-        SegmentPointLocation::OnEdge([1.0 - s, s])
+        SegmentPointLocation::OnEdge([Real::from(1.0) - s, s])
     };
 
     let loc2 = if t == 0.0 {
@@ -104,7 +104,7 @@ pub fn closest_points_segment_segment_with_locations_nD<const D: usize>(
     } else if t == 1.0 {
         SegmentPointLocation::OnVertex(1)
     } else {
-        SegmentPointLocation::OnEdge([1.0 - t, t])
+        SegmentPointLocation::OnEdge([Real::from(1.0) - t, t])
     };
 
     (loc1, loc2)

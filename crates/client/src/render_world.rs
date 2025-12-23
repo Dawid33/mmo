@@ -7,7 +7,9 @@ use std::{
 use crossbeam::{channel::Receiver, utils::Backoff};
 use derive_more::Debug;
 use game::{
-    na::{Matrix4, Perspective3}, parry::math::HashableReal
+    na::{Matrix4, Perspective3},
+    parry::math::HashableReal,
+    parry::math::Real,
 };
 use game::{
     ChunkMesh, EntityId, EntityKey, GameData, GameDataUpdate, IsometryReal, RegionId, UIElement,
@@ -388,11 +390,11 @@ impl RenderWorld {
                         .translation
                         .vector
                         .metric_distance(&true_pos.translation.vector)
-                        <= 0.1
+                        <= Real::from(0.1)
                     {
                         *pos = true_pos;
                     } else {
-                        *pos = pos.lerp_slerp(&true_pos, 0.5);
+                        *pos = pos.lerp_slerp(&true_pos, Real::from(0.5));
                     }
                     if *pos == true_pos {
                         false
@@ -411,12 +413,12 @@ impl RenderWorld {
                         .translation
                         .vector
                         .metric_distance(&cam.1.translation.vector)
-                        <= 0.0005
-                        && cam_bufs.3.rotation.angle_to(&cam.1.rotation) < 0.001
+                        <= Real::from(0.0005)
+                        && cam_bufs.3.rotation.angle_to(&cam.1.rotation) < Real::from(0.001)
                     {
                         cam_bufs.3 = cam.1;
                     } else {
-                        cam_bufs.3 = cam_bufs.3.lerp_slerp(&cam.1, 0.1);
+                        cam_bufs.3 = cam_bufs.3.lerp_slerp(&cam.1, Real::from(0.1));
                     }
                     queue.write_buffer(
                         &cam_bufs.1,

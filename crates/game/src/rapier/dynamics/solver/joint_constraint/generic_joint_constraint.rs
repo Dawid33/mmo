@@ -2,7 +2,7 @@ use crate::rapier::dynamics::solver::joint_constraint::joint_velocity_constraint
 use crate::rapier::dynamics::solver::joint_constraint::{JointConstraintHelper, JointSolverBody};
 use crate::rapier::dynamics::solver::solver_body::SolverBodies;
 use crate::rapier::dynamics::{GenericJoint, IntegrationParameters, JointGraphEdge, JointIndex};
-use crate::rapier::math::{DIM, Isometry, Real};
+use crate::rapier::math::{DIM, Isometry, Real, RawReal};
 use crate::rapier::prelude::SPATIAL_DIM;
 use na::{DVector, DVectorView, DVectorViewMut};
 
@@ -51,13 +51,13 @@ impl GenericJointConstraint {
             ndofs2: usize::MAX,
             j_id2: usize::MAX,
             joint_id: usize::MAX,
-            impulse: 0.0,
-            impulse_bounds: [-Real::MAX, Real::MAX],
-            inv_lhs: Real::MAX,
-            rhs: Real::MAX,
-            rhs_wo_bias: Real::MAX,
-            cfm_coeff: Real::MAX,
-            cfm_gain: Real::MAX,
+            impulse: Real::from(0.0),
+            impulse_bounds: [Real::from(-RawReal::MAX), Real::from(RawReal::MAX)],
+            inv_lhs: Real::from(RawReal::MAX),
+            rhs: Real::from(RawReal::MAX),
+            rhs_wo_bias: Real::from(RawReal::MAX),
+            cfm_coeff: Real::from(RawReal::MAX),
+            cfm_gain: Real::from(RawReal::MAX),
             writeback_id: WritebackId::Dof(0),
         }
     }
@@ -295,11 +295,11 @@ impl GenericJointConstraint {
 
         let mut solver_vel1 = self.solver_vel1_mut(solver_vels, generic_solver_vels);
         let wj1 = DVectorView::from_slice(&jacobians[self.wj_id1()..], self.ndofs1);
-        solver_vel1.axpy(delta_impulse, &wj1, 1.0);
+        solver_vel1.axpy(delta_impulse, &wj1, Real::from(1.0));
 
         let mut solver_vel2 = self.solver_vel2_mut(solver_vels, generic_solver_vels);
         let wj2 = DVectorView::from_slice(&jacobians[self.wj_id2()..], self.ndofs2);
-        solver_vel2.axpy(-delta_impulse, &wj2, 1.0);
+        solver_vel2.axpy(-delta_impulse, &wj2, Real::from(1.0));
     }
 
     pub fn writeback_impulses(&self, joints_all: &mut [JointGraphEdge]) {

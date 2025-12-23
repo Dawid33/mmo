@@ -15,7 +15,7 @@ pub fn line_toi_with_halfspace(
     let dpos = *halfspace_center - *line_origin;
     let denom = halfspace_normal.dot(line_dir);
 
-    if relative_eq!(denom, 0.0) {
+    if relative_eq!(denom, Real::from(0.0)) {
         None
     } else {
         Some(halfspace_normal.dot(&dpos) / denom)
@@ -30,7 +30,7 @@ pub fn ray_toi_with_halfspace(
     ray: &Ray,
 ) -> Option<Real> {
     if let Some(t) = line_toi_with_halfspace(center, normal, &ray.origin, &ray.dir) {
-        if t >= 0.0 {
+        if t >= Real::from(0.0) {
             return Some(t);
         }
     }
@@ -50,15 +50,20 @@ impl RayCast for HalfSpace {
 
         let dot_normal_dpos = self.normal.dot(&dpos.coords);
 
-        if solid && dot_normal_dpos > 0.0 {
+        if solid && dot_normal_dpos > Real::from(0.0) {
             // The ray is inside of the solid half-space.
-            return Some(RayIntersection::new(0.0, na::zero(), FeatureId::Face(0)));
+            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
+            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
         }
 
         let t = dot_normal_dpos / self.normal.dot(&ray.dir);
 
-        if t >= 0.0 && t <= max_time_of_impact {
-            let n = if dot_normal_dpos > 0.0 {
+            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
+            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
+            if t >= Real::from(0.0) && t <= max_time_of_impact {
+            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
+            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
+            let n = if dot_normal_dpos > Real::from(0.0) {
                 -self.normal
             } else {
                 self.normal

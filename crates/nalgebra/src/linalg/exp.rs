@@ -444,7 +444,7 @@ where
 fn solve_p_q<T, D>(u: OMatrix<T, D, D>, v: OMatrix<T, D, D>) -> OMatrix<T, D, D>
 where
     T: ComplexField,
-    D: DimMin<D, Output = D>,
+    D: DimMin<D, Output = D> + std::hash::Hash,
     DefaultAllocator: Allocator<D, D> + Allocator<DimMinimum<D, D>>,
 {
     let p = &u + &v;
@@ -476,7 +476,7 @@ where
 
 impl<T: ComplexField + MinMax, D> OMatrix<T, D, D>
 where
-    D: DimMin<D, Output = D>,
+    D: DimMin<D, Output = D> + std::hash::Hash,
     DefaultAllocator: Allocator<D, D>
         + Allocator<DimMinimum<D, D>>
         + Allocator<D>

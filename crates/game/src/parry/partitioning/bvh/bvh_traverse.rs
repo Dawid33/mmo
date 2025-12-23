@@ -1,5 +1,5 @@
 use super::BvhNode;
-use crate::parry::math::Real;
+use crate::parry::math::{Real, RawReal};
 use crate::parry::partitioning::Bvh;
 use smallvec::SmallVec;
 
@@ -372,7 +372,7 @@ impl Bvh {
             }
 
             let mut found_next = false;
-            if left_score < best_cost && left_score != Real::MAX {
+            if left_score < best_cost && left_score != Real::from(RawReal::MAX) {
                 if left.is_leaf() {
                     if let Some(primitive_val) = leaf_cost(left.children, best_cost) {
                         let primitive_score = primitive_val.cost();
@@ -388,7 +388,7 @@ impl Bvh {
                 }
             }
 
-            if right_score < best_cost && right_score != Real::MAX {
+            if right_score < best_cost && right_score != Real::from(RawReal::MAX) {
                 if right.is_leaf() {
                     if let Some(primitive_val) = leaf_cost(right.children, best_cost) {
                         let primitive_score = primitive_val.cost();

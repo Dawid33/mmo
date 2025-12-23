@@ -214,7 +214,7 @@ impl OctantPattern {
 /// println!("Voxel type: {:?}", state.voxel_type());
 /// # }
 /// ```
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct VoxelState(pub(super) u8);
 
@@ -494,7 +494,7 @@ pub struct VoxelData {
 /// - [`VoxelType`]: Classification of voxels by their topology
 /// - [`VoxelData`]: Complete information about a single voxel
 /// - [`crate::parry::transformation::voxelization`]: Convert meshes to voxels
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct Voxels {
     /// A BVH of chunk keys.
@@ -734,7 +734,7 @@ impl Voxels {
 
         // NOTE that we shift the AABB’s bounds so the endpoint matches a voxel center
         //      to avoid rounding errors.
-        let half_sz = self.voxel_size() / 2.0;
+        let half_sz = self.voxel_size() / Real::from(2.0);
         let mins = self.voxel_at_point(aabb.mins + half_sz);
         // + 1 because the range is semi-open.
         let maxs = self.voxel_at_point(aabb.maxs - half_sz) + Vector::repeat(1);
@@ -772,7 +772,7 @@ impl Voxels {
     /// The AABB of the voxel with the given quantized `key`.
     pub fn voxel_aabb(&self, key: Point<i32>) -> Aabb {
         let center = self.voxel_center(key);
-        let hext = self.voxel_size / 2.0;
+        let hext = self.voxel_size / Real::from(2.0);
         Aabb::from_half_extents(center, hext)
     }
 
@@ -921,12 +921,12 @@ impl Voxels {
         let mins = aabb
             .mins
             .coords
-            .zip_map(&self.voxel_size, |m, sz| (m / sz).floor() * m)
+            .zip_map(&self.voxel_size, |m, sz| Real::from((m / sz).floor()) * m)
             .into();
         let maxs = aabb
             .maxs
             .coords
-            .zip_map(&self.voxel_size, |m, sz| (m / sz).ceil() * m)
+            .zip_map(&self.voxel_size, |m, sz| Real::from((m / sz).ceil()) * m)
             .into();
         Aabb { mins, maxs }
     }
@@ -1044,7 +1044,7 @@ impl Voxels {
     /// # }
     /// ```
     pub fn voxel_center(&self, key: Point<i32>) -> Point<Real> {
-        (key.cast::<Real>() + Vector::repeat(0.5))
+        (key.cast::<Real>() + Vector::repeat(Real::from(0.5)))
             .coords
             .component_mul(&self.voxel_size)
             .into()

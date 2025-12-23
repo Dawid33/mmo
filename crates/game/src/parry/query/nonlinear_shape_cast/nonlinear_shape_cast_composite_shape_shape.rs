@@ -1,4 +1,4 @@
-use crate::parry::math::Real;
+use crate::parry::math::{Real, RawReal};
 use crate::parry::partitioning::BvhNode;
 use crate::parry::query::{
     self, details::NonlinearShapeCastMode, NonlinearRigidMotion, QueryDispatcher, ShapeCastHit,
@@ -47,7 +47,7 @@ impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
                     NonlinearShapeCastMode::StopAtPenetration,
                 )
                 .map(|hit| hit.time_of_impact)
-                .unwrap_or(Real::MAX)
+                .unwrap_or(Real::from(RawReal::MAX))
             },
             |part_id, _| {
                 self.0

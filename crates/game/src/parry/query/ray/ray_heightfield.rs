@@ -137,13 +137,13 @@ impl RayCast for HeightField {
             Some(cell) => cell,
             // None may happen due to slight numerical errors.
             None => {
-                let i = if ray.origin.z > 0.0 {
+                let i = if ray.origin.z > Real::from(0.0) {
                     self.nrows() - 1
                 } else {
                     0
                 };
 
-                let j = if ray.origin.x > 0.0 {
+                let j = if ray.origin.x > Real::from(0.0) {
                     self.ncols() - 1
                 } else {
                     0
@@ -190,20 +190,20 @@ impl RayCast for HeightField {
             /*
              * Find the next cell to cast the ray on.
              */
-            let (toi_x, right) = if ray.dir.x > 0.0 {
+            let (toi_x, right) = if ray.dir.x > Real::from(0.0) {
                 let x = self.x_at(cell.1 + 1);
                 ((x - ray.origin.x) / ray.dir.x, true)
-            } else if ray.dir.x < 0.0 {
+            } else if ray.dir.x < Real::from(0.0) {
                 let x = self.x_at(cell.1);
                 ((x - ray.origin.x) / ray.dir.x, false)
             } else {
                 (Real::max_value(), false)
             };
 
-            let (toi_z, down) = if ray.dir.z > 0.0 {
+            let (toi_z, down) = if ray.dir.z > Real::from(0.0) {
                 let z = self.z_at(cell.0 + 1);
                 ((z - ray.origin.z) / ray.dir.z, true)
-            } else if ray.dir.z < 0.0 {
+            } else if ray.dir.z < Real::from(0.0) {
                 let z = self.z_at(cell.0);
                 ((z - ray.origin.z) / ray.dir.z, false)
             } else {
@@ -214,7 +214,7 @@ impl RayCast for HeightField {
                 break;
             }
 
-            if toi_x >= 0.0 && toi_x < toi_z {
+            if toi_x >= Real::from(0.0) && toi_x < toi_z {
                 if right {
                     cell.1 += 1
                 } else if cell.1 > 0 {
@@ -222,7 +222,7 @@ impl RayCast for HeightField {
                 } else {
                     break;
                 }
-            } else if toi_z >= 0.0 {
+            } else if toi_z >= Real::from(0.0) {
                 if down {
                     cell.0 += 1
                 } else if cell.0 > 0 {

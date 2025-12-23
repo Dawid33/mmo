@@ -16,7 +16,7 @@ use na::{SVector, Vector2};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
     archive(check_bytes)
 )]
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub(crate) struct VoxelsShapeSubDetector {
     pub manifold_id: usize,
     pub selected_contacts: u32,
@@ -27,7 +27,7 @@ pub(crate) struct VoxelsShapeSubDetector {
 //       It is different from the trimesh cash though. Which one is better?
 /// A workspace for collision-detection against voxels shape.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Hash)]
 pub struct VoxelsShapeContactManifoldsWorkspace<const N: usize> {
     pub(crate) timestamp: bool,
     pub(crate) sub_detectors: HashMap<SVector<u32, N>, VoxelsShapeSubDetector>,
@@ -123,13 +123,13 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
     // TODO: avoid reallocating the new `manifolds` vec at each step.
     let mut old_manifolds = core::mem::take(manifolds);
 
-    let radius1 = voxels1.voxel_size() / 2.0;
+    let radius1 = voxels1.voxel_size() / Real::from(2.0);
 
     let aabb1 = voxels1.local_aabb();
     let aabb2_1 = shape2.compute_aabb(pos12);
     let domain2_1 = Aabb {
-        mins: aabb2_1.mins - radius1 * 10.0,
-        maxs: aabb2_1.maxs + radius1 * 10.0,
+        mins: aabb2_1.mins - radius1 * Real::from(10.0),
+        maxs: aabb2_1.maxs + radius1 * Real::from(10.0),
     };
 
     if let Some(intersection_aabb1) = aabb1.intersection(&aabb2_1) {
@@ -255,7 +255,7 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
             /*
              * Filter-out points that don’t belong to this block.
              */
-            let test_voxel = Cuboid::new(radius1 + Vector::repeat(1.0e-2));
+            let test_voxel = Cuboid::new(radius1 + Vector::repeat(Real::from(1.0e-2)));
             let penetration_dir1 = if flipped {
                 manifold.local_n2
             } else {
@@ -263,7 +263,7 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
             };
 
             for (i, pt) in manifold.points.iter().enumerate() {
-                if pt.dist < 0.0 {
+                if pt.dist < Real::from(0.0) {
                     // If this is a penetration, double-check that we are not hitting the
                     // interior of the infinitely expanded canonical shape by checking if
                     // the opposite normal had led to a better vector.
@@ -373,7 +373,7 @@ impl CanonicalVoxelShape {
         vox: &VoxelData,
         domain2_1: Aabb,
     ) -> (Point<Real>, Cuboid) {
-        let radius = voxels.voxel_size() / 2.0;
+        let radius = voxels.voxel_size() / Real::from(2.0);
         let mut canonical_mins = voxels.voxel_center(self.range[0]);
         let mut canonical_maxs = voxels.voxel_center(self.range[1]);
 
@@ -387,7 +387,7 @@ impl CanonicalVoxelShape {
             }
         }
 
-        let canonical_half_extents = (canonical_maxs - canonical_mins) / 2.0 + radius;
+        let canonical_half_extents = (canonical_maxs - canonical_mins) / Real::from(2.0) + radius;
         let canonical_center = na::center(&canonical_mins, &canonical_maxs);
         let canonical_cube = Cuboid::new(canonical_half_extents);
 

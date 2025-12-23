@@ -32,8 +32,8 @@ impl PointQuery for Ball {
     fn distance_to_local_point(&self, pt: &Point<Real>, solid: bool) -> Real {
         let dist = pt.coords.norm() - self.radius;
 
-        if solid && dist < 0.0 {
-            0.0
+        if solid && dist < Real::from(0.0) {
+            Real::from(0.0)
         } else {
             dist
         }

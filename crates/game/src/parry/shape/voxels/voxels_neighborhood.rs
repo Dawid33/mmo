@@ -144,8 +144,8 @@ impl Voxels {
         for chunk_key in &self.chunk_keys {
             let mut aabb = VoxelsChunk::aabb(chunk_key, &self.voxel_size);
             // Enlarge by one-half voxel so we detect cases where we also detect neighbor chunks from `other`.
-            aabb.mins -= self.voxel_size / 2.0;
-            aabb.maxs += self.voxel_size / 2.0;
+            aabb.mins -= self.voxel_size / Real::from(2.0);
+            aabb.maxs += self.voxel_size / Real::from(2.0);
             // Shift to the local coordinate system of `other`.
             let shifted_aabb = aabb.translated(&-origin_shift_worldspace);
 

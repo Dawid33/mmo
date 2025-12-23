@@ -4,7 +4,7 @@ use super::{
 use crate::rapier::dynamics::solver::solver_body::SolverBodies;
 use crate::rapier::dynamics::{IntegrationParameters, MultibodyJointSet, RigidBodySet};
 use crate::rapier::geometry::{ContactManifold, ContactManifoldIndex, SimdSolverContact};
-use crate::rapier::math::{DIM, MAX_MANIFOLD_POINTS, Point, Real, SIMD_WIDTH, SimdReal, Vector};
+use crate::rapier::math::{DIM, MAX_MANIFOLD_POINTS, Point, Real, RawReal, SIMD_WIDTH, SimdReal, Vector};
 #[cfg(feature = "dim2")]
 use crate::rapier::utils::SimdBasis;
 use crate::rapier::utils::{self, SimdAngularInertia, SimdCross, SimdDot, SimdRealCopy};
@@ -95,7 +95,7 @@ impl ContactWithTwistFrictionBuilder {
                 array![|ii| &manifolds[ii].data.solver_contacts[l..num_active_contacts]];
             let num_points = manifold_points[0].len().min(MAX_MANIFOLD_POINTS);
 
-            let inv_num_points = SimdReal::splat(1.0 / num_points as Real);
+            let inv_num_points = SimdReal::splat(Real::from(1.0) / Real::from(num_points as RawReal));
 
             let constraint = &mut out_constraints[l / MAX_MANIFOLD_POINTS];
             let builder = &mut out_builders[l / MAX_MANIFOLD_POINTS];
@@ -244,7 +244,7 @@ impl ContactWithTwistFrictionBuilder {
             {
                 // TODO PERF: we already applied the inverse inertia to the torque
                 //            dire before. Could we reuse the value instead of retransforming?
-                constraint.tangent_part.r[2] = SimdReal::splat(2.0)
+                constraint.tangent_part.r[2] = SimdReal::splat(Real::from(2.0))
                     * (constraint.tangent_part.ii_torque_dir1[0]
                         .gdot(constraint.tangent_part.torque_dir1[1])
                         + constraint.tangent_part.ii_torque_dir2[0]
@@ -505,7 +505,7 @@ impl ContactWithTwistFriction {
     }
 
     pub fn remove_cfm_and_bias_from_rhs(&mut self) {
-        self.cfm_factor = SimdReal::splat(1.0);
+        self.cfm_factor = SimdReal::splat(Real::from(1.0));
         for elt in &mut self.normal_part {
             elt.rhs = elt.rhs_wo_bias;
         }

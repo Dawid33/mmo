@@ -1,4 +1,4 @@
-use crate::parry::math::Real;
+use crate::parry::math::{Real, RawReal};
 use crate::parry::shape::Cylinder;
 use crate::parry::transformation::utils;
 use alloc::vec::Vec;
@@ -18,7 +18,7 @@ impl Cylinder {
 /// Generates a cylinder with unit height and diameter.
 fn unit_cylinder(nsubdiv: u32) -> (Vec<Point3<Real>>, Vec<[u32; 3]>) {
     let two_pi = Real::two_pi();
-    let invsubdiv = 1.0 / (nsubdiv as Real);
+    let invsubdiv = Real::from(1.0 / (nsubdiv as RawReal));
     let dtheta = two_pi * invsubdiv;
     let mut coords = Vec::new();
     let mut indices = Vec::new();

@@ -7,7 +7,8 @@ use crate::base::{DefaultAllocator, SquareMatrix};
 
 use crate::linalg::LU;
 
-impl<T: ComplexField, D: DimMin<D, Output = D>, S: Storage<T, D, D>> SquareMatrix<T, D, S> {
+impl<T: ComplexField, D: DimMin<D, Output = D>, S: Storage<T, D, D>> SquareMatrix<T, D, S>
+    where D: std::hash::Hash {
     /// Computes the matrix determinant.
     ///
     /// If the matrix has a dimension larger than 3, an LU decomposition is used.

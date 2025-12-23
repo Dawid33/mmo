@@ -1,7 +1,7 @@
 use super::bvh_tree::{BvhNodeIndex, BvhNodeWide};
 use super::BvhNode;
 use crate::parry::bounding_volume::{Aabb, BoundingVolume};
-use crate::parry::math::{Real, Vector};
+use crate::parry::math::{Real, Vector, RawReal};
 use crate::parry::partitioning::Bvh;
 use alloc::vec;
 
@@ -124,7 +124,7 @@ impl Bvh {
     /// [`refit`]: Self::refit
     /// [`optimize_incremental`]: Self::optimize_incremental
     pub fn insert(&mut self, aabb: Aabb, leaf_index: u32) {
-        self.insert_with_change_detection(aabb, leaf_index, 0.0)
+        self.insert_with_change_detection(aabb, leaf_index, 0.0.into())
     }
 
     /// Inserts a leaf into this BVH, or updates it if already exists.
@@ -141,7 +141,7 @@ impl Bvh {
         if let Some(leaf) = self.leaf_node_indices.get(leaf_index as usize) {
             let node = &mut self.nodes[*leaf];
 
-            if change_detection_margin > 0.0 {
+            if change_detection_margin > 0.0.into() {
                 if !node.contains_aabb(&aabb) {
                     node.mins = aabb.mins - Vector::repeat(change_detection_margin);
                     node.maxs = aabb.maxs + Vector::repeat(change_detection_margin);
@@ -215,7 +215,7 @@ impl Bvh {
         if let Some(leaf) = self.leaf_node_indices.get(leaf_index as usize) {
             let node = &mut self.nodes[*leaf];
 
-            if change_detection_margin > 0.0 {
+            if change_detection_margin > 0.0.into() {
                 if !node.contains_aabb(&aabb) {
                     node.mins = aabb.mins - Vector::repeat(change_detection_margin);
                     node.maxs = aabb.maxs + Vector::repeat(change_detection_margin);
@@ -291,9 +291,9 @@ impl Bvh {
             //       parent’s volume since both compared costs use the same factor so
             //       ignoring it doesn’t affect the comparison.
             let left_cost =
-                left_merged_vol * (left_count + 1) as Real + right_vol * right_count as Real;
+                left_merged_vol * (left_count + 1) as RawReal + right_vol * right_count as RawReal;
             let right_cost =
-                right_merged_vol * (right_count + 1) as Real + left_vol * left_count as Real;
+                right_merged_vol * (right_count + 1) as RawReal + left_vol * left_count as RawReal;
 
             // Insert into the branch with lowest post-insertion SAH cost.
             // If the costs are equal, just pick the branch with the smallest leaf count.
@@ -376,7 +376,7 @@ impl Bvh {
         let right = &node.right;
 
         let curr_score =
-            left.volume() * left.leaf_count() as Real + right.volume() * right.leaf_count() as Real;
+            left.volume() * left.leaf_count() as RawReal + right.volume() * right.leaf_count() as RawReal;
 
         macro_rules! eval_costs {
             ($left: ident, $right: ident) => {
@@ -387,15 +387,15 @@ impl Bvh {
 
                     // New SAH score after transforming [{left_child, right_child}, right]
                     // into [left_child, {right_child, right}].
-                    let new_score1 = left_child.volume() * left_child.leaf_count() as Real
+                    let new_score1 = left_child.volume() * left_child.leaf_count() as RawReal
                         + right_child.merged_volume($right)
-                            * (right_child.leaf_count() + $right.leaf_count()) as Real;
+                            * (right_child.leaf_count() + $right.leaf_count()) as RawReal;
 
                     // New SAH score after transforming [{left_child, right_child}, right]
                     // into [right_child, {left_child, right}].
-                    let new_score2 = right_child.volume() * right_child.leaf_count() as Real
+                    let new_score2 = right_child.volume() * right_child.leaf_count() as RawReal
                         + left_child.merged_volume($right)
-                            * (left_child.leaf_count() + $right.leaf_count()) as Real;
+                            * (left_child.leaf_count() + $right.leaf_count()) as RawReal;
 
                     if new_score1 < new_score2 {
                         (new_score1 - curr_score, true)
@@ -403,7 +403,7 @@ impl Bvh {
                         (new_score2 - curr_score, false)
                     }
                 } else {
-                    (Real::MAX, false)
+                    (Real::from(RawReal::MAX), false)
                 }
             };
         }
@@ -422,7 +422,7 @@ impl Bvh {
         // For left rotation.
         let (rotation_score1, left_child_moves_up1) = eval_costs!(right, left);
 
-        if rotation_score0 < 0.0 || rotation_score1 < 0.0 {
+        if rotation_score0 < 0.0.into() || rotation_score1 < 0.0.into() {
             // At least one of the rotations is worth it, apply the one with
             // the best impact on SAH scoring.
             if rotation_score0 < rotation_score1 {

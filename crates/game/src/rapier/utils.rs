@@ -1,12 +1,13 @@
 //! Miscellaneous utilities.
 
 use crate::parry::utils::SdpMatrix3;
-use crate::rapier::math::Real;
+use crate::rapier::math::{Real, RawReal};
 use crate::HashableReal;
 use na::{
     Matrix1, Matrix2, Matrix3, RealField, RowVector2, Scalar, SimdRealField, SimdSigned,
     UnitComplex, UnitQuaternion, Vector1, Vector2, Vector3,
 };
+use ordered_float::OrderedFloat;
 use std::ops::IndexMut;
 
 #[cfg(feature = "simd-is-enabled")]
@@ -20,11 +21,10 @@ use crate::rapier::{
 /// This includes `f32`, `f64` and their related SIMD types.
 pub trait SimdRealCopy: SimdRealField<Element = Real> + Copy {}
 impl SimdRealCopy for Real {}
-impl SimdRealCopy for HashableReal {}
 #[cfg(feature = "simd-is-enabled")]
 impl SimdRealCopy for SimdReal {}
 
-const INV_EPSILON: Real = 1.0e-20;
+const INV_EPSILON: Real = OrderedFloat(1.0e-20);
 
 pub(crate) fn inv(val: HashableReal) -> HashableReal {
     if (-INV_EPSILON..=INV_EPSILON).contains(&val) {
@@ -48,9 +48,9 @@ pub trait SimdSign<Rhs>: Sized {
 
 impl SimdSign<Real> for Real {
     fn copy_sign_to(self, to: Self) -> Self {
-        const MINUS_ZERO: Real = -0.0;
+        const MINUS_ZERO: Real = OrderedFloat(-0.0);
         let signbit = MINUS_ZERO.to_bits();
-        Real::from_bits((signbit & self.to_bits()) | ((!signbit) & to.to_bits()))
+        Real::from(RawReal::from_bits((signbit & self.to_bits()) | ((!signbit) & to.to_bits())))
     }
 }
 
@@ -192,12 +192,12 @@ impl SimdCrossMatrix for Real {
 
     #[inline]
     fn gcross_matrix(self) -> Matrix2<Real> {
-        Matrix2::new(0.0, -self, self, 0.0)
+        Matrix2::new(Real::from(0.0), -self, self, Real::from(0.0))
     }
 
     #[inline]
     fn gcross_matrix_tr(self) -> Matrix2<Real> {
-        Matrix2::new(0.0, self, -self, 0.0)
+        Matrix2::new(Real::from(0.0), self, -self, Real::from(0.0))
     }
 }
 
@@ -333,7 +333,7 @@ impl<N: SimdRealCopy> SimdQuat<N> for UnitComplex<N> {
     type Result = Matrix1<N>;
 
     fn diff_conj1_2(&self, rhs: &Self) -> Self::Result {
-        let two: N = N::splat(2.0);
+        let two: N = N::splat(Real::from(2.0));
         Matrix1::new((self.im * rhs.im + self.re * rhs.re) * two)
     }
 }
@@ -342,7 +342,7 @@ impl<N: SimdRealCopy> SimdQuat<N> for UnitQuaternion<N> {
     type Result = Matrix3<N>;
 
     fn diff_conj1_2(&self, rhs: &Self) -> Self::Result {
-        let half = N::splat(0.5);
+        let half = N::splat(Real::from(0.5));
         let v1 = self.imag();
         let v2 = rhs.imag();
         let w1 = self.w;
@@ -590,7 +590,7 @@ pub fn smallest_abs_diff_between_sin_angles<N: SimdRealCopy>(a: N, b: N) -> N {
     // Select the smallest path among the two angles to reach the target.
     let s_err = a - b;
     let sgn = s_err.simd_signum();
-    let s_err_complement = s_err - sgn * N::splat(2.0);
+    let s_err_complement = s_err - sgn * N::splat(Real::from(2.0));
     let s_err_is_smallest = s_err.simd_abs().simd_lt(s_err_complement.simd_abs());
     s_err.select(s_err_is_smallest, s_err_complement)
 }

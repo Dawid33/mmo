@@ -10,7 +10,7 @@ impl PointQuery for Cone {
         let mut dir_from_basis_center = pt.coords.xz();
         let planar_dist_from_basis_center = dir_from_basis_center.normalize_mut();
 
-        if planar_dist_from_basis_center <= crate::parry::math::DEFAULT_EPSILON {
+        if planar_dist_from_basis_center <= Real::from(crate::parry::math::DEFAULT_EPSILON) {
             dir_from_basis_center = na::Vector2::x();
         }
 
@@ -27,12 +27,12 @@ impl PointQuery for Cone {
 
         // Project on the conic side.
         // TODO: we could solve this in 2D using the plane passing through the cone axis and the conic_side_segment to save some computation.
-        let apex_point = Point::new(0.0, self.half_height, 0.0);
+        let apex_point = Point::new(Real::from(0.0), Real::from(self.half_height), Real::from(0.0));
         let conic_side_segment = Segment::new(apex_point, projection_on_basis_circle);
         let conic_side_segment_dir = conic_side_segment.scaled_direction();
         let mut proj = conic_side_segment.project_local_point(pt, true);
 
-        let apex_to_basis_center = Vector::new(0.0, -2.0 * self.half_height, 0.0);
+        let apex_to_basis_center = Vector::new(Real::from(0.0), Real::from(-2.0) * self.half_height, Real::from(0.0));
 
         // Now determine if the point is inside of the cone.
         if pt.y >= -self.half_height
@@ -40,7 +40,7 @@ impl PointQuery for Cone {
             && conic_side_segment_dir
                 .cross(&(pt - apex_point))
                 .dot(&conic_side_segment_dir.cross(&apex_to_basis_center))
-                >= 0.0
+                >= Real::from(0.0)
         {
             if solid {
                 PointProjection::new(true, *pt)

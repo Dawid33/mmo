@@ -8,7 +8,7 @@ use std::ops::Deref;
 /// It is possible to bypass the wrapper with `.as_mut_internal`. But this should only
 /// be done for internal engine usage (like the physics pipeline).
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub struct ModifiedObjects<Handle, Object>(Vec<Handle>, PhantomData<Object>);
 
 impl<Handle, Object> Default for ModifiedObjects<Handle, Object> {

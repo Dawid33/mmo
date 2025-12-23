@@ -158,7 +158,7 @@
 //! - [`convex_hull`](crate::parry::transformation::convex_hull) - Convex hull computation
 //! - [`TriMesh`](crate::parry::shape::TriMesh) - Triangle mesh shape
 
-use crate::parry::math::{Isometry, Point, Real, Vector};
+use crate::parry::math::{Isometry, Point, Real, RawReal, Vector};
 use na::ComplexField;
 use alloc::vec::Vec;
 #[cfg(feature = "dim3")]
@@ -705,10 +705,10 @@ pub fn push_arc(
 ) {
     assert!(nsubdivs > 0);
     if let (Some((start_dir, start_len)), Some((end_dir, end_len))) = (
-        na::Unit::try_new_and_get(start - center, 0.0),
-        na::Unit::try_new_and_get(end - center, 0.0),
+        na::Unit::try_new_and_get(start - center, 0.0.into()),
+        na::Unit::try_new_and_get(end - center, 0.0.into()),
     ) {
-        let len_inc = (end_len - start_len) / nsubdivs as Real;
+        let len_inc = (end_len - start_len) / nsubdivs as RawReal;
 
         #[cfg(feature = "dim2")]
         let rot = Some(na::UnitComplex::scaled_rotation_between_axis(
@@ -721,7 +721,7 @@ pub fn push_arc(
         let rot = na::UnitQuaternion::scaled_rotation_between_axis(
             &start_dir,
             &end_dir,
-            1.0 / nsubdivs as Real,
+            Real::from(1.0 / nsubdivs as RawReal),
         );
 
         if let Some(rot) = rot {
@@ -764,11 +764,11 @@ pub fn apply_revolution(
     out_idx: &mut Vec<[u32; 2]>,
 ) {
     use na::RealField;
-    let ang_increment = Real::two_pi() / (nsubdivs as Real);
+    let ang_increment = Real::two_pi() / (nsubdivs as RawReal);
     let angles = [
-        ang_increment * (nsubdivs / 4) as Real,
-        ang_increment * (nsubdivs / 2) as Real,
-        ang_increment * ((3 * nsubdivs) / 4) as Real,
+        ang_increment * (nsubdivs / 4) as RawReal,
+        ang_increment * (nsubdivs / 2) as RawReal,
+        ang_increment * ((3 * nsubdivs) / 4) as RawReal,
     ];
 
     let half_profile_len = out_vtx.len();

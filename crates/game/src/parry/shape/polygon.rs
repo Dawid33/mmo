@@ -52,7 +52,7 @@ impl Polygon {
     }
 
     pub(crate) fn support_point(&self, dir: &Vector<Real>) -> usize {
-        let mut best_dot = -Real::MAX;
+        let mut best_dot = -RawReal::MAX;
         let mut best_i = 0;
 
         for (i, pt) in self.vertices.iter().enumerate() {
@@ -67,7 +67,7 @@ impl Polygon {
     }
 
     pub(crate) fn support_face(&self, dir: &Vector<Real>) -> usize {
-        let mut max_dot = -Real::MAX;
+        let mut max_dot = -RawReal::MAX;
         let mut max_dot_i = 0;
 
         for (i, normal) in self.normals.iter().enumerate() {

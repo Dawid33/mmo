@@ -1,5 +1,5 @@
 use crate::parry::bounding_volume::Aabb;
-use crate::parry::math::{Point, Real, Vector, DIM};
+use crate::parry::math::{Point, Real, RawReal, Vector, DIM};
 use crate::parry::query::Ray;
 use crate::parry::shape::Segment;
 use num::{Bounded, Zero};
@@ -12,7 +12,7 @@ impl Aabb {
     pub fn clip_segment(&self, pa: &Point<Real>, pb: &Point<Real>) -> Option<Segment> {
         let ab = pb - pa;
         clip_aabb_line(self, pa, &ab)
-            .map(|clip| Segment::new(pa + ab * (clip.0).0.max(0.0), pa + ab * (clip.1).0.min(1.0)))
+            .map(|clip| Segment::new(pa + ab * (clip.0).0.max(Real::from(0.0)), pa + ab * (clip.1).0.min(Real::from(1.0))))
     }
 
     /// Computes the parameters of the two intersection points between a line and this Aabb.
@@ -48,10 +48,10 @@ impl Aabb {
                 let t0 = clip.0;
                 let t1 = clip.1;
 
-                if t1 < 0.0 {
+                if t1 < Real::from(0.0) {
                     None
                 } else {
-                    Some((t0.max(0.0), t1))
+                    Some((t0.max(Real::from(0.0)), t1))
                 }
             })
     }
@@ -94,7 +94,7 @@ pub fn clip_aabb_line(
                 return None;
             }
         } else {
-            let denom = 1.0 / dir[i];
+            let denom = Real::from(1.0) / dir[i];
             let flip_sides;
             let mut inter_with_near_halfspace = (aabb.mins[i] - origin[i]) * denom;
             let mut inter_with_far_halfspace = (aabb.maxs[i] - origin[i]) * denom;
@@ -133,7 +133,7 @@ pub fn clip_aabb_line(
                 far_diag = true;
             }
 
-            if tmax < 0.0 || tmin > tmax {
+            if tmax < Real::from(0.0) || tmin > tmax {
                 return None;
             }
         }
@@ -146,16 +146,16 @@ pub fn clip_aabb_line(
         // zero or NaN. Return `Some` only if the ray starts inside the
         // aabb.
         if near_side == 0 {
-            let zero = (0.0, Vector::zeros(), 0);
+            let zero = (Real::from(0.0), Vector::zeros(), 0);
             return aabb.contains_local_point(origin).then_some((zero, zero));
         }
 
         let mut normal = Vector::zeros();
 
         if near_side < 0 {
-            normal[(-near_side - 1) as usize] = 1.0;
+            normal[(-near_side - 1) as usize] = Real::from(1.0);
         } else {
-            normal[(near_side - 1) as usize] = -1.0;
+            normal[(near_side - 1) as usize] = Real::from(-1.0);
         }
 
         (tmin, normal, near_side)
@@ -168,16 +168,16 @@ pub fn clip_aabb_line(
         // zero or NaN. Return `Some` only if the ray starts inside the
         // aabb.
         if far_side == 0 {
-            let zero = (0.0, Vector::zeros(), 0);
+            let zero = (Real::from(0.0), Vector::zeros(), 0);
             return aabb.contains_local_point(origin).then_some((zero, zero));
         }
 
         let mut normal = Vector::zeros();
 
         if far_side < 0 {
-            normal[(-far_side - 1) as usize] = -1.0;
+            normal[(-far_side - 1) as usize] = Real::from(-1.0);
         } else {
-            normal[(far_side - 1) as usize] = 1.0;
+            normal[(far_side - 1) as usize] = Real::from(1.0);
         }
 
         (tmax, normal, far_side)
@@ -198,7 +198,7 @@ mod test {
         )
         .is_some());
         assert!(clip_aabb_line(
-            &Aabb::new(Vector::repeat(1.0).into(), Vector::repeat(2.0).into()),
+            &Aabb::new(Vector::repeat(Real::from(1.0)).into(), Vector::repeat(Real::from(2.0)).into()),
             &Point::origin(),
             &Vector::zeros(),
         )
@@ -208,12 +208,12 @@ mod test {
     #[test]
     pub fn clip_empty_aabb_segment() {
         let aabb_origin = Aabb::new(Point::origin(), Point::origin());
-        let aabb_shifted = Aabb::new(Vector::repeat(1.0).into(), Vector::repeat(2.0).into());
+        let aabb_shifted = Aabb::new(Vector::repeat(Real::from(1.0)).into(), Vector::repeat(Real::from(2.0)).into());
         assert!(aabb_origin
-            .clip_segment(&Point::origin(), &Point::from(Vector::repeat(Real::NAN)))
+            .clip_segment(&Point::origin(), &Point::from(Vector::repeat(Real::from(RawReal::NAN))))
             .is_some());
         assert!(aabb_shifted
-            .clip_segment(&Point::origin(), &Point::from(Vector::repeat(Real::NAN)))
+            .clip_segment(&Point::origin(), &Point::from(Vector::repeat(Real::from(RawReal::NAN))))
             .is_none());
     }
 }

@@ -75,7 +75,7 @@ use rkyv::{bytecheck, CheckBytes};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
     archive(as = "Self")
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(PartialEq, Debug, Copy, Clone, Hash)]
 #[repr(C)]
 pub struct Cone {
     /// Half the total height of the cone.
@@ -140,7 +140,7 @@ impl Cone {
     ) -> Option<Either<Self, super::ConvexPolyhedron>> {
         // NOTE: if the y scale is negative, the result cone points downwards,
         //       which can’t be represented with this Cone (without a transform).
-        if scale.x != scale.z || scale.y < 0.0 {
+        if scale.x != scale.z || scale.y < 0.0.into() {
             // The scaled shape isn’t a cone.
             let (mut vtx, idx) = self.to_trimesh(nsubdivs);
             vtx.iter_mut()
@@ -162,11 +162,11 @@ impl SupportMap for Cone {
     fn local_support_point(&self, dir: &Vector<Real>) -> Point<Real> {
         let mut vres = *dir;
 
-        vres[1] = 0.0;
+        vres[1] = 0.0.into();
 
         if vres.normalize_mut().is_zero() {
             vres = na::zero();
-            vres[1] = self.half_height.copysign(dir[1]);
+            vres[1] = Real::from(self.half_height.copysign(*dir[1]));
         } else {
             vres *= self.radius;
             vres[1] = -self.half_height;

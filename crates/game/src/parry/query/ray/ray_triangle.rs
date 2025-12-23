@@ -29,7 +29,7 @@ impl RayCast for Triangle {
         }
 
         let mut best = None;
-        let mut smallest_toi = Real::MAX;
+        let mut smallest_toi = RawReal::MAX;
 
         for edge in &edges {
             if let Some(inter) = edge.cast_local_ray_and_get_normal(ray, max_time_of_impact, solid)
@@ -89,13 +89,13 @@ pub fn local_ray_intersection_with_triangle(
     let t = ap.dot(&n);
 
     // the ray does not intersect the halfspace defined by the triangle
-    if (t < 0.0 && d < 0.0) || (t > 0.0 && d > 0.0) {
+    if (t < Real::from(0.0) && d < Real::from(0.0)) || (t > Real::from(0.0) && d > Real::from(0.0)) {
         return None;
     }
 
-    let fid = if d < 0.0 { 0 } else { 1 };
+    let fid = if d < Real::from(0.0) { 0 } else { 1 };
 
-    let d = d.abs();
+    let d = Real::from(d.abs());
 
     //
     // intersection: compute barycentric coordinates
@@ -107,20 +107,20 @@ pub fn local_ray_intersection_with_triangle(
     let time_of_impact;
     let normal;
 
-    if t < 0.0 {
+    if t < Real::from(0.0) {
         v = -ac.dot(&e);
 
-        if v < 0.0 || v > d {
+        if v < Real::from(0.0) || v > d {
             return None;
         }
 
         w = ab.dot(&e);
 
-        if w < 0.0 || v + w > d {
+        if w < Real::from(0.0) || v + w > d {
             return None;
         }
 
-        let invd = 1.0 / d;
+        let invd = Real::from(1.0) / d;
         time_of_impact = -t * invd;
         normal = -n.normalize();
         v *= invd;
@@ -128,17 +128,17 @@ pub fn local_ray_intersection_with_triangle(
     } else {
         v = ac.dot(&e);
 
-        if v < 0.0 || v > d {
+        if v < Real::from(0.0) || v > d {
             return None;
         }
 
         w = -ab.dot(&e);
 
-        if w < 0.0 || v + w > d {
+        if w < Real::from(0.0) || v + w > d {
             return None;
         }
 
-        let invd = 1.0 / d;
+        let invd = Real::from(1.0) / d;
         time_of_impact = t * invd;
         normal = n.normalize();
         v *= invd;
@@ -147,6 +147,6 @@ pub fn local_ray_intersection_with_triangle(
 
     Some((
         RayIntersection::new(time_of_impact, normal, FeatureId::Face(fid)),
-        Vector3::new(-v - w + 1.0, v, w),
+        Vector3::new(-v - w + Real::from(1.0), v, w),
     ))
 }

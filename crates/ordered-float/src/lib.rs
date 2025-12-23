@@ -3053,3 +3053,12 @@ mod impl_bytemuck {
         assert!(try_cast::<f64, NotNan<f64>>(pi).is_ok());
     }
 }
+
+#[cfg(feature = "spade")]
+mod impl_spade {
+    impl From<super::OrderedFloat<f32>> for f64 {
+        fn from(value: super::OrderedFloat<f32>) -> Self {
+            *value as f64
+        }
+    }
+}

@@ -48,7 +48,7 @@ pub fn contact_manifolds_voxels_ball<'a, ManifoldData, ContactData>(
 
     let radius2 = ball2.radius;
     let center2 = Point::origin(); // The ball’s center.
-    let radius1 = voxels1.voxel_size() / 2.0;
+    let radius1 = voxels1.voxel_size() / Real::from(2.0);
 
     // FIXME: optimize this.
     let aabb1 = voxels1.local_aabb().loosened(prediction / 2.0);
@@ -145,11 +145,11 @@ pub fn project_point_on_pseudo_cube(
     #[cfg(feature = "dim2")]
     let octant_key = ((dpos.x >= 0.0) as usize) | (((dpos.y >= 0.0) as usize) << 1);
     #[cfg(feature = "dim3")]
-    let octant_key = ((dpos.x >= 0.0) as usize)
-        | (((dpos.y >= 0.0) as usize) << 1)
-        | (((dpos.z >= 0.0) as usize) << 2);
+    let octant_key = ((dpos.x >= Real::from(0.0)) as usize)
+        | (((dpos.y >= Real::from(0.0)) as usize) << 1)
+        | (((dpos.z >= Real::from(0.0)) as usize) << 2);
     let aabb_octant_key = AABB_OCTANT_KEYS[octant_key];
-    let dpos_signs = dpos.map(|x| x.signum());
+    let dpos_signs = dpos.map(|x| Real::from(x.signum()));
     let unit_dpos = dpos.abs().component_div(&voxel_radius); // Project the point in "local unit octant space".
 
     // Extract the feature pattern specific to the selected octant.
@@ -161,20 +161,20 @@ pub fn project_point_on_pseudo_cube(
             // PERF: inline the projection on cuboid to improve performances further.
             //       In particular we already know on what octant we are to compute the
             //       collision.
-            let cuboid = Cuboid::new(Vector::repeat(1.0));
+            let cuboid = Cuboid::new(Vector::repeat(Real::from(1.0)));
             let unit_dpos_pt = Point::from(unit_dpos);
             let proj = cuboid.project_local_point(&unit_dpos_pt, false);
             let mut normal = unit_dpos_pt - proj.point;
-            let dist = normal.try_normalize_mut(1.0e-8)?;
+            let dist = normal.try_normalize_mut(Real::from(1.0e-8))?;
             Some((normal, dist))
         }
         #[cfg(feature = "dim3")]
         OctantPattern::EDGE_X | OctantPattern::EDGE_Y | OctantPattern::EDGE_Z => {
-            let cuboid = Cuboid::new(Vector::repeat(1.0));
+            let cuboid = Cuboid::new(Vector::repeat(Real::from(1.0)));
             let unit_dpos_pt = Point::from(unit_dpos);
             let proj = cuboid.project_local_point(&unit_dpos_pt, false);
             let mut normal = unit_dpos_pt - proj.point;
-            let dist = normal.try_normalize_mut(1.0e-8)?;
+            let dist = normal.try_normalize_mut(Real::from(1.0e-8))?;
             Some((normal, dist))
         }
         #[cfg(feature = "dim2")]
@@ -195,15 +195,15 @@ pub fn project_point_on_pseudo_cube(
             let i2 = (i1 + 1) % 3;
             let i3 = (i1 + 2) % 3;
 
-            if unit_dpos[i2] > 1.0
-                || unit_dpos[i2] < 0.0
-                || unit_dpos[i3] > 1.0
-                || unit_dpos[i3] < 0.0
+            if unit_dpos[i2] > Real::from(1.0)
+                || unit_dpos[i2] < Real::from(0.0)
+                || unit_dpos[i3] > Real::from(1.0)
+                || unit_dpos[i3] < Real::from(0.0)
             {
                 None
             } else {
-                let dist = unit_dpos[i1] - 1.0; // Subtract 1 to get the distance wrt. the boundary of the unit voxel.
-                Some((Vector::ith(i1, 1.0), dist))
+                let dist = unit_dpos[i1] - Real::from(1.0); // Subtract 1 to get the distance wrt. the boundary of the unit voxel.
+                Some((Vector::ith(i1, Real::from(1.0)), dist))
             }
         }
         _ => unreachable!(),

@@ -81,7 +81,7 @@ mod game_data {
         multi_body_joint_set: MultibodyJointSet,
         ccd_solver: CCDSolver,
         colliders: ColliderSet,
-        gravity: Vector<HashableReal>,
+        gravity: Vector<Real>,
         integration_parameters: IntegrationParameters,
         islands: IslandManager,
         narrow_phase: NarrowPhase,
@@ -192,15 +192,15 @@ impl Rollback {
     pub fn create_player_safe(&mut self) -> PlayerKey {
         let e = self.ecs.create_entity_safe();
         let position = IsometryReal::from_parts(
-            Translation3::new(0.0, 1.0, 5.0),
-            Unit::<Quaternion<f32>>::identity(),
+            Translation3::new(Real::from(0.0), Real::from(1.0), Real::from(5.0)),
+            Unit::<Quaternion<Real>>::identity(),
         );
         let body = RigidBodyBuilder::kinematic_position_based()
             .pose(position)
-            .gravity_scale(0.0)
+            .gravity_scale(Real::from(0.0))
             .enabled_rotations(true, true, true)
             .ccd_enabled(false)
-            .angular_damping(1.0)
+            .angular_damping(Real::from(1.0))
             .can_sleep(false)
             .user_data(e.data().as_ffi() as u128)
             .build();

@@ -1283,7 +1283,6 @@ dependencies = [
  "foldhash 0.2.0",
  "grid",
  "hashbrown 0.16.0",
- "indexmap",
  "log",
  "nalgebra",
  "num-derive",
@@ -1291,6 +1290,7 @@ dependencies = [
  "obj",
  "oorandom",
  "ordered-float 5.1.0",
+ "ordermap",
  "parley",
  "profiling",
  "rayon",
@@ -1884,9 +1884,9 @@ checksum = "0cfe9645a18782869361d9c8732246be7b410ad4e919d3609ebabdac00ba12c3"
 
 [[package]]
 name = "indexmap"
-version = "2.11.4"
+version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b0f83760fb341a774ed326568e19f5a863af4a952def8c39f9ab92fd95b88e5"
+checksum = "6717a8d2a5a929a1a2eb43a12812498ed141a0bcfb7e8f7844fbdbe4303bba9f"
 dependencies = [
  "equivalent",
  "hashbrown 0.16.0",
@@ -2275,6 +2275,7 @@ dependencies = [
  "num-complex 0.4.6",
  "num-rational",
  "num-traits",
+ "ordered-float 5.1.0",
  "pest",
  "pest_derive",
  "proptest",
@@ -2746,7 +2747,19 @@ dependencies = [
  "schemars",
  "serde",
  "serde_test",
+ "spade",
  "speedy",
+]
+
+[[package]]
+name = "ordermap"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed637741ced8fb240855d22a2b4f208dab7a06bcce73380162e5253000c16758"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -4071,6 +4084,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "num-traits",
  "robust",
+ "serde",
  "smallvec",
 ]
 

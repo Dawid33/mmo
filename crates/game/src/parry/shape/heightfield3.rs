@@ -3,7 +3,7 @@ use core::ops::Range;
 use na::DMatrix;
 
 use crate::parry::bounding_volume::Aabb;
-use crate::parry::math::{Real, Vector};
+use crate::parry::math::{Real, RawReal, Vector};
 use crate::parry::shape::{FeatureId, Triangle, TrianglePseudoNormals};
 use na::{Point3, Unit};
 
@@ -63,7 +63,7 @@ bitflags::bitflags! {
 //     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
 //     archive(check_bytes)
 // )]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 #[repr(C)]
 /// A 3D heightfield.
 pub struct HeightField {
@@ -95,7 +95,7 @@ impl HeightField {
         );
         let max = heights.max();
         let min = heights.min();
-        let hscale = scale * 0.5;
+        let hscale = scale * Real::from(0.5);
         let aabb = Aabb::new(
             Point3::new(-hscale.x, min * scale.y, -hscale.z),
             Point3::new(hscale.x, max * scale.y, hscale.z),
@@ -171,12 +171,12 @@ impl HeightField {
         na::clamp(
             ((val + 0.5) / cell_size).floor(),
             0.0,
-            (num_cells - 1) as Real,
+            (num_cells - 1) as RawReal,
         ) as usize
     }
 
     fn quantize_ceil(&self, val: Real, cell_size: Real, num_cells: usize) -> usize {
-        na::clamp(((val + 0.5) / cell_size).ceil(), 0.0, num_cells as Real) as usize
+        na::clamp(((val + 0.5) / cell_size).ceil(), 0.0, num_cells as RawReal) as usize
     }
 
     /// The pair of index of the cell containing the vertical projection of the given point.
@@ -200,7 +200,7 @@ impl HeightField {
         let ncells_x = self.ncols();
         let ncells_z = self.nrows();
 
-        if scaled_pt.x < -0.5 || scaled_pt.x > 0.5 || scaled_pt.z < -0.5 || scaled_pt.z > 0.5 {
+        if scaled_pt.x < Real::from(-0.5) || scaled_pt.x > 0.5.into() || scaled_pt.z < Real::from(-0.5) || scaled_pt.z > 0.5.into() {
             // Outside of the heightfield bounds.
             None
         } else {
@@ -223,22 +223,22 @@ impl HeightField {
 
     /// The smallest x coordinate of the `j`-th column of this heightfield.
     pub fn x_at(&self, j: usize) -> Real {
-        (-0.5 + self.unit_cell_width() * (j as Real)) * self.scale.x
+        (Real::from(-0.5) + self.unit_cell_width() * Real::from(j as RawReal)) * self.scale.x
     }
 
     /// The smallest z coordinate of the start of the `i`-th row of this heightfield.
     pub fn z_at(&self, i: usize) -> Real {
-        (-0.5 + self.unit_cell_height() * (i as Real)) * self.scale.z
+        (Real::from(-0.5) + self.unit_cell_height() * Real::from(i as RawReal)) * self.scale.z
     }
 
     /// The smallest x coordinate of the `j`-th column of this heightfield.
     pub fn signed_x_at(&self, j: isize) -> Real {
-        (-0.5 + self.unit_cell_width() * (j as Real)) * self.scale.x
+        (Real::from(-0.5) + self.unit_cell_width() * Real::from(j as RawReal)) * self.scale.x
     }
 
     /// The smallest z coordinate of the start of the `i`-th row of this heightfield.
     pub fn signed_z_at(&self, i: isize) -> Real {
-        (-0.5 + self.unit_cell_height() * (i as Real)) * self.scale.z
+        (Real::from(-0.5) + self.unit_cell_height() * Real::from(i as RawReal)) * self.scale.z
     }
 
     /// An iterator through all the triangles of this heightfield.
@@ -354,11 +354,11 @@ impl HeightField {
         let cell_width = self.unit_cell_width();
         let cell_height = self.unit_cell_height();
 
-        let z0 = -0.5 + cell_height * (i as Real);
-        let z1 = -0.5 + cell_height * ((i + 1) as Real);
+        let z0 = Real::from(-0.5) + cell_height * Real::from(i as RawReal);
+        let z1 = Real::from(-0.5) + cell_height * Real::from((i + 1) as RawReal);
 
-        let x0 = -0.5 + cell_width * (j as Real);
-        let x1 = -0.5 + cell_width * ((j + 1) as Real);
+        let x0 = Real::from(-0.5) + cell_width * Real::from(j as RawReal);
+        let x1 = Real::from(-0.5) + cell_width * Real::from((j + 1) as RawReal);
 
         let y00 = self.heights[(i, j)];
         let y10 = self.heights[(i + 1, j)];
@@ -436,9 +436,9 @@ impl HeightField {
             };
 
             let diag_dir = if status.contains(HeightFieldCellStatus::ZIGZAG_SUBDIVISION) {
-                Vector::new(-1.0, 0.0, 1.0)
+                Vector::new(Real::from(-1.0), Real::from(0.0), Real::from(1.0))
             } else {
-                Vector::new(1.0, 0.0, 1.0)
+                Vector::new(Real::from(1.0), Real::from(0.0), Real::from(1.0))
             };
 
             let (left_pseudo_normal, right_pseudo_normal) = if left {
@@ -490,10 +490,10 @@ impl HeightField {
             };
 
             // NOTE: the normalization can only succeed due to the heightfield’s definition.
-            let pseudo_normal1 = Unit::new_normalize((tri_normal + left_pseudo_normal) / 2.0);
-            let pseudo_normal2 = Unit::new_normalize((tri_normal + right_pseudo_normal) / 2.0);
+            let pseudo_normal1 = Unit::new_normalize((tri_normal + left_pseudo_normal) / Real::from(2.0));
+            let pseudo_normal2 = Unit::new_normalize((tri_normal + right_pseudo_normal) / Real::from(2.0));
             let pseudo_normal3 =
-                Unit::new_normalize((tri_normal + top_or_bottom_pseudo_normal) / 2.0);
+                Unit::new_normalize((tri_normal + top_or_bottom_pseudo_normal) / Real::from(2.0));
 
             Some(TrianglePseudoNormals {
                 face: Unit::new_unchecked(tri_normal), // No need to re-normalize.
@@ -577,12 +577,12 @@ impl HeightField {
 
     /// The width (extent along its local `x` axis) of each cell of this heightmap, excluding the scale factor.
     pub fn unit_cell_width(&self) -> Real {
-        1.0 / (self.heights.ncols() as Real - 1.0)
+        Real::from(1.0) / (self.heights.ncols() as RawReal - 1.0)
     }
 
     /// The height (extent along its local `z` axis) of each cell of this heightmap, excluding the scale factor.
     pub fn unit_cell_height(&self) -> Real {
-        1.0 / (self.heights.nrows() as Real - 1.0)
+        Real::from(1.0) / (self.heights.nrows() as RawReal - 1.0)
     }
 
     /// The [`Aabb`] of this heightmap.
@@ -698,7 +698,7 @@ impl HeightField {
         let cell_width = self.unit_cell_width();
         let cell_height = self.unit_cell_height();
 
-        if ref_maxs.x <= -0.5 || ref_maxs.z <= -0.5 || ref_mins.x >= 0.5 || ref_mins.z >= 0.5 {
+        if ref_maxs.x <= Real::from(-0.5) || ref_maxs.z <= Real::from(-0.5) || ref_mins.x >= Real::from(0.5) || ref_mins.z >= Real::from(0.5) {
             // Outside of the heightfield bounds.
             return;
         }
@@ -719,10 +719,10 @@ impl HeightField {
                     continue;
                 }
 
-                let z0 = -0.5 + cell_height * (i as Real);
+                let z0 = Real::from(-0.5) + cell_height * Real::from(i as RawReal);
                 let z1 = z0 + cell_height;
 
-                let x0 = -0.5 + cell_width * (j as Real);
+                let x0 = Real::from(-0.5) + cell_width * Real::from(j as RawReal);
                 let x1 = x0 + cell_width;
 
                 let y00 = self.heights[(i, j)];
@@ -826,7 +826,7 @@ impl HeightFieldRadialTriangles<'_> {
     /// to be yielded. The `max_dist` can be modified at each iteration
     /// as long as the new value is smaller or equal to the previous value.
     pub fn next(&mut self, max_dist: Real) -> Option<Triangle> {
-        let max_rad = if max_dist == Real::MAX {
+        let max_rad = if max_dist == RawReal::MAX {
             usize::MAX
         } else {
             (max_dist / self.heightfield.cell_width())

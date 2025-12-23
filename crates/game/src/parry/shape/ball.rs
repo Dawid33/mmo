@@ -45,7 +45,7 @@ use crate::parry::shape::SupportMap;
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
     archive(check_bytes)
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(PartialEq, Debug, Copy, Clone, Hash)]
 #[repr(C)]
 pub struct Ball {
     /// The radius of the ball.

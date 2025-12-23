@@ -1,9 +1,9 @@
 use crate::parry::bounding_volume::Aabb;
-use crate::parry::math::{Point, Real, Vector};
+use crate::parry::math::{Point, Real, RawReal, Vector};
 use crate::parry::shape::{VoxelData, VoxelState, Voxels};
 use na::point;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub(super) struct VoxelsChunkHeader {
     pub(super) id: usize,
@@ -13,7 +13,7 @@ pub(super) struct VoxelsChunkHeader {
     pub(super) len: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[repr(C)]
 #[repr(align(64))]
@@ -303,7 +303,7 @@ impl<'a> VoxelsChunkRef<'a> {
                     }
 
                     let grid_coords = Point::new(ix, iy, iz);
-                    let center = Vector::new(ix as Real + 0.5, iy as Real + 0.5, iz as Real + 0.5)
+                    let center = Vector::new(Real::from(ix as RawReal + 0.5), Real::from(iy as RawReal + 0.5), Real::from(iz as RawReal + 0.5))
                         .component_mul(&self.parent.voxel_size);
                     Some(VoxelData {
                         linear_id: VoxelIndex {

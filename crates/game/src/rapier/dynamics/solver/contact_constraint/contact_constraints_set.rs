@@ -12,7 +12,7 @@ use crate::rapier::dynamics::{
 };
 use crate::rapier::geometry::{ContactManifold, ContactManifoldIndex};
 use crate::rapier::math::SIMD_WIDTH;
-use crate::rapier::math::{MAX_MANIFOLD_POINTS, Real};
+use crate::rapier::math::{MAX_MANIFOLD_POINTS, Real, RawReal};
 use na::DVector;
 use crate::parry::math::DIM;
 
@@ -97,7 +97,7 @@ impl ContactConstraintsSet {
     }
 
     pub fn clear_constraints(&mut self) {
-        self.generic_jacobians.fill(0.0);
+        self.generic_jacobians.fill(Real::from(0.0));
         self.generic_velocity_constraints.clear();
         self.simd_velocity_coulomb_constraints.clear();
         #[cfg(feature = "dim3")]
@@ -579,7 +579,7 @@ impl ContactConstraintsSet {
                 for (builder, constraint) in self.$builders.iter().zip(self.$constraints.iter_mut()) {
                     builder.update(
                         &params,
-                        small_step_id as Real * params.dt,
+                        Real::from(small_step_id as RawReal) * params.dt,
                         solver_bodies,
                         multibodies,
                         constraint,

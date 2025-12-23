@@ -1,4 +1,4 @@
-use crate::parry::math::{Isometry, Point, Real, Vector};
+use crate::parry::math::{Isometry, Point, Real, RawReal, Vector};
 use crate::parry::shape::Ball;
 use crate::parry::transformation::utils;
 use alloc::vec::Vec;
@@ -15,13 +15,13 @@ impl Ball {
 
 fn unit_sphere_outline(nsubdiv: u32) -> (Vec<Point3<Real>>, Vec<[u32; 2]>) {
     let two_pi = Real::two_pi();
-    let dtheta = two_pi / (nsubdiv as Real);
+    let dtheta = two_pi / Real::from(nsubdiv as RawReal);
     let mut coords = Vec::new();
     let mut indices = Vec::new();
 
-    utils::push_circle(0.5, nsubdiv, dtheta, 0.0, &mut coords);
-    utils::push_circle(0.5, nsubdiv, dtheta, 0.0, &mut coords);
-    utils::push_circle(0.5, nsubdiv, dtheta, 0.0, &mut coords);
+    utils::push_circle(0.5.into(), nsubdiv, dtheta, 0.0.into(), &mut coords);
+    utils::push_circle(0.5.into(), nsubdiv, dtheta, 0.0.into(), &mut coords);
+    utils::push_circle(0.5.into(), nsubdiv, dtheta, 0.0.into(), &mut coords);
 
     let n = nsubdiv as usize;
     utils::transform(
@@ -47,11 +47,11 @@ pub(crate) fn push_unit_hemisphere_outline(
     idx: &mut Vec<[u32; 2]>,
 ) {
     let base_idx = pts.len() as u32;
-    let dtheta = Real::pi() / (nsubdiv as Real);
+    let dtheta = Real::pi() / Real::from(nsubdiv as RawReal);
     let npoints = nsubdiv + 1;
 
-    utils::push_circle(0.5, npoints, dtheta, 0.0, pts);
-    utils::push_circle(0.5, npoints, dtheta, 0.0, pts);
+    utils::push_circle(0.5.into(), npoints, dtheta, 0.0.into(), pts);
+    utils::push_circle(0.5.into(), npoints, dtheta, 0.0.into(), pts);
 
     let n = npoints as usize;
     utils::transform(

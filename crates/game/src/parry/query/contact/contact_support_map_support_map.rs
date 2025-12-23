@@ -52,7 +52,7 @@ where
     let dir = if let Some(init_dir) = init_dir {
         init_dir
     } else if let Some(init_dir) =
-        Unit::try_new(pos12.translation.vector, crate::parry::math::DEFAULT_EPSILON)
+        Unit::try_new(pos12.translation.vector, Real::from(crate::parry::math::DEFAULT_EPSILON))
     {
         init_dir
     } else {

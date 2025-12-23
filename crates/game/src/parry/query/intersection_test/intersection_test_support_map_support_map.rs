@@ -41,7 +41,7 @@ where
     let dir = if let Some(init_dir) = init_dir {
         init_dir
     } else if let Some(init_dir) =
-        Unit::try_new(pos12.translation.vector, crate::parry::math::DEFAULT_EPSILON)
+        Unit::try_new(pos12.translation.vector, Real::from(crate::parry::math::DEFAULT_EPSILON))
     {
         init_dir
     } else {
@@ -50,7 +50,7 @@ where
 
     simplex.reset(CSOPoint::from_shapes(pos12, g1, g2, &dir));
 
-    match gjk::closest_points(pos12, g1, g2, 0.0, false, simplex) {
+    match gjk::closest_points(pos12, g1, g2, Real::from(0.0), false, simplex) {
         GJKResult::Intersection => (true, dir),
         GJKResult::Proximity(dir) => (false, dir),
         GJKResult::NoIntersection(dir) => (false, dir),

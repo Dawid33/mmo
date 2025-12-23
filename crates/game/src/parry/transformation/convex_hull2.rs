@@ -225,7 +225,7 @@ impl SegmentFacet {
         let p0 = &points[self.pts[0]];
         let pt = &points[point];
 
-        let _eps = crate::parry::math::DEFAULT_EPSILON;
+        let _eps = Real::from(crate::parry::math::DEFAULT_EPSILON);
 
         (*pt - *p0).dot(&self.normal) > _eps * na::convert::<f64, Real>(100.0f64)
     }

@@ -47,6 +47,8 @@
  *   - https://cs.gmu.edu/~jmlien/teaching/cs451/uploads/Main/dual-quaternion.pdf
  */
 
+use ordered_float::OrderedFloat;
+
 use crate::base::storage::Storage;
 use crate::{
     DualQuaternion, Isometry3, Point, Point3, Quaternion, SimdRealField, Translation3, U3, Unit,

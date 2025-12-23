@@ -1,5 +1,5 @@
 use crate::parry::bounding_volume::Aabb;
-use crate::parry::math::{Isometry, Real};
+use crate::parry::math::{Isometry, Real, RawReal};
 use crate::parry::partitioning::BvhNode;
 use crate::parry::query::{ClosestPoints, QueryDispatcher};
 use crate::parry::shape::{CompositeShapeRef, Shape, TypedCompositeShape};
@@ -56,12 +56,12 @@ impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
                                         let p2_1 = pose12 * *p2;
                                         na::distance(&*p1, &p2_1)
                                     }
-                                    ClosestPoints::Intersecting => -Real::MAX,
-                                    ClosestPoints::Disjoint => Real::MAX,
+                                    ClosestPoints::Intersecting => Real::from(-RawReal::MAX),
+                                    ClosestPoints::Disjoint => Real::from(RawReal::MAX),
                                 };
                                 (cost, pts)
                             } else {
-                                (Real::MAX, ClosestPoints::Disjoint)
+                                (Real::from(RawReal::MAX), ClosestPoints::Disjoint)
                             }
                         })
                 },

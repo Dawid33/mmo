@@ -16,7 +16,7 @@
 // >
 // > THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::parry::math::{Point, Real, Vector, DIM};
+use crate::parry::math::{Point, Real, RawReal, Vector, DIM};
 use crate::parry::transformation::vhacd::VHACDParameters;
 use crate::parry::transformation::voxelization::{VoxelSet, VoxelizedVolume};
 use alloc::sync::Arc;
@@ -354,8 +354,8 @@ impl VHACD {
         let mut result = Self {
             // raycast_mesh: None,
             voxel_parts: Vec::new(),
-            volume_ch0: 0.0,
-            max_concavity: -Real::MAX,
+            volume_ch0: 0.0.into(),
+            max_concavity: Real::from(-RawReal::MAX),
         };
 
         result.do_compute_acd(params, voxels);
@@ -462,27 +462,27 @@ impl VHACD {
             let dir = Vector::x();
 
             if e == 0.0 {
-                (dir, 0.0)
+                (dir, Real::from(0.0))
             } else {
-                (dir, 1.0 - vx / e)
+                (dir, Real::from(1.0) - vx / e)
             }
         } else if vy < vx && vy < vz {
             let e = eigenvalues.x * eigenvalues.x + eigenvalues.z * eigenvalues.z;
             let dir = Vector::y();
 
             if e == 0.0 {
-                (dir, 0.0)
+                (dir, Real::from(0.0))
             } else {
-                (dir, 1.0 - vy / e)
+                (dir, Real::from(1.0) - vy / e)
             }
         } else {
             let e = eigenvalues.x * eigenvalues.x + eigenvalues.y * eigenvalues.y;
             let dir = Vector::z();
 
             if e == 0.0 {
-                (dir, 0.0)
+                (dir, Real::from(0.0))
             } else {
-                (dir, 1.0 - vz / e)
+                (dir, Real::from(1.0) - vz / e)
             }
         }
     }
@@ -502,9 +502,9 @@ impl VHACD {
 
         for i in i0..=i1 {
             let plane = CutPlane {
-                abc: Vector::ith(best_id, 1.0),
+                abc: Vector::ith(best_id, Real::from(1.0)),
                 axis: best_plane.axis,
-                d: -(vset.origin[best_id] + (i as Real + 0.5) * vset.scale),
+                d: -(vset.origin[best_id] + Real::from(i as RawReal + 0.5) * vset.scale),
                 index: i,
             };
             planes.push(plane);
@@ -525,9 +525,9 @@ impl VHACD {
         params: &VHACDParameters,
     ) -> (CutPlane, Real) {
         let mut best_plane = planes[0];
-        let mut min_concavity = Real::MAX;
+        let mut min_concavity = Real::from(RawReal::MAX);
         let mut i_best = -1;
-        let mut min_total = Real::MAX;
+        let mut min_total = Real::from(RawReal::MAX);
 
         let mut left_ch;
         let mut right_ch;
@@ -689,7 +689,7 @@ impl VHACD {
         input_parts.push(core::mem::take(&mut voxels));
 
         let mut first_iteration = true;
-        self.volume_ch0 = 1.0;
+        self.volume_ch0 =Real::from(1.0);
 
         // Compute the decomposition depth based on the number of convex hulls being requested.
         let mut hull_count = 2;
@@ -1161,7 +1161,7 @@ impl VHACD {
 }
 
 fn compute_concavity(volume: Real, volume_ch: Real, volume0: Real) -> Real {
-    (volume_ch - volume).abs() / volume0
+    Real::from((volume_ch - volume).abs()) / volume0
 }
 
 fn clip_mesh(
@@ -1173,9 +1173,9 @@ fn clip_mesh(
     for pt in points {
         let d = plane.abc.dot(&pt.coords) + plane.d;
 
-        if d > 0.0 {
+        if d > Real::from(0.0) {
             positive_part.push(*pt);
-        } else if d < 0.0 {
+        } else if d < Real::from(0.0) {
             negative_part.push(*pt);
         } else {
             positive_part.push(*pt);
@@ -1217,6 +1217,6 @@ fn compute_volume(mesh: &(Vec<Point<Real>>, Vec<[u32; DIM]>)) -> Real {
         crate::parry::mass_properties::details::trimesh_signed_volume_and_center_of_mass(&mesh.0, &mesh.1)
             .0
     } else {
-        0.0
+        Real::from(0.0)
     }
 }

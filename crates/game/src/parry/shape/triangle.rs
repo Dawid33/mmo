@@ -1,6 +1,6 @@
 //! Definition of the triangle shape.
 
-use crate::parry::math::{Isometry, Point, Real, Vector};
+use crate::parry::math::{Isometry, Point, Real, RawReal, Vector};
 use crate::parry::shape::SupportMap;
 use crate::parry::shape::{PolygonalFeature, Segment};
 use crate::parry::utils;
@@ -80,7 +80,7 @@ use rkyv::{bytecheck, CheckBytes};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
     archive(as = "Self")
 )]
-#[derive(PartialEq, Debug, Copy, Clone, Default)]
+#[derive(PartialEq, Debug, Copy, Clone, Default, Hash)]
 #[repr(C)]
 pub struct Triangle {
     /// The first vertex of the triangle.
@@ -119,10 +119,10 @@ impl TrianglePointLocation {
     ///
     /// Returns `None` if the location is `TrianglePointLocation::OnSolid`.
     pub fn barycentric_coordinates(&self) -> Option<[Real; 3]> {
-        let mut bcoords = [0.0; 3];
+        let mut bcoords = [Real::from(0.0); 3];
 
         match self {
-            TrianglePointLocation::OnVertex(i) => bcoords[*i as usize] = 1.0,
+            TrianglePointLocation::OnVertex(i) => bcoords[*i as usize] = Real::from(1.0),
             TrianglePointLocation::OnEdge(i, uv) => {
                 let idx = match i {
                     0 => (0, 1),
@@ -224,7 +224,7 @@ impl Triangle {
     #[inline]
     #[cfg(feature = "dim3")]
     pub fn normal(&self) -> Option<Unit<Vector<Real>>> {
-        Unit::try_new(self.scaled_normal(), crate::parry::math::DEFAULT_EPSILON)
+        Unit::try_new(self.scaled_normal(), Real::from(crate::parry::math::DEFAULT_EPSILON))
     }
 
     /// The three edges of this triangle: [AB, BC, CA].
@@ -286,7 +286,7 @@ impl Triangle {
     #[cfg(feature = "dim2")]
     pub fn support_face(&self, dir: Vector<Real>) -> PolygonalFeature {
         let mut best = 0;
-        let mut best_dot = -Real::MAX;
+        let mut best_dot = -RawReal::MAX;
 
         for (i, tangent) in self.edges_scaled_directions().iter().enumerate() {
             let normal = Vector::new(tangent.y, -tangent.x);
@@ -451,7 +451,7 @@ impl Triangle {
 
         // We take the max(0.0) because it can be slightly negative
         // because of numerical errors due to almost-degenerate triangles.
-        ComplexField::sqrt(sqr.max(0.0)) * 0.25
+        ComplexField::sqrt(sqr.max(Real::from(0.0))) * 0.25
     }
 
     /// Computes the unit angular inertia of this triangle.
@@ -492,7 +492,7 @@ impl Triangle {
 
         let dab = a.dot(&b);
 
-        let denom = 2.0 * (na * nb - dab * dab);
+        let denom = Real::from(2.0) * (na * nb - dab * dab);
 
         if denom.is_zero() {
             // The triangle is degenerate (the three points are collinear).
@@ -532,11 +532,11 @@ impl Triangle {
     /// Tests if this triangle is affinely dependent, i.e., its points are almost aligned.
     #[cfg(feature = "dim3")]
     pub fn is_affinely_dependent(&self) -> bool {
-        const EPS: Real = crate::parry::math::DEFAULT_EPSILON * 100.0;
+        const EPS: RawReal = crate::parry::math::DEFAULT_EPSILON * 100.0;
 
         let p1p2 = self.b - self.a;
         let p1p3 = self.c - self.a;
-        relative_eq!(p1p2.cross(&p1p3).norm_squared(), 0.0, epsilon = EPS * EPS)
+        relative_eq!(p1p2.cross(&p1p3).norm_squared(), Real::from(0.0), epsilon = Real::from(EPS * EPS))
 
         // relative_eq!(
         //     self.area(),
@@ -552,7 +552,7 @@ impl Triangle {
         let p1p3 = self.c - self.a;
         relative_eq!(
             p1p2.cross(&p1p3).norm(),
-            0.0,
+            Real::from(0.0),
             epsilon = eps * p1p2.norm().max(p1p3.norm())
         )
 
@@ -580,7 +580,7 @@ impl Triangle {
     /// Tests if a point is inside of this triangle.
     #[cfg(feature = "dim3")]
     pub fn contains_point(&self, p: &Point<Real>) -> bool {
-        const EPS: Real = crate::parry::math::DEFAULT_EPSILON;
+        const EPS: Real = ordered_float::OrderedFloat(crate::parry::math::DEFAULT_EPSILON);
 
         let vb = self.b - self.a;
         let vc = self.c - self.a;
@@ -618,7 +618,7 @@ impl Triangle {
         let c = vp.dot(&nb) * signed_clim.signum();
         let clim = signed_clim.abs();
 
-        c >= 0.0 && c <= clim && b >= 0.0 && b <= blim && c * blim + b * clim <= blim * clim
+        c >= 0.0.into() && c <= clim && b >= 0.0.into() && b <= blim && c * blim + b * clim <= blim * clim
     }
 
     /// The normal of the given feature of this shape.
@@ -670,7 +670,7 @@ impl Triangle {
     /// degrees in the triangle.
     pub fn angle_closest_to_90(&self) -> usize {
         let points = self.vertices();
-        let mut best_cos = 2.0;
+        let mut best_cos = Real::from(2.0);
         let mut selected_i = 0;
 
         for i in 0..3 {
@@ -871,44 +871,44 @@ mod test {
 
     #[test]
     fn test_triangle_area() {
-        let pa = Point3::new(0.0, 5.0, 0.0);
+        let pa = Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0));
         let pb = Point3::origin();
-        let pc = Point3::new(0.0, 0.0, 4.0);
+        let pc = Point3::new(Real::from(0.0), Real::from(0.0), Real::from(4.0));
 
-        assert!(relative_eq!(Triangle::new(pa, pb, pc).area(), 10.0));
+        assert!(relative_eq!(Triangle::new(pa, pb, pc).area(), Real::from(10.0)));
     }
 
     #[test]
     fn test_triangle_contains_point() {
         let tri = Triangle::new(
-            Point3::new(0.0, 5.0, 0.0),
+            Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0)),
             Point3::origin(),
-            Point3::new(0.0, 0.0, 4.0),
+            Point3::new(Real::from(0.0), Real::from(0.0), Real::from(4.0)),
         );
 
-        assert!(tri.contains_point(&Point3::new(0.0, 1.0, 1.0)));
-        assert!(!tri.contains_point(&Point3::new(0.0, -1.0, 1.0)));
+        assert!(tri.contains_point(&Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0))));
+        assert!(!tri.contains_point(&Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0))));
     }
 
     #[test]
     fn test_obtuse_triangle_contains_point() {
         let tri = Triangle::new(
-            Point3::new(-10.0, 10.0, 0.0),
+            Point3::new(Real::from(-10.0), Real::from(10.0), Real::from(0.0)),
             Point3::origin(),
-            Point3::new(20.0, 0.0, 0.0),
+            Point3::new(Real::from(20.0), Real::from(0.0), Real::from(0.0)),
         );
 
-        assert!(tri.contains_point(&Point3::new(-3.0, 5.0, 0.0)));
-        assert!(tri.contains_point(&Point3::new(5.0, 1.0, 0.0)));
-        assert!(!tri.contains_point(&Point3::new(0.0, -1.0, 0.0)));
+        assert!(tri.contains_point(&Point3::new(Real::from(-3.0), Real::from(0.0), Real::from(0.0))));
+        assert!(tri.contains_point(&Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0))));
+        assert!(!tri.contains_point(&Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0))));
     }
 
     #[test]
     fn test_3dtriangle_contains_point() {
         let o = Point3::origin();
-        let pa = Point3::new(1.2, 1.4, 5.6);
-        let pb = Point3::new(1.5, 6.7, 1.9);
-        let pc = Point3::new(5.0, 2.1, 1.3);
+        let pa = Point3::new(Real::from(1.2), Real::from(1.4), Real::from(5.6));
+        let pb = Point3::new(Real::from(1.5), Real::from(6.7), Real::from(1.9));
+        let pc = Point3::new(Real::from(0.0), Real::from(2.1), Real::from(1.3));
 
         let tri = Triangle::new(pa, pb, pc);
 
@@ -923,10 +923,10 @@ mod test {
         // triangle if:
         // * each of alpha, beta, gamma is in (0, 1)
         // * alpha + beta + gamma = 1
-        let contained_p = o + (va * 0.2 + vb * 0.3 + vc * 0.5);
-        let not_contained_coplanar_p = o + (va * -0.5 + vb * 0.8 + vc * 0.7);
-        let not_coplanar_p = o + (va * 0.2 + vb * 0.3 + vc * 0.5) + n * 0.1;
-        let not_coplanar_p2 = o + (va * -0.5 + vb * 0.8 + vc * 0.7) + n * 0.1;
+        let contained_p = o + (va * Real::from(0.2) + vb * Real::from(0.3) + vc * Real::from(0.5));
+        let not_contained_coplanar_p = o + (va * Real::from(-0.5) + vb * Real::from(0.8) + vc * Real::from(0.7));
+        let not_coplanar_p = o + (va * Real::from(0.2) + vb * Real::from(0.3) + vc * Real::from(0.5)) + n * Real::from(0.1);
+        let not_coplanar_p2 = o + (va * Real::from(-0.5) + vb * Real::from(0.8) + vc * Real::from(0.7)) + n * Real::from(0.1);
         assert!(tri.contains_point(&contained_p));
         assert!(!tri.contains_point(&not_contained_coplanar_p));
         assert!(!tri.contains_point(&not_coplanar_p));
@@ -935,9 +935,9 @@ mod test {
         // Test that points that are clearly within the triangle as seen as such, by testing
         // a number of points along a line intersecting the triangle.
         for i in -50i16..150 {
-            let a = 0.15;
-            let b = 0.01 * Real::from(i); // b ranges from -0.5 to 1.5
-            let c = 1.0 - a - b;
+            let a = Real::from(0.15);
+            let b = Real::from(0.01) * Real::from(i); // b ranges from -0.5 to 1.5
+            let c = Real::from(1.0) - a - b;
             let p = o + (va * a + vb * b + vc * c);
 
             match i {

@@ -1,4 +1,4 @@
-use crate::parry::math::{Isometry, Point, Real, Vector};
+use crate::parry::math::{Isometry, Point, Real, RawReal, Vector};
 use crate::parry::query::contact_manifolds::{NormalConstraints, NormalConstraintsPair};
 use crate::parry::query::{ContactManifold, Ray, TrackedContact};
 use crate::parry::shape::{Ball, PackedFeatureId, Shape};
@@ -62,10 +62,10 @@ pub fn contact_manifold_convex_ball<'a, ManifoldData, ContactData, S1>(
 
     // local_n1 points from the surface towards our origin if defined, otherwise from the other
     // shape's origin towards our origin if defined, otherwise towards +x
-    let (mut local_n1, mut dist) = Unit::try_new_and_get(dpos, 0.0).unwrap_or_else(|| {
+    let (mut local_n1, mut dist) = Unit::try_new_and_get(dpos, Real::from(0.0)).unwrap_or_else(|| {
         (
-            Unit::try_new(pos12.translation.vector, 0.0).unwrap_or_else(Vector::x_axis),
-            0.0,
+            Unit::try_new(pos12.translation.vector, Real::from(0.0)).unwrap_or_else(Vector::x_axis),
+            Real::from(0.0),
         )
     });
 
@@ -101,7 +101,7 @@ pub fn contact_manifold_convex_ball<'a, ManifoldData, ContactData, S1>(
                 },
             );
 
-            if let Some(hit) = shape1.cast_local_ray_and_get_normal(&ray1, Real::MAX, false) {
+            if let Some(hit) = shape1.cast_local_ray_and_get_normal(&ray1, Real::from(RawReal::MAX), false) {
                 local_p1 = ray1.point_at(hit.time_of_impact);
                 dist = if proj.is_inside {
                     -hit.time_of_impact

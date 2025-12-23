@@ -173,7 +173,7 @@ impl MassProperties {
         let cyl_mass = cyl_vol * density;
 
         Self::with_principal_inertia_frame(
-            Point::new(0.0, -half_height / 2.0, 0.0),
+            Point::new(0.0.into(), Real::from(-half_height / 2.0), 0.0.into()),
             cyl_mass,
             cyl_unit_i * cyl_mass,
             Rotation::identity(),

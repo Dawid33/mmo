@@ -1,9 +1,10 @@
 #[cfg(feature = "dim3")]
 use crate::parry::math::HashableReal;
-use crate::parry::math::{AngVector, AngularInertia, Isometry, Point, Real, Rotation, Vector};
+use crate::parry::math::{AngVector, AngularInertia, Isometry, Point, Real, RawReal, Rotation, Vector};
 use crate::parry::utils;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 use num::Zero;
+use ordered_float::OrderedFloat;
 #[cfg(feature = "dim3")]
 use {core::ops::MulAssign, na::Matrix3};
 
@@ -11,9 +12,9 @@ use {core::ops::MulAssign, na::Matrix3};
 use rkyv::{bytecheck, CheckBytes};
 
 #[cfg_attr(feature = "f32", expect(clippy::unnecessary_cast))]
-const EPSILON: Real = f32::EPSILON as Real;
+const EPSILON: Real = OrderedFloat(f32::EPSILON as RawReal);
 
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -220,7 +221,7 @@ impl MassProperties {
     pub fn with_inertia_matrix(local_com: Point<Real>, mass: Real, inertia: Matrix3<Real>) -> Self {
         let mut eigen = inertia.symmetric_eigen();
 
-        if eigen.eigenvectors.determinant() < 0.0 {
+        if eigen.eigenvectors.determinant() < 0.0.into() {
             eigen.eigenvectors.swap_columns(1, 2);
             eigen.eigenvalues.swap_rows(1, 2);
         }
@@ -230,7 +231,7 @@ impl MassProperties {
         let _ = principal_inertia_local_frame.renormalize();
 
         // Drop negative eigenvalues.
-        let principal_inertia = eigen.eigenvalues.map(|e| e.max(0.0));
+        let principal_inertia = eigen.eigenvalues.map(|e| e.max(0.0.into()));
 
         Self::with_principal_inertia_frame(
             local_com,
@@ -323,7 +324,7 @@ impl MassProperties {
         let matrix = self.reconstruct_inertia_matrix();
 
         if self.inv_mass != 0.0 {
-            let mass = 1.0 / self.inv_mass;
+            let mass = Real::from(1.0) / self.inv_mass;
             let diag = shift.norm_squared();
             let diagm = Matrix3::from_diagonal_element(diag);
             matrix + (diagm - shift * shift.transpose()) * mass
@@ -368,7 +369,7 @@ impl MassProperties {
 impl Zero for MassProperties {
     fn zero() -> Self {
         Self {
-            inv_mass: 0.0,
+            inv_mass: 0.0.into(),
             inv_principal_inertia: na::zero(),
             #[cfg(feature = "dim3")]
             principal_inertia_local_frame: Rotation::identity(),
@@ -433,7 +434,7 @@ impl Sub<MassProperties> for MassProperties {
         let mut new_mass = m1 - m2;
 
         if new_mass < EPSILON {
-            new_mass = 0.0;
+            new_mass = 0.0.into();
         }
 
         let inv_mass = utils::inv(new_mass);
@@ -549,7 +550,7 @@ impl core::iter::Sum<MassProperties> for MassProperties {
     {
         use alloc::vec::Vec;
 
-        let mut total_mass = 0.0;
+        let mut total_mass: Real = 0.0.into();
         let mut total_com = Point::origin();
         let mut total_inertia = Matrix3::zeros();
         // TODO: avoid this allocation.
@@ -563,7 +564,7 @@ impl core::iter::Sum<MassProperties> for MassProperties {
             all_props.push(props);
         }
 
-        if total_mass > 0.0 {
+        if total_mass > 0.0.into() {
             total_com /= total_mass;
         }
 
@@ -641,7 +642,7 @@ mod test {
     use super::MassProperties;
     use crate::parry::math::{AngVector, Point};
     #[cfg(feature = "dim3")]
-    use crate::parry::math::{Rotation, Vector};
+    use crate::parry::math::{Rotation, Vector, Real};
     use crate::parry::shape::{Ball, Capsule, Shape};
     use approx::assert_relative_eq;
     use num::Zero;
@@ -650,28 +651,28 @@ mod test {
     fn mass_properties_add_partial_zero() {
         let m1 = MassProperties {
             local_com: Point::origin(),
-            inv_mass: 2.0,
+            inv_mass: 2.0.into(),
             inv_principal_inertia: na::zero(),
             #[cfg(feature = "dim3")]
             principal_inertia_local_frame: Rotation::identity(),
         };
         let m2 = MassProperties {
             local_com: Point::origin(),
-            inv_mass: 0.0,
+            inv_mass: 0.0.into(),
             #[cfg(feature = "dim2")]
             inv_principal_inertia: 1.0,
             #[cfg(feature = "dim3")]
-            inv_principal_inertia: Vector::new(1.0, 2.0, 3.0),
+            inv_principal_inertia: Vector::new(1.0.into(), 2.0.into(), 3.0.into()),
             #[cfg(feature = "dim3")]
             principal_inertia_local_frame: Rotation::identity(),
         };
         let result = MassProperties {
             local_com: Point::origin(),
-            inv_mass: 2.0,
+            inv_mass: 2.0.into(),
             #[cfg(feature = "dim2")]
             inv_principal_inertia: 1.0,
             #[cfg(feature = "dim3")]
-            inv_principal_inertia: Vector::new(1.0, 2.0, 3.0),
+            inv_principal_inertia: Vector::new(1.0.into(), 2.0.into(), 3.0.into()),
             #[cfg(feature = "dim3")]
             principal_inertia_local_frame: Rotation::identity(),
         };
@@ -683,25 +684,25 @@ mod test {
     #[test]
     fn mass_properties_add_sub() {
         // Check that addition and subtraction of mass properties behave as expected.
-        let c1 = Capsule::new_x(1.0, 2.0);
-        let c2 = Capsule::new_y(3.0, 4.0);
-        let c3 = Ball::new(2.0);
+        let c1 = Capsule::new_x(1.0.into(), 2.0.into());
+        let c2 = Capsule::new_y(3.0.into(), 4.0.into());
+        let c3 = Ball::new(2.0.into());
 
-        let m1 = c1.mass_properties(1.0);
-        let m2 = c2.mass_properties(1.0);
-        let m3 = c3.mass_properties(1.0);
+        let m1 = c1.mass_properties(1.0.into());
+        let m2 = c2.mass_properties(1.0.into());
+        let m3 = c3.mass_properties(1.0.into());
         let m1m2m3 = m1 + m2 + m3;
 
-        assert_relative_eq!(m1 + m2, m2 + m1, epsilon = 1.0e-6);
-        assert_relative_eq!(m1m2m3 - m1, m2 + m3, epsilon = 1.0e-6);
-        assert_relative_eq!(m1m2m3 - m2, m1 + m3, epsilon = 1.0e-6);
-        assert_relative_eq!(m1m2m3 - m3, m1 + m2, epsilon = 1.0e-6);
-        assert_relative_eq!(m1m2m3 - (m1 + m2), m3, epsilon = 1.0e-6);
-        assert_relative_eq!(m1m2m3 - (m1 + m3), m2, epsilon = 1.0e-6);
-        assert_relative_eq!(m1m2m3 - (m2 + m3), m1, epsilon = 1.0e-6);
-        assert_relative_eq!(m1m2m3 - m1 - m2, m3, epsilon = 1.0e-6);
-        assert_relative_eq!(m1m2m3 - m1 - m3, m2, epsilon = 1.0e-6);
-        assert_relative_eq!(m1m2m3 - m2 - m3, m1, epsilon = 1.0e-6);
+        assert_relative_eq!(m1 + m2, m2 + m1, epsilon = 1.0e-6.into());
+        assert_relative_eq!(m1m2m3 - m1, m2 + m3, epsilon = 1.0e-6.into());
+        assert_relative_eq!(m1m2m3 - m2, m1 + m3, epsilon = 1.0e-6.into());
+        assert_relative_eq!(m1m2m3 - m3, m1 + m2, epsilon = 1.0e-6.into());
+        assert_relative_eq!(m1m2m3 - (m1 + m2), m3, epsilon = 1.0e-6.into());
+        assert_relative_eq!(m1m2m3 - (m1 + m3), m2, epsilon = 1.0e-6.into());
+        assert_relative_eq!(m1m2m3 - (m2 + m3), m1, epsilon = 1.0e-6.into());
+        assert_relative_eq!(m1m2m3 - m1 - m2, m3, epsilon = 1.0e-6.into());
+        assert_relative_eq!(m1m2m3 - m1 - m3, m2, epsilon = 1.0e-6.into());
+        assert_relative_eq!(m1m2m3 - m2 - m3, m1, epsilon = 1.0e-6.into());
 
         // NOTE: converting the inverse inertia matrices don’t work well here because
         //       tiny inertia value originating from the subtraction can result in a non-zero
@@ -709,9 +710,9 @@ mod test {
         assert_relative_eq!(
             (((m1m2m3 - m1) - m2) - m3).principal_inertia(),
             AngVector::zero(),
-            epsilon = 1.0e-3
+            epsilon = 1.0e-3.into()
         );
-        assert_relative_eq!((((m1m2m3 - m1) - m2) - m3).mass(), 0.0, epsilon = 1.0e-6);
+        assert_relative_eq!((((m1m2m3 - m1) - m2) - m3).mass(), Real::from(0.0), epsilon = 1.0e-6.into());
     }
 
     #[test]
@@ -725,8 +726,8 @@ mod test {
         };
 
         // Compute the mass properties of a compound shape made of three 1x1x1 cuboids.
-        let shape = Cuboid::new(Vector::repeat(0.5));
-        let mp = shape.mass_properties(1.0);
+        let shape = Cuboid::new(Vector::repeat(0.5.into()));
+        let mp = shape.mass_properties(1.0.into());
         let iso2 = Isometry::from_parts(Vector::y().into(), Default::default());
         let iso3 = Isometry::from_parts((-Vector::y()).into(), Default::default());
 
@@ -744,31 +745,31 @@ mod test {
             (iso2, SharedShape::new(shape)),
             (iso3, SharedShape::new(shape)),
         ]);
-        let mp_compound = compound_shape.mass_properties(1.0);
+        let mp_compound = compound_shape.mass_properties(1.0.into());
 
         // Check that the mass properties of the compound shape match the mass properties
         // of a single 1x3x1 cuboid.
         #[cfg(feature = "dim2")]
         let expected = Cuboid::new(Vector::new(0.5, 1.5)).mass_properties(1.0);
         #[cfg(feature = "dim3")]
-        let expected = Cuboid::new(Vector::new(0.5, 1.5, 0.5)).mass_properties(1.0);
+        let expected = Cuboid::new(Vector::new(0.5.into(), 1.5.into(), 0.5.into())).mass_properties(1.0.into());
 
         // Sum shifted
-        assert_relative_eq!(sum.local_com, expected.local_com, epsilon = 1.0e-6);
-        assert_relative_eq!(sum.inv_mass, expected.inv_mass, epsilon = 1.0e-6);
+        assert_relative_eq!(sum.local_com, expected.local_com, epsilon = 1.0e-6.into());
+        assert_relative_eq!(sum.inv_mass, expected.inv_mass, epsilon = 1.0e-6.into());
         assert_relative_eq!(
             sum.inv_principal_inertia,
             expected.inv_principal_inertia,
-            epsilon = 1.0e-6
+            epsilon = 1.0e-6.into()
         );
 
         // Compound
-        assert_relative_eq!(mp_compound.local_com, expected.local_com, epsilon = 1.0e-6);
-        assert_relative_eq!(mp_compound.inv_mass, expected.inv_mass, epsilon = 1.0e-6);
+        assert_relative_eq!(mp_compound.local_com, expected.local_com, epsilon = 1.0e-6.into());
+        assert_relative_eq!(mp_compound.inv_mass, expected.inv_mass, epsilon = 1.0e-6.into());
         assert_relative_eq!(
             mp_compound.inv_principal_inertia,
             expected.inv_principal_inertia,
-            epsilon = 1.0e-6
+            epsilon = 1.0e-6.into()
         );
     }
 

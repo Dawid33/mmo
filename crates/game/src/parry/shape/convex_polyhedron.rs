@@ -19,7 +19,7 @@ use rkyv::{bytecheck, CheckBytes};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
     archive(as = "Self")
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(PartialEq, Debug, Copy, Clone, Hash)]
 pub struct Vertex {
     pub first_adj_face_or_edge: u32,
     pub num_adj_faces_or_edge: u32,
@@ -31,7 +31,7 @@ pub struct Vertex {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
     archive(as = "Self")
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(PartialEq, Debug, Copy, Clone, Hash)]
 pub struct Edge {
     pub vertices: Point2<u32>,
     pub faces: Point2<u32>,
@@ -55,7 +55,7 @@ impl Edge {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
     archive(as = "Self")
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(PartialEq, Debug, Copy, Clone, Hash)]
 pub struct Face {
     pub first_vertex_or_edge: u32,
     pub num_vertices_or_edges: u32,
@@ -95,7 +95,7 @@ impl Triangle {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
     archive(check_bytes)
 )]
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone, Hash)]
 /// A 3D convex polyhedron without degenerate faces.
 ///
 /// A convex polyhedron is a 3D solid shape where all faces are flat polygons, all interior angles
@@ -446,7 +446,7 @@ impl ConvexPolyhedron {
 
                         let dir = Unit::try_new(
                             points[idx[i2] as usize] - points[idx[i1] as usize],
-                            crate::parry::math::DEFAULT_EPSILON,
+                            crate::parry::math::DEFAULT_EPSILON.into(),
                         );
 
                         edges.push(Edge {
@@ -480,7 +480,7 @@ impl ConvexPolyhedron {
         for e in &mut edges {
             let tri1 = triangles.get(e.faces[0] as usize)?;
             let tri2 = triangles.get(e.faces[1] as usize)?;
-            if tri1.normal.dot(&tri2.normal) > 1.0 - eps {
+            if tri1.normal.dot(&tri2.normal) > Real::from(1.0) - eps {
                 e.deleted = true;
             }
         }
@@ -646,7 +646,7 @@ impl ConvexPolyhedron {
                 self.points[self.vertices_adj_to_face[face.first_vertex_or_edge as usize] as usize];
 
             for v in &self.points {
-                assert!((v - p0).dot(face.normal.as_ref()) <= crate::parry::math::DEFAULT_EPSILON);
+                assert!((v - p0).dot(face.normal.as_ref()) <= Real::from(crate::parry::math::DEFAULT_EPSILON));
             }
         }
     }
@@ -872,11 +872,11 @@ impl ConvexPolyhedron {
             .for_each(|pt| pt.coords.component_mul_assign(scale));
 
         for f in &mut self.faces {
-            f.normal = Unit::try_new(f.normal.component_mul(scale), 0.0).unwrap_or(f.normal);
+            f.normal = Unit::try_new(f.normal.component_mul(scale), Real::from(0.0)).unwrap_or(f.normal);
         }
 
         for e in &mut self.edges {
-            e.dir = Unit::try_new(e.dir.component_mul(scale), 0.0).unwrap_or(e.dir);
+            e.dir = Unit::try_new(e.dir.component_mul(scale), Real::from(0.0)).unwrap_or(e.dir);
         }
 
         Some(self)
@@ -896,7 +896,7 @@ impl ConvexPolyhedron {
             let face_id = self.faces_adj_to_vertex[(vertex.first_adj_face_or_edge + i) as usize];
             let face = &self.faces[face_id as usize];
 
-            if face.normal.dot(local_dir.as_ref()) >= ceps {
+            if face.normal.dot(local_dir.as_ref()) >= Real::from(ceps) {
                 return FeatureId::Face(face_id);
             }
         }

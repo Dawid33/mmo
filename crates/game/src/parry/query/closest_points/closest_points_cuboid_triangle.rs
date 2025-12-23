@@ -24,14 +24,14 @@ pub fn closest_points_cuboid_triangle(
     }
 
     #[cfg(feature = "dim2")]
-    let sep3 = (-Real::MAX, crate::parry::math::Vector::<Real>::y()); // This case does not exist in 2D.
+    let sep3 = (-RawReal::MAX, crate::parry::math::Vector::<Real>::y()); // This case does not exist in 2D.
     #[cfg(feature = "dim3")]
     let sep3 = sat::cuboid_triangle_find_local_separating_edge_twoway(cuboid1, triangle2, pos12);
     if sep3.0 > margin {
         return ClosestPoints::Disjoint;
     }
 
-    if sep1.0 <= 0.0 && sep2.0 <= 0.0 && sep3.0 <= 0.0 {
+    if sep1.0 <= Real::from(0.0) && sep2.0 <= Real::from(0.0) && sep3.0 <= Real::from(0.0) {
         return ClosestPoints::Intersecting;
     }
 

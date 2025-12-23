@@ -1,8 +1,12 @@
-use crate::rapier::dynamics::{IntegrationParameters, RigidBodySet};
-use crate::rapier::geometry::{Aabb, BroadPhasePairEvent, ColliderHandle, ColliderPair, ColliderSet};
-use crate::rapier::math::Real;
+use ordered_float::OrderedFloat;
+
 use crate::parry::partitioning::{Bvh, BvhWorkspace};
 use crate::parry::utils::hashmap::{Entry, HashMap};
+use crate::rapier::dynamics::{IntegrationParameters, RigidBodySet};
+use crate::rapier::geometry::{
+    Aabb, BroadPhasePairEvent, ColliderHandle, ColliderPair, ColliderSet,
+};
+use crate::rapier::math::Real;
 
 /// The broad-phase collision detector that quickly filters out distant object pairs.
 ///
@@ -25,13 +29,22 @@ pub struct BroadPhaseBvh {
     optimization_strategy: BvhOptimizationStrategy,
 }
 
+impl std::hash::Hash for BroadPhaseBvh {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.tree.hash(state);
+        self.pairs.hash(state);
+        self.frame_index.hash(state);
+        self.optimization_strategy.hash(state);
+    }
+}
+
 // TODO: would be interesting to try out:
 // "Fast Insertion-Based Optimization of Bounding Volume Hierarchies"
 // by Bittner et al.
 /// Selection of strategies to maintain through time the broad-phase BVH in shape that remains
 /// efficient for collision-detection and scene queries.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Default, PartialEq, Eq, Copy, Clone)]
+#[derive(Default, PartialEq, Eq, Copy, Clone, Hash)]
 pub enum BvhOptimizationStrategy {
     /// Different sub-trees of the BVH will be optimized at each frame.
     #[default]
@@ -46,7 +59,7 @@ const ENABLE_TREE_VALIDITY_CHECK: bool = false;
 
 impl BroadPhaseBvh {
     const CHANGE_DETECTION_ENABLED: bool = true;
-    const CHANGE_DETECTION_FACTOR: Real = 1.0e-2;
+    const CHANGE_DETECTION_FACTOR: Real = OrderedFloat(1.0e-2);
 
     /// Initializes a new empty broad-phase.
     pub fn new() -> Self {
@@ -120,7 +133,7 @@ impl BroadPhaseBvh {
                 let change_detection_skin = if Self::CHANGE_DETECTION_ENABLED {
                     Self::CHANGE_DETECTION_FACTOR * params.length_unit
                 } else {
-                    0.0
+                    Real::from(0.0)
                 };
 
                 self.tree.insert_or_update_partially(
@@ -267,7 +280,7 @@ impl BroadPhaseBvh {
         let change_detection_skin = if Self::CHANGE_DETECTION_ENABLED {
             Self::CHANGE_DETECTION_FACTOR * params.length_unit
         } else {
-            0.0
+            Real::from(0.0)
         };
         self.tree.insert_with_change_detection(
             aabb,

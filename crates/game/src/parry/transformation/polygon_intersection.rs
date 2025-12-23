@@ -2,7 +2,7 @@ use alloc::{vec, vec::Vec};
 use na::Point2;
 use ordered_float::OrderedFloat;
 
-use crate::parry::math::Real;
+use crate::parry::math::{Real, RawReal};
 use crate::parry::shape::{SegmentPointLocation, Triangle, TriangleOrientation};
 use crate::parry::utils::hashmap::HashMap;
 use crate::parry::utils::{self, SegmentsIntersection};
@@ -37,7 +37,7 @@ pub struct PolygonIntersectionTolerances {
 impl Default for PolygonIntersectionTolerances {
     fn default() -> Self {
         Self {
-            collinearity_epsilon: Real::EPSILON * 100.0,
+            collinearity_epsilon: Real::from(RawReal::EPSILON * 100.0),
         }
     }
 }
@@ -101,9 +101,9 @@ impl PolylinePointLocation {
         match self {
             Self::OnVertex(vid) => {
                 if *vid == edge[0] {
-                    0.0
+                    0.0.into()
                 } else {
-                    1.0
+                    1.0.into()
                 }
             }
             Self::OnEdge(ia, ib, bcoords) => {
@@ -526,7 +526,7 @@ pub fn convex_polygons_intersection_with_tolerances(
                     second_loc1,
                     second_loc2,
                 } => {
-                    if dir_edge1.dot(&dir_edge2) < 0.0 {
+                    if dir_edge1.dot(&dir_edge2) < 0.0.into() {
                         // Special case: edge1 & edge2 overlap and oppositely oriented. The
                         //               intersection is degenerate (equals to a segment). Output
                         //               the segment and exit.

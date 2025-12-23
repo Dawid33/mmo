@@ -44,28 +44,28 @@ pub fn ray_toi_with_ball(
 
     // Special case for when the dir is zero.
     if a.is_zero() {
-        if c > 0.0 {
+        if c > Real::from(0.0) {
             return (false, None);
         } else {
-            return (true, Some(0.0));
+            return (true, Some(Real::from(0.0)));
         }
     }
 
-    if c > 0.0 && b > 0.0 {
+    if c > Real::from(0.0) && b > Real::from(0.0) {
         (false, None)
     } else {
         let delta = b * b - a * c;
 
-        if delta < 0.0 {
+        if delta < Real::from(0.0) {
             // no solution
             (false, None)
         } else {
             let t = (-b - ComplexField::sqrt(delta)) / a;
 
-            if t <= 0.0 {
+            if t <= Real::from(0.0) {
                 // origin inside of the ball
                 if solid {
-                    (true, Some(0.0))
+                    (true, Some(Real::from(0.0)))
                 } else {
                     (true, Some((-b + delta.sqrt()) / a))
                 }

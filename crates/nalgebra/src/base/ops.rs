@@ -548,7 +548,7 @@ macro_rules! left_scalar_mul_impl(
     )*}
 );
 
-left_scalar_mul_impl!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64);
+left_scalar_mul_impl!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64, ordered_float::OrderedFloat<f32>);
 
 // Matrix × Matrix
 impl<'b, T, R1: Dim, C1: Dim, R2: Dim, C2: Dim, SA, SB> Mul<&'b Matrix<T, R2, C2, SB>>

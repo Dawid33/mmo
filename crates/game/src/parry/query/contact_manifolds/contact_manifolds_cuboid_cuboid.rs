@@ -54,7 +54,7 @@ pub fn contact_manifold_cuboid_cuboid<'a, ManifoldData, ContactData: Default + C
      *
      */
     #[cfg(feature = "dim2")]
-    let sep3 = (-Real::MAX, Vector::x()); // This case does not exist in 2D.
+    let sep3 = (-RawReal::MAX, Vector::x()); // This case does not exist in 2D.
     #[cfg(feature = "dim3")]
     let sep3 = sat::cuboid_cuboid_find_local_separating_edge_twoway(cuboid1, cuboid2, pos12);
     if sep3.0 > prediction {

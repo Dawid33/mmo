@@ -12,7 +12,7 @@ use na::{DVector, DVectorViewMut};
 use na::{UnitQuaternion, Vector3};
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash)]
 /// An joint attached to two bodies based on the reduced coordinates formalism.
 pub struct MultibodyJoint {
     /// The joint’s description.
@@ -123,7 +123,7 @@ impl MultibodyJoint {
             #[cfg(feature = "dim3")]
             3 => {
                 let angvel = Vector3::from_row_slice(&vels[curr_free_dof..curr_free_dof + 3]);
-                let disp = UnitQuaternion::new_eps(angvel * dt, 0.0);
+                let disp = UnitQuaternion::new_eps(angvel * dt, Real::from(0.0));
                 self.joint_rot = disp * self.joint_rot;
                 self.coords[3] += angvel[0] * dt;
                 self.coords[4] += angvel[1] * dt;
@@ -135,7 +135,7 @@ impl MultibodyJoint {
 
     /// Apply a displacement to the multibody_joint.
     pub fn apply_displacement(&mut self, disp: &[Real]) {
-        self.integrate(1.0, disp);
+        self.integrate(Real::from(1.0), disp);
     }
 
     /// Sets in `out` the non-zero entries of the multibody_joint jacobian transformed by `transform`.
@@ -145,7 +145,7 @@ impl MultibodyJoint {
 
         for i in 0..DIM {
             if (locked_bits & (1 << i)) == 0 {
-                let transformed_axis = transform * Vector::ith(i, 1.0);
+                let transformed_axis = transform * Vector::ith(i, Real::from(1.0));
                 out.fixed_view_mut::<DIM, 1>(0, curr_free_dof)
                     .copy_from(&transformed_axis);
                 curr_free_dof += 1;
@@ -234,7 +234,7 @@ impl MultibodyJoint {
         for i in DIM..SPATIAL_DIM {
             if locked_bits & (1 << i) == 0 {
                 // This is a free angular DOF.
-                out[curr_free_dof] = 0.1;
+                out[curr_free_dof] = Real::from(0.1);
                 curr_free_dof += 1;
             }
         }

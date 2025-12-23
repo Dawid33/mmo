@@ -37,18 +37,18 @@ use num::Zero;
 ///     .build();
 /// let handle = bodies.insert(body);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 // #[repr(C)]
 // #[repr(align(64))]
 pub struct RigidBody {
     pub(crate) ids: RigidBodyIds,
     pub(crate) pos: RigidBodyPosition,
-    pub(crate) damping: RigidBodyDamping<HashableReal>,
-    pub(crate) vels: RigidBodyVelocity<HashableReal>,
+    pub(crate) damping: RigidBodyDamping<Real>,
+    pub(crate) vels: RigidBodyVelocity<Real>,
     pub(crate) forces: RigidBodyForces,
     pub(crate) mprops: RigidBodyMassProps,
 
-    pub(crate) ccd_vels: RigidBodyVelocity<HashableReal>,
+    pub(crate) ccd_vels: RigidBodyVelocity<Real>,
     pub(crate) ccd: RigidBodyCcd,
     pub(crate) colliders: RigidBodyColliders,
     /// Whether or not this rigid-body is sleeping.
@@ -1424,11 +1424,11 @@ impl RigidBody {
         let curr_momentum = i.component_mul(&w);
         let explicit_gyro_momentum = -w.cross(&curr_momentum) * dt;
         let total_momentum = curr_momentum + explicit_gyro_momentum;
-        let total_momentum_sqnorm = total_momentum.norm_squared();
+        let total_momentum_sqnorm = Real::from(total_momentum.norm_squared());
 
-        if total_momentum_sqnorm != 0.0 {
+        if total_momentum_sqnorm != Real::from(0.0) {
             let capped_momentum =
-                total_momentum * (curr_momentum.norm_squared() / total_momentum_sqnorm).sqrt();
+                total_momentum * Real::from((curr_momentum.norm_squared() / total_momentum_sqnorm).sqrt());
             self.pos.position * (ii.component_mul(&capped_momentum))
         } else {
             *self.angvel()
@@ -1521,16 +1521,16 @@ impl RigidBodyBuilder {
             position: Isometry::identity(),
             linvel: Vector::zeros(),
             angvel: na::zero(),
-            gravity_scale: 1.0,
-            linear_damping: 0.0,
-            angular_damping: 0.0,
+            gravity_scale: Real::from(1.0),
+            linear_damping: Real::from(0.0),
+            angular_damping: Real::from(0.0),
             body_type,
             mprops_flags: LockedAxes::empty(),
             additional_mass_properties: RigidBodyAdditionalMassProps::default(),
             can_sleep: true,
             sleeping: false,
             ccd_enabled: false,
-            soft_ccd_prediction: 0.0,
+            soft_ccd_prediction: Real::from(0.0),
             dominance_group: 0,
             enabled: true,
             user_data: 0,
@@ -1614,7 +1614,7 @@ impl RigidBodyBuilder {
 
     /// Sets the scale applied to the gravity force affecting the rigid-body to be created.
     pub fn gravity_scale(mut self, scale_factor: Real) -> Self {
-        *self.gravity_scale = scale_factor;
+        self.gravity_scale = scale_factor;
         self
     }
 
@@ -1931,7 +1931,7 @@ impl RigidBodyBuilder {
 
         if self.additional_mass_properties
             != RigidBodyAdditionalMassProps::MassProps(MassProperties::zero())
-            && self.additional_mass_properties != RigidBodyAdditionalMassProps::Mass(0.0)
+            && self.additional_mass_properties != RigidBodyAdditionalMassProps::Mass(Real::from(0.0))
         {
             rb.mprops.additional_local_mprops = Some(Box::new(self.additional_mass_properties));
         }
@@ -1954,8 +1954,8 @@ impl RigidBodyBuilder {
         }
 
         if !self.can_sleep {
-            rb.activation.normalized_linear_threshold = -1.0;
-            rb.activation.angular_threshold = -1.0;
+            rb.activation.normalized_linear_threshold = Real::from(-1.0);
+            rb.activation.angular_threshold = Real::from(-1.0);
         }
 
         rb

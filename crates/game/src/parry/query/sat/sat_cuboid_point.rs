@@ -1,4 +1,4 @@
-use crate::parry::math::{Isometry, Point, Real, Vector};
+use crate::parry::math::{Isometry, Point, Real, RawReal, Vector};
 use crate::parry::shape::{Cuboid, SupportMap};
 
 use na::Unit;
@@ -71,11 +71,11 @@ pub fn point_cuboid_find_local_separating_normal_oneway(
     shape2: &Cuboid,
     pos12: &Isometry<Real>,
 ) -> (Real, Vector<Real>) {
-    let mut best_separation = -Real::MAX;
+    let mut best_separation = Real::from(-RawReal::MAX);
     let mut best_dir = Vector::zeros();
 
     if let Some(normal1) = normal1 {
-        let axis1 = if (pos12.translation.vector - point1.coords).dot(&normal1) >= 0.0 {
+        let axis1 = if (pos12.translation.vector - point1.coords).dot(&normal1) >= Real::from(0.0) {
             normal1
         } else {
             -normal1

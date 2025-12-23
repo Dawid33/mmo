@@ -1,11 +1,15 @@
 use super::TOIEntry;
-use crate::rapier::dynamics::{IntegrationParameters, IslandManager, RigidBodyHandle, RigidBodySet};
-use crate::rapier::geometry::{BroadPhaseBvh, ColliderParent, ColliderSet, CollisionEvent, NarrowPhase};
-use crate::rapier::math::Real;
+use crate::parry::utils::hashmap::HashMap;
 use crate::parry::utils::SortedPair;
+use crate::rapier::dynamics::{
+    IntegrationParameters, IslandManager, RigidBodyHandle, RigidBodySet,
+};
+use crate::rapier::geometry::{
+    BroadPhaseBvh, ColliderParent, ColliderSet, CollisionEvent, NarrowPhase,
+};
+use crate::rapier::math::Real;
 use crate::rapier::pipeline::{EventHandler, QueryFilter};
 use crate::rapier::prelude::{ActiveEvents, CollisionEventFlags};
-use crate::parry::utils::hashmap::HashMap;
 use std::collections::BinaryHeap;
 
 pub enum PredictedImpacts {
@@ -36,7 +40,7 @@ pub enum PredictedImpacts {
 /// **Cost**: More expensive than regular collision detection. Only use when needed!
 ///
 /// Enable via `RigidBodyBuilder::ccd_enabled(true)` or `body.enable_ccd(true)`.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct CCDSolver;
 
@@ -66,9 +70,9 @@ impl CCDSolver {
                 //     rb.ccd.ccd_thickness,
                 //     rb.ccd.max_point_velocity(&rb.integrated_vels)
                 // );
-                let new_pos = rb
-                    .ccd_vels
-                    .integrate(toi.max(min_toi), &rb.pos.position, local_com);
+                let new_pos =
+                    rb.ccd_vels
+                        .integrate(*toi.max(&min_toi), &rb.pos.position, local_com);
                 rb.pos.next_position = new_pos;
             }
         }
@@ -202,7 +206,7 @@ impl CCDSolver {
                                 .contact_pair(*ch1, ch2)
                                 .and_then(|p| p.find_deepest_contact())
                                 .map(|c| c.1.dist)
-                                .unwrap_or(0.0);
+                                .unwrap_or(Real::from(0.0));
 
                             let rb2 = bh2.and_then(|h| bodies.get(h));
 
@@ -216,7 +220,7 @@ impl CCDSolver {
                                 rb2,
                                 None,
                                 None,
-                                0.0,
+                                Real::from(0.0),
                                 min_toi,
                                 smallest_dist,
                             ) {
@@ -228,7 +232,11 @@ impl CCDSolver {
             }
         }
 
-        if min_toi < dt { Some(min_toi) } else { None }
+        if min_toi < dt {
+            Some(min_toi)
+        } else {
+            None
+        }
     }
 
     /// Outputs the set of bodies as well as their first time-of-impact event.
@@ -328,7 +336,7 @@ impl CCDSolver {
                                 .contact_pair(*ch1, ch2)
                                 .and_then(|p| p.find_deepest_contact())
                                 .map(|c| c.1.dist)
-                                .unwrap_or(0.0);
+                                .unwrap_or(Real::from(0.0));
 
                             let rb1 = bh1.map(|h| &bodies[h]);
                             let rb2 = bh2.map(|h| &bodies[h]);
@@ -343,7 +351,7 @@ impl CCDSolver {
                                 rb2,
                                 None,
                                 None,
-                                0.0,
+                                Real::from(0.0),
                                 // NOTE: we use dt here only once we know that
                                 // there is at least one TOI before dt.
                                 min_overstep,
@@ -458,7 +466,7 @@ impl CCDSolver {
                         .contact_pair(*ch1, ch2)
                         .and_then(|p| p.find_deepest_contact())
                         .map(|c| c.1.dist)
-                        .unwrap_or(0.0);
+                        .unwrap_or(Real::from(0.0));
 
                     if let Some(toi) = TOIEntry::try_from_colliders(
                         query_pipeline.dispatcher,

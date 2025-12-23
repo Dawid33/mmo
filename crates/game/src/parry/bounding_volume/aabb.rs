@@ -106,7 +106,7 @@ use rkyv::{bytecheck, CheckBytes};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
     archive(as = "Self")
 )]
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, PartialEq, Copy, Clone, Hash)]
 #[repr(C)]
 pub struct Aabb {
     /// The point with minimum coordinates (bottom-left-back corner).
@@ -571,7 +571,7 @@ impl Aabb {
         };
         let ray = Ray::new(Point::origin(), vel12);
 
-        msum.intersects_local_ray(&ray, 1.0)
+        msum.intersects_local_ray(&ray, 1.0.into())
     }
 
     /// Computes the intersection of this `Aabb` and another one.
@@ -840,7 +840,7 @@ impl Aabb {
                 //       of using `Rotation2::new()` because we will use similar
                 //       formulas on the interval methods.
                 let (sin, cos) = angle.sin_cos();
-                let rotmat = na::Matrix2::new(cos, -sin, sin, cos);
+                let rotmat = na::Matrix2::new(Real::from(cos), Real::from( -sin), Real::from(sin), Real::from(cos));
 
                 let rotated_pt = rotmat * self.point;
                 let shift = self.tangents[0] * rotated_pt.x + self.tangents[1] * rotated_pt.y;
@@ -890,7 +890,7 @@ impl Aabb {
             angvel,
             point: na::Vector2::new(dpos.dot(&tangents[0]), dpos.dot(&tangents[1])),
             plane: Vector::x(),
-            bias: 0.0,
+            bias: 0.0.into(),
         };
 
         // Check the 8 planar faces of the Aabb.
@@ -917,8 +917,8 @@ impl Aabb {
             crate::parry::utils::find_root_intervals_to(
                 &distance_fn,
                 interval,
-                1.0e-5,
-                1.0e-5,
+                1.0e-5.into(),
+                1.0e-5.into(),
                 100,
                 &mut roots,
                 &mut candidates,
@@ -973,14 +973,14 @@ impl BoundingVolume for Aabb {
 
     #[inline]
     fn loosen(&mut self, amount: Real) {
-        assert!(amount >= 0.0, "The loosening margin must be positive.");
+        assert!(amount >= 0.0.into(), "The loosening margin must be positive.");
         self.mins += Vector::repeat(-amount);
         self.maxs += Vector::repeat(amount);
     }
 
     #[inline]
     fn loosened(&self, amount: Real) -> Aabb {
-        assert!(amount >= 0.0, "The loosening margin must be positive.");
+        assert!(amount >= 0.0.into(), "The loosening margin must be positive.");
         Aabb {
             mins: self.mins + Vector::repeat(-amount),
             maxs: self.maxs + Vector::repeat(amount),
@@ -989,7 +989,7 @@ impl BoundingVolume for Aabb {
 
     #[inline]
     fn tighten(&mut self, amount: Real) {
-        assert!(amount >= 0.0, "The tightening margin must be positive.");
+        assert!(amount >= 0.0.into(), "The tightening margin must be positive.");
         self.mins += Vector::repeat(amount);
         self.maxs += Vector::repeat(-amount);
         assert!(
@@ -1000,7 +1000,7 @@ impl BoundingVolume for Aabb {
 
     #[inline]
     fn tightened(&self, amount: Real) -> Aabb {
-        assert!(amount >= 0.0, "The tightening margin must be positive.");
+        assert!(amount >= 0.0.into(), "The tightening margin must be positive.");
 
         Aabb::new(
             self.mins + Vector::repeat(amount),

@@ -19,14 +19,14 @@ impl RoundCone {
         let mut out_idx = vec![];
 
         // Compute the profile.
-        let center_ab = Point3::new(-r, -he, 0.0);
-        let center_cd = Point3::new(0.0, he, 0.0);
-        let side_dir = Vector3::new(-2.0 * he, r, 0.0).normalize();
+        let center_ab = Point3::new(-r, -he, 0.0.into());
+        let center_cd = Point3::new(Real::from(0.0), he.into(), Real::from(0.0));
+        let side_dir = Vector3::new(Real::from(-2.0) * he, r, Real::from(0.0)).normalize();
 
-        let a = Point3::new(-r, -he - br, 0.0);
-        let b = Point3::new(-r, -he, 0.0) + side_dir * br;
-        let c = Point3::new(0.0, he, 0.0) + side_dir * br;
-        let d = Point3::new(0.0, he + br, 0.0);
+        let a = Point3::new(-r, -he - br, Real::from(0.0));
+        let b = Point3::new(-r, -he, Real::from(0.0)) + side_dir * br;
+        let c = Point3::new(Real::from(0.0), he, Real::from(0.0)) + side_dir * br;
+        let d = Point3::new(Real::from(0.0), he + br, Real::from(0.0));
 
         out_vtx.push(a);
         utils::push_arc(center_ab, a, b, border_nsubdiv, &mut out_vtx);

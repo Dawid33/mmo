@@ -10,7 +10,7 @@ pub fn point_cloud_bounding_sphere_with_center(
     pts: &[Point<Real>],
     center: Point<Real>,
 ) -> BoundingSphere {
-    let mut sqradius = 0.0;
+    let mut sqradius = 0.0.into();
 
     for pt in pts.iter() {
         let distance_squared = na::distance_squared(pt, &center);

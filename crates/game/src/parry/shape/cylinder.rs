@@ -72,7 +72,7 @@ use rkyv::{bytecheck, CheckBytes};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
     archive(as = "Self")
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(PartialEq, Debug, Copy, Clone, Hash)]
 #[repr(C)]
 pub struct Cylinder {
     /// Half the length of the cylinder along the Y axis.
@@ -205,7 +205,7 @@ impl SupportMap for Cylinder {
     fn local_support_point(&self, dir: &Vector<Real>) -> Point<Real> {
         let mut vres = *dir;
 
-        vres[1] = 0.0;
+        vres[1] = Real::from(0.0);
 
         if vres.normalize_mut().is_zero() {
             vres = na::zero()
@@ -213,7 +213,7 @@ impl SupportMap for Cylinder {
             vres *= self.radius;
         }
 
-        vres[1] = self.half_height.copysign(dir[1]);
+        vres[1] = Real::from(self.half_height.copysign(*dir[1]));
 
         Point::from(vres)
     }

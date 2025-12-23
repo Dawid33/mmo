@@ -1,6 +1,6 @@
 //! Support mapping based Cuboid shape.
 
-use crate::parry::math::{Point, Real, Vector};
+use crate::parry::math::{Point, Real, RawReal, Vector};
 #[cfg(feature = "dim3")]
 use crate::parry::shape::Segment;
 use crate::parry::shape::{FeatureId, PackedFeatureId, PolygonalFeature, SupportMap};
@@ -64,7 +64,7 @@ use rkyv::{bytecheck, CheckBytes};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
     archive(as = "Self")
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(PartialEq, Debug, Copy, Clone, Hash)]
 #[repr(C)]
 pub struct Cuboid {
     /// The half-extents of the cuboid along each axis.
@@ -253,8 +253,8 @@ impl Cuboid {
         let k = (i + 2) % 3;
         let mut a = Point::origin();
         a[i] = he[i];
-        a[j] = he[j].copysign(local_dir[j]);
-        a[k] = he[k].copysign(local_dir[k]);
+        a[j] = Real::from(he[j].copysign(*local_dir[j]));
+        a[k] = Real::from(he[k].copysign(*local_dir[k]));
 
         let mut b = a;
         b[i] = -he[i];
@@ -270,7 +270,7 @@ impl Cuboid {
         let he = self.half_extents;
         let iamax = local_dir.iamax();
         #[expect(clippy::unnecessary_cast)]
-        let sign = (1.0 as Real).copysign(local_dir[iamax]);
+        let sign = Real::from(1.0 as RawReal).copysign(*local_dir[iamax]);
 
         let vertices = match iamax {
             0 => [
@@ -404,9 +404,9 @@ impl Cuboid {
                 let mut dir: Vector<Real> = na::zero();
 
                 if id < 3 {
-                    dir[id as usize] = 1.0;
+                    dir[id as usize] = Real::from(1.0);
                 } else {
-                    dir[id as usize - 3] = -1.0;
+                    dir[id as usize - 3] = Real::from(-1.0);
                 }
                 Some(Unit::new_unchecked(dir))
             }
@@ -419,15 +419,15 @@ impl Cuboid {
                 let mut dir: Vector<Real> = na::zero();
 
                 if signs & (1 << face1) != 0 {
-                    dir[face1 as usize] = -1.0
+                    dir[face1 as usize] = Real::from(-1.0)
                 } else {
-                    dir[face1 as usize] = 1.0
+                    dir[face1 as usize] = Real::from(1.0)
                 }
 
                 if signs & (1 << face2) != 0 {
-                    dir[face2 as usize] = -1.0
+                    dir[face2 as usize] = Real::from(-1.0)
                 } else {
-                    dir[face2 as usize] = 1.0;
+                    dir[face2 as usize] = Real::from(1.0);
                 }
 
                 Some(Unit::new_normalize(dir))
@@ -436,9 +436,9 @@ impl Cuboid {
                 let mut dir: Vector<Real> = na::zero();
                 for i in 0..3 {
                     if id & (1 << i) != 0 {
-                        dir[i] = -1.0;
+                        dir[i] = Real::from(-1.0);
                     } else {
-                        dir[i] = 1.0
+                        dir[i] = Real::from(1.0)
                     }
                 }
 

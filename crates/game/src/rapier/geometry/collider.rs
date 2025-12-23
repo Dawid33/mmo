@@ -1,4 +1,10 @@
-use crate::rapier::dynamics::{CoefficientCombineRule, MassProperties, RigidBodyHandle, RigidBodySet};
+use crate::parry::bounding_volume::{Aabb, BoundingVolume};
+use crate::parry::shape::{Shape, TriMeshBuilderError, TriMeshFlags};
+use crate::parry::transformation::vhacd::VHACDParameters;
+use crate::parry::transformation::voxelization::FillMode;
+use crate::rapier::dynamics::{
+    CoefficientCombineRule, MassProperties, RigidBodyHandle, RigidBodySet,
+};
 #[cfg(feature = "dim3")]
 use crate::rapier::geometry::HeightFieldFlags;
 use crate::rapier::geometry::{
@@ -6,17 +12,13 @@ use crate::rapier::geometry::{
     ColliderParent, ColliderPosition, ColliderShape, ColliderType, InteractionGroups,
     MeshConverter, MeshConverterError, SharedShape,
 };
-use crate::rapier::math::{AngVector, DIM, Isometry, Point, Real, Rotation, Vector};
-use crate::parry::transformation::vhacd::VHACDParameters;
+use crate::rapier::math::{AngVector, Isometry, Point, RawReal, Real, Rotation, Vector, DIM};
 use crate::rapier::pipeline::{ActiveEvents, ActiveHooks};
 use crate::rapier::prelude::{ColliderEnabled, IntegrationParameters};
 use na::Unit;
-use crate::parry::bounding_volume::{Aabb, BoundingVolume};
-use crate::parry::shape::{Shape, TriMeshBuilderError, TriMeshFlags};
-use crate::parry::transformation::voxelization::FillMode;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 /// The collision shape attached to a rigid body that defines what it can collide with.
 ///
 /// Think of a collider as the "hitbox" or "collision shape" for your physics object. While a
@@ -73,7 +75,7 @@ impl Collider {
         {
             self.contact_force_event_threshold
         } else {
-            Real::MAX
+            Real::from(RawReal::MAX)
         }
     }
 
@@ -430,7 +432,7 @@ impl Collider {
     ///
     /// Used internally for mass calculations when density is set.
     pub fn volume(&self) -> Real {
-        self.shape.mass_properties(1.0).mass()
+        self.shape.mass_properties(Real::from(1.0)).mass()
     }
 
     /// The density of this collider (mass per unit volume).
@@ -441,11 +443,11 @@ impl Collider {
         match &self.mprops {
             ColliderMassProps::Density(density) => *density,
             ColliderMassProps::Mass(mass) => {
-                let inv_volume = self.shape.mass_properties(1.0).inv_mass;
+                let inv_volume = self.shape.mass_properties(Real::from(1.0)).inv_mass;
                 mass * inv_volume
             }
             ColliderMassProps::MassProperties(mprops) => {
-                let inv_volume = self.shape.mass_properties(1.0).inv_mass;
+                let inv_volume = self.shape.mass_properties(Real::from(1.0)).inv_mass;
                 mprops.mass() * inv_volume
             }
         }
@@ -574,7 +576,7 @@ impl Collider {
         // Take soft-ccd into account by growing the aabb.
         let next_pose = self.parent.and_then(|p| {
             let parent = bodies.get(p.handle)?;
-            (parent.soft_ccd_prediction() > 0.0).then(|| {
+            (parent.soft_ccd_prediction() > Real::from(0.0)).then(|| {
                 parent.predict_position_using_velocity_and_forces_with_max_dist(
                     params.dt,
                     parent.soft_ccd_prediction(),
@@ -676,7 +678,7 @@ pub struct ColliderBuilder {
 
 impl Default for ColliderBuilder {
     fn default() -> Self {
-        Self::ball(0.5)
+        Self::ball(Real::from(0.5))
     }
 }
 
@@ -687,7 +689,7 @@ impl ColliderBuilder {
             shape,
             mass_properties: ColliderMassProps::default(),
             friction: Self::default_friction(),
-            restitution: 0.0,
+            restitution: Real::from(0.0),
             position: Isometry::identity(),
             is_sensor: false,
             user_data: 0,
@@ -699,8 +701,8 @@ impl ColliderBuilder {
             active_hooks: ActiveHooks::empty(),
             active_events: ActiveEvents::empty(),
             enabled: true,
-            contact_force_event_threshold: 0.0,
-            contact_skin: 0.0,
+            contact_force_event_threshold: Real::from(0.0),
+            contact_skin: Real::from(0.0),
         }
     }
 
@@ -1108,12 +1110,12 @@ impl ColliderBuilder {
 
     /// Returns the default friction value used when not specified (0.5).
     pub fn default_friction() -> Real {
-        0.5
+        Real::from(0.5)
     }
 
     /// Returns the default density value used when not specified (1.0).
     pub fn default_density() -> Real {
-        1.0
+        Real::from(1.0)
     }
 
     /// Stores custom user data with this collider (128-bit integer).

@@ -17,7 +17,7 @@ pub fn closest_points_line_line_parameters(
         dir1,
         orig2,
         dir2,
-        crate::parry::math::DEFAULT_EPSILON,
+        Real::from(crate::parry::math::DEFAULT_EPSILON),
     );
     (res.0, res.1)
 }
@@ -44,13 +44,13 @@ pub fn closest_points_line_line_parameters_eps<const D: usize>(
     let f = dir2.dot(&r);
 
     if a <= eps && e <= eps {
-        (0.0, 0.0, false)
+        (Real::from(0.0), Real::from(0.0), false)
     } else if a <= eps {
-        (0.0, f / e, false)
+        (Real::from(0.0), f / e, false)
     } else {
         let c = dir1.dot(&r);
         if e <= eps {
-            (-c / a, 0.0, false)
+            (-c / a, Real::from(0.0), false)
         } else {
             let b = dir1.dot(dir2);
             let ae = a * e;
@@ -63,7 +63,7 @@ pub fn closest_points_line_line_parameters_eps<const D: usize>(
             let s = if !parallel {
                 (b * f - c * e) / denom
             } else {
-                0.0
+                Real::from(0.0)
             };
 
             (s, (b * s + f) / e, parallel)

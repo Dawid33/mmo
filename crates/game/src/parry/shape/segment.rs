@@ -1,6 +1,6 @@
 //! Definition of the segment shape.
 
-use crate::parry::math::{Isometry, Point, Real, Vector};
+use crate::parry::math::{Isometry, Point, Real, RawReal, Vector};
 use crate::parry::shape::{FeatureId, SupportMap};
 
 use core::mem;
@@ -66,7 +66,7 @@ use rkyv::{bytecheck, CheckBytes};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
     archive(as = "Self")
 )]
-#[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(PartialEq, Debug, Copy, Clone, Hash)]
 #[repr(C)]
 pub struct Segment {
     /// The first endpoint of the segment.
@@ -156,10 +156,10 @@ impl SegmentPointLocation {
     /// # }
     /// ```
     pub fn barycentric_coordinates(&self) -> [Real; 2] {
-        let mut bcoords = [0.0; 2];
+        let mut bcoords = [Real::from(0.0); 2];
 
         match self {
-            SegmentPointLocation::OnVertex(i) => bcoords[*i as usize] = 1.0,
+            SegmentPointLocation::OnVertex(i) => bcoords[*i as usize] = 1.0.into(),
             SegmentPointLocation::OnEdge(uv) => {
                 bcoords[0] = uv[0];
                 bcoords[1] = uv[1];
@@ -356,7 +356,7 @@ impl Segment {
     /// # }
     /// ```
     pub fn direction(&self) -> Option<Unit<Vector<Real>>> {
-        Unit::try_new(self.scaled_direction(), crate::parry::math::DEFAULT_EPSILON)
+        Unit::try_new(self.scaled_direction(), Real::from(crate::parry::math::DEFAULT_EPSILON))
     }
 
     /// In 2D, the not-normalized counterclockwise normal of this segment.
@@ -372,9 +372,9 @@ impl Segment {
     pub fn scaled_planar_normal(&self, plane_axis: u8) -> Vector<Real> {
         let dir = self.scaled_direction();
         match plane_axis {
-            0 => Vector::new(0.0, dir.z, -dir.y),
-            1 => Vector::new(-dir.z, 0.0, dir.x),
-            2 => Vector::new(dir.y, -dir.x, 0.0),
+            0 => Vector::new(Real::from(0.0), dir.z, -dir.y),
+            1 => Vector::new(-dir.z, Real::from(0.0), dir.x),
+            2 => Vector::new(dir.y, -dir.x, Real::from(0.0)),
             _ => panic!("Invalid axis given: must be 0 (X axis), 1 (Y axis) or 2 (Z axis)"),
         }
     }
@@ -397,7 +397,7 @@ impl Segment {
     pub fn planar_normal(&self, plane_axis: u8) -> Option<Unit<Vector<Real>>> {
         Unit::try_new(
             self.scaled_planar_normal(plane_axis),
-            crate::parry::math::DEFAULT_EPSILON,
+            Real::from(crate::parry::math::DEFAULT_EPSILON),
         )
     }
 
@@ -433,7 +433,7 @@ impl Segment {
                 FeatureId::Edge(_) => {
                     let iamin = direction.iamin();
                     let mut normal = Vector::zeros();
-                    normal[iamin] = 1.0;
+                    normal[iamin] = Real::from(1.0);
                     normal -= *direction * direction[iamin];
                     Some(Unit::new_normalize(normal))
                 }
@@ -633,32 +633,32 @@ mod test {
         let ray = Ray::new(Point::origin(), Vector::x());
         let segment = Segment {
             a: Point::new(
-                10.0,
-                10.0,
+                Real::from(10.0),
+                Real::from(10.0),
                 #[cfg(feature = "dim3")]
-                10.0,
+                Real::from(10.0),
             ),
             b: Point::new(
-                10.0,
-                10.0,
+                Real::from(10.0),
+                Real::from(10.0),
                 #[cfg(feature = "dim3")]
-                10.0,
+                Real::from(10.0),
             ),
         };
 
-        let hit = segment.intersects_ray(&Isometry::identity(), &ray, Real::MAX);
+        let hit = segment.intersects_ray(&Isometry::identity(), &ray, Real::from(RawReal::MAX));
         assert_eq!(hit, false);
     }
     #[test]
     fn segment_very_close_points_hit() {
-        let epsilon = 1.1920929e-7;
+        let epsilon: Real = 1.1920929e-7.into();
         // intersect each other
         let ray = Ray::new(
             Point::new(
-                epsilon * 0.5,
-                0.3,
+                Real::from(epsilon * 0.5),
+                Real::from(0.3),
                 #[cfg(feature = "dim3")]
-                0.0,
+                Real::from(0.0),
             ),
             -Vector::y(),
         );
@@ -666,14 +666,14 @@ mod test {
             a: Point::origin(),
             b: Point::new(
                 // Theoretically, epsilon would suffice but imprecisions force us to add some more offset.
-                epsilon * 1.01,
-                0.0,
+                Real::from(epsilon * 1.01),
+                Real::from(0.0),
                 #[cfg(feature = "dim3")]
-                0.0,
+                Real::from(0.0),
             ),
         };
 
-        let hit = segment.intersects_ray(&Isometry::identity(), &ray, Real::MAX);
+        let hit = segment.intersects_ray(&Isometry::identity(), &ray, Real::from(RawReal::MAX));
         assert_eq!(hit, true);
     }
     #[test]
@@ -683,24 +683,24 @@ mod test {
         let ray = Ray::new(
             Point::new(
                 // Theoretically, epsilon would suffice  but imprecisions force us to add some more offset.
-                epsilon * 11.0,
-                0.1,
+                Real::from(epsilon * 11.0),
+                Real::from(0.1),
                 #[cfg(feature = "dim3")]
-                0.0,
+                Real::from(0.0),
             ),
             -Vector::y(),
         );
         let segment = Segment {
             a: Point::origin(),
             b: Point::new(
-                epsilon * 0.9,
-                0.0,
+                Real::from(epsilon * 0.9),
+                Real::from(0.0),
                 #[cfg(feature = "dim3")]
-                0.0,
+                Real::from(0.0),
             ),
         };
 
-        let hit = segment.intersects_ray(&Isometry::identity(), &ray, Real::MAX);
+        let hit = segment.intersects_ray(&Isometry::identity(), &ray, Real::from(RawReal::MAX));
         assert_eq!(hit, false);
     }
 }

@@ -1,5 +1,5 @@
 use super::{Bvh, BvhWorkspace};
-use crate::parry::math::Real;
+use crate::parry::math::{Real, RawReal};
 use core::cmp::Ordering;
 use ordered_float::OrderedFloat;
 
@@ -12,7 +12,7 @@ impl Bvh {
         let num_leaves = self.nodes[0].leaf_count();
         let num_optimized_leaves = (num_leaves * TARGET_REBUILD_NODE_PERCENTAGE).div_ceil(100);
 
-        let num_leaves_sqrt = (num_leaves as Real).sqrt();
+        let num_leaves_sqrt: Real = (num_leaves as RawReal).sqrt().into();
         let root_mode = if frame_index.is_multiple_of(2) {
             RootOptimizationMode::Skip
         } else if (frame_index / 2).is_multiple_of(16) {
@@ -26,7 +26,7 @@ impl Bvh {
         let root_refinement_cost = target_root_node_count * target_root_node_count.log2()
             / (target_subtree_leaf_count * target_subtree_leaf_count.log2());
         let mut target_optimized_subtree_count =
-            (num_optimized_leaves as Real / target_subtree_leaf_count - root_refinement_cost)
+            (num_optimized_leaves as RawReal / target_subtree_leaf_count - root_refinement_cost)
                 .round()
                 .max(0.0) as usize;
 
@@ -393,7 +393,7 @@ impl Bvh {
         }
 
         workspace.queue.push(BvhOptimizationHeapEntry {
-            score: OrderedFloat(Real::MAX),
+            score: Real::from(RawReal::MAX),
             id: 0,
         });
 
@@ -410,10 +410,10 @@ impl Bvh {
                 workspace.rebuild_leaves.push(*left);
             } else {
                 let children = self.nodes[left.children as usize];
-                let left_score = children.left.volume() * children.left.leaf_count() as Real
-                    + children.right.volume() * children.right.leaf_count() as Real;
+                let left_score = children.left.volume() * children.left.leaf_count() as RawReal
+                    + children.right.volume() * children.right.leaf_count() as RawReal;
                 workspace.queue.push(BvhOptimizationHeapEntry {
-                    score: OrderedFloat(left_score),
+                    score: left_score,
                     id: left.children,
                 });
             }
@@ -422,10 +422,10 @@ impl Bvh {
                 workspace.rebuild_leaves.push(*right);
             } else {
                 let children = self.nodes[right.children as usize];
-                let right_score = children.left.volume() * children.left.leaf_count() as Real
-                    + children.right.volume() * children.right.leaf_count() as Real;
+                let right_score = children.left.volume() * children.left.leaf_count() as RawReal
+                    + children.right.volume() * children.right.leaf_count() as RawReal;
                 workspace.queue.push(BvhOptimizationHeapEntry {
-                    score: OrderedFloat(right_score),
+                    score: right_score,
                     id: right.children,
                 });
             }
@@ -539,7 +539,7 @@ struct OptimizationConfig {
 
 #[derive(Copy, Clone, Debug)]
 pub struct BvhOptimizationHeapEntry {
-    score: OrderedFloat<Real>,
+    score: Real,
     id: u32,
 }
 

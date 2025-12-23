@@ -18,7 +18,7 @@
 
 use super::{FillMode, VoxelizedVolume};
 use crate::parry::bounding_volume::Aabb;
-use crate::parry::math::{Matrix, Point, Real, Vector, DIM};
+use crate::parry::math::{Matrix, Point, Real, RawReal, Vector, DIM};
 use crate::parry::transformation::vhacd::CutPlane;
 use alloc::sync::Arc;
 use alloc::{vec, vec::Vec};
@@ -214,7 +214,7 @@ impl VoxelSet {
             origin: Point::origin(),
             min_bb_voxels: Point::origin(),
             max_bb_voxels: Vector::repeat(1).into(),
-            scale: 1.0,
+            scale: 1.0.into(),
             voxels: Vec::new(),
             intersections: Arc::new(Vec::new()),
             primitive_classes: Arc::new(Vec::new()),
@@ -448,7 +448,7 @@ impl VoxelSet {
     /// # }
     /// ```
     pub fn compute_volume(&self) -> Real {
-        self.voxel_volume() * self.voxels.len() as Real
+        self.voxel_volume() * self.voxels.len() as RawReal
     }
 
     /// Converts voxel grid coordinates to world-space coordinates.
@@ -708,7 +708,7 @@ impl VoxelSet {
                 let prim_class = self.primitive_classes.get(*prim_id as usize).copied();
                 if prim_class == Some(u32::MAX) || prim_class.is_none() {
                     let aabb_center =
-                        self.origin + voxel.coords.coords.map(|k| k as Real) * self.scale;
+                        self.origin + voxel.coords.coords.map(|k| Real::from(k as RawReal)) * self.scale;
                     let aabb =
                         Aabb::from_half_extents(aabb_center, Vector::repeat(self.scale / 2.0));
 
@@ -780,7 +780,7 @@ impl VoxelSet {
             let intersections =
                 &self.intersections[voxel.intersections_range.0..voxel.intersections_range.1];
             for prim_id in intersections {
-                let aabb_center = self.origin + voxel.coords.coords.map(|k| k as Real) * self.scale;
+                let aabb_center = self.origin + voxel.coords.coords.map(|k| Real::from(k as RawReal)) * self.scale;
                 let aabb = Aabb::from_half_extents(aabb_center, Vector::repeat(self.scale / 2.0));
 
                 let pa = points[indices[*prim_id as usize][0] as usize];
@@ -865,7 +865,7 @@ impl VoxelSet {
 
     /// Gets the vertices of the given voxel.
     fn map_voxel_points(&self, voxel: &Voxel, mut f: impl FnMut(Point<Real>)) {
-        let ijk = voxel.coords.coords.map(|e| e as Real);
+        let ijk = voxel.coords.coords.map(|e| Real::from(e as RawReal));
 
         #[cfg(feature = "dim2")]
         let shifts = [
@@ -877,14 +877,14 @@ impl VoxelSet {
 
         #[cfg(feature = "dim3")]
         let shifts = [
-            Vector::new(-0.5, -0.5, -0.5),
-            Vector::new(0.5, -0.5, -0.5),
-            Vector::new(0.5, 0.5, -0.5),
-            Vector::new(-0.5, 0.5, -0.5),
-            Vector::new(-0.5, -0.5, 0.5),
-            Vector::new(0.5, -0.5, 0.5),
-            Vector::new(0.5, 0.5, 0.5),
-            Vector::new(-0.5, 0.5, 0.5),
+            Vector::new(Real::from(-0.5),Real::from( -0.5), Real::from(-0.5)),
+            Vector::new(Real::from(0.5), Real::from(-0.5), Real::from(-0.5)),
+            Vector::new(Real::from(0.5), Real::from(0.5), Real::from(-0.5)),
+            Vector::new(Real::from(-0.5),Real::from( 0.5), Real::from(-0.5)),
+            Vector::new(Real::from(-0.5),Real::from( -0.5), Real::from(0.5)),
+            Vector::new(Real::from(0.5), Real::from(-0.5), Real::from(0.5)),
+            Vector::new(Real::from(0.5), Real::from(0.5), Real::from(0.5)),
+            Vector::new(Real::from(-0.5),Real::from( 0.5), Real::from(0.5)),
         ];
 
         for shift in &shifts {
@@ -917,7 +917,7 @@ impl VoxelSet {
             // if      (d >= 0.0 && d <= d0) positive_pts.push(pt);
             // else if (d < 0.0 && -d <= d0) negative_pts.push(pt);
 
-            if d >= 0.0 {
+            if d >= 0.0.into() {
                 if d <= d0 {
                     self.map_voxel_points(&voxel, |p| positive_pts.push(p));
                 } else {
@@ -943,7 +943,7 @@ impl VoxelSet {
     // Returns (negative_volume, positive_volume)
     pub(crate) fn compute_clipped_volumes(&self, plane: &CutPlane) -> (Real, Real) {
         if self.voxels.is_empty() {
-            return (0.0, 0.0);
+            return (0.0.into(), 0.0.into());
         }
 
         let mut num_positive_voxels = 0;
@@ -951,12 +951,12 @@ impl VoxelSet {
         for voxel in &self.voxels {
             let pt = self.get_voxel_point(voxel);
             let d = plane.abc.dot(&pt.coords) + plane.d;
-            num_positive_voxels += (d >= 0.0) as usize;
+            num_positive_voxels += (d >= 0.0.into()) as usize;
         }
 
         let num_negative_voxels = self.voxels.len() - num_positive_voxels;
-        let positive_volume = self.voxel_volume() * (num_positive_voxels as Real);
-        let negative_volume = self.voxel_volume() * (num_negative_voxels as Real);
+        let positive_volume = self.voxel_volume() * (num_positive_voxels as RawReal);
+        let negative_volume = self.voxel_volume() * (num_negative_voxels as RawReal);
 
         (negative_volume, positive_volume)
     }
@@ -1004,7 +1004,7 @@ impl VoxelSet {
             let pt = self.get_voxel_point(&voxel);
             let d = plane.abc.dot(&pt.coords) + plane.d;
 
-            if d >= 0.0 {
+            if d >= 0.0.into() {
                 if voxel.is_on_surface || d <= d0 {
                     voxel.is_on_surface = true;
                     positive_part.voxels.push(voxel);
@@ -1064,16 +1064,16 @@ impl VoxelSet {
         // points twice. So passing an iterator to crate::parry::utils::cov
         // isn't really possible.
         let mut center = Point::origin();
-        let denom = 1.0 / (num_voxels as Real);
+        let denom = Real::from(1.0 / (num_voxels as RawReal));
 
         for voxel in &self.voxels {
-            center += voxel.coords.map(|e| e as Real).coords * denom;
+            center += voxel.coords.map(|e| Real::from(e as RawReal)).coords * denom;
         }
 
         let mut cov_mat = Matrix::zeros();
         for voxel in &self.voxels {
-            let xyz = voxel.coords.map(|e| e as Real) - center;
-            cov_mat.syger(denom, &xyz, &xyz, 1.0);
+            let xyz = voxel.coords.map(|e| Real::from(e as RawReal)) - center;
+            cov_mat.syger(denom, &xyz, &xyz, 1.0.into());
         }
 
         cov_mat.symmetric_eigenvalues()
@@ -1093,9 +1093,9 @@ impl VoxelSet {
 
             for i in (i0..=i1).step_by(downsampling as usize) {
                 let plane = CutPlane {
-                    abc: Vector::ith(dim, 1.0),
+                    abc: Vector::ith(dim, 1.0.into()),
                     axis: dim as u8,
-                    d: -(self.origin[dim] + (i as Real + 0.5) * self.scale),
+                    d: -(self.origin[dim] + Real::from(i as RawReal + 0.5) * self.scale),
                     index: i,
                 };
 

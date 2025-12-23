@@ -140,7 +140,7 @@ pub enum GJKResult {
 /// The absolute tolerance value (10 * DEFAULT_EPSILON)
 pub fn eps_tol() -> Real {
     let _eps = crate::parry::math::DEFAULT_EPSILON;
-    _eps * 10.0
+    Real::from(_eps * 10.0)
 }
 
 /// Projects the origin onto the boundary of the given shape.
@@ -371,7 +371,7 @@ where
 
     let mut old_dir;
 
-    if let Some(proj_dir) = Unit::try_new(proj.coords, 0.0) {
+    if let Some(proj_dir) = Unit::try_new(proj.coords, Real::from(0.0)) {
         old_dir = -proj_dir;
     } else {
         return GJKResult::Intersection;
@@ -408,7 +408,7 @@ where
 
         if min_bound > max_dist {
             return GJKResult::NoIntersection(dir);
-        } else if !exact_dist && min_bound > 0.0 && max_bound <= max_dist {
+        } else if !exact_dist && min_bound > Real::from(0.0) && max_bound <= max_dist {
             return GJKResult::Proximity(old_dir);
         } else if max_bound - min_bound <= _eps_rel * max_bound {
             if exact_dist {
@@ -675,11 +675,11 @@ where
 
     let ray_length = ray.dir.norm();
 
-    if relative_eq!(ray_length, 0.0) {
+    if relative_eq!(ray_length, Real::from(0.0)) {
         return None;
     }
 
-    let mut ltoi = 0.0;
+    let mut ltoi = Real::from(0.0);
     let mut curr_ray = Ray::new(ray.origin, ray.dir / ray_length);
     let dir = -curr_ray.dir;
     let mut ldir = dir;
@@ -713,7 +713,7 @@ where
             CSOPoint::from_shapes(pos12, g1, g2, &dir)
         };
 
-        if last_chance && ltoi > 0.0 {
+        if last_chance && ltoi > Real::from(0.0) {
             // last_chance && ltoi > 0.0 && (support_point.point - curr_ray.origin).dot(&ldir) >= 0.0 {
             return Some((ltoi / ray_length, ldir));
         }
@@ -728,7 +728,7 @@ where
         //          > 0             |  > 0  | New higher bound.
         match query::details::ray_toi_with_halfspace(&support_point.point, &dir, &curr_ray) {
             Some(t) => {
-                if dir.dot(&curr_ray.dir) < 0.0 && t > 0.0 {
+                if dir.dot(&curr_ray.dir) < Real::from(0.0) && t > Real::from(0.0) {
                     // new lower bound
                     ldir = *dir;
                     ltoi += t;

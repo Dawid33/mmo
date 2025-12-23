@@ -9,7 +9,7 @@ pub use self::ray_support_map::local_ray_intersection_with_support_map_with_para
 pub use self::ray_triangle::local_ray_intersection_with_triangle;
 #[cfg(all(feature = "dim3", feature = "alloc"))]
 pub use self::ray_trimesh::RayCullingMode;
-pub use self::simd_ray::SimdRay;
+// pub use self::simd_ray::SimdRay;
 
 #[doc(hidden)]
 pub mod ray;
@@ -29,4 +29,4 @@ mod ray_triangle;
 mod ray_trimesh;
 #[cfg(feature = "alloc")]
 mod ray_voxels;
-mod simd_ray;
+// mod simd_ray;

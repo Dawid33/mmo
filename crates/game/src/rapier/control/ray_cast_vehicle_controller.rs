@@ -2,7 +2,7 @@
 
 use crate::rapier::dynamics::{RigidBody, RigidBodyHandle, RigidBodySet};
 use crate::rapier::geometry::{ColliderHandle, ColliderSet, Ray};
-use crate::rapier::math::{Point, Real, Rotation, Vector};
+use crate::rapier::math::{Point, Real, RawReal, Rotation, Vector};
 use crate::rapier::pipeline::QueryPipeline;
 use crate::rapier::prelude::QueryPipelineMut;
 use crate::rapier::utils::{SimdCross, SimdDot};
@@ -55,13 +55,13 @@ pub struct WheelTuning {
 impl Default for WheelTuning {
     fn default() -> Self {
         Self {
-            suspension_stiffness: 5.88,
-            suspension_compression: 0.83,
-            suspension_damping: 0.88,
-            max_suspension_travel: 5.0,
-            side_friction_stiffness: 1.0,
-            friction_slip: 10.5,
-            max_suspension_force: 6000.0,
+            suspension_stiffness: Real::from(5.88),
+            suspension_compression: Real::from(0.83),
+            suspension_damping: Real::from(0.88),
+            max_suspension_travel: Real::from(5.0),
+            side_friction_stiffness: Real::from(1.0),
+            friction_slip: Real::from(10.5),
+            max_suspension_force: Real::from(6000.0),
         }
     }
 }
@@ -188,19 +188,19 @@ impl Wheel {
             wheel_axle_ws: info.axle_cs,
             center: Point::origin(),
             friction_slip: info.friction_slip,
-            steering: 0.0,
-            engine_force: 0.0,
-            rotation: 0.0,
-            delta_rotation: 0.0,
-            brake: 0.0,
-            roll_influence: 0.1,
-            clipped_inv_contact_dot_suspension: 0.0,
-            suspension_relative_velocity: 0.0,
-            wheel_suspension_force: 0.0,
+            steering: Real::from(0.0),
+            engine_force: Real::from(0.0),
+            rotation: Real::from(0.0),
+            delta_rotation: Real::from(0.0),
+            brake: Real::from(0.0),
+            roll_influence: Real::from(0.1),
+            clipped_inv_contact_dot_suspension: Real::from(0.0),
+            suspension_relative_velocity: Real::from(0.0),
+            wheel_suspension_force: Real::from(0.0),
             max_suspension_force: info.max_suspension_force,
-            skid_info: 0.0,
-            side_impulse: 0.0,
-            forward_impulse: 0.0,
+            skid_info: Real::from(0.0),
+            side_impulse: Real::from(0.0),
+            forward_impulse: Real::from(0.0),
             side_friction_stiffness: info.side_friction_stiffness,
         }
     }
@@ -255,7 +255,7 @@ impl DynamicRayCastVehicleController {
             wheels: vec![],
             forward_ws: vec![],
             axle: vec![],
-            current_vehicle_speed: 0.0,
+            current_vehicle_speed: Real::from(0.0),
             chassis,
             index_up_axis: 1,
             index_forward_axis: 0,
@@ -335,7 +335,7 @@ impl DynamicRayCastVehicleController {
         let source = wheel.raycast_info.hard_point_ws;
         wheel.raycast_info.contact_point_ws = source + rayvector;
         let ray = Ray::new(source, rayvector);
-        let hit = queries.cast_ray_and_get_normal(&ray, 1.0, true);
+        let hit = queries.cast_ray_and_get_normal(&ray, Real::from(1.0), true);
 
         wheel.raycast_info.ground_object = None;
 
@@ -346,7 +346,7 @@ impl DynamicRayCastVehicleController {
                 if let Some(hit2) =
                     collider
                         .shape
-                        .cast_ray_and_get_normal(collider.position(), &up_ray, 1.0, false)
+                        .cast_ray_and_get_normal(collider.position(), &up_ray, Real::from(1.0), false)
                 {
                     hit.normal = -hit2.normal;
                 }
@@ -384,20 +384,20 @@ impl DynamicRayCastVehicleController {
                 .contact_normal_ws
                 .dot(&chassis_velocity_at_contact_point);
 
-            if denominator >= -0.1 {
-                wheel.suspension_relative_velocity = 0.0;
-                wheel.clipped_inv_contact_dot_suspension = 1.0 / 0.1;
+            if denominator >= Real::from(-0.1) {
+                wheel.suspension_relative_velocity = Real::from(0.0);
+                wheel.clipped_inv_contact_dot_suspension = Real::from(1.0 / 0.1);
             } else {
-                let inv = -1.0 / denominator;
+                let inv = Real::from(-1.0) / denominator;
                 wheel.suspension_relative_velocity = proj_vel * inv;
                 wheel.clipped_inv_contact_dot_suspension = inv;
             }
         } else {
             // No contact, put wheel info as in rest position
             wheel.raycast_info.suspension_length = wheel.suspension_rest_length;
-            wheel.suspension_relative_velocity = 0.0;
+            wheel.suspension_relative_velocity = Real::from(0.0);
             wheel.raycast_info.contact_normal_ws = -wheel.wheel_direction_ws;
-            wheel.clipped_inv_contact_dot_suspension = 1.0;
+            wheel.clipped_inv_contact_dot_suspension = Real::from(1.0);
         }
     }
 
@@ -413,9 +413,9 @@ impl DynamicRayCastVehicleController {
 
         self.current_vehicle_speed = chassis.linvel().norm();
 
-        let forward_w = chassis.position() * Vector::ith(self.index_forward_axis, 1.0);
+        let forward_w = chassis.position() * Vector::ith(self.index_forward_axis, Real::from(1.0));
 
-        if forward_w.dot(chassis.linvel()) < 0.0 {
+        if forward_w.dot(chassis.linvel()) < Real::from(0.0) {
             self.current_vehicle_speed *= -1.0;
         }
 
@@ -436,7 +436,7 @@ impl DynamicRayCastVehicleController {
             .unwrap();
 
         for wheel in &mut self.wheels {
-            if wheel.engine_force > 0.0 {
+            if wheel.engine_force > Real::from(0.0) {
                 chassis.wake_up(true);
             }
 
@@ -462,7 +462,7 @@ impl DynamicRayCastVehicleController {
             let vel = chassis.velocity_at_point(&wheel.raycast_info.hard_point_ws);
 
             if wheel.raycast_info.is_in_contact {
-                let mut fwd = chassis.position() * Vector::ith(self.index_forward_axis, 1.0);
+                let mut fwd = chassis.position() * Vector::ith(self.index_forward_axis, Real::from(1.0));
                 let proj = fwd.dot(&wheel.raycast_info.contact_normal_ws);
                 fwd -= wheel.raycast_info.contact_normal_ws * proj;
 
@@ -509,7 +509,7 @@ impl DynamicRayCastVehicleController {
                 {
                     let projected_rel_vel = wheels.suspension_relative_velocity;
                     {
-                        let susp_damping = if projected_rel_vel < 0.0 {
+                        let susp_damping = if projected_rel_vel < Real::from(0.0) {
                             wheels.damping_compression
                         } else {
                             wheels.damping_relaxation
@@ -519,9 +519,9 @@ impl DynamicRayCastVehicleController {
                 }
 
                 // RESULT
-                wheels.wheel_suspension_force = (force * chassis_mass).max(0.0);
+                wheels.wheel_suspension_force = (force * chassis_mass).max(Real::from(0.0));
             } else {
-                wheels.wheel_suspension_force = 0.0;
+                wheels.wheel_suspension_force = Real::from(0.0);
             }
         }
     }
@@ -547,8 +547,8 @@ impl DynamicRayCastVehicleController {
                 num_wheels_on_ground += 1;
             }
 
-            wheel.side_impulse = 0.0;
-            wheel.forward_impulse = 0.0;
+            wheel.side_impulse = Real::from(0.0);
+            wheel.forward_impulse = Real::from(0.0);
         }
 
         {
@@ -563,11 +563,11 @@ impl DynamicRayCastVehicleController {
                     let proj = self.axle[i].dot(&surf_normal_ws);
                     self.axle[i] -= surf_normal_ws * proj;
                     self.axle[i] = self.axle[i]
-                        .try_normalize(1.0e-5)
+                        .try_normalize(Real::from(1.0e-5))
                         .unwrap_or_else(Vector::zeros);
                     self.forward_ws[i] = surf_normal_ws
                         .cross(&self.axle[i])
-                        .try_normalize(1.0e-5)
+                        .try_normalize(Real::from(1.0e-5))
                         .unwrap_or_else(Vector::zeros);
 
                     if let Some(ground_body) = ground_object
@@ -595,8 +595,8 @@ impl DynamicRayCastVehicleController {
             }
         }
 
-        let side_factor = 1.0;
-        let fwd_factor = 0.5;
+        let side_factor = Real::from(1.0);
+        let fwd_factor = Real::from(0.5);
 
         let mut sliding = false;
         {
@@ -604,14 +604,14 @@ impl DynamicRayCastVehicleController {
                 let wheel = &mut self.wheels[wheel_id];
                 let ground_object = wheel.raycast_info.ground_object;
 
-                let mut rolling_friction = 0.0;
+                let mut rolling_friction = Real::from(0.0);
 
                 if ground_object.is_some() {
                     if wheel.engine_force != 0.0 {
                         rolling_friction = wheel.engine_force * dt;
                     } else {
-                        let default_rolling_friction_impulse = 0.0;
-                        let max_impulse = if wheel.brake != 0.0 {
+                        let default_rolling_friction_impulse = Real::from(0.0);
+                        let max_impulse = if wheel.brake != Real::from(0.0) {
                             wheel.brake
                         } else {
                             default_rolling_friction_impulse
@@ -632,14 +632,14 @@ impl DynamicRayCastVehicleController {
 
                 //switch between active rolling (throttle), braking and non-active rolling friction (no throttle/break)
 
-                wheel.forward_impulse = 0.0;
-                wheel.skid_info = 1.0;
+                wheel.forward_impulse = Real::from(0.0);
+                wheel.skid_info = Real::from(1.0);
 
                 if ground_object.is_some() {
                     let max_imp = wheel.wheel_suspension_force * dt * wheel.friction_slip;
                     let max_imp_side = max_imp;
                     let max_imp_squared = max_imp * max_imp_side;
-                    assert!(max_imp_squared >= 0.0);
+                    assert!(max_imp_squared >= Real::from(0.0));
 
                     wheel.forward_impulse = rolling_friction;
 
@@ -651,7 +651,7 @@ impl DynamicRayCastVehicleController {
                     if impulse_squared > max_imp_squared {
                         sliding = true;
 
-                        let factor = max_imp * crate::rapier::utils::inv(impulse_squared.sqrt());
+                        let factor = max_imp * crate::rapier::utils::inv(Real::from(impulse_squared.sqrt()));
                         wheel.skid_info *= factor;
                     }
                 }
@@ -660,7 +660,7 @@ impl DynamicRayCastVehicleController {
 
         if sliding {
             for wheel in &mut self.wheels {
-                if wheel.side_impulse != 0.0 && wheel.skid_info < 1.0 {
+                if wheel.side_impulse != 0.0 && wheel.skid_info < Real::from(1.0) {
                     wheel.forward_impulse *= wheel.skid_info;
                     wheel.side_impulse *= wheel.skid_info;
                 }
@@ -677,21 +677,21 @@ impl DynamicRayCastVehicleController {
                 let wheel = &self.wheels[wheel_id];
                 let mut impulse_point = wheel.raycast_info.contact_point_ws;
 
-                if wheel.forward_impulse != 0.0 {
+                if wheel.forward_impulse != Real::from(0.0) {
                     chassis.apply_impulse_at_point(
                         self.forward_ws[wheel_id] * wheel.forward_impulse,
                         impulse_point,
                         false,
                     );
                 }
-                if wheel.side_impulse != 0.0 {
+                if wheel.side_impulse != Real::from(0.0) {
                     let side_impulse = self.axle[wheel_id] * wheel.side_impulse;
 
                     let v_chassis_world_up =
-                        chassis.position().rotation * Vector::ith(self.index_up_axis, 1.0);
+                        chassis.position().rotation * Vector::ith(self.index_up_axis, Real::from(1.0));
                     impulse_point -= v_chassis_world_up
                         * (v_chassis_world_up.dot(&(impulse_point - chassis.center_of_mass()))
-                            * (1.0 - wheel.roll_influence));
+                            * (Real::from(1.0) - wheel.roll_influence));
 
                     chassis.apply_impulse_at_point(side_impulse, impulse_point, false);
 
@@ -738,8 +738,8 @@ impl<'a> WheelContactPoint<'a> {
             .map(|body1| {
                 impulse_denominator(body1, &friction_position_world, &friction_direction_world)
             })
-            .unwrap_or(0.0);
-        let relaxation = 1.0;
+            .unwrap_or(Real::from(0.0));
+        let relaxation = Real::from(1.0);
         let jac_diag_ab_inv = relaxation / (denom0 + denom1);
 
         Self {
@@ -765,7 +765,7 @@ impl<'a> WheelContactPoint<'a> {
         let vrel = self.friction_direction_world.dot(&vel);
 
         // calculate friction that moves us to zero relative velocity
-        (-vrel * self.jac_diag_ab_inv / (num_wheels_on_ground as Real))
+        (-vrel * self.jac_diag_ab_inv / Real::from(num_wheels_on_ground as RawReal))
             .clamp(-max_impulse, max_impulse)
     }
 }
@@ -797,7 +797,7 @@ fn resolve_single_bilateral(
     let rel_vel = normal.dot(&dvel);
 
     //todo: move this into proper structure
-    let contact_damping = 0.2;
+    let contact_damping = Real::from(0.2);
     -contact_damping * rel_vel * jac_diag_ab_inv
 }
 
@@ -815,6 +815,6 @@ fn resolve_single_unilateral(body1: &RigidBody, pt1: &Point<Real>, normal: &Vect
     let rel_vel = normal.dot(&dvel);
 
     //todo: move this into proper structure
-    let contact_damping = 0.2;
+    let contact_damping = Real::from(0.2);
     -contact_damping * rel_vel * jac_diag_ab_inv
 }

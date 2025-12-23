@@ -9,7 +9,7 @@ pub type TemporaryInteractionIndex = EdgeIndex;
 
 /// A graph where nodes are collision objects and edges are contact or proximity algorithms.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub struct InteractionGraph<N, E> {
     pub(crate) graph: Graph<N, E>,
 }

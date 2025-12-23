@@ -2,8 +2,9 @@ use crate::parry::math::{Isometry, Point, Real, Vector};
 use crate::parry::shape::PackedFeatureId;
 #[cfg(feature = "dim3")]
 use alloc::vec::Vec;
+use ordered_float::OrderedFloat;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -225,7 +226,7 @@ impl<Data: Default + Copy> TrackedContact<Data> {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// A contact manifold between two shapes.
 ///
@@ -653,7 +654,7 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
         // const DOT_THRESHOLD: Real = 0.crate::parry::COS_10_DEGREES;
         // const DOT_THRESHOLD: Real = crate::parry::utils::COS_5_DEGREES;
         const DOT_THRESHOLD: Real = crate::parry::utils::COS_1_DEGREES;
-        const DIST_SQ_THRESHOLD: Real = 1.0e-6; // TODO: this should not be hard-coded.
+        const DIST_SQ_THRESHOLD: Real = OrderedFloat(1.0e-6); // TODO: this should not be hard-coded.
         self.try_update_contacts_eps(pos12, DOT_THRESHOLD, DIST_SQ_THRESHOLD)
     }
 
@@ -680,7 +681,7 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
             let dpt = local_p2 - pt.local_p1;
             let dist = dpt.dot(&self.local_n1);
 
-            if dist * pt.dist < 0.0 {
+            if dist * pt.dist < Real::from(0.0) {
                 // We switched between penetrating/non-penetrating.
                 // The may result in other contacts to appear.
                 return false;

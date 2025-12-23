@@ -28,10 +28,11 @@ use crate::linalg::PermutationSequence;
          PermutationSequence<DimMinimum<R, C>>: Deserialize<'de>"))
 )]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub struct LU<T: ComplexField, R: DimMin<C>, C: Dim>
 where
     DefaultAllocator: Allocator<R, C> + Allocator<DimMinimum<R, C>>,
+    <R as DimMin<C>>::Output: std::hash::Hash
 {
     lu: OMatrix<T, R, C>,
     p: PermutationSequence<DimMinimum<R, C>>,
@@ -42,6 +43,7 @@ where
     DefaultAllocator: Allocator<R, C> + Allocator<DimMinimum<R, C>>,
     OMatrix<T, R, C>: Copy,
     PermutationSequence<DimMinimum<R, C>>: Copy,
+    <R as DimMin<C>>::Output: std::hash::Hash
 {
 }
 
@@ -88,6 +90,7 @@ where
 impl<T: ComplexField, R: DimMin<C>, C: Dim> LU<T, R, C>
 where
     DefaultAllocator: Allocator<R, C> + Allocator<DimMinimum<R, C>>,
+    <R as DimMin<C>>::Output: std::hash::Hash
 {
     /// Computes the LU decomposition with partial (row) pivoting of `matrix`.
     pub fn new(mut matrix: OMatrix<T, R, C>) -> Self {
@@ -213,6 +216,7 @@ where
 impl<T: ComplexField, D: DimMin<D, Output = D>> LU<T, D, D>
 where
     DefaultAllocator: Allocator<D, D> + Allocator<D>,
+    D: std::hash::Hash
 {
     /// Solves the linear system `self * x = b`, where `x` is the unknown to be determined.
     ///

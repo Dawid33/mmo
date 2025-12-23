@@ -1,6 +1,6 @@
 #![allow(unused_parens)] // Needed by the macro.
 
-use crate::parry::math::{Point, Real};
+use crate::parry::math::{Point, Real, RawReal};
 use crate::parry::partitioning::BvhNode;
 use crate::parry::query::{PointProjection, PointQuery, PointQueryWithLocation};
 use crate::parry::shape::{
@@ -62,7 +62,7 @@ impl<S: TypedCompositeShape> CompositeShapeRef<'_, S> {
             .0
             .bvh()
             .find_best(
-                Real::MAX,
+                Real::from(RawReal::MAX),
                 |node: &BvhNode, _best_so_far| node.aabb().distance_to_local_point(point, true),
                 |primitive, _best_so_far| {
                     let proj = self.0.map_typed_part_at(primitive, |pose, shape, _| {
@@ -94,7 +94,7 @@ impl<S: TypedCompositeShape> CompositeShapeRef<'_, S> {
             .0
             .bvh()
             .find_best(
-                Real::MAX,
+                Real::from(RawReal::MAX),
                 |node: &BvhNode, _best_so_far| node.aabb().distance_to_local_point(point, true),
                 |primitive, _best_so_far| {
                     let proj = self.0.map_typed_part_at(primitive, |pose, shape, _| {
@@ -253,7 +253,7 @@ impl PointQueryWithLocation for Polyline {
         solid: bool,
     ) -> (PointProjection, Self::Location) {
         let (seg_id, (proj, loc)) = CompositeShapeRef(self)
-            .project_local_point_and_get_location(point, Real::MAX, solid)
+            .project_local_point_and_get_location(point, Real::from(RawReal::MAX), solid)
             .unwrap();
         (proj, (seg_id, loc))
     }
@@ -269,7 +269,7 @@ impl PointQueryWithLocation for TriMesh {
         point: &Point<Real>,
         solid: bool,
     ) -> (PointProjection, Self::Location) {
-        self.project_local_point_and_get_location_with_max_dist(point, solid, Real::MAX)
+        self.project_local_point_and_get_location_with_max_dist(point, solid, Real::from(RawReal::MAX))
             .unwrap()
     }
 
@@ -305,7 +305,7 @@ impl PointQueryWithLocation for TriMesh {
 
                 if let Some(pseudo_normal) = pseudo_normal {
                     let dpt = point - proj.point;
-                    proj.is_inside = dpt.dot(&pseudo_normal) <= 0.0;
+                    proj.is_inside = dpt.dot(&pseudo_normal) <= Real::from(0.0);
                 }
             }
 

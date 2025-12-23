@@ -4,7 +4,7 @@ use core::fmt::Debug;
 
 use crate::parry::bounding_volume::{Aabb, BoundingSphere, BoundingVolume};
 use crate::parry::mass_properties::MassProperties;
-use crate::parry::math::{Isometry, Point, Real, Vector};
+use crate::parry::math::{Isometry, Point, Real, RawReal, Vector};
 #[cfg(not(feature = "alloc"))]
 use crate::num::Float;
 use crate::parry::query::{PointQuery, RayCast};
@@ -336,7 +336,7 @@ impl DeserializableTypedShape {
 }
 
 /// Trait implemented by shapes usable by Rapier.
-pub trait Shape: RayCast + PointQuery + DowncastSync {
+pub trait Shape: RayCast + PointQuery + DowncastSync + crate::DynHash {
     /// Computes the [`Aabb`] of this shape.
     fn compute_local_aabb(&self) -> Aabb;
     /// Computes the bounding-sphere of this shape.
@@ -440,6 +440,14 @@ pub trait Shape: RayCast + PointQuery + DowncastSync {
 }
 
 impl_downcast!(sync Shape);
+
+impl std::hash::Hash for dyn Shape {
+    fn hash<H>(&self, state: &mut H)
+    where
+        H: std::hash::Hasher {
+        self.dyn_hash(state);
+    }
+}
 
 impl dyn Shape {
     /// Converts this abstract shape to the given shape, if it is one.
@@ -732,7 +740,7 @@ impl Shape for Ball {
         _: FeatureId,
         point: &Point<Real>,
     ) -> Option<Unit<Vector<Real>>> {
-        Unit::try_new(point.coords, crate::parry::math::DEFAULT_EPSILON)
+        Unit::try_new(point.coords, Real::from(crate::parry::math::DEFAULT_EPSILON))
     }
 }
 
@@ -788,7 +796,7 @@ impl Shape for Cuboid {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, 0.0))
+        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
     }
 
     fn feature_normal_at_point(
@@ -901,7 +909,7 @@ impl Shape for Triangle {
 
     fn ccd_thickness(&self) -> Real {
         // TODO: in 2D use the smallest height of the triangle.
-        0.0
+        0.0.into()
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -913,7 +921,7 @@ impl Shape for Triangle {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, 0.0))
+        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
     }
 
     fn feature_normal_at_point(
@@ -960,7 +968,7 @@ impl Shape for Segment {
     }
 
     fn ccd_thickness(&self) -> Real {
-        0.0
+        0.0.into()
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -980,7 +988,7 @@ impl Shape for Segment {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, 0.0))
+        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
     }
 
     fn feature_normal_at_point(
@@ -1045,11 +1053,11 @@ impl Shape for Compound {
     fn ccd_thickness(&self) -> Real {
         self.shapes()
             .iter()
-            .fold(Real::MAX, |curr, (_, s)| curr.min(s.ccd_thickness()))
+            .fold(Real::from(RawReal::MAX), |curr, (_, s)| curr.min(s.ccd_thickness()))
     }
 
     fn ccd_angular_thickness(&self) -> Real {
-        self.shapes().iter().fold(Real::MAX, |curr, (_, s)| {
+        self.shapes().iter().fold(Real::from(RawReal::MAX), |curr, (_, s)| {
             curr.max(s.ccd_angular_thickness())
         })
     }
@@ -1095,7 +1103,7 @@ impl Shape for Polyline {
     }
 
     fn ccd_thickness(&self) -> Real {
-        0.0
+        0.0.into()
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -1146,7 +1154,7 @@ impl Shape for TriMesh {
 
     fn ccd_thickness(&self) -> Real {
         // TODO: in 2D, return the smallest CCD thickness among triangles?
-        0.0
+        0.0.into()
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -1208,7 +1216,7 @@ impl Shape for HeightField {
     }
 
     fn ccd_thickness(&self) -> Real {
-        0.0
+        0.0.into()
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -1341,7 +1349,7 @@ impl Shape for ConvexPolyhedron {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, 0.0))
+        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
     }
 
     fn feature_normal_at_point(
@@ -1407,7 +1415,7 @@ impl Shape for Cylinder {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, 0.0))
+        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
     }
 }
 
@@ -1458,7 +1466,7 @@ impl Shape for Cone {
 
     fn ccd_angular_thickness(&self) -> Real {
         let apex_half_angle = RealField::atan2(self.radius, self.half_height);
-        assert!(apex_half_angle >= 0.0);
+        assert!(apex_half_angle >= Real::from(0.0));
         let basis_angle = Real::frac_pi_2() - apex_half_angle;
         basis_angle.min(apex_half_angle * 2.0)
     }
@@ -1468,7 +1476,7 @@ impl Shape for Cone {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, 0.0))
+        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
     }
 }
 
@@ -1501,7 +1509,7 @@ impl Shape for HalfSpace {
 
     fn ccd_thickness(&self) -> Real {
         #[cfg_attr(feature = "f32", expect(clippy::unnecessary_cast))]
-        let result = f32::MAX as Real;
+        let result = Real::from(f32::MAX);
         result
     }
 

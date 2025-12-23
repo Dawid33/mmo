@@ -1,6 +1,6 @@
 use crate::rapier::dynamics::{RigidBody, RigidBodyHandle};
 use crate::rapier::geometry::{Collider, ColliderHandle};
-use crate::rapier::math::Real;
+use crate::rapier::math::{Real, RawReal};
 use crate::parry::query::{NonlinearRigidMotion, QueryDispatcher, ShapeCastOptions};
 
 #[derive(Copy, Clone, Debug)]
@@ -55,13 +55,13 @@ impl TOIEntry {
         }
 
         let linvel1 =
-            frozen1.is_none() as u32 as Real * rb1.map(|b| b.ccd_vels.linvel).unwrap_or(na::zero());
+        Real::from(frozen1.is_none() as u32 as RawReal) * rb1.map(|b| b.ccd_vels.linvel).unwrap_or(na::zero());
         let linvel2 =
-            frozen2.is_none() as u32 as Real * rb2.map(|b| b.ccd_vels.linvel).unwrap_or(na::zero());
+        Real::from(frozen2.is_none() as u32 as RawReal) * rb2.map(|b| b.ccd_vels.linvel).unwrap_or(na::zero());
         let angvel1 =
-            frozen1.is_none() as u32 as Real * rb1.map(|b| b.ccd_vels.angvel).unwrap_or(na::zero());
+        Real::from(frozen1.is_none() as u32 as RawReal) * rb1.map(|b| b.ccd_vels.angvel).unwrap_or(na::zero());
         let angvel2 =
-            frozen2.is_none() as u32 as Real * rb2.map(|b| b.ccd_vels.angvel).unwrap_or(na::zero());
+        Real::from(frozen2.is_none() as u32 as RawReal) * rb2.map(|b| b.ccd_vels.angvel).unwrap_or(na::zero());
 
         #[cfg(feature = "dim2")]
         let vel12 = (linvel2 - linvel1).norm()
@@ -69,14 +69,14 @@ impl TOIEntry {
             + angvel2.abs() * rb2.map(|b| b.ccd.ccd_max_dist).unwrap_or(0.0);
         #[cfg(feature = "dim3")]
         let vel12 = (linvel2 - linvel1).norm()
-            + angvel1.norm() * rb1.map(|b| b.ccd.ccd_max_dist).unwrap_or(0.0)
-            + angvel2.norm() * rb2.map(|b| b.ccd.ccd_max_dist).unwrap_or(0.0);
+            + angvel1.norm() * rb1.map(|b| b.ccd.ccd_max_dist).unwrap_or(Real::from(0.0))
+            + angvel2.norm() * rb2.map(|b| b.ccd.ccd_max_dist).unwrap_or(Real::from(0.0));
 
         // We may be slightly over-conservative by taking the `max(0.0)` here.
         // But removing the `max` doesn't really affect performances so let's
         // keep it since more conservatism is good at this stage.
         let thickness = (co1.shape.0.ccd_thickness() + co2.shape.0.ccd_thickness())
-            + smallest_contact_dist.max(0.0);
+            + smallest_contact_dist.max(Real::from(0.0));
         let is_pseudo_intersection_test = co1.is_sensor()
             || co2.is_sensor()
             || !co1.flags.solver_groups.test(co2.flags.solver_groups);

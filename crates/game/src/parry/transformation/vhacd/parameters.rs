@@ -470,15 +470,15 @@ impl Default for VHACDParameters {
             #[cfg(feature = "dim3")]
             resolution: 64,
             #[cfg(feature = "dim3")]
-            concavity: 0.01,
+            concavity: 0.01.into(),
             #[cfg(feature = "dim2")]
             resolution: 256,
             #[cfg(feature = "dim2")]
             concavity: 0.1,
             plane_downsampling: 4,
             convex_hull_downsampling: 4,
-            alpha: 0.05,
-            beta: 0.05,
+            alpha: 0.05.into(),
+            beta: 0.05.into(),
             convex_hull_approximation: true,
             max_convex_hulls: 1024,
             fill_mode: FillMode::FloodFill {

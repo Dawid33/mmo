@@ -25,7 +25,7 @@ pub fn intersection_test_voxels_shape(
     voxels1: &Voxels,
     shape2: &dyn Shape,
 ) -> bool {
-    let radius1 = voxels1.voxel_size() / 2.0;
+    let radius1 = voxels1.voxel_size() / Real::from(2.0);
     let aabb1 = voxels1.local_aabb();
     let aabb2_1 = shape2.compute_aabb(pos12);
 

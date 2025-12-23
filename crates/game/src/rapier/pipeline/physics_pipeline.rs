@@ -13,7 +13,7 @@ use crate::rapier::geometry::{
     BroadPhaseBvh, BroadPhasePairEvent, ColliderChanges, ColliderHandle, ColliderPair,
     ContactManifoldIndex, ModifiedColliders, NarrowPhase, TemporaryInteractionIndex,
 };
-use crate::rapier::math::{Real, Vector};
+use crate::rapier::math::{Real, RawReal, Vector};
 use crate::rapier::pipeline::{EventHandler, PhysicsHooks};
 use crate::rapier::prelude::ModifiedRigidBodies;
 use crate::HashableReal;
@@ -329,7 +329,7 @@ impl PhysicsPipeline {
                 .effective_contact_force_event_threshold()
                 .min(co2.effective_contact_force_event_threshold());
 
-            if threshold < Real::MAX {
+            if threshold < Real::from(RawReal::MAX) {
                 let total_magnitude = pair.total_impulse_magnitude() * inv_dt;
 
                 // NOTE: the strict inequality is important here, so we don’t
@@ -607,13 +607,13 @@ impl PhysicsPipeline {
                 };
 
                 if let Some(toi) = first_impact {
-                    let original_interval = remaining_time / (remaining_substeps as Real);
+                    let original_interval = remaining_time / (Real::from(remaining_substeps as RawReal));
 
                     if toi < original_interval {
                         integration_parameters.dt = original_interval;
                     } else {
                         integration_parameters.dt =
-                            toi + (remaining_time - toi) / (remaining_substeps as Real);
+                            toi + (remaining_time - toi) / (Real::from(remaining_substeps as RawReal));
                     }
 
                     remaining_substeps -= 1;
@@ -632,7 +632,7 @@ impl PhysicsPipeline {
                 }
             } else {
                 integration_parameters.dt = remaining_time;
-                remaining_time = 0.0;
+                remaining_time = Real::from(0.0);
                 remaining_substeps = 0;
             }
 
@@ -740,7 +740,7 @@ mod test {
         RigidBodySet,
     };
     use crate::rapier::geometry::{BroadPhaseBvh, ColliderBuilder, ColliderSet, NarrowPhase};
-    use crate::rapier::math::Vector;
+    use crate::rapier::math::{Vector, Real};
     use crate::rapier::pipeline::PhysicsPipeline;
     use crate::rapier::prelude::{MultibodyJointSet, RevoluteJointBuilder, RigidBodyType};
 
@@ -757,7 +757,7 @@ mod test {
 
         let rb = RigidBodyBuilder::fixed().build();
         let h1 = bodies.insert(rb.clone());
-        let co = ColliderBuilder::ball(10.0).build();
+        let co = ColliderBuilder::ball(Real::from(10.0)).build();
         colliders.insert_with_parent(co.clone(), h1, &mut bodies);
 
         // The same but with a kinematic body.
@@ -894,7 +894,7 @@ mod test {
     #[test]
     fn collider_removal_before_step() {
         let mut pipeline = PhysicsPipeline::new();
-        let gravity = Vector::y() * -9.81;
+        let gravity = Vector::y() * Real::from(-9.81);
         let integration_parameters = IntegrationParameters::default();
         let mut broad_phase = BroadPhaseBvh::new();
         let mut narrow_phase = NarrowPhase::new();
@@ -909,7 +909,7 @@ mod test {
 
         let body = RigidBodyBuilder::dynamic().build();
         let b_handle = bodies.insert(body);
-        let collider = ColliderBuilder::ball(1.0).build();
+        let collider = ColliderBuilder::ball(1.0.into()).build();
         let c_handle = colliders.insert_with_parent(collider, b_handle, &mut bodies);
         colliders.remove(c_handle, &mut islands, &mut bodies, true);
         bodies.remove(
@@ -953,12 +953,12 @@ mod test {
 
         // Initialize body as kinematic with mass
         let rb = RigidBodyBuilder::kinematic_position_based()
-            .additional_mass(1.0)
+            .additional_mass(Real::from(1.0))
             .build();
         let h = bodies.insert(rb.clone());
 
         // Step once
-        let gravity = Vector::y() * -9.81;
+        let gravity = Vector::y() * Real::from(-9.81);
         pipeline.step(
             &gravity,
             &IntegrationParameters::default(),
@@ -1000,7 +1000,7 @@ mod test {
         let h_y = body.pos.position.translation.y;
 
         // Expect gravity to be applied on second step after switching to Dynamic
-        assert!(h_y < 0.0);
+        assert!(h_y < Real::from(0.0));
 
         // Expect body to now be in active_set
         assert!(islands.active_set.contains(&h));
@@ -1019,9 +1019,9 @@ mod test {
         let mut bodies = RigidBodySet::new();
 
         // Initialize bodies
-        let rb = RigidBodyBuilder::fixed().additional_mass(1.0).build();
+        let rb = RigidBodyBuilder::fixed().additional_mass(1.0.into()).build();
         let h = bodies.insert(rb.clone());
-        let rb_dynamic = RigidBodyBuilder::dynamic().additional_mass(1.0).build();
+        let rb_dynamic = RigidBodyBuilder::dynamic().additional_mass(1.0.into()).build();
         let h_dynamic = bodies.insert(rb_dynamic.clone());
 
         // Add joint
@@ -1031,16 +1031,16 @@ mod test {
             .local_anchor2(point![0.0, -3.0]);
         #[cfg(feature = "dim3")]
         let joint = RevoluteJointBuilder::new(Vector::z_axis())
-            .local_anchor1(point![0.0, 1.0, 0.0])
-            .local_anchor2(point![0.0, -3.0, 0.0]);
+            .local_anchor1(point![Real::from(0.0), Real::from(1.0), Real::from(0.0)])
+            .local_anchor2(point![Real::from(0.0), Real::from(-3.0), Real::from(0.0)]);
         impulse_joints.insert(h, h_dynamic, joint, true);
 
         let parameters = IntegrationParameters {
-            dt: 0.0,
+            dt: Real::from(0.0),
             ..Default::default()
         };
         // Step once
-        let gravity = Vector::y() * -9.81;
+        let gravity = Vector::y() * Real::from(-9.81);
         pipeline.step(
             &gravity,
             &parameters,

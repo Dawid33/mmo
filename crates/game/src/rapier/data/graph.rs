@@ -92,7 +92,7 @@ impl Direction {
 const DIRECTIONS: [Direction; 2] = [Direction::Outgoing, Direction::Incoming];
 
 /// The graph's node type.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct Node<N> {
     /// Associated node data.
@@ -102,7 +102,7 @@ pub struct Node<N> {
 }
 
 /// The graph's edge type.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct Edge<E> {
     /// Associated edge data.
@@ -125,7 +125,7 @@ impl<E> Edge<E> {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct Graph<N, E> {
     pub(crate) nodes: Vec<Node<N>>,

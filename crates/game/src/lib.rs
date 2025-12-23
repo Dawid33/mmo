@@ -20,12 +20,7 @@ use ordered_float::OrderedFloat;
 use rollback::rollback;
 use slotmapd::{new_key_type, DefaultKey};
 use std::{
-    any::{Any, TypeId},
-    collections::BTreeMap,
-    ops::Deref,
-    rc::Rc,
-    sync::{Arc, Mutex},
-    time::Instant,
+    any::{Any, TypeId}, collections::BTreeMap, hash::Hasher, ops::Deref, rc::Rc, sync::{Arc, Mutex}, time::Instant, hash::Hash
 };
 
 mod camera;
@@ -47,6 +42,17 @@ pub use crate::taffy::Style;
 use crate::{mesh::ChunkVoxels, parry::math::{HashableReal, Real}};
 use na::{Matrix4, Matrix4x2, Perspective3, RealField};
 use rapier::prelude::{RigidBody, RigidBodyHandle};
+
+trait DynHash {
+    /// Feeds this value into the given [`Hasher`].
+    fn dyn_hash(&self, state: &mut dyn Hasher);
+}
+
+impl<H: Hash + ?Sized> crate::DynHash for H {
+    fn dyn_hash(&self, mut state: &mut dyn Hasher) {
+        self.hash(&mut state);
+    }
+}
 
 #[derive(Copy, Clone, Debug)]
 pub enum GameDataTransactionKind {

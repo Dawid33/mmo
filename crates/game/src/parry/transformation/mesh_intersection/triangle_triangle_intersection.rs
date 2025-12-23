@@ -1,5 +1,5 @@
 use super::EPS;
-use crate::parry::math::{Point, Real, Vector};
+use crate::parry::math::{Point, Real, RawReal, Vector};
 use crate::parry::query;
 use crate::parry::query::PointQuery;
 use crate::parry::shape::{FeatureId, Segment, Triangle};
@@ -41,14 +41,14 @@ pub(crate) fn triangle_triangle_intersection(
     let normal1 = tri1.robust_normal();
     let normal2 = tri2.robust_normal();
 
-    if let Some(intersection_dir) = normal1.cross(&normal2).try_normalize(1.0e-6) {
+    if let Some(intersection_dir) = normal1.cross(&normal2).try_normalize(1.0e-6.into()) {
         let mut range1 = [
-            (Real::MAX, Point::origin(), FeatureId::Unknown),
-            (-Real::MAX, Point::origin(), FeatureId::Unknown),
+            (Real::from(RawReal::MAX), Point::origin(), FeatureId::Unknown),
+            (Real::from(-RawReal::MAX), Point::origin(), FeatureId::Unknown),
         ];
         let mut range2 = [
-            (Real::MAX, Point::origin(), FeatureId::Unknown),
-            (-Real::MAX, Point::origin(), FeatureId::Unknown),
+            (Real::from(RawReal::MAX), Point::origin(), FeatureId::Unknown),
+            (Real::from(-RawReal::MAX), Point::origin(), FeatureId::Unknown),
         ];
 
         let hits1 = [
@@ -241,7 +241,7 @@ fn debug_check_intersections(
     for pt in intersections {
         if !tri1
             .project_local_point(&pt.p1, false)
-            .is_inside_eps(&pt.p1, 1.0e-5)
+            .is_inside_eps(&pt.p1, 1.0e-5.into())
         {
             incorrect = true;
             break;
@@ -249,7 +249,7 @@ fn debug_check_intersections(
 
         if !tri2
             .project_local_point(&pt.p1, false)
-            .is_inside_eps(&pt.p1, 1.0e-5)
+            .is_inside_eps(&pt.p1, 1.0e-5.into())
         {
             incorrect = true;
             break;

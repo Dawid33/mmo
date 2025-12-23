@@ -106,7 +106,7 @@ where
     #[must_use]
     pub fn is_special_orthogonal(&self, eps: T) -> bool
     where
-        D: DimMin<D, Output = D>,
+        D: DimMin<D, Output = D> + std::hash::Hash,
         DefaultAllocator: Allocator<D>,
     {
         self.is_square() && self.is_orthogonal(eps) && self.determinant() > T::zero()

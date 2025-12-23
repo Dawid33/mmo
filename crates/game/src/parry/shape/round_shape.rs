@@ -13,7 +13,7 @@ use na::Unit;
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
     archive(check_bytes)
 )]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash)]
 #[repr(C)]
 /// A shape with rounded borders.
 ///

@@ -289,7 +289,7 @@ pub enum TriMeshBuilderError {
 /// point on the triangle, as described in the paper:
 /// "Signed distance computation using the angle weighted pseudonormal", Baerentzen, et al.
 /// DOI: 10.1109/TVCG.2005.49
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -306,7 +306,7 @@ pub struct TriMeshPseudoNormals {
 }
 
 /// The connected-components of a triangle mesh.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -388,7 +388,7 @@ impl TriMeshConnectedComponents {
 }
 
 /// A vertex of a triangle-mesh’s half-edge topology.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -402,7 +402,7 @@ pub struct TopoVertex {
 }
 
 /// A face of a triangle-mesh’s half-edge topology.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -417,7 +417,7 @@ pub struct TopoFace {
 }
 
 /// A half-edge of a triangle-mesh’s half-edge topology.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -439,7 +439,7 @@ pub struct TopoHalfEdge {
 }
 
 /// The half-edge topology information of a triangle mesh.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -514,7 +514,7 @@ bitflags::bitflags! {
     archive(check_bytes)
 )]
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 /// A triangle mesh.
 pub struct TriMesh {
     bvh: Bvh,
@@ -971,16 +971,16 @@ impl TriMesh {
         if let Some(pn) = &mut self.pseudo_normals {
             pn.vertices_pseudo_normal.iter_mut().for_each(|n| {
                 n.component_mul_assign(scale);
-                let _ = n.try_normalize_mut(0.0);
+                let _ = n.try_normalize_mut(0.0.into());
             });
             pn.edges_pseudo_normal.iter_mut().for_each(|n| {
                 n[0].component_mul_assign(scale);
                 n[1].component_mul_assign(scale);
                 n[2].component_mul_assign(scale);
 
-                let _ = n[0].try_normalize_mut(0.0);
-                let _ = n[1].try_normalize_mut(0.0);
-                let _ = n[2].try_normalize_mut(0.0);
+                let _ = n[0].try_normalize_mut(0.0.into());
+                let _ = n[1].try_normalize_mut(0.0.into());
+                let _ = n[2].try_normalize_mut(0.0.into());
             });
         }
 
@@ -1919,9 +1919,9 @@ impl TriMesh {
             Some(TrianglePseudoNormals {
                 face: triangle.normal()?,
                 edges: [
-                    Unit::try_new(edges_pseudo_normals[0], 1.0e-6)?,
-                    Unit::try_new(edges_pseudo_normals[1], 1.0e-6)?,
-                    Unit::try_new(edges_pseudo_normals[2], 1.0e-6)?,
+                    Unit::try_new(edges_pseudo_normals[0], 1.0e-6.into())?,
+                    Unit::try_new(edges_pseudo_normals[1], 1.0e-6.into())?,
+                    Unit::try_new(edges_pseudo_normals[2], 1.0e-6.into())?,
                 ],
             })
         } else {
@@ -2176,7 +2176,7 @@ impl TypedCompositeShape for TriMesh {
 
 #[cfg(test)]
 mod test {
-    use crate::parry::math::{Real, Vector};
+    use crate::parry::math::{Real, RawReal, Vector};
     use crate::parry::shape::{Cuboid, TriMesh, TriMeshFlags};
 
     #[test]
@@ -2189,7 +2189,7 @@ mod test {
 
     #[test]
     fn connected_components() {
-        let (vtx, idx) = Cuboid::new(Vector::repeat(0.5)).to_trimesh();
+        let (vtx, idx) = Cuboid::new(Vector::repeat(0.5.into())).to_trimesh();
 
         // Push 10 copy of the mesh, each time pushed with an offset.
         let mut mesh = TriMesh::new(vtx.clone(), idx.clone()).unwrap();
@@ -2197,7 +2197,7 @@ mod test {
         for i in 1..10 {
             let cc_vtx = vtx
                 .iter()
-                .map(|pt| pt + Vector::repeat(2.0 * i as Real))
+                .map(|pt| pt + Vector::repeat(Real::from(2.0 * i as RawReal)))
                 .collect();
 
             let to_append = TriMesh::new(cc_vtx, idx.clone()).unwrap();

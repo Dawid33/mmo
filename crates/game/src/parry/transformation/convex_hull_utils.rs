@@ -1,4 +1,4 @@
-use crate::parry::math::Real;
+use crate::parry::math::{Real, RawReal};
 use crate::num::Bounded;
 use na;
 #[cfg(feature = "dim3")]
@@ -112,7 +112,7 @@ where
     I: Iterator<Item = usize>,
 {
     let mut argmax = None;
-    let mut max = -Real::MAX;
+    let mut max = Real::from(-RawReal::MAX);
 
     for i in idx.into_iter() {
         let dot = direction.dot(&points[i].coords);
@@ -176,7 +176,7 @@ where
     I: Iterator<Item = usize>,
 {
     let mut argmax = None;
-    let mut max = -Real::MAX;
+    let mut max = Real::from(-RawReal::MAX);
 
     for (k, i) in idx.into_iter().enumerate() {
         let dot = direction.dot(&points[i].coords);

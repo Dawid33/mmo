@@ -19,7 +19,7 @@ impl Cuboid {
     /// Discretize the boundary of this cuboid as a triangle-mesh.
     pub fn to_trimesh(&self) -> (Vec<Point<Real>>, Vec<[u32; 3]>) {
         let (vtx, idx) = unit_cuboid();
-        (utils::scaled(vtx, self.half_extents * 2.0), idx)
+        (utils::scaled(vtx, self.half_extents * Real::from(2.0)), idx)
     }
 }
 
@@ -32,14 +32,14 @@ fn unit_cuboid() -> (Vec<Point<Real>>, Vec<[u32; 3]>) {
         let mut coords = Vec::with_capacity(8);
         let mut faces = Vec::with_capacity(12);
 
-        coords.push(Point::new(-0.5, -0.5, 0.5));
-        coords.push(Point::new(-0.5, -0.5, -0.5));
-        coords.push(Point::new(0.5, -0.5, -0.5));
-        coords.push(Point::new(0.5, -0.5, 0.5));
-        coords.push(Point::new(-0.5, 0.5, 0.5));
-        coords.push(Point::new(-0.5, 0.5, -0.5));
-        coords.push(Point::new(0.5, 0.5, -0.5));
-        coords.push(Point::new(0.5, 0.5, 0.5));
+        coords.push(Point::new(Real::from(-0.5), Real::from(-0.5), Real::from(0.5)));
+        coords.push(Point::new(Real::from(-0.5), Real::from(-0.5), Real::from(-0.5)));
+        coords.push(Point::new(Real::from(0.5), Real::from(-0.5), Real::from(-0.5)));
+        coords.push(Point::new(Real::from(0.5), Real::from(-0.5), Real::from(0.5)));
+        coords.push(Point::new(Real::from(-0.5), Real::from(0.5), Real::from(0.5)));
+        coords.push(Point::new(Real::from(-0.5), Real::from(0.5),Real::from( -0.5)));
+        coords.push(Point::new(Real::from(0.5), Real::from(0.5), Real::from(-0.5)));
+        coords.push(Point::new(Real::from(0.5), Real::from(0.5),Real::from( 0.5)));
 
         faces.push([4, 5, 0]);
         faces.push([5, 1, 0]);

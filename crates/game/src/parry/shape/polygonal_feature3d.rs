@@ -268,7 +268,7 @@ impl PolygonalFeature {
                 (vertices2_1[2] - vertices2_1[1]).cross(&(vertices2_1[0] - vertices2_1[1]));
             let denom = normal2_1.dot(sep_axis1);
 
-            if !relative_eq!(denom, 0.0) {
+            if !relative_eq!(denom, Real::from(0.0)) {
                 let last_index2 = face2.num_vertices - 1;
 
                 #[allow(clippy::needless_range_loop)] // Would make it much more verbose.
@@ -283,7 +283,7 @@ impl PolygonalFeature {
 
                         if sign == 0.0 {
                             sign = new_sign;
-                        } else if sign * new_sign < 0.0 {
+                        } else if sign * new_sign < Real::from(0.0) {
                             // The point lies outside.
                             continue 'point_loop1;
                         }
@@ -312,7 +312,7 @@ impl PolygonalFeature {
                 .cross(&(face1.vertices[0] - face1.vertices[1]));
 
             let denom = -normal1.dot(sep_axis1);
-            if !relative_eq!(denom, 0.0) {
+            if !relative_eq!(denom, Real::from(0.0)) {
                 let last_index1 = face1.num_vertices - 1;
                 'point_loop2: for i in 0..face2.num_vertices {
                     let p2 = projected_face2[i];
@@ -325,7 +325,7 @@ impl PolygonalFeature {
 
                         if sign == 0.0 {
                             sign = new_sign;
-                        } else if sign * new_sign < 0.0 {
+                        } else if sign * new_sign < Real::from(0.0) {
                             // The point lies outside.
                             continue 'point_loop2;
                         }
@@ -363,15 +363,15 @@ impl PolygonalFeature {
                     projected_face1[(i + 1) % face1.num_vertices],
                 ];
                 if let Some(bcoords) = closest_points_line2d(projected_edge1, projected_edge2) {
-                    if bcoords.0 > 0.0 && bcoords.0 < 1.0 && bcoords.1 > 0.0 && bcoords.1 < 1.0 {
+                    if bcoords.0 > 0.0.into() && bcoords.0 < 1.0.into() && bcoords.1 > 0.0.into() && bcoords.1 < 1.0.into() {
                         // Found a contact between the two edges.
                         let edge1 = (
                             face1.vertices[i],
                             face1.vertices[(i + 1) % face1.num_vertices],
                         );
                         let edge2 = (vertices2_1[j], vertices2_1[(j + 1) % face2.num_vertices]);
-                        let local_p1 = edge1.0 * (1.0 - bcoords.0) + edge1.1.coords * bcoords.0;
-                        let local_p2_1 = edge2.0 * (1.0 - bcoords.1) + edge2.1.coords * bcoords.1;
+                        let local_p1 = edge1.0 * (Real::from(1.0) - bcoords.0) + edge1.1.coords * bcoords.0;
+                        let local_p2_1 = edge2.0 * (Real::from(1.0) - bcoords.1) + edge2.1.coords * bcoords.1;
                         let dist = (local_p2_1 - local_p1).dot(sep_axis1);
 
                         manifold.points.push(TrackedContact::flipped(
@@ -407,13 +407,13 @@ fn closest_points_line2d(
     let eps = Real::default_epsilon();
 
     if a <= eps && e <= eps {
-        Some((0.0, 0.0))
+        Some((0.0.into(), 0.0.into()))
     } else if a <= eps {
-        Some((0.0, f / e))
+        Some((0.0.into(), f / e))
     } else {
         let c = dir1.dot(&r);
         if e <= eps {
-            Some((-c / a, 0.0))
+            Some((-c / a, 0.0.into()))
         } else {
             let b = dir1.dot(&dir2);
             let ae = a * e;
@@ -426,7 +426,7 @@ fn closest_points_line2d(
             let s = if !parallel {
                 (b * f - c * e) / denom
             } else {
-                0.0
+                0.0.into()
             };
 
             if parallel {

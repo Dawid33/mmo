@@ -7,6 +7,7 @@
 // use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
 use core::fmt;
+use core::hash::Hash;
 use core::iter::{Enumerate, FusedIterator};
 use core::marker::PhantomData;
 #[allow(unused_imports)] // MaybeUninit is only used on nightly at the moment.
@@ -27,6 +28,20 @@ union SlotUnion<T> {
 struct Slot<T> {
     u: SlotUnion<T>,
     version: u32, // Even = vacant, odd = occupied.
+}
+
+impl<T> Hash for Slot<T>
+where
+    T: Hash,
+{
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        if self.occupied() {
+            unsafe { self.u.value.hash(state) };
+        } else {
+            unsafe { self.u.next_free.hash(state) };
+        }
+        self.version.hash(state);
+    }
 }
 
 // Safe API to read a slot.
@@ -126,7 +141,7 @@ impl<T: fmt::Debug> fmt::Debug for Slot<T> {
 /// Slot map, storage with stable unique keys.
 ///
 /// See [crate documentation](crate) for more details.
-#[derive(Debug)]
+#[derive(Debug, Hash)]
 pub struct SlotMap<K: Key, V> {
     slots: Vec<Slot<V>>,
     free_head: u32,

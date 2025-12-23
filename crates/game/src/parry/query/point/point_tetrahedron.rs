@@ -46,7 +46,7 @@ impl PointQueryWithLocation for Tetrahedron {
         let ap_ac = ap.dot(&ac);
         let ap_ad = ap.dot(&ad);
 
-        if ap_ab <= 0.0 && ap_ac <= 0.0 && ap_ad <= 0.0 {
+        if ap_ab <= Real::from(0.0) && ap_ac <= Real::from(0.0) && ap_ad <= Real::from(0.0) {
             // Voronoï region of `a`.
             let proj = PointProjection::new(false, self.a);
             return (proj, TetrahedronPointLocation::OnVertex(0));
@@ -60,7 +60,7 @@ impl PointQueryWithLocation for Tetrahedron {
         let bp_bd = bp.dot(&bd);
         let bp_ab = bp.dot(&ab);
 
-        if bp_bc <= 0.0 && bp_bd <= 0.0 && bp_ab >= 0.0 {
+        if bp_bc <= Real::from(0.0) && bp_bd <= Real::from(0.0) && bp_ab >= Real::from(0.0) {
             // Voronoï region of `b`.
             let proj = PointProjection::new(false, self.b);
             return (proj, TetrahedronPointLocation::OnVertex(1));
@@ -73,7 +73,7 @@ impl PointQueryWithLocation for Tetrahedron {
         let cp_bc = cp.dot(&bc);
         let cp_cd = cp.dot(&cd);
 
-        if cp_cd <= 0.0 && cp_bc >= 0.0 && cp_ac >= 0.0 {
+        if cp_cd <= Real::from(0.0) && cp_bc >= Real::from(0.0) && cp_ac >= Real::from(0.0) {
             // Voronoï region of `c`.
             let proj = PointProjection::new(false, self.c);
             return (proj, TetrahedronPointLocation::OnVertex(2));
@@ -85,7 +85,7 @@ impl PointQueryWithLocation for Tetrahedron {
         let dp_bd = dp.dot(&bd);
         let dp_ad = dp.dot(&ad);
 
-        if dp_ad >= 0.0 && dp_bd >= 0.0 && dp_cd >= 0.0 {
+        if dp_ad >= Real::from(0.0) && dp_bd >= Real::from(0.0) && dp_cd >= Real::from(0.0) {
             // Voronoï region of `d`.
             let proj = PointProjection::new(false, self.d);
             return (proj, TetrahedronPointLocation::OnVertex(3));
@@ -123,10 +123,10 @@ impl PointQueryWithLocation for Tetrahedron {
             let dabd = ap_x_ab.dot(nabd);
 
             // TODO: the case where ab_ab == 0.0 is not well defined.
-            if ab_ab != 0.0 && dabc >= 0.0 && dabd >= 0.0 && ap_ab >= 0.0 && ap_ab <= ab_ab {
+            if ab_ab != 0.0 && dabc >= Real::from(0.0) && dabd >= Real::from(0.0) && ap_ab >= Real::from(0.0) && ap_ab <= ab_ab {
                 // Voronoi region of `ab`.
                 let u = ap_ab / ab_ab;
-                let bcoords = [1.0 - u, u];
+                let bcoords = [Real::from(1.0) - u, u];
                 let res = a + ab * u;
                 let proj = PointProjection::new(false, res);
                 (
@@ -253,9 +253,9 @@ impl PointQueryWithLocation for Tetrahedron {
             /* ap_ab: Real, bp_ab: Real, cp_ab: Real,
             ap_ac: Real, bp_ac: Real, cp_ac: Real, */
         ) -> Option<(PointProjection, TetrahedronPointLocation)> {
-            if dabc < 0.0 && dbca < 0.0 && dacb < 0.0 {
+            if dabc < Real::from(0.0) && dbca < Real::from(0.0) && dacb < Real::from(0.0) {
                 let n = ab.cross(ac); // TODO: is is possible to avoid this cross product?
-                if n.dot(ad) * n.dot(ap) < 0.0 {
+                if n.dot(ad) * n.dot(ap) < Real::from(0.0) {
                     // Voronoï region of the face.
 
                     // NOTE:
@@ -270,14 +270,14 @@ impl PointQueryWithLocation for Tetrahedron {
                     // above were < 0. This happens, e.g., when we use fixed-point
                     // numbers and there are not enough decimal bits to perform
                     // the normalization.
-                    let normal = n.try_normalize(crate::parry::math::DEFAULT_EPSILON)?;
+                    let normal = n.try_normalize(Real::from(crate::parry::math::DEFAULT_EPSILON))?;
                     let vc = normal.dot(&ap.cross(bp));
                     let va = normal.dot(&bp.cross(cp));
                     let vb = normal.dot(&cp.cross(ap));
 
                     let denom = va + vb + vc;
                     assert!(denom != 0.0);
-                    let inv_denom = 1.0 / denom;
+                    let inv_denom = Real::from(1.0) / denom;
 
                     let bcoords = [va * inv_denom, vb * inv_denom, vc * inv_denom];
                     let res = a * bcoords[0] + b.coords * bcoords[1] + c.coords * bcoords[2];

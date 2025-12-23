@@ -33,6 +33,15 @@ pub struct IslandManager {
     stack: Vec<RigidBodyHandle>, // Workspace.
 }
 
+impl std::hash::Hash for IslandManager {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.active_set.hash(state);
+        self.active_islands.hash(state);
+        self.active_islands_additional_solver_iterations.hash(state);
+        self.active_set_timestamp.hash(state);
+    }
+}
+
 impl IslandManager {
     /// Creates a new empty island manager.
     pub fn new() -> Self {
@@ -352,6 +361,6 @@ fn update_energy(
     if can_sleep {
         activation.time_since_can_sleep += dt;
     } else {
-        activation.time_since_can_sleep = 0.0;
+        activation.time_since_can_sleep = Real::from(0.0);
     }
 }

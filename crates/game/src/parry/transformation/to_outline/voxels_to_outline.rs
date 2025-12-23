@@ -24,7 +24,7 @@ impl Voxels {
     /// The outline is such that only convex edges are output in the polyline.
     pub fn iter_outline(&self, mut f: impl FnMut(Point<Real>, Point<Real>)) {
         // TODO: move this as a new method: Voxels::to_outline?
-        let radius = self.voxel_size() / 2.0;
+        let radius = self.voxel_size() / Real::from(2.0);
         let aabb = Aabb::from_half_extents(Point::origin(), radius);
         let vtx = aabb.vertices();
 

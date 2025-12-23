@@ -186,6 +186,57 @@ impl SubsetOf<OrderedFloat> for f64 {
     }
 }
 
+impl SubsetOf<OrderedFloat> for u32 {
+    #[inline]
+    fn to_superset(&self) -> OrderedFloat {
+        ordered_float::OrderedFloat(*self as f32)
+    }
+
+    #[inline]
+    fn from_superset_unchecked(element: &OrderedFloat) -> u32 {
+        **element as u32
+    }
+
+    #[inline]
+    fn is_in_subset(_: &OrderedFloat) -> bool {
+        true
+    }
+}
+
+impl SubsetOf<OrderedFloat> for i32 {
+    #[inline]
+    fn to_superset(&self) -> OrderedFloat {
+        ordered_float::OrderedFloat(*self as f32)
+    }
+
+    #[inline]
+    fn from_superset_unchecked(element: &OrderedFloat) -> i32 {
+        **element as i32
+    }
+
+    #[inline]
+    fn is_in_subset(_: &OrderedFloat) -> bool {
+        true
+    }
+}
+
+impl SubsetOf<f64> for OrderedFloat {
+    #[inline]
+    fn to_superset(&self) -> f64 {
+        **self as f64
+    }
+
+    #[inline]
+    fn from_superset_unchecked(element: &f64) -> OrderedFloat {
+        ordered_float::OrderedFloat(*element as f32)
+    }
+
+    #[inline]
+    fn is_in_subset(_: &f64) -> bool {
+        true
+    }
+}
+
 impl SubsetOf<OrderedFloat> for OrderedFloat {
     #[inline]
     fn to_superset(&self) -> OrderedFloat {
@@ -270,7 +321,7 @@ macro_rules! impl_scalar_subset_of_complex (
 );
 
 impl_scalar_subset_of_complex!(
-    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
+    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64, OrderedFloat
 );
 #[cfg(feature = "decimal")]
 impl_scalar_subset_of_complex!(d128);

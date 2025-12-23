@@ -49,6 +49,7 @@ impl<T: ComplexField, R: Dim, C: Dim, S: Storage<T, R, C>> Matrix<T, R, C, S> {
     where
         R: DimMin<C>,
         DefaultAllocator: Allocator<R, C> + Allocator<DimMinimum<R, C>>,
+        <R as DimMin<C>>::Output: std::hash::Hash,
     {
         LU::new(self.into_owned())
     }

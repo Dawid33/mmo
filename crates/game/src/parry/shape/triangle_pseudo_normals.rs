@@ -55,14 +55,14 @@ impl NormalConstraints for TrianglePseudoNormals {
         if *closest_edge == self.face {
             // The normal cone is degenerate, there is only one possible direction.
             *dir = *self.face;
-            return dot_face >= 0.0;
+            return dot_face >= Real::from(0.0);
         }
 
         // TODO: take into account the two closest edges instead for better continuity
         //       of vertex normals?
         let dot_edge_face = self.face.dot(closest_edge);
         let dot_dir_face = self.face.dot(dir);
-        let dot_corrected_dir_face = 2.0 * dot_edge_face * dot_edge_face - 1.0; // cos(2 * angle(closest_edge, face))
+        let dot_corrected_dir_face = Real::from(2.0) * dot_edge_face * dot_edge_face - Real::from(1.0); // cos(2 * angle(closest_edge, face))
 
         if dot_dir_face >= dot_corrected_dir_face {
             // The direction is in the pseudo-normal cone. No correction to apply.
@@ -75,30 +75,30 @@ impl NormalConstraints for TrianglePseudoNormals {
 
         let dir_on_normal = *self.face * dot_dir_face;
         let dir_orthogonal_to_normal = *dir - dir_on_normal;
-        let Some(unit_dir_orthogonal_to_normal) = dir_orthogonal_to_normal.try_normalize(1.0e-6)
+        let Some(unit_dir_orthogonal_to_normal) = dir_orthogonal_to_normal.try_normalize(Real::from(1.0e-6))
         else {
-            return dot_face >= 0.0;
+            return dot_face >= Real::from(0.0);
         };
 
         // NOTE: the normalization might be redundant as the result vector is guaranteed to be
         //       unit sized. Though some rounding errors could throw it off.
         let Some(adjusted_pseudo_normal) = (edge_on_normal
             + unit_dir_orthogonal_to_normal * edge_orthogonal_to_normal.norm())
-        .try_normalize(1.0e-6) else {
-            return dot_face >= 0.0;
+        .try_normalize(Real::from(1.0e-6)) else {
+            return dot_face >= Real::from(0.0);
         };
 
         // The reflection of the face normal wrt. the adjusted pseudo-normal gives us the
         // second end of the pseudo-normal cone the direction is projected on.
-        *dir = adjusted_pseudo_normal * (2.0 * self.face.dot(&adjusted_pseudo_normal)) - *self.face;
-        dot_face >= 0.0
+        *dir = adjusted_pseudo_normal * (Real::from(2.) * self.face.dot(&adjusted_pseudo_normal)) - *self.face;
+        dot_face >= Real::from(0.0)
     }
 }
 
 #[cfg(test)]
 #[cfg(all(feature = "dim3", feature = "alloc"))]
 mod test {
-    use crate::parry::math::{Real, Vector};
+    use crate::parry::math::{Real, RawReal, Vector};
     use crate::parry::shape::TrianglePseudoNormals;
     use na::Unit;
 
@@ -120,7 +120,7 @@ mod test {
         };
 
         assert_eq!(
-            pn.project_local_normal(Vector::new(1.0, 1.0, 1.0)),
+            pn.project_local_normal(Vector::new(Real::from(1.0), Real::from(1.0), Real::from(1.0))),
             Some(Vector::y())
         );
         assert!(pn.project_local_normal(-Vector::y()).is_none());
@@ -135,7 +135,7 @@ mod test {
         let cones_ref_dir = [
             -Vector::z(),
             -Vector::x(),
-            Vector::new(1.0, 0.0, 1.0).normalize(),
+            Vector::new(Real::from(1.0), Real::from(0.0), Real::from(1.0)).normalize(),
         ];
         let cones_ends = cones_ref_dir.map(bisector_y);
         let cones_axes = cones_ends.map(bisector_y);
@@ -149,7 +149,7 @@ mod test {
             assert_relative_eq!(
                 pn.project_local_normal(cones_ends[i]).unwrap(),
                 cones_ends[i],
-                epsilon = 1.0e-5
+                epsilon = Real::from(1.0e-5)
             );
             assert_eq!(pn.project_local_normal(cones_axes[i]), Some(cones_axes[i]));
 
@@ -158,7 +158,7 @@ mod test {
 
             for k in 1..100 {
                 let v = Vector::y()
-                    .lerp(&cones_ends[i], k as Real / (subdivs as Real))
+                    .lerp(&cones_ends[i], Real::from(k as RawReal / (subdivs as RawReal)))
                     .normalize();
                 assert_eq!(pn.project_local_normal(v).unwrap(), v);
             }
@@ -166,19 +166,19 @@ mod test {
             // Guaranteed to be outside the normal cone of edge i.
             for k in 1..subdivs {
                 let v = cones_ref_dir[i]
-                    .lerp(&cones_ends[i], k as Real / (subdivs as Real))
+                    .lerp(&cones_ends[i], Real::from(k as RawReal / (subdivs as RawReal)))
                     .normalize();
                 assert_relative_eq!(
                     pn.project_local_normal(v).unwrap(),
                     cones_ends[i],
-                    epsilon = 1.0e-5
+                    epsilon = Real::from(1.0e-5)
                 );
             }
 
             // Guaranteed to be outside the normal cone, and in the -Y half-space.
             for k in 1..subdivs {
                 let v = cones_ref_dir[i]
-                    .lerp(&(-Vector::y()), k as Real / (subdivs as Real))
+                    .lerp(&(-Vector::y()), Real::from(k as RawReal / (subdivs as RawReal)))
                     .normalize();
                 assert!(pn.project_local_normal(v).is_none(),);
             }
@@ -191,7 +191,7 @@ mod test {
         let cones_ref_dir = [
             -Vector::z(),
             -Vector::x(),
-            Vector::new(1.0, 0.0, 1.0).normalize(),
+            Vector::new(Real::from(1.0), Real::from(0.0),Real::from(1.0)).normalize(),
         ];
         let cones_ends = cones_ref_dir.map(|v| bisector(v, -Vector::y()));
         let cones_axes = [
@@ -213,7 +213,7 @@ mod test {
 
             for k in 1..subdivs {
                 let v = Vector::y()
-                    .lerp(&cones_ends[i], k as Real / (subdivs as Real))
+                    .lerp(&cones_ends[i], Real::from(k as RawReal / (subdivs as RawReal)))
                     .normalize();
                 assert_eq!(pn.project_local_normal(v).unwrap(), v);
             }
@@ -222,8 +222,7 @@ mod test {
             // Since it is additionally guaranteed to be in the -Y half-space, we should get None.
             for k in 1..subdivs {
                 let v = (-Vector::y())
-                    .lerp(&cones_ends[i], k as Real / (subdivs as Real))
-                    .normalize();
+                    .lerp(&cones_ends[i], Real::from(k as RawReal / (subdivs as RawReal)));
                 assert!(pn.project_local_normal(v).is_none());
             }
         }

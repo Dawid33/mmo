@@ -83,13 +83,13 @@ impl PolygonalFeatureMap for Cylinder {
             out_features.vids = PackedFeatureId::vertices([1, 11, 11, 11]);
         } else {
             // We return a square approximation of the cylinder cap.
-            let y = self.half_height.copysign(dir.y);
+            let y = Real::from(self.half_height.copysign(*dir.y));
             out_features.vertices[0] = Point::new(dir2.x * self.radius, y, dir2.y * self.radius);
             out_features.vertices[1] = Point::new(-dir2.y * self.radius, y, dir2.x * self.radius);
             out_features.vertices[2] = Point::new(-dir2.x * self.radius, y, -dir2.y * self.radius);
             out_features.vertices[3] = Point::new(dir2.y * self.radius, y, -dir2.x * self.radius);
 
-            if dir.y < 0.0 {
+            if dir.y < Real::from(0.0) {
                 out_features.eids = PackedFeatureId::edges([2, 4, 6, 8]);
                 out_features.fid = PackedFeatureId::face(9);
                 out_features.num_vertices = 4;
@@ -125,14 +125,14 @@ impl PolygonalFeatureMap for Cone {
             .try_normalize(Real::default_epsilon())
             .unwrap_or(Vector2::x());
 
-        if dir.y > 0.0 {
+        if dir.y > Real::from(0.0) {
             // We return a segment lying on the cone's curved part.
             out_features.vertices[0] = Point::new(
                 dir2.x * self.radius,
                 -self.half_height,
                 dir2.y * self.radius,
             );
-            out_features.vertices[1] = Point::new(0.0, self.half_height, 0.0);
+            out_features.vertices[1] = Point::new(Real::from(0.0), self.half_height, Real::from(0.0));
             out_features.eids = PackedFeatureId::edges([0, 0, 0, 0]);
             out_features.fid = PackedFeatureId::face(0);
             out_features.num_vertices = 2;

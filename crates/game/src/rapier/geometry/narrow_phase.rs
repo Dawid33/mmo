@@ -1,8 +1,11 @@
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::rapier::data::Coarena;
+use crate::parry::query::{DefaultQueryDispatcher, PersistentQueryDispatcher};
+use crate::parry::utils::hashmap::HashMap;
+use crate::parry::utils::IsometryOpt;
 use crate::rapier::data::graph::EdgeIndex;
+use crate::rapier::data::Coarena;
 use crate::rapier::dynamics::{
     CoefficientCombineRule, ImpulseJointSet, IslandManager, RigidBodyDominance, RigidBodySet,
     RigidBodyType,
@@ -13,19 +16,16 @@ use crate::rapier::geometry::{
     ContactPair, InteractionGraph, IntersectionPair, SolverContact, SolverFlags,
     TemporaryInteractionIndex,
 };
-use crate::rapier::math::{Real, Vector};
+use crate::rapier::math::{RawReal, Real, Vector};
 use crate::rapier::pipeline::{
     ActiveEvents, ActiveHooks, ContactModificationContext, EventHandler, PairFilterContext,
     PhysicsHooks,
 };
 use crate::rapier::prelude::{CollisionEventFlags, MultibodyJointSet};
-use crate::parry::query::{DefaultQueryDispatcher, PersistentQueryDispatcher};
-use crate::parry::utils::IsometryOpt;
-use crate::parry::utils::hashmap::HashMap;
 use std::sync::Arc;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Hash)]
 struct ColliderGraphIndices {
     contact_graph_index: ColliderGraphIndex,
     intersection_graph_index: ColliderGraphIndex,
@@ -64,12 +64,23 @@ enum PairRemovalMode {
 pub struct NarrowPhase {
     #[cfg_attr(
         feature = "serde-serialize",
-        serde(skip, default = "crate::rapier::geometry::default_persistent_query_dispatcher")
+        serde(
+            skip,
+            default = "crate::rapier::geometry::default_persistent_query_dispatcher"
+        )
     )]
     query_dispatcher: Arc<dyn PersistentQueryDispatcher<ContactManifoldData, ContactData>>,
     contact_graph: InteractionGraph<ColliderHandle, ContactPair>,
     intersection_graph: InteractionGraph<ColliderHandle, IntersectionPair>,
     graph_indices: Coarena<ColliderGraphIndices>,
+}
+
+impl std::hash::Hash for NarrowPhase {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.contact_graph.hash(state);
+        self.intersection_graph.hash(state);
+        self.graph_indices.hash(state);
+    }
 }
 
 pub(crate) type ContactManifoldIndex = usize;
@@ -934,11 +945,11 @@ impl NarrowPhase {
                 let pos12 = co1.pos.inv_mul(&co2.pos);
 
                 let contact_skin_sum = co1.contact_skin() + co2.contact_skin();
-                let soft_ccd_prediction1 = rb1.map(|rb| rb.soft_ccd_prediction()).unwrap_or(0.0);
-                let soft_ccd_prediction2 = rb2.map(|rb| rb.soft_ccd_prediction()).unwrap_or(0.0);
-                let effective_prediction_distance = if soft_ccd_prediction1 > 0.0 || soft_ccd_prediction2 > 0.0 {
-                        let aabb1 = co1.compute_collision_aabb(0.0);
-                        let aabb2 = co2.compute_collision_aabb(0.0);
+                let soft_ccd_prediction1 = rb1.map(|rb| rb.soft_ccd_prediction()).unwrap_or(Real::from(0.0));
+                let soft_ccd_prediction2 = rb2.map(|rb| rb.soft_ccd_prediction()).unwrap_or(Real::from(0.0));
+                let effective_prediction_distance = if soft_ccd_prediction1 > Real::from(0.0) || soft_ccd_prediction2 > Real::from(0.0) {
+                        let aabb1 = co1.compute_collision_aabb(Real::from(0.0));
+                        let aabb2 = co2.compute_collision_aabb(Real::from(0.0));
                         let inv_dt = crate::rapier::utils::inv(dt);
 
                         let linvel1 = rb1.map(|rb| rb.linvel()
@@ -1027,7 +1038,7 @@ impl NarrowPhase {
                                 friction,
                                 restitution,
                                 tangent_velocity: Vector::zeros(),
-                                is_new: (contact.data.impulse == 0.0) as u32 as Real,
+                                is_new: Real::from((contact.data.impulse == Real::from(0.0)) as u32 as RawReal),
                                 warmstart_impulse: contact.data.warmstart_impulse,
                                 warmstart_tangent_impulse: contact.data.warmstart_tangent_impulse,
                                 #[cfg(feature = "dim2")]
@@ -1212,11 +1223,11 @@ mod test {
         let mut collider_set = ColliderSet::new();
 
         /* Create the ground. */
-        let collider = ColliderBuilder::ball(0.5);
+        let collider = ColliderBuilder::ball(Real::from(0.5));
 
         /* Create body 1, which will contain both colliders at first. */
         let rigid_body_1 = RigidBodyBuilder::dynamic()
-            .translation(vector![0.0, 0.0, 0.0])
+            .translation(vector![Real::from(0.0), Real::from(0.0), Real::from(0.0)])
             .build();
         let body_1_handle = rigid_body_set.insert(rigid_body_1);
 
@@ -1230,12 +1241,12 @@ mod test {
 
         /* Create body 2. No attached colliders yet. */
         let rigid_body_2 = RigidBodyBuilder::dynamic()
-            .translation(vector![0.0, 0.0, 0.0])
+            .translation(vector![Real::from(0.0), Real::from(0.0), Real::from(0.0)])
             .build();
         let body_2_handle = rigid_body_set.insert(rigid_body_2);
 
         /* Create other structures necessary for the simulation. */
-        let gravity = vector![0.0, 0.0, 0.0];
+        let gravity = vector![Real::from(0.0), Real::from(0.0), Real::from(0.0)];
         let integration_parameters = IntegrationParameters::default();
         let mut physics_pipeline = PhysicsPipeline::new();
         let mut island_manager = IslandManager::new();
@@ -1266,7 +1277,7 @@ mod test {
         assert!(
             (collider_1_position.translation.vector - collider_2_position.translation.vector)
                 .magnitude()
-                < 0.5f32
+                < Real::from(0.5f32)
         );
 
         let contact_pair = narrow_phase
@@ -1337,7 +1348,7 @@ mod test {
         assert!(
             (collider_1_position.translation.vector - collider_2_position.translation.vector)
                 .magnitude()
-                >= 0.5f32,
+                >= Real::from(0.5f32),
             "colliders should no longer be penetrating."
         );
     }
@@ -1356,11 +1367,11 @@ mod test {
         let mut collider_set = ColliderSet::new();
 
         /* Create the ground. */
-        let collider = ColliderBuilder::ball(0.5);
+        let collider = ColliderBuilder::ball(Real::from(0.5));
 
         /* Create body 1, which will contain collider 1. */
         let rigid_body_1 = RigidBodyBuilder::dynamic()
-            .translation(vector![0.0, 0.0, 0.0])
+            .translation(vector![Real::from(0.0), Real::from(0.0), Real::from(0.0)])
             .build();
         let body_1_handle = rigid_body_set.insert(rigid_body_1);
 
@@ -1370,7 +1381,7 @@ mod test {
 
         /* Create body 2, which will contain collider 2 at first. */
         let rigid_body_2 = RigidBodyBuilder::dynamic()
-            .translation(vector![0.0, 0.0, 0.0])
+            .translation(vector![Real::from(0.0), Real::from(0.0), Real::from(0.0)])
             .build();
         let body_2_handle = rigid_body_set.insert(rigid_body_2);
 
@@ -1379,7 +1390,7 @@ mod test {
             collider_set.insert_with_parent(collider.build(), body_2_handle, &mut rigid_body_set);
 
         /* Create other structures necessary for the simulation. */
-        let gravity = vector![0.0, 0.0, 0.0];
+        let gravity = vector![Real::from(0.0), Real::from(0.0), Real::from(0.0)];
         let integration_parameters = IntegrationParameters::default();
         let mut physics_pipeline = PhysicsPipeline::new();
         let mut island_manager = IslandManager::new();
@@ -1420,7 +1431,7 @@ mod test {
         assert!(
             (collider_1_position.translation.vector - collider_2_position.translation.vector)
                 .magnitude()
-                < 0.5f32
+                < Real::from(0.5f32)
         );
 
         /* Parent collider 2 to body 1. */

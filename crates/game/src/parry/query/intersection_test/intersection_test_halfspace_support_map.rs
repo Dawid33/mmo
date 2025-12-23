@@ -9,7 +9,7 @@ pub fn intersection_test_halfspace_support_map<G: ?Sized + SupportMap>(
     other: &G,
 ) -> bool {
     let deepest = other.support_point_toward(pos12, &-halfspace.normal);
-    halfspace.normal.dot(&deepest.coords) <= 0.0
+    halfspace.normal.dot(&deepest.coords) <= Real::from(0.0)
 }
 
 /// Intersection test between a support-mapped shape (Cuboid, ConvexHull, etc.) and a halfspace.

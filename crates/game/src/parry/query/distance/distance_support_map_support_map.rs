@@ -31,7 +31,7 @@ where
     // TODO: or m2.translation - m1.translation ?
     let dir = init_dir.unwrap_or_else(|| -pos12.translation.vector);
 
-    if let Some(dir) = Unit::try_new(dir, crate::parry::math::DEFAULT_EPSILON) {
+    if let Some(dir) = Unit::try_new(dir, Real::from(crate::parry::math::DEFAULT_EPSILON)) {
         simplex.reset(CSOPoint::from_shapes(pos12, g1, g2, &dir));
     } else {
         simplex.reset(CSOPoint::from_shapes(
@@ -43,9 +43,9 @@ where
     }
 
     match gjk::closest_points(pos12, g1, g2, Real::max_value(), true, simplex) {
-        GJKResult::Intersection => 0.0,
+        GJKResult::Intersection => Real::from(0.0),
         GJKResult::ClosestPoints(p1, p2, _) => na::distance(&p1, &p2),
         GJKResult::Proximity(_) => unreachable!(),
-        GJKResult::NoIntersection(_) => 0.0, // TODO: GJK did not converge.
+        GJKResult::NoIntersection(_) => Real::from(0.0), // TODO: GJK did not converge.
     }
 }

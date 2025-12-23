@@ -4,13 +4,13 @@ use crate::rapier::dynamics::{RigidBodyHandle, RigidBodySet, RigidBodyType, Rigi
 #[cfg(feature = "dim3")]
 use crate::rapier::math::Matrix;
 use crate::rapier::math::{
-    ANG_DIM, AngDim, AngVector, DIM, Dim, Isometry, Jacobian, Point, Real, SPATIAL_DIM, Vector,
+    AngDim, AngVector, Dim, Isometry, Jacobian, Point, Real, Vector, ANG_DIM, DIM, SPATIAL_DIM,
 };
 use crate::rapier::prelude::MultibodyJoint;
 use crate::rapier::utils::{IndexMut2, SimdAngularInertia, SimdCross, SimdCrossMatrix};
 use na::{
-    self, DMatrix, DVector, DVectorView, DVectorViewMut, Dyn, LU, OMatrix, SMatrix, SVector,
-    StorageMut,
+    self, DMatrix, DVector, DVectorView, DVectorViewMut, Dyn, OMatrix, SMatrix, SVector,
+    StorageMut, LU,
 };
 
 #[cfg(doc)]
@@ -62,7 +62,7 @@ fn concat_rb_mass_matrix(
 
 /// An articulated body simulated using the reduced-coordinates approach.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub struct Multibody {
     // TODO: serialization: skip the workspace fields.
     pub(crate) links: MultibodyLinkVec,
@@ -405,9 +405,12 @@ impl Multibody {
 
     fn grow_buffers(&mut self, ndofs: usize, num_jacobians: usize) {
         let len = self.velocities.len();
-        self.velocities.resize_vertically_mut(len + ndofs, 0.0);
-        self.damping.resize_vertically_mut(len + ndofs, 0.0);
-        self.accelerations.resize_vertically_mut(len + ndofs, 0.0);
+        self.velocities
+            .resize_vertically_mut(len + ndofs, Real::from(0.0));
+        self.damping
+            .resize_vertically_mut(len + ndofs, Real::from(0.0));
+        self.accelerations
+            .resize_vertically_mut(len + ndofs, Real::from(0.0));
         self.body_jacobians
             .extend((0..num_jacobians).map(|_| Jacobian::zeros(0)));
     }
@@ -417,7 +420,7 @@ impl Multibody {
             return; // Nothing to do.
         }
 
-        self.accelerations.fill(0.0);
+        self.accelerations.fill(Real::from(0.0));
 
         // Eqn 42 to 45
         for i in 0..self.links.len() {
@@ -434,7 +437,8 @@ impl Multibody {
                 acc += self.workspace.accs[parent_id];
                 // The 2.0 originates from the two identical terms of Jdot (the terms become
                 // identical once they are multiplied by the generalized velocities).
-                acc.linvel += 2.0 * parent_rb.vels.angvel.gcross(link.joint_velocity.linvel);
+                acc.linvel +=
+                    Real::from(2.0) * parent_rb.vels.angvel.gcross(link.joint_velocity.linvel);
                 #[cfg(feature = "dim3")]
                 {
                     acc.angvel += parent_rb.vels.angvel.cross(&link.joint_velocity.angvel);
@@ -472,15 +476,19 @@ impl Multibody {
                 rb.forces.torque - gyroscopic - rb_inertia * acc.angvel,
             );
             self.accelerations.gemv_tr(
-                1.0,
+                Real::from(1.0),
                 &self.body_jacobians[i],
                 external_forces.as_vector(),
-                1.0,
+                Real::from(1.0),
             );
         }
 
-        self.accelerations
-            .cmpy(-1.0, &self.damping, &self.velocities, 1.0);
+        self.accelerations.cmpy(
+            Real::from(-1.0),
+            &self.damping,
+            &self.velocities,
+            Real::from(1.0),
+        );
 
         self.augmented_mass_indices
             .with_rearranged_rows_mut(&mut self.accelerations, |accs| {
@@ -552,10 +560,10 @@ impl Multibody {
                     let parent_j_w = parent_j.fixed_rows::<ANG_DIM>(DIM);
 
                     let shift_tr = (link.shift02).gcross_matrix_tr();
-                    link_j_v.gemm(1.0, &shift_tr, &parent_j_w, 1.0);
+                    link_j_v.gemm(Real::from(1.0), &shift_tr, &parent_j_w, Real::from(1.0));
                 }
             } else {
-                self.body_jacobians[i].fill(0.0);
+                self.body_jacobians[i].fill(Real::from(0.0));
                 parent_to_world = Isometry::identity();
             }
 
@@ -574,7 +582,7 @@ impl Multibody {
                 let (mut link_j_v, link_j_w) =
                     link_j.rows_range_pair_mut(0..DIM, DIM..DIM + ANG_DIM);
                 let shift_tr = link.shift23.gcross_matrix_tr();
-                link_j_v.gemm(1.0, &shift_tr, &link_j_w, 1.0);
+                link_j_v.gemm(Real::from(1.0), &shift_tr, &link_j_w, Real::from(1.0));
             }
         }
     }
@@ -589,8 +597,8 @@ impl Multibody {
             self.augmented_mass = DMatrix::zeros(self.ndofs, self.ndofs);
             self.acc_augmented_mass = DMatrix::zeros(self.ndofs, self.ndofs);
         } else {
-            self.augmented_mass.fill(0.0);
-            self.acc_augmented_mass.fill(0.0);
+            self.augmented_mass.fill(Real::from(0.0));
+            self.acc_augmented_mass.fill(Real::from(0.0));
         }
 
         self.augmented_mass_indices.clear();
@@ -651,10 +659,18 @@ impl Multibody {
             // TODO: this could be better optimized in 2D.
             let rb_mass_matrix_wo_gyro = concat_rb_mass_matrix(rb_mass, rb_inertia);
             let rb_mass_matrix = concat_rb_mass_matrix(rb_mass, augmented_inertia);
-            self.augmented_mass
-                .quadform(1.0, &rb_mass_matrix_wo_gyro, body_jacobian, 1.0);
-            self.acc_augmented_mass
-                .quadform(1.0, &rb_mass_matrix, body_jacobian, 1.0);
+            self.augmented_mass.quadform(
+                Real::from(1.0),
+                &rb_mass_matrix_wo_gyro,
+                body_jacobian,
+                Real::from(1.0),
+            );
+            self.acc_augmented_mass.quadform(
+                Real::from(1.0),
+                &rb_mass_matrix,
+                body_jacobian,
+                Real::from(1.0),
+            );
 
             /*
              *
@@ -682,27 +698,42 @@ impl Multibody {
 
                 // [c1 - c0].gcross() * (JDot + JDot/u * qdot)"
                 let shift_cross_tr = link.shift02.gcross_matrix_tr();
-                coriolis_v.gemm(1.0, &shift_cross_tr, parent_coriolis_w, 1.0);
+                coriolis_v.gemm(
+                    Real::from(1.0),
+                    &shift_cross_tr,
+                    parent_coriolis_w,
+                    Real::from(1.0),
+                );
 
                 // JDot (but the 2.0 originates from the sum of two identical terms in JDot and JDot/u * gdot)
                 let dvel_cross = (rb.vels.angvel.gcross(link.shift02)
-                    + 2.0 * link.joint_velocity.linvel)
+                    + Real::from(2.0) * link.joint_velocity.linvel)
                     .gcross_matrix_tr();
-                coriolis_v.gemm(1.0, &dvel_cross, &parent_j_w, 1.0);
+                coriolis_v.gemm(Real::from(1.0), &dvel_cross, &parent_j_w, Real::from(1.0));
 
                 // JDot/u * qdot
                 coriolis_v.gemm(
-                    1.0,
+                    Real::from(1.0),
                     &link.joint_velocity.linvel.gcross_matrix_tr(),
                     &parent_j_w,
-                    1.0,
+                    Real::from(1.0),
                 );
-                coriolis_v.gemm(1.0, &(parent_w * shift_cross_tr), &parent_j_w, 1.0);
+                coriolis_v.gemm(
+                    Real::from(1.0),
+                    &(parent_w * shift_cross_tr),
+                    &parent_j_w,
+                    Real::from(1.0),
+                );
 
                 #[cfg(feature = "dim3")]
                 {
                     let vel_wrt_joint_w = link.joint_velocity.angvel.gcross_matrix();
-                    coriolis_w.gemm(-1.0, &vel_wrt_joint_w, &parent_j_w, 1.0);
+                    coriolis_w.gemm(
+                        Real::from(-1.0),
+                        &vel_wrt_joint_w,
+                        &parent_j_w,
+                        Real::from(1.0),
+                    );
                 }
 
                 // JDot (but the 2.0 originates from the sum of two identical terms in JDot and JDot/u * gdot)
@@ -718,18 +749,28 @@ impl Multibody {
                     );
 
                     let rb_joint_j_v = rb_joint_j.fixed_rows::<DIM>(0);
-                    coriolis_v_part.gemm(2.0, &parent_w, &rb_joint_j_v, 1.0);
+                    coriolis_v_part.gemm(
+                        Real::from(2.0),
+                        &parent_w,
+                        &rb_joint_j_v,
+                        Real::from(1.0),
+                    );
 
                     #[cfg(feature = "dim3")]
                     {
                         let rb_joint_j_w = rb_joint_j.fixed_rows::<ANG_DIM>(DIM);
                         let mut coriolis_w_part = coriolis_w.columns_mut(link.assembly_id, ndofs);
-                        coriolis_w_part.gemm(1.0, &parent_w, &rb_joint_j_w, 1.0);
+                        coriolis_w_part.gemm(
+                            Real::from(1.0),
+                            &parent_w,
+                            &rb_joint_j_w,
+                            Real::from(1.0),
+                        );
                     }
                 }
             } else {
-                self.coriolis_v[i].fill(0.0);
-                self.coriolis_w[i].fill(0.0);
+                self.coriolis_v[i].fill(Real::from(0.0));
+                self.coriolis_w[i].fill(Real::from(0.0));
             }
 
             let coriolis_v = &mut self.coriolis_v[i];
@@ -738,18 +779,23 @@ impl Multibody {
             {
                 // [c3 - c2].gcross() * (JDot + JDot/u * qdot)
                 let shift_cross_tr = link.shift23.gcross_matrix_tr();
-                coriolis_v.gemm(1.0, &shift_cross_tr, coriolis_w, 1.0);
+                coriolis_v.gemm(
+                    Real::from(1.0),
+                    &shift_cross_tr,
+                    coriolis_w,
+                    Real::from(1.0),
+                );
 
                 // JDot
                 let dvel_cross = rb.vels.angvel.gcross(link.shift23).gcross_matrix_tr();
-                coriolis_v.gemm(1.0, &dvel_cross, &rb_j_w, 1.0);
+                coriolis_v.gemm(Real::from(1.0), &dvel_cross, &rb_j_w, Real::from(1.0));
 
                 // JDot/u * qdot
                 coriolis_v.gemm(
-                    1.0,
+                    Real::from(1.0),
                     &(rb.vels.angvel.gcross_matrix() * shift_cross_tr),
                     &rb_j_w,
-                    1.0,
+                    Real::from(1.0),
                 );
             }
 
@@ -776,11 +822,15 @@ impl Multibody {
             #[cfg(feature = "dim3")]
             {
                 let mut i_coriolis_dt_w = self.i_coriolis_dt.fixed_rows_mut::<ANG_DIM>(DIM);
-                i_coriolis_dt_w.gemm(dt, &rb_inertia, coriolis_w, 0.0);
+                i_coriolis_dt_w.gemm(dt, &rb_inertia, coriolis_w, Real::from(0.0));
             }
 
-            self.acc_augmented_mass
-                .gemm_tr(1.0, rb_j, &self.i_coriolis_dt, 1.0);
+            self.acc_augmented_mass.gemm_tr(
+                Real::from(1.0),
+                rb_j,
+                &self.i_coriolis_dt,
+                Real::from(1.0),
+            );
         }
 
         /*
@@ -888,10 +938,18 @@ impl Multibody {
                     self.links[0].assembly_id = 0;
                     self.ndofs += SPATIAL_DIM;
 
-                    self.velocities = self.velocities.clone().insert_rows(0, SPATIAL_DIM, 0.0);
-                    self.damping = self.damping.clone().insert_rows(0, SPATIAL_DIM, 0.0);
+                    self.velocities =
+                        self.velocities
+                            .clone()
+                            .insert_rows(0, SPATIAL_DIM, Real::from(0.0));
+                    self.damping =
+                        self.damping
+                            .clone()
+                            .insert_rows(0, SPATIAL_DIM, Real::from(0.0));
                     self.accelerations =
-                        self.accelerations.clone().insert_rows(0, SPATIAL_DIM, 0.0);
+                        self.accelerations
+                            .clone()
+                            .insert_rows(0, SPATIAL_DIM, Real::from(0.0));
 
                     for link in &mut self.links[1..] {
                         link.assembly_id += SPATIAL_DIM - prev_root_ndofs;
@@ -1108,7 +1166,7 @@ impl Multibody {
             if out_jacobian.ncols() != self.ndofs {
                 *out_jacobian = Jacobian::zeros(self.ndofs);
             } else {
-                out_jacobian.fill(0.0);
+                out_jacobian.fill(Real::from(0.0));
             }
         }
 
@@ -1146,7 +1204,7 @@ impl Multibody {
                     let (mut link_j_v, parent_j_w) =
                         out_jacobian.rows_range_pair_mut(0..DIM, DIM..DIM + ANG_DIM);
                     let shift_tr = (link.shift02).gcross_matrix_tr();
-                    link_j_v.gemm(1.0, &shift_tr, &parent_j_w, 1.0);
+                    link_j_v.gemm(Real::from(1.0), &shift_tr, &parent_j_w, Real::from(1.0));
                 }
             } else {
                 link.local_to_parent = link.joint.body_to_parent();
@@ -1169,7 +1227,7 @@ impl Multibody {
                     let (mut link_j_v, link_j_w) =
                         out_jacobian.rows_range_pair_mut(0..DIM, DIM..DIM + ANG_DIM);
                     let shift_tr = link.shift23.gcross_matrix_tr();
-                    link_j_v.gemm(1.0, &shift_tr, &link_j_w, 1.0);
+                    link_j_v.gemm(Real::from(1.0), &shift_tr, &link_j_w, Real::from(1.0));
                 }
             }
 
@@ -1196,7 +1254,7 @@ impl Multibody {
         jacobians: &mut DVector<Real>,
     ) -> (Real, Real) {
         if self.ndofs == 0 {
-            return (0.0, 0.0);
+            return (Real::from(0.0), Real::from(0.0));
         }
 
         let wj_id = *j_id + self.ndofs;
@@ -1253,7 +1311,7 @@ impl Multibody {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 struct IndexSequence {
     first_to_remove: usize,
     index_map: Vec<usize>,
@@ -1314,7 +1372,7 @@ impl IndexSequence {
 
         if clear_removed {
             mat.columns_range_mut(self.first_to_remove + self.index_map.len()..)
-                .fill(0.0);
+                .fill(Real::from(0.0));
         }
     }
 
@@ -1336,7 +1394,7 @@ impl IndexSequence {
 
             if clear_removed {
                 col.rows_range_mut(self.first_to_remove + self.index_map.len()..)
-                    .fill(0.0);
+                    .fill(Real::from(0.0));
             }
         }
     }
@@ -1354,7 +1412,7 @@ impl IndexSequence {
             for (target_shift, source) in self.index_map.iter().enumerate().rev() {
                 let target = self.first_to_remove + target_shift;
                 col[*source] = col[target];
-                col[target] = 0.0;
+                col[target] = Real::from(0.0);
             }
         }
     }
@@ -1377,7 +1435,7 @@ impl IndexSequence {
 mod test {
     use super::IndexSequence;
     use crate::rapier::dynamics::{ImpulseJointSet, IslandManager};
-    use crate::rapier::math::{Real, SPATIAL_DIM};
+    use crate::rapier::math::{RawReal, Real, SPATIAL_DIM};
     use crate::rapier::prelude::{
         ColliderSet, MultibodyJointHandle, MultibodyJointSet, RevoluteJoint, RigidBodyBuilder,
         RigidBodySet,
@@ -1529,42 +1587,95 @@ mod test {
     #[test]
     fn index_sequence_rearrange_columns() {
         let seq = test_sequence();
-        let mut vec = RowDVector::from_fn(10, |_, c| c as Real);
+        let mut vec = RowDVector::from_fn(10, |_, c| Real::from(c as RawReal));
         seq.rearrange_columns(&mut vec, true);
         assert_eq!(
             vec,
-            RowDVector::from(vec![0.0, 1.0, 5.0, 6.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            RowDVector::from(vec![
+                Real::from(0.0),
+                Real::from(1.0),
+                Real::from(5.0),
+                Real::from(6.0),
+                Real::from(8.0),
+                Real::from(0.0),
+                Real::from(0.0),
+                Real::from(0.0),
+                Real::from(0.0),
+                Real::from(0.0)
+            ])
         );
     }
 
     #[test]
     fn index_sequence_rearrange_rows() {
         let seq = test_sequence();
-        let mut vec = DVector::from_fn(10, |r, _| r as Real);
+        let mut vec = DVector::from_fn(10, |r, _| Real::from(r as RawReal));
         seq.rearrange_rows(&mut vec, true);
         assert_eq!(
             vec,
-            DVector::from(vec![0.0, 1.0, 5.0, 6.0, 8.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            DVector::from(vec![
+                Real::from(0.0),
+                Real::from(1.0),
+                Real::from(5.0),
+                Real::from(6.0),
+                Real::from(8.0),
+                Real::from(0.0),
+                Real::from(0.0),
+                Real::from(0.0),
+                Real::from(0.0),
+                Real::from(0.0)
+            ])
         );
         seq.inv_rearrange_rows(&mut vec);
         assert_eq!(
             vec,
-            DVector::from(vec![0.0, 1.0, 0.0, 0.0, 0.0, 5.0, 6.0, 0.0, 8.0, 0.0])
+            DVector::from(vec![
+                Real::from(0.0),
+                Real::from(1.0),
+                Real::from(0.0),
+                Real::from(0.0),
+                Real::from(0.0),
+                Real::from(5.0),
+                Real::from(6.0),
+                Real::from(0.0),
+                Real::from(8.0),
+                Real::from(0.0)
+            ])
         );
     }
 
     #[test]
     fn index_sequence_with_rearranged_rows_mut() {
         let seq = test_sequence();
-        let mut vec = DVector::from_fn(10, |r, _| r as Real);
+        let mut vec = DVector::from_fn(10, |r, _| Real::from(r as RawReal));
         seq.with_rearranged_rows_mut(&mut vec, |v| {
             assert_eq!(v.len(), 5);
-            assert_eq!(*v, DVector::from(vec![0.0, 1.0, 5.0, 6.0, 8.0]));
-            *v *= 10.0;
+            assert_eq!(
+                *v,
+                DVector::from(vec![
+                    Real::from(0.0),
+                    Real::from(1.0),
+                    Real::from(5.0),
+                    Real::from(6.0),
+                    Real::from(8.0)
+                ])
+            );
+            *v *= Real::from(10.0);
         });
         assert_eq!(
             vec,
-            DVector::from(vec![0.0, 10.0, 0.0, 0.0, 0.0, 50.0, 60.0, 0.0, 80.0, 0.0])
+            DVector::from(vec![
+                Real::from(0.0),
+                Real::from(10.0),
+                Real::from(0.0),
+                Real::from(0.0),
+                Real::from(0.0),
+                Real::from(50.0),
+                Real::from(60.0),
+                Real::from(0.0),
+                Real::from(80.0),
+                Real::from(0.0)
+            ])
         );
     }
 }

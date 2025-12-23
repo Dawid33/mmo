@@ -50,7 +50,7 @@ where
         tangent_relative_linvel.normalize_mut()
     };
 
-    const THRESHOLD: Real = 1.0e-4;
+    const THRESHOLD: Real = ordered_float::OrderedFloat(1.0e-4);
     let use_fallback = tangent_linvel_norm.simd_lt(N::splat(THRESHOLD));
     let tangent_fallback = force_dir1.orthonormal_vector();
 

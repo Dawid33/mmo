@@ -25,7 +25,7 @@ pub fn contact_cuboid_cuboid(
     }
 
     #[cfg(feature = "dim2")]
-    let sep3 = (-Real::MAX, crate::parry::math::Vector::<Real>::y()); // This case does not exist in 2D.
+    let sep3 = (-RawReal::MAX, crate::parry::math::Vector::<Real>::y()); // This case does not exist in 2D.
     #[cfg(feature = "dim3")]
     let sep3 = sat::cuboid_cuboid_find_local_separating_edge_twoway(cuboid1, cuboid2, pos12);
     if sep3.0 > prediction {
@@ -47,7 +47,7 @@ pub fn contact_cuboid_cuboid(
 
         // NOTE: we had to recompute the normal because we can't use
         // the separation vector for the case where we have a vertex-vertex contact.
-        if separation < 0.0 || normalized_dir.is_none() {
+        if separation < Real::from(0.0) || normalized_dir.is_none() {
             // Penetration or contact lying on the boundary exactly.
             normal1 = Unit::new_unchecked(sep1.1);
             dist = separation;
@@ -88,7 +88,7 @@ pub fn contact_cuboid_cuboid(
 
         // NOTE: we had to recompute the normal because we can't use
         // the separation vector for the case where we have a vertex-vertex contact.
-        if separation < 0.0 || normalized_dir.is_none() {
+        if separation < Real::from(0.0) || normalized_dir.is_none() {
             // Penetration or contact lying on the boundary exactly.
             normal2 = Unit::new_unchecked(sep2.1);
             dist = separation;

@@ -26,5 +26,5 @@ pub fn distance_convex_polyhedron_ball(
 ) -> Real {
     let center2_1 = Point::from(pos12.translation.vector);
     let proj = shape1.project_local_point(&center2_1, true);
-    (na::distance(&proj.point, &center2_1) - ball2.radius).max(0.0)
+    (na::distance(&proj.point, &center2_1) - ball2.radius).max(Real::from(0.0))
 }

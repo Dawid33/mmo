@@ -1,6 +1,6 @@
 use super::BvhOptimizationHeapEntry;
 use crate::parry::bounding_volume::{Aabb, BoundingVolume};
-use crate::parry::math::{Point, Real, Vector};
+use crate::parry::math::{Point, RawReal, Real, Vector};
 use crate::parry::query::{Ray, RayCast};
 use crate::parry::utils::VecMap;
 use alloc::collections::{BinaryHeap, VecDeque};
@@ -145,7 +145,7 @@ pub struct BvhWorkspace {
 }
 
 /// A piece of data packing state flags as well as leaf counts for a BVH tree node.
-#[derive(Default, Copy, Clone, Debug)]
+#[derive(Default, Copy, Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -249,7 +249,7 @@ impl BvhNodeData {
 ///
 /// - [`BvhNode`] - Individual node in the pair
 /// - [`Bvh`] - The main BVH structure
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -444,7 +444,7 @@ static_assertions::assert_eq_size!(BvhNode, BvhNodeSimd);
 ///
 /// - `BvhNodeWide` - Pair of nodes stored together
 /// - [`Bvh`] - The main BVH structure
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash)]
 #[repr(C)] // SAFETY: needed to ensure SIMD aabb checks rely on the layout.
 #[cfg_attr(all(feature = "f32", feature = "dim3"), repr(align(16)))]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
@@ -1177,7 +1177,7 @@ impl BvhNode {
     pub fn cast_ray(&self, ray: &Ray, max_toi: Real) -> Real {
         self.aabb()
             .cast_local_ray(ray, max_toi, true)
-            .unwrap_or(Real::MAX)
+            .unwrap_or(RawReal::MAX.into())
     }
 
     /// Casts a ray on this AABB, with SIMD optimizations.
@@ -1240,7 +1240,7 @@ impl BvhNode {
 ///
 /// - `BvhNodeWide` - The pair of nodes this index points into
 /// - [`Bvh`] - The main BVH structure
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -1414,7 +1414,7 @@ impl BvhNodeIndex {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -1745,7 +1745,7 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
 /// - [`BvhBuildStrategy`] - Choose construction algorithm (Binned vs PLOC)
 /// - [`BvhWorkspace`] - Reusable workspace to avoid allocations
 /// - [`BvhNode`] - Individual tree nodes with AABBs
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",

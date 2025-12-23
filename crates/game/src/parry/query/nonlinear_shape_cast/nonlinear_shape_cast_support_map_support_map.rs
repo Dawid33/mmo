@@ -1,6 +1,6 @@
 use na::{RealField, Unit};
 
-use crate::parry::math::{Point, Real, Vector};
+use crate::parry::math::{Point, Real, RawReal, Vector};
 use crate::parry::query::{
     self, ClosestPoints, NonlinearRigidMotion, QueryDispatcher, ShapeCastHit, ShapeCastStatus,
 };
@@ -144,7 +144,7 @@ where
                 result.witness2 = p2;
 
                 if let Some((normal1, dist)) =
-                    Unit::try_new_and_get(pos12 * p2 - p1, crate::parry::math::DEFAULT_EPSILON)
+                    Unit::try_new_and_get(pos12 * p2 - p1, Real::from(crate::parry::math::DEFAULT_EPSILON))
                 {
                     // TODO: do the "inverse transform unit vector" only when we are about to return.
                     result.normal1 = normal1;
@@ -177,7 +177,7 @@ where
                             let pt1 = sm1.local_support_point_toward(&normal1);
                             let pt2 = sm2.support_point_toward(&pos12, &-normal1);
 
-                            if (pt2 - pt1).dot(&normal1) > 0.0 {
+                            if (pt2 - pt1).dot(&normal1) > Real::from(0.0) {
                                 // We found an axis that separate both objects at the end configuration.
                                 return None;
                             }
@@ -317,7 +317,7 @@ where
         let pos2_at_next_time = motion2.position_at_time(next_time);
         let pos12_at_next_time = pos1_at_next_time.inv_mul(&pos2_at_next_time);
         let contact = dispatcher
-            .contact(&pos12_at_next_time, g1, g2, Real::MAX)
+            .contact(&pos12_at_next_time, g1, g2, Real::from(RawReal::MAX))
             .ok()??;
         {
             // dbg!("C");
@@ -332,7 +332,7 @@ where
             let vel2 = motion2.linvel + motion2.angvel.gcross(pos2_at_next_time * r2);
             let vel12 = vel2 - vel1;
             let normal_vel = -vel12.dot(&(pos1_at_next_time * contact.normal1));
-            let ccd_threshold = if contact.dist <= 0.0 {
+            let ccd_threshold = if contact.dist <= Real::from(0.0) {
                 sum_linear_thickness
             } else {
                 contact.dist + sum_linear_thickness
@@ -368,7 +368,7 @@ where
                     status: ShapeCastStatus::Converged,
                 };
 
-                if contact.dist > 0.0 {
+                if contact.dist > Real::from(0.0) {
                     // This is an acceptable impact. Now determine when
                     // the impacts happens exactly.
                     let curr_range = BisectionRange {
@@ -470,7 +470,7 @@ where
     loop {
         // println!("Bisection dist: {}, range: {:?}", dist, range);
         // TODO: use the secant method too for finding the next iterate and converge more quickly.
-        if dist < 0.0 {
+        if dist < Real::from(0.0) {
             // Too close or penetration, go back in time.
             range.max_t = range.curr_t;
             range.curr_t = (range.min_t + range.curr_t) * 0.5;

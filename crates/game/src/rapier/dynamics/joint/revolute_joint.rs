@@ -99,10 +99,10 @@ impl RevoluteJoint {
         let ang_err = joint_rot1.inverse() * joint_rot2;
 
         #[cfg(feature = "dim3")]
-        if joint_rot1.dot(&joint_rot2) < 0.0 {
-            -ang_err.i.clamp(-1.0, 1.0).asin() * 2.0
+        if joint_rot1.dot(&joint_rot2) < Real::from(0.0) {
+            Real::from(-ang_err.i.clamp(Real::from(-1.0), Real::from(1.0)).asin() * 2.0)
         } else {
-            ang_err.i.clamp(-1.0, 1.0).asin() * 2.0
+            Real::from(ang_err.i.clamp(Real::from(-1.0), Real::from(1.0)).asin() * 2.0)
         }
 
         #[cfg(feature = "dim2")]
@@ -320,7 +320,7 @@ impl From<RevoluteJointBuilder> for GenericJoint {
 mod test {
     #[test]
     fn test_revolute_joint_angle() {
-        use crate::rapier::math::{Real, Rotation};
+        use crate::rapier::math::{Real, RawReal, Rotation};
         use crate::na::{RealField, vector};
         #[cfg(feature = "dim3")]
         use crate::rapier::{math::Vector};
@@ -332,18 +332,18 @@ mod test {
         #[cfg(feature = "dim3")]
         let revolute = super::RevoluteJointBuilder::new(Vector::y_axis()).build();
         #[cfg(feature = "dim3")]
-        let rot1 = Rotation::new(vector![0.0, 1.0, 0.0]);
+        let rot1 = Rotation::new(vector![Real::from(0.0), Real::from(1.0), Real::from(0.0)]);
 
         let steps = 100;
 
         // The -pi and pi values will be checked later.
         for i in 1..steps {
-            let delta = -Real::pi() + i as Real * Real::two_pi() / steps as Real;
+            let delta = -Real::pi() + Real::from(i as RawReal) * Real::two_pi() / Real::from(steps as RawReal);
             #[cfg(feature = "dim2")]
             let rot2 = Rotation::new(1.0 + delta);
             #[cfg(feature = "dim3")]
-            let rot2 = Rotation::new(vector![0.0, 1.0 + delta, 0.0]);
-            approx::assert_relative_eq!(revolute.angle(&rot1, &rot2), delta, epsilon = 1.0e-5);
+            let rot2 = Rotation::new(vector![Real::from(0.0), Real::from(1.0) + delta, Real::from(0.0)]);
+            approx::assert_relative_eq!(revolute.angle(&rot1, &rot2), delta, epsilon = Real::from(1.0e-5));
         }
 
         // Check the special case for -pi and pi that may return an angle with a flipped sign
@@ -352,7 +352,7 @@ mod test {
             #[cfg(feature = "dim2")]
             let rot2 = Rotation::new(1.0 + delta);
             #[cfg(feature = "dim3")]
-            let rot2 = Rotation::new(vector![0.0, 1.0 + delta, 0.0]);
+            let rot2 = Rotation::new(vector![Real::from(0.0), Real::from(1.0) + delta, Real::from(0.0)]);
             approx::assert_relative_eq!(
                 revolute.angle(&rot1, &rot2).abs(),
                 delta.abs(),

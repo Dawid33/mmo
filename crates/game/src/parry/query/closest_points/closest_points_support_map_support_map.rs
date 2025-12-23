@@ -54,7 +54,7 @@ where
         Some(dir) => dir,
     };
 
-    if let Some(dir) = Unit::try_new(dir, crate::parry::math::DEFAULT_EPSILON) {
+    if let Some(dir) = Unit::try_new(dir, Real::from(crate::parry::math::DEFAULT_EPSILON)) {
         simplex.reset(CSOPoint::from_shapes(pos12, g1, g2, &dir));
     } else {
         simplex.reset(CSOPoint::from_shapes(

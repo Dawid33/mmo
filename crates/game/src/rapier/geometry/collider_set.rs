@@ -21,7 +21,7 @@ impl HasModifiedFlag for Collider {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, Hash)]
 /// The collection that stores all colliders (collision shapes) in your physics world.
 ///
 /// Similar to [`RigidBodySet`](crate::rapier::dynamics::RigidBodySet), this is the "database" where

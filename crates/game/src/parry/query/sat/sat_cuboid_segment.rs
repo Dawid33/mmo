@@ -75,9 +75,9 @@ pub fn cuboid_segment_find_local_separating_edge_twoway(
 
     let axes = [
         // Vector::{x, y ,z}().cross(y2)
-        Vector::new(0.0, -x2.z, x2.y),
-        Vector::new(x2.z, 0.0, -x2.x),
-        Vector::new(-x2.y, x2.x, 0.0),
+        Vector::new(Real::from(0.0), -x2.z, x2.y),
+        Vector::new(x2.z, Real::from(0.0), -x2.x),
+        Vector::new(-x2.y, x2.x, Real::from(0.0)),
     ];
 
     sat::cuboid_support_map_find_local_separating_edge_twoway(cube1, segment2, &axes, pos12)

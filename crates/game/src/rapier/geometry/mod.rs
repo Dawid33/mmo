@@ -187,7 +187,7 @@ impl ContactForceEvent {
         };
 
         for m in &pair.manifolds {
-            let mut total_manifold_impulse = 0.0;
+            let mut total_manifold_impulse = Real::from(0.0);
             for pt in m.contacts() {
                 total_manifold_impulse += pt.data.impulse;
 

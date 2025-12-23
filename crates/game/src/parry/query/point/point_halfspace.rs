@@ -6,7 +6,7 @@ impl PointQuery for HalfSpace {
     #[inline]
     fn project_local_point(&self, pt: &Point<Real>, solid: bool) -> PointProjection {
         let d = self.normal.dot(&pt.coords);
-        let inside = d <= 0.0;
+        let inside = d <= Real::from(0.0);
 
         if inside && solid {
             PointProjection::new(true, *pt)
@@ -27,8 +27,8 @@ impl PointQuery for HalfSpace {
     fn distance_to_local_point(&self, pt: &Point<Real>, solid: bool) -> Real {
         let dist = self.normal.dot(&pt.coords);
 
-        if dist < 0.0 && solid {
-            0.0
+        if dist < Real::from(0.0) && solid {
+            Real::from(0.0)
         } else {
             // This will automatically be negative if the point is inside.
             dist
@@ -37,6 +37,6 @@ impl PointQuery for HalfSpace {
 
     #[inline]
     fn contains_local_point(&self, pt: &Point<Real>) -> bool {
-        self.normal.dot(&pt.coords) <= 0.0
+        self.normal.dot(&pt.coords) <= Real::from(0.0)
     }
 }

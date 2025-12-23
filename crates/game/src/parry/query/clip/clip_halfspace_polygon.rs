@@ -20,7 +20,7 @@ pub fn clip_halfspace_polygon(
         return;
     }
 
-    let keep_point = |pt: &Point<Real>| (pt - center).dot(normal) <= 0.0;
+    let keep_point = |pt: &Point<Real>| (pt - center).dot(normal) <= Real::from(0.0);
     let last_pt = polygon.last().unwrap();
     let mut last_keep = keep_point(last_pt);
 
@@ -42,7 +42,7 @@ pub fn clip_halfspace_polygon(
             if let Some(time_of_impact) =
                 query::details::ray_toi_with_halfspace(center, normal, &ray)
             {
-                if time_of_impact > 0.0 && time_of_impact < 1.0 {
+                if time_of_impact > Real::from(0.0) && time_of_impact < Real::from(1.0) {
                     result.push(ray.origin + ray.dir * time_of_impact)
                 }
             }

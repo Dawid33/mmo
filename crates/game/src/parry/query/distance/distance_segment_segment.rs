@@ -1,4 +1,4 @@
-use crate::parry::math::{Isometry, Real};
+use crate::parry::math::{Isometry, Real, RawReal};
 use crate::parry::query::ClosestPoints;
 use crate::parry::shape::Segment;
 
@@ -13,9 +13,9 @@ pub fn distance_segment_segment(
         pos12,
         segment1,
         segment2,
-        Real::MAX,
+        Real::from(RawReal::MAX),
     ) {
         ClosestPoints::WithinMargin(p1, p2) => na::distance(&p1, &(pos12 * p2)),
-        _ => 0.0,
+        _ => Real::from(0.0),
     }
 }

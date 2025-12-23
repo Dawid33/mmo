@@ -5,7 +5,7 @@ use crate::rapier::dynamics::solver::contact_constraint::ContactConstraintsSet;
 use crate::rapier::dynamics::{IntegrationParameters, JointGraphEdge, JointIndex, RigidBodySet};
 use crate::rapier::geometry::{ContactManifold, ContactManifoldIndex};
 use crate::rapier::prelude::MultibodyJointSet;
-use crate::parry::math::Real;
+use crate::parry::math::{Real, RawReal};
 
 pub struct IslandSolver {
     contact_constraints: ContactConstraintsSet,
@@ -47,7 +47,7 @@ impl IslandSolver {
             + islands.active_island_additional_solver_iterations(island_id);
 
         let mut params = *base_params;
-        params.dt /= num_solver_iterations as Real;
+        params.dt /= Real::from(num_solver_iterations as RawReal);
 
         /*
          *

@@ -141,7 +141,7 @@ impl VelocitySolver {
                 .generic_solver_vels
                 .rows_mut(multibody.solver_id as usize, multibody.ndofs());
 
-            solver_vels_incr.axpy(params.dt, &multibody.accelerations, 0.0);
+            solver_vels_incr.axpy(params.dt, &multibody.accelerations, Real::from(0.0));
             solver_vels.copy_from(&multibody.velocities);
         }
     }
@@ -277,7 +277,7 @@ impl VelocitySolver {
                 let mut solver_vels_incr = self
                     .generic_solver_vels_increment
                     .rows_mut(multibody.solver_id as usize, multibody.ndofs());
-                solver_vels_incr.axpy(params.dt, &multibody.accelerations, 0.0);
+                solver_vels_incr.axpy(params.dt, &multibody.accelerations, Real::from(0.0));
             }
         }
     }

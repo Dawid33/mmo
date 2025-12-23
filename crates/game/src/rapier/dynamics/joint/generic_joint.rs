@@ -4,7 +4,9 @@ use crate::rapier::dynamics::solver::MotorParameters;
 use crate::rapier::dynamics::{
     FixedJoint, MotorModel, PrismaticJoint, RevoluteJoint, RigidBody, RopeJoint,
 };
-use crate::rapier::math::{Isometry, Point, Real, Rotation, SPATIAL_DIM, UnitVector, Vector};
+use crate::rapier::math::{
+    Isometry, Point, RawReal, Real, Rotation, UnitVector, Vector, SPATIAL_DIM,
+};
 use crate::rapier::utils::{SimdBasis, SimdRealCopy};
 
 #[cfg(feature = "dim3")]
@@ -14,7 +16,7 @@ use crate::rapier::dynamics::SphericalJoint;
 bitflags::bitflags! {
     /// A bit mask identifying multiple degrees of freedom of a joint.
     #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
     pub struct JointAxesMask: u8 {
         /// The linear (translational) degree of freedom along the local X axis of a joint.
         const LIN_X = 1 << 0;
@@ -124,7 +126,7 @@ impl From<JointAxis> for JointAxesMask {
 ///
 /// When a joint hits its limit, forces are applied to prevent further movement in that direction.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash)]
 pub struct JointLimits<N> {
     /// Minimum allowed value (angle for revolute, distance for prismatic).
     pub min: N,
@@ -137,9 +139,9 @@ pub struct JointLimits<N> {
 impl<N: SimdRealCopy> Default for JointLimits<N> {
     fn default() -> Self {
         Self {
-            min: -N::splat(Real::MAX),
-            max: N::splat(Real::MAX),
-            impulse: N::splat(0.0),
+            min: -N::splat(Real::from(RawReal::MAX)),
+            max: N::splat(Real::from(RawReal::MAX)),
+            impulse: N::splat(Real::from(0.0)),
         }
     }
 }
@@ -149,7 +151,7 @@ impl<N: SimdRealCopy> From<[N; 2]> for JointLimits<N> {
         Self {
             min: value[0],
             max: value[1],
-            impulse: N::splat(0.0),
+            impulse: N::splat(Real::from(0.0)),
         }
     }
 }
@@ -185,7 +187,7 @@ impl<N: SimdRealCopy> From<[N; 2]> for JointLimits<N> {
 /// prismatic_joint.set_motor_position(5.0, 100.0, 10.0);  // stiffness=100, damping=10
 /// ```
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash)]
 pub struct JointMotor {
     /// Target velocity (units/sec for prismatic, rad/sec for revolute).
     pub target_vel: Real,
@@ -206,12 +208,12 @@ pub struct JointMotor {
 impl Default for JointMotor {
     fn default() -> Self {
         Self {
-            target_pos: 0.0,
-            target_vel: 0.0,
-            stiffness: 0.0,
-            damping: 0.0,
-            max_force: Real::MAX,
-            impulse: 0.0,
+            target_pos: Real::from(0.0),
+            target_vel: Real::from(0.0),
+            stiffness: Real::from(0.0),
+            damping: Real::from(0.0),
+            max_force: Real::from(RawReal::MAX),
+            impulse: Real::from(0.0),
             model: MotorModel::AccelerationBased,
         }
     }
@@ -248,7 +250,7 @@ pub enum JointEnabled {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash)]
 /// A generic joint.
 pub struct GenericJoint {
     /// The joint’s frame, expressed in the first rigid-body’s local-space.
@@ -486,7 +488,7 @@ impl GenericJoint {
             axis,
             self.motors[axis as usize].target_pos,
             target_vel,
-            0.0,
+            Real::from(0.0),
             factor,
         )
     }
@@ -499,7 +501,7 @@ impl GenericJoint {
         stiffness: Real,
         damping: Real,
     ) -> &mut Self {
-        self.set_motor(axis, target_pos, 0.0, stiffness, damping)
+        self.set_motor(axis, target_pos, Real::from(0.0), stiffness, damping)
     }
 
     /// Sets the maximum force the motor can deliver along the specified axis.

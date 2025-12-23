@@ -10,7 +10,7 @@ impl PointQuery for Cylinder {
         let mut dir_from_basis_center = pt.coords.xz();
         let planar_dist_from_basis_center = dir_from_basis_center.normalize_mut();
 
-        if planar_dist_from_basis_center <= crate::parry::math::DEFAULT_EPSILON {
+        if planar_dist_from_basis_center <= Real::from(crate::parry::math::DEFAULT_EPSILON) {
             dir_from_basis_center = na::Vector2::x();
         }
 

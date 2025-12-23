@@ -11,7 +11,7 @@ pub fn closest_points_halfspace_support_map<G: ?Sized + SupportMap>(
     margin: Real,
 ) -> ClosestPoints {
     assert!(
-        margin >= 0.0,
+        margin >= Real::from(0.0),
         "The proximity margin must be positive or null."
     );
 
@@ -19,7 +19,7 @@ pub fn closest_points_halfspace_support_map<G: ?Sized + SupportMap>(
     let distance = halfspace.normal.dot(&(-deepest.coords));
 
     if distance >= -margin {
-        if distance >= 0.0 {
+        if distance >= Real::from(0.0) {
             ClosestPoints::Intersecting
         } else {
             let p1 = deepest + *halfspace.normal * distance;

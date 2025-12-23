@@ -69,7 +69,7 @@ impl CollisionPipeline {
 
         let params = IntegrationParameters {
             normalized_prediction_distance: prediction_distance,
-            dt: 0.0,
+            dt: 0.0.into(),
             ..Default::default()
         };
 
@@ -97,7 +97,7 @@ impl CollisionPipeline {
         narrow_phase.register_pairs(None, colliders, bodies, &self.broad_phase_events, events);
         narrow_phase.compute_contacts(
             prediction_distance,
-            0.0,
+            0.0.into(),
             bodies,
             colliders,
             &ImpulseJointSet::new(),
@@ -189,7 +189,7 @@ mod tests {
         let mut collider_set = ColliderSet::new();
 
         /* Create the ground. */
-        let collider_a = ColliderBuilder::cuboid(1.0, 1.0, 1.0)
+        let collider_a = ColliderBuilder::cuboid(Real::from(1.0), Real::from(1.0), Real::from(1.0))
             .active_collision_types(ActiveCollisionTypes::all())
             .sensor(true)
             .active_events(ActiveEvents::COLLISION_EVENTS)
@@ -197,7 +197,7 @@ mod tests {
 
         let a_handle = collider_set.insert(collider_a);
 
-        let collider_b = ColliderBuilder::cuboid(1.0, 1.0, 1.0)
+        let collider_b = ColliderBuilder::cuboid(Real::from(1.0), Real::from(1.0), Real::from(1.0))
             .active_collision_types(ActiveCollisionTypes::all())
             .sensor(true)
             .active_events(ActiveEvents::COLLISION_EVENTS)

@@ -89,7 +89,7 @@ pub fn contact_manifold_cuboid_triangle<'a, ManifoldData, ContactData>(
      *
      */
     #[cfg(feature = "dim2")]
-    let sep3 = (-Real::MAX, Vector::x()); // This case does not exist in 2D.
+    let sep3 = (-RawReal::MAX, Vector::x()); // This case does not exist in 2D.
     #[cfg(feature = "dim3")]
     let sep3 = sat::cuboid_triangle_find_local_separating_edge_twoway(cuboid1, triangle2, pos12);
     if sep3.0 > prediction {
@@ -158,7 +158,7 @@ pub fn contact_manifold_cuboid_triangle<'a, ManifoldData, ContactData>(
         //       relative to the unconstrained penetration distance.
         manifold
             .points
-            .retain(|pt| dist >= 0.0 || pt.dist >= 0.0 || pt.dist >= dist * 5.0);
+            .retain(|pt| dist >= Real::from(0.0) || pt.dist >= Real::from(0.0) || pt.dist >= dist * Real::from(5.0));
     }
 
     if flipped {

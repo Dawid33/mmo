@@ -1,4 +1,4 @@
-use crate::parry::math::{Isometry, Real, Vector, DIM};
+use crate::parry::math::{Isometry, Real, RawReal, Vector, DIM};
 use crate::parry::shape::{Cuboid, SupportMap};
 
 use na::Unit;
@@ -173,7 +173,7 @@ pub fn cuboid_support_map_find_local_separating_edge_twoway(
     pos12: &Isometry<Real>,
 ) -> (Real, Vector<Real>) {
     use approx::AbsDiffEq;
-    let mut best_separation = -Real::MAX;
+    let mut best_separation = Real::from(-RawReal::MAX);
     let mut best_dir = Vector::zeros();
 
     for axis1 in axes {
@@ -257,11 +257,11 @@ pub fn cuboid_support_map_find_local_separating_normal_oneway<S: SupportMap>(
     shape2: &S,
     pos12: &Isometry<Real>,
 ) -> (Real, Vector<Real>) {
-    let mut best_separation = -Real::MAX;
+    let mut best_separation = Real::from(-RawReal::MAX);
     let mut best_dir = Vector::zeros();
 
     for i in 0..DIM {
-        for sign in &[-1.0, 1.0] {
+        for sign in &[Real::from(-1.0), Real::from(1.0)] {
             let axis1 = Vector::ith(i, *sign);
             let pt2 = shape2.support_point_toward(pos12, &Unit::new_unchecked(-axis1));
             let separation = pt2[i] * *sign - cube1.half_extents[i];

@@ -57,7 +57,7 @@ impl JointConstraintsSet {
     }
 
     pub fn clear_constraints(&mut self) {
-        self.generic_jacobians.fill(0.0);
+        self.generic_jacobians.fill(Real::from(0.0));
         self.generic_velocity_constraints.clear();
         #[cfg(feature = "simd-is-enabled")]
         self.simd_velocity_constraints.clear();

@@ -58,8 +58,8 @@ mod ray_cast_with_culling {
     impl RayCullingMode {
         fn check(self, tri_normal: &Vector<Real>, ray_dir: &Vector<Real>) -> bool {
             match self {
-                RayCullingMode::IgnoreBackfaces => tri_normal.dot(ray_dir) < 0.0,
-                RayCullingMode::IgnoreFrontfaces => tri_normal.dot(ray_dir) > 0.0,
+                RayCullingMode::IgnoreBackfaces => tri_normal.dot(ray_dir) < Real::from(0.0),
+                RayCullingMode::IgnoreFrontfaces => tri_normal.dot(ray_dir) > Real::from(0.0),
             }
         }
     }
@@ -182,32 +182,33 @@ mod ray_cast_with_culling {
     mod test {
         use crate::parry::query::{Ray, RayCullingMode};
         use crate::parry::shape::TriMesh;
+        use crate::parry::math::{Real};
         use nalgebra::{Point3, Vector3};
 
         #[test]
         fn cast_ray_on_trimesh_with_culling() {
             let vertices = vec![
                 Point3::origin(),
-                Point3::new(1.0, 0.0, 0.0),
-                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(Real::from(1.0), Real::from(0.0), Real::from(0.0)),
+                Point3::new(Real::from(0.0), Real::from(1.0), Real::from(0.0)),
             ];
             let indices = vec![[0, 1, 2]];
-            let ray_up = Ray::new(Point3::new(0.0, 0.0, -1.0), Vector3::new(0.0, 0.0, 1.0));
-            let ray_down = Ray::new(Point3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 0.0, -1.0));
+            let ray_up = Ray::new(Point3::new(Real::from(0.0), Real::from(0.0), Real::from(-1.0)), Vector3::new(Real::from(0.0), Real::from(0.0), Real::from(1.0)));
+            let ray_down = Ray::new(Point3::new(Real::from(0.0), Real::from(0.0),Real::from( 1.0)), Vector3::new(Real::from(0.0), Real::from(0.0), Real::from(-1.0)));
 
             let mesh = TriMesh::new(vertices, indices).unwrap();
             assert!(mesh
-                .cast_local_ray_with_culling(&ray_up, 1000.0, RayCullingMode::IgnoreFrontfaces)
+                .cast_local_ray_with_culling(&ray_up, Real::from(1000.0), RayCullingMode::IgnoreFrontfaces)
                 .is_some());
             assert!(mesh
-                .cast_local_ray_with_culling(&ray_down, 1000.0, RayCullingMode::IgnoreFrontfaces)
+                .cast_local_ray_with_culling(&ray_down, Real::from(1000.0), RayCullingMode::IgnoreFrontfaces)
                 .is_none());
 
             assert!(mesh
-                .cast_local_ray_with_culling(&ray_up, 1000.0, RayCullingMode::IgnoreBackfaces)
+                .cast_local_ray_with_culling(&ray_up, Real::from(1000.0), RayCullingMode::IgnoreBackfaces)
                 .is_none());
             assert!(mesh
-                .cast_local_ray_with_culling(&ray_down, 1000.0, RayCullingMode::IgnoreBackfaces)
+                .cast_local_ray_with_culling(&ray_down, Real::from(1000.0), RayCullingMode::IgnoreBackfaces)
                 .is_some());
         }
     }

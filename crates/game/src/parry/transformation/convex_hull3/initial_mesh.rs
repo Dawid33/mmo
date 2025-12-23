@@ -83,7 +83,7 @@ pub fn try_get_initial_mesh(
      */
     let mut dimension = 0;
     while dimension < 3 {
-        if relative_eq!(eigpairs[dimension].1, 0.0, epsilon = 1.0e-7) {
+        if relative_eq!(eigpairs[dimension].1, Real::from(0.0), epsilon = 1.0e-7.into()) {
             break;
         }
 
@@ -152,7 +152,7 @@ pub fn try_get_initial_mesh(
             let p2 = support_point_id(&-eigpairs[0].0, normalized_points)
                 .ok_or(ConvexHullError::MissingSupportPoint)?;
 
-            let mut max_area = 0.0;
+            let mut max_area = Real::from(0.0);
             let mut p3 = usize::MAX;
 
             for (i, point) in normalized_points.iter().enumerate() {
@@ -189,7 +189,7 @@ pub fn try_get_initial_mesh(
                     }
 
                     let mut furthest = usize::MAX;
-                    let mut furthest_dist = 0.0;
+                    let mut furthest_dist = Real::from(0.0);
 
                     for (i, curr_facet) in facets.iter().enumerate() {
                         if curr_facet.can_see_point(point, normalized_points) {
@@ -232,14 +232,15 @@ mod tests {
     fn try_get_initial_mesh_should_fail_for_missing_support_points() {
         use super::*;
         use crate::parry::transformation::try_convex_hull;
+        use crate::parry::math::Real;
         use na::Point3;
 
         let point_cloud = vec![
-            Point3::new(103.05024, 303.44974, 106.125),
-            Point3::new(103.21692, 303.44974, 106.125015),
-            Point3::new(104.16538, 303.44974, 106.125),
-            Point3::new(106.55025, 303.44974, 106.125),
-            Point3::new(106.55043, 303.44974, 106.125),
+            Point3::new(Real::from(103.05024), Real::from(303.44974), Real::from(106.125)),
+            Point3::new(Real::from(103.21692), Real::from(303.44974), Real::from(106.125015)),
+            Point3::new(Real::from(104.16538), Real::from(303.44974), Real::from(106.125)),
+            Point3::new(Real::from(106.55025), Real::from(303.44974), Real::from(106.125)),
+            Point3::new(Real::from(106.55043), Real::from(303.44974), Real::from(106.125)),
         ];
         let result = try_convex_hull(&point_cloud);
         assert_eq!(ConvexHullError::MissingSupportPoint, result.unwrap_err());

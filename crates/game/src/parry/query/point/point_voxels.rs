@@ -1,4 +1,4 @@
-use crate::parry::math::{Point, Real, Vector};
+use crate::parry::math::{Point, Real, RawReal, Vector};
 use crate::parry::query::{PointProjection, PointQuery};
 use crate::parry::shape::{Cuboid, FeatureId, Voxels, VoxelsChunkRef};
 
@@ -6,7 +6,7 @@ impl PointQuery for Voxels {
     #[inline]
     fn project_local_point(&self, pt: &Point<Real>, solid: bool) -> PointProjection {
         self.chunk_bvh()
-            .project_point(pt, Real::MAX, |chunk_id, _| {
+            .project_point(pt, Real::from(RawReal::MAX), |chunk_id, _| {
                 let chunk = self.chunk_ref(chunk_id);
                 chunk
                     .project_local_point_and_get_vox_id(pt, solid)
@@ -15,7 +15,7 @@ impl PointQuery for Voxels {
             .map(|res| res.1 .1)
             .unwrap_or(PointProjection::new(
                 false,
-                Vector::repeat(Real::MAX).into(),
+                Vector::repeat(Real::from(RawReal::MAX)).into(),
             ))
     }
 
@@ -25,7 +25,7 @@ impl PointQuery for Voxels {
         pt: &Point<Real>,
     ) -> (PointProjection, FeatureId) {
         self.chunk_bvh()
-            .project_point_and_get_feature(pt, Real::MAX, |chunk_id, _| {
+            .project_point_and_get_feature(pt, Real::from(RawReal::MAX), |chunk_id, _| {
                 let chunk = self.chunk_ref(chunk_id);
                 // TODO: we need a way to return both the voxel id, and the feature on the voxel.
                 chunk
@@ -34,7 +34,7 @@ impl PointQuery for Voxels {
             })
             .map(|res| res.1 .1)
             .unwrap_or((
-                PointProjection::new(false, Vector::repeat(Real::MAX).into()),
+                PointProjection::new(false, Vector::repeat(Real::from(RawReal::MAX)).into()),
                 FeatureId::Unknown,
             ))
     }
@@ -49,8 +49,8 @@ impl<'a> VoxelsChunkRef<'a> {
     ) -> Option<(PointProjection, u32)> {
         // TODO: optimize this naive implementation that just iterates on all the voxels
         //       from this chunk.
-        let base_cuboid = Cuboid::new(self.parent.voxel_size() / 2.0);
-        let mut smallest_dist = Real::MAX;
+        let base_cuboid = Cuboid::new(self.parent.voxel_size() / Real::from(2.0));
+        let mut smallest_dist = Real::from(RawReal::MAX);
         let mut result = PointProjection::new(false, *pt);
         let mut result_vox_id = 0;
 
@@ -66,6 +66,6 @@ impl<'a> VoxelsChunkRef<'a> {
             }
         }
 
-        (smallest_dist < Real::MAX).then_some((result, result_vox_id as u32))
+        (smallest_dist < Real::from(RawReal::MAX)).then_some((result, result_vox_id as u32))
     }
 }

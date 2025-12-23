@@ -39,7 +39,7 @@ pub fn segments_intersection2d(
     let denom = a.x * (d.y - c.y) + b.x * (c.y - d.y) + d.x * (b.y - a.y) + c.x * (a.y - b.y);
 
     // If denom is zero, then segments are parallel: handle separately.
-    if denom.abs() < *epsilon || ulps_eq!(denom, 0.0) {
+    if denom.abs() < *epsilon || ulps_eq!(denom, Real::from(0.0)) {
         return parallel_intersection(a, b, c, d, epsilon);
     }
 

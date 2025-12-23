@@ -1,7 +1,7 @@
 use crate::rapier::data::arena::Index;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Hash)]
 /// A container for data associated to item existing into another Arena.
 pub struct Coarena<T> {
     data: Vec<(u32, T)>,

@@ -37,11 +37,9 @@ static_assertions = "1"
 serde_arrays = "0.2.0"
 either = { version = "1", default-features = false }
 slab = { version = "0.4", optional = true }
-indexmap = { version = "2", features = ["serde"], optional = true }
-hashbrown = { version = "0.16", optional = true, default-features = false, features = [
-  "default-hasher",
-] }
-spade = { version = "2.9", default-features = false }
+ordermap = { workspace = true, optional = true }
+hashbrown = {workspace = true, optional = true}
+spade = { workspace = true }
 rstar = "0.12.0"
 obj = { version = "0.10.2", optional = true }
 ena = { version = "0.14.3", optional = true, default-features = false }
@@ -91,7 +89,7 @@ rkyv-serialize = []
 bytemuck-serialize = ["bytemuck"]
 bytemuck = []
 
-enhanced-determinism = ["indexmap"]
+enhanced-determinism = ["ordermap"]
 # Adds `TriMesh:to_obj_file` function.
 wavefront = ["obj"]
 spade = []

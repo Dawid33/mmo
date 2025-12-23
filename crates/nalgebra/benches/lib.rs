@@ -41,7 +41,7 @@ criterion_main!(
     linalg::cholesky,
     linalg::full_piv_lu,
     linalg::hessenberg,
-    linalg::lu,
+    // linalg::lu,
     linalg::qr,
     linalg::schur,
     linalg::solve,

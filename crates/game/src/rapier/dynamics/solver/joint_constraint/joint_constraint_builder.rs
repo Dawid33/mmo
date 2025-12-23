@@ -6,7 +6,7 @@ use crate::rapier::dynamics::solver::joint_constraint::joint_velocity_constraint
 };
 use crate::rapier::dynamics::solver::solver_body::SolverBodies;
 use crate::rapier::dynamics::{GenericJoint, ImpulseJoint, IntegrationParameters, JointIndex};
-use crate::rapier::math::{ANG_DIM, AngVector, DIM, Isometry, Matrix, Point, Real, Rotation, Vector};
+use crate::rapier::math::{ANG_DIM, AngVector, DIM, Isometry, Matrix, Point, Real, RawReal, Rotation, Vector};
 use crate::rapier::prelude::RigidBodySet;
 use crate::rapier::utils;
 use crate::rapier::utils::{IndexMut2, SimdCrossMatrix, SimdDot};
@@ -293,8 +293,8 @@ impl<N: SimdRealCopy> JointConstraintHelper<N> {
         constraint.rhs = constraint.rhs_wo_bias + rhs_bias;
         constraint.cfm_coeff = cfm_coeff;
         constraint.impulse_bounds = [
-            N::splat(-Real::INFINITY).select(min_enabled, zero),
-            N::splat(Real::INFINITY).select(max_enabled, zero),
+            N::splat(Real::from(-RawReal::INFINITY)).select(min_enabled, zero),
+            N::splat(Real::from(RawReal::INFINITY)).select(max_enabled, zero),
         ];
 
         constraint
@@ -349,7 +349,7 @@ impl<N: SimdRealCopy> JointConstraintHelper<N> {
         let cfm_coeff = N::splat(params.joint_cfm_coeff());
         let rhs_bias = (dist - limits[1]).simd_max(zero) * erp_inv_dt;
         let rhs = rhs_wo_bias + rhs_bias;
-        let impulse_bounds = [N::zero(), N::splat(Real::INFINITY)];
+        let impulse_bounds = [N::zero(), N::splat(Real::from(RawReal::INFINITY))];
 
         JointConstraint {
             joint_id,
@@ -523,7 +523,7 @@ impl<N: SimdRealCopy> JointConstraintHelper<N> {
             im1: body1.im,
             im2: body2.im,
             impulse: N::zero(),
-            impulse_bounds: [-N::splat(Real::MAX), N::splat(Real::MAX)],
+            impulse_bounds: [-N::splat(Real::from(RawReal::MAX)), N::splat(Real::from(RawReal::MAX))],
             lin_jac,
             ang_jac1,
             ang_jac2,
@@ -549,7 +549,7 @@ impl<N: SimdRealCopy> JointConstraintHelper<N> {
         writeback_id: WritebackId,
     ) -> JointConstraint<N, LANES> {
         let zero = N::zero();
-        let half = N::splat(0.5);
+        let half = N::splat(Real::from(0.5));
         let s_limits = [(limits[0] * half).simd_sin(), (limits[1] * half).simd_sin()];
         #[cfg(feature = "dim2")]
         let s_ang = (self.ang_err.angle() * half).simd_sin();
@@ -559,8 +559,8 @@ impl<N: SimdRealCopy> JointConstraintHelper<N> {
         let max_enabled = s_limits[1].simd_le(s_ang);
 
         let impulse_bounds = [
-            N::splat(-Real::INFINITY).select(min_enabled, zero),
-            N::splat(Real::INFINITY).select(max_enabled, zero),
+            N::splat(Real::from(-RawReal::INFINITY)).select(min_enabled, zero),
+            N::splat(Real::from(RawReal::INFINITY)).select(max_enabled, zero),
         ];
 
         #[cfg(feature = "dim2")]
@@ -626,7 +626,7 @@ impl<N: SimdRealCopy> JointConstraintHelper<N> {
             {
                 // Clamp the component from -1.0 to 1.0 to account for slight imprecision
                 let clamped_err = self.ang_err.imag()[_motor_axis].simd_clamp(-N::one(), N::one());
-                ang_dist = clamped_err.simd_asin() * N::splat(2.0);
+                ang_dist = clamped_err.simd_asin() * N::splat(Real::from(2.0));
             }
 
             let target_ang = motor_params.target_pos;
@@ -693,7 +693,7 @@ impl<N: SimdRealCopy> JointConstraintHelper<N> {
             im1: body1.im,
             im2: body2.im,
             impulse: N::zero(),
-            impulse_bounds: [-N::splat(Real::MAX), N::splat(Real::MAX)],
+            impulse_bounds: [-N::splat(Real::from(RawReal::MAX)), N::splat(Real::from(RawReal::MAX))],
             lin_jac: na::zero(),
             ang_jac1: ang_jac,
             ang_jac2: ang_jac,
@@ -729,7 +729,7 @@ impl<N: SimdRealCopy> JointConstraintHelper<N> {
             c_j.inv_lhs = crate::rapier::utils::simd_inv(dot_jj + cfm_gain); // Don’t forget to update the inv_lhs.
             c_j.cfm_gain = cfm_gain;
 
-            if c_j.impulse_bounds != [-N::splat(Real::MAX), N::splat(Real::MAX)] {
+            if c_j.impulse_bounds != [-N::splat(Real::from(RawReal::MAX)), N::splat(Real::from(RawReal::MAX))] {
                 // Don't remove constraints with limited forces from the others
                 // because they may not deliver the necessary forces to fulfill
                 // the removed parts of other constraints.
@@ -779,21 +779,21 @@ impl JointConstraintHelper<Real> {
         let (ang_jac, angle) = rot
             .axis_angle()
             .map(|(axis, angle)| (axis.into_inner(), angle))
-            .unwrap_or_else(|| (axis1.orthonormal_basis()[0], 0.0));
+            .unwrap_or_else(|| (axis1.orthonormal_basis()[0], Real::from(0.0)));
 
         let min_enabled = angle <= limits[0];
         let max_enabled = limits[1] <= angle;
 
         let impulse_bounds = [
-            if min_enabled { -Real::INFINITY } else { 0.0 },
-            if max_enabled { Real::INFINITY } else { 0.0 },
+            if min_enabled { Real::from(-RawReal::INFINITY) } else { Real::from(0.0) },
+            if max_enabled { Real::from(RawReal::INFINITY) } else { Real::from(0.0) },
         ];
 
-        let rhs_wo_bias = 0.0;
+        let rhs_wo_bias = Real::from(0.0);
 
         let erp_inv_dt = params.joint_erp_inv_dt();
         let cfm_coeff = params.joint_cfm_coeff();
-        let rhs_bias = ((angle - limits[1]).max(0.0) - (limits[0] - angle).max(0.0)) * erp_inv_dt;
+        let rhs_bias = ((angle - limits[1]).max(Real::from(0.0)) - (limits[0] - angle).max(Real::from(0.0))) * erp_inv_dt;
 
         let ii_ang_jac1 = body1.ii * ang_jac;
         let ii_ang_jac2 = body2.ii * ang_jac;
@@ -804,16 +804,16 @@ impl JointConstraintHelper<Real> {
             solver_vel2: body2.solver_vel,
             im1: body1.im,
             im2: body2.im,
-            impulse: 0.0,
+            impulse: Real::from(0.0),
             impulse_bounds,
             lin_jac: na::zero(),
             ang_jac1: ang_jac,
             ang_jac2: ang_jac,
             ii_ang_jac1,
             ii_ang_jac2,
-            inv_lhs: 0.0, // Will be set during orthogonalization.
+            inv_lhs: Real::from(0.0), // Will be set during orthogonalization.
             cfm_coeff,
-            cfm_gain: 0.0,
+            cfm_gain: Real::from(0.0),
             rhs: rhs_wo_bias + rhs_bias,
             rhs_wo_bias,
             writeback_id,

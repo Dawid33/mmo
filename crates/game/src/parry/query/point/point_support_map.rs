@@ -25,7 +25,7 @@ where
 {
     let m = Isometry::new(-point.coords, na::zero());
     let m_inv = Isometry::new(point.coords, na::zero());
-    let dir = Unit::try_new(-m.translation.vector, crate::parry::math::DEFAULT_EPSILON)
+    let dir = Unit::try_new(-m.translation.vector, Real::from(crate::parry::math::DEFAULT_EPSILON))
         .unwrap_or(Vector::x_axis());
     let support_point = CSOPoint::from_shapes(&m_inv, shape, &ConstantOrigin, &dir);
 
@@ -67,7 +67,7 @@ impl PointQuery for ConvexPolyhedron {
         let dpt = *point - proj.point;
         let local_dir = if proj.is_inside { -dpt } else { dpt };
 
-        if let Some(local_dir) = Unit::try_new(local_dir, crate::parry::math::DEFAULT_EPSILON) {
+        if let Some(local_dir) = Unit::try_new(local_dir, Real::from(crate::parry::math::DEFAULT_EPSILON)) {
             let feature = self.support_feature_id_toward(&local_dir);
             (proj, feature)
         } else {

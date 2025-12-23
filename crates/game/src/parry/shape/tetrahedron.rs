@@ -227,10 +227,10 @@ impl TetrahedronPointLocation {
     /// # }
     /// ```
     pub fn barycentric_coordinates(&self) -> Option<[Real; 4]> {
-        let mut bcoords = [0.0; 4];
+        let mut bcoords = [Real::from(0.0); 4];
 
         match self {
-            TetrahedronPointLocation::OnVertex(i) => bcoords[*i as usize] = 1.0,
+            TetrahedronPointLocation::OnVertex(i) => bcoords[*i as usize] = Real::from(1.0),
             TetrahedronPointLocation::OnEdge(i, uv) => {
                 let idx = Tetrahedron::edge_ids(*i);
                 bcoords[idx.0 as usize] = uv[0];
@@ -593,7 +593,7 @@ impl Tetrahedron {
         m.try_inverse().map(|im| {
             let bcoords = im * (p - self.a);
             [
-                1.0 - bcoords.x - bcoords.y - bcoords.z,
+                Real::from(1.0) - bcoords.x - bcoords.y - bcoords.z,
                 bcoords.x,
                 bcoords.y,
                 bcoords.z,
@@ -630,7 +630,7 @@ impl Tetrahedron {
     /// ```
     #[inline]
     pub fn volume(&self) -> Real {
-        self.signed_volume().abs()
+        self.signed_volume().abs().into()
     }
 
     /// Computes the signed volume of this tetrahedron.

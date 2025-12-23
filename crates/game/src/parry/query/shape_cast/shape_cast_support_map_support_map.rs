@@ -1,6 +1,6 @@
 use na::Unit;
 
-use crate::parry::math::{Isometry, Real, Vector};
+use crate::parry::math::{Isometry, Real, RawReal, Vector};
 use crate::parry::query::details;
 use crate::parry::query::details::ShapeCastOptions;
 use crate::parry::query::gjk::{self, VoronoiSimplex};
@@ -20,7 +20,7 @@ where
     G1: ?Sized + SupportMap,
     G2: ?Sized + SupportMap,
 {
-    let gjk_result = if options.target_distance > 0.0 {
+    let gjk_result = if options.target_distance > Real::from(0.0) {
         let round_g1 = RoundShapeRef {
             inner_shape: g1,
             border_radius: options.target_distance,
@@ -34,12 +34,12 @@ where
         if time_of_impact > options.max_time_of_impact {
             None
         } else if (options.compute_impact_geometry_on_penetration || !options.stop_at_penetration)
-            && time_of_impact < 1.0e-5
+            && time_of_impact < Real::from(1.0e-5)
         {
-            let contact = details::contact_support_map_support_map(pos12, g1, g2, Real::MAX)?;
+            let contact = details::contact_support_map_support_map(pos12, g1, g2, Real::from(RawReal::MAX))?;
             let normal_vel = contact.normal1.dot(vel12);
 
-            if !options.stop_at_penetration && normal_vel >= 0.0 {
+            if !options.stop_at_penetration && normal_vel >= Real::from(0.0) {
                 None
             } else {
                 Some(ShapeCastHit {

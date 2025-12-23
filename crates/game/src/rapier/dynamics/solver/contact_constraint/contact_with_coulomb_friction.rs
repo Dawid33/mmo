@@ -180,7 +180,7 @@ impl ContactWithCoulombFrictionBuilder {
                 {
                     // TODO PERF: we already applied the inverse inertia to the torque
                     //            dire before. Could we reuse the value instead of retransforming?
-                    constraint.tangent_part[k].r[2] = SimdReal::splat(2.0)
+                    constraint.tangent_part[k].r[2] = SimdReal::splat(Real::from(2.0))
                         * (constraint.tangent_part[k].ii_torque_dir1[0]
                             .gdot(constraint.tangent_part[k].torque_dir1[1])
                             + constraint.tangent_part[k].ii_torque_dir2[0]
@@ -494,7 +494,7 @@ impl ContactWithCoulombFriction {
     }
 
     pub fn remove_cfm_and_bias_from_rhs(&mut self) {
-        self.cfm_factor = SimdReal::splat(1.0);
+        self.cfm_factor = SimdReal::splat(Real::from(1.0));
         for elt in &mut self.normal_part {
             elt.rhs = elt.rhs_wo_bias;
         }

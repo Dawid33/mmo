@@ -19,14 +19,14 @@ use crate::parry::utils::hashmap::{Entry, HashMap};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
     archive(check_bytes)
 )]
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 struct SubDetector {
     manifold_id: usize,
     timestamp: bool,
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Hash)]
 pub struct HeightFieldShapeContactManifoldsWorkspace {
     timestamp: bool,
     sub_detectors: HashMap<u32, SubDetector>,

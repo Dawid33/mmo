@@ -1,5 +1,5 @@
 use crate::parry::bounding_volume::Aabb;
-use crate::parry::math::{Isometry, Point, Real, Vector};
+use crate::parry::math::{Isometry, Point, Real, RawReal, Vector};
 use crate::parry::partitioning::BvhNode;
 use crate::parry::query::shape_cast::ShapeCastOptions;
 use crate::parry::query::{QueryDispatcher, Ray, RayCast, ShapeCastHit};
@@ -35,7 +35,7 @@ impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
 
                 // Compute the time of impact.
                 msum.cast_local_ray(&ray, best_so_far, true)
-                    .unwrap_or(Real::MAX)
+                    .unwrap_or(Real::from(RawReal::MAX))
             },
             |part_id, _| {
                 self.0

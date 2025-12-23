@@ -4,7 +4,7 @@
 #[cfg(all(not(feature = "enhanced-determinism"), feature = "serde-serialize"))]
 use hashbrown::hash_map::HashMap as StdHashMap;
 #[cfg(all(feature = "enhanced-determinism", feature = "serde-serialize"))]
-use indexmap::IndexMap as StdHashMap;
+use ordermap::OrderMap as StdHashMap;
 
 /// Serializes only the capacity of a hash-map instead of its actual content.
 #[cfg(feature = "serde-serialize")]
@@ -52,9 +52,9 @@ pub fn deserialize_hashmap_capacity<
 /// Deterministic hashmap using [`indexmap::IndexMap`]
 #[cfg(feature = "enhanced-determinism")]
 pub type FxHashMap32<K, V> =
-    indexmap::IndexMap<K, V, core::hash::BuildHasherDefault<super::fx_hasher::FxHasher32>>;
+    ordermap::OrderMap<K, V, core::hash::BuildHasherDefault<super::fx_hasher::FxHasher32>>;
 #[cfg(feature = "enhanced-determinism")]
-pub use {self::FxHashMap32 as HashMap, indexmap::map::Entry};
+pub use {self::FxHashMap32 as HashMap, ordermap::map::Entry};
 
 #[cfg(not(feature = "enhanced-determinism"))]
 pub use hashbrown::hash_map::Entry;

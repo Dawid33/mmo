@@ -13,7 +13,7 @@ pub fn closest_points_ball_ball(
     margin: Real,
 ) -> ClosestPoints {
     assert!(
-        margin >= 0.0,
+        margin >= Real::from(0.0),
         "The proximity margin must be positive or null."
     );
 

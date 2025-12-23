@@ -79,13 +79,13 @@ pub fn contact_manifolds_voxels_composite_shape<ManifoldData, ContactData>(
     let mut old_manifolds = core::mem::take(manifolds);
     let bvh2 = shape2.bvh();
 
-    let radius1 = voxels1.voxel_size() / 2.0;
+    let radius1 = voxels1.voxel_size() / Real::from(2.0);
 
     let aabb1 = voxels1.local_aabb();
     let aabb2_1 = shape2.bvh().root_aabb().transform_by(pos12);
     let domain2_1 = Aabb {
-        mins: aabb2_1.mins - radius1 * 10.0,
-        maxs: aabb2_1.maxs + radius1 * 10.0,
+        mins: aabb2_1.mins - radius1 * Real::from(10.0),
+        maxs: aabb2_1.maxs + radius1 * Real::from(10.0),
     };
 
     if let Some(intersection_aabb1) = aabb1.intersection(&aabb2_1) {
@@ -222,7 +222,7 @@ pub fn contact_manifolds_voxels_composite_shape<ManifoldData, ContactData>(
                     /*
                      * Filter-out points that don’t belong to this block.
                      */
-                    let test_voxel = Cuboid::new(radius1 + Vector::repeat(1.0e-2));
+                    let test_voxel = Cuboid::new(radius1 + Vector::repeat(Real::from(1.0e-2)));
                     let penetration_dir1 = if flipped {
                         manifold.local_n2
                     } else {
@@ -230,7 +230,7 @@ pub fn contact_manifolds_voxels_composite_shape<ManifoldData, ContactData>(
                     };
 
                     for (i, pt) in manifold.points.iter().enumerate() {
-                        if pt.dist < 0.0 {
+                        if pt.dist < Real::from(0.0) {
                             // If this is a penetration, double-check that we are not hitting the
                             // interior of the infinitely expanded canonical shape by checking if
                             // the opposite normal had led to a better vector.

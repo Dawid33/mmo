@@ -1,6 +1,6 @@
 #[cfg(feature = "dim3")]
 use crate::approx::AbsDiffEq;
-use crate::parry::math::{Isometry, Real, Vector};
+use crate::parry::math::{Isometry, Real, RawReal, Vector};
 #[cfg(feature = "dim3")]
 use crate::parry::query::sat;
 #[cfg(feature = "dim2")]
@@ -92,17 +92,17 @@ pub fn cuboid_triangle_find_local_separating_edge_twoway(
     // We have 3 * 3 = 9 axes to test.
     let axes = [
         // Vector::{x, y ,z}().cross(ab)
-        Vector::new(0.0, -ab.z, ab.y),
-        Vector::new(ab.z, 0.0, -ab.x),
-        Vector::new(-ab.y, ab.x, 0.0),
+        Vector::new(Real::from(0.0), -ab.z, ab.y),
+        Vector::new(ab.z, Real::from(0.0), -ab.x),
+        Vector::new(-ab.y, ab.x, Real::from(0.0)),
         // Vector::{x, y ,z}().cross(bc)
-        Vector::new(0.0, -bc.z, bc.y),
-        Vector::new(bc.z, 0.0, -bc.x),
-        Vector::new(-bc.y, bc.x, 0.0),
+        Vector::new(Real::from(0.0), -bc.z, bc.y),
+        Vector::new(bc.z, Real::from(0.0), -bc.x),
+        Vector::new(-bc.y, bc.x, Real::from(0.0)),
         // Vector::{x, y ,z}().cross(ca)
-        Vector::new(0.0, -ca.z, ca.y),
-        Vector::new(ca.z, 0.0, -ca.x),
-        Vector::new(-ca.y, ca.x, 0.0),
+        Vector::new(Real::from(0.0), -ca.z, ca.y),
+        Vector::new(ca.z, Real::from(0.0), -ca.x),
+        Vector::new(-ca.y, ca.x, Real::from(0.0)),
     ];
 
     let tri_dots = [
@@ -117,7 +117,7 @@ pub fn cuboid_triangle_find_local_separating_edge_twoway(
         (axes[8].dot(&a.coords), axes[8].dot(&b.coords)),
     ];
 
-    let mut best_sep = -Real::MAX;
+    let mut best_sep = Real::from(-RawReal::MAX);
     let mut best_axis = axes[0];
 
     for (i, axis) in axes.iter().enumerate() {
@@ -210,7 +210,7 @@ pub fn triangle_support_map_find_local_separating_normal_oneway(
     shape2: &impl SupportMap,
     pos12: &Isometry<Real>,
 ) -> (Real, Vector<Real>) {
-    let mut best_sep = -Real::MAX;
+    let mut best_sep = -RawReal::MAX;
     let mut best_normal = Vector::zeros();
 
     for edge in &triangle1.edges() {

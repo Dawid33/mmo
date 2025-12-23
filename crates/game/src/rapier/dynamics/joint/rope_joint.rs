@@ -1,6 +1,6 @@
 use crate::rapier::dynamics::joint::{GenericJoint, GenericJointBuilder, JointAxesMask};
 use crate::rapier::dynamics::{JointAxis, MotorModel};
-use crate::rapier::math::{Point, Real};
+use crate::rapier::math::{Point, Real, RawReal};
 
 use super::JointMotor;
 
@@ -135,7 +135,7 @@ impl RopeJoint {
         self.data
             .limits(JointAxis::LinX)
             .map(|l| l.max)
-            .unwrap_or(Real::MAX)
+            .unwrap_or(Real::from(RawReal::MAX))
     }
 
     /// Changes the maximum rope length.
@@ -150,7 +150,7 @@ impl RopeJoint {
     /// rope_joint.set_max_distance(10.0);  // Max 10 units apart
     /// ```
     pub fn set_max_distance(&mut self, max_dist: Real) -> &mut Self {
-        self.data.set_limits(JointAxis::LinX, [0.0, max_dist]);
+        self.data.set_limits(JointAxis::LinX, [Real::from(0.0), max_dist]);
         self
     }
 }

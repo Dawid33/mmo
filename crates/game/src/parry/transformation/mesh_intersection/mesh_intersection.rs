@@ -1,6 +1,6 @@
 use super::{MeshIntersectionError, TriangleTriangleIntersection};
 use crate::parry::bounding_volume::BoundingVolume;
-use crate::parry::math::{Isometry, Real};
+use crate::parry::math::{Isometry, Real, RawReal};
 use crate::parry::partitioning::BvhNode;
 use crate::parry::query::point::point_query::PointQueryWithLocation;
 use crate::parry::query::PointQuery;
@@ -58,10 +58,10 @@ impl Default for MeshIntersectionTolerances {
     fn default() -> Self {
         Self {
             #[expect(clippy::unnecessary_cast)]
-            angle_epsilon: (0.005 as Real).to_radians(), // 0.005 degrees
-            global_insertion_epsilon: Real::EPSILON * 100.0,
-            local_insertion_epsilon_scale: 10.,
-            collinearity_epsilon: Real::EPSILON * 100.0,
+            angle_epsilon: Real::from((0.005 as RawReal).to_radians()), // 0.005 degrees
+            global_insertion_epsilon: Real::from(RawReal::EPSILON * 100.0),
+            local_insertion_epsilon_scale: Real::from(10.),
+            collinearity_epsilon: Real::from(RawReal::EPSILON * 100.0),
         }
     }
 }
@@ -555,7 +555,7 @@ fn insert_into_set(
 fn smallest_angle(points: &[Point3<Real>]) -> Real {
     let n = points.len();
 
-    let mut worst_cos: Real = -2.0;
+    let mut worst_cos: Real = Real::from(-2.0);
     for i in 0..points.len() {
         let d1 = (points[i] - points[(i + 1) % n]).normalize();
         let d2 = (points[(i + 2) % n] - points[(i + 1) % n]).normalize();
@@ -566,12 +566,12 @@ fn smallest_angle(points: &[Point3<Real>]) -> Real {
         }
     }
 
-    worst_cos.acos()
+    Real::from(worst_cos.acos())
 }
 
 fn planar_gram_schmidt(v1: Vector3<Real>, v2: Vector3<Real>) -> (Vector3<Real>, Vector3<Real>) {
     let u1 = v1;
-    let u2 = v2 - (v2.dot(&u1) / u1.norm_squared()) * u1;
+    let u2 = v2 - Real::from(v2.dot(&u1) / u1.norm_squared()) * u1;
 
     let e1 = u1.normalize();
     let e2 = u2.normalize();
@@ -585,7 +585,7 @@ fn project_point_to_segment(point: &Point3<Real>, segment: &[Point3<Real>; 2]) -
 
     let norm = dir.norm();
     // Restrict the result to the segment portion of the line.
-    let coeff = (dir.dot(&local) / norm).clamp(0., norm);
+    let coeff = (dir.dot(&local) / norm).clamp(Real::from(0.), norm);
 
     segment[0] + coeff * dir.normalize()
 }

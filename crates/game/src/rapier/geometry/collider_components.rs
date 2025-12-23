@@ -1,11 +1,13 @@
-use crate::rapier::dynamics::{CoefficientCombineRule, MassProperties, RigidBodyHandle, RigidBodyType};
+use crate::rapier::dynamics::{
+    CoefficientCombineRule, MassProperties, RigidBodyHandle, RigidBodyType,
+};
 use crate::rapier::geometry::{InteractionGroups, Shape, SharedShape};
 use crate::rapier::math::{Isometry, Real};
 use crate::rapier::pipeline::{ActiveEvents, ActiveHooks};
 use std::ops::{Deref, DerefMut};
 
 /// The unique identifier of a collider added to a collider set.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[repr(transparent)]
 pub struct ColliderHandle(pub crate::rapier::data::arena::Index);
@@ -18,7 +20,9 @@ impl ColliderHandle {
 
     /// Reconstructs an handle from its (index, generation) components.
     pub fn from_raw_parts(id: u32, generation: u32) -> Self {
-        Self(crate::rapier::data::arena::Index::from_raw_parts(id, generation))
+        Self(crate::rapier::data::arena::Index::from_raw_parts(
+            id, generation,
+        ))
     }
 
     /// An always-invalid collider handle.
@@ -32,7 +36,7 @@ impl ColliderHandle {
 
 bitflags::bitflags! {
     #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
     /// Flags describing how the collider has been modified by the user.
     pub struct ColliderChanges: u32 {
         /// Flag indicating that any component of the collider has been modified.
@@ -87,7 +91,7 @@ impl ColliderChanges {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The type of collider.
 pub enum ColliderType {
@@ -107,7 +111,7 @@ impl ColliderType {
 /// The shape of a collider.
 pub type ColliderShape = SharedShape;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The mass-properties of a collider.
 pub enum ColliderMassProps {
@@ -126,7 +130,7 @@ pub enum ColliderMassProps {
 
 impl Default for ColliderMassProps {
     fn default() -> Self {
-        ColliderMassProps::Density(1.0)
+        ColliderMassProps::Density(Real::from(1.0))
     }
 }
 
@@ -154,7 +158,7 @@ impl ColliderMassProps {
             }
             ColliderMassProps::Mass(mass) => {
                 if *mass != 0.0 {
-                    let mut mprops = shape.mass_properties(1.0);
+                    let mut mprops = shape.mass_properties(Real::from(1.0));
                     mprops.set_mass(*mass, true);
                     mprops
                 } else {
@@ -166,7 +170,7 @@ impl ColliderMassProps {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// Information about the rigid-body this collider is attached to.
 pub struct ColliderParent {
@@ -176,7 +180,7 @@ pub struct ColliderParent {
     pub pos_wrt_parent: Isometry<Real>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The position of a collider.
 pub struct ColliderPosition(pub Isometry<Real>);
@@ -231,7 +235,7 @@ where
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The constraints solver-related properties of this collider (friction, restitution, etc.)
 pub struct ColliderMaterial {
@@ -266,8 +270,8 @@ impl ColliderMaterial {
 impl Default for ColliderMaterial {
     fn default() -> Self {
         Self {
-            friction: 1.0,
-            restitution: 0.0,
+            friction: Real::from(1.0),
+            restitution: Real::from(0.0),
             friction_combine_rule: CoefficientCombineRule::default(),
             restitution_combine_rule: CoefficientCombineRule::default(),
         }

@@ -67,7 +67,7 @@ use na::Unit;
 /// # }
 /// # }
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct SharedShape(pub Arc<dyn Shape>);
 
 impl Deref for SharedShape {

@@ -137,7 +137,7 @@ use rkyv::{bytecheck, CheckBytes};
 /// // This plane passes through the origin and divides space diagonally
 /// # }
 /// ```
-#[derive(PartialEq, Debug, Clone, Copy)]
+#[derive(PartialEq, Debug, Clone, Copy, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -323,6 +323,6 @@ impl HalfSpace {
     /// # }
     /// ```
     pub fn scaled(self, scale: &Vector<Real>) -> Option<Self> {
-        Unit::try_new(self.normal.component_mul(scale), 0.0).map(|normal| Self { normal })
+        Unit::try_new(self.normal.component_mul(scale), Real::from(0.0)).map(|normal| Self { normal })
     }
 }

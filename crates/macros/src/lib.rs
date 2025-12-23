@@ -23,7 +23,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "Undo AsRef",
         quote! {
             impl<T> AsRef<T> for Undo<T>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
                 fn as_ref(&self) -> &T {
                     &self.data
                 }
@@ -35,7 +35,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "Undo Deref",
         quote! {
             impl<T> ::std::ops::Deref for Undo<T>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
                 type Target = T;
 
                 fn deref(&self) -> &Self::Target {
@@ -49,7 +49,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "Undo DerefMut Clone",
         quote! {
             impl<T> ::std::ops::DerefMut for Undo<T>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
                 fn deref_mut(&mut self) -> &mut Self::Target {
                     &mut self.data
                 }
@@ -61,7 +61,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "mut access",
         quote! {
             impl<T> Undo<T>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
                 pub fn change(&mut self) -> &mut T {
                     let old = self.data.clone();
                     self.undo(move |mut d, s| *d = old);
@@ -75,7 +75,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "DelayedUndo Deref",
         quote! {
             impl<T, 'a> ::std::ops::Deref for DelayedUndo<T, 'a>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
                 type Target = T;
 
                 fn deref(&self) -> &Self::Target {
@@ -89,7 +89,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "DelayedUndo DerefMut",
         quote! {
             impl<T, 'a> ::std::ops::DerefMut for DelayedUndo<T, 'a>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
                 fn deref_mut(&mut self) -> &mut Self::Target {
                     &mut self.value
                 }
@@ -213,7 +213,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         match &mut i {
             Item::Struct(item_struct) => {
                 item_struct.attrs.push(
-                    parse_quote! {#[derive(::core::default::Default, ::rollback::Debug, ::rollback::serde::Serialize, ::rollback::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial/*, ::std::hash::Hash*/)] },
+                    parse_quote! {#[derive(::core::default::Default, ::rollback::Debug, ::rollback::serde::Serialize, ::rollback::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial, ::std::hash::Hash)] },
                 );
                 item_struct.attrs.push(parse_quote! {#[module(crate)]});
 
@@ -277,7 +277,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "struct Delayed Undo<T>",
         quote! {
-            pub struct DelayedUndo<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
+            pub struct DelayedUndo<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
                 hash: u32,
                 value: &'a mut Undo<T>
             }
@@ -287,7 +287,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "impl DelayedUndo<T>",
         quote! {
-            impl<T, 'a> DelayedUndo<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static  {
+            impl<T, 'a> DelayedUndo<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash  {
                 pub fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
                     let mut global = self.value.global_log.lock().unwrap();
                     let mut local = self.value.log.lock().unwrap();
@@ -303,7 +303,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         "struct Undo<T>",
         quote! {
             #[derive(::core::default::Default, ::rollback::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
-            pub struct Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send /*+ ::std::hash::Hash*/ + 'static {
+            pub struct Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
                 #[serde(skip)]
                 #[debug(skip)]
                 log: ::std::sync::Arc<::std::sync::Mutex<::std::collections::VecDeque<Box<dyn FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>>>>,
@@ -322,23 +322,23 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         },
     ));
 
-    // items.push(item(
-    //     "impl hash Undo<T>",
-    //     quote! {
-    //         impl<T> ::std::hash::Hash for Undo<T>
-    //             where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static
-    //         {
-    //             fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
-    //                 self.data.hash(state);
-    //             }
-    //         }
-    //     },
-    // ));
+    items.push(item(
+        "impl hash Undo<T>",
+        quote! {
+            impl<T> ::std::hash::Hash for Undo<T>
+                where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static + ::std::hash::Hash
+            {
+                fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+                    self.data.hash(state);
+                }
+            }
+        },
+    ));
 
     items.push(item(
         "impl Undo<T>",
         quote! {
-            impl<T> Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + Sized {
+            impl<T> Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + Sized + ::std::hash::Hash {
                 pub fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
                     let mut global = self.global_log.lock().unwrap();
                     let mut local = self.log.lock().unwrap();
@@ -399,6 +399,17 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub log: ::std::sync::Arc<::std::sync::Mutex<RollbackLog>>,
                 #[debug(skip)]
                 pub data: Undo<#root_struct_ident>,
+            }
+        },
+    ));
+
+    items.push(item(
+        "impl hash Rollback",
+        quote! {
+            impl ::std::hash::Hash for Rollback {
+                fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+                    self.data.hash(state);
+                }
             }
         },
     ));

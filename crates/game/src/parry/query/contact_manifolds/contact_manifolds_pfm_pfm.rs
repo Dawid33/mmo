@@ -60,11 +60,11 @@ pub fn contact_manifold_pfm_pfm<'a, ManifoldData, ContactData, S1, S2>(
     // We use very small thresholds for the manifold update because something to high would
     // cause numerical drifts with the effect of introducing bumps in
     // what should have been smooth rolling motions.
-    if manifold.try_update_contacts_eps(pos12, crate::parry::utils::COS_1_DEGREES, 1.0e-6) {
+    if manifold.try_update_contacts_eps(pos12, crate::parry::utils::COS_1_DEGREES, Real::from(1.0e-6)) {
         return;
     }
 
-    let init_dir = Unit::try_new(manifold.local_n1, crate::parry::math::DEFAULT_EPSILON);
+    let init_dir = Unit::try_new(manifold.local_n1, Real::from(crate::parry::math::DEFAULT_EPSILON));
     let total_prediction = prediction + border_radius1 + border_radius2;
     let contact = query::details::contact_support_map_support_map_with_params(
         pos12,
@@ -132,7 +132,7 @@ pub fn contact_manifold_pfm_pfm<'a, ManifoldData, ContactData, S1, S2>(
                 //       relative to the unconstrained penetration distance.
                 manifold
                     .points
-                    .retain(|pt| dist >= 0.0 || pt.dist >= 0.0 || pt.dist >= dist * 5.0);
+                    .retain(|pt| dist >= Real::from(0.0) || pt.dist >= Real::from(0.0) || pt.dist >= dist * Real::from(5.0));
             }
 
             // Adjust points to take the radius into account.
@@ -153,7 +153,7 @@ pub fn contact_manifold_pfm_pfm<'a, ManifoldData, ContactData, S1, S2>(
         }
         _ => {
             // Reset the cached direction.
-            manifold.local_n1.fill(0.0);
+            manifold.local_n1.fill(Real::from(0.0));
         }
     }
 

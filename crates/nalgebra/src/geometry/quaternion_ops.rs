@@ -535,7 +535,7 @@ macro_rules! left_scalar_mul_impl(
     )*}
 );
 
-left_scalar_mul_impl!(f32, f64);
+left_scalar_mul_impl!(f32, f64, ordered_float::OrderedFloat<f32>);
 
 impl<T: SimdRealField> Neg for Quaternion<T>
 where

@@ -17,7 +17,7 @@ use crate::parry::shape::{Shape, TriMesh};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
     archive(check_bytes)
 )]
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct TriMeshShapeContactManifoldsWorkspace {
     interferences: Vec<u32>,
     local_aabb2: Aabb,
@@ -113,7 +113,7 @@ pub fn contact_manifolds_trimesh_shape<ManifoldData, ContactData>(
 
     if !same_local_aabb2 {
         let extra_margin =
-            (new_local_aabb2.maxs - new_local_aabb2.mins).map(|e| (e / 10.0).min(0.1));
+            (new_local_aabb2.maxs - new_local_aabb2.mins).map(|e| (e / 10.0).min(Real::from(0.1)));
         new_local_aabb2.mins -= extra_margin;
         new_local_aabb2.maxs += extra_margin;
 

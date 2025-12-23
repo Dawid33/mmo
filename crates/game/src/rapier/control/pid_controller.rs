@@ -1,5 +1,5 @@
 use crate::rapier::dynamics::{AxesMask, RigidBody, RigidBodyPosition, RigidBodyVelocity};
-use crate::rapier::math::{Isometry, Point, Real, Rotation, Vector};
+use crate::rapier::math::{Isometry, Point, Real, RawReal, Rotation, Vector};
 use crate::parry::math::AngVector;
 
 /// A Proportional-Derivative (PD) controller.
@@ -44,7 +44,7 @@ pub struct PdController {
 
 impl Default for PdController {
     fn default() -> Self {
-        Self::new(60.0, 0.8, AxesMask::all())
+        Self::new(Real::from(60.0), Real::from(0.8), AxesMask::all())
     }
 }
 
@@ -69,7 +69,7 @@ pub struct PidController {
 
 impl Default for PidController {
     fn default() -> Self {
-        Self::new(60.0, 1.0, 0.8, AxesMask::all())
+        Self::new(Real::from(60.0), Real::from(1.0), Real::from(0.8), AxesMask::all())
     }
 }
 
@@ -196,9 +196,9 @@ impl PdController {
         );
         #[cfg(feature = "dim3")]
         return Vector::new(
-            self.axes.contains(AxesMask::LIN_X) as u32 as Real,
-            self.axes.contains(AxesMask::LIN_Y) as u32 as Real,
-            self.axes.contains(AxesMask::LIN_Z) as u32 as Real,
+            Real::from(self.axes.contains(AxesMask::LIN_X) as u32 as RawReal),
+            Real::from(self.axes.contains(AxesMask::LIN_Y) as u32 as RawReal),
+            Real::from(self.axes.contains(AxesMask::LIN_Z) as u32 as RawReal),
         );
     }
 
@@ -209,9 +209,9 @@ impl PdController {
         return self.axes.contains(AxesMask::ANG_Z) as u32 as Real;
         #[cfg(feature = "dim3")]
         return Vector::new(
-            self.axes.contains(AxesMask::ANG_X) as u32 as Real,
-            self.axes.contains(AxesMask::ANG_Y) as u32 as Real,
-            self.axes.contains(AxesMask::ANG_Z) as u32 as Real,
+            Real::from(self.axes.contains(AxesMask::ANG_X) as u32 as RawReal),
+            Real::from(self.axes.contains(AxesMask::ANG_Y) as u32 as RawReal),
+            Real::from(self.axes.contains(AxesMask::ANG_Z) as u32 as RawReal),
         );
     }
 

@@ -3,8 +3,8 @@ use crate::parry::utils::hashset::HashSet;
 use super::ImpulseJoint;
 use crate::rapier::geometry::{InteractionGraph, RigidBodyGraphIndex, TemporaryInteractionIndex};
 
-use crate::rapier::data::Coarena;
 use crate::rapier::data::arena::Arena;
+use crate::rapier::data::Coarena;
 use crate::rapier::dynamics::{GenericJoint, IslandManager, RigidBodyHandle, RigidBodySet};
 
 /// The unique identifier of a joint added to the joint set.
@@ -22,7 +22,9 @@ impl ImpulseJointHandle {
 
     /// Reconstructs an handle from its (index, generation) components.
     pub fn from_raw_parts(id: u32, generation: u32) -> Self {
-        Self(crate::rapier::data::arena::Index::from_raw_parts(id, generation))
+        Self(crate::rapier::data::arena::Index::from_raw_parts(
+            id, generation,
+        ))
     }
 
     /// An always-invalid joint handle.
@@ -38,7 +40,7 @@ pub(crate) type JointIndex = usize;
 pub(crate) type JointGraphEdge = crate::rapier::data::graph::Edge<ImpulseJoint>;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, Hash)]
 /// The collection that stores all joints connecting rigid bodies in your physics world.
 ///
 /// Joints constrain how two bodies can move relative to each other. This set manages
@@ -82,7 +84,7 @@ impl ImpulseJointSet {
             rb_graph_ids: Coarena::new(),
             joint_ids: Arena::new(),
             joint_graph: InteractionGraph::new(),
-            to_wake_up: HashSet::default(),
+            to_wake_up: Default::default(),
         }
     }
 

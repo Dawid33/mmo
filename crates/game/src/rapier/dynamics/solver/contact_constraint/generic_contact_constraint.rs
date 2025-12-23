@@ -1,7 +1,7 @@
 use crate::rapier::dynamics::solver::GenericRhs;
 use crate::rapier::dynamics::{IntegrationParameters, MultibodyJointSet, RigidBodySet};
 use crate::rapier::geometry::{ContactManifold, ContactManifoldIndex};
-use crate::rapier::math::{DIM, MAX_MANIFOLD_POINTS, Real};
+use crate::rapier::math::{DIM, MAX_MANIFOLD_POINTS, Real, RawReal};
 use crate::rapier::utils::{SimdAngularInertia, SimdCross, SimdDot};
 
 use super::{ContactConstraintNormalPart, ContactConstraintTangentPart};
@@ -27,7 +27,7 @@ impl GenericContactConstraintBuilder {
             infos: [CoulombContactPointInfos::default(); MAX_MANIFOLD_POINTS],
             handle1: RigidBodyHandle::invalid(),
             handle2: RigidBodyHandle::invalid(),
-            ccd_thickness: Real::MAX,
+            ccd_thickness: Real::from(RawReal::MAX),
         }
     }
 
@@ -96,7 +96,7 @@ impl GenericContactConstraintBuilder {
             *jacobian_id + manifold.data.solver_contacts.len() * multibodies_ndof * 2 * DIM;
 
         if jacobians.nrows() < required_jacobian_len && !cfg!(feature = "parallel") {
-            jacobians.resize_vertically_mut(required_jacobian_len, 0.0);
+            jacobians.resize_vertically_mut(required_jacobian_len, Real::from(0.0));
         }
 
         for (l, manifold_points) in manifold
@@ -178,7 +178,7 @@ impl GenericContactConstraintBuilder {
                         force_dir1.dot(&mprops1.effective_inv_mass.component_mul(&force_dir1))
                             + ii_torque_dir1.gdot(torque_dir1)
                     } else {
-                        0.0
+                        Real::from(0.0)
                     };
 
                     let inv_r2 = if let Some((mb2, link_id2)) = multibody2.as_ref() {
@@ -197,12 +197,12 @@ impl GenericContactConstraintBuilder {
                         force_dir1.dot(&mprops2.effective_inv_mass.component_mul(&force_dir1))
                             + ii_torque_dir2.gdot(torque_dir2)
                     } else {
-                        0.0
+                        Real::from(0.0)
                     };
 
                     let r = crate::rapier::utils::inv(inv_r1 + inv_r2);
 
-                    let is_bouncy = manifold_point.is_bouncy() as u32 as Real;
+                    let is_bouncy = Real::from(*manifold_point.is_bouncy() as u32 as RawReal);
 
                     normal_rhs_wo_bias =
                         (is_bouncy * manifold_point.restitution) * (vel1 - vel2).dot(&force_dir1);
@@ -217,7 +217,7 @@ impl GenericContactConstraintBuilder {
                         impulse_accumulator: na::zero(),
                         impulse: manifold_point.warmstart_impulse,
                         r,
-                        r_mat_elts: [0.0; 2],
+                        r_mat_elts: [Real::from(0.0); 2],
                     };
                 }
 
@@ -264,7 +264,7 @@ impl GenericContactConstraintBuilder {
                             force_dir1.dot(&mprops1.effective_inv_mass.component_mul(&force_dir1))
                                 + ii_torque_dir1.gdot(torque_dir1)
                         } else {
-                            0.0
+                            Real::from(0.0)
                         };
 
                         let inv_r2 = if let Some((mb2, link_id2)) = multibody2.as_ref() {
@@ -283,7 +283,7 @@ impl GenericContactConstraintBuilder {
                             force_dir1.dot(&mprops2.effective_inv_mass.component_mul(&force_dir1))
                                 + ii_torque_dir2.gdot(torque_dir2)
                         } else {
-                            0.0
+                            Real::from(0.0)
                         };
 
                         let r = crate::rapier::utils::inv(inv_r1 + inv_r2);
@@ -383,9 +383,9 @@ impl GenericContactConstraintBuilder {
 
             // Normal part.
             {
-                let rhs_wo_bias = info.normal_vel + dist.max(0.0) * inv_dt;
+                let rhs_wo_bias = info.normal_vel + dist.max(Real::from(0.0)) * inv_dt;
                 let rhs_bias = (erp_inv_dt * (dist + params.allowed_linear_error()))
-                    .clamp(-params.max_corrective_velocity(), 0.0);
+                    .clamp(-params.max_corrective_velocity(), Real::from(0.0));
                 let new_rhs = rhs_wo_bias + rhs_bias;
 
                 normal_part.rhs_wo_bias = rhs_wo_bias;
@@ -451,8 +451,8 @@ impl GenericContactConstraint {
             tangent1: Vector::zeros(),
             im1: Vector::zeros(),
             im2: Vector::zeros(),
-            cfm_factor: 0.0,
-            limit: 0.0,
+            cfm_factor: Real::from(0.0),
+            limit: Real::from(0.0),
             solver_vel1: u32::MAX,
             solver_vel2: u32::MAX,
             manifold_id: ContactManifoldIndex::MAX,
@@ -583,7 +583,7 @@ impl GenericContactConstraint {
     }
 
     pub fn remove_cfm_and_bias_from_rhs(&mut self) {
-        self.cfm_factor = 1.0;
+        self.cfm_factor = Real::from(1.0);
         for normal_part in &mut self.normal_part {
             normal_part.rhs = normal_part.rhs_wo_bias;
         }
