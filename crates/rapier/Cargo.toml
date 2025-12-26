@@ -1,0 +1,68 @@
+[workspace]
+members = [
+    "crates/rapier2d",
+    "crates/rapier2d-f64",
+    "crates/rapier_testbed2d",
+    "crates/rapier_testbed2d-f64",
+    "examples2d",
+    "benchmarks2d",
+    "crates/rapier3d",
+    "crates/rapier3d-f64",
+    "crates/rapier_testbed3d",
+    "crates/rapier_testbed3d-f64",
+    "examples3d",
+    "examples3d-f64",
+    "benchmarks3d",
+    "crates/rapier3d-urdf",
+    "crates/rapier3d-meshloader",
+]
+resolver = "2"
+
+[workspace.lints.clippy]
+needless_lifetimes = "allow"
+
+[patch.crates-io]
+#wrapped2d = { git = "https://github.com/Bastacyclop/rust_box2d.git" }
+#xurdf = { path = "../xurdf/xurdf" }
+
+#simba = { path = "../simba" }
+#kiss3d = { path = "../kiss3d" }
+#parry2d = { path = "../parry/crates/parry2d" }
+#parry3d = { path = "../parry/crates/parry3d" }
+#parry2d-f64 = { path = "../parry/crates/parry2d-f64" }
+#parry3d-f64 = { path = "../parry/crates/parry3d-f64" }
+#nalgebra = { path = "../nalgebra" }
+#simba = { path = "../simba" }
+#wide = { path = "../wide" }
+
+#kiss3d = { git = "https://github.com/sebcrozet/kiss3d" }
+#nalgebra = { git = "https://github.com/dimforge/nalgebra", branch = "dev" }
+#parry2d = { git = "https://github.com/dimforge/parry", branch = "master" }
+#parry3d = { git = "https://github.com/dimforge/parry", branch = "master" }
+#parry2d-f64 = { git = "https://github.com/dimforge/parry", branch = "master" }
+#parry3d-f64 = { git = "https://github.com/dimforge/parry", branch = "master" }
+
+# See https://github.com/EmbarkStudios/puffin/pull/234
+puffin_egui = { git = "https://github.com/tedsteen/puffin.git", rev = "11771ebe00fd257aedbb545df3339ad597b1cc34" }
+
+
+# # For feature unstable-puffin-pr-235
+# # See https://github.com/dimforge/rapier/issues/760.
+# puffin_egui = { version = "0.29", optional = true, git = "https://github.com/Vrixyz/puffin.git", branch = "expose_ui_options" }
+# puffin = { version = "0.19", optional = true, git = "https://github.com/Vrixyz/puffin.git", branch = "expose_ui_options" }
+# # 
+
+[profile.release]
+#debug = true
+#codegen-units = 1
+#lto = true
+
+[profile.dev]
+opt-level = 1
+
+
+#[profile.dev.package.rapier3d]
+#opt-level = 3
+#
+#[profile.dev.package.kiss3d]
+#opt-level = 3

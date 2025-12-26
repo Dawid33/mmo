@@ -8,14 +8,15 @@ use std::{
 use crossbeam::channel::{Receiver, Sender};
 use game::na::Matrix4;
 use game::{
-    ClientUpdateEvent, EntityId, EntityKey, GameData, GameDataTransactionKind, GameDataUpdate,
-    GameEventKind, IsometryReal, PlayerKey, RegionId, Rollback, Vertex,
+    ClientUpdateEvent, EntityId, GameData, GameDataTransactionKind, GameDataUpdate, GameEventKind,
+    RegionId, Rollback,
 };
 use image::EncodableLayout;
 #[allow(unused)]
 use log::info;
 use log::warn;
 use rand::seq::IndexedRandom;
+use rollback::{EntityKey, IsometryReal, PlayerKey};
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     BlendComponent, BlendFactor, BlendOperation, BlendState, BufferUsages, Device, Features, Queue,
@@ -25,7 +26,7 @@ use winit::window::{CursorGrabMode, Window};
 
 use crate::{
     layout::CAMERA_LAYOUT_DESC,
-    render_world::{GpuEntity, RenderWorld},
+    render_world::{GpuEntity, RenderWorld, Vertex},
 };
 
 pub struct State {

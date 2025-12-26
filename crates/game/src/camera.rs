@@ -1,8 +1,9 @@
 use std::{fmt::Debug, ops::DerefMut, sync::Arc, time::Instant};
 
 use crate::data::Camera;
-use crate::rapier::math::Vector;
-use crate::rapier::prelude::RigidBodyHandle;
+use parry3d::math::Real;
+use rapier3d::math::Vector;
+use rapier3d::prelude::RigidBodyHandle;
 use assert_json_diff::{CompareMode, Config};
 use borrow::PartialHelper;
 use crossbeam::channel::Sender;
@@ -15,7 +16,6 @@ use na::{
 use ordered_float::OrderedFloat;
 use parley::swash::shape::Direction;
 use winit::event::MouseButton;
-use crate::parry::math::Real;
 
 use crate::{data::Undo, ClientPacket, ClientUpdateEvent, Controller, GameData, GameDataUpdate};
 
@@ -24,14 +24,41 @@ pub const ASPECT: f32 = (16 / 9) as f32;
 impl Camera {
     pub fn new(handle: RigidBodyHandle) -> Self {
         let m = Matrix4::from_columns(&[
-            Vector4::new(OrderedFloat(1.0), OrderedFloat(0.0), OrderedFloat(0.0), OrderedFloat(0.0)),
-            Vector4::new(OrderedFloat(0.0), OrderedFloat(1.0), OrderedFloat(0.0), OrderedFloat(0.0)),
-            Vector4::new(OrderedFloat(0.0), OrderedFloat(0.0), OrderedFloat(0.5), OrderedFloat(0.0)),
-            Vector4::new(OrderedFloat(0.0), OrderedFloat(0.0), OrderedFloat(0.5), OrderedFloat(1.0)),
+            Vector4::new(
+                OrderedFloat(1.0),
+                OrderedFloat(0.0),
+                OrderedFloat(0.0),
+                OrderedFloat(0.0),
+            ),
+            Vector4::new(
+                OrderedFloat(0.0),
+                OrderedFloat(1.0),
+                OrderedFloat(0.0),
+                OrderedFloat(0.0),
+            ),
+            Vector4::new(
+                OrderedFloat(0.0),
+                OrderedFloat(0.0),
+                OrderedFloat(0.5),
+                OrderedFloat(0.0),
+            ),
+            Vector4::new(
+                OrderedFloat(0.0),
+                OrderedFloat(0.0),
+                OrderedFloat(0.5),
+                OrderedFloat(1.0),
+            ),
         ]);
         Camera {
             proj_matrix: Perspective3::from_matrix_unchecked(
-                Perspective3::new(OrderedFloat(ASPECT), OrderedFloat(90.0), OrderedFloat(0.1), OrderedFloat(100.0)).as_matrix() * m,
+                Perspective3::new(
+                    OrderedFloat(ASPECT),
+                    OrderedFloat(90.0),
+                    OrderedFloat(0.1),
+                    OrderedFloat(100.0),
+                )
+                .as_matrix()
+                    * m,
             ),
             opengl_to_wgpu_matrix: m,
             view_matrix: Some(handle),
@@ -40,7 +67,7 @@ impl Camera {
 }
 
 impl Camera {
-    pub fn build_projection(&self) -> Matrix4<crate::HashableReal> {
+    pub fn build_projection(&self) -> Matrix4<crate::Real> {
         *self.proj_matrix.as_matrix()
     }
 }
@@ -49,7 +76,12 @@ impl Default for Camera {
     fn default() -> Self {
         Self {
             opengl_to_wgpu_matrix: Default::default(),
-            proj_matrix: Perspective3::new(OrderedFloat(ASPECT), OrderedFloat(90.0), OrderedFloat(0.1), OrderedFloat(100.0)),
+            proj_matrix: Perspective3::new(
+                OrderedFloat(ASPECT),
+                OrderedFloat(90.0),
+                OrderedFloat(0.1),
+                OrderedFloat(100.0),
+            ),
             view_matrix: Default::default(),
         }
     }
@@ -76,7 +108,7 @@ impl Controller for CameraController {
                 ecs.camera
                     .get_mut(e_id)
                     .proj_matrix
-                    .set_aspect(OrderedFloat((resolution.width / resolution.height)as f32));
+                    .set_aspect(OrderedFloat((resolution.width / resolution.height) as f32));
                 let m = ecs.camera.get_mut(e_id).proj_matrix.clone();
                 ecs.camera.send(GameDataUpdate::new(
                     crate::GameDataTransactionKind::Do,
@@ -143,7 +175,11 @@ impl Controller for CameraController {
                 if !diff.0.is_nan() {
                     r = UnitQuaternion::from_axis_angle(
                         &Vector3::y_axis(),
-                        -clamp(Real::from(diff.0 as f32 * (0.00136 + SENSITIVITIY)), Real::from(-0.2), Real::from(0.2)),
+                        -clamp(
+                            Real::from(diff.0 as f32 * (0.00136 + SENSITIVITIY)),
+                            Real::from(-0.2),
+                            Real::from(0.2),
+                        ),
                     ) * rotation;
                 }
             }
@@ -151,7 +187,11 @@ impl Controller for CameraController {
                 if !diff.1.is_nan() {
                     r = r * UnitQuaternion::from_axis_angle(
                         &Vector3::x_axis(),
-                        -clamp(Real::from(diff.1 as f32 * (0.0008 + SENSITIVITIY)), Real::from(-0.2), Real::from(0.2)),
+                        -clamp(
+                            Real::from(diff.1 as f32 * (0.0008 + SENSITIVITIY)),
+                            Real::from(-0.2),
+                            Real::from(0.2),
+                        ),
                     );
                 }
             }

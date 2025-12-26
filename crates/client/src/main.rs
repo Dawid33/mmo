@@ -1,18 +1,18 @@
 #![allow(unused)]
 //! Game client
 // #![deny(missing_docs)]
+use crate::window::App;
 use crossbeam::{
     channel::{Receiver, Sender},
     select,
 };
-use game::{na::Perspective3, rapier::math::Isometry};
+use game::na::Perspective3;
 use game::{
     ClientPacket, ClientUpdateEvent, EntityKey, GameDataTransactionKind, GameDataUpdate, GameError,
     GameEvent, GameEventKind, PlayerKey, Region, INDUCED_LATENCY,
 };
 use log::{info, trace, warn, LevelFilter};
-use pyroscope::PyroscopeAgent;
-use pyroscope_pprofrs::{pprof_backend, PprofConfig};
+use rapier3d::math::Isometry;
 use simplelog::{FormatItem, SimpleLogger};
 use std::{
     collections::BTreeMap,
@@ -26,7 +26,10 @@ use std::{
 };
 use winit::event_loop::{self, ControlFlow, EventLoop};
 
-use crate::window::App;
+#[cfg(feature = "pyroscope")]
+use pyroscope::PyroscopeAgent;
+#[cfg(feature = "pyroscope")]
+use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 
 mod layout;
 mod netcode;
@@ -116,8 +119,10 @@ impl GameInstanceManager {
         let mut ready = false;
         let mut is_caught_up = false;
         let mut buffer = Vec::new();
+        let mut results_buffer = BTreeMap::new();
         loop {
             select! {
+                // Recieve and handle server packets.
                 recv(server_recv) -> server_msg => {
                     match server_msg.unwrap() {
                         game::ServerPacket::SyncClock(region_id, server_tick_rate, server_tick, rtt) => {
@@ -131,10 +136,10 @@ impl GameInstanceManager {
 
                                 if total_mili_diff < INDUCED_LATENCY {
                                     ready = false;
-                                    tick_rate.store((server_tick_rate as f32 * 0.2) as u64, Ordering::SeqCst);
+                                    tick_rate.store((server_tick_rate as f32 * 0.9) as u64, Ordering::SeqCst);
                                 } else if total_mili_diff > INDUCED_LATENCY {
                                     ready = true;
-                                    tick_rate.store((server_tick_rate as f32 * 1.2) as u64, Ordering::SeqCst);
+                                    tick_rate.store((server_tick_rate as f32 * 1.1) as u64, Ordering::SeqCst);
                                 } else {
                                     ready = true;
                                     tick_rate.store(server_tick_rate, Ordering::SeqCst);
@@ -159,18 +164,20 @@ impl GameInstanceManager {
                                 is_caught_up = false;
                             }
                         }
-                        game::ServerPacket::Region(id, mut raw_game_data, last_id, key) => {
+                        game::ServerPacket::Region(id, mut raw_game_data, key) => {
                             self.client_event_send.send(ClientUpdateEvent::SetPlayer(key));
                             let (send, recv) = crossbeam::channel::unbounded();
                             let mut data = Region::new(raw_game_data.clone(), Some(send), id);
                             self.client_event_send.send(ClientUpdateEvent::NewRegion(id, (*raw_game_data.data).clone(), recv)).unwrap();
                             let mut w = game::World::new();
-                            w.load(&id, data, last_id);
+                            w.load(&id, data);
                             world = Some(w);
                             info!("Region recieved and loaded!");
                         }
                     }
                 },
+                // Recieve client game events from either the player or from
+                // client-side game tick timer.
                 recv(self.game_event_recv) -> game_event => {
                     if let Some(ref mut world) = world {
                          match game_event.clone() {
@@ -184,8 +191,15 @@ impl GameInstanceManager {
                                                 continue;
                                             }
                                         }
-                                        let event = world.handle_event(game_event.unwrap(), 0)?;
-                                        server_game_send.send(game::ClientPacket::GameEvent(event)).unwrap();
+                                        match e {
+                                            GameEventKind::Tick => {
+                                                world.progress_world_one_tick(&mut results_buffer);
+                                            },
+                                            GameEventKind::Quit | GameEventKind::PlayerWinitEvent(_, _) => {
+                                                let event = world.handle_region_event(game_event.unwrap(), 0)?;
+                                                server_game_send.send(game::ClientPacket::GameEvent(event)).unwrap();
+                                            },
+                                        }
                                     }
                                 }
                             },
@@ -249,6 +263,7 @@ fn main() {
         .build();
     SimpleLogger::init(LevelFilter::Info, config).unwrap();
 
+    #[cfg(feature = "pyroscope")]
     let agent_running = if let Ok(p) = std::env::var("PYROSCOPE") {
         let agent = PyroscopeAgent::builder("http://localhost:4040", "client")
             .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
@@ -265,6 +280,7 @@ fn main() {
     let mut app = App::new(sender);
     event_loop.run_app(&mut app).unwrap();
 
+    #[cfg(feature = "pyroscope")]
     if let Some(a) = agent_running {
         let agent_ready = a.stop().unwrap();
         agent_ready.shutdown();

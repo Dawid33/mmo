@@ -171,7 +171,8 @@ fn main() {
                         break;
                     }
                     _ => {
-                        let event = match world.handle_event(game_event.kind, game_event.region_id)
+                        let event = match world
+                            .handle_region_event(game_event.kind, game_event.region_id)
                         {
                             Ok(e) => {
                                 world.forget_last_event(game_event.region_id);
@@ -185,7 +186,7 @@ fn main() {
             },
             ServerEvent::ServerTickTimer => {
                 let region = 0;
-                let event = match world.handle_event(GameEventKind::Tick, region) {
+                let event = match world.handle_region_event(GameEventKind::Tick, region) {
                     Ok(e) => e,
                     Err(e) => panic!("Server crashed {:?}", e),
                 };

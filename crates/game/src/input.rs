@@ -1,7 +1,7 @@
-use crate::parry::math::{HashableReal, Real};
-use crate::rapier::prelude::PhysicsHooks;
 use log::info;
 use ordered_float::OrderedFloat;
+use parry3d::math::Real;
+use rapier3d::prelude::PhysicsHooks;
 use serde::{Deserialize, Serialize};
 use winit::dpi::PhysicalSize;
 use winit::event::MouseButton;
@@ -22,7 +22,7 @@ enum KeyState {
 pub struct WinitInput {
     window_resized: Option<PhysicalSize<u32>>,
     keyboard_state: BTreeMap<winit::keyboard::KeyCode, KeyState>,
-    mouse_diff: Option<(HashableReal, HashableReal)>,
+    mouse_diff: Option<(Real, Real)>,
 }
 
 impl WinitInput {
@@ -99,7 +99,8 @@ impl WinitInput {
                         m.0 += delta.0 as f32;
                         m.1 += delta.1 as f32;
                     } else {
-                        self.mouse_diff = Some((OrderedFloat(delta.0 as f32), OrderedFloat(delta.1 as f32)));
+                        self.mouse_diff =
+                            Some((OrderedFloat(delta.0 as f32), OrderedFloat(delta.1 as f32)));
                     }
                     Some(Box::new(move |s: &mut Self| {
                         s.mouse_diff = old;

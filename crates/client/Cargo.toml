@@ -3,9 +3,16 @@ name = "client"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
+
+[target.x86_64-unknown-linux-gnu]
+linker = "/usr/bin/clang"
+rustflags = ["-C", "link-arg=--ld-path=/usr/bin/mold"]
+
 [dependencies]
 game = { workspace = true }
-slotmapd = { path = "../slotmapd", features = ["serde"] }
+slotmapd = { workspace = true }
 simplelog = { workspace = true }
 log = { workspace = true }
 rand = { workspace = true }
@@ -18,14 +25,16 @@ derive_more = { workspace = true }
 weak-table = { workspace = true }
 bytemuck = { workspace = true }
 futures-lite = { workspace = true }
-pyroscope = { workspace = true }
-pyroscope_pprofrs = { workspace = true }
+pyroscope = { workspace = true, optional = true }
+pyroscope_pprofrs = { workspace = true, optional = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 winit = { workspace = true }
 parley = { workspace = true }
+rapier3d = { workspace = true }
 # vello = { workspace = true }
 # kurbo = { workspace = true }
-quinn = "0.11.6"
-tokio = { version = "1.42.0", features = ["rt-multi-thread"] }
+quinn = { workspace = true }
+tokio = { workspace = true }
 image = { workspace = true }
+rollback = { workspace = true }

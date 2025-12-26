@@ -356,7 +356,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
 
                 pub unsafe fn hash_data(&self) -> u32 {
-                    ::crc32fast::hash(&::bincode::serialize(&self.data).unwrap()[..])
+                    let mut hasher = ::crc32fast::Hasher::new();
+                    self.data.hash(&mut hasher);
+                    hasher.finalize()
                 }
 
                 pub fn print_log(&mut self) {

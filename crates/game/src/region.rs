@@ -12,6 +12,7 @@ use borrow::RefCast;
 use crossbeam::channel::Sender;
 use log::{info, warn};
 use parley::{Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, StyleProperty};
+use rollback::PlayerKey;
 use winit::keyboard::{KeyCode, SmolStr};
 
 use crate::{
@@ -19,7 +20,7 @@ use crate::{
     data::{Ecs, GameData, Rollback, Undo},
     physics::PhysicsController,
     ClientUpdateEvent, Controller, GameDataUpdate, GameError, GameEvent, GameEventKind, RegionId,
-    INDUCED_LATENCY,
+    ServerPacket, INDUCED_LATENCY,
 };
 
 #[allow(unused)]
@@ -37,9 +38,8 @@ pub fn text_layout<'a>(fctx: &mut FontContext, text: &str) -> Layout<()> {
 /// its own tick rate separately from other regions.
 #[allow(unused)]
 pub struct Region {
-    pub event_log: VecDeque<GameEvent>,
-    pub data: Rollback,
-    pub next_game_event_id: usize,
+    event_log: VecDeque<GameEvent>,
+    data: Rollback,
     id: RegionId,
     input_buffer: BinaryHeap<Reverse<GameEvent>>,
     controllers: Vec<Box<dyn Controller>>,
@@ -55,17 +55,13 @@ impl Region {
         id: RegionId,
     ) -> Self {
         data.reinitialize(game_update_send);
-        // let hasher = ::crc32fast::Hasher::new();
-        // println!("{:?}", hasher.finish());
         Self {
             data,
             event_log: VecDeque::new(),
             input_buffer: BinaryHeap::new(),
             controllers: Vec::from([CameraController::new(), PhysicsController::new()]),
-            // font_context: FontContext::new(),
             id,
             synchronized: false,
-            next_game_event_id: 0,
         }
     }
 
@@ -96,7 +92,7 @@ impl Region {
                             }
 
                             // apply server event that was different from expected.
-                            self.handle_event(server_event.clone().0)?;
+                            self.handle_event(server_event.clone().0.kind)?;
                             self.data.forget();
 
                             // Remove the corresponding event from event log, it must
@@ -123,7 +119,7 @@ impl Region {
 
                             // TODO: if from other client, increase event id' as well as self.next_game_event_id
                             for event in &mut temp_log {
-                                self.handle_event(event.clone());
+                                self.handle_event(event.clone().kind);
                             }
                             self.event_log = temp_log;
                         } else {
@@ -144,10 +140,12 @@ impl Region {
     }
 
     /// Handle a client event.
-    pub fn handle_event(&mut self, event: GameEvent) -> Result<(), GameError> {
-        // println!("{:?}", event);
+    pub fn handle_event(&mut self, event: GameEventKind) -> Result<GameEvent, GameError> {
+        let event = GameEvent::new(event, *self.data.next_game_event_id, self.id);
         self.data.new_transaction();
-        match event.kind {
+        self.data.next_game_event_id.undo(|d, _| *d -= 1);
+        *self.data.next_game_event_id += 1;
+        match &event.kind {
             GameEventKind::Tick => {
                 for c in self.controllers.iter_mut() {
                     let data = self.data.as_refs_mut();
@@ -184,13 +182,13 @@ impl Region {
                 self.data.tick.undo(|d, _| *d -= 1);
                 *self.data.tick += 1;
             }
-            GameEventKind::PlayerWinitEvent(player_key, event) => {
+            GameEventKind::PlayerWinitEvent(player_key, player_event) => {
                 let data: &mut GameData = self.data.deref_mut();
                 if let Some((p, e)) = data.players.iter().next() {
                     let e = e.clone();
                     let mut players = data.ecs.player.delayed_undo();
                     let p = players.get_mut(e);
-                    if let Some(undo_func) = p.input.update(event) {
+                    if let Some(undo_func) = p.input.update(player_event.clone()) {
                         players.undo(move |player, _| {
                             let p = &mut player.get_mut(e).input;
                             undo_func(p);
@@ -200,6 +198,33 @@ impl Region {
             }
             GameEventKind::Quit => return Err(GameError::QuitRequested),
         }
-        Ok(())
+        self.event_log.push_back(event.clone());
+        Ok(event)
+    }
+
+    pub fn build_region_server_packet(&self, region_id: usize, player: PlayerKey) -> ServerPacket {
+        ServerPacket::Region(region_id, self.data.clone(), player)
+    }
+
+    pub fn current_tick(&self) -> usize {
+        *self.data.tick
+    }
+
+    pub fn data(&self) -> &Rollback {
+        &self.data
+    }
+
+    pub fn create_basic(&mut self, create_player: bool) -> Option<PlayerKey> {
+        let p = if create_player {
+            Some(self.data.create_player_safe())
+        } else {
+            None
+        };
+        self.data.create_mesh();
+        p
+    }
+
+    pub fn forget_last_event(&mut self) {
+        self.data.forget();
     }
 }

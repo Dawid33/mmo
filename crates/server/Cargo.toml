@@ -3,9 +3,13 @@ name = "server"
 version = "0.1.0"
 edition = "2021"
 
+[target.x86_64-unknown-linux-gnu]
+linker = "/usr/bin/clang"
+rustflags = ["-C", "link-arg=--ld-path=/usr/bin/mold"]
+
 [dependencies]
 game = { workspace = true }
-slotmapd = { path = "../slotmapd", features = ["serde"] }
+slotmapd = { workspace = true }
 crossbeam = { workspace = true }
 simplelog = { workspace = true }
 log = { workspace = true }
@@ -15,5 +19,5 @@ tokio = { workspace = true }
 rcgen = { workspace = true }
 dashmap = { workspace = true }
 papaya = { workspace = true }
-# pyroscope = { workspace = true }
-# pyroscope_pprofrs = { workspace = true }
+pyroscope = { workspace = true, optional = true }
+pyroscope_pprofrs = { workspace = true, optional = true }

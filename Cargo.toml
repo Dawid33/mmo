@@ -5,26 +5,16 @@ members = [
   "crates/game",
   "crates/macros",
   "crates/rollback",
-  "crates/server",   #"crates/rusqlite"
+  "crates/server",
+  "crates/worldgen",
 ]
-
-[profile.wasm-release]
-# Default to release profile values.
-inherits = "release"
-# Optimize with size in mind (also try "z", sometimes it is better).
-# Slightly slows compile times, great improvements to file size and runtime performance.
-opt-level = "s"
-# Strip all debugging information from the binary to slightly reduce file size.
-strip = "debuginfo"
-lto = true
-codegen-units = 1
 
 [profile.dev]
 opt-level = 1
 
 # Enable a large amount of optimization in the dev profile for dependencies.
 [profile.dev.package."*"]
-opt-level = 3
+opt-level = 1
 
 [workspace.dependencies]
 block-mesh = { path = "crates/block-mesh", default-features = false }
@@ -37,6 +27,7 @@ crossbeam = { version = "0.8.4", features = [
   "crossbeam-channel",
 ], default-features = false }
 serde = { version = "1.0.216", features = ["derive"], default-features = false }
+miniserde = { version = "0.1.44", default-features = false }
 parley = { version = "0.5.0", features = ["std"], default-features = false }
 bytemuck = { version = "1.23.2", default-features = false }
 winit = { version = "0.30.12", features = [
@@ -58,7 +49,7 @@ crc32fast = { version = "1.5.0", default-features = false }
 simplelog = { version = "0.12.2", default-features = false }
 pollster = { version = "0.4", default-features = false }
 vello = { version = "0.6.0", features = ["wgpu"], default-features = false }
-quinn = { version = "0.11.6", default-features = false }
+quinn = { version = "0.11.6", features = ["rustls-ring", "runtime-tokio"], default-features = false }
 tokio = { version = "1.42.0", features = [
   "rt-multi-thread",
 ], default-features = false }
@@ -81,8 +72,8 @@ dashmap = { version = "6.1.0", default-features = false }
 papaya = { version = "0.2.3", default-features = false }
 serde_json = "1.0.93"
 assert-json-diff = "=2.0.2"
-pyroscope = "0.5.8"
-pyroscope_pprofrs = "0.2.10"
+pyroscope = { version = "0.5.8" }
+pyroscope_pprofrs = { version = "0.2.10" }
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 ordered-float = { path = "crates/ordered-float", default-features = false, features = [
   "serde", "bytemuck", "spade"
@@ -93,7 +84,8 @@ nalgebra = { path = "crates/nalgebra", default-features = false, features = [
   "convert-bytemuck",
   "serde-serialize",
   "std",
-  "macros"
+  "macros",
+  "libm"
 ] }
 simba = { path = "crates/simba", default-features = false, features = [
   "libm_force",
@@ -104,3 +96,8 @@ ordermap = { version = "1.0.0", features = ["serde"] }
 hashbrown = { version = "0.16", default-features = false, features = [
   "default-hasher",
 ] }
+parry3d = { path = "crates/parry/crates/parry3d" }
+rapier3d = { path = "crates/rapier/crates/rapier3d", features = ["enhanced-determinism"] }
+slotmapd = {path = "crates/slotmapd"}
+num-traits = { version = "0.2.11" }
+rollback = {path = "crates/rollback"}

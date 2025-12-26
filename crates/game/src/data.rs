@@ -2,45 +2,46 @@ use std::collections::BTreeSet;
 use std::ops::{BitAndAssign, DerefMut};
 
 use crate::input::WinitInput;
-use crate::mesh::{Chunk, VoxelType};
+use crate::mesh::Chunk;
 use crate::na::{
     Complex, ComplexField, Isometry3, Matrix4, OPoint, Perspective3, Point3, Quaternion, RealField,
     Rotation, Rotation3, Translation3, Unit, Vector3, Vector4,
 };
-use crate::parry::math::HashableReal;
-use crate::rapier::math::{Real, Vector};
-use crate::rapier::prelude::{
+use na::Translation;
+use rapier3d::math::Vector;
+use rapier3d::prelude::{
     CCDSolver, ColliderSet, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters,
     IslandManager, LockedAxes, MultibodyJointSet, NarrowPhase, QueryPipeline, RigidBodyBuilder,
     RigidBodyHandle, RigidBodySet,
 };
-use crate::taffy::style::BlockItemStyle;
-use crate::taffy::TaffyTree;
-use crate::{ChunkMesh, ClientUpdateEvent};
-use crate::{GameDataTransactionKind, GameDataUpdate, GameError, IsometryReal, RegionId, Usize};
+use rollback::{
+    rollback, EntityKey, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, IsometryReal,
+    PlayerKey,
+};
+// use crate::taffy::style::BlockItemStyle;
+// use crate::taffy::TaffyTree;
+use crate::ClientUpdateEvent;
+use crate::{GameError, RegionId, Usize};
 use borrow::Partial;
 use crossbeam::channel::Sender;
 pub use game_data::*;
 use log::info;
-use rollback::rollback;
+use parry3d::math::Real;
 use slotmapd::secondary::Iter;
 use slotmapd::{new_key_type, Key, KeyData, SecondaryMap, SlotMap, SparseSecondaryMap};
 use winit::keyboard::KeyCode;
 
-new_key_type! { pub struct EntityKey; }
-new_key_type! { pub struct PlayerKey; }
-
 #[derive(Debug, Default, Clone)]
 pub struct UIElement {
-    style: crate::taffy::Style,
+    // style: crate::taffy::Style,
     content: Option<String>,
 }
 
-#[derive(Debug, rollback::serde::Serialize, rollback::serde::Deserialize, Clone, Partial, Hash)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Partial, Hash)]
 #[module(crate)]
 pub struct Camera {
-    pub opengl_to_wgpu_matrix: Matrix4<HashableReal>,
-    pub proj_matrix: Perspective3<HashableReal>,
+    pub opengl_to_wgpu_matrix: Matrix4<Real>,
+    pub proj_matrix: Perspective3<Real>,
     pub view_matrix: Option<RigidBodyHandle>,
 }
 
@@ -60,8 +61,7 @@ mod game_data {
         ecs: Ecs,
         physics: PhysicsState,
         tick: usize,
-        // menu: TaffyTree<()>,
-        // gui: TaffyTree<()>,
+        next_game_event_id: usize,
         players: SlotMap<PlayerKey, EntityKey>,
     }
 
@@ -180,12 +180,13 @@ where
 impl Rollback {
     pub fn create_mesh(&mut self) -> EntityKey {
         let e = self.ecs.create_entity_safe();
-
         let mut chunk = Chunk::default();
-        // for x in &mut chunk.voxels {
-        //     *x = VoxelType::Blue;
-        // }
         self.ecs.chunk.set_safe(e, Some(chunk));
+        let position = IsometryReal::from_parts(
+            Translation3::new(Real::from(0.0), Real::from(1.0), Real::from(5.0)),
+            Unit::<Quaternion<Real>>::identity(),
+        );
+        self.ecs.isometry.set_safe(e, Some(position));
         e
     }
 

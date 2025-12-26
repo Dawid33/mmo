@@ -4,20 +4,23 @@ use std::{
     sync::Arc,
 };
 
+use block_mesh::{
+    greedy_quads, GreedyQuadsBuffer, MergeVoxel, VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG,
+};
+use bytemuck::NoUninit;
 use crossbeam::{channel::Receiver, utils::Backoff};
 use derive_more::Debug;
 use game::{
     na::{Matrix4, Perspective3},
-    parry::math::HashableReal,
     parry::math::Real,
+    ChunkShape, VoxelType,
 };
-use game::{
-    ChunkMesh, EntityId, EntityKey, GameData, GameDataUpdate, IsometryReal, RegionId, UIElement,
-    ASPECT,
-};
+use game::{EntityId, GameData, RegionId, UIElement, ASPECT};
 use log::info;
+use ndshape::ConstShape;
 use parley::LayoutContext;
 use rand::seq::IndexedRandom;
+use rollback::{EntityKey, GameDataUpdate, IsometryReal, Voxel};
 // use vello::{
 //     kurbo::{self, Affine, Rect},
 //     peniko::{
@@ -45,6 +48,83 @@ use crate::{
     state::{DepthTexture, UITexture},
 };
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, NoUninit)]
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub tex_coord: [f32; 2],
+    pub color: [f32; 3],
+}
+
+impl Vertex {
+    const ATTRIBS: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x3];
+
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Vertex::ATTRIBS,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ChunkMesh {
+    buffer: GreedyQuadsBuffer,
+    pub indices: Vec<u32>,
+    pub vertices: Vec<Vertex>,
+    pub normals: Vec<[f32; 3]>,
+}
+
+impl ChunkMesh {
+    pub fn new(data: &Vec<Voxel>) -> Self {
+        let mut buffer = GreedyQuadsBuffer::new(data.len());
+        greedy_quads(
+            &data,
+            &ChunkShape {},
+            [0; 3],
+            [31, 31, 31],
+            &RIGHT_HANDED_Y_UP_CONFIG.faces,
+            &mut buffer,
+        );
+        let num_indices = buffer.quads.num_quads() * 6;
+        let num_vertices = buffer.quads.num_quads() * 4;
+        let mut indices = Vec::with_capacity(num_indices);
+        let mut vertices = Vec::with_capacity(num_vertices);
+        let mut normals = Vec::with_capacity(num_vertices);
+        for (group, face) in buffer
+            .quads
+            .groups
+            .iter()
+            .zip(RIGHT_HANDED_Y_UP_CONFIG.faces.into_iter())
+        {
+            let quad_tex_coords = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+            for quad in group.into_iter() {
+                indices.extend_from_slice(&face.quad_mesh_indices(vertices.len() as u32));
+                for (i, position) in face.quad_mesh_positions(&quad, 1.0).iter().enumerate() {
+                    vertices.push(Vertex {
+                        position: *position,
+                        color: [0.0, 0.0, 0.0],
+                        tex_coord: [
+                            quad_tex_coords[i][0] * quad.width as f32,
+                            quad_tex_coords[i][1] * quad.height as f32,
+                        ],
+                    });
+                }
+                normals.extend_from_slice(&face.quad_mesh_normals());
+            }
+        }
+
+        Self {
+            buffer,
+            indices,
+            vertices,
+            normals,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum RenderEntityType {
     UIElement(UIElement),
@@ -61,7 +141,7 @@ impl Default for RenderEntityType {
 pub struct RenderEntity {
     kind: RenderEntityType,
     position: Option<IsometryReal>,
-    camera: Option<(Perspective3<HashableReal>, IsometryReal)>,
+    camera: Option<(Perspective3<Real>, IsometryReal)>,
     voxel_mesh: Option<ChunkMesh>,
 }
 
@@ -171,7 +251,7 @@ impl GpuData {
         &mut self,
         region: RegionId,
         entity_key: EntityKey,
-        view_proj: Perspective3<HashableReal>,
+        view_proj: Perspective3<Real>,
         view_matrix: IsometryReal,
     ) -> (wgpu::Buffer, wgpu::Buffer, wgpu::BindGroup, IsometryReal) {
         let proj_matrix = self
@@ -359,10 +439,10 @@ impl RenderWorld {
                             window.set_cursor_grab(CursorGrabMode::None);
                         }
                     }
-                    game::GameDataUpdateKind::CreateUIElement(default_key, uielement, isometry) => {
-                        todo!()
-                    }
-                    game::GameDataUpdateKind::SetUIElementStyle(default_key, style) => todo!(),
+                    // game::GameDataUpdateKind::CreateUIElement(default_key, uielement, isometry) => {
+                    //     todo!()
+                    // }
+                    // game::GameDataUpdateKind::SetUIElementStyle(default_key, style) => todo!(),
                     game::GameDataUpdateKind::SetUIElementContent(default_key, _) => todo!(),
                     game::GameDataUpdateKind::RemoveUIElement(default_key) => todo!(),
                     game::GameDataUpdateKind::SetVoxelComponent(entity_key, voxel) => {

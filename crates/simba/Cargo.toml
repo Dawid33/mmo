@@ -15,11 +15,11 @@ edition = "2018"
 maintenance = { status = "actively-developed" }
 
 [features]
-default = ["std", "libm_force"]
+default = ["std", "libm_force", "serde_serialize"]
 std = ["wide/std"]
 portable_simd = ["std"]
 partial_fixed_point_support = ["fixed", "cordic"]
-serde_serialize = ["serde", "fixed/serde"]
+serde_serialize = ["fixed/serde"]
 rkyv-serialize = ["rkyv"]
 libm = ["num-traits/libm"]
 
@@ -33,7 +33,7 @@ fixed = { version = "1", optional = true }
 cordic = { version = "0.1", optional = true }
 paste = "1.0"
 rand = { version = "0.8", optional = true }
-serde = { version = "1", default-features = false, optional = true }
+serde = { workspace = true }
 rkyv = { version = "0.7", optional = true }
 libm_force = { package = "libm", version = "0.2", optional = true }
 ordered-float = { workspace = true }

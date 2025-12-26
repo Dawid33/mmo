@@ -1,8 +1,9 @@
 use std::{any::TypeId, collections::BTreeMap, path::PathBuf, time::Duration};
 
-use crate::{data::PlayerKey, GameData, GameDataUpdate, Rollback};
+use crate::Rollback;
 use derive_more::Debug;
 use log::info;
+use rollback::{GameDataUpdate, GameDataUpdateKind, PlayerKey};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::{
@@ -56,7 +57,7 @@ pub enum ServerPacket {
     GameEvent(GameEvent),
     // TODO: Create player serverside and add player id here to let client know
     // who he is.
-    Region(RegionId, Rollback, LastGameEventId, PlayerKey),
+    Region(RegionId, Rollback, PlayerKey),
 }
 
 /// A Game event
