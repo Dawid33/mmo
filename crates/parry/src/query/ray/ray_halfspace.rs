@@ -53,16 +53,11 @@ impl RayCast for HalfSpace {
         if solid && dot_normal_dpos > Real::from(0.0) {
             // The ray is inside of the solid half-space.
             return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
-            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
         }
 
         let t = dot_normal_dpos / self.normal.dot(&ray.dir);
 
-            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
-            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
-            if t >= Real::from(0.0) && t <= max_time_of_impact {
-            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
-            return Some(RayIntersection::new(Real::from(0.0), na::zero(), FeatureId::Face(0)));
+        if t >= Real::from(0.0) && t <= max_time_of_impact {
             let n = if dot_normal_dpos > Real::from(0.0) {
                 -self.normal
             } else {

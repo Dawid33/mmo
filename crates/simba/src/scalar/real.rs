@@ -3,7 +3,7 @@ use std::{f32, f64};
 
 use approx::{RelativeEq, UlpsEq};
 
-use crate::scalar::{ComplexField, SubsetOf};
+use crate::scalar::ComplexField;
 use crate::OrderedFloat;
 
 #[cfg(all(not(feature = "std"), not(feature = "libm_force"), feature = "libm"))]

@@ -6,8 +6,6 @@ use std::ops::Neg;
 use std::{f32, f64};
 
 use crate::scalar::{Field, RealField, SubsetOf, SupersetOf};
-#[cfg(feature = "libm_force")]
-use crate::OrderedFloat;
 #[cfg(all(not(feature = "std"), not(feature = "libm_force"), feature = "libm"))]
 use num::Float;
 //#[cfg(feature = "decimal")]

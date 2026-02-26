@@ -1,5 +1,5 @@
 use crate::bounding_volume::Aabb;
-use crate::math::{Point, Real, RawReal, Vector, DIM};
+use crate::math::{Point, Real, Vector, DIM};
 use crate::query::Ray;
 use crate::shape::Segment;
 use num::{Bounded, Zero};
@@ -188,6 +188,7 @@ pub fn clip_aabb_line(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::math::{RawReal};
 
     #[test]
     pub fn clip_empty_aabb_line() {

@@ -1,9 +1,5 @@
 use std::{fmt::Debug, ops::DerefMut, sync::Arc, time::Instant};
 
-use crate::data::Camera;
-use parry3d::math::Real;
-use rapier3d::math::Vector;
-use rapier3d::prelude::RigidBodyHandle;
 use assert_json_diff::{CompareMode, Config};
 use borrow::PartialHelper;
 use crossbeam::channel::Sender;
@@ -15,88 +11,25 @@ use na::{
 };
 use ordered_float::OrderedFloat;
 use parley::swash::shape::Direction;
+use parry3d::math::Real;
+use rapier3d::math::Vector;
+use rapier3d::prelude::RigidBodyHandle;
+use rollback::Camera;
 use winit::event::MouseButton;
 
-use crate::{data::Undo, ClientPacket, ClientUpdateEvent, Controller, GameData, GameDataUpdate};
-
-pub const ASPECT: f32 = (16 / 9) as f32;
-
-impl Camera {
-    pub fn new(handle: RigidBodyHandle) -> Self {
-        let m = Matrix4::from_columns(&[
-            Vector4::new(
-                OrderedFloat(1.0),
-                OrderedFloat(0.0),
-                OrderedFloat(0.0),
-                OrderedFloat(0.0),
-            ),
-            Vector4::new(
-                OrderedFloat(0.0),
-                OrderedFloat(1.0),
-                OrderedFloat(0.0),
-                OrderedFloat(0.0),
-            ),
-            Vector4::new(
-                OrderedFloat(0.0),
-                OrderedFloat(0.0),
-                OrderedFloat(0.5),
-                OrderedFloat(0.0),
-            ),
-            Vector4::new(
-                OrderedFloat(0.0),
-                OrderedFloat(0.0),
-                OrderedFloat(0.5),
-                OrderedFloat(1.0),
-            ),
-        ]);
-        Camera {
-            proj_matrix: Perspective3::from_matrix_unchecked(
-                Perspective3::new(
-                    OrderedFloat(ASPECT),
-                    OrderedFloat(90.0),
-                    OrderedFloat(0.1),
-                    OrderedFloat(100.0),
-                )
-                .as_matrix()
-                    * m,
-            ),
-            opengl_to_wgpu_matrix: m,
-            view_matrix: Some(handle),
-        }
-    }
-}
-
-impl Camera {
-    pub fn build_projection(&self) -> Matrix4<crate::Real> {
-        *self.proj_matrix.as_matrix()
-    }
-}
-
-impl Default for Camera {
-    fn default() -> Self {
-        Self {
-            opengl_to_wgpu_matrix: Default::default(),
-            proj_matrix: Perspective3::new(
-                OrderedFloat(ASPECT),
-                OrderedFloat(90.0),
-                OrderedFloat(0.1),
-                OrderedFloat(100.0),
-            ),
-            view_matrix: Default::default(),
-        }
-    }
-}
+use crate::{ClientPacket, ClientUpdateEvent, Controller, GameData, GameDataUpdate};
+use rollback::Undo;
 
 pub struct CameraController {}
 
 impl Controller for CameraController {
     fn on_tick<'a>(&mut self, data: &mut Undo<GameData>) {
         let data = data.as_refs_mut();
-        for (p, e_id) in data.players.iter() {
+        for (client_id, e_id) in data.player_entites.iter() {
             let e_id = *e_id;
             let ecs = data.ecs.as_refs_mut();
-            let p = ecs.player.get_mut(e_id);
-            if let Some(resolution) = p.input.window_resized() {
+            let client = data.clients.get_mut(client_id).unwrap();
+            if let Some(resolution) = client.input.window_resized() {
                 let old = ecs.camera.get(e_id).proj_matrix.clone();
                 ecs.camera.undo(move |d, s| {
                     s.send(GameDataUpdate::new(
@@ -116,7 +49,7 @@ impl Controller for CameraController {
                 ));
             }
 
-            if !p.fps_cam_mode {
+            if !client.fps_cam_mode {
                 continue;
             }
 
@@ -126,25 +59,28 @@ impl Controller for CameraController {
             let mut linvel = Vector::zeros();
             const SPEED: Real = OrderedFloat(5.0);
 
-            if p.input.key_held(&winit::keyboard::KeyCode::KeyW) {
+            if client.input.key_held(&winit::keyboard::KeyCode::KeyW) {
                 linvel.z = Real::from(-0.1) * SPEED
             }
-            if p.input.key_held(&winit::keyboard::KeyCode::KeyS) {
+            if client.input.key_held(&winit::keyboard::KeyCode::KeyS) {
                 linvel.z = Real::from(0.1) * SPEED
             }
-            if p.input.key_held(&winit::keyboard::KeyCode::KeyA) {
+            if client.input.key_held(&winit::keyboard::KeyCode::KeyA) {
                 linvel.x = Real::from(-0.1) * SPEED
             }
-            if p.input.key_held(&winit::keyboard::KeyCode::KeyD) {
+            if client.input.key_held(&winit::keyboard::KeyCode::KeyD) {
                 linvel.x = Real::from(0.1) * SPEED
             }
             let mut linvel = rotation.transform_vector(&linvel);
             linvel.y = Real::from(0.0);
 
-            if p.input.key_held(&winit::keyboard::KeyCode::Space) {
+            if client.input.key_held(&winit::keyboard::KeyCode::Space) {
                 linvel.y = Real::from(0.1) * SPEED
             }
-            if p.input.key_held(&winit::keyboard::KeyCode::ControlLeft) {
+            if client
+                .input
+                .key_held(&winit::keyboard::KeyCode::ControlLeft)
+            {
                 linvel.y = Real::from(-0.1) * SPEED
             }
             if linvel != Vector3::zeros() {
@@ -169,7 +105,7 @@ impl Controller for CameraController {
             let b = data.physics.bodies.get_mut(handle).unwrap();
             let rotation = b.next_position().rotation.clone();
             let mut r = b.rotation().clone();
-            let diff = p.input.mouse_diff();
+            let diff = client.input.mouse_diff();
             const SENSITIVITIY: f32 = 0.001;
             if diff.0.abs() > 2.0 {
                 if !diff.0.is_nan() {

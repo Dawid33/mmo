@@ -3,10 +3,10 @@
 // #![deny(missing_docs)]
 use crate::window::App;
 use crossbeam::{
-    channel::{Receiver, Sender},
+    channel::{Receiver, RecvError, Sender},
     select,
 };
-use game::na::Perspective3;
+use game::{na::Perspective3, ChunkCoords, ClientId, RegionId, Rollback, ServerPacket};
 use game::{
     ClientPacket, ClientUpdateEvent, EntityKey, GameDataTransactionKind, GameDataUpdate, GameError,
     GameEvent, GameEventKind, PlayerKey, Region, INDUCED_LATENCY,
@@ -16,6 +16,7 @@ use rapier3d::math::Isometry;
 use simplelog::{FormatItem, SimpleLogger};
 use std::{
     collections::BTreeMap,
+    error::Error,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     ops::Deref,
     sync::{
@@ -44,6 +45,16 @@ pub struct GameInstanceManager {
     game_event_recv: Receiver<GameEventKind>,
     client_event_send: Sender<ClientUpdateEvent>,
     server: SocketAddr,
+
+    server_game_send: Sender<ClientPacket>,
+    server_game_recv: Receiver<ClientPacket>,
+    world: Option<game::World>,
+    buffer: Vec<GameEvent>,
+    tick_rate: Arc<AtomicU64>,
+    ready: bool,
+    is_caught_up: bool,
+    client_id: Option<ClientId>,
+    player_chunk: Option<ChunkCoords>,
 }
 
 impl GameInstanceManager {
@@ -60,11 +71,21 @@ impl GameInstanceManager {
         client_event_send: Sender<ClientUpdateEvent>,
         server: SocketAddr,
     ) -> Self {
+        let (server_game_send, server_game_recv) = crossbeam::channel::unbounded();
         Self {
             game_event_recv,
             game_event_send,
             client_event_send,
             server,
+            world: None,
+            buffer: Vec::new(),
+            tick_rate: Arc::new(AtomicU64::new(game::TICK_RATE)),
+            ready: false,
+            is_caught_up: false,
+            server_game_send,
+            server_game_recv,
+            client_id: None,
+            player_chunk: None,
         }
     }
 
@@ -87,8 +108,7 @@ impl GameInstanceManager {
     /// and update tick time.
     pub fn connect_and_run(&mut self) -> Result<(), GameError> {
         let tick_sender = self.game_event_send.clone();
-        let tick_rate = Arc::new(AtomicU64::new(game::TICK_RATE));
-        let tick_thread_tick_rate = tick_rate.clone();
+        let tick_thread_tick_rate = self.tick_rate.clone();
         // Generate ticks
         std::thread::spawn(move || loop {
             // TODO: Sync ticks with server.
@@ -100,8 +120,8 @@ impl GameInstanceManager {
         });
 
         let (server_send, server_recv) = crossbeam::channel::unbounded();
-        let (server_game_send, server_game_recv) = crossbeam::channel::unbounded();
-        let mut conn = netcode::ServerConnection::new(server_send, server_game_recv, self.server);
+        let mut conn =
+            netcode::ServerConnection::new(server_send, self.server_game_recv.clone(), self.server);
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -110,76 +130,23 @@ impl GameInstanceManager {
             rt.block_on(async { conn.connect_and_handle().await.unwrap() });
         });
 
-        server_game_send
-            .send(game::ClientPacket::RequestRegion)
+        self.server_game_send
+            .send(ClientPacket::RequestPlayerRegion)
             .unwrap();
 
-        let mut world: Option<game::World> = None;
         let mut now = Instant::now();
-        let mut ready = false;
-        let mut is_caught_up = false;
-        let mut buffer = Vec::new();
         let mut results_buffer = BTreeMap::new();
         loop {
             select! {
                 // Recieve and handle server packets.
                 recv(server_recv) -> server_msg => {
-                    match server_msg.unwrap() {
-                        game::ServerPacket::SyncClock(region_id, server_tick_rate, server_tick, rtt) => {
-                            if let Some(ref mut world) = world {
-                                let client_tick = world.current_tick(&region_id);
-                                let diff: isize = client_tick as isize - server_tick as isize;
-                                // this is how far behind the server is
-                                let milisecond_diff = diff * server_tick_rate as isize;
-                                // we subract the rtt to get a more accurate approximation of how far behind the server is.
-                                let total_mili_diff = milisecond_diff - rtt.as_millis() as isize;
-
-                                if total_mili_diff < INDUCED_LATENCY {
-                                    ready = false;
-                                    tick_rate.store((server_tick_rate as f32 * 0.9) as u64, Ordering::SeqCst);
-                                } else if total_mili_diff > INDUCED_LATENCY {
-                                    ready = true;
-                                    tick_rate.store((server_tick_rate as f32 * 1.1) as u64, Ordering::SeqCst);
-                                } else {
-                                    ready = true;
-                                    tick_rate.store(server_tick_rate, Ordering::SeqCst);
-                                }
-                            }
-                        },
-                        game::ServerPacket::GameEvent(game_event) => {
-                            if let Some(ref mut world) = world {
-                                for event in buffer.drain(..) {
-                                    match world.reconcile_event(event) {
-                                        Ok(_) => (),
-                                        Err(e) => {warn!("Failed in catch up. {:?}", e); return Err(e)},
-                                    };
-                                }
-                                match world.reconcile_event(game_event) {
-                                    Ok(_) => (),
-                                    Err(e) => {warn!("{:?}", e); return Err(e)},
-                                };
-                                is_caught_up = true;
-                            } else {
-                                buffer.push(game_event);
-                                is_caught_up = false;
-                            }
-                        }
-                        game::ServerPacket::Region(id, mut raw_game_data, key) => {
-                            self.client_event_send.send(ClientUpdateEvent::SetPlayer(key));
-                            let (send, recv) = crossbeam::channel::unbounded();
-                            let mut data = Region::new(raw_game_data.clone(), Some(send), id);
-                            self.client_event_send.send(ClientUpdateEvent::NewRegion(id, (*raw_game_data.data).clone(), recv)).unwrap();
-                            let mut w = game::World::new();
-                            w.load(&id, data);
-                            world = Some(w);
-                            info!("Region recieved and loaded!");
-                        }
-                    }
+                    self.handle_server(server_msg);
                 },
                 // Recieve client game events from either the player or from
                 // client-side game tick timer.
                 recv(self.game_event_recv) -> game_event => {
-                    if let Some(ref mut world) = world {
+                    // TODO: Check if client needs to request more chunks to be loaded.
+                    if let Some(ref mut world) = self.world {
                          match game_event.clone() {
                             Ok(event) => {
                                 match event {
@@ -187,7 +154,7 @@ impl GameInstanceManager {
                                     e => {
                                         if let GameEventKind::PlayerWinitEvent(_,_) = e {
                                             // don't handle player events until sim has caught up with server.
-                                            if !ready && is_caught_up {
+                                            if !self.ready && self.is_caught_up {
                                                 continue;
                                             }
                                         }
@@ -195,9 +162,11 @@ impl GameInstanceManager {
                                             GameEventKind::Tick => {
                                                 world.progress_world_one_tick(&mut results_buffer);
                                             },
-                                            GameEventKind::Quit | GameEventKind::PlayerWinitEvent(_, _) => {
-                                                let event = world.handle_region_event(game_event.unwrap(), 0)?;
-                                                server_game_send.send(game::ClientPacket::GameEvent(event)).unwrap();
+                                            GameEventKind::Quit | GameEventKind::PlayerWinitEvent(_, _) | GameEventKind::CreateClient(_) => {
+                                                if let Some(chunk) = self.player_chunk {
+                                                    let event = world.handle_region_event(game_event.unwrap(), chunk)?;
+                                                    self.server_game_send.send(game::ClientPacket::GameEvent(event)).unwrap();
+                                                }
                                             },
                                         }
                                     }
@@ -209,6 +178,104 @@ impl GameInstanceManager {
                 }
             }
         }
+    }
+
+    pub fn handle_server(
+        &mut self,
+        server_msg: Result<ServerPacket, RecvError>,
+    ) -> Result<(), GameError> {
+        let new_region =
+            |id: RegionId, mut raw_game_data: Rollback, world: &mut Option<game::World>| {
+                let (send, recv) = crossbeam::channel::unbounded();
+                let mut data = Region::new(raw_game_data.clone(), Some(send), id);
+                self.client_event_send
+                    .send(ClientUpdateEvent::NewRegion(
+                        id,
+                        (*raw_game_data.data).clone(),
+                        recv,
+                    ))
+                    .unwrap();
+                if let Some(ref mut w) = world {
+                    w.load(&id, data);
+                } else {
+                    let mut w = game::World::new();
+                    w.load(&id, data);
+                    *world = Some(w);
+                }
+                info!("Region recieved and loaded!");
+            };
+
+        match server_msg.unwrap() {
+            game::ServerPacket::SyncClock(region_id, server_tick_rate, server_tick, rtt) => {
+                if let Some(ref mut world) = self.world {
+                    let client_tick = world.current_tick(&region_id);
+                    let diff: isize = client_tick as isize - server_tick as isize;
+                    // this is how far behind the server is
+                    let milisecond_diff = diff * server_tick_rate as isize;
+                    // we subract the rtt to get a more accurate approximation of how far behind the server is.
+                    let total_mili_diff = milisecond_diff - rtt.as_millis() as isize;
+
+                    if total_mili_diff < INDUCED_LATENCY {
+                        self.ready = false;
+                        self.tick_rate
+                            .store((server_tick_rate as f32 * 0.9) as u64, Ordering::SeqCst);
+                    } else if total_mili_diff > INDUCED_LATENCY {
+                        self.ready = true;
+                        self.tick_rate
+                            .store((server_tick_rate as f32 * 1.1) as u64, Ordering::SeqCst);
+                    } else {
+                        self.ready = true;
+                        self.tick_rate.store(server_tick_rate, Ordering::SeqCst);
+                    }
+                }
+            }
+            game::ServerPacket::GameEvent(game_event) => {
+                if let Some(ref mut world) = self.world {
+                    for event in self.buffer.drain(..) {
+                        match world.reconcile_event(event) {
+                            Ok(_) => (),
+                            Err(e) => {
+                                warn!("Failed in catch up. {:?}", e);
+                                return Err(e);
+                            }
+                        };
+                    }
+                    match world.reconcile_event(game_event) {
+                        Ok(_) => (),
+                        Err(e) => {
+                            warn!("{:?}", e);
+                            return Err(e);
+                        }
+                    };
+                    self.is_caught_up = true;
+                } else {
+                    self.buffer.push(game_event);
+                    self.is_caught_up = false;
+                }
+            }
+            game::ServerPacket::PlayerRegion(id, client_id) => {
+                self.client_event_send
+                    .send(ClientUpdateEvent::SetPlayer(client_id));
+
+                let id = id.unwrap_or(ChunkCoords::new(0, 0, 0));
+                self.client_id = Some(client_id);
+                self.player_chunk = Some(id);
+                self.server_game_send
+                    .send(ClientPacket::RequestRegionConnection(id))
+                    .unwrap();
+            }
+            game::ServerPacket::Region(id, mut raw_game_data) => {
+                new_region(id, raw_game_data, &mut self.world);
+                if let Some(player_chunk) = self.player_chunk {
+                    if id == player_chunk && self.client_id.is_some() {
+                        self.game_event_send
+                            .send(GameEventKind::CreateClient(self.client_id.unwrap()))
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 

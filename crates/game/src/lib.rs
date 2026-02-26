@@ -18,7 +18,10 @@ use borrow::AsRefsHelper;
 use crossbeam::channel::Sender;
 use ordered_float::OrderedFloat;
 use rollback::rollback;
-use slotmapd::{new_key_type, DefaultKey};
+use slotmapd::{
+    basic::{Iter, Keys},
+    new_key_type, DefaultKey,
+};
 use std::{
     any::{Any, TypeId},
     collections::BTreeMap,
@@ -31,22 +34,21 @@ use std::{
 };
 
 mod camera;
-mod common;
 mod data;
-mod input;
 mod mesh;
 mod physics;
 mod region;
 pub use parry3d as parry;
 
-pub use crate::camera::ASPECT;
-pub use crate::data::{GameData, Rollback, UIElement, Undo};
-pub use crate::mesh::ChunkShape;
 use na::{Matrix4, Matrix4x2, Perspective3, RealField};
 use parry3d::math::Real;
 use rapier3d::prelude::{RigidBody, RigidBodyHandle};
+pub use rollback::common::*;
+use rollback::input::WinitInput;
+pub use rollback::{ChunkCoords, ChunkShape, GameData, Rollback, Undo, ASPECT};
 pub use rollback::{
-    EntityKey, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, PlayerKey, VoxelType,
+    ClientId, EntityKey, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, PlayerKey,
+    VoxelType,
 };
 
 pub const TICK_RATE: u64 = 50;
@@ -55,15 +57,14 @@ pub const INDUCED_LATENCY: isize = 0;
 #[derive(Debug)]
 pub enum ClientUpdateEvent {
     NewRegion(
-        usize,
+        RegionId,
         GameData,
         crossbeam::channel::Receiver<GameDataUpdate>,
     ),
     GameCrash(GameError),
-    SetPlayer(PlayerKey),
+    SetPlayer(ClientId),
 }
 
-pub use common::*;
 use log::info;
 pub use region::Region;
 
@@ -72,7 +73,7 @@ trait Controller {
 }
 
 pub struct World {
-    regions: BTreeMap<usize, Region>,
+    pub regions: BTreeMap<ChunkCoords, Region>,
 }
 
 impl World {
@@ -82,35 +83,36 @@ impl World {
         };
     }
 
-    pub fn editor() -> (Self, PlayerKey) {
-        let mut data = Region::new(Rollback::new(None), None, 0);
-        let key = data.create_basic(true).unwrap();
-        let mut second = Region::new(Rollback::new(None), None, 1);
-        second.create_basic(false);
-        return (
-            Self {
-                regions: BTreeMap::from([(0, data), (1, second)]),
-            },
-            key,
-        );
+    pub fn basic() -> Self {
+        let one = ChunkCoords::new(0, 0, 0);
+        let mut data = Region::new(Rollback::new(None), None, one);
+        let key = data.create_basic(one);
+
+        return Self {
+            regions: BTreeMap::from([(one, data)]),
+        };
     }
 
-    pub fn current_tick(&self, id: &usize) -> usize {
+    pub fn current_tick(&self, id: &RegionId) -> usize {
         self.regions.get(id).unwrap().current_tick()
     }
 
-    pub fn data(&self, id: &usize) -> &Rollback {
+    pub fn region_exists(&self, id: &RegionId) -> bool {
+        self.regions.contains_key(id)
+    }
+
+    pub fn data(&self, id: &RegionId) -> &Rollback {
         self.regions.get(id).unwrap().data()
     }
 
-    pub fn load(&mut self, id: &usize, mut region: Region) {
+    pub fn load(&mut self, id: &RegionId, mut region: Region) {
         self.regions.insert(*id, region);
     }
 
     pub fn handle_region_event(
         &mut self,
         event: GameEventKind,
-        region_id: usize,
+        region_id: RegionId,
     ) -> Result<GameEvent, GameError> {
         let region = self.regions.get_mut(&region_id).unwrap();
         region.handle_event(event)
@@ -118,7 +120,7 @@ impl World {
 
     pub fn progress_world_one_tick(
         &mut self,
-        results: &mut BTreeMap<usize, Result<GameEvent, GameError>>,
+        results: &mut BTreeMap<RegionId, Result<GameEvent, GameError>>,
     ) {
         results.clear();
         for (id, region) in &mut self.regions {
@@ -127,11 +129,8 @@ impl World {
     }
 
     /// Used by server
-    pub fn forget_last_event(&mut self, region_id: usize) {
-        self.regions
-            .get_mut(&region_id)
-            .unwrap()
-            .forget_last_event();
+    pub fn forget_last_event(&mut self, region_id: &RegionId) {
+        self.regions.get_mut(region_id).unwrap().forget_last_event();
     }
 
     pub fn reconcile_event(&mut self, event: GameEvent) -> Result<(), GameError> {
@@ -143,10 +142,25 @@ impl World {
         result
     }
 
-    pub fn build_region_server_packet(&self, region_id: usize, player: PlayerKey) -> ServerPacket {
+    pub fn find_player(&self, client: &ClientId) -> Option<RegionId> {
+        let mut region = None;
+        for (id, r) in &self.regions {
+            if r.data().player_entites.contains_key(client) {
+                region = Some(*id);
+                break;
+            };
+        }
+        region
+    }
+
+    pub fn build_region_server_packet(&self, region_id: &RegionId) -> ServerPacket {
         self.regions
             .get(&region_id)
             .unwrap()
-            .build_region_server_packet(region_id, player)
+            .build_region_server_packet(region_id)
+    }
+
+    pub fn get_region_data(&self, region_id: &RegionId) -> Rollback {
+        self.regions.get(&region_id).unwrap().data().clone()
     }
 }

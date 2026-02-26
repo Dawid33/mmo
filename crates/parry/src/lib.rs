@@ -86,6 +86,7 @@ mod real {
     #[cfg(feature = "f32")]
     pub use f32 as RawReal;
 
+    /// Required to use ordered float in type alias.
     pub type OrderedFloatF32 = ordered_float::OrderedFloat<f32>;
 
     #[cfg(feature = "f32")]
@@ -101,7 +102,6 @@ pub mod math {
         Isometry3, Matrix3, Point3, Translation3, UnitQuaternion, UnitVector3, Vector3, Vector6,
         U3, U6,
     };
-    use ordered_float::OrderedFloat;
 
     /// The default tolerance used for geometric operations.
     pub const DEFAULT_EPSILON: RawReal = RawReal::EPSILON;
@@ -272,7 +272,8 @@ mod simd {
     pub const SIMD_LAST_INDEX: usize = 3;
 }
 
-trait DynHash {
+/// A trait for implementing the hash trait for dyn types.
+pub trait DynHash {
     /// Feeds this value into the given [`Hasher`].
     fn dyn_hash(&self, state: &mut dyn std::hash::Hasher);
 }

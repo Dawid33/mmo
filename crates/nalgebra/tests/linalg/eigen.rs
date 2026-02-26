@@ -1,4 +1,4 @@
-use na::{Complex, DMatrix, Matrix3};
+use na::{DMatrix, Matrix3};
 
 #[cfg(feature = "proptest-support")]
 mod proptest_tests {

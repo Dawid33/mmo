@@ -1,7 +1,6 @@
 use super::{Bvh, BvhWorkspace};
 use crate::math::{Real, RawReal};
 use core::cmp::Ordering;
-use ordered_float::OrderedFloat;
 
 #[cfg(not(feature = "std"))]
 use na::ComplexField; // For `round` and `sqrt` in no-std+alloc builds.

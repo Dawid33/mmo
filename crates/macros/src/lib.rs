@@ -213,7 +213,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         match &mut i {
             Item::Struct(item_struct) => {
                 item_struct.attrs.push(
-                    parse_quote! {#[derive(::core::default::Default, ::rollback::Debug, ::rollback::serde::Serialize, ::rollback::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial, ::std::hash::Hash)] },
+                    parse_quote! {#[derive(::core::default::Default, ::derive_more::Debug, crate::serde::Serialize, crate::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial, ::std::hash::Hash)] },
                 );
                 item_struct.attrs.push(parse_quote! {#[module(crate)]});
 
@@ -221,6 +221,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     syn::Fields::Named(named_fields) => {
                         for f in &mut named_fields.named {
                             all_fields.push(f.clone());
+                            for a in &f.attrs {}
                             let ty = &f.ty;
                             f.ty = syn::Type::parse
                                 .parse2(quote! { Undo<#ty> })
@@ -302,7 +303,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "struct Undo<T>",
         quote! {
-            #[derive(::core::default::Default, ::rollback::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
+            #[derive(::core::default::Default, ::derive_more::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
             pub struct Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
                 #[serde(skip)]
                 #[debug(skip)]
@@ -312,7 +313,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 global_log: ::std::sync::Arc<::std::sync::Mutex<RollbackLog>>,
                 #[serde(skip)]
                 #[debug(skip)]
-                info: ::rollback::RollbackInfo,
+                info: RollbackInfo,
                 #[serde(skip)]
                 #[debug(skip)]
                 field: usize,
@@ -384,7 +385,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             pub struct RollbackLog {
                 pub log: ::std::collections::VecDeque<(usize, usize, u32)>,
                 pub client: ::std::option::Option<::crossbeam::channel::Sender<crate::GameDataUpdate>>,
-                info: ::rollback::RollbackInfo,
+                info: RollbackInfo,
                 #(#iter_log_ident1 : ::std::sync::Arc<::std::sync::Mutex<::std::collections::VecDeque<Box<dyn FnOnce(&mut #iter_ty1, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>>>>,)*
             }
         },
@@ -393,7 +394,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "Rollback",
         quote! {
-            #[derive(::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial, ::rollback::Debug)]
+            #[derive(::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial, ::derive_more::Debug)]
             #[module(crate)]
             pub struct Rollback {
                 #[serde(skip)]

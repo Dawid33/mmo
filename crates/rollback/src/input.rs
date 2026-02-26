@@ -1,15 +1,9 @@
-use log::info;
 use ordered_float::OrderedFloat;
 use parry3d::math::Real;
-use rapier3d::prelude::PhysicsHooks;
 use serde::{Deserialize, Serialize};
-use winit::dpi::PhysicalSize;
-use winit::event::MouseButton;
-use winit::event::{ElementState, MouseScrollDelta};
-use winit::keyboard::{Key, KeyCode, PhysicalKey};
-
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use winit::dpi::PhysicalSize;
+use winit::keyboard::PhysicalKey;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 enum KeyState {

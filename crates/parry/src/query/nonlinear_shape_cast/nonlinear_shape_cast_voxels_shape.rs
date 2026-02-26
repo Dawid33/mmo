@@ -1,5 +1,5 @@
 use crate::bounding_volume::BoundingVolume;
-use crate::math::{Point, Real, RawReal, Vector};
+use crate::math::{Point, Real, Vector};
 use crate::query::{NonlinearRigidMotion, QueryDispatcher, ShapeCastHit};
 use crate::shape::{Cuboid, Shape, Voxels};
 

@@ -53,6 +53,7 @@ pub struct RigidBody {
     pub(crate) colliders: RigidBodyColliders,
     /// Whether or not this rigid-body is sleeping.
     pub activation: RigidBodyActivation,
+    /// Changes made to rigidbody
     pub changes: RigidBodyChanges,
     /// The status of the body, governing how it is affected by external forces.
     pub(crate) body_type: RigidBodyType,

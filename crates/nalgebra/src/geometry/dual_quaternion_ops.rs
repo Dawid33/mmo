@@ -47,7 +47,6 @@
  *   - https://cs.gmu.edu/~jmlien/teaching/cs451/uploads/Main/dual-quaternion.pdf
  */
 
-use ordered_float::OrderedFloat;
 
 use crate::base::storage::Storage;
 use crate::{

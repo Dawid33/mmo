@@ -1,6 +1,6 @@
 //! Definition of the segment shape.
 
-use crate::math::{Isometry, Point, Real, RawReal, Vector};
+use crate::math::{Isometry, Point, Real, Vector};
 use crate::shape::{FeatureId, SupportMap};
 
 use core::mem;
@@ -625,6 +625,7 @@ impl ConvexPolyhedron for Segment {
 #[cfg(test)]
 mod test {
     use crate::query::{Ray, RayCast};
+    use crate::math::{RawReal};
 
     pub use super::*;
     #[test]

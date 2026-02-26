@@ -1,6 +1,7 @@
 //! Server
 // #![deny(missing_docs)]
 use std::{
+    collections::BTreeMap,
     fmt::Debug,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -11,8 +12,8 @@ use std::{
 
 use crossbeam::channel::{Receiver, Sender};
 use dashmap::DashMap;
-use game::{ClientPacket, GameEventKind, ServerPacket, World};
-use log::{error, info, LevelFilter};
+use game::{ChunkCoords, ClientId, ClientPacket, ServerPacket, World};
+use log::{error, info};
 use quinn::{
     crypto::rustls::QuicServerConfig,
     rustls::{
@@ -81,15 +82,18 @@ impl WorldIngress {
             }
         });
 
+        let mut next_id = 0;
         while let Some(conn) = endpoint.accept().await {
             let send = send.clone();
             let conns = connections.clone();
+            let id = next_id;
+            next_id += 1;
             tokio::spawn(async move {
                 info!("accepting connection");
                 let connection = conn.await.unwrap();
                 conns.insert(connection.stable_id(), connection.clone());
 
-                let fut = handle_connection(connection, send);
+                let fut = handle_connection(connection, send, id);
                 tokio::spawn(async move {
                     if let Err(e) = fut.await {
                         error!("connection failed: {reason}", reason = e.to_string())
@@ -104,13 +108,10 @@ impl WorldIngress {
 /// Internal event that is handled by the server.
 pub enum ServerEvent {
     /// Recieved a packet from a client that needs to be handled.
-    ClientPacket(ClientPacket),
+    ClientPacket(ClientPacket, ClientId),
     /// Internal timer for generated game ticks.
     ServerTickTimer,
 }
-
-use simplelog::{FormatItem, SimpleLogger};
-const FORMAT: &'static [FormatItem] = &[FormatItem::Literal("server".as_bytes())];
 
 fn main() {
     // use pyroscope::PyroscopeAgent;
@@ -121,9 +122,12 @@ fn main() {
     //     .unwrap();
     // let agent_running = agent.start().unwrap();
 
+    // use simplelog::FormatItem;
+    // const FORMAT: &'static [FormatItem] = &[FormatItem::Literal("server".as_bytes())];
     // let config = simplelog::ConfigBuilder::new()
     //     .set_time_format_custom(FORMAT)
     //     .build();
+    // use log::LevelFilter;
     // SimpleLogger::init(LevelFilter::Info, config).unwrap();
 
     let (client_packet_send, client_packet_recv) = crossbeam::channel::unbounded();
@@ -139,17 +143,17 @@ fn main() {
 
     let tick_rate = Arc::new(AtomicU64::new(game::TICK_RATE));
     let tick_thread_tick_rate = tick_rate.clone();
+    let tick_thread_send = client_packet_send.clone();
     // Handle game loop
     std::thread::spawn(move || loop {
         // TODO: Sync ticks with server.
-        client_packet_send
-            .send(ServerEvent::ServerTickTimer)
-            .unwrap();
+        tick_thread_send.send(ServerEvent::ServerTickTimer).unwrap();
         let rate = tick_thread_tick_rate.load(Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(rate));
     });
 
-    let (mut world, player) = World::editor();
+    let mut world = World::basic();
+    let mut results_buffer = BTreeMap::new();
     // handle game events on server and send successfull events to connected clients.
     while let Ok(event) = client_packet_recv.recv() {
         let count = client_packet_recv.len();
@@ -159,10 +163,24 @@ fn main() {
             tick_rate.store(game::TICK_RATE, Ordering::SeqCst);
         }
         match event {
-            ServerEvent::ClientPacket(client_packet) => match client_packet {
-                ClientPacket::RequestRegion => {
+            ServerEvent::ClientPacket(client_packet, client_id) => match client_packet {
+                // Find region in world that contains player linked to client_id.
+                // If the player doesn't exist, send him 0, 0.
+                ClientPacket::RequestPlayerRegion => {
+                    if let Some(id) = world.find_player(&client_id) {
+                        server_send
+                            .send(ServerPacket::PlayerRegion(Some(id), client_id))
+                            .unwrap();
+                    } else {
+                        server_send
+                            .send(ServerPacket::PlayerRegion(None, client_id))
+                            .unwrap();
+                    };
+                }
+                // Send the requested region to the client.
+                ClientPacket::RequestRegionConnection(id) => {
                     server_send
-                        .send(world.build_region_server_packet(0, player))
+                        .send(world.build_region_server_packet(&id))
                         .unwrap();
                 }
                 ClientPacket::GameEvent(game_event) => match game_event.kind {
@@ -175,7 +193,7 @@ fn main() {
                             .handle_region_event(game_event.kind, game_event.region_id)
                         {
                             Ok(e) => {
-                                world.forget_last_event(game_event.region_id);
+                                world.forget_last_event(&game_event.region_id);
                                 e
                             }
                             Err(e) => panic!("Server crashed {:?}", e),
@@ -185,20 +203,22 @@ fn main() {
                 },
             },
             ServerEvent::ServerTickTimer => {
-                let region = 0;
-                let event = match world.handle_region_event(GameEventKind::Tick, region) {
-                    Ok(e) => e,
-                    Err(e) => panic!("Server crashed {:?}", e),
-                };
-                server_send.send(ServerPacket::GameEvent(event)).unwrap();
-                server_send
-                    .send(ServerPacket::SyncClock(
-                        region,
-                        tick_rate.load(Ordering::SeqCst),
-                        world.current_tick(&region),
-                        Duration::new(0, 0),
-                    ))
-                    .unwrap();
+                world.progress_world_one_tick(&mut results_buffer);
+                for (id, result) in &results_buffer {
+                    server_send
+                        .send(ServerPacket::GameEvent(result.as_ref().unwrap().clone()))
+                        .unwrap();
+                    if world.current_tick(&ChunkCoords::new(0, 0, 0)) % 10 == 0 {
+                        server_send
+                            .send(ServerPacket::SyncClock(
+                                *id,
+                                tick_rate.load(Ordering::SeqCst),
+                                world.current_tick(&id),
+                                Duration::new(0, 0),
+                            ))
+                            .unwrap();
+                    }
+                }
             }
         }
     }
@@ -209,6 +229,7 @@ fn main() {
 async fn handle_connection(
     connection: quinn::Connection,
     send: Sender<ServerEvent>,
+    id: ClientId,
 ) -> Result<(), ConnectionError> {
     loop {
         let send = send.clone();
@@ -235,7 +256,7 @@ async fn handle_connection(
                     return ();
                 }
             };
-            send.send(ServerEvent::ClientPacket(packet)).unwrap();
+            send.send(ServerEvent::ClientPacket(packet, id)).unwrap();
         });
     }
 }

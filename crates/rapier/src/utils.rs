@@ -3,7 +3,7 @@
 use parry3d::utils::SdpMatrix3;
 use crate::math::{Real, RawReal};
 use na::{
-    Matrix1, Matrix2, Matrix3, RealField, RowVector2, Scalar, SimdRealField, SimdSigned,
+    Matrix1, Matrix2, Matrix3, RowVector2, Scalar, SimdRealField,
     UnitComplex, UnitQuaternion, Vector1, Vector2, Vector3,
 };
 use ordered_float::OrderedFloat;

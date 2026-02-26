@@ -12,15 +12,14 @@ use borrow::RefCast;
 use crossbeam::channel::Sender;
 use log::{info, warn};
 use parley::{Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, StyleProperty};
-use rollback::PlayerKey;
+use rollback::{Client, ClientId, PlayerKey};
+use rollback::{Ecs, GameData, Rollback, Undo};
 use winit::keyboard::{KeyCode, SmolStr};
 
 use crate::{
-    camera::CameraController,
-    data::{Ecs, GameData, Rollback, Undo},
-    physics::PhysicsController,
-    ClientUpdateEvent, Controller, GameDataUpdate, GameError, GameEvent, GameEventKind, RegionId,
-    ServerPacket, INDUCED_LATENCY,
+    camera::CameraController, physics::PhysicsController, ChunkCoords, ClientUpdateEvent,
+    Controller, GameDataUpdate, GameError, GameEvent, GameEventKind, RegionId, ServerPacket,
+    INDUCED_LATENCY,
 };
 
 #[allow(unused)]
@@ -44,7 +43,6 @@ pub struct Region {
     input_buffer: BinaryHeap<Reverse<GameEvent>>,
     controllers: Vec<Box<dyn Controller>>,
     synchronized: bool,
-    // font_context: FontContext,
 }
 
 impl Region {
@@ -52,7 +50,7 @@ impl Region {
     pub fn new(
         mut data: Rollback,
         game_update_send: Option<Sender<GameDataUpdate>>,
-        id: RegionId,
+        id: ChunkCoords,
     ) -> Self {
         data.reinitialize(game_update_send);
         Self {
@@ -128,6 +126,7 @@ impl Region {
                     } else {
                         // IDs are incorrect, game event arrived out of order.
                         info!("Arrived out of order, Adding to input buffer.");
+                        info!("{:?} != {:?}", server_event, event);
                         self.input_buffer.push(server_event);
                         self.event_log.push_front(event);
                         break 'outer;
@@ -145,36 +144,36 @@ impl Region {
         self.data.new_transaction();
         self.data.next_game_event_id.undo(|d, _| *d -= 1);
         *self.data.next_game_event_id += 1;
-        match &event.kind {
+        let b = &event.kind;
+        match event.kind.clone() {
             GameEventKind::Tick => {
                 for c in self.controllers.iter_mut() {
                     let data = self.data.as_refs_mut();
                     c.on_tick(data.data);
                 }
                 let data: &mut GameData = self.data.deref_mut();
-
-                if let Some((p, e)) = data.players.iter().next() {
-                    let e = e.clone();
-                    let p = data.ecs.player.get_mut(e);
-                    if p.input.key_pressed(&winit::keyboard::KeyCode::KeyE) {
-                        let old = p.fps_cam_mode;
-                        data.ecs.player.undo(move |p, _| {
-                            p.get_mut(e).fps_cam_mode = old;
+                let keys: Vec<ClientId> = data.clients.keys().cloned().collect();
+                for client_id in keys {
+                    let client = data.clients.get_mut(&client_id).unwrap();
+                    if client.input.key_pressed(&winit::keyboard::KeyCode::KeyE) {
+                        let old = client.fps_cam_mode;
+                        data.clients.undo(move |clients, _| {
+                            clients.get_mut(&client_id).unwrap().fps_cam_mode = old;
                         });
-                        let p = data.ecs.player.get_mut(e);
-                        p.fps_cam_mode = !p.fps_cam_mode;
-                        let mode = p.fps_cam_mode;
+                        let client = data.clients.get_mut(&client_id).unwrap();
+                        client.fps_cam_mode = !client.fps_cam_mode;
+                        let mode = client.fps_cam_mode;
                         data.ecs.send(GameDataUpdate::new(
                             crate::GameDataTransactionKind::Do,
-                            crate::GameDataUpdateKind::SetFreeCam(e, mode),
+                            crate::GameDataUpdateKind::SetFreeCam(client_id, mode),
                         ));
                     }
 
-                    let mut players = data.ecs.player.delayed_undo();
-                    let p = players.get_mut(e);
-                    if let Some(undo_func) = p.input.step() {
-                        players.undo(move |player, _| {
-                            let p = &mut player.get_mut(e).input;
+                    let mut clients = data.clients.delayed_undo();
+                    let client = clients.get_mut(&client_id).unwrap();
+                    if let Some(undo_func) = client.input.step() {
+                        clients.undo(move |client, _| {
+                            let p = &mut client.get_mut(&client_id).unwrap().input;
                             undo_func(p);
                         })
                     }
@@ -182,28 +181,31 @@ impl Region {
                 self.data.tick.undo(|d, _| *d -= 1);
                 *self.data.tick += 1;
             }
-            GameEventKind::PlayerWinitEvent(player_key, player_event) => {
+            GameEventKind::PlayerWinitEvent(client_id, player_event) => {
                 let data: &mut GameData = self.data.deref_mut();
-                if let Some((p, e)) = data.players.iter().next() {
-                    let e = e.clone();
-                    let mut players = data.ecs.player.delayed_undo();
-                    let p = players.get_mut(e);
-                    if let Some(undo_func) = p.input.update(player_event.clone()) {
-                        players.undo(move |player, _| {
-                            let p = &mut player.get_mut(e).input;
-                            undo_func(p);
+                let mut clients = data.clients.delayed_undo();
+                if let Some(c) = clients.get_mut(&client_id) {
+                    if let Some(undo_func) = c.input.update(player_event.clone()) {
+                        clients.undo(move |clients, _| {
+                            let c = &mut clients.get_mut(&client_id).unwrap().input;
+                            undo_func(c);
                         })
                     }
                 }
             }
             GameEventKind::Quit => return Err(GameError::QuitRequested),
+            GameEventKind::CreateClient(client_id) => {
+                info!("{:?}", event);
+                self.data.clients.insert(client_id, Client::default());
+                self.data.create_player_safe(client_id);
+            }
         }
         self.event_log.push_back(event.clone());
         Ok(event)
     }
 
-    pub fn build_region_server_packet(&self, region_id: usize, player: PlayerKey) -> ServerPacket {
-        ServerPacket::Region(region_id, self.data.clone(), player)
+    pub fn build_region_server_packet(&self, region_id: &RegionId) -> ServerPacket {
+        ServerPacket::Region(*region_id, self.data.clone())
     }
 
     pub fn current_tick(&self) -> usize {
@@ -214,14 +216,8 @@ impl Region {
         &self.data
     }
 
-    pub fn create_basic(&mut self, create_player: bool) -> Option<PlayerKey> {
-        let p = if create_player {
-            Some(self.data.create_player_safe())
-        } else {
-            None
-        };
-        self.data.create_mesh();
-        p
+    pub fn create_basic(&mut self, coords: ChunkCoords) {
+        self.data.create_mesh(coords);
     }
 
     pub fn forget_last_event(&mut self) {

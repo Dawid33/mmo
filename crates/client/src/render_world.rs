@@ -15,23 +15,12 @@ use game::{
     parry::math::Real,
     ChunkShape, VoxelType,
 };
-use game::{EntityId, GameData, RegionId, UIElement, ASPECT};
+use game::{EntityId, GameData, RegionId, ASPECT};
 use log::info;
 use ndshape::ConstShape;
 use parley::LayoutContext;
 use rand::seq::IndexedRandom;
 use rollback::{EntityKey, GameDataUpdate, IsometryReal, Voxel};
-// use vello::{
-//     kurbo::{self, Affine, Rect},
-//     peniko::{
-//         color::{
-//             palette::{self, css::TRANSPARENT},
-//             AlphaColor,
-//         },
-//         Fill,
-//     },
-//     AaConfig, Renderer, RendererOptions, Scene,
-// };
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     BindGroup, BlendComponent, BlendFactor, BlendOperation, BufferUsages, CommandBuffer,
@@ -127,7 +116,7 @@ impl ChunkMesh {
 
 #[derive(Debug)]
 pub enum RenderEntityType {
-    UIElement(UIElement),
+    UIElement,
     Default,
 }
 
@@ -153,8 +142,10 @@ pub struct TrueWorld {
 impl TrueWorld {
     pub fn new(data: &GameData, reciever: Receiver<GameDataUpdate>) -> Self {
         let mut entities = BTreeMap::new();
+
         for (id, _) in data.ecs.entities.iter() {
             let position = if let Some(handle) = data.ecs.rigidbody.try_get(id) {
+                info!("adding position");
                 let b = data.physics.bodies.get(*handle).unwrap();
                 Some(*b.position())
             } else {
@@ -170,6 +161,7 @@ impl TrueWorld {
             };
 
             let mesh = if let Some(mesh) = data.ecs.chunk.try_get(id) {
+                info!("adding mesh");
                 Some(ChunkMesh::new(&mesh.voxels))
             } else {
                 None
@@ -287,8 +279,10 @@ impl GpuData {
     }
 
     pub fn add_region(&mut self, id: RegionId, world: &TrueWorld) {
+        info!("Adding region = {:?}", id);
         self.entities.insert(id, BTreeMap::new());
         for (key, e) in &world.entities {
+            info!("Adding entity = {:?}", key);
             self.create_entity(&id, *key, e);
         }
     }
@@ -340,75 +334,71 @@ impl GpuData {
 /// - Lerp GpuData towards TrueWorld.
 /// - Draw region.
 pub struct RenderWorld {
-    data: GpuData,
+    gpu: GpuData,
+    true_world: BTreeMap<RegionId, TrueWorld>,
     lerp_set: BTreeMap<RegionId, BTreeSet<EntityKey>>,
-    regions: BTreeMap<RegionId, TrueWorld>,
-    // vello_render: Renderer,
     pub in_freecam: bool,
 }
 
 impl RenderWorld {
-    pub fn device(&self) -> &Device {
-        &self.data.device
+    pub fn new(device: Device) -> Self {
+        Self {
+            gpu: GpuData::new(device),
+            lerp_set: BTreeMap::new(),
+            true_world: BTreeMap::new(),
+            in_freecam: false,
+        }
     }
 
-    pub fn add_region(&mut self, id: usize, data: &GameData, receiver: Receiver<GameDataUpdate>) {
+    pub fn device(&self) -> &Device {
+        &self.gpu.device
+    }
+
+    pub fn add_region(
+        &mut self,
+        id: RegionId,
+        data: &GameData,
+        receiver: Receiver<GameDataUpdate>,
+    ) {
         let mut set = BTreeSet::new();
+        // let iter = data.into_game_update_iter();
         let world = TrueWorld::new(&data, receiver);
         for (e, _) in &world.entities {
             set.insert(*e);
         }
-        self.data.add_region(id, &world);
-        self.regions.insert(id, world);
+        self.gpu.add_region(id, &world);
+        self.true_world.insert(id, world);
         self.lerp_set.insert(id, set);
-    }
-
-    pub fn new(device: Device) -> Self {
-        // let vello_render = vello::Renderer::new(
-        //     &device,
-        //     RendererOptions {
-        //         use_cpu: true,
-        //         antialiasing_support: vello::AaSupport::all(),
-        //         num_init_threads: NonZeroUsize::new(1),
-        //         pipeline_cache: None,
-        //     },
-        // )
-        // .unwrap();
-
-        Self {
-            data: GpuData::new(device),
-            lerp_set: BTreeMap::new(),
-            regions: BTreeMap::new(),
-            in_freecam: false,
-            // vello_render,
-        }
     }
 
     /// 1. Update true worlds with updates from sim thread.
     /// 2. Lerp GpuEntities based on updates to true worlds
     pub fn update(&mut self, queue: &Queue, window: &Window) {
-        for (i, region) in self.regions.iter_mut() {
+        for (i, region) in self.true_world.iter_mut() {
             while let Ok(event) = region.reciever.try_recv() {
                 match event.update_kind {
                     game::GameDataUpdateKind::SetEntityPosition(entity_key, isometry) => {
+                        info!("client update: {:?}", event);
                         let e = region.entities.get_mut(&entity_key).unwrap();
                         e.position = Some(isometry);
                         self.lerp_set.get_mut(i).unwrap().insert(entity_key);
                     }
                     game::GameDataUpdateKind::CreateEntity(entity_key) => {
+                        info!("client update: {:?}", event);
                         let entity = RenderEntity::default();
-                        self.data.create_entity(i, entity_key, &entity);
+                        self.gpu.create_entity(i, entity_key, &entity);
                         region.entities.insert(entity_key, entity);
                     }
                     game::GameDataUpdateKind::RemoveEntity(entity_key) => {
-                        self.data.remove_entity(i, entity_key);
+                        info!("client update: {:?}", event);
+                        self.gpu.remove_entity(i, entity_key);
                         region.entities.remove(&entity_key);
                     }
                     game::GameDataUpdateKind::UpdateCameraViewProj(entity_key, matrix) => {
                         let e = region.entities.get_mut(&entity_key).unwrap();
                         e.camera.as_mut().unwrap().0 = matrix;
                         let gpu_e = self
-                            .data
+                            .gpu
                             .entities
                             .get_mut(i)
                             .unwrap()
@@ -439,12 +429,6 @@ impl RenderWorld {
                             window.set_cursor_grab(CursorGrabMode::None);
                         }
                     }
-                    // game::GameDataUpdateKind::CreateUIElement(default_key, uielement, isometry) => {
-                    //     todo!()
-                    // }
-                    // game::GameDataUpdateKind::SetUIElementStyle(default_key, style) => todo!(),
-                    game::GameDataUpdateKind::SetUIElementContent(default_key, _) => todo!(),
-                    game::GameDataUpdateKind::RemoveUIElement(default_key) => todo!(),
                     game::GameDataUpdateKind::SetVoxelComponent(entity_key, voxel) => {
                         if let Some(v) = voxel {
                             region.entities.get_mut(&entity_key).unwrap().voxel_mesh =
@@ -453,15 +437,27 @@ impl RenderWorld {
                             region.entities.get_mut(&entity_key).unwrap().voxel_mesh = None;
                         }
                     }
+                    game::GameDataUpdateKind::AddCameraComponent(
+                        entity_key,
+                        perspective3,
+                        isometry,
+                    ) => {
+                        let e = region.entities.get_mut(&entity_key).unwrap();
+                        e.camera = Some((perspective3, isometry));
+                    }
+                    game::GameDataUpdateKind::RemoveCameraComponent(entity_key) => {
+                        let e = region.entities.get_mut(&entity_key).unwrap();
+                        e.camera = None;
+                    }
                 }
             }
         }
 
         for (i, set) in &mut self.lerp_set {
             set.retain(|e| {
-                let gpu_entities = self.data.entities.get_mut(i).unwrap();
+                let gpu_entities = self.gpu.entities.get_mut(i).unwrap();
                 let mut gpu_e = gpu_entities.get_mut(e).unwrap();
-                let entities = &mut self.regions.get_mut(i).unwrap().entities;
+                let entities = &mut self.true_world.get_mut(i).unwrap().entities;
                 let entity = entities.get(e).unwrap();
 
                 let keep = if let Some(true_pos) = entity.position {
@@ -555,22 +551,14 @@ impl RenderWorld {
         });
         renderpass.set_pipeline(&render_pipeline);
 
-        let cam_bind_group = if let Some((r, e)) = &self.data.current_cam {
-            let e = self.data.entities.get(r).unwrap().get(e).unwrap();
+        let cam_bind_group = if let Some((r, e)) = &self.gpu.current_cam {
+            let e = self.gpu.entities.get(r).unwrap().get(e).unwrap();
             &e.camera.as_ref().unwrap().2
         } else {
-            &self.data.default_camera.2
+            &self.gpu.default_camera.2
         };
 
-        // let mut scene = Scene::new();
-        // scene.fill(
-        //     Fill::NonZero,
-        //     Affine::IDENTITY,
-        //     palette::css::WHITE.with_alpha(0.5),
-        //     None,
-        //     &Rect::new(50.0, 50.0, 500.0, 500.0),
-        // );
-        for (i, region) in self.data.entities.iter() {
+        for (i, region) in self.gpu.entities.iter() {
             for (_, e) in region {
                 if let Some(mesh) = &e.voxel_mesh {
                     renderpass.set_bind_group(0, cam_bind_group, &[]);
@@ -581,27 +569,7 @@ impl RenderWorld {
                 }
             }
         }
-        // self.vello_render
-        //     .render_to_texture(
-        //         &self.data.device,
-        //         &queue,
-        //         &scene,
-        //         &ui_texture.view,
-        //         &vello::RenderParams {
-        //             base_color: TRANSPARENT,
-        //             width: size.width,
-        //             height: size.height,
-        //             antialiasing_method: AaConfig::Msaa16,
-        //         },
-        //     )
-        //     .expect("Failed to render to a texture");
         drop(renderpass);
-        // blitter.copy(
-        //     self.device(),
-        //     &mut background,
-        //     &ui_texture.view,
-        //     &surface_texture_view,
-        // );
         Vec::from([background.finish()])
     }
 }

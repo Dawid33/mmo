@@ -6,7 +6,7 @@ use std::{
 };
 
 use crossbeam::channel::{Receiver, Sender};
-use game::na::Matrix4;
+use game::{na::Matrix4, ClientId};
 use game::{
     ClientUpdateEvent, EntityId, GameData, GameDataTransactionKind, GameDataUpdate, GameEventKind,
     RegionId, Rollback,
@@ -16,7 +16,7 @@ use image::EncodableLayout;
 use log::info;
 use log::warn;
 use rand::seq::IndexedRandom;
-use rollback::{EntityKey, IsometryReal, PlayerKey};
+use rollback::{EntityKey, IsometryReal};
 use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
     BlendComponent, BlendFactor, BlendOperation, BlendState, BufferUsages, Device, Features, Queue,
@@ -32,7 +32,7 @@ use crate::{
 pub struct State {
     pub client_recv: Receiver<ClientUpdateEvent>,
     pub game_send: Sender<GameEventKind>,
-    pub player: Option<PlayerKey>,
+    pub player: Option<ClientId>,
     pub window: Arc<Window>,
     queue: wgpu::Queue,
     size: winit::dpi::PhysicalSize<u32>,
@@ -400,7 +400,7 @@ impl State {
         state
     }
 
-    pub fn add_region(&mut self, id: usize, data: GameData, receiver: Receiver<GameDataUpdate>) {
+    pub fn add_region(&mut self, id: RegionId, data: GameData, receiver: Receiver<GameDataUpdate>) {
         self.render_world.add_region(id, &data, receiver);
     }
 
