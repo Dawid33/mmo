@@ -11,6 +11,7 @@ use block_mesh::ndshape::{ConstShape, ConstShape3u32};
 use block_mesh::{MergeVoxel, VoxelVisibility};
 use borrow::Partial;
 use crossbeam::channel::Sender;
+use log::info;
 use nalgebra::Perspective3;
 use nalgebra::{
     ComplexField, Isometry3, Matrix4, OPoint, Point3, Quaternion, RealField, Rotation, Rotation3,
@@ -509,8 +510,10 @@ impl Rollback {
             }),
         );
         self.data.player_entites.insert(client_id, e);
+        info!("Before {:?}", self.data.player_entites.as_ref());
         self.data.player_entites.undo(move |d, _| {
             d.remove(&client_id);
+            info!("After {:?}", d);
         });
     }
 }

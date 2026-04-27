@@ -13,7 +13,7 @@ use derive_more::Debug;
 use game::{
     na::{Matrix4, Perspective3},
     parry::math::Real,
-    ChunkShape, VoxelType,
+    ChunkShape, Region, VoxelType,
 };
 use game::{EntityId, GameData, RegionId, ASPECT};
 use log::info;
@@ -444,6 +444,20 @@ impl RenderWorld {
                     ) => {
                         let e = region.entities.get_mut(&entity_key).unwrap();
                         e.camera = Some((perspective3, isometry));
+                        self.gpu
+                            .entities
+                            .get_mut(i)
+                            .unwrap()
+                            .get_mut(&entity_key)
+                            .unwrap()
+                            .camera =
+                            Some(
+                                self.gpu
+                                    .create_camera(*i, entity_key, perspective3, isometry),
+                            );
+                        if self.gpu.current_cam.is_none() {
+                            self.gpu.current_cam = Some((*i, entity_key));
+                        }
                     }
                     game::GameDataUpdateKind::RemoveCameraComponent(entity_key) => {
                         let e = region.entities.get_mut(&entity_key).unwrap();
