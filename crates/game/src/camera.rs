@@ -84,21 +84,15 @@ impl Controller for CameraController {
             }
             if linvel != Vector3::zeros() {
                 let t = b.translation().clone();
-                let old = b.next_position().translation.clone().vector;
-                let a = b.activation.clone();
-                let c = b.changes.clone();
-                let mut scope = data.physics.bodies.undo_scope();
-                scope
+                // change(): whole-set snapshot. Surgical field restores are
+                // NOT exact here — set_next_kinematic_* also wakes the body
+                // and marks it modified (hashed state the closure can't
+                // restore); the snapshot covers all of it.
+                let bodies = data.physics.bodies.change();
+                bodies
                     .get_mut(handle)
                     .unwrap()
                     .set_next_kinematic_translation(t + linvel);
-                scope.register(move |d, _| {
-                    d.get_mut(handle)
-                        .unwrap()
-                        .set_next_kinematic_translation(old);
-                    d.get_mut(handle).unwrap().activation = a;
-                    d.get_mut(handle).unwrap().changes = c;
-                });
             }
 
             let b = data.physics.bodies.get(handle).unwrap();
@@ -132,20 +126,12 @@ impl Controller for CameraController {
             }
 
             if rotation != r {
-                let a = b.activation.clone();
-                let c = b.changes.clone();
-                let mut scope = data.physics.bodies.undo_scope();
-                scope
+                // Same snapshot rationale as the translation site above.
+                let bodies = data.physics.bodies.change();
+                bodies
                     .get_mut(handle)
                     .unwrap()
                     .set_next_kinematic_rotation(r);
-                scope.register(move |d, _| {
-                    d.get_mut(handle)
-                        .unwrap()
-                        .set_next_kinematic_rotation(rotation.clone());
-                    d.get_mut(handle).unwrap().activation = a;
-                    d.get_mut(handle).unwrap().changes = c;
-                });
             }
         }
     }
