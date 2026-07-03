@@ -291,10 +291,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             impl<T, 'a> DelayedUndo<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash  {
                 pub fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
                     let mut global = self.value.global_log.lock().unwrap();
-                    let mut local = self.value.log.lock().unwrap();
                     let trans = self.value.info.current.load(::std::sync::atomic::Ordering::SeqCst);
-                    local.push_back(Box::new(undo));
-                    global.log.push_back((trans, self.value.field, self.hash));
+                    let wrap = self.value.wrap.expect("Undo field not wired to a FieldUndo variant");
+                    global.log.push_back(Entry { transaction: trans, undo: wrap(Box::new(undo)), pre_hash: self.hash });
                 }
             }
         },
@@ -307,16 +306,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             pub struct Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
                 #[serde(skip)]
                 #[debug(skip)]
-                log: ::std::sync::Arc<::std::sync::Mutex<::std::collections::VecDeque<Box<dyn FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>>>>,
-                #[serde(skip)]
-                #[debug(skip)]
                 global_log: ::std::sync::Arc<::std::sync::Mutex<RollbackLog>>,
                 #[serde(skip)]
                 #[debug(skip)]
                 info: RollbackInfo,
                 #[serde(skip)]
                 #[debug(skip)]
-                field: usize,
+                wrap: ::std::option::Option<fn(Box<dyn FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>) -> FieldUndo>,
                 #[debug(skip)]
                 data: T
             }
@@ -342,11 +338,10 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             impl<T> Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + Sized + ::std::hash::Hash {
                 pub fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
                     let mut global = self.global_log.lock().unwrap();
-                    let mut local = self.log.lock().unwrap();
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
-                    local.push_back(Box::new(undo));
-                    let hash = unsafe {self.hash_data()};
-                    global.log.push_back((trans, self.field, hash));
+                    let pre_hash = unsafe { self.hash_data() };
+                    let wrap = self.wrap.expect("Undo field not wired to a FieldUndo variant");
+                    global.log.push_back(Entry { transaction: trans, undo: wrap(Box::new(undo)), pre_hash });
                 }
 
                 pub fn delayed_undo(&mut self) -> DelayedUndo<T, '_> {
@@ -363,7 +358,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
 
                 pub fn print_log(&mut self) {
-                    ::log::info!("{:?}", self.global_log.lock().unwrap().log);
+                    let global = self.global_log.lock().unwrap();
+                    let entries: Vec<(usize, u32)> = global.log.iter().map(|e| (e.transaction, e.pre_hash)).collect();
+                    ::log::info!("{:?}", entries);
                 }
 
                 pub fn send(&self, value: crate::GameDataUpdate) {
@@ -379,14 +376,35 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let iter_ty1 = iter_ty.clone();
     let iter_log_ident1 = iter_log_ident.clone();
     items.push(item(
+        "FieldUndo",
+        quote! {
+            // One variant per field path, plus the root struct. Tuple-variant
+            // constructors double as the `wrap` fn pointers stored on Undo<T>.
+            #[allow(non_camel_case_types)]
+            pub enum FieldUndo {
+                root(Box<dyn FnOnce(&mut #root_struct_ident, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>),
+                #(#iter_log_ident1(Box<dyn FnOnce(&mut #iter_ty1, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>),)*
+            }
+        },
+    ));
+    items.push(item(
+        "Entry",
+        quote! {
+            pub struct Entry {
+                pub transaction: usize,
+                pub undo: FieldUndo,
+                pub pre_hash: u32,
+            }
+        },
+    ));
+    items.push(item(
         "RollbackLog",
         quote! {
             #[derive(::core::default::Default)]
             pub struct RollbackLog {
-                pub log: ::std::collections::VecDeque<(usize, usize, u32)>,
+                pub log: ::std::collections::VecDeque<Entry>,
                 pub client: ::std::option::Option<::crossbeam::channel::Sender<crate::GameDataUpdate>>,
                 info: RollbackInfo,
-                #(#iter_log_ident1 : ::std::sync::Arc<::std::sync::Mutex<::std::collections::VecDeque<Box<dyn FnOnce(&mut #iter_ty1, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>>>>,)*
             }
         },
     ));
@@ -448,58 +466,52 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     use ::std::hash::{Hash, Hasher};
                     let rollback_log = self.log.clone();
                     let mut rollback_log = rollback_log.lock().unwrap();
-                    let oldest = rollback_log.info.oldest.load(::std::sync::atomic::Ordering::SeqCst).clone();
-                    let current = rollback_log.info.current.load(::std::sync::atomic::Ordering::SeqCst).clone();
-                    while let Some((transaction, field, hash)) = rollback_log.log.pop_back().clone() {
-                        if current == transaction {
-                            match field {
-                                #(#iter_log_ident_index1 => {
-                                    let func = rollback_log.#iter_log_ident1.lock().unwrap().pop_back().unwrap();
-                                    let previous = unsafe { self.#iter_path4.hash_data() };
-                                    let previous_data = self.#iter_path5.data.clone();
-                                    func(&mut self.#iter_path1.data, rollback_log.client.as_ref().unwrap());
-                                    let new_hash = unsafe { self.#iter_path6.hash_data() };
-                                    if new_hash != hash {
-                                        println!("Hash verification failed for self.{}.hash_data() in transaction {:?} with new_hash != hash: {:?} != {:?}\n hash before undo = {:?} \nlog: {:?}", #iter_path_string1, transaction, new_hash, hash, previous, rollback_log.log);
-                                        match ::assert_json_diff::assert_json_matches_no_panic(&self.#iter_path7.data, &previous_data, ::assert_json_diff::Config::new(::assert_json_diff::CompareMode::Strict)) {
-                                            Ok(()) => panic!("Before and after is equal via serde_json"),
-                                            Err(e) => panic!("lhs: new, rhs: old. {}", e),
-                                        }
-                                    }
-                                })*
-                                _ => panic!("Tried to undo field that doesn't exist.")
-                            }
-                        } else {
-                            rollback_log.log.push_back((transaction, field, hash));
+                    let current = rollback_log.info.current.load(::std::sync::atomic::Ordering::SeqCst);
+                    while let Some(entry) = rollback_log.log.pop_back() {
+                        if entry.transaction != current {
+                            rollback_log.log.push_back(entry);
                             break;
                         }
+                        match entry.undo {
+                            FieldUndo::root(func) => {
+                                func(&mut self.data.data, rollback_log.client.as_ref().unwrap());
+                                let new_hash = unsafe { self.data.hash_data() };
+                                if new_hash != entry.pre_hash {
+                                    panic!("Hash verification failed for root in transaction {:?}: {:?} != {:?}", entry.transaction, new_hash, entry.pre_hash);
+                                }
+                            }
+                            #(FieldUndo::#iter_log_ident1(func) => {
+                                let previous_data = self.#iter_path5.data.clone();
+                                func(&mut self.#iter_path1.data, rollback_log.client.as_ref().unwrap());
+                                let new_hash = unsafe { self.#iter_path6.hash_data() };
+                                if new_hash != entry.pre_hash {
+                                    println!("Hash verification failed for self.{}.hash_data() in transaction {:?} with new_hash != pre_hash: {:?} != {:?}\nremaining log len: {:?}", #iter_path_string1, entry.transaction, new_hash, entry.pre_hash, rollback_log.log.len());
+                                    match ::assert_json_diff::assert_json_matches_no_panic(&self.#iter_path7.data, &previous_data, ::assert_json_diff::Config::new(::assert_json_diff::CompareMode::Strict)) {
+                                        Ok(()) => panic!("Before and after is equal via serde_json"),
+                                        Err(e) => panic!("lhs: new, rhs: old. {}", e),
+                                    }
+                                }
+                            })*
+                        }
                     }
-                    rollback_log.info.current.store(current - 1, ::std::sync::atomic::Ordering::SeqCst).clone();
+                    rollback_log.info.current.store(current - 1, ::std::sync::atomic::Ordering::SeqCst);
                 }
                 pub fn forget(&mut self) {
-                    use ::std::hash::{Hash, Hasher};
                     let rollback_log = self.log.clone();
                     let mut rollback_log = rollback_log.lock().unwrap();
-                    let oldest = rollback_log.info.oldest.load(::std::sync::atomic::Ordering::SeqCst).clone();
-                    let current = rollback_log.info.current.load(::std::sync::atomic::Ordering::SeqCst).clone();
+                    let oldest = rollback_log.info.oldest.load(::std::sync::atomic::Ordering::SeqCst);
+                    let current = rollback_log.info.current.load(::std::sync::atomic::Ordering::SeqCst);
                     if oldest >= current {
                         panic!("Cannot forget transaction or transaction that doesn't exist. oldest, current = {:?}, {:?}", oldest, current);
                     }
-                    let mut forgot = false;
-                    while let Some((transaction, field, hash)) = rollback_log.log.pop_front().clone() {
-                        if oldest + 1 < transaction {
-                            rollback_log.log.push_front((transaction, field, hash));
+                    while let Some(entry) = rollback_log.log.pop_front() {
+                        if oldest + 1 < entry.transaction {
+                            rollback_log.log.push_front(entry);
                             break;
                         }
-                        forgot = true;
-                        match field {
-                            #(#iter_log_ident_index2 => {
-                                rollback_log.#iter_log_ident2.lock().unwrap().pop_front().unwrap();
-                            })*
-                            _ => panic!("Tried to forget field that doesn't exist.")
-                        }
+                        // Entries are data; dropping them is the whole job.
                     }
-                    rollback_log.info.oldest.store(oldest + 1, ::std::sync::atomic::Ordering::SeqCst).clone();
+                    rollback_log.info.oldest.store(oldest + 1, ::std::sync::atomic::Ordering::SeqCst);
                 }
             }
         },
@@ -524,11 +536,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         data: Undo::default(),
                     };
                     r.data.global_log = log.clone();
+                    r.data.wrap = Some(FieldUndo::root);
                     #(r.#iter_path2.global_log = log.clone();)*
-                    let mut log = log.lock().unwrap();
-                    #(r.#iter_path1.log = log.#iter_log_ident1.clone();)*
+                    #(r.#iter_path4.wrap = Some(FieldUndo::#iter_log_ident1);)*
+                    let log = log.lock().unwrap();
+                    r.data.info = log.info.clone();
                     #(r.#iter_path3.info = log.info.clone();)*
-                    #(r.#iter_path4.field = #iter_log_ident_index1;)*
                     drop(log);
                     r
                 }
@@ -552,11 +565,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let log = ::std::sync::Arc::new(::std::sync::Mutex::new(log));
                     self.log = log.clone();
                     self.data.global_log = log.clone();
+                    self.data.wrap = Some(FieldUndo::root);
                     #(self.#iter_path2.global_log = log.clone();)*
-                    let mut log = log.lock().unwrap();
-                    #(self.#iter_path1.log = log.#iter_log_ident1.clone();)*
+                    #(self.#iter_path4.wrap = Some(FieldUndo::#iter_log_ident1);)*
+                    let log = log.lock().unwrap();
+                    self.data.info = log.info.clone();
                     #(self.#iter_path3.info = log.info.clone();)*
-                    #(self.#iter_path4.field = #iter_log_ident_index1;)*
                 }
             }
         },
