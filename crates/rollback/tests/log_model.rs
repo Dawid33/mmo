@@ -78,14 +78,17 @@ fn lifo_order_is_preserved_across_fields() {
 fn undo_scope_snapshot_registration_rolls_back() {
     use std::ops::DerefMut;
     let (mut r, _recv) = new_rollback();
-    let h0 = state_hash(&r);
+    r.new_transaction();
+    let key = r.ecs.create_entity_safe();
+    let h1 = state_hash(&r);
+
     r.new_transaction();
     let old: rollback::Ecs = (*r.ecs).clone();
     let mut scope = r.ecs.undo_scope();
-    let _key = scope.entities.deref_mut().insert(());
+    scope.camera.deref_mut().insert(key, Some(Default::default()));
     scope.register(move |ecs, _| *ecs = old);
     r.rollback();
-    assert_eq!(h0, state_hash(&r));
+    assert_eq!(h1, state_hash(&r));
 }
 
 #[test]
@@ -95,9 +98,26 @@ fn undo_scope_drop_without_register_panics() {
     use std::ops::DerefMut;
     let (mut r, _recv) = new_rollback();
     r.new_transaction();
+    let key = r.ecs.create_entity_safe();
     let mut scope = r.ecs.undo_scope();
-    let _ = scope.entities.deref_mut().insert(());
+    scope.camera.deref_mut().insert(key, Some(Default::default()));
     drop(scope);
+}
+
+#[test]
+fn create_entity_rolls_back_without_snapshot_and_reuses_key() {
+    let (mut r, _recv) = new_rollback();
+    let h0 = state_hash(&r);
+
+    r.new_transaction();
+    let k1 = r.ecs.create_entity_safe();
+    r.rollback();
+    assert_eq!(h0, state_hash(&r), "entity creation must fully revert");
+
+    // Determinism: after rollback the next insert must allocate the SAME key.
+    r.new_transaction();
+    let k2 = r.ecs.create_entity_safe();
+    assert_eq!(k1, k2, "key allocation must be deterministic across rollback");
 }
 
 #[test]

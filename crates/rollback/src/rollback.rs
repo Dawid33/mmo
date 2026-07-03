@@ -306,6 +306,7 @@ mod game_data {
     }
 
     pub struct Ecs {
+        #[undo(slotmap)]
         entities: SlotMap<EntityKey, ()>,
         camera: Component<Camera>,
         isometry: Component<IsometryReal>,
@@ -333,25 +334,22 @@ impl GameData {
 
 impl Undo<Ecs> {
     pub fn create_entity_safe(&mut self) -> EntityKey {
-        // SlotMap hashes slot versions and the free list, so removing an
-        // inserted entity can't restore the pre-insert state (and the next
-        // insert would allocate a different key). Undo restores a snapshot
-        // until the slotmapd fork exposes true inverses (Phase 2).
-        let old: Ecs = (**self).clone();
-        let mut this = self.undo_scope();
-        let key = this.entities.deref_mut().insert(());
-        this.camera.insert(key, None);
-        this.isometry.insert(key, None);
-        this.rigidbody.insert(key, None);
-        this.chunk.insert(key, None);
-        this.register(move |d, s| {
-            *d = old;
+        let key = self.entities.insert(());
+        // Compensation-only undo: mutates nothing (the typed entities delta
+        // reverts the slot exactly); tells the renderer the entity is gone.
+        // Ordered here so it fires after the component undos, before the
+        // slot revert.
+        self.undo(move |_, s| {
             s.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
                 crate::GameDataUpdateKind::RemoveEntity(key),
             ))
             .unwrap();
         });
+        self.camera.insert_safe(key);
+        self.isometry.insert_safe(key);
+        self.rigidbody.insert_safe(key);
+        self.chunk.insert_safe(key);
         self.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
             crate::GameDataUpdateKind::CreateEntity(key),
@@ -378,6 +376,16 @@ where
         + ::serde::Serialize
         + for<'a> ::serde::Deserialize<'a>,
 {
+    /// Creates the (empty) component entry for a new entity, undo-safely.
+    /// SparseSecondaryMap remove(insert) is hash-exact (see hash_restore.rs),
+    /// so a removal closure is a true inverse here.
+    pub fn insert_safe(&mut self, key: EntityKey) {
+        self.undo(move |d, _| {
+            d.list.remove(key);
+        });
+        self.list.insert(key, None);
+    }
+
     pub fn set_safe(&mut self, key: EntityKey, item: Option<T>) {
         let old = self.list.get(key).cloned().unwrap();
         self.undo(move |d, _| *d.list.get_mut(key).unwrap() = old.clone());
