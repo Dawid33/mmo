@@ -33,16 +33,15 @@ impl Controller for CameraController {
                 let old = ecs.camera.get(e_id).proj_matrix.clone();
                 ecs.camera.emit_on_undo(GameDataUpdate::new(
                     crate::GameDataTransactionKind::Undo,
-                    crate::GameDataUpdateKind::UpdateCameraViewProj(e_id, old),
+                    crate::GameDataUpdateKind::UpdateCameraViewProj(e_id, old.clone()),
                 ));
-                ecs.camera.undo(move |d, _| {
-                    d.get_mut(e_id).proj_matrix = old;
-                });
-                ecs.camera
+                let mut scope = ecs.camera.undo_scope();
+                scope
                     .get_mut(e_id)
                     .proj_matrix
                     .set_aspect(OrderedFloat((resolution.width / resolution.height) as f32));
-                let m = ecs.camera.get_mut(e_id).proj_matrix.clone();
+                let m = scope.get_mut(e_id).proj_matrix.clone();
+                scope.register(move |d, _| d.get_mut(e_id).proj_matrix = old);
                 ecs.camera.send(GameDataUpdate::new(
                     crate::GameDataTransactionKind::Do,
                     crate::GameDataUpdateKind::UpdateCameraViewProj(e_id, m),
@@ -54,7 +53,7 @@ impl Controller for CameraController {
             }
 
             let handle = ecs.rigidbody.get(e_id).clone();
-            let b = data.physics.bodies.get_mut(handle).unwrap();
+            let b = data.physics.bodies.get(handle).unwrap();
             let rotation = b.rotation();
             let mut linvel = Vector::zeros();
             const SPEED: Real = OrderedFloat(5.0);
@@ -88,21 +87,21 @@ impl Controller for CameraController {
                 let old = b.next_position().translation.clone().vector;
                 let a = b.activation.clone();
                 let c = b.changes.clone();
-                data.physics.bodies.undo(move |d, _| {
+                let mut scope = data.physics.bodies.undo_scope();
+                scope
+                    .get_mut(handle)
+                    .unwrap()
+                    .set_next_kinematic_translation(t + linvel);
+                scope.register(move |d, _| {
                     d.get_mut(handle)
                         .unwrap()
                         .set_next_kinematic_translation(old);
                     d.get_mut(handle).unwrap().activation = a;
                     d.get_mut(handle).unwrap().changes = c;
                 });
-                data.physics
-                    .bodies
-                    .get_mut(handle)
-                    .unwrap()
-                    .set_next_kinematic_translation(t + linvel);
             }
 
-            let b = data.physics.bodies.get_mut(handle).unwrap();
+            let b = data.physics.bodies.get(handle).unwrap();
             let rotation = b.next_position().rotation.clone();
             let mut r = b.rotation().clone();
             let diff = client.input.mouse_diff();
@@ -135,18 +134,18 @@ impl Controller for CameraController {
             if rotation != r {
                 let a = b.activation.clone();
                 let c = b.changes.clone();
-                data.physics.bodies.undo(move |d, _| {
+                let mut scope = data.physics.bodies.undo_scope();
+                scope
+                    .get_mut(handle)
+                    .unwrap()
+                    .set_next_kinematic_rotation(r);
+                scope.register(move |d, _| {
                     d.get_mut(handle)
                         .unwrap()
                         .set_next_kinematic_rotation(rotation.clone());
                     d.get_mut(handle).unwrap().activation = a;
                     d.get_mut(handle).unwrap().changes = c;
                 });
-                data.physics
-                    .bodies
-                    .get_mut(handle)
-                    .unwrap()
-                    .set_next_kinematic_rotation(r);
             }
         }
     }

@@ -188,6 +188,23 @@ tick is acceptable. Body insert/remove no longer snapshots: the rapier fork
 provides exact LIFO inverses (`Arena::revert_insert`/`revert_remove`,
 `RigidBodySet::revert_insert`) used via `undo_scope` closures.
 
+## Final surface (Phase 5, as built)
+
+Unlogged mutation is unrepresentable outside the rollback crate:
+
+- The blanket `DerefMut` on `Undo<T>` is gone. The macro emits `DerefMut` only
+  for module structs (`GameData`, `Ecs`, `PhysicsState`) — safe because every
+  one of their fields is a guarded wrapper. Pass-through access and
+  `borrow::Partial` splits keep working.
+- Raw `&mut` to leaf data exists in exactly two licensed forms: `change()` /
+  `snapshot_raw()` (snapshot logged first; `snapshot_raw` also projects a
+  generated `#SRaw` view of `&mut` inner fields for multi-field consumers like
+  the physics step) and `UndoScope` (`DerefMut` + `raw_fields()`; the
+  drop-assert enforces `register()`).
+- `undo()` and a `raw_mut()` helper are `pub(crate)`: trusted tier-2 helpers
+  inside the rollback crate (`insert_safe`, `set_safe`, `change`,
+  `emit_on_undo`) build on them; application crates cannot.
+
 ## Migration plan (phased, each phase green before the next)
 
 1. **Foundations**: new log model + `UndoCell`/`UndoBTreeMap` wrappers behind

@@ -85,7 +85,7 @@ fn undo_scope_snapshot_registration_rolls_back() {
     r.new_transaction();
     let old: rollback::Ecs = (*r.ecs).clone();
     let mut scope = r.ecs.undo_scope();
-    scope.camera.deref_mut().insert(key, Some(Default::default()));
+    scope.raw_fields().camera.insert(key, Some(Default::default()));
     scope.register(move |ecs, _| *ecs = old);
     r.rollback();
     assert_eq!(h1, state_hash(&r));
@@ -100,7 +100,7 @@ fn undo_scope_drop_without_register_panics() {
     r.new_transaction();
     let key = r.ecs.create_entity_safe();
     let mut scope = r.ecs.undo_scope();
-    scope.camera.deref_mut().insert(key, Some(Default::default()));
+    scope.raw_fields().camera.insert(key, Some(Default::default()));
     drop(scope);
 }
 
