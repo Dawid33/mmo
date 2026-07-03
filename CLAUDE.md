@@ -21,7 +21,7 @@ A voxel MMO in Rust with client/server architecture over QUIC, built around dete
 
 The server listens on `127.0.0.1:6466` (hardcoded in `crates/server/src/main.rs`); the client connects to localhost. Run the server before/alongside the client.
 
-There are currently no automated tests in the first-party crates. A test would be run with `cargo +nightly test -p <crate>`.
+The rollback crate has the test suite: `cargo test -p rollback` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact.
 
 ### Profiling
 
