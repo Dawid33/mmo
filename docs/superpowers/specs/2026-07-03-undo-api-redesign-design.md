@@ -178,17 +178,15 @@ pub fn create_player_safe(&mut self, client_id: ClientId) {
 No ordering rules, no hand-written inverse maps, no manual channel sends, no
 whole-struct clones.
 
-## Open question (does not block implementation)
+## Resolved: undoing a physics step (Phase 4 decision)
 
-**Undoing a physics step.** rapier's `step()` mutates broad-phase / narrow-
-phase / island caches opaquely; no per-entry delta exists. Candidates:
-
-1. Per-tick closure that restores the pre-step physics state from retained
-   data (requires identifying the minimal mutated set — fork investigation).
-2. Accept bounded per-region physics snapshots at tick granularity only
-   (physics state per active region may be small enough, unlike world data).
-
-Decide during the physics migration phase; earlier phases don't depend on it.
+Option 2 adopted: `PhysicsController::on_tick` keeps the per-tick
+`PhysicsState` `change()` snapshot. rapier's `step()` mutates broad-phase /
+narrow-phase / island caches with no per-entry delta available, and physics
+state is bounded per active region — unlike world data, cloning it once per
+tick is acceptable. Body insert/remove no longer snapshots: the rapier fork
+provides exact LIFO inverses (`Arena::revert_insert`/`revert_remove`,
+`RigidBodySet::revert_insert`) used via `undo_scope` closures.
 
 ## Migration plan (phased, each phase green before the next)
 

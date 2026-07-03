@@ -436,10 +436,12 @@ impl Rollback {
             .pose(position)
             .user_data(e.data().as_ffi() as u128)
             .build();
-        // The rigid-body arena hashes generation counters and the free list,
-        // so removing the inserted body can't restore the pre-insert state.
-        // change() snapshots the whole PhysicsState and restores it on undo.
-        let handle = self.data.physics.change().bodies.insert(body);
+        // Tier-2 with a true fork inverse: reverts the arena allocator state
+        // exactly, no PhysicsState clone. See RigidBodySet::revert_insert.
+        let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
+        let mut scope = self.data.physics.bodies.undo_scope();
+        let handle = scope.insert(body);
+        scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
         self.ecs.rigidbody.set_safe(e, Some(handle));
         e
     }
@@ -459,9 +461,11 @@ impl Rollback {
             .can_sleep(false)
             .user_data(e.data().as_ffi() as u128)
             .build();
-        // Snapshot-restore for the same reason as in create_mesh: removal
-        // doesn't bring the arena back to its pre-insert state.
-        let handle = self.data.physics.change().bodies.insert(body);
+        // True fork inverse, same shape as in create_mesh.
+        let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
+        let mut scope = self.data.physics.bodies.undo_scope();
+        let handle = scope.insert(body);
+        scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
         let cam = Camera::new(handle);
         self.data.send(GameDataUpdate::new(
