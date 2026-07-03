@@ -22,7 +22,7 @@ fn random_op_sequences_roll_back_to_every_boundary() {
         for _tx in 0..5 {
             r.new_transaction();
             for _op in 0..(1 + rng.rand_range(0..4)) {
-                match rng.rand_range(0..5) {
+                match rng.rand_range(0..6) {
                     0 => r.tick.update(|t| *t += 1),
                     1 => r.next_game_event_id.update(|n| *n = n.wrapping_add(3)),
                     2 => {
@@ -33,8 +33,11 @@ fn random_op_sequences_roll_back_to_every_boundary() {
                         let k = rng.rand_range(0..3) as usize;
                         r.player_entites.remove(&k);
                     }
-                    _ => {
+                    4 => {
                         r.create_mesh(ChunkCoords::new(0, 0, 0));
+                    }
+                    _ => {
+                        r.ecs.create_entity_safe();
                     }
                 }
             }
