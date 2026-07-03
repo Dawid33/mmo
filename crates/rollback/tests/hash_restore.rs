@@ -41,6 +41,58 @@ fn sparse_secondary_remove_restores_hash() {
 }
 
 #[test]
+fn slotmap_revert_insert_restores_hash_exactly() {
+    let mut m: SlotMap<K, u32> = SlotMap::with_key();
+    // Build some history so the free list is non-trivial.
+    let a = m.insert(1);
+    let _b = m.insert(2);
+    m.remove(a);
+    let before = h(&m);
+
+    // Reuse-case insert (free list non-empty) then revert.
+    let k = m.insert(3);
+    m.revert_insert(k);
+    assert_eq!(before, h(&m), "reuse-case revert_insert must be exact");
+
+    // Append-case insert (drain free list first) then revert.
+    let c = m.insert(4); // reuses slot a
+    let before2 = h(&m);
+    let d = m.insert(5); // appends
+    m.revert_insert(d);
+    assert_eq!(before2, h(&m), "append-case revert_insert must be exact");
+    let _ = c;
+}
+
+#[test]
+fn slotmap_revert_remove_restores_hash_exactly() {
+    let mut m: SlotMap<K, u32> = SlotMap::with_key();
+    let a = m.insert(1);
+    let _b = m.insert(2);
+    let before = h(&m);
+    let v = m.remove(a).unwrap();
+    m.revert_remove(a, v);
+    assert_eq!(before, h(&m), "revert_remove must be exact");
+    // The key must still resolve to the restored value.
+    assert_eq!(m.get(a).copied(), Some(1));
+}
+
+#[test]
+fn slotmap_lifo_revert_chain_restores_hash() {
+    let mut m: SlotMap<K, u32> = SlotMap::with_key();
+    let a = m.insert(1);
+    m.remove(a);
+    let before = h(&m);
+    // insert, insert, remove — revert in reverse order.
+    let x = m.insert(10);
+    let y = m.insert(20);
+    let vy = m.remove(y).unwrap();
+    m.revert_remove(y, vy);
+    m.revert_insert(y);
+    m.revert_insert(x);
+    assert_eq!(before, h(&m), "LIFO revert chain must be exact");
+}
+
+#[test]
 fn rigidbodyset_remove_does_not_restore_hash() {
     let mut bodies = RigidBodySet::new();
     let mut islands = IslandManager::new();

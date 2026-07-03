@@ -496,6 +496,59 @@ impl<K: Key, V> SlotMap<K, V> {
         }
     }
 
+    /// Exact inverse of the MOST RECENT `insert` that returned `key`.
+    ///
+    /// Restores the free list, slot version, and length bit-for-bit, so the
+    /// map's full serialized state (and hash) match the pre-insert state and
+    /// the next insert allocates the same key it would have originally.
+    ///
+    /// LIFO contract: only valid if no other insert/remove happened on this
+    /// map since the insert being reverted. Panics if `key` is not occupied.
+    pub fn revert_insert(&mut self, key: K) {
+        let kd = key.data();
+        let idx = kd.idx as usize;
+        assert!(self.contains_key(key), "revert_insert: key not occupied");
+        if kd.version.get() == 1 && idx == self.slots.len() - 1 {
+            // Append-case: the slot was pushed; before the insert the free
+            // list was empty and free_head == old len == idx. Popping the
+            // slot drops the value via Slot's Drop impl.
+            self.slots.pop();
+            self.free_head = kd.idx;
+        } else {
+            // Reuse-case: the insert popped this slot off the free list; the
+            // old next_free became free_head, so the current free_head is
+            // exactly what the slot must point at again.
+            let free_head = self.free_head;
+            let slot = &mut self.slots[idx];
+            unsafe {
+                ManuallyDrop::drop(&mut slot.u.value);
+            }
+            slot.u.next_free = free_head;
+            slot.version -= 1; // occupied odd -> prior even (vacant)
+            self.free_head = kd.idx;
+        }
+        self.num_elems -= 1;
+    }
+
+    /// Exact inverse of the MOST RECENT `remove` of `key` that returned
+    /// `value`. Same LIFO contract as [`Self::revert_insert`].
+    pub fn revert_remove(&mut self, key: K, value: V) {
+        let kd = key.data();
+        let idx = kd.idx as usize;
+        assert!(
+            self.free_head == kd.idx,
+            "revert_remove: key was not the most recently removed slot"
+        );
+        let slot = &mut self.slots[idx];
+        debug_assert!(!slot.occupied(), "revert_remove: slot already occupied");
+        // remove() stored the old free_head in next_free and bumped version.
+        self.free_head = unsafe { slot.u.next_free };
+        slot.u.value = ManuallyDrop::new(value);
+        slot.version = slot.version.wrapping_sub(1);
+        self.num_elems += 1;
+        debug_assert_eq!(slot.version, kd.version.get());
+    }
+
     /// Retains only the elements specified by the predicate.
     ///
     /// In other words, remove all key-value pairs `(k, v)` such that
