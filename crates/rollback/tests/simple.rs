@@ -1,102 +1,132 @@
-#![allow(unused)]
-use rollback::rollback;
+//! Transaction-counter and licensed-mutation semantics.
+//!
+//! The old version of this file applied #[rollback] to a standalone struct,
+//! which the macro no longer supports (generated code is tied to the crate's
+//! GameDataUpdate types). These are the same behaviors exercised against the
+//! real GameData Rollback, using the current API.
+use std::hash::Hash;
 
-use crate::mod_test::Test;
+use rapier3d::prelude::RigidBodyBuilder;
+use rollback::Rollback;
 
-pub enum GameDataUpdate {}
+fn state_hash(r: &Rollback) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    r.hash(&mut hasher);
+    hasher.finalize()
+}
 
-#[rollback(Test)]
-mod mod_test {
-    pub struct Test {
-        tick: usize,
+fn new_rollback() -> (
+    Rollback,
+    crossbeam::channel::Receiver<rollback::GameDataUpdate>,
+) {
+    let (send, recv) = crossbeam::channel::unbounded();
+    (Rollback::new(Some(send)), recv)
+}
+
+#[test]
+fn transaction_increments() {
+    let (mut r, _recv) = new_rollback();
+    assert_eq!(r.current(), 0);
+    r.new_transaction();
+    assert_eq!(r.current(), 1);
+    r.new_transaction();
+    assert_eq!(r.current(), 2);
+}
+
+#[test]
+fn update_rolls_back() {
+    let (mut r, _recv) = new_rollback();
+    r.new_transaction();
+    r.tick.update(|t| *t += 1);
+    assert_eq!(*r.tick, 1);
+    r.rollback();
+    assert_eq!(*r.tick, 0);
+}
+
+#[test]
+fn two_transactions_roll_back_stepwise() {
+    let (mut r, _recv) = new_rollback();
+    r.new_transaction();
+    r.tick.update(|t| *t += 1);
+    r.new_transaction();
+    r.tick.update(|t| *t += 1);
+    assert_eq!(*r.tick, 2);
+    r.rollback();
+    assert_eq!(*r.tick, 1);
+}
+
+#[test]
+fn forget_basic() {
+    let (mut r, _recv) = new_rollback();
+    r.new_transaction();
+    assert_eq!(r.oldest(), 0);
+    assert_eq!(r.current(), 1);
+    r.forget();
+    assert_eq!(r.oldest(), 1);
+    assert_eq!(r.current(), 1);
+}
+
+#[test]
+fn forget_advances_oldest_only() {
+    let (mut r, _recv) = new_rollback();
+    r.new_transaction();
+    assert_eq!(r.oldest(), 0);
+    assert_eq!(r.current(), 1);
+    r.new_transaction();
+    r.forget();
+    assert_eq!(r.oldest(), 1);
+    assert_eq!(r.current(), 2);
+}
+
+#[test]
+fn rollback_after_forget_keeps_forgotten_changes() {
+    let (mut r, _recv) = new_rollback();
+    r.new_transaction();
+    r.tick.update(|t| *t += 1);
+
+    assert_eq!(r.oldest(), 0);
+    assert_eq!(r.current(), 1);
+    r.new_transaction();
+    assert_eq!(r.oldest(), 0);
+    assert_eq!(r.current(), 2);
+    // Forget tx1 (which holds the tick delta) ...
+    r.forget();
+    assert_eq!(r.oldest(), 1);
+    assert_eq!(r.current(), 2);
+    // ... then roll back tx2, which has no entries: the forgotten tick
+    // change must persist.
+    r.rollback();
+    assert_eq!(r.oldest(), 1);
+    assert_eq!(r.current(), 1);
+    assert_eq!(*r.tick, 1);
+}
+
+#[test]
+fn change_grants_licensed_raw_access_and_rolls_back() {
+    // change(): snapshot-first raw &mut to a leaf tier-2 field.
+    let (mut r, _recv) = new_rollback();
+    let h0 = state_hash(&r);
+    r.new_transaction();
+    let bodies = r.physics.bodies.change();
+    bodies.insert(RigidBodyBuilder::fixed().build());
+    assert_ne!(h0, state_hash(&r));
+    r.rollback();
+    assert_eq!(h0, state_hash(&r));
+}
+
+#[test]
+fn snapshot_raw_grants_multi_field_access_and_rolls_back() {
+    // snapshot_raw(): whole-struct snapshot + raw view of every field at
+    // once (the physics-step pattern).
+    let (mut r, _recv) = new_rollback();
+    let h0 = state_hash(&r);
+    r.new_transaction();
+    {
+        let p = r.physics.snapshot_raw();
+        p.bodies.insert(RigidBodyBuilder::fixed().build());
+        p.bodies.insert(RigidBodyBuilder::dynamic().build());
     }
-}
-
-fn dummy() -> mod_test::Rollback {
-    let (send, _) = crossbeam::channel::bounded(1);
-    mod_test::Rollback::new(Some(send))
-}
-
-#[test]
-pub fn transaction_increments() {
-    let mut test = dummy();
-    assert_eq!(test.current(), 0);
-    test.new_transaction();
-    assert_eq!(test.current(), 1);
-    test.new_transaction();
-    assert_eq!(test.current(), 2);
-}
-
-#[test]
-pub fn as_mut() {
-    let mut test = dummy();
-    test.new_transaction();
-    let old = *test.tick;
-    *test.tick.change() += 1;
-    assert_eq!(*test.tick, 1);
-    test.rollback();
-    assert_eq!(*test.tick, 0);
-}
-
-#[test]
-pub fn two() {
-    let mut test = dummy();
-    test.new_transaction();
-    let old = test.tick.as_ref().clone();
-    *test.tick.change() += 1;
-    test.new_transaction();
-    let old = test.tick.as_ref().clone();
-    *test.tick.change() += 1;
-    assert_eq!(test.tick.as_ref(), &2);
-    test.rollback();
-    assert_eq!(test.tick.as_ref(), &1);
-}
-
-#[test]
-pub fn forget_basic() {
-    let mut test = dummy();
-    test.new_transaction();
-    assert_eq!(test.oldest(), 0);
-    assert_eq!(test.current(), 1);
-    test.forget();
-    assert_eq!(test.oldest(), 1);
-    assert_eq!(test.current(), 1);
-}
-
-#[test]
-pub fn forget() {
-    let mut test = dummy();
-    test.new_transaction();
-    assert_eq!(test.oldest(), 0);
-    assert_eq!(test.current(), 1);
-    test.new_transaction();
-    test.forget();
-    assert_eq!(test.oldest(), 1);
-    assert_eq!(test.current(), 2);
-}
-
-#[test]
-pub fn rollback_forgotten() {
-    let mut test = dummy();
-    test.new_transaction();
-
-    let old = *test.tick;
-    *test.tick += 1;
-
-    // Create new transaction
-    assert_eq!(test.oldest(), 0);
-    assert_eq!(test.current(), 1);
-    test.new_transaction();
-    // Forget the the 1 that was set to tick
-    assert_eq!(test.oldest(), 0);
-    assert_eq!(test.current(), 2);
-    test.forget();
-    // roll back the current transaction which has no changes, meaning changes
-    // to tick will persist.
-    assert_eq!(test.oldest(), 1);
-    assert_eq!(test.current(), 2);
-    test.rollback();
-    assert_eq!(test.oldest(), 1);
-    assert_eq!(test.current(), 1);
-    assert_eq!(test.tick.as_ref(), &1);
+    assert_ne!(h0, state_hash(&r));
+    r.rollback();
+    assert_eq!(h0, state_hash(&r));
 }
