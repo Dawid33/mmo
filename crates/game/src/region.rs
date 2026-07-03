@@ -142,8 +142,7 @@ impl Region {
     pub fn handle_event(&mut self, event: GameEventKind) -> Result<GameEvent, GameError> {
         let event = GameEvent::new(event, *self.data.next_game_event_id, self.id);
         self.data.new_transaction();
-        self.data.next_game_event_id.undo(|d, _| *d -= 1);
-        *self.data.next_game_event_id += 1;
+        self.data.next_game_event_id.update(|n| *n += 1);
         let b = &event.kind;
         match event.kind.clone() {
             GameEventKind::Tick => {
@@ -178,8 +177,7 @@ impl Region {
                         })
                     }
                 }
-                self.data.tick.undo(|d, _| *d -= 1);
-                *self.data.tick += 1;
+                self.data.tick.update(|t| *t += 1);
             }
             GameEventKind::PlayerWinitEvent(client_id, player_event) => {
                 let data: &mut GameData = self.data.deref_mut();

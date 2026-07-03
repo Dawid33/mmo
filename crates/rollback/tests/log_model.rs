@@ -61,20 +61,42 @@ fn forget_drops_oldest_transaction_and_keeps_state() {
 #[test]
 fn lifo_order_is_preserved_across_fields() {
     // player_entites and tick are different fields; undos must pop LIFO
-    // across fields within a transaction. Uses tier-2 undo() directly.
+    // across fields within a transaction.
     let (mut r, _recv) = new_rollback();
     let h0 = state_hash(&r);
 
     r.new_transaction();
-    r.tick.undo(|d, _| *d -= 1);
-    *r.tick += 1;
+    r.tick.update(|t| *t += 1);
     r.player_entites.undo(|d, _| {
         d.remove(&3);
     });
     r.player_entites.insert(3, rollback::EntityKey::default());
-    r.tick.undo(|d, _| *d -= 10);
-    *r.tick += 10;
+    r.tick.update(|t| *t += 10);
 
+    r.rollback();
+    assert_eq!(h0, state_hash(&r));
+}
+
+#[test]
+fn undocell_update_is_rolled_back() {
+    let (mut r, _recv) = new_rollback();
+    let h0 = state_hash(&r);
+    r.new_transaction();
+    r.tick.update(|t| *t += 1);
+    r.next_game_event_id.update(|n| *n += 5);
+    assert_eq!(*r.tick, 1);
+    r.rollback();
+    assert_eq!(*r.tick, 0);
+    assert_eq!(h0, state_hash(&r));
+}
+
+#[test]
+fn undocell_set_is_rolled_back() {
+    let (mut r, _recv) = new_rollback();
+    let h0 = state_hash(&r);
+    r.new_transaction();
+    r.tick.set(42);
+    assert_eq!(*r.tick, 42);
     r.rollback();
     assert_eq!(h0, state_hash(&r));
 }

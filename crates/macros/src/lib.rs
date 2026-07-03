@@ -128,6 +128,16 @@ fn item(name: &str, s: proc_macro2::TokenStream) -> syn::Item {
         .expect(&format!("{:?} failed to parse.", name))
 }
 
+/// Reads the `#[undo(kind)]` attribute off a field, if present.
+fn undo_kind(f: &syn::Field) -> Option<String> {
+    f.attrs.iter().find_map(|a| {
+        if !a.path().is_ident("undo") {
+            return None;
+        }
+        a.parse_args::<syn::Ident>().ok().map(|i| i.to_string())
+    })
+}
+
 #[proc_macro_attribute]
 pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut ast = parse_macro_input!(input as syn::ItemMod);
@@ -182,7 +192,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut path_stack: Vec<&Ident> = Vec::new();
     let mut struct_stack: Vec<(&ItemStruct, usize)> =
         Vec::from([(find(&root_struct_ident_string).unwrap(), 0)]);
-    let mut paths: Vec<(proc_macro2::TokenStream, syn::Field)> = Vec::new();
+    let mut paths: Vec<(proc_macro2::TokenStream, syn::Field, Option<String>)> = Vec::new();
     while let Some((s, current)) = struct_stack.pop() {
         match &s.fields {
             syn::Fields::Named(fields_named) => {
@@ -190,7 +200,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     struct_stack.push((s, current + 1));
                     let ident = f.ident.as_ref().unwrap();
                     let stack = path_stack.iter();
-                    paths.push((quote! { #(#stack.)*#ident }, f.to_owned().clone()));
+                    paths.push((quote! { #(#stack.)*#ident }, f.to_owned().clone(), undo_kind(f)));
                     let stack = path_stack.iter();
                     if let Some(s) = find(&f.ty.to_token_stream().to_string()) {
                         path_stack.push(ident);
@@ -207,6 +217,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             syn::Fields::Unit => panic!("Cannot have unit fields."),
         }
     }
+    for p in &paths {
+        if let Some(kind) = &p.2 {
+            if kind != "cell" {
+                panic!("unknown undo kind `{}` on field `{}`", kind, p.0);
+            }
+        }
+    }
 
     let mut all_fields = Vec::new();
     for mut i in items.iter_mut() {
@@ -221,11 +238,18 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     syn::Fields::Named(named_fields) => {
                         for f in &mut named_fields.named {
                             all_fields.push(f.clone());
-                            for a in &f.attrs {}
+                            let kind = undo_kind(f);
+                            f.attrs.retain(|a| !a.path().is_ident("undo"));
                             let ty = &f.ty;
-                            f.ty = syn::Type::parse
-                                .parse2(quote! { Undo<#ty> })
-                                .expect("Failed to change type of field to Undo<T>");
+                            f.ty = match kind.as_deref() {
+                                Some("cell") => syn::Type::parse
+                                    .parse2(quote! { UndoCell<#ty> })
+                                    .expect("Failed to change type of field to UndoCell<T>"),
+                                Some(other) => panic!("unknown undo kind `{}`", other),
+                                None => syn::Type::parse
+                                    .parse2(quote! { Undo<#ty> })
+                                    .expect("Failed to change type of field to Undo<T>"),
+                            };
                             f.vis = parse_quote! {pub};
                         }
                     }
@@ -236,41 +260,70 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     }
 
-    let iter_ident = paths
-        .iter()
-        .map(|f| f.1.ident.clone().unwrap())
-        .collect::<Vec<syn::Ident>>()
-        .into_iter();
-    let iter_log_ident = paths
-        .iter()
-        .enumerate()
-        .map(|(i, f)| {
-            Ident::new(
-                &format!("{}{}", f.1.ident.as_ref().unwrap(), i),
-                Span::call_site(),
-            )
-        })
-        .collect::<Vec<syn::Ident>>()
-        .into_iter();
-    let iter_log_ident_index = paths
-        .iter()
-        .enumerate()
-        .map(|(i, f)| i)
-        .collect::<Vec<usize>>()
-        .into_iter();
-    let iter_ty = paths
-        .iter()
-        .map(|f| f.1.ty.clone())
-        .collect::<Vec<_>>()
-        .into_iter();
-    let iter_path = paths
+    // Every field path, regardless of wrapper kind: used to wire global_log/info.
+    let all_path = paths
         .iter()
         .map(|f| f.0.clone())
+        .collect::<Vec<proc_macro2::TokenStream>>();
+
+    // Tier-2 (opaque closure) fields: everything without an #[undo(...)] kind.
+    let opaque: Vec<(usize, &(proc_macro2::TokenStream, syn::Field, Option<String>))> = paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.2.is_none())
+        .collect();
+    // Tier-1 cell fields.
+    let cells: Vec<(usize, &(proc_macro2::TokenStream, syn::Field, Option<String>))> = paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.2.as_deref() == Some("cell"))
+        .collect();
+
+    let log_ident_of = |i: usize, f: &syn::Field| {
+        Ident::new(
+            &format!("{}{}", f.ident.as_ref().unwrap(), i),
+            Span::call_site(),
+        )
+    };
+    let iter_log_ident = opaque
+        .iter()
+        .map(|(i, p)| log_ident_of(*i, &p.1))
+        .collect::<Vec<syn::Ident>>()
+        .into_iter();
+    let iter_ty = opaque
+        .iter()
+        .map(|(_, p)| p.1.ty.clone())
+        .collect::<Vec<_>>()
+        .into_iter();
+    let iter_path = opaque
+        .iter()
+        .map(|(_, p)| p.0.clone())
         .collect::<Vec<proc_macro2::TokenStream>>()
         .into_iter();
-    let iter_path_string = paths
+    let iter_path_string = opaque
         .iter()
-        .map(|f| f.0.clone().to_token_stream().to_string())
+        .map(|(_, p)| p.0.clone().to_token_stream().to_string())
+        .collect::<Vec<String>>()
+        .into_iter();
+
+    let cell_log_ident = cells
+        .iter()
+        .map(|(i, p)| log_ident_of(*i, &p.1))
+        .collect::<Vec<syn::Ident>>()
+        .into_iter();
+    let cell_ty = cells
+        .iter()
+        .map(|(_, p)| p.1.ty.clone())
+        .collect::<Vec<_>>()
+        .into_iter();
+    let cell_path = cells
+        .iter()
+        .map(|(_, p)| p.0.clone())
+        .collect::<Vec<proc_macro2::TokenStream>>()
+        .into_iter();
+    let cell_path_string = cells
+        .iter()
+        .map(|(_, p)| p.0.clone().to_token_stream().to_string())
         .collect::<Vec<String>>()
         .into_iter();
 
@@ -293,7 +346,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let mut global = self.value.global_log.lock().unwrap();
                     let trans = self.value.info.current.load(::std::sync::atomic::Ordering::SeqCst);
                     let wrap = self.value.wrap.expect("Undo field not wired to a FieldUndo variant");
-                    global.log.push_back(Entry { transaction: trans, undo: wrap(Box::new(undo)), pre_hash: self.hash });
+                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(undo))), pre_hash: self.hash });
                 }
             }
         },
@@ -341,7 +394,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
                     let pre_hash = unsafe { self.hash_data() };
                     let wrap = self.wrap.expect("Undo field not wired to a FieldUndo variant");
-                    global.log.push_back(Entry { transaction: trans, undo: wrap(Box::new(undo)), pre_hash });
+                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(undo))), pre_hash });
                 }
 
                 pub fn delayed_undo(&mut self) -> DelayedUndo<T, '_> {
@@ -392,8 +445,103 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             pub struct Entry {
                 pub transaction: usize,
-                pub undo: FieldUndo,
+                pub undo: UndoOp,
                 pub pre_hash: u32,
+            }
+        },
+    ));
+    items.push(item(
+        "UndoOp",
+        quote! {
+            pub enum UndoOp {
+                Opaque(FieldUndo),
+                Typed(Delta),
+            }
+        },
+    ));
+    let cell_log_ident1 = cell_log_ident.clone();
+    let cell_ty1 = cell_ty.clone();
+    items.push(item(
+        "Delta",
+        quote! {
+            // Typed, inspectable undo records for tier-1 fields. One tuple
+            // variant per field holding the OLD value; the constructor doubles
+            // as the `make` fn pointer stored on the wrapper.
+            #[allow(non_camel_case_types)]
+            pub enum Delta {
+                #(#cell_log_ident1(#cell_ty1),)*
+            }
+        },
+    ));
+    items.push(item(
+        "UndoCell",
+        quote! {
+            #[derive(::core::default::Default, ::derive_more::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
+            pub struct UndoCell<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
+                #[serde(skip)]
+                #[debug(skip)]
+                global_log: ::std::sync::Arc<::std::sync::Mutex<RollbackLog>>,
+                #[serde(skip)]
+                #[debug(skip)]
+                info: RollbackInfo,
+                #[serde(skip)]
+                #[debug(skip)]
+                make: ::std::option::Option<fn(T) -> Delta>,
+                #[debug(skip)]
+                data: T
+            }
+        },
+    ));
+    items.push(item(
+        "impl UndoCell",
+        quote! {
+            impl<T> UndoCell<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
+                fn log_old(&mut self) {
+                    let mut global = self.global_log.lock().unwrap();
+                    let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
+                    let mut hasher = ::crc32fast::Hasher::new();
+                    ::std::hash::Hash::hash(&self.data, &mut hasher);
+                    let pre_hash = hasher.finalize();
+                    let make = self.make.expect("UndoCell not wired to a Delta variant");
+                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Typed(make(self.data.clone())), pre_hash });
+                }
+                pub fn set(&mut self, v: T) {
+                    self.log_old();
+                    self.data = v;
+                }
+                pub fn update(&mut self, f: impl FnOnce(&mut T)) {
+                    self.log_old();
+                    f(&mut self.data);
+                }
+                pub unsafe fn hash_data(&self) -> u32 {
+                    let mut hasher = ::crc32fast::Hasher::new();
+                    ::std::hash::Hash::hash(&self.data, &mut hasher);
+                    hasher.finalize()
+                }
+            }
+        },
+    ));
+    items.push(item(
+        "UndoCell Deref",
+        quote! {
+            impl<T> ::std::ops::Deref for UndoCell<T>
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
+                type Target = T;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.data
+                }
+            }
+        },
+    ));
+    items.push(item(
+        "UndoCell Hash",
+        quote! {
+            impl<T> ::std::hash::Hash for UndoCell<T>
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
+                fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+                    self.data.hash(state);
+                }
             }
         },
     ));
@@ -435,12 +583,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         },
     ));
 
-    let iter_log_ident_index1 = iter_log_ident_index.clone();
-    let iter_log_ident_index2 = iter_log_ident_index.clone();
     let iter_log_ident1 = iter_log_ident.clone();
     let iter_log_ident2 = iter_log_ident.clone();
     let iter_path1 = iter_path.clone();
-    let iter_log_ident_index2 = iter_log_ident_index.clone();
     let iter_log_ident2 = iter_log_ident.clone();
     let iter_path2 = iter_path.clone();
     let iter_path3 = iter_path.clone();
@@ -449,6 +594,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let iter_path6 = iter_path.clone();
     let iter_path7 = iter_path.clone();
     let iter_path_string1 = iter_path_string.clone();
+    let cell_log_ident2 = cell_log_ident.clone();
+    let cell_path1 = cell_path.clone();
+    let cell_path_string1 = cell_path_string.clone();
     items.push(item(
         "impl Rollback",
         quote! {
@@ -473,14 +621,14 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                             break;
                         }
                         match entry.undo {
-                            FieldUndo::root(func) => {
+                            UndoOp::Opaque(FieldUndo::root(func)) => {
                                 func(&mut self.data.data, rollback_log.client.as_ref().unwrap());
                                 let new_hash = unsafe { self.data.hash_data() };
                                 if new_hash != entry.pre_hash {
                                     panic!("Hash verification failed for root in transaction {:?}: {:?} != {:?}", entry.transaction, new_hash, entry.pre_hash);
                                 }
                             }
-                            #(FieldUndo::#iter_log_ident1(func) => {
+                            #(UndoOp::Opaque(FieldUndo::#iter_log_ident1(func)) => {
                                 let previous_data = self.#iter_path5.data.clone();
                                 func(&mut self.#iter_path1.data, rollback_log.client.as_ref().unwrap());
                                 let new_hash = unsafe { self.#iter_path6.hash_data() };
@@ -492,6 +640,17 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                     }
                                 }
                             })*
+                            UndoOp::Typed(delta) => match delta {
+                                #(Delta::#cell_log_ident2(old) => {
+                                    self.#cell_path1.data = old;
+                                    let mut hasher = ::crc32fast::Hasher::new();
+                                    ::std::hash::Hash::hash(&self.#cell_path1.data, &mut hasher);
+                                    let new_hash = hasher.finalize();
+                                    if new_hash != entry.pre_hash {
+                                        panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #cell_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                    }
+                                })*
+                            }
                         }
                     }
                     rollback_log.info.current.store(current - 1, ::std::sync::atomic::Ordering::SeqCst);
@@ -517,12 +676,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         },
     ));
 
-    let iter_path1 = iter_path.clone();
-    let iter_path2 = iter_path.clone();
-    let iter_path3 = iter_path.clone();
+    let all_path1 = all_path.clone();
+    let all_path2 = all_path.clone();
     let iter_path4 = iter_path.clone();
     let iter_log_ident1 = iter_log_ident.clone();
-    let iter_log_ident_index1 = iter_log_ident_index.clone();
+    let cell_path2 = cell_path.clone();
+    let cell_log_ident3 = cell_log_ident.clone();
     items.push(item(
         "impl new for Rollback",
         quote! {
@@ -537,11 +696,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     };
                     r.data.global_log = log.clone();
                     r.data.wrap = Some(FieldUndo::root);
-                    #(r.#iter_path2.global_log = log.clone();)*
+                    #(r.#all_path1.global_log = log.clone();)*
                     #(r.#iter_path4.wrap = Some(FieldUndo::#iter_log_ident1);)*
+                    #(r.#cell_path2.make = Some(Delta::#cell_log_ident3);)*
                     let log = log.lock().unwrap();
                     r.data.info = log.info.clone();
-                    #(r.#iter_path3.info = log.info.clone();)*
+                    #(r.#all_path2.info = log.info.clone();)*
                     drop(log);
                     r
                 }
@@ -549,12 +709,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         },
     ));
 
-    let iter_path1 = iter_path.clone();
-    let iter_path2 = iter_path.clone();
-    let iter_path3 = iter_path.clone();
+    let all_path1 = all_path.clone();
+    let all_path2 = all_path.clone();
     let iter_path4 = iter_path.clone();
     let iter_log_ident1 = iter_log_ident.clone();
-    let iter_log_ident_index1 = iter_log_ident_index.clone();
+    let cell_path2 = cell_path.clone();
+    let cell_log_ident3 = cell_log_ident.clone();
     items.push(item(
         "impl Rollback reinitialize",
         quote! {
@@ -566,11 +726,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     self.log = log.clone();
                     self.data.global_log = log.clone();
                     self.data.wrap = Some(FieldUndo::root);
-                    #(self.#iter_path2.global_log = log.clone();)*
+                    #(self.#all_path1.global_log = log.clone();)*
                     #(self.#iter_path4.wrap = Some(FieldUndo::#iter_log_ident1);)*
+                    #(self.#cell_path2.make = Some(Delta::#cell_log_ident3);)*
                     let log = log.lock().unwrap();
                     self.data.info = log.info.clone();
-                    #(self.#iter_path3.info = log.info.clone();)*
+                    #(self.#all_path2.info = log.info.clone();)*
                 }
             }
         },

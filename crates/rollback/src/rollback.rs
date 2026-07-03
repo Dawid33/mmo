@@ -295,7 +295,9 @@ mod game_data {
     pub struct GameData {
         ecs: Ecs,
         physics: PhysicsState,
+        #[undo(cell)]
         tick: usize,
+        #[undo(cell)]
         next_game_event_id: usize,
         player_entites: BTreeMap<ClientId, EntityKey>,
         clients: BTreeMap<ClientId, Client>,
