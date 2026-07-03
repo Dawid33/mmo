@@ -196,7 +196,7 @@ impl Region {
             GameEventKind::Quit => return Err(GameError::QuitRequested),
             GameEventKind::CreateClient(client_id) => {
                 info!("{:?}", event);
-                self.data.clients.insert(client_id, Client::default());
+                self.data.clients.change().insert(client_id, Client::default());
                 self.data.create_player_safe(client_id);
             }
         }

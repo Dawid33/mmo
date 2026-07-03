@@ -329,16 +329,18 @@ impl GameData {
 
 impl Undo<Ecs> {
     pub fn create_entity_safe(&mut self) -> EntityKey {
-        let key = self.entities.deref_mut().insert(());
-        self.camera.insert(key, None);
-        self.isometry.insert(key, None);
-        self.rigidbody.insert(key, None);
-        self.chunk.insert(key, None);
-        self.undo(move |d, s| {
-            d.entities.remove(key);
-            d.camera.remove(key);
-            d.isometry.remove(key);
-            d.rigidbody.remove(key);
+        // SlotMap hashes slot versions and the free list, so removing an
+        // inserted entity can't restore the pre-insert state (and the next
+        // insert would allocate a different key). Undo restores a snapshot.
+        let old: Ecs = (**self).clone();
+        let mut this = self.delayed_undo();
+        let key = this.entities.deref_mut().insert(());
+        this.camera.insert(key, None);
+        this.isometry.insert(key, None);
+        this.rigidbody.insert(key, None);
+        this.chunk.insert(key, None);
+        this.undo(move |d, s| {
+            *d = old;
             s.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
                 crate::GameDataUpdateKind::RemoveEntity(key),
@@ -451,17 +453,10 @@ impl Rollback {
             .pose(position)
             .user_data(e.data().as_ffi() as u128)
             .build();
-        let handle = self.data.physics.bodies.insert(body);
-        self.data.physics.undo(move |d, _| {
-            d.bodies.remove(
-                handle,
-                &mut d.islands,
-                &mut d.colliders,
-                &mut d.implules_joint_set,
-                &mut d.multi_body_joint_set,
-                true,
-            );
-        });
+        // The rigid-body arena hashes generation counters and the free list,
+        // so removing the inserted body can't restore the pre-insert state.
+        // change() snapshots the whole PhysicsState and restores it on undo.
+        let handle = self.data.physics.change().bodies.insert(body);
         self.ecs.rigidbody.set_safe(e, Some(handle));
         e
     }
@@ -481,17 +476,9 @@ impl Rollback {
             .can_sleep(false)
             .user_data(e.data().as_ffi() as u128)
             .build();
-        let handle = self.data.physics.bodies.insert(body);
-        self.data.physics.undo(move |d, _| {
-            d.bodies.remove(
-                handle,
-                &mut d.islands,
-                &mut d.colliders,
-                &mut d.implules_joint_set,
-                &mut d.multi_body_joint_set,
-                true,
-            );
-        });
+        // Snapshot-restore for the same reason as in create_mesh: removal
+        // doesn't bring the arena back to its pre-insert state.
+        let handle = self.data.physics.change().bodies.insert(body);
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
         let cam = Camera::new(handle);
         self.data.send(GameDataUpdate::new(
@@ -509,11 +496,11 @@ impl Rollback {
                 .unwrap();
             }),
         );
-        self.data.player_entites.insert(client_id, e);
-        info!("Before {:?}", self.data.player_entites.as_ref());
+        // Register the undo before mutating: the recorded hash must match the
+        // state the closure restores to.
         self.data.player_entites.undo(move |d, _| {
             d.remove(&client_id);
-            info!("After {:?}", d);
         });
+        self.data.player_entites.insert(client_id, e);
     }
 }

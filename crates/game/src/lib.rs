@@ -1,5 +1,4 @@
-#![feature(core_intrinsics)]
-#![allow(unused, internal_features)]
+#![allow(unused)]
 // #![deny(missing_docs)]
 //! Game simulation code that is shared between client and server.
 
