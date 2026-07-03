@@ -253,7 +253,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     }
     for p in &paths {
         if let Some(kind) = &p.2 {
-            if kind != "cell" && kind != "map" {
+            if kind != "cell" && kind != "map" && kind != "slotmap" {
                 panic!("unknown undo kind `{}` on field `{}`", kind, p.0);
             }
         }
@@ -284,6 +284,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                     syn::Type::parse
                                         .parse2(quote! { UndoMap<#k, #v> })
                                         .expect("Failed to change type of field to UndoMap<K, V>")
+                                }
+                                Some("slotmap") => {
+                                    let (k, v) = map_kv(ty);
+                                    syn::Type::parse
+                                        .parse2(quote! { UndoSlotMap<#k, #v> })
+                                        .expect("Failed to change type of field to UndoSlotMap<K, V>")
                                 }
                                 Some(other) => panic!("unknown undo kind `{}`", other),
                                 None => syn::Type::parse
@@ -394,6 +400,38 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         .collect::<Vec<proc_macro2::TokenStream>>()
         .into_iter();
     let map_path_string = maps
+        .iter()
+        .map(|(_, p)| p.0.clone().to_token_stream().to_string())
+        .collect::<Vec<String>>()
+        .into_iter();
+
+    // Tier-1 slotmap fields (vendored fork provides exact LIFO inverses).
+    let slotmaps: Vec<(usize, &(proc_macro2::TokenStream, syn::Field, Option<String>))> = paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.2.as_deref() == Some("slotmap"))
+        .collect();
+    let slot_log_ident = slotmaps
+        .iter()
+        .map(|(i, p)| log_ident_of(*i, &p.1))
+        .collect::<Vec<syn::Ident>>()
+        .into_iter();
+    let slot_k = slotmaps
+        .iter()
+        .map(|(_, p)| map_kv(&p.1.ty).0)
+        .collect::<Vec<_>>()
+        .into_iter();
+    let slot_v = slotmaps
+        .iter()
+        .map(|(_, p)| map_kv(&p.1.ty).1)
+        .collect::<Vec<_>>()
+        .into_iter();
+    let slot_path = slotmaps
+        .iter()
+        .map(|(_, p)| p.0.clone())
+        .collect::<Vec<proc_macro2::TokenStream>>()
+        .into_iter();
+    let slot_path_string = slotmaps
         .iter()
         .map(|(_, p)| p.0.clone().to_token_stream().to_string())
         .collect::<Vec<String>>()
@@ -544,6 +582,20 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let map_log_ident1 = map_log_ident.clone();
     let map_k1 = map_k.clone();
     let map_v1 = map_v.clone();
+    let slot_log_ident1 = slot_log_ident.clone();
+    let slot_k1 = slot_k.clone();
+    let slot_v1 = slot_v.clone();
+    items.push(item(
+        "SlotOp",
+        quote! {
+            // What a slotmap mutation did; reverted via the vendored fork's
+            // exact LIFO inverses (revert_insert / revert_remove).
+            pub enum SlotOp<K, V> {
+                Inserted(K),
+                Removed(K, V),
+            }
+        },
+    ));
     items.push(item(
         "Delta",
         quote! {
@@ -555,6 +607,94 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             pub enum Delta {
                 #(#cell_log_ident1(#cell_ty1),)*
                 #(#map_log_ident1(#map_k1, ::std::option::Option<#map_v1>),)*
+                #(#slot_log_ident1(SlotOp<#slot_k1, #slot_v1>),)*
+            }
+        },
+    ));
+    items.push(item(
+        "UndoSlotMap",
+        quote! {
+            #[derive(::core::default::Default, ::derive_more::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
+            pub struct UndoSlotMap<K, V>
+            where
+                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+            {
+                #[serde(skip)]
+                #[debug(skip)]
+                global_log: ::std::sync::Arc<::std::sync::Mutex<RollbackLog>>,
+                #[serde(skip)]
+                #[debug(skip)]
+                info: RollbackInfo,
+                #[serde(skip)]
+                #[debug(skip)]
+                make: ::std::option::Option<fn(SlotOp<K, V>) -> Delta>,
+                #[debug(skip)]
+                data: ::slotmapd::SlotMap<K, V>
+            }
+        },
+    ));
+    items.push(item(
+        "impl UndoSlotMap",
+        quote! {
+            impl<K, V> UndoSlotMap<K, V>
+            where
+                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+            {
+                fn log_op(&mut self, op: SlotOp<K, V>, pre_hash: u32) {
+                    let mut global = self.global_log.lock().unwrap();
+                    let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
+                    let make = self.make.expect("UndoSlotMap not wired to a Delta variant");
+                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Typed(make(op)), pre_hash });
+                }
+                pub fn insert(&mut self, v: V) -> K {
+                    let pre_hash = unsafe { self.hash_data() };
+                    let k = self.data.insert(v);
+                    self.log_op(SlotOp::Inserted(k), pre_hash);
+                    k
+                }
+                pub fn remove(&mut self, k: K) -> ::std::option::Option<V> {
+                    let pre_hash = unsafe { self.hash_data() };
+                    let v = self.data.remove(k)?;
+                    self.log_op(SlotOp::Removed(k, v.clone()), pre_hash);
+                    Some(v)
+                }
+                pub unsafe fn hash_data(&self) -> u32 {
+                    let mut hasher = ::crc32fast::Hasher::new();
+                    ::std::hash::Hash::hash(&self.data, &mut hasher);
+                    hasher.finalize()
+                }
+            }
+        },
+    ));
+    items.push(item(
+        "UndoSlotMap Deref",
+        quote! {
+            impl<K, V> ::std::ops::Deref for UndoSlotMap<K, V>
+            where
+                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+            {
+                type Target = ::slotmapd::SlotMap<K, V>;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.data
+                }
+            }
+        },
+    ));
+    items.push(item(
+        "UndoSlotMap Hash",
+        quote! {
+            impl<K, V> ::std::hash::Hash for UndoSlotMap<K, V>
+            where
+                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+            {
+                fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+                    self.data.hash(state);
+                }
             }
         },
     ));
@@ -780,6 +920,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let map_log_ident2 = map_log_ident.clone();
     let map_path1 = map_path.clone();
     let map_path_string1 = map_path_string.clone();
+    let slot_log_ident2 = slot_log_ident.clone();
+    let slot_path1 = slot_path.clone();
+    let slot_path_string1 = slot_path_string.clone();
     items.push(item(
         "impl Rollback",
         quote! {
@@ -845,6 +988,18 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                         panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #map_path_string1, entry.transaction, new_hash, entry.pre_hash);
                                     }
                                 })*
+                                #(Delta::#slot_log_ident2(op) => {
+                                    match op {
+                                        SlotOp::Inserted(k) => { self.#slot_path1.data.revert_insert(k); }
+                                        SlotOp::Removed(k, v) => { self.#slot_path1.data.revert_remove(k, v); }
+                                    }
+                                    let mut hasher = ::crc32fast::Hasher::new();
+                                    ::std::hash::Hash::hash(&self.#slot_path1.data, &mut hasher);
+                                    let new_hash = hasher.finalize();
+                                    if new_hash != entry.pre_hash {
+                                        panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                    }
+                                })*
                             }
                         }
                     }
@@ -879,6 +1034,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let cell_log_ident3 = cell_log_ident.clone();
     let map_path2 = map_path.clone();
     let map_log_ident3 = map_log_ident.clone();
+    let slot_path2 = slot_path.clone();
+    let slot_log_ident3 = slot_log_ident.clone();
     items.push(item(
         "impl new for Rollback",
         quote! {
@@ -897,6 +1054,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     #(r.#iter_path4.wrap = Some(FieldUndo::#iter_log_ident1);)*
                     #(r.#cell_path2.make = Some(Delta::#cell_log_ident3);)*
                     #(r.#map_path2.make = Some(Delta::#map_log_ident3);)*
+                    #(r.#slot_path2.make = Some(Delta::#slot_log_ident3);)*
                     let log = log.lock().unwrap();
                     r.data.info = log.info.clone();
                     #(r.#all_path2.info = log.info.clone();)*
@@ -915,6 +1073,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let cell_log_ident3 = cell_log_ident.clone();
     let map_path2 = map_path.clone();
     let map_log_ident3 = map_log_ident.clone();
+    let slot_path2 = slot_path.clone();
+    let slot_log_ident3 = slot_log_ident.clone();
     items.push(item(
         "impl Rollback reinitialize",
         quote! {
@@ -930,6 +1090,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     #(self.#iter_path4.wrap = Some(FieldUndo::#iter_log_ident1);)*
                     #(self.#cell_path2.make = Some(Delta::#cell_log_ident3);)*
                     #(self.#map_path2.make = Some(Delta::#map_log_ident3);)*
+                    #(self.#slot_path2.make = Some(Delta::#slot_log_ident3);)*
                     let log = log.lock().unwrap();
                     self.data.info = log.info.clone();
                     #(self.#all_path2.info = log.info.clone();)*
