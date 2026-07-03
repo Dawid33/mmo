@@ -385,24 +385,6 @@ where
         }
     }
 
-    pub fn set_safe_with_closure(
-        &mut self,
-        key: EntityKey,
-        item: Option<T>,
-        closure: Box<dyn FnOnce(&Sender<GameDataUpdate>) -> () + Send>,
-    ) {
-        let old = self.list.get(key).cloned().unwrap();
-        self.undo(move |d, s| {
-            *d.list.get_mut(key).unwrap() = old.clone();
-            closure(s);
-        });
-
-        if let Some(item) = item {
-            self.list.get_mut(key).unwrap().replace(item);
-        } else {
-            self.list.get_mut(key).unwrap().take();
-        }
-    }
 }
 
 impl<T> Component<T>
@@ -486,17 +468,13 @@ impl Rollback {
             GameDataTransactionKind::Do,
             GameDataUpdateKind::AddCameraComponent(e, cam.proj_matrix, position),
         ));
-        self.data.ecs.camera.set_safe_with_closure(
-            e,
-            Some(cam),
-            Box::new(move |s| {
-                s.send(GameDataUpdate::new(
-                    GameDataTransactionKind::Undo,
-                    GameDataUpdateKind::RemoveCameraComponent(e),
-                ))
-                .unwrap();
-            }),
-        );
+        // LIFO: registered before set_safe, so the notification fires after
+        // the camera value is restored.
+        self.data.ecs.camera.emit_on_undo(GameDataUpdate::new(
+            GameDataTransactionKind::Undo,
+            GameDataUpdateKind::RemoveCameraComponent(e),
+        ));
+        self.data.ecs.camera.set_safe(e, Some(cam));
         self.data.player_entites.insert(client_id, e);
     }
 }

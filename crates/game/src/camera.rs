@@ -31,11 +31,11 @@ impl Controller for CameraController {
             let client = data.clients.get_mut(client_id).unwrap();
             if let Some(resolution) = client.input.window_resized() {
                 let old = ecs.camera.get(e_id).proj_matrix.clone();
-                ecs.camera.undo(move |d, s| {
-                    s.send(GameDataUpdate::new(
-                        crate::GameDataTransactionKind::Undo,
-                        crate::GameDataUpdateKind::UpdateCameraViewProj(e_id, old),
-                    ));
+                ecs.camera.emit_on_undo(GameDataUpdate::new(
+                    crate::GameDataTransactionKind::Undo,
+                    crate::GameDataUpdateKind::UpdateCameraViewProj(e_id, old),
+                ));
+                ecs.camera.undo(move |d, _| {
                     d.get_mut(e_id).proj_matrix = old;
                 });
                 ecs.camera

@@ -141,6 +141,32 @@ fn entity_creation_auto_emits_in_both_directions() {
 }
 
 #[test]
+fn player_creation_emits_camera_pair() {
+    let (mut r, recv) = new_rollback();
+    r.new_transaction();
+    r.create_player_safe(0);
+
+    let applied: Vec<_> = recv.try_iter().collect();
+    assert!(
+        applied.iter().any(|u| matches!(
+            u.update_kind,
+            rollback::GameDataUpdateKind::AddCameraComponent(..)
+        )),
+        "apply must emit AddCameraComponent, got {applied:?}"
+    );
+
+    r.rollback();
+    let undone: Vec<_> = recv.try_iter().collect();
+    assert!(
+        undone.iter().any(|u| matches!(
+            u.update_kind,
+            rollback::GameDataUpdateKind::RemoveCameraComponent(_)
+        )),
+        "undo must emit RemoveCameraComponent, got {undone:?}"
+    );
+}
+
+#[test]
 fn undomap_ops_roll_back_exactly() {
     let (mut r, _recv) = new_rollback();
     r.new_transaction();

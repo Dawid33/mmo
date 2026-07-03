@@ -604,6 +604,16 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(undo))), pre_hash });
                 }
 
+                /// Registers a compensation-only undo entry: no data changes,
+                /// `event` is sent when the undo runs. Use for render
+                /// notifications whose payload isn't derivable from a single
+                /// field's delta.
+                pub fn emit_on_undo(&mut self, event: crate::GameDataUpdate) {
+                    self.undo(move |_, s| {
+                        s.send(event).unwrap();
+                    });
+                }
+
                 pub fn undo_scope(&mut self) -> UndoScope<T, '_> {
                     UndoScope {
                         pre_hash: unsafe { self.hash_data() },
