@@ -153,48 +153,36 @@ impl Region {
                 let data: &mut GameData = self.data.deref_mut();
                 let keys: Vec<ClientId> = data.clients.keys().cloned().collect();
                 for client_id in keys {
-                    let client = data.clients.get_mut(&client_id).unwrap();
-                    if client.input.key_pressed(&winit::keyboard::KeyCode::KeyE) {
-                        let old = client.fps_cam_mode;
-                        data.clients.undo(move |clients, _| {
-                            clients.get_mut(&client_id).unwrap().fps_cam_mode = old;
-                        });
+                    // get_mut logs the prior Client, so the toggle and the
+                    // input step are both covered by one delta.
+                    let toggled = {
                         let client = data.clients.get_mut(&client_id).unwrap();
-                        client.fps_cam_mode = !client.fps_cam_mode;
-                        let mode = client.fps_cam_mode;
+                        let toggle = client.input.key_pressed(&winit::keyboard::KeyCode::KeyE);
+                        if toggle {
+                            client.fps_cam_mode = !client.fps_cam_mode;
+                        }
+                        let _ = client.input.step();
+                        toggle.then_some(client.fps_cam_mode)
+                    };
+                    if let Some(mode) = toggled {
                         data.ecs.send(GameDataUpdate::new(
                             crate::GameDataTransactionKind::Do,
                             crate::GameDataUpdateKind::SetFreeCam(client_id, mode),
                         ));
-                    }
-
-                    let mut clients = data.clients.delayed_undo();
-                    let client = clients.get_mut(&client_id).unwrap();
-                    if let Some(undo_func) = client.input.step() {
-                        clients.undo(move |client, _| {
-                            let p = &mut client.get_mut(&client_id).unwrap().input;
-                            undo_func(p);
-                        })
                     }
                 }
                 self.data.tick.update(|t| *t += 1);
             }
             GameEventKind::PlayerWinitEvent(client_id, player_event) => {
                 let data: &mut GameData = self.data.deref_mut();
-                let mut clients = data.clients.delayed_undo();
-                if let Some(c) = clients.get_mut(&client_id) {
-                    if let Some(undo_func) = c.input.update(player_event.clone()) {
-                        clients.undo(move |clients, _| {
-                            let c = &mut clients.get_mut(&client_id).unwrap().input;
-                            undo_func(c);
-                        })
-                    }
+                if let Some(c) = data.clients.get_mut(&client_id) {
+                    let _ = c.input.update(player_event.clone());
                 }
             }
             GameEventKind::Quit => return Err(GameError::QuitRequested),
             GameEventKind::CreateClient(client_id) => {
                 info!("{:?}", event);
-                self.data.clients.change().insert(client_id, Client::default());
+                self.data.clients.insert(client_id, Client::default());
                 self.data.create_player_safe(client_id);
             }
         }

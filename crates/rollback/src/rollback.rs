@@ -299,7 +299,9 @@ mod game_data {
         tick: usize,
         #[undo(cell)]
         next_game_event_id: usize,
+        #[undo(map)]
         player_entites: BTreeMap<ClientId, EntityKey>,
+        #[undo(map)]
         clients: BTreeMap<ClientId, Client>,
     }
 
@@ -498,11 +500,6 @@ impl Rollback {
                 .unwrap();
             }),
         );
-        // Register the undo before mutating: the recorded hash must match the
-        // state the closure restores to.
-        self.data.player_entites.undo(move |d, _| {
-            d.remove(&client_id);
-        });
         self.data.player_entites.insert(client_id, e);
     }
 }

@@ -138,6 +138,24 @@ fn undo_kind(f: &syn::Field) -> Option<String> {
     })
 }
 
+/// Extracts (K, V) from a `Map<K, V>`-shaped field type.
+fn map_kv(ty: &syn::Type) -> (syn::Type, syn::Type) {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            if let syn::PathArguments::AngleBracketed(ab) = &seg.arguments {
+                let mut types = ab.args.iter().filter_map(|a| match a {
+                    syn::GenericArgument::Type(t) => Some(t.clone()),
+                    _ => None,
+                });
+                if let (Some(k), Some(v)) = (types.next(), types.next()) {
+                    return (k, v);
+                }
+            }
+        }
+    }
+    panic!("#[undo(map)] requires a Map<K, V> field type");
+}
+
 #[proc_macro_attribute]
 pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut ast = parse_macro_input!(input as syn::ItemMod);
@@ -219,7 +237,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     }
     for p in &paths {
         if let Some(kind) = &p.2 {
-            if kind != "cell" {
+            if kind != "cell" && kind != "map" {
                 panic!("unknown undo kind `{}` on field `{}`", kind, p.0);
             }
         }
@@ -245,6 +263,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                 Some("cell") => syn::Type::parse
                                     .parse2(quote! { UndoCell<#ty> })
                                     .expect("Failed to change type of field to UndoCell<T>"),
+                                Some("map") => {
+                                    let (k, v) = map_kv(ty);
+                                    syn::Type::parse
+                                        .parse2(quote! { UndoMap<#k, #v> })
+                                        .expect("Failed to change type of field to UndoMap<K, V>")
+                                }
                                 Some(other) => panic!("unknown undo kind `{}`", other),
                                 None => syn::Type::parse
                                     .parse2(quote! { Undo<#ty> })
@@ -322,6 +346,38 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         .collect::<Vec<proc_macro2::TokenStream>>()
         .into_iter();
     let cell_path_string = cells
+        .iter()
+        .map(|(_, p)| p.0.clone().to_token_stream().to_string())
+        .collect::<Vec<String>>()
+        .into_iter();
+
+    // Tier-1 map fields.
+    let maps: Vec<(usize, &(proc_macro2::TokenStream, syn::Field, Option<String>))> = paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.2.as_deref() == Some("map"))
+        .collect();
+    let map_log_ident = maps
+        .iter()
+        .map(|(i, p)| log_ident_of(*i, &p.1))
+        .collect::<Vec<syn::Ident>>()
+        .into_iter();
+    let map_k = maps
+        .iter()
+        .map(|(_, p)| map_kv(&p.1.ty).0)
+        .collect::<Vec<_>>()
+        .into_iter();
+    let map_v = maps
+        .iter()
+        .map(|(_, p)| map_kv(&p.1.ty).1)
+        .collect::<Vec<_>>()
+        .into_iter();
+    let map_path = maps
+        .iter()
+        .map(|(_, p)| p.0.clone())
+        .collect::<Vec<proc_macro2::TokenStream>>()
+        .into_iter();
+    let map_path_string = maps
         .iter()
         .map(|(_, p)| p.0.clone().to_token_stream().to_string())
         .collect::<Vec<String>>()
@@ -461,15 +517,115 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     ));
     let cell_log_ident1 = cell_log_ident.clone();
     let cell_ty1 = cell_ty.clone();
+    let map_log_ident1 = map_log_ident.clone();
+    let map_k1 = map_k.clone();
+    let map_v1 = map_v.clone();
     items.push(item(
         "Delta",
         quote! {
             // Typed, inspectable undo records for tier-1 fields. One tuple
-            // variant per field holding the OLD value; the constructor doubles
-            // as the `make` fn pointer stored on the wrapper.
+            // variant per field holding the OLD value (for maps: the key and
+            // the prior value at that key, None = key was absent); the
+            // constructor doubles as the `make` fn pointer on the wrapper.
             #[allow(non_camel_case_types)]
             pub enum Delta {
                 #(#cell_log_ident1(#cell_ty1),)*
+                #(#map_log_ident1(#map_k1, ::std::option::Option<#map_v1>),)*
+            }
+        },
+    ));
+    items.push(item(
+        "UndoMap",
+        quote! {
+            #[derive(::core::default::Default, ::derive_more::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
+            pub struct UndoMap<K, V>
+            where
+                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+            {
+                #[serde(skip)]
+                #[debug(skip)]
+                global_log: ::std::sync::Arc<::std::sync::Mutex<RollbackLog>>,
+                #[serde(skip)]
+                #[debug(skip)]
+                info: RollbackInfo,
+                #[serde(skip)]
+                #[debug(skip)]
+                make: ::std::option::Option<fn(K, ::std::option::Option<V>) -> Delta>,
+                #[debug(skip)]
+                data: ::std::collections::BTreeMap<K, V>
+            }
+        },
+    ));
+    items.push(item(
+        "impl UndoMap",
+        quote! {
+            impl<K, V> UndoMap<K, V>
+            where
+                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+            {
+                fn log_entry(&mut self, key: K, prev: ::std::option::Option<V>) {
+                    let mut global = self.global_log.lock().unwrap();
+                    let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
+                    let mut hasher = ::crc32fast::Hasher::new();
+                    ::std::hash::Hash::hash(&self.data, &mut hasher);
+                    let pre_hash = hasher.finalize();
+                    let make = self.make.expect("UndoMap not wired to a Delta variant");
+                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Typed(make(key, prev)), pre_hash });
+                }
+                pub fn insert(&mut self, k: K, v: V) -> ::std::option::Option<V> {
+                    let prev = self.data.get(&k).cloned();
+                    self.log_entry(k.clone(), prev);
+                    self.data.insert(k, v)
+                }
+                pub fn remove(&mut self, k: &K) -> ::std::option::Option<V> {
+                    if let Some(prev) = self.data.get(k).cloned() {
+                        self.log_entry(k.clone(), Some(prev));
+                    }
+                    self.data.remove(k)
+                }
+                pub fn get_mut(&mut self, k: &K) -> ::std::option::Option<&mut V> {
+                    if let Some(prev) = self.data.get(k).cloned() {
+                        self.log_entry(k.clone(), Some(prev));
+                    }
+                    self.data.get_mut(k)
+                }
+                pub unsafe fn hash_data(&self) -> u32 {
+                    let mut hasher = ::crc32fast::Hasher::new();
+                    ::std::hash::Hash::hash(&self.data, &mut hasher);
+                    hasher.finalize()
+                }
+            }
+        },
+    ));
+    items.push(item(
+        "UndoMap Deref",
+        quote! {
+            impl<K, V> ::std::ops::Deref for UndoMap<K, V>
+            where
+                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+            {
+                type Target = ::std::collections::BTreeMap<K, V>;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.data
+                }
+            }
+        },
+    ));
+    items.push(item(
+        "UndoMap Hash",
+        quote! {
+            impl<K, V> ::std::hash::Hash for UndoMap<K, V>
+            where
+                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+            {
+                fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+                    self.data.hash(state);
+                }
             }
         },
     ));
@@ -597,6 +753,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let cell_log_ident2 = cell_log_ident.clone();
     let cell_path1 = cell_path.clone();
     let cell_path_string1 = cell_path_string.clone();
+    let map_log_ident2 = map_log_ident.clone();
+    let map_path1 = map_path.clone();
+    let map_path_string1 = map_path_string.clone();
     items.push(item(
         "impl Rollback",
         quote! {
@@ -650,6 +809,18 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                         panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #cell_path_string1, entry.transaction, new_hash, entry.pre_hash);
                                     }
                                 })*
+                                #(Delta::#map_log_ident2(key, prev) => {
+                                    match prev {
+                                        Some(v) => { self.#map_path1.data.insert(key, v); }
+                                        None => { self.#map_path1.data.remove(&key); }
+                                    }
+                                    let mut hasher = ::crc32fast::Hasher::new();
+                                    ::std::hash::Hash::hash(&self.#map_path1.data, &mut hasher);
+                                    let new_hash = hasher.finalize();
+                                    if new_hash != entry.pre_hash {
+                                        panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #map_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                    }
+                                })*
                             }
                         }
                     }
@@ -682,6 +853,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let iter_log_ident1 = iter_log_ident.clone();
     let cell_path2 = cell_path.clone();
     let cell_log_ident3 = cell_log_ident.clone();
+    let map_path2 = map_path.clone();
+    let map_log_ident3 = map_log_ident.clone();
     items.push(item(
         "impl new for Rollback",
         quote! {
@@ -699,6 +872,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     #(r.#all_path1.global_log = log.clone();)*
                     #(r.#iter_path4.wrap = Some(FieldUndo::#iter_log_ident1);)*
                     #(r.#cell_path2.make = Some(Delta::#cell_log_ident3);)*
+                    #(r.#map_path2.make = Some(Delta::#map_log_ident3);)*
                     let log = log.lock().unwrap();
                     r.data.info = log.info.clone();
                     #(r.#all_path2.info = log.info.clone();)*
@@ -715,6 +889,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let iter_log_ident1 = iter_log_ident.clone();
     let cell_path2 = cell_path.clone();
     let cell_log_ident3 = cell_log_ident.clone();
+    let map_path2 = map_path.clone();
+    let map_log_ident3 = map_log_ident.clone();
     items.push(item(
         "impl Rollback reinitialize",
         quote! {
@@ -729,6 +905,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     #(self.#all_path1.global_log = log.clone();)*
                     #(self.#iter_path4.wrap = Some(FieldUndo::#iter_log_ident1);)*
                     #(self.#cell_path2.make = Some(Delta::#cell_log_ident3);)*
+                    #(self.#map_path2.make = Some(Delta::#map_log_ident3);)*
                     let log = log.lock().unwrap();
                     self.data.info = log.info.clone();
                     #(self.#all_path2.info = log.info.clone();)*

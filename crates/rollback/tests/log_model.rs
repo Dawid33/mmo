@@ -67,14 +67,28 @@ fn lifo_order_is_preserved_across_fields() {
 
     r.new_transaction();
     r.tick.update(|t| *t += 1);
-    r.player_entites.undo(|d, _| {
-        d.remove(&3);
-    });
     r.player_entites.insert(3, rollback::EntityKey::default());
     r.tick.update(|t| *t += 10);
 
     r.rollback();
     assert_eq!(h0, state_hash(&r));
+}
+
+#[test]
+fn undomap_ops_roll_back_exactly() {
+    let (mut r, _recv) = new_rollback();
+    r.new_transaction();
+    r.player_entites.insert(1, rollback::EntityKey::default());
+    let h1 = state_hash(&r);
+
+    r.new_transaction();
+    r.player_entites.insert(1, rollback::EntityKey::default()); // overwrite
+    r.player_entites.insert(2, rollback::EntityKey::default()); // fresh insert
+    r.player_entites.remove(&1); // remove
+    r.rollback();
+    assert_eq!(h1, state_hash(&r), "insert-overwrite/insert/remove must all revert");
+    assert!(r.player_entites.get(&1).is_some());
+    assert!(r.player_entites.get(&2).is_none());
 }
 
 #[test]
