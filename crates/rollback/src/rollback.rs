@@ -335,15 +335,16 @@ impl Undo<Ecs> {
     pub fn create_entity_safe(&mut self) -> EntityKey {
         // SlotMap hashes slot versions and the free list, so removing an
         // inserted entity can't restore the pre-insert state (and the next
-        // insert would allocate a different key). Undo restores a snapshot.
+        // insert would allocate a different key). Undo restores a snapshot
+        // until the slotmapd fork exposes true inverses (Phase 2).
         let old: Ecs = (**self).clone();
-        let mut this = self.delayed_undo();
+        let mut this = self.undo_scope();
         let key = this.entities.deref_mut().insert(());
         this.camera.insert(key, None);
         this.isometry.insert(key, None);
         this.rigidbody.insert(key, None);
         this.chunk.insert(key, None);
-        this.undo(move |d, s| {
+        this.register(move |d, s| {
             *d = old;
             s.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,

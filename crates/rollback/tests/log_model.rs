@@ -75,6 +75,32 @@ fn lifo_order_is_preserved_across_fields() {
 }
 
 #[test]
+fn undo_scope_snapshot_registration_rolls_back() {
+    use std::ops::DerefMut;
+    let (mut r, _recv) = new_rollback();
+    let h0 = state_hash(&r);
+    r.new_transaction();
+    let old: rollback::Ecs = (*r.ecs).clone();
+    let mut scope = r.ecs.undo_scope();
+    let _key = scope.entities.deref_mut().insert(());
+    scope.register(move |ecs, _| *ecs = old);
+    r.rollback();
+    assert_eq!(h0, state_hash(&r));
+}
+
+#[test]
+#[should_panic(expected = "UndoScope mutated without register")]
+#[cfg(debug_assertions)]
+fn undo_scope_drop_without_register_panics() {
+    use std::ops::DerefMut;
+    let (mut r, _recv) = new_rollback();
+    r.new_transaction();
+    let mut scope = r.ecs.undo_scope();
+    let _ = scope.entities.deref_mut().insert(());
+    drop(scope);
+}
+
+#[test]
 fn undomap_ops_roll_back_exactly() {
     let (mut r, _recv) = new_rollback();
     r.new_transaction();

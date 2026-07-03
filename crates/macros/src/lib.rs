@@ -72,9 +72,9 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
     ));
 
     items.push(item(
-        "DelayedUndo Deref",
+        "UndoScope Deref",
         quote! {
-            impl<T, 'a> ::std::ops::Deref for DelayedUndo<T, 'a>
+            impl<T, 'a> ::std::ops::Deref for UndoScope<T, 'a>
             where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
                 type Target = T;
 
@@ -86,12 +86,28 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
     ));
 
     items.push(item(
-        "DelayedUndo DerefMut",
+        "UndoScope DerefMut",
         quote! {
-            impl<T, 'a> ::std::ops::DerefMut for DelayedUndo<T, 'a>
+            impl<T, 'a> ::std::ops::DerefMut for UndoScope<T, 'a>
             where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
                 fn deref_mut(&mut self) -> &mut Self::Target {
+                    self.touched = true;
                     &mut self.value
+                }
+            }
+        },
+    ));
+
+    items.push(item(
+        "UndoScope Drop",
+        quote! {
+            impl<T, 'a> ::std::ops::Drop for UndoScope<T, 'a>
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+                fn drop(&mut self) {
+                    debug_assert!(
+                        !self.touched || self.registered,
+                        "UndoScope mutated without register()"
+                    );
                 }
             }
         },
@@ -385,24 +401,30 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
 
     boilerplate(items, root_struct_ident);
     items.push(item(
-        "struct Delayed Undo<T>",
+        "struct UndoScope<T>",
         quote! {
-            pub struct DelayedUndo<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
-                hash: u32,
+            // Tier-2 escape hatch: captures the pre-mutation hash at creation,
+            // hands out &mut T, and requires register() with a TRUE inverse of
+            // the full serialized state before it is dropped.
+            pub struct UndoScope<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+                pre_hash: u32,
+                touched: bool,
+                registered: bool,
                 value: &'a mut Undo<T>
             }
         },
     ));
 
     items.push(item(
-        "impl DelayedUndo<T>",
+        "impl UndoScope<T>",
         quote! {
-            impl<T, 'a> DelayedUndo<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash  {
-                pub fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
+            impl<T, 'a> UndoScope<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash  {
+                pub fn register(mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
+                    self.registered = true;
                     let mut global = self.value.global_log.lock().unwrap();
                     let trans = self.value.info.current.load(::std::sync::atomic::Ordering::SeqCst);
                     let wrap = self.value.wrap.expect("Undo field not wired to a FieldUndo variant");
-                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(undo))), pre_hash: self.hash });
+                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(undo))), pre_hash: self.pre_hash });
                 }
             }
         },
@@ -453,9 +475,11 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(undo))), pre_hash });
                 }
 
-                pub fn delayed_undo(&mut self) -> DelayedUndo<T, '_> {
-                    DelayedUndo {
-                        hash: unsafe { self.hash_data() },
+                pub fn undo_scope(&mut self) -> UndoScope<T, '_> {
+                    UndoScope {
+                        pre_hash: unsafe { self.hash_data() },
+                        touched: false,
+                        registered: false,
                         value: self
                     }
                 }
