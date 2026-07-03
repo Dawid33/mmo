@@ -154,6 +154,28 @@ fn undo_kind(f: &syn::Field) -> Option<String> {
     })
 }
 
+/// Reads `#[emit(insert = Variant, remove = Variant)]` off a field. The
+/// variants are `crate::GameDataUpdateKind` constructors taking the key.
+fn emit_pair(f: &syn::Field) -> Option<(syn::Path, syn::Path)> {
+    let attr = f.attrs.iter().find(|a| a.path().is_ident("emit"))?;
+    let mut insert = None;
+    let mut remove = None;
+    attr.parse_nested_meta(|meta| {
+        let value: syn::Path = meta.value()?.parse()?;
+        if meta.path.is_ident("insert") {
+            insert = Some(value);
+        } else if meta.path.is_ident("remove") {
+            remove = Some(value);
+        }
+        Ok(())
+    })
+    .expect("malformed #[emit(insert = ..., remove = ...)]");
+    Some((
+        insert.expect("emit: missing `insert = ...`"),
+        remove.expect("emit: missing `remove = ...`"),
+    ))
+}
+
 /// Extracts (K, V) from a `Map<K, V>`-shaped field type.
 fn map_kv(ty: &syn::Type) -> (syn::Type, syn::Type) {
     if let syn::Type::Path(tp) = ty {
@@ -226,7 +248,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let mut path_stack: Vec<&Ident> = Vec::new();
     let mut struct_stack: Vec<(&ItemStruct, usize)> =
         Vec::from([(find(&root_struct_ident_string).unwrap(), 0)]);
-    let mut paths: Vec<(proc_macro2::TokenStream, syn::Field, Option<String>)> = Vec::new();
+    let mut paths: Vec<(
+        proc_macro2::TokenStream,
+        syn::Field,
+        Option<String>,
+        Option<(syn::Path, syn::Path)>,
+    )> = Vec::new();
     while let Some((s, current)) = struct_stack.pop() {
         match &s.fields {
             syn::Fields::Named(fields_named) => {
@@ -234,7 +261,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     struct_stack.push((s, current + 1));
                     let ident = f.ident.as_ref().unwrap();
                     let stack = path_stack.iter();
-                    paths.push((quote! { #(#stack.)*#ident }, f.to_owned().clone(), undo_kind(f)));
+                    paths.push((
+                        quote! { #(#stack.)*#ident },
+                        f.to_owned().clone(),
+                        undo_kind(f),
+                        emit_pair(f),
+                    ));
                     let stack = path_stack.iter();
                     if let Some(s) = find(&f.ty.to_token_stream().to_string()) {
                         path_stack.push(ident);
@@ -257,6 +289,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 panic!("unknown undo kind `{}` on field `{}`", kind, p.0);
             }
         }
+        if p.3.is_some() && p.2.as_deref() != Some("slotmap") {
+            panic!("#[emit(...)] is only supported on #[undo(slotmap)] fields (field `{}`)", p.0);
+        }
     }
 
     let mut all_fields = Vec::new();
@@ -273,7 +308,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         for f in &mut named_fields.named {
                             all_fields.push(f.clone());
                             let kind = undo_kind(f);
-                            f.attrs.retain(|a| !a.path().is_ident("undo"));
+                            f.attrs
+                                .retain(|a| !a.path().is_ident("undo") && !a.path().is_ident("emit"));
                             let ty = &f.ty;
                             f.ty = match kind.as_deref() {
                                 Some("cell") => syn::Type::parse
@@ -313,13 +349,29 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         .collect::<Vec<proc_macro2::TokenStream>>();
 
     // Tier-2 (opaque closure) fields: everything without an #[undo(...)] kind.
-    let opaque: Vec<(usize, &(proc_macro2::TokenStream, syn::Field, Option<String>))> = paths
+    let opaque: Vec<(
+        usize,
+        &(
+            proc_macro2::TokenStream,
+            syn::Field,
+            Option<String>,
+            Option<(syn::Path, syn::Path)>,
+        ),
+    )> = paths
         .iter()
         .enumerate()
         .filter(|(_, p)| p.2.is_none())
         .collect();
     // Tier-1 cell fields.
-    let cells: Vec<(usize, &(proc_macro2::TokenStream, syn::Field, Option<String>))> = paths
+    let cells: Vec<(
+        usize,
+        &(
+            proc_macro2::TokenStream,
+            syn::Field,
+            Option<String>,
+            Option<(syn::Path, syn::Path)>,
+        ),
+    )> = paths
         .iter()
         .enumerate()
         .filter(|(_, p)| p.2.as_deref() == Some("cell"))
@@ -374,7 +426,15 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         .into_iter();
 
     // Tier-1 map fields.
-    let maps: Vec<(usize, &(proc_macro2::TokenStream, syn::Field, Option<String>))> = paths
+    let maps: Vec<(
+        usize,
+        &(
+            proc_macro2::TokenStream,
+            syn::Field,
+            Option<String>,
+            Option<(syn::Path, syn::Path)>,
+        ),
+    )> = paths
         .iter()
         .enumerate()
         .filter(|(_, p)| p.2.as_deref() == Some("map"))
@@ -406,7 +466,15 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         .into_iter();
 
     // Tier-1 slotmap fields (vendored fork provides exact LIFO inverses).
-    let slotmaps: Vec<(usize, &(proc_macro2::TokenStream, syn::Field, Option<String>))> = paths
+    let slotmaps: Vec<(
+        usize,
+        &(
+            proc_macro2::TokenStream,
+            syn::Field,
+            Option<String>,
+            Option<(syn::Path, syn::Path)>,
+        ),
+    )> = paths
         .iter()
         .enumerate()
         .filter(|(_, p)| p.2.as_deref() == Some("slotmap"))
@@ -435,6 +503,29 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         .iter()
         .map(|(_, p)| p.0.clone().to_token_stream().to_string())
         .collect::<Vec<String>>()
+        .into_iter();
+
+    // Slotmap fields with an #[emit(...)] pair.
+    let emits: Vec<&(
+        proc_macro2::TokenStream,
+        syn::Field,
+        Option<String>,
+        Option<(syn::Path, syn::Path)>,
+    )> = paths.iter().filter(|p| p.3.is_some()).collect();
+    let emit_path = emits
+        .iter()
+        .map(|p| p.0.clone())
+        .collect::<Vec<proc_macro2::TokenStream>>()
+        .into_iter();
+    let emit_insert_variant = emits
+        .iter()
+        .map(|p| p.3.clone().unwrap().0)
+        .collect::<Vec<syn::Path>>()
+        .into_iter();
+    let emit_remove_variant = emits
+        .iter()
+        .map(|p| p.3.clone().unwrap().1)
+        .collect::<Vec<syn::Path>>()
         .into_iter();
 
     boilerplate(items, root_struct_ident);
@@ -629,6 +720,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 #[serde(skip)]
                 #[debug(skip)]
                 make: ::std::option::Option<fn(SlotOp<K, V>) -> Delta>,
+                #[serde(skip)]
+                #[debug(skip)]
+                emit_insert: ::std::option::Option<fn(K) -> crate::GameDataUpdateKind>,
+                #[serde(skip)]
+                #[debug(skip)]
+                emit_remove: ::std::option::Option<fn(K) -> crate::GameDataUpdateKind>,
                 #[debug(skip)]
                 data: ::slotmapd::SlotMap<K, V>
             }
@@ -642,22 +739,27 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
                 V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
             {
-                fn log_op(&mut self, op: SlotOp<K, V>, pre_hash: u32) {
+                fn log_op(&mut self, op: SlotOp<K, V>, pre_hash: u32, emit: ::std::option::Option<crate::GameDataUpdateKind>) {
                     let mut global = self.global_log.lock().unwrap();
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
                     let make = self.make.expect("UndoSlotMap not wired to a Delta variant");
                     global.log.push_back(Entry { transaction: trans, undo: UndoOp::Typed(make(op)), pre_hash });
+                    if let (Some(kind), Some(client)) = (emit, global.client.as_ref()) {
+                        client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Do, kind)).unwrap();
+                    }
                 }
                 pub fn insert(&mut self, v: V) -> K {
                     let pre_hash = unsafe { self.hash_data() };
                     let k = self.data.insert(v);
-                    self.log_op(SlotOp::Inserted(k), pre_hash);
+                    let emit = self.emit_insert.map(|mk| mk(k));
+                    self.log_op(SlotOp::Inserted(k), pre_hash, emit);
                     k
                 }
                 pub fn remove(&mut self, k: K) -> ::std::option::Option<V> {
                     let pre_hash = unsafe { self.hash_data() };
                     let v = self.data.remove(k)?;
-                    self.log_op(SlotOp::Removed(k, v.clone()), pre_hash);
+                    let emit = self.emit_remove.map(|mk| mk(k));
+                    self.log_op(SlotOp::Removed(k, v.clone()), pre_hash, emit);
                     Some(v)
                 }
                 pub unsafe fn hash_data(&self) -> u32 {
@@ -990,8 +1092,18 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                 })*
                                 #(Delta::#slot_log_ident2(op) => {
                                     match op {
-                                        SlotOp::Inserted(k) => { self.#slot_path1.data.revert_insert(k); }
-                                        SlotOp::Removed(k, v) => { self.#slot_path1.data.revert_remove(k, v); }
+                                        SlotOp::Inserted(k) => {
+                                            self.#slot_path1.data.revert_insert(k);
+                                            if let (Some(mk), Some(client)) = (self.#slot_path1.emit_remove, rollback_log.client.as_ref()) {
+                                                client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Undo, mk(k))).unwrap();
+                                            }
+                                        }
+                                        SlotOp::Removed(k, v) => {
+                                            self.#slot_path1.data.revert_remove(k, v);
+                                            if let (Some(mk), Some(client)) = (self.#slot_path1.emit_insert, rollback_log.client.as_ref()) {
+                                                client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Undo, mk(k))).unwrap();
+                                            }
+                                        }
                                     }
                                     let mut hasher = ::crc32fast::Hasher::new();
                                     ::std::hash::Hash::hash(&self.#slot_path1.data, &mut hasher);
@@ -1036,6 +1148,10 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let map_log_ident3 = map_log_ident.clone();
     let slot_path2 = slot_path.clone();
     let slot_log_ident3 = slot_log_ident.clone();
+    let emit_path1 = emit_path.clone();
+    let emit_path2 = emit_path.clone();
+    let emit_insert_variant1 = emit_insert_variant.clone();
+    let emit_remove_variant1 = emit_remove_variant.clone();
     items.push(item(
         "impl new for Rollback",
         quote! {
@@ -1055,6 +1171,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     #(r.#cell_path2.make = Some(Delta::#cell_log_ident3);)*
                     #(r.#map_path2.make = Some(Delta::#map_log_ident3);)*
                     #(r.#slot_path2.make = Some(Delta::#slot_log_ident3);)*
+                    #(r.#emit_path1.emit_insert = Some(crate::GameDataUpdateKind::#emit_insert_variant1);)*
+                    #(r.#emit_path2.emit_remove = Some(crate::GameDataUpdateKind::#emit_remove_variant1);)*
                     let log = log.lock().unwrap();
                     r.data.info = log.info.clone();
                     #(r.#all_path2.info = log.info.clone();)*
@@ -1075,6 +1193,10 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let map_log_ident3 = map_log_ident.clone();
     let slot_path2 = slot_path.clone();
     let slot_log_ident3 = slot_log_ident.clone();
+    let emit_path1 = emit_path.clone();
+    let emit_path2 = emit_path.clone();
+    let emit_insert_variant1 = emit_insert_variant.clone();
+    let emit_remove_variant1 = emit_remove_variant.clone();
     items.push(item(
         "impl Rollback reinitialize",
         quote! {
@@ -1091,6 +1213,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     #(self.#cell_path2.make = Some(Delta::#cell_log_ident3);)*
                     #(self.#map_path2.make = Some(Delta::#map_log_ident3);)*
                     #(self.#slot_path2.make = Some(Delta::#slot_log_ident3);)*
+                    #(self.#emit_path1.emit_insert = Some(crate::GameDataUpdateKind::#emit_insert_variant1);)*
+                    #(self.#emit_path2.emit_remove = Some(crate::GameDataUpdateKind::#emit_remove_variant1);)*
                     let log = log.lock().unwrap();
                     self.data.info = log.info.clone();
                     #(self.#all_path2.info = log.info.clone();)*

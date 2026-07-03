@@ -121,6 +121,26 @@ fn create_entity_rolls_back_without_snapshot_and_reuses_key() {
 }
 
 #[test]
+fn entity_creation_auto_emits_in_both_directions() {
+    let (mut r, recv) = new_rollback();
+    r.new_transaction();
+    let key = r.ecs.create_entity_safe();
+
+    let applied: Vec<_> = recv.try_iter().collect();
+    assert!(
+        applied.iter().any(|u| matches!(u.update_kind, rollback::GameDataUpdateKind::CreateEntity(k) if k == key)),
+        "apply must emit CreateEntity, got {applied:?}"
+    );
+
+    r.rollback();
+    let undone: Vec<_> = recv.try_iter().collect();
+    assert!(
+        undone.iter().any(|u| matches!(u.update_kind, rollback::GameDataUpdateKind::RemoveEntity(k) if k == key)),
+        "undo must emit RemoveEntity, got {undone:?}"
+    );
+}
+
+#[test]
 fn undomap_ops_roll_back_exactly() {
     let (mut r, _recv) = new_rollback();
     r.new_transaction();

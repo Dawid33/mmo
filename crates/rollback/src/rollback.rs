@@ -307,6 +307,7 @@ mod game_data {
 
     pub struct Ecs {
         #[undo(slotmap)]
+        #[emit(insert = CreateEntity, remove = RemoveEntity)]
         entities: SlotMap<EntityKey, ()>,
         camera: Component<Camera>,
         isometry: Component<IsometryReal>,
@@ -334,26 +335,13 @@ impl GameData {
 
 impl Undo<Ecs> {
     pub fn create_entity_safe(&mut self) -> EntityKey {
+        // CreateEntity / RemoveEntity emits ride the entities delta in both
+        // directions — see #[emit] on the field.
         let key = self.entities.insert(());
-        // Compensation-only undo: mutates nothing (the typed entities delta
-        // reverts the slot exactly); tells the renderer the entity is gone.
-        // Ordered here so it fires after the component undos, before the
-        // slot revert.
-        self.undo(move |_, s| {
-            s.send(GameDataUpdate::new(
-                GameDataTransactionKind::Do,
-                crate::GameDataUpdateKind::RemoveEntity(key),
-            ))
-            .unwrap();
-        });
         self.camera.insert_safe(key);
         self.isometry.insert_safe(key);
         self.rigidbody.insert_safe(key);
         self.chunk.insert_safe(key);
-        self.send(GameDataUpdate::new(
-            GameDataTransactionKind::Do,
-            crate::GameDataUpdateKind::CreateEntity(key),
-        ));
         key
     }
 }
