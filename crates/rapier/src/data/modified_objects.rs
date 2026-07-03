@@ -66,4 +66,9 @@ impl<Handle, Object: HasModifiedFlag> ModifiedObjects<Handle, Object> {
         object.set_modified_flag();
         self.0.push(handle);
     }
+
+    /// Pops the most recently pushed handle (LIFO undo support).
+    pub fn pop(&mut self) -> Option<Handle> {
+        self.0.pop()
+    }
 }

@@ -162,6 +162,30 @@ impl RigidBodySet {
         handle
     }
 
+    /// Allocator state to capture before `insert` for [`Self::revert_insert`].
+    pub fn alloc_state(&self) -> (Option<u32>, u32) {
+        self.bodies.alloc_state()
+    }
+
+    /// Exact inverse of the MOST RECENT `insert` that returned `handle`,
+    /// given the state captured by [`Self::alloc_state`] just before it.
+    /// LIFO contract: invalid if any other body was inserted/removed/marked
+    /// modified since.
+    pub fn revert_insert(
+        &mut self,
+        handle: RigidBodyHandle,
+        prev_free_head: Option<u32>,
+        prev_items_len: u32,
+    ) {
+        let popped = self.modified_bodies.pop();
+        assert_eq!(
+            popped,
+            Some(handle),
+            "revert_insert: not the most recent insert"
+        );
+        self.bodies.revert_insert(handle.0, prev_free_head, prev_items_len);
+    }
+
     /// Removes a rigid body from the world along with all its attached colliders and joints.
     ///
     /// This is a complete cleanup operation that removes:

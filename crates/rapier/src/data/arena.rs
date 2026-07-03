@@ -366,6 +366,53 @@ impl<T> Arena<T> {
         }
     }
 
+    /// Allocator state to capture before an `insert` for [`Self::revert_insert`].
+    pub fn alloc_state(&self) -> (Option<u32>, u32) {
+        (self.free_list_head, self.items.len() as u32)
+    }
+
+    /// Exact inverse of the MOST RECENT `insert` that returned `i`, given the
+    /// allocator state captured just before that insert. Restores the free
+    /// list, storage length, generation, and len bit-for-bit. LIFO contract:
+    /// invalid if any other insert/remove happened since.
+    pub fn revert_insert(&mut self, i: Index, prev_free_head: Option<u32>, prev_items_len: u32) {
+        let idx = i.index as usize;
+        match &self.items[idx] {
+            Entry::Occupied { generation, .. } if *generation == i.generation => {}
+            _ => panic!("revert_insert: index not occupied with matching generation"),
+        }
+        if (self.items.len() as u32) > prev_items_len {
+            // Slow path: the insert reserved a chained Free block and took its
+            // first slot; drop the whole block.
+            debug_assert_eq!(i.index, prev_items_len);
+            self.items.truncate(prev_items_len as usize);
+        } else {
+            // Fast path: the insert popped this slot off the free list; the
+            // slot's old next_free became the current free_list_head.
+            self.items[idx] = Entry::Free {
+                next_free: self.free_list_head,
+            };
+        }
+        self.free_list_head = prev_free_head;
+        self.len -= 1;
+    }
+
+    /// Exact inverse of the MOST RECENT `remove` of `i` that returned `value`.
+    /// Same LIFO contract as [`Self::revert_insert`].
+    pub fn revert_remove(&mut self, i: Index, value: T) {
+        let idx = i.index as usize;
+        match self.items[idx] {
+            Entry::Free { next_free } => self.free_list_head = next_free,
+            _ => panic!("revert_remove: slot not free"),
+        }
+        self.items[idx] = Entry::Occupied {
+            generation: i.generation,
+            value,
+        };
+        self.generation -= 1;
+        self.len += 1;
+    }
+
     /// Retains only the elements specified by the predicate.
     ///
     /// In other words, remove all indices such that `predicate(index, &value)` returns `false`.

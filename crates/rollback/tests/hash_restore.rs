@@ -93,6 +93,31 @@ fn slotmap_lifo_revert_chain_restores_hash() {
 }
 
 #[test]
+fn rigidbodyset_revert_insert_restores_hash_exactly() {
+    let mut bodies = RigidBodySet::new();
+    // Slow path (empty arena grows storage).
+    let s0 = h(&bodies);
+    let st = bodies.alloc_state();
+    let h1 = bodies.insert(RigidBodyBuilder::fixed().build());
+    bodies.revert_insert(h1, st.0, st.1);
+    assert_eq!(s0, h(&bodies), "slow-path (grow) revert must be exact");
+
+    // Build history: occupied + freed slot, then fast-path insert + revert.
+    let a = bodies.insert(RigidBodyBuilder::fixed().build());
+    let mut islands = IslandManager::new();
+    let mut colliders = ColliderSet::new();
+    let mut ij = ImpulseJointSet::new();
+    let mut mj = MultibodyJointSet::new();
+    let _b = bodies.insert(RigidBodyBuilder::fixed().build());
+    bodies.remove(a, &mut islands, &mut colliders, &mut ij, &mut mj, true);
+    let s1 = h(&bodies);
+    let st = bodies.alloc_state();
+    let c = bodies.insert(RigidBodyBuilder::fixed().build());
+    bodies.revert_insert(c, st.0, st.1);
+    assert_eq!(s1, h(&bodies), "fast-path (reuse) revert must be exact");
+}
+
+#[test]
 fn rigidbodyset_remove_does_not_restore_hash() {
     let mut bodies = RigidBodySet::new();
     let mut islands = IslandManager::new();
