@@ -371,7 +371,7 @@ where
         self.undo(move |d, _| {
             d.list.remove(key);
         });
-        self.list.insert(key, None);
+        self.raw_mut().list.insert(key, None);
     }
 
     pub fn set_safe(&mut self, key: EntityKey, item: Option<T>) {
@@ -379,9 +379,9 @@ where
         self.undo(move |d, _| *d.list.get_mut(key).unwrap() = old.clone());
 
         if let Some(item) = item {
-            self.list.get_mut(key).unwrap().replace(item);
+            self.raw_mut().list.get_mut(key).unwrap().replace(item);
         } else {
-            self.list.get_mut(key).unwrap().take();
+            self.raw_mut().list.get_mut(key).unwrap().take();
         }
     }
 

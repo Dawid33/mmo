@@ -46,18 +46,6 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
     ));
 
     items.push(item(
-        "Undo DerefMut Clone",
-        quote! {
-            impl<T> ::std::ops::DerefMut for Undo<T>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
-                fn deref_mut(&mut self) -> &mut Self::Target {
-                    &mut self.data
-                }
-            }
-        },
-    ));
-
-    items.push(item(
         "mut access",
         quote! {
             impl<T> Undo<T>
@@ -92,7 +80,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
             where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
                 fn deref_mut(&mut self) -> &mut Self::Target {
                     self.touched = true;
-                    &mut self.value
+                    &mut self.value.data
                 }
             }
         },
@@ -295,6 +283,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     let mut all_fields = Vec::new();
+    // Per module struct: (ident, [(field ident, ORIGINAL type)]) — collected
+    // before wrapping, used to generate DerefMut / #SRaw projections.
+    let mut struct_infos: Vec<(Ident, Vec<(Ident, syn::Type)>)> = Vec::new();
     for mut i in items.iter_mut() {
         match &mut i {
             Item::Struct(item_struct) => {
@@ -302,11 +293,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     parse_quote! {#[derive(::core::default::Default, ::derive_more::Debug, crate::serde::Serialize, crate::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial, ::std::hash::Hash)] },
                 );
                 item_struct.attrs.push(parse_quote! {#[module(crate)]});
+                let mut struct_info: Vec<(Ident, syn::Type)> = Vec::new();
 
                 match &mut item_struct.fields {
                     syn::Fields::Named(named_fields) => {
                         for f in &mut named_fields.named {
                             all_fields.push(f.clone());
+                            struct_info.push((f.ident.clone().unwrap(), f.ty.clone()));
                             let kind = undo_kind(f);
                             f.attrs
                                 .retain(|a| !a.path().is_ident("undo") && !a.path().is_ident("emit"));
@@ -337,10 +330,76 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                     _ => (),
                 }
+                struct_infos.push((item_struct.ident.clone(), struct_info));
             }
             _ => (),
         }
     }
+
+    // Per-struct licensed-access items: DerefMut only for module structs
+    // (all their fields are guarded wrappers, so &mut on them is harmless),
+    // plus a #SRaw projection reachable only from the two license carriers
+    // (change()-style snapshot or an UndoScope).
+    let mut per_struct_items: Vec<Item> = Vec::new();
+    for (s_ident, fields) in &struct_infos {
+        let raw_ident = Ident::new(&format!("{}Raw", s_ident), Span::call_site());
+        let f_ident: Vec<&Ident> = fields.iter().map(|(i, _)| i).collect();
+        let f_ty: Vec<&syn::Type> = fields.iter().map(|(_, t)| t).collect();
+        per_struct_items.push(item(
+            "per-struct DerefMut",
+            quote! {
+                impl ::std::ops::DerefMut for Undo<#s_ident> {
+                    fn deref_mut(&mut self) -> &mut #s_ident {
+                        &mut self.data
+                    }
+                }
+            },
+        ));
+        per_struct_items.push(item(
+            "SRaw struct",
+            quote! {
+                // Raw (&mut inner data) view of every field, bypassing the
+                // wrappers. Only obtainable from snapshot_raw()/raw_fields(),
+                // whose licenses (snapshot / scope registration) cover all
+                // mutations made through it.
+                pub struct #raw_ident<'a> {
+                    #(pub #f_ident: &'a mut #f_ty,)*
+                }
+            },
+        ));
+        per_struct_items.push(item(
+            "snapshot_raw",
+            quote! {
+                impl Undo<#s_ident> {
+                    /// Snapshots the whole struct into the log (like change())
+                    /// and returns raw access to every field.
+                    pub fn snapshot_raw(&mut self) -> #raw_ident<'_> {
+                        let old = self.data.clone();
+                        self.undo(move |d, _| *d = old);
+                        #raw_ident {
+                            #(#f_ident: &mut self.data.#f_ident.data,)*
+                        }
+                    }
+                }
+            },
+        ));
+        per_struct_items.push(item(
+            "scope raw_fields",
+            quote! {
+                impl<'a> UndoScope<#s_ident, 'a> {
+                    /// Raw access to every field; the scope's registration
+                    /// obligation covers all mutations made through it.
+                    pub fn raw_fields(&mut self) -> #raw_ident<'_> {
+                        self.touched = true;
+                        #raw_ident {
+                            #(#f_ident: &mut self.value.data.#f_ident.data,)*
+                        }
+                    }
+                }
+            },
+        ));
+    }
+    items.extend(per_struct_items);
 
     // Every field path, regardless of wrapper kind: used to wire global_log/info.
     let all_path = paths
@@ -596,7 +655,14 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         "impl Undo<T>",
         quote! {
             impl<T> Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + Sized + ::std::hash::Hash {
-                pub fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
+                /// Crate-internal raw access for trusted tier-2 helpers that
+                /// pair it with a pre-registered undo(). Not visible outside
+                /// the rollback crate.
+                pub(crate) fn raw_mut(&mut self) -> &mut T {
+                    &mut self.data
+                }
+
+                pub(crate) fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
                     let mut global = self.global_log.lock().unwrap();
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
                     let pre_hash = unsafe { self.hash_data() };
