@@ -25,6 +25,19 @@ The game crate has the rollback test suite: `cargo test -p game` (transaction/un
 
 Bevy is pinned to `0.18` in the root `Cargo.toml`; Bevy's API surface moves fast between minor versions, so treat upgrades as a deliberate, tested migration rather than a routine bump — API drift (renamed types/traits, moved modules, changed system-set names) is a known hazard.
 
+### WASM build (offline single-player)
+
+The client also targets `wasm32-unknown-unknown` (native QUIC netcode is
+replaced by an embedded `LocalServer`; see `crates/client/src/local_server.rs`):
+
+```sh
+# From the repo root (so ./assets is served):
+cargo run -p client --target wasm32-unknown-unknown   # opens via wasm-server-runner
+```
+
+Requires `rustup target add wasm32-unknown-unknown` and
+`cargo install wasm-server-runner`.
+
 ### Profiling
 
 - `docker-compose up` starts Pyroscope (`:4040`) + Grafana (`:3000`); build client/server with the `pyroscope` feature to push profiles.
