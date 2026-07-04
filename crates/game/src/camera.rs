@@ -1,22 +1,12 @@
-use std::{fmt::Debug, ops::DerefMut, sync::Arc, time::Instant};
 
-use assert_json_diff::{CompareMode, Config};
-use borrow::PartialHelper;
-use crossbeam::channel::Sender;
 #[allow(unused)]
 use log::info;
-use na::{
-    clamp, AbstractRotation, ComplexField, Matrix4, Perspective3, Quaternion, UnitQuaternion,
-    Vector2, Vector3, Vector4,
-};
+use na::{clamp, UnitQuaternion, Vector3};
 use ordered_float::OrderedFloat;
-use parley::swash::shape::Direction;
 use parry3d::math::Real;
 use rapier3d::math::Vector;
-use rapier3d::prelude::RigidBodyHandle;
-use rollback::Camera;
 
-use crate::{ClientPacket, ClientUpdateEvent, Controller, GameData, GameDataUpdate};
+use crate::{Controller, GameData, GameDataUpdate};
 use rollback::Undo;
 
 pub struct CameraController {}

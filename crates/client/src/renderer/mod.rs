@@ -28,7 +28,7 @@ pub struct GameEvents(pub Sender<GameEventKind>);
 pub struct LocalPlayer(pub Option<ClientId>);
 
 /// Maps a simulation `VoxelType` to the array-texture layer index that renders it.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct VoxelTypeLayers(pub BTreeMap<rollback::VoxelType, u32>);
 
 pub struct SimBridgePlugin {
@@ -54,7 +54,10 @@ impl Plugin for SimBridgePlugin {
                     .chain(),
             )
             .add_systems(Startup, setup_scene)
-            .add_systems(Update, (meshing::mesh_chunks, interpolate::interpolate_transforms));
+            .add_systems(
+                Update,
+                (meshing::queue_meshing, meshing::apply_meshed_chunks, interpolate::interpolate_transforms),
+            );
     }
 }
 

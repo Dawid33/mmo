@@ -56,11 +56,6 @@ float-derive = { version = "0.1.0", default-features = false }
 derive_more = { version = "2.0.1", features = [
   "debug",
 ], default-features = false }
-wgpu = { version = "26.0.1", features = [
-  "std",
-  "vulkan",
-  "wgsl",
-], default-features = false }
 crc32fast = { version = "1.5.0", default-features = false }
 simplelog = { version = "0.12.2", default-features = false }
 pollster = { version = "0.4", default-features = false }

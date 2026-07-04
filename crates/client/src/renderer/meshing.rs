@@ -1,8 +1,8 @@
 use bevy::asset::RenderAssetUsages;
-use bevy::ecs::entity::EntityHashSet;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
+use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use block_mesh::ndshape::ConstShape;
 use block_mesh::{greedy_quads, GreedyQuadsBuffer, RIGHT_HANDED_Y_UP_CONFIG};
 use game::ChunkShape;
@@ -54,23 +54,52 @@ pub fn build_chunk_mesh(voxels: &[Voxel], layers: &VoxelTypeLayers) -> Option<Me
 #[derive(Resource)]
 pub struct ChunkMaterial(pub Handle<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>);
 
-pub fn mesh_chunks(
+/// In-flight background mesh build for an entity, spawned by `queue_meshing` and
+/// polled to completion by `apply_meshed_chunks`.
+#[derive(Component)]
+pub struct MeshingTask(Task<Option<Mesh>>);
+
+/// Spawns a background meshing job whenever an entity's `VoxelData` changes. Inserting
+/// a fresh `MeshingTask` replaces any prior in-flight task component-wise; the old
+/// `Task` is dropped (and its background work cancelled/discarded) along with it, so
+/// stale results can never land after a newer edit.
+pub fn queue_meshing(
     mut commands: Commands,
     changed: Query<(Entity, &super::bridge::VoxelData), Changed<super::bridge::VoxelData>>,
-    mut removed: RemovedComponents<super::bridge::VoxelData>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    material: Res<ChunkMaterial>,
     layers: Res<VoxelTypeLayers>,
 ) {
-    let mut handled = EntityHashSet::default();
+    let pool = AsyncComputeTaskPool::get();
     for (e, voxels) in &changed {
-        handled.insert(e);
-        match build_chunk_mesh(&voxels.0, &layers) {
+        let voxels = voxels.0.clone();
+        let layers = layers.0.clone();
+        let task = pool.spawn(async move { build_chunk_mesh(&voxels, &VoxelTypeLayers(layers)) });
+        commands.entity(e).insert(MeshingTask(task));
+    }
+}
+
+/// Polls in-flight `MeshingTask`s to completion and attaches the resulting `Mesh3d`
+/// (or strips it, for an all-air chunk). Also handles `VoxelData` removal.
+pub fn apply_meshed_chunks(
+    mut commands: Commands,
+    mut tasks: Query<(Entity, &mut MeshingTask)>,
+    mut removed: RemovedComponents<super::bridge::VoxelData>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    material: Option<Res<ChunkMaterial>>,
+    still_alive: Query<Entity, Or<(With<super::bridge::VoxelData>, With<MeshingTask>)>>,
+) {
+    for (e, mut task) in &mut tasks {
+        let Some(result) = block_on(future::poll_once(&mut task.0)) else { continue };
+        match result {
             Some(mesh) => {
-                commands.entity(e).insert((Mesh3d(meshes.add(mesh)), MeshMaterial3d(material.0.clone())));
+                let mut ec = commands.entity(e);
+                ec.insert(Mesh3d(meshes.add(mesh)));
+                if let Some(material) = &material {
+                    ec.insert(MeshMaterial3d(material.0.clone()));
+                }
+                ec.remove::<MeshingTask>();
             }
             None => {
-                commands.entity(e).remove::<Mesh3d>();
+                commands.entity(e).remove::<(Mesh3d, MeshingTask)>();
             }
         }
     }
@@ -79,15 +108,17 @@ pub fn mesh_chunks(
     // is independently true. So a remove-then-reinsert of VoxelData on the same entity
     // within one frame (which drain_region_updates can produce when it drains several
     // buffered SetVoxelComponent(None)/Some(..) updates in one PreUpdate pass) would
-    // otherwise queue insert-then-remove here, leaving valid VoxelData with no Mesh3d.
-    // The changed-branch's own Some/None decision is authoritative when both fire in
-    // the same frame, so skip entities it already handled.
+    // otherwise strip a still-valid entity's Mesh3d/MeshingTask here. `queue_meshing`
+    // (order-independent: both systems only defer mutation via Commands, applied after
+    // both run) will have queued a fresh MeshingTask for a same-frame reinsert, or the
+    // VoxelData itself is still present — either signals the entity is still live, so
+    // skip stripping it.
     for e in removed.read() {
-        if handled.contains(&e) {
+        if still_alive.contains(e) {
             continue;
         }
         if let Ok(mut ec) = commands.get_entity(e) {
-            ec.remove::<Mesh3d>();
+            ec.remove::<(Mesh3d, MeshingTask)>();
         }
     }
 }
@@ -116,6 +147,40 @@ mod tests {
     }
 
     #[test]
+    fn async_meshing_attaches_mesh_eventually() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<crate::renderer::VoxelTypeLayers>()
+            .add_systems(Update, (queue_meshing, apply_meshed_chunks));
+        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        voxels[ChunkShape::linearize([5, 5, 5]) as usize] = Voxel::new(VoxelType::Black);
+        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
+        for _ in 0..100 {
+            app.update();
+            if app.world().entity(e).contains::<Mesh3d>() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("mesh never attached");
+    }
+
+    /// Runs `app.update()` (with a short sleep between attempts so the background
+    /// meshing task gets a chance to make progress) until `e` has a `Mesh3d`, or
+    /// panics after 100 attempts.
+    fn settle_until_meshed(app: &mut App, e: Entity) {
+        for _ in 0..100 {
+            app.update();
+            if app.world().entity(e).contains::<Mesh3d>() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("mesh never attached");
+    }
+
+    #[test]
     fn same_frame_remove_and_reinsert_keeps_mesh() {
         use super::super::bridge::VoxelData;
 
@@ -126,7 +191,7 @@ mod tests {
             .init_asset::<Image>()
             .init_asset::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>()
             .init_resource::<VoxelTypeLayers>()
-            .add_systems(Update, mesh_chunks);
+            .add_systems(Update, (queue_meshing, apply_meshed_chunks));
 
         let image_handle = app.world_mut().resource_mut::<Assets<Image>>().add(Image::default());
         let handle = app
@@ -143,11 +208,14 @@ mod tests {
         voxels[idx] = Voxel::new(VoxelType::Black);
 
         let e = app.world_mut().spawn(VoxelData(voxels.clone())).id();
-        app.update();
+        settle_until_meshed(&mut app, e);
         assert!(app.world().entity(e).contains::<Mesh3d>(), "mesh should exist after initial insert");
 
         // Same-frame remove-then-reinsert, as `drain_region_updates` can produce when it
         // drains several buffered SetVoxelComponent(None)/Some(..) updates in one PreUpdate pass.
+        // This must not flicker the mesh off even transiently: `apply_meshed_chunks`'s
+        // `still_alive` guard must skip the stale removal within this very update, since
+        // the entity's VoxelData (or a freshly queued MeshingTask) is still present.
         app.world_mut().entity_mut(e).remove::<VoxelData>();
         app.world_mut().entity_mut(e).insert(VoxelData(voxels));
         app.update();

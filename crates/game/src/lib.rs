@@ -1,11 +1,5 @@
-#![allow(unused)]
 // #![deny(missing_docs)]
 //! Game simulation code that is shared between client and server.
-
-#[macro_use]
-extern crate serde;
-#[macro_use]
-extern crate approx;
 
 #[cfg_attr(test, macro_use)]
 extern crate alloc;
@@ -13,24 +7,7 @@ pub extern crate nalgebra as na;
 extern crate num_traits as num;
 extern crate std;
 
-use borrow::AsRefsHelper;
-use crossbeam::channel::Sender;
-use ordered_float::OrderedFloat;
-use rollback::rollback;
-use slotmapd::{
-    basic::{Iter, Keys},
-    new_key_type, DefaultKey,
-};
-use std::{
-    any::{Any, TypeId},
-    collections::BTreeMap,
-    hash::Hash,
-    hash::Hasher,
-    ops::Deref,
-    rc::Rc,
-    sync::{Arc, Mutex},
-    time::Instant,
-};
+use std::collections::BTreeMap;
 
 mod camera;
 mod data;
@@ -39,11 +16,7 @@ mod physics;
 mod region;
 pub use parry3d as parry;
 
-use na::{Matrix4, Matrix4x2, Perspective3, RealField};
-use parry3d::math::Real;
-use rapier3d::prelude::{RigidBody, RigidBodyHandle};
 pub use rollback::common::*;
-use rollback::input::InputState;
 pub use rollback::{ChunkCoords, ChunkShape, GameData, Rollback, Undo, ASPECT};
 pub use rollback::{
     ClientId, EntityKey, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, PlayerKey,
@@ -64,11 +37,10 @@ pub enum ClientUpdateEvent {
     SetPlayer(ClientId),
 }
 
-use log::info;
 pub use region::Region;
 
 trait Controller {
-    fn on_tick<'a>(&mut self, t: &mut Undo<GameData>) {}
+    fn on_tick<'a>(&mut self, _t: &mut Undo<GameData>) {}
 }
 
 pub struct World {
@@ -85,7 +57,7 @@ impl World {
     pub fn basic() -> Self {
         let one = ChunkCoords::new(0, 0, 0);
         let mut data = Region::new(Rollback::new(None), None, one);
-        let key = data.create_basic(one);
+        let _key = data.create_basic(one);
 
         return Self {
             regions: BTreeMap::from([(one, data)]),
@@ -104,7 +76,7 @@ impl World {
         self.regions.get(id).unwrap().data()
     }
 
-    pub fn load(&mut self, id: &RegionId, mut region: Region) {
+    pub fn load(&mut self, id: &RegionId, region: Region) {
         self.regions.insert(*id, region);
     }
 
