@@ -58,6 +58,26 @@ impl Plugin for SimBridgePlugin {
     }
 }
 
+/// Resolve the blocks asset directory; must mirror AssetPlugin.file_path resolution in main.rs.
+fn resolve_blocks_dir() -> std::path::PathBuf {
+    use std::path::PathBuf;
+
+    // Try CARGO_MANIFEST_DIR (set by cargo at runtime); mirrors BeVy's AssetPlugin behavior.
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        return PathBuf::from(manifest_dir).join("../../assets/blocks");
+    }
+
+    // Fall back to exe directory if running outside cargo.
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            return exe_dir.join("assets/blocks");
+        }
+    }
+
+    // Final fallback: cwd-relative (original behavior).
+    PathBuf::from("assets/blocks")
+}
+
 fn setup_scene(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -66,7 +86,8 @@ fn setup_scene(
     let mut layers: Vec<image::RgbaImage> = Vec::new();
     let mut layer_names: Vec<String> = Vec::new();
     let mut sorted: BTreeMap<String, image::RgbaImage> = BTreeMap::new();
-    if let Ok(dir) = std::fs::read_dir("assets/blocks") {
+    let blocks_dir = resolve_blocks_dir();
+    if let Ok(dir) = std::fs::read_dir(&blocks_dir) {
         for file in dir {
             let file = match file {
                 Ok(file) => file,
@@ -146,4 +167,33 @@ fn setup_scene(
         brightness: 100.0,
         ..Default::default()
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_blocks_dir;
+    use std::path::Path;
+
+    #[test]
+    fn test_resolve_blocks_dir_with_cargo_manifest() {
+        let blocks_path = resolve_blocks_dir();
+        // When tests run, CARGO_MANIFEST_DIR should be set to crates/client.
+        // The resolved path should end with assets/blocks.
+        assert!(
+            blocks_path.ends_with("assets/blocks"),
+            "blocks_path should end with assets/blocks, got {:?}",
+            blocks_path
+        );
+
+        // Verify the actual directory and asset exist (crates/client/../../assets/blocks -> assets/blocks).
+        assert!(
+            blocks_path.exists(),
+            "resolved blocks directory should exist at {:?}",
+            blocks_path
+        );
+
+        // Check that the expected dirt.png texture exists.
+        let dirt_texture = blocks_path.join("dirt.png");
+        assert!(dirt_texture.exists(), "dirt.png should exist at {:?}", dirt_texture);
+    }
 }
