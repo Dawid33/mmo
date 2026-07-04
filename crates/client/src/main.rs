@@ -150,11 +150,15 @@ impl GameInstanceManager {
                                             GameEventKind::Tick => {
                                                 world.progress_world_one_tick(&mut results_buffer);
                                             },
-                                            GameEventKind::Quit | GameEventKind::PlayerInput(_, _) | GameEventKind::CreateClient(_) => {
+                                            GameEventKind::Quit | GameEventKind::PlayerInput(_, _) => {
                                                 if let Some(chunk) = self.player_chunk {
                                                     let event = world.handle_region_event(game_event.unwrap(), chunk)?;
                                                     self.server_game_send.send(game::ClientPacket::GameEvent(event)).unwrap();
                                                 }
+                                            },
+                                            GameEventKind::CreateClient(_) => {
+                                                // Players are created by the server on connection.
+                                                warn!("ignoring locally-originated CreateClient");
                                             },
                                         }
                                     }
@@ -175,7 +179,7 @@ impl GameInstanceManager {
         let new_region =
             |id: RegionId, raw_game_data: Rollback, world: &mut Option<game::World>| {
                 let (send, recv) = crossbeam::channel::unbounded();
-                let data = Region::new(raw_game_data.clone(), Some(send), id);
+                let data = Region::new(raw_game_data.clone(), Some(send), id, self.client_id);
                 self.client_event_send
                     .send(ClientUpdateEvent::NewRegion(
                         id,
@@ -257,13 +261,6 @@ impl GameInstanceManager {
             }
             game::ServerPacket::Region(id, raw_game_data) => {
                 new_region(id, raw_game_data, &mut self.world);
-                if let Some(player_chunk) = self.player_chunk {
-                    if id == player_chunk && self.client_id.is_some() {
-                        self.game_event_send
-                            .send(GameEventKind::CreateClient(self.client_id.unwrap()))
-                            .unwrap();
-                    }
-                }
             }
         }
         Ok(())

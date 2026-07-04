@@ -64,7 +64,7 @@ impl World {
 
     pub fn basic() -> Self {
         let one = ChunkCoords::new(0, 0, 0);
-        let mut data = Region::new(Rollback::new(None), None, one);
+        let mut data = Region::new(Rollback::new(None), None, one, None);
         let _key = data.create_basic(one);
 
         return Self {

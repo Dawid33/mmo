@@ -51,7 +51,11 @@ impl WorldIngress {
     ///   if the buffer grows too large.
     /// - Recieve region packets from game loop and send them to their assorted
     ///   regions.
-    pub async fn listen(&mut self, send: Sender<ServerEvent>, server_recv: Receiver<ServerPacket>) {
+    pub async fn listen(
+        &mut self,
+        send: Sender<ServerEvent>,
+        server_recv: Receiver<(Option<ClientId>, ServerPacket)>,
+    ) {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert_der = CertificateDer::from(cert.cert);
         let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
@@ -66,18 +70,34 @@ impl WorldIngress {
         config.transport_config(Arc::new(t_config));
         let endpoint = Endpoint::server(config, "127.0.0.1:6466".parse().unwrap()).unwrap();
 
-        let connections: Arc<DashMap<usize, Connection>> = Arc::new(DashMap::new());
+        let connections: Arc<DashMap<ClientId, Connection>> = Arc::new(DashMap::new());
         let conns = connections.clone();
         tokio::spawn(async move {
-            while let Ok(event) = server_recv.recv() {
+            while let Ok((target, event)) = server_recv.recv() {
                 let packet = bincode::serialize(&event).unwrap();
-                for entry in conns.iter() {
-                    let mut stream = entry.value().open_uni().await.unwrap();
-                    stream.write_all(&packet).await.unwrap();
-                    stream.finish().unwrap();
-                    tokio::spawn(async move {
-                        stream.stopped().await.unwrap();
-                    });
+                match target {
+                    // Directed packet: if the client is gone, drop it.
+                    Some(id) => {
+                        let conn = conns.get(&id).map(|e| e.value().clone());
+                        if let Some(conn) = conn {
+                            let mut stream = conn.open_uni().await.unwrap();
+                            stream.write_all(&packet).await.unwrap();
+                            stream.finish().unwrap();
+                            tokio::spawn(async move {
+                                stream.stopped().await.unwrap();
+                            });
+                        }
+                    }
+                    None => {
+                        for entry in conns.iter() {
+                            let mut stream = entry.value().open_uni().await.unwrap();
+                            stream.write_all(&packet).await.unwrap();
+                            stream.finish().unwrap();
+                            tokio::spawn(async move {
+                                stream.stopped().await.unwrap();
+                            });
+                        }
+                    }
                 }
             }
         });
@@ -91,13 +111,18 @@ impl WorldIngress {
             tokio::spawn(async move {
                 info!("accepting connection");
                 let connection = conn.await.unwrap();
-                conns.insert(connection.stable_id(), connection.clone());
+                conns.insert(id, connection.clone());
+                // Announce before any of this client's packets can be read:
+                // guarantees the player exists before its first request is
+                // served.
+                send.send(ServerEvent::ClientConnected(id)).unwrap();
 
                 let fut = handle_connection(connection, send, id);
                 tokio::spawn(async move {
                     if let Err(e) = fut.await {
                         error!("connection failed: {reason}", reason = e.to_string())
                     }
+                    conns.remove(&id);
                 });
             });
         }
@@ -109,6 +134,8 @@ impl WorldIngress {
 pub enum ServerEvent {
     /// Recieved a packet from a client that needs to be handled.
     ClientPacket(ClientPacket, ClientId),
+    /// A new client finished connecting and needs a player.
+    ClientConnected(ClientId),
     /// Internal timer for generated game ticks.
     ServerTickTimer,
 }
@@ -169,18 +196,18 @@ fn main() {
                 ClientPacket::RequestPlayerRegion => {
                     if let Some(id) = world.find_player(&client_id) {
                         server_send
-                            .send(ServerPacket::PlayerRegion(Some(id), client_id))
+                            .send((Some(client_id), ServerPacket::PlayerRegion(Some(id), client_id)))
                             .unwrap();
                     } else {
                         server_send
-                            .send(ServerPacket::PlayerRegion(None, client_id))
+                            .send((Some(client_id), ServerPacket::PlayerRegion(None, client_id)))
                             .unwrap();
                     };
                 }
                 // Send the requested region to the client.
                 ClientPacket::RequestRegionConnection(id) => {
                     server_send
-                        .send(world.build_region_server_packet(&id))
+                        .send((Some(client_id), world.build_region_server_packet(&id)))
                         .unwrap();
                 }
                 ClientPacket::GameEvent(game_event) => match game_event.kind {
@@ -198,23 +225,43 @@ fn main() {
                             }
                             Err(e) => panic!("Server crashed {:?}", e),
                         };
-                        server_send.send(ServerPacket::GameEvent(event)).unwrap();
+                        server_send.send((None, ServerPacket::GameEvent(event))).unwrap();
                     }
                 },
             },
+            ServerEvent::ClientConnected(client_id) => {
+                // Server-authoritative player creation. Reconnects (player
+                // already exists) create nothing.
+                if world.find_player(&client_id).is_none() {
+                    let region_id = ChunkCoords::new(0, 0, 0);
+                    let event = match world
+                        .handle_region_event(game::GameEventKind::CreateClient(client_id), region_id)
+                    {
+                        Ok(e) => {
+                            world.forget_last_event(&region_id);
+                            e
+                        }
+                        Err(e) => panic!("Server crashed {:?}", e),
+                    };
+                    server_send.send((None, ServerPacket::GameEvent(event))).unwrap();
+                }
+            }
             ServerEvent::ServerTickTimer => {
                 world.progress_world_one_tick(&mut results_buffer);
                 for (id, result) in &results_buffer {
                     server_send
-                        .send(ServerPacket::GameEvent(result.as_ref().unwrap().clone()))
+                        .send((None, ServerPacket::GameEvent(result.as_ref().unwrap().clone())))
                         .unwrap();
                     if world.current_tick(&ChunkCoords::new(0, 0, 0)) % 10 == 0 {
                         server_send
-                            .send(ServerPacket::SyncClock(
-                                *id,
-                                tick_rate.load(Ordering::SeqCst),
-                                world.current_tick(&id),
-                                Duration::new(0, 0),
+                            .send((
+                                None,
+                                ServerPacket::SyncClock(
+                                    *id,
+                                    tick_rate.load(Ordering::SeqCst),
+                                    world.current_tick(&id),
+                                    Duration::new(0, 0),
+                                ),
                             ))
                             .unwrap();
                     }

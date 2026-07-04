@@ -24,6 +24,12 @@ pub struct Region {
     input_buffer: BinaryHeap<Reverse<GameEvent>>,
     controllers: Vec<Box<dyn Controller>>,
     synchronized: bool,
+    /// `Some` on a client (which client's predictions live in `event_log`);
+    /// `None` on the server, which never reconciles.
+    local_client_id: Option<ClientId>,
+    /// `next_game_event_id` of the snapshot this region was built from.
+    /// Server events below this id are already baked into the state.
+    base_event_id: usize,
 }
 
 impl Region {
@@ -32,8 +38,10 @@ impl Region {
         mut data: Rollback,
         game_update_send: Option<Sender<GameDataUpdate>>,
         id: ChunkCoords,
+        local_client_id: Option<ClientId>,
     ) -> Self {
         data.reinitialize(game_update_send);
+        let base_event_id = *data.next_game_event_id;
         Self {
             data,
             event_log: VecDeque::new(),
@@ -41,12 +49,19 @@ impl Region {
             controllers: Vec::from([CameraController::new(), PhysicsController::new()]),
             id,
             synchronized: false,
+            local_client_id,
+            base_event_id,
         }
     }
 
     /// Check if event from network matches client event history. rollback the
     /// game state as neccessary and re-simulate to current time.
     pub fn reconcile(&mut self, server_event: GameEvent) -> Result<(), GameError> {
+        // Events older than the snapshot this region was constructed from
+        // are already baked into its state.
+        if server_event.id < self.base_event_id {
+            return Ok(());
+        }
         self.input_buffer.push(Reverse(server_event.clone()));
 
         if self.input_buffer.len() > 1000 {
@@ -74,20 +89,38 @@ impl Region {
                             self.handle_event(server_event.clone().0.kind)?;
                             self.data.forget();
 
-                            // Remove the corresponding event from event log, it must
-                            // have happened later.
-                            // TODO: DO NOT DO THIS FOR EVENTS THAT ORIGINATE FROM
-                            // OTHER CLIENTS
-                            {
+                            let foreign = match server_event.0.kind.origin_client() {
+                                Some(origin) => Some(origin) != self.local_client_id,
+                                None => false,
+                            };
+
+                            if foreign {
+                                // Another client's event is an *insertion* into
+                                // our timeline: keep every prediction, shift
+                                // them all one id later.
+                                for event in &mut temp_log {
+                                    event.id += 1;
+                                }
+                            } else {
+                                // Our own event came back at a different id
+                                // than predicted: remove our matching
+                                // prediction, shifting everything before it.
+                                // Only locally-originated predictions are
+                                // candidates for removal.
                                 let len = temp_log.len();
-                                let mut iter = temp_log.iter_mut().enumerate();
-                                while let Some((i, event)) = iter.next() {
-                                    if event.kind == server_event.0.kind {
-                                        drop(iter);
+                                let mut i = 0;
+                                while i < temp_log.len() {
+                                    let e = &mut temp_log[i];
+                                    let local_origin = match e.kind.origin_client() {
+                                        Some(o) => Some(o) == self.local_client_id,
+                                        None => true,
+                                    };
+                                    if local_origin && e.kind == server_event.0.kind {
                                         temp_log.remove(i);
                                         break;
                                     }
-                                    event.id += 1;
+                                    e.id += 1;
+                                    i += 1;
                                 }
                                 if len == temp_log.len() {
                                     info!(
@@ -96,7 +129,6 @@ impl Region {
                                 }
                             }
 
-                            // TODO: if from other client, increase event id' as well as self.next_game_event_id
                             for event in &mut temp_log {
                                 let _ = self.handle_event(event.clone().kind);
                             }
@@ -177,6 +209,12 @@ impl Region {
 
     pub fn current_tick(&self) -> usize {
         *self.data.tick
+    }
+
+    /// Ids of locally-predicted events awaiting server confirmation.
+    /// Exposed for tests.
+    pub fn pending_event_ids(&self) -> Vec<usize> {
+        self.event_log.iter().map(|e| e.id).collect()
     }
 
     pub fn data(&self) -> &Rollback {
