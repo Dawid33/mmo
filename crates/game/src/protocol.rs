@@ -94,3 +94,14 @@ pub enum GameEventKind {
     CreateClient(ClientId),
     Quit,
 }
+
+impl GameEventKind {
+    /// The client this event originated from. `Tick` and `Quit` are
+    /// server/shared events with no originating client.
+    pub fn origin_client(&self) -> Option<ClientId> {
+        match self {
+            GameEventKind::PlayerInput(id, _) | GameEventKind::CreateClient(id) => Some(*id),
+            GameEventKind::Tick | GameEventKind::Quit => None,
+        }
+    }
+}
