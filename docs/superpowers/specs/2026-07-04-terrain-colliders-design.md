@@ -74,9 +74,10 @@ rapier's kinematic character controller:
 
 ### 3. Spawn height
 
-`create_player_safe` spawn moves from `(0, 1, 5)` to `(0, 3, 5)`: the
+`create_player_safe` spawn moves from `(0, 1, 5)` to `(2, 3, 5)`: the
 default chunk's floor slab occupies world y ∈ [1, 2), and the capsule
 (half-height 0.5 + radius 0.4) centered at y=1 starts embedded in it.
+x=2 because the floor slab spans x,z ∈ [1,31) — x=0 is over a hole.
 
 ## Determinism & rollback
 

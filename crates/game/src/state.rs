@@ -311,8 +311,10 @@ impl Rollback {
 
     pub fn create_player_safe(&mut self, client_id: ClientId) {
         let e = self.ecs.create_entity_safe();
+        // x=2 because the default chunk's floor slab spans x,z ∈ [1,31) —
+        // x=0 is over a hole; y=3 keeps the capsule clear of the slab top.
         let position = IsometryReal::from_parts(
-            Translation3::new(Real::from(0.0), Real::from(1.0), Real::from(5.0)),
+            Translation3::new(Real::from(2.0), Real::from(3.0), Real::from(5.0)),
             Unit::<Quaternion<Real>>::identity(),
         );
         let body = RigidBodyBuilder::kinematic_position_based()
