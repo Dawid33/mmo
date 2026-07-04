@@ -1,22 +1,27 @@
 //! Game client
 // #![deny(missing_docs)]
 use bevy::prelude::*;
-use crossbeam::{
-    channel::{Receiver, RecvError, Sender},
-    select,
-};
+use crossbeam::channel::{Receiver, RecvError, Sender};
+#[cfg(not(target_arch = "wasm32"))]
+use crossbeam::select;
 use game::{ChunkCoords, ClientId, RegionId, Rollback, ServerPacket};
 use game::{
     ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind, Region, INDUCED_LATENCY,
 };
-use log::{info, trace, warn};
+#[cfg(not(target_arch = "wasm32"))]
+use log::trace;
+use log::{info, warn};
 use std::{
     collections::BTreeMap,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::SocketAddr,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+};
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    net::{Ipv4Addr, SocketAddrV4},
     time::Duration,
 };
 
@@ -25,16 +30,22 @@ use pyroscope::PyroscopeAgent;
 #[cfg(feature = "pyroscope")]
 use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 
+#[cfg(not(target_arch = "wasm32"))]
 mod netcode;
-mod renderer;
 #[cfg(any(target_arch = "wasm32", test))]
 mod local_server;
+#[cfg(target_arch = "wasm32")]
+mod sim_driver;
+mod renderer;
 
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
     game_event_send: Sender<GameEventKind>,
     game_event_recv: Receiver<GameEventKind>,
     client_event_send: Sender<ClientUpdateEvent>,
+    /// Only read by the native netcode path (`connect_and_run`); kept on wasm
+    /// so `new()` has one signature on both targets.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     server: SocketAddr,
 
     server_game_send: Sender<ClientPacket>,
@@ -106,71 +117,6 @@ impl GameInstanceManager {
     /// reads outgoing ClientPackets from.
     pub fn client_packet_recv(&self) -> Receiver<ClientPacket> {
         self.server_game_recv.clone()
-    }
-
-    /// Recieve and process game events from the client and network, in that order.
-    ///
-    /// - If received a client event:
-    ///   - Simulate the event and push it on to a buffer.
-    ///   - Send it to the players authoritative region.
-    ///   - The client buffer should always be larger than the
-    ///     network buffer by at least the number of ticks the client is ahead of
-    ///     the server.
-    /// - If recieved a network event:
-    ///   - Check if the network and client event on the front of each buffer match.
-    ///   - Keep doing this until the network buffer is empty. Reconcile the region
-    ///     each time the comparison succeeds.
-    ///   - Any time it doesn't succeed, rollback the client, apply the network
-    ///     event and then re-apply the client events that were just rolled back.
-    ///
-    /// If sync clock event: send client update to window with desired input delay
-    /// and update tick time.
-    pub fn connect_and_run(&mut self) -> Result<(), GameError> {
-        let tick_sender = self.game_event_send.clone();
-        let tick_thread_tick_rate = self.tick_rate.clone();
-        // Generate ticks
-        std::thread::spawn(move || loop {
-            // TODO: Sync ticks with server.
-            if let Err(_) = tick_sender.send(GameEventKind::Tick) {
-                return;
-            };
-            let rate = tick_thread_tick_rate.load(Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(rate));
-        });
-
-        let (server_send, server_recv) = crossbeam::channel::unbounded();
-        let mut conn =
-            netcode::ServerConnection::new(server_send, self.server_game_recv.clone(), self.server);
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async { conn.connect_and_handle().await.unwrap() });
-        });
-
-        self.start();
-
-        loop {
-            select! {
-                // Recieve and handle server packets.
-                recv(server_recv) -> server_msg => {
-                    self.handle_server(server_msg)?;
-                },
-                // Recieve client game events from either the player or from
-                // client-side game tick timer.
-                recv(self.game_event_recv) -> game_event => {
-                    match game_event {
-                        Ok(event) => {
-                            if !self.handle_game_event(event)? {
-                                return Ok(());
-                            }
-                        }
-                        Err(e) => panic!("{}", e),
-                    }
-                }
-            }
-        }
     }
 
     /// Handle one client-side game event. Returns Ok(false) if the game
@@ -316,7 +262,76 @@ impl GameInstanceManager {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl GameInstanceManager {
+    /// Recieve and process game events from the client and network, in that order.
+    ///
+    /// - If received a client event:
+    ///   - Simulate the event and push it on to a buffer.
+    ///   - Send it to the players authoritative region.
+    ///   - The client buffer should always be larger than the
+    ///     network buffer by at least the number of ticks the client is ahead of
+    ///     the server.
+    /// - If recieved a network event:
+    ///   - Check if the network and client event on the front of each buffer match.
+    ///   - Keep doing this until the network buffer is empty. Reconcile the region
+    ///     each time the comparison succeeds.
+    ///   - Any time it doesn't succeed, rollback the client, apply the network
+    ///     event and then re-apply the client events that were just rolled back.
+    ///
+    /// If sync clock event: send client update to window with desired input delay
+    /// and update tick time.
+    pub fn connect_and_run(&mut self) -> Result<(), GameError> {
+        let tick_sender = self.game_event_send.clone();
+        let tick_thread_tick_rate = self.tick_rate.clone();
+        // Generate ticks
+        std::thread::spawn(move || loop {
+            // TODO: Sync ticks with server.
+            if let Err(_) = tick_sender.send(GameEventKind::Tick) {
+                return;
+            };
+            let rate = tick_thread_tick_rate.load(Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(rate));
+        });
+
+        let (server_send, server_recv) = crossbeam::channel::unbounded();
+        let mut conn =
+            netcode::ServerConnection::new(server_send, self.server_game_recv.clone(), self.server);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async { conn.connect_and_handle().await.unwrap() });
+        });
+
+        self.start();
+
+        loop {
+            select! {
+                // Recieve and handle server packets.
+                recv(server_recv) -> server_msg => {
+                    self.handle_server(server_msg)?;
+                },
+                // Recieve client game events from either the player or from
+                // client-side game tick timer.
+                recv(self.game_event_recv) -> game_event => {
+                    match game_event {
+                        Ok(event) => {
+                            if !self.handle_game_event(event)? {
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => panic!("{}", e),
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Event sent from client to game thread.
+#[cfg(not(target_arch = "wasm32"))]
 pub enum Command {
     /// Connect to a server, sync and start running game sim.
     ConnectToServerAndScene(
@@ -329,6 +344,7 @@ pub enum Command {
     Quit,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn start_game_thread() -> Sender<Command> {
     let (command_send, command_recv) = crossbeam::channel::unbounded();
     std::thread::spawn(move || loop {
@@ -369,46 +385,72 @@ fn main() {
         None
     };
 
-    let command_send = start_game_thread();
-    let (game_send, game_recv) = crossbeam::channel::unbounded();
-    let (client_send, client_recv) = crossbeam::channel::unbounded();
-    command_send
-        .send(Command::ConnectToServerAndScene(
-            game_send.clone(),
-            game_recv,
-            client_send,
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466)),
-        ))
-        .unwrap();
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
 
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(bevy::window::WindowPlugin {
-                    primary_window: Some(bevy::window::Window {
-                        title: "Labour of Love".into(),
-                        ..Default::default()
-                    }),
+    #[cfg(not(target_arch = "wasm32"))]
+    let (command_send, game_send, client_recv) = {
+        let command_send = start_game_thread();
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, client_recv) = crossbeam::channel::unbounded();
+        command_send
+            .send(Command::ConnectToServerAndScene(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466)),
+            ))
+            .unwrap();
+        (command_send, game_send, client_recv)
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    let (sim, game_send, client_recv) = sim_driver::start_wasm_sim();
+
+    // Bevy's default asset root is CARGO_MANIFEST_DIR/assets (crates/client/assets,
+    // a local, gitignored scratch dir left over from earlier prototyping). The
+    // workspace's actual tracked asset tree (assets/blocks, assets/shaders/...) lives
+    // two levels up at the repo root, so point the file-asset source there instead.
+    // On wasm, assets are fetched over HTTP relative to the served root, and
+    // wasm-server-runner serves ./assets from the working directory.
+    #[cfg(not(target_arch = "wasm32"))]
+    let asset_path = "../../assets";
+    #[cfg(target_arch = "wasm32")]
+    let asset_path = "assets";
+
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(bevy::window::WindowPlugin {
+                primary_window: Some(bevy::window::Window {
+                    title: "Labour of Love".into(),
                     ..Default::default()
-                })
-                .set(bevy::log::LogPlugin {
-                    filter: "wgpu=error,naga=warn".into(),
-                    ..Default::default()
-                })
-                // Bevy's default asset root is CARGO_MANIFEST_DIR/assets (crates/client/assets,
-                // a local, gitignored scratch dir left over from earlier prototyping). The
-                // workspace's actual tracked asset tree (assets/blocks, assets/shaders/...) lives
-                // two levels up at the repo root, so point the file-asset source there instead.
-                .set(bevy::asset::AssetPlugin { file_path: "../../assets".into(), ..Default::default() }),
-        )
-        .add_plugins(renderer::SimBridgePlugin {
-            client_recv,
-            game_send: game_send.clone(),
-        })
-        .run();
+                }),
+                ..Default::default()
+            })
+            .set(bevy::log::LogPlugin {
+                filter: "wgpu=error,naga=warn".into(),
+                ..Default::default()
+            })
+            .set(bevy::asset::AssetPlugin {
+                file_path: asset_path.into(),
+                ..Default::default()
+            }),
+    )
+    .add_plugins(renderer::SimBridgePlugin {
+        client_recv,
+        game_send: game_send.clone(),
+    });
+
+    #[cfg(target_arch = "wasm32")]
+    app.insert_resource(sim)
+        .add_systems(Update, sim_driver::drive_sim);
+
+    app.run();
 
     // Window closed: shut the sim and game threads down.
     let _ = game_send.send(GameEventKind::Quit);
+    #[cfg(not(target_arch = "wasm32"))]
     let _ = command_send.send(Command::Quit);
 
     #[cfg(feature = "pyroscope")]
