@@ -193,3 +193,42 @@ fn create_player_attaches_capsule_collider() {
     let collider = data.physics.colliders.get(body.colliders()[0]).unwrap();
     assert_eq!(collider.parent(), Some(handle));
 }
+
+#[test]
+fn chunk_gets_voxels_collider() {
+    let server = World::basic();
+    let data = server.data(&r0());
+    // Exactly one collider exists before any player joins: the chunk's.
+    assert_eq!(data.physics.colliders.len(), 1);
+    let (_, collider) = data.physics.colliders.iter().next().unwrap();
+    assert!(collider.shape().as_voxels().is_some(), "chunk collider is a Voxels shape");
+    assert!(collider.parent().is_some(), "parented to the chunk's fixed body");
+}
+
+#[test]
+fn descending_player_stops_on_terrain() {
+    let (mut server, _) = server_with_players(1);
+    let mut results = BTreeMap::new();
+
+    // Enable fps-cam movement (E toggles it during the next tick)...
+    let e_press = InputEvent::Key { key: Key::KeyE, pressed: true };
+    server.handle_region_event(GameEventKind::PlayerInput(0, e_press), r0()).unwrap();
+    server.forget_last_event(&r0());
+    server.progress_world_one_tick(&mut results);
+    // ...then hold descend.
+    let ctrl = InputEvent::Key { key: Key::ControlLeft, pressed: true };
+    server.handle_region_event(GameEventKind::PlayerInput(0, ctrl), r0()).unwrap();
+    server.forget_last_event(&r0());
+    for _ in 0..60 {
+        server.progress_world_one_tick(&mut results);
+    }
+
+    let data = server.data(&r0());
+    let e = *data.player_entites.get(&0).unwrap();
+    let handle = *data.ecs.rigidbody.get(e);
+    let y = data.physics.bodies.get(handle).unwrap().translation().y;
+    // Floor top is world y=2.0; capsule half-extent 0.9. Uncorrected descent
+    // would reach y = 3 - 60*0.5 = -27. Corrected must rest just above 2.9.
+    assert!(y > game::parry::math::Real::from(2.5), "player tunneled through the floor: y = {y}");
+    assert!(y < game::parry::math::Real::from(3.0), "player never moved down: y = {y}");
+}

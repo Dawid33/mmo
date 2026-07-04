@@ -7,6 +7,9 @@ use parry3d::math::Real;
 use rapier3d::math::Vector;
 use rapier3d::prelude::RigidBodyHandle;
 
+use rapier3d::control::KinematicCharacterController;
+use rapier3d::prelude::QueryFilter;
+
 use crate::input::Key;
 use crate::{Controller, GameData, GameDataUpdate, Undo};
 
@@ -149,15 +152,49 @@ impl Controller for CameraController {
             }
             if linvel != Vector3::zeros() {
                 let t = b.translation().clone();
-                // change(): whole-set snapshot. Surgical field restores are
-                // NOT exact here — set_next_kinematic_* also wakes the body
-                // and marks it modified (hashed state the closure can't
-                // restore); the snapshot covers all of it.
-                let bodies = data.physics.bodies.change();
-                bodies
-                    .get_mut(handle)
-                    .unwrap()
-                    .set_next_kinematic_translation(t + linvel);
+                // Collision-corrected movement: slide along / stop at terrain
+                // instead of teleporting through it. Queries are read-only;
+                // the sole write below stays under the change() snapshot.
+                let corrected = match b.colliders().first().copied() {
+                    Some(collider_handle) => {
+                        let collider = data.physics.colliders.get(collider_handle).unwrap();
+                        let queries = data.physics.broad_phase.as_query_pipeline(
+                            data.physics.narrow_phase.query_dispatcher(),
+                            &data.physics.bodies,
+                            &data.physics.colliders,
+                            QueryFilter::default().exclude_rigid_body(handle),
+                        );
+                        let controller = KinematicCharacterController {
+                            // Pure fly movement: no downward snap while
+                            // skimming the ground.
+                            snap_to_ground: None,
+                            ..Default::default()
+                        };
+                        controller
+                            .move_shape(
+                                Real::from(1.0),
+                                &queries,
+                                collider.shape(),
+                                collider.position(),
+                                linvel,
+                                |_| {},
+                            )
+                            .translation
+                    }
+                    // No collider on the mover: keep the uncorrected motion.
+                    None => linvel,
+                };
+                if corrected != Vector3::zeros() {
+                    // change(): whole-set snapshot. Surgical field restores are
+                    // NOT exact here — set_next_kinematic_* also wakes the body
+                    // and marks it modified (hashed state the closure can't
+                    // restore); the snapshot covers all of it.
+                    let bodies = data.physics.bodies.change();
+                    bodies
+                        .get_mut(handle)
+                        .unwrap()
+                        .set_next_kinematic_translation(t + corrected);
+                }
             }
 
             let b = data.physics.bodies.get(handle).unwrap();

@@ -8,7 +8,8 @@
 use nalgebra as na;
 use na::{Perspective3, Quaternion, Translation3, Unit};
 use macros::rollback;
-use parry3d::math::{RawReal, Real};
+use block_mesh::ndshape::ConstShape;
+use parry3d::math::{Point, RawReal, Real, Vector};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
 use slotmapd::Key as _;
 use slotmapd::{new_key_type, SlotMap, SparseSecondaryMap};
@@ -16,7 +17,7 @@ use std::sync::{Arc, atomic::AtomicUsize};
 
 use crate::camera::Camera;
 use crate::input::InputState;
-use crate::voxel::{Chunk, ChunkCoords, Voxel};
+use crate::voxel::{Chunk, ChunkCoords, ChunkShape, Voxel, VoxelType};
 
 pub type IsometryReal = na::Isometry<Real, na::Unit<na::Quaternion<Real>>, 3>;
 
@@ -239,6 +240,14 @@ impl Rollback {
     pub fn create_mesh(&mut self, coords: ChunkCoords) -> EntityKey {
         let e = self.ecs.create_entity_safe();
         let chunk = Chunk::default();
+        // Deterministic linearize order; grid coords are body-local.
+        let solid: Vec<Point<i32>> = (0..ChunkShape::SIZE)
+            .filter(|i| chunk.voxels[*i as usize].kind != VoxelType::Air)
+            .map(|i| {
+                let [x, y, z] = ChunkShape::delinearize(i);
+                Point::new(x as i32, y as i32, z as i32)
+            })
+            .collect();
         self.ecs.chunk.set_safe(e, Some(chunk));
         let position = IsometryReal::from_parts(
             Translation3::new(
@@ -259,7 +268,27 @@ impl Rollback {
         let handle = scope.insert(body);
         scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
         self.ecs.rigidbody.set_safe(e, Some(handle));
+        if !solid.is_empty() {
+            self.attach_voxels_collider_safe(e, handle, &solid);
+        }
         e
+    }
+
+    /// Attach a voxel-grid collider to an entity's body. One cell per solid
+    /// voxel; cell g spans [g, g+1) in body-local space, matching the render
+    /// mesh. Entity-generic. Undo restores the whole PhysicsState snapshot —
+    /// same rationale as attach_capsule_collider_safe.
+    pub fn attach_voxels_collider_safe(
+        &mut self,
+        e: EntityKey,
+        body: RigidBodyHandle,
+        coords: &[Point<i32>],
+    ) {
+        let collider = ColliderBuilder::voxels(Vector::repeat(Real::from(1.0)), coords)
+            .user_data(e.data().as_ffi() as u128)
+            .build();
+        let p = self.data.physics.snapshot_raw();
+        p.colliders.insert_with_parent(collider, body, p.bodies);
     }
 
     /// Attach a capsule collider to an entity's body. Entity-generic: player
@@ -282,8 +311,10 @@ impl Rollback {
 
     pub fn create_player_safe(&mut self, client_id: ClientId) {
         let e = self.ecs.create_entity_safe();
+        // x=2 because the default chunk's floor slab spans x,z ∈ [1,31) —
+        // x=0 is over a hole; y=3 keeps the capsule clear of the slab top.
         let position = IsometryReal::from_parts(
-            Translation3::new(Real::from(0.0), Real::from(1.0), Real::from(5.0)),
+            Translation3::new(Real::from(2.0), Real::from(3.0), Real::from(5.0)),
             Unit::<Quaternion<Real>>::identity(),
         );
         let body = RigidBodyBuilder::kinematic_position_based()
