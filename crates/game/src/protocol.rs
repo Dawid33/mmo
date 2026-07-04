@@ -1,7 +1,7 @@
 use std::time::Duration;
 
+use crate::input::InputEvent;
 use crate::{ChunkCoords, ClientId, Rollback};
-use crate::{GameDataUpdate, GameDataUpdateKind, PlayerKey};
 use derive_more::Debug;
 use log::info;
 
@@ -86,41 +86,6 @@ impl GameEvent {
             region_id,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-pub enum Key {
-    KeyW,
-    KeyA,
-    KeyS,
-    KeyD,
-    KeyE,
-    Space,
-    ControlLeft,
-    ShiftLeft,
-    Escape,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum MouseButton {
-    Left,
-    Right,
-    Middle,
-    Other(u16),
-}
-
-/// Engine-neutral input event. This is the wire format for player input —
-/// it must never contain types from a windowing library.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum InputEvent {
-    Resized { width: u32, height: u32 },
-    Key { key: Key, pressed: bool },
-    MouseButton { button: MouseButton, pressed: bool },
-    /// Line-based wheel scrolling, in lines.
-    MouseWheel { x: f32, y: f32 },
-    /// Accumulated raw mouse motion for one frame.
-    MouseMotion { dx: f32, dy: f32 },
-    Focused(bool),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]

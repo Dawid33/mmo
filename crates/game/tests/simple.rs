@@ -7,7 +7,7 @@
 use std::hash::Hash;
 
 use rapier3d::prelude::RigidBodyBuilder;
-use rollback::Rollback;
+use game::Rollback;
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
@@ -17,7 +17,7 @@ fn state_hash(r: &Rollback) -> u32 {
 
 fn new_rollback() -> (
     Rollback,
-    crossbeam::channel::Receiver<rollback::GameDataUpdate>,
+    crossbeam::channel::Receiver<game::GameDataUpdate>,
 ) {
     let (send, recv) = crossbeam::channel::unbounded();
     (Rollback::new(Some(send)), recv)

@@ -10,7 +10,7 @@ RUST_BACKTRACE=1 ~/Software/rustc_codegen_cranelift/dist/cargo-clif run --bin cl
 RUST_BACKTRACE=1 ~/Software/rustc_codegen_cranelift/dist/cargo-clif run --bin server --color=always 2>&1
 } |& less -R +F 
 
-# RUST_BACKTRACE=1 cargo test -p rollback --color=always -- --no-capture 2>&1 | less -R +F 
+# RUST_BACKTRACE=1 cargo test -p game --color=always -- --no-capture 2>&1 | less -R +F 
  
 # RUST_BACKTRACE=1 CARGO_PROFILE_DEV_CODEGEN_BACKEND=cranelift cargo +nightly run -Zcodegen-backend --bin worldgen --color=always 2>&1 |& less -R +F 
  

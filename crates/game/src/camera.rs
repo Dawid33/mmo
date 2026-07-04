@@ -14,10 +14,84 @@ use parley::swash::shape::Direction;
 use parry3d::math::Real;
 use rapier3d::math::Vector;
 use rapier3d::prelude::RigidBodyHandle;
-use rollback::Camera;
 
-use crate::{ClientPacket, ClientUpdateEvent, Controller, GameData, GameDataUpdate};
-use rollback::Undo;
+use crate::{ClientPacket, ClientUpdateEvent, Controller, GameData, GameDataUpdate, Undo};
+
+pub const ASPECT: f32 = (16 / 9) as f32;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
+#[module(crate)]
+pub struct Camera {
+    pub opengl_to_wgpu_matrix: Matrix4<Real>,
+    pub proj_matrix: Perspective3<Real>,
+    pub view_matrix: Option<RigidBodyHandle>,
+}
+
+impl Camera {
+    pub fn new(handle: RigidBodyHandle) -> Self {
+        let m = Matrix4::from_columns(&[
+            Vector4::new(
+                OrderedFloat(1.0),
+                OrderedFloat(0.0),
+                OrderedFloat(0.0),
+                OrderedFloat(0.0),
+            ),
+            Vector4::new(
+                OrderedFloat(0.0),
+                OrderedFloat(1.0),
+                OrderedFloat(0.0),
+                OrderedFloat(0.0),
+            ),
+            Vector4::new(
+                OrderedFloat(0.0),
+                OrderedFloat(0.0),
+                OrderedFloat(0.5),
+                OrderedFloat(0.0),
+            ),
+            Vector4::new(
+                OrderedFloat(0.0),
+                OrderedFloat(0.0),
+                OrderedFloat(0.5),
+                OrderedFloat(1.0),
+            ),
+        ]);
+        Camera {
+            proj_matrix: Perspective3::from_matrix_unchecked(
+                Perspective3::new(
+                    OrderedFloat(ASPECT),
+                    OrderedFloat(90.0),
+                    OrderedFloat(0.1),
+                    OrderedFloat(100.0),
+                )
+                .as_matrix()
+                    * m,
+            ),
+            opengl_to_wgpu_matrix: m,
+            view_matrix: Some(handle),
+        }
+    }
+}
+
+impl Camera {
+    pub fn build_projection(&self) -> Matrix4<Real> {
+        *self.proj_matrix.as_matrix()
+    }
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            opengl_to_wgpu_matrix: Default::default(),
+            proj_matrix: Perspective3::new(
+                OrderedFloat(ASPECT),
+                OrderedFloat(90.0),
+                OrderedFloat(0.1),
+                OrderedFloat(100.0),
+            ),
+            view_matrix: Default::default(),
+        }
+    }
+}
 
 pub struct CameraController {}
 
@@ -57,25 +131,25 @@ impl Controller for CameraController {
             let mut linvel = Vector::zeros();
             const SPEED: Real = OrderedFloat(5.0);
 
-            if client.input.key_held(&rollback::common::Key::KeyW) {
+            if client.input.key_held(&crate::Key::KeyW) {
                 linvel.z = Real::from(-0.1) * SPEED
             }
-            if client.input.key_held(&rollback::common::Key::KeyS) {
+            if client.input.key_held(&crate::Key::KeyS) {
                 linvel.z = Real::from(0.1) * SPEED
             }
-            if client.input.key_held(&rollback::common::Key::KeyA) {
+            if client.input.key_held(&crate::Key::KeyA) {
                 linvel.x = Real::from(-0.1) * SPEED
             }
-            if client.input.key_held(&rollback::common::Key::KeyD) {
+            if client.input.key_held(&crate::Key::KeyD) {
                 linvel.x = Real::from(0.1) * SPEED
             }
             let mut linvel = rotation.transform_vector(&linvel);
             linvel.y = Real::from(0.0);
 
-            if client.input.key_held(&rollback::common::Key::Space) {
+            if client.input.key_held(&crate::Key::Space) {
                 linvel.y = Real::from(0.1) * SPEED
             }
-            if client.input.key_held(&rollback::common::Key::ControlLeft) {
+            if client.input.key_held(&crate::Key::ControlLeft) {
                 linvel.y = Real::from(-0.1) * SPEED
             }
             if linvel != Vector3::zeros() {

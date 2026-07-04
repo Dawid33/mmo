@@ -8,7 +8,7 @@ use std::hash::Hash;
 use nalgebra::{UnitQuaternion, Vector3};
 use parry3d::math::Real;
 use rapier3d::prelude::PhysicsPipeline;
-use rollback::Rollback;
+use game::Rollback;
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();

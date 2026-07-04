@@ -2,7 +2,7 @@
 //! log-model refactor. Uses only public API that exists in both worlds.
 use std::hash::Hash;
 
-use rollback::{ChunkCoords, Rollback};
+use game::{ChunkCoords, Rollback};
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
@@ -12,7 +12,7 @@ fn state_hash(r: &Rollback) -> u32 {
 
 fn new_rollback() -> (
     Rollback,
-    crossbeam::channel::Receiver<rollback::GameDataUpdate>,
+    crossbeam::channel::Receiver<game::GameDataUpdate>,
 ) {
     let (send, recv) = crossbeam::channel::unbounded();
     (Rollback::new(Some(send)), recv)
@@ -67,7 +67,7 @@ fn lifo_order_is_preserved_across_fields() {
 
     r.new_transaction();
     r.tick.update(|t| *t += 1);
-    r.player_entites.insert(3, rollback::EntityKey::default());
+    r.player_entites.insert(3, game::EntityKey::default());
     r.tick.update(|t| *t += 10);
 
     r.rollback();
@@ -83,7 +83,7 @@ fn undo_scope_snapshot_registration_rolls_back() {
     let h1 = state_hash(&r);
 
     r.new_transaction();
-    let old: rollback::Ecs = (*r.ecs).clone();
+    let old: game::Ecs = (*r.ecs).clone();
     let mut scope = r.ecs.undo_scope();
     scope.raw_fields().camera.insert(key, Some(Default::default()));
     scope.register(move |ecs, _| *ecs = old);
@@ -128,14 +128,14 @@ fn entity_creation_auto_emits_in_both_directions() {
 
     let applied: Vec<_> = recv.try_iter().collect();
     assert!(
-        applied.iter().any(|u| matches!(u.update_kind, rollback::GameDataUpdateKind::CreateEntity(k) if k == key)),
+        applied.iter().any(|u| matches!(u.update_kind, game::GameDataUpdateKind::CreateEntity(k) if k == key)),
         "apply must emit CreateEntity, got {applied:?}"
     );
 
     r.rollback();
     let undone: Vec<_> = recv.try_iter().collect();
     assert!(
-        undone.iter().any(|u| matches!(u.update_kind, rollback::GameDataUpdateKind::RemoveEntity(k) if k == key)),
+        undone.iter().any(|u| matches!(u.update_kind, game::GameDataUpdateKind::RemoveEntity(k) if k == key)),
         "undo must emit RemoveEntity, got {undone:?}"
     );
 }
@@ -150,7 +150,7 @@ fn player_creation_emits_camera_pair() {
     assert!(
         applied.iter().any(|u| matches!(
             u.update_kind,
-            rollback::GameDataUpdateKind::AddCameraComponent(..)
+            game::GameDataUpdateKind::AddCameraComponent(..)
         )),
         "apply must emit AddCameraComponent, got {applied:?}"
     );
@@ -160,7 +160,7 @@ fn player_creation_emits_camera_pair() {
     assert!(
         undone.iter().any(|u| matches!(
             u.update_kind,
-            rollback::GameDataUpdateKind::RemoveCameraComponent(_)
+            game::GameDataUpdateKind::RemoveCameraComponent(_)
         )),
         "undo must emit RemoveCameraComponent, got {undone:?}"
     );
@@ -170,12 +170,12 @@ fn player_creation_emits_camera_pair() {
 fn undomap_ops_roll_back_exactly() {
     let (mut r, _recv) = new_rollback();
     r.new_transaction();
-    r.player_entites.insert(1, rollback::EntityKey::default());
+    r.player_entites.insert(1, game::EntityKey::default());
     let h1 = state_hash(&r);
 
     r.new_transaction();
-    r.player_entites.insert(1, rollback::EntityKey::default()); // overwrite
-    r.player_entites.insert(2, rollback::EntityKey::default()); // fresh insert
+    r.player_entites.insert(1, game::EntityKey::default()); // overwrite
+    r.player_entites.insert(2, game::EntityKey::default()); // fresh insert
     r.player_entites.remove(&1); // remove
     r.rollback();
     assert_eq!(h1, state_hash(&r), "insert-overwrite/insert/remove must all revert");

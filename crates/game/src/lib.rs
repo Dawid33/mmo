@@ -16,7 +16,6 @@ extern crate std;
 use borrow::AsRefsHelper;
 use crossbeam::channel::Sender;
 use ordered_float::OrderedFloat;
-use rollback::rollback;
 use slotmapd::{
     basic::{Iter, Keys},
     new_key_type, DefaultKey,
@@ -32,23 +31,26 @@ use std::{
     time::Instant,
 };
 
-mod camera;
-mod data;
+pub mod camera;
+pub mod input;
 mod mesh;
 mod physics;
+pub mod protocol;
 mod region;
+pub mod state;
+pub mod voxel;
 pub use parry3d as parry;
 
 use na::{Matrix4, Matrix4x2, Perspective3, RealField};
 use parry3d::math::Real;
 use rapier3d::prelude::{RigidBody, RigidBodyHandle};
-pub use rollback::common::*;
-use rollback::input::InputState;
-pub use rollback::{ChunkCoords, ChunkShape, GameData, Rollback, Undo, ASPECT};
-pub use rollback::{
-    ClientId, EntityKey, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, PlayerKey,
-    VoxelType,
-};
+// The #[rollback] macro expansion in `state` and the borrow::Partial derives
+// rely on these items being reachable at the crate root (`crate::...`).
+pub use camera::*;
+pub use input::*;
+pub use protocol::*;
+pub use state::*;
+pub use voxel::*;
 
 pub const TICK_RATE: u64 = 50;
 pub const INDUCED_LATENCY: isize = 0;
@@ -67,7 +69,7 @@ pub enum ClientUpdateEvent {
 use log::info;
 pub use region::Region;
 
-trait Controller {
+pub trait Controller {
     fn on_tick<'a>(&mut self, t: &mut Undo<GameData>) {}
 }
 

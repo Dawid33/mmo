@@ -21,7 +21,7 @@ A voxel MMO in Rust with client/server architecture over QUIC, built around dete
 
 The server listens on `127.0.0.1:6466` (hardcoded in `crates/server/src/main.rs`); the client connects to localhost. Run the server before/alongside the client.
 
-The rollback crate has the test suite: `cargo test -p rollback` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact.
+The game crate has the rollback test suite: `cargo test -p game` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact.
 
 ### Profiling
 
@@ -32,9 +32,8 @@ The rollback crate has the test suite: `cargo test -p rollback` (transaction/und
 
 First-party crates (workspace members):
 
-- `crates/rollback` — Core rollback-netcode state layer. Defines `Chunk` (32³ voxels), `GameData`, transactions/undo, input types. The design spec lives in `docs/superpowers/specs/2026-07-03-undo-api-redesign-design.md`.
-- `crates/macros` — Proc macro crate providing `#[rollback]` on the state module. Fields marked `#[undo(cell|map|slotmap)]` get tier-1 wrappers (`UndoCell`/`UndoMap`/`UndoSlotMap`) whose mutating methods log typed, exactly-invertible deltas automatically; `#[emit(insert = ..., remove = ...)]` derives renderer `GameDataUpdate`s from those deltas in both apply and undo directions. Unmarked fields stay `Undo<T>` (tier 2): mutate via `undo_scope()`/`undo()` closures that MUST be true inverses of the full serialized state (`hash(before) == hash(after undo)` is enforced at rollback time), or `change()` for snapshot-restore; `emit_on_undo()` registers compensating render events. The vendored `slotmapd`/`rapier` forks expose exact LIFO inverses (`revert_insert`/`revert_remove`) because plain `remove(insert(x))` does NOT restore allocator state (free lists, versions/generations) — see `crates/rollback/tests/hash_restore.rs`.
-- `crates/game` — Deterministic simulation shared by client and server: `World`, `Region`/`RegionGroup`, camera, physics (rapier), meshing. `TICK_RATE = 50`.
+- `crates/macros` — Proc macro crate providing `#[rollback]` on the state module. Fields marked `#[undo(cell|map|slotmap)]` get tier-1 wrappers (`UndoCell`/`UndoMap`/`UndoSlotMap`) whose mutating methods log typed, exactly-invertible deltas automatically; `#[emit(insert = ..., remove = ...)]` derives renderer `GameDataUpdate`s from those deltas in both apply and undo directions. Unmarked fields stay `Undo<T>` (tier 2): mutate via `undo_scope()`/`undo()` closures that MUST be true inverses of the full serialized state (`hash(before) == hash(after undo)` is enforced at rollback time), or `change()` for snapshot-restore; `emit_on_undo()` registers compensating render events. The vendored `slotmapd`/`rapier` forks expose exact LIFO inverses (`revert_insert`/`revert_remove`) because plain `remove(insert(x))` does NOT restore allocator state (free lists, versions/generations) — see `crates/game/tests/hash_restore.rs`. The macro generates all undo infrastructure (`Rollback`, `Undo<T>`, the wrappers, the log) at its invocation site and hardcodes `crate::GameDataUpdate`/`crate::serde` paths, so it must expand in the crate that defines the update enums — that's `game`. The design spec lives in `docs/superpowers/specs/2026-07-03-undo-api-redesign-design.md`.
+- `crates/game` — Deterministic simulation shared by client and server, and the rollback-netcode state layer (absorbed from the former `crates/rollback`): `World`, `Region`, controllers (camera, rapier physics), meshing, plus `state.rs` (`GameData`, the `#[rollback]` invocation, `GameDataUpdate`), `voxel.rs` (`Chunk` 32³ voxels), `protocol.rs` (packets/events), `input.rs` (engine-neutral input). `lib.rs` glob re-exports these at the crate root — the macro expansion and `borrow::Partial` derives depend on that. `TICK_RATE = 50`.
 - `crates/server` — Tokio + quinn QUIC server. Deliberately a "dumb router" of game event packets: orders incoming client packets by tick, executes ticks, broadcasts. Self-signed cert generated at startup via rcgen.
 - `crates/client` — winit/wgpu client. `GameInstanceManager` in `main.rs` coordinates netcode + rollback; rendering in `render_world.rs`/`window.rs`, networking in `netcode.rs`.
 - `crates/worldgen` — World generation (currently a stub).
@@ -47,5 +46,5 @@ First-party crates (workspace members):
 
 - Serialization over the wire is `bincode`; state hashing uses `crc32fast`.
 - Cross-thread communication uses `crossbeam` channels (game loop ↔ network loop ↔ render loop); async (tokio) is confined to the QUIC networking edges.
-- Editions are mixed intentionally: older crates are 2021, newer ones (`rollback`, `macros`, `worldgen`) are 2024.
+- Editions are mixed intentionally: older crates are 2021, newer ones (`macros`, `worldgen`) are 2024.
 - `TODO.md` tracks the current high-level direction (multi-region/chunk-grid simulation instances).

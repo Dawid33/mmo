@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use bevy::prelude::*;
 use crossbeam::channel::Receiver;
 use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, RegionId};
-use rollback::{EntityKey, Voxel};
+use game::{EntityKey, Voxel};
 
 use super::convert::iso_to_transform;
 use super::{ClientUpdates, LocalPlayer};
@@ -179,7 +179,7 @@ mod tests {
     use super::*;
     use crate::renderer::{ClientUpdates, GameEvents, LocalPlayer};
     use game::{ChunkCoords, ClientUpdateEvent, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback};
-    use rollback::EntityKey;
+    use game::EntityKey;
     use slotmapd::KeyData;
 
     fn test_app() -> (App, crossbeam::channel::Sender<ClientUpdateEvent>, crossbeam::channel::Sender<GameDataUpdate>, game::RegionId) {
@@ -223,7 +223,7 @@ mod tests {
 
         let k = key(7);
         updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
-        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(k, rollback::IsometryReal::identity()))).unwrap();
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(k, game::IsometryReal::identity()))).unwrap();
         app.update();
 
         let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).expect("entity mapped");
@@ -239,7 +239,7 @@ mod tests {
     fn unknown_key_is_tolerated() {
         let (mut app, _c, updates, _region_id) = test_app();
         app.update();
-        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(key(99), rollback::IsometryReal::identity()))).unwrap();
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(key(99), game::IsometryReal::identity()))).unwrap();
         app.update(); // must not panic
     }
 }

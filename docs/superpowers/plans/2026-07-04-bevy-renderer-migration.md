@@ -8,13 +8,15 @@
 
 **Tech Stack:** bevy 0.18 (default-features off, curated feature list), existing crossbeam channels, existing `block-mesh` greedy meshing, `image` crate for texture-array assembly.
 
+> **Retcon note (2026-07-04):** the `rollback` crate has since been merged into `game` and deleted (`crates/rollback` no longer exists). Paths and `rollback::X` imports throughout this plan have been rewritten to their `game` equivalents (`crates/game/src/{state,protocol,input,voxel}.rs`); the test gate is `cargo test -p game`. Task 1 was executed before the merge — its prose describes the old crate.
+
 ## Global Constraints
 
 - **One-way bridge:** nothing in the Bevy world may mutate sim state. The only bevy→sim path is `GameEventKind::PlayerInput` over the existing channel.
-- **No bevy outside the client:** `game`, `rollback`, `server`, and the vendored forks must not gain a bevy dependency.
+- **No bevy outside the client:** `game`, `server`, and the vendored forks must not gain a bevy dependency.
 - **Vendored forks untouched:** never modify `crates/nalgebra`, `crates/rapier`, `crates/parry`, `crates/simba`, `crates/ordered-float`, `crates/slotmapd`, `crates/approx`, `crates/block-mesh`.
 - **Wire format changes are fine** (client and server are always built from the same tree), but `cargo build --workspace --bins` must pass at the end of every task.
-- **Rollback correctness bar unchanged:** `cargo test -p rollback` must pass at the end of every task.
+- **Rollback correctness bar unchanged:** `cargo test -p game` must pass at the end of every task.
 - **Bevy version:** pin `bevy = "0.18"` (released 2026-01-13). This plan's Bevy API usage was written against the 0.16→0.18 API line; 0.19 (2026-06-19) exists but is NOT the target. If a bevy item in this plan fails to compile (bevy renames things between minors — e.g. buffered events are `Message`/`MessageReader` since 0.17, cursor options may live on a `CursorOptions` component rather than `Window`), check docs.rs for bevy 0.18 and keep the semantics of the step; do not downgrade bevy.
 - **Build command:** plain `cargo build -p <crate>` / `cargo test -p <crate>` (stable) is the verification gate. The cranelift wrapper is a dev convenience, not part of this plan.
 - **Commit after every task** with the message given in the task.
@@ -22,8 +24,8 @@
 ## File Structure
 
 ```
-crates/rollback/src/common.rs      # MODIFY: engine-neutral Key/MouseButton/InputEvent, GameEventKind::PlayerInput
-crates/rollback/src/input.rs       # MODIFY: InputState (renamed WinitInput), keyed by rollback Key
+crates/game/src/{input,protocol}.rs      # MODIFY: engine-neutral Key/MouseButton/InputEvent, GameEventKind::PlayerInput
+crates/game/src/input.rs       # MODIFY: InputState (renamed WinitInput), keyed by rollback Key
 crates/game/src/camera.rs          # MODIFY: rollback Key instead of winit KeyCode; aspect fix
 crates/game/src/region.rs          # MODIFY: rollback Key; PlayerInput rename; drop parley helper (task 10)
 crates/client/src/main.rs          # MODIFY: bevy App entry; GameInstanceManager unchanged
@@ -45,26 +47,26 @@ crates/client/src/{window,state,render_world,layout,text,bevy}.rs # DELETE (task
 Removes winit from the wire format and from `rollback`/`game`, so the client can later be the only crate that knows about a windowing library. The current winit renderer keeps working after this task — `window.rs` maps winit events to the new types at the edge.
 
 **Files:**
-- Modify: `crates/rollback/src/common.rs` (winit imports at top; `WindowEvent`/`DeviceEvent`/`WinitEvent` at lines ~98-180)
-- Modify: `crates/rollback/src/input.rs` (whole file)
-- Modify: `crates/rollback/Cargo.toml` (remove `winit`)
+- Modify: `crates/game/src/{input,protocol}.rs` (winit imports at top; `WindowEvent`/`DeviceEvent`/`WinitEvent` at lines ~98-180)
+- Modify: `crates/game/src/input.rs` (whole file)
+- Modify: `crates/game/Cargo.toml` (remove `winit`)
 - Modify: `crates/game/src/camera.rs:32-83` (key constants, resize handling)
 - Modify: `crates/game/src/region.rs:160-180` (KeyE toggle, `PlayerWinitEvent` arm)
 - Modify: `crates/game/src/data.rs` (drop `winit::keyboard::KeyCode` import if unused)
 - Modify: `crates/client/src/window.rs`, `crates/client/src/main.rs` (map winit → `InputEvent`)
-- Test: inline `#[cfg(test)]` module in `crates/rollback/src/input.rs`
+- Test: inline `#[cfg(test)]` module in `crates/game/src/input.rs`
 
 **Interfaces:**
 - Produces (used by every later task):
-  - `rollback::common::Key` — `enum Key { KeyW, KeyA, KeyS, KeyD, KeyE, Space, ControlLeft, ShiftLeft, Escape }`
-  - `rollback::common::MouseButton` — `enum MouseButton { Left, Right, Middle, Other(u16) }`
-  - `rollback::common::InputEvent` — see step 1
-  - `rollback::common::GameEventKind::PlayerInput(ClientId, InputEvent)` (replaces `PlayerWinitEvent`)
-  - `rollback::input::InputState` (replaces `WinitInput`) with `update(&mut self, event: InputEvent) -> Option<Box<dyn Fn(&mut InputState) + Send + Sync>>`, `step()`, `mouse_diff() -> (f32, f32)`, `window_resized() -> &Option<(u32, u32)>`, `key_pressed(&Key) -> bool`, `key_held(&Key) -> bool`
+  - `game::Key` — `enum Key { KeyW, KeyA, KeyS, KeyD, KeyE, Space, ControlLeft, ShiftLeft, Escape }`
+  - `game::MouseButton` — `enum MouseButton { Left, Right, Middle, Other(u16) }`
+  - `game::InputEvent` — see step 1
+  - `game::GameEventKind::PlayerInput(ClientId, InputEvent)` (replaces `PlayerWinitEvent`)
+  - `game::input::InputState` (replaces `WinitInput`) with `update(&mut self, event: InputEvent) -> Option<Box<dyn Fn(&mut InputState) + Send + Sync>>`, `step()`, `mouse_diff() -> (f32, f32)`, `window_resized() -> &Option<(u32, u32)>`, `key_pressed(&Key) -> bool`, `key_held(&Key) -> bool`
 
 - [ ] **Step 1: Replace the winit event types in `common.rs`**
 
-Delete the `use winit::{...}` block at the top of `crates/rollback/src/common.rs`, the `WindowEvent`, `DeviceEvent`, and `WinitEvent` enums, and replace with:
+Delete the `use winit::{...}` block at the top of `crates/game/src/{input,protocol}.rs`, the `WindowEvent`, `DeviceEvent`, and `WinitEvent` enums, and replace with:
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -215,11 +217,11 @@ impl InputState {
     }
 ```
 
-Remove `winit = { workspace = true }` from `crates/rollback/Cargo.toml`. Rename the type alias/export site: wherever `rollback` re-exports `WinitInput` (grep `WinitInput` in `crates/rollback/src/`), export `InputState` instead; keep `pub use` paths otherwise identical.
+Remove `winit = { workspace = true }` from `crates/game/Cargo.toml`. Rename the type alias/export site: wherever `rollback` re-exports `WinitInput` (grep `WinitInput` in `crates/game/src/`), export `InputState` instead; keep `pub use` paths otherwise identical.
 
 - [ ] **Step 3: Add the failing state-machine test**
 
-At the bottom of `crates/rollback/src/input.rs`:
+At the bottom of `crates/game/src/input.rs`:
 
 ```rust
 #[cfg(test)]
@@ -257,11 +259,11 @@ mod tests {
 }
 ```
 
-Run: `cargo test -p rollback input` — expect PASS (implementation was written in step 2; if it fails, fix `input.rs`, not the test).
+Run: `cargo test -p game input` — expect PASS (implementation was written in step 2; if it fails, fix `input.rs`, not the test).
 
 - [ ] **Step 4: Update the `game` crate**
 
-`crates/game/src/camera.rs`: replace all seven `client.input.key_held(&winit::keyboard::KeyCode::X)` / `key_pressed` calls with `rollback::Key::X` (W, S, A, D, Space, ControlLeft). Replace the resize block (the `window_resized()` consumer) — note this **fixes an existing integer-division bug** (`resolution.width / resolution.height` divided two `u32`s):
+`crates/game/src/camera.rs`: replace all seven `client.input.key_held(&winit::keyboard::KeyCode::X)` / `key_pressed` calls with `game::Key::X` (W, S, A, D, Space, ControlLeft). Replace the resize block (the `window_resized()` consumer) — note this **fixes an existing integer-division bug** (`resolution.width / resolution.height` divided two `u32`s):
 
 ```rust
             if let Some((width, height)) = *client.input.window_resized() {
@@ -273,7 +275,7 @@ Run: `cargo test -p rollback input` — expect PASS (implementation was written 
                     .set_aspect(OrderedFloat(width as f32 / height as f32));
 ```
 
-`crates/game/src/region.rs`: `winit::keyboard::KeyCode::KeyE` → `rollback::Key::KeyE` (line ~160); `GameEventKind::PlayerWinitEvent(client_id, player_event)` → `GameEventKind::PlayerInput(client_id, player_event)` (line ~176). Remove the now-unused `use winit::keyboard::{KeyCode, SmolStr};` import. In `crates/game/src/data.rs` remove the `winit::keyboard::KeyCode` import if nothing else uses it.
+`crates/game/src/region.rs`: `winit::keyboard::KeyCode::KeyE` → `game::Key::KeyE` (line ~160); `GameEventKind::PlayerWinitEvent(client_id, player_event)` → `GameEventKind::PlayerInput(client_id, player_event)` (line ~176). Remove the now-unused `use winit::keyboard::{KeyCode, SmolStr};` import. In `crates/game/src/data.rs` remove the `winit::keyboard::KeyCode` import if nothing else uses it.
 
 - [ ] **Step 5: Map winit → `InputEvent` in the client (current renderer stays)**
 
@@ -310,7 +312,7 @@ fn map_mouse_button(b: winit::event::MouseButton) -> game::MouseButton {
 }
 ```
 
-(`game` re-exports `rollback::common::*`, so `game::Key`/`game::MouseButton`/`game::InputEvent` resolve; if not, add them to the `pub use rollback::...` list in `crates/game/src/lib.rs:48`.)
+(`game` re-exports `game::*`, so `game::Key`/`game::MouseButton`/`game::InputEvent` resolve; if not, add them to the `pub use game::...` list in `crates/game/src/lib.rs:48`.)
 
 Then rewrite the event senders: every `GameEventKind::PlayerWinitEvent(player, WinitEvent::...)` becomes `GameEventKind::PlayerInput(player, InputEvent::...)`:
 - `Resized(size)` → `InputEvent::Resized { width: size.width, height: size.height }`
@@ -326,7 +328,7 @@ In `crates/client/src/main.rs:155`, the gate `if let GameEventKind::PlayerWinitE
 - [ ] **Step 6: Verify workspace**
 
 Run: `cargo build --workspace --bins` — expect success.
-Run: `cargo test -p rollback` — expect all tests PASS (including the existing log_model/simple/random_ops/hash_restore suites).
+Run: `cargo test -p game` — expect all tests PASS (including the existing log_model/simple/random_ops/hash_restore suites).
 Smoke: run `cargo run --bin server` and `cargo run --bin client` (or `scripts/run.sh`); WASD/mouse must still move the camera, E must still toggle freecam.
 
 - [ ] **Step 7: Commit**
@@ -380,7 +382,7 @@ bevy = { version = "0.18", default-features = false, features = [
 ] }
 ```
 
-In `crates/client/Cargo.toml`: add `bevy = { workspace = true }`; remove `wgpu`, `pollster`, `winit`, `parley`, `simplelog`, `bytemuck`, `ndshape`, `derive_more`, `weak-table`, `futures-lite`. Keep `image`, `block-mesh`, `crossbeam`, `log`, `rand`, `slotmapd`, `bincode`, `crc32fast`, `quinn`, `tokio`, `rollback`, `game`, `rapier3d`.
+In `crates/client/Cargo.toml`: add `bevy = { workspace = true }`; remove `wgpu`, `pollster`, `winit`, `parley`, `simplelog`, `bytemuck`, `ndshape`, `derive_more`, `weak-table`, `futures-lite`. Keep `image`, `block-mesh`, `crossbeam`, `log`, `rand`, `slotmapd`, `bincode`, `crc32fast`, `quinn`, `tokio`, `game`, `rapier3d`.
 
 Run: `cargo tree -p client -i winit` afterwards to confirm exactly one winit version (bevy's). If bevy 0.18 pins a different winit minor than 0.30, that is fine — nothing outside bevy uses winit anymore after this task.
 
@@ -520,7 +522,7 @@ git commit -m "feat(client): bevy app scaffold with sim-bridge stub; old wgpu re
 - Test: inline `#[cfg(test)]` module in the same file
 
 **Interfaces:**
-- Consumes: `rollback::IsometryReal` (nalgebra `Isometry3<OrderedFloat<f32>>`), `game::na::Perspective3<Real>`
+- Consumes: `game::IsometryReal` (nalgebra `Isometry3<OrderedFloat<f32>>`), `game::na::Perspective3<Real>`
 - Produces: `convert::iso_to_transform(&IsometryReal) -> Transform`, `convert::perspective_to_projection(&Perspective3<Real>) -> PerspectiveProjection`
 
 - [ ] **Step 1: Write the failing tests**
@@ -535,14 +537,14 @@ mod tests {
 
     #[test]
     fn identity_iso_is_identity_transform() {
-        let iso = rollback::IsometryReal::identity();
+        let iso = game::IsometryReal::identity();
         let t = iso_to_transform(&iso);
         assert_eq!(t, Transform::IDENTITY);
     }
 
     #[test]
     fn translation_maps_componentwise() {
-        let iso = rollback::IsometryReal::from_parts(
+        let iso = game::IsometryReal::from_parts(
             Translation3::new(OrderedFloat(1.0), OrderedFloat(2.0), OrderedFloat(-3.0)),
             UnitQuaternion::identity(),
         );
@@ -553,7 +555,7 @@ mod tests {
     #[test]
     fn rotation_maps_to_equivalent_quat() {
         let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), Real::from(1.0));
-        let iso = rollback::IsometryReal::from_parts(Translation3::identity(), rot);
+        let iso = game::IsometryReal::from_parts(Translation3::identity(), rot);
         let t = iso_to_transform(&iso);
         let expected = Quat::from_axis_angle(Vec3::Y, 1.0);
         assert!(t.rotation.angle_between(expected) < 1e-6);
@@ -587,7 +589,7 @@ use bevy::math::{Quat, Vec3};
 use bevy::prelude::{PerspectiveProjection, Transform};
 use game::na::Perspective3;
 use game::parry::math::Real;
-use rollback::IsometryReal;
+use game::IsometryReal;
 
 /// Sim isometry (right-handed, Y-up — same convention as bevy) → bevy Transform.
 pub fn iso_to_transform(iso: &IsometryReal) -> Transform {
@@ -617,7 +619,7 @@ pub fn perspective_to_projection(p: &Perspective3<Real>) -> PerspectiveProjectio
 }
 ```
 
-(If `IsometryReal` is exported under a different path, check `crates/rollback/src/common.rs` for the alias — the current renderer imports it as `rollback::IsometryReal`.)
+(If `IsometryReal` is exported under a different path, check `crates/game/src/{input,protocol}.rs` for the alias — the current renderer imports it as `game::IsometryReal`.)
 
 - [ ] **Step 4: Run tests**
 
@@ -662,7 +664,7 @@ mod tests {
     use super::*;
     use crate::renderer::{ClientUpdates, GameEvents, LocalPlayer};
     use game::{ChunkCoords, ClientUpdateEvent, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback};
-    use rollback::EntityKey;
+    use game::EntityKey;
     use slotmapd::KeyData;
 
     fn test_app() -> (App, crossbeam::channel::Sender<ClientUpdateEvent>, crossbeam::channel::Sender<GameDataUpdate>, game::RegionId) {
@@ -706,7 +708,7 @@ mod tests {
 
         let k = key(7);
         updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
-        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(k, rollback::IsometryReal::identity()))).unwrap();
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(k, game::IsometryReal::identity()))).unwrap();
         app.update();
 
         let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).expect("entity mapped");
@@ -722,7 +724,7 @@ mod tests {
     fn unknown_key_is_tolerated() {
         let (mut app, _c, updates, _region_id) = test_app();
         app.update();
-        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(key(99), rollback::IsometryReal::identity()))).unwrap();
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(key(99), game::IsometryReal::identity()))).unwrap();
         app.update(); // must not panic
     }
 }
@@ -740,7 +742,7 @@ use std::collections::BTreeMap;
 use bevy::prelude::*;
 use crossbeam::channel::Receiver;
 use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, RegionId};
-use rollback::{EntityKey, Voxel};
+use game::{EntityKey, Voxel};
 
 use super::convert::iso_to_transform;
 use super::{ClientUpdates, LocalPlayer};
@@ -910,7 +912,7 @@ In `renderer/mod.rs`: `mod bridge; pub use bridge::*;`, add `.init_resource::<Re
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p client bridge` — expect 3 PASS. If `chunk.voxels` or `try_get` signatures differ, check `crates/rollback/src/rollback.rs` (the old `TrueWorld::new` at the pre-task-2 revision of `render_world.rs:143-181` is the reference — `git show HEAD~2:crates/client/src/render_world.rs`).
+Run: `cargo test -p client bridge` — expect 3 PASS. If `chunk.voxels` or `try_get` signatures differ, check `crates/game/src/state.rs` (the old `TrueWorld::new` at the pre-task-2 revision of `render_world.rs:143-181` is the reference — `git show HEAD~2:crates/client/src/render_world.rs`).
 
 - [ ] **Step 5: Smoke and commit**
 
@@ -1046,7 +1048,7 @@ Add to `bridge.rs` tests:
         );
         updates.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
-            GameDataUpdateKind::AddCameraComponent(k, proj.clone(), rollback::IsometryReal::identity()),
+            GameDataUpdateKind::AddCameraComponent(k, proj.clone(), game::IsometryReal::identity()),
         )).unwrap();
         app.update();
         // second frame: AddCameraComponent on a same-drain-spawned entity goes through Commands
@@ -1122,7 +1124,7 @@ Add `use super::convert::perspective_to_projection;` and the needed `bevy::prelu
         }
 ```
 
-(Check the `cam.view_matrix` type in `crates/rollback/src/rollback.rs` — the old code used `cam.view_matrix.unwrap()`, so it is an `Option<RigidBodyHandle>`.)
+(Check the `cam.view_matrix` type in `crates/game/src/state.rs` — the old code used `cam.view_matrix.unwrap()`, so it is an `Option<RigidBodyHandle>`.)
 
 - [ ] **Step 3: Run tests**
 
@@ -1160,7 +1162,7 @@ mod tests {
     use super::*;
     use game::ChunkShape;
     use block_mesh::ndshape::ConstShape; // ndshape itself is no longer a direct dep (task 2)
-    use rollback::{Voxel, VoxelType, CHUNK_VOXEL_COUNT};
+    use game::{Voxel, VoxelType, CHUNK_VOXEL_COUNT};
 
     #[test]
     fn empty_chunk_yields_no_mesh() {
@@ -1192,7 +1194,7 @@ use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use block_mesh::{greedy_quads, GreedyQuadsBuffer, RIGHT_HANDED_Y_UP_CONFIG};
 use game::ChunkShape;
-use rollback::Voxel;
+use game::Voxel;
 
 pub fn build_chunk_mesh(voxels: &[Voxel]) -> Option<Mesh> {
     let mut buffer = GreedyQuadsBuffer::new(voxels.len());
@@ -1299,7 +1301,7 @@ git commit -m "feat(client): greedy-meshed chunks render via bevy pbr"
 - Modify: `crates/client/src/renderer/mod.rs` (register)
 
 **Interfaces:**
-- Consumes: `GameEvents`, `LocalPlayer` (task 2); `rollback::{Key, MouseButton, InputEvent}` (task 1)
+- Consumes: `GameEvents`, `LocalPlayer` (task 2); `game::{Key, MouseButton, InputEvent}` (task 1)
 - Produces: `fn forward_input` in `PreUpdate` (before the drains — input first, then state application)
 
 - [ ] **Step 1: Implement `input.rs`**
@@ -1478,7 +1480,7 @@ Replace the plain `StandardMaterial` chunk material with the extended one. In `r
 
 ```rust
 #[derive(Resource, Default)]
-pub struct VoxelTypeLayers(pub std::collections::BTreeMap<rollback::VoxelType, u32>);
+pub struct VoxelTypeLayers(pub std::collections::BTreeMap<game::VoxelType, u32>);
 ```
 
 In `setup_scene` (now also taking `mut images: ResMut<Assets<Image>>`, `mut voxel_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>>`), port the `assets/blocks` PNG scan from the old `state.rs` (`git show HEAD~8:crates/client/src/state.rs`, lines 115-196), but stack the decoded RGBA8 images into one array texture instead of separate bindings:
@@ -1644,12 +1646,12 @@ Run: `cargo test -p client` — all PASS.
 - `crates/game/src/region.rs`: delete `text_layout` and the `parley` imports; `crates/game/src/camera.rs`: delete the `parley::swash` import. Remove `parley` and `winit` from `crates/game/Cargo.toml`. If anything else in `game` still references winit, it was missed in task 1 — fix it the same way.
 - `crates/client/Cargo.toml`: confirm the task-2 removals stuck; additionally drop anything `cargo machete`-style unused (`rand`, `crc32fast` if nothing references them: `grep -rn "rand::\|crc32fast" crates/client/src/`).
 - Remove `#![allow(unused)]` from `crates/game/src/lib.rs` and fix the fallout (delete dead imports; genuinely-pending items get `#[allow(dead_code)]` at item level with a one-line reason).
-- Update `CLAUDE.md`: in the workspace-layout section, change the `crates/client` line to say the client is a Bevy app (`renderer/` bridge modules, networking in `netcode.rs`, game loop coordination in `main.rs`), and note that `game`/`rollback`/`server` must stay bevy-free and windowing-library-free.
+- Update `CLAUDE.md`: in the workspace-layout section, change the `crates/client` line to say the client is a Bevy app (`renderer/` bridge modules, networking in `netcode.rs`, game loop coordination in `main.rs`), and note that `game`/`server` must stay bevy-free and windowing-library-free.
 
 - [ ] **Step 5: Final gates**
 
 Run: `cargo build --workspace --bins` — success.
-Run: `cargo test -p rollback -p client` — all PASS.
+Run: `cargo test -p game -p client` — all PASS.
 Run: `cargo tree -p game -i winit` — expect "nothing depends on winit" style error (winit gone from sim side).
 Smoke: full server + client session — chunk textured, WASD+mouse freecam, E toggle, resize, clean exit.
 

@@ -2,7 +2,7 @@ use bevy::math::{Quat, Vec3, Vec4};
 use bevy::prelude::{PerspectiveProjection, Transform};
 use game::na::Perspective3;
 use game::parry::math::Real;
-use rollback::IsometryReal;
+use game::IsometryReal;
 
 /// Sim isometry (right-handed, Y-up — same convention as bevy) → bevy Transform.
 pub fn iso_to_transform(iso: &IsometryReal) -> Transform {
@@ -42,14 +42,14 @@ mod tests {
 
     #[test]
     fn identity_iso_is_identity_transform() {
-        let iso = rollback::IsometryReal::identity();
+        let iso = game::IsometryReal::identity();
         let t = iso_to_transform(&iso);
         assert_eq!(t, Transform::IDENTITY);
     }
 
     #[test]
     fn translation_maps_componentwise() {
-        let iso = rollback::IsometryReal::from_parts(
+        let iso = game::IsometryReal::from_parts(
             Translation3::new(OrderedFloat(1.0), OrderedFloat(2.0), OrderedFloat(-3.0)),
             UnitQuaternion::identity(),
         );
@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn rotation_maps_to_equivalent_quat() {
         let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), Real::from(1.0));
-        let iso = rollback::IsometryReal::from_parts(Translation3::identity(), rot);
+        let iso = game::IsometryReal::from_parts(Translation3::identity(), rot);
         let t = iso_to_transform(&iso);
         let expected = Quat::from_axis_angle(Vec3::Y, 1.0);
         assert!(t.rotation.angle_between(expected) < 1e-6);

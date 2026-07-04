@@ -1644,7 +1644,6 @@ dependencies = [
  "quinn",
  "rand 0.9.2",
  "rapier3d",
- "rollback",
  "slotmapd",
  "tokio",
 ]
@@ -2619,6 +2618,7 @@ dependencies = [
  "grid",
  "hashbrown 0.16.1",
  "log",
+ "macros",
  "nalgebra",
  "num-traits 0.2.19",
  "obj",
@@ -2629,7 +2629,6 @@ dependencies = [
  "parry3d",
  "rapier3d",
  "rayon",
- "rollback",
  "serde 1.0.225",
  "serde_json",
  "simba",
@@ -3683,17 +3682,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mini-internal"
-version = "0.1.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2ffabe294f16012f377bfc1ef361724c66656152e8f5b60c2147e351275637"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
 name = "miniquad"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3703,17 +3691,6 @@ dependencies = [
  "ndk-sys 0.2.2",
  "objc-rs",
  "winapi",
-]
-
-[[package]]
-name = "miniserde"
-version = "0.1.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e28077609c1e958780768659d8bef2f2b48a9d1f4807d64c5e78e4550bbe309"
-dependencies = [
- "itoa",
- "mini-internal",
- "zmij",
 ]
 
 [[package]]
@@ -5423,29 +5400,6 @@ name = "robust"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
-
-[[package]]
-name = "rollback"
-version = "0.1.0"
-dependencies = [
- "assert-json-diff",
- "bincode",
- "block-mesh",
- "borrow",
- "crc32fast",
- "crossbeam",
- "derive_more",
- "log",
- "macros",
- "miniserde",
- "nalgebra",
- "oorandom",
- "ordered-float 5.1.0",
- "parry3d",
- "rapier3d",
- "serde 1.0.225",
- "slotmapd",
-]
 
 [[package]]
 name = "ron"
@@ -7814,9 +7768,3 @@ dependencies = [
  "quote",
  "syn 2.0.118",
 ]
-
-[[package]]
-name = "zmij"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e404bcd8afdaf006e529269d3e85a743f9480c3cef60034d77860d02964f3ba"

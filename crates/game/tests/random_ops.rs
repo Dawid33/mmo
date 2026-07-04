@@ -3,7 +3,7 @@
 //! rollback system.
 use std::hash::Hash;
 
-use rollback::{ChunkCoords, EntityKey, Rollback};
+use game::{ChunkCoords, EntityKey, Rollback};
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();

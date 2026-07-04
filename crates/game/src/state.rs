@@ -1,98 +1,22 @@
-//! Issues:
-//! Re-do this whole thing by applying the attribute to a module and
-//! putting all rollbackable structs inside that module.
-//! That would make it possible to not need to do any recursion for rollback or
-//! forget, also eliminating the edge case of setting a rollback implementor who
-//! is inside an undo
+//! The rollbackable simulation state: `GameData` plus the `#[rollback]`
+//! invocation that generates the undo/transaction infrastructure
+//! (`Rollback`, `Undo`, `UndoCell`, `UndoMap`, `UndoSlotMap`, ...) for it.
+//! The generated code assumes `GameDataUpdate`/`GameDataUpdateKind`/
+//! `GameDataTransactionKind` and `serde` are reachable at the crate root —
+//! `lib.rs` re-exports this module to satisfy that.
 
-extern crate nalgebra as na;
-
-use block_mesh::ndshape::{ConstShape, ConstShape3u32};
-use block_mesh::{MergeVoxel, VoxelVisibility};
-use borrow::Partial;
-use crossbeam::channel::Sender;
-use log::info;
-use nalgebra::Perspective3;
-use nalgebra::{
-    ComplexField, Isometry3, Matrix4, OPoint, Point3, Quaternion, RealField, Rotation, Rotation3,
-    Translation3, Unit, Vector3, Vector4,
-};
-use ordered_float::OrderedFloat;
+use nalgebra as na;
+use na::{Perspective3, Quaternion, Translation3, Unit};
+use macros::rollback;
 use parry3d::math::{RawReal, Real};
-use rapier3d::math::Vector;
-use rapier3d::prelude::{
-    CCDSolver, ColliderHandle, ColliderSet, DefaultBroadPhase, ImpulseJointSet,
-    IntegrationParameters, IslandManager, LockedAxes, MultibodyJointSet, NarrowPhase,
-    QueryPipeline, RigidBodyBuilder, RigidBodyHandle, RigidBodySet,
-};
-use slotmapd::secondary::Iter;
-use slotmapd::{DefaultKey, new_key_type};
+use rapier3d::prelude::{RigidBodyBuilder, RigidBodyHandle};
 use slotmapd::Key as _;
-use slotmapd::{KeyData, SecondaryMap, SlotMap, SparseSecondaryMap};
-use std::ops::DerefMut;
+use slotmapd::{new_key_type, SlotMap, SparseSecondaryMap};
 use std::sync::{Arc, atomic::AtomicUsize};
-// use winit::keyboard::KeyCode;
 
-pub use derive_more::Debug;
-pub use game_data::*;
-pub use macros::rollback;
-pub use serde;
-
-pub mod common;
-pub use common::*;
-pub mod input;
-
-const HALF_VOXEL_SIZE: f32 = 1.0 / 2.0;
-pub type ChunkShape = ConstShape3u32<32, 32, 32>;
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
-#[module(crate)]
-pub struct Chunk {
-    pub voxels: Vec<Voxel>,
-    pub collider: Vec<ColliderHandle>,
-}
-
-impl Default for Chunk {
-    fn default() -> Self {
-        let mut voxels = Vec::with_capacity(ChunkShape::SIZE as usize);
-        for i in 0..ChunkShape::SIZE {
-            let [mut x, mut y, mut z] = ChunkShape::delinearize(i);
-
-            let v = if x > 0 && y > 0 && z > 0 && y < 31 && z < 31 && x < 31 {
-                if y == 1 {
-                    Voxel::new(VoxelType::Black)
-                } else {
-                    Voxel::new(VoxelType::Air)
-                }
-            } else {
-                Voxel::new(VoxelType::Air)
-            };
-            voxels.push(v);
-        }
-
-        Self {
-            collider: Vec::new(),
-            voxels,
-        }
-    }
-}
-
-#[derive(
-    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, PartialOrd, Ord, Eq,
-)]
-pub struct ChunkCoords {
-    x: usize,
-    y: usize,
-    z: usize,
-}
-
-impl ChunkCoords {
-    pub fn new(x: usize, y: usize, z: usize) -> Self {
-        Self { x, y, z }
-    }
-}
-
-pub const CHUNK_VOXEL_COUNT: usize = 32 * 32 * 32;
+use crate::camera::Camera;
+use crate::input::InputState;
+use crate::voxel::{Chunk, ChunkCoords, Voxel};
 
 pub type IsometryReal = na::Isometry<Real, na::Unit<na::Quaternion<Real>>, 3>;
 
@@ -150,132 +74,10 @@ pub enum GameDataTransactionKind {
     Undo,
 }
 
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone, Hash)]
-pub struct Voxel {
-    pub kind: VoxelType,
-}
-
-impl Voxel {
-    pub fn new(kind: VoxelType) -> Self {
-        Self { kind }
-    }
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum VoxelType {
-    Black,
-    Air,
-}
-
-impl Default for VoxelType {
-    fn default() -> Self {
-        VoxelType::Air
-    }
-}
-
-impl block_mesh::Voxel for Voxel {
-    fn get_visibility(&self) -> VoxelVisibility {
-        if self.kind == VoxelType::Air {
-            VoxelVisibility::Empty
-        } else {
-            VoxelVisibility::Opaque
-        }
-    }
-}
-
-impl MergeVoxel for Voxel {
-    type MergeValue = VoxelType;
-    type MergeValueFacingNeighbour = VoxelType;
-
-    fn merge_value(&self) -> Self::MergeValue {
-        self.kind
-    }
-
-    fn merge_value_facing_neighbour(&self) -> Self::MergeValueFacingNeighbour {
-        self.kind
-    }
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Partial, Hash)]
-#[module(crate)]
-pub struct Camera {
-    pub opengl_to_wgpu_matrix: Matrix4<Real>,
-    pub proj_matrix: Perspective3<Real>,
-    pub view_matrix: Option<RigidBodyHandle>,
-}
-
-pub const ASPECT: f32 = (16 / 9) as f32;
-
-impl Camera {
-    pub fn new(handle: RigidBodyHandle) -> Self {
-        let m = Matrix4::from_columns(&[
-            Vector4::new(
-                OrderedFloat(1.0),
-                OrderedFloat(0.0),
-                OrderedFloat(0.0),
-                OrderedFloat(0.0),
-            ),
-            Vector4::new(
-                OrderedFloat(0.0),
-                OrderedFloat(1.0),
-                OrderedFloat(0.0),
-                OrderedFloat(0.0),
-            ),
-            Vector4::new(
-                OrderedFloat(0.0),
-                OrderedFloat(0.0),
-                OrderedFloat(0.5),
-                OrderedFloat(0.0),
-            ),
-            Vector4::new(
-                OrderedFloat(0.0),
-                OrderedFloat(0.0),
-                OrderedFloat(0.5),
-                OrderedFloat(1.0),
-            ),
-        ]);
-        Camera {
-            proj_matrix: Perspective3::from_matrix_unchecked(
-                Perspective3::new(
-                    OrderedFloat(ASPECT),
-                    OrderedFloat(90.0),
-                    OrderedFloat(0.1),
-                    OrderedFloat(100.0),
-                )
-                .as_matrix()
-                    * m,
-            ),
-            opengl_to_wgpu_matrix: m,
-            view_matrix: Some(handle),
-        }
-    }
-}
-
-impl Camera {
-    pub fn build_projection(&self) -> Matrix4<crate::Real> {
-        *self.proj_matrix.as_matrix()
-    }
-}
-
-impl Default for Camera {
-    fn default() -> Self {
-        Self {
-            opengl_to_wgpu_matrix: Default::default(),
-            proj_matrix: Perspective3::new(
-                OrderedFloat(ASPECT),
-                OrderedFloat(90.0),
-                OrderedFloat(0.1),
-                OrderedFloat(100.0),
-            ),
-            view_matrix: Default::default(),
-        }
-    }
-}
-
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
 #[module(crate)]
 pub struct Client {
-    pub input: input::InputState,
+    pub input: InputState,
     pub fps_cam_mode: bool,
 }
 
@@ -329,6 +131,8 @@ mod game_data {
         narrow_phase: NarrowPhase,
     }
 }
+
+pub use game_data::*;
 
 impl GameData {
     pub fn into_game_update_iter(self) {}

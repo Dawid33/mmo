@@ -8,8 +8,8 @@ use rapier3d::prelude::*;
 use slotmapd::KeyData;
 use winit::dpi::PhysicalInsets;
 
-use rollback::EntityKey;
-use rollback::{PhysicsState, Undo};
+use crate::EntityKey;
+use crate::{PhysicsState, Undo};
 
 use crate::{ClientUpdateEvent, Controller, GameData, GameDataUpdate};
 

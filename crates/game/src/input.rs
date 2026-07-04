@@ -3,7 +3,40 @@ use parry3d::math::Real;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::common::{InputEvent, Key};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum Key {
+    KeyW,
+    KeyA,
+    KeyS,
+    KeyD,
+    KeyE,
+    Space,
+    ControlLeft,
+    ShiftLeft,
+    Escape,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    Other(u16),
+}
+
+/// Engine-neutral input event. This is the wire format for player input —
+/// it must never contain types from a windowing library.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum InputEvent {
+    Resized { width: u32, height: u32 },
+    Key { key: Key, pressed: bool },
+    MouseButton { button: MouseButton, pressed: bool },
+    /// Line-based wheel scrolling, in lines.
+    MouseWheel { x: f32, y: f32 },
+    /// Accumulated raw mouse motion for one frame.
+    MouseMotion { dx: f32, dy: f32 },
+    Focused(bool),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 enum KeyState {

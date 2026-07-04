@@ -1,6 +1,6 @@
 use std::hash::Hash;
 
-use rollback::Rollback;
+use game::Rollback;
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
@@ -29,7 +29,7 @@ fn rollback_of_create_mesh_restores_state() {
     let before = state_hash(&r);
 
     r.new_transaction();
-    r.create_mesh(rollback::ChunkCoords::new(0, 0, 0));
+    r.create_mesh(game::ChunkCoords::new(0, 0, 0));
     assert_ne!(before, state_hash(&r), "create_mesh changed nothing");
 
     r.rollback();

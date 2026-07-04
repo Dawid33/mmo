@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 slotmapd = { workspace = true }
-rollback = { workspace = true }
+macros = { path = "../macros" }
 log = { workspace = true }
 bincode = { workspace = true }
 crossbeam = { workspace = true }

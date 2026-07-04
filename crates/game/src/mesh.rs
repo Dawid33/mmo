@@ -10,4 +10,4 @@ use parry3d::transformation::voxelization::VoxelSet;
 use rapier3d::prelude::{
     CCDSolver, ColliderBuilder, ColliderHandle, ColliderSet, InverseKinematicsOption,
 };
-use rollback::{Voxel, VoxelType, CHUNK_VOXEL_COUNT};
+use crate::{Voxel, VoxelType, CHUNK_VOXEL_COUNT};
