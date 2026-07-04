@@ -168,19 +168,26 @@ fn main() {
     let cps = client_packet_send.clone();
     std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
 
+    let mut world = World::basic();
+    let mut results_buffer = BTreeMap::new();
+
+    // Tick generation starts only after the world exists (no boot backlog)
+    // and never runs more than one tick ahead of processing, so client
+    // packets are never starved behind a tick pileup.
     let tick_rate = Arc::new(AtomicU64::new(game::TICK_RATE));
+    let pending_ticks = Arc::new(AtomicU64::new(0));
     let tick_thread_tick_rate = tick_rate.clone();
+    let tick_thread_pending = pending_ticks.clone();
     let tick_thread_send = client_packet_send.clone();
-    // Handle game loop
     std::thread::spawn(move || loop {
         // TODO: Sync ticks with server.
-        tick_thread_send.send(ServerEvent::ServerTickTimer).unwrap();
+        if tick_thread_pending.load(Ordering::SeqCst) < 1 {
+            tick_thread_pending.fetch_add(1, Ordering::SeqCst);
+            tick_thread_send.send(ServerEvent::ServerTickTimer).unwrap();
+        }
         let rate = tick_thread_tick_rate.load(Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(rate));
     });
-
-    let mut world = World::basic();
-    let mut results_buffer = BTreeMap::new();
     // handle game events on server and send successfull events to connected clients.
     while let Ok(event) = client_packet_recv.recv() {
         let count = client_packet_recv.len();
@@ -247,6 +254,7 @@ fn main() {
                 }
             }
             ServerEvent::ServerTickTimer => {
+                pending_ticks.fetch_sub(1, Ordering::SeqCst);
                 world.progress_world_one_tick(&mut results_buffer);
                 for (id, result) in &results_buffer {
                     server_send
@@ -265,6 +273,11 @@ fn main() {
                             ))
                             .unwrap();
                     }
+                }
+                // The server never rolls back: drop each tick's transaction
+                // immediately so the undo log and memory stay bounded.
+                for id in results_buffer.keys() {
+                    world.forget_last_event(id);
                 }
             }
         }
