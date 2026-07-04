@@ -51,9 +51,10 @@ like `revert_insert` — the forks exist to support this rollback machinery.)
   `cached_hash` (plus `voxel_size`). The hash stays deterministic and
   content-based, so the rollback bar (`hash(before) == hash(after undo)`,
   bit-exact) and cross-machine state comparison keep their meaning.
-- Serde: `#[serde(skip)]` the cache and recompute on deserialize (a stale
-  cache can never travel). Requires a deserialize hook (custom
-  `Deserialize` or post-deserialize fixup where snapshots are loaded).
+- Serde: the cache field serializes with the derive (deviation from the
+  earlier skip-and-recompute idea: every mutation path maintains the
+  invariant, snapshots only travel between identical binaries, and keeping
+  the derive minimizes fork surface).
 - The content-hash function itself must be deterministic and independent of
   HashMap iteration order (iterate parry-chunks in sorted key order).
 
