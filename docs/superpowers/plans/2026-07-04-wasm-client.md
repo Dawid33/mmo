@@ -881,6 +881,8 @@ git commit -m "docs: wasm client dev loop"
 
 ---
 
+**Amendment (2026-07-04, found during Task 5's headless run):** block-texture discovery (`crates/client/src/renderer/mod.rs:setup_scene`) enumerates `assets/blocks/*.png` via `std::fs::read_dir` — impossible on wasm (no filesystem; HTTP cannot list directories), so browser voxels rendered untextured. Resolution (Task 6): on wasm, embed the textures at compile time — a `#[cfg(any(target_arch = "wasm32", test))]` constant `EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])]` built from `include_bytes!`, consumed by a `#[cfg(target_arch = "wasm32")]` branch in `setup_scene` via `image::load_from_memory`; the native `read_dir` path is untouched. A native unit test asserts the embedded name list exactly matches the `.png` files present in `assets/blocks/`, so the list cannot silently drift when new textures are added.
+
 ## Follow-up (separate plan, not part of this one)
 
 Real browser multiplayer: browsers cannot open raw QUIC/UDP sockets, so the options are (a) WebTransport — closest to the existing quinn stack; the server adds a WebTransport endpoint (e.g. `wtransport` or `web-transport-quinn` sharing the QUIC listener) and the client gets a `web-sys` WebTransport implementation of the same `Sender<ServerPacket>`/`Receiver<ClientPacket>` seam that `LocalServer` and `netcode::ServerConnection` implement today, or (b) a WebSocket↔QUIC bridge process. Decision deferred until this plan lands.
