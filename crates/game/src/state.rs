@@ -51,6 +51,7 @@ pub enum GameDataUpdateKind {
     CreateEntity(EntityKey),
     RemoveEntity(EntityKey),
     SetFreeCam(ClientId, bool),
+    SetEntityKind(EntityKey, Option<EntityKind>),
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +82,14 @@ pub struct Client {
     pub fps_cam_mode: bool,
 }
 
+/// What an entity *is*, for rendering and future gameplay. The player is the
+/// first kind; NPC kinds extend this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, Hash)]
+pub enum EntityKind {
+    #[default]
+    Player,
+}
+
 #[rollback(GameData)]
 mod game_data {
     use parry3d::math::{Real, Vector};
@@ -90,8 +99,8 @@ mod game_data {
     };
 
     use super::{
-        Camera, Chunk, Client, ClientId, Component, EntityKey, IsometryReal, RigidBodyHandle,
-        RollbackInfo, SlotMap,
+        Camera, Chunk, Client, ClientId, Component, EntityKey, EntityKind, IsometryReal,
+        RigidBodyHandle, RollbackInfo, SlotMap,
     };
     use std::collections::BTreeMap;
 
@@ -116,6 +125,7 @@ mod game_data {
         isometry: Component<IsometryReal>,
         rigidbody: Component<RigidBodyHandle>,
         chunk: Component<Chunk>,
+        kind: Component<EntityKind>,
     }
 
     pub struct PhysicsState {
@@ -147,6 +157,7 @@ impl Undo<Ecs> {
         self.isometry.insert_safe(key);
         self.rigidbody.insert_safe(key);
         self.chunk.insert_safe(key);
+        self.kind.insert_safe(key);
         key
     }
 }
@@ -284,6 +295,15 @@ impl Rollback {
             GameDataUpdateKind::RemoveCameraComponent(e),
         ));
         self.data.ecs.camera.set_safe(e, Some(cam));
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetEntityKind(e, Some(EntityKind::Player)),
+        ));
+        self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
+            GameDataTransactionKind::Undo,
+            GameDataUpdateKind::SetEntityKind(e, None),
+        ));
+        self.data.ecs.kind.set_safe(e, Some(EntityKind::Player));
         self.data.player_entites.insert(client_id, e);
     }
 }

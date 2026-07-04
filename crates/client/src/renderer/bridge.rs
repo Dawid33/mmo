@@ -234,6 +234,9 @@ pub fn drain_region_updates(
                         commands.entity(e).insert(SimTarget::camera(tf.translation, tf.rotation));
                     }
                 }
+                GameDataUpdateKind::SetEntityKind(_key, _kind) => {
+                    // Replaced by the SimKind mirror in the next commit.
+                }
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
                     // Only the local player's toggle may grab this window's cursor.
                     if local_player.0 != Some(client_id) {
