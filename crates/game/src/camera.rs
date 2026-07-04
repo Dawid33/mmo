@@ -58,8 +58,9 @@ impl Camera {
                 Perspective3::new(
                     OrderedFloat(ASPECT),
                     OrderedFloat(FOV_Y),
-                    OrderedFloat(0.1),
-                    OrderedFloat(100.0),
+                    // 1 unit = 1/16 m: near 6 cm, far 125 m.
+                    OrderedFloat(1.0),
+                    OrderedFloat(2000.0),
                 )
                 .as_matrix()
                     * m,
@@ -83,8 +84,9 @@ impl Default for Camera {
             proj_matrix: Perspective3::new(
                 OrderedFloat(ASPECT),
                 OrderedFloat(FOV_Y),
-                OrderedFloat(0.1),
-                OrderedFloat(100.0),
+                // 1 unit = 1/16 m: near 6 cm, far 125 m.
+                OrderedFloat(1.0),
+                OrderedFloat(2000.0),
             ),
             view_matrix: Default::default(),
         }
@@ -127,7 +129,8 @@ impl Controller for CameraController {
             let b = data.physics.bodies.get(handle).unwrap();
             let rotation = b.rotation();
             let mut linvel = Vector::zeros();
-            const SPEED: Real = OrderedFloat(5.0);
+            // 0.1 * 80 = 8 units/tick = 0.5 m/tick = 10 m/s at 1/16 m units.
+            const SPEED: Real = OrderedFloat(80.0);
 
             if client.input.key_held(&Key::KeyW) {
                 linvel.z = Real::from(-0.1) * SPEED

@@ -34,7 +34,7 @@ fn random_op_sequences_roll_back_to_every_boundary() {
                         r.player_entites.remove(&k);
                     }
                     4 => {
-                        r.create_mesh(ChunkCoords::new(0, 0, 0));
+                        r.create_mesh(ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
                     }
                     _ => {
                         r.ecs.create_entity_safe();

@@ -237,9 +237,8 @@ where
 }
 
 impl Rollback {
-    pub fn create_mesh(&mut self, coords: ChunkCoords) -> EntityKey {
+    pub fn create_mesh(&mut self, coords: ChunkCoords, chunk: Chunk) -> EntityKey {
         let e = self.ecs.create_entity_safe();
-        let chunk = Chunk::default();
         // Deterministic linearize order; grid coords are body-local.
         let solid: Vec<Point<i32>> = (0..ChunkShape::SIZE)
             .filter(|i| chunk.voxels[*i as usize].kind != VoxelType::Air)
@@ -311,10 +310,10 @@ impl Rollback {
 
     pub fn create_player_safe(&mut self, client_id: ClientId) {
         let e = self.ecs.create_entity_safe();
-        // x=2 because the default chunk's floor slab spans x,z ∈ [1,31) —
-        // x=0 is over a hole; y=3 keeps the capsule clear of the slab top.
+        // Spawn at the center of the 8x8-chunk floor (256x256 units = 16m x
+        // 16m). Floor top y=8, capsule half-extent 14.4, ~3.6 units clear.
         let position = IsometryReal::from_parts(
-            Translation3::new(Real::from(2.0), Real::from(3.0), Real::from(5.0)),
+            Translation3::new(Real::from(128.0), Real::from(26.0), Real::from(128.0)),
             Unit::<Quaternion<Real>>::identity(),
         );
         let body = RigidBodyBuilder::kinematic_position_based()
@@ -332,7 +331,8 @@ impl Rollback {
         let handle = scope.insert(body);
         scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
-        self.attach_capsule_collider_safe(e, handle, 0.5, 0.4);
+        // 28.8 units = 1.8 m at 1 unit = 1/16 m (~29 voxels, VS proportions).
+        self.attach_capsule_collider_safe(e, handle, 8.0, 6.4);
         let cam = Camera::new(handle);
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,

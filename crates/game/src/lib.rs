@@ -65,7 +65,11 @@ impl World {
     pub fn basic() -> Self {
         let one = ChunkCoords::new(0, 0, 0);
         let mut data = Region::new(Rollback::new(None), None, one, None);
-        let _key = data.create_basic(one);
+        for x in 0..8 {
+            for z in 0..8 {
+                data.create_basic(ChunkCoords::new(x, 0, z));
+            }
+        }
 
         return Self {
             regions: BTreeMap::from([(one, data)]),

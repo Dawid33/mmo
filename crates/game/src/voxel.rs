@@ -15,27 +15,31 @@ pub struct Chunk {
 }
 
 impl Default for Chunk {
+    /// All-air. Exists because `Component<T>` requires `T: Default`;
+    /// real content comes from constructors like [`Chunk::flat_floor`].
     fn default() -> Self {
+        Self {
+            collider: Vec::new(),
+            voxels: vec![Voxel::new(VoxelType::Air); CHUNK_VOXEL_COUNT],
+        }
+    }
+}
+
+impl Chunk {
+    /// Solid floor across the full 32×32 footprint for `y < depth`, air
+    /// above. Full-footprint fill makes chunk seams tile with no gaps.
+    pub fn flat_floor(depth: u32) -> Self {
         let mut voxels = Vec::with_capacity(ChunkShape::SIZE as usize);
         for i in 0..ChunkShape::SIZE {
-            let [mut x, mut y, mut z] = ChunkShape::delinearize(i);
-
-            let v = if x > 0 && y > 0 && z > 0 && y < 31 && z < 31 && x < 31 {
-                if y == 1 {
-                    Voxel::new(VoxelType::Black)
-                } else {
-                    Voxel::new(VoxelType::Air)
-                }
+            let [_x, y, _z] = ChunkShape::delinearize(i);
+            let v = if y < depth {
+                Voxel::new(VoxelType::Black)
             } else {
                 Voxel::new(VoxelType::Air)
             };
             voxels.push(v);
         }
-
-        Self {
-            collider: Vec::new(),
-            voxels,
-        }
+        Self { collider: Vec::new(), voxels }
     }
 }
 
