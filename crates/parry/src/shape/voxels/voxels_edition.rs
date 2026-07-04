@@ -165,6 +165,10 @@ impl Voxels {
                 self.free_chunks.push(chunk_id);
                 self.chunk_keys[chunk_id] = VoxelsChunk::INVALID_CHUNK_KEY;
             }
+
+            // Content changed (including neighbor-state updates in adjacent
+            // chunks via update_neighbors_state): refresh the cached hash.
+            self.recompute_cached_hash();
         }
 
         prev

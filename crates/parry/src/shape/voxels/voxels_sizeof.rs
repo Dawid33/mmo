@@ -19,6 +19,7 @@ impl Voxels {
             free_chunks,
             chunk_keys,
             voxel_size: _,
+            cached_hash: _,
         } = self;
         chunks.capacity() * size_of::<VoxelsChunk>()
             + free_chunks.capacity() * size_of::<usize>()

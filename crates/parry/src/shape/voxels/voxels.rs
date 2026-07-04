@@ -494,7 +494,7 @@ pub struct VoxelData {
 /// - [`VoxelType`]: Classification of voxels by their topology
 /// - [`VoxelData`]: Complete information about a single voxel
 /// - [`crate::transformation::voxelization`]: Convert meshes to voxels
-#[derive(Clone, Debug, Hash)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct Voxels {
     /// A BVH of chunk keys.
@@ -507,6 +507,54 @@ pub struct Voxels {
     pub(super) chunks: Vec<VoxelsChunk>,
     pub(super) free_chunks: Vec<usize>,
     pub(super) voxel_size: Vector<Real>,
+    /// Content hash over (sorted chunk key → voxel states), maintained by
+    /// every constructor/mutator. Lets `Hash` be O(1) in voxel count so the
+    /// rollback machinery's per-tick hashing doesn't walk voxel contents.
+    pub(super) cached_hash: u32,
+}
+
+impl core::hash::Hash for Voxels {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        // Content is summarized by cached_hash; free lists, chunk allocation
+        // order, and BVH layout are deliberately excluded (they are not
+        // semantic content — but note they ARE part of `Clone`/serde state,
+        // so exact-restore invariants are unaffected).
+        self.voxel_size.hash(state);
+        self.cached_hash.hash(state);
+    }
+}
+
+/// Minimal FNV-1a, used only for the canonical content hash below.
+/// Deterministic across platforms (no_std, no external deps).
+struct ContentHasher(u64);
+
+impl core::hash::Hasher for ContentHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 ^= *b as u64;
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+}
+
+impl Voxels {
+    /// Recompute the cached content hash. Iterates chunk keys in sorted
+    /// order so the result is independent of map iteration order and of
+    /// the chunk allocation history.
+    pub(super) fn recompute_cached_hash(&mut self) {
+        let mut keys: Vec<Point<i32>> = self.chunk_headers.keys().copied().collect();
+        keys.sort_unstable_by_key(|p| (p.x, p.y, p.z));
+        let mut h = ContentHasher(0xcbf29ce484222325);
+        for key in keys {
+            core::hash::Hash::hash(&key, &mut h);
+            let id = self.chunk_headers[&key].id;
+            core::hash::Hash::hash(&self.chunks[id].states[..], &mut h);
+        }
+        self.cached_hash = core::hash::Hasher::finish(&h) as u32;
+    }
 }
 
 impl Voxels {
@@ -579,6 +627,7 @@ impl Voxels {
             chunks: vec![],
             free_chunks: vec![],
             voxel_size,
+            cached_hash: 0,
         };
 
         for vox in grid_coordinates {
@@ -604,6 +653,7 @@ impl Voxels {
         );
 
         result.recompute_all_voxels_states();
+        result.recompute_cached_hash();
         result
     }
 
