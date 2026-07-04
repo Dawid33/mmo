@@ -1,5 +1,5 @@
 use crossbeam::channel::Sender;
-use game::{ClientUpdateEvent, GameData, GameEventKind, Rollback, WindowEvent, WinitEvent};
+use game::{ClientUpdateEvent, GameData, GameEventKind, InputEvent, Rollback};
 #[allow(unused)]
 use log::info;
 use std::{
@@ -97,11 +97,12 @@ impl ApplicationHandler for App {
                     if let Some(buf) = self.mouse_motion_buffer.take() {
                         state
                             .game_send
-                            .send(GameEventKind::PlayerWinitEvent(
+                            .send(GameEventKind::PlayerInput(
                                 *player,
-                                WinitEvent::DeviceEvent(game::DeviceEvent::MouseMotion {
-                                    delta: buf,
-                                }),
+                                InputEvent::MouseMotion {
+                                    dx: buf.0 as f32,
+                                    dy: buf.1 as f32,
+                                },
                             ))
                             .unwrap();
                     }
@@ -140,9 +141,12 @@ impl ApplicationHandler for App {
                 self.last_event_was_new_events = false;
                 state
                     .game_send
-                    .send(GameEventKind::PlayerWinitEvent(
+                    .send(GameEventKind::PlayerInput(
                         player,
-                        WinitEvent::WindowEvent(game::WindowEvent::Resized(size)),
+                        InputEvent::Resized {
+                            width: size.width,
+                            height: size.height,
+                        },
                     ))
                     .unwrap();
             }
@@ -157,89 +161,59 @@ impl ApplicationHandler for App {
                 }
                 state
                     .game_send
-                    .send(GameEventKind::PlayerWinitEvent(
+                    .send(GameEventKind::PlayerInput(
                         player,
-                        WinitEvent::WindowEvent(WindowEvent::MouseInput {
-                            state: button_state,
-                            button: button,
-                        }),
+                        InputEvent::MouseButton {
+                            button: map_mouse_button(button),
+                            pressed: button_state.is_pressed(),
+                        },
                     ))
                     .unwrap()
             }
-            winit::event::WindowEvent::MouseWheel { delta, phase, .. } => {
+            winit::event::WindowEvent::MouseWheel { delta, .. } => {
                 self.last_event_was_new_events = false;
+                let event = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => {
+                        InputEvent::MouseWheel { x, y }
+                    }
+                    winit::event::MouseScrollDelta::PixelDelta(p) => InputEvent::MouseWheel {
+                        x: p.x as f32 / 20.0,
+                        y: p.y as f32 / 20.0,
+                    },
+                };
                 state
                     .game_send
-                    .send(GameEventKind::PlayerWinitEvent(
-                        player,
-                        WinitEvent::WindowEvent(WindowEvent::MouseWheel { delta, phase }),
-                    ))
+                    .send(GameEventKind::PlayerInput(player, event))
                     .unwrap()
             }
-            winit::event::WindowEvent::KeyboardInput {
-                event,
-                is_synthetic,
-                ..
-            } => {
+            winit::event::WindowEvent::KeyboardInput { event, .. } => {
                 self.last_event_was_new_events = false;
                 if !event.repeat {
-                    state
-                        .game_send
-                        .send(GameEventKind::PlayerWinitEvent(
-                            player,
-                            WinitEvent::WindowEvent(WindowEvent::KeyboardInput {
-                                physical_key: event.physical_key,
-                                logical_key: event.logical_key,
-                                location: event.location,
-                                state: event.state,
-                                repeat: event.repeat,
-                                is_synthetic,
-                            }),
-                        ))
-                        .unwrap()
+                    if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
+                        if let Some(key) = map_key(code) {
+                            state
+                                .game_send
+                                .send(GameEventKind::PlayerInput(
+                                    player,
+                                    InputEvent::Key {
+                                        key,
+                                        pressed: event.state.is_pressed(),
+                                    },
+                                ))
+                                .unwrap()
+                        }
+                    }
                 }
             }
             winit::event::WindowEvent::Focused(focused) => {
                 self.last_event_was_new_events = false;
                 state
                     .game_send
-                    .send(GameEventKind::PlayerWinitEvent(
+                    .send(GameEventKind::PlayerInput(
                         player,
-                        WinitEvent::WindowEvent(game::WindowEvent::Focused(focused)),
+                        InputEvent::Focused(focused),
                     ))
                     .unwrap();
-            }
-            winit::event::WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.last_event_was_new_events = false;
-                state
-                    .game_send
-                    .send(GameEventKind::PlayerWinitEvent(
-                        player,
-                        WinitEvent::WindowEvent(game::WindowEvent::ScaleFactorChanged {
-                            scale_factor,
-                        }),
-                    ))
-                    .unwrap()
-            }
-            winit::event::WindowEvent::DroppedFile(path) => {
-                self.last_event_was_new_events = false;
-                state
-                    .game_send
-                    .send(GameEventKind::PlayerWinitEvent(
-                        player,
-                        WinitEvent::WindowEvent(game::WindowEvent::DroppedFile(path)),
-                    ))
-                    .unwrap()
-            }
-            winit::event::WindowEvent::Destroyed => {
-                self.last_event_was_new_events = false;
-                state
-                    .game_send
-                    .send(GameEventKind::PlayerWinitEvent(
-                        player,
-                        WinitEvent::WindowEvent(game::WindowEvent::Destroyed),
-                    ))
-                    .unwrap()
             }
             winit::event::WindowEvent::Moved(_) => self.cursor_on_window = true,
             winit::event::WindowEvent::CursorEntered { device_id } => self.cursor_on_window = true,
@@ -258,29 +232,10 @@ impl ApplicationHandler for App {
             Some(s) => s,
             None => return,
         };
-        let player = if let Some(player) = state.player {
-            player
-        } else {
+        if state.player.is_none() {
             return;
-        };
-        let send = move |event| {
-            state
-                .game_send
-                .send(GameEventKind::PlayerWinitEvent(
-                    player,
-                    WinitEvent::DeviceEvent(event),
-                ))
-                .unwrap();
-        };
+        }
         match event {
-            winit::event::DeviceEvent::Added => {
-                self.last_event_was_new_events = false;
-                send(game::DeviceEvent::Added)
-            }
-            winit::event::DeviceEvent::Removed => {
-                self.last_event_was_new_events = false;
-                send(game::DeviceEvent::Removed)
-            }
             winit::event::DeviceEvent::MouseMotion { delta } => {
                 self.last_event_was_new_events = false;
                 if let Some(buf) = &mut self.mouse_motion_buffer {
@@ -289,10 +244,6 @@ impl ApplicationHandler for App {
                 } else {
                     self.mouse_motion_buffer = Some(delta);
                 }
-            }
-            winit::event::DeviceEvent::MouseWheel { delta } => {
-                self.last_event_was_new_events = false;
-                send(game::DeviceEvent::MouseWheel { delta })
             }
             _ => (),
         }
@@ -316,5 +267,34 @@ impl ApplicationHandler for App {
                 return;
             };
         }
+    }
+}
+
+fn map_key(code: winit::keyboard::KeyCode) -> Option<game::Key> {
+    use game::Key;
+    use winit::keyboard::KeyCode as K;
+    Some(match code {
+        K::KeyW => Key::KeyW,
+        K::KeyA => Key::KeyA,
+        K::KeyS => Key::KeyS,
+        K::KeyD => Key::KeyD,
+        K::KeyE => Key::KeyE,
+        K::Space => Key::Space,
+        K::ControlLeft => Key::ControlLeft,
+        K::ShiftLeft => Key::ShiftLeft,
+        K::Escape => Key::Escape,
+        _ => return None,
+    })
+}
+
+fn map_mouse_button(b: winit::event::MouseButton) -> game::MouseButton {
+    use winit::event::MouseButton as M;
+    match b {
+        M::Left => game::MouseButton::Left,
+        M::Right => game::MouseButton::Right,
+        M::Middle => game::MouseButton::Middle,
+        M::Back => game::MouseButton::Other(3),
+        M::Forward => game::MouseButton::Other(4),
+        M::Other(n) => game::MouseButton::Other(n),
     }
 }

@@ -14,7 +14,6 @@ use log::{info, warn};
 use parley::{Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, StyleProperty};
 use rollback::{Client, ClientId, PlayerKey};
 use rollback::{Ecs, GameData, Rollback, Undo};
-use winit::keyboard::{KeyCode, SmolStr};
 
 use crate::{
     camera::CameraController, physics::PhysicsController, ChunkCoords, ClientUpdateEvent,
@@ -157,7 +156,7 @@ impl Region {
                     // input step are both covered by one delta.
                     let toggled = {
                         let client = data.clients.get_mut(&client_id).unwrap();
-                        let toggle = client.input.key_pressed(&winit::keyboard::KeyCode::KeyE);
+                        let toggle = client.input.key_pressed(&rollback::common::Key::KeyE);
                         if toggle {
                             client.fps_cam_mode = !client.fps_cam_mode;
                         }
@@ -173,7 +172,7 @@ impl Region {
                 }
                 self.data.tick.update(|t| *t += 1);
             }
-            GameEventKind::PlayerWinitEvent(client_id, player_event) => {
+            GameEventKind::PlayerInput(client_id, player_event) => {
                 let data: &mut GameData = self.data.deref_mut();
                 if let Some(c) = data.clients.get_mut(&client_id) {
                     let _ = c.input.update(player_event.clone());

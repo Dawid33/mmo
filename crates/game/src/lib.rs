@@ -43,7 +43,7 @@ use na::{Matrix4, Matrix4x2, Perspective3, RealField};
 use parry3d::math::Real;
 use rapier3d::prelude::{RigidBody, RigidBodyHandle};
 pub use rollback::common::*;
-use rollback::input::WinitInput;
+use rollback::input::InputState;
 pub use rollback::{ChunkCoords, ChunkShape, GameData, Rollback, Undo, ASPECT};
 pub use rollback::{
     ClientId, EntityKey, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, PlayerKey,

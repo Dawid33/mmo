@@ -152,7 +152,7 @@ impl GameInstanceManager {
                                 match event {
                                     GameEventKind::Quit => return Ok(()),
                                     e => {
-                                        if let GameEventKind::PlayerWinitEvent(_,_) = e {
+                                        if let GameEventKind::PlayerInput(_,_) = e {
                                             // don't handle player events until sim has caught up with server.
                                             if !self.ready && self.is_caught_up {
                                                 continue;
@@ -162,7 +162,7 @@ impl GameInstanceManager {
                                             GameEventKind::Tick => {
                                                 world.progress_world_one_tick(&mut results_buffer);
                                             },
-                                            GameEventKind::Quit | GameEventKind::PlayerWinitEvent(_, _) | GameEventKind::CreateClient(_) => {
+                                            GameEventKind::Quit | GameEventKind::PlayerInput(_, _) | GameEventKind::CreateClient(_) => {
                                                 if let Some(chunk) = self.player_chunk {
                                                     let event = world.handle_region_event(game_event.unwrap(), chunk)?;
                                                     self.server_game_send.send(game::ClientPacket::GameEvent(event)).unwrap();

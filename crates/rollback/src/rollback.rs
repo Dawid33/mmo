@@ -27,7 +27,8 @@ use rapier3d::prelude::{
 };
 use slotmapd::secondary::Iter;
 use slotmapd::{DefaultKey, new_key_type};
-use slotmapd::{Key, KeyData, SecondaryMap, SlotMap, SparseSecondaryMap};
+use slotmapd::Key as _;
+use slotmapd::{KeyData, SecondaryMap, SlotMap, SparseSecondaryMap};
 use std::ops::DerefMut;
 use std::sync::{Arc, atomic::AtomicUsize};
 // use winit::keyboard::KeyCode;
@@ -274,7 +275,7 @@ impl Default for Camera {
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
 #[module(crate)]
 pub struct Client {
-    pub input: input::WinitInput,
+    pub input: input::InputState,
     pub fps_cam_mode: bool,
 }
 
