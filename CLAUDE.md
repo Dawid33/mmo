@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A voxel MMO in Rust with client/server architecture over QUIC, built around deterministic simulation and rollback netcode. No framework — custom engine using winit + wgpu directly (Bevy was removed).
+A voxel MMO in Rust with client/server architecture over QUIC, built around deterministic simulation and rollback netcode. The client is a Bevy app (rendering, windowing, input); the simulation crates (`game`, `rollback`, `server`) stay engine-agnostic — no Bevy, no windowing library.
 
 ## Building and Running
 
@@ -21,7 +21,9 @@ A voxel MMO in Rust with client/server architecture over QUIC, built around dete
 
 The server listens on `127.0.0.1:6466` (hardcoded in `crates/server/src/main.rs`); the client connects to localhost. Run the server before/alongside the client.
 
-The rollback crate has the test suite: `cargo test -p rollback` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact.
+The rollback crate has the test suite: `cargo test -p rollback` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact. The client now has its own headless test suite: `cargo test -p client` (16 tests covering the sim-bridge, coordinate conversion, interpolation, and async chunk meshing, run via `MinimalPlugins`/`AssetPlugin` with no window or GPU).
+
+Bevy is pinned to `0.18` in the root `Cargo.toml`; Bevy's API surface moves fast between minor versions, so treat upgrades as a deliberate, tested migration rather than a routine bump — API drift (renamed types/traits, moved modules, changed system-set names) is a known hazard.
 
 ### Profiling
 
@@ -36,7 +38,7 @@ First-party crates (workspace members):
 - `crates/macros` — Proc macro crate providing `#[rollback]` on the state module. Fields marked `#[undo(cell|map|slotmap)]` get tier-1 wrappers (`UndoCell`/`UndoMap`/`UndoSlotMap`) whose mutating methods log typed, exactly-invertible deltas automatically; `#[emit(insert = ..., remove = ...)]` derives renderer `GameDataUpdate`s from those deltas in both apply and undo directions. Unmarked fields stay `Undo<T>` (tier 2): mutate via `undo_scope()`/`undo()` closures that MUST be true inverses of the full serialized state (`hash(before) == hash(after undo)` is enforced at rollback time), or `change()` for snapshot-restore; `emit_on_undo()` registers compensating render events. The vendored `slotmapd`/`rapier` forks expose exact LIFO inverses (`revert_insert`/`revert_remove`) because plain `remove(insert(x))` does NOT restore allocator state (free lists, versions/generations) — see `crates/rollback/tests/hash_restore.rs`.
 - `crates/game` — Deterministic simulation shared by client and server: `World`, `Region`/`RegionGroup`, camera, physics (rapier), meshing. `TICK_RATE = 50`.
 - `crates/server` — Tokio + quinn QUIC server. Deliberately a "dumb router" of game event packets: orders incoming client packets by tick, executes ticks, broadcasts. Self-signed cert generated at startup via rcgen.
-- `crates/client` — winit/wgpu client. `GameInstanceManager` in `main.rs` coordinates netcode + rollback; rendering in `render_world.rs`/`window.rs`, networking in `netcode.rs`.
+- `crates/client` — A Bevy app. `renderer/` holds the bridge modules that translate sim state into Bevy render state (`bridge.rs`/`convert.rs`/`interpolate.rs`/`meshing.rs`/`voxel_material.rs`), plus engine-neutral input handling (`input.rs`); networking lives in `netcode.rs`; `main.rs` coordinates the game loop (netcode + rollback) and wires up the Bevy `App`. `game`, `rollback`, and `server` must stay Bevy-free and windowing-library-free — they are shared by both client and server and must not pull in rendering/windowing deps.
 - `crates/worldgen` — World generation (currently a stub).
 
 ## Vendored Forks (do not treat as dependencies to update)

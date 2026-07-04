@@ -1,23 +1,13 @@
-use std::{fmt::Debug, ops::DerefMut, sync::Arc, time::Instant};
 
-use assert_json_diff::{CompareMode, Config};
-use borrow::PartialHelper;
-use crossbeam::channel::Sender;
 #[allow(unused)]
 use log::info;
-use na::{
-    clamp, AbstractRotation, ComplexField, Matrix4, Perspective3, Quaternion, UnitQuaternion,
-    Vector2, Vector3, Vector4,
-};
+use na::{clamp, UnitQuaternion, Vector3};
 use ordered_float::OrderedFloat;
-use parley::swash::shape::Direction;
 use parry3d::math::Real;
 use rapier3d::math::Vector;
-use rapier3d::prelude::RigidBodyHandle;
-use rollback::Camera;
-use winit::event::MouseButton;
 
-use crate::{ClientPacket, ClientUpdateEvent, Controller, GameData, GameDataUpdate};
+use crate::{Controller, GameData, GameDataUpdate};
+use rollback::common::Key;
 use rollback::Undo;
 
 pub struct CameraController {}
@@ -29,7 +19,7 @@ impl Controller for CameraController {
             let e_id = *e_id;
             let ecs = data.ecs.as_refs_mut();
             let client = data.clients.get_mut(client_id).unwrap();
-            if let Some(resolution) = client.input.window_resized() {
+            if let Some((width, height)) = *client.input.window_resized() {
                 let old = ecs.camera.get(e_id).proj_matrix.clone();
                 ecs.camera.emit_on_undo(GameDataUpdate::new(
                     crate::GameDataTransactionKind::Undo,
@@ -39,7 +29,7 @@ impl Controller for CameraController {
                 scope
                     .get_mut(e_id)
                     .proj_matrix
-                    .set_aspect(OrderedFloat((resolution.width / resolution.height) as f32));
+                    .set_aspect(OrderedFloat(width as f32 / height as f32));
                 let m = scope.get_mut(e_id).proj_matrix.clone();
                 scope.register(move |d, _| d.get_mut(e_id).proj_matrix = old);
                 ecs.camera.send(GameDataUpdate::new(
@@ -58,28 +48,25 @@ impl Controller for CameraController {
             let mut linvel = Vector::zeros();
             const SPEED: Real = OrderedFloat(5.0);
 
-            if client.input.key_held(&winit::keyboard::KeyCode::KeyW) {
+            if client.input.key_held(&Key::KeyW) {
                 linvel.z = Real::from(-0.1) * SPEED
             }
-            if client.input.key_held(&winit::keyboard::KeyCode::KeyS) {
+            if client.input.key_held(&Key::KeyS) {
                 linvel.z = Real::from(0.1) * SPEED
             }
-            if client.input.key_held(&winit::keyboard::KeyCode::KeyA) {
+            if client.input.key_held(&Key::KeyA) {
                 linvel.x = Real::from(-0.1) * SPEED
             }
-            if client.input.key_held(&winit::keyboard::KeyCode::KeyD) {
+            if client.input.key_held(&Key::KeyD) {
                 linvel.x = Real::from(0.1) * SPEED
             }
             let mut linvel = rotation.transform_vector(&linvel);
             linvel.y = Real::from(0.0);
 
-            if client.input.key_held(&winit::keyboard::KeyCode::Space) {
+            if client.input.key_held(&Key::Space) {
                 linvel.y = Real::from(0.1) * SPEED
             }
-            if client
-                .input
-                .key_held(&winit::keyboard::KeyCode::ControlLeft)
-            {
+            if client.input.key_held(&Key::ControlLeft) {
                 linvel.y = Real::from(-0.1) * SPEED
             }
             if linvel != Vector3::zeros() {

@@ -1,43 +1,32 @@
-#![allow(unused)]
 //! Game client
 // #![deny(missing_docs)]
-use crate::window::App;
+use bevy::prelude::*;
 use crossbeam::{
     channel::{Receiver, RecvError, Sender},
     select,
 };
-use game::{na::Perspective3, ChunkCoords, ClientId, RegionId, Rollback, ServerPacket};
+use game::{ChunkCoords, ClientId, RegionId, Rollback, ServerPacket};
 use game::{
-    ClientPacket, ClientUpdateEvent, EntityKey, GameDataTransactionKind, GameDataUpdate, GameError,
-    GameEvent, GameEventKind, PlayerKey, Region, INDUCED_LATENCY,
+    ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind, Region, INDUCED_LATENCY,
 };
-use log::{info, trace, warn, LevelFilter};
-use rapier3d::math::Isometry;
-use simplelog::{FormatItem, SimpleLogger};
+use log::{info, trace, warn};
 use std::{
     collections::BTreeMap,
-    error::Error,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    ops::Deref,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
-use winit::event_loop::{self, ControlFlow, EventLoop};
 
 #[cfg(feature = "pyroscope")]
 use pyroscope::PyroscopeAgent;
 #[cfg(feature = "pyroscope")]
 use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 
-mod layout;
 mod netcode;
-mod render_world;
-mod state;
-mod text;
-mod window;
+mod renderer;
 
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
@@ -134,13 +123,12 @@ impl GameInstanceManager {
             .send(ClientPacket::RequestPlayerRegion)
             .unwrap();
 
-        let mut now = Instant::now();
         let mut results_buffer = BTreeMap::new();
         loop {
             select! {
                 // Recieve and handle server packets.
                 recv(server_recv) -> server_msg => {
-                    self.handle_server(server_msg);
+                    self.handle_server(server_msg)?;
                 },
                 // Recieve client game events from either the player or from
                 // client-side game tick timer.
@@ -152,7 +140,7 @@ impl GameInstanceManager {
                                 match event {
                                     GameEventKind::Quit => return Ok(()),
                                     e => {
-                                        if let GameEventKind::PlayerWinitEvent(_,_) = e {
+                                        if let GameEventKind::PlayerInput(_,_) = e {
                                             // don't handle player events until sim has caught up with server.
                                             if !self.ready && self.is_caught_up {
                                                 continue;
@@ -162,7 +150,7 @@ impl GameInstanceManager {
                                             GameEventKind::Tick => {
                                                 world.progress_world_one_tick(&mut results_buffer);
                                             },
-                                            GameEventKind::Quit | GameEventKind::PlayerWinitEvent(_, _) | GameEventKind::CreateClient(_) => {
+                                            GameEventKind::Quit | GameEventKind::PlayerInput(_, _) | GameEventKind::CreateClient(_) => {
                                                 if let Some(chunk) = self.player_chunk {
                                                     let event = world.handle_region_event(game_event.unwrap(), chunk)?;
                                                     self.server_game_send.send(game::ClientPacket::GameEvent(event)).unwrap();
@@ -185,9 +173,9 @@ impl GameInstanceManager {
         server_msg: Result<ServerPacket, RecvError>,
     ) -> Result<(), GameError> {
         let new_region =
-            |id: RegionId, mut raw_game_data: Rollback, world: &mut Option<game::World>| {
+            |id: RegionId, raw_game_data: Rollback, world: &mut Option<game::World>| {
                 let (send, recv) = crossbeam::channel::unbounded();
-                let mut data = Region::new(raw_game_data.clone(), Some(send), id);
+                let data = Region::new(raw_game_data.clone(), Some(send), id);
                 self.client_event_send
                     .send(ClientUpdateEvent::NewRegion(
                         id,
@@ -254,8 +242,11 @@ impl GameInstanceManager {
                 }
             }
             game::ServerPacket::PlayerRegion(id, client_id) => {
-                self.client_event_send
-                    .send(ClientUpdateEvent::SetPlayer(client_id));
+                if let Err(e) = self.client_event_send.send(ClientUpdateEvent::SetPlayer(client_id)) {
+                    // Receiver gone means the render/client-bridge thread has exited;
+                    // nothing left to notify, so just log and keep going.
+                    warn!("client_event_send closed while sending SetPlayer: {:?}", e);
+                }
 
                 let id = id.unwrap_or(ChunkCoords::new(0, 0, 0));
                 self.client_id = Some(client_id);
@@ -264,7 +255,7 @@ impl GameInstanceManager {
                     .send(ClientPacket::RequestRegionConnection(id))
                     .unwrap();
             }
-            game::ServerPacket::Region(id, mut raw_game_data) => {
+            game::ServerPacket::Region(id, raw_game_data) => {
                 new_region(id, raw_game_data, &mut self.world);
                 if let Some(player_chunk) = self.player_chunk {
                     if id == player_chunk && self.client_id.is_some() {
@@ -320,16 +311,7 @@ fn start_game_thread() -> Sender<Command> {
     return command_send;
 }
 
-const FORMAT: &'static [FormatItem] = &[FormatItem::Literal("client".as_bytes())];
-
 fn main() {
-    let config = simplelog::ConfigBuilder::new()
-        .set_time_format_custom(FORMAT)
-        .add_filter_ignore_str("winit")
-        .add_filter_ignore_str("wgpu")
-        .build();
-    SimpleLogger::init(LevelFilter::Info, config).unwrap();
-
     #[cfg(feature = "pyroscope")]
     let agent_running = if let Ok(p) = std::env::var("PYROSCOPE") {
         let agent = PyroscopeAgent::builder("http://localhost:4040", "client")
@@ -341,11 +323,47 @@ fn main() {
         None
     };
 
-    let sender = start_game_thread();
-    let event_loop = EventLoop::new().unwrap();
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::new(sender);
-    event_loop.run_app(&mut app).unwrap();
+    let command_send = start_game_thread();
+    let (game_send, game_recv) = crossbeam::channel::unbounded();
+    let (client_send, client_recv) = crossbeam::channel::unbounded();
+    command_send
+        .send(Command::ConnectToServerAndScene(
+            game_send.clone(),
+            game_recv,
+            client_send,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466)),
+        ))
+        .unwrap();
+
+    App::new()
+        .add_plugins(
+            DefaultPlugins
+                .set(bevy::window::WindowPlugin {
+                    primary_window: Some(bevy::window::Window {
+                        title: "Labour of Love".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .set(bevy::log::LogPlugin {
+                    filter: "wgpu=error,naga=warn".into(),
+                    ..Default::default()
+                })
+                // Bevy's default asset root is CARGO_MANIFEST_DIR/assets (crates/client/assets,
+                // a local, gitignored scratch dir left over from earlier prototyping). The
+                // workspace's actual tracked asset tree (assets/blocks, assets/shaders/...) lives
+                // two levels up at the repo root, so point the file-asset source there instead.
+                .set(bevy::asset::AssetPlugin { file_path: "../../assets".into(), ..Default::default() }),
+        )
+        .add_plugins(renderer::SimBridgePlugin {
+            client_recv,
+            game_send: game_send.clone(),
+        })
+        .run();
+
+    // Window closed: shut the sim and game threads down.
+    let _ = game_send.send(GameEventKind::Quit);
+    let _ = command_send.send(Command::Quit);
 
     #[cfg(feature = "pyroscope")]
     if let Some(a) = agent_running {

@@ -1,16 +1,9 @@
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use crate::{ChunkCoords, ClientId, Rollback};
 use crate::{GameDataUpdate, GameDataUpdateKind, PlayerKey};
 use derive_more::Debug;
 use log::info;
-use winit::{
-    dpi::{PhysicalPosition, PhysicalSize},
-    event::{
-        AxisId, ButtonId, ElementState, MouseButton, MouseScrollDelta, RawKeyEvent, TouchPhase,
-    },
-    keyboard::{self, PhysicalKey},
-};
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Usize {
@@ -95,86 +88,45 @@ impl GameEvent {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub enum WindowEvent {
-    KeyboardInput {
-        physical_key: PhysicalKey,
-        logical_key: keyboard::Key,
-        location: keyboard::KeyLocation,
-        state: ElementState,
-        repeat: bool,
-        is_synthetic: bool,
-    },
-    CursorMoved {
-        position: PhysicalPosition<f64>,
-    },
-    MouseInput {
-        state: ElementState,
-        button: MouseButton,
-    },
-    MouseWheel {
-        delta: MouseScrollDelta,
-        phase: TouchPhase,
-    },
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum Key {
+    KeyW,
+    KeyA,
+    KeyS,
+    KeyD,
+    KeyE,
+    Space,
+    ControlLeft,
+    ShiftLeft,
+    Escape,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    Other(u16),
+}
+
+/// Engine-neutral input event. This is the wire format for player input —
+/// it must never contain types from a windowing library.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum InputEvent {
+    Resized { width: u32, height: u32 },
+    Key { key: Key, pressed: bool },
+    MouseButton { button: MouseButton, pressed: bool },
+    /// Line-based wheel scrolling, in lines.
+    MouseWheel { x: f32, y: f32 },
+    /// Accumulated raw mouse motion for one frame.
+    MouseMotion { dx: f32, dy: f32 },
     Focused(bool),
-    ScaleFactorChanged {
-        scale_factor: f64,
-    },
-    DroppedFile(PathBuf),
-    Resized(PhysicalSize<u32>),
-    CloseRequested,
-    Destroyed,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub enum DeviceEvent {
-    Added,
-    Removed,
-
-    /// Change in physical position of a pointing device.
-    ///
-    /// This represents raw, unfiltered physical motion. Not to be confused with
-    /// [`WindowEvent::CursorMoved`].
-    MouseMotion {
-        /// (x, y) change in position in unspecified units.
-        ///
-        /// Different devices may use different units.
-        delta: (f64, f64),
-    },
-
-    /// Physical scroll event
-    MouseWheel {
-        delta: MouseScrollDelta,
-    },
-
-    /// Motion on some analog axis. This event will be reported for all arbitrary input devices
-    /// that winit supports on this platform, including mouse devices.  If the device is a mouse
-    /// device then this will be reported alongside the MouseMotion event.
-    Motion {
-        axis: AxisId,
-        value: f64,
-    },
-
-    Button {
-        button: ButtonId,
-        state: ElementState,
-    },
-
-    Key(RawKeyEvent),
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub enum WinitEvent {
-    WindowEvent(WindowEvent),
-    DeviceEvent(DeviceEvent),
-    NewEvents,
-    AboutToWait,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub enum GameEventKind {
     Tick,
-    PlayerWinitEvent(ClientId, WinitEvent),
+    PlayerInput(ClientId, InputEvent),
     CreateClient(ClientId),
     Quit,
 }
