@@ -29,7 +29,7 @@ fn rollback_of_create_mesh_restores_state() {
     let before = state_hash(&r);
 
     r.new_transaction();
-    r.create_mesh(game::ChunkCoords::new(0, 0, 0));
+    r.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
     assert_ne!(before, state_hash(&r), "create_mesh changed nothing");
 
     r.rollback();

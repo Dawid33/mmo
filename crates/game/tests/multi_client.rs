@@ -198,8 +198,8 @@ fn create_player_attaches_capsule_collider() {
 fn chunk_gets_voxels_collider() {
     let server = World::basic();
     let data = server.data(&r0());
-    // Exactly one collider exists before any player joins: the chunk's.
-    assert_eq!(data.physics.colliders.len(), 1);
+    // 8x8 floor chunks, one Voxels collider each, before any player joins.
+    assert_eq!(data.physics.colliders.len(), 64);
     let (_, collider) = data.physics.colliders.iter().next().unwrap();
     assert!(collider.shape().as_voxels().is_some(), "chunk collider is a Voxels shape");
     assert!(collider.parent().is_some(), "parented to the chunk's fixed body");
@@ -227,8 +227,8 @@ fn descending_player_stops_on_terrain() {
     let e = *data.player_entites.get(&0).unwrap();
     let handle = *data.ecs.rigidbody.get(e);
     let y = data.physics.bodies.get(handle).unwrap().translation().y;
-    // Floor top is world y=2.0; capsule half-extent 0.9. Uncorrected descent
-    // would reach y = 3 - 60*0.5 = -27. Corrected must rest just above 2.9.
-    assert!(y > game::parry::math::Real::from(2.5), "player tunneled through the floor: y = {y}");
-    assert!(y < game::parry::math::Real::from(3.0), "player never moved down: y = {y}");
+    // Floor top is y=8; capsule half-extent 14.4 -> blocked rest ~22.4+.
+    // Uncorrected descent from y=26 at 8 units/tick would reach y << 0.
+    assert!(y > game::parry::math::Real::from(21.0), "player tunneled through the floor: y = {y}");
+    assert!(y < game::parry::math::Real::from(23.5), "player never moved down or never got blocked: y = {y}");
 }

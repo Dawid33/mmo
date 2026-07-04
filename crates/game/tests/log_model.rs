@@ -24,7 +24,7 @@ fn multi_transaction_rollback_restores_each_boundary() {
     let h0 = state_hash(&r);
 
     r.new_transaction();
-    r.create_mesh(ChunkCoords::new(0, 0, 0));
+    r.create_mesh(ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
     let h1 = state_hash(&r);
 
     r.new_transaction();
@@ -42,7 +42,7 @@ fn forget_drops_oldest_transaction_and_keeps_state() {
     let (mut r, _recv) = new_rollback();
 
     r.new_transaction();
-    r.create_mesh(ChunkCoords::new(0, 0, 0));
+    r.create_mesh(ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
     r.new_transaction();
     r.create_player_safe(7);
     let h2 = state_hash(&r);

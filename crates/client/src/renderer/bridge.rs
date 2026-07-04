@@ -41,11 +41,13 @@ pub struct SimTarget {
 }
 
 impl SimTarget {
+    // pos_snap values are world-unit distances (1 unit = 1/16 m); smoothing
+    // factors and rotation snaps are dimensionless/radians.
     pub fn body(pos: Vec3, rot: Quat) -> Self {
-        Self { pos, rot, smoothing: 0.5, pos_snap: 0.1, rot_snap: 0.1 }
+        Self { pos, rot, smoothing: 0.5, pos_snap: 1.6, rot_snap: 0.1 }
     }
     pub fn camera(pos: Vec3, rot: Quat) -> Self {
-        Self { pos, rot, smoothing: 0.1, pos_snap: 0.0005, rot_snap: 0.001 }
+        Self { pos, rot, smoothing: 0.1, pos_snap: 0.008, rot_snap: 0.001 }
     }
 }
 

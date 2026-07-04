@@ -7,7 +7,7 @@ use std::{
 use crossbeam::channel::Sender;
 use log::info;
 use crate::input::Key;
-use crate::{Client, ClientId, GameData, Rollback};
+use crate::{Chunk, Client, ClientId, GameData, Rollback};
 
 use crate::{
     camera::CameraController, physics::PhysicsController, ChunkCoords,
@@ -222,7 +222,7 @@ impl Region {
     }
 
     pub fn create_basic(&mut self, coords: ChunkCoords) {
-        self.data.create_mesh(coords);
+        self.data.create_mesh(coords, Chunk::flat_floor(8));
     }
 
     pub fn forget_last_event(&mut self) {
