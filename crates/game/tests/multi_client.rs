@@ -181,3 +181,15 @@ fn create_player_sets_entity_kind() {
     let e = *data.player_entites.get(&0).unwrap();
     assert_eq!(*data.ecs.kind.try_get(e), Some(game::EntityKind::Player));
 }
+
+#[test]
+fn create_player_attaches_capsule_collider() {
+    let (server, _) = server_with_players(1);
+    let data = server.data(&r0());
+    let e = *data.player_entites.get(&0).unwrap();
+    let handle = *data.ecs.rigidbody.get(e);
+    let body = data.physics.bodies.get(handle).unwrap();
+    assert_eq!(body.colliders().len(), 1, "player body carries exactly one collider");
+    let collider = data.physics.colliders.get(body.colliders()[0]).unwrap();
+    assert_eq!(collider.parent(), Some(handle));
+}
