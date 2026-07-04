@@ -193,3 +193,14 @@ fn create_player_attaches_capsule_collider() {
     let collider = data.physics.colliders.get(body.colliders()[0]).unwrap();
     assert_eq!(collider.parent(), Some(handle));
 }
+
+#[test]
+fn chunk_gets_voxels_collider() {
+    let server = World::basic();
+    let data = server.data(&r0());
+    // Exactly one collider exists before any player joins: the chunk's.
+    assert_eq!(data.physics.colliders.len(), 1);
+    let (_, collider) = data.physics.colliders.iter().next().unwrap();
+    assert!(collider.shape().as_voxels().is_some(), "chunk collider is a Voxels shape");
+    assert!(collider.parent().is_some(), "parented to the chunk's fixed body");
+}
