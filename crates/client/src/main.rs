@@ -175,7 +175,7 @@ impl GameInstanceManager {
         let new_region =
             |id: RegionId, raw_game_data: Rollback, world: &mut Option<game::World>| {
                 let (send, recv) = crossbeam::channel::unbounded();
-                let data = Region::new(raw_game_data.clone(), Some(send), id);
+                let data = Region::new(raw_game_data.clone(), Some(send), id, self.client_id);
                 self.client_event_send
                     .send(ClientUpdateEvent::NewRegion(
                         id,

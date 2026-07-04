@@ -24,6 +24,12 @@ pub struct Region {
     input_buffer: BinaryHeap<Reverse<GameEvent>>,
     controllers: Vec<Box<dyn Controller>>,
     synchronized: bool,
+    /// `Some` on a client (which client's predictions live in `event_log`);
+    /// `None` on the server, which never reconciles.
+    local_client_id: Option<ClientId>,
+    /// `next_game_event_id` of the snapshot this region was built from.
+    /// Server events below this id are already baked into the state.
+    base_event_id: usize,
 }
 
 impl Region {
@@ -32,8 +38,10 @@ impl Region {
         mut data: Rollback,
         game_update_send: Option<Sender<GameDataUpdate>>,
         id: ChunkCoords,
+        local_client_id: Option<ClientId>,
     ) -> Self {
         data.reinitialize(game_update_send);
+        let base_event_id = *data.next_game_event_id;
         Self {
             data,
             event_log: VecDeque::new(),
@@ -41,6 +49,8 @@ impl Region {
             controllers: Vec::from([CameraController::new(), PhysicsController::new()]),
             id,
             synchronized: false,
+            local_client_id,
+            base_event_id,
         }
     }
 
@@ -177,6 +187,12 @@ impl Region {
 
     pub fn current_tick(&self) -> usize {
         *self.data.tick
+    }
+
+    /// Ids of locally-predicted events awaiting server confirmation.
+    /// Exposed for tests.
+    pub fn pending_event_ids(&self) -> Vec<usize> {
+        self.event_log.iter().map(|e| e.id).collect()
     }
 
     pub fn data(&self) -> &Rollback {
