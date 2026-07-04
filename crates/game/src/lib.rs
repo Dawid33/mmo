@@ -10,8 +10,6 @@ extern crate std;
 use std::collections::BTreeMap;
 
 mod camera;
-mod data;
-mod mesh;
 mod physics;
 mod region;
 pub use parry3d as parry;

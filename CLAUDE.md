@@ -21,7 +21,9 @@ A voxel MMO in Rust with client/server architecture over QUIC, built around dete
 
 The server listens on `127.0.0.1:6466` (hardcoded in `crates/server/src/main.rs`); the client connects to localhost. Run the server before/alongside the client.
 
-The rollback crate has the test suite: `cargo test -p rollback` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact.
+The rollback crate has the test suite: `cargo test -p rollback` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact. The client now has its own headless test suite: `cargo test -p client` (16 tests covering the sim-bridge, coordinate conversion, interpolation, and async chunk meshing, run via `MinimalPlugins`/`AssetPlugin` with no window or GPU).
+
+Bevy is pinned to `0.18` in the root `Cargo.toml`; Bevy's API surface moves fast between minor versions, so treat upgrades as a deliberate, tested migration rather than a routine bump — API drift (renamed types/traits, moved modules, changed system-set names) is a known hazard.
 
 ### Profiling
 

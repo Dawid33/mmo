@@ -15,7 +15,6 @@ mod input;
 mod interpolate;
 pub mod meshing;
 mod voxel_material;
-pub use bridge::*;
 use voxel_material::StandardVoxelMaterial;
 
 #[derive(Resource)]
@@ -62,23 +61,32 @@ impl Plugin for SimBridgePlugin {
 }
 
 /// Resolve the blocks asset directory; must mirror AssetPlugin.file_path resolution in main.rs.
+///
+/// Base-path priority mirrors bevy_asset's `get_base_path` exactly (see
+/// `bevy_asset::io::file::get_base_path`): `BEVY_ASSET_ROOT` env var, then
+/// `CARGO_MANIFEST_DIR` (set by cargo at runtime), then the running executable's
+/// parent directory. Each base is then joined with the same relative path
+/// `AssetPlugin { file_path: "../../assets", .. }` uses in main.rs, plus our own
+/// `blocks` subdir, so all three bases resolve consistently.
 fn resolve_blocks_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
 
-    // Try CARGO_MANIFEST_DIR (set by cargo at runtime); mirrors BeVy's AssetPlugin behavior.
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        return PathBuf::from(manifest_dir).join("../../assets/blocks");
-    }
-
-    // Fall back to exe directory if running outside cargo.
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            return exe_dir.join("assets/blocks");
+    let base = if let Ok(root) = std::env::var("BEVY_ASSET_ROOT") {
+        PathBuf::from(root)
+    } else if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        PathBuf::from(manifest_dir)
+    } else if let Ok(exe_path) = std::env::current_exe() {
+        match exe_path.parent() {
+            Some(exe_dir) => exe_dir.to_path_buf(),
+            // No parent (e.g. exe at filesystem root): fall back to cwd-relative.
+            None => return PathBuf::from("assets/blocks"),
         }
-    }
+    } else {
+        // Final fallback: cwd-relative (original behavior).
+        return PathBuf::from("assets/blocks");
+    };
 
-    // Final fallback: cwd-relative (original behavior).
-    PathBuf::from("assets/blocks")
+    base.join("../../assets/blocks")
 }
 
 fn setup_scene(
@@ -175,7 +183,6 @@ fn setup_scene(
 #[cfg(test)]
 mod tests {
     use super::resolve_blocks_dir;
-    use std::path::Path;
 
     #[test]
     fn test_resolve_blocks_dir_with_cargo_manifest() {

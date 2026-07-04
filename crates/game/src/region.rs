@@ -6,6 +6,7 @@ use std::{
 
 use crossbeam::channel::Sender;
 use log::info;
+use rollback::common::Key;
 use rollback::{Client, ClientId};
 use rollback::{GameData, Rollback};
 
@@ -138,7 +139,7 @@ impl Region {
                     // input step are both covered by one delta.
                     let toggled = {
                         let client = data.clients.get_mut(&client_id).unwrap();
-                        let toggle = client.input.key_pressed(&rollback::common::Key::KeyE);
+                        let toggle = client.input.key_pressed(&Key::KeyE);
                         if toggle {
                             client.fps_cam_mode = !client.fps_cam_mode;
                         }

@@ -99,7 +99,11 @@ pub fn apply_meshed_chunks(
                 ec.remove::<MeshingTask>();
             }
             None => {
-                commands.entity(e).remove::<(Mesh3d, MeshingTask)>();
+                commands.entity(e).remove::<(
+                    Mesh3d,
+                    MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
+                    MeshingTask,
+                )>();
             }
         }
     }
@@ -122,7 +126,11 @@ pub fn apply_meshed_chunks(
             continue;
         }
         if let Ok(mut ec) = commands.get_entity(e) {
-            ec.remove::<(Mesh3d, MeshingTask)>();
+            ec.remove::<(
+                Mesh3d,
+                MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
+                MeshingTask,
+            )>();
         }
     }
 }
@@ -160,6 +168,12 @@ mod tests {
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[ChunkShape::linearize([5, 5, 5]) as usize] = Voxel::new(VoxelType::Black);
         let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
+        app.update();
+        // Non-racy evidence that meshing actually went through the async path rather
+        // than, say, `queue_meshing` never running: the task must be queued (and not
+        // yet resolved, since nothing has polled it before this first `Update`) before
+        // we start looping to await its completion below.
+        assert!(app.world().entity(e).contains::<MeshingTask>(), "MeshingTask should be queued after first update");
         for _ in 0..100 {
             app.update();
             if app.world().entity(e).contains::<Mesh3d>() {

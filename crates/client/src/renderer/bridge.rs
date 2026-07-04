@@ -18,6 +18,8 @@ pub struct RegionRoots(pub BTreeMap<RegionId, Entity>);
 #[derive(Resource, Default)]
 pub struct SimEntityMap(pub BTreeMap<(RegionId, EntityKey), Entity>);
 
+// identity breadcrumbs for debugging; not yet read
+#[allow(dead_code)]
 #[derive(Component)]
 pub struct SimEntity {
     pub region: RegionId,
@@ -126,7 +128,7 @@ pub fn drain_region_updates(
     mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     for (&region, receiver) in regions.0.iter() {
-        let root = roots.0[&region];
+        let root = *roots.0.get(&region).expect("RegionRoots co-populated with Regions");
         while let Ok(update) = receiver.try_recv() {
             // Do and Undo both applied: see SimTarget doc comment.
             match update.update_kind {
@@ -179,7 +181,10 @@ pub fn drain_region_updates(
                     }
                 }
                 GameDataUpdateKind::AddCameraComponent(key, proj, iso) => {
-                    let Some(&e) = map.0.get(&(region, key)) else { continue };
+                    let Some(&e) = map.0.get(&(region, key)) else {
+                        warn!("bridge: AddCameraComponent for unmapped {:?}", key);
+                        continue;
+                    };
                     let tf = iso_to_transform(&iso);
                     commands.entity(e).insert((
                         Camera3d::default(),
@@ -191,15 +196,22 @@ pub fn drain_region_updates(
                 GameDataUpdateKind::RemoveCameraComponent(key) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
                         commands.entity(e).remove::<(Camera3d, Projection)>();
+                    } else {
+                        warn!("bridge: RemoveCameraComponent for unmapped {:?}", key);
                     }
                 }
                 GameDataUpdateKind::UpdateCameraViewProj(key, proj) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
                         commands.entity(e).insert(Projection::Perspective(perspective_to_projection(&proj)));
+                    } else {
+                        warn!("bridge: UpdateCameraViewProj for unmapped {:?}", key);
                     }
                 }
                 GameDataUpdateKind::UpdateCameraViewMatrix(key, iso) => {
-                    let Some(&e) = map.0.get(&(region, key)) else { continue };
+                    let Some(&e) = map.0.get(&(region, key)) else {
+                        warn!("bridge: UpdateCameraViewMatrix for unmapped {:?}", key);
+                        continue;
+                    };
                     let tf = iso_to_transform(&iso);
                     if let Ok(mut target) = targets.get_mut(e) {
                         target.pos = tf.translation;
@@ -282,6 +294,9 @@ mod tests {
 
         let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).expect("entity mapped");
         assert!(app.world().entity(e).contains::<SimTarget>());
+        let target = app.world().entity(e).get::<SimTarget>().expect("SimTarget present");
+        assert_eq!(target.pos, Vec3::ZERO, "identity isometry should convert to zero translation");
+        assert_eq!(target.rot, Quat::IDENTITY, "identity isometry should convert to identity rotation");
 
         updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::RemoveEntity(k))).unwrap();
         app.update();

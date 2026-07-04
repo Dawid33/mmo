@@ -7,6 +7,7 @@ use parry3d::math::Real;
 use rapier3d::math::Vector;
 
 use crate::{Controller, GameData, GameDataUpdate};
+use rollback::common::Key;
 use rollback::Undo;
 
 pub struct CameraController {}
@@ -47,25 +48,25 @@ impl Controller for CameraController {
             let mut linvel = Vector::zeros();
             const SPEED: Real = OrderedFloat(5.0);
 
-            if client.input.key_held(&rollback::common::Key::KeyW) {
+            if client.input.key_held(&Key::KeyW) {
                 linvel.z = Real::from(-0.1) * SPEED
             }
-            if client.input.key_held(&rollback::common::Key::KeyS) {
+            if client.input.key_held(&Key::KeyS) {
                 linvel.z = Real::from(0.1) * SPEED
             }
-            if client.input.key_held(&rollback::common::Key::KeyA) {
+            if client.input.key_held(&Key::KeyA) {
                 linvel.x = Real::from(-0.1) * SPEED
             }
-            if client.input.key_held(&rollback::common::Key::KeyD) {
+            if client.input.key_held(&Key::KeyD) {
                 linvel.x = Real::from(0.1) * SPEED
             }
             let mut linvel = rotation.transform_vector(&linvel);
             linvel.y = Real::from(0.0);
 
-            if client.input.key_held(&rollback::common::Key::Space) {
+            if client.input.key_held(&Key::Space) {
                 linvel.y = Real::from(0.1) * SPEED
             }
-            if client.input.key_held(&rollback::common::Key::ControlLeft) {
+            if client.input.key_held(&Key::ControlLeft) {
                 linvel.y = Real::from(-0.1) * SPEED
             }
             if linvel != Vector3::zeros() {
