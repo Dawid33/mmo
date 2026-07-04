@@ -204,7 +204,9 @@ pub struct Camera {
     pub view_matrix: Option<RigidBodyHandle>,
 }
 
-pub const ASPECT: f32 = (16 / 9) as f32;
+pub const ASPECT: f32 = 16.0 / 9.0;
+/// Vertical field of view in radians (Perspective3 expects radians, not degrees).
+pub const FOV_Y: f32 = std::f32::consts::FRAC_PI_3; // 60°
 
 impl Camera {
     pub fn new(handle: RigidBodyHandle) -> Self {
@@ -238,7 +240,7 @@ impl Camera {
             proj_matrix: Perspective3::from_matrix_unchecked(
                 Perspective3::new(
                     OrderedFloat(ASPECT),
-                    OrderedFloat(90.0),
+                    OrderedFloat(FOV_Y),
                     OrderedFloat(0.1),
                     OrderedFloat(100.0),
                 )
@@ -263,7 +265,7 @@ impl Default for Camera {
             opengl_to_wgpu_matrix: Default::default(),
             proj_matrix: Perspective3::new(
                 OrderedFloat(ASPECT),
-                OrderedFloat(90.0),
+                OrderedFloat(FOV_Y),
                 OrderedFloat(0.1),
                 OrderedFloat(100.0),
             ),
