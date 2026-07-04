@@ -1,4 +1,5 @@
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::entity::EntityHashSet;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use block_mesh::{greedy_quads, GreedyQuadsBuffer, RIGHT_HANDED_Y_UP_CONFIG};
@@ -45,7 +46,9 @@ pub fn mesh_chunks(
     mut meshes: ResMut<Assets<Mesh>>,
     material: Res<ChunkMaterial>,
 ) {
+    let mut handled = EntityHashSet::default();
     for (e, voxels) in &changed {
+        handled.insert(e);
         match build_chunk_mesh(&voxels.0) {
             Some(mesh) => {
                 commands.entity(e).insert((Mesh3d(meshes.add(mesh)), MeshMaterial3d(material.0.clone())));
@@ -55,7 +58,18 @@ pub fn mesh_chunks(
             }
         }
     }
+    // Bevy's removal log for a component persists for the whole frame even if the
+    // component was re-inserted afterwards, and `Changed` on the re-inserted component
+    // is independently true. So a remove-then-reinsert of VoxelData on the same entity
+    // within one frame (which drain_region_updates can produce when it drains several
+    // buffered SetVoxelComponent(None)/Some(..) updates in one PreUpdate pass) would
+    // otherwise queue insert-then-remove here, leaving valid VoxelData with no Mesh3d.
+    // The changed-branch's own Some/None decision is authoritative when both fire in
+    // the same frame, so skip entities it already handled.
     for e in removed.read() {
+        if handled.contains(&e) {
+            continue;
+        }
         if let Ok(mut ec) = commands.get_entity(e) {
             ec.remove::<Mesh3d>();
         }
@@ -83,5 +97,35 @@ mod tests {
         let mesh = build_chunk_mesh(&voxels).expect("mesh");
         assert_eq!(mesh.count_vertices(), 24, "6 faces x 4 verts");
         assert_eq!(mesh.indices().unwrap().len(), 36, "6 faces x 2 tris x 3");
+    }
+
+    #[test]
+    fn same_frame_remove_and_reinsert_keeps_mesh() {
+        use super::super::bridge::VoxelData;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(AssetPlugin::default())
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .add_systems(Update, mesh_chunks);
+
+        let handle = app.world_mut().resource_mut::<Assets<StandardMaterial>>().add(StandardMaterial::default());
+        app.insert_resource(ChunkMaterial(handle));
+
+        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let idx = ChunkShape::linearize([5, 5, 5]) as usize;
+        voxels[idx] = Voxel::new(VoxelType::Black);
+
+        let e = app.world_mut().spawn(VoxelData(voxels.clone())).id();
+        app.update();
+        assert!(app.world().entity(e).contains::<Mesh3d>(), "mesh should exist after initial insert");
+
+        // Same-frame remove-then-reinsert, as `drain_region_updates` can produce when it
+        // drains several buffered SetVoxelComponent(None)/Some(..) updates in one PreUpdate pass.
+        app.world_mut().entity_mut(e).remove::<VoxelData>();
+        app.world_mut().entity_mut(e).insert(VoxelData(voxels));
+        app.update();
+        assert!(app.world().entity(e).contains::<Mesh3d>(), "mesh should survive same-frame remove+reinsert");
     }
 }
