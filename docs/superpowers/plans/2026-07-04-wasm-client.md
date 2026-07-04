@@ -796,7 +796,9 @@ use bevy::utils::synccell::SyncCell;
 pub struct SimDriverRes(pub SyncCell<SimDriver>);
 ```
 
-and in `drive_sim` take `mut driver: ResMut<SimDriverRes>` and start with `let driver = driver.0.get();`. (`SyncCell<T>` is `Sync` for any `T: Send`, and `GameData` is provably `Send` — the native client already sends it across a crossbeam channel in `handle_server`.) If it is not even `Send`, stop and report; that would also break the native client and means something deeper changed.
+and in `drive_sim` take `mut driver: ResMut<SimDriverRes>` and start with `let driver = driver.0.get();`. (`SyncCell<T>` is `Sync` for any `T: Send`, and `GameData` is provably `Send` — the native client already sends it across a crossbeam channel in `handle_server`.)
+
+**Amendment (2026-07-04, hit during execution):** `SimDriver` was not `Send` — not because of `GameData`, but because `game::Controller` (`crates/game/src/lib.rs:50`) had no `Send` supertrait, making `Vec<Box<dyn Controller>>` inside `Region` (and hence `World`) `!Send`. The `World` never crosses threads natively (it is created *inside* the game thread), so nothing had ever forced this. Resolution: add the supertrait — `pub trait Controller: Send { ... }` — as a separate commit touching `crates/game`. Both implementors (`PhysicsController` wrapping rapier's `PhysicsPipeline`, and the zero-sized `CameraController`) are `Send`, so this compiles without further changes, keeps `game` Bevy-free, and does not affect determinism or native behavior.
 
 Run: `cargo test -p client && cargo test -p game && cargo check -p client && cargo check -p server`
 Expected: all PASS.
