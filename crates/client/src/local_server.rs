@@ -122,12 +122,18 @@ mod tests {
             assert!(manager.pump(&server_recv).unwrap());
         }
 
-        // Client received region + player identity.
+        // Client received region + player identity. NewRegion carries the
+        // render bridge's Receiver; keep it alive so the region's Sender
+        // doesn't hit a closed channel when later ticks emit render updates.
         let mut saw_region = false;
         let mut saw_player = false;
+        let mut bridge_recv = None;
         while let Ok(ev) = client_recv.try_recv() {
             match ev {
-                ClientUpdateEvent::NewRegion(..) => saw_region = true,
+                ClientUpdateEvent::NewRegion(_, _, recv) => {
+                    saw_region = true;
+                    bridge_recv = Some(recv);
+                }
                 ClientUpdateEvent::SetPlayer(id) => {
                     saw_player = true;
                     assert_eq!(id, LOCAL_CLIENT_ID);
@@ -145,5 +151,6 @@ mod tests {
         // Client ticks advance the local prediction.
         manager.send_tick();
         assert!(manager.pump(&server_recv).unwrap());
+        drop(bridge_recv);
     }
 }
