@@ -16,7 +16,13 @@ bincode = { workspace = true }
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
 bevy = { workspace = true }
-quinn = { workspace = true }
-tokio = { workspace = true }
 image = { workspace = true }
 ordered-float = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+quinn = { workspace = true }
+tokio = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+bevy = { workspace = true, features = ["webgl2"] }
+console_error_panic_hook = "0.1"
