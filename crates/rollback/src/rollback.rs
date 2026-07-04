@@ -161,7 +161,7 @@ impl Voxel {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum VoxelType {
     Black,
     Air,

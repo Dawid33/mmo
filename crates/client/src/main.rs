@@ -346,7 +346,12 @@ fn main() {
                 .set(bevy::log::LogPlugin {
                     filter: "wgpu=error,naga=warn".into(),
                     ..Default::default()
-                }),
+                })
+                // Bevy's default asset root is CARGO_MANIFEST_DIR/assets (crates/client/assets,
+                // a local, gitignored scratch dir left over from earlier prototyping). The
+                // workspace's actual tracked asset tree (assets/blocks, assets/shaders/...) lives
+                // two levels up at the repo root, so point the file-asset source there instead.
+                .set(bevy::asset::AssetPlugin { file_path: "../../assets".into(), ..Default::default() }),
         )
         .add_plugins(renderer::SimBridgePlugin {
             client_recv,
