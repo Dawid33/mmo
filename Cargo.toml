@@ -17,6 +17,22 @@ opt-level = 1
 opt-level = 1
 
 [workspace.dependencies]
+bevy = { version = "0.18", default-features = false, features = [
+  "std",
+  "bevy_winit",
+  "bevy_window",
+  "bevy_render",
+  "bevy_core_pipeline",
+  "bevy_pbr",
+  "bevy_asset",
+  "bevy_log",
+  "multi_threaded",
+  "tonemapping_luts",
+  "ktx2",
+  "zstd_rust",
+  "x11",
+  "wayland",
+] }
 block-mesh = { path = "crates/block-mesh", default-features = false }
 game = { path = "crates/game" }
 log = { version = "0.4.22", default-features = false }

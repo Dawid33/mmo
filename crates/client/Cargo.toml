@@ -9,27 +9,16 @@ pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
 [dependencies]
 game = { workspace = true }
 slotmapd = { workspace = true }
-simplelog = { workspace = true }
 log = { workspace = true }
 rand = { workspace = true }
 block-mesh = { workspace = true }
-ndshape = { workspace = true }
 crossbeam = { workspace = true }
 bincode = { workspace = true }
 crc32fast = { workspace = true }
-derive_more = { workspace = true }
-weak-table = { workspace = true }
-bytemuck = { workspace = true }
-futures-lite = { workspace = true }
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
-wgpu = { workspace = true }
-pollster = { workspace = true }
-winit = { workspace = true }
-parley = { workspace = true }
+bevy = { workspace = true }
 rapier3d = { workspace = true }
-# vello = { workspace = true }
-# kurbo = { workspace = true }
 quinn = { workspace = true }
 tokio = { workspace = true }
 image = { workspace = true }

@@ -1,43 +1,32 @@
-#![allow(unused)]
 //! Game client
 // #![deny(missing_docs)]
-use crate::window::App;
+use bevy::prelude::*;
 use crossbeam::{
     channel::{Receiver, RecvError, Sender},
     select,
 };
-use game::{na::Perspective3, ChunkCoords, ClientId, RegionId, Rollback, ServerPacket};
+use game::{ChunkCoords, ClientId, RegionId, Rollback, ServerPacket};
 use game::{
-    ClientPacket, ClientUpdateEvent, EntityKey, GameDataTransactionKind, GameDataUpdate, GameError,
-    GameEvent, GameEventKind, PlayerKey, Region, INDUCED_LATENCY,
+    ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind, Region, INDUCED_LATENCY,
 };
-use log::{info, trace, warn, LevelFilter};
-use rapier3d::math::Isometry;
-use simplelog::{FormatItem, SimpleLogger};
+use log::{info, trace, warn};
 use std::{
     collections::BTreeMap,
-    error::Error,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    ops::Deref,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
 };
-use winit::event_loop::{self, ControlFlow, EventLoop};
 
 #[cfg(feature = "pyroscope")]
 use pyroscope::PyroscopeAgent;
 #[cfg(feature = "pyroscope")]
 use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 
-mod layout;
 mod netcode;
-mod render_world;
-mod state;
-mod text;
-mod window;
+mod renderer;
 
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
@@ -320,16 +309,7 @@ fn start_game_thread() -> Sender<Command> {
     return command_send;
 }
 
-const FORMAT: &'static [FormatItem] = &[FormatItem::Literal("client".as_bytes())];
-
 fn main() {
-    let config = simplelog::ConfigBuilder::new()
-        .set_time_format_custom(FORMAT)
-        .add_filter_ignore_str("winit")
-        .add_filter_ignore_str("wgpu")
-        .build();
-    SimpleLogger::init(LevelFilter::Info, config).unwrap();
-
     #[cfg(feature = "pyroscope")]
     let agent_running = if let Ok(p) = std::env::var("PYROSCOPE") {
         let agent = PyroscopeAgent::builder("http://localhost:4040", "client")
@@ -341,11 +321,42 @@ fn main() {
         None
     };
 
-    let sender = start_game_thread();
-    let event_loop = EventLoop::new().unwrap();
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::new(sender);
-    event_loop.run_app(&mut app).unwrap();
+    let command_send = start_game_thread();
+    let (game_send, game_recv) = crossbeam::channel::unbounded();
+    let (client_send, client_recv) = crossbeam::channel::unbounded();
+    command_send
+        .send(Command::ConnectToServerAndScene(
+            game_send.clone(),
+            game_recv,
+            client_send,
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466)),
+        ))
+        .unwrap();
+
+    App::new()
+        .add_plugins(
+            DefaultPlugins
+                .set(bevy::window::WindowPlugin {
+                    primary_window: Some(bevy::window::Window {
+                        title: "Labour of Love".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .set(bevy::log::LogPlugin {
+                    filter: "wgpu=error,naga=warn".into(),
+                    ..Default::default()
+                }),
+        )
+        .add_plugins(renderer::SimBridgePlugin {
+            client_recv,
+            game_send: game_send.clone(),
+        })
+        .run();
+
+    // Window closed: shut the sim and game threads down.
+    let _ = game_send.send(GameEventKind::Quit);
+    let _ = command_send.send(Command::Quit);
 
     #[cfg(feature = "pyroscope")]
     if let Some(a) = agent_running {
