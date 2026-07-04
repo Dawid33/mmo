@@ -44,6 +44,7 @@ pub struct GameInstanceManager {
     is_caught_up: bool,
     client_id: Option<ClientId>,
     player_chunk: Option<ChunkCoords>,
+    results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
 }
 
 impl GameInstanceManager {
@@ -75,7 +76,34 @@ impl GameInstanceManager {
             server_game_recv,
             client_id: None,
             player_chunk: None,
+            results_buffer: BTreeMap::new(),
         }
+    }
+
+    /// Kick off the connection handshake: ask the server which region the
+    /// player belongs to. Both the native thread loop and the wasm frame
+    /// driver call this exactly once before their first pump/select.
+    pub fn start(&mut self) {
+        self.server_game_send
+            .send(ClientPacket::RequestPlayerRegion)
+            .unwrap();
+    }
+
+    /// Inject a client-side tick (wasm frame driver replaces the native
+    /// tick-generator thread with this).
+    pub fn send_tick(&self) {
+        let _ = self.game_event_send.send(GameEventKind::Tick);
+    }
+
+    /// Current adaptive tick interval in milliseconds.
+    pub fn tick_rate_ms(&self) -> u64 {
+        self.tick_rate.load(Ordering::SeqCst)
+    }
+
+    /// The channel the transport (quinn on native, LocalServer on wasm)
+    /// reads outgoing ClientPackets from.
+    pub fn client_packet_recv(&self) -> Receiver<ClientPacket> {
+        self.server_game_recv.clone()
     }
 
     /// Recieve and process game events from the client and network, in that order.
@@ -119,11 +147,8 @@ impl GameInstanceManager {
             rt.block_on(async { conn.connect_and_handle().await.unwrap() });
         });
 
-        self.server_game_send
-            .send(ClientPacket::RequestPlayerRegion)
-            .unwrap();
+        self.start();
 
-        let mut results_buffer = BTreeMap::new();
         loop {
             select! {
                 // Recieve and handle server packets.
@@ -133,43 +158,65 @@ impl GameInstanceManager {
                 // Recieve client game events from either the player or from
                 // client-side game tick timer.
                 recv(self.game_event_recv) -> game_event => {
-                    // TODO: Check if client needs to request more chunks to be loaded.
-                    if let Some(ref mut world) = self.world {
-                         match game_event.clone() {
-                            Ok(event) => {
-                                match event {
-                                    GameEventKind::Quit => return Ok(()),
-                                    e => {
-                                        if let GameEventKind::PlayerInput(_,_) = e {
-                                            // don't handle player events until sim has caught up with server.
-                                            if !self.ready && self.is_caught_up {
-                                                continue;
-                                            }
-                                        }
-                                        match e {
-                                            GameEventKind::Tick => {
-                                                world.progress_world_one_tick(&mut results_buffer);
-                                            },
-                                            GameEventKind::Quit | GameEventKind::PlayerInput(_, _) => {
-                                                if let Some(chunk) = self.player_chunk {
-                                                    let event = world.handle_region_event(game_event.unwrap(), chunk)?;
-                                                    self.server_game_send.send(game::ClientPacket::GameEvent(event)).unwrap();
-                                                }
-                                            },
-                                            GameEventKind::CreateClient(_) => {
-                                                // Players are created by the server on connection.
-                                                warn!("ignoring locally-originated CreateClient");
-                                            },
-                                        }
-                                    }
-                                }
-                            },
-                            Err(e) => panic!("{}", e),
+                    match game_event {
+                        Ok(event) => {
+                            if !self.handle_game_event(event)? {
+                                return Ok(());
+                            }
                         }
+                        Err(e) => panic!("{}", e),
                     }
                 }
             }
         }
+    }
+
+    /// Handle one client-side game event. Returns Ok(false) if the game
+    /// should quit. Events arriving before the first region loads are
+    /// dropped, matching the pre-refactor select! loop.
+    fn handle_game_event(&mut self, event: GameEventKind) -> Result<bool, GameError> {
+        if self.world.is_none() {
+            return Ok(true);
+        }
+        match event {
+            GameEventKind::Quit => return Ok(false),
+            GameEventKind::Tick => {
+                self.world
+                    .as_mut()
+                    .unwrap()
+                    .progress_world_one_tick(&mut self.results_buffer);
+            }
+            GameEventKind::PlayerInput(_, _) if !self.ready && self.is_caught_up => {
+                // don't handle player events until sim has caught up with server.
+            }
+            e @ GameEventKind::PlayerInput(_, _) => {
+                if let Some(chunk) = self.player_chunk {
+                    let event = self.world.as_mut().unwrap().handle_region_event(e, chunk)?;
+                    self.server_game_send
+                        .send(game::ClientPacket::GameEvent(event))
+                        .unwrap();
+                }
+            }
+            GameEventKind::CreateClient(_) => {
+                // Players are created by the server on connection.
+                warn!("ignoring locally-originated CreateClient");
+            }
+        }
+        Ok(true)
+    }
+
+    /// Drain all pending server packets, then all pending game events,
+    /// without blocking. Returns Ok(false) once Quit has been consumed.
+    pub fn pump(&mut self, server_recv: &Receiver<ServerPacket>) -> Result<bool, GameError> {
+        while let Ok(msg) = server_recv.try_recv() {
+            self.handle_server(Ok(msg))?;
+        }
+        while let Ok(event) = self.game_event_recv.try_recv() {
+            if !self.handle_game_event(event)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub fn handle_server(
@@ -366,5 +413,57 @@ fn main() {
     if let Some(a) = agent_running {
         let agent_ready = a.stop().unwrap();
         agent_ready.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod manager_tests {
+    use super::*;
+    use game::ClientUpdateEvent;
+
+    /// pump() must: load a region from a ServerPacket, then advance the sim
+    /// on a Tick game event — all without blocking.
+    #[test]
+    fn pump_loads_region_and_ticks() {
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
+        let (server_send, server_recv) = crossbeam::channel::unbounded();
+        let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+        let mut manager =
+            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+
+        // Fake the server side using the same code the real server uses.
+        let world = game::World::basic();
+        let region_id = ChunkCoords::new(0, 0, 0);
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(region_id), 0))
+            .unwrap();
+        server_send
+            .send(world.build_region_server_packet(&region_id))
+            .unwrap();
+
+        assert!(manager.pump(&server_recv).unwrap());
+        let tick_before = manager.world.as_ref().unwrap().current_tick(&region_id);
+
+        manager.send_tick();
+        assert!(manager.pump(&server_recv).unwrap());
+        let tick_after = manager.world.as_ref().unwrap().current_tick(&region_id);
+        assert_eq!(tick_after, tick_before + 1);
+
+        // The render bridge must have been told about the new region + player.
+        let mut saw_region = false;
+        let mut saw_player = false;
+        while let Ok(ev) = client_recv.try_recv() {
+            match ev {
+                ClientUpdateEvent::NewRegion(..) => saw_region = true,
+                ClientUpdateEvent::SetPlayer(..) => saw_player = true,
+                _ => {}
+            }
+        }
+        assert!(saw_region && saw_player);
+
+        // Quit terminates the pump.
+        game_send.send(GameEventKind::Quit).unwrap();
+        assert!(!manager.pump(&server_recv).unwrap());
     }
 }
