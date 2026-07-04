@@ -4,6 +4,7 @@ use game::{ClientId, ClientUpdateEvent, GameEventKind};
 
 mod bridge;
 pub mod convert;
+mod input;
 mod interpolate;
 pub mod meshing;
 pub use bridge::*;
@@ -32,7 +33,11 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<bridge::SimEntityMap>()
             .add_systems(
                 PreUpdate,
-                (bridge::drain_client_updates, bridge::drain_region_updates).chain(),
+                (
+                    input::forward_input,
+                    (bridge::drain_client_updates, bridge::drain_region_updates).chain(),
+                )
+                    .chain(),
             )
             .add_systems(Startup, setup_scene)
             .add_systems(Update, (meshing::mesh_chunks, interpolate::interpolate_transforms));

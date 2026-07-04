@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use crossbeam::channel::Receiver;
 use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, RegionId};
 use rollback::{EntityKey, Voxel};
@@ -121,6 +122,8 @@ pub fn drain_region_updates(
     roots: Res<RegionRoots>,
     mut map: ResMut<SimEntityMap>,
     mut targets: Query<&mut SimTarget>,
+    local_player: Res<LocalPlayer>,
+    mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     for (&region, receiver) in regions.0.iter() {
         let root = roots.0[&region];
@@ -205,8 +208,21 @@ pub fn drain_region_updates(
                         commands.entity(e).insert(SimTarget::camera(tf.translation, tf.rotation));
                     }
                 }
-                // Freecam: task 8.
-                GameDataUpdateKind::SetFreeCam(..) => {}
+                GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
+                    // Only the local player's toggle may grab this window's cursor.
+                    if local_player.0 != Some(client_id) {
+                        continue;
+                    }
+                    if let Ok(mut cursor) = windows.single_mut() {
+                        if enabled {
+                            cursor.grab_mode = CursorGrabMode::Locked;
+                            cursor.visible = false;
+                        } else {
+                            cursor.grab_mode = CursorGrabMode::None;
+                            cursor.visible = true;
+                        }
+                    }
+                }
             }
         }
     }
