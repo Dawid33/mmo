@@ -4,6 +4,7 @@ use game::{ClientId, ClientUpdateEvent, GameEventKind};
 
 mod bridge;
 pub mod convert;
+mod interpolate;
 pub use bridge::*;
 
 #[derive(Resource)]
@@ -31,6 +32,7 @@ impl Plugin for SimBridgePlugin {
             .add_systems(
                 PreUpdate,
                 (bridge::drain_client_updates, bridge::drain_region_updates).chain(),
-            );
+            )
+            .add_systems(Update, interpolate::interpolate_transforms);
     }
 }
