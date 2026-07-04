@@ -130,6 +130,8 @@ pub fn drain_region_updates(
                 GameDataUpdateKind::RemoveEntity(key) => {
                     if let Some(e) = map.0.remove(&(region, key)) {
                         commands.entity(e).despawn();
+                    } else {
+                        warn!("bridge: RemoveEntity for unmapped {:?}", key);
                     }
                 }
                 GameDataUpdateKind::SetEntityPosition(key, iso) => {
@@ -150,11 +152,15 @@ pub fn drain_region_updates(
                 GameDataUpdateKind::SetVoxelComponent(key, Some(voxels)) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
                         commands.entity(e).insert(VoxelData(voxels));
+                    } else {
+                        warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }
                 }
                 GameDataUpdateKind::SetVoxelComponent(key, None) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
                         commands.entity(e).remove::<VoxelData>();
+                    } else {
+                        warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }
                 }
                 // Camera arms: task 6. Freecam: task 8.
