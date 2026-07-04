@@ -27,6 +27,8 @@ use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 
 mod netcode;
 mod renderer;
+#[cfg(any(target_arch = "wasm32", test))]
+mod local_server;
 
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
