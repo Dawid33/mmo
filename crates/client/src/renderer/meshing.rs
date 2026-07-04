@@ -85,7 +85,7 @@ pub fn apply_meshed_chunks(
     mut removed: RemovedComponents<super::bridge::VoxelData>,
     mut meshes: ResMut<Assets<Mesh>>,
     material: Option<Res<ChunkMaterial>>,
-    still_alive: Query<Entity, Or<(With<super::bridge::VoxelData>, With<MeshingTask>)>>,
+    still_alive: Query<Entity, With<super::bridge::VoxelData>>,
 ) {
     for (e, mut task) in &mut tasks {
         let Some(result) = block_on(future::poll_once(&mut task.0)) else { continue };
@@ -104,15 +104,19 @@ pub fn apply_meshed_chunks(
         }
     }
     // Bevy's removal log for a component persists for the whole frame even if the
-    // component was re-inserted afterwards, and `Changed` on the re-inserted component
-    // is independently true. So a remove-then-reinsert of VoxelData on the same entity
-    // within one frame (which drain_region_updates can produce when it drains several
-    // buffered SetVoxelComponent(None)/Some(..) updates in one PreUpdate pass) would
-    // otherwise strip a still-valid entity's Mesh3d/MeshingTask here. `queue_meshing`
-    // (order-independent: both systems only defer mutation via Commands, applied after
-    // both run) will have queued a fresh MeshingTask for a same-frame reinsert, or the
-    // VoxelData itself is still present — either signals the entity is still live, so
-    // skip stripping it.
+    // component was re-inserted afterwards. So a remove-then-reinsert of VoxelData on
+    // the same entity within one frame (which drain_region_updates can produce when it
+    // drains several buffered SetVoxelComponent(None)/Some(..) updates in one PreUpdate
+    // pass) would otherwise strip a still-valid entity's Mesh3d/MeshingTask here. The
+    // bridge's remove-then-insert both flush (via Commands) before Update runs, so by
+    // the time this system runs a same-frame reinsert already carries `VoxelData` again
+    // — `VoxelData` presence is the sole authority on liveness. `MeshingTask` presence is
+    // NOT a valid liveness signal: it can outlive a permanent removal (an earlier edit's
+    // task is still in flight, polled to completion only in the loop above), so keying
+    // off it would let a stale in-flight result attach a ghost mesh after `VoxelData` is
+    // gone for good. Removing `MeshingTask` here alongside `Mesh3d` cancels that stale
+    // work outright (dropping the `Task` cancels/discards its background job), so no
+    // later poll can ever apply it.
     for e in removed.read() {
         if still_alive.contains(e) {
             continue;
@@ -220,5 +224,35 @@ mod tests {
         app.world_mut().entity_mut(e).insert(VoxelData(voxels));
         app.update();
         assert!(app.world().entity(e).contains::<Mesh3d>(), "mesh should survive same-frame remove+reinsert");
+    }
+
+    #[test]
+    fn removal_while_task_in_flight_clears_mesh() {
+        use super::super::bridge::VoxelData;
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<crate::renderer::VoxelTypeLayers>()
+            .add_systems(Update, (queue_meshing, apply_meshed_chunks));
+
+        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        voxels[ChunkShape::linearize([5, 5, 5]) as usize] = Voxel::new(VoxelType::Black);
+        let e = app.world_mut().spawn(VoxelData(voxels)).id();
+
+        // Queue the meshing task (MeshingTask attached after this update's commands flush),
+        // then remove VoxelData permanently (no reinsert) — mirroring the bridge's
+        // SetVoxelComponent(key, None) arm clearing a chunk to air while an earlier edit's
+        // mesh task is still in flight.
+        app.update();
+        app.world_mut().entity_mut(e).remove::<VoxelData>();
+
+        for _ in 0..100 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(!app.world().entity(e).contains::<Mesh3d>(), "ghost mesh must not be attached after VoxelData removal");
+        assert!(!app.world().entity(e).contains::<MeshingTask>(), "in-flight task must be cancelled on VoxelData removal");
     }
 }
