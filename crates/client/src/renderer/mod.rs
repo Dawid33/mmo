@@ -2,6 +2,8 @@ use bevy::prelude::*;
 use crossbeam::channel::{Receiver, Sender};
 use game::{ClientId, ClientUpdateEvent, GameEventKind};
 
+pub mod convert;
+
 #[derive(Resource)]
 pub struct ClientUpdates(pub Receiver<ClientUpdateEvent>);
 
