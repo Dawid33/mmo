@@ -44,7 +44,7 @@ impl RollbackInfo {
 pub enum GameDataUpdateKind {
     SetVoxelComponent(EntityKey, Option<Vec<Voxel>>),
     SetEntityPosition(EntityKey, IsometryReal),
-    AddCameraComponent(EntityKey, Perspective3<Real>, IsometryReal),
+    AddCameraComponent(EntityKey, ClientId, Perspective3<Real>, IsometryReal),
     RemoveCameraComponent(EntityKey),
     UpdateCameraViewProj(EntityKey, Perspective3<Real>),
     UpdateCameraViewMatrix(EntityKey, IsometryReal),
@@ -275,7 +275,7 @@ impl Rollback {
         let cam = Camera::new(handle);
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
-            GameDataUpdateKind::AddCameraComponent(e, cam.proj_matrix, position),
+            GameDataUpdateKind::AddCameraComponent(e, client_id, cam.proj_matrix, position),
         ));
         // LIFO: registered before set_safe, so the notification fires after
         // the camera value is restored.

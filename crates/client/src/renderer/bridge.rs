@@ -68,7 +68,7 @@ pub fn drain_client_updates(
                     .id();
                 roots.0.insert(id, root);
                 regions.0.insert(id, receiver);
-                spawn_region_snapshot(&mut commands, root, id, &data, &mut map);
+                spawn_region_snapshot(&mut commands, root, id, &data, &mut map, player.0);
                 info!("bridge: region {:?} loaded", id);
             }
             ClientUpdateEvent::SetPlayer(client_id) => player.0 = Some(client_id),
@@ -84,7 +84,11 @@ fn spawn_region_snapshot(
     region: RegionId,
     data: &GameData,
     map: &mut SimEntityMap,
+    local_player: Option<game::ClientId>,
 ) {
+    // Every player in the snapshot has a sim camera, but only the local
+    // player's may become this window's active Camera3d.
+    let local_camera_key = local_player.and_then(|id| data.player_entites.get(&id).copied());
     for (key, _) in data.ecs.entities.iter() {
         let mut e = commands.spawn((
             SimEntity { region, key },
@@ -102,17 +106,21 @@ fn spawn_region_snapshot(
             e.insert(VoxelData(chunk.voxels.clone()));
         }
         if let Some(cam) = data.ecs.camera.try_get(key) {
-            if let Some(handle) = cam.view_matrix {
-                if let Some(body) = data.physics.bodies.get(handle) {
-                    let tf = iso_to_transform(body.position());
-                    e.insert((
-                        Camera3d::default(),
-                        Projection::Perspective(perspective_to_projection(&cam.proj_matrix)),
-                        tf,
-                        SimTarget::camera(tf.translation, tf.rotation),
-                    ));
+            if Some(key) == local_camera_key {
+                if let Some(handle) = cam.view_matrix {
+                    if let Some(body) = data.physics.bodies.get(handle) {
+                        let tf = iso_to_transform(body.position());
+                        e.insert((
+                            Camera3d::default(),
+                            Projection::Perspective(perspective_to_projection(&cam.proj_matrix)),
+                            tf,
+                            SimTarget::camera(tf.translation, tf.rotation),
+                        ));
+                    }
                 }
             }
+            // Other players' pose tracking comes from the rigidbody branch
+            // above; their cameras stay inert in this window.
         }
         map.0.insert((region, key), e.id());
     }
@@ -180,18 +188,24 @@ pub fn drain_region_updates(
                         warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }
                 }
-                GameDataUpdateKind::AddCameraComponent(key, proj, iso) => {
+                GameDataUpdateKind::AddCameraComponent(key, client_id, proj, iso) => {
                     let Some(&e) = map.0.get(&(region, key)) else {
                         warn!("bridge: AddCameraComponent for unmapped {:?}", key);
                         continue;
                     };
                     let tf = iso_to_transform(&iso);
-                    commands.entity(e).insert((
-                        Camera3d::default(),
-                        Projection::Perspective(perspective_to_projection(&proj)),
-                        tf,
-                        SimTarget::camera(tf.translation, tf.rotation),
-                    ));
+                    if local_player.0 == Some(client_id) {
+                        commands.entity(e).insert((
+                            Camera3d::default(),
+                            Projection::Perspective(perspective_to_projection(&proj)),
+                            tf,
+                            SimTarget::camera(tf.translation, tf.rotation),
+                        ));
+                    } else {
+                        // Another player's camera: track its pose so the
+                        // entity follows the sim, but never render from it.
+                        commands.entity(e).insert((tf, SimTarget::body(tf.translation, tf.rotation)));
+                    }
                 }
                 GameDataUpdateKind::RemoveCameraComponent(key) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
@@ -248,9 +262,8 @@ mod tests {
     use game::EntityKey;
     use slotmapd::KeyData;
 
-    fn test_app() -> (App, crossbeam::channel::Sender<ClientUpdateEvent>, crossbeam::channel::Sender<GameDataUpdate>, game::RegionId) {
+    fn app_shell() -> (App, crossbeam::channel::Sender<ClientUpdateEvent>) {
         let (client_send, client_recv) = crossbeam::channel::unbounded();
-        let (update_send, update_recv) = crossbeam::channel::unbounded();
         let (game_send, _game_recv) = crossbeam::channel::unbounded();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
@@ -261,13 +274,27 @@ mod tests {
             .init_resource::<RegionRoots>()
             .init_resource::<SimEntityMap>()
             .add_systems(PreUpdate, (drain_client_updates, drain_region_updates).chain());
+        (app, client_send)
+    }
 
+    fn test_app() -> (App, crossbeam::channel::Sender<ClientUpdateEvent>, crossbeam::channel::Sender<GameDataUpdate>, game::RegionId) {
+        let (app, client_send) = app_shell();
+        let (update_send, update_recv) = crossbeam::channel::unbounded();
         let region_id = ChunkCoords::new(0, 0, 0);
         let rb = Rollback::new(None);
         client_send
             .send(ClientUpdateEvent::NewRegion(region_id, (*rb.data).clone(), update_recv))
             .unwrap();
         (app, client_send, update_send, region_id)
+    }
+
+    fn test_proj() -> game::na::Perspective3<game::parry::math::Real> {
+        game::na::Perspective3::new(
+            game::parry::math::Real::from(1.5),
+            game::parry::math::Real::from(1.2),
+            game::parry::math::Real::from(0.1),
+            game::parry::math::Real::from(100.0),
+        )
     }
 
     fn key(n: u64) -> EntityKey {
@@ -314,19 +341,14 @@ mod tests {
 
     #[test]
     fn camera_add_update_remove() {
-        let (mut app, _c, updates, region_id) = test_app();
+        let (mut app, client, updates, region_id) = test_app();
+        client.send(ClientUpdateEvent::SetPlayer(0)).unwrap();
         app.update();
         let k = key(3);
         updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
-        let proj = game::na::Perspective3::new(
-            game::parry::math::Real::from(1.5),
-            game::parry::math::Real::from(1.2),
-            game::parry::math::Real::from(0.1),
-            game::parry::math::Real::from(100.0),
-        );
         updates.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
-            GameDataUpdateKind::AddCameraComponent(k, proj.clone(), game::IsometryReal::identity()),
+            GameDataUpdateKind::AddCameraComponent(k, 0, test_proj(), game::IsometryReal::identity()),
         )).unwrap();
         app.update();
         // second frame: AddCameraComponent on a same-drain-spawned entity goes through Commands
@@ -342,5 +364,61 @@ mod tests {
         updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::RemoveCameraComponent(k))).unwrap();
         app.update();
         assert!(!app.world().entity(e).contains::<Camera3d>());
+    }
+
+    #[test]
+    fn foreign_camera_is_tracked_but_not_activated() {
+        let (mut app, client, updates, region_id) = test_app();
+        client.send(ClientUpdateEvent::SetPlayer(0)).unwrap();
+        app.update();
+        let k = key(4);
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
+        updates.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            // client 1's camera arriving at client 0's window
+            GameDataUpdateKind::AddCameraComponent(k, 1, test_proj(), game::IsometryReal::identity()),
+        )).unwrap();
+        app.update();
+        app.update();
+
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).unwrap();
+        assert!(
+            !app.world().entity(e).contains::<Camera3d>(),
+            "another player's camera must not render this window"
+        );
+        assert!(
+            app.world().entity(e).contains::<SimTarget>(),
+            "foreign player's pose must still be tracked"
+        );
+    }
+
+    #[test]
+    fn snapshot_spawns_camera_only_for_local_player() {
+        let (mut app, client) = app_shell();
+        let (_update_send, update_recv) = crossbeam::channel::unbounded();
+
+        // Region snapshot that already contains two players (the join flow).
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        rb.create_player_safe(0);
+        rb.create_player_safe(1);
+        let data = (*rb.data).clone();
+        let k0 = *data.player_entites.get(&0).unwrap();
+        let k1 = *data.player_entites.get(&1).unwrap();
+
+        let region_id = ChunkCoords::new(0, 0, 0);
+        // SetPlayer always precedes NewRegion (PlayerRegion precedes Region).
+        client.send(ClientUpdateEvent::SetPlayer(0)).unwrap();
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        app.update();
+
+        let map = app.world().resource::<SimEntityMap>();
+        let e0 = *map.0.get(&(region_id, k0)).unwrap();
+        let e1 = *map.0.get(&(region_id, k1)).unwrap();
+        assert!(app.world().entity(e0).contains::<Camera3d>(), "local player's camera is active");
+        assert!(
+            !app.world().entity(e1).contains::<Camera3d>(),
+            "other player's camera from the snapshot must not be active"
+        );
     }
 }
