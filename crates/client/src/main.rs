@@ -17,7 +17,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[cfg(feature = "pyroscope")]
@@ -123,13 +123,12 @@ impl GameInstanceManager {
             .send(ClientPacket::RequestPlayerRegion)
             .unwrap();
 
-        let mut now = Instant::now();
         let mut results_buffer = BTreeMap::new();
         loop {
             select! {
                 // Recieve and handle server packets.
                 recv(server_recv) -> server_msg => {
-                    self.handle_server(server_msg);
+                    self.handle_server(server_msg)?;
                 },
                 // Recieve client game events from either the player or from
                 // client-side game tick timer.
@@ -174,9 +173,9 @@ impl GameInstanceManager {
         server_msg: Result<ServerPacket, RecvError>,
     ) -> Result<(), GameError> {
         let new_region =
-            |id: RegionId, mut raw_game_data: Rollback, world: &mut Option<game::World>| {
+            |id: RegionId, raw_game_data: Rollback, world: &mut Option<game::World>| {
                 let (send, recv) = crossbeam::channel::unbounded();
-                let mut data = Region::new(raw_game_data.clone(), Some(send), id);
+                let data = Region::new(raw_game_data.clone(), Some(send), id);
                 self.client_event_send
                     .send(ClientUpdateEvent::NewRegion(
                         id,
@@ -243,8 +242,11 @@ impl GameInstanceManager {
                 }
             }
             game::ServerPacket::PlayerRegion(id, client_id) => {
-                self.client_event_send
-                    .send(ClientUpdateEvent::SetPlayer(client_id));
+                if let Err(e) = self.client_event_send.send(ClientUpdateEvent::SetPlayer(client_id)) {
+                    // Receiver gone means the render/client-bridge thread has exited;
+                    // nothing left to notify, so just log and keep going.
+                    warn!("client_event_send closed while sending SetPlayer: {:?}", e);
+                }
 
                 let id = id.unwrap_or(ChunkCoords::new(0, 0, 0));
                 self.client_id = Some(client_id);
@@ -253,7 +255,7 @@ impl GameInstanceManager {
                     .send(ClientPacket::RequestRegionConnection(id))
                     .unwrap();
             }
-            game::ServerPacket::Region(id, mut raw_game_data) => {
+            game::ServerPacket::Region(id, raw_game_data) => {
                 new_region(id, raw_game_data, &mut self.world);
                 if let Some(player_chunk) = self.player_chunk {
                     if id == player_chunk && self.client_id.is_some() {
@@ -346,7 +348,12 @@ fn main() {
                 .set(bevy::log::LogPlugin {
                     filter: "wgpu=error,naga=warn".into(),
                     ..Default::default()
-                }),
+                })
+                // Bevy's default asset root is CARGO_MANIFEST_DIR/assets (crates/client/assets,
+                // a local, gitignored scratch dir left over from earlier prototyping). The
+                // workspace's actual tracked asset tree (assets/blocks, assets/shaders/...) lives
+                // two levels up at the repo root, so point the file-asset source there instead.
+                .set(bevy::asset::AssetPlugin { file_path: "../../assets".into(), ..Default::default() }),
         )
         .add_plugins(renderer::SimBridgePlugin {
             client_recv,

@@ -1,36 +1,18 @@
 use std::{
-    any::Any,
-    borrow::BorrowMut,
     cmp::Reverse,
     collections::{BinaryHeap, VecDeque},
-    hash::{Hash, Hasher},
-    ops::{Deref, DerefMut},
-    time::Instant,
+    ops::DerefMut,
 };
 
-use borrow::RefCast;
 use crossbeam::channel::Sender;
-use log::{info, warn};
-use parley::{Alignment, AlignmentOptions, FontContext, Layout, LayoutContext, StyleProperty};
-use crate::{Client, ClientId, PlayerKey};
-use crate::{Ecs, GameData, Rollback, Undo};
+use log::info;
+use crate::input::Key;
+use crate::{Client, ClientId, GameData, Rollback};
 
 use crate::{
-    camera::CameraController, physics::PhysicsController, ChunkCoords, ClientUpdateEvent,
+    camera::CameraController, physics::PhysicsController, ChunkCoords,
     Controller, GameDataUpdate, GameError, GameEvent, GameEventKind, RegionId, ServerPacket,
-    INDUCED_LATENCY,
 };
-
-#[allow(unused)]
-pub fn text_layout<'a>(fctx: &mut FontContext, text: &str) -> Layout<()> {
-    let mut l: LayoutContext<()> = LayoutContext::new();
-    let mut l = l.ranged_builder(fctx, &text, 1.0, true);
-    l.push_default(StyleProperty::FontSize(16.0));
-    let mut layout = l.build(text);
-    layout.align(None, Alignment::Start, AlignmentOptions::default());
-    layout.break_all_lines(Some(10000.0));
-    layout
-}
 
 /// A region represents an portion of the world that processes game events at
 /// its own tick rate separately from other regions.
@@ -84,7 +66,7 @@ impl Region {
                             let mut temp_log = self.event_log.clone();
 
                             // rollback whole event log
-                            while let Some(e) = self.event_log.pop_back() {
+                            while let Some(_e) = self.event_log.pop_back() {
                                 self.data.rollback();
                             }
 
@@ -97,7 +79,7 @@ impl Region {
                             // TODO: DO NOT DO THIS FOR EVENTS THAT ORIGINATE FROM
                             // OTHER CLIENTS
                             {
-                                let mut len = temp_log.len();
+                                let len = temp_log.len();
                                 let mut iter = temp_log.iter_mut().enumerate();
                                 while let Some((i, event)) = iter.next() {
                                     if event.kind == server_event.0.kind {
@@ -116,7 +98,7 @@ impl Region {
 
                             // TODO: if from other client, increase event id' as well as self.next_game_event_id
                             for event in &mut temp_log {
-                                self.handle_event(event.clone().kind);
+                                let _ = self.handle_event(event.clone().kind);
                             }
                             self.event_log = temp_log;
                         } else {
@@ -142,7 +124,7 @@ impl Region {
         let event = GameEvent::new(event, *self.data.next_game_event_id, self.id);
         self.data.new_transaction();
         self.data.next_game_event_id.update(|n| *n += 1);
-        let b = &event.kind;
+        let _b = &event.kind;
         match event.kind.clone() {
             GameEventKind::Tick => {
                 for c in self.controllers.iter_mut() {
@@ -156,7 +138,7 @@ impl Region {
                     // input step are both covered by one delta.
                     let toggled = {
                         let client = data.clients.get_mut(&client_id).unwrap();
-                        let toggle = client.input.key_pressed(&crate::Key::KeyE);
+                        let toggle = client.input.key_pressed(&Key::KeyE);
                         if toggle {
                             client.fps_cam_mode = !client.fps_cam_mode;
                         }

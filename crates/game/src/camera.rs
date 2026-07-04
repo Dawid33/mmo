@@ -1,23 +1,18 @@
-use std::{fmt::Debug, ops::DerefMut, sync::Arc, time::Instant};
 
-use assert_json_diff::{CompareMode, Config};
-use borrow::PartialHelper;
-use crossbeam::channel::Sender;
 #[allow(unused)]
 use log::info;
-use na::{
-    clamp, AbstractRotation, ComplexField, Matrix4, Perspective3, Quaternion, UnitQuaternion,
-    Vector2, Vector3, Vector4,
-};
+use na::{clamp, Matrix4, Perspective3, UnitQuaternion, Vector3, Vector4};
 use ordered_float::OrderedFloat;
-use parley::swash::shape::Direction;
 use parry3d::math::Real;
 use rapier3d::math::Vector;
 use rapier3d::prelude::RigidBodyHandle;
 
-use crate::{ClientPacket, ClientUpdateEvent, Controller, GameData, GameDataUpdate, Undo};
+use crate::input::Key;
+use crate::{Controller, GameData, GameDataUpdate, Undo};
 
-pub const ASPECT: f32 = (16 / 9) as f32;
+pub const ASPECT: f32 = 16.0 / 9.0;
+/// Vertical field of view in radians (Perspective3 expects radians, not degrees).
+pub const FOV_Y: f32 = std::f32::consts::FRAC_PI_3; // 60°
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
 #[module(crate)]
@@ -59,7 +54,7 @@ impl Camera {
             proj_matrix: Perspective3::from_matrix_unchecked(
                 Perspective3::new(
                     OrderedFloat(ASPECT),
-                    OrderedFloat(90.0),
+                    OrderedFloat(FOV_Y),
                     OrderedFloat(0.1),
                     OrderedFloat(100.0),
                 )
@@ -84,7 +79,7 @@ impl Default for Camera {
             opengl_to_wgpu_matrix: Default::default(),
             proj_matrix: Perspective3::new(
                 OrderedFloat(ASPECT),
-                OrderedFloat(90.0),
+                OrderedFloat(FOV_Y),
                 OrderedFloat(0.1),
                 OrderedFloat(100.0),
             ),
@@ -131,25 +126,25 @@ impl Controller for CameraController {
             let mut linvel = Vector::zeros();
             const SPEED: Real = OrderedFloat(5.0);
 
-            if client.input.key_held(&crate::Key::KeyW) {
+            if client.input.key_held(&Key::KeyW) {
                 linvel.z = Real::from(-0.1) * SPEED
             }
-            if client.input.key_held(&crate::Key::KeyS) {
+            if client.input.key_held(&Key::KeyS) {
                 linvel.z = Real::from(0.1) * SPEED
             }
-            if client.input.key_held(&crate::Key::KeyA) {
+            if client.input.key_held(&Key::KeyA) {
                 linvel.x = Real::from(-0.1) * SPEED
             }
-            if client.input.key_held(&crate::Key::KeyD) {
+            if client.input.key_held(&Key::KeyD) {
                 linvel.x = Real::from(0.1) * SPEED
             }
             let mut linvel = rotation.transform_vector(&linvel);
             linvel.y = Real::from(0.0);
 
-            if client.input.key_held(&crate::Key::Space) {
+            if client.input.key_held(&Key::Space) {
                 linvel.y = Real::from(0.1) * SPEED
             }
-            if client.input.key_held(&crate::Key::ControlLeft) {
+            if client.input.key_held(&Key::ControlLeft) {
                 linvel.y = Real::from(-0.1) * SPEED
             }
             if linvel != Vector3::zeros() {

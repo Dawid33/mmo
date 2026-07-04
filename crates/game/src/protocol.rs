@@ -3,7 +3,6 @@ use std::time::Duration;
 use crate::input::InputEvent;
 use crate::{ChunkCoords, ClientId, Rollback};
 use derive_more::Debug;
-use log::info;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Usize {

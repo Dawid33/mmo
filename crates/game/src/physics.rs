@@ -1,17 +1,8 @@
-use std::ops::{Deref, DerefMut};
 
-use crate::na::Vector3;
-use borrow::PartialHelper;
-use crossbeam::channel::Sender;
-use log::info;
 use rapier3d::prelude::*;
 use slotmapd::KeyData;
-use winit::dpi::PhysicalInsets;
 
-use crate::EntityKey;
-use crate::{PhysicsState, Undo};
-
-use crate::{ClientUpdateEvent, Controller, GameData, GameDataUpdate};
+use crate::{Controller, EntityKey, GameDataUpdate, Undo};
 
 #[derive(Default)]
 pub struct PhysicsController {
@@ -41,7 +32,7 @@ impl Controller for PhysicsController {
         for handle in data.physics.islands.active_bodies() {
             let b = data.physics.bodies.get(*handle).unwrap();
             let e_id = EntityKey::from(KeyData::from_ffi(b.user_data as u64));
-            if let Some(c) = data.ecs.camera.try_get(e_id) {
+            if let Some(_c) = data.ecs.camera.try_get(e_id) {
                 data.send(GameDataUpdate::new(
                     crate::GameDataTransactionKind::Do,
                     crate::GameDataUpdateKind::UpdateCameraViewMatrix(e_id, *b.position()),
