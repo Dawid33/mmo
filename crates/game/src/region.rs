@@ -89,20 +89,38 @@ impl Region {
                             self.handle_event(server_event.clone().0.kind)?;
                             self.data.forget();
 
-                            // Remove the corresponding event from event log, it must
-                            // have happened later.
-                            // TODO: DO NOT DO THIS FOR EVENTS THAT ORIGINATE FROM
-                            // OTHER CLIENTS
-                            {
+                            let foreign = match server_event.0.kind.origin_client() {
+                                Some(origin) => Some(origin) != self.local_client_id,
+                                None => false,
+                            };
+
+                            if foreign {
+                                // Another client's event is an *insertion* into
+                                // our timeline: keep every prediction, shift
+                                // them all one id later.
+                                for event in &mut temp_log {
+                                    event.id += 1;
+                                }
+                            } else {
+                                // Our own event came back at a different id
+                                // than predicted: remove our matching
+                                // prediction, shifting everything before it.
+                                // Only locally-originated predictions are
+                                // candidates for removal.
                                 let len = temp_log.len();
-                                let mut iter = temp_log.iter_mut().enumerate();
-                                while let Some((i, event)) = iter.next() {
-                                    if event.kind == server_event.0.kind {
-                                        drop(iter);
+                                let mut i = 0;
+                                while i < temp_log.len() {
+                                    let e = &mut temp_log[i];
+                                    let local_origin = match e.kind.origin_client() {
+                                        Some(o) => Some(o) == self.local_client_id,
+                                        None => true,
+                                    };
+                                    if local_origin && e.kind == server_event.0.kind {
                                         temp_log.remove(i);
                                         break;
                                     }
-                                    event.id += 1;
+                                    e.id += 1;
+                                    i += 1;
                                 }
                                 if len == temp_log.len() {
                                     info!(
@@ -111,7 +129,6 @@ impl Region {
                                 }
                             }
 
-                            // TODO: if from other client, increase event id' as well as self.next_game_event_id
                             for event in &mut temp_log {
                                 let _ = self.handle_event(event.clone().kind);
                             }
