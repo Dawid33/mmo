@@ -57,6 +57,11 @@ impl Region {
     /// Check if event from network matches client event history. rollback the
     /// game state as neccessary and re-simulate to current time.
     pub fn reconcile(&mut self, server_event: GameEvent) -> Result<(), GameError> {
+        // Events older than the snapshot this region was constructed from
+        // are already baked into its state.
+        if server_event.id < self.base_event_id {
+            return Ok(());
+        }
         self.input_buffer.push(Reverse(server_event.clone()));
 
         if self.input_buffer.len() > 1000 {
