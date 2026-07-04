@@ -2,7 +2,9 @@ use bevy::prelude::*;
 use crossbeam::channel::{Receiver, Sender};
 use game::{ClientId, ClientUpdateEvent, GameEventKind};
 
+mod bridge;
 pub mod convert;
+pub use bridge::*;
 
 #[derive(Resource)]
 pub struct ClientUpdates(pub Receiver<ClientUpdateEvent>);
@@ -23,23 +25,12 @@ impl Plugin for SimBridgePlugin {
         app.insert_resource(ClientUpdates(self.client_recv.clone()))
             .insert_resource(GameEvents(self.game_send.clone()))
             .init_resource::<LocalPlayer>()
-            .add_systems(PreUpdate, drain_client_updates);
-    }
-}
-
-fn drain_client_updates(updates: Res<ClientUpdates>, mut player: ResMut<LocalPlayer>) {
-    while let Ok(event) = updates.0.try_recv() {
-        match event {
-            ClientUpdateEvent::NewRegion(id, _data, _receiver) => {
-                info!("bridge: new region {:?}", id);
-            }
-            ClientUpdateEvent::SetPlayer(client_id) => {
-                info!("bridge: local player {:?}", client_id);
-                player.0 = Some(client_id);
-            }
-            ClientUpdateEvent::GameCrash(e) => {
-                error!("bridge: game thread crashed: {:?}", e);
-            }
-        }
+            .init_resource::<bridge::Regions>()
+            .init_resource::<bridge::RegionRoots>()
+            .init_resource::<bridge::SimEntityMap>()
+            .add_systems(
+                PreUpdate,
+                (bridge::drain_client_updates, bridge::drain_region_updates).chain(),
+            );
     }
 }
