@@ -52,6 +52,11 @@ impl SimTarget {
 #[derive(Component)]
 pub struct VoxelData(pub Vec<Voxel>);
 
+/// Mirror of the sim's `EntityKind` for this entity. Consumed by the avatar
+/// system to attach a renderable mesh.
+#[derive(Component, Clone, Copy)]
+pub struct SimKind(pub game::EntityKind);
+
 pub fn drain_client_updates(
     mut commands: Commands,
     updates: Res<ClientUpdates>,
@@ -121,6 +126,9 @@ fn spawn_region_snapshot(
             }
             // Other players' pose tracking comes from the rigidbody branch
             // above; their cameras stay inert in this window.
+        }
+        if let Some(kind) = *data.ecs.kind.try_get(key) {
+            e.insert(SimKind(kind));
         }
         map.0.insert((region, key), e.id());
     }
@@ -232,6 +240,16 @@ pub fn drain_region_updates(
                         target.rot = tf.rotation;
                     } else {
                         commands.entity(e).insert(SimTarget::camera(tf.translation, tf.rotation));
+                    }
+                }
+                GameDataUpdateKind::SetEntityKind(key, kind) => {
+                    let Some(&e) = map.0.get(&(region, key)) else {
+                        warn!("bridge: SetEntityKind for unmapped {:?}", key);
+                        continue;
+                    };
+                    match kind {
+                        Some(k) => { commands.entity(e).insert(SimKind(k)); }
+                        None => { commands.entity(e).remove::<SimKind>(); }
                     }
                 }
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
@@ -390,6 +408,54 @@ mod tests {
             app.world().entity(e).contains::<SimTarget>(),
             "foreign player's pose must still be tracked"
         );
+    }
+
+    #[test]
+    fn set_entity_kind_mirrors_to_sim_kind() {
+        let (mut app, _c, updates, region_id) = test_app();
+        app.update();
+        let k = key(5);
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
+        updates.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetEntityKind(k, Some(game::EntityKind::Player)),
+        )).unwrap();
+        app.update();
+        app.update();
+
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).unwrap();
+        assert!(app.world().entity(e).contains::<SimKind>());
+
+        updates.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetEntityKind(k, None),
+        )).unwrap();
+        app.update();
+        assert!(!app.world().entity(e).contains::<SimKind>());
+    }
+
+    #[test]
+    fn snapshot_carries_entity_kind() {
+        let (mut app, client) = app_shell();
+        let (_update_send, update_recv) = crossbeam::channel::unbounded();
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        rb.create_player_safe(0);
+        rb.create_player_safe(1);
+        let data = (*rb.data).clone();
+        let k0 = *data.player_entites.get(&0).unwrap();
+        let k1 = *data.player_entites.get(&1).unwrap();
+
+        let region_id = ChunkCoords::new(0, 0, 0);
+        client.send(ClientUpdateEvent::SetPlayer(0)).unwrap();
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        app.update();
+
+        let map = app.world().resource::<SimEntityMap>();
+        let e0 = *map.0.get(&(region_id, k0)).unwrap();
+        let e1 = *map.0.get(&(region_id, k1)).unwrap();
+        assert!(app.world().entity(e0).contains::<SimKind>());
+        assert!(app.world().entity(e1).contains::<SimKind>());
     }
 
     #[test]

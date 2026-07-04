@@ -9,6 +9,7 @@ use crossbeam::channel::{Receiver, Sender};
 use game::{ClientId, ClientUpdateEvent, GameEventKind};
 use std::collections::BTreeMap;
 
+mod avatar;
 mod bridge;
 pub mod convert;
 mod input;
@@ -44,6 +45,7 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<bridge::Regions>()
             .init_resource::<bridge::RegionRoots>()
             .init_resource::<bridge::SimEntityMap>()
+            .init_resource::<avatar::AvatarAssets>()
             .add_systems(
                 PreUpdate,
                 (
@@ -55,7 +57,12 @@ impl Plugin for SimBridgePlugin {
             .add_systems(Startup, setup_scene)
             .add_systems(
                 Update,
-                (meshing::queue_meshing, meshing::apply_meshed_chunks, interpolate::interpolate_transforms),
+                (
+                    meshing::queue_meshing,
+                    meshing::apply_meshed_chunks,
+                    interpolate::interpolate_transforms,
+                    avatar::attach_avatars,
+                ),
             );
     }
 }

@@ -9,7 +9,7 @@ use nalgebra as na;
 use na::{Perspective3, Quaternion, Translation3, Unit};
 use macros::rollback;
 use parry3d::math::{RawReal, Real};
-use rapier3d::prelude::{RigidBodyBuilder, RigidBodyHandle};
+use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
 use slotmapd::Key as _;
 use slotmapd::{new_key_type, SlotMap, SparseSecondaryMap};
 use std::sync::{Arc, atomic::AtomicUsize};
@@ -51,6 +51,7 @@ pub enum GameDataUpdateKind {
     CreateEntity(EntityKey),
     RemoveEntity(EntityKey),
     SetFreeCam(ClientId, bool),
+    SetEntityKind(EntityKey, Option<EntityKind>),
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +82,14 @@ pub struct Client {
     pub fps_cam_mode: bool,
 }
 
+/// What an entity *is*, for rendering and future gameplay. The player is the
+/// first kind; NPC kinds extend this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, Hash)]
+pub enum EntityKind {
+    #[default]
+    Player,
+}
+
 #[rollback(GameData)]
 mod game_data {
     use parry3d::math::{Real, Vector};
@@ -90,8 +99,8 @@ mod game_data {
     };
 
     use super::{
-        Camera, Chunk, Client, ClientId, Component, EntityKey, IsometryReal, RigidBodyHandle,
-        RollbackInfo, SlotMap,
+        Camera, Chunk, Client, ClientId, Component, EntityKey, EntityKind, IsometryReal,
+        RigidBodyHandle, RollbackInfo, SlotMap,
     };
     use std::collections::BTreeMap;
 
@@ -116,6 +125,7 @@ mod game_data {
         isometry: Component<IsometryReal>,
         rigidbody: Component<RigidBodyHandle>,
         chunk: Component<Chunk>,
+        kind: Component<EntityKind>,
     }
 
     pub struct PhysicsState {
@@ -147,6 +157,7 @@ impl Undo<Ecs> {
         self.isometry.insert_safe(key);
         self.rigidbody.insert_safe(key);
         self.chunk.insert_safe(key);
+        self.kind.insert_safe(key);
         key
     }
 }
@@ -251,6 +262,24 @@ impl Rollback {
         e
     }
 
+    /// Attach a capsule collider to an entity's body. Entity-generic: player
+    /// today, NPCs later. Undo restores the whole PhysicsState snapshot —
+    /// the vendored fork has no exact ColliderSet inverse, and
+    /// insert_with_parent also mutates the parent body's mass properties.
+    pub fn attach_capsule_collider_safe(
+        &mut self,
+        e: EntityKey,
+        body: RigidBodyHandle,
+        half_height: f32,
+        radius: f32,
+    ) {
+        let collider = ColliderBuilder::capsule_y(Real::from(half_height), Real::from(radius))
+            .user_data(e.data().as_ffi() as u128)
+            .build();
+        let p = self.data.physics.snapshot_raw();
+        p.colliders.insert_with_parent(collider, body, p.bodies);
+    }
+
     pub fn create_player_safe(&mut self, client_id: ClientId) {
         let e = self.ecs.create_entity_safe();
         let position = IsometryReal::from_parts(
@@ -272,6 +301,7 @@ impl Rollback {
         let handle = scope.insert(body);
         scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
+        self.attach_capsule_collider_safe(e, handle, 0.5, 0.4);
         let cam = Camera::new(handle);
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
@@ -284,6 +314,15 @@ impl Rollback {
             GameDataUpdateKind::RemoveCameraComponent(e),
         ));
         self.data.ecs.camera.set_safe(e, Some(cam));
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetEntityKind(e, Some(EntityKind::Player)),
+        ));
+        self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
+            GameDataTransactionKind::Undo,
+            GameDataUpdateKind::SetEntityKind(e, None),
+        ));
+        self.data.ecs.kind.set_safe(e, Some(EntityKind::Player));
         self.data.player_entites.insert(client_id, e);
     }
 }
