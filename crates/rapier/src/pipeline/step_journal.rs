@@ -22,7 +22,7 @@ pub struct StepJournal {
     pub(crate) saved_body_set: HashSet<RigidBodyHandle>,
     pub(crate) saved_colliders: Vec<(ColliderHandle, Collider)>,
     pub(crate) saved_collider_set: HashSet<ColliderHandle>,
-    // pub(crate) islands: Option<crate::dynamics::IslandsSaved>, // Task 3
+    pub(crate) islands: Option<crate::dynamics::IslandsSaved>,
     pub(crate) lists: Option<ListsSaved>,
     pub(crate) joints: Option<Box<(ImpulseJointSet, MultibodyJointSet)>>,
     // pub(crate) narrow: Vec<crate::geometry::NarrowUndo>, // Task 5
@@ -30,9 +30,6 @@ pub struct StepJournal {
     // pub(crate) broad: Option<Box<crate::geometry::BroadSaved>>, // Task 4
 }
 
-// Task 3 constructs and reads these fields; until then nothing builds a
-// `ListsSaved`, so silence the (correct) dead-code warning.
-#[allow(dead_code)]
 pub(crate) struct ListsSaved {
     pub modified_bodies: crate::dynamics::ModifiedRigidBodies,
     pub modified_colliders: crate::geometry::ModifiedColliders,
@@ -48,12 +45,13 @@ impl StepJournal {
             && self.saved_colliders.is_empty()
             && self.narrow_wholesale.is_none()
             // && self.broad.is_none() // Task 4
-        // islands are captured unconditionally but are O(active)/O(modified);
-        // is_empty() reports "nothing moved" for the size assertions, so it
-        // will additionally need to require the islands capture to be empty
-        // once Task 3 adds the field:
-        // self.islands.as_ref().map_or(true, |i| i.active_set.is_empty())
-            && true // Task 3
+            // islands are captured unconditionally but are O(active)/O(modified);
+            // is_empty() reports "nothing moved" for the size assertions, so an
+            // empty capture is one with no active bodies at step start.
+            && self
+                .islands
+                .as_ref()
+                .map_or(true, |i| i.active_set.is_empty())
     }
 
     /// Saves the pre-mutation state of `body` the first time it's touched this tick.
@@ -90,23 +88,37 @@ impl StepJournal {
         // Sections are disjoint state; within each, restoration is LIFO.
         // Bodies/colliders: value restore (old clone wins over any number of
         // intra-tick writes).
-        // for (h, old) in self.saved_bodies.into_iter().rev() {
-        //     bodies.restore_raw(h, old); // Task 3
-        // }
-        // for (h, old) in self.saved_colliders.into_iter().rev() {
-        //     colliders.restore_raw(h, old); // Task 3
-        // }
-        // Later tasks: islands, lists, joints, narrow (LIFO ops or wholesale),
-        // broad (wholesale).
-        let _ = (
-            islands,
-            broad_phase,
-            narrow_phase,
-            bodies,
-            colliders,
-            impulse_joints,
-            multibody_joints,
-        );
-        let _ = (self.lists, self.joints, self.narrow_wholesale); // Task 3/5
+        for (h, old) in self.saved_bodies.into_iter().rev() {
+            bodies.restore_raw(h, old);
+        }
+        for (h, old) in self.saved_colliders.into_iter().rev() {
+            colliders.restore_raw(h, old);
+        }
+
+        // Islands: whole hashed-field snapshot restore.
+        if let Some(s) = self.islands {
+            islands.journal_restore(s);
+        }
+
+        // Modified/removed lists + the joint-set to-wake-up queues: wholesale
+        // restore of the pre-tick values.
+        if let Some(l) = self.lists {
+            bodies.set_modified(l.modified_bodies);
+            colliders.set_modified(l.modified_colliders);
+            colliders.set_removed(l.removed_colliders);
+            impulse_joints.to_wake_up = l.impulse_to_wake_up;
+            multibody_joints.to_wake_up = l.multibody_to_wake_up;
+        }
+
+        // Joints: coarse wholesale fallback (only captured when non-empty at
+        // step start). Applied after `lists` so the full pre-tick joint sets win.
+        if let Some(j) = self.joints {
+            let (ij, mj) = *j;
+            *impulse_joints = ij;
+            *multibody_joints = mj;
+        }
+
+        // Narrow (Task 5) / broad (Task 4) are not yet captured here.
+        let _ = (broad_phase, narrow_phase, self.narrow_wholesale);
     }
 }

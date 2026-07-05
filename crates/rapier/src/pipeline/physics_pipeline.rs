@@ -81,8 +81,21 @@ impl PhysicsPipeline {
         &mut self,
         colliders: &mut ColliderSet,
         modified_colliders: &mut ModifiedColliders,
+        journal: Option<&StepJournal>,
     ) {
         for co in colliders.colliders.iter_mut() {
+            // Hook 9: this sweep sets EVERY collider's `changes` to empty. For a
+            // collider that was already empty this is a value no-op (no hash
+            // change → no save needed). Any collider whose `changes` is NOT empty
+            // must have been journaled earlier this tick, or its clear-to-empty
+            // would be an unrecoverable mutation.
+            debug_assert!(
+                co.1.changes.is_empty()
+                    || journal.map_or(true, |j| j
+                        .saved_collider_set
+                        .contains(&ColliderHandle(co.0))),
+                "clear_modified_colliders: non-empty collider changes not journaled"
+            );
             co.1.changes = ColliderChanges::empty();
         }
         // for handle in modified_colliders.iter() {
@@ -385,13 +398,20 @@ impl PhysicsPipeline {
         bodies: &mut RigidBodySet,
         colliders: &mut ColliderSet,
         modified_colliders: &mut ModifiedColliders,
+        journal: &mut Option<&mut StepJournal>,
     ) {
         // Set the rigid-bodies and kinematic bodies to their final position.
+        // NOTE: each `rb` here is in the active set and was already journaled by
+        // hook 6 before this substep, so only the collider writes need saving.
         for handle in islands.active_bodies() {
             let rb = bodies.index_mut_internal(*handle);
             rb.pos.position = rb.pos.next_position;
-            rb.colliders
-                .update_positions(colliders, modified_colliders, &rb.pos.position);
+            rb.colliders.update_positions_journaled(
+                colliders,
+                modified_colliders,
+                &rb.pos.position,
+                journal,
+            );
         }
     }
 
@@ -568,6 +588,24 @@ impl PhysicsPipeline {
 
         // Apply some of delayed wake-ups.
         self.counters.stages.user_changes.start();
+
+        // Journal (hook 1): snapshot the island manager + joint sets before any
+        // mutation this tick, and clone the joint-set to-wake-up queues *before*
+        // the drain below empties them. Joints are captured wholesale only when
+        // non-empty (the documented coarse fallback; the game uses none today).
+        let saved_wake_up = if let Some(j) = journal.as_deref_mut() {
+            j.islands = Some(islands.journal_save());
+            if impulse_joints.len() > 0 || multibody_joints.multibodies.len() > 0 {
+                j.joints = Some(Box::new((impulse_joints.clone(), multibody_joints.clone())));
+            }
+            Some((
+                impulse_joints.to_wake_up.clone(),
+                multibody_joints.to_wake_up.clone(),
+            ))
+        } else {
+            None
+        };
+
         #[cfg(feature = "enhanced-determinism")]
         let impulse_joints_iterator = impulse_joints
             .to_wake_up
@@ -579,20 +617,54 @@ impl PhysicsPipeline {
             .drain()
             .chain(multibody_joints.to_wake_up.drain());
         for handle in impulse_joints_iterator {
-            islands.wake_up(bodies, handle, true);
+            // Journal (hook 2): wake_up_journaled saves the body before waking it.
+            islands.wake_up_journaled(bodies, handle, true, &mut journal.as_deref_mut());
         }
 
         // Apply modifications.
         let mut modified_colliders = colliders.take_modified();
         let mut removed_colliders = colliders.take_removed();
 
+        // Journal (hook 3a): save every modified collider before
+        // `handle_user_changes_to_colliders` mutates it.
+        if let Some(j) = journal.as_deref_mut() {
+            for h in modified_colliders.iter() {
+                if let Some(co) = colliders.get(*h) {
+                    j.save_collider(*h, co);
+                }
+            }
+        }
+
         super::user_changes::handle_user_changes_to_colliders(
             bodies,
             colliders,
             &modified_colliders[..],
+            &mut journal.as_deref_mut(),
         );
 
         let mut modified_bodies = bodies.take_modified();
+
+        // Journal (hook 3b): save every modified body before
+        // `handle_user_changes_to_rigid_bodies` mutates it, and record the
+        // pre-tick modified/removed lists together with the to-wake-up queues
+        // cloned in hook 1.
+        if let Some(j) = journal.as_deref_mut() {
+            for h in modified_bodies.iter() {
+                if let Some(rb) = bodies.get(*h) {
+                    j.save_body(*h, rb);
+                }
+            }
+            let (impulse_to_wake_up, multibody_to_wake_up) =
+                saved_wake_up.expect("saved_wake_up is set whenever journaling");
+            j.lists = Some(super::step_journal::ListsSaved {
+                modified_bodies: modified_bodies.clone(),
+                modified_colliders: modified_colliders.clone(),
+                removed_colliders: removed_colliders.clone(),
+                impulse_to_wake_up,
+                multibody_to_wake_up,
+            });
+        }
+
         super::user_changes::handle_user_changes_to_rigid_bodies(
             Some(islands),
             bodies,
@@ -601,6 +673,7 @@ impl PhysicsPipeline {
             multibody_joints,
             &modified_bodies,
             &mut modified_colliders,
+            &mut journal.as_deref_mut(),
         );
 
         // Disabled colliders are treated as if they were removed.
@@ -613,6 +686,13 @@ impl PhysicsPipeline {
                 .filter(|h| colliders.get(*h).map(|c| !c.is_enabled()).unwrap_or(false)),
         );
         self.counters.stages.user_changes.pause();
+
+        // Journal (hook 10): multibody bodies are only covered by the wholesale
+        // joint snapshot (hook 1). Assert it was taken when any multibody exists.
+        debug_assert!(
+            multibody_joints.multibodies.is_empty()
+                || journal.as_deref().map_or(true, |j| j.joints.is_some())
+        );
 
         // TODO: do this only on user-change.
         // TODO: do we want some kind of automatic inverse kinematics?
@@ -641,7 +721,7 @@ impl PhysicsPipeline {
         );
 
         self.counters.stages.user_changes.resume();
-        self.clear_modified_colliders(colliders, &mut modified_colliders);
+        self.clear_modified_colliders(colliders, &mut modified_colliders, journal.as_deref());
         self.clear_modified_bodies(bodies, &mut modified_bodies);
         removed_colliders.clear();
         self.counters.stages.user_changes.pause();
@@ -718,6 +798,20 @@ impl PhysicsPipeline {
 
             self.counters.ccd.num_substeps += 1;
 
+            // Journal (hook 6): save every active body before this substep mutates
+            // it. This single pre-substep save covers kinematic-velocity
+            // interpolation, solver writeback, sleep commits, CCD flag writes,
+            // advance_to_final_positions, and both mass-props loops — all of which
+            // iterate subsets of the active set. save_body dedups, so the repeated
+            // touches across those stages are free.
+            if let Some(j) = journal.as_deref_mut() {
+                for h in islands.active_bodies() {
+                    if let Some(rb) = bodies.get(*h) {
+                        j.save_body(*h, rb);
+                    }
+                }
+            }
+
             self.interpolate_kinematic_velocities(&integration_parameters, islands, bodies);
             self.build_islands_and_solve_velocity_constraints(
                 gravity,
@@ -756,7 +850,13 @@ impl PhysicsPipeline {
             }
 
             self.counters.stages.update_time.resume();
-            self.advance_to_final_positions(islands, bodies, colliders, &mut modified_colliders);
+            self.advance_to_final_positions(
+                islands,
+                bodies,
+                colliders,
+                &mut modified_colliders,
+                &mut journal.as_deref_mut(),
+            );
             self.counters.stages.update_time.pause();
 
             if remaining_substeps > 0 {
@@ -777,7 +877,11 @@ impl PhysicsPipeline {
                     &mut journal.as_deref_mut(),
                 );
 
-                self.clear_modified_colliders(colliders, &mut modified_colliders);
+                self.clear_modified_colliders(
+                    colliders,
+                    &mut modified_colliders,
+                    journal.as_deref(),
+                );
             } else {
                 // If we ran the last substep, just update the broad-phase bvh instead
                 // of a full collision-detection step.

@@ -4,6 +4,7 @@ pub use self::ccd::CCDSolver;
 pub use self::coefficient_combine_rule::CoefficientCombineRule;
 pub use self::integration_parameters::IntegrationParameters;
 pub use self::island_manager::IslandManager;
+pub(crate) use self::island_manager::IslandsSaved;
 
 #[cfg(feature = "dim3")]
 pub use self::integration_parameters::FrictionModel;

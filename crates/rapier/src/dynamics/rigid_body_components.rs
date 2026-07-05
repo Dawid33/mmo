@@ -1107,14 +1107,24 @@ impl RigidBodyColliders {
         rb_mprops.update_world_mass_properties(rb_type, &rb_pos.position);
     }
 
-    /// Update the positions of all the colliders attached to this rigid-body.
-    pub(crate) fn update_positions(
+    /// Update the positions of all the colliders attached to this rigid-body,
+    /// saving each collider's pre-mutation state into `journal` (if any) before
+    /// overwriting its `pos`/`changes`.
+    pub(crate) fn update_positions_journaled(
         &self,
         colliders: &mut ColliderSet,
         modified_colliders: &mut ModifiedColliders,
         parent_pos: &Isometry<Real>,
+        journal: &mut Option<&mut crate::pipeline::StepJournal>,
     ) {
         for handle in &self.0 {
+            // Journal (hook 8): save before the `pos`/`changes` writes below.
+            if let Some(j) = journal.as_deref_mut() {
+                if let Some(co) = colliders.get(*handle) {
+                    j.save_collider(*handle, co);
+                }
+            }
+
             // NOTE: the ColliderParent component must exist if we enter this method.
             let co = colliders.index_mut_internal(*handle);
             let new_pos = parent_pos * co.parent.as_ref().unwrap().pos_wrt_parent;

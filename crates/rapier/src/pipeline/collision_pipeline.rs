@@ -141,6 +141,7 @@ impl CollisionPipeline {
             bodies,
             colliders,
             &modified_colliders[..],
+            &mut None,
         );
         super::user_changes::handle_user_changes_to_rigid_bodies(
             None,
@@ -150,6 +151,7 @@ impl CollisionPipeline {
             &mut MultibodyJointSet::new(),
             &modified_bodies,
             &mut modified_colliders,
+            &mut None,
         );
 
         // Disabled colliders are treated as if they were removed.
