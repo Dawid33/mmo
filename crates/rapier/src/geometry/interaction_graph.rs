@@ -54,7 +54,10 @@ impl<N: Copy, E> InteractionGraph<N, E> {
         &mut self,
         index1: ColliderGraphIndex,
         index2: ColliderGraphIndex,
-    ) -> Option<E> {
+    ) -> Option<E>
+    where
+        E: Clone,
+    {
         let id = self.graph.find_edge(index1, index2)?;
         self.graph.remove_edge(id)
     }
@@ -81,7 +84,10 @@ impl<N: Copy, E> InteractionGraph<N, E> {
     /// a map between `CollisionObjectSlabHandle` and `ColliderGraphIndex`, then you should update this
     /// map to associate `id` to the handle returned by this method.
     #[must_use = "The graph index of the collision object returned by this method has been changed to `id`."]
-    pub(crate) fn remove_node(&mut self, id: ColliderGraphIndex) -> Option<N> {
+    pub(crate) fn remove_node(&mut self, id: ColliderGraphIndex) -> Option<N>
+    where
+        E: Clone,
+    {
         let _ = self.graph.remove_node(id);
         self.graph.node_weight(id).cloned()
     }

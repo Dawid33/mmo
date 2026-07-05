@@ -309,29 +309,10 @@ impl<N, E> Graph<N, E> {
     /// **Note:** `Graph` allows adding parallel (“duplicate”) edges. If you want
     /// to avoid this, use [`.update_edge(a, b, weight)`](#method.update_edge) instead.
     pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, weight: E) -> EdgeIndex {
-        assert!(self.edges.len() != crate::INVALID_USIZE);
-        let edge_idx = EdgeIndex::new(self.edges.len() as u32);
-        let mut edge = Edge {
-            weight,
-            node: [a, b],
-            next: [EdgeIndex::end(); 2],
-        };
-        match index_twice(&mut self.nodes, a.index(), b.index()) {
-            Pair::None => panic!("Graph::add_edge: node indices out of bounds"),
-            Pair::One(an) => {
-                edge.next = an.next;
-                an.next[0] = edge_idx;
-                an.next[1] = edge_idx;
-            }
-            Pair::Both(an, bn) => {
-                // a and b are different indices
-                edge.next = [an.next[0], bn.next[1]];
-                an.next[0] = edge_idx;
-                bn.next[1] = edge_idx;
-            }
-        }
-        self.edges.push(edge);
-        edge_idx
+        // Non-journaled path: delegate to the journaled twin with `None` so the
+        // list-splice logic exists in exactly one place (the full step-journal
+        // battery proves the behavior is bit-identical).
+        self.add_edge_journaled(a, b, weight, None)
     }
 
     /// Journaling variant of [`Self::add_edge`]. Records the two overwritten
@@ -404,7 +385,10 @@ impl<N, E> Graph<N, E> {
     /// edges, including *n* calls to `.remove_edge()` where *n* is the number
     /// of edges with an endpoint in `a`, and including the edges with an
     /// endpoint in the displaced node.
-    pub fn remove_node(&mut self, a: NodeIndex) -> Option<N> {
+    pub fn remove_node(&mut self, a: NodeIndex) -> Option<N>
+    where
+        E: Clone,
+    {
         self.nodes.get(a.index())?;
         for d in &DIRECTIONS {
             let k = *d as usize;
@@ -449,43 +433,6 @@ impl<N, E> Graph<N, E> {
         Some(node.weight)
     }
 
-    /// For edge `e` with endpoints `edge_node`, replace links to it,
-    /// with links to `edge_next`.
-    fn change_edge_links(
-        &mut self,
-        edge_node: [NodeIndex; 2],
-        e: EdgeIndex,
-        edge_next: [EdgeIndex; 2],
-    ) {
-        for &d in &DIRECTIONS {
-            let k = d as usize;
-            let node = match self.nodes.get_mut(edge_node[k].index()) {
-                Some(r) => r,
-                None => {
-                    debug_assert!(
-                        false,
-                        "Edge's endpoint dir={:?} index={:?} not found",
-                        d, edge_node[k]
-                    );
-                    return;
-                }
-            };
-            let fst = node.next[k];
-            if fst == e {
-                //println!("Updating first edge 0 for node {}, set to {}", edge_node[0], edge_next[0]);
-                node.next[k] = edge_next[k];
-            } else {
-                let mut edges = edges_walker_mut(&mut self.edges, fst, d);
-                while let Some(curedge) = edges.next_edge() {
-                    if curedge.next[k] == e {
-                        curedge.next[k] = edge_next[k];
-                        break; // the edge can only be present once in the list.
-                    }
-                }
-            }
-        }
-    }
-
     /// Remove an edge and return its edge weight, or `None` if it didn't exist.
     ///
     /// Apart from `e`, this invalidates the last edge index in the graph
@@ -493,36 +440,16 @@ impl<N, E> Graph<N, E> {
     ///
     /// Computes in **O(e')** time, where **e'** is the size of four particular edge lists, for
     /// the vertices of `e` and the vertices of another affected edge.
-    pub fn remove_edge(&mut self, e: EdgeIndex) -> Option<E> {
-        // every edge is part of two lists,
-        // outgoing and incoming edges.
-        // Remove it from both
-        let (edge_node, edge_next) = match self.edges.get(e.index()) {
-            None => return None,
-            Some(x) => (x.node, x.next),
-        };
-        // Remove the edge from its in and out lists by replacing it with
-        // a link to the next in the list.
-        self.change_edge_links(edge_node, e, edge_next);
-        self.remove_edge_adjust_indices(e)
-    }
-
-    fn remove_edge_adjust_indices(&mut self, e: EdgeIndex) -> Option<E> {
-        // swap_remove the edge -- only the removed edge
-        // and the edge swapped into place are affected and need updating
-        // indices.
-        let edge = self.edges.swap_remove(e.index());
-        let swap = match self.edges.get(e.index()) {
-            // no element needed to be swapped.
-            None => return Some(edge.weight),
-            Some(ed) => ed.node,
-        };
-        let swapped_e = EdgeIndex::new(self.edges.len() as u32);
-
-        // Update the edge lists by replacing links to the old index by references to the new
-        // edge index.
-        self.change_edge_links(swap, swapped_e, [e, e]);
-        Some(edge.weight)
+    pub fn remove_edge(&mut self, e: EdgeIndex) -> Option<E>
+    where
+        E: Clone,
+    {
+        // Non-journaled path: delegate to the journaled twin with `None`. The
+        // `E: Clone` bound is inherited from the twin but never exercised at
+        // runtime here (the clone is guarded on `ops.is_some()`); every `E` in
+        // this crate (`ContactPair`, `IntersectionPair`, `ImpulseJoint`, `()`)
+        // is `Clone`, so the bound is free.
+        self.remove_edge_journaled(e, None)
     }
 
     /// Journaling variant of [`Self::change_edge_links`]: every `node.next[k]` /

@@ -212,38 +212,8 @@ impl<T> Coarena<T> {
     where
         T: Clone,
     {
-        let (i1, g1) = a.into_raw_parts();
-        let (i2, g2) = b.into_raw_parts();
-
-        assert_ne!(i1, i2, "Cannot index the same object twice.");
-
-        let (elt1, elt2) = if i1 > i2 {
-            if self.data.len() <= i1 as usize {
-                self.data
-                    .resize(i1 as usize + 1, (u32::MAX, default.clone()));
-            }
-
-            let (left, right) = self.data.split_at_mut(i1 as usize);
-            (&mut right[0], &mut left[i2 as usize])
-        } else {
-            // i2 > i1
-            if self.data.len() <= i2 as usize {
-                self.data
-                    .resize(i2 as usize + 1, (u32::MAX, default.clone()));
-            }
-
-            let (left, right) = self.data.split_at_mut(i2 as usize);
-            (&mut left[i1 as usize], &mut right[0])
-        };
-
-        if elt1.0 != g1 {
-            *elt1 = (g1, default.clone());
-        }
-
-        if elt2.0 != g2 {
-            *elt2 = (g2, default);
-        }
-
-        (&mut elt1.1, &mut elt2.1)
+        // Non-journaled path: delegate to the journaled twin with `None` so the
+        // resize/slot-init logic lives in exactly one place.
+        self.ensure_pair_exists_journaled(a, b, default, None)
     }
 }
