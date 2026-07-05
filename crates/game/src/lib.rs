@@ -47,7 +47,7 @@ pub enum ClientUpdateEvent {
 
 pub use region::Region;
 
-pub trait Controller {
+pub trait Controller: Send {
     fn on_tick<'a>(&mut self, _t: &mut Undo<GameData>) {}
 }
 

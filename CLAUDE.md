@@ -21,9 +21,22 @@ A voxel MMO in Rust with client/server architecture over QUIC, built around dete
 
 The server listens on `127.0.0.1:6466` (hardcoded in `crates/server/src/main.rs`); the client connects to localhost. Run the server before/alongside the client.
 
-The game crate has the rollback test suite: `cargo test -p game` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact. The client has its own headless test suite: `cargo test -p client` (16 tests covering the sim-bridge, coordinate conversion, interpolation, and async chunk meshing, run via `MinimalPlugins`/`AssetPlugin` with no window or GPU).
+The game crate has the rollback test suite: `cargo test -p game` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact. The client has its own headless test suite: `cargo test -p client` (26 tests covering the sim-bridge, coordinate conversion, interpolation, and async chunk meshing, run via `MinimalPlugins`/`AssetPlugin` with no window or GPU).
 
 Bevy is pinned to `0.18` in the root `Cargo.toml`; Bevy's API surface moves fast between minor versions, so treat upgrades as a deliberate, tested migration rather than a routine bump — API drift (renamed types/traits, moved modules, changed system-set names) is a known hazard.
+
+### WASM build (offline single-player)
+
+The client also targets `wasm32-unknown-unknown` (native QUIC netcode is
+replaced by an embedded `LocalServer`; see `crates/client/src/local_server.rs`):
+
+```sh
+# From the repo root (so ./assets is served):
+cargo run -p client --target wasm32-unknown-unknown   # opens via wasm-server-runner
+```
+
+Requires `rustup target add wasm32-unknown-unknown` and
+`cargo install wasm-server-runner`.
 
 ### Profiling
 

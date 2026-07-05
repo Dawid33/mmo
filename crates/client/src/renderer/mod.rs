@@ -75,6 +75,7 @@ impl Plugin for SimBridgePlugin {
 /// parent directory. Each base is then joined with the same relative path
 /// `AssetPlugin { file_path: "../../assets", .. }` uses in main.rs, plus our own
 /// `blocks` subdir, so all three bases resolve consistently.
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_blocks_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
 
@@ -96,6 +97,15 @@ fn resolve_blocks_dir() -> std::path::PathBuf {
     base.join("../../assets/blocks")
 }
 
+/// Block textures for targets with no filesystem (wasm): embedded at compile
+/// time. The `embedded_block_textures_match_assets_dir` test keeps this list
+/// in sync with assets/blocks/*.png.
+#[cfg(any(target_arch = "wasm32", test))]
+const EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])] = &[(
+    "dirt.png",
+    include_bytes!("../../../../assets/blocks/dirt.png"),
+)];
+
 fn setup_scene(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -104,25 +114,39 @@ fn setup_scene(
     let mut layers: Vec<image::RgbaImage> = Vec::new();
     let mut layer_names: Vec<String> = Vec::new();
     let mut sorted: BTreeMap<String, image::RgbaImage> = BTreeMap::new();
-    let blocks_dir = resolve_blocks_dir();
-    if let Ok(dir) = std::fs::read_dir(&blocks_dir) {
-        for file in dir {
-            let file = match file {
-                Ok(file) => file,
-                Err(_) => continue,
-            };
-            if file.path().extension().and_then(|e| e.to_str()) != Some("png") {
-                continue;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let blocks_dir = resolve_blocks_dir();
+        if let Ok(dir) = std::fs::read_dir(&blocks_dir) {
+            for file in dir {
+                let file = match file {
+                    Ok(file) => file,
+                    Err(_) => continue,
+                };
+                if file.path().extension().and_then(|e| e.to_str()) != Some("png") {
+                    continue;
+                }
+                match image::ImageReader::open(file.path()) {
+                    Ok(reader) => match reader.decode() {
+                        Ok(decoded) => {
+                            sorted.insert(file.file_name().to_string_lossy().to_string(), decoded.to_rgba8());
+                        }
+                        Err(e) => warn!("failed to decode {:?}, {:?}", file.path(), e),
+                    },
+                    Err(e) => warn!("failed to read {:?}, {:?}", file.path(), e),
+                }
             }
-            match image::ImageReader::open(file.path()) {
-                Ok(reader) => match reader.decode() {
-                    Ok(decoded) => {
-                        sorted.insert(file.file_name().to_string_lossy().to_string(), decoded.to_rgba8());
-                    }
-                    Err(e) => warn!("failed to decode {:?}, {:?}", file.path(), e),
-                },
-                Err(e) => warn!("failed to read {:?}, {:?}", file.path(), e),
+        }
+    }
+    // No filesystem in the browser: HTTP can't enumerate a directory, so wasm
+    // builds carry the block textures embedded in the binary instead.
+    #[cfg(target_arch = "wasm32")]
+    for (name, bytes) in EMBEDDED_BLOCK_TEXTURES {
+        match image::load_from_memory(bytes) {
+            Ok(decoded) => {
+                sorted.insert((*name).to_string(), decoded.to_rgba8());
             }
+            Err(e) => warn!("failed to decode embedded block texture {name}: {e:?}"),
         }
     }
     for (name, image) in sorted {
@@ -189,7 +213,26 @@ fn setup_scene(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_blocks_dir;
+    use super::{resolve_blocks_dir, EMBEDDED_BLOCK_TEXTURES};
+
+    #[test]
+    fn embedded_block_textures_match_assets_dir() {
+        let dir = resolve_blocks_dir();
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("assets/blocks must exist for this test")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("png"))
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        on_disk.sort();
+        let mut embedded: Vec<String> =
+            EMBEDDED_BLOCK_TEXTURES.iter().map(|(n, _)| (*n).to_string()).collect();
+        embedded.sort();
+        assert_eq!(
+            embedded, on_disk,
+            "EMBEDDED_BLOCK_TEXTURES is out of sync with assets/blocks/*.png — update the const in renderer/mod.rs"
+        );
+    }
 
     #[test]
     fn test_resolve_blocks_dir_with_cargo_manifest() {
