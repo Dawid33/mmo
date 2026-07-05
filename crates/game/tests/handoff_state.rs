@@ -169,13 +169,18 @@ fn arrival_upgrades_ghost_in_place_keeping_entity_key() {
     rb.forget();
     let ghost_entity = rb.data.ghosts.get(&(src, src_key)).unwrap().entity;
 
+    // Do NOT forget: the upgrade (ghost drop + SetGhostSource-clear emit + body
+    // inject) must be exactly invertible, including the compensating undo emit
+    // that restores the ghost mark.
+    let before = crc(&rb);
     rb.new_transaction();
     rb.apply_arrival(bundle(src, src_key, 9, 2.0));
-    rb.forget();
     let owned = *rb.data.player_entites.get(&9).unwrap();
     assert_eq!(owned, ghost_entity, "upgrade-in-place: same EntityKey continues");
     assert!(rb.data.ghosts.get(&(src, src_key)).is_none(), "ghost record dropped");
     assert!(rb.data.ecs.rigidbody.try_get(owned).is_some(), "body attached on upgrade");
+    rb.rollback();
+    assert_eq!(before, crc(&rb), "upgrade path holds the hash bar, bit-exact");
 }
 
 #[test]
@@ -189,12 +194,16 @@ fn replayed_arrival_is_a_pose_correction_not_a_duplicate() {
     rb.forget();
     let count = rb.data.ecs.entities.len();
 
+    // Do NOT forget: the idempotent replay (pose correction, no duplicate)
+    // must be exactly invertible.
+    let before = crc(&rb);
     rb.new_transaction();
     rb.apply_arrival(bundle(src, src_key, 9, 5.0));
-    rb.forget();
     assert_eq!(rb.data.ecs.entities.len(), count, "no duplicate entity");
     let e = *rb.data.player_entites.get(&9).unwrap();
     let handle = rb.data.ecs.rigidbody.try_get(e).unwrap();
     let t = rb.data.physics.bodies.get(handle).unwrap().translation();
     assert_eq!(t.x, Real::from(5.0), "replay corrected the pose");
+    rb.rollback();
+    assert_eq!(before, crc(&rb), "idempotent replay path holds the hash bar");
 }

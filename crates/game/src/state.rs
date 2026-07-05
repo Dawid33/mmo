@@ -499,6 +499,16 @@ impl Rollback {
                 GameDataTransactionKind::Do,
                 GameDataUpdateKind::SetGhostSource(entry.entity, None),
             ));
+            // The entity persists across rollback (it was baked as a ghost in a
+            // prior transaction), so on undo we must re-apply the ghost mark —
+            // otherwise the renderer keeps a phantom owned mirror. Compensating
+            // emit rides `kind` (a tracked field; the ghosts map has no
+            // emit_on_undo), fires LIFO after state is restored. source_region
+            // == identity.0.
+            self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
+                GameDataTransactionKind::Undo,
+                GameDataUpdateKind::SetGhostSource(entry.entity, Some(bundle.source_region)),
+            ));
             entry.entity
         } else {
             self.data.ecs.create_entity_safe()
@@ -604,6 +614,15 @@ impl Rollback {
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
                 GameDataUpdateKind::SetGhostSource(e, None),
+            ));
+            // remove_entity_safe's undo re-creates the entity (its slot #[emit]
+            // fires CreateEntity on undo), so on rollback the ghost survives and
+            // its mark must be restored. Registered BEFORE remove_entity_safe so
+            // it replays LIFO-after the entity is re-created/re-mapped — else the
+            // bridge would warn on an unmapped key. k.0 is the source region.
+            self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
+                GameDataTransactionKind::Undo,
+                GameDataUpdateKind::SetGhostSource(e, Some(k.0)),
             ));
             self.remove_entity_safe(e, None);
         }
