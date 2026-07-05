@@ -329,17 +329,31 @@ impl<S: RegionSpawner> WorldManager<S> {
     }
 
     fn subscribe(&mut self, client: ClientId, rc: RegionCoords) {
+        // Invariant: a client appears in `link.subscribers` (or in
+        // `resubscribe_pending`) only while it has a live session whose
+        // `subscribed` set contains `rc`. Sessionless subscribes — ghost
+        // packets, or a Stopped-replay for a client that disconnected during
+        // the stopping window — are dropped here; otherwise they'd pin the
+        // region forever with a subscriber no disconnect can remove.
+        let Some(session) = self.sessions.get_mut(&client) else {
+            log::debug!(
+                "dropping subscribe from sessionless client {client} for {:?}",
+                rc
+            );
+            return;
+        };
+        session.subscribed.insert(rc);
         self.ensure_running(rc);
         let link = self.regions.get_mut(&rc).unwrap();
         if link.stopping {
+            // Recorded in session.subscribed above, so a disconnect (or
+            // release) before Stopped arrives still reaches
+            // unsubscribe_link and clears the pending intent.
             link.resubscribe_pending.push(client);
             return;
         }
         link.subscribers.insert(client);
         link.empty_since_ms = None;
-        if let Some(session) = self.sessions.get_mut(&client) {
-            session.subscribed.insert(rc);
-        }
         self.send_to_region(rc, RegionInput::RequestSnapshot(client));
     }
 
@@ -353,6 +367,10 @@ impl<S: RegionSpawner> WorldManager<S> {
     fn unsubscribe_link(&mut self, client: ClientId, rc: RegionCoords, now_ms: u64) {
         let Some(link) = self.regions.get_mut(&rc) else { return };
         link.subscribers.remove(&client);
+        // The client may only exist as a pending intent (subscribed during
+        // the stopping window); clear that too so a Stopped-replay can't
+        // resurrect the subscription.
+        link.resubscribe_pending.retain(|c| c != &client);
         self.refresh_keepalive(rc, now_ms);
     }
 

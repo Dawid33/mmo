@@ -187,6 +187,46 @@ fn dead_region_respawns_and_resnapshots_subscribers() {
 }
 
 #[test]
+fn disconnect_during_stopping_window_leaves_no_phantom_subscriber() {
+    let mut h = harness();
+    h.event(ServerEvent::ClientConnected(0), 0);
+    let rc = RegionCoords::new(3, 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(rc), 0), 1000);
+    h.drain_packets();
+
+    // Past grace: Shutdown is sent but NOT yet processed (no settle) — the
+    // region sits in the stopping window.
+    h.manager.maintain(1000 + UNLOAD_GRACE_MS);
+
+    // Re-subscribe lands in resubscribe_pending, then the client
+    // disconnects, all before Stopped arrives. (Drive the manager directly:
+    // the harness's event() auto-settles, which would close the window.)
+    h.manager.handle_server_event(
+        ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0),
+        2000 + UNLOAD_GRACE_MS,
+    );
+    h.manager.handle_server_event(ServerEvent::ClientDisconnected(0), 2000 + UNLOAD_GRACE_MS);
+    h.drain_packets();
+
+    // Now let the Shutdown → Stopped handshake (and any pending replays)
+    // complete.
+    h.settle(2000 + UNLOAD_GRACE_MS);
+
+    // The dead client must not pin the region as a phantom subscriber:
+    // after another grace period it must be parked (or never respawned).
+    h.manager.maintain(3000 + UNLOAD_GRACE_MS * 2);
+    h.settle(3000 + UNLOAD_GRACE_MS * 2);
+    assert!(
+        !h.manager.running_regions().contains(&rc),
+        "phantom subscriber kept the region running"
+    );
+    assert!(h.manager.parked_regions().contains(&rc));
+    // No packets to the disconnected client after the disconnect.
+    assert!(h.drain_packets().is_empty(), "packets sent to a dead client");
+}
+
+#[test]
 fn quit_event_stops_the_manager() {
     let mut h = harness();
     h.event(ServerEvent::ClientConnected(0), 0);
