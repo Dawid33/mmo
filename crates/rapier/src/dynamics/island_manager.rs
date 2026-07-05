@@ -217,6 +217,7 @@ impl IslandManager {
         impulse_joints: &ImpulseJointSet,
         multibody_joints: &MultibodyJointSet,
         min_island_size: usize,
+        journal: &mut Option<&mut crate::pipeline::StepJournal>,
     ) {
         assert!(
             min_island_size > 0,
@@ -348,6 +349,15 @@ impl IslandManager {
 
             for other in multibody_joints.bodies_attached_with_enabled_joint(handle) {
                 self.stack.push(other);
+            }
+
+            // Journal (hook 7): a sleeping dynamic body first reached here via
+            // `push_contacting_bodies` (contact-wake) was NOT in the prior active
+            // set, so hook 6 never saved it — yet the wake/ids writes below are all
+            // hashed. Save it before the first write. Dedup makes the prior-active
+            // repeats free, so this stays O(active bodies).
+            if let Some(j) = journal.as_deref_mut() {
+                j.save_body(handle, rb);
             }
 
             rb.activation.wake_up(false);

@@ -1365,66 +1365,88 @@ impl NarrowPhase {
         out_contact_pairs: &mut Vec<TemporaryInteractionIndex>,
         out_manifolds: &mut Vec<&'a mut ContactManifold>,
         out: &mut [Vec<ContactManifoldIndex>],
+        journal: &mut Option<&mut crate::pipeline::StepJournal>,
     ) {
         for out_island in &mut out[..islands.num_islands()] {
             out_island.clear();
         }
 
+        // Selection predicate, shared by the pre-pass (decide + journal) and the
+        // push-pass (hand `&mut` manifolds to the solver). Returns the manifold's
+        // target island when it qualifies, `None` otherwise. Pure reads, so it is
+        // safe to evaluate twice per manifold.
+        fn island_of(manifold: &ContactManifold, bodies: &RigidBodySet) -> Option<usize> {
+            if !(manifold
+                .data
+                .solver_flags
+                .contains(SolverFlags::COMPUTE_IMPULSES)
+                && manifold.data.num_active_contacts() != 0)
+            {
+                return None;
+            }
+            let (active_island_id1, rb_type1, sleeping1) =
+                if let Some(handle1) = manifold.data.rigid_body1 {
+                    let rb1 = &bodies[handle1];
+                    (rb1.ids.active_island_id, rb1.body_type, rb1.activation.sleeping)
+                } else {
+                    (0, RigidBodyType::Fixed, true)
+                };
+            let (active_island_id2, rb_type2, sleeping2) =
+                if let Some(handle2) = manifold.data.rigid_body2 {
+                    let rb2 = &bodies[handle2];
+                    (rb2.ids.active_island_id, rb2.body_type, rb2.activation.sleeping)
+                } else {
+                    (0, RigidBodyType::Fixed, true)
+                };
+            if (rb_type1.is_dynamic() || rb_type2.is_dynamic())
+                && (!rb_type1.is_dynamic() || !sleeping1)
+                && (!rb_type2.is_dynamic() || !sleeping2)
+            {
+                Some(if !rb_type1.is_dynamic() {
+                    active_island_id2
+                } else {
+                    active_island_id1
+                })
+            } else {
+                None
+            }
+        }
+
         // TODO: don't iterate through all the interactions.
         for (pair_id, inter) in self.contact_graph.graph.edges.iter_mut().enumerate() {
-            let mut push_pair = false;
+            // Pre-pass (immutable): is this pair selected this substep?
+            let selected = inter
+                .weight
+                .manifolds
+                .iter()
+                .any(|m| island_of(m, bodies).is_some());
+            if !selected {
+                continue;
+            }
 
-            for manifold in &mut inter.weight.manifolds {
-                if manifold
-                    .data
-                    .solver_flags
-                    .contains(SolverFlags::COMPUTE_IMPULSES)
-                    && manifold.data.num_active_contacts() != 0
-                {
-                    let (active_island_id1, rb_type1, sleeping1) =
-                        if let Some(handle1) = manifold.data.rigid_body1 {
-                            let rb1 = &bodies[handle1];
-                            (
-                                rb1.ids.active_island_id,
-                                rb1.body_type,
-                                rb1.activation.sleeping,
-                            )
-                        } else {
-                            (0, RigidBodyType::Fixed, true)
-                        };
-
-                    let (active_island_id2, rb_type2, sleeping2) =
-                        if let Some(handle2) = manifold.data.rigid_body2 {
-                            let rb2 = &bodies[handle2];
-                            (
-                                rb2.ids.active_island_id,
-                                rb2.body_type,
-                                rb2.activation.sleeping,
-                            )
-                        } else {
-                            (0, RigidBodyType::Fixed, true)
-                        };
-
-                    if (rb_type1.is_dynamic() || rb_type2.is_dynamic())
-                        && (!rb_type1.is_dynamic() || !sleeping1)
-                        && (!rb_type2.is_dynamic() || !sleeping2)
-                    {
-                        let island_index = if !rb_type1.is_dynamic() {
-                            active_island_id2
-                        } else {
-                            active_island_id1
-                        };
-
-                        out[island_index].push(out_manifolds.len());
-                        out_manifolds.push(manifold);
-                        push_pair = true;
-                    }
+            // Journal the pair payload BEFORE the solver writes warm-start
+            // impulses into it. `compute_contacts` only saves pairs whose
+            // colliders carry narrow-phase-update flags; a contact-woken or
+            // user-woken body's dormant pairs carry none, so this is the only
+            // save point that covers them. Dedup per edge index keeps it
+            // O(touched pairs) across substeps.
+            if let Some(j) = journal.as_deref_mut() {
+                if j.saved_narrow_edges.insert(pair_id as u32) {
+                    j.narrow.push(NarrowUndo::ContactPayload {
+                        edge: pair_id as u32,
+                        old: Box::new(inter.weight.clone()),
+                    });
                 }
             }
 
-            if push_pair {
-                out_contact_pairs.push(EdgeIndex::new(pair_id as u32));
+            // Push-pass (mutable): hand the qualifying manifolds to the solver.
+            for manifold in &mut inter.weight.manifolds {
+                if let Some(island_index) = island_of(manifold, bodies) {
+                    out[island_index].push(out_manifolds.len());
+                    out_manifolds.push(manifold);
+                }
             }
+            out_contact_pairs.push(EdgeIndex::new(pair_id as u32));
         }
     }
 }

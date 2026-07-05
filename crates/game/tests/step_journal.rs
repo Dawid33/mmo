@@ -169,6 +169,40 @@ fn same_tick_remove_and_slot_reuse_keeps_replacement_collidable() {
 }
 
 #[test]
+fn ball_rests_on_untouched_terrain_no_tunneling() {
+    // Removal-free tunneling regression: a ball dropped onto floor tiles it never
+    // shared an arena slot with must come to rest, not fall through. This pins the
+    // broad-phase `pending_leaf_changes` handling on the plain path, independently
+    // of the same-tick remove/slot-reuse case — a leaf-update regression that only
+    // the remove/insert ordering masks would still trip here.
+    let mut w = World::new();
+    for x in 0..2 {
+        for z in 0..2 {
+            add_floor(&mut w, x, z);
+        }
+    }
+    let ball = w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(2.0), Real::from(8.0), Real::from(2.0)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(),
+        ball,
+        &mut w.bodies,
+    );
+    // Fall from y=8 onto tile (0,0) (top at y=0) and settle.
+    for _ in 0..200 {
+        let _ = w.step();
+    }
+    let y = w.bodies[ball].translation().y;
+    assert!(
+        y > Real::from(0.0),
+        "ball tunneled through untouched terrain: y = {y:?}"
+    );
+}
+
+#[test]
 fn landing_on_floor_revert_is_hash_exact() {
     let mut w = World::new();
     add_floor(&mut w, 0, 0);
@@ -355,9 +389,11 @@ fn collider_removal_tick_revert_is_hash_exact() {
         tile_body,
         &mut w.bodies,
     );
+    // Ball above the REMOVED tile (top at y=0, tile centered at x=40,z=2), so it
+    // truly rests on that tile's leaf and shares a narrow-phase pair with it.
     let ball = w.bodies.insert(
         RigidBodyBuilder::dynamic()
-            .translation(vector![Real::from(2.0), Real::from(1.0), Real::from(2.0)])
+            .translation(vector![Real::from(40.0), Real::from(1.0), Real::from(2.0)])
             .build(),
     );
     w.colliders.insert_with_parent(
@@ -365,7 +401,6 @@ fn collider_removal_tick_revert_is_hash_exact() {
         ball,
         &mut w.bodies,
     );
-    let _ = ball;
     // Settle so the ball rests, pairs exist, and the tree holds every leaf.
     for _ in 0..90 {
         let _ = w.step();
@@ -461,6 +496,24 @@ impl Lcg {
 
 #[test]
 fn randomized_scene_revert_is_hash_exact() {
+    // Wake-transition fuzzer. The balls are spawned in a TIGHT column over one
+    // floor tile so they pile up and form real ball-ball contacts (not just
+    // ball-floor), then long quiet windows let the pile fall fully asleep
+    // (dormant resting pairs carrying warm-start data). A strong lateral impulse
+    // on ONE resting ball then exercises BOTH criticals at once: the kicked ball
+    // is user-woken with a dormant pair (critical 2, solver warm-start
+    // writeback), and as it barrels into its sleeping neighbours it contact-wakes
+    // them via `push_contacting_bodies` (critical 1).
+    //
+    // Revert model: PER-TICK standalone (snapshot -> step -> revert -> assert ->
+    // re-step to advance), NOT whole-sequence LIFO. A user `apply_impulse` that
+    // wakes a *sleeping* body changes state the step journal deliberately does
+    // not own (user mutations belong to the game log), so its effect cannot be
+    // walked back past the wake tick by a multi-tick LIFO replay — that leak is a
+    // property of user mutations, not a journal defect. Reverting each tick's
+    // single step in isolation is the exact promise the journal makes and is
+    // immune to that leak. Deterministic (LCG), ~460 ticks x 2 steps, well under
+    // a few seconds.
     let mut rng = Lcg(0x5EED_2026_0704);
     let mut w = World::new();
     for x in 0..4 {
@@ -473,9 +526,9 @@ fn randomized_scene_revert_is_hash_exact() {
         let b = w.bodies.insert(
             RigidBodyBuilder::dynamic()
                 .translation(vector![
-                    Real::from(rng.f(1.0, 100.0)),
-                    Real::from(rng.f(2.0, 6.0)),
-                    Real::from(rng.f(1.0, 100.0))
+                    Real::from(rng.f(2.0, 4.0)),
+                    Real::from(rng.f(1.0, 5.0)),
+                    Real::from(rng.f(2.0, 4.0))
                 ])
                 .build(),
         );
@@ -486,32 +539,53 @@ fn randomized_scene_revert_is_hash_exact() {
         );
         balls.push(b);
     }
-    let mut checkpoints = Vec::new();
-    let mut journals = Vec::new();
-    for tick in 0..200 {
-        if tick % 7 == 0 {
-            // random impulse = user mutation BEFORE the step
+    let sleeping = |w: &World, balls: &[RigidBodyHandle]| -> usize {
+        balls.iter().filter(|b| w.bodies[**b].is_sleeping()).count()
+    };
+    let mut any_slept = false;
+    let mut woke_a_sleeper = false;
+    for tick in 0..460 {
+        // Measured BEFORE the impulse so the kicked ball's user-wake registers.
+        let sleeping_before = sleeping(&w, &balls);
+        any_slept |= sleeping_before > 0;
+        // Strong lateral+up impulse on a resting ball after each long quiet
+        // window: user-wakes it (dormant pair -> warm-start) and sends it into
+        // its sleeping neighbours (contact-wake). One action, both criticals.
+        if tick == 300 || tick == 350 || tick == 400 {
             let b = balls[(rng.next() as usize) % balls.len()];
             w.bodies.get_mut(b).unwrap().apply_impulse(
                 vector![
-                    Real::from(rng.f(-2.0, 2.0)),
-                    Real::from(rng.f(0.0, 4.0)),
-                    Real::from(rng.f(-2.0, 2.0))
+                    Real::from(rng.f(-8.0, 8.0)),
+                    Real::from(rng.f(3.0, 8.0)),
+                    Real::from(rng.f(-8.0, 8.0))
                 ],
                 true,
             );
         }
-        checkpoints.push(w.hash_full()); // post-user-mutation, pre-step
-        journals.push(w.step());
-    }
-    for (j, expect) in journals.into_iter().rev().zip(checkpoints.into_iter().rev()) {
+
+        // Standalone revert check for THIS tick's step.
+        let before = w.hash_full();
+        let j = w.step();
         w.revert(j);
+        let got = w.hash_full();
         assert_eq!(
-            expect,
-            w.hash_full(),
-            "fuzzer: pre-step state must restore exactly at every tick"
+            before, got,
+            "fuzzer tick {tick}: single-step revert must be exact \
+             (bodies {} colliders {} islands {} broad {} narrow {})",
+            got.0 != before.0, got.1 != before.1, got.2 != before.2, got.3 != before.3, got.4 != before.4
         );
+
+        // Re-run the step (identical, since we restored `before`) to advance.
+        let _ = w.step();
+        if sleeping_before > 0 && sleeping(&w, &balls) < sleeping_before {
+            woke_a_sleeper = true;
+        }
     }
+    assert!(any_slept, "fuzzer must let the pile fall asleep");
+    assert!(
+        woke_a_sleeper,
+        "fuzzer must actually wake a sleeping ball (else it never exercises the wake path)"
+    );
 }
 
 #[test]
@@ -562,4 +636,92 @@ fn sleep_transition_revert_is_hash_exact() {
     let journals: Vec<StepJournal> = (0..120).map(|_| w.step()).collect();
     for j in journals.into_iter().rev() { w.revert(j); }
     assert_eq!(before, w.hash_full());
+}
+
+#[test]
+fn impact_wakes_sleeper_revert_is_hash_exact() {
+    // Spec test 3 (wake transition): a fully-asleep dynamic body woken purely
+    // by an incoming contact. The waker (A) falls onto the sleeper (B).
+    let mut w = World::new();
+    add_floor(&mut w, 0, 0);
+    let b = w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(2.0), Real::from(1.0), Real::from(2.0)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(),
+        b,
+        &mut w.bodies,
+    );
+    // Settle B until it sleeps.
+    for _ in 0..300 {
+        let _ = w.step();
+    }
+    assert!(w.bodies[b].is_sleeping(), "precondition: B must be asleep");
+    // Drop A directly above B (user mutation: insertion).
+    let a = w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(2.0), Real::from(3.0), Real::from(2.0)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(),
+        a,
+        &mut w.bodies,
+    );
+    let mut checkpoints = Vec::new();
+    let mut journals = Vec::new();
+    let mut woke = false;
+    for _ in 0..120 {
+        checkpoints.push(w.hash_full()); // pre-step (post-user-mutation on tick 0)
+        journals.push(w.step());
+        if !w.bodies[b].is_sleeping() {
+            woke = true;
+        }
+    }
+    assert!(woke, "scenario must actually wake B by impact");
+    for (i, (j, expect)) in journals.into_iter().rev().zip(checkpoints.into_iter().rev()).enumerate() {
+        let tick = 119 - i;
+        w.revert(j);
+        let got = w.hash_full();
+        if got != expect {
+            panic!(
+                "first mismatch at tick {tick}: bodies {} colliders {} islands {} broad {} narrow {}",
+                got.0 != expect.0, got.1 != expect.1, got.2 != expect.2, got.3 != expect.3, got.4 != expect.4
+            );
+        }
+    }
+}
+
+#[test]
+fn user_wake_of_resting_sleeper_revert_is_hash_exact() {
+    // Same shape as the fuzzer's impulse-on-sleeping-ball path, minimized:
+    // B sleeps resting on the floor (dormant contact pair with warm-start
+    // data), user wakes it, one journaled step, revert.
+    let mut w = World::new();
+    add_floor(&mut w, 0, 0);
+    let b = w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(2.0), Real::from(1.0), Real::from(2.0)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(),
+        b,
+        &mut w.bodies,
+    );
+    for _ in 0..300 { let _ = w.step(); }
+    assert!(w.bodies[b].is_sleeping(), "precondition: B must be asleep");
+    w.bodies.get_mut(b).unwrap().apply_impulse(
+        vector![Real::from(0.5), Real::from(1.0), Real::from(0.0)], true);
+    let before = w.hash_full();
+    let j = w.step();
+    w.revert(j);
+    let got = w.hash_full();
+    assert_eq!(
+        before, got,
+        "user-wake tick revert: bodies {} colliders {} islands {} broad {} narrow {}",
+        got.0 != before.0, got.1 != before.1, got.2 != before.2, got.3 != before.3, got.4 != before.4
+    );
 }

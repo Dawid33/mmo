@@ -212,6 +212,7 @@ impl PhysicsPipeline {
         impulse_joints: &mut ImpulseJointSet,
         multibody_joints: &mut MultibodyJointSet,
         events: &dyn EventHandler,
+        journal: &mut Option<&mut StepJournal>,
     ) {
         self.counters.stages.island_construction_time.resume();
         islands.update_active_set_with_contacts(
@@ -223,6 +224,7 @@ impl PhysicsPipeline {
             impulse_joints,
             multibody_joints,
             integration_parameters.min_island_size,
+            journal,
         );
 
         if self.manifold_indices.len() < islands.num_islands() {
@@ -242,6 +244,7 @@ impl PhysicsPipeline {
             &mut self.contact_pair_indices,
             &mut manifolds,
             &mut self.manifold_indices,
+            journal,
         );
         impulse_joints.select_active_interactions(
             islands,
@@ -843,6 +846,7 @@ impl PhysicsPipeline {
                 impulse_joints,
                 multibody_joints,
                 events,
+                &mut journal.as_deref_mut(),
             );
 
             // If CCD is enabled, execute the CCD motion clamping.

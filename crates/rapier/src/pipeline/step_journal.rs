@@ -30,6 +30,16 @@ pub struct StepJournal {
     /// [`Self::narrow_wholesale`] is set — collider-removal ticks fall back to a
     /// wholesale snapshot instead (see [`NarrowPhase::handle_user_changes`]).
     pub(crate) narrow: Vec<crate::geometry::NarrowUndo>,
+    /// Per-edge dedup guard for the solver-boundary payload saves in
+    /// [`NarrowPhase::select_active_contacts`]. A re-woken body's dormant contact
+    /// pairs carry no collider flags, so `compute_contacts` never saves them, yet
+    /// the solver writes warm-start impulses into their manifolds; select's save
+    /// closes that gap. This set records which contact-graph edges select has
+    /// already snapshotted so the same edge is captured at most once across the
+    /// tick's substeps. Double-saves against `compute_contacts` (a pair that is
+    /// both flag-dirty and selected) are harmless: LIFO revert applies the
+    /// latest-pushed op first, so the earliest (true pre-tick) payload always wins.
+    pub(crate) saved_narrow_edges: HashSet<u32>,
     pub(crate) narrow_wholesale: Option<Box<NarrowPhase>>,
     /// Pre-mutation broad-phase snapshot, captured once on the first dirty tick
     /// (see [`BroadPhaseBvh::journal_save`]). `None` on a clean tick where the
