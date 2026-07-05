@@ -1,8 +1,8 @@
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
     Chunk, ChunkCoords, ClientId, ClientPacket, GameEvent, GameEventKind, InlineSpawner,
-    InputEvent, Key, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldManager,
-    SPAWN_REGION, UNLOAD_GRACE_MS,
+    RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldManager, SPAWN_REGION,
+    UNLOAD_GRACE_MS,
 };
 
 struct Harness {
@@ -21,16 +21,6 @@ fn harness() -> Harness {
         manager: WorldManager::new(InlineSpawner::default(), generator, out_send, region_out_send),
         region_out,
         packets,
-    }
-}
-
-/// Simplest constructible `InputEvent` variant — `InputEvent` doesn't derive
-/// `Default`, so a key-release stands in (mirrors the shape used in
-/// crates/client/src/main.rs's regression test).
-fn any_input() -> InputEvent {
-    InputEvent::Key {
-        key: Key::KeyE,
-        pressed: true,
     }
 }
 
@@ -89,14 +79,16 @@ fn events_route_only_to_subscribed_regions() {
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
     h.drain_packets();
 
-    // Subscribed: input event comes back as an authoritative GameEvent.
-    let ev = GameEvent::new(GameEventKind::PlayerInput(0, any_input()), 0, rc);
+    // Subscribed: a generic (non-input) event comes back as an authoritative
+    // GameEvent. (PlayerInput is now home-routed, so it can't probe the
+    // subscription path — use CreateClient, which flows through it.)
+    let ev = GameEvent::new(GameEventKind::CreateClient(0), 0, rc);
     h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 0);
     assert!(h.drain_packets().iter().any(|(_, p)| matches!(p, ServerPacket::GameEvent(_))));
 
     // Not subscribed: dropped silently.
     let far = RegionCoords::new(9, 9);
-    let ev = GameEvent::new(GameEventKind::PlayerInput(0, any_input()), 0, far);
+    let ev = GameEvent::new(GameEventKind::CreateClient(0), 0, far);
     h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 0);
     assert!(!h.manager.running_regions().contains(&far));
 }
@@ -177,8 +169,9 @@ fn dead_region_respawns_and_resnapshots_subscribers() {
     // the input channel's receiver is dropped, so the next send fails).
     h.manager.spawner_mut().kill(rc);
 
-    // Next routed event detects the death, respawns, resnapshots.
-    let ev = GameEvent::new(GameEventKind::PlayerInput(0, any_input()), 0, rc);
+    // Next routed event detects the death, respawns, resnapshots. (A
+    // subscription-routed event, not PlayerInput, which is now home-routed.)
+    let ev = GameEvent::new(GameEventKind::CreateClient(0), 0, rc);
     h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 500);
     assert!(h.manager.running_regions().contains(&rc));
     assert!(h.drain_packets().iter().any(|(target, p)| {
