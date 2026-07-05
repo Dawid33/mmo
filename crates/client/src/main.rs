@@ -66,6 +66,24 @@ pub struct GameInstanceManager {
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
 }
 
+/// The client's desired subscription set: the 3x3 window around the viewer,
+/// plus the home region. Home must NEVER be released while the free-cam
+/// roams — PlayerInput routes to it (World::handle_region_event unwraps on a
+/// missing region) and it anchors viewer_region's pose read; this also
+/// mirrors the server's keep-alive rule, which pins a client's home region
+/// regardless of its window.
+fn desired_window(
+    center: RegionCoords,
+    home: Option<RegionCoords>,
+) -> std::collections::BTreeSet<RegionCoords> {
+    let mut desired: std::collections::BTreeSet<RegionCoords> =
+        center.window_3x3().into_iter().collect();
+    if let Some(home) = home {
+        desired.insert(home);
+    }
+    desired
+}
+
 impl GameInstanceManager {
     /// Create new GameInstanceManager
     ///
@@ -154,6 +172,14 @@ impl GameInstanceManager {
             }
             e @ GameEventKind::PlayerInput(_, _) => {
                 if let Some(home) = self.home_region {
+                    // Belt-and-braces: desired_window pins home in the
+                    // subscription set, so it should always be loaded — but
+                    // handle_region_event unwraps on a missing region, so
+                    // never route input into a hole.
+                    if !self.world.as_ref().unwrap().region_exists(&home) {
+                        warn!("dropping PlayerInput: home region {:?} not loaded", home);
+                        return Ok(true);
+                    }
                     let event = self.world.as_mut().unwrap().handle_region_event(e, home)?;
                     self.server_game_send
                         .send(game::ClientPacket::GameEvent(event))
@@ -234,13 +260,12 @@ impl GameInstanceManager {
         Some(RegionCoords::from_world(t.x.0 + off[0], t.z.0 + off[2]))
     }
 
-    /// Diff the desired 3x3 window against current subscriptions; request
+    /// Diff the desired window against current subscriptions; request
     /// the new, release the stale, and tear stale regions out of the local
     /// world + render bridge. Cheap when nothing changed (set compare).
     fn update_window(&mut self) {
         let Some(center) = self.viewer_region() else { return };
-        let desired: std::collections::BTreeSet<RegionCoords> =
-            center.window_3x3().into_iter().collect();
+        let desired = desired_window(center, self.home_region);
         if desired == self.subscribed {
             return;
         }
@@ -360,12 +385,16 @@ impl GameInstanceManager {
                         .unwrap();
                     return Ok(());
                 }
+                // Capture events that raced ahead of the snapshot BEFORE
+                // drop_region — its first act is to clear this region's
+                // pending buffer, which would silently discard them.
+                let pending = self.pending_events.remove(&id);
                 // Replace-on-re-receipt: crash-respawn/resubscribe resyncs.
                 self.drop_region(id);
                 self.new_region(id, raw_game_data);
                 // Replay events that raced ahead of the snapshot; reconcile
                 // skips anything already baked in (base_event_id).
-                if let Some(pending) = self.pending_events.remove(&id) {
+                if let Some(pending) = pending {
                     if let Some(ref mut world) = self.world {
                         for ev in pending {
                             let _ = world.reconcile_event(ev);
@@ -720,6 +749,37 @@ mod manager_tests {
         (manager, server_send, server_recv, client_recv, game_send)
     }
 
+    /// The desired window must keep the home region subscribed even when
+    /// the free-cam viewer roams outside home's 3x3 neighbourhood: input
+    /// routing and viewer-pose reads both anchor on home.
+    #[test]
+    fn desired_window_pins_home_outside_3x3() {
+        let home = RegionCoords::new(0, 0);
+        let far = RegionCoords::new(5, -3);
+        let desired = desired_window(far, Some(home));
+        assert!(desired.contains(&home), "home must never leave the window");
+        assert_eq!(desired.len(), 10, "3x3 around viewer plus distant home");
+        for rc in far.window_3x3() {
+            assert!(desired.contains(&rc));
+        }
+    }
+
+    /// Home inside (or at the centre of) the 3x3 must not duplicate, and no
+    /// home yields the plain 3x3.
+    #[test]
+    fn desired_window_home_inside_does_not_duplicate() {
+        let home = RegionCoords::new(0, 0);
+        // Home adjacent to centre: inside the 3x3.
+        let desired = desired_window(RegionCoords::new(1, 0), Some(home));
+        assert_eq!(desired.len(), 9);
+        assert!(desired.contains(&home));
+        // Home at centre.
+        let desired = desired_window(home, Some(home));
+        assert_eq!(desired.len(), 9);
+        // No home yet: plain 3x3.
+        assert_eq!(desired_window(RegionCoords::new(2, 2), None).len(), 9);
+    }
+
     /// PlayerRegion must trigger subscription requests for the full 3x3
     /// window around home, not just home.
     #[test]
@@ -761,15 +821,44 @@ mod manager_tests {
         manager.pump(&server_recv).unwrap();
         assert!(!manager.world.as_ref().unwrap().region_exists(&neighbour));
 
-        // Snapshot arrives: region loads, then the buffered event is
-        // replayed through reconcile (which no-ops it here — id 0 is at the
-        // snapshot's base_event_id — the point is it must not panic or drop
-        // the region).
+        // Snapshot arrives: region loads, then the buffered event must be
+        // replayed through reconcile — Tick id 0 lands in the region's
+        // server-input buffer, waiting for the matching local prediction.
         let mut neighbour_world = game::World::new();
         neighbour_world.load(&neighbour, Region::from_chunks(neighbour, Vec::new()));
         server_send.send(neighbour_world.build_region_server_packet(&neighbour)).unwrap();
         manager.pump(&server_recv).unwrap();
         assert!(manager.world.as_ref().unwrap().region_exists(&neighbour));
+
+        // Prove the replay actually happened (not just that the region
+        // loaded): tick locally once — the neighbour predicts Tick id 0 —
+        // then deliver server Tick id 1. Reconcile pops the *replayed* id 0
+        // from the input buffer, matches it against the prediction, and
+        // forgets it. If the replay was dropped, id 1 mismatches prediction
+        // id 0 and the prediction stays stuck in the event log.
+        manager.send_tick();
+        manager.pump(&server_recv).unwrap();
+        server_send
+            .send(ServerPacket::GameEvent(GameEvent::new(
+                GameEventKind::Tick,
+                1,
+                neighbour,
+            )))
+            .unwrap();
+        manager.pump(&server_recv).unwrap();
+        let unconfirmed = manager
+            .world
+            .as_ref()
+            .unwrap()
+            .regions
+            .get(&neighbour)
+            .unwrap()
+            .pending_event_ids();
+        assert!(
+            unconfirmed.is_empty(),
+            "buffered event was not replayed: prediction(s) {:?} never confirmed",
+            unconfirmed
+        );
     }
 
     /// A snapshot for an already-loaded region replaces it (crash-respawn /
