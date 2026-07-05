@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use game::{ChunkCoords, ClientPacket, ServerPacket};
+use game::{ClientPacket, RegionCoords, ServerPacket};
 use server::{webtransport, ClientSink, ServerEvent};
 
 async fn recv_packet(conn: &wtransport::Connection) -> ServerPacket {
@@ -92,7 +92,7 @@ async fn webtransport_client_full_handshake() {
                 },
                 ServerEvent::ClientConnected(client_id) => {
                     if world.find_player(&client_id).is_none() {
-                        let region = ChunkCoords::new(0, 0, 0);
+                        let region = RegionCoords::new(0, 0);
                         let ev = world
                             .handle_region_event(
                                 game::GameEventKind::CreateClient(client_id),
@@ -135,7 +135,7 @@ async fn webtransport_client_full_handshake() {
     let region_id = match player_region {
         ServerPacket::PlayerRegion(id, client_id) => {
             assert_eq!(client_id, 0);
-            id.unwrap_or(ChunkCoords::new(0, 0, 0))
+            id.unwrap_or(RegionCoords::new(0, 0))
         }
         p => panic!("expected PlayerRegion, got {p:?}"),
     };

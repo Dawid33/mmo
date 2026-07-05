@@ -37,7 +37,7 @@ impl Region {
     pub fn new(
         mut data: Rollback,
         game_update_send: Option<Sender<GameDataUpdate>>,
-        id: ChunkCoords,
+        id: RegionId,
         local_client_id: Option<ClientId>,
     ) -> Self {
         data.reinitialize(game_update_send);

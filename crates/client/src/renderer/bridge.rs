@@ -278,7 +278,7 @@ pub fn drain_region_updates(
 mod tests {
     use super::*;
     use crate::renderer::{ClientUpdates, GameEvents, LocalPlayer};
-    use game::{ChunkCoords, ClientUpdateEvent, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback};
+    use game::{ClientUpdateEvent, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, RegionCoords, Rollback};
     use game::EntityKey;
     use slotmapd::KeyData;
 
@@ -300,7 +300,7 @@ mod tests {
     fn test_app() -> (App, crossbeam::channel::Sender<ClientUpdateEvent>, crossbeam::channel::Sender<GameDataUpdate>, game::RegionId) {
         let (app, client_send) = app_shell();
         let (update_send, update_recv) = crossbeam::channel::unbounded();
-        let region_id = ChunkCoords::new(0, 0, 0);
+        let region_id = RegionCoords::new(0, 0);
         let rb = Rollback::new(None);
         client_send
             .send(ClientUpdateEvent::NewRegion(region_id, (*rb.data).clone(), update_recv))
@@ -448,7 +448,7 @@ mod tests {
         let k0 = *data.player_entites.get(&0).unwrap();
         let k1 = *data.player_entites.get(&1).unwrap();
 
-        let region_id = ChunkCoords::new(0, 0, 0);
+        let region_id = RegionCoords::new(0, 0);
         client.send(ClientUpdateEvent::SetPlayer(0)).unwrap();
         client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
         app.update();
@@ -474,7 +474,7 @@ mod tests {
         let k0 = *data.player_entites.get(&0).unwrap();
         let k1 = *data.player_entites.get(&1).unwrap();
 
-        let region_id = ChunkCoords::new(0, 0, 0);
+        let region_id = RegionCoords::new(0, 0);
         // SetPlayer always precedes NewRegion (PlayerRegion precedes Region).
         client.send(ClientUpdateEvent::SetPlayer(0)).unwrap();
         client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();

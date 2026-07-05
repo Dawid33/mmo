@@ -12,7 +12,7 @@ use std::{
 
 use crossbeam::channel::{Receiver, Sender};
 use dashmap::DashMap;
-use game::{ChunkCoords, ClientId, ClientPacket, ServerPacket, World};
+use game::{ClientId, ClientPacket, RegionCoords, ServerPacket, World};
 use log::{error, info};
 use quinn::{
     crypto::rustls::QuicServerConfig,
@@ -311,7 +311,7 @@ pub fn run() {
                 // Server-authoritative player creation. Reconnects (player
                 // already exists) create nothing.
                 if world.find_player(&client_id).is_none() {
-                    let region_id = ChunkCoords::new(0, 0, 0);
+                    let region_id = RegionCoords::new(0, 0);
                     let event = match world.handle_region_event(
                         game::GameEventKind::CreateClient(client_id),
                         region_id,
@@ -337,7 +337,7 @@ pub fn run() {
                             ServerPacket::GameEvent(result.as_ref().unwrap().clone()),
                         ))
                         .unwrap();
-                    if world.current_tick(&ChunkCoords::new(0, 0, 0)) % 10 == 0 {
+                    if world.current_tick(id) % 10 == 0 {
                         server_send
                             .send((
                                 None,

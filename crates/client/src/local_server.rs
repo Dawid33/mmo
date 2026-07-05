@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crossbeam::channel::{Receiver, Sender};
 use game::{
-    ChunkCoords, ClientId, ClientPacket, GameError, GameEvent, GameEventKind, RegionId,
+    ClientId, ClientPacket, GameError, GameEvent, GameEventKind, RegionCoords, RegionId,
     ServerPacket, World, TICK_RATE,
 };
 
@@ -29,7 +29,7 @@ impl LocalServer {
     ) -> Result<Self, GameError> {
         let mut world = World::basic();
         // Server-authoritative player creation, as on ClientConnected.
-        let region_id = ChunkCoords::new(0, 0, 0);
+        let region_id = RegionCoords::new(0, 0);
         let event = world.handle_region_event(GameEventKind::CreateClient(LOCAL_CLIENT_ID), region_id)?;
         world.forget_last_event(&region_id);
         send.send(ServerPacket::GameEvent(event)).unwrap();
@@ -83,9 +83,6 @@ impl LocalServer {
             self.send
                 .send(ServerPacket::GameEvent(result.as_ref().unwrap().clone()))
                 .unwrap();
-            // The real server hardcodes the origin chunk here (server/main.rs); using the
-            // iterated `id` is equivalent while there is one region, and more correct once
-            // multi-region lands.
             if self.world.current_tick(id) % 10 == 0 {
                 self.send
                     .send(ServerPacket::SyncClock(

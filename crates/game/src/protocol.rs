@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::input::InputEvent;
-use crate::{ChunkCoords, ClientId, Rollback};
+use crate::{ClientId, Rollback};
 use derive_more::Debug;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -20,7 +20,55 @@ impl From<usize> for Usize {
 pub type Tick = usize;
 pub type EventId = usize;
 pub type EntityId = usize;
-pub type RegionId = ChunkCoords;
+/// Regions tile the horizontal plane in fixed 256-unit squares (8×8 chunks
+/// of 32 voxels). Signed and unbounded: the world grows in every direction.
+/// Sims stay region-local; the world offset exists only at the render
+/// boundary (region root Transform) and, later, in handoff rebasing.
+pub const REGION_CHUNKS: usize = 8;
+pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // 256.0, exact in f32
+
+#[derive(
+    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+pub struct RegionCoords {
+    pub x: i32,
+    pub z: i32,
+}
+
+impl RegionCoords {
+    pub fn new(x: i32, z: i32) -> Self {
+        Self { x, z }
+    }
+
+    /// World-space origin of this region: `(x*256, 0, z*256)`. Exactly
+    /// representable in f32, so render offsets are lossless.
+    pub fn world_offset(&self) -> [f32; 3] {
+        [self.x as f32 * REGION_SIZE, 0.0, self.z as f32 * REGION_SIZE]
+    }
+
+    /// Which region owns a world-space point (floor division, so the
+    /// negative side maps correctly: -0.1 is region -1, not 0).
+    pub fn from_world(x: f32, z: f32) -> Self {
+        Self {
+            x: (x / REGION_SIZE).floor() as i32,
+            z: (z / REGION_SIZE).floor() as i32,
+        }
+    }
+
+    /// The 3×3 window of regions centered on `self` — the client's desired
+    /// loaded set.
+    pub fn window_3x3(&self) -> Vec<RegionCoords> {
+        let mut out = Vec::with_capacity(9);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                out.push(RegionCoords::new(self.x + dx, self.z + dz));
+            }
+        }
+        out
+    }
+}
+
+pub type RegionId = RegionCoords;
 pub type LastGameEventId = usize;
 
 #[derive(Debug)]

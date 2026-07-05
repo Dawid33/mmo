@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::hash::Hash;
 
-use game::{ChunkCoords, GameEventKind, InputEvent, Key, Region, World};
+use game::{GameEventKind, InputEvent, Key, Region, RegionCoords, World};
 
 fn state_hash(r: &game::Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
@@ -12,8 +12,8 @@ fn state_hash(r: &game::Rollback) -> u32 {
     hasher.finalize()
 }
 
-fn r0() -> ChunkCoords {
-    ChunkCoords::new(0, 0, 0)
+fn r0() -> RegionCoords {
+    RegionCoords::new(0, 0)
 }
 
 /// Server world with `n` players created on connection (the new join flow),

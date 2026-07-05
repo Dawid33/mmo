@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use crossbeam::channel::{Receiver, RecvError, Sender};
 #[cfg(not(target_arch = "wasm32"))]
 use crossbeam::select;
-use game::{ChunkCoords, ClientId, RegionId, Rollback, ServerPacket};
+use game::{ClientId, RegionCoords, RegionId, Rollback, ServerPacket};
 use game::{
     ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind, Region, INDUCED_LATENCY,
 };
@@ -58,7 +58,7 @@ pub struct GameInstanceManager {
     ready: bool,
     is_caught_up: bool,
     client_id: Option<ClientId>,
-    player_chunk: Option<ChunkCoords>,
+    player_chunk: Option<RegionCoords>,
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
 }
 
@@ -255,7 +255,7 @@ impl GameInstanceManager {
                     warn!("client_event_send closed while sending SetPlayer: {:?}", e);
                 }
 
-                let id = id.unwrap_or(ChunkCoords::new(0, 0, 0));
+                let id = id.unwrap_or(RegionCoords::new(0, 0));
                 self.client_id = Some(client_id);
                 self.player_chunk = Some(id);
                 self.server_game_send
@@ -495,7 +495,7 @@ mod manager_tests {
 
         // Fake the server side using the same code the real server uses.
         let world = game::World::basic();
-        let region_id = ChunkCoords::new(0, 0, 0);
+        let region_id = RegionCoords::new(0, 0);
         server_send
             .send(ServerPacket::PlayerRegion(Some(region_id), 0))
             .unwrap();
@@ -545,7 +545,7 @@ mod manager_tests {
         let outgoing = manager.client_packet_recv();
 
         let world = game::World::basic();
-        let region_id = ChunkCoords::new(0, 0, 0);
+        let region_id = RegionCoords::new(0, 0);
         server_send
             .send(ServerPacket::PlayerRegion(Some(region_id), 0))
             .unwrap();

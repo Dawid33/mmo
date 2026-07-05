@@ -52,7 +52,7 @@ pub trait Controller: Send {
 }
 
 pub struct World {
-    pub regions: BTreeMap<ChunkCoords, Region>,
+    pub regions: BTreeMap<RegionId, Region>,
 }
 
 impl World {
@@ -63,7 +63,7 @@ impl World {
     }
 
     pub fn basic() -> Self {
-        let one = ChunkCoords::new(0, 0, 0);
+        let one = RegionCoords::new(0, 0);
         let mut data = Region::new(Rollback::new(None), None, one, None);
         for x in 0..8 {
             for z in 0..8 {
@@ -117,12 +117,18 @@ impl World {
     }
 
     pub fn reconcile_event(&mut self, event: GameEvent) -> Result<(), GameError> {
-        let result = self
-            .regions
-            .get_mut(&event.region_id)
-            .unwrap()
-            .reconcile(event);
-        result
+        // Tolerate events for regions we don't hold: with a moving 3×3
+        // window, an event racing a just-released region is steady-state
+        // noise, not an error.
+        let Some(region) = self.regions.get_mut(&event.region_id) else {
+            log::debug!("dropping event for unloaded region {:?}", event.region_id);
+            return Ok(());
+        };
+        region.reconcile(event)
+    }
+
+    pub fn remove_region(&mut self, id: &RegionId) -> Option<Region> {
+        self.regions.remove(id)
     }
 
     pub fn find_player(&self, client: &ClientId) -> Option<RegionId> {
