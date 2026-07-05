@@ -237,6 +237,33 @@ fn stage2_ghost_has_a_collidable_body_that_tracks_updates() {
 }
 
 #[test]
+fn stage2_ghost_create_with_body_is_exactly_invertible() {
+    // Task 9 gap: apply_ghost's CREATE path allocates a kinematic body (via
+    // build_kinematic_body_safe -> revert_insert) plus a capsule collider
+    // (via attach_capsule_collider_safe -> whole-PhysicsState snapshot). The
+    // existing stage2 tests only ever roll back a REFRESH (the CREATE is
+    // always `forget()`-ed first) or an arrival-upgrade (which reuses an
+    // already-created ghost body). Nothing directly proves the ghost CREATE
+    // itself — the body+collider allocation — is exactly invertible. This
+    // test does, on a fresh Rollback with no ghost yet.
+    let (_, src_key) = donor();
+    let src = RegionCoords::new(0, 0);
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+
+    let before = crc(&rb);
+    rb.new_transaction();
+    rb.apply_ghost(ghost(src, src_key, 250.0));
+    let e = rb.data.ghosts.get(&(src, src_key)).unwrap().entity;
+    assert!(
+        rb.data.ecs.rigidbody.try_get(e).is_some(),
+        "ghost create must allocate a body (proves this exercises the bodied-create path)"
+    );
+    rb.rollback();
+    assert_eq!(before, crc(&rb), "ghost create (body + collider alloc) holds the hash bar, bit-exact");
+}
+
+#[test]
 fn stage2_upgrade_reuses_the_ghost_body() {
     let (_, src_key) = donor();
     let src = RegionCoords::new(0, 0);
