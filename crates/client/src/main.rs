@@ -35,6 +35,8 @@ mod netcode;
 #[cfg(any(target_arch = "wasm32", test))]
 mod local_server;
 #[cfg(target_arch = "wasm32")]
+mod netcode_web;
+#[cfg(target_arch = "wasm32")]
 mod sim_driver;
 mod renderer;
 

@@ -1026,11 +1026,39 @@ impl RigidBodyCcd {
     }
 }
 
+#[cfg(feature = "serde-serialize")]
+pub(crate) mod sentinel_usize {
+    //! Cross-architecture-stable (de)serialization for usize::MAX sentinels.
+    //! bincode encodes usize as u64: a 64-bit peer's sentinel arrives as
+    //! u64::MAX, which cannot fit a 32-bit usize (wasm32) and kills the whole
+    //! Region snapshot. Map the sentinel explicitly in both directions so the
+    //! wire bytes — and therefore the rollback CRC state hashes — are
+    //! identical on 32- and 64-bit builds. Non-sentinel values are unchanged
+    //! (usize as u64 is what serde emitted before).
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &usize, s: S) -> Result<S::Ok, S::Error> {
+        let out: u64 = if *v == usize::MAX { u64::MAX } else { *v as u64 };
+        out.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
+        let v = u64::deserialize(d)?;
+        if v == u64::MAX {
+            Ok(usize::MAX)
+        } else {
+            usize::try_from(v).map_err(serde::de::Error::custom)
+        }
+    }
+}
+
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Hash)]
 /// Internal identifiers used by the physics engine.
 pub struct RigidBodyIds {
+    #[cfg_attr(feature = "serde-serialize", serde(with = "sentinel_usize"))]
     pub(crate) active_island_id: usize,
+    #[cfg_attr(feature = "serde-serialize", serde(with = "sentinel_usize"))]
     pub(crate) active_set_id: usize,
     pub(crate) active_set_offset: u32,
     pub(crate) active_set_timestamp: u32,

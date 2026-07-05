@@ -40,6 +40,13 @@ WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
 Requires `rustup target add wasm32-unknown-unknown` and
 `cargo install wasm-server-runner`.
 
+Browser multiplayer (WebTransport): start the native server (`cargo run --bin
+server` — it also opens a WebTransport ingress on 127.0.0.1:6467 and writes
+`assets/webtransport-cert-hash.json` for the page), then open the wasm client
+with `?server` appended: `http://127.0.0.1:1334/?server`. Without the query
+param the wasm build stays offline single-player. See
+`docs/superpowers/specs/2026-07-05-webtransport-netcode-design.md`.
+
 ### Profiling
 
 - `docker-compose up` starts Pyroscope (`:4040`) + Grafana (`:3000`); build client/server with the `pyroscope` feature to push profiles.
