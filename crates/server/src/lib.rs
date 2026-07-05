@@ -123,6 +123,20 @@ impl WorldIngress {
         let sinks: Arc<DashMap<ClientId, ClientSink>> = Arc::new(DashMap::new());
         let writer_sinks = sinks.clone();
         tokio::spawn(async move {
+            // A stalled or vanished peer must never wedge this shared task:
+            // undetected dead connections stop yielding stream credit, so an
+            // unbounded send here would freeze outgoing traffic for EVERY
+            // client. Cleanup itself is the read task's job (idle timeout).
+            async fn send_bounded(sink: ClientSink, packet: Vec<u8>) {
+                let deadline = std::time::Duration::from_secs(2);
+                if tokio::time::timeout(deadline, sink.send_packet(packet))
+                    .await
+                    .is_err()
+                {
+                    log::warn!("send to client timed out; skipping (peer stalled or gone)");
+                }
+            }
+
             while let Ok((target, event)) = server_recv.recv() {
                 let packet = bincode::serialize(&event).unwrap();
                 match target {
@@ -130,14 +144,14 @@ impl WorldIngress {
                     Some(id) => {
                         let sink = writer_sinks.get(&id).map(|e| e.value().clone());
                         if let Some(sink) = sink {
-                            sink.send_packet(packet.clone()).await;
+                            send_bounded(sink, packet.clone()).await;
                         }
                     }
                     None => {
                         let targets: Vec<ClientSink> =
                             writer_sinks.iter().map(|e| e.value().clone()).collect();
                         for sink in targets {
-                            sink.send_packet(packet.clone()).await;
+                            send_bounded(sink, packet.clone()).await;
                         }
                     }
                 }

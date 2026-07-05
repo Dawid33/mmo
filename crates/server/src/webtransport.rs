@@ -35,6 +35,13 @@ pub async fn serve(
     let config = ServerConfig::builder()
         .with_bind_address(bind)
         .with_identity(identity)
+        // A browser that vanishes without a close frame (tab killed, laptop
+        // lid, frozen headless run) must be DETECTED, or its sink wedges the
+        // shared writer task once the dead peer's stream credit runs out —
+        // which stalls outgoing traffic for every client.
+        .keep_alive_interval(Some(std::time::Duration::from_secs(3)))
+        .max_idle_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("static idle timeout is in range")
         .build();
     let endpoint = Endpoint::server(config)?;
     info!("WebTransport endpoint listening on {bind}");
