@@ -27,3 +27,13 @@ tokio = { workspace = true }
 # Adds to (does not replace) the base [dependencies] bevy features — target tables merge additively.
 bevy = { workspace = true, features = ["webgl2"] }
 console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+  "Window", "Location", "Response", "Document",
+  "WebTransport", "WebTransportOptions", "WebTransportHash",
+  "WebTransportCloseInfo", "ReadableStream", "ReadableStreamDefaultReader",
+  "WritableStream", "WritableStreamDefaultWriter",
+  "WebTransportReceiveStream", "WebTransportSendStream",
+] }
