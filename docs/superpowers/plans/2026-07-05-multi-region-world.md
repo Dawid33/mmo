@@ -20,7 +20,9 @@
 - Tick rate pinned to `game::TICK_RATE = 50` (ms per tick) per region; no per-region adaptive rates.
 - Unload grace period `UNLOAD_GRACE_MS = 5000`; spawn region is `RegionCoords::new(0, 0)`.
 - Rollback bar: `hash(before) == hash(after undo)` and `hash(before park) == hash(after restore)`, bit-exact.
+- Both transports keep working: quinn on `127.0.0.1:6466` AND WebTransport on `127.0.0.1:6467` (merged in d936f0f). `cargo test -p server --test webtransport_handshake` must keep passing.
 - Editions stay as-is (game/server/client 2021, worldgen/macros 2024).
+- NOTE (post-plan merge): the WebTransport netcode landed after this plan's line references were taken (d936f0f..190fdc0). Server logic now lives in `crates/server/src/lib.rs` (not main.rs); client has `netcode_web.rs` and a changed input gate. Locate code by SYMBOL, not by the quoted line numbers.
 - Commit after every task with the trailer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
 
 ---
@@ -33,7 +35,8 @@ Regions get signed, unbounded 2D coordinates. `RegionId` stops being an alias of
 - Modify: `crates/game/src/protocol.rs` (add `RegionCoords`, change `RegionId` alias)
 - Modify: `crates/game/src/lib.rs` (World::basic region id; `World::remove_region`)
 - Modify: `crates/game/src/region.rs:37-42` (`Region::new` id param type)
-- Modify: `crates/server/src/main.rs:243,263` (region id literals)
+- Modify: `crates/server/src/lib.rs` (region id literals in `run()`: `ChunkCoords::new(0, 0, 0)` at the CreateClient site and the `current_tick` SyncClock site)
+- Modify: `crates/server/tests/webtransport_handshake.rs` (region id literal in its scripted router)
 - Modify: `crates/client/src/main.rs` (`player_chunk` type, `PlayerRegion` default, test literals)
 - Modify: `crates/client/src/local_server.rs:32` (region id literal)
 - Modify: `crates/client/src/renderer/bridge.rs` tests (region id literals)
@@ -156,8 +159,8 @@ Run `cargo build --workspace --bins` repeatedly; every error is one of these pat
 - `crates/game/src/region.rs:40` — `Region::new(..., id: ChunkCoords, ...)` → `id: RegionId`.
 - `crates/game/src/lib.rs:55` — `World.regions: BTreeMap<ChunkCoords, Region>` → `BTreeMap<RegionId, Region>`.
 - `crates/game/src/lib.rs:66` — `World::basic`: `let one = ChunkCoords::new(0, 0, 0);` → `let one = RegionCoords::new(0, 0);` (the inner `create_basic(ChunkCoords::new(x, 0, z))` loop is chunk-local and stays `ChunkCoords`).
-- `crates/server/src/main.rs:243` — `let region_id = ChunkCoords::new(0, 0, 0);` → `RegionCoords::new(0, 0)`; `main.rs:263` — `world.current_tick(&ChunkCoords::new(0, 0, 0))` → `world.current_tick(id)` (use the iterated region id; this also fixes the hardcoded-origin TODO noted in local_server.rs:86-88). Update the `use game::{...}` import list.
-- `crates/client/src/main.rs:59` — `player_chunk: Option<ChunkCoords>` → `Option<RegionCoords>`; `main.rs:250` — `id.unwrap_or(ChunkCoords::new(0, 0, 0))` → `id.unwrap_or(RegionCoords::new(0, 0))`; test at `main.rs:490` — `ChunkCoords::new(0, 0, 0)` → `RegionCoords::new(0, 0)`. Update imports (`use game::{RegionCoords, ...}`).
+- `crates/server/src/lib.rs` (`run()`) — `let region_id = ChunkCoords::new(0, 0, 0);` → `RegionCoords::new(0, 0)`; and `world.current_tick(&ChunkCoords::new(0, 0, 0))` → `world.current_tick(id)` (use the iterated region id; this also fixes the hardcoded-origin TODO noted in local_server.rs:86-88). Update the `use game::{...}` import list. Same treatment for the region-id literal in `crates/server/tests/webtransport_handshake.rs`.
+- `crates/client/src/main.rs:59` — `player_chunk: Option<ChunkCoords>` → `Option<RegionCoords>`; `main.rs:250` — `id.unwrap_or(ChunkCoords::new(0, 0, 0))` → `id.unwrap_or(RegionCoords::new(0, 0))`; tests in `manager_tests` (`pump_loads_region_and_ticks` and `player_input_flows_while_not_ready_once_caught_up`) — `ChunkCoords::new(0, 0, 0)` → `RegionCoords::new(0, 0)`. Update imports (`use game::{RegionCoords, ...}`).
 - `crates/client/src/local_server.rs:32` — `ChunkCoords::new(0, 0, 0)` → `RegionCoords::new(0, 0)`; update imports.
 - `crates/client/src/renderer/bridge.rs` tests (lines 303, 451, 477) — `ChunkCoords::new(0, 0, 0)` as a region id → `RegionCoords::new(0, 0)`; update the test imports.
 
@@ -1412,14 +1415,14 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ### Task 5: Server on region threads
 
-The server binary becomes: netcode thread (unchanged transport) + manager thread + one thread per running region with its own tick timer. The old single-`World` loop, the tick-generator thread, and the adaptive tick rate go away. The crate gains a lib target so the threaded integration test can drive the real pieces.
+The server keeps its dual-transport ingress (quinn `:6466` + WebTransport `:6467`, `ClientSink` fan-out, shared writer task — all merged in d936f0f and NOT to be restructured) and swaps only the game side: `run()`'s single-`World` loop, the tick-generator thread, and the adaptive tick rate are replaced by a manager loop + one thread per running region. The local `ServerEvent` enum is deleted in favor of `game::ServerEvent` (Task 4), and both transports gain `ClientDisconnected` reporting.
 
 **Files:**
-- Create: `crates/server/src/lib.rs`
-- Create: `crates/server/src/netcode.rs` (move `WorldIngress` + `handle_connection` out of main.rs)
+- Modify: `crates/server/src/lib.rs` (delete local `ServerEvent`; rewrite `run()`; add disconnect reporting in the quinn cleanup path)
+- Modify: `crates/server/src/webtransport.rs` (disconnect reporting after the read loop)
 - Create: `crates/server/src/region_threads.rs`
-- Modify: `crates/server/src/main.rs` (reduce to a thin entry point)
-- Modify: `crates/server/Cargo.toml` (add `worldgen` dependency; lib target)
+- Modify: `crates/server/Cargo.toml` (add `worldgen = { path = "../worldgen" }`)
+- Modify: `crates/server/tests/webtransport_handshake.rs` (import `ServerEvent` from `game`; its scripted router is ITS OWN loop and keeps working — do not rewrite it)
 - Test: `crates/server/tests/threaded_world.rs` (new)
 
 **Interfaces:**
@@ -1438,63 +1441,55 @@ pub fn region_thread_loop(runner: game::RegionRunner,
 pub fn run(); // full server: netcode thread + manager loop; returns on Quit
 ```
 
-- [ ] **Step 1: Restructure into a lib**
+- [ ] **Step 1: Swap `ServerEvent` to the shared type and report disconnects**
 
-`crates/server/Cargo.toml` — add under `[dependencies]`: `worldgen = { path = "../worldgen" }`. Add lib+bin targets if the crate is bin-only:
+In `crates/server/src/lib.rs`:
 
-```toml
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "server"
-path = "src/main.rs"
-```
-
-`crates/server/src/lib.rs`:
+1. DELETE the local `pub enum ServerEvent` (the block with `ClientPacket` / `ClientConnected` / `ServerTickTimer` doc comments) and add `ServerEvent` to the `use game::{...}` import. `game::ServerEvent` (Task 4) has `ClientDisconnected` instead of `ServerTickTimer`.
+2. In `WorldIngress::listen`'s quinn accept loop, the per-connection cleanup task currently ends with `sinks.remove(&id);` — extend it:
 
 ```rust
-//! Server: netcode thread (quinn) + manager thread + one thread per running
-//! region. The manager core lives in `game` (shared with the wasm
-//! LocalServer); this crate provides only the shells: OS threads, timers,
-//! QUIC.
-pub mod netcode;
-pub mod region_threads;
+                let fut = handle_connection(connection, send.clone(), id);
+                tokio::spawn(async move {
+                    if let Err(e) = fut.await {
+                        error!("connection failed: {reason}", reason = e.to_string())
+                    }
+                    sinks.remove(&id);
+                    // The world must know: unsubscribe everywhere, let the
+                    // home region's grace timer start.
+                    let _ = send.send(ServerEvent::ClientDisconnected(id));
+                });
+```
 
-use std::time::{Duration, Instant};
+(The `send` passed to `handle_connection` must be a clone so the cleanup task still owns one — adjust the existing `let send = send.clone()` dance minimally.)
 
-use crossbeam::channel::select;
-use game::{ServerEvent, WorldManager};
-use region_threads::ThreadRegionSpawner;
+3. In `crates/server/src/webtransport.rs`, the read loop ends with `sinks.remove(&id);` — add the same report after it:
 
-pub fn run() {
-    let (server_event_send, server_event_recv) = crossbeam::channel::unbounded();
-    let (server_send, server_recv) = crossbeam::channel::unbounded();
+```rust
+            sinks.remove(&id);
+            let _ = send.send(ServerEvent::ClientDisconnected(id));
+```
+
+4. In `crates/server/tests/webtransport_handshake.rs`, fix the `ServerEvent` import to come from `game` (its scripted router matches on `ClientPacket`/`ClientConnected` only, which both still exist; add a catch-all `_ => {}` arm if the match becomes non-exhaustive over `ClientDisconnected`).
+
+- [ ] **Step 2: Rewrite `run()` as the manager loop**
+
+Replace everything in `run()` AFTER the `WorldIngress` thread spawn (i.e. delete: `World::basic()`, `results_buffer`, the tick-rate atomics, the tick-generator `std::thread::spawn`, and the whole `while let Ok(event)` match) with:
+
+```rust
     let (region_out_send, region_out_recv) = crossbeam::channel::unbounded();
-
-    // Netcode thread: unchanged transport, now also reports disconnects.
-    let mut ingress = netcode::WorldIngress::new();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let net_send = server_event_send.clone();
-    std::thread::spawn(move || {
-        rt.block_on(async move { ingress.listen(net_send, server_recv).await })
-    });
-
-    let mut manager = WorldManager::new(
-        ThreadRegionSpawner::default(),
+    let mut manager = game::WorldManager::new(
+        region_threads::ThreadRegionSpawner::default(),
         Box::new(worldgen::generate_region),
         server_send,
         region_out_send,
     );
 
-    let start = Instant::now();
+    let start = std::time::Instant::now();
     'main: loop {
         let now_ms = start.elapsed().as_millis() as u64;
-        select! {
-            recv(server_event_recv) -> ev => match ev {
+        crossbeam::channel::select! {
+            recv(client_packet_recv) -> ev => match ev {
                 Ok(ev) => {
                     if !manager.handle_server_event(ev, now_ms) {
                         break 'main;
@@ -1507,56 +1502,25 @@ pub fn run() {
                     manager.handle_region_output(rc, output, now_ms);
                 }
             },
-            default(Duration::from_millis(200)) => {}
+            default(std::time::Duration::from_millis(200)) => {}
         }
         manager.maintain(now_ms);
     }
 
     // Orderly exit: park everything, join region threads.
     manager.shutdown_all();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !manager.running_regions().is_empty() && Instant::now() < deadline {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !manager.running_regions().is_empty() && std::time::Instant::now() < deadline {
         let now_ms = start.elapsed().as_millis() as u64;
-        if let Ok((rc, output)) = region_out_recv.recv_timeout(Duration::from_millis(100)) {
+        if let Ok((rc, output)) = region_out_recv.recv_timeout(std::time::Duration::from_millis(100)) {
             manager.handle_region_output(rc, output, now_ms);
         }
     }
-}
 ```
 
-`crates/server/src/main.rs` shrinks to:
+Add `pub mod region_threads;` next to `pub mod webtransport;`. Keep the `simplelog` init at the top of `run()` and the channel names (`client_packet_send/recv`, `server_send/recv`) exactly as they are — the ingress side of the function does not change. Clean up now-unused imports (`World`, `ChunkCoords`, `BTreeMap`, `AtomicU64`, ...); the `use crossbeam::channel::select` style may differ from the fully-qualified form above — either is fine, match the file.
 
-```rust
-//! Server entry point. All logic lives in the lib (src/lib.rs) so the
-//! threaded integration tests can drive the same code.
-fn main() {
-    server::run();
-}
-```
-
-(Keep the commented-out pyroscope/simplelog blocks by moving them into `run()` or deleting them — they are already commented out; deleting is fine.)
-
-- [ ] **Step 2: Move netcode into `crates/server/src/netcode.rs`**
-
-Cut `WorldIngress`, `listen`, and `handle_connection` from the old main.rs verbatim, with three changes:
-
-1. `use game::ServerEvent;` — the local `ServerEvent` enum (old main.rs:132-141) is DELETED; the type now comes from `game` (Task 4) and has `ClientDisconnected` instead of `ServerTickTimer`.
-2. In `listen`'s accept loop (old main.rs:120-126), report disconnects after the connection future ends:
-
-```rust
-                let fut = handle_connection(connection, send.clone(), id);
-                tokio::spawn(async move {
-                    if let Err(e) = fut.await {
-                        error!("connection failed: {reason}", reason = e.to_string())
-                    }
-                    conns.remove(&id);
-                    // The world must know: unsubscribe everywhere, let the
-                    // home region's grace timer start.
-                    let _ = send.send(ServerEvent::ClientDisconnected(id));
-                });
-```
-
-3. Update the module doc comment: `WorldIngress` is now genuinely only the network ingress; the game loop lives in `lib.rs`/`game::WorldManager`.
+Add to `crates/server/Cargo.toml` `[dependencies]`: `worldgen = { path = "../worldgen" }`.
 
 - [ ] **Step 3: Implement `crates/server/src/region_threads.rs`**
 
@@ -1640,7 +1604,7 @@ pub fn region_thread_loop(mut runner: RegionRunner, recv: Receiver<RegionInput>)
 - [ ] **Step 4: Build**
 
 Run: `cargo build --workspace --bins`
-Expected: compiles. The old main.rs content (tick thread, `World::basic`, adaptive tick rate, the whole `ServerEvent` match) is gone — `git diff --stat` should show main.rs shrinking to a few lines.
+Expected: compiles. The tick thread, `World::basic`, adaptive tick rate, and the old `ServerEvent` match are gone from `run()`; the ingress half of lib.rs (ClientSink, WorldIngress::listen, handle_connection, webtransport) is untouched apart from the two disconnect sends.
 
 - [ ] **Step 5: Write the threaded integration test**
 
@@ -1778,8 +1742,8 @@ Note: `snapshot_regions()` drains the packet channel once and asserts set-wise �
 
 - [ ] **Step 6: Run it**
 
-Run: `cargo test -p server --test threaded_world -- --nocapture`
-Expected: PASS in a few seconds. Also rerun `cargo test -p game && cargo test -p client`.
+Run: `cargo test -p server --test threaded_world -- --nocapture && cargo test -p server --test webtransport_handshake`
+Expected: both PASS in a few seconds. Also rerun `cargo test -p game && cargo test -p client`.
 
 - [ ] **Step 7: Manual smoke — server + native client still work single-region**
 
@@ -1970,7 +1934,7 @@ Run: `cargo test -p client manager_tests` — Expected: FAIL (fields/behavior mi
 
 - [ ] **Step 3: Implement the manager changes in `crates/client/src/main.rs`**
 
-Field changes on `GameInstanceManager` (main.rs:42-61): replace `player_chunk: Option<RegionCoords>` with:
+Field changes on `GameInstanceManager` (locate by symbol; line refs predate the WebTransport merge): replace `player_chunk: Option<RegionCoords>` with:
 
 ```rust
     home_region: Option<RegionCoords>,
@@ -1980,7 +1944,7 @@ Field changes on `GameInstanceManager` (main.rs:42-61): replace `player_chunk: O
     pending_events: BTreeMap<RegionCoords, Vec<GameEvent>>,
 ```
 
-Initialize all three in `new()` (`None` / `BTreeSet::new()` / `BTreeMap::new()`). Delete every `player_chunk` mention; `handle_game_event`'s PlayerInput arm routes to `self.home_region` instead (same shape as before).
+Initialize all three in `new()` (`None` / `BTreeSet::new()` / `BTreeMap::new()`). Delete every `player_chunk` mention; `handle_game_event`'s PlayerInput arm routes to `self.home_region` instead (same shape as before). Do NOT touch the input-admission guard arm — it is now `PlayerInput(_, _) if !self.is_caught_up` (commit 190fdc0 removed the flapping `ready` gate; there is a regression test).
 
 Viewer position + window logic (new `impl GameInstanceManager` methods, target-independent):
 
@@ -2301,7 +2265,7 @@ The wasm/offline server stops hand-mirroring server logic and becomes a thin sin
 
 **Interfaces:**
 - Consumes: `game::{WorldManager, InlineSpawner, ServerEvent, RegionOutput, RegionCoords, ClientId, ClientPacket, ServerPacket, TICK_RATE}`; `worldgen::generate_region`.
-- Produces: `LocalServer::{new(recv, send), pump(), tick()}` — same signatures as today (sim_driver.rs:40,75,87 keep compiling untouched).
+- Produces: `LocalServer::{new(recv, send), pump(), tick()}` — same signatures as today, so `sim_driver.rs` keeps compiling untouched. (Since the WebTransport merge, sim_driver has an online mode that skips LocalServer entirely; only the offline path constructs it. Don't touch sim_driver.)
 
 - [ ] **Step 1: Rewrite `crates/client/src/local_server.rs`**
 
