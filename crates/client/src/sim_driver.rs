@@ -49,14 +49,14 @@ pub fn start_wasm_sim() -> (
     let mut manager =
         GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
 
-    // `?server` anywhere in the query string selects the real WebTransport
-    // path; its absence keeps today's embedded single-player behavior.
-    let online = web_sys::window()
+    // Online (real WebTransport server) is the default; `?offline` anywhere
+    // in the query string opts into the embedded single-player world instead.
+    let offline = web_sys::window()
         .and_then(|w| w.location().search().ok())
-        .map(|s| s.contains("server"))
+        .map(|s| s.contains("offline"))
         .unwrap_or(false);
 
-    let mode = if online {
+    let mode = if !offline {
         crate::netcode_web::connect(server_send, manager.client_packet_recv());
         SimMode::Online
     } else {

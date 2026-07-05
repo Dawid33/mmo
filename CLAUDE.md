@@ -25,26 +25,25 @@ The game crate has the rollback test suite: `cargo test -p game` (transaction/un
 
 Bevy is pinned to `0.18` in the root `Cargo.toml`; Bevy's API surface moves fast between minor versions, so treat upgrades as a deliberate, tested migration rather than a routine bump — API drift (renamed types/traits, moved modules, changed system-set names) is a known hazard.
 
-### WASM build (offline single-player)
+### WASM build (browser multiplayer)
 
-The client also targets `wasm32-unknown-unknown` (native QUIC netcode is
-replaced by an embedded `LocalServer`; see `crates/client/src/local_server.rs`):
+The client also targets `wasm32-unknown-unknown`; in the browser the native
+QUIC netcode is replaced by WebTransport (`crates/client/src/netcode_web.rs`):
 
 ```sh
+cargo run --bin server   # quinn :6466 + WebTransport ingress :6467; writes
+                         # assets/webtransport-cert-hash.json for the page
 # From the repo root (so ./assets is served). The custom index adds a
 # fullscreen canvas + download progress bar:
 WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
   cargo run -p client --target wasm32-unknown-unknown   # opens via wasm-server-runner
 ```
 
-Requires `rustup target add wasm32-unknown-unknown` and
-`cargo install wasm-server-runner`.
-
-Browser multiplayer (WebTransport): start the native server (`cargo run --bin
-server` — it also opens a WebTransport ingress on 127.0.0.1:6467 and writes
-`assets/webtransport-cert-hash.json` for the page), then open the wasm client
-with `?server` appended: `http://127.0.0.1:1334/?server`. Without the query
-param the wasm build stays offline single-player. See
+Open `http://127.0.0.1:1334/` — connecting to the real server is the default.
+Append `?offline` to opt into the embedded single-player world instead
+(`crates/client/src/local_server.rs`, no server needed). Requires
+`rustup target add wasm32-unknown-unknown` and `cargo install
+wasm-server-runner`. See
 `docs/superpowers/specs/2026-07-05-webtransport-netcode-design.md`.
 
 ### Profiling
