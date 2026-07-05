@@ -1,7 +1,7 @@
 use game::{IsometryReal, Rollback};
 use game::na::{Quaternion, Translation3, Unit};
 use game::parry::math::Real;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 
 fn crc(rb: &Rollback) -> u32 {
     let mut h = crc32fast::Hasher::new();
