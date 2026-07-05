@@ -7,11 +7,22 @@ use crossbeam::channel::{Receiver, Sender};
 use game::{ClientPacket, ServerPacket};
 use js_sys::{Reflect, Uint8Array};
 use log::{error, info, warn};
+use std::cell::Cell;
+use std::rc::Rc;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     ReadableStreamDefaultReader, WebTransport, WebTransportHash, WebTransportOptions,
 };
+
+/// Dev-grade on-screen signal (per the spec): flag the dead connection in the
+/// tab title, not just the console.
+fn connection_lost(reason: &str) {
+    error!("connection lost: {reason}");
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        doc.set_title("CONNECTION LOST — Labour of Love");
+    }
+}
 
 /// Kick off the connection; returns immediately. All I/O runs on the browser
 /// event loop via spawn_local, feeding the same channels LocalServer feeds
@@ -19,11 +30,7 @@ use web_sys::{
 pub fn connect(server_send: Sender<ServerPacket>, client_recv: Receiver<ClientPacket>) {
     spawn_local(async move {
         if let Err(e) = run(server_send, client_recv).await {
-            error!("webtransport connection failed: {e:?}");
-            // Spec: dev-grade on-screen signal, not just the console.
-            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-                doc.set_title("CONNECTION LOST — Labour of Love");
-            }
+            connection_lost(&format!("{e:?}"));
         }
     });
 }
@@ -34,18 +41,32 @@ async fn run(
 ) -> Result<(), JsValue> {
     let window = web_sys::window().expect("no window");
 
-    // 1. Fetch the cert hash + port the server wrote into assets/.
+    // 1. Fetch the cert hash + port the server wrote into assets/. Malformed
+    //    contents are Err returns, not panics: a panic inside this promise
+    //    would poison the whole wasm instance instead of just flagging the
+    //    connection as lost.
     let resp: web_sys::Response =
         JsFuture::from(window.fetch_with_str("assets/webtransport-cert-hash.json"))
             .await?
             .dyn_into()?;
     let text = JsFuture::from(resp.text()?).await?;
-    let text = text.as_string().expect("hash file not text");
-    let (hash_hex, port) = parse_hash_json(&text).expect("malformed cert hash file");
+    let text = text
+        .as_string()
+        .ok_or_else(|| JsValue::from_str("hash file not text"))?;
+    let (hash_hex, port) =
+        parse_hash_json(&text).ok_or_else(|| JsValue::from_str("malformed cert hash file"))?;
+    // Guard the slicing too: odd-length or non-ASCII hex would panic on
+    // `&hash_hex[i..i + 2]` before from_str_radix ever saw it.
+    if hash_hex.len() % 2 != 0 || !hash_hex.is_ascii() {
+        return Err(JsValue::from_str("bad hex in cert hash"));
+    }
     let hash_bytes: Vec<u8> = (0..hash_hex.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&hash_hex[i..i + 2], 16).unwrap())
-        .collect();
+        .map(|i| {
+            u8::from_str_radix(&hash_hex[i..i + 2], 16)
+                .map_err(|_| JsValue::from_str("bad hex in cert hash"))
+        })
+        .collect::<Result<_, _>>()?;
 
     // 2. Open the transport, trusting exactly that certificate.
     let hash = WebTransportHash::new();
@@ -60,23 +81,37 @@ async fn run(
     JsFuture::from(transport.ready()).await?;
     info!("[client] webtransport connected");
 
-    // 3. Read loop: each incoming uni-stream is one ServerPacket.
+    // Shared death flag: the read loop is the one that observes the server
+    // going away; the write loop checks it so it stops polling instead of
+    // spinning against a dead transport every 16ms forever.
+    let dead = Rc::new(Cell::new(false));
+
+    // 3. Read loop: each incoming uni-stream is one ServerPacket. One stream
+    //    at a time, fully read before the next is accepted: preserves
+    //    server-send order exactly like the native quinn loop in netcode.rs
+    //    (the rollback reconciler relies on server-open order, not
+    //    stream-completion order).
     let incoming: ReadableStreamDefaultReader = transport
         .incoming_unidirectional_streams()
         .get_reader()
         .dyn_into()?;
     let read_send = server_send.clone();
+    let read_dead = dead.clone();
     spawn_local(async move {
         loop {
             let next = match JsFuture::from(incoming.read()).await {
                 Ok(v) => v,
-                Err(e) => return warn!("incoming streams closed: {e:?}"),
+                Err(e) => {
+                    read_dead.set(true);
+                    return connection_lost(&format!("incoming streams closed: {e:?}"));
+                }
             };
             if Reflect::get(&next, &"done".into())
                 .map(|d| d.is_truthy())
                 .unwrap_or(true)
             {
-                return info!("server closed the connection");
+                read_dead.set(true);
+                return connection_lost("server closed the connection");
             }
             let stream: web_sys::ReadableStream =
                 match Reflect::get(&next, &"value".into()).and_then(|v| v.dyn_into()) {
@@ -86,18 +121,15 @@ async fn run(
                         continue;
                     }
                 };
-            let send = read_send.clone();
-            spawn_local(async move {
-                match read_stream_to_end(stream).await {
-                    Ok(bytes) => match bincode::deserialize::<ServerPacket>(&bytes) {
-                        Ok(packet) => {
-                            let _ = send.send(packet);
-                        }
-                        Err(e) => warn!("failed deserializing packet {e:?}"),
-                    },
-                    Err(e) => warn!("stream read failed: {e:?}"),
-                }
-            });
+            match read_stream_to_end(stream).await {
+                Ok(bytes) => match bincode::deserialize::<ServerPacket>(&bytes) {
+                    Ok(packet) => {
+                        let _ = read_send.send(packet);
+                    }
+                    Err(e) => warn!("failed deserializing packet {e:?}"),
+                },
+                Err(e) => warn!("stream read failed: {e:?}"),
+            }
         }
     });
 
@@ -106,6 +138,9 @@ async fn run(
     //    yields to the event loop between drains.
     spawn_local(async move {
         loop {
+            if dead.get() {
+                return;
+            }
             while let Ok(packet) = client_recv.try_recv() {
                 let payload = bincode::serialize(&packet).unwrap();
                 // `create_unidirectional_stream` resolves to a typed
@@ -128,7 +163,12 @@ async fn run(
                         }
                         let _ = JsFuture::from(writer.close()).await;
                     }
-                    Err(e) => warn!("open uni failed: {e:?}"),
+                    Err(e) => {
+                        // Can't open streams: the session is gone. Fatal, not
+                        // retry-every-16ms.
+                        dead.set(true);
+                        return connection_lost(&format!("failed to open outgoing stream: {e:?}"));
+                    }
                 }
             }
             // Yield ~one frame so the sim can enqueue more packets.
