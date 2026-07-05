@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use crossbeam::channel::Sender;
 use dashmap::DashMap;
-use game::{ClientId, ClientPacket};
+use game::{ClientId, ClientPacket, ServerEvent};
 use log::{info, warn};
 use wtransport::{Endpoint, Identity, ServerConfig};
 
-use crate::{ClientSink, ServerEvent};
+use crate::ClientSink;
 
 /// Max size of a single packet stream; region snapshots are the largest
 /// payloads and stay well under this.
@@ -93,6 +93,7 @@ pub async fn serve(
                 }
             }
             sinks.remove(&id);
+            let _ = send.send(ServerEvent::ClientDisconnected(id));
         });
     }
 }

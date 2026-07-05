@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use game::{ClientPacket, RegionCoords, ServerPacket};
-use server::{webtransport, ClientSink, ServerEvent};
+use game::{ClientPacket, RegionCoords, ServerEvent, ServerPacket};
+use server::{webtransport, ClientSink};
 
 async fn recv_packet(conn: &wtransport::Connection) -> ServerPacket {
     let mut stream = conn.accept_uni().await.expect("server closed stream");
@@ -104,7 +104,7 @@ async fn webtransport_client_full_handshake() {
                         server_send.send((None, ServerPacket::GameEvent(ev))).unwrap();
                     }
                 }
-                ServerEvent::ServerTickTimer => {}
+                ServerEvent::ClientDisconnected(_) => {}
             }
         }
     });

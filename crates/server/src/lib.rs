@@ -1,18 +1,10 @@
 //! Server
 // #![deny(missing_docs)]
-use std::{
-    collections::BTreeMap,
-    fmt::Debug,
-    sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::sync::{atomic::AtomicUsize, atomic::Ordering, Arc};
 
 use crossbeam::channel::{Receiver, Sender};
 use dashmap::DashMap;
-use game::{ClientId, ClientPacket, RegionCoords, ServerPacket, World};
+use game::{ClientId, ClientPacket, ServerEvent, ServerPacket};
 use log::{error, info};
 use quinn::{
     crypto::rustls::QuicServerConfig,
@@ -23,6 +15,7 @@ use quinn::{
     ConnectionError, Endpoint, TransportConfig,
 };
 
+pub mod region_threads;
 pub mod webtransport;
 
 /// One connected client's outgoing half, transport-agnostic. The router
@@ -189,27 +182,19 @@ impl WorldIngress {
                 // served.
                 send.send(ServerEvent::ClientConnected(id)).unwrap();
 
-                let fut = handle_connection(connection, send, id);
+                let fut = handle_connection(connection, send.clone(), id);
                 tokio::spawn(async move {
                     if let Err(e) = fut.await {
                         error!("connection failed: {reason}", reason = e.to_string())
                     }
                     sinks.remove(&id);
+                    // The world must know: unsubscribe everywhere, let the
+                    // home region's grace timer start.
+                    let _ = send.send(ServerEvent::ClientDisconnected(id));
                 });
             });
         }
     }
-}
-
-#[derive(Debug)]
-/// Internal event that is handled by the server.
-pub enum ServerEvent {
-    /// Recieved a packet from a client that needs to be handled.
-    ClientPacket(ClientPacket, ClientId),
-    /// A new client finished connecting and needs a player.
-    ClientConnected(ClientId),
-    /// Internal timer for generated game ticks.
-    ServerTickTimer,
 }
 
 pub fn run() {
@@ -234,132 +219,43 @@ pub fn run() {
     let cps = client_packet_send.clone();
     std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
 
-    let mut world = World::basic();
-    let mut results_buffer = BTreeMap::new();
+    let (region_out_send, region_out_recv) = crossbeam::channel::unbounded();
+    let mut manager = game::WorldManager::new(
+        region_threads::ThreadRegionSpawner::default(),
+        Box::new(worldgen::generate_region),
+        server_send,
+        region_out_send,
+    );
 
-    // Tick generation starts only after the world exists (no boot backlog)
-    // and never runs more than one tick ahead of processing, so client
-    // packets are never starved behind a tick pileup.
-    let tick_rate = Arc::new(AtomicU64::new(game::TICK_RATE));
-    let pending_ticks = Arc::new(AtomicU64::new(0));
-    let tick_thread_tick_rate = tick_rate.clone();
-    let tick_thread_pending = pending_ticks.clone();
-    let tick_thread_send = client_packet_send.clone();
-    std::thread::spawn(move || loop {
-        // TODO: Sync ticks with server.
-        if tick_thread_pending.load(Ordering::SeqCst) < 1 {
-            tick_thread_pending.fetch_add(1, Ordering::SeqCst);
-            tick_thread_send.send(ServerEvent::ServerTickTimer).unwrap();
-        }
-        let rate = tick_thread_tick_rate.load(Ordering::SeqCst);
-        std::thread::sleep(Duration::from_millis(rate));
-    });
-    // handle game events on server and send successfull events to connected clients.
-    while let Ok(event) = client_packet_recv.recv() {
-        let count = client_packet_recv.len();
-        if count > 2 {
-            tick_rate.store(game::TICK_RATE + count as u64, Ordering::SeqCst);
-        } else {
-            tick_rate.store(game::TICK_RATE, Ordering::SeqCst);
-        }
-        match event {
-            ServerEvent::ClientPacket(client_packet, client_id) => match client_packet {
-                // Find region in world that contains player linked to client_id.
-                // If the player doesn't exist, send him 0, 0.
-                ClientPacket::RequestPlayerRegion => {
-                    if let Some(id) = world.find_player(&client_id) {
-                        server_send
-                            .send((
-                                Some(client_id),
-                                ServerPacket::PlayerRegion(Some(id), client_id),
-                            ))
-                            .unwrap();
-                    } else {
-                        server_send
-                            .send((Some(client_id), ServerPacket::PlayerRegion(None, client_id)))
-                            .unwrap();
-                    };
-                }
-                // Send the requested region to the client.
-                ClientPacket::RequestRegionConnection(id) => {
-                    server_send
-                        .send((Some(client_id), world.build_region_server_packet(&id)))
-                        .unwrap();
-                }
-                ClientPacket::ReleaseRegionConnection(_) => {
-                    // Subscription management lands with the WorldManager (Task 5).
-                }
-                ClientPacket::GameEvent(game_event) => match game_event.kind {
-                    game::GameEventKind::Tick => (),
-                    game::GameEventKind::Quit => {
-                        break;
+    let start = std::time::Instant::now();
+    'main: loop {
+        let now_ms = start.elapsed().as_millis() as u64;
+        crossbeam::channel::select! {
+            recv(client_packet_recv) -> ev => match ev {
+                Ok(ev) => {
+                    if !manager.handle_server_event(ev, now_ms) {
+                        break 'main;
                     }
-                    _ => {
-                        let event = match world
-                            .handle_region_event(game_event.kind, game_event.region_id)
-                        {
-                            Ok(e) => {
-                                world.forget_last_event(&game_event.region_id);
-                                e
-                            }
-                            Err(e) => panic!("Server crashed {:?}", e),
-                        };
-                        server_send
-                            .send((None, ServerPacket::GameEvent(event)))
-                            .unwrap();
-                    }
-                },
+                }
+                Err(_) => break 'main,
             },
-            ServerEvent::ClientConnected(client_id) => {
-                // Server-authoritative player creation. Reconnects (player
-                // already exists) create nothing.
-                if world.find_player(&client_id).is_none() {
-                    let region_id = RegionCoords::new(0, 0);
-                    let event = match world.handle_region_event(
-                        game::GameEventKind::CreateClient(client_id),
-                        region_id,
-                    ) {
-                        Ok(e) => {
-                            world.forget_last_event(&region_id);
-                            e
-                        }
-                        Err(e) => panic!("Server crashed {:?}", e),
-                    };
-                    server_send
-                        .send((None, ServerPacket::GameEvent(event)))
-                        .unwrap();
+            recv(region_out_recv) -> out => {
+                if let Ok((rc, output)) = out {
+                    manager.handle_region_output(rc, output, now_ms);
                 }
-            }
-            ServerEvent::ServerTickTimer => {
-                pending_ticks.fetch_sub(1, Ordering::SeqCst);
-                world.progress_world_one_tick(&mut results_buffer);
-                for (id, result) in &results_buffer {
-                    server_send
-                        .send((
-                            None,
-                            ServerPacket::GameEvent(result.as_ref().unwrap().clone()),
-                        ))
-                        .unwrap();
-                    if world.current_tick(id) % 10 == 0 {
-                        server_send
-                            .send((
-                                None,
-                                ServerPacket::SyncClock(
-                                    *id,
-                                    tick_rate.load(Ordering::SeqCst),
-                                    world.current_tick(&id),
-                                    Duration::new(0, 0),
-                                ),
-                            ))
-                            .unwrap();
-                    }
-                }
-                // The server never rolls back: drop each tick's transaction
-                // immediately so the undo log and memory stay bounded.
-                for id in results_buffer.keys() {
-                    world.forget_last_event(id);
-                }
-            }
+            },
+            default(std::time::Duration::from_millis(200)) => {}
+        }
+        manager.maintain(now_ms);
+    }
+
+    // Orderly exit: park everything, join region threads.
+    manager.shutdown_all();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !manager.running_regions().is_empty() && std::time::Instant::now() < deadline {
+        let now_ms = start.elapsed().as_millis() as u64;
+        if let Ok((rc, output)) = region_out_recv.recv_timeout(std::time::Duration::from_millis(100)) {
+            manager.handle_region_output(rc, output, now_ms);
         }
     }
     // let agent_ready = agent_running.stop().unwrap();
