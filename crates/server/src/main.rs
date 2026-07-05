@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     fmt::Debug,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -20,8 +20,42 @@ use quinn::{
         self,
         pki_types::{CertificateDer, PrivatePkcs8KeyDer},
     },
-    Connection, ConnectionError, Endpoint, TransportConfig,
+    ConnectionError, Endpoint, TransportConfig,
 };
+
+/// One connected client's outgoing half, transport-agnostic. The router
+/// writes bincode ServerPackets; each variant frames them as one
+/// uni-stream per packet.
+#[derive(Clone)]
+pub enum ClientSink {
+    Quinn(quinn::Connection),
+}
+
+impl ClientSink {
+    /// Send one packet; a failed/vanished client is logged and skipped so a
+    /// single dead connection can't kill the shared writer task.
+    pub async fn send_packet(&self, packet: Vec<u8>) {
+        match self {
+            ClientSink::Quinn(conn) => {
+                let mut stream = match conn.open_uni().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!("dropping packet to gone client: {e:?}");
+                        return;
+                    }
+                };
+                if let Err(e) = stream.write_all(&packet).await {
+                    log::warn!("write to client failed: {e:?}");
+                    return;
+                }
+                let _ = stream.finish();
+                tokio::spawn(async move {
+                    let _ = stream.stopped().await;
+                });
+            }
+        }
+    }
+}
 
 /// Wrapper around RegionGroup with additional bookeeping / networking
 /// to make it work as a server. Acts only as a dumb router of game event packets.
@@ -70,48 +104,37 @@ impl WorldIngress {
         config.transport_config(Arc::new(t_config));
         let endpoint = Endpoint::server(config, "127.0.0.1:6466".parse().unwrap()).unwrap();
 
-        let connections: Arc<DashMap<ClientId, Connection>> = Arc::new(DashMap::new());
-        let conns = connections.clone();
+        let sinks: Arc<DashMap<ClientId, ClientSink>> = Arc::new(DashMap::new());
+        let writer_sinks = sinks.clone();
         tokio::spawn(async move {
             while let Ok((target, event)) = server_recv.recv() {
                 let packet = bincode::serialize(&event).unwrap();
                 match target {
                     // Directed packet: if the client is gone, drop it.
                     Some(id) => {
-                        let conn = conns.get(&id).map(|e| e.value().clone());
-                        if let Some(conn) = conn {
-                            let mut stream = conn.open_uni().await.unwrap();
-                            stream.write_all(&packet).await.unwrap();
-                            stream.finish().unwrap();
-                            tokio::spawn(async move {
-                                stream.stopped().await.unwrap();
-                            });
+                        let sink = writer_sinks.get(&id).map(|e| e.value().clone());
+                        if let Some(sink) = sink {
+                            sink.send_packet(packet.clone()).await;
                         }
                     }
                     None => {
-                        for entry in conns.iter() {
-                            let mut stream = entry.value().open_uni().await.unwrap();
-                            stream.write_all(&packet).await.unwrap();
-                            stream.finish().unwrap();
-                            tokio::spawn(async move {
-                                stream.stopped().await.unwrap();
-                            });
+                        for entry in writer_sinks.iter() {
+                            entry.value().send_packet(packet.clone()).await;
                         }
                     }
                 }
             }
         });
 
-        let mut next_id = 0;
+        let next_client_id = Arc::new(AtomicUsize::new(0));
         while let Some(conn) = endpoint.accept().await {
             let send = send.clone();
-            let conns = connections.clone();
-            let id = next_id;
-            next_id += 1;
+            let sinks = sinks.clone();
+            let id = next_client_id.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
                 info!("accepting connection");
                 let connection = conn.await.unwrap();
-                conns.insert(id, connection.clone());
+                sinks.insert(id, ClientSink::Quinn(connection.clone()));
                 // Announce before any of this client's packets can be read:
                 // guarantees the player exists before its first request is
                 // served.
@@ -122,7 +145,7 @@ impl WorldIngress {
                     if let Err(e) = fut.await {
                         error!("connection failed: {reason}", reason = e.to_string())
                     }
-                    conns.remove(&id);
+                    sinks.remove(&id);
                 });
             });
         }
