@@ -141,6 +141,11 @@ pub enum ServerEvent {
 }
 
 fn main() {
+    // Debug builds keep per-transaction hash self-verification (the rollback
+    // bar); release skips the O(state) walk — state restore is identical.
+    #[cfg(not(debug_assertions))]
+    game::set_hash_verification(false);
+
     // use pyroscope::PyroscopeAgent;
     // use pyroscope_pprofrs::{pprof_backend, PprofConfig};
     // let agent = PyroscopeAgent::builder("http://localhost:4040", "server")

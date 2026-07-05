@@ -309,6 +309,11 @@ fn start_game_thread() -> Sender<Command> {
 }
 
 fn main() {
+    // Debug builds keep per-transaction hash self-verification (the rollback
+    // bar); release skips the O(state) walk — state restore is identical.
+    #[cfg(not(debug_assertions))]
+    game::set_hash_verification(false);
+
     #[cfg(feature = "pyroscope")]
     let agent_running = if let Ok(p) = std::env::var("PYROSCOPE") {
         let agent = PyroscopeAgent::builder("http://localhost:4040", "client")
