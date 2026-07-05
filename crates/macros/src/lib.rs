@@ -1180,9 +1180,14 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                 }
                             }
                             #(UndoOp::Opaque(FieldUndo::#iter_log_ident1(func)) => {
-                                let previous_data = self.#iter_path5.data.clone();
+                                // Pre-undo snapshot feeds only the hash-mismatch
+                                // diagnostics; skip the O(state) clone when
+                                // verification is off.
+                                let previous_data = if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                                    Some(self.#iter_path5.data.clone())
+                                } else { None };
                                 func(&mut self.#iter_path1.data, rollback_log.client.as_ref().unwrap());
-                                if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                                if let Some(previous_data) = previous_data {
                                     let new_hash = unsafe { self.#iter_path6.hash_data() };
                                     if new_hash != entry.pre_hash {
                                         println!("Hash verification failed for self.{}.hash_data() in transaction {:?} with new_hash != pre_hash: {:?} != {:?}\nremaining log len: {:?}", #iter_path_string1, entry.transaction, new_hash, entry.pre_hash, rollback_log.log.len());
