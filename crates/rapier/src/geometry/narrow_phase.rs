@@ -1430,8 +1430,14 @@ impl NarrowPhase {
             // user-woken body's dormant pairs carry none, so this is the only
             // save point that covers them. Dedup per edge index keeps it
             // O(touched pairs) across substeps.
+            // NOTE: the edge-index dedup key is only stable because
+            // max_ccd_substeps defaults to 1 (one select per tick). With >1
+            // substeps, a second-substep DeletePair swap-relocation could move
+            // a never-saved dormant pair onto an already-recorded index and
+            // suppress its save — key by the pair's collider handles (swap-
+            // stable) if CCD substeps are ever enabled.
             if let Some(j) = journal.as_deref_mut() {
-                if j.saved_narrow_edges.insert(pair_id as u32) {
+                if j.narrow_wholesale.is_none() && j.saved_narrow_edges.insert(pair_id as u32) {
                     j.narrow.push(NarrowUndo::ContactPayload {
                         edge: pair_id as u32,
                         old: Box::new(inter.weight.clone()),
