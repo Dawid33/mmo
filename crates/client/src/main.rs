@@ -136,8 +136,14 @@ impl GameInstanceManager {
                     .unwrap()
                     .progress_world_one_tick(&mut self.results_buffer);
             }
-            GameEventKind::PlayerInput(_, _) if !self.ready && self.is_caught_up => {
-                // don't handle player events until sim has caught up with server.
+            GameEventKind::PlayerInput(_, _) if !self.is_caught_up => {
+                // Don't handle player events until the sim has caught up with
+                // the server (join/replay window). `ready` deliberately does
+                // NOT gate input: it flaps with SyncClock sampling jitter
+                // (diff of ±1 tick at rtt≈0) and its job is tuning the
+                // adaptive tick rate, not input admission — gating on it ate
+                // a 500ms window of keypresses per flap (261:1 measured in
+                // the browser).
             }
             e @ GameEventKind::PlayerInput(_, _) => {
                 if let Some(chunk) = self.player_chunk {
@@ -520,5 +526,73 @@ mod manager_tests {
         // Quit terminates the pump.
         game_send.send(GameEventKind::Quit).unwrap();
         assert!(!manager.pump(&server_recv).unwrap());
+    }
+
+    /// `ready` only tunes the adaptive tick rate; it must NOT gate input.
+    /// Regression test for the browser input-drop: SyncClock sampling flaps
+    /// `ready` to false whenever the client samples one tick behind (rtt=0),
+    /// and the old `!ready && is_caught_up` gate then ate every keypress for
+    /// the following 500ms window — measured live at 261 dropped : 1 sent.
+    /// Only a sim that has not yet caught up with the server may drop input.
+    #[test]
+    fn player_input_flows_while_not_ready_once_caught_up() {
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
+        let (server_send, server_recv) = crossbeam::channel::unbounded();
+        let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+        let mut manager =
+            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+        let outgoing = manager.client_packet_recv();
+
+        let world = game::World::basic();
+        let region_id = ChunkCoords::new(0, 0, 0);
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(region_id), 0))
+            .unwrap();
+        server_send
+            .send(world.build_region_server_packet(&region_id))
+            .unwrap();
+        assert!(manager.pump(&server_recv).unwrap());
+        // Keep the render-bridge receiver alive so region emits don't hit a
+        // closed channel (see offline_handshake_loads_region).
+        let mut bridge_recv = None;
+        while let Ok(ev) = client_recv.try_recv() {
+            if let ClientUpdateEvent::NewRegion(_, _, recv) = ev {
+                bridge_recv = Some(recv);
+            }
+        }
+        // Drain the handshake packets the manager itself sent.
+        while outgoing.try_recv().is_ok() {}
+
+        // The flapping state observed live: caught up, but sampled behind.
+        manager.is_caught_up = true;
+        manager.ready = false;
+
+        game_send
+            .send(GameEventKind::PlayerInput(
+                0,
+                game::InputEvent::Key { key: game::Key::KeyE, pressed: true },
+            ))
+            .unwrap();
+        assert!(manager.pump(&server_recv).unwrap());
+        assert!(
+            matches!(outgoing.try_recv(), Ok(ClientPacket::GameEvent(_))),
+            "PlayerInput must be predicted + sent while ready=false once caught up"
+        );
+
+        // The join/replay window is still protected: before catch-up, drop.
+        manager.is_caught_up = false;
+        game_send
+            .send(GameEventKind::PlayerInput(
+                0,
+                game::InputEvent::Key { key: game::Key::KeyE, pressed: false },
+            ))
+            .unwrap();
+        assert!(manager.pump(&server_recv).unwrap());
+        assert!(
+            outgoing.try_recv().is_err(),
+            "PlayerInput must be dropped until the sim has caught up"
+        );
+        drop(bridge_recv);
     }
 }
