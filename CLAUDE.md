@@ -31,8 +31,10 @@ The client also targets `wasm32-unknown-unknown` (native QUIC netcode is
 replaced by an embedded `LocalServer`; see `crates/client/src/local_server.rs`):
 
 ```sh
-# From the repo root (so ./assets is served):
-cargo run -p client --target wasm32-unknown-unknown   # opens via wasm-server-runner
+# From the repo root (so ./assets is served). The custom index adds a
+# fullscreen canvas + download progress bar:
+WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
+  cargo run -p client --target wasm32-unknown-unknown   # opens via wasm-server-runner
 ```
 
 Requires `rustup target add wasm32-unknown-unknown` and
