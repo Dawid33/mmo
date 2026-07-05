@@ -59,7 +59,7 @@ pub async fn serve(
             send.send(ServerEvent::ClientConnected(id)).unwrap();
 
             loop {
-                let mut stream = match session.accept_uni().await {
+                let stream = match session.accept_uni().await {
                     Ok(s) => s,
                     Err(e) => {
                         info!("webtransport client {id} disconnected: {e:?}");
@@ -67,7 +67,12 @@ pub async fn serve(
                     }
                 };
                 let mut buf = Vec::new();
-                if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf).await {
+                // Cap the read up front: read_to_end would otherwise buffer an
+                // arbitrarily large stream before the size check below fires.
+                // take() truncates at cap+1, so the post-check still rejects.
+                let mut limited =
+                    tokio::io::AsyncReadExt::take(stream, (MAX_PACKET_BYTES as u64) + 1);
+                if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut limited, &mut buf).await {
                     warn!("webtransport read failed: {e:?}");
                     continue;
                 }
