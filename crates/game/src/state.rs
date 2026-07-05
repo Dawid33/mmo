@@ -360,4 +360,80 @@ impl Rollback {
         self.data.ecs.kind.set_safe(e, Some(EntityKind::Player));
         self.data.player_entites.insert(client_id, e);
     }
+
+    /// Forward inverse of the create path: undo-tracked removal of an
+    /// entity's components, physics body+collider, and ECS slot. The
+    /// physics removal has no exact surgical inverse (body removal touches
+    /// colliders, islands, joints), so it rides a whole-PhysicsState
+    /// snapshot — extractions are rare (one per boundary crossing).
+    /// `cam_client`: the owning client if the entity has a camera, so the
+    /// undo direction can re-emit AddCameraComponent for the renderer.
+    pub fn remove_entity_safe(&mut self, key: EntityKey, cam_client: Option<ClientId>) {
+        // Camera: Do-emit removal now; on undo, re-advertise it.
+        if let Some(cam) = self.data.ecs.camera.try_get(key).clone() {
+            let restored_pose = self
+                .data
+                .ecs
+                .rigidbody
+                .try_get(key)
+                .and_then(|h| self.data.physics.bodies.get(h).map(|b| *b.position()))
+                .unwrap_or_else(IsometryReal::identity);
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::RemoveCameraComponent(key),
+            ));
+            self.data.ecs.camera.emit_on_undo(GameDataUpdate::new(
+                GameDataTransactionKind::Undo,
+                GameDataUpdateKind::AddCameraComponent(
+                    key,
+                    cam_client.unwrap_or_default(),
+                    cam.proj_matrix.clone(),
+                    restored_pose,
+                ),
+            ));
+            self.data.ecs.camera.set_safe(key, None);
+        }
+        // Kind: Do-emit clear; undo re-emits the old kind.
+        if let Some(kind) = *self.data.ecs.kind.try_get(key) {
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetEntityKind(key, None),
+            ));
+            self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
+                GameDataTransactionKind::Undo,
+                GameDataUpdateKind::SetEntityKind(key, Some(kind)),
+            ));
+            self.data.ecs.kind.set_safe(key, None);
+        }
+        // Physics: remove body + attached colliders under a full snapshot.
+        if let Some(handle) = *self.data.ecs.rigidbody.try_get(key) {
+            let p = self.data.physics.snapshot_raw();
+            p.bodies.remove(
+                handle,
+                p.islands,
+                p.colliders,
+                p.implules_joint_set,
+                p.multi_body_joint_set,
+                true,
+            );
+        }
+        self.data.ecs.rigidbody.set_safe(key, None);
+        self.data.ecs.isometry.set_safe(key, None);
+        // ECS slot last: the slotmap #[emit] fires RemoveEntity on the delta
+        // (and CreateEntity again on undo).
+        self.data.ecs.entities.remove(key);
+    }
+
+    /// Teleport a body, undo-safely. change(): whole-RigidBodySet snapshot —
+    /// set_position also wakes the body / marks it modified (hashed state a
+    /// surgical closure can't restore); same rationale as camera.rs.
+    pub fn set_body_pose_safe(&mut self, key: EntityKey, pose: IsometryReal) {
+        let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { return };
+        let bodies = self.data.physics.bodies.change();
+        bodies.get_mut(handle).unwrap().set_position(pose, true);
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetEntityPosition(key, pose),
+        ));
+    }
 }
