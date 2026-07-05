@@ -3,6 +3,14 @@ name = "server"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
 [dependencies]
 game = { workspace = true }
 slotmapd = { workspace = true }
@@ -18,3 +26,11 @@ papaya = { workspace = true }
 wtransport = { workspace = true }
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
+
+[dev-dependencies]
+game = { workspace = true }
+crossbeam = { workspace = true }
+dashmap = { workspace = true }
+bincode = { workspace = true }
+tokio = { workspace = true, features = ["macros", "time"] }
+wtransport = { workspace = true, features = ["dangerous-configuration"] }
