@@ -225,6 +225,16 @@ impl Region {
         self.data.create_mesh(coords, Chunk::flat_floor(8));
     }
 
+    /// Build a server-side region from generated chunk contents. Mirrors
+    /// what `World::basic` does for the origin region, for any region.
+    pub fn from_chunks(id: RegionId, chunks: Vec<(ChunkCoords, Chunk)>) -> Self {
+        let mut region = Region::new(Rollback::new(None), None, id, None);
+        for (coords, chunk) in chunks {
+            region.data.create_mesh(coords, chunk);
+        }
+        region
+    }
+
     pub fn forget_last_event(&mut self) {
         self.data.forget();
     }
