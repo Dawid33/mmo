@@ -207,13 +207,7 @@ pub fn run() {
     //     .unwrap();
     // let agent_running = agent.start().unwrap();
 
-    // use simplelog::FormatItem;
-    // const FORMAT: &'static [FormatItem] = &[FormatItem::Literal("server".as_bytes())];
-    // let config = simplelog::ConfigBuilder::new()
-    //     .set_time_format_custom(FORMAT)
-    //     .build();
-    // use log::LevelFilter;
-    // SimpleLogger::init(LevelFilter::Info, config).unwrap();
+    simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default()).unwrap();
 
     let (client_packet_send, client_packet_recv) = crossbeam::channel::unbounded();
     let (server_send, server_recv) = crossbeam::channel::unbounded();
