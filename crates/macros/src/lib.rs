@@ -384,6 +384,21 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             },
         ));
         per_struct_items.push(item(
+            "raw_undo_parts",
+            quote! {
+                impl #s_ident {
+                    /// Raw per-field view for use INSIDE undo closures only —
+                    /// running as an undo is the mutation license (the log entry
+                    /// being reverted covers these writes).
+                    pub fn raw_undo_parts(&mut self) -> #raw_ident<'_> {
+                        #raw_ident {
+                            #(#f_ident: &mut self.#f_ident.data,)*
+                        }
+                    }
+                }
+            },
+        ));
+        per_struct_items.push(item(
             "scope raw_fields",
             quote! {
                 impl<'a> UndoScope<#s_ident, 'a> {
@@ -665,7 +680,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub(crate) fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
                     let mut global = self.global_log.lock().unwrap();
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
-                    let pre_hash = unsafe { self.hash_data() };
+                    let pre_hash = if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                        unsafe { self.hash_data() }
+                    } else { 0u32 };
                     let wrap = self.wrap.expect("Undo field not wired to a FieldUndo variant");
                     global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(undo))), pre_hash });
                 }
@@ -682,7 +699,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
 
                 pub fn undo_scope(&mut self) -> UndoScope<T, '_> {
                     UndoScope {
-                        pre_hash: unsafe { self.hash_data() },
+                        pre_hash: if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                            unsafe { self.hash_data() }
+                        } else { 0u32 },
                         touched: false,
                         registered: false,
                         value: self
@@ -732,6 +751,31 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub transaction: usize,
                 pub undo: UndoOp,
                 pub pre_hash: u32,
+            }
+        },
+    ));
+    items.push(item(
+        "VERIFY_HASHES",
+        quote! {
+            pub static VERIFY_HASHES: ::std::sync::atomic::AtomicBool =
+                ::std::sync::atomic::AtomicBool::new(true);
+        },
+    ));
+    items.push(item(
+        "set_hash_verification",
+        quote! {
+            /// Disable per-transaction hash self-verification (release perf). Set once,
+            /// before any world/transaction exists; entries logged while off carry a
+            /// sentinel pre_hash and are never checked.
+            ///
+            /// One-way latch: this can only ever turn verification OFF, never back on.
+            /// Once disabled, entries get logged with a sentinel pre_hash (0); re-enabling
+            /// would later compare a live hash against that sentinel and spuriously fail,
+            /// so a re-enable request is silently ignored.
+            pub fn set_hash_verification(enabled: bool) {
+                if !enabled {
+                    VERIFY_HASHES.store(false, ::std::sync::atomic::Ordering::Relaxed);
+                }
             }
         },
     ));
@@ -825,14 +869,18 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                 }
                 pub fn insert(&mut self, v: V) -> K {
-                    let pre_hash = unsafe { self.hash_data() };
+                    let pre_hash = if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                        unsafe { self.hash_data() }
+                    } else { 0u32 };
                     let k = self.data.insert(v);
                     let emit = self.emit_insert.map(|mk| mk(k));
                     self.log_op(SlotOp::Inserted(k), pre_hash, emit);
                     k
                 }
                 pub fn remove(&mut self, k: K) -> ::std::option::Option<V> {
-                    let pre_hash = unsafe { self.hash_data() };
+                    let pre_hash = if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                        unsafe { self.hash_data() }
+                    } else { 0u32 };
                     let v = self.data.remove(k)?;
                     let emit = self.emit_remove.map(|mk| mk(k));
                     self.log_op(SlotOp::Removed(k, v.clone()), pre_hash, emit);
@@ -910,9 +958,11 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 fn log_entry(&mut self, key: K, prev: ::std::option::Option<V>) {
                     let mut global = self.global_log.lock().unwrap();
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
-                    let mut hasher = ::crc32fast::Hasher::new();
-                    ::std::hash::Hash::hash(&self.data, &mut hasher);
-                    let pre_hash = hasher.finalize();
+                    let pre_hash = if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                        let mut hasher = ::crc32fast::Hasher::new();
+                        ::std::hash::Hash::hash(&self.data, &mut hasher);
+                        hasher.finalize()
+                    } else { 0u32 };
                     let make = self.make.expect("UndoMap not wired to a Delta variant");
                     global.log.push_back(Entry { transaction: trans, undo: UndoOp::Typed(make(key, prev)), pre_hash });
                 }
@@ -997,9 +1047,11 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 fn log_old(&mut self) {
                     let mut global = self.global_log.lock().unwrap();
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
-                    let mut hasher = ::crc32fast::Hasher::new();
-                    ::std::hash::Hash::hash(&self.data, &mut hasher);
-                    let pre_hash = hasher.finalize();
+                    let pre_hash = if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                        let mut hasher = ::crc32fast::Hasher::new();
+                        ::std::hash::Hash::hash(&self.data, &mut hasher);
+                        hasher.finalize()
+                    } else { 0u32 };
                     let make = self.make.expect("UndoCell not wired to a Delta variant");
                     global.log.push_back(Entry { transaction: trans, undo: UndoOp::Typed(make(self.data.clone())), pre_hash });
                 }
@@ -1127,31 +1179,42 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         match entry.undo {
                             UndoOp::Opaque(FieldUndo::root(func)) => {
                                 func(&mut self.data.data, rollback_log.client.as_ref().unwrap());
-                                let new_hash = unsafe { self.data.hash_data() };
-                                if new_hash != entry.pre_hash {
-                                    panic!("Hash verification failed for root in transaction {:?}: {:?} != {:?}", entry.transaction, new_hash, entry.pre_hash);
+                                if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                                    let new_hash = unsafe { self.data.hash_data() };
+                                    if new_hash != entry.pre_hash {
+                                        panic!("Hash verification failed for root in transaction {:?}: {:?} != {:?}", entry.transaction, new_hash, entry.pre_hash);
+                                    }
                                 }
                             }
                             #(UndoOp::Opaque(FieldUndo::#iter_log_ident1(func)) => {
-                                let previous_data = self.#iter_path5.data.clone();
+                                // Pre-undo snapshot feeds only the hash-mismatch
+                                // diagnostics; skip the O(state) clone when
+                                // verification is off.
+                                let previous_data = if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                                    Some(self.#iter_path5.data.clone())
+                                } else { None };
                                 func(&mut self.#iter_path1.data, rollback_log.client.as_ref().unwrap());
-                                let new_hash = unsafe { self.#iter_path6.hash_data() };
-                                if new_hash != entry.pre_hash {
-                                    println!("Hash verification failed for self.{}.hash_data() in transaction {:?} with new_hash != pre_hash: {:?} != {:?}\nremaining log len: {:?}", #iter_path_string1, entry.transaction, new_hash, entry.pre_hash, rollback_log.log.len());
-                                    match ::assert_json_diff::assert_json_matches_no_panic(&self.#iter_path7.data, &previous_data, ::assert_json_diff::Config::new(::assert_json_diff::CompareMode::Strict)) {
-                                        Ok(()) => panic!("Before and after is equal via serde_json"),
-                                        Err(e) => panic!("lhs: new, rhs: old. {}", e),
+                                if let Some(previous_data) = previous_data {
+                                    let new_hash = unsafe { self.#iter_path6.hash_data() };
+                                    if new_hash != entry.pre_hash {
+                                        println!("Hash verification failed for self.{}.hash_data() in transaction {:?} with new_hash != pre_hash: {:?} != {:?}\nremaining log len: {:?}", #iter_path_string1, entry.transaction, new_hash, entry.pre_hash, rollback_log.log.len());
+                                        match ::assert_json_diff::assert_json_matches_no_panic(&self.#iter_path7.data, &previous_data, ::assert_json_diff::Config::new(::assert_json_diff::CompareMode::Strict)) {
+                                            Ok(()) => panic!("Before and after is equal via serde_json"),
+                                            Err(e) => panic!("lhs: new, rhs: old. {}", e),
+                                        }
                                     }
                                 }
                             })*
                             UndoOp::Typed(delta) => match delta {
                                 #(Delta::#cell_log_ident2(old) => {
                                     self.#cell_path1.data = old;
-                                    let mut hasher = ::crc32fast::Hasher::new();
-                                    ::std::hash::Hash::hash(&self.#cell_path1.data, &mut hasher);
-                                    let new_hash = hasher.finalize();
-                                    if new_hash != entry.pre_hash {
-                                        panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #cell_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                    if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                                        let mut hasher = ::crc32fast::Hasher::new();
+                                        ::std::hash::Hash::hash(&self.#cell_path1.data, &mut hasher);
+                                        let new_hash = hasher.finalize();
+                                        if new_hash != entry.pre_hash {
+                                            panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #cell_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                        }
                                     }
                                 })*
                                 #(Delta::#map_log_ident2(key, prev) => {
@@ -1159,11 +1222,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                         Some(v) => { self.#map_path1.data.insert(key, v); }
                                         None => { self.#map_path1.data.remove(&key); }
                                     }
-                                    let mut hasher = ::crc32fast::Hasher::new();
-                                    ::std::hash::Hash::hash(&self.#map_path1.data, &mut hasher);
-                                    let new_hash = hasher.finalize();
-                                    if new_hash != entry.pre_hash {
-                                        panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #map_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                    if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                                        let mut hasher = ::crc32fast::Hasher::new();
+                                        ::std::hash::Hash::hash(&self.#map_path1.data, &mut hasher);
+                                        let new_hash = hasher.finalize();
+                                        if new_hash != entry.pre_hash {
+                                            panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #map_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                        }
                                     }
                                 })*
                                 #(Delta::#slot_log_ident2(op) => {
@@ -1181,11 +1246,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                             }
                                         }
                                     }
-                                    let mut hasher = ::crc32fast::Hasher::new();
-                                    ::std::hash::Hash::hash(&self.#slot_path1.data, &mut hasher);
-                                    let new_hash = hasher.finalize();
-                                    if new_hash != entry.pre_hash {
-                                        panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                    if VERIFY_HASHES.load(::std::sync::atomic::Ordering::Relaxed) {
+                                        let mut hasher = ::crc32fast::Hasher::new();
+                                        ::std::hash::Hash::hash(&self.#slot_path1.data, &mut hasher);
+                                        let new_hash = hasher.finalize();
+                                        if new_hash != entry.pre_hash {
+                                            panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                        }
                                     }
                                 })*
                             }

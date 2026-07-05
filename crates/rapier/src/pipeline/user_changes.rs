@@ -11,10 +11,13 @@ pub(crate) fn handle_user_changes_to_colliders(
     bodies: &mut RigidBodySet,
     colliders: &mut ColliderSet,
     modified_colliders: &[ColliderHandle],
+    journal: &mut Option<&mut crate::pipeline::StepJournal>,
 ) {
     for handle in modified_colliders {
         // NOTE: we use `get` because the collider may no longer
         //       exist if it has been removed.
+        // NOTE: the collider itself is already journaled by the caller (hook 3a)
+        //       before this function runs, so we only journal the parent body here.
         if let Some(co) = colliders.get_mut_internal(*handle) {
             if co.changes.contains(ColliderChanges::PARENT) {
                 if let Some(co_parent) = co.parent {
@@ -31,11 +34,19 @@ pub(crate) fn handle_user_changes_to_colliders(
                     | ColliderChanges::ENABLED_OR_DISABLED
                     | ColliderChanges::PARENT,
             ) {
-                if let Some(rb) = co
-                    .parent
-                    .and_then(|p| bodies.get_mut_internal_with_modification_tracking(p.handle))
-                {
-                    rb.changes |= RigidBodyChanges::LOCAL_MASS_PROPERTIES;
+                if let Some(parent) = co.parent {
+                    // Journal (hook 4): save the parent body before its
+                    // `changes` field is mutated below.
+                    if let Some(j) = journal.as_deref_mut() {
+                        if let Some(rb) = bodies.get(parent.handle) {
+                            j.save_body(parent.handle, rb);
+                        }
+                    }
+                    if let Some(rb) =
+                        bodies.get_mut_internal_with_modification_tracking(parent.handle)
+                    {
+                        rb.changes |= RigidBodyChanges::LOCAL_MASS_PROPERTIES;
+                    }
                 }
             }
         }
@@ -50,6 +61,7 @@ pub(crate) fn handle_user_changes_to_rigid_bodies(
     _multibody_joints: &mut MultibodyJointSet, // FIXME: propagate disabled state to multibodies
     modified_bodies: &[RigidBodyHandle],
     modified_colliders: &mut ModifiedColliders,
+    journal: &mut Option<&mut crate::pipeline::StepJournal>,
 ) {
     enum FinalAction {
         RemoveFromIsland,
@@ -91,14 +103,24 @@ pub(crate) fn handle_user_changes_to_rigid_bodies(
             if changes.contains(RigidBodyChanges::POSITION)
                 || changes.contains(RigidBodyChanges::COLLIDERS)
             {
-                rb.colliders
-                    .update_positions(colliders, modified_colliders, &rb.pos.position);
+                rb.colliders.update_positions_journaled(
+                    colliders,
+                    modified_colliders,
+                    &rb.pos.position,
+                    journal,
+                );
             }
 
             if changes.contains(RigidBodyChanges::DOMINANCE)
                 || changes.contains(RigidBodyChanges::TYPE)
             {
                 for handle in rb.colliders.0.iter() {
+                    // Journal (hook 5): save before the `changes` write below.
+                    if let Some(j) = journal.as_deref_mut() {
+                        if let Some(co) = colliders.get(*handle) {
+                            j.save_collider(*handle, co);
+                        }
+                    }
                     // NOTE: we can’t just use `colliders.get_mut_internal_with_modification_tracking`
                     // here because that would modify the `modified_colliders` inside of the `ColliderSet`
                     // instead of the one passed to this method.
@@ -111,6 +133,12 @@ pub(crate) fn handle_user_changes_to_rigid_bodies(
             if changes.contains(RigidBodyChanges::ENABLED_OR_DISABLED) {
                 // Propagate the rigid-body’s enabled/disable status to its colliders.
                 for handle in rb.colliders.0.iter() {
+                    // Journal (hook 5): save before the `flags`/`changes` writes below.
+                    if let Some(j) = journal.as_deref_mut() {
+                        if let Some(co) = colliders.get(*handle) {
+                            j.save_collider(*handle, co);
+                        }
+                    }
                     // NOTE: we can’t just use `colliders.get_mut_internal_with_modification_tracking`
                     // here because that would modify the `modified_colliders` inside of the `ColliderSet`
                     // instead of the one passed to this method.
@@ -167,7 +195,7 @@ pub(crate) fn handle_user_changes_to_rigid_bodies(
                 match action {
                     FinalAction::RemoveFromIsland => {
                         let ids = rb.ids;
-                        islands.rigid_body_removed(*handle, &ids, bodies);
+                        islands.rigid_body_removed(*handle, &ids, bodies, journal);
                     }
                 };
             }

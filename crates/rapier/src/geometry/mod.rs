@@ -1,6 +1,6 @@
 //! Structures related to geometry: colliders, shapes, etc.
 
-pub use self::broad_phase_bvh::{BroadPhaseBvh, BvhOptimizationStrategy};
+pub use self::broad_phase_bvh::{BroadPhaseBvh, BroadSaved, BvhOptimizationStrategy};
 pub use self::broad_phase_pair_event::{BroadPhasePairEvent, ColliderPair};
 pub use self::collider::{Collider, ColliderBuilder};
 pub use self::collider_components::*;
@@ -15,6 +15,7 @@ pub use self::interaction_graph::{
 pub use self::interaction_groups::{Group, InteractionGroups, InteractionTestMode};
 pub use self::mesh_converter::{MeshConverter, MeshConverterError};
 pub use self::narrow_phase::NarrowPhase;
+pub(crate) use self::narrow_phase::NarrowUndo;
 
 pub use parry3d::bounding_volume::BoundingVolume;
 pub use parry3d::partitioning::{Bvh, BvhBuildStrategy};

@@ -101,6 +101,20 @@ impl ColliderSet {
         std::mem::take(&mut self.removed_colliders)
     }
 
+    pub(crate) fn set_removed(&mut self, removed: Vec<ColliderHandle>) {
+        self.removed_colliders = removed;
+    }
+
+    /// Undo-only: overwrite the slot value; the handle must be occupied.
+    /// Does NOT touch modified/removed lists (the journal restores those
+    /// wholesale).
+    pub fn restore_raw(&mut self, handle: ColliderHandle, collider: Collider) {
+        *self
+            .colliders
+            .get_mut(handle.0)
+            .expect("restore_raw: slot vacant") = collider;
+    }
+
     /// Returns a handle that's guaranteed to be invalid.
     ///
     /// Useful as a sentinel/placeholder value.

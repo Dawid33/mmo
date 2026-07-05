@@ -7,6 +7,18 @@ use crate::geometry::{
     Aabb, BroadPhasePairEvent, ColliderHandle, ColliderPair, ColliderSet,
 };
 use crate::math::Real;
+use crate::pipeline::StepJournal;
+
+/// Pre-mutation snapshot of the hashed broad-phase state, captured by the
+/// [`StepJournal`] the first time a step is about to mutate the BVH. The
+/// workspace is unhashed serde-skipped scratch and is deliberately never
+/// captured or restored.
+pub struct BroadSaved {
+    pub(crate) tree: Bvh,
+    pub(crate) pairs: HashMap<(ColliderHandle, ColliderHandle), u32>,
+    pub(crate) frame_index: u32,
+    pub(crate) pending_leaf_changes: bool,
+}
 
 /// The broad-phase collision detector that quickly filters out distant object pairs.
 ///
@@ -27,6 +39,15 @@ pub struct BroadPhaseBvh {
     pairs: HashMap<(ColliderHandle, ColliderHandle), u32>,
     frame_index: u32,
     optimization_strategy: BvhOptimizationStrategy,
+    /// True when [`Self::set_aabb`]/[`Self::set_aabb_journaled`] wrote leaves
+    /// since the last [`Self::update`]. Moving bodies refresh their leaves
+    /// through the last-substep `set_aabb` path WITHOUT appearing in the next
+    /// tick's `modified_colliders`, so `update` must treat such a tick as dirty
+    /// (run the BVTT traversal + pair GC) even with empty modified/removed
+    /// lists — otherwise new overlaps from those moves would never form pairs.
+    /// Hashed and journal-captured like the rest of the broad-phase state so
+    /// rollback and replay stay bit-exact.
+    pending_leaf_changes: bool,
 }
 
 impl std::hash::Hash for BroadPhaseBvh {
@@ -35,6 +56,7 @@ impl std::hash::Hash for BroadPhaseBvh {
         self.pairs.hash(state);
         self.frame_index.hash(state);
         self.optimization_strategy.hash(state);
+        self.pending_leaf_changes.hash(state);
     }
 }
 
@@ -47,11 +69,16 @@ impl std::hash::Hash for BroadPhaseBvh {
 #[derive(Default, PartialEq, Eq, Copy, Clone, Hash)]
 pub enum BvhOptimizationStrategy {
     /// Different sub-trees of the BVH will be optimized at each frame.
-    #[default]
     SubtreeOptimizer,
-    /// Disables incremental BVH optimization (discouraged).
+    /// Disables incremental BVH optimization.
     ///
-    /// This should not be used except for debugging purpose.
+    /// Default for this rollback fork: incremental optimization rewrites ~5% of
+    /// the tree every frame regardless of movement, which is pure per-tick churn
+    /// the [`StepJournal`] would have to capture and revert on every dirty tick.
+    /// Insert-time rotations keep the tree in good enough shape; a full
+    /// [`Bvh::rebuild`] at load time is the escalation if broad-phase queries
+    /// ever profile hot.
+    #[default]
     None,
 }
 
@@ -106,42 +133,71 @@ impl BroadPhaseBvh {
         modified_colliders: &[ColliderHandle],
         removed_colliders: &[ColliderHandle],
         events: &mut Vec<BroadPhasePairEvent>,
+        journal: &mut Option<&mut StepJournal>,
     ) {
-        self.frame_index = self.frame_index.overflowing_add(1).0;
+        let change_detection_skin = if Self::CHANGE_DETECTION_ENABLED {
+            Self::CHANGE_DETECTION_FACTOR * params.length_unit
+        } else {
+            Real::from(0.0)
+        };
 
-        // Removals must be handled first, in case another collider in
-        // `modified_colliders` shares the same index.
-        for handle in removed_colliders {
-            self.tree.remove(handle.into_raw_parts().0);
+        // The pre-scan (read-only) computes each modified collider's AABB once and
+        // asks whether `insert_or_update_partially` would actually write anything.
+        // It MUST observe post-removal leaf state: when collider X (raw index i) is
+        // removed and a replacement Y reuses slot i in the same tick, comparing Y's
+        // AABB against X's still-present, margin-inflated leaf would wrongly skip
+        // Y's insertion. So:
+        //   - removals present → the tick is unconditionally dirty: capture, bump,
+        //     apply removals FIRST, then pre-scan the (post-removal) tree;
+        //   - no removals → pre-scan first; if nothing would be written AND no
+        //     leaves were changed via `set_aabb` since the last update
+        //     (`pending_leaf_changes`), this is a clean tick that bails before
+        //     any tree/pairs/frame_index change.
+        let updates;
+        if !removed_colliders.is_empty() {
+            // Capture the pre-mutation state BEFORE the first tree/pairs mutation
+            // (removals included), once per tick.
+            if let Some(j) = journal.as_deref_mut() {
+                if j.broad.is_none() {
+                    j.broad = Some(Box::new(self.journal_save()));
+                }
+            }
+            self.frame_index = self.frame_index.overflowing_add(1).0;
+
+            // Removals must be handled first, in case another collider in
+            // `modified_colliders` shares the same index.
+            for handle in removed_colliders {
+                self.tree.remove(handle.into_raw_parts().0);
+            }
+
+            updates = self.scan_updates(params, colliders, bodies, modified_colliders, change_detection_skin);
+        } else {
+            updates = self.scan_updates(params, colliders, bodies, modified_colliders, change_detection_skin);
+            if updates.is_empty() && !self.pending_leaf_changes {
+                // Clean tick: no node changed (neither here nor via `set_aabb`
+                // since the last update), so the stale-pair GC below would be
+                // a no-op (its removal condition requires a changed node) and the
+                // BVTT traversal would re-find the same pairs. Skipping the whole
+                // update — including the frame_index bump — is therefore exact and
+                // leaves the hashed broad-phase state bit-identical.
+                return;
+            }
+            if let Some(j) = journal.as_deref_mut() {
+                if j.broad.is_none() {
+                    j.broad = Some(Box::new(self.journal_save()));
+                }
+            }
+            self.frame_index = self.frame_index.overflowing_add(1).0;
         }
-
-        // if modified_colliders.is_empty() {
-        //     return;
-        // }
+        // The traversal + pair GC below will account for every leaf changed via
+        // `set_aabb` since the last update.
+        self.pending_leaf_changes = false;
 
         let first_pass = self.tree.is_empty();
 
-        // let t0 = std::time::Instant::now();
-        for modified in modified_colliders {
-            if let Some(collider) = colliders.get(*modified) {
-                if !collider.is_enabled() || !collider.changes.needs_broad_phase_update() {
-                    continue;
-                }
-
-                let aabb = collider.compute_broad_phase_aabb(params, bodies);
-
-                let change_detection_skin = if Self::CHANGE_DETECTION_ENABLED {
-                    Self::CHANGE_DETECTION_FACTOR * params.length_unit
-                } else {
-                    Real::from(0.0)
-                };
-
-                self.tree.insert_or_update_partially(
-                    aabb,
-                    modified.into_raw_parts().0,
-                    change_detection_skin,
-                );
-            }
+        for (key, aabb) in updates {
+            self.tree
+                .insert_or_update_partially(aabb, key, change_detection_skin);
         }
 
         if ENABLE_TREE_VALIDITY_CHECK {
@@ -272,6 +328,37 @@ impl BroadPhaseBvh {
         // );
     }
 
+    /// Read-only pre-scan for [`Self::update`]: compute each modified collider's
+    /// AABB once and keep only those for which `insert_or_update_partially`
+    /// would actually write ([`Bvh::leaf_needs_update`]). Never mutates the tree,
+    /// and allocates nothing when no collider needs a write.
+    fn scan_updates(
+        &self,
+        params: &IntegrationParameters,
+        colliders: &ColliderSet,
+        bodies: &RigidBodySet,
+        modified_colliders: &[ColliderHandle],
+        change_detection_skin: Real,
+    ) -> Vec<(u32, Aabb)> {
+        let mut updates: Vec<(u32, Aabb)> = Vec::new();
+        for modified in modified_colliders {
+            if let Some(collider) = colliders.get(*modified) {
+                if !collider.is_enabled() || !collider.changes.needs_broad_phase_update() {
+                    continue;
+                }
+                let aabb = collider.compute_broad_phase_aabb(params, bodies);
+                let key = modified.into_raw_parts().0;
+                if self
+                    .tree
+                    .leaf_needs_update(&aabb, key, change_detection_skin)
+                {
+                    updates.push((key, aabb));
+                }
+            }
+        }
+        updates
+    }
+
     /// Sets the AABB associated to the given collider.
     ///
     /// The AABB change will be immediately applied and propagated through the underlying BVH.
@@ -287,5 +374,59 @@ impl BroadPhaseBvh {
             handle.into_raw_parts().0,
             change_detection_skin,
         );
+        self.pending_leaf_changes = true;
+    }
+
+    /// Journaled twin of [`Self::set_aabb`] used by the last-substep broad-phase
+    /// refresh. Captures the pre-mutation broad-phase state into `journal` before
+    /// the first write, and skips the write entirely when the AABB change would be
+    /// a no-op (keeping clean ticks clean; `insert_with_change_detection` would
+    /// otherwise rewrite even equal bounds).
+    pub fn set_aabb_journaled(
+        &mut self,
+        params: &IntegrationParameters,
+        handle: ColliderHandle,
+        aabb: Aabb,
+        journal: &mut Option<&mut StepJournal>,
+    ) {
+        let change_detection_skin = if Self::CHANGE_DETECTION_ENABLED {
+            Self::CHANGE_DETECTION_FACTOR * params.length_unit
+        } else {
+            Real::from(0.0)
+        };
+        let key = handle.into_raw_parts().0;
+        if !self.tree.leaf_needs_update(&aabb, key, change_detection_skin) {
+            return;
+        }
+        if let Some(j) = journal.as_deref_mut() {
+            if j.broad.is_none() {
+                j.broad = Some(Box::new(self.journal_save()));
+            }
+        }
+        self.tree
+            .insert_with_change_detection(aabb, key, change_detection_skin);
+        self.pending_leaf_changes = true;
+    }
+
+    /// Snapshots the hashed broad-phase state (tree + pairs + frame index +
+    /// pending-leaf flag) for the [`StepJournal`]. The workspace is unhashed
+    /// scratch and is not captured.
+    pub fn journal_save(&self) -> BroadSaved {
+        BroadSaved {
+            tree: self.tree.clone(),
+            pairs: self.pairs.clone(),
+            frame_index: self.frame_index,
+            pending_leaf_changes: self.pending_leaf_changes,
+        }
+    }
+
+    /// Restores a [`BroadSaved`] snapshot, reverting the broad-phase to its
+    /// pre-tick state. The workspace (unhashed serde-skipped scratch) is
+    /// deliberately left untouched.
+    pub fn journal_restore(&mut self, s: BroadSaved) {
+        self.tree = s.tree;
+        self.pairs = s.pairs;
+        self.frame_index = s.frame_index;
+        self.pending_leaf_changes = s.pending_leaf_changes;
     }
 }
