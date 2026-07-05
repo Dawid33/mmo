@@ -124,7 +124,7 @@ impl Region {
                                         Some(o) => Some(o) == self.local_client_id,
                                         None => true,
                                     };
-                                    if local_origin && e.kind == server_event.0.kind {
+                                    if local_origin && e.kind.matches_prediction(&server_event.0.kind) {
                                         temp_log.remove(i);
                                         break;
                                     }

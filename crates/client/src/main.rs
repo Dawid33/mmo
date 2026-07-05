@@ -159,6 +159,10 @@ impl GameInstanceManager {
                     .as_mut()
                     .unwrap()
                     .progress_world_one_tick(&mut self.results_buffer);
+                // MUST run here and only here: transfer buffers reflect the
+                // tick just executed (read-after-progress invariant), and a
+                // predicted home flip must land before update_window recenters.
+                self.apply_local_transfers();
                 self.update_window();
             }
             GameEventKind::PlayerInput(_, _) if !self.is_caught_up => {
@@ -195,6 +199,37 @@ impl GameInstanceManager {
             GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) => {}
         }
         Ok(true)
+    }
+
+    /// Mirror of the server manager's relay, on the predicted timeline:
+    /// drain this tick's transfer buffers and inject them into loaded
+    /// sibling regions as predicted events. Targets outside the local
+    /// window are dropped — their authoritative streams cover them.
+    fn apply_local_transfers(&mut self) {
+        let Some(world) = self.world.as_mut() else { return };
+        let (departures, ghosts) = world.take_transfers();
+        for (bundle, target) in departures {
+            let source = bundle.source_region;
+            let is_local_player =
+                bundle.client.as_ref().map(|(c, _)| *c) == self.client_id && self.client_id.is_some();
+            if world.region_exists(&target) {
+                let mut b = bundle;
+                b.isometry = game::rebase_isometry(&b.isometry, source, target);
+                let _ = world.handle_region_event(GameEventKind::EntityArrived(b), target);
+            }
+            if is_local_player {
+                // Predicted home flip: reroute input now; the server's
+                // PlayerRegion push confirms (or corrects) it.
+                self.home_region = Some(target);
+            }
+        }
+        for (data, target) in ghosts {
+            if world.region_exists(&target) {
+                let mut d = data;
+                d.isometry = game::rebase_isometry(&d.isometry, d.source_region, target);
+                let _ = world.handle_region_event(GameEventKind::GhostUpdate(d), target);
+            }
+        }
     }
 
     /// Drain all pending server packets, then all pending game events,
@@ -370,14 +405,19 @@ impl GameInstanceManager {
                 self.client_id = Some(client_id);
 
                 let home = id.unwrap_or(RegionCoords::new(0, 0));
+                let first_home = self.home_region.is_none();
                 self.home_region = Some(home);
-                // Ask for the whole 3x3 window up front; update_window keeps
-                // it in sync from then on.
-                for rc in home.window_3x3() {
-                    self.server_game_send
-                        .send(ClientPacket::RequestRegionConnection(rc))
-                        .unwrap();
-                    self.subscribed.insert(rc);
+                if first_home {
+                    // Initial join: ask for the whole 3x3 window up front;
+                    // update_window keeps it in sync from then on. Later
+                    // pushes (handoff confirmations) must NOT re-burst —
+                    // that would resnapshot nine regions per crossing.
+                    for rc in home.window_3x3() {
+                        self.server_game_send
+                            .send(ClientPacket::RequestRegionConnection(rc))
+                            .unwrap();
+                        self.subscribed.insert(rc);
+                    }
                 }
             }
             game::ServerPacket::Region(id, raw_game_data) => {
@@ -913,5 +953,85 @@ mod manager_tests {
         assert!(!manager.world.as_ref().unwrap().region_exists(&far));
         let released: Vec<ClientPacket> = manager.client_packet_recv().try_iter().collect();
         assert!(released.iter().any(|p| matches!(p, ClientPacket::ReleaseRegionConnection(rc) if *rc == far)));
+    }
+
+    /// A predicted departure in one local region synthesizes a predicted
+    /// arrival in the (loaded) target and flips home_region immediately.
+    #[test]
+    fn predicted_crossing_synthesizes_arrival_and_flips_home() {
+        let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
+        let home = RegionCoords::new(0, 0);
+        let target = RegionCoords::new(1, 0);
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        manager.pump(&server_recv).unwrap();
+
+        // Load home (with the player) and the empty target region.
+        let mut world = game::World::new();
+        let mut home_region = Region::from_chunks(home, Vec::new());
+        home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        home_region.forget_last_event();
+        world.load(&home, home_region);
+        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        let mut target_world = game::World::new();
+        target_world.load(&target, Region::from_chunks(target, Vec::new()));
+        server_send.send(target_world.build_region_server_packet(&target)).unwrap();
+        manager.pump(&server_recv).unwrap();
+        manager.is_caught_up = true;
+
+        // Teleport the local player's predicted body past the boundary.
+        {
+            let w = manager.world.as_mut().unwrap();
+            let key = *w.data(&home).player_entites.get(&0).unwrap();
+            w.regions.get_mut(&home).unwrap().with_data(|d| {
+                d.set_body_pose_safe(
+                    key,
+                    game::IsometryReal::from_parts(
+                        game::na::Translation3::new(
+                            (game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0).into(),
+                            26.0f32.into(),
+                            128.0f32.into(),
+                        ),
+                        game::na::Unit::<game::na::Quaternion<game::parry::math::Real>>::identity(),
+                    ),
+                )
+            });
+        }
+
+        manager.send_tick();
+        manager.pump(&server_recv).unwrap();
+
+        assert_eq!(manager.home_region, Some(target), "home flipped on prediction");
+        let w = manager.world.as_ref().unwrap();
+        assert!(
+            w.data(&target).player_entites.contains_key(&0),
+            "predicted arrival applied in the target region"
+        );
+        assert!(
+            !w.data(&home).player_entites.contains_key(&0),
+            "predicted extraction removed the player from the old home"
+        );
+    }
+
+    /// PlayerRegion after the first one must NOT re-request the whole 3x3
+    /// window (that would resnapshot 9 regions on every crossing).
+    #[test]
+    fn player_region_push_updates_home_without_window_burst() {
+        let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
+        let home = RegionCoords::new(0, 0);
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        manager.pump(&server_recv).unwrap();
+        while manager.client_packet_recv().try_recv().is_ok() {}
+
+        let target = RegionCoords::new(1, 0);
+        server_send.send(ServerPacket::PlayerRegion(Some(target), 0)).unwrap();
+        manager.pump(&server_recv).unwrap();
+
+        assert_eq!(manager.home_region, Some(target));
+        let bursts: Vec<ClientPacket> = manager.client_packet_recv().try_iter().collect();
+        assert!(
+            !bursts.iter().any(|p| matches!(p, ClientPacket::RequestRegionConnection(_))),
+            "no re-subscription burst on a home push: {:?}",
+            bursts
+        );
     }
 }

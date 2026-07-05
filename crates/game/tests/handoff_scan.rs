@@ -1,5 +1,6 @@
 use game::{
-    GameEventKind, IsometryReal, Region, RegionCoords, Rollback, FLIP_HYSTERESIS, REGION_SIZE,
+    GameEvent, GameEventKind, IsometryReal, Region, RegionCoords, Rollback, FLIP_HYSTERESIS,
+    REGION_SIZE,
 };
 use game::na::{Quaternion, Translation3, Unit};
 use game::parry::math::Real;
@@ -190,4 +191,57 @@ fn bodyless_ghost_is_not_scanned() {
     let (departures, ghosts) = region.take_transfers();
     assert!(departures.is_empty(), "bodyless ghosts are never extracted");
     assert!(ghosts.is_empty(), "bodyless ghosts are never re-mirrored");
+}
+
+#[test]
+fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
+    // Client region B predicted an arrival with pose X; the authoritative
+    // arrival has pose Y (server extracted on a different tick). Reconcile
+    // must (a) end with the authoritative pose and (b) leave no unconfirmed
+    // prediction stuck in the event log.
+    let (_, src_key) = {
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        rb.create_player_safe(9);
+        rb.forget();
+        let key = *rb.data.player_entites.get(&9).unwrap();
+        (rb, key)
+    };
+    let src = RegionCoords::new(0, 0);
+    let id = RegionCoords::new(1, 0);
+    let mk = |x: f32| game::EntityBundle {
+        kind: game::EntityKind::Player,
+        isometry: pose(x, 128.0),
+        linvel: game::parry::math::Vector::zeros(),
+        collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+        has_camera: true,
+        client: Some((9, game::Client::default())),
+        source_region: src,
+        source_key: src_key,
+    };
+
+    // Client-side region (local_client_id = Some → predictions reconcile).
+    // reconcile() rolls back on divergence, which replays tier-2 undo closures
+    // through the rollback log's `client` sender (`client.as_ref().unwrap()`);
+    // a None sender panics. Real client regions always have a live sender
+    // (built via new_region with Some(send)), so give this one a throwaway
+    // sender too — _recv stays bound to keep the channel connected.
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(Rollback::new(None), Some(send), id, Some(9));
+    // Predict the arrival.
+    region.handle_event(GameEventKind::EntityArrived(mk(2.0))).unwrap();
+    // Authoritative copy arrives at the same event id with a different pose.
+    region
+        .reconcile(GameEvent::new(GameEventKind::EntityArrived(mk(4.0)), 0, id))
+        .unwrap();
+
+    assert!(
+        region.pending_event_ids().is_empty(),
+        "identity-matched prediction must be consumed, not stuck: {:?}",
+        region.pending_event_ids()
+    );
+    let e = *region.data().player_entites.get(&9).unwrap();
+    let handle = region.data().ecs.rigidbody.try_get(e).unwrap();
+    let t = region.data().physics.bodies.get(handle).unwrap().translation();
+    assert_eq!(t.x, Real::from(4.0), "authoritative pose won");
 }
