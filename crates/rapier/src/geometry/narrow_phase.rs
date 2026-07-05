@@ -715,6 +715,18 @@ impl NarrowPhase {
             let mut gops_c: Vec<GraphCellUndo<ColliderHandle, ContactPair>> = Vec::new();
             let mut gops_i: Vec<GraphCellUndo<ColliderHandle, IntersectionPair>> = Vec::new();
 
+            // NOTE (latent sensor-only capture gap): `ensure_pair_exists_journaled`
+            // records a coarena-slot undo only when it CREATES the slot, so a later
+            // `gid.contact_graph_index = ...` write below is covered only because,
+            // without sensors, a collider's graph_indices slot is first created in
+            // this very call (the contact-graph join and the slot creation coincide).
+            // If sensors are ever enabled, a collider's slot can predate this tick's
+            // contact-graph join (created earlier by an intersection-pair join), and
+            // then the `contact_graph_index` mutation on that pre-existing slot would
+            // go uncaptured — the reverted narrow phase would keep a stale contact
+            // graph index. Unreachable today (this fork runs contacts only); promote
+            // this note to a fix (capture the slot's pre-write value here) if sensors
+            // land.
             let (gid1, gid2) = self.graph_indices.ensure_pair_exists_journaled(
                 pair.collider1.0,
                 pair.collider2.0,

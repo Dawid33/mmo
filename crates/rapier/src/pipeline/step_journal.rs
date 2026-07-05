@@ -52,6 +52,18 @@ impl StepJournal {
         self.broad.is_some()
     }
 
+    /// Number of rigid bodies whose pre-tick state this journal saved. A proxy for
+    /// per-tick undo-log cost that scales with activity, not world size.
+    pub fn saved_body_count(&self) -> usize {
+        self.saved_bodies.len()
+    }
+
+    /// Number of colliders whose pre-tick state this journal saved. A proxy for
+    /// per-tick undo-log cost that scales with activity, not world size.
+    pub fn saved_collider_count(&self) -> usize {
+        self.saved_colliders.len()
+    }
+
     /// True if nothing has been captured this tick, i.e. `revert` would be a no-op.
     pub fn is_empty(&self) -> bool {
         self.saved_bodies.is_empty()

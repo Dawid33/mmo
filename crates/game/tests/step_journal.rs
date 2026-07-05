@@ -335,6 +335,219 @@ fn parented_collider_edit_revert_is_hash_exact() {
 }
 
 #[test]
+fn collider_removal_tick_revert_is_hash_exact() {
+    // End-to-end for the wholesale-narrow fallback + removal-dirty broad path:
+    // settle a ball on a two-tile floor, then in ONE tick remove one tile's
+    // collider and step. Removing a collider forces the wholesale narrow-phase
+    // snapshot and marks the broad phase dirty; revert must restore everything.
+    let mut w = World::new();
+    add_floor(&mut w, 0, 0);
+    add_floor(&mut w, 1, 0);
+    // The removed tile carries a ball resting on it, so its leaf is live in the
+    // broad phase and it participates in narrow-phase contact pairs.
+    let tile_body = w.bodies.insert(
+        RigidBodyBuilder::fixed()
+            .translation(vector![Real::from(40.0), Real::from(-1.0), Real::from(2.0)])
+            .build(),
+    );
+    let tile = w.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(Real::from(16.0), Real::from(1.0), Real::from(16.0)).build(),
+        tile_body,
+        &mut w.bodies,
+    );
+    let ball = w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(2.0), Real::from(1.0), Real::from(2.0)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(),
+        ball,
+        &mut w.bodies,
+    );
+    let _ = ball;
+    // Settle so the ball rests, pairs exist, and the tree holds every leaf.
+    for _ in 0..90 {
+        let _ = w.step();
+    }
+    // The removal is a USER mutation before the step, so the pre-step checkpoint
+    // is taken AFTER the remove (mirrors the fly-by test's kinematic write).
+    w.colliders.remove(tile, &mut w.islands, &mut w.bodies, true);
+    let before = w.hash_full();
+    let j = w.step();
+    assert!(
+        j.broad_captured(),
+        "a collider-removal tick must mark the broad phase dirty"
+    );
+    w.revert(j);
+    assert_eq!(
+        before,
+        w.hash_full(),
+        "collider-removal tick revert must restore every step-touched structure exactly"
+    );
+}
+
+/// Perf/memory evidence (not a CI gate — run with
+/// `cargo test -p game --test step_journal -- --ignored --nocapture perf_evidence`).
+/// Tallies per-tick journal cost (saved bodies/colliders + broad captures) for
+/// 100 idle ticks vs 100 ticks with one moving body. Under the old design every
+/// tick paid a whole-PhysicsState snapshot regardless of activity; here idle
+/// ticks capture nothing and the moving case scales with the one active body.
+#[test]
+#[ignore = "perf evidence, prints numbers; run with --ignored --nocapture"]
+fn perf_evidence_journal_scales_with_activity() {
+    fn tally(label: &str, mut w: World, ticks: usize) {
+        let (mut bodies, mut colliders, mut broad) = (0usize, 0usize, 0usize);
+        for _ in 0..ticks {
+            let j = w.step();
+            bodies += j.saved_body_count();
+            colliders += j.saved_collider_count();
+            if j.broad_captured() {
+                broad += 1;
+            }
+        }
+        println!(
+            "{label}: {ticks} ticks -> saved_bodies={bodies}, saved_colliders={colliders}, broad_captured_ticks={broad}"
+        );
+    }
+    // Idle: 8x8 floor, no dynamic bodies, settled — every tick is clean.
+    let mut idle = World::new();
+    for x in 0..8 {
+        for z in 0..8 {
+            add_floor(&mut idle, x, z);
+        }
+    }
+    for _ in 0..5 {
+        let _ = idle.step();
+    }
+    tally("idle", idle, 100);
+    // Moving: same floor + one ball free-falling from high up (stays mid-air).
+    let mut moving = World::new();
+    for x in 0..8 {
+        for z in 0..8 {
+            add_floor(&mut moving, x, z);
+        }
+    }
+    let ball = moving.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(2.0), Real::from(60.0), Real::from(2.0)])
+            .build(),
+    );
+    moving.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.4)).build(),
+        ball,
+        &mut moving.bodies,
+    );
+    for _ in 0..5 {
+        let _ = moving.step();
+    }
+    tally("one-moving-body", moving, 100);
+}
+
+// Deterministic LCG so the test needs no rand dep and reproduces exactly.
+struct Lcg(u64);
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+    fn f(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + (self.next() % 10_000) as f32 / 10_000.0 * (hi - lo)
+    }
+}
+
+#[test]
+fn randomized_scene_revert_is_hash_exact() {
+    let mut rng = Lcg(0x5EED_2026_0704);
+    let mut w = World::new();
+    for x in 0..4 {
+        for z in 0..4 {
+            add_floor(&mut w, x, z);
+        }
+    }
+    let mut balls = Vec::new();
+    for _ in 0..6 {
+        let b = w.bodies.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(vector![
+                    Real::from(rng.f(1.0, 100.0)),
+                    Real::from(rng.f(2.0, 6.0)),
+                    Real::from(rng.f(1.0, 100.0))
+                ])
+                .build(),
+        );
+        w.colliders.insert_with_parent(
+            ColliderBuilder::ball(Real::from(0.4)).build(),
+            b,
+            &mut w.bodies,
+        );
+        balls.push(b);
+    }
+    let mut checkpoints = Vec::new();
+    let mut journals = Vec::new();
+    for tick in 0..200 {
+        if tick % 7 == 0 {
+            // random impulse = user mutation BEFORE the step
+            let b = balls[(rng.next() as usize) % balls.len()];
+            w.bodies.get_mut(b).unwrap().apply_impulse(
+                vector![
+                    Real::from(rng.f(-2.0, 2.0)),
+                    Real::from(rng.f(0.0, 4.0)),
+                    Real::from(rng.f(-2.0, 2.0))
+                ],
+                true,
+            );
+        }
+        checkpoints.push(w.hash_full()); // post-user-mutation, pre-step
+        journals.push(w.step());
+    }
+    for (j, expect) in journals.into_iter().rev().zip(checkpoints.into_iter().rev()) {
+        w.revert(j);
+        assert_eq!(
+            expect,
+            w.hash_full(),
+            "fuzzer: pre-step state must restore exactly at every tick"
+        );
+    }
+}
+
+#[test]
+fn journal_size_scales_with_activity_not_world_size() {
+    let saved_counts = |chunks: i32| -> (usize, usize) {
+        let mut w = World::new();
+        for x in 0..chunks {
+            for z in 0..chunks {
+                add_floor(&mut w, x, z);
+            }
+        }
+        let b = w.bodies.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(vector![Real::from(2.0), Real::from(5.0), Real::from(2.0)])
+                .build(),
+        );
+        w.colliders.insert_with_parent(
+            ColliderBuilder::ball(Real::from(0.4)).build(),
+            b,
+            &mut w.bodies,
+        );
+        for _ in 0..5 {
+            let _ = w.step();
+        } // settle inserts
+        let j = w.step(); // one falling ball, mid-air
+        (j.saved_body_count(), j.saved_collider_count())
+    };
+    let small = saved_counts(2);
+    let big = saved_counts(8);
+    assert_eq!(
+        small, big,
+        "per-tick saved bodies/colliders must not scale with chunk count"
+    );
+}
+
+#[test]
 fn sleep_transition_revert_is_hash_exact() {
     let mut w = World::new();
     w.bodies.insert(
