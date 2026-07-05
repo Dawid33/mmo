@@ -653,7 +653,7 @@ impl Rollback {
         key: EntityKey,
         region: crate::RegionCoords,
     ) -> crate::EntityBundle {
-        let kind = self.data.ecs.kind.try_get(key).clone().unwrap_or_default();
+        let kind = (*self.data.ecs.kind.try_get(key)).unwrap_or_default();
         let handle = (*self.data.ecs.rigidbody.try_get(key))
             .expect("transferable entities have bodies");
         let body = self.data.physics.bodies.get(handle).unwrap();

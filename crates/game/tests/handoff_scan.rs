@@ -122,15 +122,58 @@ fn identical_streams_produce_identical_scans_and_hashes() {
 }
 
 #[test]
-fn ghosts_never_transfer_and_terrain_never_mirrors() {
-    // A ghost sitting past the boundary must not depart; chunk entities in
-    // the margin must not mirror.
+fn kindless_terrain_in_margin_does_not_mirror() {
+    // Chunk entities get a fixed rigidbody but their `kind` component stays
+    // `None` (create_entity_safe never sets it) — the kind-None guard in
+    // scan_boundaries is what excludes them. A chunk's own min-corner can
+    // never land strictly inside the margin (it's a multiple of 32, and the
+    // margin boundary in ghost_offsets is `> REGION_SIZE - GHOST_MARGIN` =
+    // `> 224`, itself a multiple of 32), so spawning the chunk at its
+    // natural position wouldn't exercise the guard at all — a chunk sitting
+    // ON the boundary never mirrors regardless of `kind`. To actually put a
+    // kindless bodied entity strictly inside the margin, teleport the
+    // chunk's fixed body there directly via the same undo-safe primitive the
+    // other tests use for player teleports.
     let id = RegionCoords::new(0, 0);
     let mut region = Region::from_chunks(
         id,
-        vec![(game::ChunkCoords::new(7, 0, 7), game::Chunk::flat_floor(8))], // edge chunk, inside margin
+        vec![(game::ChunkCoords::new(7, 0, 7), game::Chunk::flat_floor(8))],
     );
+    let chunk_key = region
+        .data()
+        .ecs
+        .chunk
+        .iter()
+        .find_map(|(k, c)| c.is_some().then_some(k))
+        .expect("terrain chunk registered as an entity with a chunk component");
+    // 224 < 250 < 256: strictly inside the +x margin, but not past the
+    // departure line (258), so only the ghost path is in play.
+    region.with_data(|d| d.set_body_pose_safe(chunk_key, pose(250.0, 128.0)));
+    region.handle_event(GameEventKind::Tick).unwrap();
+    region.forget_last_event();
+    let (departures, ghosts) = region.take_transfers();
+    assert!(departures.is_empty(), "terrain never departs (fixed bodies, and 250 < the 258 flip line anyway)");
+    assert!(
+        ghosts.is_empty(),
+        "kindless terrain never mirrors — this fails if the `kind`-None guard in scan_boundaries is removed"
+    );
+}
+
+#[test]
+fn bodyless_ghost_is_not_scanned() {
+    // A ghost sitting past a boundary must never depart or re-mirror. Today
+    // this holds because stage-1 ghosts (apply_ghost) never get a rigidbody,
+    // so scan_boundaries' `let Some(handle) = ... else { continue }` skips
+    // them before the `ghost_keys` set is even consulted.
+    //
+    // NOTE: this test does NOT exercise `ghost_keys` in scan_boundaries —
+    // deleting that set entirely still leaves this test green, because the
+    // missing-rigidbody guard already excludes bodyless ghosts. `ghost_keys`
+    // only becomes load-bearing (and gets its own bite-test) once Task 9
+    // gives hosted ghosts rigidbodies of their own.
+    let id = RegionCoords::new(0, 0);
     let src = RegionCoords::new(1, 0);
+    let mut region = Region::from_chunks(id, Vec::new());
     region
         .handle_event(GameEventKind::GhostUpdate(game::GhostData {
             source_region: src,
@@ -145,6 +188,6 @@ fn ghosts_never_transfer_and_terrain_never_mirrors() {
     region.handle_event(GameEventKind::Tick).unwrap();
     region.forget_last_event();
     let (departures, ghosts) = region.take_transfers();
-    assert!(departures.is_empty(), "ghosts are never extracted");
-    assert!(ghosts.is_empty(), "kindless terrain never mirrors");
+    assert!(departures.is_empty(), "bodyless ghosts are never extracted");
+    assert!(ghosts.is_empty(), "bodyless ghosts are never re-mirrored");
 }
