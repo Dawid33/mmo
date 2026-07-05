@@ -5,6 +5,7 @@ use game::{
     Client, ColliderSpec, EntityBundle, EntityKind, GhostData, RegionCoords, GHOST_TTL_TICKS,
 };
 use game::parry::math::Vector;
+use game::GameDataUpdateKind;
 use std::hash::Hash;
 
 fn crc(rb: &Rollback) -> u32 {
@@ -121,7 +122,7 @@ fn arrival_creates_player_with_client_state_and_holds_hash_bar() {
 fn ghost_upsert_refresh_and_ttl_expiry_hold_hash_bar() {
     let (_, src_key) = donor();
     let src = RegionCoords::new(0, 0);
-    let (send, _recv) = crossbeam::channel::unbounded();
+    let (send, recv) = crossbeam::channel::unbounded();
     let mut rb = Rollback::new(Some(send));
 
     // Create.
@@ -149,6 +150,10 @@ fn ghost_upsert_refresh_and_ttl_expiry_hold_hash_bar() {
         rb.data.tick.update(|t| *t += 1);
     }
     rb.forget();
+    // Drain events accumulated from the create/refresh above (including the
+    // creation-time SetGhostSource(Some) Do-emit) so the post-rollback drain
+    // below only reflects expire_ghosts' own emits, not stale lookalikes.
+    let _: Vec<_> = recv.try_iter().collect();
     let before = crc(&rb);
     rb.new_transaction();
     rb.expire_ghosts();
@@ -156,18 +161,30 @@ fn ghost_upsert_refresh_and_ttl_expiry_hold_hash_bar() {
     assert!(!rb.data.ecs.entities.contains_key(entry.entity));
     rb.rollback();
     assert_eq!(before, crc(&rb));
+    let events: Vec<_> = recv.try_iter().collect();
+    assert!(
+        events.iter().any(|u| matches!(
+            u.update_kind,
+            GameDataUpdateKind::SetGhostSource(e, Some(rc)) if e == entry.entity && rc == src
+        )),
+        "expire_ghosts rollback must restore the ghost mark via compensating emit_on_undo"
+    );
 }
 
 #[test]
 fn arrival_upgrades_ghost_in_place_keeping_entity_key() {
     let (_, src_key) = donor();
     let src = RegionCoords::new(0, 0);
-    let (send, _recv) = crossbeam::channel::unbounded();
+    let (send, recv) = crossbeam::channel::unbounded();
     let mut rb = Rollback::new(Some(send));
     rb.new_transaction();
     rb.apply_ghost(ghost(src, src_key, 250.0));
     rb.forget();
     let ghost_entity = rb.data.ghosts.get(&(src, src_key)).unwrap().entity;
+    // Drain the creation-time events (including the creation's own
+    // SetGhostSource(Some) Do-emit) so the post-rollback drain below only
+    // reflects the upgrade transaction's own emits, not a stale lookalike.
+    let _: Vec<_> = recv.try_iter().collect();
 
     // Do NOT forget: the upgrade (ghost drop + SetGhostSource-clear emit + body
     // inject) must be exactly invertible, including the compensating undo emit
@@ -181,6 +198,14 @@ fn arrival_upgrades_ghost_in_place_keeping_entity_key() {
     assert!(rb.data.ecs.rigidbody.try_get(owned).is_some(), "body attached on upgrade");
     rb.rollback();
     assert_eq!(before, crc(&rb), "upgrade path holds the hash bar, bit-exact");
+    let events: Vec<_> = recv.try_iter().collect();
+    assert!(
+        events.iter().any(|u| matches!(
+            u.update_kind,
+            GameDataUpdateKind::SetGhostSource(e, Some(rc)) if e == ghost_entity && rc == src
+        )),
+        "upgrade rollback must restore the ghost mark via compensating emit_on_undo"
+    );
 }
 
 #[test]
