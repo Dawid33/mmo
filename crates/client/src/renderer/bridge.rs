@@ -70,8 +70,17 @@ pub fn drain_client_updates(
     while let Ok(event) = updates.0.try_recv() {
         match event {
             ClientUpdateEvent::NewRegion(id, data, receiver) => {
+                if roots.0.contains_key(&id) {
+                    // Replace-on-re-receipt: resubscribe/crash-respawn resync.
+                    remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
+                }
+                let offset = id.world_offset();
                 let root = commands
-                    .spawn((Transform::IDENTITY, Visibility::default(), Name::new(format!("region {:?}", id))))
+                    .spawn((
+                        Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2])),
+                        Visibility::default(),
+                        Name::new(format!("region {:?}", id)),
+                    ))
                     .id();
                 roots.0.insert(id, root);
                 regions.0.insert(id, receiver);
@@ -79,10 +88,31 @@ pub fn drain_client_updates(
                 info!("bridge: region {:?} loaded", id);
             }
             ClientUpdateEvent::SetPlayer(client_id) => player.0 = Some(client_id),
-            ClientUpdateEvent::RemoveRegion(_) => { /* Task 7 */ }
+            ClientUpdateEvent::RemoveRegion(id) => {
+                remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
+                info!("bridge: region {:?} removed", id);
+            }
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
         }
     }
+}
+
+/// Tear down everything the bridge built for a region: root entity tree,
+/// update receiver, entity map entries. Also the first half of
+/// replace-on-re-receipt (crash-respawn resync).
+fn remove_region(
+    commands: &mut Commands,
+    regions: &mut Regions,
+    roots: &mut RegionRoots,
+    map: &mut SimEntityMap,
+    id: RegionId,
+) {
+    if let Some(root) = roots.0.remove(&id) {
+        // despawn() removes descendants via ChildOf relationships (Bevy 0.16+).
+        commands.entity(root).despawn();
+    }
+    regions.0.remove(&id);
+    map.0.retain(|(region, _), _| *region != id);
 }
 
 /// Port of the old `TrueWorld::new` snapshot walk.
@@ -459,6 +489,54 @@ mod tests {
         let e1 = *map.0.get(&(region_id, k1)).unwrap();
         assert!(app.world().entity(e0).contains::<SimKind>());
         assert!(app.world().entity(e1).contains::<SimKind>());
+    }
+
+    #[test]
+    fn region_root_sits_at_world_offset() {
+        let (mut app, client) = app_shell();
+        let (_send, update_recv) = crossbeam::channel::unbounded();
+        let region_id = game::RegionCoords::new(1, -2);
+        let rb = Rollback::new(None);
+        client
+            .send(ClientUpdateEvent::NewRegion(region_id, (*rb.data).clone(), update_recv))
+            .unwrap();
+        app.update();
+        let root = *app.world().resource::<RegionRoots>().0.get(&region_id).unwrap();
+        let tf = app.world().entity(root).get::<Transform>().unwrap();
+        assert_eq!(tf.translation, Vec3::new(256.0, 0.0, -512.0));
+    }
+
+    #[test]
+    fn remove_region_tears_down_root_maps_and_receiver() {
+        let (mut app, client, _updates, region_id) = test_app();
+        app.update();
+        let root = *app.world().resource::<RegionRoots>().0.get(&region_id).unwrap();
+
+        client.send(ClientUpdateEvent::RemoveRegion(region_id)).unwrap();
+        app.update();
+
+        assert!(app.world().get_entity(root).is_err(), "root despawned (with children)");
+        assert!(!app.world().resource::<RegionRoots>().0.contains_key(&region_id));
+        assert!(!app.world().resource::<Regions>().0.contains_key(&region_id));
+        assert!(app.world().resource::<SimEntityMap>().0.keys().all(|(r, _)| *r != region_id));
+    }
+
+    #[test]
+    fn new_region_for_loaded_region_replaces_it() {
+        let (mut app, client, _updates, region_id) = test_app();
+        app.update();
+        let first_root = *app.world().resource::<RegionRoots>().0.get(&region_id).unwrap();
+
+        let (_send2, update_recv2) = crossbeam::channel::unbounded();
+        let rb = Rollback::new(None);
+        client
+            .send(ClientUpdateEvent::NewRegion(region_id, (*rb.data).clone(), update_recv2))
+            .unwrap();
+        app.update();
+
+        let second_root = *app.world().resource::<RegionRoots>().0.get(&region_id).unwrap();
+        assert_ne!(first_root, second_root, "old root replaced");
+        assert!(app.world().get_entity(first_root).is_err(), "old root despawned");
     }
 
     #[test]
