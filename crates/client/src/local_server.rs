@@ -58,6 +58,8 @@ impl LocalServer {
                 }
                 ClientPacket::GameEvent(game_event) => match game_event.kind {
                     GameEventKind::Tick => (),
+                    // Unlike the real server (which breaks its event loop), Quit is a no-op:
+                    // there is no process to terminate in the embedded loopback.
                     GameEventKind::Quit => (),
                     kind => {
                         let event = self
@@ -81,6 +83,9 @@ impl LocalServer {
             self.send
                 .send(ServerPacket::GameEvent(result.as_ref().unwrap().clone()))
                 .unwrap();
+            // The real server hardcodes the origin chunk here (server/main.rs); using the
+            // iterated `id` is equivalent while there is one region, and more correct once
+            // multi-region lands.
             if self.world.current_tick(id) % 10 == 0 {
                 self.send
                     .send(ServerPacket::SyncClock(

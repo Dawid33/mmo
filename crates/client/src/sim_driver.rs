@@ -17,10 +17,10 @@ pub struct SimDriver {
     server_tick_ms: f64,
 }
 
-/// The sim state is `Send` but not `Sync` (interior mutability inside
-/// `GameData`'s undo wrappers), so it can't be a `Resource` directly.
-/// `SyncCell` only hands out `&mut` access, which makes it unconditionally
-/// `Sync` — enough for the `Resource` bound.
+// SyncCell makes the driver Sync (Bevy Resource requires Send + Sync).
+// The !Sync culprit is `Box<dyn Controller>` inside Region: the trait object's
+// bounds only include Send, and trait objects don't inherit auto-traits from
+// their implementors. SyncCell<T> is Sync for any T: Send, which SimDriver is.
 #[derive(Resource)]
 pub struct SimDriverRes(pub SyncCell<SimDriver>);
 
