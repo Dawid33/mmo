@@ -86,16 +86,24 @@ impl IslandManager {
         removed_handle: RigidBodyHandle,
         removed_ids: &RigidBodyIds,
         bodies: &mut RigidBodySet,
+        journal: &mut Option<&mut crate::pipeline::StepJournal>,
     ) {
         if self.active_set.get(removed_ids.active_set_id) == Some(&removed_handle) {
             self.active_set.swap_remove(removed_ids.active_set_id);
 
-            if let Some(replacement) = self
-                .active_set
-                .get(removed_ids.active_set_id)
-                .and_then(|h| bodies.get_mut_internal(*h))
+            if let Some(replacement_handle) =
+                self.active_set.get(removed_ids.active_set_id).copied()
             {
-                replacement.ids.active_set_id = removed_ids.active_set_id;
+                // Journal (hook 5): the swap-relocated body's `active_set_id` is
+                // about to be overwritten — save it first.
+                if let Some(j) = journal.as_deref_mut() {
+                    if let Some(rb) = bodies.get(replacement_handle) {
+                        j.save_body(replacement_handle, rb);
+                    }
+                }
+                if let Some(replacement) = bodies.get_mut_internal(replacement_handle) {
+                    replacement.ids.active_set_id = removed_ids.active_set_id;
+                }
             }
         }
     }
@@ -142,6 +150,42 @@ impl IslandManager {
         }
     }
 
+    /// Snapshots the hashed island-manager fields for step-journal revert.
+    /// `can_sleep`/`stack` are unhashed scratch and are deliberately excluded.
+    pub(crate) fn journal_save(&self) -> IslandsSaved {
+        IslandsSaved {
+            active_set: self.active_set.clone(),
+            active_islands: self.active_islands.clone(),
+            additional_solver_iterations: self.active_islands_additional_solver_iterations.clone(),
+            timestamp: self.active_set_timestamp,
+        }
+    }
+
+    /// Restores the hashed island-manager fields from a [`IslandsSaved`].
+    pub(crate) fn journal_restore(&mut self, s: IslandsSaved) {
+        self.active_set = s.active_set;
+        self.active_islands = s.active_islands;
+        self.active_islands_additional_solver_iterations = s.additional_solver_iterations;
+        self.active_set_timestamp = s.timestamp;
+    }
+
+    /// Journaling variant of [`Self::wake_up`]: saves the body's pre-wake state
+    /// before delegating. `wake_up` itself remains the un-journaled path.
+    pub(crate) fn wake_up_journaled(
+        &mut self,
+        bodies: &mut RigidBodySet,
+        handle: RigidBodyHandle,
+        strong: bool,
+        journal: &mut Option<&mut crate::pipeline::StepJournal>,
+    ) {
+        if let Some(j) = journal.as_deref_mut() {
+            if let Some(rb) = bodies.get(handle) {
+                j.save_body(handle, rb);
+            }
+        }
+        self.wake_up(bodies, handle, strong)
+    }
+
     pub(crate) fn active_island(&self, island_id: usize) -> &[RigidBodyHandle] {
         let island_range = self.active_islands[island_id]..self.active_islands[island_id + 1];
         &self.active_set[island_range]
@@ -173,6 +217,7 @@ impl IslandManager {
         impulse_joints: &ImpulseJointSet,
         multibody_joints: &MultibodyJointSet,
         min_island_size: usize,
+        journal: &mut Option<&mut crate::pipeline::StepJournal>,
     ) {
         assert!(
             min_island_size > 0,
@@ -306,6 +351,15 @@ impl IslandManager {
                 self.stack.push(other);
             }
 
+            // Journal (hook 7): a sleeping dynamic body first reached here via
+            // `push_contacting_bodies` (contact-wake) was NOT in the prior active
+            // set, so hook 6 never saved it — yet the wake/ids writes below are all
+            // hashed. Save it before the first write. Dedup makes the prior-active
+            // repeats free, so this stays O(active bodies).
+            if let Some(j) = journal.as_deref_mut() {
+                j.save_body(handle, rb);
+            }
+
             rb.activation.wake_up(false);
             rb.ids.active_island_id = self.active_islands.len() - 1;
             rb.ids.active_set_id = self.active_set.len();
@@ -334,6 +388,16 @@ impl IslandManager {
             }
         }
     }
+}
+
+/// Snapshot of the hashed [`IslandManager`] fields, captured at step start by
+/// the step-journal so a tick can be reverted without a whole-state snapshot.
+/// Excludes the `can_sleep`/`stack` scratch buffers (unhashed workspace).
+pub(crate) struct IslandsSaved {
+    pub active_set: Vec<RigidBodyHandle>,
+    pub active_islands: Vec<usize>,
+    pub additional_solver_iterations: Vec<usize>,
+    pub timestamp: u32,
 }
 
 fn update_energy(

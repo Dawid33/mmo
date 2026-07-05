@@ -1,4 +1,4 @@
-use crate::data::graph::{Direction, EdgeIndex, Graph, NodeIndex};
+use crate::data::graph::{Direction, EdgeIndex, Graph, GraphCellUndo, NodeIndex};
 
 /// Index of a node of the interaction graph.
 pub type ColliderGraphIndex = NodeIndex;
@@ -54,9 +54,27 @@ impl<N: Copy, E> InteractionGraph<N, E> {
         &mut self,
         index1: ColliderGraphIndex,
         index2: ColliderGraphIndex,
-    ) -> Option<E> {
+    ) -> Option<E>
+    where
+        E: Clone,
+    {
         let id = self.graph.find_edge(index1, index2)?;
         self.graph.remove_edge(id)
+    }
+
+    /// Journaling variant of [`Self::remove_edge`]. `find_edge` is read-only (no
+    /// capture); the removal delegates to `Graph::remove_edge_journaled`.
+    pub(crate) fn remove_edge_journaled(
+        &mut self,
+        index1: ColliderGraphIndex,
+        index2: ColliderGraphIndex,
+        ops: Option<&mut Vec<GraphCellUndo<N, E>>>,
+    ) -> Option<E>
+    where
+        E: Clone,
+    {
+        let id = self.graph.find_edge(index1, index2)?;
+        self.graph.remove_edge_journaled(id, ops)
     }
 
     /// Removes a handle from this graph and returns a handle that must have its graph index changed to `id`.
@@ -66,7 +84,10 @@ impl<N: Copy, E> InteractionGraph<N, E> {
     /// a map between `CollisionObjectSlabHandle` and `ColliderGraphIndex`, then you should update this
     /// map to associate `id` to the handle returned by this method.
     #[must_use = "The graph index of the collision object returned by this method has been changed to `id`."]
-    pub(crate) fn remove_node(&mut self, id: ColliderGraphIndex) -> Option<N> {
+    pub(crate) fn remove_node(&mut self, id: ColliderGraphIndex) -> Option<N>
+    where
+        E: Clone,
+    {
         let _ = self.graph.remove_node(id);
         self.graph.node_weight(id).cloned()
     }

@@ -132,6 +132,45 @@ pub struct Graph<N, E> {
     pub(crate) edges: Vec<Edge<E>>,
 }
 
+/// One reverted cell/structural write inside [`Graph`]. Recorded in execution
+/// order; revert applies LIFO. Exact inverses — same discipline as
+/// `Arena::revert_insert` (a plain re-do does NOT restore link/allocator state,
+/// and the intrusive next/node link pointers are hashed, so restoration must be
+/// bit-exact).
+pub enum GraphCellUndo<N, E> {
+    /// undo: `nodes.pop()`
+    NodePush,
+    /// undo: `edges.pop()`
+    EdgePush,
+    NodeNext {
+        node: u32,
+        dir: usize,
+        old: EdgeIndex,
+    },
+    EdgeNext {
+        edge: u32,
+        dir: usize,
+        old: EdgeIndex,
+    },
+    EdgeNode {
+        edge: u32,
+        dir: usize,
+        old: NodeIndex,
+    },
+    /// `edges.swap_remove(at)`: `removed` was taken out of slot `at`; the then-
+    /// last edge (if any) moved into `at`. Undo: move it back to the tail, put
+    /// `removed` back into `at`.
+    EdgeSwapRemove {
+        at: u32,
+        removed: Edge<E>,
+        had_swap: bool,
+    },
+    NodeWeight {
+        node: u32,
+        old: N,
+    },
+}
+
 enum Pair<T> {
     Both(T, T),
     One(T),
@@ -182,6 +221,59 @@ impl<N, E> Graph<N, E> {
         node_idx
     }
 
+    /// Journaling variant of [`Self::add_node`]: records a `NodePush` so the
+    /// append can be reverted with `nodes.pop()`.
+    pub fn add_node_journaled(
+        &mut self,
+        weight: N,
+        ops: Option<&mut Vec<GraphCellUndo<N, E>>>,
+    ) -> NodeIndex {
+        let idx = self.add_node(weight);
+        if let Some(ops) = ops {
+            ops.push(GraphCellUndo::NodePush);
+        }
+        idx
+    }
+
+    /// Applies a single recorded cell undo. Ops are recorded in execution order
+    /// and MUST be applied in reverse (LIFO): every index an op mentions is only
+    /// valid at the moment that op replays, so a post-swap rewire must be undone
+    /// before the swap it followed, and the swap before the splice that preceded
+    /// it.
+    pub fn apply_cell_undo(&mut self, op: GraphCellUndo<N, E>) {
+        match op {
+            GraphCellUndo::NodePush => {
+                self.nodes.pop();
+            }
+            GraphCellUndo::EdgePush => {
+                self.edges.pop();
+            }
+            GraphCellUndo::NodeNext { node, dir, old } => {
+                self.nodes[node as usize].next[dir] = old
+            }
+            GraphCellUndo::EdgeNext { edge, dir, old } => {
+                self.edges[edge as usize].next[dir] = old
+            }
+            GraphCellUndo::EdgeNode { edge, dir, old } => {
+                self.edges[edge as usize].node[dir] = old
+            }
+            GraphCellUndo::EdgeSwapRemove {
+                at,
+                removed,
+                had_swap,
+            } => {
+                if had_swap {
+                    let moved = std::mem::replace(&mut self.edges[at as usize], removed);
+                    self.edges.push(moved);
+                } else {
+                    debug_assert_eq!(at as usize, self.edges.len());
+                    self.edges.push(removed);
+                }
+            }
+            GraphCellUndo::NodeWeight { node, old } => self.nodes[node as usize].weight = old,
+        }
+    }
+
     /// Access the weight for node `a`.
     ///
     /// Also available with indexing syntax: `&graph[a]`.
@@ -217,6 +309,23 @@ impl<N, E> Graph<N, E> {
     /// **Note:** `Graph` allows adding parallel (“duplicate”) edges. If you want
     /// to avoid this, use [`.update_edge(a, b, weight)`](#method.update_edge) instead.
     pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, weight: E) -> EdgeIndex {
+        // Non-journaled path: delegate to the journaled twin with `None` so the
+        // list-splice logic exists in exactly one place (the full step-journal
+        // battery proves the behavior is bit-identical).
+        self.add_edge_journaled(a, b, weight, None)
+    }
+
+    /// Journaling variant of [`Self::add_edge`]. Records the two overwritten
+    /// list heads (`an.next[0]` and `bn.next[1]`, or both directions of the same
+    /// node for a self-loop) as `NodeNext` ops, then an `EdgePush` for the tail
+    /// append. After the `match`, `edge.next` holds exactly those old head values.
+    pub fn add_edge_journaled(
+        &mut self,
+        a: NodeIndex,
+        b: NodeIndex,
+        weight: E,
+        ops: Option<&mut Vec<GraphCellUndo<N, E>>>,
+    ) -> EdgeIndex {
         assert!(self.edges.len() != crate::INVALID_USIZE);
         let edge_idx = EdgeIndex::new(self.edges.len() as u32);
         let mut edge = Edge {
@@ -237,6 +346,21 @@ impl<N, E> Graph<N, E> {
                 an.next[0] = edge_idx;
                 bn.next[1] = edge_idx;
             }
+        }
+        if let Some(ops) = ops {
+            // `edge.next[0]` = old `an.next[0]`; `edge.next[1]` = old `bn.next[1]`
+            // (for a self-loop, dir 0 and 1 of the same node `a == b`).
+            ops.push(GraphCellUndo::NodeNext {
+                node: a.index() as u32,
+                dir: 0,
+                old: edge.next[0],
+            });
+            ops.push(GraphCellUndo::NodeNext {
+                node: b.index() as u32,
+                dir: 1,
+                old: edge.next[1],
+            });
+            ops.push(GraphCellUndo::EdgePush);
         }
         self.edges.push(edge);
         edge_idx
@@ -261,7 +385,10 @@ impl<N, E> Graph<N, E> {
     /// edges, including *n* calls to `.remove_edge()` where *n* is the number
     /// of edges with an endpoint in `a`, and including the edges with an
     /// endpoint in the displaced node.
-    pub fn remove_node(&mut self, a: NodeIndex) -> Option<N> {
+    pub fn remove_node(&mut self, a: NodeIndex) -> Option<N>
+    where
+        E: Clone,
+    {
         self.nodes.get(a.index())?;
         for d in &DIRECTIONS {
             let k = *d as usize;
@@ -306,13 +433,34 @@ impl<N, E> Graph<N, E> {
         Some(node.weight)
     }
 
-    /// For edge `e` with endpoints `edge_node`, replace links to it,
-    /// with links to `edge_next`.
-    fn change_edge_links(
+    /// Remove an edge and return its edge weight, or `None` if it didn't exist.
+    ///
+    /// Apart from `e`, this invalidates the last edge index in the graph
+    /// (that edge will adopt the removed edge index).
+    ///
+    /// Computes in **O(e')** time, where **e'** is the size of four particular edge lists, for
+    /// the vertices of `e` and the vertices of another affected edge.
+    pub fn remove_edge(&mut self, e: EdgeIndex) -> Option<E>
+    where
+        E: Clone,
+    {
+        // Non-journaled path: delegate to the journaled twin with `None`. The
+        // `E: Clone` bound is inherited from the twin but never exercised at
+        // runtime here (the clone is guarded on `ops.is_some()`); every `E` in
+        // this crate (`ContactPair`, `IntersectionPair`, `ImpulseJoint`, `()`)
+        // is `Clone`, so the bound is free.
+        self.remove_edge_journaled(e, None)
+    }
+
+    /// Journaling variant of [`Self::change_edge_links`]: every `node.next[k]` /
+    /// `curedge.next[k]` write records its old value (as `NodeNext` / `EdgeNext`)
+    /// into `ops` before overwriting.
+    fn change_edge_links_journaled(
         &mut self,
         edge_node: [NodeIndex; 2],
         e: EdgeIndex,
         edge_next: [EdgeIndex; 2],
+        mut ops: Option<&mut Vec<GraphCellUndo<N, E>>>,
     ) {
         for &d in &DIRECTIONS {
             let k = d as usize;
@@ -329,12 +477,25 @@ impl<N, E> Graph<N, E> {
             };
             let fst = node.next[k];
             if fst == e {
-                //println!("Updating first edge 0 for node {}, set to {}", edge_node[0], edge_next[0]);
+                if let Some(ops) = ops.as_deref_mut() {
+                    ops.push(GraphCellUndo::NodeNext {
+                        node: edge_node[k].index() as u32,
+                        dir: k,
+                        old: node.next[k],
+                    });
+                }
                 node.next[k] = edge_next[k];
             } else {
                 let mut edges = edges_walker_mut(&mut self.edges, fst, d);
-                while let Some(curedge) = edges.next_edge() {
+                while let Some((cur_index, curedge)) = edges.next() {
                     if curedge.next[k] == e {
+                        if let Some(ops) = ops.as_deref_mut() {
+                            ops.push(GraphCellUndo::EdgeNext {
+                                edge: cur_index.index() as u32,
+                                dir: k,
+                                old: curedge.next[k],
+                            });
+                        }
                         curedge.next[k] = edge_next[k];
                         break; // the edge can only be present once in the list.
                     }
@@ -343,42 +504,48 @@ impl<N, E> Graph<N, E> {
         }
     }
 
-    /// Remove an edge and return its edge weight, or `None` if it didn't exist.
-    ///
-    /// Apart from `e`, this invalidates the last edge index in the graph
-    /// (that edge will adopt the removed edge index).
-    ///
-    /// Computes in **O(e')** time, where **e'** is the size of four particular edge lists, for
-    /// the vertices of `e` and the vertices of another affected edge.
-    pub fn remove_edge(&mut self, e: EdgeIndex) -> Option<E> {
-        // every edge is part of two lists,
-        // outgoing and incoming edges.
-        // Remove it from both
+    /// Journaling variant of [`Self::remove_edge`]. Records — in execution order,
+    /// for LIFO replay — every splice write (via `change_edge_links_journaled`),
+    /// the `swap_remove` relocation (as `EdgeSwapRemove`, capturing `removed` by
+    /// clone before the swap), and the post-swap rewires. Replaying in reverse
+    /// undoes the post-swap rewires first (restoring references to the old tail
+    /// index), then the swap itself (moving the relocated edge back to the tail
+    /// and reinserting `removed`), then the splice — so every index each op names
+    /// is valid at the instant that op runs.
+    pub fn remove_edge_journaled(
+        &mut self,
+        e: EdgeIndex,
+        mut ops: Option<&mut Vec<GraphCellUndo<N, E>>>,
+    ) -> Option<E>
+    where
+        E: Clone,
+    {
         let (edge_node, edge_next) = match self.edges.get(e.index()) {
             None => return None,
             Some(x) => (x.node, x.next),
         };
-        // Remove the edge from its in and out lists by replacing it with
-        // a link to the next in the list.
-        self.change_edge_links(edge_node, e, edge_next);
-        self.remove_edge_adjust_indices(e)
-    }
+        self.change_edge_links_journaled(edge_node, e, edge_next, ops.as_deref_mut());
 
-    fn remove_edge_adjust_indices(&mut self, e: EdgeIndex) -> Option<E> {
-        // swap_remove the edge -- only the removed edge
-        // and the edge swapped into place are affected and need updating
-        // indices.
+        // swap_remove the edge -- only the removed edge and the edge swapped into
+        // place are affected and need their indices updated.
+        let old_len = self.edges.len();
+        let had_swap = e.index() != old_len - 1;
+        let removed = ops.as_deref().map(|_| self.edges[e.index()].clone());
         let edge = self.edges.swap_remove(e.index());
+        if let Some(ops) = ops.as_deref_mut() {
+            ops.push(GraphCellUndo::EdgeSwapRemove {
+                at: e.index() as u32,
+                removed: removed.expect("recorded when journaling"),
+                had_swap,
+            });
+        }
         let swap = match self.edges.get(e.index()) {
             // no element needed to be swapped.
             None => return Some(edge.weight),
             Some(ed) => ed.node,
         };
         let swapped_e = EdgeIndex::new(self.edges.len() as u32);
-
-        // Update the edge lists by replacing links to the old index by references to the new
-        // edge index.
-        self.change_edge_links(swap, swapped_e, [e, e]);
+        self.change_edge_links_journaled(swap, swapped_e, [e, e], ops);
         Some(edge.weight)
     }
 

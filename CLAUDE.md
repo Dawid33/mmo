@@ -63,7 +63,7 @@ First-party crates (workspace members):
 
 ## Vendored Forks (do not treat as dependencies to update)
 
-`crates/nalgebra`, `crates/simba`, `crates/parry`, `crates/rapier`, `crates/approx`, `crates/ordered-float`, `crates/slotmapd`, and `crates/block-mesh` are vendored, locally patched forks wired in via `[workspace.dependencies]` path overrides. They exist to guarantee **cross-machine determinism** for the rollback netcode: `simba` is forced onto `libm` (`libm_force`), `rapier3d` uses `enhanced-determinism`, floats are wrapped in `ordered-float`. Don't switch these back to crates.io versions, and be aware that changes to simulation math can break determinism between client and server.
+`crates/nalgebra`, `crates/simba`, `crates/parry`, `crates/rapier`, `crates/approx`, `crates/ordered-float`, `crates/slotmapd`, and `crates/block-mesh` are vendored, locally patched forks wired in via `[workspace.dependencies]` path overrides. They exist to guarantee **cross-machine determinism** for the rollback netcode: `simba` is forced onto `libm` (`libm_force`), `rapier3d` uses `enhanced-determinism`, floats are wrapped in `ordered-float`. The rapier/parry forks also carry the `StepJournal` rollback machinery — a per-tick mutation journal plus exact LIFO inverses — that lets `PhysicsPipeline::step` roll back without whole-state snapshots. Don't switch these back to crates.io versions, and be aware that changes to simulation math can break determinism between client and server.
 
 ## Conventions
 

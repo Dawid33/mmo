@@ -136,10 +136,13 @@ workspace buffer + swap), and the default `SubtreeOptimizer` strategy rebuilds
 every frame. Node-level journaling of an algorithm that rewrites everything is
 O(total) with extra steps. Instead:
 
-1. **Disable the incremental optimizer** (`BvhOptimizationStrategy::None`,
-   set where `PhysicsState` constructs its `BroadPhaseBvh`), with a one-time
-   full `Bvh::rebuild` at world/region creation for tree quality. Terrain is
-   static and body counts are small; optimizer churn is pure rollback noise.
+1. **Disable the incremental optimizer** (`BvhOptimizationStrategy::None`, the
+   fork default, set where `PhysicsState` constructs its `BroadPhaseBvh`).
+   Insert-time rotations keep the tree in good-enough shape without per-tick
+   churn; a one-time full `Bvh::rebuild` at world/region creation is the
+   *escalation path* for tree quality — available if broad-phase queries ever
+   profile hot, not done unconditionally. Terrain is static and body counts are
+   small; optimizer churn is pure rollback noise.
 2. **Clean-tick skip**: if there are no removed colliders, it's not the first
    pass, and no leaf AABB actually changed beyond the change-detection skin
    (`insert_or_update_partially` gains a "wrote?" return), skip optimize +
@@ -181,12 +184,16 @@ Two small macro additions (no changes to existing wrapper semantics):
 1. `raw_undo_parts()` — a raw per-field view (like `raw_fields()`) obtainable
    on the bare struct *inside undo closures only by convention*; running as an
    undo is the mutation license. Today's closures can only whole-struct-assign.
-2. **Hash-verification gating**: `undo_scope()`/`undo()` compute `pre_hash`
-   only under `cfg(debug_assertions)`; release entries carry a sentinel and
-   rollback skips the check. Tests (always debug) keep enforcing the bit-exact
-   bar on every transaction; release stops paying O(total) hashing per tick.
-   The state itself is restored bit-exact in all builds — only the always-on
-   *self-check* is gated.
+2. **Hash-verification gating**: a runtime flag (`VERIFY_HASHES`, an
+   `AtomicBool` defaulting to `true`, flipped once via `set_hash_verification`)
+   guards every `pre_hash` computation and rollback-time check;
+   `undo_scope()`/`undo()` compute `pre_hash` only while the flag is set, and
+   entries logged while it's off carry a sentinel and rollback skips the
+   check. Both binaries set it under `cfg(not(debug_assertions))` at the top
+   of `main()`, before any world/transaction exists. Tests (always debug)
+   keep enforcing the bit-exact bar on every transaction; release stops
+   paying O(total) hashing per tick. The state itself is restored bit-exact
+   in all builds — only the always-on *self-check* is gated.
 
 Server and client run the identical journaled path (the server's forget
 already prunes the entries; capture cost is O(active) and keeps debug-build

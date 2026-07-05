@@ -114,6 +114,20 @@ impl RigidBodySet {
         std::mem::take(&mut self.modified_bodies)
     }
 
+    pub(crate) fn set_modified(&mut self, modified: ModifiedRigidBodies) {
+        self.modified_bodies = modified;
+    }
+
+    /// Undo-only: overwrite the slot value; the handle must be occupied.
+    /// Does NOT touch modified/removed lists (the journal restores those
+    /// wholesale).
+    pub fn restore_raw(&mut self, handle: RigidBodyHandle, body: RigidBody) {
+        *self
+            .bodies
+            .get_mut(handle.0)
+            .expect("restore_raw: slot vacant") = body;
+    }
+
     /// Returns how many rigid bodies are currently in this collection.
     pub fn len(&self) -> usize {
         self.bodies.len()
@@ -235,7 +249,7 @@ impl RigidBodySet {
         /*
          * Update active sets.
          */
-        islands.rigid_body_removed(handle, &rb.ids, self);
+        islands.rigid_body_removed(handle, &rb.ids, self, &mut None);
 
         /*
          * Remove colliders attached to this rigid-body.
