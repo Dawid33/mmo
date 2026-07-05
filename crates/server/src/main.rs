@@ -23,12 +23,15 @@ use quinn::{
     ConnectionError, Endpoint, TransportConfig,
 };
 
+mod webtransport;
+
 /// One connected client's outgoing half, transport-agnostic. The router
 /// writes bincode ServerPackets; each variant frames them as one
 /// uni-stream per packet.
 #[derive(Clone)]
 pub enum ClientSink {
     Quinn(quinn::Connection),
+    Web(wtransport::Connection),
 }
 
 impl ClientSink {
@@ -52,6 +55,19 @@ impl ClientSink {
                 tokio::spawn(async move {
                     let _ = stream.stopped().await;
                 });
+            }
+            ClientSink::Web(session) => {
+                let mut stream = match session.open_uni().await {
+                    Ok(opening) => match opening.await {
+                        Ok(s) => s,
+                        Err(e) => return log::warn!("webtransport open failed: {e:?}"),
+                    },
+                    Err(e) => return log::warn!("dropping packet to gone client: {e:?}"),
+                };
+                if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut stream, &packet).await {
+                    return log::warn!("webtransport write failed: {e:?}");
+                }
+                let _ = stream.finish().await;
             }
         }
     }
@@ -118,8 +134,10 @@ impl WorldIngress {
                         }
                     }
                     None => {
-                        for entry in writer_sinks.iter() {
-                            entry.value().send_packet(packet.clone()).await;
+                        let targets: Vec<ClientSink> =
+                            writer_sinks.iter().map(|e| e.value().clone()).collect();
+                        for sink in targets {
+                            sink.send_packet(packet.clone()).await;
                         }
                     }
                 }
@@ -127,6 +145,23 @@ impl WorldIngress {
         });
 
         let next_client_id = Arc::new(AtomicUsize::new(0));
+
+        let wt_send = send.clone();
+        let wt_sinks = sinks.clone();
+        let wt_next = next_client_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::webtransport::serve(
+                "127.0.0.1:6467".parse().unwrap(),
+                wt_send,
+                wt_sinks,
+                wt_next,
+            )
+            .await
+            {
+                log::error!("webtransport ingress died: {e:?}");
+            }
+        });
+
         while let Some(conn) = endpoint.accept().await {
             let send = send.clone();
             let sinks = sinks.clone();
@@ -226,7 +261,10 @@ fn main() {
                 ClientPacket::RequestPlayerRegion => {
                     if let Some(id) = world.find_player(&client_id) {
                         server_send
-                            .send((Some(client_id), ServerPacket::PlayerRegion(Some(id), client_id)))
+                            .send((
+                                Some(client_id),
+                                ServerPacket::PlayerRegion(Some(id), client_id),
+                            ))
                             .unwrap();
                     } else {
                         server_send
@@ -255,7 +293,9 @@ fn main() {
                             }
                             Err(e) => panic!("Server crashed {:?}", e),
                         };
-                        server_send.send((None, ServerPacket::GameEvent(event))).unwrap();
+                        server_send
+                            .send((None, ServerPacket::GameEvent(event)))
+                            .unwrap();
                     }
                 },
             },
@@ -264,16 +304,19 @@ fn main() {
                 // already exists) create nothing.
                 if world.find_player(&client_id).is_none() {
                     let region_id = ChunkCoords::new(0, 0, 0);
-                    let event = match world
-                        .handle_region_event(game::GameEventKind::CreateClient(client_id), region_id)
-                    {
+                    let event = match world.handle_region_event(
+                        game::GameEventKind::CreateClient(client_id),
+                        region_id,
+                    ) {
                         Ok(e) => {
                             world.forget_last_event(&region_id);
                             e
                         }
                         Err(e) => panic!("Server crashed {:?}", e),
                     };
-                    server_send.send((None, ServerPacket::GameEvent(event))).unwrap();
+                    server_send
+                        .send((None, ServerPacket::GameEvent(event)))
+                        .unwrap();
                 }
             }
             ServerEvent::ServerTickTimer => {
@@ -281,7 +324,10 @@ fn main() {
                 world.progress_world_one_tick(&mut results_buffer);
                 for (id, result) in &results_buffer {
                     server_send
-                        .send((None, ServerPacket::GameEvent(result.as_ref().unwrap().clone())))
+                        .send((
+                            None,
+                            ServerPacket::GameEvent(result.as_ref().unwrap().clone()),
+                        ))
                         .unwrap();
                     if world.current_tick(&ChunkCoords::new(0, 0, 0)) % 10 == 0 {
                         server_send
