@@ -209,6 +209,117 @@ fn arrival_upgrades_ghost_in_place_keeping_entity_key() {
 }
 
 #[test]
+fn stage2_ghost_has_a_collidable_body_that_tracks_updates() {
+    // Live sender: this test rolls back, and rollback() replays tier-2 undo
+    // closures through client.as_ref().unwrap() — a None sender panics.
+    let (_, src_key) = donor();
+    let src = RegionCoords::new(0, 0);
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    rb.apply_ghost(ghost(src, src_key, 250.0));
+    rb.forget();
+    let e = rb.data.ghosts.get(&(src, src_key)).unwrap().entity;
+    let handle = rb.data.ecs.rigidbody.try_get(e).expect("stage 2: ghost has a body");
+    assert!(
+        rb.data.physics.bodies.get(handle).unwrap().colliders().len() == 1,
+        "ghost carries its collider"
+    );
+
+    // Refresh moves the body (and holds the hash bar).
+    let before = crc(&rb);
+    rb.new_transaction();
+    rb.apply_ghost(ghost(src, src_key, 240.0));
+    let t = rb.data.physics.bodies.get(handle).unwrap().translation();
+    assert_eq!(t.x, Real::from(240.0));
+    rb.rollback();
+    assert_eq!(before, crc(&rb));
+}
+
+#[test]
+fn stage2_upgrade_reuses_the_ghost_body() {
+    let (_, src_key) = donor();
+    let src = RegionCoords::new(0, 0);
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    rb.apply_ghost(ghost(src, src_key, 250.0));
+    rb.forget();
+    let e = rb.data.ghosts.get(&(src, src_key)).unwrap().entity;
+    let ghost_handle = rb.data.ecs.rigidbody.try_get(e).unwrap();
+
+    rb.new_transaction();
+    rb.apply_arrival(bundle(src, src_key, 9, 245.0));
+    rb.forget();
+    let owned_handle = rb.data.ecs.rigidbody.try_get(e).unwrap();
+    assert_eq!(ghost_handle, owned_handle, "upgrade corrects pose, keeps the body");
+    let t = rb.data.physics.bodies.get(owned_handle).unwrap().translation();
+    assert_eq!(t.x, Real::from(245.0));
+}
+
+#[test]
+fn stage2_ghost_collider_blocks_a_walking_player() {
+    // A player walking into a ghost must be collision-corrected (the same
+    // KinematicCharacterController path terrain uses). Place a ghost dead
+    // ahead of the player and drive input ticks forward.
+    //
+    // Note on tick sequencing (differs from the brief sketch): the KeyE
+    // fps-cam toggle is applied AFTER the controllers run within a tick, so
+    // the tick that flips fps-cam on produces no movement. To get three FULL
+    // walk moves (and a genuinely discriminating test — unblocked z=104 <
+    // 110, blocked z stays > 110), the toggle gets its own tick before W is
+    // held. With both keys pressed before any tick (as the brief sketched)
+    // only two moves land, so an uncollided walk would already stop at 112 —
+    // a false green. Proven by the bite-check in the task report.
+    use game::{GameEventKind, InputEvent, Key, Region};
+    let (_, src_key) = donor();
+    let id = RegionCoords::new(0, 0);
+    let mut region = Region::from_chunks(id, Vec::new());
+    region.handle_event(GameEventKind::CreateClient(1)).unwrap();
+    region.forget_last_event();
+    let player = *region.data().player_entites.get(&1).unwrap();
+
+    // Ghost dead ahead of the player (player spawns at 128,26,128 facing -z;
+    // W walks -z at 8 units/tick). Placed at z=104 so the combined capsule
+    // radii (6.4 + 6.4 = 12.8) stop the walker near z=116.8.
+    region
+        .handle_event(GameEventKind::GhostUpdate(ghost(RegionCoords::new(0, -1), src_key, 0.0)))
+        .unwrap();
+    region.forget_last_event();
+    // Reposition the ghost precisely via its entity.
+    let ghost_e = region.data().ghosts.get(&(RegionCoords::new(0, -1), src_key)).unwrap().entity;
+    region.with_data(|d| d.set_body_pose_safe(ghost_e, pose(128.0, 26.0, 104.0)));
+
+    // fps-cam on: press KeyE, then tick once so the toggle takes effect
+    // (this tick moves nothing — fps-cam is still off while controllers run).
+    region
+        .handle_event(GameEventKind::PlayerInput(1, InputEvent::Key { key: Key::KeyE, pressed: true }))
+        .unwrap();
+    region.forget_last_event();
+    region.handle_event(GameEventKind::Tick).unwrap();
+    region.forget_last_event();
+
+    // Now hold W and drive three full walk ticks.
+    region
+        .handle_event(GameEventKind::PlayerInput(1, InputEvent::Key { key: Key::KeyW, pressed: true }))
+        .unwrap();
+    region.forget_last_event();
+    for _ in 0..3 {
+        region.handle_event(GameEventKind::Tick).unwrap();
+        region.forget_last_event();
+    }
+    let handle = region.data().ecs.rigidbody.try_get(player).unwrap();
+    let z = region.data().physics.bodies.get(handle).unwrap().translation().z;
+    // Unblocked: 128 - 3*8 = 104. The ghost capsule (radius 6.4) at z=104
+    // must stop the player short of ~117.
+    assert!(
+        z.0 > 110.0,
+        "ghost collider must block the walk: z={} (unblocked would be 104)",
+        z.0
+    );
+}
+
+#[test]
 fn replayed_arrival_is_a_pose_correction_not_a_duplicate() {
     let (_, src_key) = donor();
     let src = RegionCoords::new(0, 0);

@@ -454,11 +454,19 @@ impl Rollback {
         ));
     }
 
-    /// Body+collider insertion from a bundle — the create_player_safe insert
-    /// pattern generalized to a transfer payload.
-    fn inject_body_safe(&mut self, e: EntityKey, bundle: &EntityBundle) {
+    /// Insert a kinematic character body + its collider for entity `e`,
+    /// undo-tracked (the create_player_safe insert pattern generalized). The
+    /// shared build used by transfer arrivals (`inject_body_safe`) and stage-2
+    /// ghost hosting (`apply_ghost`): both need the same kinematic body from a
+    /// pose + collider spec, so the builder chain lives here, once.
+    fn build_kinematic_body_safe(
+        &mut self,
+        e: EntityKey,
+        pose: IsometryReal,
+        collider: &ColliderSpec,
+    ) {
         let body = RigidBodyBuilder::kinematic_position_based()
-            .pose(bundle.isometry)
+            .pose(pose)
             .gravity_scale(Real::from(0.0))
             .enabled_rotations(true, true, true)
             .ccd_enabled(false)
@@ -471,11 +479,17 @@ impl Rollback {
         let handle = scope.insert(body);
         scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
-        match bundle.collider {
+        match collider {
             ColliderSpec::CapsuleY { half_height, radius } => {
-                self.attach_capsule_collider_safe(e, handle, half_height, radius);
+                self.attach_capsule_collider_safe(e, handle, *half_height, *radius);
             }
         }
+    }
+
+    /// Body+collider insertion from a bundle — the create_player_safe insert
+    /// pattern generalized to a transfer payload.
+    fn inject_body_safe(&mut self, e: EntityKey, bundle: &EntityBundle) {
+        self.build_kinematic_body_safe(e, bundle.isometry, &bundle.collider);
     }
 
     /// Ownership transfer INTO this region. Three paths:
@@ -558,7 +572,11 @@ impl Rollback {
         self.data.arrivals.insert(identity, e);
     }
 
-    /// Margin mirror upsert. Stage 1: pose-only renderable (no collider).
+    /// Margin mirror upsert. Stage 2: the ghost carries a kinematic body +
+    /// collider (built from `GhostData.collider`) so it participates in the
+    /// receiving region's physics — cross-boundary collision. A pose refresh
+    /// moves that body; the arrival upgrade path reuses it (set_body_pose vs
+    /// re-inject), and expiry removes it via remove_entity_safe.
     pub fn apply_ghost(&mut self, data: GhostData) {
         let identity = (data.source_region, data.source_key);
         let tick = *self.data.tick;
@@ -571,6 +589,9 @@ impl Rollback {
                 GameDataTransactionKind::Do,
                 GameDataUpdateKind::SetEntityPosition(entry.entity, data.isometry),
             ));
+            // Move the ghost's body to match (no-ops if it has none — safe
+            // during a mixed-version rollout of parked blobs).
+            self.set_body_pose_safe(entry.entity, data.isometry);
         } else {
             let e = self.data.ecs.create_entity_safe();
             self.data.send(GameDataUpdate::new(
@@ -591,6 +612,8 @@ impl Rollback {
                 GameDataTransactionKind::Do,
                 GameDataUpdateKind::SetGhostSource(e, Some(data.source_region)),
             ));
+            // Stage 2: a kinematic body + collider so the ghost collides.
+            self.build_kinematic_body_safe(e, data.isometry, &data.collider);
             self.data.ghosts.insert(
                 identity,
                 GhostEntry { entity: e, last_update_tick: tick },

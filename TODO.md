@@ -4,6 +4,5 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
 - Durable region persistence (parking lot is in-memory only).
 - Cross-region event relay groundwork (deferred with handoff).
 - Stable client identity across connections: reconnects get a fresh ClientId, so the manager's no-duplicate-player reconnect path only fires for same-id sessions; the old player entity lingers in its home region.
-- Ghost colliders (stage 2 of the handoff spec) if not yet landed.
 - Cross-region interactions beyond collision (combat, pickup) — future spec.
 - Ghost mirrors for parked-region persistence are TTL'd, not persisted.

@@ -194,6 +194,52 @@ fn bodyless_ghost_is_not_scanned() {
 }
 
 #[test]
+fn bodied_ghost_past_boundary_is_not_extracted() {
+    // Stage 2 gives hosted ghosts real rigidbodies, so the missing-rigidbody
+    // guard in scan_boundaries no longer excludes them — the `ghost_keys` set
+    // is now the only thing keeping a hosted ghost from being scanned as a
+    // leaver. Park a bodied ghost STRICTLY PAST the +x boundary (region-local
+    // x > REGION_SIZE + FLIP_HYSTERESIS = 258) and confirm the tick does not
+    // extract it into a departure.
+    //
+    // BITE-PROOF: deleting/bypassing the `ghost_keys` filter in
+    // scan_boundaries makes this fail — the bodied ghost past the line would
+    // then be extracted into departures.
+    let id = RegionCoords::new(0, 0);
+    let src = RegionCoords::new(1, 0);
+    let src_key = game::EntityKey::default();
+    let mut region = Region::from_chunks(id, Vec::new());
+    region
+        .handle_event(GameEventKind::GhostUpdate(game::GhostData {
+            source_region: src,
+            source_key: src_key,
+            kind: game::EntityKind::Player,
+            isometry: pose(300.0, 128.0), // strictly past the 258 flip line
+            linvel: game::parry::math::Vector::zeros(),
+            collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+        }))
+        .unwrap();
+    region.forget_last_event();
+    // Sanity: stage-2 ghost really has a body (else the guard under test is
+    // moot and the bite-proof would be vacuous).
+    let ghost_e = region.data().ghosts.get(&(src, src_key)).unwrap().entity;
+    assert!(
+        region.data().ecs.rigidbody.try_get(ghost_e).is_some(),
+        "stage-2 ghost must carry a body for ghost_keys to be load-bearing"
+    );
+    region.handle_event(GameEventKind::Tick).unwrap();
+    region.forget_last_event();
+    let (departures, _ghosts) = region.take_transfers();
+    // The region hosts nothing but this ghost, so any departure is the ghost
+    // wrongly extracted — ghost_keys must keep the buffer empty.
+    assert!(
+        departures.is_empty(),
+        "ghost_keys must exclude a hosted ghost from extraction, even past a boundary: {:?}",
+        departures.iter().map(|(_, t)| *t).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
     // Client region B predicted an arrival with pose X; the authoritative
     // arrival has pose Y (server extracted on a different tick). Reconcile
