@@ -1313,6 +1313,10 @@ impl Multibody {
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, Hash)]
 struct IndexSequence {
+    #[cfg_attr(
+        feature = "serde-serialize",
+        serde(with = "crate::dynamics::rigid_body_components::sentinel_usize")
+    )]
     first_to_remove: usize,
     index_map: Vec<usize>,
 }

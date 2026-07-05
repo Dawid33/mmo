@@ -1027,7 +1027,7 @@ impl RigidBodyCcd {
 }
 
 #[cfg(feature = "serde-serialize")]
-mod sentinel_usize {
+pub(crate) mod sentinel_usize {
     //! Cross-architecture-stable (de)serialization for usize::MAX sentinels.
     //! bincode encodes usize as u64: a 64-bit peer's sentinel arrives as
     //! u64::MAX, which cannot fit a 32-bit usize (wasm32) and kills the whole
