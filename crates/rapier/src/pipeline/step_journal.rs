@@ -29,9 +29,8 @@ pub struct StepJournal {
     pub(crate) narrow_wholesale: Option<Box<NarrowPhase>>,
     /// Pre-mutation broad-phase snapshot, captured once on the first dirty tick
     /// (see [`BroadPhaseBvh::journal_save`]). `None` on a clean tick where the
-    /// broad phase was never touched. Public so fork tests can assert the
-    /// clean-tick skip.
-    pub broad: Option<Box<crate::geometry::BroadSaved>>,
+    /// broad phase was never touched (query via [`Self::broad_captured`]).
+    pub(crate) broad: Option<Box<crate::geometry::BroadSaved>>,
 }
 
 pub(crate) struct ListsSaved {
@@ -43,6 +42,12 @@ pub(crate) struct ListsSaved {
 }
 
 impl StepJournal {
+    /// True if this tick mutated the broad phase (a pre-mutation BVH snapshot was
+    /// captured). False on a clean tick where the broad phase was never touched.
+    pub fn broad_captured(&self) -> bool {
+        self.broad.is_some()
+    }
+
     /// True if nothing has been captured this tick, i.e. `revert` would be a no-op.
     pub fn is_empty(&self) -> bool {
         self.saved_bodies.is_empty()

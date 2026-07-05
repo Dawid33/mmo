@@ -84,7 +84,7 @@ fn idle_tick_journal_is_empty_and_broad_untouched() {
     for _ in 0..3 { let _ = w.step(); }
     let before_broad = hash_broad(&w);
     let j = w.step(); // nothing moves: clean tick
-    assert!(j.broad.is_none(), "clean tick must not capture the BVH");
+    assert!(!j.broad_captured(), "clean tick must not capture the BVH");
     assert!(j.is_empty(), "idle tick journal must be empty");
     assert_eq!(before_broad, hash_broad(&w), "clean tick must not mutate the BVH");
 }
@@ -102,6 +102,59 @@ fn moving_body_dirty_tick_revert_is_hash_exact() {
     let journals: Vec<StepJournal> = (0..20).map(|_| w.step()).collect();
     for j in journals.into_iter().rev() { w.revert(j); }
     assert_eq!(before, (w.hash_dynamics(), hash_broad(&w)));
+}
+
+#[test]
+fn same_tick_remove_and_slot_reuse_keeps_replacement_collidable() {
+    // Regression: broad-phase removals must be applied BEFORE the clean-tick
+    // pre-scan reads leaf state. If collider X (raw index i) is removed and a
+    // replacement Y reuses slot i in the same tick, a pre-removal scan compares
+    // Y's AABB against X's still-present (margin-inflated) leaf, deems it a
+    // no-op, then deletes the leaf — Y never enters the broad phase and a ball
+    // falls straight through the replaced floor.
+    let mut w = World::new();
+    let floor_body = w.bodies.insert(
+        RigidBodyBuilder::fixed()
+            .translation(vector![Real::from(0.0), Real::from(-1.0), Real::from(0.0)])
+            .build(),
+    );
+    let old_floor = w.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(Real::from(16.0), Real::from(1.0), Real::from(16.0)).build(),
+        floor_body, &mut w.bodies,
+    );
+    let ball = w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(0.0), Real::from(2.0), Real::from(0.0)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(),
+        ball, &mut w.bodies,
+    );
+    // Settle the insertion ticks so the tree holds the old floor leaf.
+    for _ in 0..3 { let _ = w.step(); }
+    // Same tick: remove the floor collider and insert an identical replacement.
+    // The arena free-list reuses the slot (asserted below), so the replacement
+    // shares the old collider's raw index.
+    let old_idx = old_floor.into_raw_parts().0;
+    w.colliders.remove(old_floor, &mut w.islands, &mut w.bodies, true);
+    let new_floor = w.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(Real::from(16.0), Real::from(1.0), Real::from(16.0)).build(),
+        floor_body, &mut w.bodies,
+    );
+    assert_eq!(
+        old_idx,
+        new_floor.into_raw_parts().0,
+        "arena must reuse the slot for this regression to be exercised"
+    );
+    // Enough ticks for the ball to fall from y=2 onto the floor (top at y=0)
+    // and rest. On the buggy ordering it tunnels through and keeps falling.
+    for _ in 0..100 { let _ = w.step(); }
+    let y = w.bodies[ball].translation().y;
+    assert!(
+        y > Real::from(0.0),
+        "ball fell through the replaced floor: y = {y:?}"
+    );
 }
 
 #[test]
