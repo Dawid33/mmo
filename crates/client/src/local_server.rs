@@ -52,9 +52,18 @@ impl LocalServer {
                         .unwrap();
                 }
                 ClientPacket::RequestRegionConnection(id) => {
-                    self.send
-                        .send(self.world.build_region_server_packet(&id))
-                        .unwrap();
+                    // Task 6 has the client request its full 3x3 window, but
+                    // this embedded world (Task 8 rewrites it) only ever
+                    // holds the regions it was seeded with — log-and-ignore
+                    // requests for anything else rather than panicking on
+                    // World::build_region_server_packet's unwrap.
+                    if self.world.region_exists(&id) {
+                        self.send
+                            .send(self.world.build_region_server_packet(&id))
+                            .unwrap();
+                    } else {
+                        log::debug!("LocalServer: ignoring request for unknown region {:?}", id);
+                    }
                 }
                 ClientPacket::ReleaseRegionConnection(_) => {}
                 ClientPacket::GameEvent(game_event) => match game_event.kind {

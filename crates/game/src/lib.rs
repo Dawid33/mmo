@@ -45,6 +45,9 @@ pub enum ClientUpdateEvent {
         GameData,
         crossbeam::channel::Receiver<GameDataUpdate>,
     ),
+    /// The window moved on (or a region is being replaced): tear down this
+    /// region's render state.
+    RemoveRegion(RegionId),
     GameCrash(GameError),
     SetPlayer(ClientId),
 }

@@ -79,6 +79,7 @@ pub fn drain_client_updates(
                 info!("bridge: region {:?} loaded", id);
             }
             ClientUpdateEvent::SetPlayer(client_id) => player.0 = Some(client_id),
+            ClientUpdateEvent::RemoveRegion(_) => { /* Task 7 */ }
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
         }
     }

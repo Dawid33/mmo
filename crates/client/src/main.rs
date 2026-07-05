@@ -58,7 +58,11 @@ pub struct GameInstanceManager {
     ready: bool,
     is_caught_up: bool,
     client_id: Option<ClientId>,
-    player_chunk: Option<RegionCoords>,
+    home_region: Option<RegionCoords>,
+    /// Regions we have requested (and not released) — the desired window.
+    subscribed: std::collections::BTreeSet<RegionCoords>,
+    /// Events for subscribed regions whose snapshot hasn't arrived yet.
+    pending_events: BTreeMap<RegionCoords, Vec<GameEvent>>,
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
 }
 
@@ -90,7 +94,9 @@ impl GameInstanceManager {
             server_game_send,
             server_game_recv,
             client_id: None,
-            player_chunk: None,
+            home_region: None,
+            subscribed: std::collections::BTreeSet::new(),
+            pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
         }
     }
@@ -135,6 +141,7 @@ impl GameInstanceManager {
                     .as_mut()
                     .unwrap()
                     .progress_world_one_tick(&mut self.results_buffer);
+                self.update_window();
             }
             GameEventKind::PlayerInput(_, _) if !self.is_caught_up => {
                 // Don't handle player events until the sim has caught up with
@@ -146,8 +153,8 @@ impl GameInstanceManager {
                 // the browser).
             }
             e @ GameEventKind::PlayerInput(_, _) => {
-                if let Some(chunk) = self.player_chunk {
-                    let event = self.world.as_mut().unwrap().handle_region_event(e, chunk)?;
+                if let Some(home) = self.home_region {
+                    let event = self.world.as_mut().unwrap().handle_region_event(e, home)?;
                     self.server_game_send
                         .send(game::ClientPacket::GameEvent(event))
                         .unwrap();
@@ -175,31 +182,121 @@ impl GameInstanceManager {
         Ok(true)
     }
 
+    /// Build render-bridge + local-world state for a freshly received region
+    /// snapshot. Hoisted out of a closure (was `new_region` inline) so
+    /// `handle_server` can call `drop_region` first without fighting the
+    /// borrow checker over `self`.
+    fn new_region(&mut self, id: RegionId, raw_game_data: Rollback) {
+        let (send, recv) = crossbeam::channel::unbounded();
+        let data = Region::new(raw_game_data.clone(), Some(send), id, self.client_id);
+        self.client_event_send
+            .send(ClientUpdateEvent::NewRegion(
+                id,
+                (*raw_game_data.data).clone(),
+                recv,
+            ))
+            .unwrap();
+        if let Some(ref mut w) = self.world {
+            w.load(&id, data);
+        } else {
+            let mut w = game::World::new();
+            w.load(&id, data);
+            self.world = Some(w);
+        }
+        info!("Region recieved and loaded!");
+    }
+
+    /// The viewer's current region, from the local player's sim body in the
+    /// home region (region-local pose + home offset). Free-cam local coords
+    /// run past the region bounds on purpose; from_world floor-divides them
+    /// into the right neighbour. Falls back to home when the player entity
+    /// isn't readable yet.
+    fn viewer_region(&self) -> Option<RegionCoords> {
+        let home = self.home_region?;
+        let world = self.world.as_ref()?;
+        if !world.region_exists(&home) {
+            return Some(home);
+        }
+        let data = world.data(&home);
+        let Some(client_id) = self.client_id else { return Some(home) };
+        let Some(key) = data.player_entites.get(&client_id).copied() else {
+            return Some(home);
+        };
+        let Some(handle) = *data.ecs.rigidbody.try_get(key) else {
+            return Some(home);
+        };
+        let Some(body) = data.physics.bodies.get(handle) else {
+            return Some(home);
+        };
+        let t = body.translation();
+        let off = home.world_offset();
+        // Real = OrderedFloat<f32>; .0 unwraps to f32 (same as convert.rs).
+        Some(RegionCoords::from_world(t.x.0 + off[0], t.z.0 + off[2]))
+    }
+
+    /// Diff the desired 3x3 window against current subscriptions; request
+    /// the new, release the stale, and tear stale regions out of the local
+    /// world + render bridge. Cheap when nothing changed (set compare).
+    fn update_window(&mut self) {
+        let Some(center) = self.viewer_region() else { return };
+        let desired: std::collections::BTreeSet<RegionCoords> =
+            center.window_3x3().into_iter().collect();
+        if desired == self.subscribed {
+            return;
+        }
+        for rc in desired.difference(&self.subscribed) {
+            self.server_game_send
+                .send(ClientPacket::RequestRegionConnection(*rc))
+                .unwrap();
+        }
+        let stale: Vec<RegionCoords> = self.subscribed.difference(&desired).copied().collect();
+        for rc in stale {
+            self.server_game_send
+                .send(ClientPacket::ReleaseRegionConnection(rc))
+                .unwrap();
+            self.drop_region(rc);
+        }
+        self.subscribed = desired;
+    }
+
+    /// Remove a region from the local world and the render bridge.
+    fn drop_region(&mut self, rc: RegionCoords) {
+        self.pending_events.remove(&rc);
+        if let Some(ref mut world) = self.world {
+            if world.remove_region(&rc).is_some() {
+                let _ = self.client_event_send.send(ClientUpdateEvent::RemoveRegion(rc));
+            }
+        }
+    }
+
+    /// Route one server-authoritative game event to the region it targets:
+    /// reconcile if loaded, buffer if the snapshot is still in flight,
+    /// drop if the region was released/never wanted.
+    fn route_server_game_event(&mut self, event: GameEvent) -> Result<(), GameError> {
+        let world = self.world.as_mut().expect("routed only when world exists");
+        if world.region_exists(&event.region_id) {
+            match world.reconcile_event(event) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    warn!("reconcile failed: {:?}", e);
+                    Err(e)
+                }
+            }
+        } else if self.subscribed.contains(&event.region_id) {
+            // Snapshot still in flight: hold the event for replay.
+            self.pending_events.entry(event.region_id).or_default().push(event);
+            Ok(())
+        } else {
+            // Released/never-wanted region: steady-state noise.
+            log::debug!("dropping event for region {:?}", event.region_id);
+            Ok(())
+        }
+    }
+
     pub fn handle_server(
         &mut self,
         server_msg: Result<ServerPacket, RecvError>,
     ) -> Result<(), GameError> {
-        let new_region =
-            |id: RegionId, raw_game_data: Rollback, world: &mut Option<game::World>| {
-                let (send, recv) = crossbeam::channel::unbounded();
-                let data = Region::new(raw_game_data.clone(), Some(send), id, self.client_id);
-                self.client_event_send
-                    .send(ClientUpdateEvent::NewRegion(
-                        id,
-                        (*raw_game_data.data).clone(),
-                        recv,
-                    ))
-                    .unwrap();
-                if let Some(ref mut w) = world {
-                    w.load(&id, data);
-                } else {
-                    let mut w = game::World::new();
-                    w.load(&id, data);
-                    *world = Some(w);
-                }
-                info!("Region recieved and loaded!");
-            };
-
         match server_msg.unwrap() {
             game::ServerPacket::SyncClock(region_id, server_tick_rate, server_tick, rtt) => {
                 if let Some(ref mut world) = self.world {
@@ -225,28 +322,16 @@ impl GameInstanceManager {
                 }
             }
             game::ServerPacket::GameEvent(game_event) => {
-                if let Some(ref mut world) = self.world {
-                    for event in self.buffer.drain(..) {
-                        match world.reconcile_event(event) {
-                            Ok(_) => (),
-                            Err(e) => {
-                                warn!("Failed in catch up. {:?}", e);
-                                return Err(e);
-                            }
-                        };
-                    }
-                    match world.reconcile_event(game_event) {
-                        Ok(_) => (),
-                        Err(e) => {
-                            warn!("{:?}", e);
-                            return Err(e);
-                        }
-                    };
-                    self.is_caught_up = true;
-                } else {
+                if self.world.is_none() {
                     self.buffer.push(game_event);
                     self.is_caught_up = false;
+                    return Ok(());
                 }
+                for event in self.buffer.drain(..).collect::<Vec<_>>() {
+                    self.route_server_game_event(event)?;
+                }
+                self.route_server_game_event(game_event)?;
+                self.is_caught_up = true;
             }
             game::ServerPacket::PlayerRegion(id, client_id) => {
                 if let Err(e) = self.client_event_send.send(ClientUpdateEvent::SetPlayer(client_id)) {
@@ -254,16 +339,39 @@ impl GameInstanceManager {
                     // nothing left to notify, so just log and keep going.
                     warn!("client_event_send closed while sending SetPlayer: {:?}", e);
                 }
-
-                let id = id.unwrap_or(RegionCoords::new(0, 0));
                 self.client_id = Some(client_id);
-                self.player_chunk = Some(id);
-                self.server_game_send
-                    .send(ClientPacket::RequestRegionConnection(id))
-                    .unwrap();
+
+                let home = id.unwrap_or(RegionCoords::new(0, 0));
+                self.home_region = Some(home);
+                // Ask for the whole 3x3 window up front; update_window keeps
+                // it in sync from then on.
+                for rc in home.window_3x3() {
+                    self.server_game_send
+                        .send(ClientPacket::RequestRegionConnection(rc))
+                        .unwrap();
+                    self.subscribed.insert(rc);
+                }
             }
             game::ServerPacket::Region(id, raw_game_data) => {
-                new_region(id, raw_game_data, &mut self.world);
+                if !self.subscribed.contains(&id) {
+                    // Window moved on while the snapshot was in flight.
+                    self.server_game_send
+                        .send(ClientPacket::ReleaseRegionConnection(id))
+                        .unwrap();
+                    return Ok(());
+                }
+                // Replace-on-re-receipt: crash-respawn/resubscribe resyncs.
+                self.drop_region(id);
+                self.new_region(id, raw_game_data);
+                // Replay events that raced ahead of the snapshot; reconcile
+                // skips anything already baked in (base_event_id).
+                if let Some(pending) = self.pending_events.remove(&id) {
+                    if let Some(ref mut world) = self.world {
+                        for ev in pending {
+                            let _ = world.reconcile_event(ev);
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -594,5 +702,119 @@ mod manager_tests {
             "PlayerInput must be dropped until the sim has caught up"
         );
         drop(bridge_recv);
+    }
+
+    fn manager_with_player() -> (
+        GameInstanceManager,
+        crossbeam::channel::Sender<ServerPacket>,
+        Receiver<ServerPacket>,
+        Receiver<ClientUpdateEvent>,
+        crossbeam::channel::Sender<GameEventKind>,
+    ) {
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
+        let (server_send, server_recv) = crossbeam::channel::unbounded();
+        let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+        let manager =
+            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+        (manager, server_send, server_recv, client_recv, game_send)
+    }
+
+    /// PlayerRegion must trigger subscription requests for the full 3x3
+    /// window around home, not just home.
+    #[test]
+    fn player_region_requests_full_window() {
+        let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
+        let home = RegionCoords::new(0, 0);
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        assert!(manager.pump(&server_recv).unwrap());
+
+        let mut requested = std::collections::BTreeSet::new();
+        while let Ok(p) = manager.client_packet_recv().try_recv() {
+            if let ClientPacket::RequestRegionConnection(rc) = p {
+                requested.insert(rc);
+            }
+        }
+        let expected: std::collections::BTreeSet<_> = home.window_3x3().into_iter().collect();
+        assert_eq!(requested, expected);
+    }
+
+    /// Events for a subscribed-but-not-yet-loaded region are buffered and
+    /// applied when the snapshot arrives, not dropped.
+    #[test]
+    fn events_for_pending_region_are_buffered_until_snapshot() {
+        let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
+        let home = RegionCoords::new(0, 0);
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        manager.pump(&server_recv).unwrap();
+
+        // Load home so `world` exists.
+        let world = game::World::basic();
+        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        manager.pump(&server_recv).unwrap();
+
+        // A neighbour's tick arrives before its snapshot.
+        let neighbour = RegionCoords::new(1, 0);
+        let tick_from_neighbour =
+            GameEvent::new(GameEventKind::Tick, 0, neighbour);
+        server_send.send(ServerPacket::GameEvent(tick_from_neighbour)).unwrap();
+        manager.pump(&server_recv).unwrap();
+        assert!(!manager.world.as_ref().unwrap().region_exists(&neighbour));
+
+        // Snapshot arrives: region loads, then the buffered event is
+        // replayed through reconcile (which no-ops it here — id 0 is at the
+        // snapshot's base_event_id — the point is it must not panic or drop
+        // the region).
+        let mut neighbour_world = game::World::new();
+        neighbour_world.load(&neighbour, Region::from_chunks(neighbour, Vec::new()));
+        server_send.send(neighbour_world.build_region_server_packet(&neighbour)).unwrap();
+        manager.pump(&server_recv).unwrap();
+        assert!(manager.world.as_ref().unwrap().region_exists(&neighbour));
+    }
+
+    /// A snapshot for an already-loaded region replaces it (crash-respawn /
+    /// resubscribe path), emitting RemoveRegion then NewRegion to the bridge.
+    #[test]
+    fn region_re_receipt_replaces_and_signals_bridge() {
+        let (mut manager, server_send, server_recv, client_recv, _game) = manager_with_player();
+        let home = RegionCoords::new(0, 0);
+        let world = game::World::basic();
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        manager.pump(&server_recv).unwrap();
+        while client_recv.try_recv().is_ok() {} // clear initial events
+
+        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        manager.pump(&server_recv).unwrap();
+
+        let events: Vec<ClientUpdateEvent> = client_recv.try_iter().collect();
+        assert!(
+            matches!(events[0], ClientUpdateEvent::RemoveRegion(rc) if rc == home),
+            "teardown precedes rebuild, got {:?}", events
+        );
+        assert!(matches!(events[1], ClientUpdateEvent::NewRegion(rc, _, _) if rc == home));
+    }
+
+    /// A snapshot for a region outside the desired window is released
+    /// immediately, never loaded (window moved on before it arrived).
+    #[test]
+    fn stale_snapshot_is_released_not_loaded() {
+        let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
+        let home = RegionCoords::new(0, 0);
+        let world = game::World::basic();
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        manager.pump(&server_recv).unwrap();
+        while manager.client_packet_recv().try_recv().is_ok() {}
+
+        let far = RegionCoords::new(50, 50);
+        let mut far_world = game::World::new();
+        far_world.load(&far, Region::from_chunks(far, Vec::new()));
+        server_send.send(far_world.build_region_server_packet(&far)).unwrap();
+        manager.pump(&server_recv).unwrap();
+
+        assert!(!manager.world.as_ref().unwrap().region_exists(&far));
+        let released: Vec<ClientPacket> = manager.client_packet_recv().try_iter().collect();
+        assert!(released.iter().any(|p| matches!(p, ClientPacket::ReleaseRegionConnection(rc) if *rc == far)));
     }
 }
