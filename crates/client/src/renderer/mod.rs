@@ -50,7 +50,7 @@ impl Plugin for SimBridgePlugin {
                 PreUpdate,
                 (
                     input::forward_input.after(bevy::input::InputSystems),
-                    (bridge::drain_client_updates, bridge::drain_region_updates).chain(),
+                    (bridge::drain_client_updates, bridge::drain_region_updates, bridge::dedupe_ghosts).chain(),
                 )
                     .chain(),
             )

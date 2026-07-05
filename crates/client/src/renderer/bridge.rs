@@ -59,6 +59,12 @@ pub struct VoxelData(pub Vec<Voxel>);
 #[derive(Component, Clone, Copy)]
 pub struct SimKind(pub game::EntityKind);
 
+/// Marks a bevy entity as a ghost mirror sourced from another region. Used
+/// only for render dedupe: when the source region is also loaded locally,
+/// the owned copy renders and the ghost hides (sim state keeps both).
+#[derive(Component, Clone, Copy)]
+pub struct GhostSource(pub RegionId);
+
 pub fn drain_client_updates(
     mut commands: Commands,
     updates: Res<ClientUpdates>,
@@ -285,8 +291,15 @@ pub fn drain_region_updates(
                         None => { commands.entity(e).remove::<SimKind>(); }
                     }
                 }
-                GameDataUpdateKind::SetGhostSource(_, _) => {
-                    // Ghost render-dedupe lands with the bridge task.
+                GameDataUpdateKind::SetGhostSource(key, src) => {
+                    let Some(&e) = map.0.get(&(region, key)) else {
+                        warn!("bridge: SetGhostSource for unmapped {:?}", key);
+                        continue;
+                    };
+                    match src {
+                        Some(rc) => { commands.entity(e).insert(GhostSource(rc)); }
+                        None => { commands.entity(e).remove::<GhostSource>(); }
+                    }
                 }
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
                     // Only the local player's toggle may grab this window's cursor.
@@ -304,6 +317,22 @@ pub fn drain_region_updates(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Render rule: a ghost is visible only while its source region is NOT
+/// loaded locally — with both regions in the window you see the owned copy,
+/// not its mirror. Runs every frame; ghosts are few.
+pub fn dedupe_ghosts(
+    roots: Res<RegionRoots>,
+    mut ghosts: Query<(&GhostSource, &mut Visibility)>,
+) {
+    for (src, mut vis) in ghosts.iter_mut() {
+        let hidden = roots.0.contains_key(&src.0);
+        let want = if hidden { Visibility::Hidden } else { Visibility::Inherited };
+        if *vis != want {
+            *vis = want;
         }
     }
 }
@@ -569,6 +598,66 @@ mod tests {
         assert!(
             !app.world().entity(e1).contains::<Camera3d>(),
             "other player's camera from the snapshot must not be active"
+        );
+    }
+
+    #[test]
+    fn ghost_hidden_only_while_its_source_region_is_loaded() {
+        let (mut app, client, updates, region_id) = test_app();
+        app.add_systems(Update, dedupe_ghosts);
+        app.update();
+
+        let k = key(11);
+        let src = RegionCoords::new(1, 0);
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
+        updates.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetGhostSource(k, Some(src)),
+        )).unwrap();
+        app.update();
+        app.update(); // component insert lands a frame after spawn-in-same-drain
+
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).unwrap();
+        // Source region NOT loaded: ghost visible.
+        assert_ne!(
+            *app.world().entity(e).get::<Visibility>().unwrap(),
+            Visibility::Hidden,
+            "ghost renders while its source region is absent"
+        );
+
+        // Load the source region: the owned copy renders there; hide the ghost.
+        let (_s2, recv2) = crossbeam::channel::unbounded();
+        let rb2 = Rollback::new(None);
+        client.send(ClientUpdateEvent::NewRegion(src, (*rb2.data).clone(), recv2)).unwrap();
+        app.update();
+        app.update();
+        assert_eq!(
+            *app.world().entity(e).get::<Visibility>().unwrap(),
+            Visibility::Hidden,
+            "ghost hides when its source region loads"
+        );
+
+        // Unload the source: ghost visible again.
+        client.send(ClientUpdateEvent::RemoveRegion(src)).unwrap();
+        app.update();
+        app.update();
+        assert_ne!(*app.world().entity(e).get::<Visibility>().unwrap(), Visibility::Hidden);
+
+        // Upgrade clears the mark: never hidden again.
+        updates.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetGhostSource(k, None),
+        )).unwrap();
+        client.send(ClientUpdateEvent::NewRegion(src, (*Rollback::new(None).data).clone(), {
+            let (_s3, r3) = crossbeam::channel::unbounded();
+            r3
+        })).unwrap();
+        app.update();
+        app.update();
+        assert_ne!(
+            *app.world().entity(e).get::<Visibility>().unwrap(),
+            Visibility::Hidden,
+            "upgraded (owned) entity is never deduped"
         );
     }
 }
