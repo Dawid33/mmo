@@ -180,13 +180,10 @@ whole-struct clones.
 
 ## Resolved: undoing a physics step (Phase 4 decision)
 
-Option 2 adopted: `PhysicsController::on_tick` keeps the per-tick
-`PhysicsState` `change()` snapshot. rapier's `step()` mutates broad-phase /
-narrow-phase / island caches with no per-entry delta available, and physics
-state is bounded per active region — unlike world data, cloning it once per
-tick is acceptable. Body insert/remove no longer snapshots: the rapier fork
-provides exact LIFO inverses (`Arena::revert_insert`/`revert_remove`,
-`RigidBodySet::revert_insert`) used via `undo_scope` closures.
+Superseded 2026-07-04: `step()` now logs a `StepJournal` (exact per-tick
+delta captured inside the fork) instead of a whole-`PhysicsState` snapshot —
+see `2026-07-04-physics-step-journal-design.md`. Collider attach still
+snapshots (rare).
 
 ## Final surface (Phase 5, as built)
 
