@@ -418,14 +418,23 @@ fn main() {
     #[cfg(target_arch = "wasm32")]
     let asset_path = "assets";
 
+    #[allow(unused_mut)]
+    let mut primary_window = bevy::window::Window {
+        title: "Labour of Love".into(),
+        ..Default::default()
+    };
+    // Track the canvas's parent (the full-viewport <body> in index.html) so the
+    // render buffer resizes with the browser window instead of CSS-stretching.
+    #[cfg(target_arch = "wasm32")]
+    {
+        primary_window.fit_canvas_to_parent = true;
+    }
+
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
             .set(bevy::window::WindowPlugin {
-                primary_window: Some(bevy::window::Window {
-                    title: "Labour of Love".into(),
-                    ..Default::default()
-                }),
+                primary_window: Some(primary_window),
                 ..Default::default()
             })
             .set(bevy::log::LogPlugin {
