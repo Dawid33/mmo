@@ -87,6 +87,8 @@ pub enum ClientPacket {
     GameEvent(GameEvent),
     RequestPlayerRegion,
     RequestRegionConnection(RegionId),
+    /// Client no longer wants this region's events (window moved on).
+    ReleaseRegionConnection(RegionId),
 }
 
 type CurrentTickRate = u64;

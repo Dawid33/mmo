@@ -56,6 +56,7 @@ impl LocalServer {
                         .send(self.world.build_region_server_packet(&id))
                         .unwrap();
                 }
+                ClientPacket::ReleaseRegionConnection(_) => {}
                 ClientPacket::GameEvent(game_event) => match game_event.kind {
                     GameEventKind::Tick => (),
                     // Unlike the real server (which breaks its event loop), Quit is a no-op:

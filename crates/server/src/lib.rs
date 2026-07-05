@@ -286,6 +286,9 @@ pub fn run() {
                         .send((Some(client_id), world.build_region_server_packet(&id)))
                         .unwrap();
                 }
+                ClientPacket::ReleaseRegionConnection(_) => {
+                    // Subscription management lands with the WorldManager (Task 5).
+                }
                 ClientPacket::GameEvent(game_event) => match game_event.kind {
                     game::GameEventKind::Tick => (),
                     game::GameEventKind::Quit => {

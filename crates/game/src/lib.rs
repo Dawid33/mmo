@@ -19,6 +19,7 @@ pub mod input;
 mod physics;
 pub mod protocol;
 mod region;
+pub mod region_runner;
 pub mod state;
 pub mod voxel;
 pub use parry3d as parry;
@@ -28,6 +29,7 @@ pub use parry3d as parry;
 pub use camera::*;
 pub use input::*;
 pub use protocol::*;
+pub use region_runner::*;
 pub use state::*;
 pub use voxel::*;
 
