@@ -7,6 +7,17 @@ pub struct Coarena<T> {
     data: Vec<(u32, T)>,
 }
 
+/// One reverted structural write inside a [`Coarena`], recorded by
+/// [`Coarena::ensure_pair_exists_journaled`]. Applied LIFO by
+/// [`Coarena::apply_slot_undo`] — exact inverses; the generation numbers are
+/// hashed, so restoration must be bit-exact.
+pub(crate) enum CoarenaSlotUndo<T> {
+    /// The backing `data` was grown from `old_len`; undo truncates back to it.
+    Truncate { old_len: u32 },
+    /// Slot `index` was overwritten; undo restores its old `(gen, value)`.
+    Slot { index: u32, old_gen: u32, old: T },
+}
+
 impl<T> Coarena<T> {
     /// A coarena with no element.
     pub fn new() -> Self {
@@ -112,6 +123,86 @@ impl<T> Coarena<T> {
         }
 
         &mut data.1
+    }
+
+    /// Journaling variant of [`Self::ensure_pair_exists`]. Records a `Truncate`
+    /// before any resize and a `Slot` before each `(gen, value)` overwrite, so
+    /// the pair-creation can be reverted bit-exactly. `ops` is `None` on the
+    /// non-journaled path.
+    pub(crate) fn ensure_pair_exists_journaled(
+        &mut self,
+        a: Index,
+        b: Index,
+        default: T,
+        mut ops: Option<&mut Vec<CoarenaSlotUndo<T>>>,
+    ) -> (&mut T, &mut T)
+    where
+        T: Clone,
+    {
+        let (i1, g1) = a.into_raw_parts();
+        let (i2, g2) = b.into_raw_parts();
+
+        assert_ne!(i1, i2, "Cannot index the same object twice.");
+
+        let max_index = i1.max(i2) as usize;
+        if self.data.len() <= max_index {
+            if let Some(ops) = ops.as_deref_mut() {
+                ops.push(CoarenaSlotUndo::Truncate {
+                    old_len: self.data.len() as u32,
+                });
+            }
+            self.data.resize(max_index + 1, (u32::MAX, default.clone()));
+        }
+
+        let (elt1, elt2) = if i1 > i2 {
+            let (left, right) = self.data.split_at_mut(i1 as usize);
+            (&mut right[0], &mut left[i2 as usize])
+        } else {
+            // i2 > i1
+            let (left, right) = self.data.split_at_mut(i2 as usize);
+            (&mut left[i1 as usize], &mut right[0])
+        };
+
+        if elt1.0 != g1 {
+            if let Some(ops) = ops.as_deref_mut() {
+                ops.push(CoarenaSlotUndo::Slot {
+                    index: i1,
+                    old_gen: elt1.0,
+                    old: elt1.1.clone(),
+                });
+            }
+            *elt1 = (g1, default.clone());
+        }
+
+        if elt2.0 != g2 {
+            if let Some(ops) = ops.as_deref_mut() {
+                ops.push(CoarenaSlotUndo::Slot {
+                    index: i2,
+                    old_gen: elt2.0,
+                    old: elt2.1.clone(),
+                });
+            }
+            *elt2 = (g2, default);
+        }
+
+        (&mut elt1.1, &mut elt2.1)
+    }
+
+    /// Reverts the backing `data` length (see [`CoarenaSlotUndo::Truncate`]).
+    pub(crate) fn truncate_raw(&mut self, len: u32) {
+        self.data.truncate(len as usize);
+    }
+
+    /// Applies a single recorded coarena undo (LIFO).
+    pub(crate) fn apply_slot_undo(&mut self, undo: CoarenaSlotUndo<T>) {
+        match undo {
+            CoarenaSlotUndo::Truncate { old_len } => self.truncate_raw(old_len),
+            CoarenaSlotUndo::Slot {
+                index,
+                old_gen,
+                old,
+            } => self.data[index as usize] = (old_gen, old),
+        }
     }
 
     /// Ensure that elements at the two given indices exist in this coarena, and return their references.

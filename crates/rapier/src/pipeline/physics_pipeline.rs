@@ -167,6 +167,7 @@ impl PhysicsPipeline {
                 colliders,
                 bodies,
                 events,
+                &mut journal.as_deref_mut(),
             );
         }
         narrow_phase.register_pairs(
@@ -175,6 +176,7 @@ impl PhysicsPipeline {
             bodies,
             &self.broad_phase_events,
             events,
+            &mut journal.as_deref_mut(),
         );
         narrow_phase.compute_contacts(
             integration_parameters.prediction_distance(),
@@ -185,8 +187,15 @@ impl PhysicsPipeline {
             multibody_joints,
             hooks,
             events,
+            &mut journal.as_deref_mut(),
         );
-        narrow_phase.compute_intersections(bodies, colliders, hooks, events);
+        narrow_phase.compute_intersections(
+            bodies,
+            colliders,
+            hooks,
+            events,
+            &mut journal.as_deref_mut(),
+        );
 
         self.counters.cd.narrow_phase_time.pause();
         self.counters.stages.collision_detection_time.pause();

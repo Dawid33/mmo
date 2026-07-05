@@ -25,7 +25,11 @@ pub struct StepJournal {
     pub(crate) islands: Option<crate::dynamics::IslandsSaved>,
     pub(crate) lists: Option<ListsSaved>,
     pub(crate) joints: Option<Box<(ImpulseJointSet, MultibodyJointSet)>>,
-    // pub(crate) narrow: Vec<crate::geometry::NarrowUndo>, // Task 5
+    /// Fine-grained narrow-phase mutation log (payload saves + exact graph/coarena
+    /// cell inverses), recorded in execution order and reverted LIFO. Empty when
+    /// [`Self::narrow_wholesale`] is set — collider-removal ticks fall back to a
+    /// wholesale snapshot instead (see [`NarrowPhase::handle_user_changes`]).
+    pub(crate) narrow: Vec<crate::geometry::NarrowUndo>,
     pub(crate) narrow_wholesale: Option<Box<NarrowPhase>>,
     /// Pre-mutation broad-phase snapshot, captured once on the first dirty tick
     /// (see [`BroadPhaseBvh::journal_save`]). `None` on a clean tick where the
@@ -52,6 +56,7 @@ impl StepJournal {
     pub fn is_empty(&self) -> bool {
         self.saved_bodies.is_empty()
             && self.saved_colliders.is_empty()
+            && self.narrow.is_empty()
             && self.narrow_wholesale.is_none()
             && self.broad.is_none()
             // islands are captured unconditionally but are O(active)/O(modified);
@@ -127,13 +132,19 @@ impl StepJournal {
             *multibody_joints = mj;
         }
 
+        // Narrow phase: the wholesale snapshot (collider-removal ticks) takes
+        // precedence over op replay; otherwise LIFO-revert the fine-grained log.
+        // Ordered before the broad restore per the design spec.
+        if let Some(w) = self.narrow_wholesale {
+            *narrow_phase = *w;
+        } else {
+            narrow_phase.journal_revert(self.narrow);
+        }
+
         // Broad phase: wholesale restore of the pre-tick snapshot (only present
         // on a tick that actually mutated the BVH).
         if let Some(b) = self.broad {
             broad_phase.journal_restore(*b);
         }
-
-        // Narrow (Task 5) is not yet captured here.
-        let _ = (narrow_phase, self.narrow_wholesale);
     }
 }

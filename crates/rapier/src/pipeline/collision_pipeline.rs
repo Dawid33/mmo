@@ -83,7 +83,8 @@ impl CollisionPipeline {
             &mut None,
         );
 
-        // Update narrow-phase.
+        // Update narrow-phase. The collision pipeline is not journaled, so all
+        // narrow-phase capture is disabled by threading `&mut None`.
         if handle_user_changes {
             narrow_phase.handle_user_changes(
                 None,
@@ -92,10 +93,18 @@ impl CollisionPipeline {
                 colliders,
                 bodies,
                 events,
+                &mut None,
             );
         }
 
-        narrow_phase.register_pairs(None, colliders, bodies, &self.broad_phase_events, events);
+        narrow_phase.register_pairs(
+            None,
+            colliders,
+            bodies,
+            &self.broad_phase_events,
+            events,
+            &mut None,
+        );
         narrow_phase.compute_contacts(
             prediction_distance,
             0.0.into(),
@@ -105,8 +114,9 @@ impl CollisionPipeline {
             &MultibodyJointSet::new(),
             hooks,
             events,
+            &mut None,
         );
-        narrow_phase.compute_intersections(bodies, colliders, hooks, events);
+        narrow_phase.compute_intersections(bodies, colliders, hooks, events, &mut None);
     }
 
     fn clear_modified_colliders(

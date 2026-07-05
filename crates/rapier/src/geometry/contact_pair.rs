@@ -61,7 +61,7 @@ impl Default for ContactData {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, Hash)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 /// The description of all the contacts between a pair of colliders.
 pub struct IntersectionPair {
     /// Are the colliders intersecting?

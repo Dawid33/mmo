@@ -60,6 +60,17 @@ impl World {
     fn hash_dynamics(&self) -> (u32, u32, u32) {
         (h(&self.bodies), h(&self.colliders), h(&self.islands))
     }
+    // Full step-touched state: dynamics + broad + narrow. The bar for a
+    // hash-exact revert of everything `step` mutates.
+    fn hash_full(&self) -> (u32, u32, u32, u32, u32) {
+        (
+            h(&self.bodies),
+            h(&self.colliders),
+            h(&self.islands),
+            h(&self.broad),
+            h(&self.narrow),
+        )
+    }
 }
 
 fn add_floor(w: &mut World, x: i32, z: i32) {
@@ -158,6 +169,85 @@ fn same_tick_remove_and_slot_reuse_keeps_replacement_collidable() {
 }
 
 #[test]
+fn landing_on_floor_revert_is_hash_exact() {
+    let mut w = World::new();
+    add_floor(&mut w, 0, 0);
+    let b = w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(2.0), Real::from(3.0), Real::from(2.0)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(),
+        b,
+        &mut w.bodies,
+    );
+    let mut checkpoints = vec![w.hash_full()];
+    let mut journals = Vec::new();
+    for _ in 0..90 {
+        // fall, impact (pair add + manifolds + warm-start), settle, sleep
+        journals.push(w.step());
+        checkpoints.push(w.hash_full());
+    }
+    for (j, expect) in journals
+        .into_iter()
+        .rev()
+        .zip(checkpoints.into_iter().rev().skip(1))
+    {
+        w.revert(j);
+        assert_eq!(
+            expect,
+            w.hash_full(),
+            "every intermediate tick must restore exactly"
+        );
+    }
+}
+
+#[test]
+fn flyby_pair_create_then_destroy_revert_is_hash_exact() {
+    let mut w = World::new();
+    // Two adjacent floor tiles: the bullet contacts tile 0, then tile 1, so at
+    // the hand-off two contact edges coexist and leaving tile 0 removes a
+    // non-last edge — exercising remove_edge's swap-relocation inverse (the
+    // single-tile case only ever hits the no-swap path).
+    add_floor(&mut w, 0, 0);
+    add_floor(&mut w, 1, 0);
+    // Kinematic bullet passing over the floor: pair appears, then DeletePair
+    // fires when it leaves — exercises remove_edge's swap-relocation inverse.
+    let b = w.bodies.insert(
+        RigidBodyBuilder::kinematic_position_based()
+            .translation(vector![Real::from(-40.0), Real::from(0.5), Real::from(2.0)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(),
+        b,
+        &mut w.bodies,
+    );
+    // `before` is captured AFTER the first user write, before the first step:
+    // set_next_kinematic_translation is a USER mutation outside step(); revert
+    // restores each tick's pre-step state, and the game log — not the step
+    // journal — owns user mutations. See the brief's correction note.
+    let mut journals = Vec::new();
+    let mut before = None;
+    for i in 0..60 {
+        let x = Real::from(-40.0 + (i as f32) * 2.0);
+        w.bodies
+            .get_mut(b)
+            .unwrap()
+            .set_next_kinematic_translation(vector![x, Real::from(0.5), Real::from(2.0)]);
+        if before.is_none() {
+            before = Some(w.hash_full());
+        }
+        journals.push(w.step());
+    }
+    for j in journals.into_iter().rev() {
+        w.revert(j);
+    }
+    assert_eq!(before.unwrap(), w.hash_full());
+}
+
+#[test]
 fn free_fall_revert_is_hash_exact() {
     let mut w = World::new();
     // No colliders at all: broad/narrow untouched; exercises integration,
@@ -167,12 +257,12 @@ fn free_fall_revert_is_hash_exact() {
             .translation(vector![Real::from(0.0), Real::from(10.0), Real::from(0.0)])
             .build(),
     );
-    let before = w.hash_dynamics();
+    let before = w.hash_full();
     let journals: Vec<StepJournal> = (0..10).map(|_| w.step()).collect();
     for j in journals.into_iter().rev() {
         w.revert(j);
     }
-    assert_eq!(before, w.hash_dynamics(), "free-fall 10-step LIFO revert must be exact");
+    assert_eq!(before, w.hash_full(), "free-fall 10-step LIFO revert must be exact");
 }
 
 #[test]
@@ -254,9 +344,9 @@ fn sleep_transition_revert_is_hash_exact() {
             .gravity_scale(Real::from(0.0)) // no colliders; zero-vel body falls asleep
             .build(),
     );
-    let before = w.hash_dynamics();
+    let before = w.hash_full();
     // Enough ticks to cross the sleep threshold (activation commits vels=0 + sleep()).
     let journals: Vec<StepJournal> = (0..120).map(|_| w.step()).collect();
     for j in journals.into_iter().rev() { w.revert(j); }
-    assert_eq!(before, w.hash_dynamics());
+    assert_eq!(before, w.hash_full());
 }

@@ -4,8 +4,9 @@ use rayon::prelude::*;
 use parry3d::query::{DefaultQueryDispatcher, PersistentQueryDispatcher};
 use parry3d::utils::hashmap::HashMap;
 use parry3d::utils::IsometryOpt;
-use crate::data::graph::EdgeIndex;
-use crate::data::Coarena;
+use crate::data::graph::{EdgeIndex, GraphCellUndo};
+use crate::data::{Coarena, CoarenaSlotUndo};
+use crate::pipeline::StepJournal;
 use crate::dynamics::{
     CoefficientCombineRule, ImpulseJointSet, IslandManager, RigidBodyDominance, RigidBodySet,
     RigidBodyType,
@@ -26,7 +27,7 @@ use std::sync::Arc;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default, Hash)]
-struct ColliderGraphIndices {
+pub(crate) struct ColliderGraphIndices {
     contact_graph_index: ColliderGraphIndex,
     intersection_graph_index: ColliderGraphIndex,
 }
@@ -46,6 +47,27 @@ enum PairRemovalMode {
     FromIntersectionGraph,
     Auto,
 }
+
+/// One reverted narrow-phase mutation, recorded in execution order into
+/// [`StepJournal::narrow`] and applied LIFO by [`NarrowPhase::journal_revert`].
+///
+/// Payload variants wholesale-save the pre-mutation edge weight (the `Hash`
+/// covers every field, so a clone is the correct save); the graph/coarena
+/// variants wrap the exact structural cell inverses. The two interaction graphs
+/// have different edge types, hence the two `*Graph` variants.
+///
+/// This deviates slightly from the design's flat `GraphIndicesSlot`/
+/// `GraphIndicesTruncate`: those are unified under one [`CoarenaSlotUndo`]
+/// (kept in `data/coarena.rs` for layering — the coarena stays unaware of the
+/// narrow phase). The semantics are identical.
+pub(crate) enum NarrowUndo {
+    ContactPayload { edge: u32, old: Box<ContactPair> },
+    IntersectionPayload { edge: u32, old: IntersectionPair },
+    ContactGraph(GraphCellUndo<ColliderHandle, ContactPair>),
+    IntersectionGraph(GraphCellUndo<ColliderHandle, IntersectionPair>),
+    GraphIndices(CoarenaSlotUndo<ColliderGraphIndices>),
+}
+
 
 /// The narrow-phase collision detector that computes precise contact points between colliders.
 ///
@@ -299,7 +321,22 @@ impl NarrowPhase {
         colliders: &mut ColliderSet,
         bodies: &mut RigidBodySet,
         events: &dyn EventHandler,
+        journal: &mut Option<&mut StepJournal>,
     ) {
+        // Collider removal drives `remove_node` cascades in both graphs, which are
+        // not instrumented for fine-grained inverses (a swap-removed node relocates
+        // and rewrites arbitrary edge endpoints). Instead, snapshot the whole
+        // narrow phase once, before any removal mutates it, and suppress every
+        // fine-grained capture for the rest of the tick (each capture site is
+        // guarded on `narrow_wholesale.is_none()`). Rare structural event.
+        if !removed_colliders.is_empty() {
+            if let Some(j) = journal.as_deref_mut() {
+                if j.narrow_wholesale.is_none() {
+                    j.narrow_wholesale = Some(Box::new(self.clone()));
+                }
+            }
+        }
+
         // TODO: avoid these hash-maps.
         // They are necessary to handle the swap-remove done internally
         // by the contact/intersection graphs when a node is removed.
@@ -331,6 +368,7 @@ impl NarrowPhase {
                     &mut prox_id_remap,
                     &mut contact_id_remap,
                     events,
+                    journal,
                 );
             }
         }
@@ -341,6 +379,7 @@ impl NarrowPhase {
             colliders,
             bodies,
             events,
+            journal,
         );
     }
 
@@ -355,16 +394,17 @@ impl NarrowPhase {
         prox_id_remap: &mut HashMap<ColliderHandle, ColliderGraphIndex>,
         contact_id_remap: &mut HashMap<ColliderHandle, ColliderGraphIndex>,
         events: &dyn EventHandler,
+        journal: &mut Option<&mut StepJournal>,
     ) {
         // Wake up every body in contact with the deleted collider and generate Stopped collision events.
         if let Some(islands) = islands {
             for (a, b, pair) in self.contact_graph.interactions_with(contact_graph_id) {
                 if let Some(parent) = colliders.get(a).and_then(|c| c.parent.as_ref()) {
-                    islands.wake_up(bodies, parent.handle, true)
+                    islands.wake_up_journaled(bodies, parent.handle, true, journal)
                 }
 
                 if let Some(parent) = colliders.get(b).and_then(|c| c.parent.as_ref()) {
-                    islands.wake_up(bodies, parent.handle, true)
+                    islands.wake_up_journaled(bodies, parent.handle, true, journal)
                 }
 
                 if pair.start_event_emitted {
@@ -444,6 +484,7 @@ impl NarrowPhase {
         colliders: &ColliderSet,
         bodies: &mut RigidBodySet,
         events: &dyn EventHandler,
+        journal: &mut Option<&mut StepJournal>,
     ) {
         let mut pairs_to_remove = vec![];
 
@@ -463,7 +504,7 @@ impl NarrowPhase {
                     // it could be a fixed or kinematic body which don't propagate the wake-up state.
                     if let Some(islands) = islands.as_deref_mut() {
                         if let Some(co_parent) = &co.parent {
-                            islands.wake_up(bodies, co_parent.handle, true);
+                            islands.wake_up_journaled(bodies, co_parent.handle, true, journal);
                         }
 
                         for inter in self
@@ -476,7 +517,12 @@ impl NarrowPhase {
                                 .and_then(|co| co.parent.as_ref());
 
                             if let Some(other_parent) = other_parent {
-                                islands.wake_up(bodies, other_parent.handle, true);
+                                islands.wake_up_journaled(
+                                    bodies,
+                                    other_parent.handle,
+                                    true,
+                                    journal,
+                                );
                             }
                         }
                     }
@@ -535,12 +581,13 @@ impl NarrowPhase {
                 &pair.0,
                 events,
                 pair.1,
+                journal,
             );
         }
 
         // Add the removed pair to the relevant graph.
         for pair in pairs_to_remove {
-            self.add_pair(colliders, &pair.0);
+            self.add_pair(colliders, &pair.0, journal);
         }
     }
 
@@ -553,7 +600,12 @@ impl NarrowPhase {
         pair: &ColliderPair,
         events: &dyn EventHandler,
         mode: PairRemovalMode,
+        journal: &mut Option<&mut StepJournal>,
     ) {
+        // Fine-grained capture is suppressed once the wholesale snapshot is set.
+        let record = journal
+            .as_deref()
+            .is_some_and(|j| j.narrow_wholesale.is_none());
         if let (Some(co1), Some(co2)) =
             (colliders.get(pair.collider1), colliders.get(pair.collider2))
         {
@@ -566,9 +618,16 @@ impl NarrowPhase {
                 if mode == PairRemovalMode::FromIntersectionGraph
                     || (mode == PairRemovalMode::Auto && (co1.is_sensor() || co2.is_sensor()))
                 {
-                    let intersection = self
-                        .intersection_graph
-                        .remove_edge(gid1.intersection_graph_index, gid2.intersection_graph_index);
+                    let mut gops = Vec::new();
+                    let intersection = self.intersection_graph.remove_edge_journaled(
+                        gid1.intersection_graph_index,
+                        gid2.intersection_graph_index,
+                        if record { Some(&mut gops) } else { None },
+                    );
+                    if let Some(j) = journal.as_deref_mut() {
+                        j.narrow
+                            .extend(gops.into_iter().map(NarrowUndo::IntersectionGraph));
+                    }
 
                     // Emit an intersection lost event if we had an intersection before removing the edge.
                     if let Some(mut intersection) = intersection {
@@ -586,9 +645,15 @@ impl NarrowPhase {
                         }
                     }
                 } else {
-                    let contact_pair = self
-                        .contact_graph
-                        .remove_edge(gid1.contact_graph_index, gid2.contact_graph_index);
+                    let mut gops = Vec::new();
+                    let contact_pair = self.contact_graph.remove_edge_journaled(
+                        gid1.contact_graph_index,
+                        gid2.contact_graph_index,
+                        if record { Some(&mut gops) } else { None },
+                    );
+                    if let Some(j) = journal.as_deref_mut() {
+                        j.narrow.extend(gops.into_iter().map(NarrowUndo::ContactGraph));
+                    }
 
                     // Emit a contact stopped event if we had a contact before removing the edge.
                     // Also wake up the dynamic bodies that were in contact.
@@ -596,11 +661,21 @@ impl NarrowPhase {
                         if ctct.has_any_active_contact {
                             if let Some(islands) = islands {
                                 if let Some(co_parent1) = &co1.parent {
-                                    islands.wake_up(bodies, co_parent1.handle, true);
+                                    islands.wake_up_journaled(
+                                        bodies,
+                                        co_parent1.handle,
+                                        true,
+                                        journal,
+                                    );
                                 }
 
                                 if let Some(co_parent2) = co2.parent {
-                                    islands.wake_up(bodies, co_parent2.handle, true);
+                                    islands.wake_up_journaled(
+                                        bodies,
+                                        co_parent2.handle,
+                                        true,
+                                        journal,
+                                    );
                                 }
                             }
 
@@ -617,16 +692,34 @@ impl NarrowPhase {
     }
 
     #[profiling::function]
-    fn add_pair(&mut self, colliders: &ColliderSet, pair: &ColliderPair) {
+    fn add_pair(
+        &mut self,
+        colliders: &ColliderSet,
+        pair: &ColliderPair,
+        journal: &mut Option<&mut StepJournal>,
+    ) {
         if let (Some(co1), Some(co2)) =
             (colliders.get(pair.collider1), colliders.get(pair.collider2))
         {
             // These colliders have no parents - continue.
 
-            let (gid1, gid2) = self.graph_indices.ensure_pair_exists(
+            // Fine-grained capture is suppressed once the wholesale snapshot is set.
+            let record = journal
+                .as_deref()
+                .is_some_and(|j| j.narrow_wholesale.is_none());
+
+            // Ops are recorded in execution order (coarena writes first, then the
+            // graph node/edge appends), buffered in these locals, and appended to
+            // `journal.narrow` at the end preserving that order for LIFO replay.
+            let mut cops: Vec<CoarenaSlotUndo<ColliderGraphIndices>> = Vec::new();
+            let mut gops_c: Vec<GraphCellUndo<ColliderHandle, ContactPair>> = Vec::new();
+            let mut gops_i: Vec<GraphCellUndo<ColliderHandle, IntersectionPair>> = Vec::new();
+
+            let (gid1, gid2) = self.graph_indices.ensure_pair_exists_journaled(
                 pair.collider1.0,
                 pair.collider2.0,
                 ColliderGraphIndices::invalid(),
+                if record { Some(&mut cops) } else { None },
             );
 
             if co1.is_sensor() || co2.is_sensor() {
@@ -634,14 +727,18 @@ impl NarrowPhase {
                 // as it does not interact with anything.
                 if !InteractionGraph::<(), ()>::is_graph_index_valid(gid1.intersection_graph_index)
                 {
-                    gid1.intersection_graph_index =
-                        self.intersection_graph.graph.add_node(pair.collider1);
+                    gid1.intersection_graph_index = self.intersection_graph.graph.add_node_journaled(
+                        pair.collider1,
+                        if record { Some(&mut gops_i) } else { None },
+                    );
                 }
 
                 if !InteractionGraph::<(), ()>::is_graph_index_valid(gid2.intersection_graph_index)
                 {
-                    gid2.intersection_graph_index =
-                        self.intersection_graph.graph.add_node(pair.collider2);
+                    gid2.intersection_graph_index = self.intersection_graph.graph.add_node_journaled(
+                        pair.collider2,
+                        if record { Some(&mut gops_i) } else { None },
+                    );
                 }
 
                 if self
@@ -650,10 +747,11 @@ impl NarrowPhase {
                     .find_edge(gid1.intersection_graph_index, gid2.intersection_graph_index)
                     .is_none()
                 {
-                    let _ = self.intersection_graph.add_edge(
+                    let _ = self.intersection_graph.graph.add_edge_journaled(
                         gid1.intersection_graph_index,
                         gid2.intersection_graph_index,
                         IntersectionPair::new(),
+                        if record { Some(&mut gops_i) } else { None },
                     );
                 }
             } else {
@@ -663,11 +761,17 @@ impl NarrowPhase {
                 // NOTE: the collider won't have a graph index as long
                 // as it does not interact with anything.
                 if !InteractionGraph::<(), ()>::is_graph_index_valid(gid1.contact_graph_index) {
-                    gid1.contact_graph_index = self.contact_graph.graph.add_node(pair.collider1);
+                    gid1.contact_graph_index = self.contact_graph.graph.add_node_journaled(
+                        pair.collider1,
+                        if record { Some(&mut gops_c) } else { None },
+                    );
                 }
 
                 if !InteractionGraph::<(), ()>::is_graph_index_valid(gid2.contact_graph_index) {
-                    gid2.contact_graph_index = self.contact_graph.graph.add_node(pair.collider2);
+                    gid2.contact_graph_index = self.contact_graph.graph.add_node_journaled(
+                        pair.collider2,
+                        if record { Some(&mut gops_c) } else { None },
+                    );
                 }
 
                 if self
@@ -677,12 +781,23 @@ impl NarrowPhase {
                     .is_none()
                 {
                     let interaction = ContactPair::new(pair.collider1, pair.collider2);
-                    let _ = self.contact_graph.add_edge(
+                    let _ = self.contact_graph.graph.add_edge_journaled(
                         gid1.contact_graph_index,
                         gid2.contact_graph_index,
                         interaction,
+                        if record { Some(&mut gops_c) } else { None },
                     );
                 }
+            }
+
+            // gid1/gid2 borrows end above; now safe to touch `journal` again.
+            if let Some(j) = journal.as_deref_mut() {
+                j.narrow
+                    .extend(cops.into_iter().map(NarrowUndo::GraphIndices));
+                j.narrow
+                    .extend(gops_i.into_iter().map(NarrowUndo::IntersectionGraph));
+                j.narrow
+                    .extend(gops_c.into_iter().map(NarrowUndo::ContactGraph));
             }
         }
     }
@@ -694,11 +809,12 @@ impl NarrowPhase {
         bodies: &mut RigidBodySet,
         broad_phase_events: &[BroadPhasePairEvent],
         events: &dyn EventHandler,
+        journal: &mut Option<&mut StepJournal>,
     ) {
         for event in broad_phase_events {
             match event {
                 BroadPhasePairEvent::AddPair(pair) => {
-                    self.add_pair(colliders, pair);
+                    self.add_pair(colliders, pair, journal);
                 }
                 BroadPhasePairEvent::DeletePair(pair) => {
                     self.remove_pair(
@@ -708,6 +824,7 @@ impl NarrowPhase {
                         pair,
                         events,
                         PairRemovalMode::Auto,
+                        journal,
                     );
                 }
             }
@@ -721,17 +838,29 @@ impl NarrowPhase {
         colliders: &ColliderSet,
         hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
+        journal: &mut Option<&mut StepJournal>,
     ) {
         let nodes = &self.intersection_graph.graph.nodes;
         let query_dispatcher = &*self.query_dispatcher;
+        // Fine-grained capture is suppressed once the wholesale snapshot is set.
+        let record = journal
+            .as_deref()
+            .is_some_and(|j| j.narrow_wholesale.is_none());
 
         // TODO: don't iterate on all the edges.
-        par_iter_mut!(&mut self.intersection_graph.graph.edges).for_each(|edge| {
+        // NOTE: `parallel` is disabled for this fork; serial `iter_mut` makes the
+        // `&mut journal` capture a plain `FnMut` (see `compute_contacts`).
+        par_iter_mut!(&mut self.intersection_graph.graph.edges).enumerate().for_each(|(edge_id, edge)| {
+            let edge_id = edge_id as u32;
             let handle1 = nodes[edge.source().index()].weight;
             let handle2 = nodes[edge.target().index()].weight;
             let had_intersection = edge.weight.intersecting;
             let co1 = &colliders[handle1];
             let co2 = &colliders[handle2];
+
+            // `IntersectionPair` is `Copy` (two bools); snapshot the pre-state
+            // once the edge is known active, and save-if-differs at the end.
+            let mut saved: Option<IntersectionPair> = None;
 
             'emit_events: {
                 if !co1.changes.needs_narrow_phase_update()
@@ -739,6 +868,9 @@ impl NarrowPhase {
                 {
                     // No update needed for these colliders.
                     return;
+                }
+                if record {
+                    saved = Some(edge.weight);
                 }
                 if co1.parent.map(|p| p.handle) == co2.parent.map(|p| p.handle)
                     && co1.parent.is_some()
@@ -811,6 +943,20 @@ impl NarrowPhase {
                         .emit_stop_event(bodies, colliders, handle1, handle2, events);
                 }
             }
+
+            // Save-if-differs: only record when the compute actually changed the
+            // pair (intersecting / start_event_emitted), keeping idle worlds off
+            // the journal.
+            if let Some(saved) = saved {
+                if edge.weight != saved {
+                    if let Some(j) = journal.as_deref_mut() {
+                        j.narrow.push(NarrowUndo::IntersectionPayload {
+                            edge: edge_id,
+                            old: saved,
+                        });
+                    }
+                }
+            }
         });
     }
 
@@ -825,15 +971,32 @@ impl NarrowPhase {
         multibody_joints: &MultibodyJointSet,
         hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
+        journal: &mut Option<&mut StepJournal>,
     ) {
         let query_dispatcher = &*self.query_dispatcher;
+        // Fine-grained capture is suppressed once the wholesale snapshot is set.
+        let record = journal
+            .as_deref()
+            .is_some_and(|j| j.narrow_wholesale.is_none());
 
         // TODO: don't iterate on all the edges.
-        par_iter_mut!(&mut self.contact_graph.graph.edges).for_each(|edge| {
+        // NOTE: `parallel` is disabled for this fork (enhanced-determinism), so
+        // this is a serial `iter_mut` and the `&mut journal` capture below is a
+        // plain `FnMut`; the payload-save sink relies on that.
+        par_iter_mut!(&mut self.contact_graph.graph.edges).enumerate().for_each(|(edge_id, edge)| {
+            let edge_id = edge_id as u32;
             let pair = &mut edge.weight;
             let had_any_active_contact = pair.has_any_active_contact;
             let co1 = &colliders[pair.collider1];
             let co2 = &colliders[pair.collider2];
+
+            // Payload-save bookkeeping (see `journal_contact_clear`/`_full`). The
+            // snapshot is taken only once the edge is known active (after the
+            // early-return below), so sleeping edges cost nothing. `reached_full`
+            // records whether the manifold-computing path was entered, promoting
+            // the save from save-if-nonempty (clear early-outs) to unconditional.
+            let mut saved: Option<ContactPair> = None;
+            let mut reached_full = false;
 
             'emit_events: {
                 if !co1.changes.needs_narrow_phase_update()
@@ -841,6 +1004,9 @@ impl NarrowPhase {
                 {
                     // No update needed for these colliders.
                     return;
+                }
+                if record {
+                    saved = Some(pair.clone());
                 }
                 if co1.parent.map(|p| p.handle) == co2.parent.map(|p| p.handle) && co1.parent.is_some()
                 {
@@ -934,6 +1100,12 @@ impl NarrowPhase {
                 if !co1.flags.solver_groups.test(co2.flags.solver_groups) {
                     solver_flags.remove(SolverFlags::COMPUTE_IMPULSES);
                 }
+
+                // Full-compute path: from here on the pair is (re)computed and may
+                // go empty -> non-empty, so its pre-state must be saved even if it
+                // was empty. All the `pair.clear()` early-outs above never reach
+                // this line, so their save stays conditional on non-emptiness.
+                reached_full = true;
 
                 if co1.changes.contains(ColliderChanges::SHAPE)
                     || co2.changes.contains(ColliderChanges::SHAPE)
@@ -1123,7 +1295,53 @@ impl NarrowPhase {
                     pair.emit_stop_event(bodies, colliders, events);
                 }
             }
+
+            // Commit the payload save (pre-state clone captured above). LIFO
+            // replay restores this weight before the graph-structure undos, so a
+            // stale `edge_id` is impossible. On the full-compute path the save is
+            // unconditional (empty -> non-empty is possible); at a `pair.clear()`
+            // early-out it is skipped when the pre-state was already empty (an
+            // idle broad-overlap pair), keeping idle worlds off the journal.
+            if let Some(saved) = saved {
+                let worth_saving = reached_full
+                    || !(saved.manifolds.is_empty()
+                        && saved.workspace.is_none()
+                        && !saved.has_any_active_contact);
+                if worth_saving {
+                    if let Some(j) = journal.as_deref_mut() {
+                        j.narrow.push(NarrowUndo::ContactPayload {
+                            edge: edge_id,
+                            old: Box::new(saved),
+                        });
+                    }
+                }
+            }
         });
+    }
+
+    /// LIFO-reverts the fine-grained narrow-phase log captured during a journaled
+    /// step (payload weight restores + exact graph/coarena cell inverses). Only
+    /// used when no wholesale snapshot was taken (see [`StepJournal::revert`]).
+    ///
+    /// Payload restores run before the structural (graph/coarena) undos because
+    /// they were recorded after them; at replay time the edge vectors are still
+    /// in their post-step shape, so every recorded `edge` index is valid.
+    pub(crate) fn journal_revert(&mut self, ops: Vec<NarrowUndo>) {
+        for op in ops.into_iter().rev() {
+            match op {
+                NarrowUndo::ContactPayload { edge, old } => {
+                    self.contact_graph.graph.edges[edge as usize].weight = *old;
+                }
+                NarrowUndo::IntersectionPayload { edge, old } => {
+                    self.intersection_graph.graph.edges[edge as usize].weight = old;
+                }
+                NarrowUndo::ContactGraph(u) => self.contact_graph.graph.apply_cell_undo(u),
+                NarrowUndo::IntersectionGraph(u) => {
+                    self.intersection_graph.graph.apply_cell_undo(u)
+                }
+                NarrowUndo::GraphIndices(u) => self.graph_indices.apply_slot_undo(u),
+            }
+        }
     }
 
     /// Retrieve all the interactions with at least one contact point, happening between two active bodies.

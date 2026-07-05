@@ -2,6 +2,7 @@
 
 pub use self::arena::{Arena, Index};
 pub use self::coarena::Coarena;
+pub(crate) use self::coarena::CoarenaSlotUndo;
 pub use self::modified_objects::{HasModifiedFlag, ModifiedObjects};
 
 pub mod arena;
