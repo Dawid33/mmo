@@ -196,6 +196,24 @@ impl Bvh {
         }
     }
 
+    /// Read-only: would [`Bvh::insert_or_update_partially`] with these arguments
+    /// write anything? (Same conditions, no mutation.)
+    ///
+    /// Used by rollback callers to decide, before any tree mutation, whether a
+    /// tick is a clean no-op that can be skipped entirely.
+    pub fn leaf_needs_update(&self, aabb: &Aabb, leaf_index: u32, margin: Real) -> bool {
+        match self.leaf_node_indices.get(leaf_index as usize) {
+            Some(leaf) => {
+                if margin > 0.0.into() {
+                    !self.nodes[*leaf].contains_aabb(aabb)
+                } else {
+                    true
+                }
+            }
+            None => true, // new leaf → insert_new_unchecked
+        }
+    }
+
     /// Either inserts a node on this tree, or, if it already exists, updates its associated bounding
     /// but doesn’t update its ascendant nodes.
     ///

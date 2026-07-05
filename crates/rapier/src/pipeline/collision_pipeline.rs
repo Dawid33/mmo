@@ -80,6 +80,7 @@ impl CollisionPipeline {
             modified_colliders,
             removed_colliders,
             &mut self.broad_phase_events,
+            &mut None,
         );
 
         // Update narrow-phase.

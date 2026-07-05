@@ -1,6 +1,6 @@
 //! Structures related to geometry: colliders, shapes, etc.
 
-pub use self::broad_phase_bvh::{BroadPhaseBvh, BvhOptimizationStrategy};
+pub use self::broad_phase_bvh::{BroadPhaseBvh, BroadSaved, BvhOptimizationStrategy};
 pub use self::broad_phase_pair_event::{BroadPhasePairEvent, ColliderPair};
 pub use self::collider::{Collider, ColliderBuilder};
 pub use self::collider_components::*;

@@ -139,10 +139,6 @@ impl PhysicsPipeline {
         handle_user_changes: bool,
         journal: &mut Option<&mut StepJournal>,
     ) {
-        // No capture hooks yet (Task 2 threads the journal through without
-        // recording anything); later tasks will forward `journal.as_deref_mut()`
-        // to the capture points below.
-        let _ = journal.as_deref_mut();
         self.counters.stages.collision_detection_time.resume();
         self.counters.cd.broad_phase_time.resume();
 
@@ -156,6 +152,7 @@ impl PhysicsPipeline {
             modified_colliders,
             removed_colliders,
             &mut self.broad_phase_events,
+            &mut journal.as_deref_mut(),
         );
 
         self.counters.cd.broad_phase_time.pause();
@@ -902,7 +899,12 @@ impl PhysicsPipeline {
                 for handle in modified_colliders.iter() {
                     let co = &colliders[*handle];
                     let aabb = co.compute_broad_phase_aabb(&integration_parameters, bodies);
-                    broad_phase.set_aabb(&integration_parameters, *handle, aabb);
+                    broad_phase.set_aabb_journaled(
+                        &integration_parameters,
+                        *handle,
+                        aabb,
+                        &mut journal.as_deref_mut(),
+                    );
                 }
                 modified_colliders.clear();
                 // self.clear_modified_colliders(colliders, &mut modified_colliders);

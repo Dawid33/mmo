@@ -27,7 +27,11 @@ pub struct StepJournal {
     pub(crate) joints: Option<Box<(ImpulseJointSet, MultibodyJointSet)>>,
     // pub(crate) narrow: Vec<crate::geometry::NarrowUndo>, // Task 5
     pub(crate) narrow_wholesale: Option<Box<NarrowPhase>>,
-    // pub(crate) broad: Option<Box<crate::geometry::BroadSaved>>, // Task 4
+    /// Pre-mutation broad-phase snapshot, captured once on the first dirty tick
+    /// (see [`BroadPhaseBvh::journal_save`]). `None` on a clean tick where the
+    /// broad phase was never touched. Public so fork tests can assert the
+    /// clean-tick skip.
+    pub broad: Option<Box<crate::geometry::BroadSaved>>,
 }
 
 pub(crate) struct ListsSaved {
@@ -44,7 +48,7 @@ impl StepJournal {
         self.saved_bodies.is_empty()
             && self.saved_colliders.is_empty()
             && self.narrow_wholesale.is_none()
-            // && self.broad.is_none() // Task 4
+            && self.broad.is_none()
             // islands are captured unconditionally but are O(active)/O(modified);
             // is_empty() reports "nothing moved" for the size assertions, so an
             // empty capture is one with no active bodies at step start.
@@ -118,7 +122,13 @@ impl StepJournal {
             *multibody_joints = mj;
         }
 
-        // Narrow (Task 5) / broad (Task 4) are not yet captured here.
-        let _ = (broad_phase, narrow_phase, self.narrow_wholesale);
+        // Broad phase: wholesale restore of the pre-tick snapshot (only present
+        // on a tick that actually mutated the BVH).
+        if let Some(b) = self.broad {
+            broad_phase.journal_restore(*b);
+        }
+
+        // Narrow (Task 5) is not yet captured here.
+        let _ = (narrow_phase, self.narrow_wholesale);
     }
 }

@@ -62,6 +62,48 @@ impl World {
     }
 }
 
+fn add_floor(w: &mut World, x: i32, z: i32) {
+    // One fixed cuboid per "chunk" — stands in for chunk voxel colliders.
+    let b = w.bodies.insert(
+        RigidBodyBuilder::fixed()
+            .translation(vector![Real::from((x * 32) as f32), Real::from(-1.0), Real::from((z * 32) as f32)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(Real::from(16.0), Real::from(1.0), Real::from(16.0)).build(),
+        b, &mut w.bodies,
+    );
+}
+fn hash_broad(w: &World) -> u32 { h(&w.broad) }
+
+#[test]
+fn idle_tick_journal_is_empty_and_broad_untouched() {
+    let mut w = World::new();
+    for x in 0..8 { for z in 0..8 { add_floor(&mut w, x, z); } }
+    // Settle the initial inserts (first dirty ticks build the tree).
+    for _ in 0..3 { let _ = w.step(); }
+    let before_broad = hash_broad(&w);
+    let j = w.step(); // nothing moves: clean tick
+    assert!(j.broad.is_none(), "clean tick must not capture the BVH");
+    assert!(j.is_empty(), "idle tick journal must be empty");
+    assert_eq!(before_broad, hash_broad(&w), "clean tick must not mutate the BVH");
+}
+
+#[test]
+fn moving_body_dirty_tick_revert_is_hash_exact() {
+    let mut w = World::new();
+    for x in 0..8 { for z in 0..8 { add_floor(&mut w, x, z); } }
+    w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(2.0), Real::from(8.0), Real::from(2.0)])
+            .build(),
+    ); // falls fast enough to move leaves past the change-detection skin
+    let before = (w.hash_dynamics(), hash_broad(&w));
+    let journals: Vec<StepJournal> = (0..20).map(|_| w.step()).collect();
+    for j in journals.into_iter().rev() { w.revert(j); }
+    assert_eq!(before, (w.hash_dynamics(), hash_broad(&w)));
+}
+
 #[test]
 fn free_fall_revert_is_hash_exact() {
     let mut w = World::new();
