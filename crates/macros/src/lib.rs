@@ -767,8 +767,15 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             /// Disable per-transaction hash self-verification (release perf). Set once,
             /// before any world/transaction exists; entries logged while off carry a
             /// sentinel pre_hash and are never checked.
+            ///
+            /// One-way latch: this can only ever turn verification OFF, never back on.
+            /// Once disabled, entries get logged with a sentinel pre_hash (0); re-enabling
+            /// would later compare a live hash against that sentinel and spuriously fail,
+            /// so a re-enable request is silently ignored.
             pub fn set_hash_verification(enabled: bool) {
-                VERIFY_HASHES.store(enabled, ::std::sync::atomic::Ordering::Relaxed);
+                if !enabled {
+                    VERIFY_HASHES.store(false, ::std::sync::atomic::Ordering::Relaxed);
+                }
             }
         },
     ));

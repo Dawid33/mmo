@@ -136,10 +136,13 @@ workspace buffer + swap), and the default `SubtreeOptimizer` strategy rebuilds
 every frame. Node-level journaling of an algorithm that rewrites everything is
 O(total) with extra steps. Instead:
 
-1. **Disable the incremental optimizer** (`BvhOptimizationStrategy::None`,
-   set where `PhysicsState` constructs its `BroadPhaseBvh`), with a one-time
-   full `Bvh::rebuild` at world/region creation for tree quality. Terrain is
-   static and body counts are small; optimizer churn is pure rollback noise.
+1. **Disable the incremental optimizer** (`BvhOptimizationStrategy::None`, the
+   fork default, set where `PhysicsState` constructs its `BroadPhaseBvh`).
+   Insert-time rotations keep the tree in good-enough shape without per-tick
+   churn; a one-time full `Bvh::rebuild` at world/region creation is the
+   *escalation path* for tree quality — available if broad-phase queries ever
+   profile hot, not done unconditionally. Terrain is static and body counts are
+   small; optimizer churn is pure rollback noise.
 2. **Clean-tick skip**: if there are no removed colliders, it's not the first
    pass, and no leaf AABB actually changed beyond the change-detection skin
    (`insert_or_update_partially` gains a "wrote?" return), skip optimize +
