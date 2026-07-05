@@ -22,6 +22,7 @@ mod region;
 pub mod region_runner;
 pub mod state;
 pub mod voxel;
+pub mod world_manager;
 pub use parry3d as parry;
 
 // The #[rollback] macro expansion in `state` and the borrow::Partial derives
@@ -32,6 +33,7 @@ pub use protocol::*;
 pub use region_runner::*;
 pub use state::*;
 pub use voxel::*;
+pub use world_manager::*;
 
 pub const TICK_RATE: u64 = 50;
 pub const INDUCED_LATENCY: isize = 0;
