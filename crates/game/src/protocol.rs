@@ -29,7 +29,8 @@ pub const REGION_CHUNKS: usize = 8;
 pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // 256.0, exact in f32
 
 #[derive(
-    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd,
+    Ord, Hash,
 )]
 pub struct RegionCoords {
     pub x: i32,

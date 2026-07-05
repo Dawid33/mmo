@@ -17,6 +17,7 @@ use std::sync::{Arc, atomic::AtomicUsize};
 
 use crate::camera::Camera;
 use crate::input::InputState;
+use crate::protocol::{ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
 use crate::voxel::{Chunk, ChunkCoords, ChunkShape, Voxel, VoxelType};
 
 pub type IsometryReal = na::Isometry<Real, na::Unit<na::Quaternion<Real>>, 3>;
@@ -95,6 +96,15 @@ pub enum EntityKind {
     Player,
 }
 
+/// A live ghost mirror in this region, keyed in `GameData::ghosts` by its
+/// source identity. `last_update_tick` drives the TTL reaper.
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash, PartialEq)]
+#[module(crate)]
+pub struct GhostEntry {
+    pub entity: EntityKey,
+    pub last_update_tick: usize,
+}
+
 #[rollback(GameData)]
 mod game_data {
     use parry3d::math::{Real, Vector};
@@ -104,8 +114,8 @@ mod game_data {
     };
 
     use super::{
-        Camera, Chunk, Client, ClientId, Component, EntityKey, EntityKind, IsometryReal,
-        RigidBodyHandle, RollbackInfo, SlotMap,
+        Camera, Chunk, Client, ClientId, Component, EntityKey, EntityKind, GhostEntry,
+        IsometryReal, RigidBodyHandle, RollbackInfo, SlotMap,
     };
     use std::collections::BTreeMap;
 
@@ -120,6 +130,13 @@ mod game_data {
         player_entites: BTreeMap<ClientId, EntityKey>,
         #[undo(map)]
         clients: BTreeMap<ClientId, Client>,
+        /// Ghost mirrors hosted here, by source identity.
+        #[undo(map)]
+        ghosts: BTreeMap<(crate::RegionCoords, EntityKey), GhostEntry>,
+        /// Owned entities that arrived via handoff, by the identity they
+        /// arrived under — makes replayed arrivals idempotent.
+        #[undo(map)]
+        arrivals: BTreeMap<(crate::RegionCoords, EntityKey), EntityKey>,
     }
 
     pub struct Ecs {
@@ -435,5 +452,160 @@ impl Rollback {
             GameDataTransactionKind::Do,
             GameDataUpdateKind::SetEntityPosition(key, pose),
         ));
+    }
+
+    /// Body+collider insertion from a bundle — the create_player_safe insert
+    /// pattern generalized to a transfer payload.
+    fn inject_body_safe(&mut self, e: EntityKey, bundle: &EntityBundle) {
+        let body = RigidBodyBuilder::kinematic_position_based()
+            .pose(bundle.isometry)
+            .gravity_scale(Real::from(0.0))
+            .enabled_rotations(true, true, true)
+            .ccd_enabled(false)
+            .angular_damping(Real::from(1.0))
+            .can_sleep(false)
+            .user_data(e.data().as_ffi() as u128)
+            .build();
+        let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
+        let mut scope = self.data.physics.bodies.undo_scope();
+        let handle = scope.insert(body);
+        scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
+        self.data.ecs.rigidbody.set_safe(e, Some(handle));
+        match bundle.collider {
+            ColliderSpec::CapsuleY { half_height, radius } => {
+                self.attach_capsule_collider_safe(e, handle, half_height, radius);
+            }
+        }
+    }
+
+    /// Ownership transfer INTO this region. Three paths:
+    /// replayed identity → pose correction; ghost present → upgrade in
+    /// place (same EntityKey — visual continuity); else → fresh create.
+    pub fn apply_arrival(&mut self, bundle: EntityBundle) {
+        let identity = (bundle.source_region, bundle.source_key);
+
+        // Idempotency: a respawn-resnapshot replay must not duplicate.
+        if let Some(&e) = self.data.arrivals.get(&identity) {
+            if self.data.ecs.entities.contains_key(e) {
+                self.set_body_pose_safe(e, bundle.isometry);
+                return;
+            }
+        }
+
+        let e = if let Some(entry) = self.data.ghosts.get(&identity).cloned() {
+            // Upgrade-in-place: drop the ghost record, keep the entity.
+            self.data.ghosts.remove(&identity);
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetGhostSource(entry.entity, None),
+            ));
+            entry.entity
+        } else {
+            self.data.ecs.create_entity_safe()
+        };
+
+        // Kind (emit both directions, as create_player_safe does).
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetEntityKind(e, Some(bundle.kind)),
+        ));
+        self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
+            GameDataTransactionKind::Undo,
+            GameDataUpdateKind::SetEntityKind(e, None),
+        ));
+        self.data.ecs.kind.set_safe(e, Some(bundle.kind));
+
+        // Body + collider at the (already rebased) bundle pose. A stage-1
+        // ghost has no body; if one exists (stage 2), correct its pose
+        // instead of double-inserting.
+        if self.data.ecs.rigidbody.try_get(e).is_some() {
+            self.set_body_pose_safe(e, bundle.isometry);
+        } else {
+            self.inject_body_safe(e, &bundle);
+        }
+
+        // Camera + client attachment (players).
+        if let Some((client_id, client)) = bundle.client.clone() {
+            if bundle.has_camera {
+                let handle = self.data.ecs.rigidbody.try_get(e).unwrap();
+                let cam = Camera::new(handle);
+                self.data.send(GameDataUpdate::new(
+                    GameDataTransactionKind::Do,
+                    GameDataUpdateKind::AddCameraComponent(
+                        e, client_id, cam.proj_matrix.clone(), bundle.isometry,
+                    ),
+                ));
+                self.data.ecs.camera.emit_on_undo(GameDataUpdate::new(
+                    GameDataTransactionKind::Undo,
+                    GameDataUpdateKind::RemoveCameraComponent(e),
+                ));
+                self.data.ecs.camera.set_safe(e, Some(cam));
+            }
+            self.data.clients.insert(client_id, client);
+            self.data.player_entites.insert(client_id, e);
+        }
+
+        self.data.arrivals.insert(identity, e);
+    }
+
+    /// Margin mirror upsert. Stage 1: pose-only renderable (no collider).
+    pub fn apply_ghost(&mut self, data: GhostData) {
+        let identity = (data.source_region, data.source_key);
+        let tick = *self.data.tick;
+        if let Some(entry) = self.data.ghosts.get(&identity).cloned() {
+            let mut refreshed = entry.clone();
+            refreshed.last_update_tick = tick;
+            self.data.ghosts.insert(identity, refreshed); // UndoMap logs the old value
+            self.data.ecs.isometry.set_safe(entry.entity, Some(data.isometry));
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetEntityPosition(entry.entity, data.isometry),
+            ));
+        } else {
+            let e = self.data.ecs.create_entity_safe();
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetEntityKind(e, Some(data.kind)),
+            ));
+            self.data.ecs.kind.emit_on_undo(GameDataUpdate::new(
+                GameDataTransactionKind::Undo,
+                GameDataUpdateKind::SetEntityKind(e, None),
+            ));
+            self.data.ecs.kind.set_safe(e, Some(data.kind));
+            self.data.ecs.isometry.set_safe(e, Some(data.isometry));
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetEntityPosition(e, data.isometry),
+            ));
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetGhostSource(e, Some(data.source_region)),
+            ));
+            self.data.ghosts.insert(
+                identity,
+                GhostEntry { entity: e, last_update_tick: tick },
+            );
+        }
+    }
+
+    /// TTL reaper: called once per tick. Covers the owner region parking,
+    /// dying, or the entity leaving the margin.
+    pub fn expire_ghosts(&mut self) {
+        let tick = *self.data.tick;
+        let expired: Vec<((crate::RegionCoords, EntityKey), EntityKey)> = self
+            .data
+            .ghosts
+            .iter()
+            .filter(|(_, g)| tick.saturating_sub(g.last_update_tick) > GHOST_TTL_TICKS)
+            .map(|(k, g)| (*k, g.entity))
+            .collect();
+        for (k, e) in expired {
+            self.data.ghosts.remove(&k);
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetGhostSource(e, None),
+            ));
+            self.remove_entity_safe(e, None);
+        }
     }
 }
