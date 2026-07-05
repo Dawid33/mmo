@@ -198,6 +198,10 @@ impl Region {
                 self.data.clients.insert(client_id, Client::default());
                 self.data.create_player_safe(client_id);
             }
+            // Injection/ghost-mirror mutation lands in a later task; for now
+            // these are protocol-only (constructed, wired through, never
+            // acted on).
+            GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) => {}
         }
         self.event_log.push_back(event.clone());
         Ok(event)

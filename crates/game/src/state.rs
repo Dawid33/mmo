@@ -53,6 +53,10 @@ pub enum GameDataUpdateKind {
     RemoveEntity(EntityKey),
     SetFreeCam(ClientId, bool),
     SetEntityKind(EntityKey, Option<EntityKind>),
+    /// Marks an entity as a ghost mirror of (source region, source key), or
+    /// clears the mark on upgrade/expiry. The bridge uses it to hide ghosts
+    /// whose source region is also loaded locally.
+    SetGhostSource(EntityKey, Option<crate::protocol::RegionCoords>),
 }
 
 #[derive(Clone, Debug)]
@@ -76,7 +80,7 @@ pub enum GameDataTransactionKind {
     Undo,
 }
 
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash, PartialEq)]
 #[module(crate)]
 pub struct Client {
     pub input: InputState,

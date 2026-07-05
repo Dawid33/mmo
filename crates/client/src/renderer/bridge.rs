@@ -285,6 +285,9 @@ pub fn drain_region_updates(
                         None => { commands.entity(e).remove::<SimKind>(); }
                     }
                 }
+                GameDataUpdateKind::SetGhostSource(_, _) => {
+                    // Ghost render-dedupe lands with the bridge task.
+                }
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
                     // Only the local player's toggle may grab this window's cursor.
                     if local_player.0 != Some(client_id) {

@@ -45,7 +45,7 @@ enum KeyState {
     Held,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, Hash)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, Hash, PartialEq)]
 pub struct InputState {
     window_resized: Option<(u32, u32)>,
     keyboard_state: BTreeMap<Key, KeyState>,

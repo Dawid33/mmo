@@ -190,6 +190,9 @@ impl GameInstanceManager {
                 // Players are created by the server on connection.
                 warn!("ignoring locally-originated CreateClient");
             }
+            // Transfer events are relayed into regions directly (server) or
+            // client-predicted (later task); never locally-originated here.
+            GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) => {}
         }
         Ok(true)
     }
