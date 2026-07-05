@@ -81,6 +81,75 @@ fn free_fall_revert_is_hash_exact() {
 }
 
 #[test]
+fn active_parent_stale_flags_revert_is_hash_exact() {
+    // Regression: after any step, colliders of active bodies keep stale
+    // MODIFIED|POSITION `changes` (the last-substep branch clears the modified
+    // LIST but not the flags). On the next tick they are NOT in
+    // `modified_colliders` (push_once no-ops on the stale flag), yet the
+    // full-sweep `clear_modified_colliders` wipes their `changes` — a
+    // hash-visible mutation the journal must capture.
+    let mut w = World::new();
+    let b = w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(0.0), Real::from(10.0), Real::from(0.0)])
+            .build(),
+    );
+    let c = w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(),
+        b,
+        &mut w.bodies,
+    );
+    // Settle one tick; the body stays active so `c` carries stale flags now.
+    let _ = w.step();
+    // Edit through the tracking path (no-op push: flag already set).
+    w.colliders
+        .get_mut(c)
+        .unwrap()
+        .set_density(Real::from(2.0));
+    let before = w.hash_dynamics();
+    let j = w.step();
+    w.revert(j);
+    assert_eq!(
+        before,
+        w.hash_dynamics(),
+        "stale-flag collider tick revert must be exact"
+    );
+}
+
+#[test]
+fn parented_collider_edit_revert_is_hash_exact() {
+    // Regression: a user edit that sets SHAPE/MASS/ENABLED/PARENT changes on an
+    // attached collider makes `handle_user_changes_to_colliders` push the parent
+    // body into the hashed `modified_bodies` list DURING the step. The journal
+    // must save the pre-tick list, not the contaminated take_modified() result.
+    // A FIXED parent keeps the collider's flags clean between steps, so the
+    // edit really lands in `modified_colliders` and reaches the parent-push.
+    let mut w = World::new();
+    let b = w.bodies.insert(RigidBodyBuilder::fixed().build());
+    let c = w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(),
+        b,
+        &mut w.bodies,
+    );
+    // Settle one tick so the insertion-tick modified lists are drained.
+    let _ = w.step();
+    // User edit through the modification-tracking path: set_density flags
+    // LOCAL_MASS_PROPERTIES, which triggers the parent-body push at step entry.
+    w.colliders
+        .get_mut(c)
+        .unwrap()
+        .set_density(Real::from(2.0));
+    let before = w.hash_dynamics();
+    let j = w.step();
+    w.revert(j);
+    assert_eq!(
+        before,
+        w.hash_dynamics(),
+        "parented-collider edit tick revert must be exact"
+    );
+}
+
+#[test]
 fn sleep_transition_revert_is_hash_exact() {
     let mut w = World::new();
     w.bodies.insert(

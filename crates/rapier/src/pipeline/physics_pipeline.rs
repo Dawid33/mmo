@@ -81,21 +81,22 @@ impl PhysicsPipeline {
         &mut self,
         colliders: &mut ColliderSet,
         modified_colliders: &mut ModifiedColliders,
-        journal: Option<&StepJournal>,
+        journal: &mut Option<&mut StepJournal>,
     ) {
         for co in colliders.colliders.iter_mut() {
             // Hook 9: this sweep sets EVERY collider's `changes` to empty. For a
-            // collider that was already empty this is a value no-op (no hash
-            // change → no save needed). Any collider whose `changes` is NOT empty
-            // must have been journaled earlier this tick, or its clear-to-empty
-            // would be an unrecoverable mutation.
-            debug_assert!(
-                co.1.changes.is_empty()
-                    || journal.map_or(true, |j| j
-                        .saved_collider_set
-                        .contains(&ColliderHandle(co.0))),
-                "clear_modified_colliders: non-empty collider changes not journaled"
-            );
+            // collider whose `changes` is already empty this is a value no-op
+            // (no hash change → no save needed). But non-empty `changes` can
+            // reach this sweep OUTSIDE `modified_colliders` (hence unsaved by
+            // hook 3a): the previous tick's last-substep branch clears the
+            // modified LIST without clearing the flags, so colliders of
+            // previously-active bodies carry stale MODIFIED|POSITION here. Save
+            // them before the wipe (save_collider dedups if already captured).
+            if !co.1.changes.is_empty() {
+                if let Some(j) = journal.as_deref_mut() {
+                    j.save_collider(ColliderHandle(co.0), co.1);
+                }
+            }
             co.1.changes = ColliderChanges::empty();
         }
         // for handle in modified_colliders.iter() {
@@ -593,6 +594,10 @@ impl PhysicsPipeline {
         // mutation this tick, and clone the joint-set to-wake-up queues *before*
         // the drain below empties them. Joints are captured wholesale only when
         // non-empty (the documented coarse fallback; the game uses none today).
+        // The bodies' modified list is also cloned HERE, not at take_modified
+        // time: `handle_user_changes_to_colliders` can push parent bodies into
+        // it mid-step, and the journal must restore the pre-tick list, not that
+        // contaminated superset.
         let saved_wake_up = if let Some(j) = journal.as_deref_mut() {
             j.islands = Some(islands.journal_save());
             if impulse_joints.len() > 0 || multibody_joints.multibodies.len() > 0 {
@@ -601,6 +606,7 @@ impl PhysicsPipeline {
             Some((
                 impulse_joints.to_wake_up.clone(),
                 multibody_joints.to_wake_up.clone(),
+                bodies.modified_bodies.clone(),
             ))
         } else {
             None
@@ -646,18 +652,22 @@ impl PhysicsPipeline {
 
         // Journal (hook 3b): save every modified body before
         // `handle_user_changes_to_rigid_bodies` mutates it, and record the
-        // pre-tick modified/removed lists together with the to-wake-up queues
-        // cloned in hook 1.
+        // pre-tick lists. The body saves iterate the TAKEN vec (superset —
+        // includes bodies pushed mid-step by handle_user_changes_to_colliders,
+        // which need value-saving too), but the SAVED list is the pre-tick
+        // clone from hook 1.
         if let Some(j) = journal.as_deref_mut() {
             for h in modified_bodies.iter() {
                 if let Some(rb) = bodies.get(*h) {
                     j.save_body(*h, rb);
                 }
             }
-            let (impulse_to_wake_up, multibody_to_wake_up) =
-                saved_wake_up.expect("saved_wake_up is set whenever journaling");
+            // Invariant: `saved_wake_up` is `Some` exactly when `journal` is —
+            // both are set together at hook 1 and neither changes in between.
+            let (impulse_to_wake_up, multibody_to_wake_up, pre_tick_modified_bodies) =
+                saved_wake_up.expect("saved_wake_up is set whenever journaling (hook 1)");
             j.lists = Some(super::step_journal::ListsSaved {
-                modified_bodies: modified_bodies.clone(),
+                modified_bodies: pre_tick_modified_bodies,
                 modified_colliders: modified_colliders.clone(),
                 removed_colliders: removed_colliders.clone(),
                 impulse_to_wake_up,
@@ -721,7 +731,11 @@ impl PhysicsPipeline {
         );
 
         self.counters.stages.user_changes.resume();
-        self.clear_modified_colliders(colliders, &mut modified_colliders, journal.as_deref());
+        self.clear_modified_colliders(
+            colliders,
+            &mut modified_colliders,
+            &mut journal.as_deref_mut(),
+        );
         self.clear_modified_bodies(bodies, &mut modified_bodies);
         removed_colliders.clear();
         self.counters.stages.user_changes.pause();
@@ -880,7 +894,7 @@ impl PhysicsPipeline {
                 self.clear_modified_colliders(
                     colliders,
                     &mut modified_colliders,
-                    journal.as_deref(),
+                    &mut journal.as_deref_mut(),
                 );
             } else {
                 // If we ran the last substep, just update the broad-phase bvh instead
