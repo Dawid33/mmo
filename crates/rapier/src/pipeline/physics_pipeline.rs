@@ -14,7 +14,7 @@ use crate::geometry::{
     ContactManifoldIndex, ModifiedColliders, NarrowPhase, TemporaryInteractionIndex,
 };
 use parry3d::math::{Real, RawReal, Vector};
-use crate::pipeline::{EventHandler, PhysicsHooks};
+use crate::pipeline::{EventHandler, PhysicsHooks, StepJournal};
 use crate::prelude::ModifiedRigidBodies;
 use {crate::dynamics::RigidBodySet, crate::geometry::ColliderSet};
 
@@ -123,7 +123,12 @@ impl PhysicsPipeline {
         hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
         handle_user_changes: bool,
+        journal: &mut Option<&mut StepJournal>,
     ) {
+        // No capture hooks yet (Task 2 threads the journal through without
+        // recording anything); later tasks will forward `journal.as_deref_mut()`
+        // to the capture points below.
+        let _ = journal.as_deref_mut();
         self.counters.stages.collision_detection_time.resume();
         self.counters.cd.broad_phase_time.resume();
 
@@ -483,6 +488,81 @@ impl PhysicsPipeline {
         hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
     ) {
+        self.step_inner(
+            gravity,
+            integration_parameters,
+            islands,
+            broad_phase,
+            narrow_phase,
+            bodies,
+            colliders,
+            impulse_joints,
+            multibody_joints,
+            ccd_solver,
+            hooks,
+            events,
+            None,
+        );
+    }
+
+    /// Same as [`Self::step`], but records every mutation into `journal` so the tick
+    /// can later be undone via [`StepJournal::revert`] without a whole-state snapshot.
+    ///
+    /// As of now, `journal` is threaded through but nothing is captured into it yet
+    /// (see `StepJournal`'s doc comment); a subsequent revert of an empty journal is
+    /// a no-op. Behavior is otherwise identical to [`Self::step`].
+    pub fn step_journaled(
+        &mut self,
+        gravity: &Vector<Real>,
+        integration_parameters: &IntegrationParameters,
+        islands: &mut IslandManager,
+        broad_phase: &mut BroadPhaseBvh,
+        narrow_phase: &mut NarrowPhase,
+        bodies: &mut RigidBodySet,
+        colliders: &mut ColliderSet,
+        impulse_joints: &mut ImpulseJointSet,
+        multibody_joints: &mut MultibodyJointSet,
+        ccd_solver: &mut CCDSolver,
+        hooks: &dyn PhysicsHooks,
+        events: &dyn EventHandler,
+        journal: &mut StepJournal,
+    ) {
+        self.step_inner(
+            gravity,
+            integration_parameters,
+            islands,
+            broad_phase,
+            narrow_phase,
+            bodies,
+            colliders,
+            impulse_joints,
+            multibody_joints,
+            ccd_solver,
+            hooks,
+            events,
+            Some(journal),
+        );
+    }
+
+    /// Shared implementation for [`Self::step`] and [`Self::step_journaled`].
+    /// `journal` is `None` for the plain `step()` path, so no capture work happens
+    /// unless a caller opts in via `step_journaled`.
+    fn step_inner(
+        &mut self,
+        gravity: &Vector<Real>,
+        integration_parameters: &IntegrationParameters,
+        islands: &mut IslandManager,
+        broad_phase: &mut BroadPhaseBvh,
+        narrow_phase: &mut NarrowPhase,
+        bodies: &mut RigidBodySet,
+        colliders: &mut ColliderSet,
+        impulse_joints: &mut ImpulseJointSet,
+        multibody_joints: &mut MultibodyJointSet,
+        ccd_solver: &mut CCDSolver,
+        hooks: &dyn PhysicsHooks,
+        events: &dyn EventHandler,
+        mut journal: Option<&mut StepJournal>,
+    ) {
         self.counters.reset();
         self.counters.step_started();
 
@@ -557,6 +637,7 @@ impl PhysicsPipeline {
             hooks,
             events,
             true,
+            &mut journal.as_deref_mut(),
         );
 
         self.counters.stages.user_changes.resume();
@@ -693,6 +774,7 @@ impl PhysicsPipeline {
                     hooks,
                     events,
                     false,
+                    &mut journal.as_deref_mut(),
                 );
 
                 self.clear_modified_colliders(colliders, &mut modified_colliders);

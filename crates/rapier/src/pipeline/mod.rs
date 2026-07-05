@@ -5,6 +5,7 @@ pub use event_handler::{ActiveEvents, ChannelEventCollector, EventHandler};
 pub use physics_hooks::{ActiveHooks, ContactModificationContext, PairFilterContext, PhysicsHooks};
 pub use physics_pipeline::PhysicsPipeline;
 pub use query_pipeline::{QueryFilter, QueryFilterFlags, QueryPipeline, QueryPipelineMut};
+pub use step_journal::StepJournal;
 
 #[cfg(feature = "debug-render")]
 pub use self::debug_render_pipeline::{
@@ -17,6 +18,7 @@ mod event_handler;
 mod physics_hooks;
 mod physics_pipeline;
 mod query_pipeline;
+mod step_journal;
 mod user_changes;
 
 #[cfg(feature = "debug-render")]
