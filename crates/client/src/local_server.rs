@@ -1,25 +1,27 @@
-//! Embedded single-player "server" for the wasm build: mirrors the dumb-router
-//! event loop in crates/server/src/main.rs against a local World, behind the
-//! same channel interface netcode::ServerConnection provides on native. A
-//! future WebTransport/WebSocket transport replaces this without touching
+//! Embedded single-player "server" for the wasm build: the same
+//! WorldManager core the real server runs, with regions pumped inline
+//! (no threads in the browser), behind the same channel interface
+//! netcode::ServerConnection provides on native. A future
+//! WebTransport/WebSocket transport replaces this without touching
 //! GameInstanceManager.
-use std::collections::BTreeMap;
-use std::time::Duration;
-
-use crossbeam::channel::{Receiver, Sender};
+use crossbeam::channel::{unbounded, Receiver, Sender};
 use game::{
-    ClientId, ClientPacket, GameError, GameEvent, GameEventKind, RegionCoords, RegionId,
-    ServerPacket, World, TICK_RATE,
+    ClientId, ClientPacket, GameError, InlineSpawner, RegionCoords, RegionOutput, ServerEvent,
+    ServerPacket, WorldManager, TICK_RATE,
 };
 
 /// The only client in an offline world.
 pub const LOCAL_CLIENT_ID: ClientId = 0;
 
 pub struct LocalServer {
-    world: World,
+    manager: WorldManager<InlineSpawner>,
     recv: Receiver<ClientPacket>,
     send: Sender<ServerPacket>,
-    results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
+    out_recv: Receiver<(Option<ClientId>, ServerPacket)>,
+    region_out_recv: Receiver<(RegionCoords, RegionOutput)>,
+    /// Monotonic sim-time for grace-period lifecycle; advances TICK_RATE ms
+    /// per authoritative tick (no wall clock on wasm).
+    now_ms: u64,
 }
 
 impl LocalServer {
@@ -27,82 +29,63 @@ impl LocalServer {
         recv: Receiver<ClientPacket>,
         send: Sender<ServerPacket>,
     ) -> Result<Self, GameError> {
-        let mut world = World::basic();
+        let (out_send, out_recv) = unbounded();
+        let (region_out_send, region_out_recv) = unbounded();
+        let mut manager = WorldManager::new(
+            InlineSpawner::default(),
+            Box::new(worldgen::generate_region),
+            out_send,
+            region_out_send,
+        );
         // Server-authoritative player creation, as on ClientConnected.
-        let region_id = RegionCoords::new(0, 0);
-        let event = world.handle_region_event(GameEventKind::CreateClient(LOCAL_CLIENT_ID), region_id)?;
-        world.forget_last_event(&region_id);
-        send.send(ServerPacket::GameEvent(event)).unwrap();
-        Ok(Self {
-            world,
+        manager.handle_server_event(ServerEvent::ClientConnected(LOCAL_CLIENT_ID), 0);
+        let mut server = Self {
+            manager,
             recv,
             send,
-            results_buffer: BTreeMap::new(),
-        })
+            out_recv,
+            region_out_recv,
+            now_ms: 0,
+        };
+        server.drain();
+        Ok(server)
     }
 
     /// Drain pending client packets without blocking.
     pub fn pump(&mut self) -> Result<(), GameError> {
         while let Ok(packet) = self.recv.try_recv() {
-            match packet {
-                ClientPacket::RequestPlayerRegion => {
-                    let id = self.world.find_player(&LOCAL_CLIENT_ID);
-                    self.send
-                        .send(ServerPacket::PlayerRegion(id, LOCAL_CLIENT_ID))
-                        .unwrap();
-                }
-                ClientPacket::RequestRegionConnection(id) => {
-                    // Task 6 has the client request its full 3x3 window, but
-                    // this embedded world (Task 8 rewrites it) only ever
-                    // holds the regions it was seeded with — log-and-ignore
-                    // requests for anything else rather than panicking on
-                    // World::build_region_server_packet's unwrap.
-                    if self.world.region_exists(&id) {
-                        self.send
-                            .send(self.world.build_region_server_packet(&id))
-                            .unwrap();
-                    } else {
-                        log::debug!("LocalServer: ignoring request for unknown region {:?}", id);
-                    }
-                }
-                ClientPacket::ReleaseRegionConnection(_) => {}
-                ClientPacket::GameEvent(game_event) => match game_event.kind {
-                    GameEventKind::Tick => (),
-                    // Unlike the real server (which breaks its event loop), Quit is a no-op:
-                    // there is no process to terminate in the embedded loopback.
-                    GameEventKind::Quit => (),
-                    kind => {
-                        let event = self
-                            .world
-                            .handle_region_event(kind, game_event.region_id)?;
-                        self.world.forget_last_event(&game_event.region_id);
-                        self.send.send(ServerPacket::GameEvent(event)).unwrap();
-                    }
-                },
-            }
+            // Quit is a no-op offline (no process to stop); the manager
+            // returning false is deliberately ignored here.
+            let _ = self.manager.handle_server_event(
+                ServerEvent::ClientPacket(packet, LOCAL_CLIENT_ID),
+                self.now_ms,
+            );
         }
+        self.drain();
         Ok(())
     }
 
-    /// Advance the authoritative sim one tick and broadcast results,
-    /// mirroring ServerEvent::ServerTickTimer handling on the real server
-    /// (including the every-10-ticks SyncClock, with zero RTT).
+    /// Advance every running region one tick and run lifecycle upkeep.
     pub fn tick(&mut self) {
-        self.world.progress_world_one_tick(&mut self.results_buffer);
-        for (id, result) in &self.results_buffer {
-            self.send
-                .send(ServerPacket::GameEvent(result.as_ref().unwrap().clone()))
-                .unwrap();
-            if self.world.current_tick(id) % 10 == 0 {
-                self.send
-                    .send(ServerPacket::SyncClock(
-                        *id,
-                        TICK_RATE,
-                        self.world.current_tick(id),
-                        Duration::ZERO,
-                    ))
-                    .unwrap();
+        self.now_ms += TICK_RATE;
+        self.manager.spawner_mut().tick_all();
+        self.manager.maintain(self.now_ms);
+        self.drain();
+    }
+
+    /// Pump inline regions and route their outputs, twice: outputs can
+    /// trigger follow-up work (resubscribe-after-park, respawn snapshots)
+    /// that needs one more pump to answer within the same frame. Then
+    /// forward everything to the single client (all packets are ours).
+    fn drain(&mut self) {
+        for _ in 0..2 {
+            self.manager.spawner_mut().pump();
+            while let Ok((rc, output)) = self.region_out_recv.try_recv() {
+                self.manager.handle_region_output(rc, output, self.now_ms);
             }
+        }
+        while let Ok((_target, packet)) = self.out_recv.try_recv() {
+            let _ = self.send.send(packet);
         }
     }
 }
@@ -129,22 +112,22 @@ mod tests {
         manager.start();
 
         // A few frames of the wasm drive loop: server pump -> client pump.
-        for _ in 0..4 {
+        for _ in 0..6 {
             server.pump().unwrap();
             assert!(manager.pump(&server_recv).unwrap());
         }
 
         // Client received region + player identity. NewRegion carries the
-        // render bridge's Receiver; keep it alive so the region's Sender
-        // doesn't hit a closed channel when later ticks emit render updates.
+        // render bridge's Receiver; keep every one alive so no region's
+        // Sender hits a closed channel when later ticks emit render updates.
         let mut saw_region = false;
         let mut saw_player = false;
-        let mut bridge_recv = None;
+        let mut bridge_recv = Vec::new();
         while let Ok(ev) = client_recv.try_recv() {
             match ev {
                 ClientUpdateEvent::NewRegion(_, _, recv) => {
                     saw_region = true;
-                    bridge_recv = Some(recv);
+                    bridge_recv.push(recv);
                 }
                 ClientUpdateEvent::SetPlayer(id) => {
                     saw_player = true;
@@ -164,5 +147,86 @@ mod tests {
         manager.send_tick();
         assert!(manager.pump(&server_recv).unwrap());
         drop(bridge_recv);
+    }
+
+    /// The offline client loads the full 3x3 window through the shared
+    /// WorldManager core.
+    #[test]
+    fn offline_window_loads_nine_regions() {
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
+        let (server_send, server_recv) = crossbeam::channel::unbounded::<ServerPacket>();
+        let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+        let mut manager =
+            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+        let mut server = LocalServer::new(manager.client_packet_recv(), server_send).unwrap();
+        manager.start();
+
+        // Handshake + window subscription needs a few pump rounds:
+        // RequestPlayerRegion -> PlayerRegion -> 9x RequestRegionConnection -> 9x Region.
+        for _ in 0..6 {
+            server.pump().unwrap();
+            assert!(manager.pump(&server_recv).unwrap());
+        }
+
+        let mut loaded = std::collections::BTreeSet::new();
+        let mut receivers = Vec::new(); // keep bridge receivers alive
+        while let Ok(ev) = client_recv.try_recv() {
+            if let ClientUpdateEvent::NewRegion(rc, _, recv) = ev {
+                loaded.insert(rc);
+                receivers.push(recv);
+            }
+        }
+        let expected: std::collections::BTreeSet<_> = game::RegionCoords::new(0, 0)
+            .window_3x3()
+            .into_iter()
+            .collect();
+        assert_eq!(loaded, expected, "3x3 offline window loaded");
+        drop(receivers);
+    }
+
+    /// Release + grace parks a region offline; resubscribing restores it
+    /// from the parking lot (a fresh Region packet arrives again).
+    #[test]
+    fn offline_release_parks_and_resubscribe_restores() {
+        use game::{RegionCoords, TICK_RATE, UNLOAD_GRACE_MS};
+
+        let (packet_send, packet_recv) = crossbeam::channel::unbounded::<ClientPacket>();
+        let (out_send, out_recv) = crossbeam::channel::unbounded::<ServerPacket>();
+        let mut server = LocalServer::new(packet_recv, out_send).unwrap();
+
+        let corner = RegionCoords::new(-1, -1);
+        packet_send
+            .send(ClientPacket::RequestRegionConnection(corner))
+            .unwrap();
+        server.pump().unwrap();
+        assert!(
+            out_recv
+                .try_iter()
+                .any(|p| matches!(p, ServerPacket::Region(rc, _) if rc == corner)),
+            "snapshot on first subscribe"
+        );
+
+        packet_send
+            .send(ClientPacket::ReleaseRegionConnection(corner))
+            .unwrap();
+        server.pump().unwrap();
+        // tick() advances the internal clock TICK_RATE ms per call; run past
+        // the grace period so maintain() parks the corner.
+        for _ in 0..(UNLOAD_GRACE_MS / TICK_RATE + 2) {
+            server.tick();
+        }
+        while out_recv.try_recv().is_ok() {} // discard tick traffic
+
+        packet_send
+            .send(ClientPacket::RequestRegionConnection(corner))
+            .unwrap();
+        server.pump().unwrap();
+        assert!(
+            out_recv
+                .try_iter()
+                .any(|p| matches!(p, ServerPacket::Region(rc, _) if rc == corner)),
+            "parked region restored on resubscribe"
+        );
     }
 }

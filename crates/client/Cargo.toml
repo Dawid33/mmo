@@ -8,6 +8,7 @@ pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
 
 [dependencies]
 game = { workspace = true }
+worldgen = { path = "../worldgen" }
 slotmapd = { workspace = true }
 log = { workspace = true }
 block-mesh = { workspace = true }
