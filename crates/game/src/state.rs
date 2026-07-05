@@ -627,4 +627,122 @@ impl Rollback {
             self.remove_entity_safe(e, None);
         }
     }
+
+    /// The transferable shape spec of a body's first collider, or the player
+    /// default. Non-capsule shapes don't cross the seam yet.
+    fn collider_spec_of(&self, handle: RigidBodyHandle) -> crate::ColliderSpec {
+        self.data
+            .physics
+            .bodies
+            .get(handle)
+            .and_then(|b| b.colliders().first().copied())
+            .and_then(|ch| self.data.physics.colliders.get(ch))
+            .and_then(|c| {
+                c.shape().as_capsule().map(|cap| crate::ColliderSpec::CapsuleY {
+                    half_height: cap.half_height().0,
+                    radius: cap.radius.0,
+                })
+            })
+            // Non-capsule shapes don't transfer yet; the player default.
+            .unwrap_or(crate::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 })
+    }
+
+    /// Assemble the bundle, then remove the entity — all undo-tracked.
+    pub fn extract_entity_safe(
+        &mut self,
+        key: EntityKey,
+        region: crate::RegionCoords,
+    ) -> crate::EntityBundle {
+        let kind = self.data.ecs.kind.try_get(key).clone().unwrap_or_default();
+        let handle = (*self.data.ecs.rigidbody.try_get(key))
+            .expect("transferable entities have bodies");
+        let body = self.data.physics.bodies.get(handle).unwrap();
+        let isometry = *body.position();
+        let linvel = *body.linvel();
+        let collider = self.collider_spec_of(handle);
+        let client_id = self
+            .data
+            .player_entites
+            .iter()
+            .find(|(_, e)| **e == key)
+            .map(|(c, _)| *c);
+        let client = client_id.map(|c| (c, self.data.clients.get(&c).unwrap().clone()));
+        let bundle = crate::EntityBundle {
+            kind,
+            isometry,
+            linvel,
+            collider,
+            has_camera: self.data.ecs.camera.try_get(key).is_some(),
+            client,
+            source_region: region,
+            source_key: key,
+        };
+        if let Some(c) = client_id {
+            self.data.player_entites.remove(&c);
+            self.data.clients.remove(&c);
+        }
+        // This entity's own arrival identity (if it arrived here) is now stale.
+        let stale: Vec<(crate::RegionCoords, EntityKey)> = self
+            .data
+            .arrivals
+            .iter()
+            .filter(|(_, e)| **e == key)
+            .map(|(k, _)| *k)
+            .collect();
+        for k in stale {
+            self.data.arrivals.remove(&k);
+        }
+        self.remove_entity_safe(key, client_id);
+        bundle
+    }
+
+    /// Post-step boundary/margin scan. Iterates the kind component in key
+    /// order (deterministic); terrain (kindless) and ghosts are excluded.
+    /// Returns `(departures, ghost updates)` with ABSOLUTE target coords.
+    pub fn scan_boundaries(
+        &mut self,
+        region: crate::RegionCoords,
+    ) -> (
+        Vec<(crate::EntityBundle, crate::RegionCoords)>,
+        Vec<(crate::GhostData, crate::RegionCoords)>,
+    ) {
+        let ghost_keys: std::collections::BTreeSet<EntityKey> =
+            self.data.ghosts.iter().map(|(_, g)| g.entity).collect();
+        // Read-only pass: gather leavers/ghosts before any mutation, so the
+        // immutable borrows of physics/ecs don't collide with extraction.
+        let mut leavers: Vec<(EntityKey, crate::RegionCoords)> = Vec::new();
+        let mut ghosts: Vec<(crate::GhostData, crate::RegionCoords)> = Vec::new();
+        for (key, kind) in self.data.ecs.kind.iter() {
+            let Some(kind) = kind else { continue };
+            if ghost_keys.contains(&key) {
+                continue;
+            }
+            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
+            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
+            let t = body.translation();
+            if let Some((dx, dz)) = crate::departure_offset(t.x.0, t.z.0) {
+                leavers.push((key, crate::RegionCoords::new(region.x + dx, region.z + dz)));
+            } else {
+                for (dx, dz) in crate::ghost_offsets(t.x.0, t.z.0) {
+                    ghosts.push((
+                        crate::GhostData {
+                            source_region: region,
+                            source_key: key,
+                            kind: *kind,
+                            isometry: *body.position(),
+                            linvel: *body.linvel(),
+                            collider: self.collider_spec_of(handle),
+                        },
+                        crate::RegionCoords::new(region.x + dx, region.z + dz),
+                    ));
+                }
+            }
+        }
+        // Mutating pass: extraction is undo-tracked, one per leaver.
+        let mut departures = Vec::new();
+        for (key, target) in leavers {
+            departures.push((self.extract_entity_safe(key, region), target));
+        }
+        (departures, ghosts)
+    }
 }

@@ -1,0 +1,150 @@
+use game::{
+    GameEventKind, IsometryReal, Region, RegionCoords, Rollback, FLIP_HYSTERESIS, REGION_SIZE,
+};
+use game::na::{Quaternion, Translation3, Unit};
+use game::parry::math::Real;
+use std::hash::Hash;
+
+fn crc(region: &Region) -> u32 {
+    let mut h = crc32fast::Hasher::new();
+    region.data().data.hash(&mut h);
+    h.finalize()
+}
+
+fn pose(x: f32, z: f32) -> IsometryReal {
+    IsometryReal::from_parts(
+        Translation3::new(Real::from(x), Real::from(26.0), Real::from(z)),
+        Unit::<Quaternion<Real>>::identity(),
+    )
+}
+
+/// A region with one player, teleported to (x, z), ticked once.
+fn region_with_player_at(id: RegionCoords, x: f32, z: f32) -> Region {
+    let mut region = Region::from_chunks(id, Vec::new());
+    region.handle_event(GameEventKind::CreateClient(7)).unwrap();
+    region.forget_last_event();
+    let key = *region.data().player_entites.get(&7).unwrap();
+    // Test-only teleport through the public undo-safe primitive, wrapped in
+    // its own forgotten transaction so the tick under test stays clean.
+    region.with_data(|d| d.set_body_pose_safe(key, pose(x, z)));
+    region.handle_event(GameEventKind::Tick).unwrap();
+    region.forget_last_event();
+    region
+}
+
+#[test]
+fn tick_extracts_a_leaver_into_a_departure() {
+    let id = RegionCoords::new(0, 0);
+    let mut region = region_with_player_at(id, REGION_SIZE + FLIP_HYSTERESIS + 1.0, 128.0);
+    let (departures, _ghosts) = region.take_transfers();
+    assert_eq!(departures.len(), 1);
+    let (bundle, target) = &departures[0];
+    assert_eq!(*target, RegionCoords::new(1, 0));
+    assert_eq!(bundle.source_region, id);
+    assert!(bundle.client.is_some(), "player carries its client input state");
+    assert!(bundle.has_camera);
+    assert!(
+        !region.data().player_entites.contains_key(&7),
+        "extracted player is gone from the source"
+    );
+    assert!(!region.data().clients.contains_key(&7));
+}
+
+#[test]
+fn tick_mirrors_margin_entities_without_extracting() {
+    let id = RegionCoords::new(0, 0);
+    let mut region = region_with_player_at(id, REGION_SIZE - 10.0, 128.0);
+    let (departures, ghosts) = region.take_transfers();
+    assert!(departures.is_empty());
+    assert_eq!(ghosts.len(), 1);
+    let (data, target) = &ghosts[0];
+    assert_eq!(*target, RegionCoords::new(1, 0));
+    assert_eq!(data.source_region, id);
+    assert!(region.data().player_entites.contains_key(&7), "still owned here");
+}
+
+#[test]
+fn corner_mirrors_into_three_neighbours() {
+    let mut region = region_with_player_at(RegionCoords::new(0, 0), 10.0, 10.0);
+    let (_, ghosts) = region.take_transfers();
+    let targets: Vec<RegionCoords> = ghosts.iter().map(|(_, t)| *t).collect();
+    assert_eq!(targets.len(), 3);
+    for t in [RegionCoords::new(-1, 0), RegionCoords::new(0, -1), RegionCoords::new(-1, -1)] {
+        assert!(targets.contains(&t));
+    }
+}
+
+#[test]
+fn hysteresis_stops_boundary_thrash() {
+    // Just past the line but inside the band: still owned, only mirrored.
+    let mut region = region_with_player_at(RegionCoords::new(0, 0), REGION_SIZE + 1.0, 128.0);
+    let (departures, ghosts) = region.take_transfers();
+    assert!(departures.is_empty(), "inside the hysteresis band: no flip");
+    assert!(!ghosts.is_empty());
+}
+
+#[test]
+fn extracting_tick_holds_the_hash_bar() {
+    // rollback_last_event replays tier-2 undo closures through
+    // client.as_ref().unwrap(); a None render sender panics. Region::from_chunks
+    // wires None (server regions forget, never roll back), so build the region
+    // with a live throwaway sender instead — mirrors the sibling rollback tests
+    // (handoff_state/random_ops/...). _recv stays bound so the channel is live.
+    let id = RegionCoords::new(0, 0);
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(Rollback::new(None), Some(send), id, None);
+    region.handle_event(GameEventKind::CreateClient(7)).unwrap();
+    region.forget_last_event();
+    let key = *region.data().player_entites.get(&7).unwrap();
+    region.with_data(|d| d.set_body_pose_safe(key, pose(REGION_SIZE + 5.0, 128.0)));
+    let before = crc(&region);
+    // The extracting tick, NOT forgotten: roll it back.
+    region.handle_event(GameEventKind::Tick).unwrap();
+    assert!(!region.data().player_entites.contains_key(&7));
+    region.rollback_last_event();
+    assert_eq!(before, crc(&region), "hash(before) == crc(after undo) across extraction");
+}
+
+#[test]
+fn identical_streams_produce_identical_scans_and_hashes() {
+    // The property client prediction depends on (spec Testing #3): two
+    // regions fed the same events agree bit-exactly on state AND transfers.
+    let run = || {
+        let id = RegionCoords::new(0, 0);
+        let mut region = region_with_player_at(id, REGION_SIZE - 10.0, 10.0);
+        let transfers = region.take_transfers();
+        (crc(&region), format!("{:?}", transfers))
+    };
+    let (h1, t1) = run();
+    let (h2, t2) = run();
+    assert_eq!(h1, h2, "state hashes agree across runs");
+    assert_eq!(t1, t2, "departure/ghost buffers agree across runs");
+}
+
+#[test]
+fn ghosts_never_transfer_and_terrain_never_mirrors() {
+    // A ghost sitting past the boundary must not depart; chunk entities in
+    // the margin must not mirror.
+    let id = RegionCoords::new(0, 0);
+    let mut region = Region::from_chunks(
+        id,
+        vec![(game::ChunkCoords::new(7, 0, 7), game::Chunk::flat_floor(8))], // edge chunk, inside margin
+    );
+    let src = RegionCoords::new(1, 0);
+    region
+        .handle_event(GameEventKind::GhostUpdate(game::GhostData {
+            source_region: src,
+            source_key: Default::default(),
+            kind: game::EntityKind::Player,
+            isometry: pose(300.0, 128.0), // absurdly out of bounds
+            linvel: game::parry::math::Vector::zeros(),
+            collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
+        }))
+        .unwrap();
+    region.forget_last_event();
+    region.handle_event(GameEventKind::Tick).unwrap();
+    region.forget_last_event();
+    let (departures, ghosts) = region.take_transfers();
+    assert!(departures.is_empty(), "ghosts are never extracted");
+    assert!(ghosts.is_empty(), "kindless terrain never mirrors");
+}

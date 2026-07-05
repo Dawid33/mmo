@@ -11,7 +11,8 @@ use crate::{Chunk, Client, ClientId, GameData, Rollback};
 
 use crate::{
     camera::CameraController, physics::PhysicsController, ChunkCoords,
-    Controller, GameDataUpdate, GameError, GameEvent, GameEventKind, RegionId, ServerPacket,
+    Controller, EntityBundle, GameDataUpdate, GameError, GameEvent, GameEventKind, GhostData,
+    RegionCoords, RegionId, ServerPacket,
 };
 
 /// A region represents an portion of the world that processes game events at
@@ -30,6 +31,12 @@ pub struct Region {
     /// `next_game_event_id` of the snapshot this region was built from.
     /// Server events below this id are already baked into the state.
     base_event_id: usize,
+    /// Boundary-scan results from the LAST executed tick. REPLACED by each
+    /// tick, never appended: consumers read immediately after driving a
+    /// tick; reconcile replays overwrite these with stale scans that are
+    /// never read (see the plan's read-after-progress invariant).
+    pending_departures: Vec<(EntityBundle, RegionCoords)>,
+    pending_ghosts: Vec<(GhostData, RegionCoords)>,
 }
 
 impl Region {
@@ -51,6 +58,8 @@ impl Region {
             synchronized: false,
             local_client_id,
             base_event_id,
+            pending_departures: Vec::new(),
+            pending_ghosts: Vec::new(),
         }
     }
 
@@ -184,6 +193,10 @@ impl Region {
                         ));
                     }
                 }
+                let (departures, ghosts) = self.data.scan_boundaries(self.id);
+                self.pending_departures = departures;
+                self.pending_ghosts = ghosts;
+                self.data.expire_ghosts();
                 self.data.tick.update(|t| *t += 1);
             }
             GameEventKind::PlayerInput(client_id, player_event) => {
@@ -198,10 +211,12 @@ impl Region {
                 self.data.clients.insert(client_id, Client::default());
                 self.data.create_player_safe(client_id);
             }
-            // Injection/ghost-mirror mutation lands in a later task; for now
-            // these are protocol-only (constructed, wired through, never
-            // acted on).
-            GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) => {}
+            GameEventKind::EntityArrived(bundle) => {
+                self.data.apply_arrival(bundle);
+            }
+            GameEventKind::GhostUpdate(data) => {
+                self.data.apply_ghost(data);
+            }
         }
         self.event_log.push_back(event.clone());
         Ok(event)
@@ -241,5 +256,31 @@ impl Region {
 
     pub fn forget_last_event(&mut self) {
         self.data.forget();
+    }
+
+    /// Boundary-scan results from the LAST executed tick. REPLACED (not
+    /// appended) each tick; call immediately after driving a tick and at no
+    /// other time — see the read-after-progress invariant on the fields.
+    pub fn take_transfers(
+        &mut self,
+    ) -> (Vec<(EntityBundle, RegionCoords)>, Vec<(GhostData, RegionCoords)>) {
+        (
+            std::mem::take(&mut self.pending_departures),
+            std::mem::take(&mut self.pending_ghosts),
+        )
+    }
+
+    /// Test hook: run an undo-safe mutation in its own forgotten
+    /// transaction (teleports, state surgery in integration tests).
+    pub fn with_data(&mut self, f: impl FnOnce(&mut Rollback)) {
+        self.data.new_transaction();
+        f(&mut self.data);
+        self.data.forget();
+    }
+
+    /// Test hook: roll back the most recent (unforgotten) event.
+    pub fn rollback_last_event(&mut self) {
+        self.data.rollback();
+        self.event_log.pop_back();
     }
 }
