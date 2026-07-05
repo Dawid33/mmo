@@ -822,6 +822,19 @@ git commit -m "feat(client): WebTransport netcode for wasm, ?server mode select"
 
 ---
 
+**Amendment (2026-07-05, found by Task 5's E2E, fix approved by user as Task 6):** the browser
+connects over WebTransport but the first `Region` snapshot fails to deserialize on wasm32:
+vendored rapier's `RigidBodyIds::{active_island_id, active_set_id}`
+(`crates/rapier/src/dynamics/rigid_body_components.rs:1033-1043`) use `usize::MAX` as a
+sentinel; bincode encodes a 64-bit server's sentinel as `u64::MAX`, which cannot fit a 32-bit
+`usize`. Resolution: a serde adapter on exactly those fields mapping the sentinel cross-width
+(`usize::MAX` ⇄ `u64::MAX`, other values must fit or error). On 64-bit builds the emitted
+bytes are provably unchanged (bincode already encodes `usize` as `u64`), so native wire format
+and CRC state hashes are untouched; 32-bit builds now emit/accept the same bytes as 64-bit,
+restoring cross-architecture parity — which is the vendored forks' entire reason to exist.
+Whack-a-mole bound: if the E2E trips further sentinel fields, fix at most 2 more the same way,
+then stop and report.
+
 ### Task 5: End-to-end verification + docs
 
 **Files:**
