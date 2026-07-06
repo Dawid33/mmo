@@ -13,11 +13,6 @@ use log::warn;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-#[cfg(feature = "pyroscope")]
-use pyroscope::PyroscopeAgent;
-#[cfg(feature = "pyroscope")]
-use pyroscope_pprofrs::{pprof_backend, PprofConfig};
-
 use client::renderer;
 #[cfg(target_arch = "wasm32")]
 use client::sim_driver;
@@ -72,17 +67,6 @@ fn main() {
     // bar); release skips the O(state) walk — state restore is identical.
     #[cfg(not(debug_assertions))]
     game::set_hash_verification(false);
-
-    #[cfg(feature = "pyroscope")]
-    let agent_running = if let Ok(p) = std::env::var("PYROSCOPE") {
-        let agent = PyroscopeAgent::builder("http://localhost:4040", "client")
-            .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
-            .build()
-            .unwrap();
-        Some(agent.start().unwrap())
-    } else {
-        None
-    };
 
     #[cfg(target_arch = "wasm32")]
     console_error_panic_hook::set_once();
@@ -160,10 +144,4 @@ fn main() {
     let _ = game_send.send(GameEventKind::Quit);
     #[cfg(not(target_arch = "wasm32"))]
     let _ = command_send.send(Command::Quit);
-
-    #[cfg(feature = "pyroscope")]
-    if let Some(a) = agent_running {
-        let agent_ready = a.stop().unwrap();
-        agent_ready.shutdown();
-    }
 }

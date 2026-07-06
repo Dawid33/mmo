@@ -203,13 +203,22 @@ pub fn run() {
     #[cfg(not(debug_assertions))]
     game::set_hash_verification(false);
 
-    // use pyroscope::PyroscopeAgent;
-    // use pyroscope_pprofrs::{pprof_backend, PprofConfig};
-    // let agent = PyroscopeAgent::builder("http://localhost:4040", "server")
-    //     .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
-    //     .build()
-    //     .unwrap();
-    // let agent_running = agent.start().unwrap();
+    // Continuous profiling: build with `--features pyroscope` and set PYROSCOPE
+    // to push flamegraphs to a local Pyroscope (`just profile-server`). Off
+    // unless both the feature and the env var are present, so release runs are
+    // never instrumented.
+    #[cfg(feature = "pyroscope")]
+    let agent_running = if std::env::var("PYROSCOPE").is_ok() {
+        use pyroscope::PyroscopeAgent;
+        use pyroscope_pprofrs::{pprof_backend, PprofConfig};
+        let agent = PyroscopeAgent::builder("http://localhost:4040", "server")
+            .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
+            .build()
+            .unwrap();
+        Some(agent.start().unwrap())
+    } else {
+        None
+    };
 
     simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default()).unwrap();
 
@@ -271,8 +280,11 @@ pub fn run() {
             manager.handle_region_output(rc, output, now_ms);
         }
     }
-    // let agent_ready = agent_running.stop().unwrap();
-    // agent_ready.shutdown();
+    #[cfg(feature = "pyroscope")]
+    if let Some(agent) = agent_running {
+        let agent_ready = agent.stop().unwrap();
+        agent_ready.shutdown();
+    }
 }
 
 async fn handle_connection(

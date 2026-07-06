@@ -15,6 +15,7 @@ pub mod renderer;
 pub mod blocks; // block registry loader (assets/blocks/blocks.ron)
 pub mod instance; // GameInstanceManager (moved out of main.rs)
 pub mod harness; // SimHarness — added in Task 3 (empty stub file for now)
+pub mod bevy_harness; // BevyInputHarness — headless Bevy-layer input harness
 
 pub use instance::GameInstanceManager;
 pub use local_server::{LocalServer, LOCAL_CLIENT_ID};

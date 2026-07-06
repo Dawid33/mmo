@@ -28,6 +28,11 @@ wtransport = { workspace = true }
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
 
+[features]
+# Push CPU profiles to a local Pyroscope (`just profile-server`); gated so
+# normal builds don't pull the agent in. Runtime-activated by the PYROSCOPE env.
+pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
+
 [dev-dependencies]
 game = { workspace = true }
 worldgen = { path = "../worldgen" }

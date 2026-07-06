@@ -10,10 +10,22 @@ members = [
 
 [profile.dev]
 opt-level = 1
+# Full debug info (line tables + variables) so perf/hotspot/pyroscope resolve
+# symbols and inlined frames in dev builds. Cargo's dev default is already
+# `true`; pinned explicitly so a profiled dev build is always navigable.
+debug = "full"
 
 # Enable a large amount of optimization in the dev profile for dependencies.
 [profile.dev.package."*"]
 opt-level = 1
+
+# Optimized build that keeps full debug info — use for representative CPU
+# profiles (`just perf-client` / `just perf-server` / `just profile-*`). Dev's
+# opt-level 1 makes the mesher + derive_voxels hot loops ~2.5x slower than this,
+# so profile here when hunting real hotspots, not in a plain debug build.
+[profile.profiling]
+inherits = "release"
+debug = "full"
 
 [workspace.dependencies]
 bevy = { version = "0.18", default-features = false, features = [

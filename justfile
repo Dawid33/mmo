@@ -58,6 +58,48 @@ run:
     trap 'kill "$client_pid" 2>/dev/null || true' EXIT
     RUST_BACKTRACE=1 {{cargo}} run --bin server
 
+# Interactive play-test: build, run server + client, and tee both to
+# target/play-test/*.log so the run can be reviewed for errors afterwards.
+# Close the client window (or Ctrl-C) to stop both; on exit it prints a
+# panic/error summary and the log paths.
+play-test:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    log_dir="target/play-test"
+    mkdir -p "$log_dir"
+    srv_log="$log_dir/server.log"; cli_log="$log_dir/client.log"
+    : > "$srv_log"; : > "$cli_log"
+
+    echo ">> building workspace..."
+    if ! {{cargo}} build --workspace --bins 2>&1 | tee "$log_dir/build.log"; then
+        echo "!! BUILD FAILED — see $log_dir/build.log" >&2
+        exit 1
+    fi
+
+    echo ">> starting server -> $srv_log"
+    RUST_BACKTRACE=1 {{cargo}} run --bin server 2>&1 | tee "$srv_log" &
+    srv_pid=$!
+    trap 'kill "$srv_pid" 2>/dev/null || true' EXIT
+    sleep 1
+
+    echo ">> starting client -> $cli_log   (close the window or Ctrl-C to finish)"
+    RUST_BACKTRACE=1 {{cargo}} run --bin client 2>&1 | tee "$cli_log"
+    cli_rc=${PIPESTATUS[0]}
+
+    kill "$srv_pid" 2>/dev/null || true
+    wait "$srv_pid" 2>/dev/null || true
+
+    echo
+    echo "=== play-test finished (client exit=$cli_rc) ==="
+    echo "logs: $srv_log  $cli_log"
+    if grep -n -iE 'panic|thread .* panicked|error\[|ERROR' "$srv_log" "$cli_log" >/dev/null 2>&1; then
+        echo "--- possible errors (grep panic|error) ---"
+        grep -n -iE 'panic|thread .* panicked|error\[|ERROR' "$srv_log" "$cli_log" || true
+    else
+        echo "no panics/errors matched in logs."
+    fi
+
 # Run the deterministic worldgen binary.
 worldgen:
     {{cargo}} run --bin worldgen
