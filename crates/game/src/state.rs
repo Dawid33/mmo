@@ -425,7 +425,6 @@ impl Rollback {
                     restored_pose,
                 ),
             ));
-            self.data.ecs.camera.remove_safe(key);
         }
         // Kind: Do-emit clear; undo re-emits the old kind.
         if let Some(kind) = *self.data.ecs.kind.try_get(key) {
@@ -437,7 +436,6 @@ impl Rollback {
                 GameDataTransactionKind::Undo,
                 GameDataUpdateKind::SetEntityKind(key, Some(kind)),
             ));
-            self.data.ecs.kind.remove_safe(key);
         }
         // Physics: remove body + attached colliders under a full snapshot.
         if let Some(handle) = *self.data.ecs.rigidbody.try_get(key) {
@@ -455,11 +453,17 @@ impl Rollback {
         // create_entity_safe's insert_safe for camera/isometry/rigidbody/
         // chunk/kind). Removing the slots — not just nulling their values —
         // keeps the component maps in sync with the entities slotmap, so the
-        // freed index can be reused later in the SAME transaction and still
-        // roll back bit-exact.
+        // freed index can be reused later and still roll back bit-exact.
+        // This MUST be unconditional: camera/kind carry a None slot for every
+        // non-camera/non-kind entity, so gating their removal on a present
+        // value (as the render-event emits above do) would leak a dangling
+        // slot that a reused index later clobbers — non-LIFO-invertible,
+        // hash(before) != hash(after undo) on rollback.
+        self.data.ecs.camera.remove_safe(key);
         self.data.ecs.rigidbody.remove_safe(key);
         self.data.ecs.isometry.remove_safe(key);
         self.data.ecs.chunk.remove_safe(key);
+        self.data.ecs.kind.remove_safe(key);
         // ECS slot last: the slotmap #[emit] fires RemoveEntity on the delta
         // (and CreateEntity again on undo).
         self.data.ecs.entities.remove(key);
