@@ -165,6 +165,19 @@ impl Column {
             self.base_sub_y = 0;
         }
     }
+
+    /// Materialized (`Dense`) sub-chunks as `(absolute sub_y, chunk)` pairs;
+    /// `Air` slices are skipped. Used to seed a region's per-chunk physics path.
+    pub fn materialized_sub_chunks(&self) -> Vec<(i32, Chunk)> {
+        self.sub_chunks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| match s {
+                SubChunk::Dense(c) => Some((self.base_sub_y + i as i32, (**c).clone())),
+                SubChunk::Air => None,
+            })
+            .collect()
+    }
 }
 
 impl ReadVol for Column {

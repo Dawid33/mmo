@@ -10,7 +10,7 @@ use crate::input::Key;
 use crate::{Chunk, Client, ClientId, GameData, Rollback};
 
 use crate::{
-    camera::CameraController, physics::PhysicsController, ChunkCoords,
+    camera::CameraController, physics::PhysicsController, ChunkCoords, Column, ColumnCoords,
     Controller, EntityBundle, GameDataUpdate, GameError, GameEvent, GameEventKind, GhostData,
     RegionCoords, RegionId, ServerPacket,
 };
@@ -313,6 +313,21 @@ impl Region {
             region.data.create_mesh(coords, chunk);
         }
         region
+    }
+
+    /// Seed a region from vertical columns: flatten each column's materialized
+    /// (Dense) sub-chunks into the existing per-chunk mesh/collider path.
+    pub fn from_columns(id: RegionId, columns: Vec<(ColumnCoords, Column)>) -> Self {
+        let chunks: Vec<(ChunkCoords, Chunk)> = columns
+            .into_iter()
+            .flat_map(|(col, column)| {
+                column
+                    .materialized_sub_chunks()
+                    .into_iter()
+                    .map(move |(sub_y, chunk)| (ChunkCoords::new(col.x, sub_y, col.z), chunk))
+            })
+            .collect();
+        Region::from_chunks(id, chunks)
     }
 
     pub fn forget_last_event(&mut self) {
