@@ -58,7 +58,7 @@ impl ChunkCoords {
     }
 }
 
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone, Hash)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct Voxel {
     pub kind: VoxelType,
 }

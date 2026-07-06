@@ -14,6 +14,7 @@ extern crate std;
 
 use std::collections::BTreeMap;
 
+pub mod block;
 pub mod camera;
 pub mod input;
 mod physics;
@@ -27,6 +28,7 @@ pub use parry3d as parry;
 
 // The #[rollback] macro expansion in `state` and the borrow::Partial derives
 // rely on these items being reachable at the crate root (`crate::...`).
+pub use block::*;
 pub use camera::*;
 pub use input::*;
 pub use protocol::*;
