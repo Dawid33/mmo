@@ -325,6 +325,20 @@ impl GameInstanceManager {
         Some([t.x.0, t.y.0, t.z.0])
     }
 
+    /// The local player's fps-cam toggle state in its home region, if the
+    /// client + home region are readable yet. `None` before the handshake
+    /// settles. Test/harness hook.
+    pub fn local_player_fps_cam_mode(&self) -> Option<bool> {
+        let home = self.home_region?;
+        let world = self.world.as_ref()?;
+        if !world.region_exists(&home) {
+            return None;
+        }
+        let data = world.data(&home);
+        let client_id = self.client_id?;
+        data.clients.get(&client_id).map(|c| c.fps_cam_mode)
+    }
+
     /// Current connection/sync state for the HUD, from the ready flags.
     fn connection_state(&self) -> game::ConnectionState {
         if !self.ready {

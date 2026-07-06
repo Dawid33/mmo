@@ -161,6 +161,12 @@ impl BevyInputHarness {
         self.e_forwarded
     }
 
+    /// suspect (b): the local player's fps_cam_mode after the sim tick. `Some`
+    /// once the home region is loaded.
+    pub fn sim_fps_cam_mode(&self) -> Option<bool> {
+        self.client.local_player_fps_cam_mode()
+    }
+
     /// suspect (a) + end assertion: the stub window's live grab mode.
     pub fn cursor_grab_mode(&self) -> CursorGrabMode {
         self.app
