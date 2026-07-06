@@ -362,7 +362,13 @@ impl GameInstanceManager {
     ) -> Result<(), GameError> {
         match server_msg.unwrap() {
             game::ServerPacket::SyncClock(region_id, server_tick_rate, server_tick, rtt) => {
-                if let Some(ref mut world) = self.world {
+                // With a moving 3×3 window a SyncClock can arrive for a region
+                // we no longer hold (released mid-shift) or don't hold yet
+                // (snapshot still in flight). Skip it — steady-state noise —
+                // rather than unwrap a missing region and kill the game thread
+                // (which froze input on every region crossing). Mirrors the
+                // region_exists guard in route_server_game_event.
+                if let Some(ref mut world) = self.world.as_mut().filter(|w| w.region_exists(&region_id)) {
                     let client_tick = world.current_tick(&region_id);
                     let diff: isize = client_tick as isize - server_tick as isize;
                     // this is how far behind the server is
