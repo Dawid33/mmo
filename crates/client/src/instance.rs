@@ -128,6 +128,24 @@ impl GameInstanceManager {
         self.server_game_recv.clone()
     }
 
+    /// Push a game event as if it came from local input (test/harness hook).
+    pub fn push_game_event(
+        &self,
+        ev: GameEventKind,
+    ) -> Result<(), crossbeam::channel::SendError<GameEventKind>> {
+        self.game_event_send.send(ev)
+    }
+
+    /// Read-only access to the loaded sim world (test/harness hook).
+    pub fn world_ref(&self) -> &game::World {
+        self.world.as_ref().expect("world loaded")
+    }
+
+    /// The client's current home region (test/harness hook).
+    pub fn home_region(&self) -> RegionCoords {
+        self.home_region.expect("home region set")
+    }
+
     /// Handle one client-side game event. Returns Ok(false) if the game
     /// should quit. Events arriving before the first region loads are
     /// dropped, matching the pre-refactor select! loop.
