@@ -7,6 +7,7 @@ use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, Regi
 use game::{EntityKey, Voxel};
 
 use super::convert::{iso_to_transform, perspective_to_projection};
+use super::hud::HudStatus;
 use super::{ClientUpdates, LocalPlayer};
 
 #[derive(Resource, Default)]
@@ -72,6 +73,7 @@ pub fn drain_client_updates(
     mut regions: ResMut<Regions>,
     mut roots: ResMut<RegionRoots>,
     mut map: ResMut<SimEntityMap>,
+    mut hud_status: ResMut<HudStatus>,
 ) {
     while let Ok(event) = updates.0.try_recv() {
         match event {
@@ -99,6 +101,11 @@ pub fn drain_client_updates(
                 info!("bridge: region {:?} removed", id);
             }
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
+            ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {
+                hud_status.home_region = Some(home_region);
+                hud_status.viewer_region = Some(viewer_region);
+                hud_status.connection = connection;
+            }
         }
     }
 }
@@ -356,6 +363,7 @@ mod tests {
             .init_resource::<Regions>()
             .init_resource::<RegionRoots>()
             .init_resource::<SimEntityMap>()
+            .init_resource::<HudStatus>()
             .add_systems(PreUpdate, (drain_client_updates, drain_region_updates).chain());
         (app, client_send)
     }
@@ -659,5 +667,36 @@ mod tests {
             Visibility::Hidden,
             "upgraded (owned) entity is never deduped"
         );
+    }
+
+    #[test]
+    fn drain_client_updates_writes_hud_status() {
+        use game::ConnectionState;
+
+        let (client, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(ClientUpdates(client_recv))
+            .init_resource::<LocalPlayer>()
+            .init_resource::<Regions>()
+            .init_resource::<RegionRoots>()
+            .init_resource::<SimEntityMap>()
+            .init_resource::<HudStatus>()
+            .add_systems(Update, drain_client_updates);
+
+        client
+            .send(ClientUpdateEvent::HudStatus {
+                home_region: RegionCoords::new(2, -1),
+                viewer_region: RegionCoords::new(2, 0),
+                connection: ConnectionState::Ready,
+            })
+            .unwrap();
+
+        app.update();
+
+        let status = app.world().resource::<HudStatus>();
+        assert_eq!(status.home_region, Some(RegionCoords::new(2, -1)));
+        assert_eq!(status.viewer_region, Some(RegionCoords::new(2, 0)));
+        assert_eq!(status.connection, ConnectionState::Ready);
     }
 }
