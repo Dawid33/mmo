@@ -10,10 +10,10 @@ use game::{ClientId, ClientUpdateEvent, GameEventKind};
 
 mod avatar;
 mod block_textures;
-mod bridge;
-mod hud;
+pub(crate) mod bridge;
+pub(crate) mod hud;
 pub mod convert;
-mod input;
+pub(crate) mod input;
 mod interpolate;
 pub mod meshing;
 mod voxel_material;
