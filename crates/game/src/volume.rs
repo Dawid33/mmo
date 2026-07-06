@@ -82,7 +82,7 @@ impl WriteVol for SubChunk {
     fn set(&mut self, pos: BlockPos, block: Block) -> Block {
         // Materialize on first write into an Air slice.
         if let SubChunk::Air = self {
-            *self = SubChunk::Dense(Box::new(Chunk::default()));
+            *self = SubChunk::Dense(Box::default());
         }
         let SubChunk::Dense(c) = self else { unreachable!() };
         let prev = c.block_at(pos.x as usize, pos.y as usize, pos.z as usize);
