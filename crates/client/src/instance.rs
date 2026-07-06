@@ -146,6 +146,12 @@ impl GameInstanceManager {
         self.home_region.expect("home region set")
     }
 
+    /// True once every buffered server event has been reconciled into a
+    /// loaded region (no snapshot still in flight). Test/harness hook.
+    pub fn pending_events_empty(&self) -> bool {
+        self.pending_events.values().all(|v| v.is_empty())
+    }
+
     /// Handle one client-side game event. Returns Ok(false) if the game
     /// should quit. Events arriving before the first region loads are
     /// dropped, matching the pre-refactor select! loop.

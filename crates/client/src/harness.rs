@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    ClientUpdateEvent, GameEventKind, InputEvent, Key, RegionCoords, ServerPacket,
+    state_hash, ClientUpdateEvent, GameEventKind, InputEvent, Key, RegionCoords, ServerPacket,
 };
 
 use crate::{GameInstanceManager, LocalServer, LOCAL_CLIENT_ID};
@@ -124,6 +124,104 @@ impl SimHarness {
     fn client_home(&self) -> RegionCoords {
         self.client.home_region()
     }
+
+    /// Step with no new input until the client has drained buffered server
+    /// events and its home-region tick has caught up to the server's. The
+    /// client predicts ahead of the server, so convergence checks are only
+    /// meaningful once both sides are aligned at the same tick.
+    pub fn settle(&mut self) {
+        for _ in 0..64 {
+            self.step();
+            if self.pending_events_empty() && self.client_tick() == self.server_tick(self.client_home())
+            {
+                return;
+            }
+        }
+        // Not fatal on its own; assertions below will surface a real divergence.
+    }
+
+    /// Bit-exact: every region both client and server hold must hash-match
+    /// after settling.
+    pub fn assert_converged(&mut self) {
+        self.settle();
+        for rc in self.client.world_ref().loaded_regions() {
+            if let Some(server_hash) = self.server_region_hash(rc) {
+                let client_hash = state_hash(self.client.world_ref().data(&rc));
+                assert_eq!(
+                    client_hash, server_hash,
+                    "client and server disagree on region {:?} after settle",
+                    rc
+                );
+            }
+        }
+    }
+
+    /// Liveness: holding `key` advances the sim tick AND moves the player body.
+    pub fn assert_progresses(&mut self, key: Key) {
+        let t0 = self.client_tick();
+        let p0 = self.player_pos();
+        self.press(key);
+        self.step_n(4);
+        self.release(key);
+        assert!(self.client_tick() > t0, "sim tick did not advance while holding {:?}", key);
+        assert!(self.player_pos() != p0, "player did not move while holding {:?} (input frozen?)", key);
+    }
+
+    pub fn player_region(&self) -> RegionCoords {
+        self.client.home_region()
+    }
+
+    /// Authoritative teleport for scenario setup (server-side, undo-safe).
+    pub fn teleport_player(&mut self, pos: [f32; 3]) {
+        self.server.teleport_local_player(pos);
+        self.settle();
+    }
+
+    /// Hold the movement key for `dir` and step (bounded) until the client's
+    /// home region changes — i.e. the player crossed a seam.
+    pub fn cross_boundary(&mut self, dir: Dir) {
+        let start = self.player_region();
+        let key = match dir {
+            Dir::North => Key::KeyW,
+            Dir::South => Key::KeyS,
+            Dir::East => Key::KeyD,
+            Dir::West => Key::KeyA,
+        };
+        // fps-cam must be on for movement; toggle it first.
+        self.press(Key::KeyE);
+        self.step();
+        self.release(Key::KeyE);
+        self.step();
+        self.press(key);
+        for _ in 0..400 {
+            self.step();
+            if self.player_region() != start {
+                break;
+            }
+        }
+        self.release(key);
+        assert_ne!(self.player_region(), start, "player never crossed a boundary");
+    }
+
+    // internal
+    fn server_tick(&mut self, rc: RegionCoords) -> usize {
+        self.server.region_tick(rc)
+    }
+    fn server_region_hash(&mut self, rc: RegionCoords) -> Option<u32> {
+        self.server.region_hash(rc)
+    }
+    pub fn pending_events_empty(&self) -> bool {
+        self.client.pending_events_empty()
+    }
+}
+
+/// Cardinal directions for `SimHarness::cross_boundary`.
+#[derive(Copy, Clone, Debug)]
+pub enum Dir {
+    East,
+    West,
+    North,
+    South,
 }
 
 impl Default for SimHarness {

@@ -121,6 +121,11 @@ impl World {
         self.regions.contains_key(id)
     }
 
+    /// All region ids currently loaded client-side. Test/harness hook.
+    pub fn loaded_regions(&self) -> Vec<RegionCoords> {
+        self.regions.keys().copied().collect()
+    }
+
     pub fn data(&self, id: &RegionId) -> &Rollback {
         self.regions.get(id).unwrap().data()
     }

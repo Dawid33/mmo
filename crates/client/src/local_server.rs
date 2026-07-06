@@ -88,6 +88,46 @@ impl LocalServer {
             let _ = self.send.send(packet);
         }
     }
+
+    /// Current sim tick of a running region, or 0 if it isn't running
+    /// (not yet spawned / already cycled out). Test/harness hook.
+    pub fn region_tick(&mut self, rc: RegionCoords) -> usize {
+        let mut tick = 0;
+        self.manager.spawner_mut().with_region(rc, |r| tick = r.current_tick());
+        tick
+    }
+
+    /// Bit-exact state hash of a running region's authoritative data, via
+    /// the same `game::state_hash` the rollback log uses. Test/harness hook.
+    pub fn region_hash(&mut self, rc: RegionCoords) -> Option<u32> {
+        let mut hash = None;
+        self.manager
+            .spawner_mut()
+            .with_region(rc, |r| hash = Some(game::state_hash(r.data())));
+        hash
+    }
+
+    /// Authoritative teleport of the single local player, wherever its home
+    /// region currently runs. Undo-safe (`Region::with_data` runs the pose
+    /// mutation in its own forgotten transaction). Test/harness hook.
+    pub fn teleport_local_player(&mut self, pos: [f32; 3]) {
+        let pose = game::IsometryReal::from_parts(
+            game::na::Translation3::new(pos[0].into(), pos[1].into(), pos[2].into()),
+            game::na::Unit::<game::na::Quaternion<game::parry::math::Real>>::identity(),
+        );
+        for rc in self.manager.spawner_mut().running() {
+            let mut found = false;
+            self.manager.spawner_mut().with_region(rc, |r| {
+                if let Some(key) = r.data().player_entites.get(&LOCAL_CLIENT_ID).copied() {
+                    r.with_data(|d| d.set_body_pose_safe(key, pose));
+                    found = true;
+                }
+            });
+            if found {
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

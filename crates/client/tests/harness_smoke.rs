@@ -33,3 +33,23 @@ fn releasing_a_key_stops_the_player() {
     let b = h.player_pos();
     assert_eq!(a, b, "player must stop after key release (up-edge sent)");
 }
+
+#[test]
+fn static_world_converges_client_and_server() {
+    let mut h = SimHarness::new();
+    h.connect();
+    h.step_n(30); // no input; both sides advance
+    h.assert_converged(); // client home-region state == server home-region state, bit-exact
+}
+
+#[test]
+fn held_input_moves_the_player() {
+    let mut h = SimHarness::new();
+    h.connect();
+    // fps-cam on (KeyE), let it take effect, then walk.
+    h.press(game::Key::KeyE);
+    h.step();
+    h.release(game::Key::KeyE);
+    h.step();
+    h.assert_progresses(game::Key::KeyW); // holding W advances tick AND moves the body
+}
