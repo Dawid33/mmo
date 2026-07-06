@@ -166,6 +166,7 @@ fn spawn_region_snapshot(
                             Projection::Perspective(perspective_to_projection(&cam.proj_matrix)),
                             tf,
                             SimTarget::camera(tf.translation, tf.rotation),
+                            bevy::ui::IsDefaultUiCamera,
                         ));
                     }
                 }
@@ -254,6 +255,7 @@ pub fn drain_region_updates(
                             Projection::Perspective(perspective_to_projection(&proj)),
                             tf,
                             SimTarget::camera(tf.translation, tf.rotation),
+                            bevy::ui::IsDefaultUiCamera,
                         ));
                     } else {
                         // Another player's camera: track its pose so the
@@ -447,6 +449,10 @@ mod tests {
 
         let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).unwrap();
         assert!(app.world().entity(e).contains::<Camera3d>());
+        assert!(
+            app.world().entity(e).contains::<bevy::ui::IsDefaultUiCamera>(),
+            "local player's camera must be the default UI camera"
+        );
         let Projection::Perspective(p) = app.world().entity(e).get::<Projection>().unwrap() else {
             panic!("expected perspective projection");
         };
