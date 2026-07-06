@@ -164,8 +164,28 @@ impl SimHarness {
     /// that region (the client is an exact but ~1-tick-delayed mirror — see
     /// `server_hashes`). Fails if a held region diverges, or if nothing could
     /// be tick-aligned at all (convergence would otherwise be vacuous).
+    ///
+    /// Right after a boundary crossing the just-flipped home region can be
+    /// bit-inexact for a FEW ticks — the spec-accepted transient flip-tick
+    /// rubber-band (docs/superpowers/2026-07-06-seamless-local-crossing-followup.md),
+    /// which reconciles within ~1 tick once input stops. `settle()` returns as
+    /// soon as `pending_events_empty()` (true at the flip tick), so before the
+    /// strict check we step idle up to a small bound to let that transient
+    /// heal. This does NOT weaken the check — it still demands bit-exact
+    /// agreement; it only permits the documented, bounded reconciliation the
+    /// authority guarantees. Callers must not hold input across this call (the
+    /// heal steps are meant to be idle); the tests release before asserting.
+    /// A genuinely non-healing divergence (e.g. input held indefinitely across
+    /// a seam) still exhausts the bound and fails loudly below.
     pub fn assert_converged(&mut self) {
         self.settle();
+        const HEAL_BOUND: usize = 8;
+        for _ in 0..HEAL_BOUND {
+            if self.home_converged_now() == Some(true) {
+                break;
+            }
+            self.step();
+        }
         let home = self.client.home_region();
         let mut home_checked = false;
         for rc in self.client.world_ref().loaded_regions() {
@@ -282,6 +302,16 @@ impl SimHarness {
     /// (`state_hash(h.client_home_data())`).
     pub fn client_home_data(&self) -> &game::Rollback {
         self.client.world_ref().data(&self.client.home_region())
+    }
+
+    /// Does the client's home region currently match the server's authoritative
+    /// hash recorded at the client's home tick? `Some(true|false)`, or `None` if
+    /// the server never recorded that region at that tick.
+    fn home_converged_now(&self) -> Option<bool> {
+        let home = self.client.home_region();
+        let t = self.client.world_ref().current_tick(&home);
+        let ch = state_hash(self.client.world_ref().data(&home));
+        self.server_hashes.get(&(home, t)).map(|&sh| ch == sh)
     }
 }
 
