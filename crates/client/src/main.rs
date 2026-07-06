@@ -64,6 +64,8 @@ pub struct GameInstanceManager {
     /// Events for subscribed regions whose snapshot hasn't arrived yet.
     pending_events: BTreeMap<RegionCoords, Vec<GameEvent>>,
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
+    /// Last HUD status sent, for edge-triggered emission (avoid channel spam).
+    last_hud_status: Option<(RegionCoords, RegionCoords, game::ConnectionState)>,
 }
 
 /// The client's desired subscription set: the 3x3 window around the viewer,
@@ -116,6 +118,7 @@ impl GameInstanceManager {
             subscribed: std::collections::BTreeSet::new(),
             pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
+            last_hud_status: None,
         }
     }
 
@@ -243,6 +246,7 @@ impl GameInstanceManager {
                 return Ok(false);
             }
         }
+        self.emit_hud_status();
         Ok(true)
     }
 
@@ -296,6 +300,37 @@ impl GameInstanceManager {
         let off = home.world_offset();
         // Real = OrderedFloat<f32>; .0 unwraps to f32 (same as convert.rs).
         Some(RegionCoords::from_world(t.x.0 + off[0], t.z.0 + off[2]))
+    }
+
+    /// Current connection/sync state for the HUD, from the ready flags.
+    fn connection_state(&self) -> game::ConnectionState {
+        if !self.ready {
+            game::ConnectionState::Connecting
+        } else if !self.is_caught_up {
+            game::ConnectionState::CatchingUp
+        } else {
+            game::ConnectionState::Ready
+        }
+    }
+
+    /// Push region + connection status to the render bridge, but only when it
+    /// changed since the last push (edge-triggered). No-op until we know our
+    /// home region and can resolve the viewer region.
+    fn emit_hud_status(&mut self) {
+        let (Some(home), Some(viewer)) = (self.home_region, self.viewer_region()) else {
+            return;
+        };
+        let conn = self.connection_state();
+        let snapshot = (home, viewer, conn);
+        if self.last_hud_status == Some(snapshot) {
+            return;
+        }
+        self.last_hud_status = Some(snapshot);
+        let _ = self.client_event_send.send(ClientUpdateEvent::HudStatus {
+            home_region: home,
+            viewer_region: viewer,
+            connection: conn,
+        });
     }
 
     /// Diff the desired window against current subscriptions; request
@@ -514,6 +549,7 @@ impl GameInstanceManager {
                     }
                 }
             }
+            self.emit_hud_status();
         }
     }
 }
@@ -1462,5 +1498,39 @@ mod manager_tests {
             client_hash, server_hash,
             "client B state must bit-match the authoritative B (legit inputs integrated)"
         );
+    }
+
+    #[test]
+    fn connection_state_maps_ready_flags() {
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, _client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
+        let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+        let mut manager =
+            GameInstanceManager::new(game_send, game_recv, client_send, dummy_addr);
+
+        manager.ready = false;
+        manager.is_caught_up = false;
+        assert_eq!(manager.connection_state(), game::ConnectionState::Connecting);
+
+        manager.ready = true;
+        manager.is_caught_up = false;
+        assert_eq!(manager.connection_state(), game::ConnectionState::CatchingUp);
+
+        manager.ready = true;
+        manager.is_caught_up = true;
+        assert_eq!(manager.connection_state(), game::ConnectionState::Ready);
+    }
+
+    #[test]
+    fn emit_hud_status_noop_without_home() {
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
+        let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+        let mut manager =
+            GameInstanceManager::new(game_send, game_recv, client_send, dummy_addr);
+
+        // No home_region / world yet: nothing to report, no event sent.
+        manager.emit_hud_status();
+        assert!(client_recv.try_recv().is_err());
     }
 }

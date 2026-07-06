@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 mod avatar;
 mod bridge;
+mod hud;
 pub mod convert;
 mod input;
 mod interpolate;
@@ -38,13 +39,17 @@ pub struct SimBridgePlugin {
 
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default())
+        app.add_plugins((
+                MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default(),
+                bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
+            ))
             .insert_resource(ClientUpdates(self.client_recv.clone()))
             .insert_resource(GameEvents(self.game_send.clone()))
             .init_resource::<LocalPlayer>()
             .init_resource::<bridge::Regions>()
             .init_resource::<bridge::RegionRoots>()
             .init_resource::<bridge::SimEntityMap>()
+            .init_resource::<hud::HudStatus>()
             .init_resource::<avatar::AvatarAssets>()
             .add_systems(
                 PreUpdate,
@@ -54,7 +59,7 @@ impl Plugin for SimBridgePlugin {
                 )
                     .chain(),
             )
-            .add_systems(Startup, setup_scene)
+            .add_systems(Startup, (setup_scene, hud::setup_hud))
             .add_systems(
                 Update,
                 (
@@ -62,6 +67,9 @@ impl Plugin for SimBridgePlugin {
                     meshing::apply_meshed_chunks,
                     interpolate::interpolate_transforms,
                     avatar::attach_avatars,
+                    hud::toggle_debug,
+                    hud::update_debug_text,
+                    hud::update_crosshair_visibility,
                 ),
             );
     }
@@ -214,6 +222,17 @@ fn setup_scene(
 #[cfg(test)]
 mod tests {
     use super::{resolve_blocks_dir, EMBEDDED_BLOCK_TEXTURES};
+
+    #[test]
+    fn bevy_ui_features_enabled() {
+        // Compiles only if bevy_ui / bevy_text features are on. Constructing the
+        // types (not rendering) is enough to prove the feature gate.
+        use bevy::prelude::*;
+        let _node = Node::default();
+        let _text = Text::new("hud");
+        let _white = BackgroundColor(Color::WHITE);
+        let _mark = bevy::ui::IsDefaultUiCamera;
+    }
 
     #[test]
     fn embedded_block_textures_match_assets_dir() {

@@ -40,6 +40,17 @@ pub use world_manager::*;
 pub const TICK_RATE: u64 = 50;
 pub const INDUCED_LATENCY: isize = 0;
 
+/// Connection/sync state surfaced to the client HUD. Derived from the
+/// manager's `ready`/`is_caught_up` flags; pure `game` type so the enum can
+/// cross the Bevy-free boundary in `ClientUpdateEvent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConnectionState {
+    #[default]
+    Connecting,
+    CatchingUp,
+    Ready,
+}
+
 #[derive(Debug)]
 pub enum ClientUpdateEvent {
     NewRegion(
@@ -52,6 +63,13 @@ pub enum ClientUpdateEvent {
     RemoveRegion(RegionId),
     GameCrash(GameError),
     SetPlayer(ClientId),
+    /// Region + connection status for the debug HUD. Edge-triggered by the
+    /// manager (only sent on change); consumed by the render bridge.
+    HudStatus {
+        home_region: RegionId,
+        viewer_region: RegionId,
+        connection: ConnectionState,
+    },
 }
 
 pub use region::Region;
@@ -175,5 +193,30 @@ impl World {
 
     pub fn get_region_data(&self, region_id: &RegionId) -> Rollback {
         self.regions.get(&region_id).unwrap().data().clone()
+    }
+}
+
+#[cfg(test)]
+mod hud_status_tests {
+    use super::*;
+
+    #[test]
+    fn connection_state_default_is_connecting() {
+        assert_eq!(ConnectionState::default(), ConnectionState::Connecting);
+    }
+
+    #[test]
+    fn hud_status_variant_constructs() {
+        let ev = ClientUpdateEvent::HudStatus {
+            home_region: RegionCoords::new(1, 2),
+            viewer_region: RegionCoords::new(1, 3),
+            connection: ConnectionState::Ready,
+        };
+        match ev {
+            ClientUpdateEvent::HudStatus { connection, .. } => {
+                assert_eq!(connection, ConnectionState::Ready);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }
