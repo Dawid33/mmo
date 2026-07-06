@@ -300,6 +300,25 @@ impl GameInstanceManager {
         Some(RegionCoords::from_world(t.x.0 + off[0], t.z.0 + off[2]))
     }
 
+    /// Local player's body translation in its home region's local space
+    /// (region-local; enough for movement-delta assertions). `None` until the
+    /// player entity + body exist in a loaded home region. Test/harness hook.
+    pub fn local_player_translation(&self) -> Option<[f32; 3]> {
+        let home = self.home_region?;
+        let world = self.world.as_ref()?;
+        if !world.region_exists(&home) {
+            return None;
+        }
+        let data = world.data(&home);
+        let client_id = self.client_id?;
+        let key = data.player_entites.get(&client_id).copied()?;
+        let handle = (*data.ecs.rigidbody.try_get(key))?;
+        let body = data.physics.bodies.get(handle)?;
+        let t = body.translation();
+        // Real = OrderedFloat<f32>; .0 unwraps to f32 (as convert.rs / viewer_region).
+        Some([t.x.0, t.y.0, t.z.0])
+    }
+
     /// Current connection/sync state for the HUD, from the ready flags.
     fn connection_state(&self) -> game::ConnectionState {
         if !self.ready {

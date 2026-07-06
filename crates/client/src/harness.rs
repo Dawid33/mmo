@@ -18,6 +18,11 @@ pub struct SimHarness {
     server_to_client: Receiver<ServerPacket>,
     _bridge_recv: Receiver<ClientUpdateEvent>,
     held: BTreeSet<Key>,
+    /// Keys released since the last `step()`, awaiting their one-shot key-up
+    /// edge. The sim's `InputState` only leaves `Held` on a `pressed:false`
+    /// event, so a release MUST send that edge or the key stays held forever
+    /// (movement reads `key_held`).
+    released: BTreeSet<Key>,
 }
 
 impl SimHarness {
@@ -35,7 +40,14 @@ impl SimHarness {
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();
         let server = LocalServer::new(client_to_server, server_to_client_send).expect("local server");
 
-        Self { server, client, server_to_client, _bridge_recv: bridge_recv, held: BTreeSet::new() }
+        Self {
+            server,
+            client,
+            server_to_client,
+            _bridge_recv: bridge_recv,
+            held: BTreeSet::new(),
+            released: BTreeSet::new(),
+        }
     }
 
     /// Handshake: client requests its region; pump until the home region
@@ -53,18 +65,32 @@ impl SimHarness {
         self.held.insert(key);
     }
     pub fn release(&mut self, key: Key) {
-        self.held.remove(&key);
+        // Only queue an up-edge if it was actually held, so release() without a
+        // prior press() is a no-op (matches real edge-triggered input).
+        if self.held.remove(&key) {
+            self.released.insert(key);
+        }
     }
 
     /// One deterministic tick: client predict -> server ingest+tick -> client reconcile.
     pub fn step(&mut self) {
-        // 1. Client input + predict.
+        // 1. Client input + predict. Held keys re-send `pressed:true` each tick
+        // (idempotent: InputState treats repeated press on a Held key as a
+        // no-op); released keys send exactly one `pressed:false` up-edge so the
+        // sim actually stops treating them as held.
         for &key in &self.held {
             let _ = self.client.push_game_event(GameEventKind::PlayerInput(
                 LOCAL_CLIENT_ID,
                 InputEvent::Key { key, pressed: true },
             ));
         }
+        for &key in &self.released {
+            let _ = self.client.push_game_event(GameEventKind::PlayerInput(
+                LOCAL_CLIENT_ID,
+                InputEvent::Key { key, pressed: false },
+            ));
+        }
+        self.released.clear();
         self.client.send_tick();
         self.client.pump(&self.server_to_client).expect("client pump");
 
@@ -89,6 +115,11 @@ impl SimHarness {
     }
     pub fn client_region_loaded(&self, rc: RegionCoords) -> bool {
         self.client.world_ref().region_exists(&rc)
+    }
+    /// Local player's body translation (region-local). Panics if called before
+    /// the player exists (i.e. before `connect`).
+    pub fn player_pos(&self) -> [f32; 3] {
+        self.client.local_player_translation().expect("player exists after connect")
     }
     fn client_home(&self) -> RegionCoords {
         self.client.home_region()
