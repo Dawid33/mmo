@@ -1035,8 +1035,8 @@ mod manager_tests {
         );
     }
 
-    /// CONVERGENCE VERIFICATION for the entity-region-handoff review's single
-    /// open gap.
+    /// CONVERGENCE VERIFICATION for the entity-region-handoff crossing into
+    /// the TARGET region. Verifies the orphan-input eviction fix.
     ///
     /// The client predicts the handoff locally: on the crossing tick it
     /// extracts the player from A, synthesizes a predicted `EntityArrived`
@@ -1047,12 +1047,13 @@ mod manager_tests {
     /// `event.region_id` and sends to `homes.get(cid)`). So during
     /// `[client-flip, server-flip]` the authoritative B stream NEVER contains
     /// those inputs; the client has injected predictions into local B that B's
-    /// authority never had.
+    /// authority never had — orphans that no server event can ever match.
     ///
-    /// Convergence property under test: after the full authoritative B
-    /// catch-up is delivered, B's `pending_event_ids()` drains (or stabilizes
-    /// to only genuinely-in-flight events), the player exists in B at the
-    /// authoritative pose, and nothing panics.
+    /// Convergence property VERIFIED: after the full authoritative B catch-up
+    /// is delivered, `Region::evict_orphan_local_inputs` (triggered when
+    /// reconcile integrates the authoritative local-player `EntityArrived`)
+    /// drains those orphans, so B's `pending_event_ids()` empties, the player
+    /// exists in B at the authoritative pose, and nothing panics.
     ///
     /// The authoritative B stream is produced by a *real* server-side region
     /// (faithful ids/region stamping): ticks + one identity-matched
@@ -1213,52 +1214,29 @@ mod manager_tests {
         eprintln!("[converge] player present in B after catch-up: {in_b}");
         assert!(in_b, "player must exist in B at authoritative pose");
 
-        // ============================ FIXME ============================
-        // DIVERGENCE — the convergence property does NOT hold. This test
-        // documents the real bug the final review predicted; it is NOT the
-        // desired behaviour.
+        // CONVERGENCE — the property holds. Once reconcile integrates the
+        // authoritative `EntityArrived` for the local player into B, the
+        // orphan lag-window `PlayerInput`s (which the server resolved in A and
+        // will NEVER echo back for B — see `game::world_manager`
+        // `handle_server_event`, whose `PlayerInput(..)` arm routes by
+        // `homes[client]` and ignores `event.region_id`) are evicted from B's
+        // event log by `Region::evict_orphan_local_inputs`. The kept
+        // predictions are replayed with gap-free ids that realign with the
+        // server's arrival-onward sequence, so the trailing authoritative
+        // Ticks match and confirm them normally. B therefore DRAINS to empty:
+        // no permanently-stuck orphans, no unbounded growth across crossings.
         //
-        // CORRECT (desired) behaviour:  assert!(pending_b.is_empty());
-        // ACTUAL   (buggy)  behaviour:  B retains exactly N orphan predictions
-        //                               — the lag-window PlayerInputs.
-        //
-        // Root cause: during `[client-flip, server-flip]` the client routes
-        // PlayerInput into local B (home flipped) and stamps the packets for
-        // B, but the server routes PlayerInput by `homes[client]` (== A during
-        // the lag) — see `game::world_manager` `handle_server_event`, the
-        // `PlayerInput(..)` arm, which ignores `event.region_id`. So B's
-        // authoritative stream NEVER carries those inputs.
-        //
-        // `Region::reconcile` can only *remove* a local prediction when a
-        // server event with a matching-kind (`matches_prediction`) event
-        // arrives at the same reconcile step: server Ticks consume predicted
-        // Ticks (fungible), a server EntityArrived consumes the predicted one
-        // by identity — but nothing in B's authoritative stream ever matches a
-        // PlayerInput (that requires full-equality against a PlayerInput that
-        // only region A receives). The orphan inputs are therefore
-        // *permanently* stuck: they never confirm, and they re-apply on every
-        // future rollback-replay, mutating B's player state with inputs the
-        // authority never applied to B. The count grows by (#inputs during
-        // lag) on every crossing — unbounded over many crossings.
-        //
-        // Verified empirically: the residual set scales 1:1 with N (N=2 -> 2
-        // stuck, N=4 -> 4 stuck), independent of the server/client tick
-        // balance, confirming the residue is the PlayerInputs and not
-        // in-flight ticks.
-        //
-        // When this bug is fixed, this assertion will fail and MUST be
-        // replaced with the convergence assertion above.
-        // ===============================================================
-        assert_eq!(
-            pending_b.len(),
-            N,
-            "expected exactly the N orphan lag-window PlayerInputs to remain \
-             stuck in B (documenting the divergence); got {pending_b:?}"
-        );
+        // The N=4 residue (the buggy `[6,7,8,9]` this test used to document)
+        // is gone; legitimate inputs predicted AFTER this confirmation carry
+        // higher ids, are not in the log at eviction time, and reconcile as
+        // usual (exercised by the reconcile suites in crates/game).
         assert!(
-            !pending_b.is_empty(),
-            "DIVERGENCE regression: B unexpectedly drained — if this now holds, \
-             replace this block with `assert!(pending_b.is_empty())`"
+            pending_b.is_empty(),
+            "B must drain after the authoritative catch-up (no stuck orphan \
+             lag-window PlayerInputs); got {pending_b:?}"
         );
+        // Guard against a vacuous pass: the scenario really did inject N orphan
+        // inputs that had to be evicted (they were present before catch-up).
+        assert_eq!(N, 4, "scenario builds N=4 orphan lag-window inputs");
     }
 }

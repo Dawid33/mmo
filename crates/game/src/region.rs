@@ -81,10 +81,23 @@ impl Region {
             return Ok(());
         }
 
+        // Set when this reconcile pass integrates the AUTHORITATIVE arrival of
+        // the local player into this region (the server-confirmed handoff).
+        // Triggers eviction of the orphan lag-window inputs below.
+        let mut applied_local_arrival = false;
+
         'outer: while !self.input_buffer.is_empty() && !self.event_log.is_empty() {
             if let Some(server_event) = self.input_buffer.pop() {
                 if let Some(event) = self.event_log.pop_front() {
                     if event.id == server_event.0.id {
+                        if let GameEventKind::EntityArrived(bundle) = &server_event.0.kind {
+                            let is_local = self.local_client_id.is_some()
+                                && bundle.client.as_ref().map(|(c, _)| *c)
+                                    == self.local_client_id;
+                            if is_local {
+                                applied_local_arrival = true;
+                            }
+                        }
                         if event != server_event.0 {
                             self.event_log.push_front(event);
                             let mut temp_log = self.event_log.clone();
@@ -157,7 +170,55 @@ impl Region {
             }
         }
 
+        if applied_local_arrival {
+            self.evict_orphan_local_inputs();
+        }
+
         Ok(())
+    }
+
+    /// Client-only: the authoritative handoff of the LOCAL player into this
+    /// region has just been confirmed (reconcile integrated the server's
+    /// `EntityArrived` for our client). The local-player `PlayerInput`s still
+    /// pending in this region's event log were predicted during the flip RTT,
+    /// while the server still routed our inputs to the SOURCE region by
+    /// `homes`. Those inputs resolved in the source and will NEVER echo back
+    /// for this region, so no server event can ever match/remove them: they
+    /// are orphans that would otherwise re-apply on every future rollback and
+    /// accumulate on every crossing. Evict them; the arrival bundle already
+    /// carries the post-window pose (the source applied them before extraction).
+    ///
+    /// Legitimate inputs predicted AFTER this confirmation carry higher ids,
+    /// are not yet in the log at this point, and reconcile normally.
+    ///
+    /// Removal reuses the exact-inverse rollback machinery: roll every pending
+    /// prediction back (each is one un-forgotten transaction, which also
+    /// rewinds `next_game_event_id` to the first pending slot), then replay the
+    /// non-orphan tail. The replayed events re-append with fresh, gap-free ids
+    /// that mirror the server's arrival-onward sequence — closing the id holes
+    /// the orphans left so later authoritative events still match. State stays
+    /// hash-exact because every mutation goes through the same logged deltas.
+    fn evict_orphan_local_inputs(&mut self) {
+        let Some(local) = self.local_client_id else { return };
+        let is_orphan = |e: &GameEvent| {
+            matches!(&e.kind, GameEventKind::PlayerInput(cid, _) if *cid == local)
+        };
+        if !self.event_log.iter().any(is_orphan) {
+            return;
+        }
+
+        let kept_kinds: Vec<GameEventKind> = self
+            .event_log
+            .iter()
+            .filter(|e| !is_orphan(e))
+            .map(|e| e.kind.clone())
+            .collect();
+        while self.event_log.pop_back().is_some() {
+            self.data.rollback();
+        }
+        for kind in kept_kinds {
+            let _ = self.handle_event(kind);
+        }
     }
 
     /// Handle a client event.
