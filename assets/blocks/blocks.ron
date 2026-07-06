@@ -1,0 +1,15 @@
+// Block registry. `id` is explicit and STABLE — never renumber an existing
+// block; only append. id 0 must be `air` / Untextured. Texture paths are
+// relative to assets/blocks/. Faces = per-face (top/side/bottom); the shader
+// picks the slot by face normal. Missing textures render as the layer-0
+// magenta/black "missing texture" checkerboard.
+(
+    blocks: [
+        (id: 0, name: "air",   textures: Untextured),
+        (id: 1, name: "dirt",  textures: All("dirt.png")),
+        (id: 2, name: "stone", textures: All("dirt.png")), // placeholder art until stone.png exists
+        // Per-face example — drop grass_top.png / grass_side.png into
+        // assets/blocks/ and uncomment:
+        // (id: 3, name: "grass", textures: Faces(top: "grass_top.png", side: "grass_side.png", bottom: "dirt.png")),
+    ],
+)
