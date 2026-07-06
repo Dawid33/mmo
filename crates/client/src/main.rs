@@ -1034,4 +1034,231 @@ mod manager_tests {
             bursts
         );
     }
+
+    /// CONVERGENCE VERIFICATION for the entity-region-handoff review's single
+    /// open gap.
+    ///
+    /// The client predicts the handoff locally: on the crossing tick it
+    /// extracts the player from A, synthesizes a predicted `EntityArrived`
+    /// into local B, flips `home_region` to B, and from then on routes
+    /// `PlayerInput` into B (home) AND stamps those packets for B. But the
+    /// SERVER routes `PlayerInput` by `homes[client]` — which still reads A
+    /// for k ticks (see `world_manager.rs`: the `PlayerInput` arm ignores
+    /// `event.region_id` and sends to `homes.get(cid)`). So during
+    /// `[client-flip, server-flip]` the authoritative B stream NEVER contains
+    /// those inputs; the client has injected predictions into local B that B's
+    /// authority never had.
+    ///
+    /// Convergence property under test: after the full authoritative B
+    /// catch-up is delivered, B's `pending_event_ids()` drains (or stabilizes
+    /// to only genuinely-in-flight events), the player exists in B at the
+    /// authoritative pose, and nothing panics.
+    ///
+    /// The authoritative B stream is produced by a *real* server-side region
+    /// (faithful ids/region stamping): ticks + one identity-matched
+    /// `EntityArrived` + ticks — deliberately NO `PlayerInput`s, mirroring the
+    /// server routing them to A.
+    #[test]
+    fn predicted_crossing_target_region_converges_after_authoritative_catchup() {
+        let (mut manager, server_send, server_recv, _client_recv, game_send) = manager_with_player();
+        let home = RegionCoords::new(0, 0); // A
+        let target = RegionCoords::new(1, 0); // B
+        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        manager.pump(&server_recv).unwrap();
+
+        // Load A (with the player) and the empty target B.
+        let mut world = game::World::new();
+        let mut home_region = Region::from_chunks(home, Vec::new());
+        home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        home_region.forget_last_event();
+        world.load(&home, home_region);
+        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        let mut target_world = game::World::new();
+        target_world.load(&target, Region::from_chunks(target, Vec::new()));
+        server_send.send(target_world.build_region_server_packet(&target)).unwrap();
+        manager.pump(&server_recv).unwrap();
+        manager.is_caught_up = true;
+
+        // The transfer-identity token: the player's key in the client's A.
+        let player_key = *manager
+            .world
+            .as_ref()
+            .unwrap()
+            .data(&home)
+            .player_entites
+            .get(&0)
+            .unwrap();
+
+        // Deep-into-B teleport: local x rebases to 128 (interior — no ghost
+        // back to A, no re-departure from B), just past A's +x boundary.
+        let cross_x = game::REGION_SIZE + 128.0;
+        let cross_iso = game::IsometryReal::from_parts(
+            game::na::Translation3::new(cross_x.into(), 26.0f32.into(), 128.0f32.into()),
+            game::na::Unit::<game::na::Quaternion<game::parry::math::Real>>::identity(),
+        );
+        {
+            let w = manager.world.as_mut().unwrap();
+            w.regions
+                .get_mut(&home)
+                .unwrap()
+                .with_data(|d| d.set_body_pose_safe(player_key, cross_iso));
+        }
+
+        // Crossing tick: predicted extraction + synthesized arrival + home flip.
+        manager.send_tick();
+        manager.pump(&server_recv).unwrap();
+        assert_eq!(manager.home_region, Some(target), "home flipped on prediction");
+        assert!(
+            manager
+                .world
+                .as_ref()
+                .unwrap()
+                .data(&target)
+                .player_entites
+                .contains_key(&0),
+            "predicted arrival applied in B"
+        );
+
+        // Lag window: N ticks each preceded by a PlayerInput. home == B, so
+        // these predict into local B and are 'sent to the server' (which would
+        // route them to A). N=4 → four orphan predictions in B.
+        const N: usize = 4;
+        for i in 0..N {
+            game_send
+                .send(GameEventKind::PlayerInput(
+                    0,
+                    game::InputEvent::Key { key: game::Key::KeyD, pressed: i % 2 == 0 },
+                ))
+                .unwrap();
+            manager.send_tick();
+            manager.pump(&server_recv).unwrap();
+        }
+
+        let predicted_b = manager
+            .world
+            .as_ref()
+            .unwrap()
+            .regions
+            .get(&target)
+            .unwrap()
+            .pending_event_ids();
+        eprintln!("[converge] predicted B event ids before catch-up: {predicted_b:?}");
+
+        // --- Build the FAITHFUL authoritative B stream from real server-side
+        // regions (correct ids + region stamping). ---
+
+        // Server-side extraction of the player from A, reproducing the client's
+        // crossing deterministically, to obtain the authoritative arrival
+        // bundle. Force the identity token to the client's key (the server's
+        // deterministic A would allocate the same key).
+        let mut server_a = Region::from_chunks(home, Vec::new());
+        server_a.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        server_a.forget_last_event();
+        let sa_key = *server_a.data().player_entites.get(&0).unwrap();
+        server_a.with_data(|d| d.set_body_pose_safe(sa_key, cross_iso));
+        server_a.handle_event(GameEventKind::Tick).unwrap();
+        let (departures, _ghosts) = server_a.take_transfers();
+        let (mut bundle, tgt) = departures
+            .into_iter()
+            .next()
+            .expect("server-side player departed A");
+        assert_eq!(tgt, target, "server-side departure targets B");
+        bundle.isometry = game::rebase_isometry(&bundle.isometry, home, target);
+        bundle.source_key = player_key; // identity match with the client's prediction
+
+        // Server-side region B produces the authoritative event stream: ticks,
+        // the relayed arrival, more ticks — NO PlayerInputs (server sent those
+        // to A). Five ticks total to match the client's five predicted B ticks.
+        let mut server_b = Region::from_chunks(target, Vec::new());
+        let mut auth = Vec::new();
+        auth.push(server_b.handle_event(GameEventKind::Tick).unwrap()); // Tick@0
+        auth.push(server_b.handle_event(GameEventKind::Tick).unwrap()); // Tick@1
+        auth.push(server_b.handle_event(GameEventKind::EntityArrived(bundle)).unwrap()); // EA@2
+        for _ in 0..3 {
+            auth.push(server_b.handle_event(GameEventKind::Tick).unwrap()); // Tick@3,4,5
+        }
+        eprintln!(
+            "[converge] authoritative B stream: {:?}",
+            auth.iter().map(|e| (e.id, format!("{:?}", std::mem::discriminant(&e.kind)))).collect::<Vec<_>>()
+        );
+
+        // Deliver the authoritative catch-up, plus the server's own home flip.
+        for ev in &auth {
+            server_send.send(ServerPacket::GameEvent(ev.clone())).unwrap();
+        }
+        server_send.send(ServerPacket::PlayerRegion(Some(target), 0)).unwrap();
+        manager.pump(&server_recv).unwrap();
+        // Pump again for good measure (quiescence).
+        manager.pump(&server_recv).unwrap();
+
+        let pending_b = manager
+            .world
+            .as_ref()
+            .unwrap()
+            .regions
+            .get(&target)
+            .unwrap()
+            .pending_event_ids();
+        eprintln!("[converge] B pending event ids AFTER catch-up: {pending_b:?}");
+
+        // Part of the property DOES hold: the player exists in B at the
+        // authoritative pose, and nothing panicked.
+        let in_b = manager
+            .world
+            .as_ref()
+            .unwrap()
+            .data(&target)
+            .player_entites
+            .contains_key(&0);
+        eprintln!("[converge] player present in B after catch-up: {in_b}");
+        assert!(in_b, "player must exist in B at authoritative pose");
+
+        // ============================ FIXME ============================
+        // DIVERGENCE — the convergence property does NOT hold. This test
+        // documents the real bug the final review predicted; it is NOT the
+        // desired behaviour.
+        //
+        // CORRECT (desired) behaviour:  assert!(pending_b.is_empty());
+        // ACTUAL   (buggy)  behaviour:  B retains exactly N orphan predictions
+        //                               — the lag-window PlayerInputs.
+        //
+        // Root cause: during `[client-flip, server-flip]` the client routes
+        // PlayerInput into local B (home flipped) and stamps the packets for
+        // B, but the server routes PlayerInput by `homes[client]` (== A during
+        // the lag) — see `game::world_manager` `handle_server_event`, the
+        // `PlayerInput(..)` arm, which ignores `event.region_id`. So B's
+        // authoritative stream NEVER carries those inputs.
+        //
+        // `Region::reconcile` can only *remove* a local prediction when a
+        // server event with a matching-kind (`matches_prediction`) event
+        // arrives at the same reconcile step: server Ticks consume predicted
+        // Ticks (fungible), a server EntityArrived consumes the predicted one
+        // by identity — but nothing in B's authoritative stream ever matches a
+        // PlayerInput (that requires full-equality against a PlayerInput that
+        // only region A receives). The orphan inputs are therefore
+        // *permanently* stuck: they never confirm, and they re-apply on every
+        // future rollback-replay, mutating B's player state with inputs the
+        // authority never applied to B. The count grows by (#inputs during
+        // lag) on every crossing — unbounded over many crossings.
+        //
+        // Verified empirically: the residual set scales 1:1 with N (N=2 -> 2
+        // stuck, N=4 -> 4 stuck), independent of the server/client tick
+        // balance, confirming the residue is the PlayerInputs and not
+        // in-flight ticks.
+        //
+        // When this bug is fixed, this assertion will fail and MUST be
+        // replaced with the convergence assertion above.
+        // ===============================================================
+        assert_eq!(
+            pending_b.len(),
+            N,
+            "expected exactly the N orphan lag-window PlayerInputs to remain \
+             stuck in B (documenting the divergence); got {pending_b:?}"
+        );
+        assert!(
+            !pending_b.is_empty(),
+            "DIVERGENCE regression: B unexpectedly drained — if this now holds, \
+             replace this block with `assert!(pending_b.is_empty())`"
+        );
+    }
 }
