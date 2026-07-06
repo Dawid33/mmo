@@ -40,6 +40,16 @@ pub use world_manager::*;
 pub const TICK_RATE: u64 = 50;
 pub const INDUCED_LATENCY: isize = 0;
 
+/// Deterministic, cross-machine-stable hash of a rollback's simulation state.
+/// crc32fast (not a default-seeded DefaultHasher) so it is identical across
+/// runs/machines — the basis for client/server convergence assertions in tests.
+pub fn state_hash(r: &Rollback) -> u32 {
+    use std::hash::Hash;
+    let mut h = crc32fast::Hasher::new();
+    r.data.hash(&mut h);
+    h.finalize()
+}
+
 /// Connection/sync state surfaced to the client HUD. Derived from the
 /// manager's `ready`/`is_caught_up` flags; pure `game` type so the enum can
 /// cross the Bevy-free boundary in `ClientUpdateEvent`.
@@ -109,6 +119,11 @@ impl World {
 
     pub fn region_exists(&self, id: &RegionId) -> bool {
         self.regions.contains_key(id)
+    }
+
+    /// All region ids currently loaded client-side. Test/harness hook.
+    pub fn loaded_regions(&self) -> Vec<RegionCoords> {
+        self.regions.keys().copied().collect()
     }
 
     pub fn data(&self, id: &RegionId) -> &Rollback {
