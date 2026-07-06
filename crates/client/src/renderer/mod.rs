@@ -216,6 +216,17 @@ mod tests {
     use super::{resolve_blocks_dir, EMBEDDED_BLOCK_TEXTURES};
 
     #[test]
+    fn bevy_ui_features_enabled() {
+        // Compiles only if bevy_ui / bevy_text features are on. Constructing the
+        // types (not rendering) is enough to prove the feature gate.
+        use bevy::prelude::*;
+        let _node = Node::default();
+        let _text = Text::new("hud");
+        let _white = BackgroundColor(Color::WHITE);
+        let _mark = bevy::ui::IsDefaultUiCamera;
+    }
+
+    #[test]
     fn embedded_block_textures_match_assets_dir() {
         let dir = resolve_blocks_dir();
         let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
