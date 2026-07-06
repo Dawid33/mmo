@@ -230,6 +230,29 @@ mod tests {
     }
 
     #[test]
+    fn embedded_block_textures_cover_manifest_references() {
+        use game::TextureSpec;
+
+        let reg = crate::blocks::load_registry();
+        for (_, def) in reg.iter() {
+            let referenced: Vec<&str> = match &def.textures {
+                TextureSpec::All(p) => vec![p.as_str()],
+                TextureSpec::Faces { top, side, bottom } => {
+                    vec![top.as_str(), side.as_str(), bottom.as_str()]
+                }
+                TextureSpec::Untextured => vec![],
+            };
+            for path in referenced {
+                assert!(
+                    EMBEDDED_BLOCK_TEXTURES.iter().any(|(n, _)| *n == path),
+                    "block manifest references {path:?}, but it is not in EMBEDDED_BLOCK_TEXTURES \
+                     — add it to that const in renderer/mod.rs so the wasm build has it"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_resolve_blocks_dir_with_cargo_manifest() {
         let blocks_path = resolve_blocks_dir();
         // When tests run, CARGO_MANIFEST_DIR should be set to crates/client.

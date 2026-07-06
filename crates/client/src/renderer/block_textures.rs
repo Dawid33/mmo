@@ -44,10 +44,21 @@ fn intern<F: FnMut(&str) -> Option<RgbaImage>>(
     match load(path) {
         Some(img) => {
             let (w, h) = img.dimensions(); // inherent on ImageBuffer/RgbaImage
-            assert_eq!(w, h, "block texture {path} must be square");
-            match *size {
-                Some(s) => assert_eq!(s, w, "all block textures must share dimensions"),
-                None => *size = Some(w),
+            if w != h {
+                bevy::log::warn!(
+                    "block texture {path:?} is not square ({w}x{h}); using fallback layer 0"
+                );
+                return 0;
+            }
+            if let Some(s) = *size {
+                if s != w {
+                    bevy::log::warn!(
+                        "block texture {path:?} size {w} does not match atlas size {s}; using fallback layer 0"
+                    );
+                    return 0;
+                }
+            } else {
+                *size = Some(w);
             }
             let layer = (images.len() + 1) as u32; // +1: layer 0 is reserved
             images.push(img);
@@ -164,6 +175,34 @@ mod tests {
         .unwrap();
         let (_, map) = build_layers(&reg, loader);
         assert_eq!(map.0[&BlockId(1)], [0, 0, 0], "unloadable texture falls back to layer 0");
+    }
+
+    #[test]
+    fn mismatched_size_texture_degrades_to_fallback_without_panicking() {
+        // Loader returns square images of two DIFFERENT sizes; the first-loaded
+        // texture (ascending BlockId) fixes the atlas size, so the second must
+        // be rejected as a size mismatch rather than crashing.
+        fn mismatched_loader(path: &str) -> Option<RgbaImage> {
+            match path {
+                "a.png" => Some(solid(16, [1, 2, 3, 255])),
+                "b.png" => Some(solid(8, [4, 5, 6, 255])),
+                _ => None,
+            }
+        }
+        let reg = BlockRegistry::from_ron(
+            r#"(blocks:[
+                (id:0,name:"air",textures:Untextured),
+                (id:1,name:"a",textures:All("a.png")),
+                (id:2,name:"b",textures:All("b.png")),
+            ])"#,
+        )
+        .unwrap();
+        let (_, map) = build_layers(&reg, mismatched_loader);
+        assert_eq!(
+            map.0[&BlockId(2)],
+            [0, 0, 0],
+            "size-mismatched texture falls back to layer 0 instead of panicking"
+        );
     }
 
     #[test]
