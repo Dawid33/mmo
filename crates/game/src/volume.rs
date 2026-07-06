@@ -91,9 +91,9 @@ impl WriteVol for SubChunk {
     }
 }
 
-// Referenced so CHUNK_BLOCKS stays a compile-time anchor for callers that
-// bound BlockPos; also documents the footprint size.
-const _: () = assert!(CHUNK_BLOCKS == 2);
+// A column footprint is `CHUNK_BLOCKS` blocks per horizontal axis; `BlockPos`
+// x/z components are bounded 0..CHUNK_BLOCKS. The volume math is parameterized
+// over CHUNK_BLOCKS (see `SUB_BLOCKS_Y`), so no fixed block count is assumed.
 
 /// An unbounded vertical column of sub-chunks over one region-local (x, z)
 /// cell. Sparse: only `sub_chunks` is materialized; below the band reads as
@@ -276,7 +276,7 @@ mod column_tests {
         assert_eq!(col.get(BlockPos::new(0, -1, 0)), stone());
         // Inside the band: stored stone.
         assert_eq!(col.get(BlockPos::new(0, 0, 0)), stone());
-        // Above the band (sub_y = 5): air sentinel.
+        // Above the band (block Y 20 → sub_y 10): air sentinel.
         assert_eq!(col.get(BlockPos::new(0, 20, 0)), air());
     }
 
