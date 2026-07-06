@@ -227,7 +227,24 @@ impl SimHarness {
     }
 
     /// Hold the movement key for `dir` and step (bounded) until the client's
-    /// home region changes — i.e. the player crossed a seam.
+    /// home region changes AND the player entity is actually queryable there
+    /// — i.e. the player crossed a seam and the crossing has fully landed.
+    ///
+    /// `home_region` flips as soon as the authoritative `PlayerRegion` packet
+    /// is handled, which can land one tick before the predicted
+    /// `apply_local_transfers` path creates the player entity in the new
+    /// region's data (`GameInstanceManager::local_player_translation` briefly
+    /// returns `None` in that window). Waiting on both conditions makes
+    /// "crossed" mean what callers actually need (`player_pos()` etc. are
+    /// safe to call immediately after), without loosening any assertion.
+    ///
+    /// The final `settle()` gives the just-crossed region's authoritative
+    /// confirmation one more round to land: the exact tick this loop breaks
+    /// on can be transiently one step behind reconciliation (same class of
+    /// lag as the home-flip/entity-queryable gap above), which otherwise
+    /// makes an `assert_converged()` called immediately after `cross_boundary`
+    /// spuriously see a same-tick hash mismatch that self-heals on the very
+    /// next `step()`.
     pub fn cross_boundary(&mut self, dir: Dir) {
         let start = self.player_region();
         let key = match dir {
@@ -244,16 +261,27 @@ impl SimHarness {
         self.press(key);
         for _ in 0..400 {
             self.step();
-            if self.player_region() != start {
+            if self.player_region() != start && self.client.local_player_translation().is_some() {
                 break;
             }
         }
         self.release(key);
         assert_ne!(self.player_region(), start, "player never crossed a boundary");
+        assert!(
+            self.client.local_player_translation().is_some(),
+            "player entity not queryable in the new home region after crossing"
+        );
+        self.settle();
     }
 
     pub fn pending_events_empty(&self) -> bool {
         self.client.pending_events_empty()
+    }
+
+    /// The client's home region's full rollback state, for determinism checks
+    /// (`state_hash(h.client_home_data())`).
+    pub fn client_home_data(&self) -> &game::Rollback {
+        self.client.world_ref().data(&self.client.home_region())
     }
 }
 
