@@ -123,6 +123,21 @@ impl World {
         self.regions.get_mut(region_id).unwrap().forget_last_event();
     }
 
+    /// Aggregate transfer buffers from all loaded regions. Call immediately
+    /// after progress_world_one_tick and at no other time.
+    pub fn take_transfers(
+        &mut self,
+    ) -> (Vec<(EntityBundle, RegionCoords)>, Vec<(GhostData, RegionCoords)>) {
+        let mut departures = Vec::new();
+        let mut ghosts = Vec::new();
+        for (_, region) in &mut self.regions {
+            let (d, g) = region.take_transfers();
+            departures.extend(d);
+            ghosts.extend(g);
+        }
+        (departures, ghosts)
+    }
+
     pub fn reconcile_event(&mut self, event: GameEvent) -> Result<(), GameError> {
         // Tolerate events for regions we don't hold: with a moving 3×3
         // window, an event racing a just-released region is steady-state

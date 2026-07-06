@@ -11,7 +11,8 @@ use crate::{Chunk, Client, ClientId, GameData, Rollback};
 
 use crate::{
     camera::CameraController, physics::PhysicsController, ChunkCoords,
-    Controller, GameDataUpdate, GameError, GameEvent, GameEventKind, RegionId, ServerPacket,
+    Controller, EntityBundle, GameDataUpdate, GameError, GameEvent, GameEventKind, GhostData,
+    RegionCoords, RegionId, ServerPacket,
 };
 
 /// A region represents an portion of the world that processes game events at
@@ -30,6 +31,12 @@ pub struct Region {
     /// `next_game_event_id` of the snapshot this region was built from.
     /// Server events below this id are already baked into the state.
     base_event_id: usize,
+    /// Boundary-scan results from the LAST executed tick. REPLACED by each
+    /// tick, never appended: consumers read immediately after driving a
+    /// tick; reconcile replays overwrite these with stale scans that are
+    /// never read (see the plan's read-after-progress invariant).
+    pending_departures: Vec<(EntityBundle, RegionCoords)>,
+    pending_ghosts: Vec<(GhostData, RegionCoords)>,
 }
 
 impl Region {
@@ -51,6 +58,8 @@ impl Region {
             synchronized: false,
             local_client_id,
             base_event_id,
+            pending_departures: Vec::new(),
+            pending_ghosts: Vec::new(),
         }
     }
 
@@ -72,10 +81,23 @@ impl Region {
             return Ok(());
         }
 
+        // Set when this reconcile pass integrates the AUTHORITATIVE arrival of
+        // the local player into this region (the server-confirmed handoff).
+        // Triggers eviction of the orphan lag-window inputs below.
+        let mut applied_local_arrival = false;
+
         'outer: while !self.input_buffer.is_empty() && !self.event_log.is_empty() {
             if let Some(server_event) = self.input_buffer.pop() {
                 if let Some(event) = self.event_log.pop_front() {
                     if event.id == server_event.0.id {
+                        if let GameEventKind::EntityArrived(bundle) = &server_event.0.kind {
+                            let is_local = self.local_client_id.is_some()
+                                && bundle.client.as_ref().map(|(c, _)| *c)
+                                    == self.local_client_id;
+                            if is_local {
+                                applied_local_arrival = true;
+                            }
+                        }
                         if event != server_event.0 {
                             self.event_log.push_front(event);
                             let mut temp_log = self.event_log.clone();
@@ -115,7 +137,7 @@ impl Region {
                                         Some(o) => Some(o) == self.local_client_id,
                                         None => true,
                                     };
-                                    if local_origin && e.kind == server_event.0.kind {
+                                    if local_origin && e.kind.matches_prediction(&server_event.0.kind) {
                                         temp_log.remove(i);
                                         break;
                                     }
@@ -148,7 +170,55 @@ impl Region {
             }
         }
 
+        if applied_local_arrival {
+            self.evict_orphan_local_inputs();
+        }
+
         Ok(())
+    }
+
+    /// Client-only: the authoritative handoff of the LOCAL player into this
+    /// region has just been confirmed (reconcile integrated the server's
+    /// `EntityArrived` for our client). The local-player `PlayerInput`s still
+    /// pending in this region's event log were predicted during the flip RTT,
+    /// while the server still routed our inputs to the SOURCE region by
+    /// `homes`. Those inputs resolved in the source and will NEVER echo back
+    /// for this region, so no server event can ever match/remove them: they
+    /// are orphans that would otherwise re-apply on every future rollback and
+    /// accumulate on every crossing. Evict them; the arrival bundle already
+    /// carries the post-window pose (the source applied them before extraction).
+    ///
+    /// Legitimate inputs predicted AFTER this confirmation carry higher ids,
+    /// are not yet in the log at this point, and reconcile normally.
+    ///
+    /// Removal reuses the exact-inverse rollback machinery: roll every pending
+    /// prediction back (each is one un-forgotten transaction, which also
+    /// rewinds `next_game_event_id` to the first pending slot), then replay the
+    /// non-orphan tail. The replayed events re-append with fresh, gap-free ids
+    /// that mirror the server's arrival-onward sequence — closing the id holes
+    /// the orphans left so later authoritative events still match. State stays
+    /// hash-exact because every mutation goes through the same logged deltas.
+    fn evict_orphan_local_inputs(&mut self) {
+        let Some(local) = self.local_client_id else { return };
+        let is_orphan = |e: &GameEvent| {
+            matches!(&e.kind, GameEventKind::PlayerInput(cid, _) if *cid == local)
+        };
+        if !self.event_log.iter().any(is_orphan) {
+            return;
+        }
+
+        let kept_kinds: Vec<GameEventKind> = self
+            .event_log
+            .iter()
+            .filter(|e| !is_orphan(e))
+            .map(|e| e.kind.clone())
+            .collect();
+        while self.event_log.pop_back().is_some() {
+            self.data.rollback();
+        }
+        for kind in kept_kinds {
+            let _ = self.handle_event(kind);
+        }
     }
 
     /// Handle a client event.
@@ -184,6 +254,10 @@ impl Region {
                         ));
                     }
                 }
+                let (departures, ghosts) = self.data.scan_boundaries(self.id);
+                self.pending_departures = departures;
+                self.pending_ghosts = ghosts;
+                self.data.expire_ghosts();
                 self.data.tick.update(|t| *t += 1);
             }
             GameEventKind::PlayerInput(client_id, player_event) => {
@@ -197,6 +271,12 @@ impl Region {
                 info!("{:?}", event);
                 self.data.clients.insert(client_id, Client::default());
                 self.data.create_player_safe(client_id);
+            }
+            GameEventKind::EntityArrived(bundle) => {
+                self.data.apply_arrival(bundle);
+            }
+            GameEventKind::GhostUpdate(data) => {
+                self.data.apply_ghost(data);
             }
         }
         self.event_log.push_back(event.clone());
@@ -237,5 +317,31 @@ impl Region {
 
     pub fn forget_last_event(&mut self) {
         self.data.forget();
+    }
+
+    /// Boundary-scan results from the LAST executed tick. REPLACED (not
+    /// appended) each tick; call immediately after driving a tick and at no
+    /// other time — see the read-after-progress invariant on the fields.
+    pub fn take_transfers(
+        &mut self,
+    ) -> (Vec<(EntityBundle, RegionCoords)>, Vec<(GhostData, RegionCoords)>) {
+        (
+            std::mem::take(&mut self.pending_departures),
+            std::mem::take(&mut self.pending_ghosts),
+        )
+    }
+
+    /// Test hook: run an undo-safe mutation in its own forgotten
+    /// transaction (teleports, state surgery in integration tests).
+    pub fn with_data(&mut self, f: impl FnOnce(&mut Rollback)) {
+        self.data.new_transaction();
+        f(&mut self.data);
+        self.data.forget();
+    }
+
+    /// Test hook: roll back the most recent (unforgotten) event.
+    pub fn rollback_last_event(&mut self) {
+        self.data.rollback();
+        self.event_log.pop_back();
     }
 }

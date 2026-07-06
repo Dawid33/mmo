@@ -10,7 +10,7 @@ use std::time::Duration;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
 use crate::{
-    Chunk, ChunkCoords, ClientId, ClientPacket, GameEventKind, RegionCoords, RegionInput,
+    Chunk, ChunkCoords, ClientId, ClientPacket, GameEventKind, Region, RegionCoords, RegionInput,
     RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket,
 };
 
@@ -81,6 +81,14 @@ impl InlineSpawner {
     /// handshake, simulating a crashed region thread.
     pub fn kill(&mut self, id: RegionCoords) {
         self.runners.remove(&id);
+    }
+
+    /// Test support: run a closure against a live region (state assertions
+    /// and teleports in headless harnesses).
+    pub fn with_region(&mut self, id: RegionCoords, f: impl FnOnce(&mut Region)) {
+        if let Some((_, runner)) = self.runners.get_mut(&id) {
+            f(runner.region_mut());
+        }
     }
 }
 
@@ -188,6 +196,25 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::GameEvent(event) => match event.kind {
                     GameEventKind::Tick => {}
                     GameEventKind::Quit => return false,
+                    kind @ GameEventKind::PlayerInput(..) => {
+                        // Manager-authoritative routing: the client's stamp
+                        // lags its own predicted handoff; homes is truth.
+                        let GameEventKind::PlayerInput(cid, _) = &kind else { unreachable!() };
+                        match self.homes.get(cid).copied() {
+                            Some(home) if self.regions.contains_key(&home) => {
+                                self.send_to_region(home, RegionInput::Event(kind));
+                            }
+                            _ => log::debug!("dropping input from {cid}: home not running"),
+                        }
+                    }
+                    // Manager-internal event kinds: a client must never inject
+                    // these directly. Drop rather than forward to a region.
+                    GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) => {
+                        log::debug!(
+                            "dropping internal event kind sent by client {id} for {:?}",
+                            event.region_id
+                        );
+                    }
                     kind => {
                         let subscribed = self
                             .sessions
@@ -246,6 +273,42 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.subscribe(client, rc);
                 }
                 let _ = now_ms;
+            }
+            RegionOutput::Departures(list) => {
+                for (mut bundle, target) in list {
+                    let client = bundle.client.as_ref().map(|(c, _)| *c);
+                    bundle.isometry = crate::rebase_isometry(&bundle.isometry, rc, target);
+                    // Arrivals ALWAYS wake the target (parked blob or gen).
+                    self.ensure_running(target);
+                    self.send_to_region(
+                        target,
+                        RegionInput::Event(GameEventKind::EntityArrived(bundle)),
+                    );
+                    if let Some(c) = client {
+                        self.homes.insert(c, target);
+                        let _ = self
+                            .out
+                            .send((Some(c), ServerPacket::PlayerRegion(Some(target), c)));
+                        // The old home may have just lost its keep-alive
+                        // reason; the new one just gained it.
+                        self.refresh_keepalive(rc, now_ms);
+                        self.refresh_keepalive(target, now_ms);
+                    }
+                }
+            }
+            RegionOutput::GhostUpdates(list) => {
+                for (mut data, target) in list {
+                    // Ghost updates NEVER wake a region.
+                    let running = self
+                        .regions
+                        .get(&target)
+                        .map_or(false, |link| !link.stopping);
+                    if !running {
+                        continue;
+                    }
+                    data.isometry = crate::rebase_isometry(&data.isometry, rc, target);
+                    self.send_to_region(target, RegionInput::Event(GameEventKind::GhostUpdate(data)));
+                }
             }
         }
     }
