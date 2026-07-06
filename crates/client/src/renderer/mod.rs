@@ -10,6 +10,7 @@ use game::{ClientId, ClientUpdateEvent, GameEventKind};
 use std::collections::BTreeMap;
 
 mod avatar;
+mod block_textures;
 mod bridge;
 mod hud;
 pub mod convert;
