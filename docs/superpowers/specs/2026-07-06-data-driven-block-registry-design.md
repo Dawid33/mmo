@@ -153,8 +153,15 @@ shape.
   (top/side/bottom). This finally exercises the shader's per-face capability;
   **no shader change**.
 - Rename `VoxelTypeLayers` → `BlockTextureLayers` throughout.
-- Fallback: a block whose texture can't be resolved renders with a designated
-  fallback layer (layer 0) and logs a warning — never panics.
+- **Fallback texture (guaranteed):** array **layer 0 is reserved** as a
+  procedurally generated "missing texture" — a high-contrast magenta/black
+  checkerboard built in code (a small `RgbaImage`) at atlas-build time, so it
+  depends on no asset file and can never itself be missing. Real block textures
+  occupy layers ≥ 1. Any block whose texture path fails to load, or any `BlockId`
+  with no layer entry, resolves to layer 0 on all three faces and logs a warning —
+  never panics, and renders as an unmistakable "missing texture" rather than
+  silently as another block. This holds even when `assets/blocks/` is empty or the
+  manifest references nothing.
 
 ### 5. Determinism, wire format, wasm
 
@@ -179,8 +186,12 @@ shape.
 
 - Manifest parse/validation errors (`from_ron`) are fatal at startup with a clear
   message (duplicate id, missing/misdefined air, malformed RON).
-- Missing texture file (client): warn and fall back to layer 0; do not crash.
-- Unknown `BlockId` in the mesher (id with no layer entry): fall back to layer 0.
+- Missing texture file (client): warn and fall back to the reserved layer-0
+  "missing texture" checkerboard; do not crash.
+- Unknown `BlockId` in the mesher (id with no layer entry): fall back to the
+  layer-0 missing texture.
+- The missing-texture layer is generated in code, so it is always present even
+  with an empty assets dir or a manifest that references no files.
 
 ## Testing
 
@@ -199,7 +210,9 @@ shape.
 - `All` maps to three equal layers; `Faces` maps to distinct top/side/bottom.
 - Mesher writes correct per-face `tex_idx` (top face uses top layer, sides use
   side layer, bottom uses bottom layer).
-- Missing-texture fallback path returns layer 0 without panic.
+- Layer 0 is always the generated missing-texture checkerboard (present even with
+  an empty assets dir); real textures start at layer ≥ 1.
+- Missing-texture / unknown-`BlockId` fallback resolves to layer 0 without panic.
 - Extended `embedded_block_textures_match_assets_dir` covers all manifest PNGs.
 
 ## Out of Scope (v1)
