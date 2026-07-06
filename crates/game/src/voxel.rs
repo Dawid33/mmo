@@ -1,6 +1,9 @@
-use block_mesh::ndshape::{ConstShape, ConstShape3u32};
+use std::collections::BTreeMap;
+
+use block_mesh::ndshape::ConstShape3u32;
 use block_mesh::{MergeVoxel, VoxelVisibility};
-use rapier3d::prelude::ColliderHandle;
+
+use crate::block::{Block, BlockIndex, BlockKind, ChiselData, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BLOCK_VOXELS};
 
 const HALF_VOXEL_SIZE: f32 = 1.0 / 2.0;
 pub type ChunkShape = ConstShape3u32<32, 32, 32>;
@@ -10,36 +13,60 @@ pub const CHUNK_VOXEL_COUNT: usize = 32 * 32 * 32;
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
 #[module(crate)]
 pub struct Chunk {
-    pub voxels: Vec<Voxel>,
-    pub collider: Vec<ColliderHandle>,
+    /// Authoritative block grid, length `CHUNK_BLOCK_COUNT` (8).
+    pub blocks: Vec<Block>,
+    /// Sparse sub-block detail; a block is chiseled iff present here.
+    pub chisel: BTreeMap<BlockIndex, ChiselData>,
 }
 
 impl Default for Chunk {
-    /// All-air. Exists because `Component<T>` requires `T: Default`;
-    /// real content comes from constructors like [`Chunk::flat_floor`].
+    /// All-air. `Component<T>` requires `T: Default`; real content comes from
+    /// constructors like [`Chunk::flat_floor`].
     fn default() -> Self {
         Self {
-            collider: Vec::new(),
-            voxels: vec![Voxel::new(VoxelType::Air); CHUNK_VOXEL_COUNT],
+            blocks: vec![Block::default(); CHUNK_BLOCK_COUNT],
+            chisel: BTreeMap::new(),
         }
     }
 }
 
 impl Chunk {
-    /// Solid floor across the full 32×32 footprint for `y < depth`, air
-    /// above. Full-footprint fill makes chunk seams tile with no gaps.
+    /// Solid Stone floor for voxel heights `y < depth`, air above — built at
+    /// block granularity. Blocks fully below the floor are whole Stone; blocks
+    /// straddling the floor become a chiseled slab; blocks above are air.
+    /// Derives (via `derive_voxels`) to the exact same voxel layout the old
+    /// voxel-based `flat_floor` produced.
     pub fn flat_floor(depth: u32) -> Self {
-        let mut voxels = Vec::with_capacity(ChunkShape::SIZE as usize);
-        for i in 0..ChunkShape::SIZE {
-            let [_x, y, _z] = ChunkShape::delinearize(i);
-            let v = if y < depth {
-                Voxel::new(VoxelType::Black)
-            } else {
-                Voxel::new(VoxelType::Air)
-            };
-            voxels.push(v);
+        let depth = depth as usize;
+        let mut blocks = vec![Block::new(BlockKind::Air); CHUNK_BLOCK_COUNT];
+        let mut chisel = BTreeMap::new();
+        for by in 0..CHUNK_BLOCKS {
+            let (y0, y1) = (by * BLOCK_VOXELS, by * BLOCK_VOXELS + BLOCK_VOXELS);
+            for bx in 0..CHUNK_BLOCKS {
+                for bz in 0..CHUNK_BLOCKS {
+                    let bi = BlockIndex::from_xyz(bx, by, bz);
+                    if y1 <= depth {
+                        blocks[bi.0 as usize] = Block::new(BlockKind::Stone);
+                    } else if y0 >= depth {
+                        // stays Air
+                    } else {
+                        blocks[bi.0 as usize] = Block::new(BlockKind::Stone);
+                        let mut c = ChiselData::new(vec![BlockKind::Stone]);
+                        for vy in 0..BLOCK_VOXELS {
+                            if y0 + vy < depth {
+                                for vx in 0..BLOCK_VOXELS {
+                                    for vz in 0..BLOCK_VOXELS {
+                                        c.set(vx, vy, vz, true, 0);
+                                    }
+                                }
+                            }
+                        }
+                        chisel.insert(bi, c);
+                    }
+                }
+            }
         }
-        Self { collider: Vec::new(), voxels }
+        Self { blocks, chisel }
     }
 }
 
