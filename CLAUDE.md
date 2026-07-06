@@ -8,15 +8,34 @@ A voxel MMO in Rust with client/server architecture over QUIC, built around dete
 
 ## Building and Running
 
-`cargo build --workspace --bins` works on stable. Development typically uses the Cranelift codegen backend for fast builds, via a locally built `cargo-clif`:
+Common tasks are wrapped in the root `justfile` — prefer it over retyping raw
+`cargo`/`cargo-clif` invocations. `just` (or `just --list`) shows every recipe;
+the important ones are `just build`, `just run` (server + client together),
+`just server`, `just client`, `just test`, `just test-client`, `just web`, and
+`just clippy`. Machine-specific bits are overridable variables: `cargo` selects the
+toolchain (defaults to stable `cargo`; set `cargo=$CARGO_CLIF` or export `CARGO_CLIF`
+to opt into the Cranelift `cargo-clif` wrapper for faster builds), and `adapter=6700`
+pins the client to a GPU (e.g. `just adapter=6700 run`).
+**Keep the justfile in sync**: when you add, rename, or change how a build/run/test
+command is invoked, update the corresponding recipe (and add a new one for any
+workflow worth a one-word command) in the same change.
+
+The raw commands the recipes wrap, for reference:
+
+`cargo build --workspace --bins` works on stable, which is the default. Cranelift
+is opt-in for faster dev builds — point the recipes at a locally built `cargo-clif`
+via `cargo=…` or `CARGO_CLIF`:
 
 ```sh
-# Build everything (see scripts/build.sh)
+# Build everything on stable (see scripts/build.sh)
+cargo build --workspace --bins
+
+# Or with Cranelift:
 ~/Software/rustc_codegen_cranelift/dist/cargo-clif build --workspace --bins
 
 # Run server + client together (see scripts/run.sh)
-~/Software/rustc_codegen_cranelift/dist/cargo-clif run --bin server
-~/Software/rustc_codegen_cranelift/dist/cargo-clif run --bin client
+cargo run --bin server
+cargo run --bin client
 ```
 
 The server listens on `127.0.0.1:6466` (hardcoded in `crates/server/src/lib.rs`); the client connects to localhost. Run the server before/alongside the client.
@@ -71,3 +90,4 @@ First-party crates (workspace members):
 - Cross-thread communication uses `crossbeam` channels (game loop ↔ network loop ↔ render loop); async (tokio) is confined to the QUIC networking edges.
 - Editions are mixed intentionally: older crates are 2021, newer ones (`macros`, `worldgen`) are 2024.
 - `TODO.md` tracks the current high-level direction (multi-region/chunk-grid simulation instances).
+- The root `justfile` is the canonical set of build/run/test commands — use it, and edit it whenever the underlying commands change so it never drifts from reality.
