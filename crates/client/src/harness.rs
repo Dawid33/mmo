@@ -166,23 +166,42 @@ impl SimHarness {
     /// be tick-aligned at all (convergence would otherwise be vacuous).
     pub fn assert_converged(&mut self) {
         self.settle();
-        let mut checked = 0usize;
+        let home = self.client.home_region();
+        let mut home_checked = false;
         for rc in self.client.world_ref().loaded_regions() {
             let t = self.client.world_ref().current_tick(&rc);
             let client_hash = state_hash(self.client.world_ref().data(&rc));
-            if let Some(&server_hash) = self.server_hashes.get(&(rc, t)) {
-                assert_eq!(
-                    client_hash, server_hash,
-                    "client region {:?} @tick {} diverges from the server's authoritative state at that tick",
-                    rc, t
-                );
-                checked += 1;
+            match self.server_hashes.get(&(rc, t)) {
+                Some(&server_hash) => {
+                    assert_eq!(
+                        client_hash, server_hash,
+                        "client region {:?} @tick {} diverges from the server's authoritative state at that tick",
+                        rc, t
+                    );
+                    if rc == home {
+                        home_checked = true;
+                    }
+                }
+                None => {
+                    // The home region is the region under test — it MUST be
+                    // tick-alignable, or convergence is unverified there. A
+                    // window neighbour we can't yet align (just-subscribed,
+                    // its tick not yet recorded) is tolerated; the home region
+                    // is not. Without this, a static neighbour matching would
+                    // let a genuinely diverging fresh home region pass silently
+                    // (e.g. right after cross_boundary / teleport_player).
+                    assert!(
+                        rc != home,
+                        "home region {:?} @tick {} has no matching server-authoritative tick after settle — client is ahead of / out of sync with the authority (convergence unverified)",
+                        rc, t
+                    );
+                }
             }
         }
         assert!(
-            checked > 0,
-            "no client region could be tick-aligned against a recorded server tick — convergence unverified (home {:?})",
-            self.client.home_region()
+            home_checked,
+            "home region {:?} was not tick-aligned+verified against the server — convergence is vacuous",
+            home
         );
     }
 
