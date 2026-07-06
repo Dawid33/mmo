@@ -45,6 +45,34 @@ fn remove_entity_safe_holds_the_hash_bar() {
 }
 
 #[test]
+fn remove_then_create_in_one_transaction_holds_the_hash_bar() {
+    // Region-crossing repro: a single reconcile-replayed Tick can BOTH remove
+    // an entity (expire_ghosts / extraction) AND create one (apply_ghost /
+    // apply_arrival). The slotmap reuses the just-freed slot index for the new
+    // entity, so the secondary-map (kind/camera/...) slot at that index gets
+    // reallocated mid-transaction. Rolling the whole transaction back must
+    // still restore hash(before), bit-exact.
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    rb.create_player_safe(1);
+    rb.forget(); // bake: player 1 occupies some entity/component slot index
+    let before = crc(&rb);
+    let key1 = *rb.data.player_entites.get(&1).unwrap();
+
+    rb.new_transaction();
+    rb.remove_entity_safe(key1, Some(1)); // frees the slot index
+    rb.create_player_safe(2); // reuses the freed index → clobbers the secondary-map slot
+    rb.rollback();
+
+    assert_eq!(
+        before,
+        crc(&rb),
+        "remove+create (slot reuse) in one transaction must undo bit-exact"
+    );
+}
+
+#[test]
 fn set_body_pose_safe_moves_and_undoes_exactly() {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut rb = Rollback::new(Some(send));

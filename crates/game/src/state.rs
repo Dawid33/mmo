@@ -223,6 +223,21 @@ where
         }
     }
 
+    /// Removes an entity's slot from this component, undo-safely — the true
+    /// inverse of `insert_safe` (do: remove the slot; undo: re-insert it with
+    /// its prior value). `SparseSecondaryMap` insert(remove(x)) is hash-exact
+    /// (see hash_restore.rs). Use this — not `set_safe(key, None)` — when an
+    /// entity is destroyed: leaving a dangling `None` slot while the entities
+    /// slotmap frees the index lets a same-transaction `create_entity_safe`
+    /// reuse that index and clobber the slot, which is NOT LIFO-invertible
+    /// (hash(before) != hash(after undo) on region-crossing reconcile).
+    pub fn remove_safe(&mut self, key: EntityKey) {
+        let old = self.list.get(key).cloned().unwrap();
+        self.undo(move |d, _| {
+            d.list.insert(key, old.clone());
+        });
+        self.raw_mut().list.remove(key);
+    }
 }
 
 impl<T> Component<T>
@@ -409,7 +424,7 @@ impl Rollback {
                     restored_pose,
                 ),
             ));
-            self.data.ecs.camera.set_safe(key, None);
+            self.data.ecs.camera.remove_safe(key);
         }
         // Kind: Do-emit clear; undo re-emits the old kind.
         if let Some(kind) = *self.data.ecs.kind.try_get(key) {
@@ -421,7 +436,7 @@ impl Rollback {
                 GameDataTransactionKind::Undo,
                 GameDataUpdateKind::SetEntityKind(key, Some(kind)),
             ));
-            self.data.ecs.kind.set_safe(key, None);
+            self.data.ecs.kind.remove_safe(key);
         }
         // Physics: remove body + attached colliders under a full snapshot.
         if let Some(handle) = *self.data.ecs.rigidbody.try_get(key) {
@@ -435,8 +450,15 @@ impl Rollback {
                 true,
             );
         }
-        self.data.ecs.rigidbody.set_safe(key, None);
-        self.data.ecs.isometry.set_safe(key, None);
+        // Remove every component slot this entity owns (symmetric to
+        // create_entity_safe's insert_safe for camera/isometry/rigidbody/
+        // chunk/kind). Removing the slots — not just nulling their values —
+        // keeps the component maps in sync with the entities slotmap, so the
+        // freed index can be reused later in the SAME transaction and still
+        // roll back bit-exact.
+        self.data.ecs.rigidbody.remove_safe(key);
+        self.data.ecs.isometry.remove_safe(key);
+        self.data.ecs.chunk.remove_safe(key);
         // ECS slot last: the slotmap #[emit] fires RemoveEntity on the delta
         // (and CreateEntity again on undo).
         self.data.ecs.entities.remove(key);
