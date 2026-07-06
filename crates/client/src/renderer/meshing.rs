@@ -8,10 +8,10 @@ use block_mesh::{greedy_quads, GreedyQuadsBuffer, RIGHT_HANDED_Y_UP_CONFIG};
 use game::ChunkShape;
 use game::Voxel;
 
+use super::block_textures::BlockTextureLayers;
 use super::voxel_material::{self, StandardVoxelMaterial};
-use super::VoxelTypeLayers;
 
-pub fn build_chunk_mesh(voxels: &[Voxel], layers: &VoxelTypeLayers) -> Option<Mesh> {
+pub fn build_chunk_mesh(voxels: &[Voxel], layers: &BlockTextureLayers) -> Option<Mesh> {
     let mut buffer = GreedyQuadsBuffer::new(voxels.len());
     greedy_quads(voxels, &ChunkShape {}, [0; 3], [31; 3], &RIGHT_HANDED_Y_UP_CONFIG.faces, &mut buffer);
     if buffer.quads.num_quads() == 0 {
@@ -33,8 +33,8 @@ pub fn build_chunk_mesh(voxels: &[Voxel], layers: &VoxelTypeLayers) -> Option<Me
                 uvs.push([uv[0] * quad.width as f32, uv[1] * quad.height as f32]);
             }
             let voxel_index = ChunkShape::linearize(*quad.minimum) as usize;
-            let layer = layers.0.get(&voxels[voxel_index].kind).copied().unwrap_or(0);
-            tex_indices.extend(std::iter::repeat([layer, layer, layer]).take(4));
+            let faces = layers.0.get(&voxels[voxel_index].block).copied().unwrap_or([0, 0, 0]);
+            tex_indices.extend(std::iter::repeat(faces).take(4));
         }
     }
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
@@ -66,13 +66,13 @@ pub struct MeshingTask(Task<Option<Mesh>>);
 pub fn queue_meshing(
     mut commands: Commands,
     changed: Query<(Entity, &super::bridge::VoxelData), Changed<super::bridge::VoxelData>>,
-    layers: Res<VoxelTypeLayers>,
+    layers: Res<BlockTextureLayers>,
 ) {
     let pool = AsyncComputeTaskPool::get();
     for (e, voxels) in &changed {
         let voxels = voxels.0.clone();
         let layers = layers.0.clone();
-        let task = pool.spawn(async move { build_chunk_mesh(&voxels, &VoxelTypeLayers(layers)) });
+        let task = pool.spawn(async move { build_chunk_mesh(&voxels, &BlockTextureLayers(layers)) });
         commands.entity(e).insert(MeshingTask(task));
     }
 }
@@ -140,20 +140,20 @@ mod tests {
     use super::*;
     use block_mesh::ndshape::ConstShape; // ndshape itself is no longer a direct dep (task 2)
     use game::ChunkShape;
-    use game::{Voxel, VoxelType, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
 
     #[test]
     fn empty_chunk_yields_no_mesh() {
         let voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        assert!(build_chunk_mesh(&voxels, &VoxelTypeLayers::default()).is_none());
+        assert!(build_chunk_mesh(&voxels, &BlockTextureLayers::default()).is_none());
     }
 
     #[test]
     fn single_voxel_yields_cube() {
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         let idx = ChunkShape::linearize([5, 5, 5]) as usize;
-        voxels[idx] = Voxel::new(VoxelType::Black);
-        let mesh = build_chunk_mesh(&voxels, &VoxelTypeLayers::default()).expect("mesh");
+        voxels[idx] = Voxel::new(BlockId(1));
+        let mesh = build_chunk_mesh(&voxels, &BlockTextureLayers::default()).expect("mesh");
         assert_eq!(mesh.count_vertices(), 24, "6 faces x 4 verts");
         assert_eq!(mesh.indices().unwrap().len(), 36, "6 faces x 2 tris x 3");
     }
@@ -163,10 +163,10 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<Mesh>()
-            .init_resource::<crate::renderer::VoxelTypeLayers>()
+            .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
             .add_systems(Update, (queue_meshing, apply_meshed_chunks));
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        voxels[ChunkShape::linearize([5, 5, 5]) as usize] = Voxel::new(VoxelType::Black);
+        voxels[ChunkShape::linearize([5, 5, 5]) as usize] = Voxel::new(BlockId(1));
         let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
         app.update();
         // Non-racy evidence that meshing actually went through the async path rather
@@ -208,7 +208,7 @@ mod tests {
             .init_asset::<Mesh>()
             .init_asset::<Image>()
             .init_asset::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>()
-            .init_resource::<VoxelTypeLayers>()
+            .init_resource::<BlockTextureLayers>()
             .add_systems(Update, (queue_meshing, apply_meshed_chunks));
 
         let image_handle = app.world_mut().resource_mut::<Assets<Image>>().add(Image::default());
@@ -223,7 +223,7 @@ mod tests {
 
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         let idx = ChunkShape::linearize([5, 5, 5]) as usize;
-        voxels[idx] = Voxel::new(VoxelType::Black);
+        voxels[idx] = Voxel::new(BlockId(1));
 
         let e = app.world_mut().spawn(VoxelData(voxels.clone())).id();
         settle_until_meshed(&mut app, e);
@@ -247,11 +247,11 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<Mesh>()
-            .init_resource::<crate::renderer::VoxelTypeLayers>()
+            .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
             .add_systems(Update, (queue_meshing, apply_meshed_chunks));
 
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        voxels[ChunkShape::linearize([5, 5, 5]) as usize] = Voxel::new(VoxelType::Black);
+        voxels[ChunkShape::linearize([5, 5, 5]) as usize] = Voxel::new(BlockId(1));
         let e = app.world_mut().spawn(VoxelData(voxels)).id();
 
         // Queue the meshing task (MeshingTask attached after this update's commands flush),
@@ -274,7 +274,7 @@ mod tests {
     fn derives_and_meshes_a_generated_floor_chunk() {
         let chunk = game::Chunk::flat_floor(8);
         let voxels = game::derive_voxels(&chunk.blocks, &chunk.chisel);
-        let mesh = build_chunk_mesh(&voxels, &VoxelTypeLayers::default());
+        let mesh = build_chunk_mesh(&voxels, &BlockTextureLayers::default());
         let mesh = mesh.expect("a floor chunk has solid voxels and must produce a mesh");
         assert!(
             mesh.indices().map(|i| i.len()).unwrap_or(0) > 0,

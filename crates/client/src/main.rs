@@ -32,6 +32,7 @@ use pyroscope_pprofrs::{pprof_backend, PprofConfig};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod netcode;
+mod blocks;
 #[cfg(any(target_arch = "wasm32", test))]
 mod local_server;
 #[cfg(target_arch = "wasm32")]

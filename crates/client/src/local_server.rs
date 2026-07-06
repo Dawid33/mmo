@@ -31,9 +31,11 @@ impl LocalServer {
     ) -> Result<Self, GameError> {
         let (out_send, out_recv) = unbounded();
         let (region_out_send, region_out_recv) = unbounded();
+        let registry = crate::blocks::load_registry();
+        let stone = registry.id_of("stone").expect("block manifest must define \"stone\"");
         let mut manager = WorldManager::new(
             InlineSpawner::default(),
-            Box::new(worldgen::generate_region),
+            Box::new(move |rc| worldgen::generate_region(rc, stone)),
             out_send,
             region_out_send,
         );

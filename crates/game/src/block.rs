@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 
 use block_mesh::ndshape::ConstShape;
 
-use crate::voxel::{ChunkShape, Voxel, VoxelType, CHUNK_VOXEL_COUNT};
+use crate::registry::BlockId;
+use crate::voxel::{ChunkShape, Voxel, CHUNK_VOXEL_COUNT};
 
 pub const BLOCK_VOXELS: usize = 16; // 1 block = 16³ voxels = 1 m³
 pub const CHUNK_BLOCKS: usize = 32 / BLOCK_VOXELS; // = 2 blocks per axis
@@ -47,33 +48,13 @@ impl BlockIndex {
     Copy, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Debug,
 )]
 pub struct Block {
-    pub kind: BlockKind,
+    pub id: BlockId,
     pub data: [u8; 3],
 }
 
 impl Block {
-    pub fn new(kind: BlockKind) -> Self {
-        Self { kind, data: [0; 3] }
-    }
-}
-
-/// Gameplay material atom at block granularity. Extensible.
-#[derive(
-    Copy, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Debug,
-)]
-pub enum BlockKind {
-    #[default]
-    Air,
-    Stone,
-}
-
-impl BlockKind {
-    /// The voxel material this block kind derives to.
-    pub fn voxel(self) -> VoxelType {
-        match self {
-            BlockKind::Air => VoxelType::Air,
-            BlockKind::Stone => VoxelType::Black,
-        }
+    pub fn new(id: BlockId) -> Self {
+        Self { id, data: [0; 3] }
     }
 }
 
@@ -84,11 +65,11 @@ impl BlockKind {
 pub struct ChiselData {
     occupancy: Vec<u64>,       // 64 words = 4096-bit bitset (1 = solid)
     material: Vec<u8>,         // len 4096, palette index per voxel
-    palette: Vec<BlockKind>,   // small per-block material list (≤256)
+    palette: Vec<BlockId>,     // small per-block material list (≤256)
 }
 
 impl ChiselData {
-    pub fn new(palette: Vec<BlockKind>) -> Self {
+    pub fn new(palette: Vec<BlockId>) -> Self {
         Self {
             occupancy: vec![0u64; BLOCK_VOXEL_COUNT / 64],
             material: vec![0u8; BLOCK_VOXEL_COUNT],
@@ -116,12 +97,12 @@ impl ChiselData {
         (self.occupancy[i / 64] >> (i % 64)) & 1 == 1
     }
 
-    pub fn material_at(&self, vx: usize, vy: usize, vz: usize) -> BlockKind {
+    pub fn material_at(&self, vx: usize, vy: usize, vz: usize) -> BlockId {
         let i = Self::local_index(vx, vy, vz);
         self.palette
             .get(self.material[i] as usize)
             .copied()
-            .unwrap_or_default()
+            .unwrap_or(BlockId::AIR)
     }
 }
 
@@ -134,7 +115,7 @@ pub fn derive_voxels(blocks: &[Block], chisel: &BTreeMap<BlockIndex, ChiselData>
     // must hold exactly the chunk's 8 blocks. A wrong length would silently
     // under/over-fill the voxel array (or panic on an out-of-range block coord).
     debug_assert_eq!(blocks.len(), CHUNK_BLOCK_COUNT);
-    let mut voxels = vec![Voxel::new(VoxelType::Air); CHUNK_VOXEL_COUNT];
+    let mut voxels = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
     for (idx, block) in blocks.iter().enumerate() {
         let bi = BlockIndex(idx as u8);
         let (bx, by, bz) = bi.xyz();
@@ -142,13 +123,13 @@ pub fn derive_voxels(blocks: &[Block], chisel: &BTreeMap<BlockIndex, ChiselData>
         for vx in 0..BLOCK_VOXELS {
             for vy in 0..BLOCK_VOXELS {
                 for vz in 0..BLOCK_VOXELS {
-                    let kind = match chiseled {
+                    let id = match chiseled {
                         Some(c) if c.is_solid(vx, vy, vz) => c.material_at(vx, vy, vz),
-                        Some(_) => BlockKind::Air,
-                        None => block.kind,
+                        Some(_) => BlockId::AIR,
+                        None => block.id,
                     };
                     let li = voxel_index(bx * BLOCK_VOXELS + vx, by * BLOCK_VOXELS + vy, bz * BLOCK_VOXELS + vz);
-                    voxels[li] = Voxel::new(kind.voxel());
+                    voxels[li] = Voxel::new(id);
                 }
             }
         }
@@ -159,42 +140,42 @@ pub fn derive_voxels(blocks: &[Block], chisel: &BTreeMap<BlockIndex, ChiselData>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::voxel::VoxelType;
+    use crate::registry::BlockId;
     use std::collections::BTreeMap;
 
     #[test]
     fn uniform_stone_block_fills_its_subcube() {
-        let blocks = vec![Block::new(BlockKind::Stone); CHUNK_BLOCK_COUNT];
+        let blocks = vec![Block::new(BlockId(1)); CHUNK_BLOCK_COUNT];
         let voxels = derive_voxels(&blocks, &BTreeMap::new());
-        assert!(voxels.iter().all(|v| v.kind == VoxelType::Black));
+        assert!(voxels.iter().all(|v| v.block == BlockId(1)));
     }
 
     #[test]
     fn all_air_blocks_derive_to_all_air() {
-        let blocks = vec![Block::new(BlockKind::Air); CHUNK_BLOCK_COUNT];
+        let blocks = vec![Block::new(BlockId::AIR); CHUNK_BLOCK_COUNT];
         let voxels = derive_voxels(&blocks, &BTreeMap::new());
-        assert!(voxels.iter().all(|v| v.kind == VoxelType::Air));
+        assert!(voxels.iter().all(|v| v.block == BlockId::AIR));
     }
 
     #[test]
     fn chiseled_block_uses_sparse_occupancy() {
         // One Stone block at index 0; chisel only voxel (0,0,0) solid.
-        let mut blocks = vec![Block::new(BlockKind::Air); CHUNK_BLOCK_COUNT];
-        blocks[0] = Block::new(BlockKind::Stone);
-        let mut c = ChiselData::new(vec![BlockKind::Stone]);
+        let mut blocks = vec![Block::new(BlockId::AIR); CHUNK_BLOCK_COUNT];
+        blocks[0] = Block::new(BlockId(1));
+        let mut c = ChiselData::new(vec![BlockId(1)]);
         c.set(0, 0, 0, true, 0);
         let mut chisel = BTreeMap::new();
         chisel.insert(BlockIndex(0), c);
 
         let voxels = derive_voxels(&blocks, &chisel);
-        assert_eq!(voxels[voxel_index(0, 0, 0)].kind, VoxelType::Black);
-        assert_eq!(voxels[voxel_index(1, 0, 0)].kind, VoxelType::Air, "rest of the chiseled block is empty");
+        assert_eq!(voxels[voxel_index(0, 0, 0)].block, BlockId(1));
+        assert_eq!(voxels[voxel_index(1, 0, 0)].block, BlockId::AIR, "rest of the chiseled block is empty");
     }
 
     #[test]
     fn derive_is_deterministic() {
-        let mut blocks = vec![Block::new(BlockKind::Air); CHUNK_BLOCK_COUNT];
-        blocks[3] = Block::new(BlockKind::Stone);
+        let mut blocks = vec![Block::new(BlockId::AIR); CHUNK_BLOCK_COUNT];
+        blocks[3] = Block::new(BlockId(1));
         let a = derive_voxels(&blocks, &BTreeMap::new());
         let b = derive_voxels(&blocks, &BTreeMap::new());
         assert_eq!(a, b);

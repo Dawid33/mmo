@@ -18,7 +18,8 @@ use std::sync::{Arc, atomic::AtomicUsize};
 use crate::camera::Camera;
 use crate::input::InputState;
 use crate::protocol::{ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
-use crate::voxel::{Chunk, ChunkCoords, ChunkShape, Voxel, VoxelType};
+use crate::registry::BlockId;
+use crate::voxel::{Chunk, ChunkCoords, ChunkShape, Voxel};
 
 pub type IsometryReal = na::Isometry<Real, na::Unit<na::Quaternion<Real>>, 3>;
 
@@ -278,7 +279,7 @@ impl Rollback {
         let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
         // Deterministic linearize order; grid coords are body-local.
         let solid: Vec<Point<i32>> = (0..ChunkShape::SIZE)
-            .filter(|i| voxels[*i as usize].kind != VoxelType::Air)
+            .filter(|i| voxels[*i as usize].block != BlockId::AIR)
             .map(|i| {
                 let [x, y, z] = ChunkShape::delinearize(i);
                 Point::new(x as i32, y as i32, z as i32)

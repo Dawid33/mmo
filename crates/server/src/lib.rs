@@ -225,9 +225,17 @@ pub fn run() {
     std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
 
     let (region_out_send, region_out_recv) = crossbeam::channel::unbounded();
+    // Block registry: prefer the runtime manifest, fall back to the copy
+    // embedded at build time (same repo file) so headless runs never fail.
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/blocks/blocks.ron"),
+    )
+    .unwrap_or_else(|_| include_str!("../../../assets/blocks/blocks.ron").to_string());
+    let registry = game::BlockRegistry::from_ron(&manifest).expect("invalid block manifest");
+    let stone = registry.id_of("stone").expect("block manifest must define \"stone\"");
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::default(),
-        Box::new(worldgen::generate_region),
+        Box::new(move |rc| worldgen::generate_region(rc, stone)),
         server_send,
         region_out_send,
     );

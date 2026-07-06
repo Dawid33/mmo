@@ -3,7 +3,7 @@
 //! which is what makes "cycle out = park, cycle in = restore-or-regenerate"
 //! safe for the multi-region world.
 
-use game::{Chunk, ChunkCoords, RegionCoords, REGION_CHUNKS};
+use game::{BlockId, Chunk, ChunkCoords, RegionCoords, REGION_CHUNKS};
 
 /// Floor height for a region: 8 on even `x+z`, 12 on odd — a checkerboard,
 /// so region boundaries are visible as steps while roaming.
@@ -16,13 +16,14 @@ pub fn floor_height(coords: RegionCoords) -> u32 {
 }
 
 /// The full 8×8 chunk grid for one region, region-local coordinates.
-/// Pure and deterministic; no clocks, no RNG.
-pub fn generate_region(coords: RegionCoords) -> Vec<(ChunkCoords, Chunk)> {
+/// Pure and deterministic; no clocks, no RNG. `solid` is the floor material,
+/// resolved from the block registry by the caller.
+pub fn generate_region(coords: RegionCoords, solid: BlockId) -> Vec<(ChunkCoords, Chunk)> {
     let depth = floor_height(coords);
     let mut chunks = Vec::with_capacity(REGION_CHUNKS * REGION_CHUNKS);
     for x in 0..REGION_CHUNKS {
         for z in 0..REGION_CHUNKS {
-            chunks.push((ChunkCoords::new(x, 0, z), Chunk::flat_floor(depth)));
+            chunks.push((ChunkCoords::new(x, 0, z), Chunk::flat_floor_with(depth, solid)));
         }
     }
     chunks
@@ -32,6 +33,8 @@ pub fn generate_region(coords: RegionCoords) -> Vec<(ChunkCoords, Chunk)> {
 mod tests {
     use super::*;
     use std::hash::Hash;
+
+    const TEST_STONE: game::BlockId = game::BlockId(2);
 
     fn crc(chunks: &[(ChunkCoords, Chunk)]) -> u32 {
         let mut h = crc32fast::Hasher::new();
@@ -43,8 +46,8 @@ mod tests {
 
     #[test]
     fn generation_is_pure() {
-        let a = generate_region(RegionCoords::new(-3, 7));
-        let b = generate_region(RegionCoords::new(-3, 7));
+        let a = generate_region(RegionCoords::new(-3, 7), TEST_STONE);
+        let b = generate_region(RegionCoords::new(-3, 7), TEST_STONE);
         assert_eq!(a.len(), 64);
         assert_eq!(crc(&a), crc(&b));
     }
@@ -59,8 +62,8 @@ mod tests {
 
     #[test]
     fn neighbouring_regions_differ() {
-        let even = generate_region(RegionCoords::new(0, 0));
-        let odd = generate_region(RegionCoords::new(1, 0));
+        let even = generate_region(RegionCoords::new(0, 0), TEST_STONE);
+        let odd = generate_region(RegionCoords::new(1, 0), TEST_STONE);
         assert_ne!(crc(&even), crc(&odd));
     }
 
@@ -68,7 +71,7 @@ mod tests {
     fn generated_chunks_carry_chisel_slabs() {
         // Every floor chunk straddles the floor height (8 or 12 voxels, both
         // sub-block), so its bottom blocks are chiseled.
-        let chunks = generate_region(RegionCoords::new(0, 0));
+        let chunks = generate_region(RegionCoords::new(0, 0), TEST_STONE);
         assert!(
             chunks.iter().all(|(_, c)| !c.chisel.is_empty()),
             "every generated floor chunk should have a chiseled slab"

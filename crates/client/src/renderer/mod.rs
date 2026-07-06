@@ -7,7 +7,6 @@ use bevy::render::render_resource::{
 };
 use crossbeam::channel::{Receiver, Sender};
 use game::{ClientId, ClientUpdateEvent, GameEventKind};
-use std::collections::BTreeMap;
 
 mod avatar;
 mod block_textures;
@@ -18,6 +17,7 @@ mod input;
 mod interpolate;
 pub mod meshing;
 mod voxel_material;
+use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
 
 #[derive(Resource)]
@@ -28,10 +28,6 @@ pub struct GameEvents(pub Sender<GameEventKind>);
 
 #[derive(Resource, Default)]
 pub struct LocalPlayer(pub Option<ClientId>);
-
-/// Maps a simulation `VoxelType` to the array-texture layer index that renders it.
-#[derive(Resource, Default, Clone)]
-pub struct VoxelTypeLayers(pub BTreeMap<game::VoxelType, u32>);
 
 pub struct SimBridgePlugin {
     pub client_recv: Receiver<ClientUpdateEvent>,
@@ -85,7 +81,7 @@ impl Plugin for SimBridgePlugin {
 /// `AssetPlugin { file_path: "../../assets", .. }` uses in main.rs, plus our own
 /// `blocks` subdir, so all three bases resolve consistently.
 #[cfg(not(target_arch = "wasm32"))]
-fn resolve_blocks_dir() -> std::path::PathBuf {
+pub(crate) fn resolve_blocks_dir() -> std::path::PathBuf {
     use std::path::PathBuf;
 
     let base = if let Ok(root) = std::env::var("BEVY_ASSET_ROOT") {
@@ -120,94 +116,46 @@ fn setup_scene(
     mut images: ResMut<Assets<Image>>,
     mut voxel_materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>>,
 ) {
-    let mut layers: Vec<image::RgbaImage> = Vec::new();
-    let mut layer_names: Vec<String> = Vec::new();
-    let mut sorted: BTreeMap<String, image::RgbaImage> = BTreeMap::new();
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let blocks_dir = resolve_blocks_dir();
-        if let Ok(dir) = std::fs::read_dir(&blocks_dir) {
-            for file in dir {
-                let file = match file {
-                    Ok(file) => file,
-                    Err(_) => continue,
-                };
-                if file.path().extension().and_then(|e| e.to_str()) != Some("png") {
-                    continue;
-                }
-                match image::ImageReader::open(file.path()) {
-                    Ok(reader) => match reader.decode() {
-                        Ok(decoded) => {
-                            sorted.insert(file.file_name().to_string_lossy().to_string(), decoded.to_rgba8());
-                        }
-                        Err(e) => warn!("failed to decode {:?}, {:?}", file.path(), e),
-                    },
-                    Err(e) => warn!("failed to read {:?}, {:?}", file.path(), e),
-                }
-            }
-        }
-    }
-    // No filesystem in the browser: HTTP can't enumerate a directory, so wasm
-    // builds carry the block textures embedded in the binary instead.
-    #[cfg(target_arch = "wasm32")]
-    for (name, bytes) in EMBEDDED_BLOCK_TEXTURES {
-        match image::load_from_memory(bytes) {
-            Ok(decoded) => {
-                sorted.insert((*name).to_string(), decoded.to_rgba8());
-            }
-            Err(e) => warn!("failed to decode embedded block texture {name}: {e:?}"),
-        }
-    }
-    for (name, image) in sorted {
-        layer_names.push(name);
-        layers.push(image);
-    }
+    let registry = crate::blocks::load_registry();
 
-    let mut voxel_type_layers = VoxelTypeLayers::default();
-    let handle = if layers.is_empty() {
-        warn!("no block textures found under assets/blocks; voxels will render untextured");
-        None
-    } else {
-        let (w, h) = (layers[0].width(), layers[0].height());
-        assert!(layers.iter().all(|l| l.dimensions() == (w, h)), "all block textures must share dimensions");
-        let data: Vec<u8> = layers.iter().flat_map(|l| l.as_raw().clone()).collect();
-        let mut array_image = Image::new(
-            Extent3d { width: w, height: h, depth_or_array_layers: layers.len() as u32 },
-            TextureDimension::D2,
-            data,
-            TextureFormat::Rgba8UnormSrgb,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        // `ImageSampler::nearest()` alone leaves clamp-to-edge addressing, which breaks the
-        // tiled UVs the mesher emits (uv * quad.width/height can exceed 1.0); force repeat
-        // addressing on top of nearest filtering.
-        let mut sampler = ImageSamplerDescriptor::nearest();
-        sampler.address_mode_u = ImageAddressMode::Repeat;
-        sampler.address_mode_v = ImageAddressMode::Repeat;
-        sampler.address_mode_w = ImageAddressMode::Repeat;
-        array_image.sampler = ImageSampler::Descriptor(sampler);
-        // wgpu's default texture-view dimension for a `D2` texture collapses to plain `D2`
-        // when `depth_or_array_layers == 1` (per the WebGPU default-view algorithm), which
-        // mismatches the `dimension = "2d_array"` binding `StandardVoxelMaterial` declares as
-        // soon as there's only a single block texture (e.g. just `dirt.png` today). Force the
-        // view to stay an array so the bind group is valid regardless of layer count.
-        array_image.texture_view_descriptor = Some(TextureViewDescriptor {
-            dimension: Some(TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        Some(images.add(array_image))
-    };
+    // Loader: native reads PNGs from assets/blocks/; wasm resolves from the
+    // embedded texture map. Returns None on any failure (build_layers then
+    // falls the block back to the layer-0 missing texture).
+    let (rgba_layers, block_layers) = build_layers(&registry, |path| load_block_texture(path));
 
-    if let Some(handle) = handle {
-        let black_layer = layer_names.iter().position(|n| n == "black.png").unwrap_or(0) as u32;
-        voxel_type_layers.0.insert(game::VoxelType::Black, black_layer);
+    let (w, h) = (rgba_layers[0].width(), rgba_layers[0].height());
+    let data: Vec<u8> = rgba_layers.iter().flat_map(|l| l.as_raw().clone()).collect();
+    let mut array_image = Image::new(
+        Extent3d { width: w, height: h, depth_or_array_layers: rgba_layers.len() as u32 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    // `ImageSampler::nearest()` alone leaves clamp-to-edge addressing, which breaks the
+    // tiled UVs the mesher emits (uv * quad.width/height can exceed 1.0); force repeat
+    // addressing on top of nearest filtering.
+    let mut sampler = ImageSamplerDescriptor::nearest();
+    sampler.address_mode_u = ImageAddressMode::Repeat;
+    sampler.address_mode_v = ImageAddressMode::Repeat;
+    sampler.address_mode_w = ImageAddressMode::Repeat;
+    array_image.sampler = ImageSampler::Descriptor(sampler);
+    // wgpu's default texture-view dimension for a `D2` texture collapses to plain `D2`
+    // when `depth_or_array_layers == 1` (per the WebGPU default-view algorithm), which
+    // mismatches the `dimension = "2d_array"` binding `StandardVoxelMaterial` declares as
+    // soon as there's only a single block texture. Force the view to stay an array so
+    // the bind group is valid regardless of layer count.
+    array_image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let handle = images.add(array_image);
 
-        commands.insert_resource(meshing::ChunkMaterial(voxel_materials.add(ExtendedMaterial {
-            base: StandardMaterial { perceptual_roughness: 0.9, ..Default::default() },
-            extension: StandardVoxelMaterial { voxels_texture: handle },
-        })));
-    }
-    commands.insert_resource(voxel_type_layers);
+    commands.insert_resource(meshing::ChunkMaterial(voxel_materials.add(ExtendedMaterial {
+        base: StandardMaterial { perceptual_roughness: 0.9, ..Default::default() },
+        extension: StandardVoxelMaterial { voxels_texture: handle },
+    })));
+    commands.insert_resource(block_layers);
 
     commands.spawn((
         DirectionalLight { color: Color::srgb(0.98, 0.95, 0.82), shadows_enabled: true, ..Default::default() },
@@ -218,6 +166,33 @@ fn setup_scene(
         brightness: 100.0,
         ..Default::default()
     });
+}
+
+/// Load one block texture as RGBA8. Native reads `assets/blocks/<path>`; wasm
+/// resolves it from the compiled-in texture table. `None` on any failure.
+fn load_block_texture(path: &str) -> Option<image::RgbaImage> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let full = resolve_blocks_dir().join(path);
+        match image::ImageReader::open(&full).ok().and_then(|r| r.decode().ok()) {
+            Some(img) => return Some(img.to_rgba8()),
+            None => {
+                warn!("could not read block texture {full:?}");
+                return None;
+            }
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bytes = EMBEDDED_BLOCK_TEXTURES.iter().find(|(n, _)| *n == path).map(|(_, b)| *b)?;
+        match image::load_from_memory(bytes) {
+            Ok(img) => Some(img.to_rgba8()),
+            Err(e) => {
+                warn!("could not decode embedded block texture {path}: {e:?}");
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]

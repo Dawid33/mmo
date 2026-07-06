@@ -1,4 +1,4 @@
-use game::{derive_voxels, voxel_index, Chunk, VoxelType};
+use game::{derive_voxels, voxel_index, BlockId, Chunk};
 use std::hash::Hash;
 
 fn crc(c: &Chunk) -> u32 {
@@ -29,6 +29,6 @@ fn chunk_hash_is_stable_and_bincode_roundtrips() {
 fn derive_reproduces_floor_height() {
     let c = Chunk::flat_floor(8);
     let voxels = derive_voxels(&c.blocks, &c.chisel);
-    assert_eq!(voxels[voxel_index(0, 7, 0)].kind, VoxelType::Black, "y<8 solid");
-    assert_eq!(voxels[voxel_index(0, 8, 0)].kind, VoxelType::Air, "y>=8 air");
+    assert_eq!(voxels[voxel_index(0, 7, 0)].block, BlockId(1), "y<8 solid");
+    assert_eq!(voxels[voxel_index(0, 8, 0)].block, BlockId::AIR, "y>=8 air");
 }
