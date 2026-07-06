@@ -269,4 +269,16 @@ mod tests {
         assert!(!app.world().entity(e).contains::<Mesh3d>(), "ghost mesh must not be attached after VoxelData removal");
         assert!(!app.world().entity(e).contains::<MeshingTask>(), "in-flight task must be cancelled on VoxelData removal");
     }
+
+    #[test]
+    fn derives_and_meshes_a_generated_floor_chunk() {
+        let chunk = game::Chunk::flat_floor(8);
+        let voxels = game::derive_voxels(&chunk.blocks, &chunk.chisel);
+        let mesh = build_chunk_mesh(&voxels, &VoxelTypeLayers::default());
+        let mesh = mesh.expect("a floor chunk has solid voxels and must produce a mesh");
+        assert!(
+            mesh.indices().map(|i| i.len()).unwrap_or(0) > 0,
+            "the meshed floor must have triangles"
+        );
+    }
 }

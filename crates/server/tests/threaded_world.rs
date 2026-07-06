@@ -25,6 +25,13 @@ struct Rig {
     region_out: Receiver<(RegionCoords, RegionOutput)>,
     packets: Receiver<(Option<ClientId>, ServerPacket)>,
     start: Instant,
+    /// Every region id whose `Snapshot` output we have drained, no matter
+    /// which drain saw it. On fast hardware a region can finish building
+    /// inside a `settle()` window, so `settle()` — not `wait_for_snapshots`
+    /// — is the one that pulls its snapshot off `region_out`. Recording here
+    /// (in both drains) means a snapshot eaten by `settle()` still counts, so
+    /// `wait_for_snapshots` can't hang waiting for one that already arrived.
+    seen_snapshots: BTreeSet<RegionCoords>,
 }
 
 impl Rig {
@@ -37,7 +44,18 @@ impl Rig {
             out_send,
             region_out_send,
         );
-        Rig { manager, region_out, packets, start: Instant::now() }
+        Rig { manager, region_out, packets, start: Instant::now(), seen_snapshots: BTreeSet::new() }
+    }
+
+    /// Hand one drained region output to the manager, first recording it if
+    /// it is a snapshot. Both `settle()` and `wait_for_snapshots()` funnel
+    /// through here so snapshot bookkeeping is drain-site-independent.
+    fn absorb(&mut self, rc: RegionCoords, output: RegionOutput) {
+        if let RegionOutput::Snapshot(..) = &output {
+            self.seen_snapshots.insert(rc);
+        }
+        let now = self.now_ms();
+        self.manager.handle_region_output(rc, output, now);
     }
     fn now_ms(&self) -> u64 {
         self.start.elapsed().as_millis() as u64
@@ -57,10 +75,7 @@ impl Rig {
         let budget = Instant::now() + Duration::from_millis(500);
         while Instant::now() < budget {
             match self.region_out.recv_timeout(Duration::from_millis(100)) {
-                Ok((rc, output)) => {
-                    let now = self.now_ms();
-                    self.manager.handle_region_output(rc, output, now);
-                }
+                Ok((rc, output)) => self.absorb(rc, output),
                 Err(_) => return,
             }
         }
@@ -84,22 +99,17 @@ impl Rig {
     /// on their own thread before they can answer anything.
     fn wait_for_snapshots(&mut self, want: &[RegionCoords], timeout: Duration) {
         let want: BTreeSet<RegionCoords> = want.iter().copied().collect();
-        let mut seen: BTreeSet<RegionCoords> = BTreeSet::new();
         let deadline = Instant::now() + timeout;
-        while !want.is_subset(&seen) {
+        while !want.is_subset(&self.seen_snapshots) {
             let remaining = deadline.saturating_duration_since(Instant::now());
             assert!(
                 remaining > Duration::ZERO,
                 "regions never snapshotted: missing {:?}",
-                want.difference(&seen).collect::<Vec<_>>()
+                want.difference(&self.seen_snapshots).collect::<Vec<_>>()
             );
             if let Ok((rc, output)) = self.region_out.recv_timeout(remaining.min(Duration::from_millis(200)))
             {
-                if let RegionOutput::Snapshot(..) = &output {
-                    seen.insert(rc);
-                }
-                let now = self.now_ms();
-                self.manager.handle_region_output(rc, output, now);
+                self.absorb(rc, output);
             }
         }
     }

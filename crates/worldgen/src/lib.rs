@@ -63,4 +63,19 @@ mod tests {
         let odd = generate_region(RegionCoords::new(1, 0));
         assert_ne!(crc(&even), crc(&odd));
     }
+
+    #[test]
+    fn generated_chunks_carry_chisel_slabs() {
+        // Every floor chunk straddles the floor height (8 or 12 voxels, both
+        // sub-block), so its bottom blocks are chiseled.
+        let chunks = generate_region(RegionCoords::new(0, 0));
+        assert!(
+            chunks.iter().all(|(_, c)| !c.chisel.is_empty()),
+            "every generated floor chunk should have a chiseled slab"
+        );
+        assert!(
+            chunks.iter().all(|(_, c)| c.blocks.len() == 8),
+            "every chunk has 8 blocks"
+        );
+    }
 }
