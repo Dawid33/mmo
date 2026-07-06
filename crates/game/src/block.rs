@@ -5,9 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use block_mesh::ndshape::{ConstShape, ConstShape3u32};
+use block_mesh::ndshape::ConstShape;
 
-use crate::voxel::{Voxel, VoxelType, CHUNK_VOXEL_COUNT};
+use crate::voxel::{ChunkShape, Voxel, VoxelType, CHUNK_VOXEL_COUNT};
 
 pub const BLOCK_VOXELS: usize = 16; // 1 block = 16³ voxels = 1 m³
 pub const CHUNK_BLOCKS: usize = 32 / BLOCK_VOXELS; // = 2 blocks per axis
@@ -15,8 +15,9 @@ pub const CHUNK_BLOCK_COUNT: usize = CHUNK_BLOCKS * CHUNK_BLOCKS * CHUNK_BLOCKS;
 pub const BLOCK_VOXEL_COUNT: usize = BLOCK_VOXELS * BLOCK_VOXELS * BLOCK_VOXELS; // = 4096
 
 /// Linear voxel index within a chunk, matching `ChunkShape` (x fastest).
+/// Reuses `voxel::ChunkShape` so the 32³ layout has a single source of truth.
 pub fn voxel_index(x: usize, y: usize, z: usize) -> usize {
-    ConstShape3u32::<32, 32, 32>::linearize([x as u32, y as u32, z as u32]) as usize
+    ChunkShape::linearize([x as u32, y as u32, z as u32]) as usize
 }
 
 /// Index of a block within a chunk, linear over `CHUNK_BLOCKS³` (0..8).
@@ -129,6 +130,10 @@ impl ChiselData {
 /// consume it unchanged. Deterministic; the single source of truth for both sim
 /// (collider) and client (mesh).
 pub fn derive_voxels(blocks: &[Block], chisel: &BTreeMap<BlockIndex, ChiselData>) -> Vec<Voxel> {
+    // Contract: `blocks` is indexed by `BlockIndex` (ordinal position), so it
+    // must hold exactly the chunk's 8 blocks. A wrong length would silently
+    // under/over-fill the voxel array (or panic on an out-of-range block coord).
+    debug_assert_eq!(blocks.len(), CHUNK_BLOCK_COUNT);
     let mut voxels = vec![Voxel::new(VoxelType::Air); CHUNK_VOXEL_COUNT];
     for (idx, block) in blocks.iter().enumerate() {
         let bi = BlockIndex(idx as u8);
