@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 mod avatar;
 mod bridge;
+mod hud;
 pub mod convert;
 mod input;
 mod interpolate;
@@ -45,6 +46,7 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<bridge::Regions>()
             .init_resource::<bridge::RegionRoots>()
             .init_resource::<bridge::SimEntityMap>()
+            .init_resource::<hud::HudStatus>()
             .init_resource::<avatar::AvatarAssets>()
             .add_systems(
                 PreUpdate,
