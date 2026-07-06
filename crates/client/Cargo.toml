@@ -3,6 +3,14 @@ name = "client"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "client"
+path = "src/main.rs"
+
 [features]
 pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
 
