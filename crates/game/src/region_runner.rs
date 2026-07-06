@@ -6,8 +6,8 @@
 //! wasm build LocalServer pumps runners inline (crates/client).
 
 use crate::{
-    Chunk, ChunkCoords, ClientId, GameEvent, GameEventKind, Region, RegionCoords, RegionId,
-    Rollback, Tick, TICK_RATE,
+    Chunk, ChunkCoords, ClientId, EntityBundle, GameEvent, GameEventKind, GhostData, Region,
+    RegionCoords, RegionId, Rollback, Tick, TICK_RATE,
 };
 use crossbeam::channel::Sender;
 
@@ -45,6 +45,11 @@ pub enum RegionOutput {
     Snapshot(ClientId, Rollback),
     SyncClock { tick_rate: u64, tick: Tick },
     Stopped(SerializedRegion),
+    /// Boundary crossings this tick: bundles + ABSOLUTE target regions.
+    /// Isometries are still source-local; the manager rebases.
+    Departures(Vec<(EntityBundle, RegionCoords)>),
+    /// Margin mirrors this tick, same framing.
+    GhostUpdates(Vec<(GhostData, RegionCoords)>),
 }
 
 /// How to build a region when it spawns: restored from the parking lot if
@@ -128,6 +133,13 @@ impl RegionRunner {
             .expect("region tick failed");
         self.region.forget_last_event();
         let _ = self.out.send((self.id, RegionOutput::EventProcessed(event)));
+        let (departures, ghosts) = self.region.take_transfers();
+        if !departures.is_empty() {
+            let _ = self.out.send((self.id, RegionOutput::Departures(departures)));
+        }
+        if !ghosts.is_empty() {
+            let _ = self.out.send((self.id, RegionOutput::GhostUpdates(ghosts)));
+        }
         if self.region.current_tick() % 10 == 0 {
             let _ = self.out.send((
                 self.id,
@@ -141,5 +153,9 @@ impl RegionRunner {
 
     pub fn current_tick(&self) -> usize {
         self.region.current_tick()
+    }
+
+    pub fn region_mut(&mut self) -> &mut Region {
+        &mut self.region
     }
 }

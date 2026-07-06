@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    ClientId, ClientPacket, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldManager,
-    SPAWN_REGION, UNLOAD_GRACE_MS,
+    ClientId, ClientPacket, GameEvent, GameEventKind, InputEvent, Key, RegionCoords, RegionOutput,
+    ServerEvent, ServerPacket, WorldManager, SPAWN_REGION, UNLOAD_GRACE_MS,
 };
 use server::region_threads::ThreadRegionSpawner;
 
@@ -186,4 +186,88 @@ fn roaming_client_cycles_regions_across_threads() {
     for rc in &old_column {
         assert!(rig.manager.parked_regions().contains(rc), "{:?} parked", rc);
     }
+}
+
+/// End-to-end crossing on real region threads: a scripted client walks its
+/// player out of `SPAWN_REGION` (0,0) across the -z boundary into (0,-1) using
+/// real input, and we observe the authoritative handoff — the `PlayerRegion`
+/// home flip AND the `EntityArrived` fan-out — arrive over the packet channel.
+///
+/// Held-input note: `InputState::step` (run once per region tick) demotes a
+/// `Pressed` key to `Held` but never clears it, and `key_held` reports both.
+/// So a single `KeyW` press keeps the player walking every tick until a
+/// release — no per-tick re-send is needed. `KeyE` enables fps-cam (the mode
+/// the walk controller requires); the toggle fires on the first tick that
+/// sees it `Pressed`. Both inputs are stamped to (0,0): the manager routes
+/// `PlayerInput` by the player's *home*, which is (0,0) until the flip lands.
+#[test]
+fn walking_input_crosses_a_boundary_on_real_threads() {
+    let mut rig = Rig::new();
+    rig.event(ServerEvent::ClientConnected(0));
+
+    // Subscribe the 3x3 window so both the departing (0,0) and arriving
+    // (0,-1) regions are up and relaying to us.
+    let window = SPAWN_REGION.window_3x3();
+    for rc in &window {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(*rc), 0));
+    }
+    rig.wait_for_snapshots(&window, REGION_STARTUP_BUDGET);
+    // Clear the snapshot/sync backlog so the diagnostic list below stays
+    // focused on what happened after we started walking.
+    let _ = rig.packets.try_iter().count();
+
+    // Player spawns at region-local (128,26,128) facing -z. Enable fps-cam,
+    // then hold W: 8 units/tick along -z from z=128 crosses the -z boundary
+    // (past -FLIP_HYSTERESIS) after ~17 ticks (<1s at TICK_RATE=50ms).
+    let press = |key| {
+        ServerEvent::ClientPacket(
+            ClientPacket::GameEvent(GameEvent::new(
+                GameEventKind::PlayerInput(0, InputEvent::Key { key, pressed: true }),
+                0,
+                SPAWN_REGION,
+            )),
+            0,
+        )
+    };
+    rig.event(press(Key::KeyE));
+    rig.event(press(Key::KeyW));
+
+    let arrival_region = RegionCoords::new(0, -1);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen_flip = false;
+    let mut seen_arrival = false;
+    let mut observed: Vec<String> = Vec::new();
+    while (!seen_flip || !seen_arrival) && Instant::now() < deadline {
+        // Keep region-thread outputs flowing into the manager: the crossing
+        // surfaces as a `Departures` output that the manager turns into the
+        // `PlayerRegion` push and the `EntityArrived` relay.
+        if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(50)) {
+            let now = rig.now_ms();
+            rig.manager.handle_region_output(rc, output, now);
+        }
+        for (_to, p) in rig.packets.try_iter() {
+            match &p {
+                ServerPacket::PlayerRegion(Some(rc), 0) if *rc == arrival_region => {
+                    seen_flip = true;
+                }
+                ServerPacket::GameEvent(ev)
+                    if ev.region_id == arrival_region
+                        && matches!(ev.kind, GameEventKind::EntityArrived(_)) =>
+                {
+                    seen_arrival = true;
+                }
+                _ => {}
+            }
+            observed.push(format!("{p:?}"));
+        }
+    }
+
+    assert!(
+        seen_flip,
+        "no PlayerRegion flip to {arrival_region:?} within deadline; packets seen: {observed:#?}"
+    );
+    assert!(
+        seen_arrival,
+        "no EntityArrived GameEvent for {arrival_region:?} within deadline; packets seen: {observed:#?}"
+    );
 }
