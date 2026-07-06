@@ -76,18 +76,35 @@ impl Chunk {
     }
 }
 
+// Keep the struct's EXISTING derive list verbatim — only the `y` field type
+// changes (usize -> i32). Do not add/remove derives.
 #[derive(
     Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, PartialOrd, Ord, Eq,
 )]
 pub struct ChunkCoords {
     pub(crate) x: usize,
-    pub(crate) y: usize,
+    pub(crate) y: i32,
     pub(crate) z: usize,
 }
 
 impl ChunkCoords {
-    pub fn new(x: usize, y: usize, z: usize) -> Self {
+    pub fn new(x: usize, y: i32, z: usize) -> Self {
         Self { x, y, z }
+    }
+}
+
+/// Region-local (x, z) address of a vertical column, 0..REGION_CHUNKS.
+#[derive(
+    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord,
+)]
+pub struct ColumnCoords {
+    pub x: usize,
+    pub z: usize,
+}
+
+impl ColumnCoords {
+    pub fn new(x: usize, z: usize) -> Self {
+        Self { x, z }
     }
 }
 
@@ -113,6 +130,25 @@ impl block_mesh::Voxel for Voxel {
         } else {
             VoxelVisibility::Opaque
         }
+    }
+}
+
+#[cfg(test)]
+mod coord_tests {
+    use super::*;
+
+    #[test]
+    fn chunk_coords_allow_negative_y() {
+        let c = ChunkCoords::new(3, -2, 5);
+        assert_eq!(c.y, -2);
+        assert_eq!(c.x, 3);
+        assert_eq!(c.z, 5);
+    }
+
+    #[test]
+    fn column_coords_construct() {
+        let c = ColumnCoords::new(1, 7);
+        assert_eq!((c.x, c.z), (1, 7));
     }
 }
 
