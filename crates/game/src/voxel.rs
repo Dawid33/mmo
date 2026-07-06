@@ -74,20 +74,66 @@ impl Chunk {
         }
         Self { blocks, chisel }
     }
+
+    /// Block at block-granularity coords (each axis 0..CHUNK_BLOCKS).
+    pub fn block_at(&self, bx: usize, by: usize, bz: usize) -> Block {
+        self.blocks[BlockIndex::from_xyz(bx, by, bz).0 as usize]
+    }
+
+    /// Set a whole block, clearing any chisel detail for that block cell
+    /// (whole-block granularity — sub-block chisel is not addressed here).
+    pub fn set_block(&mut self, bx: usize, by: usize, bz: usize, block: Block) {
+        let bi = BlockIndex::from_xyz(bx, by, bz);
+        self.blocks[bi.0 as usize] = block;
+        self.chisel.remove(&bi);
+    }
+
+    /// A chunk uniformly filled with `block` (no chisel detail).
+    pub fn uniform(block: Block) -> Self {
+        Self { blocks: vec![block; CHUNK_BLOCK_COUNT], chisel: BTreeMap::new() }
+    }
+
+    /// True iff every block equals `block` (full Block, incl. `data`) and there
+    /// is no chisel detail.
+    pub fn is_uniform(&self, block: Block) -> bool {
+        self.chisel.is_empty() && self.blocks.iter().all(|b| *b == block)
+    }
+
+    /// True iff every block is air and no chisel detail remains.
+    pub fn is_all_air(&self) -> bool {
+        self.is_uniform(Block::new(BlockId::AIR))
+    }
 }
 
+// Keep the struct's EXISTING derive list verbatim — only the `y` field type
+// changes (usize -> i32). Do not add/remove derives.
 #[derive(
     Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, PartialOrd, Ord, Eq,
 )]
 pub struct ChunkCoords {
     pub(crate) x: usize,
-    pub(crate) y: usize,
+    pub(crate) y: i32,
     pub(crate) z: usize,
 }
 
 impl ChunkCoords {
-    pub fn new(x: usize, y: usize, z: usize) -> Self {
+    pub fn new(x: usize, y: i32, z: usize) -> Self {
         Self { x, y, z }
+    }
+}
+
+/// Region-local (x, z) address of a vertical column, 0..REGION_CHUNKS.
+#[derive(
+    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord,
+)]
+pub struct ColumnCoords {
+    pub x: usize,
+    pub z: usize,
+}
+
+impl ColumnCoords {
+    pub fn new(x: usize, z: usize) -> Self {
+        Self { x, z }
     }
 }
 
@@ -113,6 +159,25 @@ impl block_mesh::Voxel for Voxel {
         } else {
             VoxelVisibility::Opaque
         }
+    }
+}
+
+#[cfg(test)]
+mod coord_tests {
+    use super::*;
+
+    #[test]
+    fn chunk_coords_allow_negative_y() {
+        let c = ChunkCoords::new(3, -2, 5);
+        assert_eq!(c.y, -2);
+        assert_eq!(c.x, 3);
+        assert_eq!(c.z, 5);
+    }
+
+    #[test]
+    fn column_coords_construct() {
+        let c = ColumnCoords::new(1, 7);
+        assert_eq!((c.x, c.z), (1, 7));
     }
 }
 

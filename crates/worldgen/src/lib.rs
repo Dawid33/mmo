@@ -3,7 +3,9 @@
 //! which is what makes "cycle out = park, cycle in = restore-or-regenerate"
 //! safe for the multi-region world.
 
-use game::{BlockId, Chunk, ChunkCoords, RegionCoords, REGION_CHUNKS};
+use game::{
+    Block, BlockId, Chunk, Column, ColumnCoords, RegionCoords, SubChunk, REGION_CHUNKS,
+};
 
 /// Floor height for a region: 8 on even `x+z`, 12 on odd — a checkerboard,
 /// so region boundaries are visible as steps while roaming.
@@ -15,41 +17,57 @@ pub fn floor_height(coords: RegionCoords) -> u32 {
     }
 }
 
-/// The full 8×8 chunk grid for one region, region-local coordinates.
-/// Pure and deterministic; no clocks, no RNG. `solid` is the floor material,
-/// resolved from the block registry by the caller.
-pub fn generate_region(coords: RegionCoords, solid: BlockId) -> Vec<(ChunkCoords, Chunk)> {
+/// The full 8×8 column grid for one region, region-local coordinates.
+/// Pure and deterministic; no clocks, no RNG. `solid` is the floor material.
+/// Each column: stone sentinel below, air above, one straddling floor
+/// sub-chunk at sub_y = 0.
+pub fn generate_region(coords: RegionCoords, solid: BlockId) -> Vec<(ColumnCoords, Column)> {
     let depth = floor_height(coords);
-    let mut chunks = Vec::with_capacity(REGION_CHUNKS * REGION_CHUNKS);
+    let stone = Block::new(solid);
+    let air = Block::new(BlockId::AIR);
+    let mut columns = Vec::with_capacity(REGION_CHUNKS * REGION_CHUNKS);
     for x in 0..REGION_CHUNKS {
         for z in 0..REGION_CHUNKS {
-            chunks.push((ChunkCoords::new(x, 0, z), Chunk::flat_floor_with(depth, solid)));
+            let floor = SubChunk::Dense(Box::new(Chunk::flat_floor_with(depth, solid)));
+            let column = Column::new(0, stone, air, vec![floor]);
+            columns.push((ColumnCoords::new(x, z), column));
         }
     }
-    chunks
+    columns
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::hash::Hash;
+    use game::{Column, ColumnCoords};
 
     const TEST_STONE: game::BlockId = game::BlockId(2);
 
-    fn crc(chunks: &[(ChunkCoords, Chunk)]) -> u32 {
+    fn crc(cols: &[(ColumnCoords, Column)]) -> u32 {
         let mut h = crc32fast::Hasher::new();
-        for (_, c) in chunks {
-            c.hash(&mut h);
-        }
+        let bytes = bincode::serialize(cols).unwrap();
+        h.update(&bytes);
         h.finalize()
     }
 
     #[test]
-    fn generation_is_pure() {
+    fn produces_sixty_four_columns() {
+        let cols = generate_region(RegionCoords::new(0, 0), TEST_STONE);
+        assert_eq!(cols.len(), REGION_CHUNKS * REGION_CHUNKS); // 64
+    }
+
+    #[test]
+    fn generation_is_deterministic() {
         let a = generate_region(RegionCoords::new(-3, 7), TEST_STONE);
         let b = generate_region(RegionCoords::new(-3, 7), TEST_STONE);
-        assert_eq!(a.len(), 64);
         assert_eq!(crc(&a), crc(&b));
+    }
+
+    #[test]
+    fn parity_regions_differ() {
+        let even = generate_region(RegionCoords::new(0, 0), TEST_STONE);
+        let odd = generate_region(RegionCoords::new(1, 0), TEST_STONE);
+        assert_ne!(crc(&even), crc(&odd));
     }
 
     #[test]
@@ -61,24 +79,27 @@ mod tests {
     }
 
     #[test]
-    fn neighbouring_regions_differ() {
-        let even = generate_region(RegionCoords::new(0, 0), TEST_STONE);
-        let odd = generate_region(RegionCoords::new(1, 0), TEST_STONE);
-        assert_ne!(crc(&even), crc(&odd));
-    }
-
-    #[test]
-    fn generated_chunks_carry_chisel_slabs() {
+    fn generated_columns_carry_chisel_slabs() {
         // Every floor chunk straddles the floor height (8 or 12 voxels, both
         // sub-block), so its bottom blocks are chiseled.
-        let chunks = generate_region(RegionCoords::new(0, 0), TEST_STONE);
+        let cols = generate_region(RegionCoords::new(0, 0), TEST_STONE);
         assert!(
-            chunks.iter().all(|(_, c)| !c.chisel.is_empty()),
-            "every generated floor chunk should have a chiseled slab"
+            cols.iter().all(|(_, col)| {
+                col.sub_chunks().iter().any(|s| match s {
+                    SubChunk::Dense(c) => !c.chisel.is_empty(),
+                    SubChunk::Air => false,
+                })
+            }),
+            "every generated floor column should have a chiseled slab"
         );
         assert!(
-            chunks.iter().all(|(_, c)| c.blocks.len() == 8),
-            "every chunk has 8 blocks"
+            cols.iter().all(|(_, col)| {
+                col.sub_chunks().iter().all(|s| match s {
+                    SubChunk::Dense(c) => c.blocks.len() == 8,
+                    SubChunk::Air => true,
+                })
+            }),
+            "every sub-chunk has 8 blocks"
         );
     }
 }
