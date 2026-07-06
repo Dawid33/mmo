@@ -36,11 +36,15 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
+        let registry = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron"))
+            .expect("invalid block manifest");
+        let stone = registry.id_of("stone").expect("block manifest must define \"stone\"");
+
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let manager = WorldManager::new(
             ThreadRegionSpawner::default(),
-            Box::new(worldgen::generate_region),
+            Box::new(move |rc| worldgen::generate_region(rc, stone)),
             out_send,
             region_out_send,
         );
