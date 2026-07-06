@@ -74,6 +74,24 @@ impl Chunk {
         }
         Self { blocks, chisel }
     }
+
+    /// Block at block-granularity coords (each axis 0..CHUNK_BLOCKS).
+    pub fn block_at(&self, bx: usize, by: usize, bz: usize) -> Block {
+        self.blocks[BlockIndex::from_xyz(bx, by, bz).0 as usize]
+    }
+
+    /// Set a whole block, clearing any chisel detail for that block cell
+    /// (whole-block granularity — sub-block chisel is not addressed here).
+    pub fn set_block(&mut self, bx: usize, by: usize, bz: usize, block: Block) {
+        let bi = BlockIndex::from_xyz(bx, by, bz);
+        self.blocks[bi.0 as usize] = block;
+        self.chisel.remove(&bi);
+    }
+
+    /// True iff every block is air and no chisel detail remains.
+    pub fn is_all_air(&self) -> bool {
+        self.chisel.is_empty() && self.blocks.iter().all(|b| b.id == BlockId::AIR)
+    }
 }
 
 // Keep the struct's EXISTING derive list verbatim — only the `y` field type

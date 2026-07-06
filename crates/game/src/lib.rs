@@ -24,6 +24,7 @@ mod region;
 pub mod region_runner;
 pub mod state;
 pub mod voxel;
+pub mod volume;
 pub mod world_manager;
 pub use parry3d as parry;
 
@@ -37,6 +38,7 @@ pub use registry::*;
 pub use region_runner::*;
 pub use state::*;
 pub use voxel::*;
+pub use volume::*;
 pub use world_manager::*;
 
 pub const TICK_RATE: u64 = 50;
