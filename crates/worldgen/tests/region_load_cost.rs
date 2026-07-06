@@ -1,0 +1,67 @@
+//! Headless benchmark of the CPU work behind "receive and load a region".
+//! Ignored by default (prints, doesn't assert); run it via `just bench-region`
+//! or `cargo test -p worldgen --release --test region_load_cost -- --ignored --nocapture`.
+//!
+//! It isolates each stage the real client/server run per region so a profile or
+//! a before/after tweak has concrete numbers to compare against. The GPU upload
+//! (`meshes.add` + `RenderAssetUsages`) is NOT covered here — that needs the
+//! live client under `just perf-client`.
+use std::time::Instant;
+
+const STONE: game::BlockId = game::BlockId(2);
+
+#[test]
+#[ignore = "benchmark; run explicitly via `just bench-region`"]
+fn region_load_cost() {
+    // Warm up allocator/caches so the first stage isn't charged for them.
+    let _ = worldgen::generate_region(game::RegionCoords::new(0, 0), STONE);
+
+    // 1. Server-side generation of one region (64 chunks).
+    let t = Instant::now();
+    let chunks = worldgen::generate_region(game::RegionCoords::new(3, 5), STONE);
+    let gen_t = t.elapsed();
+
+    // 2. Client-side: derive the 32^3 voxel array for every chunk. This is what
+    //    `spawn_region_snapshot` does SYNCHRONOUSLY, on the main schedule, for
+    //    all 64 chunks in the single frame a region arrives — a guaranteed hitch.
+    let t = Instant::now();
+    let mut total_voxels = 0usize;
+    let mut derived = Vec::with_capacity(chunks.len());
+    for (_, c) in &chunks {
+        let v = game::derive_voxels(&c.blocks, &c.chisel);
+        total_voxels += v.len();
+        derived.push(v);
+    }
+    let derive = t.elapsed();
+
+    // 3. bincode round-trip of the chunk grid (proxy for the wire cost paid on
+    //    the server's writer thread and the client's netcode thread).
+    let t = Instant::now();
+    let bytes = bincode::serialize(&chunks).unwrap();
+    let ser = t.elapsed();
+    let t = Instant::now();
+    let _back: Vec<(game::ChunkCoords, game::Chunk)> = bincode::deserialize(&bytes).unwrap();
+    let de = t.elapsed();
+
+    // 4. Greedy mesher over every derived chunk — the per-chunk async meshing
+    //    job (`build_chunk_mesh`) `queue_meshing` spawns, minus the bevy Mesh
+    //    alloc. Typically the single largest slice of "load a region" wall-clock.
+    use block_mesh::{greedy_quads, GreedyQuadsBuffer, RIGHT_HANDED_Y_UP_CONFIG};
+    let t = Instant::now();
+    let mut quads_total = 0usize;
+    for v in &derived {
+        let mut buffer = GreedyQuadsBuffer::new(v.len());
+        greedy_quads(v, &game::ChunkShape {}, [0; 3], [31; 3], &RIGHT_HANDED_Y_UP_CONFIG.faces, &mut buffer);
+        quads_total += buffer.quads.num_quads();
+    }
+    let mesh = t.elapsed();
+
+    eprintln!("--- region load cost ({} chunks) ---", chunks.len());
+    eprintln!("generate_region:      {:>12?}", gen_t);
+    eprintln!("derive_voxels x{:<3}:    {:>12?}   ({} voxels, sync on main)", chunks.len(), derive, total_voxels);
+    eprintln!("bincode serialize:    {:>12?}   ({} bytes/region)", ser, bytes.len());
+    eprintln!("bincode deserialize:  {:>12?}", de);
+    eprintln!("greedy_quads x{:<3}:     {:>12?}   ({} quads, async pool)", chunks.len(), mesh, quads_total);
+    eprintln!("  per-chunk derive:   {:>12?}", derive / chunks.len() as u32);
+    eprintln!("  per-chunk mesh:     {:>12?}", mesh / chunks.len() as u32);
+}

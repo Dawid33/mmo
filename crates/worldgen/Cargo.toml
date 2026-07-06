@@ -8,6 +8,8 @@ game = { path = "../game" }
 
 [dev-dependencies]
 crc32fast = { workspace = true }
+bincode = { workspace = true }
+block-mesh = { workspace = true }
 
 [[bin]]
 path = "src/main.rs"

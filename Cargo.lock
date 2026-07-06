@@ -1976,8 +1976,6 @@ dependencies = [
  "js-sys",
  "log",
  "ordered-float 5.1.0",
- "pyroscope",
- "pyroscope_pprofrs",
  "quinn",
  "slotmapd",
  "tokio",
@@ -8233,6 +8231,8 @@ checksum = "052283831dbae3d879dc7f51f3d92703a316ca49f91540417d38591826127814"
 name = "worldgen"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "block-mesh",
  "crc32fast",
  "game",
 ]
