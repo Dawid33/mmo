@@ -88,9 +88,20 @@ impl Chunk {
         self.chisel.remove(&bi);
     }
 
+    /// A chunk uniformly filled with `block` (no chisel detail).
+    pub fn uniform(block: Block) -> Self {
+        Self { blocks: vec![block; CHUNK_BLOCK_COUNT], chisel: BTreeMap::new() }
+    }
+
+    /// True iff every block equals `block` (full Block, incl. `data`) and there
+    /// is no chisel detail.
+    pub fn is_uniform(&self, block: Block) -> bool {
+        self.chisel.is_empty() && self.blocks.iter().all(|b| *b == block)
+    }
+
     /// True iff every block is air and no chisel detail remains.
     pub fn is_all_air(&self) -> bool {
-        self.chisel.is_empty() && self.blocks.iter().all(|b| b.id == BlockId::AIR)
+        self.is_uniform(Block::new(BlockId::AIR))
     }
 }
 

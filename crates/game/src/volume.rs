@@ -49,6 +49,24 @@ impl SubChunk {
     pub fn is_air(&self) -> bool {
         matches!(self, SubChunk::Air)
     }
+
+    /// Collapsed form of a uniform block: `Air` for the air block, else a
+    /// `Dense` chunk filled with `block`.
+    pub fn uniform(block: Block) -> Self {
+        if block == Block::new(BlockId::AIR) {
+            SubChunk::Air
+        } else {
+            SubChunk::Dense(Box::new(Chunk::uniform(block)))
+        }
+    }
+
+    /// True iff this sub-chunk reads uniformly as `block`.
+    pub fn is_uniform_block(&self, block: Block) -> bool {
+        match self {
+            SubChunk::Air => block == Block::new(BlockId::AIR),
+            SubChunk::Dense(c) => c.is_uniform(block),
+        }
+    }
 }
 
 impl ReadVol for SubChunk {
@@ -114,11 +132,15 @@ impl Column {
         usize::try_from(idx).ok().and_then(|i| self.sub_chunks.get(i))
     }
 
-    /// Canonicalize: collapse all-air `Dense` to `Air`, then trim trailing
-    /// `Air` (equal to the `above` sentinel). Leading trim only when the
-    /// `below` sentinel is itself air (never, for terrain). Idempotent.
+    /// The sentinel block that applies at absolute `sub_y` (outside the band).
+    fn sentinel_at(&self, sub_y: i32) -> Block {
+        if sub_y < self.base_sub_y { self.below } else { self.above }
+    }
+
+    /// Canonicalize: collapse all-air `Dense` to `Air`, trim edge slices that
+    /// read uniformly as the adjacent sentinel (advancing `base_sub_y` on the
+    /// low edge), and reset `base_sub_y` to 0 when the band is empty. Idempotent.
     pub fn normalize(&mut self) {
-        let above_is_air = self.above.id == BlockId::AIR;
         for s in &mut self.sub_chunks {
             if let SubChunk::Dense(c) = s {
                 if c.is_all_air() {
@@ -126,16 +148,21 @@ impl Column {
                 }
             }
         }
-        if above_is_air {
-            while matches!(self.sub_chunks.last(), Some(SubChunk::Air)) {
-                self.sub_chunks.pop();
-            }
+        while matches!(self.sub_chunks.last(), Some(s) if s.is_uniform_block(self.above)) {
+            self.sub_chunks.pop();
         }
-        if self.below.id == BlockId::AIR {
-            while matches!(self.sub_chunks.first(), Some(SubChunk::Air)) {
-                self.sub_chunks.remove(0);
-                self.base_sub_y += 1;
-            }
+        while matches!(self.sub_chunks.first(), Some(s) if s.is_uniform_block(self.below)) {
+            self.sub_chunks.remove(0);
+            self.base_sub_y += 1;
+        }
+        // Only reset the boundary when the two sentinels agree: `base_sub_y`
+        // still carries meaningful information (which sentinel applies where)
+        // whenever `below != above`, even with an empty band — zeroing it
+        // unconditionally would silently reclassify already-correct `below`
+        // reads as `above` (or vice versa). See
+        // `column_tests::reads_sentinels_outside_band`.
+        if self.sub_chunks.is_empty() && self.below == self.above {
+            self.base_sub_y = 0;
         }
     }
 }
@@ -146,31 +173,34 @@ impl ReadVol for Column {
         let local_y = pos.y.rem_euclid(Self::SUB_BLOCKS_Y);
         match self.sub_chunk_at(sub_y) {
             Some(s) => s.get(BlockPos::new(pos.x, local_y, pos.z)),
-            None if sub_y < self.base_sub_y => self.below,
-            None => self.above,
+            None => self.sentinel_at(sub_y),
         }
     }
 }
 
 impl WriteVol for Column {
     fn set(&mut self, pos: BlockPos, block: Block) -> Block {
+        let prev = self.get(pos);
         let sub_y = pos.y.div_euclid(Self::SUB_BLOCKS_Y);
         let local_y = pos.y.rem_euclid(Self::SUB_BLOCKS_Y);
-        // Grow the band to include sub_y.
-        if self.sub_chunks.is_empty() {
-            self.base_sub_y = sub_y;
-            self.sub_chunks.push(SubChunk::Air);
-        }
+        // Grow via the below/above loops even from a fully empty band: both
+        // loops key off the current (always-meaningful) `base_sub_y`, so they
+        // fill exactly the gap between the old boundary and `sub_y` with the
+        // correct sentinel — no separate empty-band special case is needed
+        // (a prior version jumped `base_sub_y` straight to `sub_y`, which
+        // opened a hole of un-materialized cells that silently flipped from
+        // `below` to `above` reads; see
+        // `column_tests::downward_growth_into_stone_preserves_cells_and_prev`).
         while sub_y < self.base_sub_y {
-            self.sub_chunks.insert(0, SubChunk::Air);
+            self.sub_chunks.insert(0, SubChunk::uniform(self.below));
             self.base_sub_y -= 1;
         }
         let top = self.base_sub_y + self.sub_chunks.len() as i32;
         for _ in top..=sub_y {
-            self.sub_chunks.push(SubChunk::Air);
+            self.sub_chunks.push(SubChunk::uniform(self.above));
         }
         let idx = (sub_y - self.base_sub_y) as usize;
-        let prev = self.sub_chunks[idx].set(BlockPos::new(pos.x, local_y, pos.z), block);
+        self.sub_chunks[idx].set(BlockPos::new(pos.x, local_y, pos.z), block);
         self.normalize();
         prev
     }
@@ -247,9 +277,15 @@ mod column_tests {
 
     #[test]
     fn trailing_air_is_trimmed() {
+        // Full-canonical support (see `Column::normalize`): the trailing Air
+        // slices trim against the `above` sentinel as before, and — since
+        // `below` is also stone — the remaining `dense_stone` slice is now
+        // *also* redundant with `below` and trims away too, leaving the band
+        // fully empty. Reads are unaffected: `base_sub_y` absorbs the trim.
         let col = Column::new(0, stone(), air(), vec![dense_stone(), SubChunk::Air, SubChunk::Air]);
-        assert_eq!(col.sub_chunks.len(), 1);
-        assert!(matches!(col.sub_chunks[0], SubChunk::Dense(_)));
+        assert!(col.sub_chunks.is_empty());
+        assert_eq!(col.get(BlockPos::new(0, 0, 0)), stone());
+        assert_eq!(col.get(BlockPos::new(0, 20, 0)), air());
     }
 
     #[test]
@@ -271,6 +307,10 @@ mod column_tests {
 
     #[test]
     fn write_above_band_grows_then_normalizes() {
+        // Full-canonical support (see `Column::normalize`): `dense_stone`
+        // equals the `below` sentinel, so `Column::new` already collapses it
+        // away — the band starts (and, after this round-trip write, ends)
+        // fully empty. Reads stay correct via `base_sub_y` throughout.
         let mut col = Column::new(0, stone(), air(), vec![dense_stone()]);
         // Write a stone block well above the band.
         let far = BlockPos::new(0, 40, 0);
@@ -280,7 +320,36 @@ mod column_tests {
         // Writing air back at the same spot returns to canonical (collapse/trim).
         col.set(far, air());
         assert_eq!(col.get(far), air());
-        // Re-normalized: band is back to the single dense sub-chunk.
-        assert_eq!(col.sub_chunks.len(), 1);
+        // Re-normalized: band is back to fully empty (canonical form).
+        assert!(col.sub_chunks.is_empty());
+    }
+
+    #[test]
+    fn downward_growth_into_stone_preserves_cells_and_prev() {
+        let mut col = Column::new(0, stone(), air(), vec![dense_stone()]);
+        assert_eq!(col.get(BlockPos::new(0, -3, 0)), stone()); // below sentinel
+        let dirt = Block::new(BlockId(3));
+        let prev = col.set(BlockPos::new(0, -9, 0), dirt);
+        assert_eq!(prev, stone());                              // true previous = below sentinel
+        assert_eq!(col.get(BlockPos::new(0, -9, 0)), dirt);     // write landed
+        assert_eq!(col.get(BlockPos::new(0, -3, 0)), stone());  // untouched cell NOT corrupted to air
+    }
+
+    #[test]
+    fn writing_sentinel_value_stays_canonical() {
+        let a = Column::new(0, stone(), air(), vec![dense_stone()]);
+        let mut b = Column::new(0, stone(), air(), vec![dense_stone()]);
+        b.set(BlockPos::new(0, -9, 0), stone()); // stone below a stone sentinel = logical no-op
+        assert_eq!(bincode::serialize(&a).unwrap(), bincode::serialize(&b).unwrap());
+    }
+
+    #[test]
+    fn empty_bands_are_canonical_regardless_of_history() {
+        let x = Column::new(0, air(), air(), vec![SubChunk::Air]);   // collapses to empty
+        let mut y = Column::new(0, air(), air(), vec![SubChunk::Air]);
+        y.set(BlockPos::new(0, 10, 0), stone()); // grow band up
+        y.set(BlockPos::new(0, 10, 0), air());   // erase -> band collapses empty again
+        assert_eq!(bincode::serialize(&x).unwrap(), bincode::serialize(&y).unwrap());
+        assert_eq!(y.get(BlockPos::new(0, 10, 0)), air());
     }
 }
