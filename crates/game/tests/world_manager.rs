@@ -1,8 +1,8 @@
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    Chunk, ChunkCoords, ClientId, ClientPacket, GameEvent, GameEventKind, InlineSpawner,
-    RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldManager, SPAWN_REGION,
-    UNLOAD_GRACE_MS,
+    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind,
+    InlineSpawner, RegionCoords, RegionOutput, ServerEvent, ServerPacket, SubChunk, WorldManager,
+    SPAWN_REGION, UNLOAD_GRACE_MS,
 };
 
 struct Harness {
@@ -14,8 +14,11 @@ struct Harness {
 fn harness() -> Harness {
     let (out_send, packets) = unbounded();
     let (region_out_send, region_out) = unbounded();
-    let generator = Box::new(|_rc: RegionCoords| -> Vec<(ChunkCoords, Chunk)> {
-        vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor(8))]
+    let generator = Box::new(|_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
+        let below = Block::new(BlockId::AIR);
+        let above = Block::new(BlockId::AIR);
+        let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
+        vec![(ColumnCoords::new(0, 0), Column::new(0, below, above, vec![sub]))]
     });
     Harness {
         manager: WorldManager::new(InlineSpawner::default(), generator, out_send, region_out_send),

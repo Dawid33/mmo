@@ -10,8 +10,8 @@ use std::time::Duration;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
 use crate::{
-    Chunk, ChunkCoords, ClientId, ClientPacket, GameEventKind, Region, RegionCoords, RegionInput,
-    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket,
+    ClientId, ClientPacket, Column, ColumnCoords, GameEventKind, Region, RegionCoords,
+    RegionInput, RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket,
 };
 
 pub const SPAWN_REGION: RegionCoords = RegionCoords { x: 0, z: 0 };
@@ -26,7 +26,7 @@ pub enum ServerEvent {
     ClientDisconnected(ClientId),
 }
 
-pub type RegionGenerator = Box<dyn FnMut(RegionCoords) -> Vec<(ChunkCoords, Chunk)> + Send>;
+pub type RegionGenerator = Box<dyn FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send>;
 
 pub trait RegionSpawner {
     fn spawn(
@@ -373,10 +373,10 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.regions.contains_key(&rc) {
             return;
         }
-        let chunks = (self.generator)(rc);
+        let columns = (self.generator)(rc); // now Vec<(ColumnCoords, Column)>
         let seed = match self.parked.remove(&rc) {
-            Some(serialized) => RegionSeed::Parked(serialized, chunks),
-            None => RegionSeed::Fresh(chunks),
+            Some(serialized) => RegionSeed::Parked(serialized, columns),
+            None => RegionSeed::Fresh(columns),
         };
         let input = self.spawner.spawn(rc, seed, self.region_out_send.clone());
         self.regions.insert(

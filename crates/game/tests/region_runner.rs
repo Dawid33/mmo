@@ -1,13 +1,26 @@
 use crossbeam::channel::unbounded;
 use game::{
-    Chunk, ChunkCoords, GameEventKind, Region, RegionCoords, RegionInput, RegionOutput,
-    RegionRunner, RegionSeed, SerializedRegion,
+    Block, BlockId, Chunk, ChunkCoords, Column, ColumnCoords, GameEventKind, Region, RegionCoords,
+    RegionInput, RegionOutput, RegionRunner, RegionSeed, SerializedRegion, SubChunk,
 };
 use std::hash::{Hash, Hasher};
 
 fn flat_chunks() -> Vec<(ChunkCoords, Chunk)> {
     (0..2)
         .flat_map(|x| (0..2).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(8))))
+        .collect()
+}
+
+fn flat_columns() -> Vec<(ColumnCoords, Column)> {
+    let below = Block::new(BlockId::AIR);
+    let above = Block::new(BlockId::AIR);
+    (0..2)
+        .flat_map(move |x| {
+            (0..2).map(move |z| {
+                let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
+                (ColumnCoords::new(x, z), Column::new(0, below, above, vec![sub]))
+            })
+        })
         .collect()
 }
 
@@ -87,7 +100,7 @@ fn shutdown_stops_and_park_restore_is_hash_exact() {
     };
 
     // Restore: the exact cycle-in path the manager uses.
-    let restored = RegionSeed::Parked(serialized, flat_chunks()).into_region(id);
+    let restored = RegionSeed::Parked(serialized, flat_columns()).into_region(id);
     assert_eq!(before, crc(&restored), "hash(before park) == hash(after restore), bit-exact");
 }
 
@@ -95,6 +108,6 @@ fn shutdown_stops_and_park_restore_is_hash_exact() {
 fn corrupt_parked_blob_falls_back_to_generation() {
     let id = RegionCoords::new(2, 2);
     let garbage = SerializedRegion(vec![0xde, 0xad, 0xbe, 0xef]);
-    let region = RegionSeed::Parked(garbage, flat_chunks()).into_region(id);
+    let region = RegionSeed::Parked(garbage, flat_columns()).into_region(id);
     assert_eq!(region.data().ecs.entities.len(), 4, "fell back to the 2x2 fallback chunks");
 }

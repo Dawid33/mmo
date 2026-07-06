@@ -6,7 +6,7 @@
 //! wasm build LocalServer pumps runners inline (crates/client).
 
 use crate::{
-    Chunk, ChunkCoords, ClientId, EntityBundle, GameEvent, GameEventKind, GhostData, Region,
+    ClientId, Column, ColumnCoords, EntityBundle, GameEvent, GameEventKind, GhostData, Region,
     RegionCoords, RegionId, Rollback, Tick, TICK_RATE,
 };
 use crossbeam::channel::Sender;
@@ -56,19 +56,19 @@ pub enum RegionOutput {
 /// possible, else generated. The fallback chunks make a corrupt parked blob
 /// recoverable (log + regenerate deterministically).
 pub enum RegionSeed {
-    Fresh(Vec<(ChunkCoords, Chunk)>),
-    Parked(SerializedRegion, Vec<(ChunkCoords, Chunk)>),
+    Fresh(Vec<(ColumnCoords, Column)>),
+    Parked(SerializedRegion, Vec<(ColumnCoords, Column)>),
 }
 
 impl RegionSeed {
     pub fn into_region(self, id: RegionId) -> Region {
         match self {
-            RegionSeed::Fresh(chunks) => Region::from_chunks(id, chunks),
+            RegionSeed::Fresh(columns) => Region::from_columns(id, columns),
             RegionSeed::Parked(serialized, fallback) => match serialized.to_rollback() {
                 Ok(rollback) => Region::new(rollback, None, id, None),
                 Err(e) => {
                     log::error!("parked region {:?} corrupt ({e}); regenerating", id);
-                    Region::from_chunks(id, fallback)
+                    Region::from_columns(id, fallback)
                 }
             },
         }
