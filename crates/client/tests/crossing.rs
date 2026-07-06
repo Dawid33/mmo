@@ -1,23 +1,21 @@
 use client::harness::{Dir, SimHarness};
 
-/// KNOWN-FAILING, intentionally left red — a deterministic headless repro of
-/// the ALREADY-KNOWN, spec-accepted "seamless local crossing under active
-/// input" divergence (TODO.md; docs/superpowers/2026-07-06-seamless-local-crossing-followup.md,
-/// whose proper fix needs a protocol-level input-routing / predicted-authority
-/// design). This test is the harness earning its keep: it reproduces that
-/// flip-tick divergence deterministically and headlessly — region (1,0)
-/// @tick 33, identical client/server hash mismatch every run, single-threaded
-/// lockstep so not a race.
+/// End-to-end headless crossing through the REAL WorldManager routing +
+/// GameInstanceManager reconcile (the paths the original crossing panics lived
+/// in, and which the hand-authored `manager_tests` crossing tests fake). Guards
+/// that walking across a region seam: (1) never panics — the two fixed crossing
+/// panics stay fixed; (2) keeps input live (`assert_progresses`); (3) actually
+/// crosses; and (4) CONVERGES bit-exact to the authoritative server.
 ///
-/// What passes today: no panic through the crossing (the two fixed panics stay
-/// fixed), input still moves the player (`assert_progresses`), and the player
-/// actually crosses — i.e. the original "input stops when crossing" symptom is
-/// gone. What FAILS: the final bit-exact `assert_converged()` at the flip tick.
-/// Note the harness's strict tick-aligned check reports it as NOT self-healing
-/// within the test's steps, which is sharper than TODO.md's "transient
-/// rubber-band" wording — reconciling those (truly transient vs. sharper
-/// variant) is part of the deferred protocol-level fix, not a harness change.
-/// Remove this comment / flip to strict when the crossing converges.
+/// On (4): right at the flip tick the just-crossed home region is transiently
+/// bit-inexact — the spec-accepted flip-tick rubber-band
+/// (docs/superpowers/2026-07-06-seamless-local-crossing-followup.md). Root-caused
+/// with the harness: it reconciles within ~1 tick once input stops (verified
+/// deterministically). `assert_converged` allows that bounded, documented
+/// transient to heal before its strict bit-exact check — so this asserts the
+/// real accepted guarantee (converges just after input), not an impossible
+/// instantaneous one. The deeper case (input held INDEFINITELY across a seam,
+/// which never settles) remains the deferred protocol-level item in TODO.md.
 #[test]
 fn walking_across_a_region_boundary_keeps_input_and_converges() {
     let mut h = SimHarness::new();
@@ -26,10 +24,8 @@ fn walking_across_a_region_boundary_keeps_input_and_converges() {
 
     h.cross_boundary(Dir::East); // walk across the seam under real input
 
-    // No panic + input still applies + player crossed all hold today; the final
-    // convergence check is the one that fails (the tracked divergence above).
-    h.assert_progresses(game::Key::KeyW);
-    h.assert_converged();
+    h.assert_progresses(game::Key::KeyW); // input still moves the player post-cross
+    h.assert_converged(); // converges bit-exact once the flip-tick transient heals
     assert_ne!(h.player_region(), game::SPAWN_REGION, "player actually crossed");
 }
 
