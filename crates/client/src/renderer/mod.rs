@@ -39,7 +39,10 @@ pub struct SimBridgePlugin {
 
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default())
+        app.add_plugins((
+                MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default(),
+                bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
+            ))
             .insert_resource(ClientUpdates(self.client_recv.clone()))
             .insert_resource(GameEvents(self.game_send.clone()))
             .init_resource::<LocalPlayer>()
@@ -56,7 +59,7 @@ impl Plugin for SimBridgePlugin {
                 )
                     .chain(),
             )
-            .add_systems(Startup, setup_scene)
+            .add_systems(Startup, (setup_scene, hud::setup_hud))
             .add_systems(
                 Update,
                 (
@@ -64,6 +67,9 @@ impl Plugin for SimBridgePlugin {
                     meshing::apply_meshed_chunks,
                     interpolate::interpolate_transforms,
                     avatar::attach_avatars,
+                    hud::toggle_debug,
+                    hud::update_debug_text,
+                    hud::update_crosshair_visibility,
                 ),
             );
     }
