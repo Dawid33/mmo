@@ -77,18 +77,34 @@ play-test:
         exit 1
     fi
 
+    # Kill a PID and all its descendants (TERM, then KILL any survivors). Needed
+    # because `cargo run` does NOT forward signals to the binary it spawns, so
+    # killing cargo alone would orphan the server.
+    kill_tree() {
+        local pid=$1 sig=${2:-TERM} child
+        for child in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$child" "$sig"; done
+        kill "-$sig" "$pid" 2>/dev/null || true
+    }
+
     echo ">> starting server -> $srv_log"
-    RUST_BACKTRACE=1 {{cargo}} run --bin server 2>&1 | tee "$srv_log" &
+    # Process substitution (not a pipe) so $! is cargo's PID, not tee's.
+    RUST_BACKTRACE=1 {{cargo}} run --bin server > >(tee "$srv_log") 2>&1 &
     srv_pid=$!
-    trap 'kill "$srv_pid" 2>/dev/null || true' EXIT
+    stop_server() {
+        kill_tree "$srv_pid" TERM
+        for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$srv_pid" 2>/dev/null || return 0; sleep 0.3; done
+        kill_tree "$srv_pid" KILL
+    }
+    trap stop_server EXIT INT TERM
     sleep 1
 
     echo ">> starting client -> $cli_log   (close the window or Ctrl-C to finish)"
     RUST_BACKTRACE=1 {{cargo}} run --bin client 2>&1 | tee "$cli_log"
     cli_rc=${PIPESTATUS[0]}
 
-    kill "$srv_pid" 2>/dev/null || true
-    wait "$srv_pid" 2>/dev/null || true
+    echo ">> client exited (code $cli_rc) — stopping server"
+    stop_server
+    wait 2>/dev/null || true
 
     echo
     echo "=== play-test finished (client exit=$cli_rc) ==="
