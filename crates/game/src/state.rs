@@ -260,9 +260,10 @@ where
 impl Rollback {
     pub fn create_mesh(&mut self, coords: ChunkCoords, chunk: Chunk) -> EntityKey {
         let e = self.ecs.create_entity_safe();
+        let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
         // Deterministic linearize order; grid coords are body-local.
         let solid: Vec<Point<i32>> = (0..ChunkShape::SIZE)
-            .filter(|i| chunk.voxels[*i as usize].kind != VoxelType::Air)
+            .filter(|i| voxels[*i as usize].kind != VoxelType::Air)
             .map(|i| {
                 let [x, y, z] = ChunkShape::delinearize(i);
                 Point::new(x as i32, y as i32, z as i32)

@@ -147,7 +147,7 @@ fn spawn_region_snapshot(
             }
         }
         if let Some(chunk) = data.ecs.chunk.try_get(key) {
-            e.insert(VoxelData(chunk.voxels.clone()));
+            e.insert(VoxelData(game::derive_voxels(&chunk.blocks, &chunk.chisel)));
         }
         if let Some(cam) = data.ecs.camera.try_get(key) {
             if Some(key) == local_camera_key {
