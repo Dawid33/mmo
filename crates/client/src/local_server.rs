@@ -97,6 +97,11 @@ impl LocalServer {
         tick
     }
 
+    /// Coords of every region currently running on the server. Test/harness hook.
+    pub fn running_regions(&mut self) -> Vec<RegionCoords> {
+        self.manager.spawner_mut().running()
+    }
+
     /// Bit-exact state hash of a running region's authoritative data, via
     /// the same `game::state_hash` the rollback log uses. Test/harness hook.
     pub fn region_hash(&mut self, rc: RegionCoords) -> Option<u32> {

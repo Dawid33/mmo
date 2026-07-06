@@ -3,7 +3,7 @@
 //! over the existing channels and advanced in lockstep. No Bevy, no threads,
 //! no wall clock. See docs/superpowers/specs/2026-07-06-headless-sim-test-harness-design.md.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
@@ -23,6 +23,15 @@ pub struct SimHarness {
     /// event, so a release MUST send that edge or the key stays held forever
     /// (movement reads `key_held`).
     released: BTreeSet<Key>,
+    /// Authoritative server region state hashes, keyed by (region, that
+    /// region's tick), recorded every `step()` after `server.tick()`. The
+    /// client is a bit-exact but ~1-tick-delayed mirror of the server in this
+    /// lockstep model (the server snapshots a region then immediately ticks it
+    /// forward before the client observes the snapshot), so convergence is
+    /// checked tick-aligned: the client's `(region, tick)` must equal the
+    /// server's authoritative hash recorded FOR THAT SAME TICK — not the
+    /// server's live (already-advanced) hash.
+    server_hashes: HashMap<(RegionCoords, usize), u32>,
 }
 
 impl SimHarness {
@@ -47,6 +56,7 @@ impl SimHarness {
             _bridge_recv: bridge_recv,
             held: BTreeSet::new(),
             released: BTreeSet::new(),
+            server_hashes: HashMap::new(),
         }
     }
 
@@ -98,6 +108,16 @@ impl SimHarness {
         self.server.pump().expect("server pump");
         self.server.tick();
 
+        // Record the server's authoritative per-region hash at its new tick, so
+        // convergence can be checked tick-aligned against the ~1-tick-delayed
+        // client (see `server_hashes` / `assert_converged`).
+        for rc in self.server.running_regions() {
+            let t = self.server.region_tick(rc);
+            if let Some(hash) = self.server.region_hash(rc) {
+                self.server_hashes.insert((rc, t), hash);
+            }
+        }
+
         // 3. Client reconcile.
         self.client.pump(&self.server_to_client).expect("client reconcile pump");
     }
@@ -125,35 +145,45 @@ impl SimHarness {
         self.client.home_region()
     }
 
-    /// Step with no new input until the client has drained buffered server
-    /// events and its home-region tick has caught up to the server's. The
-    /// client predicts ahead of the server, so convergence checks are only
-    /// meaningful once both sides are aligned at the same tick.
+    /// Step with no new input until the client has drained all buffered server
+    /// events (no snapshot/event still in flight). The client stays ~1 tick
+    /// behind the server by construction, so we settle on "nothing pending",
+    /// not on tick equality (which can never hold in this lockstep).
     pub fn settle(&mut self) {
         for _ in 0..64 {
             self.step();
-            if self.pending_events_empty() && self.client_tick() == self.server_tick(self.client_home())
-            {
+            if self.pending_events_empty() {
                 return;
             }
         }
-        // Not fatal on its own; assertions below will surface a real divergence.
+        // Not fatal on its own; assert_converged surfaces any real divergence.
     }
 
-    /// Bit-exact: every region both client and server hold must hash-match
-    /// after settling.
+    /// Bit-exact convergence: after settling, each region the client holds must
+    /// match the server's authoritative state RECORDED AT THE CLIENT'S TICK for
+    /// that region (the client is an exact but ~1-tick-delayed mirror — see
+    /// `server_hashes`). Fails if a held region diverges, or if nothing could
+    /// be tick-aligned at all (convergence would otherwise be vacuous).
     pub fn assert_converged(&mut self) {
         self.settle();
+        let mut checked = 0usize;
         for rc in self.client.world_ref().loaded_regions() {
-            if let Some(server_hash) = self.server_region_hash(rc) {
-                let client_hash = state_hash(self.client.world_ref().data(&rc));
+            let t = self.client.world_ref().current_tick(&rc);
+            let client_hash = state_hash(self.client.world_ref().data(&rc));
+            if let Some(&server_hash) = self.server_hashes.get(&(rc, t)) {
                 assert_eq!(
                     client_hash, server_hash,
-                    "client and server disagree on region {:?} after settle",
-                    rc
+                    "client region {:?} @tick {} diverges from the server's authoritative state at that tick",
+                    rc, t
                 );
+                checked += 1;
             }
         }
+        assert!(
+            checked > 0,
+            "no client region could be tick-aligned against a recorded server tick — convergence unverified (home {:?})",
+            self.client.home_region()
+        );
     }
 
     /// Liveness: holding `key` advances the sim tick AND moves the player body.
@@ -203,13 +233,6 @@ impl SimHarness {
         assert_ne!(self.player_region(), start, "player never crossed a boundary");
     }
 
-    // internal
-    fn server_tick(&mut self, rc: RegionCoords) -> usize {
-        self.server.region_tick(rc)
-    }
-    fn server_region_hash(&mut self, rc: RegionCoords) -> Option<u32> {
-        self.server.region_hash(rc)
-    }
     pub fn pending_events_empty(&self) -> bool {
         self.client.pending_events_empty()
     }
