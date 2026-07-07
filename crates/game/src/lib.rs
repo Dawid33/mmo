@@ -75,6 +75,11 @@ pub enum ClientUpdateEvent {
     /// The window moved on (or a region is being replaced): tear down this
     /// region's render state.
     RemoveRegion(RegionId),
+    /// Read-only visual terrain for a far region (initial send or refresh —
+    /// replace-on-re-receipt). Never becomes a local sim `Region`.
+    NewFarRegion(RegionId, FarSnapshot),
+    /// The far ring moved on: tear down this region's far render state.
+    RemoveFarRegion(RegionId),
     GameCrash(GameError),
     SetPlayer(ClientId),
     /// Region + connection status for the debug HUD. Edge-triggered by the

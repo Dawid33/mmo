@@ -16,6 +16,13 @@ pub struct Regions(pub BTreeMap<RegionId, Receiver<GameDataUpdate>>);
 #[derive(Resource, Default)]
 pub struct RegionRoots(pub BTreeMap<RegionId, Entity>);
 
+/// Roots for read-only "far" regions: visual-only chunk trees with no
+/// physics/collider, rendered from a `FarSnapshot`. Mutually exclusive with
+/// `RegionRoots` for a given id — a region is either simulated (near) or
+/// terrain-only (far), never both.
+#[derive(Resource, Default)]
+pub struct FarRegionRoots(pub BTreeMap<RegionId, Entity>);
+
 #[derive(Resource, Default)]
 pub struct SimEntityMap(pub BTreeMap<(RegionId, EntityKey), Entity>);
 
@@ -88,6 +95,7 @@ pub fn drain_client_updates(
     mut player: ResMut<LocalPlayer>,
     mut regions: ResMut<Regions>,
     mut roots: ResMut<RegionRoots>,
+    mut far_roots: ResMut<FarRegionRoots>,
     mut map: ResMut<SimEntityMap>,
     mut hud_status: ResMut<HudStatus>,
 ) {
@@ -98,6 +106,8 @@ pub fn drain_client_updates(
                     // Replace-on-re-receipt: resubscribe/crash-respawn resync.
                     remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
                 }
+                // Near (simulated) and far (visual-only) roots never coexist.
+                remove_far_region(&mut commands, &mut far_roots, id);
                 let offset = id.world_offset();
                 let root = commands
                     .spawn((
@@ -115,6 +125,20 @@ pub fn drain_client_updates(
             ClientUpdateEvent::RemoveRegion(id) => {
                 remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
                 info!("bridge: region {:?} removed", id);
+            }
+            ClientUpdateEvent::NewFarRegion(id, snap) => {
+                // Replace-on-re-receipt (refresh) and mutual exclusion: a far
+                // region never coexists with its near (simulated) root.
+                remove_far_region(&mut commands, &mut far_roots, id);
+                if roots.0.contains_key(&id) {
+                    remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
+                }
+                spawn_far_region(&mut commands, &mut far_roots, id, &snap);
+                info!("bridge: far region {:?} loaded", id);
+            }
+            ClientUpdateEvent::RemoveFarRegion(id) => {
+                remove_far_region(&mut commands, &mut far_roots, id);
+                info!("bridge: far region {:?} removed", id);
             }
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
             ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {
@@ -142,6 +166,46 @@ fn remove_region(
     }
     regions.0.remove(&id);
     map.0.retain(|(region, _), _| *region != id);
+}
+
+/// Build the render tree for a read-only far region: a root Transform at the
+/// region's world offset, one child per chunk at its region-local grid
+/// position carrying `VoxelData` (meshed by the normal pipeline). No
+/// rigidbody, no collider — visual only.
+fn spawn_far_region(
+    commands: &mut Commands,
+    roots: &mut FarRegionRoots,
+    id: RegionId,
+    snap: &game::FarSnapshot,
+) {
+    let offset = id.world_offset();
+    let root = commands
+        .spawn((
+            Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2])),
+            Visibility::default(),
+            Name::new(format!("far region {:?}", id)),
+        ))
+        .id();
+    for (coords, chunk) in &snap.chunks {
+        commands.spawn((
+            Transform::from_translation(Vec3::new(
+                (coords.x * 32) as f32,
+                (coords.y * 32) as f32,
+                (coords.z * 32) as f32,
+            )),
+            Visibility::default(),
+            VoxelData(game::derive_voxels(&chunk.blocks, &chunk.chisel)),
+            ChildOf(root),
+        ));
+    }
+    roots.0.insert(id, root);
+}
+
+/// Despawn a far region's render tree.
+fn remove_far_region(commands: &mut Commands, roots: &mut FarRegionRoots, id: RegionId) {
+    if let Some(root) = roots.0.remove(&id) {
+        commands.entity(root).despawn();
+    }
 }
 
 /// Port of the old `TrueWorld::new` snapshot walk.
@@ -431,6 +495,7 @@ mod tests {
             .init_resource::<LocalPlayer>()
             .init_resource::<Regions>()
             .init_resource::<RegionRoots>()
+            .init_resource::<FarRegionRoots>()
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
             .add_systems(PreUpdate, (drain_client_updates, drain_region_updates).chain());
@@ -869,6 +934,39 @@ mod tests {
     }
 
     #[test]
+    fn far_region_roots_at_offset_with_meshable_chunks() {
+        use game::{Chunk, ChunkCoords, FarSnapshot, RegionCoords};
+        let (mut app, client) = app_shell();
+        let id = RegionCoords::new(1, -2);
+        let snap = FarSnapshot { chunks: vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor(8))] };
+        client.send(ClientUpdateEvent::NewFarRegion(id, snap)).unwrap();
+        app.update();
+
+        // Root exists at the region's world offset (256, 0, -512).
+        let roots = app.world().resource::<FarRegionRoots>();
+        let root = *roots.0.get(&id).expect("far root");
+        let tf = app.world().get::<Transform>(root).unwrap();
+        assert_eq!(tf.translation, Vec3::new(256.0, 0.0, -512.0));
+
+        // The chunk child carries VoxelData (so queue_meshing will mesh it).
+        let mut query = app.world_mut().query::<&VoxelData>();
+        assert!(query.iter(app.world()).next().is_some(), "a far chunk with VoxelData");
+    }
+
+    #[test]
+    fn remove_far_region_despawns_root() {
+        use game::{Chunk, ChunkCoords, FarSnapshot, RegionCoords};
+        let (mut app, client) = app_shell();
+        let id = RegionCoords::new(0, 0);
+        let snap = FarSnapshot { chunks: vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor(8))] };
+        client.send(ClientUpdateEvent::NewFarRegion(id, snap)).unwrap();
+        app.update();
+        client.send(ClientUpdateEvent::RemoveFarRegion(id)).unwrap();
+        app.update();
+        assert!(app.world().resource::<FarRegionRoots>().0.get(&id).is_none());
+    }
+
+    #[test]
     fn drain_client_updates_writes_hud_status() {
         use game::ConnectionState;
 
@@ -879,6 +977,7 @@ mod tests {
             .init_resource::<LocalPlayer>()
             .init_resource::<Regions>()
             .init_resource::<RegionRoots>()
+            .init_resource::<FarRegionRoots>()
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
             .add_systems(Update, drain_client_updates);

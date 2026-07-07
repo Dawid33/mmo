@@ -95,8 +95,9 @@ fn shutdown_stops_and_park_restore_is_hash_exact() {
     };
 
     assert!(!r.handle_input(RegionInput::Shutdown), "Shutdown must stop the runner");
-    let RegionOutput::Stopped(serialized) = out.try_iter().map(|(_, o)| o).last().unwrap() else {
-        panic!("expected Stopped")
+    let RegionOutput::Stopped(serialized, _far) = out.try_iter().map(|(_, o)| o).last().unwrap()
+    else {
+        panic!("expected Stopped");
     };
 
     // Restore: the exact cycle-in path the manager uses.
@@ -110,4 +111,49 @@ fn corrupt_parked_blob_falls_back_to_generation() {
     let garbage = SerializedRegion(vec![0xde, 0xad, 0xbe, 0xef]);
     let region = RegionSeed::Parked(garbage, flat_columns()).into_region(id);
     assert_eq!(region.data().ecs.entities.len(), 4, "fell back to the 2x2 fallback chunks");
+}
+
+#[test]
+fn request_far_snapshot_replies_with_terrain() {
+    let id = RegionCoords::new(0, 0);
+    let (mut r, out) = runner(id);
+    r.handle_input(RegionInput::RequestFarSnapshot(7));
+    let (rc, output) = out.try_recv().expect("far snapshot output");
+    assert_eq!(rc, id);
+    let RegionOutput::FarSnapshot(client, snap) = output else {
+        panic!("expected FarSnapshot")
+    };
+    assert_eq!(client, 7);
+    assert_eq!(snap.chunks.len(), 4);
+}
+
+#[test]
+fn stable_terrain_never_pushes_far_change() {
+    let (mut r, out) = runner(RegionCoords::new(0, 0));
+    for _ in 0..(game::FAR_SNAPSHOT_MIN_INTERVAL_TICKS * 2 + 1) {
+        r.tick();
+    }
+    let pushes = out
+        .try_iter()
+        .filter(|(_, o)| matches!(o, RegionOutput::FarSnapshotChanged(_)))
+        .count();
+    assert_eq!(pushes, 0, "unchanged terrain must not push a far refresh");
+}
+
+#[test]
+fn terrain_edit_pushes_one_throttled_far_change() {
+    use game::{Chunk, ChunkCoords};
+    let (mut r, out) = runner(RegionCoords::new(0, 0));
+    // Mutate terrain: add a new chunk (a flat floor) at y=1 via the test hook.
+    r.region_mut().with_data(|d| {
+        d.create_mesh(ChunkCoords::new(0, 1, 0), Chunk::flat_floor(8));
+    });
+    for _ in 0..(game::FAR_SNAPSHOT_MIN_INTERVAL_TICKS + 1) {
+        r.tick();
+    }
+    let pushes = out
+        .try_iter()
+        .filter(|(_, o)| matches!(o, RegionOutput::FarSnapshotChanged(_)))
+        .count();
+    assert_eq!(pushes, 1, "one change → exactly one throttled push");
 }

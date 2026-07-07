@@ -10,7 +10,7 @@ use std::time::Duration;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
 use crate::{
-    ClientId, ClientPacket, Column, ColumnCoords, GameEventKind, Region, RegionCoords,
+    ClientId, ClientPacket, Column, ColumnCoords, FarSnapshot, GameEventKind, Region, RegionCoords,
     RegionInput, RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket,
 };
 
@@ -109,6 +109,7 @@ impl RegionSpawner for InlineSpawner {
 #[derive(Default)]
 struct Session {
     subscribed: BTreeSet<RegionCoords>,
+    far_subscribed: BTreeSet<RegionCoords>,
 }
 
 struct RegionLink {
@@ -128,6 +129,11 @@ pub struct WorldManager<S: RegionSpawner> {
     generator: RegionGenerator,
     regions: BTreeMap<RegionCoords, RegionLink>,
     parked: BTreeMap<RegionCoords, SerializedRegion>,
+    /// Far-viewers per region, INDEPENDENT of running/parked state.
+    far_subscribers: BTreeMap<RegionCoords, BTreeSet<ClientId>>,
+    /// Frozen terrain for parked / never-run regions, so far serving never
+    /// wakes a region. Refreshed on FarSnapshotChanged and on park (Stopped).
+    far_cache: BTreeMap<RegionCoords, FarSnapshot>,
     /// Connected clients and their subscriptions.
     sessions: BTreeMap<ClientId, Session>,
     /// Survives disconnects: which region holds this client's player entity.
@@ -149,6 +155,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             generator,
             regions: BTreeMap::new(),
             parked: BTreeMap::new(),
+            far_subscribers: BTreeMap::new(),
+            far_cache: BTreeMap::new(),
             sessions: BTreeMap::new(),
             homes: BTreeMap::new(),
             out,
@@ -180,6 +188,14 @@ impl<S: RegionSpawner> WorldManager<S> {
                     for rc in session.subscribed {
                         self.unsubscribe_link(id, rc, now_ms);
                     }
+                    for rc in session.far_subscribed {
+                        if let Some(set) = self.far_subscribers.get_mut(&rc) {
+                            set.remove(&id);
+                            if set.is_empty() {
+                                self.far_subscribers.remove(&rc);
+                            }
+                        }
+                    }
                 }
                 // The home region may have just lost its keep-alive reason.
                 if let Some(home) = self.homes.get(&id).copied() {
@@ -193,6 +209,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 ClientPacket::RequestRegionConnection(rc) => self.subscribe(id, rc),
                 ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, rc, now_ms),
+                ClientPacket::RequestFarRegion(rc) => self.far_subscribe(id, rc),
+                ClientPacket::ReleaseFarRegion(rc) => self.far_unsubscribe(id, rc),
                 ClientPacket::GameEvent(event) => match event.kind {
                     GameEventKind::Tick => {}
                     GameEventKind::Quit => return false,
@@ -259,7 +277,22 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
-            RegionOutput::Stopped(serialized) => {
+            RegionOutput::FarSnapshot(client, snap) => {
+                self.far_cache.insert(rc, snap.clone());
+                let _ = self.out.send((Some(client), ServerPacket::FarRegion(rc, snap)));
+            }
+            RegionOutput::FarSnapshotChanged(snap) => {
+                self.far_cache.insert(rc, snap.clone());
+                if let Some(subs) = self.far_subscribers.get(&rc) {
+                    for client in subs {
+                        let _ = self
+                            .out
+                            .send((Some(*client), ServerPacket::FarRegion(rc, snap.clone())));
+                    }
+                }
+            }
+            RegionOutput::Stopped(serialized, far) => {
+                self.far_cache.insert(rc, far);
                 self.parked.insert(rc, serialized);
                 let pending = self
                     .regions
@@ -418,6 +451,52 @@ impl<S: RegionSpawner> WorldManager<S> {
         link.subscribers.insert(client);
         link.empty_since_ms = None;
         self.send_to_region(rc, RegionInput::RequestSnapshot(client));
+    }
+
+    fn far_subscribe(&mut self, client: ClientId, rc: RegionCoords) {
+        let Some(session) = self.sessions.get_mut(&client) else {
+            log::debug!("dropping far subscribe from sessionless client {client} for {:?}", rc);
+            return;
+        };
+        session.far_subscribed.insert(rc);
+        self.far_subscribers.entry(rc).or_default().insert(client);
+        // Running (and not stopping) → pull live from the region.
+        let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
+        if running {
+            self.send_to_region(rc, RegionInput::RequestFarSnapshot(client));
+            return;
+        }
+        // Parked / never-run → serve from cache without waking; generate on miss.
+        //
+        // Edge case: if this far-subscribe lands during a region's `stopping`
+        // window before any `FarSnapshotChanged`/`Stopped` has seeded
+        // `far_cache` for it, the worldgen fallback below may serve
+        // pre-edit terrain (a cache miss regenerates from scratch, ignoring
+        // in-flight edits made before the region stopped ticking). This
+        // self-heals on the next `FarSnapshotChanged` once the region runs
+        // again and repopulates the cache.
+        let snap = match self.far_cache.get(&rc) {
+            Some(snap) => snap.clone(),
+            None => {
+                let columns = (self.generator)(rc);
+                let snap = FarSnapshot::from_columns(columns);
+                self.far_cache.insert(rc, snap.clone());
+                snap
+            }
+        };
+        let _ = self.out.send((Some(client), ServerPacket::FarRegion(rc, snap)));
+    }
+
+    fn far_unsubscribe(&mut self, client: ClientId, rc: RegionCoords) {
+        if let Some(session) = self.sessions.get_mut(&client) {
+            session.far_subscribed.remove(&rc);
+        }
+        if let Some(set) = self.far_subscribers.get_mut(&rc) {
+            set.remove(&client);
+            if set.is_empty() {
+                self.far_subscribers.remove(&rc);
+            }
+        }
     }
 
     fn unsubscribe(&mut self, client: ClientId, rc: RegionCoords, now_ms: u64) {

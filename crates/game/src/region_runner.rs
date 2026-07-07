@@ -6,8 +6,8 @@
 //! wasm build LocalServer pumps runners inline (crates/client).
 
 use crate::{
-    ClientId, Column, ColumnCoords, EntityBundle, GameEvent, GameEventKind, GhostData, Region,
-    RegionCoords, RegionId, Rollback, Tick, TICK_RATE,
+    ClientId, Column, ColumnCoords, EntityBundle, FarSnapshot, GameEvent, GameEventKind, GhostData,
+    Region, RegionCoords, RegionId, Rollback, Tick, FAR_SNAPSHOT_MIN_INTERVAL_TICKS, TICK_RATE,
 };
 use crossbeam::channel::Sender;
 
@@ -35,6 +35,9 @@ pub enum RegionInput {
     /// A new subscriber needs the full state; replied with
     /// `RegionOutput::Snapshot(client, ...)`.
     RequestSnapshot(ClientId),
+    /// A far-viewer needs read-only terrain; replied with
+    /// `RegionOutput::FarSnapshot(client, ...)`. Does not affect sim state.
+    RequestFarSnapshot(ClientId),
     /// Graceful stop; replied with `RegionOutput::Stopped(state)`.
     Shutdown,
 }
@@ -43,8 +46,12 @@ pub enum RegionInput {
 pub enum RegionOutput {
     EventProcessed(GameEvent),
     Snapshot(ClientId, Rollback),
+    /// Reply to `RequestFarSnapshot`: read-only terrain for one far-viewer.
+    FarSnapshot(ClientId, FarSnapshot),
+    /// Throttled push when this region's terrain changed; manager fans out.
+    FarSnapshotChanged(FarSnapshot),
     SyncClock { tick_rate: u64, tick: Tick },
-    Stopped(SerializedRegion),
+    Stopped(SerializedRegion, FarSnapshot),
     /// Boundary crossings this tick: bundles + ABSOLUTE target regions.
     /// Isometries are still source-local; the manager rebases.
     Departures(Vec<(EntityBundle, RegionCoords)>),
@@ -79,6 +86,10 @@ pub struct RegionRunner {
     id: RegionCoords,
     region: Region,
     out: Sender<(RegionCoords, RegionOutput)>,
+    /// Last-pushed terrain hash; a change past the throttle window pushes a
+    /// `FarSnapshotChanged`. Seeded at construction so the initial state is a
+    /// baseline, not a spurious push.
+    last_terrain_hash: u32,
 }
 
 impl RegionRunner {
@@ -87,7 +98,8 @@ impl RegionRunner {
         region: Region,
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Self {
-        Self { id, region, out }
+        let last_terrain_hash = region.far_snapshot().terrain_hash();
+        Self { id, region, out, last_terrain_hash }
     }
 
     /// Returns false when the runner should stop (after Shutdown).
@@ -115,9 +127,16 @@ impl RegionRunner {
                     RegionOutput::Snapshot(client_id, self.region.data().clone()),
                 ));
             }
+            RegionInput::RequestFarSnapshot(client_id) => {
+                let _ = self.out.send((
+                    self.id,
+                    RegionOutput::FarSnapshot(client_id, self.region.far_snapshot()),
+                ));
+            }
             RegionInput::Shutdown => {
                 let serialized = SerializedRegion::from_rollback(self.region.data());
-                let _ = self.out.send((self.id, RegionOutput::Stopped(serialized)));
+                let far = self.region.far_snapshot();
+                let _ = self.out.send((self.id, RegionOutput::Stopped(serialized, far)));
                 return false;
             }
         }
@@ -148,6 +167,16 @@ impl RegionRunner {
                     tick: self.region.current_tick(),
                 },
             ));
+        }
+        // Push-on-change, throttled: the check cadence is the throttle. The
+        // manager drops the push if the region has no far-viewers.
+        if self.region.current_tick() % FAR_SNAPSHOT_MIN_INTERVAL_TICKS == 0 {
+            let snap = self.region.far_snapshot();
+            let hash = snap.terrain_hash();
+            if hash != self.last_terrain_hash {
+                self.last_terrain_hash = hash;
+                let _ = self.out.send((self.id, RegionOutput::FarSnapshotChanged(snap)));
+            }
         }
     }
 

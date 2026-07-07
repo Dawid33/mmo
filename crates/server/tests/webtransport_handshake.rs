@@ -90,6 +90,7 @@ async fn webtransport_client_full_handshake() {
                         server_send.send((None, ServerPacket::GameEvent(out))).unwrap();
                     }
                     ClientPacket::ReleaseRegionConnection(_) => {}
+                    ClientPacket::RequestFarRegion(_) | ClientPacket::ReleaseFarRegion(_) => {}
                 },
                 ServerEvent::ClientConnected(client_id) => {
                     if world.find_player(&client_id).is_none() {

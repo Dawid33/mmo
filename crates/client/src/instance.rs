@@ -41,6 +41,8 @@ pub struct GameInstanceManager {
     home_region: Option<RegionCoords>,
     /// Regions we have requested (and not released) — the desired window.
     subscribed: std::collections::BTreeSet<RegionCoords>,
+    /// Far (visual-only) regions we have requested and not released.
+    far_subscribed: std::collections::BTreeSet<RegionCoords>,
     /// Events for subscribed regions whose snapshot hasn't arrived yet.
     pending_events: BTreeMap<RegionCoords, Vec<GameEvent>>,
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
@@ -64,6 +66,26 @@ fn desired_window(
         desired.insert(home);
     }
     desired
+}
+
+/// The far ring: every region within `radius` (Chebyshev) of `center`, minus
+/// the near window. Far and near are disjoint by construction, so a region is
+/// never both simulated and merely visualized.
+fn desired_far(
+    center: RegionCoords,
+    near: &std::collections::BTreeSet<RegionCoords>,
+    radius: i32,
+) -> std::collections::BTreeSet<RegionCoords> {
+    let mut out = std::collections::BTreeSet::new();
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            let rc = RegionCoords::new(center.x + dx, center.z + dz);
+            if !near.contains(&rc) {
+                out.insert(rc);
+            }
+        }
+    }
+    out
 }
 
 impl GameInstanceManager {
@@ -96,6 +118,7 @@ impl GameInstanceManager {
             client_id: None,
             home_region: None,
             subscribed: std::collections::BTreeSet::new(),
+            far_subscribed: std::collections::BTreeSet::new(),
             pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
             last_hud_status: None,
@@ -171,6 +194,7 @@ impl GameInstanceManager {
                 // predicted home flip must land before update_window recenters.
                 self.apply_local_transfers();
                 self.update_window();
+                self.update_far_window();
             }
             GameEventKind::PlayerInput(_, _) if !self.is_caught_up => {
                 // Don't handle player events until the sim has caught up with
@@ -404,6 +428,39 @@ impl GameInstanceManager {
         }
     }
 
+    /// Diff the desired far ring against current far subscriptions; request
+    /// the new, release the stale. Runs right after `update_window` so the
+    /// near set it subtracts is already current.
+    fn update_far_window(&mut self) {
+        let Some(center) = self.viewer_region() else { return };
+        let near = desired_window(center, self.home_region);
+        let desired = desired_far(center, &near, game::FAR_VIEW_RADIUS);
+        if desired == self.far_subscribed {
+            return;
+        }
+        for rc in desired.difference(&self.far_subscribed) {
+            self.server_game_send
+                .send(ClientPacket::RequestFarRegion(*rc))
+                .unwrap();
+        }
+        let stale: Vec<RegionCoords> =
+            self.far_subscribed.difference(&desired).copied().collect();
+        for rc in stale {
+            self.server_game_send
+                .send(ClientPacket::ReleaseFarRegion(rc))
+                .unwrap();
+            self.drop_far_region(rc);
+        }
+        self.far_subscribed = desired;
+    }
+
+    /// Tell the render bridge to drop a far region.
+    fn drop_far_region(&mut self, rc: RegionCoords) {
+        let _ = self
+            .client_event_send
+            .send(ClientUpdateEvent::RemoveFarRegion(rc));
+    }
+
     /// Route one server-authoritative game event to the region it targets:
     /// reconcile if loaded, buffer if the snapshot is still in flight,
     /// drop if the region was released/never wanted.
@@ -522,6 +579,18 @@ impl GameInstanceManager {
                         }
                     }
                 }
+            }
+            game::ServerPacket::FarRegion(id, snap) => {
+                if !self.far_subscribed.contains(&id) {
+                    // Ring moved on while the snapshot was in flight.
+                    self.server_game_send
+                        .send(ClientPacket::ReleaseFarRegion(id))
+                        .unwrap();
+                    return Ok(());
+                }
+                self.client_event_send
+                    .send(ClientUpdateEvent::NewFarRegion(id, snap))
+                    .unwrap();
             }
         }
         Ok(())
@@ -1432,5 +1501,21 @@ mod manager_tests {
         // No home_region / world yet: nothing to report, no event sent.
         manager.emit_hud_status();
         assert!(client_recv.try_recv().is_err());
+    }
+
+    #[test]
+    fn desired_far_is_ring_minus_near() {
+        use game::{RegionCoords, FAR_VIEW_RADIUS};
+        let center = RegionCoords::new(0, 0);
+        let near: std::collections::BTreeSet<RegionCoords> =
+            center.window_3x3().into_iter().collect();
+        let far = super::desired_far(center, &near, FAR_VIEW_RADIUS);
+        // Disjoint from the near window.
+        assert!(far.is_disjoint(&near));
+        // 5×5 footprint (25) minus the 3×3 near window (9) = 16 far regions.
+        assert_eq!(far.len(), 16);
+        // A ring member is present; a near member is absent.
+        assert!(far.contains(&RegionCoords::new(2, 0)));
+        assert!(!far.contains(&RegionCoords::new(1, 0)));
     }
 }
