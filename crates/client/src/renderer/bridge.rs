@@ -48,7 +48,9 @@ impl SimTarget {
         Self { pos, rot, smoothing: 0.5, pos_snap: 1.6, rot_snap: 0.1 }
     }
     pub fn camera(pos: Vec3, rot: Quat) -> Self {
-        Self { pos, rot, smoothing: 0.1, pos_snap: 0.008, rot_snap: 0.001 }
+        // Look lives in the 50Hz sim; the render camera snaps to it every
+        // frame (smoothing = 1.0). No lerp => no slerp-arc tilt during turns.
+        Self { pos, rot, smoothing: 1.0, pos_snap: 0.008, rot_snap: 0.001 }
     }
 }
 

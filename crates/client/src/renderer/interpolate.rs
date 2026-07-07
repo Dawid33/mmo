@@ -52,4 +52,21 @@ mod tests {
         let t = app.world().entity(e).get::<Transform>().unwrap();
         assert!(t.translation.x > 0.0 && t.translation.x < 10.0);
     }
+
+    #[test]
+    fn camera_snaps_in_one_frame() {
+        // Camera targets must not lerp — one update lands exactly on the pose.
+        let target = SimTarget::camera(
+            Vec3::new(5.0, -3.0, 2.0),
+            Quat::from_rotation_y(1.2),
+        );
+        let (mut app, e) = app_with(target, Transform::IDENTITY);
+        app.update();
+        let t = app.world().entity(e).get::<Transform>().unwrap();
+        assert_eq!(t.translation, Vec3::new(5.0, -3.0, 2.0), "position must snap in one frame");
+        assert!(
+            t.rotation.angle_between(Quat::from_rotation_y(1.2)) < 1e-6,
+            "rotation must snap in one frame"
+        );
+    }
 }
