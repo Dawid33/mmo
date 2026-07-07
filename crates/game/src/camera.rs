@@ -181,8 +181,12 @@ impl Controller for CameraController {
             }
 
             let handle = ecs.rigidbody.get(e_id).clone();
+            // Look scalars are authoritative; the body quaternion is derived.
+            let (yaw0, pitch0) = {
+                let cam = ecs.camera.get(e_id);
+                (cam.yaw, cam.pitch)
+            };
             let b = data.physics.bodies.get(handle).unwrap();
-            let rotation = b.rotation();
             let mut linvel = Vector::zeros();
             // 0.1 * 80 = 8 units/tick = 0.5 m/tick = 10 m/s at 1/16 m units.
             const SPEED: Real = OrderedFloat(80.0);
@@ -199,7 +203,9 @@ impl Controller for CameraController {
             if client.input.key_held(&Key::KeyD) {
                 linvel.x = Real::from(0.1) * SPEED
             }
-            let mut linvel = rotation.transform_vector(&linvel);
+            // Horizontal movement follows yaw only — walk speed stays full
+            // regardless of pitch (Minecraft behavior).
+            let mut linvel = crate::yaw_quat(yaw0).transform_vector(&linvel);
             linvel.y = Real::from(0.0);
 
             if client.input.key_held(&Key::Space) {
@@ -255,38 +261,27 @@ impl Controller for CameraController {
                 }
             }
 
-            let b = data.physics.bodies.get(handle).unwrap();
-            let rotation = b.next_position().rotation.clone();
-            let mut r = b.rotation().clone();
+            // --- Look: accumulate mouse delta into yaw/pitch scalars ---
             let diff = client.input.mouse_diff();
-            const SENSITIVITIY: f32 = 0.001;
-            if diff.0.abs() > 2.0 {
-                if !diff.0.is_nan() {
-                    r = UnitQuaternion::from_axis_angle(
-                        &Vector3::y_axis(),
-                        -clamp(
-                            Real::from(diff.0 as f32 * (0.00136 + SENSITIVITIY)),
-                            Real::from(-0.2),
-                            Real::from(0.2),
-                        ),
-                    ) * rotation;
+            let (new_yaw, new_pitch) = crate::apply_look(yaw0, pitch0, diff.0, diff.1);
+            if new_yaw != yaw0 || new_pitch != pitch0 {
+                // Undo-tracked scalar update on the Camera component (same
+                // pattern as the proj_matrix mutation above).
+                let mut scope = ecs.camera.undo_scope();
+                {
+                    let c = scope.get_mut(e_id);
+                    c.yaw = new_yaw;
+                    c.pitch = new_pitch;
                 }
-            }
-            if diff.1.abs() > 2.0 {
-                if !diff.1.is_nan() {
-                    r = r * UnitQuaternion::from_axis_angle(
-                        &Vector3::x_axis(),
-                        -clamp(
-                            Real::from(diff.1 as f32 * (0.0008 + SENSITIVITIY)),
-                            Real::from(-0.2),
-                            Real::from(0.2),
-                        ),
-                    );
-                }
-            }
-
-            if rotation != r {
-                // Same snapshot rationale as the translation site above.
+                scope.register(move |d, _| {
+                    let c = d.get_mut(e_id);
+                    c.yaw = yaw0;
+                    c.pitch = pitch0;
+                });
+                // Rebuild the body's full-look rotation. change(): same
+                // whole-set snapshot rationale as the translation site above
+                // (set_next_kinematic_rotation wakes + marks the body).
+                let r = crate::look_quat(new_yaw, new_pitch);
                 let bodies = data.physics.bodies.change();
                 bodies
                     .get_mut(handle)
