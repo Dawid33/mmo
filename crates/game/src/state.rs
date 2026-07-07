@@ -273,6 +273,20 @@ where
     }
 }
 
+// Player spawn / capsule tunables (voxel units; 1 unit = 1/16 m). Exposed as
+// named constants so they can be tuned without hunting through the spawn math.
+/// Half-height of the player's capsule collider.
+const PLAYER_CAPSULE_HALF_HEIGHT: f32 = 8.0;
+/// Radius of the player's capsule collider.
+const PLAYER_CAPSULE_RADIUS: f32 = 6.4;
+/// Vertical gap left between the capsule bottom and the terrain surface at spawn.
+const PLAYER_SPAWN_CLEARANCE: f32 = 3.6;
+/// Region-local voxel column the player spawns over (region center: 256/2).
+const PLAYER_SPAWN_X: f32 = 128.0;
+const PLAYER_SPAWN_Z: f32 = 128.0;
+/// Spawn height used only when the spawn column has no terrain (all air).
+const PLAYER_SPAWN_FALLBACK_Y: f32 = 26.0;
+
 impl Rollback {
     pub fn create_mesh(&mut self, coords: ChunkCoords, chunk: Chunk) -> EntityKey {
         let e = self.ecs.create_entity_safe();
@@ -403,12 +417,64 @@ impl Rollback {
         p.colliders.insert_with_parent(collider, body, p.bodies);
     }
 
+    /// Highest solid voxel Y at region-local voxel column `(vx, vz)`, scanning
+    /// the terrain chunks already built in this region. `None` if that column
+    /// is all air or no chunk covers it. Voxel units — the same space as body
+    /// and collider coordinates. Chunk entities don't store `ChunkCoords`, so
+    /// the owning chunk column is recovered from each chunk body's translation
+    /// (`coords * 32`). Pure read of built terrain, hence deterministic: client
+    /// and server derive the same surface height.
+    pub fn surface_voxel_y(&self, vx: i32, vz: i32) -> Option<i32> {
+        let (cx, cz) = (vx.div_euclid(32), vz.div_euclid(32));
+        let (lx, lz) = (vx.rem_euclid(32) as u32, vz.rem_euclid(32) as u32);
+        let mut best: Option<i32> = None;
+        for (key, chunk) in self.data.ecs.chunk.iter() {
+            let Some(chunk) = chunk else { continue };
+            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else {
+                continue;
+            };
+            let Some(body) = self.data.physics.bodies.get(handle) else {
+                continue;
+            };
+            let t = body.translation();
+            let (bx, by, bz) = (t.x.0 as i32, t.y.0 as i32, t.z.0 as i32);
+            if bx.div_euclid(32) != cx || bz.div_euclid(32) != cz {
+                continue;
+            }
+            let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
+            for ly in (0..32u32).rev() {
+                if voxels[ChunkShape::linearize([lx, ly, lz]) as usize].block != BlockId::AIR {
+                    let abs = by + ly as i32;
+                    best = Some(best.map_or(abs, |b| b.max(abs)));
+                    break;
+                }
+            }
+        }
+        best
+    }
+
     pub fn create_player_safe(&mut self, client_id: ClientId) {
+        // Spawn on the terrain surface at the region-local spawn column, clear
+        // of the capsule — real terrain has real elevation, so the old
+        // hardcoded flat-floor height would bury the player. `surface + 1` is
+        // the surface voxel's top face; capsule half-extent + clearance sits
+        // the body above it. Falls back only if the column is all air.
+        let spawn_y = match self.surface_voxel_y(PLAYER_SPAWN_X as i32, PLAYER_SPAWN_Z as i32) {
+            Some(surface) => {
+                (surface + 1) as f32
+                    + PLAYER_CAPSULE_HALF_HEIGHT
+                    + PLAYER_CAPSULE_RADIUS
+                    + PLAYER_SPAWN_CLEARANCE
+            }
+            None => PLAYER_SPAWN_FALLBACK_Y,
+        };
         let e = self.ecs.create_entity_safe();
-        // Spawn at the center of the 8x8-chunk floor (256x256 units = 16m x
-        // 16m). Floor top y=8, capsule half-extent 14.4, ~3.6 units clear.
         let position = IsometryReal::from_parts(
-            Translation3::new(Real::from(128.0), Real::from(26.0), Real::from(128.0)),
+            Translation3::new(
+                Real::from(PLAYER_SPAWN_X as RawReal),
+                Real::from(spawn_y as RawReal),
+                Real::from(PLAYER_SPAWN_Z as RawReal),
+            ),
             Unit::<Quaternion<Real>>::identity(),
         );
         let body = RigidBodyBuilder::kinematic_position_based()
@@ -427,7 +493,7 @@ impl Rollback {
         scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
         // 28.8 units = 1.8 m at 1 unit = 1/16 m (~29 voxels, VS proportions).
-        self.attach_capsule_collider_safe(e, handle, 8.0, 6.4);
+        self.attach_capsule_collider_safe(e, handle, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS);
         let cam = Camera::new(handle);
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
