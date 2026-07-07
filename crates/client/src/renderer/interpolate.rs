@@ -3,8 +3,10 @@ use bevy::prelude::*;
 use super::bridge::SimTarget;
 
 /// Frame-rate-dependent exponential smoothing toward the sim pose —
-/// deliberate parity with the old renderer's lerp constants. If tick
-/// timestamps are ever added to SetEntityPosition, replace with
+/// deliberate parity with the old renderer's lerp constants. Position and
+/// rotation smooth independently (`pos_smoothing`/`rot_smoothing`) so the
+/// camera can snap its look (factor 1.0) while its position still glides.
+/// If tick timestamps are ever added to SetEntityPosition, replace with
 /// two-snapshot interpolation.
 pub fn interpolate_transforms(mut query: Query<(&mut Transform, &SimTarget)>) {
     for (mut tf, target) in &mut query {
@@ -14,8 +16,8 @@ pub fn interpolate_transforms(mut query: Query<(&mut Transform, &SimTarget)>) {
             tf.translation = target.pos;
             tf.rotation = target.rot;
         } else {
-            tf.translation = tf.translation.lerp(target.pos, target.smoothing);
-            tf.rotation = tf.rotation.slerp(target.rot, target.smoothing);
+            tf.translation = tf.translation.lerp(target.pos, target.pos_smoothing);
+            tf.rotation = tf.rotation.slerp(target.rot, target.rot_smoothing);
         }
     }
 }
@@ -54,8 +56,9 @@ mod tests {
     }
 
     #[test]
-    fn camera_snaps_in_one_frame() {
-        // Camera targets must not lerp — one update lands exactly on the pose.
+    fn camera_rotation_snaps_position_lerps() {
+        // The camera look must snap in one frame (no slerp-arc tilt), but its
+        // position must glide — lerp partway, not jump to the target.
         let target = SimTarget::camera(
             Vec3::new(5.0, -3.0, 2.0),
             Quat::from_rotation_y(1.2),
@@ -63,10 +66,17 @@ mod tests {
         let (mut app, e) = app_with(target, Transform::IDENTITY);
         app.update();
         let t = app.world().entity(e).get::<Transform>().unwrap();
-        assert_eq!(t.translation, Vec3::new(5.0, -3.0, 2.0), "position must snap in one frame");
+        // Rotation: instant.
         assert!(
             t.rotation.angle_between(Quat::from_rotation_y(1.2)) < 1e-6,
             "rotation must snap in one frame"
+        );
+        // Position: moved toward the target but not all the way there.
+        assert!(
+            t.translation.length() > 0.0
+                && t.translation.distance(Vec3::new(5.0, -3.0, 2.0)) > 0.008,
+            "position must lerp partway, not snap: {:?}",
+            t.translation
         );
     }
 }

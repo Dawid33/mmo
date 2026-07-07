@@ -32,11 +32,17 @@ pub struct SimEntity {
 /// last-write-wins, so a rollback/reapply burst drained in one frame
 /// collapses to the final pose. That idempotence is the invariant that
 /// makes the one-way bridge safe — do not switch to incremental deltas.
+/// Per-frame lerp factor for the camera's *position*. Kept < 1.0 so the
+/// eye glides between 50Hz sim poses instead of stepping. Rotation is a
+/// separate factor (see `camera`) held at 1.0 so the look stays instant.
+pub const CAMERA_POS_SMOOTHING: f32 = 0.3;
+
 #[derive(Component)]
 pub struct SimTarget {
     pub pos: Vec3,
     pub rot: Quat,
-    pub smoothing: f32,
+    pub pos_smoothing: f32,
+    pub rot_smoothing: f32,
     pub pos_snap: f32,
     pub rot_snap: f32,
 }
@@ -45,12 +51,20 @@ impl SimTarget {
     // pos_snap values are world-unit distances (1 unit = 1/16 m); smoothing
     // factors and rotation snaps are dimensionless/radians.
     pub fn body(pos: Vec3, rot: Quat) -> Self {
-        Self { pos, rot, smoothing: 0.5, pos_snap: 1.6, rot_snap: 0.1 }
+        Self { pos, rot, pos_smoothing: 0.5, rot_smoothing: 0.5, pos_snap: 1.6, rot_snap: 0.1 }
     }
     pub fn camera(pos: Vec3, rot: Quat) -> Self {
-        // Look lives in the 50Hz sim; the render camera snaps to it every
-        // frame (smoothing = 1.0). No lerp => no slerp-arc tilt during turns.
-        Self { pos, rot, smoothing: 1.0, pos_snap: 0.008, rot_snap: 0.001 }
+        // Look lives in the 50Hz sim; the render camera SNAPS its rotation
+        // (rot_smoothing = 1.0) so there's no slerp-arc tilt during turns,
+        // but LERPS its position so movement glides instead of stepping.
+        Self {
+            pos,
+            rot,
+            pos_smoothing: CAMERA_POS_SMOOTHING,
+            rot_smoothing: 1.0,
+            pos_snap: 0.008,
+            rot_snap: 0.001,
+        }
     }
 }
 
