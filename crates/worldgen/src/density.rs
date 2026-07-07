@@ -15,11 +15,18 @@ pub enum DensityFn {
     YGradient { from_y: f64, to_y: f64, from_v: f64, to_v: f64 },
     Add(Box<DensityFn>, Box<DensityFn>),
     Mul(Box<DensityFn>, Box<DensityFn>),
+    // `Min`/`Max`/`RangeChoice` are engine vocabulary the v1 pipeline doesn't use
+    // yet: the deferred features fold in through them (caves as `min(terrain,
+    // caves)`, the continent/island split as a `RangeChoice`). Kept + tested so
+    // those specs don't re-add primitives; allow-dead until a consumer lands.
+    #[allow(dead_code)]
     Min(Box<DensityFn>, Box<DensityFn>),
+    #[allow(dead_code)]
     Max(Box<DensityFn>, Box<DensityFn>),
     Abs(Box<DensityFn>),
     Clamp { input: Box<DensityFn>, min: f64, max: f64 },
     SplineOf { coord: Box<DensityFn>, spline: Spline },
+    #[allow(dead_code)]
     RangeChoice {
         input: Box<DensityFn>,
         min: f64,
@@ -62,7 +69,9 @@ impl Clone for DensityFn {
 impl DensityFn {
     pub fn add(a: DensityFn, b: DensityFn) -> DensityFn { DensityFn::Add(Box::new(a), Box::new(b)) }
     pub fn mul(a: DensityFn, b: DensityFn) -> DensityFn { DensityFn::Mul(Box::new(a), Box::new(b)) }
+    #[allow(dead_code)] // see the Min/Max/RangeChoice note on the enum
     pub fn min(a: DensityFn, b: DensityFn) -> DensityFn { DensityFn::Min(Box::new(a), Box::new(b)) }
+    #[allow(dead_code)] // see the Min/Max/RangeChoice note on the enum
     pub fn max(a: DensityFn, b: DensityFn) -> DensityFn { DensityFn::Max(Box::new(a), Box::new(b)) }
     pub fn abs(a: DensityFn) -> DensityFn { DensityFn::Abs(Box::new(a)) }
     pub fn clamp(a: DensityFn, min: f64, max: f64) -> DensityFn {
@@ -71,6 +80,7 @@ impl DensityFn {
     pub fn spline_of(coord: DensityFn, spline: Spline) -> DensityFn {
         DensityFn::SplineOf { coord: Box::new(coord), spline }
     }
+    #[allow(dead_code)] // see the Min/Max/RangeChoice note on the enum
     pub fn range_choice(input: DensityFn, min: f64, max: f64, in_range: DensityFn, out_range: DensityFn) -> DensityFn {
         DensityFn::RangeChoice {
             input: Box::new(input),
