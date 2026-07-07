@@ -6,8 +6,8 @@
 mod noise;
 mod spline;
 mod density;
-mod pipeline;
-mod material;
+pub mod pipeline;
+pub mod material;
 
 use game::{
     Block, BlockId, BlockIndex, ChiselData, Chunk, Column, ColumnCoords, RegionCoords, SubChunk,
