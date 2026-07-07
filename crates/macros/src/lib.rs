@@ -693,7 +693,11 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 /// field's delta.
                 pub fn emit_on_undo(&mut self, event: crate::GameDataUpdate) {
                     self.undo(move |_, s| {
-                        s.send(event).unwrap();
+                        // A disconnected receiver just means the render/client
+                        // bridge has gone away (e.g. the window closed while the
+                        // game thread was still reconciling). Drop the update
+                        // rather than panic and kill the sim thread.
+                        let _ = s.send(event);
                     });
                 }
 
@@ -723,7 +727,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub fn send(&self, value: crate::GameDataUpdate) {
                     let mut global = self.global_log.lock().unwrap();
                     global.client.as_ref().inspect(move |s| {
-                        s.send(value).unwrap();
+                        // Render bridge may have disconnected (window closed);
+                        // dropping the update is expected, not fatal.
+                        let _ = s.send(value);
                     });
                 }
             }
@@ -865,7 +871,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let make = self.make.expect("UndoSlotMap not wired to a Delta variant");
                     global.log.push_back(Entry { transaction: trans, undo: UndoOp::Typed(make(op)), pre_hash });
                     if let (Some(kind), Some(client)) = (emit, global.client.as_ref()) {
-                        client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Do, kind)).unwrap();
+                        // Tolerate a disconnected render bridge (window closed).
+                        let _ = client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Do, kind));
                     }
                 }
                 pub fn insert(&mut self, v: V) -> K {
@@ -1236,13 +1243,15 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                         SlotOp::Inserted(k) => {
                                             self.#slot_path1.data.revert_insert(k);
                                             if let (Some(mk), Some(client)) = (self.#slot_path1.emit_remove, rollback_log.client.as_ref()) {
-                                                client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Undo, mk(k))).unwrap();
+                                                // Tolerate a disconnected render bridge (window closed).
+                                                let _ = client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Undo, mk(k)));
                                             }
                                         }
                                         SlotOp::Removed(k, v) => {
                                             self.#slot_path1.data.revert_remove(k, v);
                                             if let (Some(mk), Some(client)) = (self.#slot_path1.emit_insert, rollback_log.client.as_ref()) {
-                                                client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Undo, mk(k))).unwrap();
+                                                // Tolerate a disconnected render bridge (window closed).
+                                                let _ = client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Undo, mk(k)));
                                             }
                                         }
                                     }

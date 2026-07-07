@@ -61,6 +61,34 @@ fn rollback_after_slot_reuse_restores_camera_hash() {
 }
 
 #[test]
+fn sim_survives_dropped_render_receiver() {
+    // Shutdown-ordering race (observed as a crash when crossing regions
+    // rapidly): when the client window closes, the render thread drops its
+    // per-region Receiver<GameDataUpdate>, but the game thread keeps
+    // reconciling. Every bridge send in the rollback machinery — the Do-path
+    // `send`, the slotmap emits, and `emit_on_undo` during rollback — must
+    // tolerate a disconnected receiver instead of unwrapping into a panic
+    // that kills the game thread (and cascades into the netcode writer).
+    let (send, recv) = crossbeam::channel::unbounded();
+    let mut r = Rollback::new(Some(send));
+    let before = state_hash(&r);
+
+    // Window closed: the render bridge receiver is gone from here on.
+    drop(recv);
+
+    // Do-path sends fire here; the rollback fires the emit_on_undo sends.
+    r.new_transaction();
+    r.create_player_safe(0);
+    r.rollback();
+
+    assert_eq!(
+        before,
+        state_hash(&r),
+        "rollback did not restore state after receiver drop"
+    );
+}
+
+#[test]
 fn rollback_of_create_mesh_restores_state() {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut r = Rollback::new(Some(send));
