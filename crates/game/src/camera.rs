@@ -39,14 +39,15 @@ pub fn look_delta_rad(px: f32, base: f32) -> f32 {
 /// Accumulate a mouse delta into (yaw, pitch). Yaw wraps freely; pitch is
 /// clamped to +/-PITCH_LIMIT. Non-finite deltas are ignored so a stray NaN
 /// cannot corrupt the look. Yaw: rightward mouse decreases the angle
-/// (matches the previous controller's convention). Pitch: positive `dy`
-/// increases the angle toward `+PITCH_LIMIT`.
+/// (matches the previous controller's convention). Pitch: negative `dy`
+/// (mouse up) increases the angle toward `+PITCH_LIMIT`, matching the
+/// same non-inverted, subtract-the-delta convention as yaw.
 pub fn apply_look(yaw: Real, pitch: Real, dx: f32, dy: f32) -> (Real, Real) {
     let dx = if dx.is_finite() { dx } else { 0.0 };
     let dy = if dy.is_finite() { dy } else { 0.0 };
     let new_yaw = yaw - Real::from(look_delta_rad(dx, LOOK_BASE_X));
     let new_pitch = clamp(
-        pitch + Real::from(look_delta_rad(dy, LOOK_BASE_Y)),
+        pitch - Real::from(look_delta_rad(dy, LOOK_BASE_Y)),
         -PITCH_LIMIT,
         PITCH_LIMIT,
     );

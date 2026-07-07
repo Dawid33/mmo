@@ -17,17 +17,17 @@ fn look_delta_matches_minecraft_cubic_formula() {
 fn pitch_clamps_and_yaw_is_free() {
     let mut yaw = OrderedFloat(0.0_f32);
     let mut pitch = OrderedFloat(0.0_f32);
-    // Slam pitch up hard, many ticks.
+    // Mouse up (negative dy) drives pitch toward the +limit (looking up).
     for _ in 0..10_000 {
-        let (y, p) = game::apply_look(yaw, pitch, 0.0, 10_000.0);
+        let (y, p) = game::apply_look(yaw, pitch, 0.0, -10_000.0);
         yaw = y;
         pitch = p;
     }
     assert!(pitch <= game::PITCH_LIMIT, "pitch exceeded +limit: {}", pitch);
     assert!(pitch >= OrderedFloat(1.0), "pitch should reach near the top");
-    // Now slam down; must clamp at -limit.
+    // Mouse down (positive dy) drives pitch toward the -limit (looking down).
     for _ in 0..20_000 {
-        let (y, p) = game::apply_look(yaw, pitch, 0.0, -10_000.0);
+        let (y, p) = game::apply_look(yaw, pitch, 0.0, 10_000.0);
         yaw = y;
         pitch = p;
     }
