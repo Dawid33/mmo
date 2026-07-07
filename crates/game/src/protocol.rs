@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use crate::input::InputEvent;
-use crate::{Client, ClientId, EntityKey, EntityKind, IsometryReal, Rollback};
+use crate::{
+    Chunk, ChunkCoords, Client, ClientId, Column, ColumnCoords, EntityKey, EntityKind,
+    IsometryReal, Rollback,
+};
 use derive_more::Debug;
 use parry3d::math::{Real, Vector};
 
@@ -27,6 +30,16 @@ pub type EntityId = usize;
 /// boundary (region root Transform) and, later, in handoff rebasing.
 pub const REGION_CHUNKS: usize = 8;
 pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // 256.0, exact in f32
+
+/// Chebyshev radius of the visual-only far ring around the viewer region.
+/// Default 2 → a 5×5 footprint (one ring outside the near 3×3 window). No UI;
+/// raise this constant (with LOD, later) to extend the horizon.
+pub const FAR_VIEW_RADIUS: i32 = 2;
+
+/// A running region checks its terrain hash this often and pushes a
+/// `FarSnapshotChanged` only when it changed — the check cadence IS the
+/// refresh throttle.
+pub const FAR_SNAPSHOT_MIN_INTERVAL_TICKS: usize = 25;
 
 #[derive(
     Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd,
@@ -168,6 +181,38 @@ pub enum GameError {
 
 pub enum WorldId {
     Default = 0,
+}
+
+/// The visual-only subset of a region's data: terrain chunks, nothing else.
+/// Much smaller than a `Rollback` (a `Chunk` is 8 blocks + a sparse chisel
+/// map). Served to far-viewers; never carries entities/physics/undo state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FarSnapshot {
+    pub chunks: Vec<(ChunkCoords, Chunk)>,
+}
+
+impl FarSnapshot {
+    /// Materialize worldgen columns into the same `(ChunkCoords, Chunk)` form
+    /// `Region::from_columns` uses — how never-run regions are served.
+    pub fn from_columns(columns: Vec<(ColumnCoords, Column)>) -> Self {
+        let chunks = columns
+            .into_iter()
+            .flat_map(|(col, column)| {
+                column
+                    .materialized_sub_chunks()
+                    .into_iter()
+                    .map(move |(sub_y, chunk)| (ChunkCoords::new(col.x, sub_y, col.z), chunk))
+            })
+            .collect();
+        Self { chunks }
+    }
+
+    /// crc32 of the terrain, for cheap change detection on the region thread.
+    pub fn terrain_hash(&self) -> u32 {
+        let mut h = crc32fast::Hasher::new();
+        h.update(&bincode::serialize(self).expect("far snapshot serializes"));
+        h.finalize()
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

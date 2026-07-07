@@ -301,6 +301,10 @@ impl Region {
         &self.data
     }
 
+    pub fn far_snapshot(&self) -> crate::FarSnapshot {
+        self.data.far_snapshot()
+    }
+
     pub fn create_basic(&mut self, coords: ChunkCoords) {
         self.data.create_mesh(coords, Chunk::flat_floor(8));
     }

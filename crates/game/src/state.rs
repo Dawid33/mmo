@@ -796,4 +796,26 @@ impl Rollback {
         }
         (departures, ghosts)
     }
+
+    /// Terrain-only extraction for far-region views. Iterates chunk
+    /// components; recovers each chunk's `ChunkCoords` from its fixed body
+    /// translation (`create_mesh` places bodies at `(cx*32, cy*32, cz*32)`,
+    /// exact). No entities/physics/undo state leaks out.
+    pub fn far_snapshot(&self) -> crate::FarSnapshot {
+        let mut chunks = Vec::new();
+        for (key, maybe_chunk) in self.data.ecs.chunk.iter() {
+            let Some(chunk) = maybe_chunk else { continue };
+            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
+            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
+            let t = body.translation();
+            // Real = OrderedFloat<f32>; `.0` unwraps to f32 (as scan_boundaries).
+            let coords = ChunkCoords::new(
+                (t.x.0 / 32.0) as usize,
+                (t.y.0 / 32.0) as i32,
+                (t.z.0 / 32.0) as usize,
+            );
+            chunks.push((coords, chunk.clone()));
+        }
+        crate::FarSnapshot { chunks }
+    }
 }

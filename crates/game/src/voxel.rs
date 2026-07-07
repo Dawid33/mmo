@@ -111,9 +111,9 @@ impl Chunk {
     Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, PartialOrd, Ord, Eq,
 )]
 pub struct ChunkCoords {
-    pub(crate) x: usize,
-    pub(crate) y: i32,
-    pub(crate) z: usize,
+    pub x: usize,
+    pub y: i32,
+    pub z: usize,
 }
 
 impl ChunkCoords {
