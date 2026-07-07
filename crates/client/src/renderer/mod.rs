@@ -17,6 +17,7 @@ pub(crate) mod input;
 mod interpolate;
 pub mod meshing;
 pub(crate) mod ui_bridge;
+pub(crate) mod ui_input;
 mod voxel_material;
 use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
@@ -52,6 +53,7 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<ui_bridge::UiUpdates>()
             .init_resource::<ui_bridge::UiWidgetMap>()
             .init_resource::<ui_bridge::UiRoot>()
+            .add_observer(ui_input::on_widget_click)
             .add_systems(
                 PreUpdate,
                 (

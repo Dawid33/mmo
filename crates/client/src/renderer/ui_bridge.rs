@@ -159,8 +159,19 @@ pub fn drain_ui_updates(
                     warn!("ui_bridge: SetContent for unmapped {:?}", id);
                 }
             }
-            UiUpdate::SetAction(_id, _action) => {
-                // Slice 2 (ui_input) reads actions off a component; no-op here.
+            UiUpdate::SetAction(id, action) => {
+                if let Some(&e) = map.0.get(&id) {
+                    match action {
+                        Some(a) => {
+                            commands.entity(e).insert(crate::renderer::ui_input::WidgetAction(a));
+                        }
+                        None => {
+                            commands.entity(e).remove::<crate::renderer::ui_input::WidgetAction>();
+                        }
+                    }
+                } else {
+                    warn!("ui_bridge: SetAction for unmapped {:?}", id);
+                }
             }
             UiUpdate::SetChildren(id, children) => {
                 let Some(&parent) = map.0.get(&id) else {
