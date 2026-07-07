@@ -816,6 +816,11 @@ impl Rollback {
             );
             chunks.push((coords, chunk.clone()));
         }
+        // Sort by coordinate: `terrain_hash` bincode-serializes this Vec
+        // positionally, so a deterministic order keeps the hash
+        // order-insensitive and stable across sources (ECS insertion order
+        // here vs. column-iteration order in `FarSnapshot::from_columns`).
+        chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
         crate::FarSnapshot { chunks }
     }
 }

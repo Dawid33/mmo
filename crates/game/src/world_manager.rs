@@ -467,6 +467,14 @@ impl<S: RegionSpawner> WorldManager<S> {
             return;
         }
         // Parked / never-run → serve from cache without waking; generate on miss.
+        //
+        // Edge case: if this far-subscribe lands during a region's `stopping`
+        // window before any `FarSnapshotChanged`/`Stopped` has seeded
+        // `far_cache` for it, the worldgen fallback below may serve
+        // pre-edit terrain (a cache miss regenerates from scratch, ignoring
+        // in-flight edits made before the region stopped ticking). This
+        // self-heals on the next `FarSnapshotChanged` once the region runs
+        // again and repopulates the cache.
         let snap = match self.far_cache.get(&rc) {
             Some(snap) => snap.clone(),
             None => {

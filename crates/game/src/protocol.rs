@@ -195,7 +195,7 @@ impl FarSnapshot {
     /// Materialize worldgen columns into the same `(ChunkCoords, Chunk)` form
     /// `Region::from_columns` uses — how never-run regions are served.
     pub fn from_columns(columns: Vec<(ColumnCoords, Column)>) -> Self {
-        let chunks = columns
+        let mut chunks: Vec<_> = columns
             .into_iter()
             .flat_map(|(col, column)| {
                 column
@@ -204,6 +204,10 @@ impl FarSnapshot {
                     .map(move |(sub_y, chunk)| (ChunkCoords::new(col.x, sub_y, col.z), chunk))
             })
             .collect();
+        // Sort by coordinate: keeps `terrain_hash` order-insensitive and
+        // stable relative to `Rollback::far_snapshot`'s ECS-insertion-order
+        // output, since both are hashed positionally via bincode.
+        chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
         Self { chunks }
     }
 

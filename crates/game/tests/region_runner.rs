@@ -144,7 +144,7 @@ fn stable_terrain_never_pushes_far_change() {
 fn terrain_edit_pushes_one_throttled_far_change() {
     use game::{Chunk, ChunkCoords};
     let (mut r, out) = runner(RegionCoords::new(0, 0));
-    // Mutate terrain: replace a chunk with a taller floor via the test hook.
+    // Mutate terrain: add a new chunk (a flat floor) at y=1 via the test hook.
     r.region_mut().with_data(|d| {
         d.create_mesh(ChunkCoords::new(0, 1, 0), Chunk::flat_floor(8));
     });
