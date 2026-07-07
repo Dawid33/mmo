@@ -57,3 +57,31 @@ fn from_columns_materializes_same_chunks_as_region() {
     let from_region = Region::from_chunks(RegionCoords::new(0, 0), flat_chunks()).far_snapshot();
     assert_eq!(from_cols.terrain_hash(), from_region.terrain_hash());
 }
+
+#[test]
+fn far_wire_packets_roundtrip_bincode() {
+    use game::{ClientPacket, RegionCoords, ServerPacket};
+
+    let rc = RegionCoords::new(3, -1);
+    let req = ClientPacket::RequestFarRegion(rc);
+    let bytes = bincode::serialize(&req).unwrap();
+    assert!(matches!(
+        bincode::deserialize::<ClientPacket>(&bytes).unwrap(),
+        ClientPacket::RequestFarRegion(r) if r == rc
+    ));
+
+    let rel = ClientPacket::ReleaseFarRegion(rc);
+    let bytes = bincode::serialize(&rel).unwrap();
+    assert!(matches!(
+        bincode::deserialize::<ClientPacket>(&bytes).unwrap(),
+        ClientPacket::ReleaseFarRegion(r) if r == rc
+    ));
+
+    let snap = Region::from_chunks(rc, flat_chunks()).far_snapshot();
+    let pkt = ServerPacket::FarRegion(rc, snap);
+    let bytes = bincode::serialize(&pkt).unwrap();
+    assert!(matches!(
+        bincode::deserialize::<ServerPacket>(&bytes).unwrap(),
+        ServerPacket::FarRegion(r, s) if r == rc && s.chunks.len() == 4
+    ));
+}

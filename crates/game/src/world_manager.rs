@@ -193,6 +193,14 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 ClientPacket::RequestRegionConnection(rc) => self.subscribe(id, rc),
                 ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, rc, now_ms),
+                // Far-region subscribe/release wiring lands in a later task;
+                // these variants only need to exist on the wire for now.
+                ClientPacket::RequestFarRegion(rc) => {
+                    log::debug!("far-region request from {id} for {rc:?} (not yet implemented)");
+                }
+                ClientPacket::ReleaseFarRegion(rc) => {
+                    log::debug!("far-region release from {id} for {rc:?} (not yet implemented)");
+                }
                 ClientPacket::GameEvent(event) => match event.kind {
                     GameEventKind::Tick => {}
                     GameEventKind::Quit => return false,

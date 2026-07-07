@@ -223,6 +223,10 @@ pub enum ClientPacket {
     RequestRegionConnection(RegionId),
     /// Client no longer wants this region's events (window moved on).
     ReleaseRegionConnection(RegionId),
+    /// Client wants read-only visual terrain for a far (unsimulated) region.
+    RequestFarRegion(RegionId),
+    /// Client no longer wants this region's far terrain (ring moved on).
+    ReleaseFarRegion(RegionId),
 }
 
 type CurrentTickRate = u64;
@@ -236,6 +240,9 @@ pub enum ServerPacket {
     // who he is.
     Region(RegionId, Rollback),
     PlayerRegion(Option<RegionId>, ClientId),
+    /// Read-only visual terrain for a far region (initial send AND refresh —
+    /// replace-on-re-receipt). Removal is client-driven; no "gone" packet.
+    FarRegion(RegionId, FarSnapshot),
 }
 
 /// A Game event
