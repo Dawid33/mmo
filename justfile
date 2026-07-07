@@ -124,6 +124,10 @@ worldgen:
 worldgen-bench:
     {{cargo}} run --release -p worldgen --bin worldgen
 
+# Time one region's collider genesis build + determinism check.
+collider-bench:
+    {{cargo}} run --release -p worldgen --example collider_profile
+
 # ---- WASM / browser -------------------------------------------------------
 
 # Start `just server` first, or append ?offline in the browser for single-player.
