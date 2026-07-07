@@ -4,6 +4,7 @@
 //! safe for the multi-region world.
 
 mod noise;
+mod spline;
 
 use game::{
     Block, BlockId, Chunk, Column, ColumnCoords, RegionCoords, SubChunk, REGION_CHUNKS,
