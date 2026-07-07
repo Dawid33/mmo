@@ -34,10 +34,10 @@ fn block_center_m(b: i32) -> f64 {
 /// Highest solid block Y in a 1 m column (world block coords), or `SCAN_BOTTOM - 1`
 /// if the whole column is air. Coarse per-block scan (design §4 step 1).
 fn surface_block_y(p: &TerrainPipeline, wx: i32, wz: i32) -> i32 {
-    let (x, z) = (block_center_m(wx), block_center_m(wz));
+    let prof = p.column(block_center_m(wx), block_center_m(wz));
     let mut by = SCAN_TOP;
     while by >= SCAN_BOTTOM {
-        if p.final_density(x, block_center_m(by), z) > 0.0 {
+        if prof.density_at(block_center_m(by)) > 0.0 {
             return by;
         }
         by -= 1;
@@ -137,13 +137,14 @@ fn place_straddle(
     let mut chisel = ChiselData::new(vec![top_mat]);
     let mut any = false;
     for vx in 0..BLOCK_VOXELS {
-        for vy in 0..BLOCK_VOXELS {
-            for vz in 0..BLOCK_VOXELS {
-                // Meter coord of this voxel center: block index + (voxel + 0.5)/16.
-                let mx = wx as f64 + (vx as f64 + 0.5) / BLOCK_VOXELS as f64;
+        for vz in 0..BLOCK_VOXELS {
+            // Meter coord of this voxel center: block index + (voxel + 0.5)/16.
+            let mx = wx as f64 + (vx as f64 + 0.5) / BLOCK_VOXELS as f64;
+            let mz = wz as f64 + (vz as f64 + 0.5) / BLOCK_VOXELS as f64;
+            let prof = p.column(mx, mz);
+            for vy in 0..BLOCK_VOXELS {
                 let my = by as f64 + (vy as f64 + 0.5) / BLOCK_VOXELS as f64;
-                let mz = wz as f64 + (vz as f64 + 0.5) / BLOCK_VOXELS as f64;
-                let solid = p.final_density(mx, my, mz) > 0.0;
+                let solid = prof.density_at(my) > 0.0;
                 chisel.set(vx, vy, vz, solid, 0);
                 any |= solid;
             }

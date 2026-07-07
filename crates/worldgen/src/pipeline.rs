@@ -20,6 +20,14 @@ const MAX_OFFSET: f64 = 2.0;
 const HEIGHT_SCALE: f64 = 96.0; // meters of surface swing per offset unit
 const DEPTH_PER_BLOCK: f64 = 1.0 / 32.0; // density falloff per meter of height
 
+// Vertical density ramp (the `neg_y` term): carries `-y` across the world band,
+// clamped at the ends. Used by BOTH the density graph node and ColumnProfile so
+// they stay bit-identical.
+const RAMP_FROM_Y: f64 = -64.0;
+const RAMP_TO_Y: f64 = 320.0;
+const RAMP_FROM_V: f64 = 64.0;
+const RAMP_TO_V: f64 = -320.0;
+
 fn continentalness() -> DensityFn {
     DensityFn::Noise { idx: N_CONTINENTS, xz_scale: 0.13 }
 }
@@ -107,7 +115,12 @@ fn jaggedness() -> DensityFn {
 /// positive below the surface, negative above. `neg_y` is a wide linear ramp
 /// carrying `-y` across the whole world band.
 fn final_density_graph() -> DensityFn {
-    let neg_y = DensityFn::YGradient { from_y: -64.0, to_y: 320.0, from_v: 64.0, to_v: -320.0 };
+    let neg_y = DensityFn::YGradient {
+        from_y: RAMP_FROM_Y,
+        to_y: RAMP_TO_Y,
+        from_v: RAMP_FROM_V,
+        to_v: RAMP_TO_V,
+    };
     let surface = DensityFn::add(
         DensityFn::mul(offset(), DensityFn::Const(HEIGHT_SCALE)),
         DensityFn::add(DensityFn::Const(SEA_LEVEL), neg_y),
@@ -124,6 +137,9 @@ fn final_density_graph() -> DensityFn {
 pub struct TerrainPipeline {
     noises: NoiseSet,
     graph: DensityFn,
+    offset_g: DensityFn,
+    factor_g: DensityFn,
+    jaggedness_g: DensityFn,
 }
 
 impl TerrainPipeline {
@@ -135,11 +151,50 @@ impl TerrainPipeline {
             OctaveNoise::new(seed ^ 0x00E0, -10, vec![2.0, 1.75, 1.5, 1.5, 1.3, 1.0]),
             OctaveNoise::new(seed ^ 0x00D0, -8, vec![1.0, 2.0, 1.0]),
         ]);
-        Self { noises, graph: final_density_graph() }
+        Self {
+            noises,
+            graph: final_density_graph(),
+            offset_g: offset(),
+            factor_g: factor(),
+            jaggedness_g: jaggedness(),
+        }
     }
 
     pub fn final_density(&self, x: f64, y: f64, z: f64) -> f64 {
         self.graph.eval(x, y, z, &self.noises)
+    }
+
+    /// Precompute the 2D profile at (x, z). The sub-graphs ignore `y`, so any y
+    /// (here 0.0) yields the same result.
+    pub fn column(&self, x: f64, z: f64) -> ColumnProfile {
+        let offset_val = self.offset_g.eval(x, 0.0, z, &self.noises);
+        ColumnProfile {
+            offset_h: offset_val * HEIGHT_SCALE,
+            factor: self.factor_g.eval(x, 0.0, z, &self.noises),
+            jaggedness: self.jaggedness_g.eval(x, 0.0, z, &self.noises),
+        }
+    }
+}
+
+/// The 2D (x,z-only) part of the density field for one column, precomputed so a
+/// whole vertical column can be evaluated with cheap arithmetic. `density_at(y)`
+/// reproduces `TerrainPipeline::final_density(x, y, z)` bit-for-bit.
+pub struct ColumnProfile {
+    offset_h: f64, // offset value * HEIGHT_SCALE
+    factor: f64,
+    jaggedness: f64,
+}
+
+impl ColumnProfile {
+    pub fn density_at(&self, y: f64) -> f64 {
+        // Must match final_density_graph's arithmetic EXACTLY, including float
+        // grouping/associativity (f64 add/mul are not associative). The graph does:
+        //   surface  = (offset*HEIGHT_SCALE) + (SEA_LEVEL + neg_y)
+        //   density  = ((surface * DEPTH_PER_BLOCK) * factor) + jaggedness
+        let t = ((y - RAMP_FROM_Y) / (RAMP_TO_Y - RAMP_FROM_Y)).clamp(0.0, 1.0);
+        let neg_y = RAMP_FROM_V + t * (RAMP_TO_V - RAMP_FROM_V);
+        let surface = self.offset_h + (SEA_LEVEL + neg_y);
+        (surface * DEPTH_PER_BLOCK) * self.factor + self.jaggedness
     }
 }
 
@@ -181,5 +236,25 @@ mod tests {
             }
         }
         assert!(air * 2 > total, "expected majority air above sea level, got {air}/{total}");
+    }
+
+    #[test]
+    fn column_profile_matches_graph_bit_exact() {
+        let p = TerrainPipeline::new(999);
+        for i in 0..20 {
+            for j in 0..20 {
+                let x = i as f64 * 13.0;
+                let z = j as f64 * 17.0;
+                let prof = p.column(x, z);
+                for k in 0..12 {
+                    let y = -64.0 + k as f64 * 34.0; // spans the world band incl. ends
+                    assert_eq!(
+                        prof.density_at(y),
+                        p.final_density(x, y, z),
+                        "profile/graph mismatch at ({x}, {y}, {z})"
+                    );
+                }
+            }
+        }
     }
 }
