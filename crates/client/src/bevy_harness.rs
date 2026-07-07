@@ -14,6 +14,7 @@ use game::{ClientId, ClientUpdateEvent, GameEventKind, InputEvent, Key, ServerPa
 use crate::renderer::bridge::{drain_client_updates, drain_region_updates, Regions, RegionRoots, SimEntityMap};
 use crate::renderer::hud::HudStatus;
 use crate::renderer::input::forward_input;
+use crate::renderer::ui_bridge::UiUpdates;
 use crate::renderer::{ClientUpdates, GameEvents, LocalPlayer};
 use crate::{GameInstanceManager, LocalServer};
 
@@ -60,6 +61,7 @@ impl BevyInputHarness {
             .init_resource::<RegionRoots>()
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
+            .init_resource::<UiUpdates>()
             .insert_resource(ClientUpdates(bridge_recv))
             .insert_resource(GameEvents(tap_send))
             // Same ordering SimBridgePlugin uses: forward_input BEFORE the drains.

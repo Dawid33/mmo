@@ -16,6 +16,7 @@ pub mod convert;
 pub(crate) mod input;
 mod interpolate;
 pub mod meshing;
+pub(crate) mod ui_bridge;
 mod voxel_material;
 use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
@@ -48,11 +49,20 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<bridge::SimEntityMap>()
             .init_resource::<hud::HudStatus>()
             .init_resource::<avatar::AvatarAssets>()
+            .init_resource::<ui_bridge::UiUpdates>()
+            .init_resource::<ui_bridge::UiWidgetMap>()
+            .init_resource::<ui_bridge::UiRoot>()
             .add_systems(
                 PreUpdate,
                 (
                     input::forward_input.after(bevy::input::InputSystems),
-                    (bridge::drain_client_updates, bridge::drain_region_updates, bridge::dedupe_ghosts).chain(),
+                    (
+                        bridge::drain_client_updates,
+                        bridge::drain_region_updates,
+                        bridge::dedupe_ghosts,
+                        ui_bridge::drain_ui_updates,
+                    )
+                        .chain(),
                 )
                     .chain(),
             )
