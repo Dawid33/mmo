@@ -3,6 +3,8 @@
 //! which is what makes "cycle out = park, cycle in = restore-or-regenerate"
 //! safe for the multi-region world.
 
+mod noise;
+
 use game::{
     Block, BlockId, Chunk, Column, ColumnCoords, RegionCoords, SubChunk, REGION_CHUNKS,
 };
