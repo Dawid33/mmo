@@ -7,7 +7,7 @@ use game::{GameEventKind, UiAction};
 use crate::renderer::{GameEvents, LocalPlayer};
 
 /// The logical action a widget fires when clicked. Set by ui_bridge on SetAction.
-#[derive(Component, Clone)]
+#[derive(Component, Clone, Debug)]
 pub struct WidgetAction(pub UiAction);
 
 /// Send a widget's action to the sim as `GameEventKind::UiAction`, addressed to

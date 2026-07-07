@@ -224,12 +224,14 @@ impl GameInstanceManager {
             }
             e @ GameEventKind::UiAction(_, _) => {
                 if let Some(home) = self.home_region {
-                    if self.world.as_ref().unwrap().region_exists(&home) {
-                        let event = self.world.as_mut().unwrap().handle_region_event(e, home)?;
-                        self.server_game_send
-                            .send(game::ClientPacket::GameEvent(event))
-                            .unwrap();
+                    if !self.world.as_ref().unwrap().region_exists(&home) {
+                        warn!("dropping UiAction: home region {:?} not loaded", home);
+                        return Ok(true);
                     }
+                    let event = self.world.as_mut().unwrap().handle_region_event(e, home)?;
+                    self.server_game_send
+                        .send(game::ClientPacket::GameEvent(event))
+                        .unwrap();
                 }
             }
         }

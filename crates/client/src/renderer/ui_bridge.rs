@@ -178,8 +178,16 @@ pub fn drain_ui_updates(
                     warn!("ui_bridge: SetChildren for unmapped parent {:?}", id);
                     continue;
                 };
-                let child_entities: Vec<Entity> =
-                    children.iter().filter_map(|c| map.0.get(c).copied()).collect();
+                let child_entities: Vec<Entity> = children
+                    .iter()
+                    .filter_map(|c| match map.0.get(c) {
+                        Some(&e) => Some(e),
+                        None => {
+                            warn!("ui_bridge: SetChildren child {:?} unmapped", c);
+                            None
+                        }
+                    })
+                    .collect();
                 // Full replace (not additive): `UiUpdate::SetChildren` always
                 // carries the widget's complete, ordered child list, so
                 // `replace_children` is the correct semantic — `add_children`
@@ -190,7 +198,11 @@ pub fn drain_ui_updates(
             }
             UiUpdate::RemoveWidget(id) => {
                 if let Some(e) = map.0.remove(&id) {
-                    commands.entity(e).despawn();
+                    // `despawn()` is recursive over `ChildOf` (Bevy 0.18), so
+                    // removing a parent may already have despawned a mapped
+                    // child; use `try_despawn` to tolerate a later
+                    // `RemoveWidget` for that now-dead entity without a warn.
+                    commands.entity(e).try_despawn();
                 } else {
                     warn!("ui_bridge: RemoveWidget for unmapped {:?}", id);
                 }
