@@ -160,6 +160,84 @@ pub enum UiUpdate {
     SetCursorGrab(bool),
 }
 
+impl IconId {
+    /// Map an item kind to a client icon handle. `Empty` has no icon.
+    pub fn of(kind: crate::ItemKind) -> Option<IconId> {
+        match kind {
+            crate::ItemKind::Empty => None,
+            crate::ItemKind::Dirt => Some(IconId(1)),
+            crate::ItemKind::Stone => Some(IconId(2)),
+        }
+    }
+}
+
+fn slot_style() -> Style {
+    Style {
+        width: Val::Px(48.0),
+        height: Val::Px(48.0),
+        justify: JustifyContent::End,
+        align: AlignItems::End,
+        background: Some(Color { r: 0.1, g: 0.1, b: 0.1, a: 0.6 }),
+        ..Style::default()
+    }
+}
+
+/// Project the local player's authoritative data into a widget tree. Pure and
+/// deterministic; run client-side only. Unknown client → empty tree.
+pub fn build_player_ui(data: &crate::GameData, client: crate::ClientId) -> WidgetTree {
+    let Some(c) = data.clients.get(&client) else {
+        return WidgetTree::empty();
+    };
+    let mut tree = WidgetTree::empty();
+
+    // Root: bottom-anchored full-width row.
+    tree.nodes.get_mut(&WidgetId(0)).unwrap().style = Style {
+        width: Val::Percent(100.0),
+        height: Val::Percent(100.0),
+        justify: JustifyContent::Center,
+        align: AlignItems::End,
+        ..Style::default()
+    };
+    tree.nodes.get_mut(&WidgetId(0)).unwrap().children = vec![WidgetId(1)];
+
+    // Hotbar container.
+    let mut hotbar = Widget {
+        style: Style {
+            direction: FlexDirection::Row,
+            gap: Val::Px(4.0),
+            padding: Rect::all(Val::Px(6.0)),
+            background: Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.4 }),
+            ..Style::default()
+        },
+        ..Widget::default()
+    };
+
+    for (i, slot) in c.inventory.slots.iter().enumerate() {
+        let slot_id = WidgetId(100 + i as u64);
+        hotbar.children.push(slot_id);
+
+        let mut slot_widget = Widget { style: slot_style(), ..Widget::default() };
+        if let Some(stack) = slot {
+            if let Some(icon) = IconId::of(stack.kind) {
+                slot_widget.content = Content::Icon(icon);
+                let count_id = WidgetId(200 + i as u64);
+                slot_widget.children = vec![count_id];
+                tree.nodes.insert(
+                    count_id,
+                    Widget {
+                        content: Content::Text(stack.count.to_string()),
+                        ..Widget::default()
+                    },
+                );
+            }
+        }
+        tree.nodes.insert(slot_id, slot_widget);
+    }
+
+    tree.nodes.insert(WidgetId(1), hotbar);
+    tree
+}
+
 /// Minimal delta set turning `prev` into `next`. See the ordering contract in
 /// the plan: creates, then property sets, then child wiring, then removes.
 pub fn diff_ui(prev: &WidgetTree, next: &WidgetTree) -> Vec<UiUpdate> {
@@ -260,5 +338,43 @@ mod tests {
         a.nodes.get_mut(&WidgetId(0)).unwrap().children = vec![WidgetId(1)];
         a.nodes.insert(WidgetId(1), leaf("x"));
         assert!(diff_ui(&a, &a).is_empty());
+    }
+
+    #[test]
+    fn build_player_ui_projects_seeded_inventory() {
+        // A minimal GameData with one client that has a seeded inventory.
+        let mut rb = crate::Rollback::new(None);
+        rb.new_transaction();
+        rb.clients.insert(
+            0,
+            crate::Client { inventory: crate::Inventory::seeded(), ..crate::Client::default() },
+        );
+        rb.forget();
+
+        let tree = build_player_ui(&rb, 0);
+
+        // Root → hotbar container → 9 slot widgets.
+        assert_eq!(tree.root, WidgetId(0));
+        assert_eq!(tree.nodes[&WidgetId(0)].children, vec![WidgetId(1)]);
+        let hotbar = &tree.nodes[&WidgetId(1)];
+        assert_eq!(hotbar.children.len(), 9);
+        assert_eq!(hotbar.children[0], WidgetId(100));
+
+        // Slot 0 is seeded (Dirt x42): Icon content + a count-label child.
+        let slot0 = &tree.nodes[&WidgetId(100)];
+        assert!(matches!(slot0.content, Content::Icon(_)));
+        assert_eq!(slot0.children, vec![WidgetId(200)]);
+        assert!(matches!(&tree.nodes[&WidgetId(200)].content, Content::Text(t) if t == "42"));
+
+        // Slot 1 is empty: present but no icon, no children.
+        let slot1 = &tree.nodes[&WidgetId(101)];
+        assert!(matches!(slot1.content, Content::None));
+        assert!(slot1.children.is_empty());
+    }
+
+    #[test]
+    fn build_player_ui_unknown_client_is_empty() {
+        let rb = crate::Rollback::new(None);
+        assert_eq!(build_player_ui(&rb, 999), WidgetTree::empty());
     }
 }
