@@ -362,6 +362,57 @@ pub fn dedupe_ghosts(
     }
 }
 
+/// Enforce exactly one active render camera: the local player's camera in the
+/// *home* region. During a boundary handoff the player is briefly owned by both
+/// the outgoing and incoming region, so both spawn a local `Camera3d` +
+/// `IsDefaultUiCamera`. Two active cameras with equal priority make Bevy pick
+/// ambiguously per frame (view flickers; mouse-look/HUD bind to the wrong one).
+///
+/// Rather than remove `Camera3d` (which would need fragile re-add logic when
+/// the player crosses back into a still-loaded region), this toggles
+/// `Camera::is_active` and moves the single `IsDefaultUiCamera` marker so only
+/// the home camera renders. All `Camera3d` entities here are the local player's
+/// (the bridge never gives another player a `Camera3d`), so no ownership filter
+/// is needed. Falls back to a deterministic keeper if no camera sits in the
+/// home region yet (handoff mid-flight) to avoid a black screen or flicker.
+pub fn enforce_single_active_camera(
+    mut commands: Commands,
+    hud_status: Res<HudStatus>,
+    mut cams: Query<(Entity, &SimEntity, &mut Camera, Has<bevy::ui::IsDefaultUiCamera>), With<Camera3d>>,
+) {
+    let home = hud_status.home_region;
+    // Choose the single keeper: the home-region camera if one exists, else a
+    // deterministic fallback (lowest Entity) so the pick doesn't flip frame to
+    // frame while a handoff is mid-flight (which would itself flicker).
+    let mut home_keeper: Option<Entity> = None;
+    let mut fallback: Option<Entity> = None;
+    for (e, se, _, _) in cams.iter() {
+        if fallback.is_none_or(|f| e < f) {
+            fallback = Some(e);
+        }
+        if Some(se.region) == home && home_keeper.is_none_or(|k| e < k) {
+            home_keeper = Some(e);
+        }
+    }
+    let Some(keeper) = home_keeper.or(fallback) else { return };
+
+    for (e, _se, mut cam, has_marker) in cams.iter_mut() {
+        let active = e == keeper;
+        if cam.is_active != active {
+            cam.is_active = active;
+        }
+        match (active, has_marker) {
+            (true, false) => {
+                commands.entity(e).insert(bevy::ui::IsDefaultUiCamera);
+            }
+            (false, true) => {
+                commands.entity(e).remove::<bevy::ui::IsDefaultUiCamera>();
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,6 +740,132 @@ mod tests {
             Visibility::Hidden,
             "upgraded (owned) entity is never deduped"
         );
+    }
+
+    #[test]
+    fn only_home_region_camera_is_active_across_regions() {
+        use game::ConnectionState;
+
+        let (mut app, client) = app_shell();
+        app.add_systems(
+            PreUpdate,
+            enforce_single_active_camera.after(drain_region_updates),
+        );
+
+        // Two loaded regions that BOTH have the local player owning a camera —
+        // the transient dual-ownership a boundary handoff produces.
+        let region_a = RegionCoords::new(0, 0);
+        let region_b = RegionCoords::new(1, 0);
+
+        let mut rb_a = Rollback::new(None);
+        rb_a.new_transaction();
+        rb_a.create_player_safe(0);
+        let data_a = (*rb_a.data).clone();
+        let ka = *data_a.player_entites.get(&0).unwrap();
+
+        let mut rb_b = Rollback::new(None);
+        rb_b.new_transaction();
+        rb_b.create_player_safe(0);
+        let data_b = (*rb_b.data).clone();
+        let kb = *data_b.player_entites.get(&0).unwrap();
+
+        let (_sa, ra) = crossbeam::channel::unbounded();
+        let (_sb, rbr) = crossbeam::channel::unbounded();
+        client.send(ClientUpdateEvent::SetPlayer(0)).unwrap();
+        client.send(ClientUpdateEvent::NewRegion(region_a, data_a, ra)).unwrap();
+        client.send(ClientUpdateEvent::NewRegion(region_b, data_b, rbr)).unwrap();
+        client
+            .send(ClientUpdateEvent::HudStatus {
+                home_region: region_a,
+                viewer_region: region_a,
+                connection: ConnectionState::Ready,
+            })
+            .unwrap();
+        app.update();
+        app.update();
+
+        let map = app.world().resource::<SimEntityMap>();
+        let ea = *map.0.get(&(region_a, ka)).unwrap();
+        let eb = *map.0.get(&(region_b, kb)).unwrap();
+
+        assert!(
+            app.world().entity(ea).get::<Camera>().unwrap().is_active,
+            "home-region camera must be the active one"
+        );
+        assert!(
+            !app.world().entity(eb).get::<Camera>().unwrap().is_active,
+            "non-home-region camera must be inactive"
+        );
+        assert!(
+            app.world().entity(ea).contains::<bevy::ui::IsDefaultUiCamera>(),
+            "home-region camera must be the default UI camera"
+        );
+        assert!(
+            !app.world().entity(eb).contains::<bevy::ui::IsDefaultUiCamera>(),
+            "non-home-region camera must not keep the default UI camera marker"
+        );
+    }
+
+    #[test]
+    fn active_camera_follows_home_region_flip() {
+        use game::ConnectionState;
+
+        let (mut app, client) = app_shell();
+        app.add_systems(
+            PreUpdate,
+            enforce_single_active_camera.after(drain_region_updates),
+        );
+
+        let region_a = RegionCoords::new(0, 0);
+        let region_b = RegionCoords::new(1, 0);
+        let mut rb_a = Rollback::new(None);
+        rb_a.new_transaction();
+        rb_a.create_player_safe(0);
+        let data_a = (*rb_a.data).clone();
+        let ka = *data_a.player_entites.get(&0).unwrap();
+        let mut rb_b = Rollback::new(None);
+        rb_b.new_transaction();
+        rb_b.create_player_safe(0);
+        let data_b = (*rb_b.data).clone();
+        let kb = *data_b.player_entites.get(&0).unwrap();
+
+        let (_sa, ra) = crossbeam::channel::unbounded();
+        let (_sb, rbr) = crossbeam::channel::unbounded();
+        client.send(ClientUpdateEvent::SetPlayer(0)).unwrap();
+        client.send(ClientUpdateEvent::NewRegion(region_a, data_a, ra)).unwrap();
+        client.send(ClientUpdateEvent::NewRegion(region_b, data_b, rbr)).unwrap();
+        let hud = |home| ClientUpdateEvent::HudStatus {
+            home_region: home,
+            viewer_region: home,
+            connection: ConnectionState::Ready,
+        };
+        client.send(hud(region_a)).unwrap();
+        app.update();
+        app.update();
+
+        let (ea, eb) = {
+            let map = app.world().resource::<SimEntityMap>();
+            (*map.0.get(&(region_a, ka)).unwrap(), *map.0.get(&(region_b, kb)).unwrap())
+        };
+        assert!(app.world().entity(ea).get::<Camera>().unwrap().is_active);
+        assert!(!app.world().entity(eb).get::<Camera>().unwrap().is_active);
+
+        // Cross into region_b: home flips. The region_b camera — whose
+        // `Camera3d` was never removed, only deactivated — must reactivate,
+        // and region_a's must go inactive. No AddCameraComponent is replayed.
+        client.send(hud(region_b)).unwrap();
+        app.update();
+
+        assert!(
+            !app.world().entity(ea).get::<Camera>().unwrap().is_active,
+            "old home camera deactivates after the flip"
+        );
+        assert!(
+            app.world().entity(eb).get::<Camera>().unwrap().is_active,
+            "new home camera reactivates after the flip"
+        );
+        assert!(app.world().entity(eb).contains::<bevy::ui::IsDefaultUiCamera>());
+        assert!(!app.world().entity(ea).contains::<bevy::ui::IsDefaultUiCamera>());
     }
 
     #[test]
