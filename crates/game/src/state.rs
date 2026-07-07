@@ -311,6 +311,63 @@ impl Rollback {
         e
     }
 
+    /// Bulk terrain build for region genesis. Inserts every chunk's fixed body
+    /// and collider WITHOUT the per-chunk whole-`PhysicsState` snapshot that
+    /// `create_mesh` takes for undo-safe runtime edits. Genesis is the base
+    /// state and is never rolled back below itself, so raw (unlogged) inserts
+    /// are correct and turn the build from O(N^2) (a growing clone per chunk)
+    /// into O(N). Fully-solid chunks get a single cuboid — collision-identical
+    /// to a solid `Voxels` shape, whose interior voxels are all culled — while
+    /// partial (surface) chunks keep the parry `Voxels` shape.
+    pub fn seed_terrain_genesis(&mut self, chunks: Vec<(ChunkCoords, Chunk)>) {
+        for (coords, chunk) in chunks {
+            let e = self.ecs.create_entity_safe();
+            let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
+            let solid: Vec<Point<i32>> = (0..ChunkShape::SIZE)
+                .filter(|i| voxels[*i as usize].block != BlockId::AIR)
+                .map(|i| {
+                    let [x, y, z] = ChunkShape::delinearize(i);
+                    Point::new(x as i32, y as i32, z as i32)
+                })
+                .collect();
+            self.ecs.chunk.set_safe(e, Some(chunk));
+            let position = IsometryReal::from_parts(
+                Translation3::new(
+                    Real::from((coords.x * 32) as RawReal),
+                    Real::from((coords.y * 32) as RawReal),
+                    Real::from((coords.z * 32) as RawReal),
+                ),
+                Unit::<Quaternion<Real>>::identity(),
+            );
+            let body = RigidBodyBuilder::fixed()
+                .pose(position)
+                .user_data(e.data().as_ffi() as u128)
+                .build();
+            // Raw, unlogged insert: covered by the genesis base state.
+            let handle = self.data.physics.raw_mut().bodies.raw_mut().insert(body);
+            self.ecs.rigidbody.set_safe(e, Some(handle));
+            if solid.is_empty() {
+                continue;
+            }
+            let collider = if solid.len() == ChunkShape::SIZE as usize {
+                // A fully-solid 32^3 chunk's collision surface is exactly a
+                // 32x32x32 cuboid (half-extents 16, centered body-local 16,16,16).
+                ColliderBuilder::cuboid(Real::from(16.0), Real::from(16.0), Real::from(16.0))
+                    .translation(Vector::new(Real::from(16.0), Real::from(16.0), Real::from(16.0)))
+                    .user_data(e.data().as_ffi() as u128)
+                    .build()
+            } else {
+                ColliderBuilder::voxels(Vector::repeat(Real::from(1.0)), &solid)
+                    .user_data(e.data().as_ffi() as u128)
+                    .build()
+            };
+            let phys = self.data.physics.raw_mut();
+            phys.colliders
+                .raw_mut()
+                .insert_with_parent(collider, handle, phys.bodies.raw_mut());
+        }
+    }
+
     /// Attach a voxel-grid collider to an entity's body. One cell per solid
     /// voxel; cell g spans [g, g+1) in body-local space, matching the render
     /// mesh. Entity-generic. Undo restores the whole PhysicsState snapshot —

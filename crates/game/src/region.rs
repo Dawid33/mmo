@@ -309,9 +309,9 @@ impl Region {
     /// what `World::basic` does for the origin region, for any region.
     pub fn from_chunks(id: RegionId, chunks: Vec<(ChunkCoords, Chunk)>) -> Self {
         let mut region = Region::new(Rollback::new(None), None, id, None);
-        for (coords, chunk) in chunks {
-            region.data.create_mesh(coords, chunk);
-        }
+        // Genesis bulk build: unlogged, O(N) inserts with full-chunk cuboid
+        // collapse. See Rollback::seed_terrain_genesis.
+        region.data.seed_terrain_genesis(chunks);
         region
     }
 
