@@ -4,7 +4,7 @@
 use crossbeam::channel::{Receiver, RecvError, Sender};
 #[cfg(not(target_arch = "wasm32"))]
 use crossbeam::select;
-use game::{ClientId, RegionCoords, RegionId, Rollback, ServerPacket};
+use game::{ClientId, ReconcileStats, RegionCoords, RegionId, Rollback, ServerPacket};
 use game::{
     ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind, Region, INDUCED_LATENCY,
 };
@@ -48,6 +48,34 @@ pub struct GameInstanceManager {
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
     /// Last HUD status sent, for edge-triggered emission (avoid channel spam).
     last_hud_status: Option<(RegionCoords, RegionCoords, game::ConnectionState)>,
+    /// Rolling reconciliation / clock-drift keep-up counters.
+    recon: ReconMetrics,
+}
+
+/// Client-side rolling counters for reconciliation load and clock drift,
+/// flushed to one INFO line every `METRICS_REPORT_INTERVAL`. The window start
+/// is lazily set on the first native report so construction stays wasm-safe
+/// (`Instant::now()` panics on `wasm32-unknown-unknown`).
+#[derive(Default)]
+struct ReconMetrics {
+    window_start: Option<std::time::Instant>,
+    mispredictions: u32,
+    replay_depth_sum: usize,
+    max_replay_depth: usize,
+    /// Latest RTT-adjusted client-vs-server tick drift, in ms (negative =
+    /// client is behind the server). Snapshotted from each `SyncClock`.
+    last_drift_ms: isize,
+}
+
+impl ReconMetrics {
+    /// Fold in the cost of one `reconcile()` pass.
+    fn record(&mut self, s: ReconcileStats) {
+        self.mispredictions += s.mispredictions;
+        self.replay_depth_sum += s.replay_depth_sum;
+        if s.max_replay_depth > self.max_replay_depth {
+            self.max_replay_depth = s.max_replay_depth;
+        }
+    }
 }
 
 /// The client's desired subscription set: the 3x3 window around the viewer,
@@ -122,6 +150,7 @@ impl GameInstanceManager {
             pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
             last_hud_status: None,
+            recon: ReconMetrics::default(),
         }
     }
 
@@ -467,13 +496,15 @@ impl GameInstanceManager {
     fn route_server_game_event(&mut self, event: GameEvent) -> Result<(), GameError> {
         let world = self.world.as_mut().expect("routed only when world exists");
         if world.region_exists(&event.region_id) {
-            match world.reconcile_event(event) {
-                Ok(()) => Ok(()),
+            let stats = match world.reconcile_event(event) {
+                Ok(stats) => stats,
                 Err(e) => {
                     warn!("reconcile failed: {:?}", e);
-                    Err(e)
+                    return Err(e);
                 }
-            }
+            };
+            self.recon.record(stats);
+            Ok(())
         } else if self.subscribed.contains(&event.region_id) {
             // Snapshot still in flight: hold the event for replay.
             self.pending_events.entry(event.region_id).or_default().push(event);
@@ -504,6 +535,7 @@ impl GameInstanceManager {
                     let milisecond_diff = diff * server_tick_rate as isize;
                     // we subract the rtt to get a more accurate approximation of how far behind the server is.
                     let total_mili_diff = milisecond_diff - rtt.as_millis() as isize;
+                    self.recon.last_drift_ms = total_mili_diff;
 
                     if total_mili_diff < INDUCED_LATENCY {
                         self.ready = false;
@@ -573,11 +605,18 @@ impl GameInstanceManager {
                 // Replay events that raced ahead of the snapshot; reconcile
                 // skips anything already baked in (base_event_id).
                 if let Some(pending) = pending {
+                    let mut acc = ReconcileStats::default();
                     if let Some(ref mut world) = self.world {
                         for ev in pending {
-                            let _ = world.reconcile_event(ev);
+                            if let Ok(stats) = world.reconcile_event(ev) {
+                                acc.mispredictions += stats.mispredictions;
+                                acc.replay_depth_sum += stats.replay_depth_sum;
+                                acc.max_replay_depth =
+                                    acc.max_replay_depth.max(stats.max_replay_depth);
+                            }
                         }
                     }
+                    self.recon.record(acc);
                 }
             }
             game::ServerPacket::FarRegion(id, snap) => {
@@ -662,7 +701,42 @@ impl GameInstanceManager {
                 }
             }
             self.emit_hud_status();
+            self.maybe_report_metrics();
         }
+    }
+
+    /// Flush the rolling reconciliation / drift counters to one INFO line once
+    /// `METRICS_REPORT_INTERVAL` has elapsed, then reset the window. Called
+    /// every loop iteration; cheap until the window fires. The `mispredicts/s`
+    /// and `avg_replay` numbers show how hard the client is working to stay in
+    /// sync; `drift` shows whether it is ahead of or behind the server.
+    fn maybe_report_metrics(&mut self) {
+        let now = std::time::Instant::now();
+        let start = *self.recon.window_start.get_or_insert(now);
+        let elapsed = now.duration_since(start);
+        if elapsed < game::METRICS_REPORT_INTERVAL {
+            return;
+        }
+        let m = &self.recon;
+        let secs = elapsed.as_secs_f32();
+        let per_sec = if secs > 0.0 { m.mispredictions as f32 / secs } else { 0.0 };
+        let avg_replay = if m.mispredictions > 0 {
+            m.replay_depth_sum as f32 / m.mispredictions as f32
+        } else {
+            0.0
+        };
+        info!(
+            "[client] mispredicts/s={:.2} avg_replay={:.1} max_replay={} tick_rate={}ms drift={}ms",
+            per_sec,
+            avg_replay,
+            m.max_replay_depth,
+            self.tick_rate.load(Ordering::SeqCst),
+            m.last_drift_ms,
+        );
+        self.recon.window_start = Some(now);
+        self.recon.mispredictions = 0;
+        self.recon.replay_depth_sum = 0;
+        self.recon.max_replay_depth = 0;
     }
 }
 

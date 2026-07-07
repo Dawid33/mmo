@@ -44,6 +44,11 @@ pub use world_manager::*;
 pub const TICK_RATE: u64 = 50;
 pub const INDUCED_LATENCY: isize = 0;
 
+/// How often the client and server each emit their rolling keep-up metrics
+/// summary line (avg/max tick duration, reconciliation load). One tunable
+/// shared by both sides so their windows line up.
+pub const METRICS_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Deterministic, cross-machine-stable hash of a rollback's simulation state.
 /// crc32fast (not a default-seeded DefaultHasher) so it is identical across
 /// runs/machines — the basis for client/server convergence assertions in tests.
@@ -91,7 +96,7 @@ pub enum ClientUpdateEvent {
     },
 }
 
-pub use region::Region;
+pub use region::{Region, ReconcileStats};
 
 pub trait Controller: Send {
     fn on_tick<'a>(&mut self, _t: &mut Undo<GameData>) {}
@@ -182,13 +187,13 @@ impl World {
         (departures, ghosts)
     }
 
-    pub fn reconcile_event(&mut self, event: GameEvent) -> Result<(), GameError> {
+    pub fn reconcile_event(&mut self, event: GameEvent) -> Result<ReconcileStats, GameError> {
         // Tolerate events for regions we don't hold: with a moving 3×3
         // window, an event racing a just-released region is steady-state
         // noise, not an error.
         let Some(region) = self.regions.get_mut(&event.region_id) else {
             log::debug!("dropping event for unloaded region {:?}", event.region_id);
-            return Ok(());
+            return Ok(ReconcileStats::default());
         };
         region.reconcile(event)
     }

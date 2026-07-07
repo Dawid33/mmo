@@ -15,6 +15,21 @@ use crate::{
     RegionCoords, RegionId, ServerPacket,
 };
 
+/// What one `reconcile()` pass cost the client, for keep-up metrics.
+/// A single pass can drain several buffered server events, so the counts
+/// accumulate across every misprediction handled in that call.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReconcileStats {
+    /// Number of predicted events that diverged from server authority and
+    /// triggered a rollback+replay in this pass.
+    pub mispredictions: u32,
+    /// Sum of replay depths (predicted ticks rolled back and re-simulated)
+    /// across those mispredictions — divide by `mispredictions` for the mean.
+    pub replay_depth_sum: usize,
+    /// Deepest single rollback in this pass.
+    pub max_replay_depth: usize,
+}
+
 /// A region represents an portion of the world that processes game events at
 /// its own tick rate separately from other regions.
 #[allow(unused)]
@@ -65,11 +80,12 @@ impl Region {
 
     /// Check if event from network matches client event history. rollback the
     /// game state as neccessary and re-simulate to current time.
-    pub fn reconcile(&mut self, server_event: GameEvent) -> Result<(), GameError> {
+    pub fn reconcile(&mut self, server_event: GameEvent) -> Result<ReconcileStats, GameError> {
+        let mut stats = ReconcileStats::default();
         // Events older than the snapshot this region was constructed from
         // are already baked into its state.
         if server_event.id < self.base_event_id {
-            return Ok(());
+            return Ok(stats);
         }
         self.input_buffer.push(Reverse(server_event.clone()));
 
@@ -78,7 +94,7 @@ impl Region {
         }
 
         if self.event_log.len() == 0 {
-            return Ok(());
+            return Ok(stats);
         }
 
         // Set when this reconcile pass integrates the AUTHORITATIVE arrival of
@@ -100,6 +116,14 @@ impl Region {
                         }
                         if event != server_event.0 {
                             self.event_log.push_front(event);
+                            // Replay depth = predicted ticks about to be rolled
+                            // back and re-simulated for this misprediction.
+                            let depth = self.event_log.len();
+                            stats.mispredictions += 1;
+                            stats.replay_depth_sum += depth;
+                            if depth > stats.max_replay_depth {
+                                stats.max_replay_depth = depth;
+                            }
                             let mut temp_log = self.event_log.clone();
 
                             // rollback whole event log
@@ -174,7 +198,7 @@ impl Region {
             self.evict_orphan_local_inputs();
         }
 
-        Ok(())
+        Ok(stats)
     }
 
     /// Client-only: the authoritative handoff of the LOCAL player into this

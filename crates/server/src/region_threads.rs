@@ -27,7 +27,7 @@ impl RegionSpawner for ThreadRegionSpawner {
                 // Deserialize/generate on the region's own thread so a big
                 // region never stalls the manager.
                 let runner = RegionRunner::new(id, seed.into_region(id), out);
-                region_thread_loop(runner, recv);
+                region_thread_loop(id, runner, recv);
             })
             .expect("failed to spawn region thread");
         self.handles.insert(id, handle);
@@ -48,9 +48,10 @@ impl RegionSpawner for ThreadRegionSpawner {
 /// recv_deadline is the whole scheduler: handle inputs as they arrive, tick
 /// when the deadline fires. Backpressure is inherent — a slow region ticks
 /// late; missed deadlines are skipped rather than burst-replayed.
-pub fn region_thread_loop(mut runner: RegionRunner, recv: Receiver<RegionInput>) {
+pub fn region_thread_loop(id: RegionCoords, mut runner: RegionRunner, recv: Receiver<RegionInput>) {
     let tick = Duration::from_millis(game::TICK_RATE);
     let mut next = Instant::now() + tick;
+    let mut metrics = TickMetrics::new();
     loop {
         match recv.recv_deadline(next) {
             Ok(input) => {
@@ -59,16 +60,75 @@ pub fn region_thread_loop(mut runner: RegionRunner, recv: Receiver<RegionInput>)
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
+                let compute_start = Instant::now();
                 runner.tick();
+                metrics.record_tick(compute_start.elapsed());
                 next += tick;
                 let now = Instant::now();
                 if next < now {
                     // Fell behind (heavy tick / scheduler stall): skip the
                     // missed deadlines instead of spiralling.
+                    metrics.overruns += 1;
                     next = now + tick;
                 }
+                metrics.maybe_report(id);
             }
             Err(RecvTimeoutError::Disconnected) => return,
         }
+    }
+}
+
+/// Rolling per-region keep-up counters, flushed to one INFO line every
+/// `METRICS_REPORT_INTERVAL`. Thread-local to the region — never shared.
+struct TickMetrics {
+    window_start: Instant,
+    ticks: u32,
+    compute_sum: Duration,
+    compute_max: Duration,
+    /// Ticks that finished after their deadline had already passed (the sim
+    /// is not keeping up with the 50ms budget).
+    overruns: u32,
+}
+
+impl TickMetrics {
+    fn new() -> Self {
+        Self {
+            window_start: Instant::now(),
+            ticks: 0,
+            compute_sum: Duration::ZERO,
+            compute_max: Duration::ZERO,
+            overruns: 0,
+        }
+    }
+
+    fn record_tick(&mut self, compute: Duration) {
+        self.ticks += 1;
+        self.compute_sum += compute;
+        if compute > self.compute_max {
+            self.compute_max = compute;
+        }
+    }
+
+    fn maybe_report(&mut self, id: RegionCoords) {
+        if self.window_start.elapsed() < game::METRICS_REPORT_INTERVAL {
+            return;
+        }
+        if self.ticks > 0 {
+            let avg = self.compute_sum / self.ticks;
+            let avg_ms = avg.as_secs_f32() * 1000.0;
+            // Share of the tick period the sim actually spent computing.
+            let budget = avg_ms / game::TICK_RATE as f32 * 100.0;
+            log::info!(
+                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% overruns={}",
+                id.x,
+                id.z,
+                self.ticks,
+                avg_ms,
+                self.compute_max.as_secs_f32() * 1000.0,
+                budget,
+                self.overruns,
+            );
+        }
+        *self = TickMetrics::new();
     }
 }
