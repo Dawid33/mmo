@@ -45,6 +45,7 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<LocalPlayer>()
             .init_resource::<bridge::Regions>()
             .init_resource::<bridge::RegionRoots>()
+            .init_resource::<bridge::FarRegionRoots>()
             .init_resource::<bridge::SimEntityMap>()
             .init_resource::<hud::HudStatus>()
             .init_resource::<avatar::AvatarAssets>()
