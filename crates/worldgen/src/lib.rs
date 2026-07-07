@@ -6,6 +6,7 @@
 mod noise;
 mod spline;
 mod density;
+mod pipeline;
 
 use game::{
     Block, BlockId, Chunk, Column, ColumnCoords, RegionCoords, SubChunk, REGION_CHUNKS,
