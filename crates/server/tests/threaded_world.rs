@@ -129,14 +129,11 @@ impl Rig {
     }
 }
 
-// IGNORED: density-pipeline terrain (worldgen) makes region startup dominated by
-// per-voxel rapier collider construction in `Region::from_columns`/`create_mesh`
-// (~23 s/region for real terrain vs near-instant flat floors), which blows this
-// test's REGION_STARTUP_BUDGET. Worldgen itself is fast (~51 ms/region); the
-// collider cost is a separate physics-layer problem tracked as the next project.
-// Re-enable once merged/greedy (or heightfield) colliders replace per-voxel ones.
+// Real-terrain region startup now fits REGION_STARTUP_BUDGET comfortably: the
+// genesis collider path (Rollback::seed_terrain_genesis) inserts colliders
+// unlogged (no O(N^2) PhysicsState snapshot) and collapses fully-solid chunks
+// to a single cuboid, so one region builds in ~1 s (was ~9-23 s).
 #[test]
-#[ignore = "blocked on per-voxel collider perf; see comment above"]
 fn roaming_client_cycles_regions_across_threads() {
     let mut rig = Rig::new();
     rig.event(ServerEvent::ClientConnected(0));
@@ -221,10 +218,7 @@ fn roaming_client_cycles_regions_across_threads() {
 /// the walk controller requires); the toggle fires on the first tick that
 /// sees it `Pressed`. Both inputs are stamped to (0,0): the manager routes
 /// `PlayerInput` by the player's *home*, which is (0,0) until the flip lands.
-// IGNORED: same per-voxel collider startup cost as
-// `roaming_client_cycles_regions_across_threads` (see the comment there).
 #[test]
-#[ignore = "blocked on per-voxel collider perf; see roaming_client_cycles_regions_across_threads"]
 fn walking_input_crosses_a_boundary_on_real_threads() {
     let mut rig = Rig::new();
     rig.event(ServerEvent::ClientConnected(0));
