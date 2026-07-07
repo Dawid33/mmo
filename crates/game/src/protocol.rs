@@ -237,6 +237,8 @@ pub enum GameEventKind {
     EntityArrived(EntityBundle),
     /// Margin mirror refresh from a neighbouring region.
     GhostUpdate(GhostData),
+    /// A logical-space UI action from a client (inventory move, toggle, ...).
+    UiAction(ClientId, crate::UiAction),
 }
 
 impl GameEventKind {
@@ -244,7 +246,9 @@ impl GameEventKind {
     /// server/shared events with no originating client.
     pub fn origin_client(&self) -> Option<ClientId> {
         match self {
-            GameEventKind::PlayerInput(id, _) | GameEventKind::CreateClient(id) => Some(*id),
+            GameEventKind::PlayerInput(id, _)
+            | GameEventKind::CreateClient(id)
+            | GameEventKind::UiAction(id, _) => Some(*id),
             GameEventKind::Tick
             | GameEventKind::Quit
             | GameEventKind::EntityArrived(_)

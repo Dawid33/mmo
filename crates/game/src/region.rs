@@ -281,6 +281,21 @@ impl Region {
             GameEventKind::GhostUpdate(data) => {
                 self.data.apply_ghost(data);
             }
+            GameEventKind::UiAction(client_id, action) => {
+                let data: &mut GameData = self.data.deref_mut();
+                if let Some(c) = data.clients.get_mut(&client_id) {
+                    match action {
+                        crate::UiAction::MoveItem { from, to } => {
+                            if from < c.inventory.slots.len() && to < c.inventory.slots.len() {
+                                c.inventory.slots.swap(from, to);
+                            }
+                        }
+                        crate::UiAction::ToggleInventory => {
+                            c.inventory_open = !c.inventory_open;
+                        }
+                    }
+                }
+            }
         }
         self.event_log.push_back(event.clone());
         Ok(event)
@@ -361,5 +376,30 @@ impl Region {
     pub fn rollback_last_event(&mut self) {
         self.data.rollback();
         self.event_log.pop_back();
+    }
+}
+
+#[cfg(test)]
+mod ui_action_tests {
+    use super::*;
+    use crate::{Inventory, ItemKind, ItemStack, UiAction};
+
+    #[test]
+    fn move_item_swaps_slots_and_rolls_back() {
+        let mut region = Region::from_chunks(RegionCoords::new(0, 0), Vec::new());
+        region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        region.forget_last_event();
+        let before = crate::state_hash(region.data());
+
+        region
+            .handle_event(GameEventKind::UiAction(0, UiAction::MoveItem { from: 0, to: 1 }))
+            .unwrap();
+        // Slot 0 (seeded Dirt) moved to slot 1.
+        let inv: &Inventory = &region.data().clients.get(&0).unwrap().inventory;
+        assert_eq!(inv.slots[0], None);
+        assert_eq!(inv.slots[1], Some(ItemStack { kind: ItemKind::Dirt, count: 42 }));
+
+        region.rollback_last_event();
+        assert_eq!(before, crate::state_hash(region.data()), "UiAction must invert bit-exact");
     }
 }

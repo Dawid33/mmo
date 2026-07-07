@@ -104,12 +104,13 @@ pub enum Content {
     Icon(IconId),
 }
 
-/// Logical-space click payload (slice 2 adds the first real variant). Kept as a
-/// non-empty enum so `Option<UiAction>` fields and matches compile today.
-#[derive(Debug, Clone, PartialEq)]
+/// Logical-space UI action (never pixels). Routed to the sim like PlayerInput.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum UiAction {
-    /// Placeholder so the type is inhabited before slice 2. Never emitted.
-    Noop,
+    /// Swap two inventory slots (drag/drop resolves to this).
+    MoveItem { from: usize, to: usize },
+    /// Open/close the inventory (drives cursor grab).
+    ToggleInventory,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -126,6 +126,7 @@ pub struct Client {
     pub input: InputState,
     pub fps_cam_mode: bool,
     pub inventory: Inventory,
+    pub inventory_open: bool,
 }
 
 /// What an entity *is*, for rendering and future gameplay. The player is the

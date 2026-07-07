@@ -196,11 +196,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::GameEvent(event) => match event.kind {
                     GameEventKind::Tick => {}
                     GameEventKind::Quit => return false,
-                    kind @ GameEventKind::PlayerInput(..) => {
+                    kind @ (GameEventKind::PlayerInput(..) | GameEventKind::UiAction(..)) => {
                         // Manager-authoritative routing: the client's stamp
                         // lags its own predicted handoff; homes is truth.
-                        let GameEventKind::PlayerInput(cid, _) = &kind else { unreachable!() };
-                        match self.homes.get(cid).copied() {
+                        // UiAction rides the same path as PlayerInput — both
+                        // must follow the player across a region handoff.
+                        let cid = kind.origin_client().expect("PlayerInput/UiAction carry a client");
+                        match self.homes.get(&cid).copied() {
                             Some(home) if self.regions.contains_key(&home) => {
                                 self.send_to_region(home, RegionInput::Event(kind));
                             }

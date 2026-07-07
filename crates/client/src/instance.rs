@@ -215,6 +215,8 @@ impl GameInstanceManager {
             // Transfer events are relayed into regions directly (server) or
             // client-predicted (later task); never locally-originated here.
             GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) => {}
+            // TODO(task 9): predict + route to home region like PlayerInput
+            GameEventKind::UiAction(_, _) => {}
         }
         Ok(true)
     }
