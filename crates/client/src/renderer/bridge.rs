@@ -100,6 +100,15 @@ pub fn drain_client_updates(
                 remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
                 info!("bridge: region {:?} removed", id);
             }
+            // TODO(Task 6): render far terrain. For now just log so the
+            // client crate compiles once the far-window policy (Task 5)
+            // starts emitting these.
+            ClientUpdateEvent::NewFarRegion(id, _snap) => {
+                info!("bridge: far region {:?} received (rendering not yet implemented)", id);
+            }
+            ClientUpdateEvent::RemoveFarRegion(id) => {
+                info!("bridge: far region {:?} released (rendering not yet implemented)", id);
+            }
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
             ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {
                 hud_status.home_region = Some(home_region);
