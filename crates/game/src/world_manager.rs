@@ -267,7 +267,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
-            RegionOutput::Stopped(serialized) => {
+            RegionOutput::FarSnapshot(_client, _snap) => {
+                // Task 4: fan out to the requesting far-viewer's session.
+            }
+            RegionOutput::FarSnapshotChanged(_snap) => {
+                // Task 4: fan out to this region's far-subscribers.
+            }
+            RegionOutput::Stopped(serialized, _far) => {
                 self.parked.insert(rc, serialized);
                 let pending = self
                     .regions
