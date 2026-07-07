@@ -82,11 +82,50 @@ pub enum GameDataTransactionKind {
     Undo,
 }
 
+/// What an inventory slot holds. `Empty` is the default so `ItemStack` and
+/// `Inventory` derive `Default` cleanly.
+#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq)]
+pub enum ItemKind {
+    #[default]
+    Empty,
+    Dirt,
+    Stone,
+}
+
+#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, Hash, PartialEq)]
+pub struct ItemStack {
+    pub kind: ItemKind,
+    pub count: u32,
+}
+
+/// A fixed-size slot list. Authoritative sim state, carried on `Client` so it
+/// follows the player across region handoffs (Client rides `EntityBundle`).
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize, Hash, PartialEq)]
+pub struct Inventory {
+    pub slots: Vec<Option<ItemStack>>,
+}
+
+impl Inventory {
+    /// Nine empty hotbar slots.
+    pub fn hotbar() -> Self {
+        Self { slots: vec![None; 9] }
+    }
+
+    /// Nine slots seeded with test items (slice-1 render target).
+    pub fn seeded() -> Self {
+        let mut inv = Self::hotbar();
+        inv.slots[0] = Some(ItemStack { kind: ItemKind::Dirt, count: 42 });
+        inv.slots[3] = Some(ItemStack { kind: ItemKind::Stone, count: 7 });
+        inv
+    }
+}
+
 #[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash, PartialEq)]
 #[module(crate)]
 pub struct Client {
     pub input: InputState,
     pub fps_cam_mode: bool,
+    pub inventory: Inventory,
 }
 
 /// What an entity *is*, for rendering and future gameplay. The player is the
@@ -795,5 +834,39 @@ impl Rollback {
             departures.push((self.extract_entity_safe(key, region), target));
         }
         (departures, ghosts)
+    }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+
+    #[test]
+    fn seeded_inventory_has_items_in_a_fixed_hotbar() {
+        let inv = Inventory::seeded();
+        assert_eq!(inv.slots.len(), 9);
+        assert!(inv.slots.iter().filter(|s| s.is_some()).count() >= 2);
+        // Client carries an inventory and it round-trips by value.
+        let c = Client { inventory: inv.clone(), ..Client::default() };
+        assert_eq!(c.inventory, inv);
+    }
+
+    #[test]
+    fn inventory_mutation_rolls_back_bit_exact() {
+        // Client is a tracked UndoMap value: get_mut logs the whole prior
+        // Client, so an inventory edit is covered by one delta and inverts.
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        rb.clients.insert(0, Client { inventory: Inventory::seeded(), ..Client::default() });
+        rb.forget();
+        let before = crate::state_hash(&rb);
+
+        rb.new_transaction();
+        {
+            let c = rb.clients.get_mut(&0).unwrap();
+            c.inventory.slots[0] = Some(ItemStack { kind: ItemKind::Stone, count: 5 });
+        }
+        rb.rollback();
+        assert_eq!(before, crate::state_hash(&rb), "inventory edit must invert bit-exact");
     }
 }
