@@ -86,6 +86,11 @@ pub enum ClientUpdateEvent {
         viewer_region: RegionId,
         connection: ConnectionState,
     },
+    /// One-shot: the receiver half of the client-side UI projection channel.
+    /// Sent once by the manager; consumed by the ui_bridge. Widget-only —
+    /// separate from the per-region `GameDataUpdate` channel because widgets
+    /// hang off a screen-space UI root, not a region's world-space root.
+    UiChannel(crossbeam::channel::Receiver<UiUpdate>),
 }
 
 pub use region::Region;

@@ -46,6 +46,10 @@ pub struct GameInstanceManager {
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
     /// Last HUD status sent, for edge-triggered emission (avoid channel spam).
     last_hud_status: Option<(RegionCoords, RegionCoords, game::ConnectionState)>,
+    /// Sender half of the client-side UI projection channel (widget deltas).
+    ui_update_send: Sender<game::UiUpdate>,
+    /// Last widget tree emitted, for diffing the next projection.
+    prev_ui_tree: game::WidgetTree,
 }
 
 /// The client's desired subscription set: the 3x3 window around the viewer,
@@ -81,6 +85,10 @@ impl GameInstanceManager {
         server: SocketAddr,
     ) -> Self {
         let (server_game_send, server_game_recv) = crossbeam::channel::unbounded();
+        let (ui_update_send, ui_update_recv) = crossbeam::channel::unbounded();
+        // Announce the UI receiver to the bridge once. Buffered channel: safe
+        // to send before the bridge's resources exist.
+        let _ = client_event_send.send(game::ClientUpdateEvent::UiChannel(ui_update_recv));
         Self {
             game_event_recv,
             game_event_send,
@@ -99,6 +107,8 @@ impl GameInstanceManager {
             pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
             last_hud_status: None,
+            ui_update_send,
+            prev_ui_tree: game::WidgetTree::empty(),
         }
     }
 
@@ -171,6 +181,7 @@ impl GameInstanceManager {
                 // predicted home flip must land before update_window recenters.
                 self.apply_local_transfers();
                 self.update_window();
+                self.project_ui();
             }
             GameEventKind::PlayerInput(_, _) if !self.is_caught_up => {
                 // Don't handle player events until the sim has caught up with
@@ -368,6 +379,27 @@ impl GameInstanceManager {
             viewer_region: viewer,
             connection: conn,
         });
+    }
+
+    /// Client-only: project the local player's authoritative data into a widget
+    /// tree, diff against the last emitted tree, and push widget deltas to the
+    /// ui_bridge. Runs once per tick after the sim has settled. No-op until the
+    /// local player + home region are known and loaded.
+    fn project_ui(&mut self) {
+        let (Some(home), Some(client_id)) = (self.home_region, self.client_id) else {
+            return;
+        };
+        let tree = {
+            let Some(world) = self.world.as_ref() else { return };
+            if !world.region_exists(&home) {
+                return;
+            }
+            game::build_player_ui(world.data(&home), client_id)
+        };
+        for update in game::diff_ui(&self.prev_ui_tree, &tree) {
+            let _ = self.ui_update_send.send(update);
+        }
+        self.prev_ui_tree = tree;
     }
 
     /// Diff the desired window against current subscriptions; request
@@ -1429,8 +1461,65 @@ mod manager_tests {
         let mut manager =
             GameInstanceManager::new(game_send, game_recv, client_send, dummy_addr);
 
+        // Drain the UiChannel announcement sent unconditionally by new().
+        assert!(matches!(
+            client_recv.try_recv(),
+            Ok(ClientUpdateEvent::UiChannel(_))
+        ));
+
         // No home_region / world yet: nothing to report, no event sent.
         manager.emit_hud_status();
         assert!(client_recv.try_recv().is_err());
+    }
+
+    /// After a tick with a seeded local player, the manager must announce a UI
+    /// channel and emit widget updates onto it (the projection ran).
+    #[test]
+    fn projection_emits_widget_updates_after_tick() {
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
+        let (server_send, server_recv) = crossbeam::channel::unbounded();
+        let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+        let mut manager =
+            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+
+        // Load a region whose snapshot already contains player 0 (seeded inv).
+        let region_id = RegionCoords::new(0, 0);
+        let mut world = game::World::new();
+        let mut home = Region::from_chunks(region_id, Vec::new());
+        home.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        home.forget_last_event();
+        world.load(&region_id, home);
+        server_send.send(ServerPacket::PlayerRegion(Some(region_id), 0)).unwrap();
+        server_send.send(world.build_region_server_packet(&region_id)).unwrap();
+        assert!(manager.pump(&server_recv).unwrap());
+
+        // A UI channel must have been announced. Keep every other drained
+        // event alive (rather than dropping it): NewRegion carries the
+        // region's GameDataUpdate receiver, and dropping it here would
+        // disconnect the sender the physics controller writes to on every
+        // tick, panicking the *next* tick with an unrelated SendError.
+        let mut kept_events = Vec::new();
+        let ui_recv = {
+            let mut found = None;
+            while let Ok(ev) = client_recv.try_recv() {
+                match ev {
+                    ClientUpdateEvent::UiChannel(r) => found = Some(r),
+                    other => kept_events.push(other),
+                }
+            }
+            found.expect("UiChannel announced")
+        };
+
+        // Tick once → projection runs → widget updates appear.
+        manager.is_caught_up = true;
+        manager.send_tick();
+        assert!(manager.pump(&server_recv).unwrap());
+
+        let ups: Vec<game::UiUpdate> = ui_recv.try_iter().collect();
+        assert!(
+            ups.iter().any(|u| matches!(u, game::UiUpdate::CreateWidget(_))),
+            "projection must emit widget creates, got {ups:?}"
+        );
     }
 }

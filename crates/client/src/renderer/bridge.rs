@@ -122,6 +122,8 @@ pub fn drain_client_updates(
                 hud_status.viewer_region = Some(viewer_region);
                 hud_status.connection = connection;
             }
+            // TODO(task 6): route into UiUpdates
+            ClientUpdateEvent::UiChannel(_) => {}
         }
     }
 }
