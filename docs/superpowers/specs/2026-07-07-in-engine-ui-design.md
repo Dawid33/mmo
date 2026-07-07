@@ -70,16 +70,17 @@ authoritative inventory (GameData rollback state)
    ▼
 client sim thread, once per settled tick:
    build_player_ui(data, local_player) -> WidgetTree   (pure, in `game`)
-   diff(prev_tree, new_tree) -> Vec<widget GameDataUpdate>
-   │  pushed into the EXISTING per-region crossbeam GameDataUpdate channel
+   diff_ui(prev_tree, new_tree) -> Vec<UiUpdate>
+   │  pushed into a DEDICATED UI update channel (not the per-region
+   │  GameDataUpdate channel: widgets hang off a screen-space UI root)
    ▼
-ui_bridge (Bevy): WidgetKey -> Entity map, dispatch deltas -> bevy::ui::Node tree
+ui_bridge (Bevy): WidgetId -> Entity map, dispatch deltas -> bevy::ui::Node tree
    │  Bevy UI's taffy lays it out against the real viewport
    ▼
 rendered UI on the local player's IsDefaultUiCamera
 
 interaction (reverse):
-   bevy_picking click -> Entity -> WidgetKey -> UiAction
+   bevy_picking click -> Entity -> WidgetId -> UiAction
    -> GameEventKind::UiAction(ClientId, UiAction)  (routed like PlayerInput)
    -> sim mutates inventory authoritatively -> projection re-derives -> UI updates
 ```
@@ -109,31 +110,35 @@ Engine-neutral, Bevy-free. Because the widget tree is a client-side projection
 (never hashed, never serialized over the wire), style floats are plain `f32` —
 no `OrderedFloat`/`Hash` determinism burden.
 
-```rust
-new_key_type! { WidgetKey }
+Widget identity is a **deterministic, stable `WidgetId`** assigned by
+`build_player_ui` from each widget's logical role (root is always `WidgetId(0)`),
+NOT a freshly-allocated slotmap key — so `diff_ui` can match nodes across
+rebuilds.
 
-struct WidgetTree { nodes: SlotMap<WidgetKey, Widget>, root: WidgetKey }
+```rust
+struct WidgetId(u64)
+
+struct WidgetTree { nodes: BTreeMap<WidgetId, Widget>, root: WidgetId }
 
 struct Widget {
     style: Style,
     content: Content,
     action: Option<UiAction>,   // Some => clickable, sends this on click
-    children: Vec<WidgetKey>,   // ordered
+    children: Vec<WidgetId>,    // ordered
 }
 
 enum Content { None, Text(String), Icon(IconId) }
 
 struct Style {
-    // flex layout intent, mapped 1:1 to bevy::ui::Node in the client
-    display: Display,
-    flex_direction: FlexDirection,
+    // flex layout intent, mapped 1:1 to bevy::ui::Node in the client. v1 keeps
+    // the field set minimal; extend as later screens need it (position_type,
+    // margin, etc.).
+    direction: FlexDirection,
     width: Val, height: Val,
     gap: Val,
-    padding: Rect, margin: Rect,
-    justify_content: JustifyContent,
-    align_items: AlignItems,
-    position_type: PositionType,
-    left: Val, top: Val,
+    padding: Rect,
+    justify: JustifyContent,
+    align: AlignItems,
     background: Option<Color>,
 }
 ```
@@ -142,9 +147,10 @@ struct Style {
 - `IconId` — engine-neutral handle the client resolves to a texture/atlas entry
   (for inventory, derived from `ItemKind`).
 - `UiAction` — logical-space click payload (see interaction).
-- **Diff:** `fn diff(prev: &WidgetTree, next: &WidgetTree) -> Vec<GameDataUpdateKind>`
-  producing the minimal set of widget deltas (create/remove/reparent/
-  restyle/recontent/reaction). Pure and unit-tested.
+- **Diff:** `fn diff_ui(prev: &WidgetTree, next: &WidgetTree) -> Vec<UiUpdate>`
+  producing the minimal set of widget deltas, ordered create → property-set →
+  child-wire → remove so the bridge never references an unmapped id. Pure and
+  unit-tested.
 
 ### `crates/game/src/ui.rs` — `build_player_ui`
 
@@ -155,23 +161,28 @@ tree out).
 
 ### `crates/game` — minimal inventory model (prerequisite)
 
-Genuine authoritative sim state, added to `GameData` as rollback-tracked state,
-e.g. `#[undo(map)] inventories: BTreeMap<ClientId, Inventory>`; `Inventory` is a
-fixed set of slots of `Option<ItemStack>`; `ItemStack { kind: ItemKind, count:
-u32 }`. Syncs to the client through the **existing** snapshot + prediction path
-— no new wire protocol for the data. Scope kept minimal: enough slots and one
-mutation (move/swap between slots) to prove the loop, seeded with test items on
-player join. Not a full item system.
+Genuine authoritative sim state, added as a field on the existing tracked
+`Client` struct: `inventory: Inventory` (and `inventory_open: bool`), where
+`Inventory` is a fixed set of slots of `Option<ItemStack>` and `ItemStack { kind:
+ItemKind, count: u32 }`. Attaching to `Client` (rather than a new `GameData` map)
+means the inventory **follows the player across region handoffs** for free —
+`Client` already rides `EntityBundle`. `Client` is an `#[undo(map)]` value, so an
+edit via `clients.get_mut` logs the whole prior `Client` and inverts bit-exact
+(the same mechanism the fps-cam toggle already uses). Derives mirror `Client`'s
+existing non-Partial field `InputState`; no `borrow::Partial` needed on the new
+types. Syncs to the client through the **existing** snapshot + prediction path —
+no new wire protocol for the data. Scope kept minimal: 9 hotbar slots, one
+mutation (move/swap), seeded with test items on player join. Not a full item
+system.
 
 `UiAction` handling lands in `crates/game/src/region.rs` alongside the existing
 `handle_event` arms (routed like `PlayerInput`, by the manager's `homes` map).
 
-### widget `GameDataUpdateKind` variants + `UiAction` protocol event
+### `UiUpdate` enum + `UiAction` protocol event
 
-New `GameDataUpdateKind` variants (in-process only, `Clone + Debug`, no serde —
-consistent with the existing enum in `crates/game/src/state.rs`):
-`CreateWidget`, `RemoveWidget`, `SetWidgetParent`, `SetWidgetStyle`,
-`SetWidgetContent`, `SetWidgetAction`.
+New `UiUpdate` enum in `crates/game/src/ui.rs` (in-process only, `Clone + Debug`,
+no serde — it never crosses the wire): `CreateWidget`, `SetStyle`, `SetContent`,
+`SetAction`, `SetChildren`, `RemoveWidget`, `SetCursorGrab`.
 
 New engine-neutral, serializable protocol event
 `GameEventKind::UiAction(ClientId, UiAction)` in `crates/game/src/protocol.rs`,
@@ -179,18 +190,18 @@ routed through the same path as `PlayerInput`.
 
 ### `crates/client/src/renderer/ui_bridge.rs` (new) — deltas → bevy_ui
 
-Mirrors `bridge.rs`. Holds a `WidgetKey -> Entity` map (like `SimEntityMap`) and
-a UI root entity parented to the local player's `IsDefaultUiCamera`. Drains the
-widget `GameDataUpdate` variants from the existing crossbeam channel and maps
-each to spawning/despawning/restyling a `bevy::ui::Node`:
-`Content::Text -> Text`, `Content::Icon -> ImageNode`, `Style -> Node` fields
-via new `convert` helpers. Bevy's taffy lays it out. Unmapped-key updates
-`warn!` and continue (same robustness rule as `drain_region_updates`).
+Mirrors `bridge.rs`. Holds a `WidgetId -> Entity` map (like `SimEntityMap`) and a
+screen-space UI root `Node`. Drains the `UiUpdate` variants from the dedicated UI
+channel and maps each to spawning/despawning/restyling a `bevy::ui::Node`:
+`Content::Text -> Text`, `Content::Icon -> ImageNode` (icon-texture resolution is
+a follow-up; v1 tints the slot), `Style -> Node` fields via a `style_to_node`
+helper. Bevy's taffy lays it out. Unmapped-id updates `warn!` and continue (same
+robustness rule as `drain_region_updates`).
 
 ### `crates/client/src/renderer/ui_input.rs` (new) — picking → action
 
 Requires enabling a `bevy_picking` UI backend (currently **off** —
-prerequisite). A click on a widget entity maps `Entity -> WidgetKey ->
+prerequisite). A click on a widget entity maps `Entity -> WidgetId ->
 UiAction`, then sends `GameEventKind::UiAction` down the existing `GameEvents`
 channel (predicted locally + sent to server, like `forward_input`). Actions are
 logical (`UiAction::MoveItem { from: SlotId, to: SlotId }`), never pixels; drag
