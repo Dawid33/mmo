@@ -9,6 +9,11 @@ mod density;
 pub mod pipeline;
 pub mod material;
 
+/// The world seed shared by every `generate_region` caller (server + offline
+/// client) so they produce the SAME world. Kept in one place so the server and
+/// client can never silently drift to different seeds.
+pub const WORLD_SEED: u64 = 0x00D5_C0DE_2026;
+
 use game::{
     Block, BlockId, BlockIndex, ChiselData, Chunk, Column, ColumnCoords, RegionCoords, SubChunk,
     BLOCK_VOXELS, CHUNK_BLOCKS, REGION_CHUNKS,

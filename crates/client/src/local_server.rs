@@ -44,10 +44,9 @@ impl LocalServer {
             sand: resolve("sand"),
             water: resolve("water"),
         };
-        const WORLD_SEED: u64 = 0x00D5_C0DE_2026;
         let mut manager = WorldManager::new(
             InlineSpawner::default(),
-            Box::new(move |rc| worldgen::generate_region(rc, WORLD_SEED, materials)),
+            Box::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials)),
             out_send,
             region_out_send,
         );

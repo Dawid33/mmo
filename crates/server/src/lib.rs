@@ -253,10 +253,10 @@ pub fn run() {
         sand: resolve("sand"),
         water: resolve("water"),
     };
-    const WORLD_SEED: u64 = 0x00D5_C0DE_2026;
+    let world_seed = worldgen::WORLD_SEED;
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::default(),
-        Box::new(move |rc| worldgen::generate_region(rc, WORLD_SEED, materials)),
+        Box::new(move |rc| worldgen::generate_region(rc, world_seed, materials)),
         server_send,
         region_out_send,
     );
