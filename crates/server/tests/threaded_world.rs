@@ -38,13 +38,25 @@ impl Rig {
     fn new() -> Self {
         let registry = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron"))
             .expect("invalid block manifest");
-        let stone = registry.id_of("stone").expect("block manifest must define \"stone\"");
+        let resolve = |name: &str| {
+            registry
+                .id_of(name)
+                .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
+        };
+        let materials = worldgen::material::Materials {
+            stone: resolve("stone"),
+            dirt: resolve("dirt"),
+            grass: resolve("grass"),
+            sand: resolve("sand"),
+            water: resolve("water"),
+        };
+        const WORLD_SEED: u64 = 0x00D5_C0DE_2026;
 
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let manager = WorldManager::new(
             ThreadRegionSpawner::default(),
-            Box::new(move |rc| worldgen::generate_region(rc, stone)),
+            Box::new(move |rc| worldgen::generate_region(rc, WORLD_SEED, materials)),
             out_send,
             region_out_send,
         );
