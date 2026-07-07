@@ -229,3 +229,109 @@ fn quit_event_stops_the_manager() {
     let ev = GameEvent::new(GameEventKind::Quit, 0, SPAWN_REGION);
     assert!(!h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 0));
 }
+
+/// Connect client 0 and drain the join packets, returning the harness ready
+/// for far-region assertions.
+fn connected_harness() -> Harness {
+    let mut h = harness();
+    h.event(ServerEvent::ClientConnected(0), 0);
+    h.drain_packets();
+    h
+}
+
+#[test]
+fn far_request_for_never_run_region_serves_without_waking() {
+    let mut h = connected_harness();
+    let rc = RegionCoords::new(5, 5);
+    h.event(
+        ServerEvent::ClientPacket(ClientPacket::RequestFarRegion(rc), 0),
+        0,
+    );
+    // Never spun up a sim thread for the far region.
+    assert!(!h.manager.running_regions().contains(&rc));
+    let packets = h.drain_packets();
+    assert!(
+        packets.iter().any(|(target, p)| {
+            *target == Some(0) && matches!(p, ServerPacket::FarRegion(id, _) if *id == rc)
+        }),
+        "far request must deliver a FarRegion packet"
+    );
+}
+
+#[test]
+fn far_request_for_running_region_pulls_live_snapshot() {
+    let mut h = connected_harness();
+    let rc = RegionCoords::new(1, 0);
+    // Make it running via a normal (near) subscribe first.
+    h.event(
+        ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0),
+        0,
+    );
+    h.drain_packets();
+    assert!(h.manager.running_regions().contains(&rc));
+    h.event(
+        ServerEvent::ClientPacket(ClientPacket::RequestFarRegion(rc), 0),
+        0,
+    );
+    let packets = h.drain_packets();
+    assert!(packets.iter().any(|(target, p)| {
+        *target == Some(0) && matches!(p, ServerPacket::FarRegion(id, _) if *id == rc)
+    }));
+}
+
+#[test]
+fn far_viewers_do_not_keep_a_region_alive() {
+    let mut h = connected_harness();
+    let rc = RegionCoords::new(9, 9);
+    // Wake it (arrival-style) by near-subscribing, then release near but keep far.
+    h.event(
+        ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0),
+        0,
+    );
+    h.event(
+        ServerEvent::ClientPacket(ClientPacket::RequestFarRegion(rc), 0),
+        0,
+    );
+    h.drain_packets();
+    h.event(
+        ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(rc), 0),
+        0,
+    );
+    // Grace timer starts; after the window, maintain must park it despite the far-viewer.
+    h.manager.maintain(UNLOAD_GRACE_MS + 1);
+    h.settle(UNLOAD_GRACE_MS + 1);
+    assert!(
+        !h.manager.running_regions().contains(&rc),
+        "a region with only far-viewers must still park"
+    );
+    assert!(h.manager.parked_regions().contains(&rc));
+}
+
+#[test]
+fn parked_far_viewer_still_gets_served_from_cache() {
+    // After the region parks (previous scenario), a fresh far request is
+    // served from far_cache without waking it.
+    let mut h = connected_harness();
+    let rc = RegionCoords::new(2, 3);
+    h.event(
+        ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0),
+        0,
+    );
+    h.event(
+        ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(rc), 0),
+        0,
+    );
+    h.manager.maintain(UNLOAD_GRACE_MS + 1);
+    h.settle(UNLOAD_GRACE_MS + 1);
+    assert!(h.manager.parked_regions().contains(&rc));
+    h.drain_packets();
+    h.event(
+        ServerEvent::ClientPacket(ClientPacket::RequestFarRegion(rc), 0),
+        UNLOAD_GRACE_MS + 2,
+    );
+    assert!(!h.manager.running_regions().contains(&rc), "far serve must not wake a parked region");
+    let packets = h.drain_packets();
+    assert!(packets.iter().any(|(target, p)| {
+        *target == Some(0) && matches!(p, ServerPacket::FarRegion(id, _) if *id == rc)
+    }));
+}
