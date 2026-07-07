@@ -3,12 +3,14 @@
 
 /// A control point: `value` is itself a spline (may be `Const`), evaluated at
 /// the outer coordinate; `derivative` is the slope used for Hermite blending.
+#[derive(Clone)]
 pub struct Point {
     pub location: f64,
     pub value: Box<Spline>,
     pub derivative: f64,
 }
 
+#[derive(Clone)]
 pub enum Spline {
     Const(f64),
     Curve { points: Vec<Point> },
