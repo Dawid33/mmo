@@ -120,6 +120,10 @@ play-test:
 worldgen:
     {{cargo}} run --bin worldgen
 
+# Time full region generation (coarse-find + voxel-smooth surfaces)
+worldgen-bench:
+    {{cargo}} run --release -p worldgen --bin worldgen
+
 # ---- WASM / browser -------------------------------------------------------
 
 # Start `just server` first, or append ?offline in the browser for single-player.

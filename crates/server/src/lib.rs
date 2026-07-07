@@ -241,10 +241,22 @@ pub fn run() {
     )
     .unwrap_or_else(|_| include_str!("../../../assets/blocks/blocks.ron").to_string());
     let registry = game::BlockRegistry::from_ron(&manifest).expect("invalid block manifest");
-    let stone = registry.id_of("stone").expect("block manifest must define \"stone\"");
+    let resolve = |name: &str| {
+        registry
+            .id_of(name)
+            .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
+    };
+    let materials = worldgen::material::Materials {
+        stone: resolve("stone"),
+        dirt: resolve("dirt"),
+        grass: resolve("grass"),
+        sand: resolve("sand"),
+        water: resolve("water"),
+    };
+    let world_seed = worldgen::WORLD_SEED;
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::default(),
-        Box::new(move |rc| worldgen::generate_region(rc, stone)),
+        Box::new(move |rc| worldgen::generate_region(rc, world_seed, materials)),
         server_send,
         region_out_send,
     );

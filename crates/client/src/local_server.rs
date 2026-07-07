@@ -32,10 +32,21 @@ impl LocalServer {
         let (out_send, out_recv) = unbounded();
         let (region_out_send, region_out_recv) = unbounded();
         let registry = crate::blocks::load_registry();
-        let stone = registry.id_of("stone").expect("block manifest must define \"stone\"");
+        let resolve = |name: &str| {
+            registry
+                .id_of(name)
+                .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
+        };
+        let materials = worldgen::material::Materials {
+            stone: resolve("stone"),
+            dirt: resolve("dirt"),
+            grass: resolve("grass"),
+            sand: resolve("sand"),
+            water: resolve("water"),
+        };
         let mut manager = WorldManager::new(
             InlineSpawner::default(),
-            Box::new(move |rc| worldgen::generate_region(rc, stone)),
+            Box::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials)),
             out_send,
             region_out_send,
         );

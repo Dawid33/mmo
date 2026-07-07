@@ -8,18 +8,33 @@
 //! live client under `just perf-client`.
 use std::time::Instant;
 
-const STONE: game::BlockId = game::BlockId(2);
+fn mats() -> worldgen::material::Materials {
+    worldgen::material::Materials {
+        stone: game::BlockId(2),
+        dirt: game::BlockId(1),
+        grass: game::BlockId(3),
+        sand: game::BlockId(4),
+        water: game::BlockId(5),
+    }
+}
 
 #[test]
 #[ignore = "benchmark; run explicitly via `just bench-region`"]
 fn region_load_cost() {
     // Warm up allocator/caches so the first stage isn't charged for them.
-    let _ = worldgen::generate_region(game::RegionCoords::new(0, 0), STONE);
+    let _ = worldgen::generate_region(game::RegionCoords::new(0, 0), 1, mats());
 
-    // 1. Server-side generation of one region (64 chunks).
+    // 1. Server-side generation of one region (64 columns).
     let t = Instant::now();
-    let chunks = worldgen::generate_region(game::RegionCoords::new(3, 5), STONE);
+    let columns = worldgen::generate_region(game::RegionCoords::new(3, 5), 1, mats());
     let gen_t = t.elapsed();
+
+    // Flatten each column's materialized (Dense) sub-chunks into the actual
+    // per-chunk `Chunk`s, mirroring what the wire/client path deals with.
+    let chunks: Vec<(i32, game::Chunk)> = columns
+        .iter()
+        .flat_map(|(_, col)| col.materialized_sub_chunks())
+        .collect();
 
     // 2. Client-side: derive the 32^3 voxel array for every chunk. This is what
     //    `spawn_region_snapshot` does SYNCHRONOUSLY, on the main schedule, for
@@ -34,13 +49,13 @@ fn region_load_cost() {
     }
     let derive = t.elapsed();
 
-    // 3. bincode round-trip of the chunk grid (proxy for the wire cost paid on
+    // 3. bincode round-trip of the column grid (proxy for the wire cost paid on
     //    the server's writer thread and the client's netcode thread).
     let t = Instant::now();
-    let bytes = bincode::serialize(&chunks).unwrap();
+    let bytes = bincode::serialize(&columns).unwrap();
     let ser = t.elapsed();
     let t = Instant::now();
-    let _back: Vec<(game::ChunkCoords, game::Chunk)> = bincode::deserialize(&bytes).unwrap();
+    let _back: Vec<(game::ColumnCoords, game::Column)> = bincode::deserialize(&bytes).unwrap();
     let de = t.elapsed();
 
     // 4. Greedy mesher over every derived chunk — the per-chunk async meshing
