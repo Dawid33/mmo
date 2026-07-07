@@ -8,8 +8,8 @@
         (id: 0, name: "air",   textures: Untextured),
         (id: 1, name: "dirt",  textures: All("dirt.png")),
         (id: 2, name: "stone", textures: All("dirt.png")), // placeholder art until stone.png exists
-        // Per-face example — drop grass_top.png / grass_side.png into
-        // assets/blocks/ and uncomment:
-        // (id: 3, name: "grass", textures: Faces(top: "grass_top.png", side: "grass_side.png", bottom: "dirt.png")),
+        (id: 3, name: "grass", textures: All("dirt.png")), // placeholder art until grass textures exist
+        (id: 4, name: "sand",  textures: All("dirt.png")), // placeholder art until sand.png exists
+        (id: 5, name: "water", textures: All("dirt.png")), // placeholder art until water.png exists
     ],
 )

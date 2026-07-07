@@ -68,4 +68,13 @@ mod tests {
         assert_eq!(m.material_at(0, 64), BlockId(4));
         assert_eq!(m.material_at(0, 65), BlockId(4));
     }
+
+    #[test]
+    fn manifest_defines_terrain_materials() {
+        let manifest = include_str!("../../../assets/blocks/blocks.ron");
+        let reg = game::BlockRegistry::from_ron(manifest).expect("valid manifest");
+        for name in ["stone", "dirt", "grass", "sand", "water"] {
+            assert!(reg.id_of(name).is_some(), "manifest must define {name}");
+        }
+    }
 }
