@@ -22,6 +22,9 @@ const REGION_BLOCKS: i32 = (REGION_CHUNKS * CHUNK_BLOCKS) as i32; // 16
 // Coarse vertical scan bounds (blocks). Terrain lives well inside this band.
 const SCAN_TOP: i32 = 320;
 const SCAN_BOTTOM: i32 = -64;
+// Deepest non-stone material_at depth (dirt/sand band). Keep in sync with
+// material.rs's `depth_below_surface <= 3` bands.
+const MAX_SOIL_DEPTH: i32 = 3;
 
 /// Meter coordinate of a block center at world block index `b`.
 fn block_center_m(b: i32) -> f64 {
@@ -70,11 +73,11 @@ pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<
                     hi = hi.max(s.max(sea)); // include the water column up to sea level
                 }
             }
-            if hi < lo {
-                // Fully air/ocean-floor below scan: emit an all-stone-below / air column.
-                columns.push((ColumnCoords::new(cx, cz), Column::new(0, stone, air, vec![])));
-                continue;
-            }
+            // Extend the band bottom past the shallowest surface in the footprint
+            // so the deepest soil (dirt/sand) of the lowest column is still
+            // materialized, rather than falling below the band and reading as
+            // the `below = stone` sentinel.
+            lo -= MAX_SOIL_DEPTH;
 
             // Materialize block Ys [lo ..= hi]; below reads as stone sentinel,
             // above as air. Build per-block, chiseling the surface straddle.
@@ -156,7 +159,7 @@ fn place_straddle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game::{BlockId, Column, ColumnCoords, ReadVol, BlockPos, REGION_CHUNKS};
+    use game::{BlockId, Column, ColumnCoords, ReadVol, BlockPos, SubChunk, REGION_CHUNKS};
 
     fn mats() -> crate::material::Materials {
         crate::material::Materials {
@@ -196,8 +199,20 @@ mod tests {
 
     #[test]
     fn columns_contain_solid_ground() {
-        // Some voxel in the region is solid (not an all-air world).
+        // At least one column has a materialized (chiseled) surface straddle
+        // block, proving the surface-find/straddle path actually ran and
+        // wrote real terrain — not just the `below = stone` sentinel, which
+        // a naive `get()` probe can't distinguish from generated ground.
         let cols = generate_region(RegionCoords::new(5, 5), 3, mats());
+        let any_chiseled = cols.iter().any(|(_, col)| {
+            col.sub_chunks().iter().any(|sub| match sub {
+                SubChunk::Dense(chunk) => !chunk.chisel.is_empty(),
+                SubChunk::Air => false,
+            })
+        });
+        assert!(any_chiseled, "expected a materialized surface straddle in the region");
+
+        // Sanity: `get()` still reads solid ground somewhere too.
         let any_solid = cols.iter().any(|(_, col)| {
             (0..64).any(|y| col.get(BlockPos::new(0, y, 0)).id != BlockId::AIR)
         });
