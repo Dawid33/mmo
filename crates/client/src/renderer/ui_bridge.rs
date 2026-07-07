@@ -244,6 +244,36 @@ mod tests {
     }
 
     #[test]
+    fn set_children_shrink_detaches_but_does_not_despawn_dropped_child() {
+        let (mut app, send) = ui_app();
+        send.send(UiUpdate::CreateWidget(WidgetId(1))).unwrap();
+        send.send(UiUpdate::CreateWidget(WidgetId(2))).unwrap();
+        send.send(UiUpdate::SetChildren(WidgetId(0), vec![WidgetId(1), WidgetId(2)])).unwrap();
+        app.update();
+
+        let root = app.world().resource::<UiRoot>().0.expect("root spawned");
+        let e1 = *app.world().resource::<UiWidgetMap>().0.get(&WidgetId(1)).unwrap();
+        let e2 = *app.world().resource::<UiWidgetMap>().0.get(&WidgetId(2)).unwrap();
+
+        let children = app.world().entity(root).get::<Children>().expect("root has children");
+        assert!(children.contains(&e1), "widget 1 attached to root");
+        assert!(children.contains(&e2), "widget 2 attached to root");
+
+        // Shrink: re-send SetChildren with widget 2 dropped from the list.
+        send.send(UiUpdate::SetChildren(WidgetId(0), vec![WidgetId(1)])).unwrap();
+        app.update();
+
+        let children = app.world().entity(root).get::<Children>();
+        let still_child = children.is_some_and(|c| c.contains(&e2));
+        assert!(!still_child, "widget 2 detached from root's Children");
+        assert!(
+            app.world().get::<ChildOf>(e2).map(|c| c.parent()) != Some(root),
+            "widget 2's ChildOf no longer targets root"
+        );
+        assert!(app.world().get_entity(e2).is_ok(), "widget 2 still exists (detached, not despawned)");
+    }
+
+    #[test]
     fn unmapped_set_is_tolerated() {
         let (mut app, send) = ui_app();
         send.send(UiUpdate::SetContent(WidgetId(77), Content::Text("x".into()))).unwrap();
