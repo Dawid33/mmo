@@ -6,6 +6,7 @@ use ordered_float::OrderedFloat;
 use parry3d::math::Real;
 use rapier3d::math::Vector;
 use rapier3d::prelude::RigidBodyHandle;
+use std::f32::consts::FRAC_PI_2;
 
 use rapier3d::control::KinematicCharacterController;
 use rapier3d::prelude::QueryFilter;
@@ -17,12 +18,61 @@ pub const ASPECT: f32 = 16.0 / 9.0;
 /// Vertical field of view in radians (Perspective3 expects radians, not degrees).
 pub const FOV_Y: f32 = std::f32::consts::FRAC_PI_3; // 60°
 
+/// Max pitch magnitude (radians), a hair under straight up/down to dodge
+/// the gimbal singularity at the poles.
+pub const PITCH_LIMIT: Real = OrderedFloat(FRAC_PI_2 - 0.001);
+/// Minecraft-style look sensitivity in [0, 1]; tune to taste.
+pub const LOOK_SENSITIVITY: f32 = 0.5;
+/// Radians of yaw per pixel of mouse motion, before the sensitivity curve.
+pub const LOOK_BASE_X: f32 = 0.0026;
+/// Radians of pitch per pixel of mouse motion, before the sensitivity curve.
+pub const LOOK_BASE_Y: f32 = 0.0026;
+
+/// Minecraft cubic sensitivity: fine control near center, fast at the ends.
+/// `f = sens*0.6 + 0.2; mult = f^3 * 8`, then `px * base * mult`.
+pub fn look_delta_rad(px: f32, base: f32) -> f32 {
+    let f = LOOK_SENSITIVITY * 0.6 + 0.2;
+    let mult = f * f * f * 8.0;
+    px * base * mult
+}
+
+/// Accumulate a mouse delta into (yaw, pitch). Yaw wraps freely; pitch is
+/// clamped to +/-PITCH_LIMIT. Non-finite deltas are ignored so a stray NaN
+/// cannot corrupt the look. Yaw: rightward mouse decreases the angle
+/// (matches the previous controller's convention). Pitch: positive `dy`
+/// increases the angle toward `+PITCH_LIMIT`.
+pub fn apply_look(yaw: Real, pitch: Real, dx: f32, dy: f32) -> (Real, Real) {
+    let dx = if dx.is_finite() { dx } else { 0.0 };
+    let dy = if dy.is_finite() { dy } else { 0.0 };
+    let new_yaw = yaw - Real::from(look_delta_rad(dx, LOOK_BASE_X));
+    let new_pitch = clamp(
+        pitch + Real::from(look_delta_rad(dy, LOOK_BASE_Y)),
+        -PITCH_LIMIT,
+        PITCH_LIMIT,
+    );
+    (new_yaw, new_pitch)
+}
+
+/// World-Y yaw only — the horizontal facing used for movement direction.
+pub fn yaw_quat(yaw: Real) -> UnitQuaternion<Real> {
+    UnitQuaternion::from_axis_angle(&Vector3::y_axis(), yaw)
+}
+
+/// Full look orientation: yaw about world-Y, then pitch about local-X.
+/// Roll is structurally impossible (the X axis is invariant under its own
+/// rotation, so the camera-right vector stays horizontal).
+pub fn look_quat(yaw: Real, pitch: Real) -> UnitQuaternion<Real> {
+    yaw_quat(yaw) * UnitQuaternion::from_axis_angle(&Vector3::x_axis(), pitch)
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
 #[module(crate)]
 pub struct Camera {
     pub opengl_to_wgpu_matrix: Matrix4<Real>,
     pub proj_matrix: Perspective3<Real>,
     pub view_matrix: Option<RigidBodyHandle>,
+    pub yaw: Real,
+    pub pitch: Real,
 }
 
 impl Camera {
@@ -67,6 +117,8 @@ impl Camera {
             ),
             opengl_to_wgpu_matrix: m,
             view_matrix: Some(handle),
+            yaw: OrderedFloat(0.0),
+            pitch: OrderedFloat(0.0),
         }
     }
 }
@@ -89,6 +141,8 @@ impl Default for Camera {
                 OrderedFloat(2000.0),
             ),
             view_matrix: Default::default(),
+            yaw: OrderedFloat(0.0),
+            pitch: OrderedFloat(0.0),
         }
     }
 }
