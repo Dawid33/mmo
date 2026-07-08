@@ -149,16 +149,72 @@ web-release:
 
 # Scoped per-crate on purpose: `cargo test --workspace` fails building the
 # vendored nalgebra fork's own tests.
-# Run the first-party test suites (rollback + client headless).
+#
+# Tests measured >100ms (2026-07-08, debug build) carry
+# `#[ignore = "slow: >100ms — run via just test-full"]`, so the default run is
+# the fast feedback loop and `test-full` adds them back via --include-ignored.
+# Tag new slow tests the same way; re-measure with:
+#   RUSTC_BOOTSTRAP=1 cargo test -p <crate> -- -Zunstable-options --report-time
+
+# Quick first-party suites (slow tests skipped) — the routine while-iterating check.
 test: test-game test-client
 
-# Rollback/undo invariants and seeded randomized rollback.
+# Rollback/undo invariants and seeded randomized rollback (quick subset).
 test-game:
     cargo test -p game
 
-# Client headless suite (sim-bridge, conversion, interpolation, meshing).
+# Client headless suite: sim-bridge, conversion, interpolation, meshing (quick subset).
 test-client:
     cargo test -p client
+
+# Everything, slow tests included — run before calling work done. Still skips
+# the wall-clock perf gates, which have their own release-mode recipes
+# (`just keepup-budget`, `just soak`) or are evidence-only printouts.
+test-full:
+    cargo test -p game -- --include-ignored --skip perf_evidence_journal_scales_with_activity
+    cargo test -p client -- --include-ignored --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
+
+# Keep-up budget benchmark (release): measures the region-tick cost and
+# asserts the death-spiral inequality (worst frame < tick period). Fails with
+# a number when a game change makes the sim too slow for the client to keep up.
+keepup-budget:
+    cargo test -p client --release --test keepup_budget -- --ignored --nocapture
+
+# Wall-clock keep-up soak (release, ~40s + build): real tick cadence + 60/s
+# fabricated input; fails if the prediction log trends up (death-spiral
+# signature). Debug builds measure but don't assert. Full output (incl. the
+# reconcile tracing) goes to target/soak.log; the [client-budget] / [soak]
+# summary lines are reprinted at the end so the attribution is readable.
+soak:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    log=target/soak.log
+    cargo test -p client --release --test reconcile_keepup soak_realtime_keepup -- --ignored --nocapture --test-threads=1 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
+    echo
+    echo "=== soak summary (full log: $log) ==="
+    cat <<'LEGEND'
+    [client-budget] = game-loop wall-time attribution, one line per 5s window:
+      window   actual window length (s)
+      util     busy share of the window (window - idle); this harness never
+               blocks the loop, so it always reads 100% here
+      tick     progress_world_one_tick calls (client ticks): count n, summed
+               wall time, mean, slowest single call
+      recon    reconcile passes for server events; replayed = predicted ticks
+               rolled back + re-simulated (separates replay cost from match cost)
+      snap     region snapshot loads (teardown + Rollback clone + world insert)
+      idle     time blocked waiting for events (live client select! only; 0 here)
+      other    window - idle - (tick+recon+snap): loop overhead, and in this
+               harness the time spent outside the manager (server sim, sleeps)
+      sim      per-region Tick executions incl. reconcile replays: count n,
+               ctrl = controller pass (physics; the hot part), input = input
+               step, scan = boundary scan; sim n > tick n x regions => replaying
+      worst    region with the highest avg per-execution cost
+    [soak]     1s home-region prediction-log depth samples; a rising series is
+               the death-spiral signature the test asserts against
+    LEGEND
+    grep -E "client-budget|\[soak\]" "$log" || true
+    exit $rc
 
 # ---- Lint / format --------------------------------------------------------
 

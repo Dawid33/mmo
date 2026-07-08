@@ -1,6 +1,7 @@
 use game::{Chunk, ChunkCoords, Region, RegionCoords};
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn from_chunks_builds_a_region_with_all_chunk_entities() {
     let chunks: Vec<(ChunkCoords, Chunk)> = (0..8)
         .flat_map(|x| (0..8).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(8))))

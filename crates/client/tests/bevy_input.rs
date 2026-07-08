@@ -7,6 +7,7 @@ use bevy::window::CursorGrabMode;
 use client::bevy_harness::BevyInputHarness;
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn local_player_is_set_after_connect() {
     let mut h = BevyInputHarness::new();
     h.connect();
@@ -17,6 +18,7 @@ fn local_player_is_set_after_connect() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn e_press_forwards_and_toggles_sim() {
     let mut h = BevyInputHarness::new();
     h.connect();
@@ -39,6 +41,7 @@ fn e_press_forwards_and_toggles_sim() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn pressing_e_grabs_and_releases_cursor() {
     let mut h = BevyInputHarness::new();
     h.connect();

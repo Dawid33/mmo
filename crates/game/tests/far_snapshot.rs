@@ -11,7 +11,9 @@ fn flat_chunks() -> Vec<(ChunkCoords, Chunk)> {
 
 #[test]
 fn constants_have_expected_defaults() {
-    assert_eq!(FAR_VIEW_RADIUS, 2);
+    // Far ring currently disabled (radius 0) while client keep-up perf work
+    // is pending; update this pin when the ring is re-enabled.
+    assert_eq!(FAR_VIEW_RADIUS, 0);
     assert_eq!(FAR_SNAPSHOT_MIN_INTERVAL_TICKS, 25);
 }
 

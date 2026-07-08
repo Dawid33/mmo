@@ -11,7 +11,7 @@ A voxel MMO in Rust with client/server architecture over QUIC, built around dete
 Common tasks are wrapped in the root `justfile` — prefer it over retyping raw
 `cargo`/`cargo-clif` invocations. `just` (or `just --list`) shows every recipe;
 the important ones are `just build`, `just run` (server + client together),
-`just server`, `just client`, `just test`, `just test-client`, `just web`, and
+`just server`, `just client`, `just test`, `just test-full`, `just web`, and
 `just clippy`. Machine-specific bits are overridable variables: `cargo` selects the
 toolchain (defaults to stable `cargo`; set `cargo=$CARGO_CLIF` or export `CARGO_CLIF`
 to opt into the Cranelift `cargo-clif` wrapper for faster builds), and `adapter=6700`
@@ -40,7 +40,9 @@ cargo run --bin client
 
 The server listens on `127.0.0.1:6466` (hardcoded in `crates/server/src/lib.rs`); the client connects to localhost. Run the server before/alongside the client.
 
-The game crate has the rollback test suite: `cargo test -p game` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact. The client has its own headless test suite: `cargo test -p client` (26 tests covering the sim-bridge, coordinate conversion, interpolation, and async chunk meshing, run via `MinimalPlugins`/`AssetPlugin` with no window or GPU).
+The game crate has the rollback test suite: `cargo test -p game` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact. The client has its own headless test suite: `cargo test -p client` (sim-bridge, coordinate conversion, interpolation, async chunk meshing, and full client/server convergence harnesses, run via `MinimalPlugins`/`AssetPlugin` with no window or GPU).
+
+Tests measured slower than 100ms are tagged `#[ignore = "slow: >100ms — run via just test-full"]`, so `just test` (plain `cargo test`) is the fast loop and `just test-full` (`--include-ignored`, minus the release-mode perf gates) is the complete suite. **Use `just test` for routine checks while iterating; run `just test-full` as the final check before declaring work done.** Tag any new test that takes >100ms the same way.
 
 Bevy is pinned to `0.18` in the root `Cargo.toml`; Bevy's API surface moves fast between minor versions, so treat upgrades as a deliberate, tested migration rather than a routine bump — API drift (renamed types/traits, moved modules, changed system-set names) is a known hazard.
 

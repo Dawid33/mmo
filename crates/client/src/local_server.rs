@@ -158,6 +158,7 @@ mod tests {
     /// Full offline handshake: manager + LocalServer wired over channels,
     /// pumped in lockstep like the wasm frame driver will.
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn offline_handshake_loads_region() {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
@@ -210,6 +211,7 @@ mod tests {
     /// The offline client loads the full 3x3 window through the shared
     /// WorldManager core.
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn offline_window_loads_nine_regions() {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
@@ -246,6 +248,7 @@ mod tests {
     /// Release + grace parks a region offline; resubscribing restores it
     /// from the parking lot (a fresh Region packet arrives again).
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn offline_release_parks_and_resubscribe_restores() {
         use game::{RegionCoords, TICK_RATE, UNLOAD_GRACE_MS};
 

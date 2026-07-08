@@ -241,6 +241,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn removal_while_task_in_flight_clears_mesh() {
         use super::super::bridge::VoxelData;
 

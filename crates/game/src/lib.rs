@@ -42,7 +42,11 @@ pub use volume::*;
 pub use world_manager::*;
 
 pub const TICK_RATE: u64 = 50;
-pub const INDUCED_LATENCY: isize = 0;
+/// TESTING KNOB — deliberately 0 in normal operation. Extra client-ahead lead
+/// (ms) the SyncClock pacing loop targets; raise it only to fabricate latency
+/// when testing the adaptive tick. Not a production pacing target and not an
+/// oversight.
+pub const TEST_INDUCED_LATENCY_MS: isize = 0;
 
 /// How often the client and server each emit their rolling keep-up metrics
 /// summary line (avg/max tick duration, reconciliation load). One tunable
@@ -97,6 +101,8 @@ pub enum ClientUpdateEvent {
 }
 
 pub use region::{Region, ReconcileStats};
+#[cfg(not(target_arch = "wasm32"))]
+pub use region::RegionTickPerf;
 
 pub trait Controller: Send {
     fn on_tick<'a>(&mut self, _t: &mut Undo<GameData>) {}

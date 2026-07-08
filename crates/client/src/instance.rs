@@ -6,7 +6,8 @@ use crossbeam::channel::{Receiver, RecvError, Sender};
 use crossbeam::select;
 use game::{ClientId, ReconcileStats, RegionCoords, RegionId, Rollback, ServerPacket};
 use game::{
-    ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind, Region, INDUCED_LATENCY,
+    ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind, Region,
+    TEST_INDUCED_LATENCY_MS,
 };
 use log::{info, warn};
 use std::{
@@ -18,7 +19,7 @@ use std::{
     },
 };
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
@@ -50,7 +51,21 @@ pub struct GameInstanceManager {
     last_hud_status: Option<(RegionCoords, RegionCoords, game::ConnectionState)>,
     /// Rolling reconciliation / clock-drift keep-up counters.
     recon: ReconMetrics,
+    /// Rolling wall-time budget attribution (native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    perf: PerfBudget,
 }
+
+/// Death-spiral tripwire tunables. The spiral's early signature (root-caused
+/// live 2026-07-08) is the home region's unconfirmed prediction log rising
+/// across metric windows: replay cost grows with depth, which slows
+/// confirmation, which grows depth. Depth is sampled once per
+/// `METRICS_REPORT_INTERVAL`; a strictly-rising run of `KEEPUP_TREND_WINDOWS`
+/// samples ending at or above `KEEPUP_WARN_MIN_DEPTH` warns, as does any
+/// single sample at or above `KEEPUP_WARN_HARD_DEPTH`.
+const KEEPUP_TREND_WINDOWS: usize = 3;
+const KEEPUP_WARN_MIN_DEPTH: usize = 24;
+const KEEPUP_WARN_HARD_DEPTH: usize = 64;
 
 /// Client-side rolling counters for reconciliation load and clock drift,
 /// flushed to one INFO line every `METRICS_REPORT_INTERVAL`. The window start
@@ -65,6 +80,47 @@ struct ReconMetrics {
     /// Latest RTT-adjusted client-vs-server tick drift, in ms (negative =
     /// client is behind the server). Snapshotted from each `SyncClock`.
     last_drift_ms: isize,
+    /// Home-region prediction-log depth, sampled once per report window;
+    /// keeps the last `KEEPUP_TREND_WINDOWS` samples for the tripwire.
+    log_depth_samples: Vec<usize>,
+}
+
+/// Wall-time attribution for the game-loop thread, flushed to one
+/// `[client-budget]` INFO line alongside the reconciliation metrics every
+/// `METRICS_REPORT_INTERVAL`. Directs optimization work by showing where the
+/// loop's budget goes. Categories are measured at their call sites; `other`
+/// is derived at report time as window − idle − (tick + reconcile +
+/// snapshot), so the line always sums to the window. `idle` is only
+/// accumulated by `connect_and_run`'s select! — in pump()-driven harnesses
+/// (headless tests) time spent outside the manager lands in `other` instead,
+/// so read `util` there as an upper bound.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct PerfBudget {
+    /// `progress_world_one_tick`: whole-world sim advance, per client tick.
+    tick_total: Duration,
+    tick_count: u32,
+    tick_max: Duration,
+    /// Server-event reconcile passes (buffer drain + rollback/replay), plus
+    /// replay of events that raced ahead of a region snapshot.
+    reconcile_total: Duration,
+    /// `ServerPacket::Region` handling: region teardown + snapshot load
+    /// (Rollback clone, render-bridge NewRegion, world insert).
+    snapshot_total: Duration,
+    snapshot_count: u32,
+    /// Time blocked in `connect_and_run`'s select! waiting for work.
+    idle_total: Duration,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PerfBudget {
+    fn record_tick(&mut self, d: Duration) {
+        self.tick_count += 1;
+        self.tick_total += d;
+        if d > self.tick_max {
+            self.tick_max = d;
+        }
+    }
 }
 
 impl ReconMetrics {
@@ -151,6 +207,8 @@ impl GameInstanceManager {
             results_buffer: BTreeMap::new(),
             last_hud_status: None,
             recon: ReconMetrics::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            perf: PerfBudget::default(),
         }
     }
 
@@ -193,6 +251,12 @@ impl GameInstanceManager {
         self.world.as_ref().expect("world loaded")
     }
 
+    /// Mutable access to the loaded sim world (test/harness hook — state
+    /// surgery like teleports in convergence tests).
+    pub fn world_mut(&mut self) -> &mut game::World {
+        self.world.as_mut().expect("world loaded")
+    }
+
     /// The client's current home region (test/harness hook).
     pub fn home_region(&self) -> RegionCoords {
         self.home_region.expect("home region set")
@@ -214,10 +278,14 @@ impl GameInstanceManager {
         match event {
             GameEventKind::Quit => return Ok(false),
             GameEventKind::Tick => {
+                #[cfg(not(target_arch = "wasm32"))]
+                let tick_start = Instant::now();
                 self.world
                     .as_mut()
                     .unwrap()
                     .progress_world_one_tick(&mut self.results_buffer);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.perf.record_tick(tick_start.elapsed());
                 // MUST run here and only here: transfer buffers reflect the
                 // tick just executed (read-after-progress invariant), and a
                 // predicted home flip must land before update_window recenters.
@@ -245,6 +313,10 @@ impl GameInstanceManager {
                         return Ok(true);
                     }
                     let event = self.world.as_mut().unwrap().handle_region_event(e, home)?;
+                    info!(
+                        "[client] predicted PlayerInput id={} in home {:?}; sending to server",
+                        event.id, home
+                    );
                     self.server_game_send
                         .send(game::ClientPacket::GameEvent(event))
                         .unwrap();
@@ -304,6 +376,10 @@ impl GameInstanceManager {
             }
         }
         self.emit_hud_status();
+        // Surface the metrics/budget lines from pump()-driven harnesses too
+        // (soak test); on wasm there is no Instant, so no reporting.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.maybe_report_metrics();
         Ok(true)
     }
 
@@ -537,11 +613,11 @@ impl GameInstanceManager {
                     let total_mili_diff = milisecond_diff - rtt.as_millis() as isize;
                     self.recon.last_drift_ms = total_mili_diff;
 
-                    if total_mili_diff < INDUCED_LATENCY {
+                    if total_mili_diff < TEST_INDUCED_LATENCY_MS {
                         self.ready = false;
                         self.tick_rate
                             .store((server_tick_rate as f32 * 0.9) as u64, Ordering::SeqCst);
-                    } else if total_mili_diff > INDUCED_LATENCY {
+                    } else if total_mili_diff > TEST_INDUCED_LATENCY_MS {
                         self.ready = true;
                         self.tick_rate
                             .store((server_tick_rate as f32 * 1.1) as u64, Ordering::SeqCst);
@@ -557,10 +633,16 @@ impl GameInstanceManager {
                     self.is_caught_up = false;
                     return Ok(());
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                let recon_start = Instant::now();
                 for event in self.buffer.drain(..).collect::<Vec<_>>() {
                     self.route_server_game_event(event)?;
                 }
                 self.route_server_game_event(game_event)?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.perf.reconcile_total += recon_start.elapsed();
+                }
                 self.is_caught_up = true;
             }
             game::ServerPacket::PlayerRegion(id, client_id) => {
@@ -599,12 +681,21 @@ impl GameInstanceManager {
                 // drop_region — its first act is to clear this region's
                 // pending buffer, which would silently discard them.
                 let pending = self.pending_events.remove(&id);
+                #[cfg(not(target_arch = "wasm32"))]
+                let snap_start = Instant::now();
                 // Replace-on-re-receipt: crash-respawn/resubscribe resyncs.
                 self.drop_region(id);
                 self.new_region(id, raw_game_data);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.perf.snapshot_count += 1;
+                    self.perf.snapshot_total += snap_start.elapsed();
+                }
                 // Replay events that raced ahead of the snapshot; reconcile
                 // skips anything already baked in (base_event_id).
                 if let Some(pending) = pending {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let recon_start = Instant::now();
                     let mut acc = ReconcileStats::default();
                     if let Some(ref mut world) = self.world {
                         for ev in pending {
@@ -617,6 +708,10 @@ impl GameInstanceManager {
                         }
                     }
                     self.recon.record(acc);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.perf.reconcile_total += recon_start.elapsed();
+                    }
                 }
             }
             game::ServerPacket::FarRegion(id, snap) => {
@@ -682,14 +777,17 @@ impl GameInstanceManager {
         self.start();
 
         loop {
+            let wait_start = Instant::now();
             select! {
                 // Recieve and handle server packets.
                 recv(server_recv) -> server_msg => {
+                    self.perf.idle_total += wait_start.elapsed();
                     self.handle_server(server_msg)?;
                 },
                 // Recieve client game events from either the player or from
                 // client-side game tick timer.
                 recv(self.game_event_recv) -> game_event => {
+                    self.perf.idle_total += wait_start.elapsed();
                     match game_event {
                         Ok(event) => {
                             if !self.handle_game_event(event)? {
@@ -717,6 +815,12 @@ impl GameInstanceManager {
         if elapsed < game::METRICS_REPORT_INTERVAL {
             return;
         }
+        // Home-region prediction-log depth: the direct death-spiral signal.
+        let log_depth = self
+            .home_region
+            .and_then(|h| self.world.as_ref()?.regions.get(&h))
+            .map(|r| r.pending_event_ids().len())
+            .unwrap_or(0);
         let m = &self.recon;
         let secs = elapsed.as_secs_f32();
         let per_sec = if secs > 0.0 { m.mispredictions as f32 / secs } else { 0.0 };
@@ -726,13 +830,83 @@ impl GameInstanceManager {
             0.0
         };
         info!(
-            "[client] mispredicts/s={:.2} avg_replay={:.1} max_replay={} tick_rate={}ms drift={}ms",
+            "[client] mispredicts/s={:.2} avg_replay={:.1} max_replay={} evlog={} tick_rate={}ms drift={}ms",
             per_sec,
             avg_replay,
             m.max_replay_depth,
+            log_depth,
             self.tick_rate.load(Ordering::SeqCst),
             m.last_drift_ms,
         );
+        // ---- perf-budget attribution: where the game-loop wall time went ----
+        // Drain the per-region sim accumulators. These include reconcile
+        // replays, so `sim n=` exceeds `tick n=` × loaded regions whenever the
+        // client is replaying; the gap is the replay multiplier.
+        let mut sim = game::RegionTickPerf::default();
+        let mut worst: Option<(RegionCoords, Duration)> = None;
+        if let Some(w) = self.world.as_mut() {
+            for (id, r) in &mut w.regions {
+                let a = r.take_tick_perf();
+                if a.ticks > 0 {
+                    let avg = a.total / a.ticks;
+                    if worst.map_or(true, |(_, b)| avg > b) {
+                        worst = Some((*id, avg));
+                    }
+                }
+                sim.merge(&a);
+            }
+        }
+        let ms = |d: Duration| d.as_secs_f32() * 1000.0;
+        let p = &self.perf;
+        let categorized = p.tick_total + p.reconcile_total + p.snapshot_total;
+        let busy = elapsed.saturating_sub(p.idle_total);
+        let other = busy.saturating_sub(categorized);
+        let tick_avg_ms = if p.tick_count > 0 {
+            ms(p.tick_total) / p.tick_count as f32
+        } else {
+            0.0
+        };
+        let worst_sim = worst
+            .map(|(id, avg)| format!("({},{})@{:.2}ms", id.x, id.z, ms(avg)))
+            .unwrap_or_else(|| "none".into());
+        info!(
+            "[client-budget] window={:.1}s util={:.1}% | tick n={} total={:.0}ms avg={:.2}ms max={:.2}ms | recon total={:.0}ms replayed={} | snap n={} total={:.0}ms | idle={:.0}ms other={:.0}ms | sim n={} ctrl={:.0}ms input={:.1}ms scan={:.0}ms worst={}",
+            secs,
+            busy.as_secs_f32() / secs * 100.0,
+            p.tick_count,
+            ms(p.tick_total),
+            tick_avg_ms,
+            ms(p.tick_max),
+            ms(p.reconcile_total),
+            self.recon.replay_depth_sum,
+            p.snapshot_count,
+            ms(p.snapshot_total),
+            ms(p.idle_total),
+            ms(other),
+            sim.ticks,
+            ms(sim.controllers),
+            ms(sim.input),
+            ms(sim.scan),
+            worst_sim,
+        );
+        self.perf = PerfBudget::default();
+        self.recon.log_depth_samples.push(log_depth);
+        if self.recon.log_depth_samples.len() > KEEPUP_TREND_WINDOWS {
+            self.recon.log_depth_samples.remove(0);
+        }
+        let s = &self.recon.log_depth_samples;
+        let rising = s.len() == KEEPUP_TREND_WINDOWS
+            && s.windows(2).all(|w| w[1] > w[0])
+            && *s.last().unwrap() >= KEEPUP_WARN_MIN_DEPTH;
+        if rising || log_depth >= KEEPUP_WARN_HARD_DEPTH {
+            warn!(
+                "[client] KEEP-UP WARNING: prediction log depth {} (samples {:?}) — \
+                 reconcile is falling behind the server stream (death-spiral \
+                 signature). Replay costs ~1 region tick per event; profile the \
+                 region tick / see crates/client/tests/keepup_budget.rs",
+                log_depth, s,
+            );
+        }
         self.recon.window_start = Some(now);
         self.recon.mispredictions = 0;
         self.recon.replay_depth_sum = 0;
@@ -749,6 +923,7 @@ mod manager_tests {
     /// pump() must: load a region from a ServerPacket, then advance the sim
     /// on a Tick game event — all without blocking.
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn pump_loads_region_and_ticks() {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
@@ -799,6 +974,7 @@ mod manager_tests {
     /// the following 500ms window — measured live at 261 dropped : 1 sent.
     /// Only a sim that has not yet caught up with the server may drop input.
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn player_input_flows_while_not_ready_once_caught_up() {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
@@ -929,6 +1105,7 @@ mod manager_tests {
     /// Events for a subscribed-but-not-yet-loaded region are buffered and
     /// applied when the snapshot arrives, not dropped.
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn events_for_pending_region_are_buffered_until_snapshot() {
         let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
         let home = RegionCoords::new(0, 0);
@@ -991,6 +1168,7 @@ mod manager_tests {
     /// A snapshot for an already-loaded region replaces it (crash-respawn /
     /// resubscribe path), emitting RemoveRegion then NewRegion to the bridge.
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn region_re_receipt_replaces_and_signals_bridge() {
         let (mut manager, server_send, server_recv, client_recv, _game) = manager_with_player();
         let home = RegionCoords::new(0, 0);
@@ -1014,6 +1192,7 @@ mod manager_tests {
     /// A snapshot for a region outside the desired window is released
     /// immediately, never loaded (window moved on before it arrived).
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn stale_snapshot_is_released_not_loaded() {
         let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
         let home = RegionCoords::new(0, 0);
@@ -1577,13 +1756,15 @@ mod manager_tests {
         assert!(client_recv.try_recv().is_err());
     }
 
+    /// Tests the ring geometry with an explicit radius, independent of the
+    /// FAR_VIEW_RADIUS tunable (currently 0 = far ring disabled).
     #[test]
     fn desired_far_is_ring_minus_near() {
-        use game::{RegionCoords, FAR_VIEW_RADIUS};
+        use game::RegionCoords;
         let center = RegionCoords::new(0, 0);
         let near: std::collections::BTreeSet<RegionCoords> =
             center.window_3x3().into_iter().collect();
-        let far = super::desired_far(center, &near, FAR_VIEW_RADIUS);
+        let far = super::desired_far(center, &near, 2);
         // Disjoint from the near window.
         assert!(far.is_disjoint(&near));
         // 5×5 footprint (25) minus the 3×3 near window (9) = 16 far regions.
@@ -1591,5 +1772,7 @@ mod manager_tests {
         // A ring member is present; a near member is absent.
         assert!(far.contains(&RegionCoords::new(2, 0)));
         assert!(!far.contains(&RegionCoords::new(1, 0)));
+        // Radius 0 (the current live setting): no far ring at all.
+        assert!(super::desired_far(center, &near, 0).is_empty());
     }
 }

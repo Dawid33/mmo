@@ -217,12 +217,19 @@ impl<S: RegionSpawner> WorldManager<S> {
                     kind @ GameEventKind::PlayerInput(..) => {
                         // Manager-authoritative routing: the client's stamp
                         // lags its own predicted handoff; homes is truth.
-                        let GameEventKind::PlayerInput(cid, _) = &kind else { unreachable!() };
-                        match self.homes.get(cid).copied() {
+                        let GameEventKind::PlayerInput(cid, ev) = &kind else { unreachable!() };
+                        let home = self.homes.get(cid).copied();
+                        match home {
                             Some(home) if self.regions.contains_key(&home) => {
+                                log::info!(
+                                    "[server] recv PlayerInput from cid={cid:?} input={ev:?} -> route to home {home:?}"
+                                );
                                 self.send_to_region(home, RegionInput::Event(kind));
                             }
-                            _ => log::debug!("dropping input from {cid}: home not running"),
+                            _ => log::info!(
+                                "[server] DROP PlayerInput from cid={cid:?}: home={home:?} not running (loaded regions: {:?})",
+                                self.regions.keys().collect::<Vec<_>>()
+                            ),
                         }
                     }
                     // Manager-internal event kinds: a client must never inject
@@ -257,6 +264,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         match output {
             RegionOutput::EventProcessed(event) => {
                 if let Some(link) = self.regions.get(&rc) {
+                    if let GameEventKind::PlayerInput(_, ev) = &event.kind {
+                        log::info!(
+                            "[server] region {rc:?} processed PlayerInput id={} input={ev:?} -> echo to {} subscriber(s): {:?}",
+                            event.id,
+                            link.subscribers.len(),
+                            link.subscribers
+                        );
+                    }
                     for client in &link.subscribers {
                         let _ = self
                             .out

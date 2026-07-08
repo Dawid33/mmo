@@ -20,3 +20,4 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
     region and never settles in the tight lockstep — the real protocol-level case above. Needs
     the server-side input stamp-routing / predicted-authority-transfer design, not a harness or
     client-side patch.
+

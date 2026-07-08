@@ -395,13 +395,22 @@ pub fn drain_region_updates(
                     if local_player.0 != Some(client_id) {
                         continue;
                     }
+                    let (want_grab, want_visible) = if enabled {
+                        (CursorGrabMode::Locked, false)
+                    } else {
+                        (CursorGrabMode::None, true)
+                    };
                     if let Ok(mut cursor) = windows.single_mut() {
-                        if enabled {
-                            cursor.grab_mode = CursorGrabMode::Locked;
-                            cursor.visible = false;
-                        } else {
-                            cursor.grab_mode = CursorGrabMode::None;
-                            cursor.visible = true;
+                        // Idempotent: SetFreeCam is emitted Do-only (no Undo
+                        // pairing), so every reconcile that replays the toggle
+                        // tick re-delivers the SAME value. `single_mut()` + a
+                        // field write trips Bevy change detection unconditionally,
+                        // which re-issues the winit cursor grab each time — an X11
+                        // re-grab loop ("already confined by another client" spam)
+                        // when the grab is contended. Only write on a real change.
+                        if cursor.grab_mode != want_grab || cursor.visible != want_visible {
+                            cursor.grab_mode = want_grab;
+                            cursor.visible = want_visible;
                         }
                     }
                 }

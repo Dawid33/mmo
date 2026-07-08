@@ -57,6 +57,7 @@ fn lockstep_tick(server: &mut World, client: &mut World) {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn join_snapshot_already_contains_player_and_stale_create_is_dropped() {
     let (mut server, events) = server_with_players(1);
     let (mut client, _recv) = join_client(&server, 0);
@@ -90,6 +91,7 @@ fn origin_client_classifies_event_kinds() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn foreign_create_client_inserts_into_predicted_timeline() {
     let (mut server, _) = server_with_players(1);
     let (mut client_a, _recv) = join_client(&server, 0);
@@ -130,6 +132,7 @@ fn foreign_create_client_inserts_into_predicted_timeline() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn foreign_player_input_converges_and_undo_stays_bit_exact() {
     let (mut server, mut events) = server_with_players(2);
     let (mut client_a, _recv) = join_client(&server, 0);
@@ -175,6 +178,7 @@ fn foreign_player_input_converges_and_undo_stays_bit_exact() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn create_player_sets_entity_kind() {
     let (server, _) = server_with_players(1);
     let data = server.data(&r0());
@@ -183,6 +187,7 @@ fn create_player_sets_entity_kind() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn create_player_attaches_capsule_collider() {
     let (server, _) = server_with_players(1);
     let data = server.data(&r0());
@@ -195,6 +200,7 @@ fn create_player_attaches_capsule_collider() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn chunk_gets_voxels_collider() {
     let server = World::basic();
     let data = server.data(&r0());
@@ -206,6 +212,7 @@ fn chunk_gets_voxels_collider() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn descending_player_stops_on_terrain() {
     let (mut server, _) = server_with_players(1);
     let mut results = BTreeMap::new();

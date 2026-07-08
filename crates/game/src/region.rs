@@ -3,6 +3,8 @@ use std::{
     collections::{BinaryHeap, VecDeque},
     ops::DerefMut,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 
 use crossbeam::channel::Sender;
 use log::info;
@@ -14,6 +16,58 @@ use crate::{
     Controller, EntityBundle, GameDataUpdate, GameError, GameEvent, GameEventKind, GhostData,
     RegionCoords, RegionId, ServerPacket,
 };
+
+/// Cumulative wall-time breakdown of `handle_event(Tick)` executions since
+/// the last `take_tick_perf()`. Native-only: `Instant::now()` panics on
+/// wasm32-unknown-unknown, so the accumulator and its call sites compile away
+/// there. Reconcile replays run through `handle_event` too, so `ticks` counts
+/// tick *executions* (main-loop + replayed), not sim-time ticks — exactly the
+/// cost the client's keep-up budget cares about. The server accumulates but
+/// never drains; a few `Instant::now()` reads per tick are noise next to the
+/// ~ms tick itself.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RegionTickPerf {
+    /// Tick executions recorded (main-loop + reconcile replays).
+    pub ticks: u32,
+    pub total: Duration,
+    /// Slowest single execution.
+    pub max: Duration,
+    /// Controller pass (camera + rapier physics step; physics dominates).
+    pub controllers: Duration,
+    /// Per-client input step + fps-cam toggle.
+    pub input: Duration,
+    /// Boundary scan + ghost expiry + tick bump.
+    pub scan: Duration,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RegionTickPerf {
+    fn record(&mut self, start: Instant, controllers_done: Instant, input_done: Instant) {
+        let end = Instant::now();
+        let total = end - start;
+        self.ticks += 1;
+        self.total += total;
+        if total > self.max {
+            self.max = total;
+        }
+        self.controllers += controllers_done - start;
+        self.input += input_done - controllers_done;
+        self.scan += end - input_done;
+    }
+
+    /// Fold another region's accumulator into this one (world-wide sum).
+    pub fn merge(&mut self, o: &RegionTickPerf) {
+        self.ticks += o.ticks;
+        self.total += o.total;
+        if o.max > self.max {
+            self.max = o.max;
+        }
+        self.controllers += o.controllers;
+        self.input += o.input;
+        self.scan += o.scan;
+    }
+}
 
 /// What one `reconcile()` pass cost the client, for keep-up metrics.
 /// A single pass can drain several buffered server events, so the counts
@@ -52,6 +106,25 @@ pub struct Region {
     /// never read (see the plan's read-after-progress invariant).
     pending_departures: Vec<(EntityBundle, RegionCoords)>,
     pending_ghosts: Vec<(GhostData, RegionCoords)>,
+    /// Wall-time attribution for Tick executions, drained by the client's
+    /// budget reporter (native only — see `RegionTickPerf`).
+    #[cfg(not(target_arch = "wasm32"))]
+    tick_perf: RegionTickPerf,
+}
+
+/// Compact one-line description of a game event for reconcile tracing.
+fn ev_desc(e: &GameEvent) -> String {
+    let kind = match &e.kind {
+        GameEventKind::Tick => "Tick".to_string(),
+        GameEventKind::PlayerInput(c, ie) => format!("PlayerInput(c={c:?}, {ie:?})"),
+        GameEventKind::CreateClient(c) => format!("CreateClient(c={c:?})"),
+        GameEventKind::Quit => "Quit".to_string(),
+        GameEventKind::EntityArrived(b) => {
+            format!("EntityArrived(c={:?})", b.client.as_ref().map(|(c, _)| *c))
+        }
+        GameEventKind::GhostUpdate(_) => "GhostUpdate".to_string(),
+    };
+    format!("[id={} r=({},{}) {}]", e.id, e.region_id.x, e.region_id.z, kind)
 }
 
 impl Region {
@@ -75,6 +148,8 @@ impl Region {
             base_event_id,
             pending_departures: Vec::new(),
             pending_ghosts: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            tick_perf: RegionTickPerf::default(),
         }
     }
 
@@ -85,6 +160,12 @@ impl Region {
         // Events older than the snapshot this region was constructed from
         // are already baked into its state.
         if server_event.id < self.base_event_id {
+            info!(
+                "[reconcile r={:?}] IGNORE {} below base_event_id={} (already baked in)",
+                self.id,
+                ev_desc(&server_event),
+                self.base_event_id
+            );
             return Ok(stats);
         }
         self.input_buffer.push(Reverse(server_event.clone()));
@@ -93,7 +174,30 @@ impl Region {
             panic!("Server event input buffer too big.");
         }
 
+        info!(
+            "[reconcile r={:?}] RECV {} | event_log.len={} front={} back={} next_id={} input_buffer.len={}",
+            self.id,
+            ev_desc(&server_event),
+            self.event_log.len(),
+            self.event_log
+                .front()
+                .map(ev_desc)
+                .unwrap_or_else(|| "none".to_string()),
+            self.event_log
+                .back()
+                .map(|e| e.id.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            *self.data.next_game_event_id,
+            self.input_buffer.len(),
+        );
+
         if self.event_log.len() == 0 {
+            info!(
+                "[reconcile r={:?}] no predictions in event_log; {} parked in input_buffer (len={})",
+                self.id,
+                ev_desc(&server_event),
+                self.input_buffer.len()
+            );
             return Ok(stats);
         }
 
@@ -105,6 +209,12 @@ impl Region {
         'outer: while !self.input_buffer.is_empty() && !self.event_log.is_empty() {
             if let Some(server_event) = self.input_buffer.pop() {
                 if let Some(event) = self.event_log.pop_front() {
+                    info!(
+                        "[reconcile r={:?}] COMPARE predicted {} vs server {}",
+                        self.id,
+                        ev_desc(&event),
+                        ev_desc(&server_event.0)
+                    );
                     if event.id == server_event.0.id {
                         if let GameEventKind::EntityArrived(bundle) = &server_event.0.kind {
                             let is_local = self.local_client_id.is_some()
@@ -115,6 +225,22 @@ impl Region {
                             }
                         }
                         if event != server_event.0 {
+                            info!(
+                                "[reconcile r={:?}] MISPREDICT at id={}: predicted {} != server {} -> rollback+replay",
+                                self.id,
+                                event.id,
+                                ev_desc(&event),
+                                ev_desc(&server_event.0)
+                            );
+                            if matches!(
+                                (&event.kind, &server_event.0.kind),
+                                (GameEventKind::PlayerInput(..), GameEventKind::PlayerInput(..))
+                            ) {
+                                info!(
+                                    "[reconcile r={:?}] INPUT-VS-INPUT FULL DIFF:\n  predicted: {:?}\n  server:    {:?}",
+                                    self.id, event, server_event.0
+                                );
+                            }
                             self.event_log.push_front(event);
                             // Replay depth = predicted ticks about to be rolled
                             // back and re-simulated for this misprediction.
@@ -144,6 +270,12 @@ impl Region {
                                 // Another client's event is an *insertion* into
                                 // our timeline: keep every prediction, shift
                                 // them all one id later.
+                                info!(
+                                    "[reconcile r={:?}] FOREIGN insert {}: keeping all {} predictions, shifting +1 id",
+                                    self.id,
+                                    ev_desc(&server_event.0),
+                                    temp_log.len()
+                                );
                                 for event in &mut temp_log {
                                     event.id += 1;
                                 }
@@ -155,6 +287,7 @@ impl Region {
                                 // candidates for removal.
                                 let len = temp_log.len();
                                 let mut i = 0;
+                                let mut removed_id = None;
                                 while i < temp_log.len() {
                                     let e = &mut temp_log[i];
                                     let local_origin = match e.kind.origin_client() {
@@ -162,6 +295,7 @@ impl Region {
                                         None => true,
                                     };
                                     if local_origin && e.kind.matches_prediction(&server_event.0.kind) {
+                                        removed_id = Some(e.id);
                                         temp_log.remove(i);
                                         break;
                                     }
@@ -170,22 +304,55 @@ impl Region {
                                 }
                                 if len == temp_log.len() {
                                     info!(
-                                        "Client didn't have event recieved from server. Client must be behind."
+                                        "[reconcile r={:?}] NO MATCHING PREDICTION for server {} — client behind; kept all {} predictions, NOTHING removed/forgotten",
+                                        self.id,
+                                        ev_desc(&server_event.0),
+                                        len
+                                    );
+                                } else {
+                                    info!(
+                                        "[reconcile r={:?}] removed local prediction id={:?} matching server {}; {} predictions remain, shifted",
+                                        self.id,
+                                        removed_id,
+                                        ev_desc(&server_event.0),
+                                        temp_log.len()
                                     );
                                 }
                             }
 
                             for event in &mut temp_log {
-                                let _ = self.handle_event(event.clone().kind);
+                                let replayed = self.handle_event(event.clone().kind);
+                                match replayed {
+                                    Ok(r) if r.id != event.id => info!(
+                                        "[reconcile r={:?}] REPLAY-ID-SKEW: temp_log says id={} but handle_event assigned id={}",
+                                        self.id, event.id, r.id
+                                    ),
+                                    Err(ref e) => info!(
+                                        "[reconcile r={:?}] REPLAY-ERR for {}: {:?}",
+                                        self.id,
+                                        ev_desc(event),
+                                        e
+                                    ),
+                                    _ => {}
+                                }
                             }
                             self.event_log = temp_log;
                         } else {
+                            info!(
+                                "[reconcile r={:?}] MATCH+FORGET {}",
+                                self.id,
+                                ev_desc(&server_event.0)
+                            );
                             self.data.forget();
                         }
                     } else {
                         // IDs are incorrect, game event arrived out of order.
-                        info!("Arrived out of order, Adding to input buffer.");
-                        info!("{:?} != {:?}", server_event, event);
+                        info!(
+                            "[reconcile r={:?}] OUT-OF-ORDER: predicted {} vs server {} (ids differ); re-buffer both, break",
+                            self.id,
+                            ev_desc(&event),
+                            ev_desc(&server_event.0)
+                        );
                         self.input_buffer.push(server_event);
                         self.event_log.push_front(event);
                         break 'outer;
@@ -195,9 +362,36 @@ impl Region {
         }
 
         if applied_local_arrival {
+            info!(
+                "[reconcile r={:?}] applied local player arrival; evicting orphan lag-window inputs",
+                self.id
+            );
             self.evict_orphan_local_inputs();
         }
 
+        // Id-accounting invariant: predictions are appended with ids from
+        // next_game_event_id, so the log tail must sit exactly one below it.
+        // A violation means the replay/evict machinery desynced the counter.
+        if let Some(back) = self.event_log.back() {
+            let next = *self.data.next_game_event_id;
+            if back.id + 1 != next {
+                log::warn!(
+                    "[reconcile r={:?}] ID-DESYNC: event_log back id={} but next_game_event_id={} (expected back+1==next); front={}",
+                    self.id,
+                    back.id,
+                    next,
+                    self.event_log.front().map(ev_desc).unwrap_or_default(),
+                );
+            }
+        }
+        info!(
+            "[reconcile r={:?}] DONE: event_log.len={} input_buffer.len={} buffered_min_id={:?} mispredicts_this_pass={}",
+            self.id,
+            self.event_log.len(),
+            self.input_buffer.len(),
+            self.input_buffer.peek().map(|Reverse(e)| e.id),
+            stats.mispredictions
+        );
         Ok(stats)
     }
 
@@ -253,10 +447,14 @@ impl Region {
         let _b = &event.kind;
         match event.kind.clone() {
             GameEventKind::Tick => {
+                #[cfg(not(target_arch = "wasm32"))]
+                let tick_start = Instant::now();
                 for c in self.controllers.iter_mut() {
                     let data = self.data.as_refs_mut();
                     c.on_tick(data.data);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                let controllers_done = Instant::now();
                 let data: &mut GameData = self.data.deref_mut();
                 let keys: Vec<ClientId> = data.clients.keys().cloned().collect();
                 for client_id in keys {
@@ -278,11 +476,15 @@ impl Region {
                         ));
                     }
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                let input_done = Instant::now();
                 let (departures, ghosts) = self.data.scan_boundaries(self.id);
                 self.pending_departures = departures;
                 self.pending_ghosts = ghosts;
                 self.data.expire_ghosts();
                 self.data.tick.update(|t| *t += 1);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.tick_perf.record(tick_start, controllers_done, input_done);
             }
             GameEventKind::PlayerInput(client_id, player_event) => {
                 let data: &mut GameData = self.data.deref_mut();
@@ -313,6 +515,12 @@ impl Region {
 
     pub fn current_tick(&self) -> usize {
         *self.data.tick
+    }
+
+    /// Drain the cumulative Tick wall-time breakdown (native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn take_tick_perf(&mut self) -> RegionTickPerf {
+        std::mem::take(&mut self.tick_perf)
     }
 
     /// Ids of locally-predicted events awaiting server confirmation.

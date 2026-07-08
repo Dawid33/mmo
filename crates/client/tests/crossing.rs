@@ -17,6 +17,7 @@ use client::harness::{Dir, SimHarness};
 /// instantaneous one. The deeper case (input held INDEFINITELY across a seam,
 /// which never settles) remains the deferred protocol-level item in TODO.md.
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn walking_across_a_region_boundary_keeps_input_and_converges() {
     let mut h = SimHarness::new();
     h.connect();
@@ -30,6 +31,7 @@ fn walking_across_a_region_boundary_keeps_input_and_converges() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn crossing_is_deterministic() {
     // Same script twice -> identical final client state hash.
     fn run() -> u32 {

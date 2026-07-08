@@ -28,6 +28,7 @@ fn window_3x3_is_the_nine_neighbours() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn reconcile_event_tolerates_unknown_region() {
     let mut world = game::World::basic();
     let ev = game::GameEvent::new(game::GameEventKind::Tick, 0, RegionCoords::new(99, 99));

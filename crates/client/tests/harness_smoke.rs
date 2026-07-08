@@ -1,6 +1,7 @@
 use client::harness::SimHarness;
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn harness_connects_and_ticks_without_panic() {
     let mut h = SimHarness::new();
     h.connect();
@@ -13,6 +14,7 @@ fn harness_connects_and_ticks_without_panic() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn releasing_a_key_stops_the_player() {
     // Regression: release() must emit the key-up edge, else the sim keeps the
     // key `Held` forever and a released movement key drives the player forever.
@@ -35,6 +37,7 @@ fn releasing_a_key_stops_the_player() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn static_world_converges_client_and_server() {
     let mut h = SimHarness::new();
     h.connect();
@@ -43,6 +46,7 @@ fn static_world_converges_client_and_server() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn held_input_moves_the_player() {
     let mut h = SimHarness::new();
     h.connect();
