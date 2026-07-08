@@ -83,7 +83,7 @@ impl Plugin for SimBridgePlugin {
                     interpolate::interpolate_transforms,
                     avatar::attach_avatars,
                     hud::toggle_debug,
-                    collider_debug::draw_collider_wireframes,
+                    collider_debug::draw_collider_wireframes.after(hud::toggle_debug),
                     hud::update_debug_text,
                     hud::update_crosshair_visibility,
                 ),

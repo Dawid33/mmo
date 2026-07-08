@@ -135,6 +135,7 @@ pub fn drain_client_updates(
                 remove_far_region(&mut commands, &mut far_roots, id);
                 if roots.0.contains_key(&id) {
                     remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
+                    debug_lines.0.remove(&id);
                 }
                 spawn_far_region(&mut commands, &mut far_roots, id, &snap);
                 info!("bridge: far region {:?} loaded", id);

@@ -504,7 +504,10 @@ impl GameInstanceManager {
         // Viewer = local player's body, rebased to world space via home.
         let (Some(local), Some(home)) = (self.local_player_translation(), self.home_region)
         else {
-            return; // no player body yet: no lines beats wrong lines
+            // no player body yet: no lines beats wrong lines — the render side
+            // keeps drawing the last buffers until the body is readable again
+            // (debug-only, self-healing).
+            return;
         };
         let hoff = home.world_offset();
         let world_pos = [local[0] + hoff[0], local[1] + hoff[1], local[2] + hoff[2]];
