@@ -49,6 +49,9 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<bridge::SimEntityMap>()
             .init_resource::<hud::HudStatus>()
             .init_resource::<avatar::AvatarAssets>()
+            .init_resource::<meshing::queue::ChunkGrid>()
+            .init_resource::<meshing::queue::RemeshQueue>()
+            .init_resource::<meshing::queue::MeshBudgets>()
             .add_systems(
                 PreUpdate,
                 (
@@ -67,8 +70,13 @@ impl Plugin for SimBridgePlugin {
             .add_systems(
                 Update,
                 (
-                    meshing::queue_meshing,
-                    meshing::apply_meshed_chunks,
+                    (
+                        meshing::queue::mark_remesh_dirty,
+                        meshing::queue::prune_chunk_grid,
+                        meshing::queue::spawn_mesh_tasks,
+                        meshing::apply_meshed_chunks,
+                    )
+                        .chain(),
                     interpolate::interpolate_transforms,
                     avatar::attach_avatars,
                     hud::toggle_debug,

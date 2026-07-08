@@ -4,11 +4,16 @@
 
 use std::collections::BTreeMap;
 
+use bevy::camera::primitives::{Frustum, Sphere};
 use bevy::prelude::*;
+use bevy::tasks::AsyncComputeTaskPool;
 use game::{Voxel, CHUNK_VOXEL_COUNT};
 
 use super::super::bridge::VoxelData;
-use super::neighbors::{zone_index, zone_offsets};
+use super::super::block_textures::BlockTextureLayers;
+use super::binary::PaddedVoxels;
+use super::neighbors::{gather_padded, zone_index, zone_offsets};
+use super::{build_chunk_mesh, MeshingTask};
 
 /// World-space chunk grid: key = world position / 32. Render-side spatial
 /// index for neighbor lookups; rebuilt from entities, never persisted.
@@ -30,6 +35,105 @@ pub struct BoundaryZones(pub [u32; 26]);
 #[derive(Resource, Default)]
 pub struct RemeshQueue {
     pub dirty: BTreeMap<Entity, Option<[i32; 3]>>,
+}
+
+/// Cap on concurrently queued meshing tasks. Each task owns a ~77 KB padded
+/// snapshot; the cap bounds join-burst memory and lets priority reordering
+/// act on everything not yet started. Tunable.
+pub const MAX_IN_FLIGHT_MESH_TASKS: usize = 64;
+/// Cap on finished meshes attached per frame — bounds per-frame GPU upload
+/// spikes during bursts. Tunable.
+pub const MESH_UPLOADS_PER_FRAME: usize = 32;
+
+#[derive(Resource)]
+pub struct MeshBudgets {
+    pub max_in_flight: usize,
+    pub uploads_per_frame: usize,
+}
+
+impl Default for MeshBudgets {
+    fn default() -> Self {
+        Self {
+            max_in_flight: MAX_IN_FLIGHT_MESH_TASKS,
+            uploads_per_frame: MESH_UPLOADS_PER_FRAME,
+        }
+    }
+}
+
+/// Sort rank: out-of-frustum chunks after in-frustum, then by squared
+/// distance to the camera. No camera (headless/startup) ranks everything 0.
+fn chunk_rank(key: [i32; 3], cam: Option<(&GlobalTransform, Option<&Frustum>)>) -> u64 {
+    let Some((tf, frustum)) = cam else { return 0 };
+    let center = Vec3::new(
+        key[0] as f32 * 32.0 + 16.0,
+        key[1] as f32 * 32.0 + 16.0,
+        key[2] as f32 * 32.0 + 16.0,
+    );
+    let dist2 = tf.translation().distance_squared(center) as u64;
+    let out = frustum
+        .map(|f| {
+            !f.intersects_sphere(
+                &Sphere { center: center.into(), radius: 16.0 * 3f32.sqrt() },
+                false,
+            )
+        })
+        .unwrap_or(false);
+    ((out as u64) << 62) | dist2.min((1 << 62) - 1)
+}
+
+/// Drain the dirty queue into meshing tasks, nearest-first, up to the
+/// in-flight budget. Re-inserting `MeshingTask` supersedes (cancels) any
+/// prior in-flight task for that entity — same rule as the old pipeline.
+pub fn spawn_mesh_tasks(
+    mut commands: Commands,
+    mut queue: ResMut<RemeshQueue>,
+    budgets: Res<MeshBudgets>,
+    grid: Res<ChunkGrid>,
+    chunks: Query<&VoxelData>,
+    in_flight: Query<(), With<MeshingTask>>,
+    camera: Query<(&GlobalTransform, Option<&Frustum>), With<Camera3d>>,
+    layers: Res<BlockTextureLayers>,
+) {
+    if queue.dirty.is_empty() {
+        return;
+    }
+    // Entities that lost VoxelData while queued are stale — drop them.
+    queue.dirty.retain(|e, _| chunks.contains(*e));
+    let capacity = budgets.max_in_flight.saturating_sub(in_flight.iter().count());
+    if capacity == 0 {
+        return;
+    }
+    let cam = camera.iter().next();
+    let mut ranked: Vec<(u64, Entity, Option<[i32; 3]>)> = queue
+        .dirty
+        .iter()
+        .map(|(&e, &key)| (key.map_or(0, |k| chunk_rank(k, cam)), e, key))
+        .collect();
+    ranked.sort_unstable_by_key(|(rank, e, _)| (*rank, *e));
+
+    let pool = AsyncComputeTaskPool::get();
+    for (_, e, key) in ranked.into_iter().take(capacity) {
+        queue.dirty.remove(&e);
+        let Ok(voxels) = chunks.get(e) else { continue };
+        let padded = match key {
+            Some(k) => {
+                let mut neigh: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
+                for off in zone_offsets() {
+                    let nk = [k[0] + off[0], k[1] + off[1], k[2] + off[2]];
+                    if let Some(&ne) = grid.0.get(&nk) {
+                        if let Ok(nv) = chunks.get(ne) {
+                            neigh.insert(off, nv.0.as_slice());
+                        }
+                    }
+                }
+                gather_padded(&voxels.0, &neigh)
+            }
+            None => PaddedVoxels::from_interior(&voxels.0),
+        };
+        let layers = layers.0.clone();
+        let task = pool.spawn(async move { build_chunk_mesh(&padded, &BlockTextureLayers(layers)) });
+        commands.entity(e).insert(MeshingTask(task));
+    }
 }
 
 /// Hash the 26 boundary zones of a 32³ chunk. Zones overlap on purpose: a
@@ -242,5 +346,128 @@ mod tests {
         app.world_mut().entity_mut(e).despawn();
         app.update();
         assert!(app.world().resource::<ChunkGrid>().0.is_empty());
+    }
+
+    use super::super::{apply_meshed_chunks, MeshingTask};
+    use super::super::super::block_textures::BlockTextureLayers;
+    use bevy::mesh::VertexAttributeValues;
+
+    fn pipeline_app(budgets: MeshBudgets) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<ChunkGrid>()
+            .init_resource::<RemeshQueue>()
+            .init_resource::<BlockTextureLayers>()
+            .insert_resource(budgets)
+            .add_systems(
+                Update,
+                (mark_remesh_dirty, prune_chunk_grid, spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
+        app
+    }
+
+    #[test]
+    fn in_flight_budget_is_respected_and_nearest_meshes_first() {
+        let mut app = pipeline_app(MeshBudgets { max_in_flight: 1, uploads_per_frame: 32 });
+        // Camera at origin.
+        app.world_mut().spawn((
+            Camera3d::default(),
+            GlobalTransform::from(Transform::from_translation(Vec3::ZERO)),
+        ));
+        let near = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
+        let far = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(320.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        app.update();
+        assert!(
+            app.world().entity(near).contains::<MeshingTask>(),
+            "nearest chunk claims the single task slot"
+        );
+        assert!(
+            !app.world().entity(far).contains::<MeshingTask>(),
+            "budget of 1 leaves the far chunk queued"
+        );
+        assert!(app.world().resource::<RemeshQueue>().dirty.contains_key(&far));
+    }
+
+    #[test]
+    fn upload_budget_spreads_mesh_attach_over_frames() {
+        let mut app = pipeline_app(MeshBudgets { max_in_flight: 64, uploads_per_frame: 1 });
+        let a = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
+        let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        // Let tasks finish, then count Mesh3d arrivals per frame.
+        for _ in 0..200 {
+            app.update();
+            let done = [a, b]
+                .iter()
+                .filter(|e| app.world().entity(**e).contains::<Mesh3d>())
+                .count();
+            if done == 1 {
+                // Exactly one landed this frame — the cap held. Let the other land.
+                for _ in 0..200 {
+                    app.update();
+                    if app.world().entity(b).contains::<Mesh3d>()
+                        && app.world().entity(a).contains::<Mesh3d>()
+                    {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                panic!("second mesh never attached");
+            }
+            assert!(done < 2, "both meshes attached in one frame despite uploads_per_frame=1");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("no mesh ever attached");
+    }
+
+    #[test]
+    fn meshing_uses_neighbor_data_from_the_grid() {
+        // Two solid X-adjacent chunks: after both mesh, neither may have quads
+        // on the shared plane. This is the end-to-end neighbor-culling test.
+        let mut app = pipeline_app(MeshBudgets::default());
+        let full: Vec<Voxel> = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+        let a = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, full.clone());
+        let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), full);
+        for _ in 0..200 {
+            app.update();
+            if app.world().entity(a).contains::<Mesh3d>()
+                && app.world().entity(b).contains::<Mesh3d>()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Chunk a spans x 0..32: with a solid +X neighbor its mesh must have
+        // no vertex at x=32 with a +X normal. (b meshed before a existed may
+        // still carry its -X wall only if it meshed first without a — the
+        // zone diff re-dirties it; loop until both settle.)
+        for _ in 0..200 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let queue_empty = app.world().resource::<RemeshQueue>().dirty.is_empty();
+            let none_in_flight =
+                app.world_mut().query::<&MeshingTask>().iter(app.world()).next().is_none();
+            if queue_empty && none_in_flight {
+                break;
+            }
+        }
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let check = |e: Entity, plane_x: f32, normal_x: f32| {
+            let handle = app.world().entity(e).get::<Mesh3d>().expect("meshed").0.clone();
+            let mesh = meshes.get(&handle).unwrap();
+            let (Some(VertexAttributeValues::Float32x3(pos)), Some(VertexAttributeValues::Float32x3(nor))) = (
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION),
+                mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
+            ) else {
+                panic!()
+            };
+            assert!(
+                !pos.iter().zip(nor).any(|(p, n)| p[0] == plane_x && n[0] == normal_x),
+                "face on the shared plane survived neighbor culling"
+            );
+        };
+        check(a, 32.0, 1.0);
+        check(b, 0.0, -1.0);
     }
 }

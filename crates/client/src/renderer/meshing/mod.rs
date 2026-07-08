@@ -1,7 +1,7 @@
 use bevy::mesh::Mesh;
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
+use bevy::tasks::{block_on, futures_lite::future, Task};
 
 use super::block_textures::BlockTextureLayers;
 use super::voxel_material::StandardVoxelMaterial;
@@ -21,31 +21,15 @@ pub fn build_chunk_mesh(padded: &PaddedVoxels, layers: &BlockTextureLayers) -> O
 #[derive(Resource)]
 pub struct ChunkMaterial(pub Handle<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>);
 
-/// In-flight background mesh build for an entity, spawned by `queue_meshing` and
-/// polled to completion by `apply_meshed_chunks`.
+/// In-flight background mesh build for an entity, spawned by `queue::spawn_mesh_tasks`
+/// and polled to completion by `apply_meshed_chunks`.
 #[derive(Component)]
 pub struct MeshingTask(Task<Option<Mesh>>);
 
-/// Spawns a background meshing job whenever an entity's `VoxelData` changes. Inserting
-/// a fresh `MeshingTask` replaces any prior in-flight task component-wise; the old
-/// `Task` is dropped (and its background work cancelled/discarded) along with it, so
-/// stale results can never land after a newer edit.
-pub fn queue_meshing(
-    mut commands: Commands,
-    changed: Query<(Entity, &super::bridge::VoxelData), Changed<super::bridge::VoxelData>>,
-    layers: Res<BlockTextureLayers>,
-) {
-    let pool = AsyncComputeTaskPool::get();
-    for (e, voxels) in &changed {
-        let padded = PaddedVoxels::from_interior(&voxels.0);
-        let layers = layers.0.clone();
-        let task = pool.spawn(async move { build_chunk_mesh(&padded, &BlockTextureLayers(layers)) });
-        commands.entity(e).insert(MeshingTask(task));
-    }
-}
-
 /// Polls in-flight `MeshingTask`s to completion and attaches the resulting `Mesh3d`
-/// (or strips it, for an all-air chunk). Also handles `VoxelData` removal.
+/// (or strips it, for an all-air chunk), up to `budgets.uploads_per_frame` per frame —
+/// remaining completed tasks attach next frame. Also handles `VoxelData` removal
+/// (uncapped: a chunk that's gone must not linger with a stale mesh).
 pub fn apply_meshed_chunks(
     mut commands: Commands,
     mut tasks: Query<(Entity, &mut MeshingTask)>,
@@ -53,9 +37,15 @@ pub fn apply_meshed_chunks(
     mut meshes: ResMut<Assets<Mesh>>,
     material: Option<Res<ChunkMaterial>>,
     still_alive: Query<Entity, With<super::bridge::VoxelData>>,
+    budgets: Res<queue::MeshBudgets>,
 ) {
+    let mut applied = 0usize;
     for (e, mut task) in &mut tasks {
+        if applied >= budgets.uploads_per_frame {
+            break; // remaining completed tasks attach next frame
+        }
         let Some(result) = block_on(future::poll_once(&mut task.0)) else { continue };
+        applied += 1;
         match result {
             Some(mesh) => {
                 let mut ec = commands.entity(e);
@@ -165,13 +155,20 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
-            .add_systems(Update, (queue_meshing, apply_meshed_chunks));
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
         app.update();
         // Non-racy evidence that meshing actually went through the async path rather
-        // than, say, `queue_meshing` never running: the task must be queued (and not
+        // than, say, `spawn_mesh_tasks` never running: the task must be queued (and not
         // yet resolved, since nothing has polled it before this first `Update`) before
         // we start looping to await its completion below.
         assert!(app.world().entity(e).contains::<MeshingTask>(), "MeshingTask should be queued after first update");
@@ -210,7 +207,14 @@ mod tests {
             .init_asset::<Image>()
             .init_asset::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>()
             .init_resource::<BlockTextureLayers>()
-            .add_systems(Update, (queue_meshing, apply_meshed_chunks));
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
 
         let image_handle = app.world_mut().resource_mut::<Assets<Image>>().add(Image::default());
         let handle = app
@@ -250,7 +254,14 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
-            .add_systems(Update, (queue_meshing, apply_meshed_chunks));
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
 
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
