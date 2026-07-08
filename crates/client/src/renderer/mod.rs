@@ -11,6 +11,7 @@ use game::{ClientId, ClientUpdateEvent, GameEventKind};
 mod avatar;
 mod block_textures;
 pub(crate) mod bridge;
+pub(crate) mod collider_debug;
 pub(crate) mod hud;
 pub mod convert;
 pub(crate) mod input;
@@ -34,6 +35,7 @@ pub struct LocalPlayer(pub Option<ClientId>);
 pub struct SimBridgePlugin {
     pub client_recv: Receiver<ClientUpdateEvent>,
     pub game_send: Sender<GameEventKind>,
+    pub debug_flags: game::DebugFlags,
 }
 
 impl Plugin for SimBridgePlugin {
@@ -54,6 +56,8 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<ui_bridge::UiUpdates>()
             .init_resource::<ui_bridge::UiWidgetMap>()
             .init_resource::<ui_bridge::UiRoot>()
+            .insert_resource(collider_debug::DebugFlagsRes(self.debug_flags.clone()))
+            .init_resource::<collider_debug::DebugColliderLines>()
             .add_observer(ui_input::on_widget_click)
             .add_systems(
                 PreUpdate,
@@ -79,6 +83,7 @@ impl Plugin for SimBridgePlugin {
                     interpolate::interpolate_transforms,
                     avatar::attach_avatars,
                     hud::toggle_debug,
+                    collider_debug::draw_collider_wireframes,
                     hud::update_debug_text,
                     hud::update_crosshair_visibility,
                 ),

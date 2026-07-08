@@ -169,6 +169,7 @@ fn main() {
     .add_plugins(renderer::SimBridgePlugin {
         client_recv,
         game_send: game_send.clone(),
+        debug_flags: debug_flags.clone(),
     });
 
     #[cfg(target_arch = "wasm32")]
