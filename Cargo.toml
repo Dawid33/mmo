@@ -111,7 +111,7 @@ hashbrown = { version = "0.16", default-features = false, features = [
   "default-hasher",
 ] }
 parry3d = { path = "crates/parry/crates/parry3d" }
-rapier3d = { path = "crates/rapier/crates/rapier3d", features = ["enhanced-determinism"] }
+rapier3d = { path = "crates/rapier/crates/rapier3d", features = ["enhanced-determinism", "debug-render"] }
 slotmapd = {path = "crates/slotmapd"}
 num-traits = { version = "0.2.11" }
 wtransport = { version = "0.7", default-features = false, features = ["self-signed", "ring"] }

@@ -67,10 +67,10 @@ impl Default for DebugRenderStyle {
             multibody_joint_separation_color: [0.0, 1.0, 0.4, 1.0],
             sleep_color_multiplier: [1.0, 1.0, 0.2, 1.0],
             disabled_color_multiplier: [0.0, 0.0, 1.0, 1.0],
-            rigid_body_axes_length: 0.5,
+            rigid_body_axes_length: Real::from(0.5),
             contact_depth_color: [120.0, 1.0, 0.4, 1.0],
             contact_normal_color: [0.0, 1.0, 1.0, 1.0],
-            contact_normal_length: 0.3,
+            contact_normal_length: Real::from(0.3),
             collider_aabb_color: [124.0, 1.0, 0.4, 1.0],
         }
     }

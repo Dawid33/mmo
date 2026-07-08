@@ -390,13 +390,13 @@ impl DebugRenderPipeline {
             }
             TypedShape::Capsule(s) => {
                 let vtx = s.to_polyline(self.style.subdivisions);
-                backend.draw_line_strip(object, &vtx, pos, &Vector::repeat(1.0), color, true)
+                backend.draw_line_strip(object, &vtx, pos, &Vector::repeat(Real::from(1.0)), color, true)
             }
             TypedShape::Segment(s) => backend.draw_line_strip(
                 object,
                 &[s.a, s.b],
                 pos,
-                &Vector::repeat(1.0),
+                &Vector::repeat(Real::from(1.0)),
                 color,
                 false,
             ),
@@ -404,7 +404,7 @@ impl DebugRenderPipeline {
                 object,
                 &[s.a, s.b, s.c],
                 pos,
-                &Vector::repeat(1.0),
+                &Vector::repeat(Real::from(1.0)),
                 color,
                 true,
             ),
@@ -418,14 +418,14 @@ impl DebugRenderPipeline {
                 s.vertices(),
                 s.indices(),
                 pos,
-                &Vector::repeat(1.0),
+                &Vector::repeat(Real::from(1.0)),
                 color,
             ),
             TypedShape::HalfSpace(s) => {
                 let basis = s.normal.orthonormal_basis()[0];
                 let a = Point::from(basis) * 10_000.0;
                 let b = Point::from(basis) * -10_000.0;
-                backend.draw_line_strip(object, &[a, b], pos, &Vector::repeat(1.0), color, false)
+                backend.draw_line_strip(object, &[a, b], pos, &Vector::repeat(Real::from(1.0)), color, false)
             }
             TypedShape::HeightField(s) => {
                 for seg in s.segments() {
@@ -438,14 +438,14 @@ impl DebugRenderPipeline {
                 }
             }
             TypedShape::ConvexPolygon(s) => {
-                backend.draw_line_strip(object, s.points(), pos, &Vector::repeat(1.0), color, true)
+                backend.draw_line_strip(object, s.points(), pos, &Vector::repeat(Real::from(1.0)), color, true)
             }
             /*
              * Round shapes.
              */
             TypedShape::RoundCuboid(s) => {
                 let vtx = s.to_polyline(self.style.border_subdivisions);
-                backend.draw_line_strip(object, &vtx, pos, &Vector::repeat(1.0), color, true)
+                backend.draw_line_strip(object, &vtx, pos, &Vector::repeat(Real::from(1.0)), color, true)
             }
             TypedShape::RoundTriangle(s) => {
                 // TODO: take roundness into account.
@@ -457,11 +457,11 @@ impl DebugRenderPipeline {
             // }
             TypedShape::RoundConvexPolygon(s) => {
                 let vtx = s.to_polyline(self.style.border_subdivisions);
-                backend.draw_line_strip(object, &vtx, pos, &Vector::repeat(1.0), color, true)
+                backend.draw_line_strip(object, &vtx, pos, &Vector::repeat(Real::from(1.0)), color, true)
             }
             TypedShape::Voxels(s) => {
                 let (vtx, idx) = s.to_polyline();
-                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(1.0), color)
+                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(Real::from(1.0)), color)
             }
             TypedShape::Custom(_) => {}
         }
@@ -491,25 +491,32 @@ impl DebugRenderPipeline {
             }
             TypedShape::Cuboid(s) => {
                 let (vtx, idx) = &self.instances[&TypeId::of::<Cuboid>()];
-                backend.draw_polyline(object, vtx, idx, pos, &(s.half_extents * 2.0), color)
+                backend.draw_polyline(
+                    object,
+                    vtx,
+                    idx,
+                    pos,
+                    &(s.half_extents * Real::from(2.0)),
+                    color,
+                )
             }
             TypedShape::Capsule(s) => {
                 let (vtx, idx) = s.to_outline(self.style.subdivisions);
-                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(1.0), color)
+                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(Real::from(1.0)), color)
             }
             TypedShape::Segment(s) => backend.draw_polyline(
                 object,
                 &[s.a, s.b],
                 &[[0, 1]],
                 pos,
-                &Vector::repeat(1.0),
+                &Vector::repeat(Real::from(1.0)),
                 color,
             ),
             TypedShape::Triangle(s) => backend.draw_line_strip(
                 object,
                 &[s.a, s.b, s.c],
                 pos,
-                &Vector::repeat(1.0),
+                &Vector::repeat(Real::from(1.0)),
                 color,
                 true,
             ),
@@ -523,21 +530,21 @@ impl DebugRenderPipeline {
                 s.vertices(),
                 s.indices(),
                 pos,
-                &Vector::repeat(1.0),
+                &Vector::repeat(Real::from(1.0)),
                 color,
             ),
             TypedShape::HalfSpace(s) => {
                 let basis = s.normal.orthonormal_basis();
-                let a = Point::from(basis[0]) * 10_000.0;
-                let b = Point::from(basis[0]) * -10_000.0;
-                let c = Point::from(basis[1]) * 10_000.0;
-                let d = Point::from(basis[1]) * -10_000.0;
+                let a = Point::from(basis[0]) * Real::from(10_000.0);
+                let b = Point::from(basis[0]) * Real::from(-10_000.0);
+                let c = Point::from(basis[1]) * Real::from(10_000.0);
+                let d = Point::from(basis[1]) * Real::from(-10_000.0);
                 backend.draw_polyline(
                     object,
                     &[a, b, c, d],
                     &[[0, 1], [2, 3]],
                     pos,
-                    &Vector::repeat(1.0),
+                    &Vector::repeat(Real::from(1.0)),
                     color,
                 )
             }
@@ -562,7 +569,7 @@ impl DebugRenderPipeline {
                     s.points(),
                     &indices,
                     pos,
-                    &Vector::repeat(1.0),
+                    &Vector::repeat(Real::from(1.0)),
                     color,
                 )
             }
@@ -573,7 +580,7 @@ impl DebugRenderPipeline {
                     vtx,
                     idx,
                     pos,
-                    &(Vector::new(s.radius, s.half_height, s.radius) * 2.0),
+                    &(Vector::new(s.radius, s.half_height, s.radius) * Real::from(2.0)),
                     color,
                 )
             }
@@ -584,7 +591,7 @@ impl DebugRenderPipeline {
                     vtx,
                     idx,
                     pos,
-                    &(Vector::new(s.radius, s.half_height, s.radius) * 2.0),
+                    &(Vector::new(s.radius, s.half_height, s.radius) * Real::from(2.0)),
                     color,
                 )
             }
@@ -593,7 +600,7 @@ impl DebugRenderPipeline {
              */
             TypedShape::RoundCuboid(s) => {
                 let (vtx, idx) = s.to_outline(self.style.border_subdivisions);
-                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(1.0), color)
+                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(Real::from(1.0)), color)
             }
             TypedShape::RoundTriangle(s) => {
                 // TODO: take roundness into account.
@@ -606,20 +613,20 @@ impl DebugRenderPipeline {
             TypedShape::RoundCylinder(s) => {
                 let (vtx, idx) =
                     s.to_outline(self.style.subdivisions, self.style.border_subdivisions);
-                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(1.0), color)
+                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(Real::from(1.0)), color)
             }
             TypedShape::RoundCone(s) => {
                 let (vtx, idx) =
                     s.to_outline(self.style.subdivisions, self.style.border_subdivisions);
-                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(1.0), color)
+                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(Real::from(1.0)), color)
             }
             TypedShape::RoundConvexPolyhedron(s) => {
                 let (vtx, idx) = s.to_outline(self.style.border_subdivisions);
-                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(1.0), color)
+                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(Real::from(1.0)), color)
             }
             TypedShape::Voxels(s) => {
                 let (vtx, idx) = s.to_outline();
-                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(1.0), color)
+                backend.draw_polyline(object, &vtx, &idx, pos, &Vector::repeat(Real::from(1.0)), color)
             }
             TypedShape::Custom(_) => {}
         }
