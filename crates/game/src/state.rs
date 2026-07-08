@@ -290,15 +290,9 @@ const PLAYER_SPAWN_FALLBACK_Y: f32 = 26.0;
 impl Rollback {
     pub fn create_mesh(&mut self, coords: ChunkCoords, chunk: Chunk) -> EntityKey {
         let e = self.ecs.create_entity_safe();
-        let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
-        // Deterministic linearize order; grid coords are body-local.
-        let solid: Vec<Point<i32>> = (0..ChunkShape::SIZE)
-            .filter(|i| voxels[*i as usize].block != BlockId::AIR)
-            .map(|i| {
-                let [x, y, z] = ChunkShape::delinearize(i);
-                Point::new(x as i32, y as i32, z as i32)
-            })
-            .collect();
+        // Two-scale decomposition: whole solid blocks at block scale, chisel
+        // detail at voxel scale. Covers exactly derive_voxels' solid cells.
+        let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
         self.ecs.chunk.set_safe(e, Some(chunk));
         let position = IsometryReal::from_parts(
             Translation3::new(
@@ -319,8 +313,16 @@ impl Rollback {
         let handle = scope.insert(body);
         scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
         self.ecs.rigidbody.set_safe(e, Some(handle));
-        if !solid.is_empty() {
-            self.attach_voxels_collider_safe(e, handle, &solid);
+        if !cells.blocks.is_empty() {
+            self.attach_voxels_collider_safe(
+                e,
+                handle,
+                &cells.blocks,
+                Real::from(crate::BLOCK_VOXELS as RawReal),
+            );
+        }
+        if !cells.voxels.is_empty() {
+            self.attach_voxels_collider_safe(e, handle, &cells.voxels, Real::from(1.0));
         }
         e
     }
@@ -382,17 +384,19 @@ impl Rollback {
         }
     }
 
-    /// Attach a voxel-grid collider to an entity's body. One cell per solid
-    /// voxel; cell g spans [g, g+1) in body-local space, matching the render
-    /// mesh. Entity-generic. Undo restores the whole PhysicsState snapshot —
-    /// same rationale as attach_capsule_collider_safe.
+    /// Attach a voxel-grid collider to an entity's body. One cell per key;
+    /// for voxel size `s`, cell g spans [g*s, (g+1)*s) in body-local space —
+    /// scale 1.0 is the render mesh's voxel grid, scale `BLOCK_VOXELS` is
+    /// the block grid. Entity-generic. Undo restores the whole PhysicsState
+    /// snapshot — same rationale as attach_capsule_collider_safe.
     pub fn attach_voxels_collider_safe(
         &mut self,
         e: EntityKey,
         body: RigidBodyHandle,
         coords: &[Point<i32>],
+        voxel_size: Real,
     ) {
-        let collider = ColliderBuilder::voxels(Vector::repeat(Real::from(1.0)), coords)
+        let collider = ColliderBuilder::voxels(Vector::repeat(voxel_size), coords)
             .user_data(e.data().as_ffi() as u128)
             .build();
         let p = self.data.physics.snapshot_raw();
