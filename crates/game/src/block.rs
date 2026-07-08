@@ -292,7 +292,7 @@ mod tests {
         }
         for v in &cells.voxels {
             let dup = !s.insert((v.x, v.y, v.z));
-            assert!(!dup, "voxel-scale cell {v:?} overlaps a block-scale cell");
+            assert!(!dup, "voxel-scale cell {v:?} duplicates a covered cell");
         }
         s
     }
@@ -358,6 +358,16 @@ mod tests {
         cd.set(3, 7, 11, true, 0);
         single_chisel.chisel.insert(BlockIndex(0), cd);
 
+        // Chisel entry wins over the (air) block id: blocks[0] stays AIR, but
+        // the chisel data marks a few voxels occupied with a non-air palette
+        // material, so those voxels must still be solid/covered.
+        let mut chisel_on_air_block = Chunk::default();
+        let mut cd2 = ChiselData::new(vec![BlockId(1)]);
+        cd2.set(1, 2, 3, true, 0);
+        cd2.set(4, 5, 6, true, 0);
+        cd2.set(7, 8, 9, true, 0);
+        chisel_on_air_block.chisel.insert(BlockIndex(0), cd2);
+
         let cases = [
             Chunk::uniform(Block::new(BlockId(1))),
             Chunk::default(),
@@ -366,6 +376,7 @@ mod tests {
             Chunk::flat_floor(24),
             Chunk::flat_floor(32),
             single_chisel,
+            chisel_on_air_block,
         ];
         for (i, chunk) in cases.iter().enumerate() {
             let cells = collider_cells(&chunk.blocks, &chunk.chisel);

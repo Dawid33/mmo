@@ -288,6 +288,14 @@ const PLAYER_SPAWN_Z: f32 = 128.0;
 const PLAYER_SPAWN_FALLBACK_Y: f32 = 26.0;
 
 impl Rollback {
+    /// Runtime chunk insertion (undo-safe): two-scale decomposition only,
+    /// unlike `seed_terrain_genesis`. Deliberately never collapses a
+    /// fully-solid chunk to a single cuboid, so the same chunk content can
+    /// yield a different collider shape depending on which path built it.
+    /// That's safe because client and server always run the same path
+    /// (create_mesh at runtime, seed_terrain_genesis at genesis) for the
+    /// same chunk, so both sides still agree — but it's hash-relevant:
+    /// unifying the two paths would shift state hashes.
     pub fn create_mesh(&mut self, coords: ChunkCoords, chunk: Chunk) -> EntityKey {
         let e = self.ecs.create_entity_safe();
         // Two-scale decomposition: whole solid blocks at block scale, chisel
