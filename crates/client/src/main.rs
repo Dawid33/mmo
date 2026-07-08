@@ -19,6 +19,15 @@ use client::sim_driver;
 #[cfg(not(target_arch = "wasm32"))]
 use client::GameInstanceManager;
 
+/// Share of total cores given to the AsyncCompute task pool, which runs the
+/// background chunk-meshing jobs (`renderer/meshing.rs`). Bevy's default is
+/// 25% capped at 4 threads, which throttles the join-time meshing burst
+/// (thousands of dense subchunks queued at once); we take half the cores,
+/// uncapped, and leave the rest to the Compute pool's "whatever remains".
+const ASYNC_COMPUTE_PERCENT: f32 = 0.5;
+const ASYNC_COMPUTE_MIN_THREADS: usize = 1;
+const ASYNC_COMPUTE_MAX_THREADS: usize = usize::MAX;
+
 /// Event sent from client to game thread.
 #[cfg(not(target_arch = "wasm32"))]
 pub enum Command {
@@ -127,6 +136,18 @@ fn main() {
             .set(bevy::asset::AssetPlugin {
                 file_path: asset_path.into(),
                 ..Default::default()
+            })
+            .set(bevy::app::TaskPoolPlugin {
+                task_pool_options: bevy::app::TaskPoolOptions {
+                    async_compute: bevy::app::TaskPoolThreadAssignmentPolicy {
+                        min_threads: ASYNC_COMPUTE_MIN_THREADS,
+                        max_threads: ASYNC_COMPUTE_MAX_THREADS,
+                        percent: ASYNC_COMPUTE_PERCENT,
+                        on_thread_spawn: None,
+                        on_thread_destroy: None,
+                    },
+                    ..Default::default()
+                },
             }),
     )
     .add_plugins(renderer::SimBridgePlugin {
