@@ -2,7 +2,11 @@
 //! the padded 34³ space; face culling via bitshifts; greedy merging (task 3)
 //! over per-merge-key bitplanes. Pure functions — no Bevy types here.
 
-use game::{Voxel, CHUNK_VOXEL_COUNT};
+use std::collections::HashMap;
+
+use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+
+use super::ao::face_ao;
 
 /// Padded chunk edge: 32 interior + 1 shell cell each side.
 pub const PADDED: usize = 34;
@@ -47,6 +51,132 @@ pub fn cross_axes(axis: usize) -> (usize, usize) {
         2 => (0, 1), // Z faces: U=X, V=Y
         _ => unreachable!("axis is 0..3"),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Face {
+    PosX,
+    NegX,
+    PosY,
+    NegY,
+    PosZ,
+    NegZ,
+}
+
+impl Face {
+    pub fn from_axis(axis: usize, positive: bool) -> Self {
+        match (axis, positive) {
+            (0, true) => Face::PosX,
+            (0, false) => Face::NegX,
+            (1, true) => Face::PosY,
+            (1, false) => Face::NegY,
+            (2, true) => Face::PosZ,
+            (2, false) => Face::NegZ,
+            _ => unreachable!("axis is 0..3"),
+        }
+    }
+
+    pub fn axis(self) -> usize {
+        match self {
+            Face::PosX | Face::NegX => 0,
+            Face::PosY | Face::NegY => 1,
+            Face::PosZ | Face::NegZ => 2,
+        }
+    }
+
+    pub fn positive(self) -> bool {
+        matches!(self, Face::PosX | Face::PosY | Face::PosZ)
+    }
+
+    pub fn normal(self) -> [f32; 3] {
+        let mut n = [0.0; 3];
+        n[self.axis()] = if self.positive() { 1.0 } else { -1.0 };
+        n
+    }
+}
+
+/// A greedy-merged rectangle of identical (block, AO) faces. `min` is the
+/// chunk-local voxel coord of the rectangle's minimum cell; `w` extends along
+/// `cross_axes(axis).0`, `h` along `.1`. `ao` corner order (cu, cv) =
+/// (0,0), (1,0), (0,1), (1,1) over (U, V).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Quad {
+    pub min: [u32; 3],
+    pub w: u32,
+    pub h: u32,
+    pub face: Face,
+    pub block: BlockId,
+    pub ao: [u8; 4],
+}
+
+/// Greedy-mesh a padded chunk. For each face direction and slice, visible
+/// faces are grouped by merge key (block, ao) into per-key row bitplanes,
+/// then rectangles are grown with bit scans: width along U within a row,
+/// height along V across rows.
+pub fn mesh_quads(p: &PaddedVoxels) -> Vec<Quad> {
+    let occ = Occupancy::new(p);
+    let mut quads = Vec::new();
+
+    for axis in 0..3 {
+        let (ua, va) = cross_axes(axis);
+        for positive in [true, false] {
+            let face = Face::from_axis(axis, positive);
+            // Slice `a` = position along the face axis (interior 1..=32).
+            for a in 1..=32usize {
+                // rows[key][v] = bitmask over u (bits 1..=32) of visible
+                // faces in this slice whose merge key is `key`.
+                let mut rows: HashMap<(BlockId, [u8; 4]), [u64; PADDED]> = HashMap::new();
+                for v in 1..=32usize {
+                    for u in 1..=32usize {
+                        if occ.face_bits(axis, positive, u, v) >> a & 1 == 0 {
+                            continue;
+                        }
+                        let mut pos = [0usize; 3];
+                        pos[axis] = a;
+                        pos[ua] = u;
+                        pos[va] = v;
+                        let block = p.get(pos[0], pos[1], pos[2]).block;
+                        let ao = face_ao(p, axis, positive, pos);
+                        rows.entry((block, ao)).or_insert([0; PADDED])[v] |= 1 << u;
+                    }
+                }
+                // Deterministic emission order: sort keys.
+                let mut keys: Vec<_> = rows.keys().copied().collect();
+                keys.sort_unstable_by_key(|(b, ao)| (b.0, *ao));
+                for key in keys {
+                    let plane = rows.get_mut(&key).expect("key from rows");
+                    for v in 1..=32usize {
+                        while plane[v] != 0 {
+                            let u0 = plane[v].trailing_zeros() as usize;
+                            let run = plane[v] >> u0;
+                            let w = run.trailing_ones() as usize;
+                            let mask = (((1u128 << w) - 1) as u64) << u0;
+                            plane[v] &= !mask;
+                            // Grow height while the same u-run is fully set.
+                            let mut h = 1usize;
+                            while v + h <= 32 && plane[v + h] & mask == mask {
+                                plane[v + h] &= !mask;
+                                h += 1;
+                            }
+                            let mut min = [0u32; 3];
+                            min[axis] = a as u32 - 1;
+                            min[ua] = u0 as u32 - 1;
+                            min[va] = v as u32 - 1;
+                            quads.push(Quad {
+                                min,
+                                w: w as u32,
+                                h: h as u32,
+                                face,
+                                block: key.0,
+                                ao: key.1,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    quads
 }
 
 /// Solidity packed as u64 columns along each axis: `cols[axis][u][v]` has bit
@@ -159,5 +289,126 @@ mod tests {
                 assert_eq!(occ.face_bits(0, false, u, v), 0);
             }
         }
+    }
+
+    #[test]
+    fn lone_voxel_yields_six_unit_quads() {
+        let p = PaddedVoxels::from_interior(&interior_with(&[([5, 6, 7], BlockId(1))]));
+        let quads = mesh_quads(&p);
+        assert_eq!(quads.len(), 6);
+        for q in &quads {
+            assert_eq!((q.w, q.h), (1, 1));
+            assert_eq!(q.min, [5, 6, 7]);
+            assert_eq!(q.block, BlockId(1));
+            assert_eq!(q.ao, [3, 3, 3, 3], "isolated voxel is unoccluded");
+        }
+        let mut faces: Vec<Face> = quads.iter().map(|q| q.face).collect();
+        faces.dedup();
+        assert_eq!(faces.len(), 6, "one quad per face direction");
+    }
+
+    #[test]
+    fn full_slab_merges_to_single_quads_per_face() {
+        // One-voxel-thick 32×32 slab at y=5: ±Y faces must merge to a single
+        // 32×32 quad each; the four rims merge to 32×1.
+        let mut cells = Vec::new();
+        for x in 0..32 {
+            for z in 0..32 {
+                cells.push(([x, 5, z], BlockId(1)));
+            }
+        }
+        let p = PaddedVoxels::from_interior(&interior_with(&cells));
+        let quads = mesh_quads(&p);
+        let top: Vec<&Quad> = quads.iter().filter(|q| q.face == Face::PosY).collect();
+        assert_eq!(top.len(), 1, "uniform top face merges fully");
+        assert_eq!((top[0].w, top[0].h), (32, 32));
+        assert_eq!(top[0].min, [0, 5, 0]);
+        // Total: 2 big faces + 4 rim strips = 6 quads.
+        assert_eq!(quads.len(), 6);
+    }
+
+    #[test]
+    fn differing_block_ids_do_not_merge() {
+        let p = PaddedVoxels::from_interior(&interior_with(&[
+            ([5, 5, 5], BlockId(1)),
+            ([6, 5, 5], BlockId(2)),
+        ]));
+        let quads = mesh_quads(&p);
+        let tops: Vec<&Quad> = quads.iter().filter(|q| q.face == Face::PosY).collect();
+        assert_eq!(tops.len(), 2, "different blocks stay separate quads");
+    }
+
+    #[test]
+    fn differing_ao_does_not_merge() {
+        // A 2×1 floor pair whose left cell gets a corner darkened by a block
+        // sitting diagonally above-left: AO differs, so top faces must not merge.
+        let p = PaddedVoxels::from_interior(&interior_with(&[
+            ([5, 5, 5], BlockId(1)),
+            ([6, 5, 5], BlockId(1)),
+            ([4, 6, 5], BlockId(1)), // occluder for (5,5,5)'s top face
+        ]));
+        let quads = mesh_quads(&p);
+        let tops: Vec<&Quad> = quads
+            .iter()
+            .filter(|q| q.face == Face::PosY && q.min[1] == 5)
+            .collect();
+        assert_eq!(tops.len(), 2, "AO mismatch splits the merge");
+    }
+
+    #[test]
+    fn covered_area_matches_visible_faces() {
+        // Decomposing quads into unit faces must reproduce exactly the visible
+        // face set — no overlap, no gap. Deterministic pseudo-random content.
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut rng = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        for cell in v.iter_mut() {
+            if rng() % 4 == 0 {
+                *cell = Voxel::new(BlockId((rng() % 3 + 1) as u16));
+            }
+        }
+        let p = PaddedVoxels::from_interior(&v);
+        let occ = Occupancy::new(&p);
+        let quads = mesh_quads(&p);
+
+        let mut covered = std::collections::BTreeSet::new();
+        for q in &quads {
+            let (ua, va) = cross_axes(q.face.axis());
+            for du in 0..q.w {
+                for dv in 0..q.h {
+                    let mut cell = q.min;
+                    cell[ua] += du;
+                    cell[va] += dv;
+                    let fresh = covered.insert((q.face.axis(), q.face.positive(), cell));
+                    assert!(fresh, "quads must not overlap");
+                }
+            }
+        }
+        let mut visible = std::collections::BTreeSet::new();
+        for axis in 0..3 {
+            let (ua, va) = cross_axes(axis);
+            for u in 1..=32usize {
+                for v2 in 1..=32usize {
+                    for positive in [true, false] {
+                        let bits = occ.face_bits(axis, positive, u, v2);
+                        for a in 1..=32usize {
+                            if bits >> a & 1 == 1 {
+                                let mut cell = [0u32; 3];
+                                cell[axis] = a as u32 - 1;
+                                cell[ua] = u as u32 - 1;
+                                cell[va] = v2 as u32 - 1;
+                                visible.insert((axis, positive, cell));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(covered, visible);
     }
 }
