@@ -6,7 +6,6 @@ use block_mesh::{MergeVoxel, VoxelVisibility};
 use crate::block::{Block, BlockIndex, ChiselData, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BLOCK_VOXELS};
 use crate::registry::BlockId;
 
-const HALF_VOXEL_SIZE: f32 = 1.0 / 2.0;
 pub type ChunkShape = ConstShape3u32<32, 32, 32>;
 
 pub const CHUNK_VOXEL_COUNT: usize = 32 * 32 * 32;

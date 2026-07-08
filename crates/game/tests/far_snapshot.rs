@@ -11,9 +11,10 @@ fn flat_chunks() -> Vec<(ChunkCoords, Chunk)> {
 
 #[test]
 fn constants_have_expected_defaults() {
-    // Far ring currently disabled (radius 0) while client keep-up perf work
-    // is pending; update this pin when the ring is re-enabled.
-    assert_eq!(FAR_VIEW_RADIUS, 0);
+    // Far ring at radius 2: one visual-only ring of far regions outside the
+    // near 3×3 window (5×5 footprint, 16 far regions), keeping the join-time
+    // worldgen/meshing burst small — LOD is still future work.
+    assert_eq!(FAR_VIEW_RADIUS, 2);
     assert_eq!(FAR_SNAPSHOT_MIN_INTERVAL_TICKS, 25);
 }
 

@@ -28,8 +28,10 @@ pub fn vertex_layout() -> Vec<VertexAttributeDescriptor> {
     ]
 }
 
+// `pub` (not `pub(crate)`): reachable through `ChunkMaterial`'s public handle
+// field in meshing.rs, so a tighter visibility trips `private_interfaces`.
 #[derive(Asset, AsBindGroup, Debug, Clone, TypePath)]
-pub(crate) struct StandardVoxelMaterial {
+pub struct StandardVoxelMaterial {
     #[texture(100, dimension = "2d_array")]
     #[sampler(101)]
     pub voxels_texture: Handle<Image>,

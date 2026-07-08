@@ -3,7 +3,7 @@ use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
-use block_mesh::ndshape::ConstShape;
+use block_mesh::ndshape::{ConstShape, ConstShape3u32};
 use block_mesh::{greedy_quads, GreedyQuadsBuffer, RIGHT_HANDED_Y_UP_CONFIG};
 use game::ChunkShape;
 use game::Voxel;
@@ -11,9 +11,23 @@ use game::Voxel;
 use super::block_textures::BlockTextureLayers;
 use super::voxel_material::{self, StandardVoxelMaterial};
 
+/// `greedy_quads` only emits faces for voxels strictly inside `[min, max]` —
+/// the boundary shell is padding for its 3x3x3 visibility kernel — so the
+/// 32³ chunk is meshed from the interior of a 34³ buffer.
+type PaddedChunkShape = ConstShape3u32<34, 34, 34>;
+const PAD: u32 = 1;
+
 pub fn build_chunk_mesh(voxels: &[Voxel], layers: &BlockTextureLayers) -> Option<Mesh> {
-    let mut buffer = GreedyQuadsBuffer::new(voxels.len());
-    greedy_quads(voxels, &ChunkShape {}, [0; 3], [31; 3], &RIGHT_HANDED_Y_UP_CONFIG.faces, &mut buffer);
+    // The padding shell stays air: without neighbour-chunk data, faces on the
+    // chunk boundary must be emitted (never culled), or chunks render with
+    // gaps — fully solid chunks would produce no mesh at all.
+    let mut padded = vec![Voxel::default(); PaddedChunkShape::SIZE as usize];
+    for (i, v) in voxels.iter().enumerate() {
+        let [x, y, z] = ChunkShape::delinearize(i as u32);
+        padded[PaddedChunkShape::linearize([x + PAD, y + PAD, z + PAD]) as usize] = *v;
+    }
+    let mut buffer = GreedyQuadsBuffer::new(padded.len());
+    greedy_quads(&padded, &PaddedChunkShape {}, [0; 3], [33; 3], &RIGHT_HANDED_Y_UP_CONFIG.faces, &mut buffer);
     if buffer.quads.num_quads() == 0 {
         return None;
     }
@@ -27,12 +41,17 @@ pub fn build_chunk_mesh(voxels: &[Voxel], layers: &BlockTextureLayers) -> Option
     for (group, face) in buffer.quads.groups.iter().zip(RIGHT_HANDED_Y_UP_CONFIG.faces.into_iter()) {
         for quad in group.iter() {
             indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
-            positions.extend_from_slice(&face.quad_mesh_positions(quad, 1.0));
+            // Quad coords are in padded space; shift back to chunk-local.
+            positions.extend(
+                face.quad_mesh_positions(quad, 1.0)
+                    .map(|p| [p[0] - PAD as f32, p[1] - PAD as f32, p[2] - PAD as f32]),
+            );
             normals.extend_from_slice(&face.quad_mesh_normals());
             for uv in quad_uv {
                 uvs.push([uv[0] * quad.width as f32, uv[1] * quad.height as f32]);
             }
-            let voxel_index = ChunkShape::linearize(*quad.minimum) as usize;
+            let [qx, qy, qz] = *quad.minimum;
+            let voxel_index = ChunkShape::linearize([qx - PAD, qy - PAD, qz - PAD]) as usize;
             let faces = layers.0.get(&voxels[voxel_index].block).copied().unwrap_or([0, 0, 0]);
             tex_indices.extend(std::iter::repeat(faces).take(4));
         }
@@ -156,6 +175,39 @@ mod tests {
         let mesh = build_chunk_mesh(&voxels, &BlockTextureLayers::default()).expect("mesh");
         assert_eq!(mesh.count_vertices(), 24, "6 faces x 4 verts");
         assert_eq!(mesh.indices().unwrap().len(), 36, "6 faces x 2 tris x 3");
+    }
+
+    #[test]
+    fn boundary_voxels_are_meshed() {
+        // Regression: voxels on the chunk's outer shell (x/y/z = 0 or 31) must
+        // produce faces. greedy_quads only meshes the *interior* of [min, max],
+        // so meshing the bare 32^3 buffer with [0..31] silently drops the
+        // boundary shell and every chunk renders with a 2-voxel gap to its
+        // neighbours.
+        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        voxels[ChunkShape::linearize([0, 5, 5]) as usize] = Voxel::new(BlockId(1));
+        let mesh = build_chunk_mesh(&voxels, &BlockTextureLayers::default())
+            .expect("boundary voxel must yield a mesh");
+        assert_eq!(mesh.count_vertices(), 24, "6 faces x 4 verts");
+    }
+
+    #[test]
+    fn full_chunk_mesh_spans_full_extent() {
+        // A fully solid chunk must mesh as the whole 32-voxel cube, i.e. vertex
+        // positions spanning [0, 32] on every axis — not shrunk to the interior.
+        let voxels = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+        let mesh = build_chunk_mesh(&voxels, &BlockTextureLayers::default()).expect("mesh");
+        let VertexAttributeValues::Float32x3(positions) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+        else {
+            panic!("positions must be Float32x3");
+        };
+        for axis in 0..3 {
+            let lo = positions.iter().map(|p| p[axis]).fold(f32::MAX, f32::min);
+            let hi = positions.iter().map(|p| p[axis]).fold(f32::MIN, f32::max);
+            assert_eq!(lo, 0.0, "axis {axis} min");
+            assert_eq!(hi, 32.0, "axis {axis} max");
+        }
     }
 
     #[test]

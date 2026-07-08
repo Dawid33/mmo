@@ -134,6 +134,7 @@ impl Rig {
 // unlogged (no O(N^2) PhysicsState snapshot) and collapses fully-solid chunks
 // to a single cuboid, so one region builds in ~1 s (was ~9-23 s).
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn roaming_client_cycles_regions_across_threads() {
     let mut rig = Rig::new();
     rig.event(ServerEvent::ClientConnected(0));
@@ -219,6 +220,7 @@ fn roaming_client_cycles_regions_across_threads() {
 /// sees it `Pressed`. Both inputs are stamped to (0,0): the manager routes
 /// `PlayerInput` by the player's *home*, which is (0,0) until the flip lands.
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn walking_input_crosses_a_boundary_on_real_threads() {
     let mut rig = Rig::new();
     rig.event(ServerEvent::ClientConnected(0));

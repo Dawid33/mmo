@@ -34,8 +34,9 @@ pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // 256.0, exact in f32
 /// Chebyshev radius of the visual-only far ring around the viewer region.
 /// 0 → no far ring (only the near window renders); 2 → a 5×5 footprint (one
 /// ring outside the near 3×3 window). No UI; raise this constant (with LOD,
-/// later) to extend the horizon.
-pub const FAR_VIEW_RADIUS: i32 = 0;
+/// later) to extend the horizon. 9 → a 19×19 footprint, horizon 76 chunks
+/// from the viewer's region center.
+pub const FAR_VIEW_RADIUS: i32 = 2;
 
 /// A running region checks its terrain hash this often and pushes a
 /// `FarSnapshotChanged` only when it changed — the check cadence IS the

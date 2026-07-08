@@ -1757,7 +1757,7 @@ mod manager_tests {
     }
 
     /// Tests the ring geometry with an explicit radius, independent of the
-    /// FAR_VIEW_RADIUS tunable (currently 0 = far ring disabled).
+    /// FAR_VIEW_RADIUS tunable.
     #[test]
     fn desired_far_is_ring_minus_near() {
         use game::RegionCoords;
@@ -1772,7 +1772,7 @@ mod manager_tests {
         // A ring member is present; a near member is absent.
         assert!(far.contains(&RegionCoords::new(2, 0)));
         assert!(!far.contains(&RegionCoords::new(1, 0)));
-        // Radius 0 (the current live setting): no far ring at all.
+        // Radius 0: no far ring at all.
         assert!(super::desired_far(center, &near, 0).is_empty());
     }
 }

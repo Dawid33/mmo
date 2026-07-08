@@ -27,6 +27,7 @@ async fn send_packet(conn: &wtransport::Connection, packet: &ClientPacket) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "slow: >100ms — run via just test-full"]
 async fn webtransport_client_full_handshake() {
     let (event_send, event_recv) = crossbeam::channel::unbounded();
     let (server_send, server_recv) = crossbeam::channel::unbounded();
