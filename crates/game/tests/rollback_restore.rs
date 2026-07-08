@@ -101,3 +101,20 @@ fn rollback_of_create_mesh_restores_state() {
     r.rollback();
     assert_eq!(before, state_hash(&r), "rollback did not restore state");
 }
+
+#[test]
+fn rollback_of_mixed_scale_create_mesh_restores_state() {
+    // flat_floor(24) yields both whole solid blocks (block-scale collider)
+    // and chiseled blocks (voxel-scale collider): two attaches, two
+    // PhysicsState snapshots, both must unwind bit-exactly.
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut r = Rollback::new(Some(send));
+    let before = state_hash(&r);
+
+    r.new_transaction();
+    r.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(24));
+    assert_ne!(before, state_hash(&r), "create_mesh changed nothing");
+
+    r.rollback();
+    assert_eq!(before, state_hash(&r), "rollback did not restore state");
+}

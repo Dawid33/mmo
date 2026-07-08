@@ -1,6 +1,8 @@
 //! Genesis collider build (Region::from_chunks -> seed_terrain_genesis):
-//! fully-solid chunks collapse to a single cuboid, partial chunks keep the
-//! parry Voxels shape, and the build is deterministic (bit-exact hash).
+//! fully-solid chunks collapse to a single cuboid; partial chunks get up to
+//! two parry Voxels shapes (block-scale for whole solid blocks, voxel-scale
+//! for chisel detail); the build is deterministic (bit-exact hash).
+use game::parry::math::Real;
 use game::parry::shape::ShapeType;
 use game::{Chunk, ChunkCoords, Region, RegionId};
 use std::hash::Hash;
@@ -58,5 +60,27 @@ fn genesis_is_deterministic() {
         hash_region(&build()),
         hash_region(&build()),
         "independent genesis builds must hash bit-exactly identical"
+    );
+}
+
+#[test]
+fn mixed_chunk_gets_block_and_voxel_scale_colliders() {
+    // flat_floor(24): whole solid by=0 block layer + chiseled by=1 layer.
+    let region = Region::from_chunks(
+        RegionId::new(0, 0),
+        vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor(24))],
+    );
+    let mut sizes: Vec<Real> = region
+        .data()
+        .physics
+        .colliders
+        .iter()
+        .filter_map(|(_, c)| c.shape().as_voxels().map(|v| v.voxel_size().x))
+        .collect();
+    sizes.sort();
+    assert_eq!(
+        sizes,
+        vec![Real::from(1.0), Real::from(16.0)],
+        "one chisel-scale and one block-scale voxels collider"
     );
 }

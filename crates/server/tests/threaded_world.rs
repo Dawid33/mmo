@@ -12,9 +12,9 @@ use game::{
 };
 use server::region_threads::ThreadRegionSpawner;
 
-/// A fresh region's first build (worldgen chunks -> physics colliders, one
-/// per solid voxel — see `Region::from_chunks`/`attach_voxels_collider_safe`)
-/// costs low single-digit seconds even for a flat floor; 9 of them in
+/// A fresh region's first build (worldgen chunks -> physics colliders,
+/// block-scale + chisel-scale voxels shapes — see `Region::from_chunks`/
+/// `seed_terrain_genesis`) costs well under a second for a flat floor; 9 in
 /// parallel on real OS threads still take a few seconds wall-clock. Steady
 /// state (ticking, shutdown of already-running regions) is fast — only the
 /// initial spawn wait needs a generous budget.
