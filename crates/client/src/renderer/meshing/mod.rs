@@ -11,6 +11,8 @@ use game::Voxel;
 use super::block_textures::BlockTextureLayers;
 use super::voxel_material::{self, StandardVoxelMaterial};
 
+pub mod binary;
+
 /// `greedy_quads` only emits faces for voxels strictly inside `[min, max]` —
 /// the boundary shell is padding for its 3x3x3 visibility kernel — so the
 /// 32³ chunk is meshed from the interior of a 34³ buffer.
