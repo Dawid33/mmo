@@ -332,20 +332,15 @@ impl Rollback {
     /// `create_mesh` takes for undo-safe runtime edits. Genesis is the base
     /// state and is never rolled back below itself, so raw (unlogged) inserts
     /// are correct and turn the build from O(N^2) (a growing clone per chunk)
-    /// into O(N). Fully-solid chunks get a single cuboid — collision-identical
-    /// to a solid `Voxels` shape, whose interior voxels are all culled — while
-    /// partial (surface) chunks keep the parry `Voxels` shape.
+    /// into O(N). Fully-solid chunks get a single cuboid; partial chunks get
+    /// up to two parry `Voxels` shapes — whole solid blocks at block scale
+    /// (voxel_size = BLOCK_VOXELS) and chisel detail at voxel scale (1.0).
+    /// A chunk solid purely via fully-occupied chisel no longer collapses to
+    /// a cuboid (collision-identical, just uncollapsed).
     pub fn seed_terrain_genesis(&mut self, chunks: Vec<(ChunkCoords, Chunk)>) {
         for (coords, chunk) in chunks {
             let e = self.ecs.create_entity_safe();
-            let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
-            let solid: Vec<Point<i32>> = (0..ChunkShape::SIZE)
-                .filter(|i| voxels[*i as usize].block != BlockId::AIR)
-                .map(|i| {
-                    let [x, y, z] = ChunkShape::delinearize(i);
-                    Point::new(x as i32, y as i32, z as i32)
-                })
-                .collect();
+            let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
             self.ecs.chunk.set_safe(e, Some(chunk));
             let position = IsometryReal::from_parts(
                 Translation3::new(
@@ -362,25 +357,51 @@ impl Rollback {
             // Raw, unlogged insert: covered by the genesis base state.
             let handle = self.data.physics.raw_mut().bodies.raw_mut().insert(body);
             self.ecs.rigidbody.set_safe(e, Some(handle));
-            if solid.is_empty() {
+            if cells.is_empty() {
                 continue;
             }
-            let collider = if solid.len() == ChunkShape::SIZE as usize {
+            let user_data = e.data().as_ffi() as u128;
+            let mut colliders = Vec::with_capacity(2);
+            if cells.is_full_cube() {
                 // A fully-solid 32^3 chunk's collision surface is exactly a
                 // 32x32x32 cuboid (half-extents 16, centered body-local 16,16,16).
-                ColliderBuilder::cuboid(Real::from(16.0), Real::from(16.0), Real::from(16.0))
-                    .translation(Vector::new(Real::from(16.0), Real::from(16.0), Real::from(16.0)))
-                    .user_data(e.data().as_ffi() as u128)
-                    .build()
+                colliders.push(
+                    ColliderBuilder::cuboid(Real::from(16.0), Real::from(16.0), Real::from(16.0))
+                        .translation(Vector::new(
+                            Real::from(16.0),
+                            Real::from(16.0),
+                            Real::from(16.0),
+                        ))
+                        .user_data(user_data)
+                        .build(),
+                );
             } else {
-                ColliderBuilder::voxels(Vector::repeat(Real::from(1.0)), &solid)
-                    .user_data(e.data().as_ffi() as u128)
-                    .build()
-            };
+                // Two-scale decomposition: whole solid blocks at block scale
+                // (voxel_size = BLOCK_VOXELS), chisel detail at voxel scale.
+                if !cells.blocks.is_empty() {
+                    colliders.push(
+                        ColliderBuilder::voxels(
+                            Vector::repeat(Real::from(crate::BLOCK_VOXELS as RawReal)),
+                            &cells.blocks,
+                        )
+                        .user_data(user_data)
+                        .build(),
+                    );
+                }
+                if !cells.voxels.is_empty() {
+                    colliders.push(
+                        ColliderBuilder::voxels(Vector::repeat(Real::from(1.0)), &cells.voxels)
+                            .user_data(user_data)
+                            .build(),
+                    );
+                }
+            }
             let phys = self.data.physics.raw_mut();
-            phys.colliders
-                .raw_mut()
-                .insert_with_parent(collider, handle, phys.bodies.raw_mut());
+            for collider in colliders {
+                phys.colliders
+                    .raw_mut()
+                    .insert_with_parent(collider, handle, phys.bodies.raw_mut());
+            }
         }
     }
 
