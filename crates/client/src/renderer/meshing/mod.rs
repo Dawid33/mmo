@@ -11,6 +11,7 @@ pub mod ao;
 pub mod binary;
 pub mod emit;
 pub mod neighbors;
+pub mod queue;
 
 /// Mesh a padded chunk snapshot. `None` = no visible faces (don't render).
 pub fn build_chunk_mesh(padded: &PaddedVoxels, layers: &BlockTextureLayers) -> Option<Mesh> {
