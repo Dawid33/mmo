@@ -21,3 +21,8 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
     the server-side input stamp-routing / predicted-authority-transfer design, not a harness or
     client-side patch.
 
+In-engine UI (spec docs/superpowers/specs/2026-07-07-in-engine-ui-design.md,
+plan docs/superpowers/plans/2026-07-07-in-engine-ui.md): inventory/hotbar landed
+(engine-owned data → client-side widget projection → bevy_ui). Follow-ups: real
+item icons/textures, drag-drop UX, additional screens, and the deferred diegetic
+world-space panel case (needs in-engine taffy + deterministic text measurement).

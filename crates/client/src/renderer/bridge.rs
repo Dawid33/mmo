@@ -98,6 +98,7 @@ pub fn drain_client_updates(
     mut far_roots: ResMut<FarRegionRoots>,
     mut map: ResMut<SimEntityMap>,
     mut hud_status: ResMut<HudStatus>,
+    mut ui_updates: ResMut<crate::renderer::ui_bridge::UiUpdates>,
 ) {
     while let Ok(event) = updates.0.try_recv() {
         match event {
@@ -145,6 +146,9 @@ pub fn drain_client_updates(
                 hud_status.home_region = Some(home_region);
                 hud_status.viewer_region = Some(viewer_region);
                 hud_status.connection = connection;
+            }
+            ClientUpdateEvent::UiChannel(recv) => {
+                ui_updates.0 = Some(recv);
             }
         }
     }
@@ -507,6 +511,7 @@ mod tests {
             .init_resource::<FarRegionRoots>()
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
+            .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
             .add_systems(PreUpdate, (drain_client_updates, drain_region_updates).chain());
         (app, client_send)
     }
@@ -989,6 +994,7 @@ mod tests {
             .init_resource::<FarRegionRoots>()
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
+            .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
             .add_systems(Update, drain_client_updates);
 
         client

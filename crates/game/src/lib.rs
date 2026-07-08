@@ -23,6 +23,7 @@ pub mod registry;
 mod region;
 pub mod region_runner;
 pub mod state;
+pub mod ui;
 pub mod voxel;
 pub mod volume;
 pub mod world_manager;
@@ -37,6 +38,7 @@ pub use protocol::*;
 pub use registry::*;
 pub use region_runner::*;
 pub use state::*;
+pub use ui::*;
 pub use voxel::*;
 pub use volume::*;
 pub use world_manager::*;
@@ -98,6 +100,11 @@ pub enum ClientUpdateEvent {
         viewer_region: RegionId,
         connection: ConnectionState,
     },
+    /// One-shot: the receiver half of the client-side UI projection channel.
+    /// Sent once by the manager; consumed by the ui_bridge. Widget-only —
+    /// separate from the per-region `GameDataUpdate` channel because widgets
+    /// hang off a screen-space UI root, not a region's world-space root.
+    UiChannel(crossbeam::channel::Receiver<UiUpdate>),
 }
 
 pub use region::{Region, ReconcileStats};
