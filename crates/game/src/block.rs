@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use block_mesh::ndshape::ConstShape;
+use parry3d::math::Point;
 
 use crate::registry::BlockId;
 use crate::voxel::{ChunkShape, Voxel, CHUNK_VOXEL_COUNT};
@@ -106,6 +107,75 @@ impl ChiselData {
     }
 }
 
+/// Chunk collider cells split by grid scale: whole (unchiseled) solid blocks
+/// on the block grid, chisel detail on the voxel grid. Together they cover
+/// exactly the solid cells of [`derive_voxels`] — this is that function's
+/// collider-facing counterpart, kept at the coarsest exact scale instead of
+/// expanded to the 32³ grid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColliderCells {
+    /// Block-grid keys (0..CHUNK_BLOCKS per axis) of solid, unchiseled blocks.
+    pub blocks: Vec<Point<i32>>,
+    /// Voxel-grid keys (0..CHUNK_BLOCKS*BLOCK_VOXELS per axis) of solid
+    /// chisel voxels (occupied with a non-air material).
+    pub voxels: Vec<Point<i32>>,
+}
+
+impl ColliderCells {
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty() && self.voxels.is_empty()
+    }
+
+    /// True iff the chunk is entirely whole solid blocks (no chisel), i.e.
+    /// its collision volume is exactly the full 32³ chunk cube. (All eight
+    /// blocks present implies no chiseled block, hence no voxel cells.)
+    pub fn is_full_cube(&self) -> bool {
+        self.blocks.len() == CHUNK_BLOCK_COUNT
+    }
+}
+
+/// Decompose a chunk's block layer into collider cells. Solidity matches
+/// [`derive_voxels`]: an unchiseled block is solid iff its id is non-air; a
+/// chisel voxel is solid iff occupied and its palette material is non-air.
+/// Deterministic: blocks in `BlockIndex` order, chisel voxels in fixed
+/// x-outer/z-inner nested order per block.
+pub fn collider_cells(
+    blocks: &[Block],
+    chisel: &BTreeMap<BlockIndex, ChiselData>,
+) -> ColliderCells {
+    debug_assert_eq!(blocks.len(), CHUNK_BLOCK_COUNT);
+    let mut out = ColliderCells { blocks: Vec::new(), voxels: Vec::new() };
+    for (idx, block) in blocks.iter().enumerate() {
+        let bi = BlockIndex(idx as u8);
+        let (bx, by, bz) = bi.xyz();
+        match chisel.get(&bi) {
+            None => {
+                if block.id != BlockId::AIR {
+                    out.blocks.push(Point::new(bx as i32, by as i32, bz as i32));
+                }
+            }
+            Some(c) => {
+                for vx in 0..BLOCK_VOXELS {
+                    for vy in 0..BLOCK_VOXELS {
+                        for vz in 0..BLOCK_VOXELS {
+                            if c.is_solid(vx, vy, vz)
+                                && c.material_at(vx, vy, vz) != BlockId::AIR
+                            {
+                                out.voxels.push(Point::new(
+                                    (bx * BLOCK_VOXELS + vx) as i32,
+                                    (by * BLOCK_VOXELS + vy) as i32,
+                                    (bz * BLOCK_VOXELS + vz) as i32,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Derive the 32³ voxel array from the authoritative block layer. Output layout
 /// is byte-identical to the old `Chunk.voxels`, so the mesher and collider
 /// consume it unchanged. Deterministic; the single source of truth for both sim
@@ -187,5 +257,133 @@ mod tests {
             let (x, y, z) = BlockIndex(i).xyz();
             assert_eq!(BlockIndex::from_xyz(x, y, z), BlockIndex(i));
         }
+    }
+
+    use crate::voxel::Chunk;
+    use std::collections::BTreeSet;
+
+    /// Voxel-grid coords of solid cells in a derived 32³ grid — the oracle.
+    fn solid_set(voxels: &[Voxel]) -> BTreeSet<(i32, i32, i32)> {
+        (0..CHUNK_VOXEL_COUNT)
+            .filter(|i| voxels[*i].block != BlockId::AIR)
+            .map(|i| {
+                let [x, y, z] = ChunkShape::delinearize(i as u32);
+                (x as i32, y as i32, z as i32)
+            })
+            .collect()
+    }
+
+    /// Voxel-grid coords covered by the two-scale cells: each block cell
+    /// expands to its 16³ voxels, chisel cells are already voxel-grid.
+    fn covered_set(cells: &ColliderCells) -> BTreeSet<(i32, i32, i32)> {
+        let mut s = BTreeSet::new();
+        for b in &cells.blocks {
+            for vx in 0..BLOCK_VOXELS as i32 {
+                for vy in 0..BLOCK_VOXELS as i32 {
+                    for vz in 0..BLOCK_VOXELS as i32 {
+                        s.insert((
+                            b.x * BLOCK_VOXELS as i32 + vx,
+                            b.y * BLOCK_VOXELS as i32 + vy,
+                            b.z * BLOCK_VOXELS as i32 + vz,
+                        ));
+                    }
+                }
+            }
+        }
+        for v in &cells.voxels {
+            let dup = !s.insert((v.x, v.y, v.z));
+            assert!(!dup, "voxel-scale cell {v:?} overlaps a block-scale cell");
+        }
+        s
+    }
+
+    #[test]
+    fn collider_cells_uniform_chunk_is_eight_blocks() {
+        let c = Chunk::uniform(Block::new(BlockId(1)));
+        let cells = collider_cells(&c.blocks, &c.chisel);
+        assert_eq!(cells.blocks.len(), CHUNK_BLOCK_COUNT);
+        assert!(cells.voxels.is_empty());
+        assert!(cells.is_full_cube());
+        assert!(!cells.is_empty());
+    }
+
+    #[test]
+    fn collider_cells_all_air_is_empty() {
+        let c = Chunk::default();
+        let cells = collider_cells(&c.blocks, &c.chisel);
+        assert!(cells.is_empty());
+        assert!(!cells.is_full_cube());
+    }
+
+    #[test]
+    fn collider_cells_mixed_floor_splits_scales() {
+        // flat_floor(24): the by=0 block layer (4 blocks) is whole solid,
+        // the by=1 layer is chiseled 8 voxel-layers deep (16*8*16 per block).
+        let c = Chunk::flat_floor(24);
+        let cells = collider_cells(&c.blocks, &c.chisel);
+        assert_eq!(cells.blocks.len(), 4);
+        assert_eq!(cells.voxels.len(), 4 * 16 * 8 * 16);
+        assert!(!cells.is_full_cube());
+    }
+
+    #[test]
+    fn collider_cells_chisel_only_floor_has_no_block_cells() {
+        // flat_floor(8) is shallower than one block: chisel cells only.
+        let c = Chunk::flat_floor(8);
+        let cells = collider_cells(&c.blocks, &c.chisel);
+        assert!(cells.blocks.is_empty());
+        assert_eq!(cells.voxels.len(), 4 * 16 * 8 * 16);
+    }
+
+    #[test]
+    fn collider_cells_skip_air_material_chisel_voxels() {
+        // Occupied chisel voxel whose palette resolves to AIR (empty palette
+        // -> material_at falls back to AIR) must not produce a collider cell,
+        // matching derive_voxels solidity.
+        let mut blocks = vec![Block::new(BlockId::AIR); CHUNK_BLOCK_COUNT];
+        blocks[0] = Block::new(BlockId(1));
+        let mut c = ChiselData::new(vec![]);
+        c.set(0, 0, 0, true, 0);
+        let mut chisel = BTreeMap::new();
+        chisel.insert(BlockIndex(0), c);
+        let cells = collider_cells(&blocks, &chisel);
+        assert!(cells.is_empty());
+    }
+
+    #[test]
+    fn collider_cells_cover_exactly_the_derived_solid_voxels() {
+        let mut single_chisel = Chunk::default();
+        single_chisel.blocks[0] = Block::new(BlockId(1));
+        let mut cd = ChiselData::new(vec![BlockId(1)]);
+        cd.set(3, 7, 11, true, 0);
+        single_chisel.chisel.insert(BlockIndex(0), cd);
+
+        let cases = [
+            Chunk::uniform(Block::new(BlockId(1))),
+            Chunk::default(),
+            Chunk::flat_floor(8),
+            Chunk::flat_floor(16),
+            Chunk::flat_floor(24),
+            Chunk::flat_floor(32),
+            single_chisel,
+        ];
+        for (i, chunk) in cases.iter().enumerate() {
+            let cells = collider_cells(&chunk.blocks, &chunk.chisel);
+            let derived = derive_voxels(&chunk.blocks, &chunk.chisel);
+            assert_eq!(
+                covered_set(&cells),
+                solid_set(&derived),
+                "case {i}: two-scale cells must cover exactly the solid voxels"
+            );
+        }
+    }
+
+    #[test]
+    fn collider_cells_is_deterministic() {
+        let c = Chunk::flat_floor(24);
+        let a = collider_cells(&c.blocks, &c.chisel);
+        let b = collider_cells(&c.blocks, &c.chisel);
+        assert_eq!(a.blocks, b.blocks);
+        assert_eq!(a.voxels, b.voxels);
     }
 }
