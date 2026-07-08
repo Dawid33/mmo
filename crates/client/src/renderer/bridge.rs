@@ -150,6 +150,8 @@ pub fn drain_client_updates(
             ClientUpdateEvent::UiChannel(recv) => {
                 ui_updates.0 = Some(recv);
             }
+            // Consumed starting Task 3 (F3 wireframe overlay); dropped for now.
+            ClientUpdateEvent::DebugLines(..) => {}
         }
     }
 }

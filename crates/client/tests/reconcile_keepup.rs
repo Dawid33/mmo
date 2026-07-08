@@ -61,7 +61,13 @@ impl Diag {
         let (server_send, server_recv) = crossbeam::channel::unbounded::<ServerPacket>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let manager =
-            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+            GameInstanceManager::new(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                dummy_addr,
+                game::DebugFlags::default(),
+            );
         let (tap_to_server, server_side_recv) = crossbeam::channel::unbounded::<ClientPacket>();
         let server = LocalServer::new(server_side_recv, server_send).unwrap();
         Self {

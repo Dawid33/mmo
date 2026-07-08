@@ -35,7 +35,9 @@ enum SimMode {
 #[derive(Resource)]
 pub struct SimDriverRes(pub SyncCell<SimDriver>);
 
-pub fn start_wasm_sim() -> (
+pub fn start_wasm_sim(
+    debug_flags: game::DebugFlags,
+) -> (
     SimDriverRes,
     Sender<GameEventKind>,
     Receiver<ClientUpdateEvent>,
@@ -46,8 +48,13 @@ pub fn start_wasm_sim() -> (
     // The addr is unused on wasm; GameInstanceManager::new keeps one
     // signature on both targets.
     let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-    let mut manager =
-        GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+    let mut manager = GameInstanceManager::new(
+        game_send.clone(),
+        game_recv,
+        client_send,
+        dummy_addr,
+        debug_flags,
+    );
 
     // Online (real WebTransport server) is the default; `?offline` anywhere
     // in the query string opts into the embedded single-player world instead.

@@ -107,6 +107,11 @@ pub enum ClientUpdateEvent {
     /// separate from the per-region `GameDataUpdate` channel because widgets
     /// hang off a screen-space UI root, not a region's world-space root.
     UiChannel(crossbeam::channel::Receiver<UiUpdate>),
+    /// Collider wireframe buffer for one region (region-local coords),
+    /// regenerated per tick while the debug flag is on — including empty
+    /// buffers, so the render side's replace-on-receipt clears stale
+    /// geometry as the viewer moves. Debug-only; never serialized.
+    DebugLines(RegionId, Vec<DebugLine>),
 }
 
 pub use region::{Region, ReconcileStats};

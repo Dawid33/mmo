@@ -47,7 +47,13 @@ impl BevyInputHarness {
         let (tap_send, tap_recv) = unbounded::<GameEventKind>();
 
         let addr = "127.0.0.1:0".parse().unwrap();
-        let client = GameInstanceManager::new(game_send, game_recv, bridge_send, addr);
+        let client = GameInstanceManager::new(
+            game_send,
+            game_recv,
+            bridge_send,
+            addr,
+            game::DebugFlags::default(),
+        );
 
         let client_to_server = client.client_packet_recv();
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();

@@ -37,6 +37,7 @@ pub enum Command {
         Receiver<GameEventKind>,
         Sender<ClientUpdateEvent>,
         SocketAddr,
+        game::DebugFlags,
     ),
     /// Quit the game thread. Should only be send when quitting the application.
     Quit,
@@ -48,9 +49,20 @@ fn start_game_thread() -> Sender<Command> {
     std::thread::spawn(move || loop {
         match command_recv.recv() {
             Ok(command) => match command {
-                Command::ConnectToServerAndScene(sender, receiver, client_sender, server) => {
-                    let mut manager =
-                        GameInstanceManager::new(sender, receiver, client_sender, server);
+                Command::ConnectToServerAndScene(
+                    sender,
+                    receiver,
+                    client_sender,
+                    server,
+                    debug_flags,
+                ) => {
+                    let mut manager = GameInstanceManager::new(
+                        sender,
+                        receiver,
+                        client_sender,
+                        server,
+                        debug_flags,
+                    );
                     if let Err(e) = manager.connect_and_run() {
                         warn!("Game Crashed: {:?}", e);
                     };
@@ -77,6 +89,9 @@ fn main() {
     #[cfg(not(debug_assertions))]
     game::set_hash_verification(false);
 
+    // Shared debug toggles: render thread (F3) writes, game thread reads.
+    let debug_flags = game::DebugFlags::default();
+
     #[cfg(target_arch = "wasm32")]
     console_error_panic_hook::set_once();
 
@@ -91,13 +106,14 @@ fn main() {
                 game_recv,
                 client_send,
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466)),
+                debug_flags.clone(),
             ))
             .unwrap();
         (command_send, game_send, client_recv)
     };
 
     #[cfg(target_arch = "wasm32")]
-    let (sim, game_send, client_recv) = sim_driver::start_wasm_sim();
+    let (sim, game_send, client_recv) = sim_driver::start_wasm_sim(debug_flags.clone());
 
     // Bevy's default asset root is CARGO_MANIFEST_DIR/assets (crates/client/assets,
     // a local, gitignored scratch dir left over from earlier prototyping). The

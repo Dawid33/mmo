@@ -55,6 +55,11 @@ pub struct GameInstanceManager {
     prev_ui_tree: game::WidgetTree,
     /// Last-emitted cursor-grab intent, for edge-triggered SetCursorGrab.
     last_cursor_grab: bool,
+    /// Shared debug toggles; the render thread's F3 handler flips them.
+    /// Process-local — not sim state.
+    debug_flags: game::DebugFlags,
+    /// Rapier debug-render wrapper (caches unit outlines across calls).
+    collider_debug: game::ColliderDebug,
     /// Rolling reconciliation / clock-drift keep-up counters.
     recon: ReconMetrics,
     /// Rolling wall-time budget attribution (native only).
@@ -191,6 +196,7 @@ impl GameInstanceManager {
         game_event_recv: Receiver<GameEventKind>,
         client_event_send: Sender<ClientUpdateEvent>,
         server: SocketAddr,
+        debug_flags: game::DebugFlags,
     ) -> Self {
         let (server_game_send, server_game_recv) = crossbeam::channel::unbounded();
         let (ui_update_send, ui_update_recv) = crossbeam::channel::unbounded();
@@ -219,6 +225,8 @@ impl GameInstanceManager {
             ui_update_send,
             prev_ui_tree: game::WidgetTree::empty(),
             last_cursor_grab: true,
+            debug_flags,
+            collider_debug: game::ColliderDebug::default(),
             recon: ReconMetrics::default(),
             #[cfg(not(target_arch = "wasm32"))]
             perf: PerfBudget::default(),
@@ -306,6 +314,7 @@ impl GameInstanceManager {
                 self.update_window();
                 self.update_far_window();
                 self.project_ui();
+                self.emit_collider_debug_lines();
             }
             GameEventKind::PlayerInput(_, _) if !self.is_caught_up => {
                 // Don't handle player events until the sim has caught up with
@@ -482,6 +491,41 @@ impl GameInstanceManager {
         let t = body.translation();
         // Real = OrderedFloat<f32>; .0 unwraps to f32 (as convert.rs / viewer_region).
         Some([t.x.0, t.y.0, t.z.0])
+    }
+
+    /// While the debug flag is on: wireframe every collider near the viewer,
+    /// one buffer per loaded region, and ship them to the render bridge.
+    /// Lines are region-local; the bridge adds each region's world offset.
+    /// Runs after the tick (read-only), so it never touches the rollback log.
+    fn emit_collider_debug_lines(&mut self) {
+        if !self.debug_flags.collider_wireframes() {
+            return;
+        }
+        // Viewer = local player's body, rebased to world space via home.
+        let (Some(local), Some(home)) = (self.local_player_translation(), self.home_region)
+        else {
+            return; // no player body yet: no lines beats wrong lines
+        };
+        let hoff = home.world_offset();
+        let world_pos = [local[0] + hoff[0], local[1] + hoff[1], local[2] + hoff[2]];
+        let Some(world) = self.world.as_ref() else { return };
+        for (id, region) in &world.regions {
+            let off = id.world_offset();
+            let viewer_local = [
+                world_pos[0] - off[0],
+                world_pos[1] - off[1],
+                world_pos[2] - off[2],
+            ];
+            let data = region.data();
+            let lines = self.collider_debug.collect(
+                &*data.physics.bodies,
+                &*data.physics.colliders,
+                viewer_local,
+            );
+            let _ = self
+                .client_event_send
+                .send(ClientUpdateEvent::DebugLines(*id, lines));
+        }
     }
 
     /// The local player's fps-cam toggle state in its home region, if the
@@ -998,7 +1042,13 @@ mod manager_tests {
         let (server_send, server_recv) = crossbeam::channel::unbounded();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let mut manager =
-            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+            GameInstanceManager::new(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                dummy_addr,
+                game::DebugFlags::default(),
+            );
 
         // Fake the server side using the same code the real server uses.
         let world = game::World::basic();
@@ -1049,7 +1099,13 @@ mod manager_tests {
         let (server_send, server_recv) = crossbeam::channel::unbounded();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let mut manager =
-            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+            GameInstanceManager::new(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                dummy_addr,
+                game::DebugFlags::default(),
+            );
         let outgoing = manager.client_packet_recv();
 
         let world = game::World::basic();
@@ -1116,7 +1172,13 @@ mod manager_tests {
         let (server_send, server_recv) = crossbeam::channel::unbounded();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let manager =
-            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+            GameInstanceManager::new(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                dummy_addr,
+                game::DebugFlags::default(),
+            );
         (manager, server_send, server_recv, client_recv, game_send)
     }
 
@@ -1796,7 +1858,13 @@ mod manager_tests {
         let (client_send, _client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let mut manager =
-            GameInstanceManager::new(game_send, game_recv, client_send, dummy_addr);
+            GameInstanceManager::new(
+                game_send,
+                game_recv,
+                client_send,
+                dummy_addr,
+                game::DebugFlags::default(),
+            );
 
         manager.ready = false;
         manager.is_caught_up = false;
@@ -1817,7 +1885,13 @@ mod manager_tests {
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let mut manager =
-            GameInstanceManager::new(game_send, game_recv, client_send, dummy_addr);
+            GameInstanceManager::new(
+                game_send,
+                game_recv,
+                client_send,
+                dummy_addr,
+                game::DebugFlags::default(),
+            );
 
         // Drain the UiChannel announcement sent unconditionally by new().
         assert!(matches!(
@@ -1859,7 +1933,13 @@ mod manager_tests {
         let (server_send, server_recv) = crossbeam::channel::unbounded();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let mut manager =
-            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+            GameInstanceManager::new(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                dummy_addr,
+                game::DebugFlags::default(),
+            );
 
         // Load a region whose snapshot already contains player 0 (seeded inv).
         let region_id = RegionCoords::new(0, 0);
@@ -1910,7 +1990,13 @@ mod manager_tests {
         let (server_send, server_recv) = crossbeam::channel::unbounded();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let mut manager =
-            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+            GameInstanceManager::new(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                dummy_addr,
+                game::DebugFlags::default(),
+            );
 
         let region_id = RegionCoords::new(0, 0);
         let mut world = game::World::new();

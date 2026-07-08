@@ -165,7 +165,13 @@ mod tests {
         let (server_send, server_recv) = crossbeam::channel::unbounded::<ServerPacket>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let mut manager =
-            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+            GameInstanceManager::new(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                dummy_addr,
+                game::DebugFlags::default(),
+            );
 
         let mut server = LocalServer::new(manager.client_packet_recv(), server_send).unwrap();
         manager.start();
@@ -218,7 +224,13 @@ mod tests {
         let (server_send, server_recv) = crossbeam::channel::unbounded::<ServerPacket>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
         let mut manager =
-            GameInstanceManager::new(game_send.clone(), game_recv, client_send, dummy_addr);
+            GameInstanceManager::new(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                dummy_addr,
+                game::DebugFlags::default(),
+            );
         let mut server = LocalServer::new(manager.client_packet_recv(), server_send).unwrap();
         manager.start();
 
