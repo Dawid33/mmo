@@ -11,6 +11,7 @@ use game::Voxel;
 use super::block_textures::BlockTextureLayers;
 use super::voxel_material::{self, StandardVoxelMaterial};
 
+pub mod ao;
 pub mod binary;
 
 /// `greedy_quads` only emits faces for voxels strictly inside `[min, max]` —
