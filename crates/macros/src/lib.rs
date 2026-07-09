@@ -413,6 +413,21 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
             },
         ));
+        per_struct_items.push(item(
+            "scope digest raw_fields",
+            quote! {
+                impl<'a> UndoScopeDigest<#s_ident, 'a> {
+                    /// Raw access to every field; the scope's registration
+                    /// obligation covers all mutations made through it.
+                    pub fn raw_fields(&mut self) -> #raw_ident<'_> {
+                        self.touched = true;
+                        #raw_ident {
+                            #(#f_ident: &mut self.value.data.#f_ident.data,)*
+                        }
+                    }
+                }
+            },
+        ));
     }
     items.extend(per_struct_items);
 
@@ -628,7 +643,91 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let mut global = self.value.global_log.lock().unwrap();
                     let trans = self.value.info.current.load(::std::sync::atomic::Ordering::SeqCst);
                     let wrap = self.value.wrap.expect("Undo field not wired to a FieldUndo variant");
-                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(undo))), pre_hash: self.pre_hash, verify: self.verify });
+                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(move |d, s| { undo(d, s); 0u32 }))), pre_hash: self.pre_hash, verify: self.verify });
+                }
+            }
+        },
+    ));
+
+    items.push(item(
+        "struct UndoScopeDigest<T>",
+        quote! {
+            // Delta-aware tier-2 escape hatch. Under Delta the caller supplies
+            // the pre-mutation footprint digest at register() time (no
+            // whole-field hash); under Full it behaves like UndoScope (captures
+            // the whole-field hash at creation); under Off nothing is checked.
+            pub struct UndoScopeDigest<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+                verify: HashMode,
+                pre_hash: u32, // whole-field hash iff verify == Full
+                touched: bool,
+                registered: bool,
+                value: &'a mut Undo<T>
+            }
+        },
+    ));
+
+    items.push(item(
+        "impl UndoScopeDigest<T>",
+        quote! {
+            impl<T, 'a> UndoScopeDigest<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash  {
+                /// True iff this scope was created under Delta mode. Lets callers
+                /// skip computing an expensive pre-digest that wouldn't be checked.
+                pub fn wants_delta_digest(&self) -> bool {
+                    self.verify == HashMode::Delta
+                }
+                pub fn register(mut self, pre: u32, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) -> u32 + 'static + Send) {
+                    self.registered = true;
+                    let mut global = self.value.global_log.lock().unwrap();
+                    let trans = self.value.info.current.load(::std::sync::atomic::Ordering::SeqCst);
+                    let (pre_hash, verify) = match self.verify {
+                        HashMode::Off => (0u32, HashMode::Off),
+                        HashMode::Full => (self.pre_hash, HashMode::Full),
+                        HashMode::Delta => (pre, HashMode::Delta),
+                    };
+                    let wrap = self.value.wrap.expect("Undo field not wired to a FieldUndo variant");
+                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(undo))), pre_hash, verify });
+                }
+            }
+        },
+    ));
+
+    items.push(item(
+        "UndoScopeDigest Deref",
+        quote! {
+            impl<T, 'a> ::std::ops::Deref for UndoScopeDigest<T, 'a>
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+                type Target = T;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.value
+                }
+            }
+        },
+    ));
+
+    items.push(item(
+        "UndoScopeDigest DerefMut",
+        quote! {
+            impl<T, 'a> ::std::ops::DerefMut for UndoScopeDigest<T, 'a>
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    self.touched = true;
+                    &mut self.value.data
+                }
+            }
+        },
+    ));
+
+    items.push(item(
+        "UndoScopeDigest Drop",
+        quote! {
+            impl<T, 'a> ::std::ops::Drop for UndoScopeDigest<T, 'a>
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+                fn drop(&mut self) {
+                    debug_assert!(
+                        !self.touched || self.registered,
+                        "UndoScopeDigest mutated without register()"
+                    );
                 }
             }
         },
@@ -647,7 +746,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 info: RollbackInfo,
                 #[serde(skip)]
                 #[debug(skip)]
-                wrap: ::std::option::Option<fn(Box<dyn FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>) -> FieldUndo>,
+                wrap: ::std::option::Option<fn(Box<dyn FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) -> u32 + Send>) -> FieldUndo>,
                 #[debug(skip)]
                 data: T
             }
@@ -681,9 +780,32 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub(crate) fn undo(&mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
                     let mut global = self.global_log.lock().unwrap();
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
+                    // A plain closure's footprint is unknown, so Delta mode still
+                    // pays the whole-field hash here on purpose.
                     let (pre_hash, verify) = match hash_mode() {
                         HashMode::Off => (0u32, HashMode::Off),
                         _ => (unsafe { self.hash_data() }, HashMode::Full),
+                    };
+                    let wrap = self.wrap.expect("Undo field not wired to a FieldUndo variant");
+                    global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(move |d, s| { undo(d, s); 0u32 }))), pre_hash, verify });
+                }
+
+                /// Delta-aware tier-2 undo. `pre` must hash exactly the data
+                /// `undo` touches, as it is BEFORE the mutation being logged;
+                /// `undo` returns that same digest recomputed from LIVE data
+                /// after it runs. Under Full the digest is ignored (whole-field
+                /// hash, today's semantics); under Off nothing is checked.
+                pub(crate) fn undo_digest(
+                    &mut self,
+                    pre: u32,
+                    undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) -> u32 + 'static + Send,
+                ) {
+                    let mut global = self.global_log.lock().unwrap();
+                    let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
+                    let (pre_hash, verify) = match hash_mode() {
+                        HashMode::Off => (0u32, HashMode::Off),
+                        HashMode::Full => (unsafe { self.hash_data() }, HashMode::Full),
+                        HashMode::Delta => (pre, HashMode::Delta),
                     };
                     let wrap = self.wrap.expect("Undo field not wired to a FieldUndo variant");
                     global.log.push_back(Entry { transaction: trans, undo: UndoOp::Opaque(wrap(Box::new(undo))), pre_hash, verify });
@@ -694,12 +816,15 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 /// notifications whose payload isn't derivable from a single
                 /// field's delta.
                 pub fn emit_on_undo(&mut self, event: crate::GameDataUpdate) {
-                    self.undo(move |_, s| {
+                    // Mutates nothing, so its footprint digest is trivially 0 → 0:
+                    // free even under Delta mode.
+                    self.undo_digest(0u32, move |_, s| {
                         // A disconnected receiver just means the render/client
                         // bridge has gone away (e.g. the window closed while the
                         // game thread was still reconciling). Drop the update
                         // rather than panic and kill the sim thread.
                         let _ = s.send(event);
+                        0u32
                     });
                 }
 
@@ -711,6 +836,25 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     UndoScope {
                         pre_hash,
                         verify,
+                        touched: false,
+                        registered: false,
+                        value: self
+                    }
+                }
+
+                /// Delta-aware sibling of undo_scope(). Stamps the mode at
+                /// creation; only Full captures the whole-field pre-hash up
+                /// front (Delta takes its footprint digest from register(), Off
+                /// checks nothing).
+                pub fn undo_scope_digest(&mut self) -> UndoScopeDigest<T, '_> {
+                    let verify = hash_mode();
+                    let pre_hash = match verify {
+                        HashMode::Full => unsafe { self.hash_data() },
+                        _ => 0u32,
+                    };
+                    UndoScopeDigest {
+                        verify,
+                        pre_hash,
                         touched: false,
                         registered: false,
                         value: self
@@ -750,8 +894,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             // constructors double as the `wrap` fn pointers stored on Undo<T>.
             #[allow(non_camel_case_types)]
             pub enum FieldUndo {
-                root(Box<dyn FnOnce(&mut #root_struct_ident, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>),
-                #(#iter_log_ident1(Box<dyn FnOnce(&mut #iter_ty1, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + Send>),)*
+                root(Box<dyn FnOnce(&mut #root_struct_ident, &::crossbeam::channel::Sender<crate::GameDataUpdate>) -> u32 + Send>),
+                #(#iter_log_ident1(Box<dyn FnOnce(&mut #iter_ty1, &::crossbeam::channel::Sender<crate::GameDataUpdate>) -> u32 + Send>),)*
             }
         },
     ));
@@ -1206,6 +1350,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     let iter_path6 = iter_path.clone();
     let iter_path7 = iter_path.clone();
     let iter_path_string1 = iter_path_string.clone();
+    let iter_path_string2 = iter_path_string.clone();
     let cell_log_ident2 = cell_log_ident.clone();
     let cell_path1 = cell_path.clone();
     let cell_path_string1 = cell_path_string.clone();
@@ -1240,31 +1385,47 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         }
                         match entry.undo {
                             UndoOp::Opaque(FieldUndo::root(func)) => {
-                                func(&mut self.data.data, rollback_log.client.as_ref().unwrap());
                                 match entry.verify {
-                                    HashMode::Off => {}
+                                    HashMode::Off => {
+                                        let _ = func(&mut self.data.data, rollback_log.client.as_ref().unwrap());
+                                    }
+                                    HashMode::Delta => {
+                                        let post = func(&mut self.data.data, rollback_log.client.as_ref().unwrap());
+                                        if post != entry.pre_hash {
+                                            panic!("Hash verification failed (delta) for root in transaction {:?}: {:?} != {:?}", entry.transaction, post, entry.pre_hash);
+                                        }
+                                    }
                                     HashMode::Full => {
+                                        let _ = func(&mut self.data.data, rollback_log.client.as_ref().unwrap());
                                         let new_hash = unsafe { self.data.hash_data() };
                                         if new_hash != entry.pre_hash {
                                             panic!("Hash verification failed for root in transaction {:?}: {:?} != {:?}", entry.transaction, new_hash, entry.pre_hash);
                                         }
                                     }
-                                    HashMode::Delta => unreachable!("no Delta loggers exist yet — added per-path in later tasks"),
                                 }
                             }
                             #(UndoOp::Opaque(FieldUndo::#iter_log_ident1(func)) => {
-                                // Pre-undo snapshot feeds only the hash-mismatch
-                                // diagnostics; skip the O(state) clone when
-                                // verification is off.
-                                let previous_data = if entry.verify == HashMode::Full { Some(self.#iter_path5.data.clone()) } else { None };
-                                func(&mut self.#iter_path1.data, rollback_log.client.as_ref().unwrap());
-                                if let Some(previous_data) = previous_data {
-                                    let new_hash = unsafe { self.#iter_path6.hash_data() };
-                                    if new_hash != entry.pre_hash {
-                                        println!("Hash verification failed for self.{}.hash_data() in transaction {:?} with new_hash != pre_hash: {:?} != {:?}\nremaining log len: {:?}", #iter_path_string1, entry.transaction, new_hash, entry.pre_hash, rollback_log.log.len());
-                                        match ::assert_json_diff::assert_json_matches_no_panic(&self.#iter_path7.data, &previous_data, ::assert_json_diff::Config::new(::assert_json_diff::CompareMode::Strict)) {
-                                            Ok(()) => panic!("Before and after is equal via serde_json"),
-                                            Err(e) => panic!("lhs: new, rhs: old. {}", e),
+                                match entry.verify {
+                                    HashMode::Off => {
+                                        let _ = func(&mut self.#iter_path1.data, rollback_log.client.as_ref().unwrap());
+                                    }
+                                    HashMode::Delta => {
+                                        let post = func(&mut self.#iter_path2.data, rollback_log.client.as_ref().unwrap());
+                                        if post != entry.pre_hash {
+                                            panic!("Hash verification failed (delta) for self.{} in transaction {:?}: {:?} != {:?}", #iter_path_string1, entry.transaction, post, entry.pre_hash);
+                                        }
+                                    }
+                                    HashMode::Full => {
+                                        // Pre-undo snapshot feeds only the hash-mismatch diagnostics.
+                                        let previous_data = self.#iter_path3.data.clone();
+                                        let _ = func(&mut self.#iter_path5.data, rollback_log.client.as_ref().unwrap());
+                                        let new_hash = unsafe { self.#iter_path6.hash_data() };
+                                        if new_hash != entry.pre_hash {
+                                            println!("Hash verification failed for self.{}.hash_data() in transaction {:?} with new_hash != pre_hash: {:?} != {:?}\nremaining log len: {:?}", #iter_path_string2, entry.transaction, new_hash, entry.pre_hash, rollback_log.log.len());
+                                            match ::assert_json_diff::assert_json_matches_no_panic(&self.#iter_path7.data, &previous_data, ::assert_json_diff::Config::new(::assert_json_diff::CompareMode::Strict)) {
+                                                Ok(()) => panic!("Before and after is equal via serde_json"),
+                                                Err(e) => panic!("lhs: new, rhs: old. {}", e),
+                                            }
                                         }
                                     }
                                 }

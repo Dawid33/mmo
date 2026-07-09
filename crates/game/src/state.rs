@@ -1054,3 +1054,59 @@ mod inventory_tests {
         assert_eq!(before, crate::state_hash(&rb), "inventory edit must invert bit-exact");
     }
 }
+
+#[cfg(test)]
+mod delta_digest_tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static MODE_LOCK: Mutex<()> = Mutex::new(());
+    struct ModeGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
+    impl Drop for ModeGuard {
+        fn drop(&mut self) {
+            set_hash_mode(HashMode::Full);
+        }
+    }
+    fn delta_mode() -> ModeGuard {
+        let g = MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_hash_mode(HashMode::Delta);
+        ModeGuard(g)
+    }
+    fn rb() -> (Rollback, crossbeam::channel::Receiver<GameDataUpdate>) {
+        let (send, recv) = crossbeam::channel::unbounded();
+        (Rollback::new(Some(send)), recv)
+    }
+
+    #[test]
+    fn tier2_digest_roundtrip_passes() {
+        let _m = delta_mode();
+        let (mut r, _recv) = rb();
+        r.new_transaction();
+        r.ecs.camera.undo_digest(42, |_d, _s| 42);
+        r.rollback(); // matching digest: no panic
+    }
+
+    #[test]
+    #[should_panic(expected = "Hash verification failed (delta)")]
+    fn tier2_digest_mismatch_panics() {
+        let _m = delta_mode();
+        let (mut r, _recv) = rb();
+        r.new_transaction();
+        r.ecs.camera.undo_digest(42, |_d, _s| 43);
+        r.rollback();
+    }
+
+    #[test]
+    fn plain_undo_closures_stay_full_verified_under_delta() {
+        // Unknown-footprint tier-2 must not silently lose checking: change()
+        // logs a whole-field snapshot and is still whole-field verified.
+        let _m = delta_mode();
+        let (mut r, _recv) = rb();
+        let before = crate::state_hash(&r);
+        r.new_transaction();
+        r.tick.update(|t| *t += 1); // cell — stamps Full per Task 2
+        r.ecs.camera.change();      // tier-2 snapshot
+        r.rollback();
+        assert_eq!(before, crate::state_hash(&r));
+    }
+}
