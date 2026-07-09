@@ -49,6 +49,34 @@ const FACE_NORMALS = array<vec3<f32>, 6>(
     vec3<f32>(0.0, 0.0, -1.0),
 );
 
+// Voxels per block edge — one texture repeat spans one block face. Must match
+// game::block::BLOCK_VOXELS.
+const BLOCK_VOXELS: f32 = 16.0;
+
+// Per-face UV sampling axes, indexed by the packed face id. This is a
+// sampling-orientation choice (nothing else reads these UVs), NOT tied to
+// binary.rs::cross_axes(), which only orders quad extents. Side faces (X/Z)
+// sample upright: U = the face's horizontal axis, V = -Y so image-up is
+// world-up (texture v=0 is the image's top row; the Repeat sampler wraps
+// negative v). Y faces map U=X, V=Z. Opposite side faces mirror horizontally
+// — irrelevant for natural art; revisit if blocks ever carry glyphs.
+const FACE_U_MASK = array<vec3<f32>, 6>(
+    vec3<f32>(0.0, 0.0, 1.0),  // +X: u = z
+    vec3<f32>(0.0, 0.0, 1.0),  // -X: u = z
+    vec3<f32>(1.0, 0.0, 0.0),  // +Y: u = x
+    vec3<f32>(1.0, 0.0, 0.0),  // -Y: u = x
+    vec3<f32>(1.0, 0.0, 0.0),  // +Z: u = x
+    vec3<f32>(1.0, 0.0, 0.0),  // -Z: u = x
+);
+const FACE_V_MASK = array<vec3<f32>, 6>(
+    vec3<f32>(0.0, -1.0, 0.0), // +X: v = -y (upright)
+    vec3<f32>(0.0, -1.0, 0.0), // -X: v = -y (upright)
+    vec3<f32>(0.0, 0.0, 1.0),  // +Y: v = z
+    vec3<f32>(0.0, 0.0, 1.0),  // -Y: v = z
+    vec3<f32>(0.0, -1.0, 0.0), // +Z: v = -y (upright)
+    vec3<f32>(0.0, -1.0, 0.0), // -Z: v = -y (upright)
+);
+
 #ifdef PREPASS_PIPELINE
 
 // Prepass/shadow vertex: decode the corner position from the packed word and
@@ -107,10 +135,6 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
     let w1 = vertex.packed.y;
     let face = (w0 >> 18u) & 7u;
     let ao = (w0 >> 21u) & 3u;
-    let cu = (w0 >> 23u) & 1u;
-    let cv = (w0 >> 24u) & 1u;
-    let quad_w = w1 & 63u;
-    let quad_h = (w1 >> 6u) & 63u;
 
     var model = mesh_functions::get_world_from_local(vertex.instance_index);
     let local_pos = unpack_local_position(w0);
@@ -119,8 +143,15 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
     out.position = position_world_to_clip(out.world_position.xyz);
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
         FACE_NORMALS[face], vertex.instance_index);
-    // Quad-extent UV tiling (repeat sampler wraps it per voxel cell).
-    out.uv = vec2<f32>(f32(cu * quad_w), f32(cv * quad_h));
+    // Block-cell UVs from the decoded chunk-local corner position: affine in
+    // position, so interpolation across greedy quads of any extent is exact,
+    // and block bounds land on integer UVs so the Repeat sampler wraps the
+    // texture once per block face. The packed cu/cv/w/h fields are no longer
+    // read here (layout unchanged, see pack.rs).
+    out.uv = vec2<f32>(
+        dot(local_pos, FACE_U_MASK[face]),
+        dot(local_pos, FACE_V_MASK[face]),
+    ) / BLOCK_VOXELS;
     // Baked AO — must match ao::AO_CURVE (0.55 + 0.15 * ao); test-pinned in pack.rs.
     out.shade = 0.55 + 0.15 * f32(ao);
     out.layer = (w1 >> 12u) & 65535u;

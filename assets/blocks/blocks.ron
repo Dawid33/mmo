@@ -5,6 +5,10 @@
 // magenta/black "missing texture" checkerboard.
 (
     blocks: [
+        // Textures span one BLOCK face (16x16 texels = 1 texel/voxel; see the
+        // per-block UV mapping in assets/shaders/voxel_texture.wgsl). To debug
+        // UV mapping, point a block at marker.png (asymmetric "F" + red patch
+        // at the UV origin).
         (id: 0, name: "air",   textures: Untextured),
         (id: 1, name: "dirt",  textures: All("dirt.png")),
         (id: 2, name: "stone", textures: All("stone.png")),

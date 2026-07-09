@@ -3,6 +3,9 @@
 //!   word0: x:6 | y:6 | z:6 | face:3 | ao:2 | cu:1 | cv:1   (bits 25-31 zero)
 //!   word1: w:6 | h:6 | layer:16                            (bits 28-31 zero)
 //! Rust packs (emit.rs) and unpacks (tests only); the shader only unpacks.
+//! Since per-block texturing the shader derives UVs from the decoded position
+//! (block-cell UVs) and no longer reads cu/cv/w/h — they stay packed so the
+//! layout (and tests) hold; reclaiming those 14 bits is a future format change.
 
 use super::binary::Face;
 

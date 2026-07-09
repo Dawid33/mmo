@@ -152,6 +152,10 @@ const EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])] = &[
         include_bytes!("../../../../assets/blocks/grass_top.png"),
     ),
     (
+        "marker.png",
+        include_bytes!("../../../../assets/blocks/marker.png"),
+    ),
+    (
         "sand.png",
         include_bytes!("../../../../assets/blocks/sand.png"),
     ),
@@ -186,9 +190,9 @@ fn setup_scene(
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
-    // `ImageSampler::nearest()` alone leaves clamp-to-edge addressing, which breaks the
-    // tiled UVs the mesher emits (uv * quad.width/height can exceed 1.0); force repeat
-    // addressing on top of nearest filtering.
+    // `ImageSampler::nearest()` alone leaves clamp-to-edge addressing, which breaks
+    // the shader's block-cell UVs (position / BLOCK_VOXELS exceeds 1.0 past the first
+    // block); force repeat addressing on top of nearest filtering.
     let mut sampler = ImageSamplerDescriptor::nearest();
     sampler.address_mode_u = ImageAddressMode::Repeat;
     sampler.address_mode_v = ImageAddressMode::Repeat;
