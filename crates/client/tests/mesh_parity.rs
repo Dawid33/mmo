@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use block_mesh::ndshape::{ConstShape, ConstShape3u32};
+use block_mesh::ndshape::ConstShape3u32;
 use block_mesh::{greedy_quads, GreedyQuadsBuffer, RIGHT_HANDED_Y_UP_CONFIG};
 use client::renderer::meshing::binary::{mesh_quads, PaddedVoxels};
 use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
