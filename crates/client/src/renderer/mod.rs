@@ -20,6 +20,7 @@ pub mod meshing;
 pub(crate) mod ui_bridge;
 pub(crate) mod ui_input;
 mod voxel_material;
+pub(crate) mod worldgen_rings;
 use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
 
@@ -64,6 +65,7 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<meshing::queue::MeshBudgets>()
             .init_resource::<meshing::queue::FrameUploads>()
             .init_resource::<meshing::visibility::CullingConfig>()
+            .insert_resource(worldgen_rings::WorldgenRings::new(load_worldgen_materials()))
             .add_systems(
                 PreUpdate,
                 (
@@ -94,6 +96,14 @@ impl Plugin for SimBridgePlugin {
                         meshing::visibility::cull_chunks,
                     )
                         .chain(),
+                    // Worldgen rings run in Update but outside the meshing
+                    // chain: they only spawn/despawn LOD roots and children,
+                    // which the LOD mesh systems pick up on later frames.
+                    (
+                        worldgen_rings::manage_worldgen_rings,
+                        worldgen_rings::finish_worldgen_tasks,
+                    )
+                        .chain(),
                     interpolate::interpolate_transforms,
                     avatar::attach_avatars,
                     hud::toggle_debug,
@@ -105,6 +115,24 @@ impl Plugin for SimBridgePlugin {
             );
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Update, meshing::visibility::enable_native_occlusion);
+    }
+}
+
+/// Terrain materials for the client-side worldgen LOD rings, resolved from
+/// the block registry exactly like the embedded server does
+/// (`local_server.rs`) so ring terrain uses the same block ids the server's
+/// snapshots would.
+fn load_worldgen_materials() -> worldgen::material::Materials {
+    let registry = crate::blocks::load_registry();
+    let resolve = |name: &str| {
+        registry.id_of(name).unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
+    };
+    worldgen::material::Materials {
+        stone: resolve("stone"),
+        dirt: resolve("dirt"),
+        grass: resolve("grass"),
+        sand: resolve("sand"),
+        water: resolve("water"),
     }
 }
 
