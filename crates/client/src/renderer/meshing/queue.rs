@@ -508,24 +508,24 @@ mod tests {
         // zone diff re-dirties it; settle until both are final.)
         assert!(wait_until_settled(&mut app), "pipeline must settle");
         let meshes = app.world().resource::<Assets<Mesh>>();
-        let check = |e: Entity, plane_x: f32, expect_face: Face| {
+        let check = |e: Entity, plane_x: u32, expect_face: Face| {
             let handle = app.world().entity(e).get::<Mesh3d>().expect("meshed").0.clone();
             let mesh = meshes.get(&handle).unwrap();
-            let (Some(VertexAttributeValues::Float32x3(pos)), Some(VertexAttributeValues::Uint32x2(packed))) = (
-                mesh.attribute(Mesh::ATTRIBUTE_POSITION),
-                mesh.attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED),
-            ) else {
+            let Some(VertexAttributeValues::Uint32x2(packed)) =
+                mesh.attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED)
+            else {
                 panic!()
             };
             assert!(
-                !pos.iter()
-                    .zip(packed)
-                    .any(|(p, &pk)| p[0] == plane_x && pack::unpack(pk).face == expect_face),
+                !packed.iter().any(|&pk| {
+                    let v = pack::unpack(pk);
+                    v.pos[0] == plane_x && v.face == expect_face
+                }),
                 "face on the shared plane survived neighbor culling"
             );
         };
-        check(a, 32.0, Face::PosX);
-        check(b, 0.0, Face::NegX);
+        check(a, 32, Face::PosX);
+        check(b, 0, Face::NegX);
     }
 
     #[test]
@@ -627,19 +627,15 @@ mod tests {
                 };
                 let meshes = app.world().resource::<Assets<Mesh>>();
                 let Some(mesh) = meshes.get(&handle) else { return false };
-                let (
-                    Some(VertexAttributeValues::Float32x3(pos)),
-                    Some(VertexAttributeValues::Uint32x2(packed)),
-                ) = (
-                    mesh.attribute(Mesh::ATTRIBUTE_POSITION),
-                    mesh.attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED),
-                )
+                let Some(VertexAttributeValues::Uint32x2(packed)) =
+                    mesh.attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED)
                 else {
                     return false;
                 };
-                pos.iter()
-                    .zip(packed)
-                    .any(|(p, &pk)| p[0] == 0.0 && pack::unpack(pk).face == Face::NegX)
+                packed.iter().any(|&pk| {
+                    let v = pack::unpack(pk);
+                    v.pos[0] == 0 && v.face == Face::NegX
+                })
             }),
             "b must re-grow its shared-plane wall after its solid neighbor a is removed"
         );

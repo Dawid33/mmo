@@ -1,9 +1,8 @@
-//! Quad list → Bevy `Mesh`. Hybrid vertex format (Phase 2 Stage A): POSITION
-//! (Float32x3) plus a single packed `ATTRIBUTE_VOXEL_PACKED` (Uint32x2)
-//! carrying face/ao/corner/extent/layer — see `pack.rs` for the bit layout.
-//! NORMAL/UV_0/COLOR/TEX_INDEX are gone; the shader unpacks everything it
-//! used to read from those attributes out of the packed word pair. Stage B
-//! (Task 4) drops POSITION too, decoding the corner position in-shader.
+//! Quad list → Bevy `Mesh`. Packed vertex format (Phase 2 Stage B): a single
+//! `ATTRIBUTE_VOXEL_PACKED` (Uint32x2, 8 bytes/vertex) carrying
+//! position/face/ao/corner/extent/layer — see `pack.rs` for the bit layout.
+//! There is no POSITION attribute; the shader decodes the corner position
+//! from the packed word (both the forward and prepass vertex stages).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
@@ -33,14 +32,13 @@ pub fn quads_to_mesh(quads: &[Quad], layers: &BlockTextureLayers) -> Option<Mesh
         return None;
     }
     let n = quads.len() * 4;
-    let mut positions = Vec::with_capacity(n);
     let mut packed: Vec<[u32; 2]> = Vec::with_capacity(n);
     let mut indices = Vec::with_capacity(quads.len() * 6);
 
     for q in quads {
         let axis = q.face.axis();
         let (ua, va) = cross_axes(axis);
-        let base = positions.len() as u32;
+        let base = packed.len() as u32;
         indices.extend(quad_indices(q.face, ao_flips_quad(&q.ao)).map(|i| base + i));
 
         let faces = layers.0.get(&q.block).copied().unwrap_or([0, 0, 0]);
@@ -55,7 +53,6 @@ pub fn quads_to_mesh(quads: &[Quad], layers: &BlockTextureLayers) -> Option<Mesh
             let mut pos = origin;
             pos[ua] += cu * q.w;
             pos[va] += cv * q.h;
-            positions.push([pos[0] as f32, pos[1] as f32, pos[2] as f32]);
             packed.push(pack::pack(pos, q.face, q.ao[i], cu, cv, q.w, q.h, layer));
         }
     }
@@ -64,7 +61,6 @@ pub fn quads_to_mesh(quads: &[Quad], layers: &BlockTextureLayers) -> Option<Mesh
     // (MinimalPlugins), and the entity Aabb is inserted constant by `apply_meshed_chunks`
     // so nothing reads mesh data main-world after upload.
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, VertexAttributeValues::Float32x3(positions));
     mesh.insert_attribute(
         voxel_material::ATTRIBUTE_VOXEL_PACKED,
         VertexAttributeValues::Uint32x2(packed),
@@ -84,16 +80,16 @@ mod tests {
     }
 
     fn tri_normals_positive(mesh: &Mesh, expected_normal: [f32; 3]) {
-        let VertexAttributeValues::Float32x3(pos) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
-        else {
-            panic!("positions are Float32x3")
-        };
+        // Positions come from the packed decode — the same source the shader uses.
+        let pos: Vec<Vec3> = packed_of(mesh)
+            .iter()
+            .map(|v| Vec3::new(v.pos[0] as f32, v.pos[1] as f32, v.pos[2] as f32))
+            .collect();
         let Indices::U32(idx) = mesh.indices().unwrap() else { panic!("u32 indices") };
         let n = Vec3::from(expected_normal);
         for tri in idx.chunks(3) {
             let [a, b, c] = [pos[tri[0] as usize], pos[tri[1] as usize], pos[tri[2] as usize]];
-            let cross = (Vec3::from(b) - Vec3::from(a)).cross(Vec3::from(c) - Vec3::from(a));
+            let cross = (b - a).cross(c - a);
             assert!(cross.dot(n) > 0.0, "triangle {tri:?} winds against its normal");
         }
     }
@@ -117,16 +113,12 @@ mod tests {
         // sits at x = 6, y spans 6..8, z spans 7..10.
         let mesh = quads_to_mesh(&[unit_quad(Face::PosX, [3; 4])], &BlockTextureLayers::default())
             .unwrap();
-        let VertexAttributeValues::Float32x3(pos) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
-        else {
-            panic!()
-        };
-        assert!(pos.iter().all(|p| p[0] == 6.0));
-        assert_eq!(pos.iter().map(|p| p[1] as i32).min(), Some(6));
-        assert_eq!(pos.iter().map(|p| p[1] as i32).max(), Some(8));
-        assert_eq!(pos.iter().map(|p| p[2] as i32).min(), Some(7));
-        assert_eq!(pos.iter().map(|p| p[2] as i32).max(), Some(10));
+        let pos: Vec<[u32; 3]> = packed_of(&mesh).iter().map(|v| v.pos).collect();
+        assert!(pos.iter().all(|p| p[0] == 6));
+        assert_eq!(pos.iter().map(|p| p[1]).min(), Some(6));
+        assert_eq!(pos.iter().map(|p| p[1]).max(), Some(8));
+        assert_eq!(pos.iter().map(|p| p[2]).min(), Some(7));
+        assert_eq!(pos.iter().map(|p| p[2]).max(), Some(10));
     }
 
     fn packed_of(mesh: &Mesh) -> Vec<crate::renderer::meshing::pack::UnpackedVertex> {
@@ -157,22 +149,6 @@ mod tests {
     }
 
     #[test]
-    fn packed_position_matches_float_position() {
-        // The packed x/y/z must agree with the POSITION attribute — this is
-        // what lets Task 4 drop POSITION entirely.
-        let mesh = quads_to_mesh(&[unit_quad(Face::PosX, [3; 4])], &BlockTextureLayers::default())
-            .unwrap();
-        let VertexAttributeValues::Float32x3(pos) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
-        else {
-            panic!()
-        };
-        for (p, v) in pos.iter().zip(packed_of(&mesh)) {
-            assert_eq!([p[0] as u32, p[1] as u32, p[2] as u32], v.pos);
-        }
-    }
-
-    #[test]
     fn packed_layer_uses_face_collapsed_triple() {
         let mut layers = BlockTextureLayers::default();
         layers.0.insert(BlockId(1), [10, 20, 30]);
@@ -183,15 +159,15 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_format_is_20_bytes_per_vertex() {
+    fn packed_format_is_8_bytes_per_vertex() {
         let mesh = quads_to_mesh(&[unit_quad(Face::PosY, [3; 4])], &BlockTextureLayers::default())
             .unwrap();
         let total: usize = mesh
             .attributes()
             .map(|(_, values)| values.get_bytes().len())
             .sum();
-        assert_eq!(total / mesh.count_vertices(), 20, "12B position + 8B packed");
-        assert_eq!(mesh.attributes().count(), 2, "exactly POSITION + VOXEL_PACKED");
+        assert_eq!(total / mesh.count_vertices(), 8, "one Uint32x2 per vertex");
+        assert_eq!(mesh.attributes().count(), 1, "exactly VOXEL_PACKED");
     }
 
     #[test]

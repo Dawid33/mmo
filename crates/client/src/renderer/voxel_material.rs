@@ -6,7 +6,7 @@ use bevy::{
     render::render_resource::{
         AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError, VertexFormat,
     },
-    shader::{ShaderDefVal, ShaderRef},
+    shader::ShaderRef,
 };
 
 /// The packed voxel vertex word pair — layout documented in
@@ -15,11 +15,10 @@ use bevy::{
 pub const ATTRIBUTE_VOXEL_PACKED: MeshVertexAttribute =
     MeshVertexAttribute::new("VoxelPacked", 988540917, VertexFormat::Uint32x2);
 
+/// The sole vertex attribute chunk meshes carry: 8 bytes/vertex, decoded
+/// entirely in-shader (both the forward and prepass vertex stages).
 pub fn vertex_layout() -> Vec<VertexAttributeDescriptor> {
-    vec![
-        Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
-        ATTRIBUTE_VOXEL_PACKED.at_shader_location(8),
-    ]
+    vec![ATTRIBUTE_VOXEL_PACKED.at_shader_location(8)]
 }
 
 // `pub` (not `pub(crate)`): reachable through `ChunkMaterial`'s public handle
@@ -40,20 +39,21 @@ impl MaterialExtension for StandardVoxelMaterial {
         "shaders/voxel_texture.wgsl".into()
     }
 
+    // The prepass (shadow/depth) pipeline needs the same packed-decode vertex
+    // stage — the default prepass vertex reads POSITION, which chunk meshes
+    // no longer carry. The WGSL branches on PREPASS_PIPELINE.
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/voxel_texture.wgsl".into()
+    }
+
+    // Called for BOTH the forward and prepass pipelines: each must accept the
+    // packed-only vertex buffer.
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
         _key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        if descriptor
-            .vertex
-            .shader_defs
-            .contains(&ShaderDefVal::Bool("PREPASS_PIPELINE".into(), true))
-        {
-            return Ok(());
-        }
-
         let vertex_layout = layout.0.get_layout(&vertex_layout())?;
         descriptor.vertex.buffers = vec![vertex_layout];
         Ok(())

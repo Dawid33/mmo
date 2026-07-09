@@ -1,18 +1,17 @@
 #import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
     mesh_functions,
     view_transformations::position_world_to_clip
 }
 #ifdef PREPASS_PIPELINE
-#import bevy_pbr::{
-    prepass_io::{VertexOutput, FragmentOutput},
-    pbr_deferred_functions::deferred_output,
-}
+// Vertex-only in the prepass: the depth/shadow fragment stage stays Bevy's
+// default. prepass_io::FragmentOutput is gated behind PREPASS_FRAGMENT, so it
+// must not be imported here.
+#import bevy_pbr::prepass_io::VertexOutput
 #else
 #import bevy_pbr::{
+    pbr_fragment::pbr_input_from_standard_material,
+    pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     forward_io::{VertexOutput, FragmentOutput},
-    pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
 }
 #endif
 
@@ -22,26 +21,22 @@ var mat_array_texture: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101)
 var mat_array_texture_sampler: sampler;
 
-// Packed voxel vertex — bit layout mirrored by
-// crates/client/src/renderer/meshing/pack.rs (the Rust source of truth):
+// Packed voxel vertex — the mesh's ONLY attribute (8 bytes/vertex); bit
+// layout mirrored by crates/client/src/renderer/meshing/pack.rs (the Rust
+// source of truth):
 //   w0: x:6 | y:6 | z:6 | face:3 | ao:2 | cu:1 | cv:1
 //   w1: w:6 | h:6 | layer:16
 struct Vertex {
     @builtin(instance_index) instance_index: u32,
-#ifdef VERTEX_POSITIONS
-    @location(0) position: vec3<f32>,
-#endif
     @location(8) packed: vec2<u32>,
 };
 
-struct CustomVertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) world_position: vec4<f32>,
-    @location(1) world_normal: vec3<f32>,
-    @location(2) uv: vec2<f32>,
-    @location(3) shade: f32,
-    @location(4) @interpolate(flat) layer: u32,
-    @location(6) @interpolate(flat) instance_index: u32,
+fn unpack_local_position(w0: u32) -> vec3<f32> {
+    return vec3<f32>(
+        f32(w0 & 63u),
+        f32((w0 >> 6u) & 63u),
+        f32((w0 >> 12u) & 63u),
+    );
 }
 
 // Indexed by the packed face id — order locked to Face::index() in binary.rs.
@@ -53,6 +48,57 @@ const FACE_NORMALS = array<vec3<f32>, 6>(
     vec3<f32>(0.0, 0.0, 1.0),
     vec3<f32>(0.0, 0.0, -1.0),
 );
+
+#ifdef PREPASS_PIPELINE
+
+// Prepass/shadow vertex: decode the corner position from the packed word and
+// populate prepass_io::VertexOutput — only the fields the active shader defs
+// declare, under the same #ifdefs prepass_io.wgsl gates them with (see
+// bevy_pbr's prepass.wgsl for the reference implementation).
+@vertex
+fn vertex(vertex: Vertex) -> VertexOutput {
+    var out: VertexOutput;
+    let w0 = vertex.packed.x;
+    let local_pos = unpack_local_position(w0);
+    var model = mesh_functions::get_world_from_local(vertex.instance_index);
+    out.world_position = mesh_functions::mesh_position_local_to_world(
+        model, vec4<f32>(local_pos, 1.0));
+    out.position = position_world_to_clip(out.world_position.xyz);
+#ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
+    out.unclipped_depth = out.position.z;
+    out.position.z = min(out.position.z, 1.0); // Clamp depth to avoid clipping
+#endif
+#ifdef NORMAL_PREPASS_OR_DEFERRED_PREPASS
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(
+        FACE_NORMALS[(w0 >> 18u) & 7u], vertex.instance_index);
+#endif
+#ifdef MOTION_VECTOR_PREPASS
+    // Chunk vertices don't animate; only the model transform can move.
+    out.previous_world_position = mesh_functions::mesh_position_local_to_world(
+        mesh_functions::get_previous_world_from_local(vertex.instance_index),
+        vec4<f32>(local_pos, 1.0));
+#endif
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    out.instance_index = vertex.instance_index;
+#endif
+#ifdef VISIBILITY_RANGE_DITHER
+    out.visibility_range_dither = mesh_functions::get_visibility_range_dither_level(
+        vertex.instance_index, model[3]);
+#endif
+    return out;
+}
+
+#else // PREPASS_PIPELINE
+
+struct CustomVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_position: vec4<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) shade: f32,
+    @location(4) @interpolate(flat) layer: u32,
+    @location(6) @interpolate(flat) instance_index: u32,
+}
 
 @vertex
 fn vertex(vertex: Vertex) -> CustomVertexOutput {
@@ -67,16 +113,7 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
     let quad_h = (w1 >> 6u) & 63u;
 
     var model = mesh_functions::get_world_from_local(vertex.instance_index);
-#ifdef VERTEX_POSITIONS
-    let local_pos = vertex.position;
-#else
-    // Stage B (no POSITION attribute): decode the corner from the packed word.
-    let local_pos = vec3<f32>(
-        f32(w0 & 63u),
-        f32((w0 >> 6u) & 63u),
-        f32((w0 >> 12u) & 63u),
-    );
-#endif
+    let local_pos = unpack_local_position(w0);
     out.world_position = mesh_functions::mesh_position_local_to_world(
         model, vec4<f32>(local_pos, 1.0));
     out.position = position_world_to_clip(out.world_position.xyz);
@@ -107,13 +144,11 @@ fn fragment(
     pbr_input.material.base_color = tex * vec4<f32>(in.shade, in.shade, in.shade, 1.0);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
-#ifdef PREPASS_PIPELINE
-    let out = deferred_output(in, pbr_input);
-#else
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
-#endif
 
     return out;
 }
+
+#endif // PREPASS_PIPELINE

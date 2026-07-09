@@ -149,16 +149,17 @@ mod tests {
         let voxels = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
         let mesh = build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default())
             .expect("mesh");
-        let VertexAttributeValues::Float32x3(positions) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+        let VertexAttributeValues::Uint32x2(packed) =
+            mesh.attribute(crate::renderer::voxel_material::ATTRIBUTE_VOXEL_PACKED).unwrap()
         else {
-            panic!("positions must be Float32x3");
+            panic!("packed attribute must be Uint32x2");
         };
+        let positions: Vec<[u32; 3]> = packed.iter().map(|&p| pack::unpack(p).pos).collect();
         for axis in 0..3 {
-            let lo = positions.iter().map(|p| p[axis]).fold(f32::MAX, f32::min);
-            let hi = positions.iter().map(|p| p[axis]).fold(f32::MIN, f32::max);
-            assert_eq!(lo, 0.0, "axis {axis} min");
-            assert_eq!(hi, 32.0, "axis {axis} max");
+            let lo = positions.iter().map(|p| p[axis]).min().unwrap();
+            let hi = positions.iter().map(|p| p[axis]).max().unwrap();
+            assert_eq!(lo, 0, "axis {axis} min");
+            assert_eq!(hi, 32, "axis {axis} max");
         }
     }
 
