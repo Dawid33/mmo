@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 pub mod block;
 pub mod camera;
+pub mod debug_render;
 pub mod input;
 mod physics;
 pub mod protocol;
@@ -33,6 +34,7 @@ pub use parry3d as parry;
 // rely on these items being reachable at the crate root (`crate::...`).
 pub use block::*;
 pub use camera::*;
+pub use debug_render::{ColliderDebug, DebugFlags, DebugLine, DEBUG_COLLIDER_RADIUS};
 pub use input::*;
 pub use protocol::*;
 pub use registry::*;
@@ -105,6 +107,11 @@ pub enum ClientUpdateEvent {
     /// separate from the per-region `GameDataUpdate` channel because widgets
     /// hang off a screen-space UI root, not a region's world-space root.
     UiChannel(crossbeam::channel::Receiver<UiUpdate>),
+    /// Collider wireframe buffer for one region (region-local coords),
+    /// regenerated per tick while the debug flag is on — including empty
+    /// buffers, so the render side's replace-on-receipt clears stale
+    /// geometry as the viewer moves. Debug-only; never serialized.
+    DebugLines(RegionId, Vec<DebugLine>),
 }
 
 pub use region::{Region, ReconcileStats};

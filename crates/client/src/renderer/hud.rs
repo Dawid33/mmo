@@ -122,9 +122,12 @@ pub fn setup_hud(mut commands: Commands) {
         });
 }
 
-/// F3 toggles the debug overlay's visibility.
+/// F3 toggles the debug overlay's visibility — and with it the collider
+/// wireframe view (one debug mode): the shared flag tells the game thread
+/// whether to generate lines at all.
 pub fn toggle_debug(
     keys: Res<ButtonInput<KeyCode>>,
+    flags: Res<super::collider_debug::DebugFlagsRes>,
     mut overlay: Query<&mut Visibility, With<DebugOverlay>>,
 ) {
     if !keys.just_pressed(KeyCode::F3) {
@@ -135,6 +138,7 @@ pub fn toggle_debug(
             Visibility::Hidden => Visibility::Visible,
             _ => Visibility::Hidden,
         };
+        flags.0.set_collider_wireframes(*vis == Visibility::Visible);
     }
 }
 
@@ -208,6 +212,9 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(crate::renderer::collider_debug::DebugFlagsRes(
+                game::DebugFlags::default(),
+            ))
             .add_systems(Startup, setup_hud)
             .add_systems(Update, toggle_debug);
         app.update(); // runs setup_hud
@@ -227,6 +234,25 @@ mod tests {
             let vis = w.query_filtered::<&Visibility, With<DebugOverlay>>().single(w).unwrap();
             assert_eq!(*vis, Visibility::Visible);
         }
+
+        // The shared debug flag follows the overlay's visibility.
+        assert!(app
+            .world()
+            .resource::<crate::renderer::collider_debug::DebugFlagsRes>()
+            .0
+            .collider_wireframes());
+
+        // F3 again: hidden + flag off. reset_all() drops both the pressed set
+        // and the just_pressed edge, so the second press registers as a fresh
+        // edge (clear() alone keeps the key "held", swallowing the press).
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::F3);
+        app.update();
+        assert!(!app
+            .world()
+            .resource::<crate::renderer::collider_debug::DebugFlagsRes>()
+            .0
+            .collider_wireframes());
     }
 
     #[test]

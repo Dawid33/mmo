@@ -47,7 +47,13 @@ impl BevyInputHarness {
         let (tap_send, tap_recv) = unbounded::<GameEventKind>();
 
         let addr = "127.0.0.1:0".parse().unwrap();
-        let client = GameInstanceManager::new(game_send, game_recv, bridge_send, addr);
+        let client = GameInstanceManager::new(
+            game_send,
+            game_recv,
+            bridge_send,
+            addr,
+            game::DebugFlags::default(),
+        );
 
         let client_to_server = client.client_packet_recv();
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();
@@ -65,6 +71,7 @@ impl BevyInputHarness {
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
             .init_resource::<UiUpdates>()
+            .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .insert_resource(ClientUpdates(bridge_recv))
             .insert_resource(GameEvents(tap_send))
             // Same ordering SimBridgePlugin uses: forward_input BEFORE the drains.

@@ -22,16 +22,19 @@ pub fn instances(nsubdivs: u32) -> HashMap<TypeId, (Vec<Point<Real>>, Vec<[u32; 
     let mut result = HashMap::new();
     result.insert(
         TypeId::of::<Cuboid>(),
-        Cuboid::new(Vector::repeat(0.5)).to_outline(),
+        Cuboid::new(Vector::repeat(Real::from(0.5))).to_outline(),
     );
-    result.insert(TypeId::of::<Ball>(), Ball::new(0.5).to_outline(nsubdivs));
+    result.insert(
+        TypeId::of::<Ball>(),
+        Ball::new(Real::from(0.5)).to_outline(nsubdivs),
+    );
     result.insert(
         TypeId::of::<Cone>(),
-        Cone::new(0.5, 0.5).to_outline(nsubdivs),
+        Cone::new(Real::from(0.5), Real::from(0.5)).to_outline(nsubdivs),
     );
     result.insert(
         TypeId::of::<Cylinder>(),
-        Cylinder::new(0.5, 0.5).to_outline(nsubdivs),
+        Cylinder::new(Real::from(0.5), Real::from(0.5)).to_outline(nsubdivs),
     );
     result
 }

@@ -16,7 +16,10 @@ pub struct SimHarness {
     server: LocalServer,
     client: GameInstanceManager,
     server_to_client: Receiver<ServerPacket>,
-    _bridge_recv: Receiver<ClientUpdateEvent>,
+    bridge_recv: Receiver<ClientUpdateEvent>,
+    /// Debug toggles shared with the manager — tests flip these the way the
+    /// render thread's F3 handler would.
+    pub debug: game::DebugFlags,
     held: BTreeSet<Key>,
     /// Keys released since the last `step()`, awaiting their one-shot key-up
     /// edge. The sim's `InputState` only leaves `Held` on a `pressed:false`
@@ -43,7 +46,14 @@ impl SimHarness {
         let (bridge_send, bridge_recv) = unbounded::<ClientUpdateEvent>();
         // Dummy address: native netcode is never constructed in the harness.
         let addr = "127.0.0.1:0".parse().unwrap();
-        let client = GameInstanceManager::new(game_event_send, game_event_recv, bridge_send, addr);
+        let debug = game::DebugFlags::default();
+        let client = GameInstanceManager::new(
+            game_event_send,
+            game_event_recv,
+            bridge_send,
+            addr,
+            debug.clone(),
+        );
 
         let client_to_server = client.client_packet_recv(); // Receiver<ClientPacket>
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();
@@ -53,7 +63,8 @@ impl SimHarness {
             server,
             client,
             server_to_client,
-            _bridge_recv: bridge_recv,
+            bridge_recv,
+            debug,
             held: BTreeSet::new(),
             released: BTreeSet::new(),
             server_hashes: HashMap::new(),
@@ -69,6 +80,11 @@ impl SimHarness {
         for _ in 0..8 {
             self.step();
         }
+    }
+
+    /// Drain everything the manager has sent to the (absent) render bridge.
+    pub fn drain_bridge_events(&mut self) -> Vec<ClientUpdateEvent> {
+        self.bridge_recv.try_iter().collect()
     }
 
     pub fn press(&mut self, key: Key) {

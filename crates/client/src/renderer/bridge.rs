@@ -99,6 +99,7 @@ pub fn drain_client_updates(
     mut map: ResMut<SimEntityMap>,
     mut hud_status: ResMut<HudStatus>,
     mut ui_updates: ResMut<crate::renderer::ui_bridge::UiUpdates>,
+    mut debug_lines: ResMut<crate::renderer::collider_debug::DebugColliderLines>,
 ) {
     while let Ok(event) = updates.0.try_recv() {
         match event {
@@ -125,6 +126,7 @@ pub fn drain_client_updates(
             ClientUpdateEvent::SetPlayer(client_id) => player.0 = Some(client_id),
             ClientUpdateEvent::RemoveRegion(id) => {
                 remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
+                debug_lines.0.remove(&id);
                 info!("bridge: region {:?} removed", id);
             }
             ClientUpdateEvent::NewFarRegion(id, snap) => {
@@ -133,6 +135,7 @@ pub fn drain_client_updates(
                 remove_far_region(&mut commands, &mut far_roots, id);
                 if roots.0.contains_key(&id) {
                     remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
+                    debug_lines.0.remove(&id);
                 }
                 spawn_far_region(&mut commands, &mut far_roots, id, &snap);
                 info!("bridge: far region {:?} loaded", id);
@@ -149,6 +152,9 @@ pub fn drain_client_updates(
             }
             ClientUpdateEvent::UiChannel(recv) => {
                 ui_updates.0 = Some(recv);
+            }
+            ClientUpdateEvent::DebugLines(id, lines) => {
+                debug_lines.0.insert(id, lines);
             }
         }
     }
@@ -512,6 +518,7 @@ mod tests {
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
             .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
+            .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .add_systems(PreUpdate, (drain_client_updates, drain_region_updates).chain());
         (app, client_send)
     }
@@ -696,6 +703,33 @@ mod tests {
         let root = *app.world().resource::<RegionRoots>().0.get(&region_id).unwrap();
         let tf = app.world().entity(root).get::<Transform>().unwrap();
         assert_eq!(tf.translation, Vec3::new(256.0, 0.0, -512.0));
+    }
+
+    #[test]
+    fn debug_lines_populate_replace_and_teardown() {
+        let (mut app, send) = app_shell();
+        let id = RegionCoords::new(0, 0);
+        let line = game::DebugLine {
+            a: [0.0, 0.0, 0.0],
+            b: [1.0, 0.0, 0.0],
+            color: [30.0, 1.0, 0.4, 1.0],
+        };
+        send.send(ClientUpdateEvent::DebugLines(id, vec![line])).unwrap();
+        app.update();
+        let lines = &app.world().resource::<crate::renderer::collider_debug::DebugColliderLines>().0;
+        assert_eq!(lines.get(&id).map(|v| v.len()), Some(1));
+
+        // Replace-on-receipt: an empty buffer overwrites, not appends.
+        send.send(ClientUpdateEvent::DebugLines(id, vec![])).unwrap();
+        app.update();
+        let lines = &app.world().resource::<crate::renderer::collider_debug::DebugColliderLines>().0;
+        assert_eq!(lines.get(&id).map(|v| v.len()), Some(0));
+
+        // RemoveRegion drops the entry entirely.
+        send.send(ClientUpdateEvent::RemoveRegion(id)).unwrap();
+        app.update();
+        let lines = &app.world().resource::<crate::renderer::collider_debug::DebugColliderLines>().0;
+        assert!(lines.get(&id).is_none());
     }
 
     #[test]
@@ -995,6 +1029,7 @@ mod tests {
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
             .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
+            .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .add_systems(Update, drain_client_updates);
 
         client
