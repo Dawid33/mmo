@@ -7,9 +7,9 @@
     blocks: [
         (id: 0, name: "air",   textures: Untextured),
         (id: 1, name: "dirt",  textures: All("dirt.png")),
-        (id: 2, name: "stone", textures: All("dirt.png")), // placeholder art until stone.png exists
-        (id: 3, name: "grass", textures: All("dirt.png")), // placeholder art until grass textures exist
-        (id: 4, name: "sand",  textures: All("dirt.png")), // placeholder art until sand.png exists
-        (id: 5, name: "water", textures: All("dirt.png")), // placeholder art until water.png exists
+        (id: 2, name: "stone", textures: All("stone.png")),
+        (id: 3, name: "grass", textures: Faces(top: "grass_top.png", side: "grass_side.png", bottom: "dirt.png")),
+        (id: 4, name: "sand",  textures: All("sand.png")),
+        (id: 5, name: "water", textures: All("water.png")),
     ],
 )

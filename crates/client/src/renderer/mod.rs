@@ -133,10 +133,32 @@ pub(crate) fn resolve_blocks_dir() -> std::path::PathBuf {
 /// time. The `embedded_block_textures_match_assets_dir` test keeps this list
 /// in sync with assets/blocks/*.png.
 #[cfg(any(target_arch = "wasm32", test))]
-const EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])] = &[(
-    "dirt.png",
-    include_bytes!("../../../../assets/blocks/dirt.png"),
-)];
+const EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])] = &[
+    (
+        "dirt.png",
+        include_bytes!("../../../../assets/blocks/dirt.png"),
+    ),
+    (
+        "grass_side.png",
+        include_bytes!("../../../../assets/blocks/grass_side.png"),
+    ),
+    (
+        "grass_top.png",
+        include_bytes!("../../../../assets/blocks/grass_top.png"),
+    ),
+    (
+        "sand.png",
+        include_bytes!("../../../../assets/blocks/sand.png"),
+    ),
+    (
+        "stone.png",
+        include_bytes!("../../../../assets/blocks/stone.png"),
+    ),
+    (
+        "water.png",
+        include_bytes!("../../../../assets/blocks/water.png"),
+    ),
+];
 
 fn setup_scene(
     mut commands: Commands,
