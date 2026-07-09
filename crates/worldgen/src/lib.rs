@@ -12,7 +12,9 @@ pub mod material;
 /// The world seed shared by every `generate_region` caller (server + offline
 /// client) so they produce the SAME world. Kept in one place so the server and
 /// client can never silently drift to different seeds.
-pub const WORLD_SEED: u64 = 0x00D5_C0DE_2026;
+// Picked by examples/seed_scan.rs: dry flat spawn (y=70, sea=64) and a
+// mostly-land ±256 m neighborhood. Re-run the scan if terrain shaping changes.
+pub const WORLD_SEED: u64 = 0x00D5_C0DE_8D78;
 
 use game::{
     Block, BlockId, BlockIndex, ChiselData, Chunk, Column, ColumnCoords, RegionCoords, SubChunk,

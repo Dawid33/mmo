@@ -20,6 +20,14 @@ const MAX_OFFSET: f64 = 2.0;
 const HEIGHT_SCALE: f64 = 96.0; // meters of surface swing per offset unit
 const DEPTH_PER_BLOCK: f64 = 1.0 / 32.0; // density falloff per meter of height
 
+// Noise-sampling offset (meters), applied to (x, z) before every noise read.
+// The world origin must NOT sit on the noise lattice zero: Perlin noise is 0
+// at lattice points for every seed, which pinned spawn (region (0,0)) to the
+// seed-independent "noise = 0" terrain — mid-ocean. Any large non-special
+// values work; they just have to be applied consistently.
+const SAMPLE_OFFSET_X_M: f64 = 100_000.0;
+const SAMPLE_OFFSET_Z_M: f64 = 50_000.0;
+
 // Vertical density ramp (the `neg_y` term): carries `-y` across the world band,
 // clamped at the ends. Used by BOTH the density graph node and ColumnProfile so
 // they stay bit-identical.
@@ -161,12 +169,14 @@ impl TerrainPipeline {
     }
 
     pub fn final_density(&self, x: f64, y: f64, z: f64) -> f64 {
-        self.graph.eval(x, y, z, &self.noises)
+        self.graph
+            .eval(x + SAMPLE_OFFSET_X_M, y, z + SAMPLE_OFFSET_Z_M, &self.noises)
     }
 
     /// Precompute the 2D profile at (x, z). The sub-graphs ignore `y`, so any y
     /// (here 0.0) yields the same result.
     pub fn column(&self, x: f64, z: f64) -> ColumnProfile {
+        let (x, z) = (x + SAMPLE_OFFSET_X_M, z + SAMPLE_OFFSET_Z_M);
         let offset_val = self.offset_g.eval(x, 0.0, z, &self.noises);
         ColumnProfile {
             offset_h: offset_val * HEIGHT_SCALE,
