@@ -102,6 +102,7 @@ impl Plugin for SimBridgePlugin {
                     (
                         worldgen_rings::manage_worldgen_rings,
                         worldgen_rings::finish_worldgen_tasks,
+                        worldgen_rings::retire_roots,
                     )
                         .chain(),
                     interpolate::interpolate_transforms,

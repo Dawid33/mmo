@@ -6,8 +6,10 @@
 //! `WORLDGEN_RINGS`. Assignment keys off the viewer region with a sticky band
 //! so ring boundaries don't thrash while the viewer wanders near an edge.
 //! Regions owned by the near window (`Regions`) or the streamed far ring
-//! (`FarRegionRoots`) are excluded — those render authoritative state, and a
-//! worldgen ring that loses a region to them despawns immediately. Outputs are
+//! (`FarRegionRoots`) are excluded — those render authoritative state. A ring
+//! that loses its region (to them, or to a factor reassignment) keeps its old
+//! root rendering until the replacement is visibly meshed (`retire_roots`),
+//! so transitions never pop the horizon to empty. Outputs are
 //! `LodVoxelData` children under per-region roots, meshed by `meshing::lod` —
 //! nothing here touches the full-res pipeline.
 
@@ -18,9 +20,12 @@ use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use game::{BlockId, Chunk, ChunkCoords, RegionCoords, Voxel, CHUNK_VOXEL_COUNT};
 use worldgen::material::Materials;
 
+use game::REGION_CHUNKS;
+
 use super::bridge::{FarRegionRoots, Regions};
 use super::hud::HudStatus;
 use super::meshing::lod::{self, LodCell};
+use super::meshing::queue::ChunkKey;
 
 /// The view distance in regions — the ring table's last bound (kept in sync
 /// by constructing the table from it). Regions beyond this render nothing.
@@ -37,6 +42,11 @@ pub const WORLDGEN_RINGS: &[(i32, u32)] = &[(4, 4), (WORLDGEN_VIEW_RADIUS, 16)];
 pub const RING_STICKY_BAND: i32 = 1;
 /// Concurrent client-side generation budget.
 pub const WORLDGEN_TASKS_MAX_IN_FLIGHT: usize = 2;
+/// Deadline for retiring/retired roots: if the replacement hasn't shown a
+/// mesh within this many frames (~10s at 60fps), despawn the old root anyway
+/// — a late pop beats leaking an entity tree forever (e.g. a replacement
+/// whose cells are all air never produces a mesh at all).
+pub const RETIREMENT_MAX_FRAMES: u32 = 600;
 
 /// Ring assignment with the production table and band. See `ring_factor_in`,
 /// which the systems call directly (the table is a resource field so tests
@@ -79,6 +89,34 @@ pub fn ring_factor_in(
 pub struct RingSlot {
     pub factor: u32,
     pub root: Option<Entity>,
+    /// The superseded assignment's root, kept alive (still rendering the old
+    /// terrain) so a factor flip never pops the horizon to empty. Despawned
+    /// by `retire_roots` once `root`'s children carry meshes, or on the
+    /// `retirement_max_frames` deadline. Ownership when the slot itself goes
+    /// away is `manage_worldgen_rings`' (see the reconcile loop): the value
+    /// carries into the replacement slot, moves to the takeover retirement
+    /// list, or despawns on radius exit — cancelled `WorldgenTask`s never
+    /// own it, so task-drop paths can't leak it.
+    pub retiring: Option<Entity>,
+    /// Frames since `retiring` was set — the deadline clock.
+    pub retiring_frames: u32,
+}
+
+impl RingSlot {
+    /// A freshly assigned slot: generation pending, nothing retiring.
+    pub fn pending(factor: u32) -> Self {
+        Self { factor, root: None, retiring: None, retiring_frames: 0 }
+    }
+}
+
+/// A worldgen root whose region was taken over by the near window or the
+/// streamed far ring, kept rendering until that owner's replacement is
+/// actually visible (or the deadline passes) — see `retire_roots`.
+pub struct RetiredRoot {
+    pub coords: RegionCoords,
+    pub entity: Entity,
+    /// Frames since retirement — the deadline clock.
+    pub frames: u32,
 }
 
 #[derive(Resource)]
@@ -88,6 +126,14 @@ pub struct WorldgenRings {
     /// Ring table — a field (defaulting to `WORLDGEN_RINGS`) so tests can
     /// shrink it; the effective view radius is the last entry's bound.
     pub table: &'static [(i32, u32)],
+    /// Sticky band — a field (defaulting to `RING_STICKY_BAND`) so tests can
+    /// zero it, consistent with `table`/`max_in_flight`.
+    pub band: i32,
+    /// Roots retired by a near/far takeover, pending a visible replacement.
+    pub retired: Vec<RetiredRoot>,
+    /// Deadline (in frames) for retiring/retired roots — a field (defaulting
+    /// to `RETIREMENT_MAX_FRAMES`) so tests can shrink it.
+    pub retirement_max_frames: u32,
     /// Generation budget — a field (defaulting to
     /// `WORLDGEN_TASKS_MAX_IN_FLIGHT`) so tests can pin it. The live in-flight
     /// count is derived from `WorldgenTask` entities, never counted separately
@@ -109,6 +155,9 @@ impl WorldgenRings {
         Self {
             assigned: BTreeMap::new(),
             table: WORLDGEN_RINGS,
+            band: RING_STICKY_BAND,
+            retired: Vec::new(),
+            retirement_max_frames: RETIREMENT_MAX_FRAMES,
             max_in_flight: WORLDGEN_TASKS_MAX_IN_FLIGHT,
             materials,
             seed: worldgen::WORLD_SEED,
@@ -156,23 +205,57 @@ pub fn manage_worldgen_rings(
     for coords in candidates {
         let current = rings.assigned.get(&coords).map(|slot| slot.factor);
         // A region the near window or the streamed far ring owns never gets a
-        // worldgen ring; if one takes over later, the ring despawns right here.
+        // worldgen ring; if one takes over later, the ring's root retires
+        // (below) rather than despawning into a hole.
         let excluded = near.0.contains_key(&coords) || far.0.contains_key(&coords);
         let desired = if excluded {
             None
         } else {
-            ring_factor_in(rings.table, RING_STICKY_BAND, chebyshev(coords), current)
+            ring_factor_in(rings.table, rings.band, chebyshev(coords), current)
         };
         if desired == current {
             continue;
         }
-        if let Some(slot) = rings.assigned.remove(&coords) {
-            if let Some(root) = slot.root {
-                commands.entity(root).despawn();
+        // The removed slot's live root: prefer the current root; a previous
+        // retiring occupant is despawned rather than stacked — at most one
+        // old root ever covers a region.
+        let live = rings.assigned.remove(&coords).and_then(|slot| match (slot.root, slot.retiring) {
+            (Some(root), prev) => {
+                if let Some(prev) = prev {
+                    commands.entity(prev).despawn();
+                }
+                Some(root)
             }
-        }
-        if let Some(factor) = desired {
-            rings.assigned.insert(coords, RingSlot { factor, root: None });
+            (None, prev) => prev,
+        });
+        match desired {
+            // Factor transition: the old root keeps rendering as `retiring`
+            // until the replacement's children mesh (`retire_roots`). A fresh
+            // assignment adopts a still-retired takeover root the same way
+            // (the region flipped back before its old root despawned).
+            Some(factor) => {
+                let retiring =
+                    live.or_else(|| take_retired(&mut rings.retired, coords, &mut commands));
+                rings.assigned.insert(coords, RingSlot { retiring, ..RingSlot::pending(factor) });
+            }
+            // Takeover by the near window / far ring: retire the root until
+            // the new owner's render is visible. KNOWN REMAINING POP (out of
+            // scope): the reverse handoff — a region leaving the far ring has
+            // its far root despawned immediately by the bridge while the
+            // worldgen replacement lags; fixing that needs bridge
+            // cooperation. Noted for a future pass.
+            None if excluded => {
+                if let Some(entity) = live {
+                    rings.retired.push(RetiredRoot { coords, entity, frames: 0 });
+                }
+            }
+            // Radius exit: no replacement is coming (the region is beyond
+            // view) — despawn immediately, as before.
+            None => {
+                if let Some(entity) = live {
+                    commands.entity(entity).despawn();
+                }
+            }
         }
     }
 
@@ -214,6 +297,101 @@ pub fn manage_worldgen_rings(
             pool.spawn(async move { build_worldgen_lod_cells(coords, seed, materials, factor) });
         commands.spawn(WorldgenTask { coords, factor, task });
     }
+}
+
+/// Pull the takeover-retired root for `coords` back out of the retirement
+/// list — the region returned to worldgen ownership before its old root
+/// despawned, so the old root becomes the new slot's `retiring` instead.
+/// More than one entry per region can't normally exist (a slot insert always
+/// drains the list for its coords, a push always follows a slot removal);
+/// extras are despawned defensively rather than stacked.
+fn take_retired(
+    retired: &mut Vec<RetiredRoot>,
+    coords: RegionCoords,
+    commands: &mut Commands,
+) -> Option<Entity> {
+    let mut found = None;
+    retired.retain(|r| {
+        if r.coords != coords {
+            return true;
+        }
+        if let Some(prev) = found.replace(r.entity) {
+            commands.entity(prev).despawn();
+        }
+        false
+    });
+    found
+}
+
+/// Despawn retiring/retired worldgen roots once their replacement is
+/// actually VISIBLE — the point of retirement is that a ring transition
+/// never pops the horizon to empty (under-draw, the plan's named failure
+/// mode). Until then the old root keeps rendering stale terrain on top of
+/// (or instead of) the new — over-draw, the guard rails' accepted trade.
+///
+/// Visibility means meshes, not entities: a replacement's `LodVoxelData`
+/// children render nothing until the budgeted LOD mesh chain reaches them,
+/// so despawning the old root when the children merely spawn would still
+/// hole the horizon for several frames (worse under mesh-queue load). Hence:
+/// - factor transition: the slot's new `root` has a child carrying `Mesh3d`;
+/// - far takeover: the region's `FarRegionRoots` root has a meshed child;
+/// - near takeover: `Regions` holds the region and some `ChunkKey`ed meshed
+///   entity's key lies in the region's chunk bounds
+///   (`r.x*REGION_CHUNKS..(r.x+1)*REGION_CHUNKS`, z likewise).
+///
+/// Each root also carries a frame deadline (`retirement_max_frames`): a
+/// replacement that never meshes (all-air cells, a far region removed again
+/// while beyond the worldgen radius) must not pin the old root forever.
+pub fn retire_roots(
+    mut commands: Commands,
+    mut rings: ResMut<WorldgenRings>,
+    near: Res<Regions>,
+    far: Res<FarRegionRoots>,
+    children: Query<&Children>,
+    meshed: Query<(), With<Mesh3d>>,
+    keyed_meshes: Query<&ChunkKey, With<Mesh3d>>,
+) {
+    if rings.retired.is_empty() && rings.assigned.values().all(|s| s.retiring.is_none()) {
+        return;
+    }
+    let max = rings.retirement_max_frames;
+    let has_meshed_child = |root: Entity| {
+        children.get(root).is_ok_and(|ch| ch.iter().any(|c| meshed.contains(c)))
+    };
+
+    // Factor transitions: the replacement is the slot's own new root.
+    for slot in rings.assigned.values_mut() {
+        let Some(old) = slot.retiring else { continue };
+        slot.retiring_frames += 1;
+        if slot.root.is_some_and(has_meshed_child) || slot.retiring_frames >= max {
+            commands.entity(old).despawn();
+            slot.retiring = None;
+        }
+    }
+
+    // Takeovers: the replacement is the new owner's render for that region.
+    let retired = std::mem::take(&mut rings.retired);
+    rings.retired = retired
+        .into_iter()
+        .filter_map(|mut r| {
+            r.frames += 1;
+            let far_visible = far.0.get(&r.coords).copied().is_some_and(has_meshed_child);
+            let near_visible = near.0.contains_key(&r.coords) && {
+                let x0 = r.coords.x * REGION_CHUNKS as i32;
+                let z0 = r.coords.z * REGION_CHUNKS as i32;
+                let span = REGION_CHUNKS as i32;
+                keyed_meshes.iter().any(|k| {
+                    (x0..x0 + span).contains(&k.0[0]) && (z0..z0 + span).contains(&k.0[2])
+                })
+            };
+            if far_visible || near_visible || r.frames >= max {
+                commands.entity(r.entity).despawn();
+                None
+            } else {
+                Some(r)
+            }
+        })
+        .collect();
 }
 
 /// Poll `WorldgenTask`s; on completion spawn the region root at the region's
@@ -524,17 +702,17 @@ mod tests {
     /// systems and their exclusion-set resources.
     fn rings_app(table: &'static [(i32, u32)], max_in_flight: usize) -> App {
         let mut app = pipeline_app(MeshBudgets::default());
+        let mut rings = WorldgenRings::new(test_materials());
+        rings.table = table;
+        rings.max_in_flight = max_in_flight;
         app.init_resource::<Regions>()
             .init_resource::<FarRegionRoots>()
             .init_resource::<HudStatus>()
-            .insert_resource(WorldgenRings {
-                assigned: BTreeMap::new(),
-                table,
-                max_in_flight,
-                materials: test_materials(),
-                seed: worldgen::WORLD_SEED,
-            })
-            .add_systems(Update, (manage_worldgen_rings, finish_worldgen_tasks).chain());
+            .insert_resource(rings)
+            .add_systems(
+                Update,
+                (manage_worldgen_rings, finish_worldgen_tasks, retire_roots).chain(),
+            );
         app
     }
 
@@ -585,8 +763,10 @@ mod tests {
             assert!(rings.assigned.values().all(|s| s.factor == 4 && s.root.is_none()));
         }
 
-        // A region the far ring takes over later loses its worldgen root
-        // immediately, even mid-render.
+        // A region the far ring takes over later loses its ASSIGNMENT
+        // immediately, but the root retires (keeps rendering) until the far
+        // replacement is visible — see `far_takeover_retires_the_root_until_
+        // the_replacement_meshes` for the full retirement lifecycle.
         let root = app.world_mut().spawn_empty().id();
         app.world_mut()
             .resource_mut::<WorldgenRings>()
@@ -608,9 +788,13 @@ mod tests {
             "far takeover evicts the assignment"
         );
         assert!(
-            app.world().get_entity(root).is_err(),
-            "the conflicting worldgen root despawns immediately"
+            app.world().get_entity(root).is_ok(),
+            "the conflicting worldgen root retires instead of popping to empty"
         );
+        let rings = app.world().resource::<WorldgenRings>();
+        assert_eq!(rings.retired.len(), 1, "the root moved to the takeover retirement list");
+        assert_eq!(rings.retired[0].coords, RegionCoords::new(1, 1));
+        assert_eq!(rings.retired[0].entity, root);
     }
 
     #[test]
@@ -642,6 +826,311 @@ mod tests {
             rings.assigned.contains_key(&RegionCoords::new(0, 0)),
             "distance 2: still held by the band"
         );
+    }
+
+    // --- retirement: ring transitions never pop to empty ----------------------
+
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Mesh, PrimitiveTopology};
+
+    fn slot_root(app: &App, coords: RegionCoords) -> Option<Entity> {
+        app.world().resource::<WorldgenRings>().assigned.get(&coords).and_then(|s| s.root)
+    }
+
+    fn root_meshed(app: &mut App, root: Entity) -> bool {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<&ChildOf, With<Mesh3d>>();
+        q.iter(world).any(|c| c.parent() == root)
+    }
+
+    /// Hand-plant a live root on an already-assigned slot, for
+    /// bookkeeping-only tests (budget 0, no real generation).
+    fn plant_root(app: &mut App, coords: RegionCoords) -> Entity {
+        let root = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<WorldgenRings>()
+            .assigned
+            .get_mut(&coords)
+            .expect("slot assigned")
+            .root = Some(root);
+        root
+    }
+
+    /// An (empty) mesh handle — `retire_roots` only checks `Mesh3d` presence.
+    fn meshed_marker(app: &mut App) -> Mesh3d {
+        let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+        Mesh3d(app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh))
+    }
+
+    // Real generation twice (factor 4 settle, then the demoted factor-16
+    // replacement) plus the meshing chain — well past the 100ms fast lane.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn factor_transition_keeps_the_old_root_until_the_replacement_meshes() {
+        let mut app = rings_app(&[(0, 4), (1, 16)], 2);
+        app.world_mut().resource_mut::<WorldgenRings>().band = 0; // flips act immediately
+        set_viewer(&mut app, 0, 0);
+        let coords = RegionCoords::new(0, 0);
+
+        assert!(
+            wait_until(&mut app, |app| {
+                slot_root(app, coords).is_some_and(|r| root_meshed(app, r))
+            }),
+            "the factor-4 root must settle to meshed children"
+        );
+        let old_root = slot_root(&app, coords).unwrap();
+        let old_children: Vec<Entity> = app
+            .world()
+            .entity(old_root)
+            .get::<Children>()
+            .map(|c| c.iter().collect())
+            .unwrap_or_default();
+        assert!(!old_children.is_empty(), "settled root has LOD children");
+
+        // Viewer steps away: distance 1, band 0 — the region demotes to 16.
+        // The old root must survive every frame until the NEW root has a
+        // meshed child (the invariant is asserted inside the wait condition).
+        set_viewer(&mut app, 1, 0);
+        assert!(
+            wait_until(&mut app, |app| {
+                let new_meshed = slot_root(app, coords)
+                    .is_some_and(|r| r != old_root && root_meshed(app, r));
+                if !new_meshed {
+                    assert!(
+                        app.world().get_entity(old_root).is_ok(),
+                        "old root despawned before the replacement meshed — horizon pop"
+                    );
+                }
+                new_meshed
+            }),
+            "the factor-16 replacement must land and mesh"
+        );
+
+        // Once the replacement is visible, `retire_roots` despawns the old
+        // root — recursively, and without leaving anything retiring.
+        assert!(
+            wait_until(&mut app, |app| app.world().get_entity(old_root).is_err()),
+            "old root despawns once the replacement is visible"
+        );
+        for e in old_children {
+            assert!(app.world().get_entity(e).is_err(), "old root's children go with it");
+        }
+        {
+            let rings = app.world().resource::<WorldgenRings>();
+            assert!(rings.assigned[&coords].retiring.is_none());
+            assert!(rings.retired.is_empty());
+        }
+        // No orphans world-wide: every LOD child still has a live parent.
+        let world = app.world_mut();
+        let parents: Vec<Entity> = {
+            let mut q = world.query_filtered::<&ChildOf, With<LodChunk>>();
+            q.iter(world).map(|c| c.parent()).collect()
+        };
+        assert!(!parents.is_empty());
+        for p in parents {
+            assert!(world.get_entity(p).is_ok(), "no orphaned LOD children anywhere");
+        }
+    }
+
+    #[test]
+    fn far_takeover_retires_the_root_until_the_replacement_meshes() {
+        // Budget 0 + a hand-planted root: retirement bookkeeping only.
+        let mut app = rings_app(&[(0, 4)], 0);
+        set_viewer(&mut app, 0, 0);
+        app.update();
+        let coords = RegionCoords::new(0, 0);
+        let root = plant_root(&mut app, coords);
+
+        let far_root = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<FarRegionRoots>().0.insert(coords, far_root);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert!(
+            app.world().get_entity(root).is_ok(),
+            "no meshed far child yet: the retired root must keep rendering"
+        );
+        assert_eq!(app.world().resource::<WorldgenRings>().retired.len(), 1);
+
+        // The far replacement shows a mesh: the retired root despawns.
+        let marker = meshed_marker(&mut app);
+        app.world_mut().spawn((marker, ChildOf(far_root)));
+        assert!(
+            wait_until(&mut app, |app| app.world().get_entity(root).is_err()),
+            "retired root despawns once the far child is meshed"
+        );
+        assert!(app.world().resource::<WorldgenRings>().retired.is_empty());
+    }
+
+    #[test]
+    fn near_takeover_waits_for_a_meshed_chunk_inside_the_region_bounds() {
+        let mut app = rings_app(&[(0, 4)], 0);
+        set_viewer(&mut app, 1, -1);
+        app.update();
+        let coords = RegionCoords::new(1, -1); // chunk keys x 8..16, z -8..0
+        let root = plant_root(&mut app, coords);
+
+        let (_keep_send, recv) = crossbeam::channel::unbounded::<GameDataUpdate>();
+        app.world_mut().resource_mut::<Regions>().0.insert(coords, recv);
+        app.update();
+        assert!(app.world().get_entity(root).is_ok(), "near takeover retires, not despawns");
+
+        // A meshed chunk OUTSIDE the region's bounds must not release it.
+        let marker = meshed_marker(&mut app);
+        app.world_mut().spawn((ChunkKey([0, 0, 0]), marker));
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(app.world().get_entity(root).is_ok(), "out-of-region mesh must not count");
+
+        // One inside the bounds does.
+        let marker = meshed_marker(&mut app);
+        app.world_mut().spawn((ChunkKey([8, 0, -8]), marker));
+        assert!(
+            wait_until(&mut app, |app| app.world().get_entity(root).is_err()),
+            "retired root despawns once a region chunk is meshed"
+        );
+        assert!(app.world().resource::<WorldgenRings>().retired.is_empty());
+    }
+
+    #[test]
+    fn radius_exit_despawns_immediately_without_retirement() {
+        let mut app = rings_app(&[(0, 4)], 0);
+        set_viewer(&mut app, 0, 0);
+        app.update();
+        let root = plant_root(&mut app, RegionCoords::new(0, 0));
+
+        // Beyond radius + band: no replacement is coming — despawn now.
+        set_viewer(&mut app, 10, 10);
+        app.update();
+        assert!(app.world().get_entity(root).is_err(), "radius exit still despawns immediately");
+        let rings = app.world().resource::<WorldgenRings>();
+        assert!(rings.retired.is_empty());
+        assert!(!rings.assigned.contains_key(&RegionCoords::new(0, 0)));
+    }
+
+    #[test]
+    fn retiring_root_despawns_at_the_deadline_when_no_replacement_ever_meshes() {
+        // Budget 0: the demoted slot's replacement never generates, so only
+        // the (shrunk) deadline can release the retiring root.
+        let mut app = rings_app(&[(0, 4), (1, 16)], 0);
+        {
+            let mut rings = app.world_mut().resource_mut::<WorldgenRings>();
+            rings.band = 0;
+            rings.retirement_max_frames = 3;
+        }
+        set_viewer(&mut app, 0, 0);
+        app.update();
+        let coords = RegionCoords::new(0, 0);
+        let root = plant_root(&mut app, coords);
+
+        set_viewer(&mut app, 1, 0); // demotes (0,0) to 16, root starts retiring
+        app.update();
+        assert_eq!(
+            app.world().resource::<WorldgenRings>().assigned[&coords].retiring,
+            Some(root),
+            "demotion made the old root retiring"
+        );
+        assert!(app.world().get_entity(root).is_ok(), "deadline not reached yet");
+        assert!(
+            wait_until(&mut app, |app| app.world().get_entity(root).is_err()),
+            "deadline must despawn the retiring root"
+        );
+        assert!(app.world().resource::<WorldgenRings>().assigned[&coords].retiring.is_none());
+    }
+
+    #[test]
+    fn retired_takeover_root_despawns_at_the_deadline() {
+        let mut app = rings_app(&[(0, 4)], 0);
+        app.world_mut().resource_mut::<WorldgenRings>().retirement_max_frames = 3;
+        set_viewer(&mut app, 0, 0);
+        app.update();
+        let coords = RegionCoords::new(0, 0);
+        let root = plant_root(&mut app, coords);
+
+        // Far takeover whose root never meshes anything.
+        let far_root = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<FarRegionRoots>().0.insert(coords, far_root);
+        assert!(
+            wait_until(&mut app, |app| app.world().get_entity(root).is_err()),
+            "deadline must despawn the retired root"
+        );
+        assert!(app.world().resource::<WorldgenRings>().retired.is_empty());
+    }
+
+    #[test]
+    fn flip_back_before_landing_carries_the_retiring_root() {
+        // 4 -> 16 -> 4 with budget 0: the 16 replacement never lands, so the
+        // original root must ride along as `retiring` through both flips —
+        // never despawned, never duplicated.
+        let mut app = rings_app(&[(0, 4), (1, 16)], 0);
+        app.world_mut().resource_mut::<WorldgenRings>().band = 0;
+        set_viewer(&mut app, 0, 0);
+        app.update();
+        let coords = RegionCoords::new(0, 0);
+        let root = plant_root(&mut app, coords);
+
+        set_viewer(&mut app, 1, 0);
+        app.update();
+        {
+            let rings = app.world().resource::<WorldgenRings>();
+            assert_eq!(rings.assigned[&coords].factor, 16);
+            assert_eq!(rings.assigned[&coords].retiring, Some(root));
+        }
+        set_viewer(&mut app, 0, 0);
+        app.update();
+        let rings = app.world().resource::<WorldgenRings>();
+        assert_eq!(rings.assigned[&coords].factor, 4);
+        assert_eq!(rings.assigned[&coords].retiring, Some(root), "old root carries over");
+        assert!(app.world().get_entity(root).is_ok());
+    }
+
+    #[test]
+    fn takeover_of_a_pending_transition_retires_the_old_root() {
+        // A slot mid-factor-transition (root None, retiring Some) is taken
+        // over: the retiring root must move to the retirement list — not
+        // leak, not despawn into a hole.
+        let mut app = rings_app(&[(0, 4), (1, 16)], 0);
+        app.world_mut().resource_mut::<WorldgenRings>().band = 0;
+        set_viewer(&mut app, 0, 0);
+        app.update();
+        let coords = RegionCoords::new(0, 0);
+        let root = plant_root(&mut app, coords);
+        set_viewer(&mut app, 1, 0);
+        app.update();
+        assert_eq!(app.world().resource::<WorldgenRings>().assigned[&coords].retiring, Some(root));
+
+        let far_root = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<FarRegionRoots>().0.insert(coords, far_root);
+        app.update();
+        let rings = app.world().resource::<WorldgenRings>();
+        assert!(!rings.assigned.contains_key(&coords));
+        assert_eq!(rings.retired.len(), 1);
+        assert_eq!(rings.retired[0].entity, root);
+        assert!(app.world().get_entity(root).is_ok());
+    }
+
+    #[test]
+    fn reassignment_adopts_a_retired_takeover_root_as_retiring() {
+        // Takeover, then the owner leaves again before the old root died:
+        // the fresh worldgen assignment adopts it as `retiring` so the
+        // region keeps rendering seamlessly through the round trip.
+        let mut app = rings_app(&[(0, 4)], 0);
+        set_viewer(&mut app, 0, 0);
+        app.update();
+        let coords = RegionCoords::new(0, 0);
+        let root = plant_root(&mut app, coords);
+        let far_root = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<FarRegionRoots>().0.insert(coords, far_root);
+        app.update();
+        assert_eq!(app.world().resource::<WorldgenRings>().retired.len(), 1);
+
+        app.world_mut().resource_mut::<FarRegionRoots>().0.remove(&coords);
+        app.update();
+        let rings = app.world().resource::<WorldgenRings>();
+        assert!(rings.retired.is_empty(), "retired entry pulled back out of the list");
+        assert_eq!(rings.assigned[&coords].retiring, Some(root), "adopted as retiring");
+        assert!(app.world().get_entity(root).is_ok());
     }
 
     // --- budget / nearest-first ----------------------------------------------
@@ -686,14 +1175,10 @@ mod tests {
     /// interfering (it would cancel a mismatched task before finish saw it).
     fn finish_only_app() -> App {
         let mut app = App::new();
+        let mut rings = WorldgenRings::new(test_materials());
+        rings.max_in_flight = 0;
         app.add_plugins(MinimalPlugins)
-            .insert_resource(WorldgenRings {
-                assigned: BTreeMap::new(),
-                table: WORLDGEN_RINGS,
-                max_in_flight: 0,
-                materials: test_materials(),
-                seed: worldgen::WORLD_SEED,
-            })
+            .insert_resource(rings)
             .add_systems(Update, finish_worldgen_tasks);
         app
     }
@@ -716,7 +1201,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<WorldgenRings>()
             .assigned
-            .insert(coords, RingSlot { factor: 16, root: None });
+            .insert(coords, RingSlot::pending(16));
 
         // Stale: the assignment says factor 16, this result was built for 4.
         ready_task(&mut app, coords, 4, one_cell([0, 0, 0]));
