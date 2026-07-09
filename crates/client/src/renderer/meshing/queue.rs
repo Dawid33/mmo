@@ -382,7 +382,7 @@ pub(crate) mod tests {
     use bevy::mesh::VertexAttributeValues;
 
     /// Full pipeline as production registers it in `renderer/mod.rs`,
-    /// including the cave-culling pass chained after `apply_meshed_chunks`.
+    /// including the cave-culling pass via `cull_plugin` (PostUpdate).
     pub(crate) fn pipeline_app(budgets: MeshBudgets) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
@@ -399,10 +399,10 @@ pub(crate) mod tests {
                     prune_chunk_grid,
                     spawn_mesh_tasks,
                     apply_meshed_chunks,
-                    super::super::visibility::cull_chunks,
                 )
                     .chain(),
-            );
+            )
+            .add_plugins(super::super::visibility::cull_plugin);
         app
     }
 

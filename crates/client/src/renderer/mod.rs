@@ -78,6 +78,7 @@ impl Plugin for SimBridgePlugin {
                 )
                     .chain(),
             )
+            .add_plugins(meshing::visibility::cull_plugin)
             .add_systems(Startup, (setup_scene, hud::setup_hud))
             .add_systems(
                 Update,
@@ -87,7 +88,6 @@ impl Plugin for SimBridgePlugin {
                         meshing::queue::prune_chunk_grid,
                         meshing::queue::spawn_mesh_tasks,
                         meshing::apply_meshed_chunks,
-                        meshing::visibility::cull_chunks,
                     )
                         .chain(),
                     interpolate::interpolate_transforms,

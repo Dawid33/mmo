@@ -274,6 +274,24 @@ pub fn cull_chunks(
     }
 }
 
+/// Registers `cull_chunks` at its one correct slot: `PostUpdate`, after
+/// `UpdateFrusta` and before `VisibilityPropagate`. The BFS must read the
+/// frustum of the frame being rendered — scheduled in `Update` it read last
+/// frame's (`update_frusta` runs in `PostUpdate`), so every camera turn
+/// visibly culled faces that were already inside the FOV at the leading
+/// screen edge — and its `Visibility` writes must still land before this
+/// frame's propagation. Shared by production (`renderer/mod.rs`) and the
+/// headless pipeline tests so the schedules cannot drift apart.
+pub fn cull_plugin(app: &mut App) {
+    use bevy::camera::visibility::VisibilitySystems;
+    app.add_systems(
+        PostUpdate,
+        cull_chunks
+            .after(VisibilitySystems::UpdateFrusta)
+            .before(VisibilitySystems::VisibilityPropagate),
+    );
+}
+
 /// F4 flips the cave-culling graph on/off at runtime.
 pub fn toggle_culling(keys: Res<ButtonInput<KeyCode>>, mut config: ResMut<CullingConfig>) {
     if keys.just_pressed(KeyCode::F4) {
@@ -531,6 +549,43 @@ mod tests {
             vis(&app, behind),
             Visibility::Inherited,
             "mask-less chunk must traverse as open — nothing behind it may hide"
+        );
+    }
+
+    /// Regression: the cull BFS must use the CURRENT frame's frustum.
+    /// `update_frusta` runs in `PostUpdate`, so a cull pass scheduled in
+    /// `Update` reads last frame's frustum while the frame renders with this
+    /// frame's — turning the camera visibly culls faces that are already
+    /// back inside the FOV. With real frustum updates in the loop, turning
+    /// toward a chunk must reveal it in the SAME frame.
+    #[test]
+    fn turning_toward_a_chunk_reveals_it_in_the_same_frame() {
+        let mut app = pipeline_app(MeshBudgets::default());
+        app.add_plugins((bevy::transform::TransformPlugin, bevy::camera::CameraProjectionPlugin));
+        // Camera in cell (0,0,0) looking AWAY (-X) from a chunk at cell (2,0,0).
+        let cam = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                Camera { is_active: true, ..Default::default() },
+                Projection::default(),
+                Transform::from_translation(Vec3::new(8.0, 8.0, 8.0))
+                    .looking_to(Vec3::NEG_X, Vec3::Y),
+            ))
+            .id();
+        let chunk =
+            spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        assert!(
+            wait_until(&mut app, |app| vis(app, chunk) == Visibility::Hidden),
+            "premise: a chunk fully behind the camera ends Hidden"
+        );
+        // Turn to face the chunk, then run exactly ONE frame.
+        app.world_mut().entity_mut(cam).get_mut::<Transform>().unwrap().look_to(Vec3::X, Vec3::Y);
+        app.update();
+        assert_eq!(
+            vis(&app, chunk),
+            Visibility::Inherited,
+            "a chunk inside the new frustum must show the same frame it enters the FOV"
         );
     }
 
