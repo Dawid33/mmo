@@ -222,8 +222,9 @@ pub struct LodMeshTask(Task<Option<Mesh>>);
 /// LOD is inherently low-priority background work), sharing `MeshBudgets.max_in_flight`
 /// with full-res: full-res never even looks at LOD's in-flight count (it always
 /// wins), so LOD's own capacity here is the budget minus BOTH full-res's and its
-/// own in-flight tasks — the only way to keep the combined in-flight count from
-/// exceeding the shared cap.
+/// own in-flight tasks — this keeps LOD from pushing the combined count over the
+/// cap on its own (full-res can still transiently exceed it by design, since it
+/// always wins and never defers to LOD).
 ///
 /// The `Local` queue (not a bare `Changed<LodVoxelData>` filter alone) matters:
 /// Bevy consumes a system's change-detection window every time it runs, so an
@@ -580,11 +581,41 @@ mod tests {
     #[test]
     fn lod_chunks_mesh_and_scale_without_entering_the_grid() {
         let mut app = pipeline_app(MeshBudgets::default());
-        let e = spawn_lod_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, 2, floor_grid());
+
+        // A camera plus a keyed full-res wall/behind pair so cull_chunks' BFS
+        // has something to actively hide. Without this, an empty ChunkGrid and
+        // no active camera make cull_chunks early-return (visibility.rs:166,
+        // :169) before ever reaching the loop that would leave a keyless
+        // entity's Visibility untouched — the Inherited assertion below would
+        // then be vacuously true regardless of whether the BFS logic itself
+        // respects keylessness. Positioning the wall/behind pair confirms the
+        // BFS genuinely ran and culled something in this same update.
+        app.world_mut().spawn((
+            Camera3d::default(),
+            Camera { is_active: true, ..Default::default() },
+            GlobalTransform::from(Transform::from_translation(Vec3::new(8.0, 8.0, 8.0))),
+        ));
+        let _wall = spawn_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(32.0, 0.0, 0.0),
+            vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT],
+        );
+        let behind = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+
+        let e = spawn_lod_chunk(&mut app, Vec3::new(1000.0, 0.0, 0.0), Vec3::ZERO, 2, floor_grid());
 
         assert!(
-            wait_until(&mut app, |app| app.world().entity(e).contains::<Mesh3d>()),
-            "LOD chunk must mesh through the full production chain"
+            wait_until(&mut app, |app| {
+                app.world().entity(e).contains::<Mesh3d>()
+                    && app
+                        .world()
+                        .entity(behind)
+                        .get::<Visibility>()
+                        .is_some_and(|v| *v == Visibility::Hidden)
+            }),
+            "LOD chunk must mesh AND the BFS must actually hide the chunk behind the full-res wall \
+             (proof the cull pass really ran, not just that it was registered)"
         );
 
         let tf = *app.world().entity(e).get::<Transform>().expect("has a transform");
@@ -596,9 +627,12 @@ mod tests {
         assert_eq!(aabb.half_extents, Vec3A::new(16.0, 16.5, 16.0));
         assert!(app.world().entity(e).contains::<NoAutoAabb>());
 
-        // Keyless assertions: the heart of this scenario.
+        // Keyless assertions: the heart of this scenario. The grid is no
+        // longer empty overall (the wall/behind full-res chunks key into it,
+        // which is what gives the BFS something to cull) — the LOD chunk
+        // specifically must never be one of its values.
         assert!(
-            app.world().resource::<ChunkGrid>().0.is_empty(),
+            app.world().resource::<ChunkGrid>().0.values().all(|&v| v != e),
             "LOD chunks never enter the world-keyed ChunkGrid"
         );
         assert!(!app.world().entity(e).contains::<ChunkKey>(), "LOD chunks stay keyless");
@@ -609,7 +643,8 @@ mod tests {
         assert_eq!(
             *app.world().entity(e).get::<Visibility>().unwrap(),
             Visibility::Inherited,
-            "cull_chunks' With<ChunkKey> filter never touches a keyless entity"
+            "cull_chunks' With<ChunkKey> filter never touches a keyless entity, \
+             even while its BFS actively hides other chunks this same pass"
         );
     }
 
