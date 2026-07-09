@@ -400,7 +400,6 @@ mod tests {
     };
     use super::super::queue::MeshBudgets;
     use crate::renderer::bridge::VoxelData;
-    use bevy::prelude::*;
 
     fn spawn_camera(app: &mut App, pos: Vec3) -> Entity {
         app.world_mut()
