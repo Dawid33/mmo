@@ -841,4 +841,36 @@ mod tests {
             "worldgen rings never produce full-res VoxelData"
         );
     }
+
+    // --- (d) view-distance integration smoke ---------------------------------
+
+    // Whole-view-distance version of (c): real worldgen across every region a
+    // shrunk ring table assigns around the viewer (a 3×3 block, all factor 4),
+    // not just one. Measured ~500ms in debug (9 regions, budget 2) — well past
+    // the 100ms fast-lane threshold, so tagged slow like the rest of this
+    // suite's real-worldgen tests.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn view_distance_smoke_settles_lod_roots_and_meshes_across_every_region_in_view() {
+        let mut app = rings_app(&[(1, 4)], WORLDGEN_TASKS_MAX_IN_FLIGHT);
+        set_viewer(&mut app, 0, 0);
+
+        assert!(
+            wait_until(&mut app, |app| {
+                let rings = app.world().resource::<WorldgenRings>();
+                rings.assigned.len() == 9 && rings.assigned.values().all(|s| s.root.is_some())
+            }),
+            "every region within the (shrunk) view distance must settle to a spawned LOD root"
+        );
+        assert!(task_list(&mut app).is_empty(), "generation budget drains to zero once settled");
+
+        assert!(
+            wait_until(&mut app, |app| {
+                let world = app.world_mut();
+                let mut q = world.query_filtered::<&LodChunk, With<Mesh3d>>();
+                q.iter(world).count() > 0
+            }),
+            "the LOD meshing chain must produce at least one mesh across the view distance"
+        );
+    }
 }

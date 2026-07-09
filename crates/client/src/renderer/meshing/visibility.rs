@@ -120,9 +120,12 @@ impl Default for CullingConfig {
 /// Hard bound on the BFS expansion (Chebyshev radius in chunk cells around
 /// the camera cell). Cells outside the expansion domain are never reached and
 /// their chunks end Hidden, so this must overshoot the largest loaded view
-/// window — today that's near 3×3 + far ring = 5×5 regions = 40 chunks
-/// across (FAR_VIEW_RADIUS = 2). REVISIT when Phase 4 adds worldgen LOD
-/// rings: undershooting silently produces permanently hidden terrain.
+/// window — today that's the near 3×3 region window alone, ≈24 chunks across
+/// (`ChunkGrid`, keyed by `ChunkKey`, holds only near-window chunks). The far
+/// ring and the worldgen rings beyond it (Phase 4) render `LodChunk` entities,
+/// which carry no `ChunkKey` and so are keyless to this BFS: `cull_chunks`
+/// queries `With<ChunkKey>` and never reaches or hides them, at any view
+/// distance. 64 overshoots the near window by more than 2×.
 pub const CULL_BFS_MAX_CHEBYSHEV: i32 = 64;
 
 /// Entry-face sentinel for the BFS start cell: no entry face, all exits
