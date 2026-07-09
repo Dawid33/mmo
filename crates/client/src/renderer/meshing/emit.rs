@@ -60,7 +60,10 @@ pub fn quads_to_mesh(quads: &[Quad], layers: &BlockTextureLayers) -> Option<Mesh
         }
     }
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    // CPU copy freed after GPU extraction; colliders come from rapier, tests never extract
+    // (MinimalPlugins), and the entity Aabb is inserted constant by `apply_meshed_chunks`
+    // so nothing reads mesh data main-world after upload.
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, VertexAttributeValues::Float32x3(positions));
     mesh.insert_attribute(
         voxel_material::ATTRIBUTE_VOXEL_PACKED,

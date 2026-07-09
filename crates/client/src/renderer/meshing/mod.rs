@@ -50,7 +50,19 @@ pub fn apply_meshed_chunks(
         match result {
             Some(mesh) => {
                 let mut ec = commands.entity(e);
-                ec.insert(Mesh3d(meshes.add(mesh)));
+                ec.insert((
+                    Mesh3d(meshes.add(mesh)),
+                    // Chunks always occupy within their 0..32 local cube; a
+                    // constant conservative Aabb keeps frustum culling working
+                    // without POSITION-derived bounds (required once Stage B
+                    // drops the POSITION attribute) and independent of mesh
+                    // data lifetime (RENDER_WORLD-only assets).
+                    bevy::camera::primitives::Aabb {
+                        center: bevy::math::Vec3A::splat(16.0),
+                        half_extents: bevy::math::Vec3A::splat(16.0),
+                    },
+                    bevy::camera::visibility::NoAutoAabb,
+                ));
                 if let Some(material) = &material {
                     ec.insert(MeshMaterial3d(material.0.clone()));
                 }
@@ -296,5 +308,32 @@ mod tests {
             mesh.indices().map(|i| i.len()).unwrap_or(0) > 0,
             "the meshed floor must have triangles"
         );
+    }
+
+    #[test]
+    fn meshed_chunks_get_a_constant_aabb() {
+        use bevy::camera::primitives::Aabb;
+        use bevy::camera::visibility::NoAutoAabb;
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
+        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
+        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
+        settle_until_meshed(&mut app, e);
+        let aabb = app.world().entity(e).get::<Aabb>().expect("constant chunk Aabb inserted");
+        assert_eq!(aabb.center, bevy::math::Vec3A::splat(16.0));
+        assert_eq!(aabb.half_extents, bevy::math::Vec3A::splat(16.0));
+        assert!(app.world().entity(e).contains::<NoAutoAabb>(), "auto-Aabb must not overwrite it");
     }
 }
