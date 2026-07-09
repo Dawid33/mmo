@@ -68,8 +68,9 @@ pub fn layer_for_face(faces: [u32; 3], face: Face) -> u32 {
     }
 }
 
-/// The AO shade the vertex shader computes: `0.55 + 0.15 * ao`. Must equal
-/// `ao::AO_CURVE[ao]` (test-pinned) — the WGSL hardcodes the same formula.
+/// The AO shade the vertex shader computes: `0.55 + 0.15 * ao`. Must match
+/// `ao::AO_CURVE[ao]` within 1e-6 (test-pinned; the f32 sum rounds one ulp
+/// off the curve literals) — the WGSL hardcodes the same formula.
 pub fn shade(ao: u8) -> f32 {
     0.55 + 0.15 * ao as f32
 }
