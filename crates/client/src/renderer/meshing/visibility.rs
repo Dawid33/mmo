@@ -5,7 +5,13 @@
 //! remesh, never rollback-hashed.
 //! Reference: https://tomcc.github.io/2014/08/31/visibility-1.html
 
-use super::binary::{Face, PaddedVoxels};
+use std::collections::{HashSet, VecDeque};
+
+use bevy::camera::primitives::{Frustum, Sphere};
+use bevy::prelude::*;
+
+use super::binary::PaddedVoxels;
+use super::queue::{ChunkGrid, ChunkKey};
 
 /// All 15 face pairs connected — the mask of an all-air (or absent) chunk.
 pub const ALL_CONNECTED: u16 = 0x7FFF;
@@ -98,8 +104,181 @@ pub fn face_connectivity(p: &PaddedVoxels) -> u16 {
     mask
 }
 
+/// Runtime switch for the camera-BFS cave culling (F4). Off ⇒ every chunk is
+/// restored to `Inherited` and stays that way.
+#[derive(Resource)]
+pub struct CullingConfig {
+    pub graph_enabled: bool,
+}
+
+impl Default for CullingConfig {
+    fn default() -> Self {
+        Self { graph_enabled: true }
+    }
+}
+
+/// Hard bound on the BFS expansion (Chebyshev radius in chunk cells around
+/// the camera cell). Cells outside the expansion domain are never reached and
+/// their chunks end Hidden, so this must overshoot the largest loaded view
+/// window (3×3 regions = 24 chunks across today), never undershoot it.
+pub const CULL_BFS_MAX_CHEBYSHEV: i32 = 64;
+
+/// Entry-face sentinel for the BFS start cell: no entry face, all exits
+/// allowed regardless of the cell's connectivity mask.
+const NO_ENTRY: u8 = 6;
+
+/// Unit steps in `Face::index()` order (PosX, NegX, PosY, NegY, PosZ, NegZ) —
+/// the locked order in which `opposite(d) = d ^ 1`.
+const DIR_STEPS: [[i32; 3]; 6] =
+    [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+
+/// Per-frame camera BFS over the chunk grid (Tommo cave culling): flood
+/// outward from the camera cell; a step from a cell with a connectivity mask
+/// is allowed only if the mask connects the entry face to the exit face, a
+/// direction whose opposite was already used on the path is banned
+/// (no-backtrack), and neighbors outside the camera frustum are rejected.
+/// Chunks whose cell the flood never reaches are `Hidden`.
+///
+/// Guard rails (under-visibility means holes in the world): grid-absent cells
+/// and chunks without a `ChunkConnectivity` yet traverse as fully-open air; a
+/// missing `Frustum` (headless) counts as everything-inside; the camera cell
+/// is clamped into the grid's inflated bounding box when outside it (flying
+/// above the band still sees down into it).
+pub fn cull_chunks(
+    config: Res<CullingConfig>,
+    grid: Res<ChunkGrid>,
+    cameras: Query<(&GlobalTransform, Option<&Frustum>, &Camera), With<Camera3d>>,
+    masks: Query<&ChunkConnectivity>,
+    mut chunks: Query<&mut Visibility, With<ChunkKey>>,
+) {
+    if !config.graph_enabled {
+        for mut vis in &mut chunks {
+            if *vis != Visibility::Inherited {
+                *vis = Visibility::Inherited;
+            }
+        }
+        return;
+    }
+    // No active camera: leave visibility unchanged rather than flashing the
+    // world hidden (startup, camera handoff mid-flight).
+    let Some((camera_tf, frustum, _)) = cameras.iter().find(|(_, _, cam)| cam.is_active) else {
+        return;
+    };
+    if grid.0.is_empty() {
+        return;
+    }
+
+    // Expansion domain: the grid keys' bounding box inflated by 1 (so sight
+    // lines may route through the open shell just outside the loaded band),
+    // intersected with the Chebyshev ball around the camera cell. The camera
+    // cell is clamped into the box first, which also keeps the ball centered
+    // on the effective start cell.
+    let mut lo = [i32::MAX; 3];
+    let mut hi = [i32::MIN; 3];
+    for key in grid.0.keys() {
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(key[axis]);
+            hi[axis] = hi[axis].max(key[axis]);
+        }
+    }
+    for axis in 0..3 {
+        lo[axis] -= 1;
+        hi[axis] += 1;
+    }
+    let translation = camera_tf.translation();
+    let mut camera_cell = [
+        (translation.x / 32.0).floor() as i32,
+        (translation.y / 32.0).floor() as i32,
+        (translation.z / 32.0).floor() as i32,
+    ];
+    for axis in 0..3 {
+        camera_cell[axis] = camera_cell[axis].clamp(lo[axis], hi[axis]);
+    }
+    let in_domain = |cell: [i32; 3]| {
+        (0..3).all(|axis| {
+            cell[axis] >= lo[axis]
+                && cell[axis] <= hi[axis]
+                && (cell[axis] - camera_cell[axis]).abs() <= CULL_BFS_MAX_CHEBYSHEV
+        })
+    };
+
+    // Node = (cell, dirs_used bitmask, entry face). dirs_used only gains bits
+    // along a path and no-backtrack caps it at one direction per axis, so at
+    // most 3 bits are ever set; with the entry face in the visited key that
+    // bounds re-visits per cell to a small constant. The entry face IS part
+    // of the key: two paths can reach a cell with identical dirs_used but
+    // different entry faces, and the sets of exits the mask allows for those
+    // entries differ — deduping them against each other would under-visit
+    // (= holes in the world).
+    let mut reached: HashSet<[i32; 3]> = HashSet::new();
+    let mut visited: HashSet<([i32; 3], u8, u8)> = HashSet::new();
+    let mut queue: VecDeque<([i32; 3], u8, u8)> = VecDeque::new();
+    visited.insert((camera_cell, 0, NO_ENTRY));
+    queue.push_back((camera_cell, 0, NO_ENTRY));
+    while let Some((cell, dirs, entry)) = queue.pop_front() {
+        reached.insert(cell);
+        // Grid-absent cells and chunks not yet carrying a mask: fully open.
+        let mask = grid.0.get(&cell).and_then(|&e| masks.get(e).ok()).map(|c| c.0);
+        for d in 0..6u8 {
+            // No-backtrack: never step opposite to a direction already used.
+            if dirs & (1 << (d ^ 1)) != 0 {
+                continue;
+            }
+            // Connectivity: the cell's own air must connect entry → exit face.
+            // The start cell (no entry face) exits freely in every direction.
+            if let Some(mask) = mask {
+                if entry != NO_ENTRY && mask & pair_bit(entry as u32, d as u32) == 0 {
+                    continue;
+                }
+            }
+            let step = DIR_STEPS[d as usize];
+            let neighbor = [cell[0] + step[0], cell[1] + step[1], cell[2] + step[2]];
+            if !in_domain(neighbor) {
+                continue;
+            }
+            // Frustum: reject neighbors fully outside the camera's view. No
+            // Frustum component (headless) ⇒ everything counts as inside.
+            if let Some(frustum) = frustum {
+                let center = Vec3::new(
+                    neighbor[0] as f32 * 32.0 + 16.0,
+                    neighbor[1] as f32 * 32.0 + 16.0,
+                    neighbor[2] as f32 * 32.0 + 16.0,
+                );
+                let sphere = Sphere { center: center.into(), radius: 16.0 * 3f32.sqrt() };
+                if !frustum.intersects_sphere(&sphere, false) {
+                    continue;
+                }
+            }
+            let node = (neighbor, dirs | (1 << d), d ^ 1);
+            if visited.insert(node) {
+                queue.push_back(node);
+            }
+        }
+    }
+
+    // Apply, writing only on change (like `dedupe_ghosts`) to avoid
+    // change-detection churn.
+    for (key, &entity) in grid.0.iter() {
+        let Ok(mut vis) = chunks.get_mut(entity) else { continue };
+        let want =
+            if reached.contains(key) { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
+        }
+    }
+}
+
+/// F4 flips the cave-culling graph on/off at runtime.
+pub fn toggle_culling(keys: Res<ButtonInput<KeyCode>>, mut config: ResMut<CullingConfig>) {
+    if keys.just_pressed(KeyCode::F4) {
+        config.graph_enabled = !config.graph_enabled;
+        info!("cave culling: {}", if config.graph_enabled { "on" } else { "off" });
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::binary::Face;
     use super::*;
     use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
 
@@ -183,5 +362,149 @@ mod tests {
         // A sealed air pocket in the middle: connects no faces.
         let air: Vec<[usize; 3]> = vec![[15, 15, 15], [16, 15, 15]];
         assert_eq!(face_connectivity(&solid_except(&air)), 0);
+    }
+
+    // --- Camera BFS culling (headless pipeline scenes) -------------------
+    //
+    // These run the real meshing pipeline (`pipeline_app` registers the full
+    // production chain, `cull_chunks` last) with a headless camera: explicit
+    // `GlobalTransform` + active `Camera` (MinimalPlugins has no transform
+    // propagation; a missing/default `Frustum` counts as "everything
+    // inside"). Assertions are on END-STATES via `wait_until`, never on
+    // transient scheduling intermediates — the mesher can spawn, complete,
+    // and apply within a single update.
+
+    use super::super::queue::tests::{
+        pipeline_app, spawn_chunk, voxels_with, wait_until, wait_until_settled,
+    };
+    use super::super::queue::MeshBudgets;
+    use crate::renderer::bridge::VoxelData;
+    use bevy::prelude::*;
+
+    fn spawn_camera(app: &mut App, pos: Vec3) -> Entity {
+        app.world_mut()
+            .spawn((
+                Camera3d::default(),
+                Camera { is_active: true, ..Default::default() },
+                GlobalTransform::from(Transform::from_translation(pos)),
+            ))
+            .id()
+    }
+
+    fn vis(app: &App, e: Entity) -> Visibility {
+        *app.world().entity(e).get::<Visibility>().expect("chunk has Visibility")
+    }
+
+    /// Camera in the (empty) cell (0,0,0), a fully solid chunk at cell
+    /// (1,0,0), and a chunk with content at cell (2,0,0) behind it.
+    fn wall_scene(app: &mut App) -> (Entity, Entity) {
+        spawn_camera(app, Vec3::new(8.0, 8.0, 8.0));
+        let wall = spawn_chunk(
+            app,
+            Vec3::ZERO,
+            Vec3::new(32.0, 0.0, 0.0),
+            vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT],
+        );
+        let behind =
+            spawn_chunk(app, Vec3::ZERO, Vec3::new(64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        (wall, behind)
+    }
+
+    #[test]
+    fn wall_hides_what_is_behind_it() {
+        // [camera cell (0,0,0), empty] [solid wall at (1,0,0)] [chunk at (2,0,0)].
+        // The wall's mask is 0: the BFS enters it but cannot pass through, and
+        // every around-path (over/under/beside) is cut by the no-backtrack
+        // rule, so (2,0,0) ends Hidden while the wall itself stays visible.
+        let mut app = pipeline_app(MeshBudgets::default());
+        let (wall, behind) = wall_scene(&mut app);
+        assert!(
+            wait_until(&mut app, |app| vis(app, behind) == Visibility::Hidden),
+            "the chunk behind a solid wall must end Hidden"
+        );
+        assert_eq!(vis(&app, wall), Visibility::Inherited, "the wall itself is entered → visible");
+    }
+
+    #[test]
+    fn open_air_gap_does_not_hide_distant_chunks() {
+        // Chunks at (0,0,0) and (5,0,0) with NOTHING between them in the grid:
+        // absent cells traverse as fully-open air, so the far chunk stays visible.
+        let mut app = pipeline_app(MeshBudgets::default());
+        spawn_camera(&mut app, Vec3::new(8.0, 8.0, 8.0));
+        let near = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
+        let far =
+            spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(160.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        assert!(wait_until_settled(&mut app), "pipeline must settle");
+        app.update();
+        assert_eq!(vis(&app, near), Visibility::Inherited, "camera's own cell is always visible");
+        assert_eq!(vis(&app, far), Visibility::Inherited, "grid-absent gap must not block sight");
+    }
+
+    #[test]
+    fn opening_a_wall_reveals_the_room_behind_it() {
+        // Spec §7.4 regression: an edit must update connectivity AND visibility.
+        let mut app = pipeline_app(MeshBudgets::default());
+        let (wall, behind) = wall_scene(&mut app);
+        assert!(
+            wait_until(&mut app, |app| vis(app, behind) == Visibility::Hidden),
+            "the wall must hide the room first"
+        );
+        // Carve a straight X tunnel through the wall at y=5, z=5.
+        {
+            let mut voxels = app.world_mut().get_mut::<VoxelData>(wall).unwrap();
+            for x in 0..32 {
+                voxels.0[x + 32 * 5 + 32 * 32 * 5] = Voxel::default();
+            }
+        }
+        assert!(
+            wait_until(&mut app, |app| vis(app, behind) == Visibility::Inherited),
+            "carving a tunnel must remesh the wall and reveal the room behind it"
+        );
+    }
+
+    #[test]
+    fn disabling_the_graph_restores_everything() {
+        let mut app = pipeline_app(MeshBudgets::default());
+        let (wall, behind) = wall_scene(&mut app);
+        assert!(
+            wait_until(&mut app, |app| vis(app, behind) == Visibility::Hidden),
+            "the wall scene must hide the behind chunk first"
+        );
+        app.world_mut().resource_mut::<CullingConfig>().graph_enabled = false;
+        app.update();
+        assert_eq!(vis(&app, wall), Visibility::Inherited);
+        assert_eq!(vis(&app, behind), Visibility::Inherited, "culling off ⇒ everything Inherited");
+    }
+
+    #[test]
+    fn chunks_without_a_mask_yet_stay_visible_and_traversable() {
+        // In-flight budget 0: `spawn_mesh_tasks` never runs, so no chunk ever
+        // gets a `ChunkConnectivity`. The BFS must treat the (actually solid)
+        // wall as open and NOT hide anything behind it — under-visibility is
+        // the failure mode.
+        let mut app =
+            pipeline_app(MeshBudgets { max_in_flight: 0, uploads_per_frame: 0 });
+        spawn_camera(&mut app, Vec3::new(8.0, 8.0, 8.0));
+        let wall = spawn_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(32.0, 0.0, 0.0),
+            vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT],
+        );
+        let behind =
+            spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(
+            app.world().entity(wall).get::<ChunkConnectivity>().is_none(),
+            "premise: no mask may have landed with a zero meshing budget"
+        );
+        assert_eq!(vis(&app, wall), Visibility::Inherited, "mask-less chunk stays visible");
+        assert_eq!(
+            vis(&app, behind),
+            Visibility::Inherited,
+            "mask-less chunk must traverse as open — nothing behind it may hide"
+        );
     }
 }

@@ -268,11 +268,11 @@ pub fn prune_chunk_grid(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use game::BlockId;
 
-    fn voxels_with(cells: &[[usize; 3]]) -> Vec<Voxel> {
+    pub(crate) fn voxels_with(cells: &[[usize; 3]]) -> Vec<Voxel> {
         let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         for [x, y, z] in cells {
             v[x + 32 * y + 32 * 32 * z] = Voxel::new(BlockId(1));
@@ -308,7 +308,7 @@ mod tests {
     }
 
     /// Region-root + chunk child at region-local chunk coords, like the bridge builds.
-    fn spawn_chunk(app: &mut App, root_at: Vec3, local: Vec3, voxels: Vec<Voxel>) -> Entity {
+    pub(crate) fn spawn_chunk(app: &mut App, root_at: Vec3, local: Vec3, voxels: Vec<Voxel>) -> Entity {
         let root = app
             .world_mut()
             .spawn((Transform::from_translation(root_at), Visibility::default()))
@@ -381,17 +381,26 @@ mod tests {
     use super::super::pack;
     use bevy::mesh::VertexAttributeValues;
 
-    fn pipeline_app(budgets: MeshBudgets) -> App {
+    /// Full pipeline as production registers it in `renderer/mod.rs`,
+    /// including the cave-culling pass chained after `apply_meshed_chunks`.
+    pub(crate) fn pipeline_app(budgets: MeshBudgets) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_resource::<ChunkGrid>()
             .init_resource::<RemeshQueue>()
             .init_resource::<BlockTextureLayers>()
+            .init_resource::<super::super::visibility::CullingConfig>()
             .insert_resource(budgets)
             .add_systems(
                 Update,
-                (mark_remesh_dirty, prune_chunk_grid, spawn_mesh_tasks, apply_meshed_chunks)
+                (
+                    mark_remesh_dirty,
+                    prune_chunk_grid,
+                    spawn_mesh_tasks,
+                    apply_meshed_chunks,
+                    super::super::visibility::cull_chunks,
+                )
                     .chain(),
             );
         app
@@ -434,7 +443,7 @@ mod tests {
     /// load (the slow soak tests starve the shared AsyncComputeTaskPool, so a
     /// ~500ms budget failed runs that pass instantly in isolation). Returns
     /// true iff `cond` became true before the deadline.
-    fn wait_until(app: &mut App, mut cond: impl FnMut(&mut App) -> bool) -> bool {
+    pub(crate) fn wait_until(app: &mut App, mut cond: impl FnMut(&mut App) -> bool) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
             app.update();
@@ -448,7 +457,7 @@ mod tests {
 
     /// Waits until the remesh pipeline is fully settled: dirty queue drained
     /// and no `MeshingTask` in flight.
-    fn wait_until_settled(app: &mut App) -> bool {
+    pub(crate) fn wait_until_settled(app: &mut App) -> bool {
         wait_until(app, |app| {
             let queue_empty = app.world().resource::<RemeshQueue>().dirty.is_empty();
             let none_in_flight =
