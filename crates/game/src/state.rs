@@ -233,6 +233,29 @@ where
     list: SparseSecondaryMap<EntityKey, Option<T>>,
 }
 
+/// crc32 of one component slot — the exact footprint of the single-key
+/// insert_safe / set_safe / remove_safe mutations.
+fn component_slot_digest<T: std::hash::Hash>(key: EntityKey, slot: Option<&Option<T>>) -> u32 {
+    use std::hash::Hash;
+    let mut h = crc32fast::Hasher::new();
+    key.hash(&mut h);
+    slot.hash(&mut h);
+    h.finalize()
+}
+
+/// crc32 of one rigid-body slot + the set's allocator state — the exact
+/// footprint of a journaled body insert (reverted via revert_insert).
+fn body_slot_digest(
+    alloc: (Option<u32>, u32),
+    body: Option<&rapier3d::prelude::RigidBody>,
+) -> u32 {
+    use std::hash::Hash;
+    let mut h = crc32fast::Hasher::new();
+    alloc.hash(&mut h);
+    body.hash(&mut h);
+    h.finalize()
+}
+
 impl<T> Undo<Component<T>>
 where
     T: 'static
@@ -247,15 +270,21 @@ where
     /// SparseSecondaryMap remove(insert) is hash-exact (see hash_restore.rs),
     /// so a removal closure is a true inverse here.
     pub fn insert_safe(&mut self, key: EntityKey) {
-        self.undo(move |d, _| {
+        let pre = component_slot_digest::<T>(key, self.list.get(key)); // absent -> None
+        self.undo_digest(pre, move |d, _| {
             d.list.remove(key);
+            component_slot_digest(key, d.list.get(key))
         });
         self.raw_mut().list.insert(key, None);
     }
 
     pub fn set_safe(&mut self, key: EntityKey, item: Option<T>) {
         let old = self.list.get(key).cloned().unwrap();
-        self.undo(move |d, _| *d.list.get_mut(key).unwrap() = old.clone());
+        let pre = component_slot_digest(key, Some(&old));
+        self.undo_digest(pre, move |d, _| {
+            *d.list.get_mut(key).unwrap() = old.clone();
+            component_slot_digest(key, d.list.get(key))
+        });
 
         if let Some(item) = item {
             self.raw_mut().list.get_mut(key).unwrap().replace(item);
@@ -274,8 +303,10 @@ where
     /// (hash(before) != hash(after undo) on region-crossing reconcile).
     pub fn remove_safe(&mut self, key: EntityKey) {
         let old = self.list.get(key).cloned().unwrap();
-        self.undo(move |d, _| {
+        let pre = component_slot_digest(key, Some(&old));
+        self.undo_digest(pre, move |d, _| {
             d.list.insert(key, old.clone());
+            component_slot_digest(key, d.list.get(key))
         });
         self.raw_mut().list.remove(key);
     }
@@ -354,12 +385,18 @@ impl Rollback {
             .pose(position)
             .user_data(e.data().as_ffi() as u128)
             .build();
-        // Tier-2 with a true fork inverse: reverts the arena allocator state
-        // exactly, no PhysicsState clone. See RigidBodySet::revert_insert.
+        // Tier-2 with a true fork inverse + delta digest: reverts the arena
+        // allocator exactly; verification hashes just this slot + alloc state.
         let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
-        let mut scope = self.data.physics.bodies.undo_scope();
+        let mut scope = self.data.physics.bodies.undo_scope_digest();
         let handle = scope.insert(body);
-        scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
+        scope.register(
+            body_slot_digest((prev_head, prev_len), None),
+            move |bodies, _| {
+                bodies.revert_insert(handle, prev_head, prev_len);
+                body_slot_digest(bodies.alloc_state(), bodies.get(handle))
+            },
+        );
         self.ecs.rigidbody.set_safe(e, Some(handle));
         if !cells.blocks.is_empty() {
             self.attach_voxels_collider_safe(
@@ -559,11 +596,17 @@ impl Rollback {
             .can_sleep(false)
             .user_data(e.data().as_ffi() as u128)
             .build();
-        // True fork inverse, same shape as in create_mesh.
+        // True fork inverse + delta digest, same shape as in create_mesh.
         let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
-        let mut scope = self.data.physics.bodies.undo_scope();
+        let mut scope = self.data.physics.bodies.undo_scope_digest();
         let handle = scope.insert(body);
-        scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
+        scope.register(
+            body_slot_digest((prev_head, prev_len), None),
+            move |bodies, _| {
+                bodies.revert_insert(handle, prev_head, prev_len);
+                body_slot_digest(bodies.alloc_state(), bodies.get(handle))
+            },
+        );
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
         // 28.8 units = 1.8 m at 1 unit = 1/16 m (~29 voxels, VS proportions).
         self.attach_capsule_collider_safe(e, handle, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS);
@@ -698,10 +741,18 @@ impl Rollback {
             .can_sleep(false)
             .user_data(e.data().as_ffi() as u128)
             .build();
+        // Tier-2 with a true fork inverse + delta digest, same shape as in
+        // create_mesh.
         let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
-        let mut scope = self.data.physics.bodies.undo_scope();
+        let mut scope = self.data.physics.bodies.undo_scope_digest();
         let handle = scope.insert(body);
-        scope.register(move |bodies, _| bodies.revert_insert(handle, prev_head, prev_len));
+        scope.register(
+            body_slot_digest((prev_head, prev_len), None),
+            move |bodies, _| {
+                bodies.revert_insert(handle, prev_head, prev_len);
+                body_slot_digest(bodies.alloc_state(), bodies.get(handle))
+            },
+        );
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
         match collider {
             ColliderSpec::CapsuleY { half_height, radius } => {

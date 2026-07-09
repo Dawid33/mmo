@@ -93,3 +93,18 @@ fn entities_slotmap_rolls_back_bit_exact_under_delta() {
     r.rollback();
     assert_eq!(h1, game::state_hash(&r), "delta-verified slotmap undos must be bit-exact");
 }
+
+#[test]
+fn entity_lifecycle_rolls_back_bit_exact_under_delta() {
+    let _mode = with_mode(HashMode::Delta);
+    let (mut r, _recv) = new_rollback();
+    r.new_transaction();
+    r.create_mesh(game::ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8));
+    let h1 = game::state_hash(&r);
+
+    r.new_transaction();
+    r.create_player_safe(7); // exercises insert_safe/set_safe, slotmap emits,
+                             // body-insert scope, capsule snapshot (Full), emits
+    r.rollback();
+    assert_eq!(h1, game::state_hash(&r), "player create must invert bit-exact under Delta");
+}
