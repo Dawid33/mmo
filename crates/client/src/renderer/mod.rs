@@ -208,7 +208,7 @@ fn setup_scene(
     // Loader: native reads PNGs from assets/blocks/; wasm resolves from the
     // embedded texture map. Returns None on any failure (build_layers then
     // falls the block back to the layer-0 missing texture).
-    let (rgba_layers, block_layers) = build_layers(&registry, |path| load_block_texture(path));
+    let (rgba_layers, block_layers) = build_layers(&registry, load_block_texture);
 
     let (w, h) = (rgba_layers[0].width(), rgba_layers[0].height());
     let data: Vec<u8> = rgba_layers.iter().flat_map(|l| l.as_raw().clone()).collect();
@@ -262,10 +262,10 @@ fn load_block_texture(path: &str) -> Option<image::RgbaImage> {
     {
         let full = resolve_blocks_dir().join(path);
         match image::ImageReader::open(&full).ok().and_then(|r| r.decode().ok()) {
-            Some(img) => return Some(img.to_rgba8()),
+            Some(img) => Some(img.to_rgba8()),
             None => {
                 warn!("could not read block texture {full:?}");
-                return None;
+                None
             }
         }
     }

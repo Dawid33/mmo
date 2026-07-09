@@ -53,28 +53,28 @@ pub fn downsample2(sources: &[Option<&[Voxel]>; 8]) -> Vec<Voxel> {
                                 let sx_coord = ox + dx;
                                 let sy_coord = oy + dy;
                                 let sz_coord = oz + dz;
+                                // ox/oy/oz top out at 30 and dx/dy/dz at 1.
+                                debug_assert!(sx_coord < 32 && sy_coord < 32 && sz_coord < 32);
 
-                                if sx_coord < 32 && sy_coord < 32 && sz_coord < 32 {
-                                    let idx = sx_coord + 32 * sy_coord + 32 * 32 * sz_coord;
-                                    let voxel = source_grid[idx];
+                                let idx = sx_coord + 32 * sy_coord + 32 * 32 * sz_coord;
+                                let voxel = source_grid[idx];
 
-                                    if !voxel.is_air() {
-                                        has_solid = true;
-                                        let block_id = voxel.block;
+                                if !voxel.is_air() {
+                                    has_solid = true;
+                                    let block_id = voxel.block;
 
-                                        // Find or add this block_id to our count array
-                                        let mut found = false;
-                                        for (bid, count) in block_counts[..block_count_len].iter_mut() {
-                                            if *bid == block_id {
-                                                *count = count.saturating_add(1);
-                                                found = true;
-                                                break;
-                                            }
+                                    // Find or add this block_id to our count array
+                                    let mut found = false;
+                                    for (bid, count) in block_counts[..block_count_len].iter_mut() {
+                                        if *bid == block_id {
+                                            *count = count.saturating_add(1);
+                                            found = true;
+                                            break;
                                         }
-                                        if !found && block_count_len < 8 {
-                                            block_counts[block_count_len] = (block_id, 1);
-                                            block_count_len += 1;
-                                        }
+                                    }
+                                    if !found && block_count_len < 8 {
+                                        block_counts[block_count_len] = (block_id, 1);
+                                        block_count_len += 1;
                                     }
                                 }
                             }
@@ -281,6 +281,7 @@ pub struct LodMeshTask(Task<Option<Mesh>>);
 /// entity skipped this frame by the budget cap would silently drop out of
 /// `Changed<>` on the next run if we didn't enqueue every changed entity,
 /// unconditionally, before applying the cap.
+#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn spawn_lod_mesh_tasks(
     mut commands: Commands,
     mut queue: Local<BTreeSet<Entity>>,
@@ -385,7 +386,7 @@ pub fn apply_lod_meshes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game::{Block, BlockId, Voxel, CHUNK_VOXEL_COUNT};
+    use game::Block;
 
     fn grid_with(cells: &[([usize; 3], u16)]) -> Vec<Voxel> {
         let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
@@ -493,7 +494,8 @@ mod tests {
         let mut chunks: [Option<&game::Chunk>; 8] = [None; 8];
         chunks[0] = Some(&chunk);
         let out = downsample_blocks(&chunks);
-        assert_eq!(out[1 + 32 * 0 + 32 * 32 * 1].block, BlockId(4));
+        let idx = |x: usize, y: usize, z: usize| x + 32 * y + 32 * 32 * z;
+        assert_eq!(out[idx(1, 0, 1)].block, BlockId(4));
         assert_eq!(out.iter().filter(|v| !v.is_air()).count(), 1);
     }
 
