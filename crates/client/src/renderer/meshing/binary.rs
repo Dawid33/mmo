@@ -379,6 +379,9 @@ mod tests {
         let quads = mesh_quads(&p);
         let tops: Vec<&Quad> = quads.iter().filter(|q| q.face == Face::PosY).collect();
         assert_eq!(tops.len(), 2, "different blocks stay separate quads");
+        let at = |min: [u32; 3]| tops.iter().find(|q| q.min == min).expect("quad at min");
+        assert_eq!(at([5, 5, 5]).block, BlockId(1));
+        assert_eq!(at([6, 5, 5]).block, BlockId(2));
     }
 
     #[test]

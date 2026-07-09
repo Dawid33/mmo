@@ -104,6 +104,22 @@ fn parity_with_block_mesh_on_random_chunks() {
 }
 
 #[test]
+fn parity_with_a_neighbor_filled_shell() {
+    // Extends parity to the shell-culling path: both meshers must agree when
+    // the padded input's shell comes from a real neighbor (not just air).
+    use std::collections::BTreeMap;
+
+    use client::renderer::meshing::neighbors::gather_padded;
+
+    let center = random_chunk(7);
+    let full_neighbor = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+    let mut neighbors: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
+    neighbors.insert([1, 0, 0], full_neighbor.as_slice());
+    let padded = gather_padded(&center, &neighbors);
+    assert_eq!(ours(&padded), oracle(&padded));
+}
+
+#[test]
 fn parity_on_structured_chunks() {
     for chunk in [
         vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT], // full

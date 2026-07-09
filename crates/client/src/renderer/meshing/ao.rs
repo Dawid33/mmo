@@ -31,9 +31,13 @@ pub fn face_ao(p: &PaddedVoxels, axis: usize, positive: bool, pos: [usize; 3]) -
     layer[axis] += if positive { 1 } else { -1 };
 
     let solid = |c: [i32; 3]| -> bool {
-        // Padded coords are 0..34; samples can step to -1 or 34 when the face
-        // voxel touches the shell. Out-of-buffer counts as open (no occlusion)
-        // — consistent with "missing neighbor = air" (task 5).
+        // Not reachable from the mesher: every position it passes here stays
+        // within 0..=33, since the AO samples are one shell cell out from a
+        // face voxel that itself stops at the shell (0/33). This guard is
+        // defensive for callers outside the mesher's contract who might pass
+        // a `pos` closer to (or past) the buffer edge; out-of-buffer counts
+        // as open (no occlusion) — consistent with "missing neighbor = air"
+        // (task 5).
         if c.iter().any(|&v| v < 0 || v as usize >= super::binary::PADDED) {
             return false;
         }

@@ -2,7 +2,7 @@
 //! and the dirty queue drained by `spawn_mesh_tasks` (task 7). All state here
 //! is render-derived — never rollback-hashed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::camera::primitives::{Frustum, Sphere};
 use bevy::prelude::*;
@@ -194,10 +194,16 @@ pub fn mark_remesh_dirty(
                 (world.y / 32.0).round() as i32,
                 (world.z / 32.0).round() as i32,
             ];
-            grid.0.insert(k, e);
             commands.entity(e).insert(ChunkKey(k));
             Some(k)
         });
+        // Idempotent: also re-enters an entity that a keyed `ChunkKey` still
+        // names but that `prune_chunk_grid` evicted from the grid on an
+        // earlier, since-reversed VoxelData removal (cross-frame remove then
+        // reinsert) — otherwise it stays treated as air by neighbors forever.
+        if let Some(k) = key {
+            grid.0.insert(k, e);
+        }
         queue.dirty.insert(e, key);
 
         let new_zones = boundary_zones(&voxels.0);
@@ -224,20 +230,40 @@ pub fn mark_remesh_dirty(
 
 /// Drop grid + queue entries for chunks whose `VoxelData` is gone for good
 /// (same liveness rule as `apply_meshed_chunks`: presence wins over the
-/// frame's removal log, so same-frame remove+reinsert survives).
+/// frame's removal log, so same-frame remove+reinsert survives), and
+/// re-dirty the 26 grid neighbors of each removed key: a neighbor that
+/// culled its shared-plane faces against the now-dead chunk must remesh
+/// with an air shell there, or the culled faces become visible holes.
 pub fn prune_chunk_grid(
     mut grid: ResMut<ChunkGrid>,
     mut queue: ResMut<RemeshQueue>,
     mut removed: RemovedComponents<VoxelData>,
     still_alive: Query<(), With<VoxelData>>,
 ) {
-    let dead: Vec<Entity> = removed.read().filter(|e| !still_alive.contains(*e)).collect();
+    let dead: BTreeSet<Entity> =
+        removed.read().filter(|e| !still_alive.contains(*e)).collect();
     if dead.is_empty() {
         return;
     }
-    grid.0.retain(|_, e| !dead.contains(e));
-    for e in dead {
-        queue.dirty.remove(&e);
+    let mut removed_keys = Vec::new();
+    grid.0.retain(|k, e| {
+        if dead.contains(e) {
+            removed_keys.push(*k);
+            false
+        } else {
+            true
+        }
+    });
+    for e in &dead {
+        queue.dirty.remove(e);
+    }
+    for k in removed_keys {
+        for off in zone_offsets() {
+            let nk = [k[0] + off[0], k[1] + off[1], k[2] + off[2]];
+            if let Some(&ne) = grid.0.get(&nk) {
+                queue.dirty.entry(ne).or_insert(Some(nk));
+            }
+        }
     }
 }
 
@@ -469,5 +495,113 @@ mod tests {
         };
         check(a, 32.0, 1.0);
         check(b, 0.0, -1.0);
+    }
+
+    #[test]
+    fn keyed_entity_same_frame_remove_and_reinsert_stays_keyed_and_remeshes() {
+        // Regression for finding 2: an entity that already carries a
+        // `ChunkKey` must not fall out of remesh consideration when its
+        // VoxelData is swapped within a single frame (the bridge's
+        // remove-then-insert pattern).
+        let mut app = pipeline_app(MeshBudgets::default());
+        let e = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
+        for _ in 0..100 {
+            app.update();
+            if app.world().entity(e).contains::<Mesh3d>() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(app.world().entity(e).contains::<Mesh3d>(), "initial mesh must land");
+        let key = app.world().entity(e).get::<ChunkKey>().expect("keyed after first mesh").0;
+
+        app.world_mut().entity_mut(e).remove::<VoxelData>();
+        app.world_mut().entity_mut(e).insert(VoxelData(voxels_with(&[[6, 6, 6]])));
+        app.update();
+
+        assert!(app.world().entity(e).contains::<ChunkKey>(), "keeps ChunkKey across same-frame remove+reinsert");
+        assert_eq!(
+            app.world().resource::<ChunkGrid>().0.get(&key),
+            Some(&e),
+            "stays in the grid across same-frame remove+reinsert"
+        );
+        assert!(
+            app.world().entity(e).contains::<MeshingTask>(),
+            "the voxel swap must queue and immediately claim a remesh, same frame"
+        );
+    }
+
+    #[test]
+    fn keyed_entity_cross_frame_remove_and_reinsert_reenters_the_grid() {
+        // Direct regression for finding 2: once `prune_chunk_grid` evicts a
+        // keyed entity (VoxelData gone for a whole frame), a later reinsert
+        // of VoxelData must re-key it into the grid — the entity still
+        // carries its old `ChunkKey`, so `mark_remesh_dirty`'s "insert only
+        // when computing a fresh key" path never ran for it.
+        let mut app = grid_app();
+        let e = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[]));
+        app.update();
+        let key = app.world().entity(e).get::<ChunkKey>().expect("keyed on first update").0;
+        assert_eq!(app.world().resource::<ChunkGrid>().0.get(&key), Some(&e));
+
+        app.world_mut().entity_mut(e).remove::<VoxelData>();
+        app.update();
+        assert!(
+            !app.world().resource::<ChunkGrid>().0.contains_key(&key),
+            "evicted once VoxelData has been gone for a full frame"
+        );
+        assert!(app.world().entity(e).contains::<ChunkKey>(), "ChunkKey itself survives eviction");
+
+        app.world_mut().entity_mut(e).insert(VoxelData(voxels_with(&[])));
+        app.update();
+        assert_eq!(
+            app.world().resource::<ChunkGrid>().0.get(&key),
+            Some(&e),
+            "entity re-enters the grid under its old key after a cross-frame reinsert"
+        );
+    }
+
+    #[test]
+    fn despawning_a_chunk_redirties_its_neighbor() {
+        // Direct regression for finding 1: two solid X-adjacent chunks mesh
+        // and cull their shared plane; despawning one must re-dirty the
+        // survivor so it re-grows the wall instead of leaving a hole.
+        let mut app = pipeline_app(MeshBudgets::default());
+        let full: Vec<Voxel> = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+        let a = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, full.clone());
+        let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), full);
+        for _ in 0..200 {
+            app.update();
+            if app.world().entity(a).contains::<Mesh3d>() && app.world().entity(b).contains::<Mesh3d>() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Settle: drain the dirty queue and let in-flight tasks finish so the
+        // despawn below is the only thing left to react to.
+        for _ in 0..200 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let queue_empty = app.world().resource::<RemeshQueue>().dirty.is_empty();
+            let none_in_flight =
+                app.world_mut().query::<&MeshingTask>().iter(app.world()).next().is_none();
+            if queue_empty && none_in_flight {
+                break;
+            }
+        }
+        assert!(app.world().resource::<RemeshQueue>().dirty.is_empty(), "must be settled before the despawn");
+
+        app.world_mut().entity_mut(a).despawn();
+        app.update();
+
+        // `spawn_mesh_tasks` chains right after `prune_chunk_grid` in this
+        // pipeline, so a freshly re-dirtied `b` can already have been drained
+        // into a `MeshingTask` within this same update — either state is
+        // proof the re-dirty happened.
+        assert!(
+            app.world().resource::<RemeshQueue>().dirty.contains_key(&b)
+                || app.world().entity(b).contains::<MeshingTask>(),
+            "b must be re-dirtied (queued or already claimed) after its solid neighbor a is removed"
+        );
     }
 }
