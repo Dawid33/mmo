@@ -13,7 +13,7 @@ use super::super::bridge::VoxelData;
 use super::super::block_textures::BlockTextureLayers;
 use super::binary::PaddedVoxels;
 use super::neighbors::{gather_padded, zone_index, zone_offsets};
-use super::{build_chunk_mesh, MeshingTask};
+use super::{mesh_chunk, MeshingTask};
 
 /// World-space chunk grid: key = world position / 32. Render-side spatial
 /// index for neighbor lookups; rebuilt from entities, never persisted.
@@ -131,7 +131,7 @@ pub fn spawn_mesh_tasks(
             None => PaddedVoxels::from_interior(&voxels.0),
         };
         let layers = layers.0.clone();
-        let task = pool.spawn(async move { build_chunk_mesh(&padded, &BlockTextureLayers(layers)) });
+        let task = pool.spawn(async move { mesh_chunk(&padded, &BlockTextureLayers(layers)) });
         commands.entity(e).insert(MeshingTask(task));
     }
 }

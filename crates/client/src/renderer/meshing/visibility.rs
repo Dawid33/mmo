@@ -10,6 +10,11 @@ use super::binary::{Face, PaddedVoxels};
 /// All 15 face pairs connected — the mask of an all-air (or absent) chunk.
 pub const ALL_CONNECTED: u16 = 0x7FFF;
 
+/// The chunk's face-pair connectivity, attached next to `Mesh3d` by
+/// `apply_meshed_chunks`. Derived render state — recomputed on every remesh.
+#[derive(bevy::prelude::Component, Copy, Clone)]
+pub struct ChunkConnectivity(pub u16);
+
 /// Index of the unordered face pair (a, b), a < b, faces in `Face::index()`
 /// order. Bijection onto 0..15 (test-pinned).
 pub fn pair_index(a: u32, b: u32) -> u32 {

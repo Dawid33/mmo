@@ -20,13 +20,27 @@ pub fn build_chunk_mesh(padded: &PaddedVoxels, layers: &BlockTextureLayers) -> O
     emit::quads_to_mesh(&binary::mesh_quads(padded), layers)
 }
 
+/// Everything the async mesh task produces for one chunk.
+pub struct MeshOutput {
+    pub mesh: Option<Mesh>,
+    pub connectivity: u16,
+}
+
+/// Mesh + connectivity in one pass over the padded snapshot.
+pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers) -> MeshOutput {
+    MeshOutput {
+        mesh: build_chunk_mesh(padded, layers),
+        connectivity: visibility::face_connectivity(padded),
+    }
+}
+
 #[derive(Resource)]
 pub struct ChunkMaterial(pub Handle<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>);
 
 /// In-flight background mesh build for an entity, spawned by `queue::spawn_mesh_tasks`
 /// and polled to completion by `apply_meshed_chunks`.
 #[derive(Component)]
-pub struct MeshingTask(Task<Option<Mesh>>);
+pub struct MeshingTask(Task<MeshOutput>);
 
 /// Polls in-flight `MeshingTask`s to completion and attaches the resulting `Mesh3d`
 /// (or strips it, for an all-air chunk), up to `budgets.uploads_per_frame` per frame —
@@ -46,9 +60,9 @@ pub fn apply_meshed_chunks(
         if applied >= budgets.uploads_per_frame {
             break; // remaining completed tasks attach next frame
         }
-        let Some(result) = block_on(future::poll_once(&mut task.0)) else { continue };
+        let Some(MeshOutput { mesh, connectivity }) = block_on(future::poll_once(&mut task.0)) else { continue };
         applied += 1;
-        match result {
+        match mesh {
             Some(mesh) => {
                 let mut ec = commands.entity(e);
                 ec.insert((
@@ -63,6 +77,7 @@ pub fn apply_meshed_chunks(
                         half_extents: bevy::math::Vec3A::splat(16.0),
                     },
                     bevy::camera::visibility::NoAutoAabb,
+                    visibility::ChunkConnectivity(connectivity),
                 ));
                 if let Some(material) = &material {
                     ec.insert(MeshMaterial3d(material.0.clone()));
@@ -70,7 +85,9 @@ pub fn apply_meshed_chunks(
                 ec.remove::<MeshingTask>();
             }
             None => {
-                commands.entity(e).remove::<(
+                let mut ec = commands.entity(e);
+                ec.insert(visibility::ChunkConnectivity(connectivity));
+                ec.remove::<(
                     Mesh3d,
                     MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
                     MeshingTask,
@@ -310,6 +327,51 @@ mod tests {
             mesh.indices().map(|i| i.len()).unwrap_or(0) > 0,
             "the meshed floor must have triangles"
         );
+    }
+
+    #[test]
+    fn meshed_chunks_carry_their_connectivity_mask() {
+        use super::visibility::{ChunkConnectivity, ALL_CONNECTED};
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
+        // A solid chunk with a single straight X tunnel: mask must be exactly
+        // the ±X pair — proves the real task computed real connectivity.
+        let mut voxels = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+        for x in 0..32 {
+            voxels[x + 32 * 5 + 32 * 32 * 5] = Voxel::default();
+        }
+        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
+        settle_until_meshed(&mut app, e);
+        let mask = app.world().entity(e).get::<ChunkConnectivity>().expect("mask attached").0;
+        use super::binary::Face;
+        assert_eq!(mask, super::visibility::pair_bit(Face::PosX.index(), Face::NegX.index()));
+
+        // All-air chunk: mesh stripped, mask = ALL_CONNECTED.
+        let air = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let e2 = app.world_mut().spawn(crate::renderer::bridge::VoxelData(air)).id();
+        // Air chunks never get Mesh3d; settle on the mask instead.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.update();
+            if let Some(c) = app.world().entity(e2).get::<ChunkConnectivity>() {
+                assert_eq!(c.0, ALL_CONNECTED);
+                assert!(!app.world().entity(e2).contains::<Mesh3d>());
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "mask never attached");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 
     #[test]
