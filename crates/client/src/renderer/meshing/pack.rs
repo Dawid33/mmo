@@ -33,7 +33,10 @@ pub fn pack(
     h: u32,
     layer: u32,
 ) -> [u32; 2] {
-    debug_assert!(pos.iter().all(|&c| c <= 32) && w <= 32 && h <= 32);
+    // 33 = 32-grid corner + the LOD skirt's one-cell downward bias (see
+    // lod.rs::mesh_lod_grid); the 6-bit field holds 0..=63 and the WGSL decode
+    // is unchanged.
+    debug_assert!(pos.iter().all(|&c| c <= 33) && w <= 33 && h <= 33);
     debug_assert!(ao <= 3 && cu <= 1 && cv <= 1 && layer <= 0xFFFF);
     let w0 = pos[0]
         | pos[1] << 6
@@ -90,8 +93,8 @@ mod tests {
             let face = Face::from_index(face_i);
             for ao in 0..4u8 {
                 for (cu, cv) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)] {
-                    for pos in [[0u32, 0, 0], [32, 32, 32], [1, 17, 32]] {
-                        for (w, h) in [(1u32, 1u32), (32, 32), (5, 17)] {
+                    for pos in [[0u32, 0, 0], [32, 32, 32], [33, 33, 33], [1, 17, 32]] {
+                        for (w, h) in [(1u32, 1u32), (32, 32), (33, 33), (5, 17)] {
                             for layer in [0u32, 1, 255, 65535] {
                                 let p = pack(pos, face, ao, cu, cv, w, h, layer);
                                 let u = unpack(p);

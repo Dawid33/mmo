@@ -20,6 +20,7 @@ pub mod meshing;
 pub(crate) mod ui_bridge;
 pub(crate) mod ui_input;
 mod voxel_material;
+pub(crate) mod worldgen_rings;
 use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
 
@@ -62,13 +63,16 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<meshing::queue::ChunkGrid>()
             .init_resource::<meshing::queue::RemeshQueue>()
             .init_resource::<meshing::queue::MeshBudgets>()
+            .init_resource::<meshing::queue::FrameUploads>()
             .init_resource::<meshing::visibility::CullingConfig>()
+            .insert_resource(worldgen_rings::WorldgenRings::new(load_worldgen_materials()))
             .add_systems(
                 PreUpdate,
                 (
                     input::forward_input.after(bevy::input::InputSystems),
                     (
                         bridge::drain_client_updates,
+                        bridge::finish_far_lod_builds,
                         bridge::drain_region_updates,
                         bridge::dedupe_ghosts,
                         bridge::enforce_single_active_camera,
@@ -88,6 +92,20 @@ impl Plugin for SimBridgePlugin {
                         meshing::queue::prune_chunk_grid,
                         meshing::queue::spawn_mesh_tasks,
                         meshing::apply_meshed_chunks,
+                        // LOD meshes land in the same chain; culling moved to
+                        // cull_plugin (PostUpdate) so it sees the current
+                        // frame's frustum — it runs after this chain either way.
+                        meshing::lod::spawn_lod_mesh_tasks,
+                        meshing::lod::apply_lod_meshes,
+                    )
+                        .chain(),
+                    // Worldgen rings run in Update but outside the meshing
+                    // chain: they only spawn/despawn LOD roots and children,
+                    // which the LOD mesh systems pick up on later frames.
+                    (
+                        worldgen_rings::manage_worldgen_rings,
+                        worldgen_rings::finish_worldgen_tasks,
+                        worldgen_rings::retire_roots,
                     )
                         .chain(),
                     interpolate::interpolate_transforms,
@@ -101,6 +119,24 @@ impl Plugin for SimBridgePlugin {
             );
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Update, meshing::visibility::enable_native_occlusion);
+    }
+}
+
+/// Terrain materials for the client-side worldgen LOD rings, resolved from
+/// the block registry exactly like the embedded server does
+/// (`local_server.rs`) so ring terrain uses the same block ids the server's
+/// snapshots would.
+fn load_worldgen_materials() -> worldgen::material::Materials {
+    let registry = crate::blocks::load_registry();
+    let resolve = |name: &str| {
+        registry.id_of(name).unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
+    };
+    worldgen::material::Materials {
+        stone: resolve("stone"),
+        dirt: resolve("dirt"),
+        grass: resolve("grass"),
+        sand: resolve("sand"),
+        water: resolve("water"),
     }
 }
 
@@ -179,7 +215,7 @@ fn setup_scene(
     // Loader: native reads PNGs from assets/blocks/; wasm resolves from the
     // embedded texture map. Returns None on any failure (build_layers then
     // falls the block back to the layer-0 missing texture).
-    let (rgba_layers, block_layers) = build_layers(&registry, |path| load_block_texture(path));
+    let (rgba_layers, block_layers) = build_layers(&registry, load_block_texture);
 
     let (w, h) = (rgba_layers[0].width(), rgba_layers[0].height());
     let data: Vec<u8> = rgba_layers.iter().flat_map(|l| l.as_raw().clone()).collect();
@@ -233,10 +269,10 @@ fn load_block_texture(path: &str) -> Option<image::RgbaImage> {
     {
         let full = resolve_blocks_dir().join(path);
         match image::ImageReader::open(&full).ok().and_then(|r| r.decode().ok()) {
-            Some(img) => return Some(img.to_rgba8()),
+            Some(img) => Some(img.to_rgba8()),
             None => {
                 warn!("could not read block texture {full:?}");
-                return None;
+                None
             }
         }
     }

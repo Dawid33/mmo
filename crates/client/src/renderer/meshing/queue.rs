@@ -60,6 +60,14 @@ impl Default for MeshBudgets {
     }
 }
 
+/// Per-frame count of mesh uploads (Mesh3d insertions) so far, shared by
+/// `apply_meshed_chunks` and `lod::apply_lod_meshes` against
+/// `MeshBudgets.uploads_per_frame` — full-res always applies first in the
+/// chain, so it always gets first claim on the shared budget. Reset here by
+/// `mark_remesh_dirty`, the first system in the chained Update pipeline.
+#[derive(Resource, Default)]
+pub struct FrameUploads(pub usize);
+
 /// Sort rank: out-of-frustum chunks after in-frustum, then by squared
 /// distance to the camera. No camera (headless/startup) ranks everything 0.
 fn chunk_rank(key: [i32; 3], cam: Option<(&GlobalTransform, Option<&Frustum>)>) -> u64 {
@@ -169,6 +177,7 @@ pub fn mark_remesh_dirty(
     mut commands: Commands,
     mut grid: ResMut<ChunkGrid>,
     mut queue: ResMut<RemeshQueue>,
+    mut uploads: ResMut<FrameUploads>,
     mut changed: Query<
         (
             Entity,
@@ -182,6 +191,7 @@ pub fn mark_remesh_dirty(
     >,
     roots: Query<&Transform, Without<VoxelData>>,
 ) {
+    uploads.0 = 0;
     for (e, voxels, tf, parent, key, mut zones) in &mut changed {
         // Resolve (or compute) the grid key. Bare test entities (no parented
         // transform) stay unkeyed and skip all neighbor logic.
@@ -303,6 +313,7 @@ pub(crate) mod tests {
         app.add_plugins(MinimalPlugins)
             .init_resource::<ChunkGrid>()
             .init_resource::<RemeshQueue>()
+            .init_resource::<FrameUploads>()
             .add_systems(Update, (mark_remesh_dirty, prune_chunk_grid));
         app
     }
@@ -382,13 +393,15 @@ pub(crate) mod tests {
     use bevy::mesh::VertexAttributeValues;
 
     /// Full pipeline as production registers it in `renderer/mod.rs`,
-    /// including the cave-culling pass via `cull_plugin` (PostUpdate).
+    /// including the LOD mesh path chained after `apply_meshed_chunks` and
+    /// the cave-culling pass via `cull_plugin` (PostUpdate).
     pub(crate) fn pipeline_app(budgets: MeshBudgets) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_resource::<ChunkGrid>()
             .init_resource::<RemeshQueue>()
+            .init_resource::<FrameUploads>()
             .init_resource::<BlockTextureLayers>()
             .init_resource::<super::super::visibility::CullingConfig>()
             .insert_resource(budgets)
@@ -399,6 +412,8 @@ pub(crate) mod tests {
                     prune_chunk_grid,
                     spawn_mesh_tasks,
                     apply_meshed_chunks,
+                    super::super::lod::spawn_lod_mesh_tasks,
+                    super::super::lod::apply_lod_meshes,
                 )
                     .chain(),
             )
