@@ -108,3 +108,41 @@ fn entity_lifecycle_rolls_back_bit_exact_under_delta() {
     r.rollback();
     assert_eq!(h1, game::state_hash(&r), "player create must invert bit-exact under Delta");
 }
+
+
+#[test]
+fn physics_ticks_roll_back_bit_exact_under_delta() {
+    // End-to-end proof that the physics controller's `undo_scope_digest` +
+    // `pre_digest`/`revert_digest` wiring inverts bit-exact under Delta. We drive
+    // physics through the public `Region` tick path (which runs the physics
+    // controller's `on_tick`) rather than naming the internal `PhysicsController`.
+    // A live render-event sender is required because rolling back a tier-2 entry
+    // unwraps it (same reason as camera_controller.rs).
+    let _mode = with_mode(HashMode::Delta);
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = game::Region::new(
+        Rollback::new(None),
+        Some(send),
+        game::RegionCoords::new(0, 0),
+        None,
+    );
+    region
+        .handle_event(game::GameEventKind::CreateClient(7))
+        .unwrap();
+    let h1 = game::state_hash(region.data());
+
+    // Five journaled physics ticks (each its own transaction), then roll them all
+    // back. Under Delta, each rollback runs revert_digest and asserts it equals
+    // the pre-tick digest, so a mismatch would panic here.
+    for _ in 0..5 {
+        region.handle_event(game::GameEventKind::Tick).unwrap();
+    }
+    for _ in 0..5 {
+        region.rollback_last_event();
+    }
+    assert_eq!(
+        h1,
+        game::state_hash(region.data()),
+        "journal-digest-verified physics ticks must invert bit-exact under Delta"
+    );
+}

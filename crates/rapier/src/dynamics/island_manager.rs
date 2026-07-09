@@ -169,6 +169,21 @@ impl IslandManager {
         self.active_set_timestamp = s.timestamp;
     }
 
+    /// Live-side twin of [`IslandsSaved::digest`], for step-journal Delta
+    /// footprint digests. Hashes exactly the fields [`Self::journal_restore`]
+    /// writes back, in the same order — so after a restore, this equals
+    /// [`IslandsSaved::digest`] of the snapshot it was restored from. Keep the
+    /// field lists of `journal_restore`, `journal_save`, [`IslandsSaved::digest`]
+    /// and this fn in lockstep. `can_sleep`/`stack` are unhashed scratch and
+    /// excluded (matching [`Self::journal_save`] and the `Hash` impl).
+    pub(crate) fn journal_digest<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+        self.active_set.hash(state);
+        self.active_islands.hash(state);
+        self.active_islands_additional_solver_iterations.hash(state);
+        self.active_set_timestamp.hash(state);
+    }
+
     /// Journaling variant of [`Self::wake_up`]: saves the body's pre-wake state
     /// before delegating. `wake_up` itself remains the un-journaled path.
     pub(crate) fn wake_up_journaled(
@@ -398,6 +413,21 @@ pub(crate) struct IslandsSaved {
     pub active_islands: Vec<usize>,
     pub additional_solver_iterations: Vec<usize>,
     pub timestamp: u32,
+}
+
+impl IslandsSaved {
+    /// Pre-side twin of [`IslandManager::journal_digest`]. Hashes the saved
+    /// island fields in the exact order [`IslandManager::journal_restore`] writes
+    /// them back, so `hash(saved) == hash(live-after-restore)`. Field-name map:
+    /// `additional_solver_iterations` <-> `active_islands_additional_solver_iterations`,
+    /// `timestamp` <-> `active_set_timestamp`.
+    pub(crate) fn digest<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+        self.active_set.hash(state);
+        self.active_islands.hash(state);
+        self.additional_solver_iterations.hash(state);
+        self.timestamp.hash(state);
+    }
 }
 
 fn update_energy(

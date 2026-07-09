@@ -725,3 +725,64 @@ fn user_wake_of_resting_sleeper_revert_is_hash_exact() {
         got.0 != before.0, got.1 != before.1, got.2 != before.2, got.3 != before.3, got.4 != before.4
     );
 }
+
+
+#[test]
+fn journal_digest_matches_after_exact_revert() {
+    let mut w = World::new();
+    for x in 0..4 { for z in 0..4 { add_floor(&mut w, x, z); } }
+    let ball = w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(2.0), Real::from(8.0), Real::from(2.0)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(), ball, &mut w.bodies,
+    );
+    for _ in 0..3 { let _ = w.step(); }
+    // Fall, impact, settle: dirty ticks of several shapes.
+    for tick in 0..60 {
+        let j = w.step();
+        let pre = j.pre_digest();
+        let live = j.revert_digest(
+            &mut w.islands, &mut w.broad, &mut w.narrow,
+            &mut w.bodies, &mut w.colliders, &mut w.ij, &mut w.mj,
+        );
+        assert_eq!(pre, live, "tick {tick}: footprint digest after exact revert must match");
+        let _ = w.step(); // advance again (state was restored)
+    }
+}
+
+#[test]
+fn journal_digest_matches_on_collider_removal_tick() {
+    // Wholesale narrow + dirty broad path (mirrors collider_removal_tick_revert_is_hash_exact).
+    let mut w = World::new();
+    add_floor(&mut w, 0, 0);
+    let tile_body = w.bodies.insert(
+        RigidBodyBuilder::fixed()
+            .translation(vector![Real::from(40.0), Real::from(-1.0), Real::from(2.0)])
+            .build(),
+    );
+    let tile = w.colliders.insert_with_parent(
+        ColliderBuilder::cuboid(Real::from(16.0), Real::from(1.0), Real::from(16.0)).build(),
+        tile_body, &mut w.bodies,
+    );
+    let ball = w.bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(vector![Real::from(40.0), Real::from(1.0), Real::from(2.0)])
+            .build(),
+    );
+    w.colliders.insert_with_parent(
+        ColliderBuilder::ball(Real::from(0.5)).build(), ball, &mut w.bodies,
+    );
+    for _ in 0..90 { let _ = w.step(); }
+    w.colliders.remove(tile, &mut w.islands, &mut w.bodies, true);
+    let j = w.step();
+    assert!(j.broad_captured());
+    let pre = j.pre_digest();
+    let live = j.revert_digest(
+        &mut w.islands, &mut w.broad, &mut w.narrow,
+        &mut w.bodies, &mut w.colliders, &mut w.ij, &mut w.mj,
+    );
+    assert_eq!(pre, live, "removal-tick digest must match after exact revert");
+}

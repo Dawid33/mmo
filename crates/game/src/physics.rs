@@ -16,7 +16,7 @@ impl Controller for PhysicsController {
         // snapshot. The scope's registration license covers step()'s writes;
         // the undo closure's raw_undo_parts license covers the revert's.
         let mut journal = StepJournal::default();
-        let mut scope = data.physics.undo_scope();
+        let mut scope = data.physics.undo_scope_digest();
         {
             let p = scope.raw_fields();
             self.pipeline.step_journaled(
@@ -35,9 +35,18 @@ impl Controller for PhysicsController {
                 &mut journal,
             );
         }
-        scope.register(move |phys, _| {
+        // Pre-digest only when Delta verification will actually read it (it walks
+        // the journal's saved payloads); Full/Off ignore it, so skip the work.
+        let pre = if scope.wants_delta_digest() {
+            journal.pre_digest()
+        } else {
+            0
+        };
+        scope.register(pre, move |phys, _| {
             let p = phys.raw_undo_parts();
-            journal.revert(
+            // Reverts the tick AND recomputes the same footprint digest from the
+            // restored live structures; Delta compares it against `pre`.
+            journal.revert_digest(
                 p.islands,
                 p.broad_phase,
                 p.narrow_phase,
@@ -45,7 +54,7 @@ impl Controller for PhysicsController {
                 p.colliders,
                 p.implules_joint_set,
                 p.multi_body_joint_set,
-            );
+            )
         });
 
         for handle in data.physics.islands.active_bodies() {

@@ -20,6 +20,21 @@ pub struct BroadSaved {
     pub(crate) pending_leaf_changes: bool,
 }
 
+impl BroadSaved {
+    /// Pre-side twin of [`BroadPhaseBvh::journal_digest`]; mirrors
+    /// [`BroadPhaseBvh::journal_restore`]'s field writes in order (tree, pairs,
+    /// frame_index, pending_leaf_changes). `optimization_strategy` is not part of
+    /// the journal snapshot, so it is excluded here too. Keep all four field lists
+    /// in lockstep.
+    pub(crate) fn digest<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+        self.tree.hash(state);
+        self.pairs.hash(state);
+        self.frame_index.hash(state);
+        self.pending_leaf_changes.hash(state);
+    }
+}
+
 /// The broad-phase collision detector that quickly filters out distant object pairs.
 ///
 /// The broad-phase is the "first pass" of collision detection. It uses a hierarchical
@@ -428,5 +443,22 @@ impl BroadPhaseBvh {
         self.pairs = s.pairs;
         self.frame_index = s.frame_index;
         self.pending_leaf_changes = s.pending_leaf_changes;
+    }
+
+    /// Live-side twin of [`BroadSaved::digest`], for step-journal Delta footprint
+    /// digests. Hashes exactly the fields [`Self::journal_restore`] writes back,
+    /// in the same order, so after a restore this equals [`BroadSaved::digest`] of
+    /// the snapshot it came from. Unlike the full [`std::hash::Hash`] impl,
+    /// `optimization_strategy` is deliberately EXCLUDED: it is not journal-saved
+    /// or restored (a step never mutates it), so the pre-side [`BroadSaved`] has no
+    /// copy of it and including it would break the pre/post parity. Keep the field
+    /// lists of `journal_save`, `journal_restore`, [`BroadSaved::digest`] and this
+    /// fn in lockstep.
+    pub(crate) fn journal_digest<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+        self.tree.hash(state);
+        self.pairs.hash(state);
+        self.frame_index.hash(state);
+        self.pending_leaf_changes.hash(state);
     }
 }

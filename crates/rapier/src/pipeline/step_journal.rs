@@ -7,6 +7,7 @@ use crate::dynamics::{
 };
 use crate::geometry::{BroadPhaseBvh, Collider, ColliderHandle, ColliderSet, NarrowPhase};
 use parry3d::utils::hashset::HashSet;
+use std::hash::Hash;
 
 /// Per-tick mutation journal for [`crate::pipeline::PhysicsPipeline::step_journaled`].
 ///
@@ -53,6 +54,20 @@ pub(crate) struct ListsSaved {
     pub removed_colliders: Vec<ColliderHandle>,
     pub impulse_to_wake_up: HashSet<RigidBodyHandle>,
     pub multibody_to_wake_up: HashSet<RigidBodyHandle>,
+}
+
+/// The handle lists + per-section presence flags a [`StepJournal::revert_inner`]
+/// restored on one tick. Lets [`StepJournal::revert_digest`] re-read the exact
+/// same footprint from the live structures without duplicating the revert logic.
+/// Handle lists are stored sorted ascending (canonical digest order).
+struct Footprint {
+    body_handles: Vec<RigidBodyHandle>,
+    collider_handles: Vec<ColliderHandle>,
+    had_islands: bool,
+    had_lists: bool,
+    had_joints: bool,
+    had_narrow_wholesale: bool,
+    had_broad: bool,
 }
 
 impl StepJournal {
@@ -110,7 +125,9 @@ impl StepJournal {
 
     /// Undoes everything this journal captured, restoring the given structures to
     /// their pre-tick state. Consumes the journal: a reverted tick's journal cannot
-    /// be reverted twice.
+    /// be reverted twice. Thin wrapper over [`Self::revert_inner`] (whose returned
+    /// footprint it discards); [`Self::revert_digest`] uses the same inner fn so
+    /// the revert logic lives in exactly one place.
     pub fn revert(
         self,
         islands: &mut IslandManager,
@@ -121,6 +138,53 @@ impl StepJournal {
         impulse_joints: &mut ImpulseJointSet,
         multibody_joints: &mut MultibodyJointSet,
     ) {
+        let _ = self.revert_inner(
+            islands,
+            broad_phase,
+            narrow_phase,
+            bodies,
+            colliders,
+            impulse_joints,
+            multibody_joints,
+        );
+    }
+
+    /// The shared body of [`Self::revert`], returning the reverted tick's
+    /// [`Footprint`] (the sorted body/collider handles it restored plus the
+    /// per-section presence flags). Restoration is unchanged from the original
+    /// `revert`; the only addition is snapshotting the footprint up front so
+    /// [`Self::revert_digest`] can re-read it from the live structures afterwards
+    /// without re-implementing any revert logic.
+    fn revert_inner(
+        self,
+        islands: &mut IslandManager,
+        broad_phase: &mut BroadPhaseBvh,
+        narrow_phase: &mut NarrowPhase,
+        bodies: &mut RigidBodySet,
+        colliders: &mut ColliderSet,
+        impulse_joints: &mut ImpulseJointSet,
+        multibody_joints: &mut MultibodyJointSet,
+    ) -> Footprint {
+        // Snapshot the footprint (handle lists + section presence) BEFORE the
+        // moves below consume `self`. Handles are sorted ascending so both digest
+        // sides iterate in the same canonical order (saved order is first-touch,
+        // not canonical).
+        let mut body_handles: Vec<RigidBodyHandle> =
+            self.saved_bodies.iter().map(|(h, _)| *h).collect();
+        body_handles.sort_unstable();
+        let mut collider_handles: Vec<ColliderHandle> =
+            self.saved_colliders.iter().map(|(h, _)| *h).collect();
+        collider_handles.sort_unstable();
+        let footprint = Footprint {
+            body_handles,
+            collider_handles,
+            had_islands: self.islands.is_some(),
+            had_lists: self.lists.is_some(),
+            had_joints: self.joints.is_some(),
+            had_narrow_wholesale: self.narrow_wholesale.is_some(),
+            had_broad: self.broad.is_some(),
+        };
+
         // Sections are disjoint state; within each, restoration is LIFO.
         // Bodies/colliders: value restore (old clone wins over any number of
         // intra-tick writes).
@@ -168,5 +232,225 @@ impl StepJournal {
         if let Some(b) = self.broad {
             broad_phase.journal_restore(*b);
         }
+
+        footprint
+    }
+
+    /// Digest of the **pre-tick** values of everything this journal captured,
+    /// section by section in a fixed order: (1) bodies, (2) colliders,
+    /// (3) islands, (4) lists, (5) joints, (6) narrow, (7) broad. Its counterpart
+    /// [`Self::revert_digest`] recomputes the identical digest from the LIVE
+    /// structures after an exact revert, so the two are equal iff the revert
+    /// restored the captured footprint bit-for-bit.
+    ///
+    /// Parity rules (both sides MUST hash identical logical content in identical
+    /// order — the per-section `digest_*` helpers are called from both sides to
+    /// keep them from drifting):
+    /// - Bodies/colliders: handles sorted ascending; hash `(handle, Some(&saved))`
+    ///   here vs `(handle, set.get(handle))` on the live side.
+    /// - Wholesale-restored sections (islands, lists, joints, narrow-wholesale,
+    ///   broad): the saved snapshot IS the post-revert live state, so `hash(saved)`
+    ///   here must equal `hash(live-after-restore)` there — paired digest fns hash
+    ///   the same fields in the same order.
+    /// - HashSets (`*_to_wake_up`) are hashed as sorted `Vec`s on both sides.
+    /// - The fine-grained `narrow` op log is EXCLUDED from both sides; only a
+    ///   presence `bool` for the WHOLESALE snapshot is hashed. Its payloads are
+    ///   covered by Full mode and the fork's own step_journal revert-exactness
+    ///   tests, not by Delta digests. A presence `bool` is hashed for every
+    ///   optional section so presence/absence itself is checked.
+    pub fn pre_digest(&self) -> u32 {
+        let mut h = crc32fast::Hasher::new();
+
+        // 1. Bodies: saved payloads keyed by handle, sorted ascending.
+        let mut bodies_sorted: Vec<(RigidBodyHandle, &RigidBody)> =
+            self.saved_bodies.iter().map(|(hnd, b)| (*hnd, b)).collect();
+        bodies_sorted.sort_unstable_by_key(|(hnd, _)| *hnd);
+        Self::digest_bodies(&mut h, bodies_sorted.iter().map(|&(hnd, b)| (hnd, Some(b))));
+
+        // 2. Colliders: same shape.
+        let mut colliders_sorted: Vec<(ColliderHandle, &Collider)> =
+            self.saved_colliders.iter().map(|(hnd, c)| (*hnd, c)).collect();
+        colliders_sorted.sort_unstable_by_key(|(hnd, _)| *hnd);
+        Self::digest_colliders(&mut h, colliders_sorted.iter().map(|&(hnd, c)| (hnd, Some(c))));
+
+        // 3. Islands: presence + saved payload (cf. revert_digest step 3).
+        self.islands.is_some().hash(&mut h);
+        if let Some(s) = &self.islands {
+            s.digest(&mut h);
+        }
+
+        // 4. Lists: presence + saved five values (cf. revert_digest step 4).
+        self.lists.is_some().hash(&mut h);
+        if let Some(l) = &self.lists {
+            Self::digest_lists(
+                &mut h,
+                &l.modified_bodies,
+                &l.modified_colliders,
+                &l.removed_colliders,
+                &l.impulse_to_wake_up,
+                &l.multibody_to_wake_up,
+            );
+        }
+
+        // 5. Joints: presence + saved sets (cf. revert_digest step 5).
+        self.joints.is_some().hash(&mut h);
+        if let Some(j) = &self.joints {
+            Self::digest_joints(&mut h, &j.0, &j.1);
+        }
+
+        // 6. Narrow phase: presence of the WHOLESALE snapshot + its payload. The
+        //    fine-grained op log is intentionally not hashed on either side.
+        self.narrow_wholesale.is_some().hash(&mut h);
+        if let Some(w) = &self.narrow_wholesale {
+            Self::digest_narrow(&mut h, w);
+        }
+
+        // 7. Broad phase: presence + saved payload (cf. revert_digest step 7).
+        self.broad.is_some().hash(&mut h);
+        if let Some(b) = &self.broad {
+            b.digest(&mut h);
+        }
+
+        h.finalize()
+    }
+
+    /// Runs exactly [`Self::revert`] (via [`Self::revert_inner`]), then recomputes
+    /// [`Self::pre_digest`]'s digest from the now-restored LIVE structures over the
+    /// same footprint and section order. Equal to `pre_digest()` iff the revert
+    /// restored the footprint exactly. Same parameters as [`Self::revert`].
+    pub fn revert_digest(
+        self,
+        islands: &mut IslandManager,
+        broad_phase: &mut BroadPhaseBvh,
+        narrow_phase: &mut NarrowPhase,
+        bodies: &mut RigidBodySet,
+        colliders: &mut ColliderSet,
+        impulse_joints: &mut ImpulseJointSet,
+        multibody_joints: &mut MultibodyJointSet,
+    ) -> u32 {
+        // Consumes the journal and restores the live structures; `fp` carries the
+        // exact footprint so the digest below re-reads the same logical content.
+        let fp = self.revert_inner(
+            islands,
+            broad_phase,
+            narrow_phase,
+            bodies,
+            colliders,
+            impulse_joints,
+            multibody_joints,
+        );
+
+        let mut h = crc32fast::Hasher::new();
+
+        // 1. Bodies: live values for the same sorted handles (cf. pre_digest 1).
+        Self::digest_bodies(
+            &mut h,
+            fp.body_handles.iter().map(|&hnd| (hnd, bodies.get(hnd))),
+        );
+
+        // 2. Colliders (cf. pre_digest 2).
+        Self::digest_colliders(
+            &mut h,
+            fp.collider_handles.iter().map(|&hnd| (hnd, colliders.get(hnd))),
+        );
+
+        // 3. Islands: live fields after journal_restore (cf. pre_digest 3).
+        fp.had_islands.hash(&mut h);
+        if fp.had_islands {
+            islands.journal_digest(&mut h);
+        }
+
+        // 4. Lists: live modified/removed lists + wake sets, read via the same
+        //    fields `revert_inner` restores (cf. pre_digest 4).
+        fp.had_lists.hash(&mut h);
+        if fp.had_lists {
+            Self::digest_lists(
+                &mut h,
+                &bodies.modified_bodies,
+                &colliders.modified_colliders,
+                &colliders.removed_colliders,
+                &impulse_joints.to_wake_up,
+                &multibody_joints.to_wake_up,
+            );
+        }
+
+        // 5. Joints: live sets (cf. pre_digest 5).
+        fp.had_joints.hash(&mut h);
+        if fp.had_joints {
+            Self::digest_joints(&mut h, impulse_joints, multibody_joints);
+        }
+
+        // 6. Narrow phase: live narrow phase, only when a wholesale snapshot was
+        //    captured (cf. pre_digest 6).
+        fp.had_narrow_wholesale.hash(&mut h);
+        if fp.had_narrow_wholesale {
+            Self::digest_narrow(&mut h, narrow_phase);
+        }
+
+        // 7. Broad phase: live fields after journal_restore (cf. pre_digest 7).
+        fp.had_broad.hash(&mut h);
+        if fp.had_broad {
+            broad_phase.journal_digest(&mut h);
+        }
+
+        h.finalize()
+    }
+
+    // --- Per-section digest helpers, shared by pre_digest and revert_digest so
+    //     the two sides cannot drift. `Option<&T>` hashes identically whether the
+    //     value came from a saved payload (`Some(&saved)`) or a live lookup
+    //     (`set.get(handle)`), which is what makes the pre/live parity hold.
+
+    fn digest_bodies<'a>(
+        h: &mut crc32fast::Hasher,
+        items: impl Iterator<Item = (RigidBodyHandle, Option<&'a RigidBody>)>,
+    ) {
+        for (handle, body) in items {
+            handle.hash(h);
+            body.hash(h);
+        }
+    }
+
+    fn digest_colliders<'a>(
+        h: &mut crc32fast::Hasher,
+        items: impl Iterator<Item = (ColliderHandle, Option<&'a Collider>)>,
+    ) {
+        for (handle, collider) in items {
+            handle.hash(h);
+            collider.hash(h);
+        }
+    }
+
+    fn digest_lists(
+        h: &mut crc32fast::Hasher,
+        modified_bodies: &crate::dynamics::ModifiedRigidBodies,
+        modified_colliders: &crate::geometry::ModifiedColliders,
+        removed_colliders: &[ColliderHandle],
+        impulse_to_wake_up: &HashSet<RigidBodyHandle>,
+        multibody_to_wake_up: &HashSet<RigidBodyHandle>,
+    ) {
+        // Modified/removed are order-deterministic Vecs (restored wholesale), so
+        // hash them directly. The to-wake-up HashSets have no canonical iteration
+        // order, so hash a sorted Vec of their contents on both sides.
+        modified_bodies.hash(h);
+        modified_colliders.hash(h);
+        removed_colliders.hash(h);
+        Self::hash_sorted_bodies(h, impulse_to_wake_up);
+        Self::hash_sorted_bodies(h, multibody_to_wake_up);
+    }
+
+    fn digest_joints(h: &mut crc32fast::Hasher, ij: &ImpulseJointSet, mj: &MultibodyJointSet) {
+        ij.hash(h);
+        mj.hash(h);
+    }
+
+    fn digest_narrow(h: &mut crc32fast::Hasher, narrow: &NarrowPhase) {
+        narrow.hash(h);
+    }
+
+    fn hash_sorted_bodies(h: &mut crc32fast::Hasher, set: &HashSet<RigidBodyHandle>) {
+        let mut v: Vec<RigidBodyHandle> = set.iter().copied().collect();
+        v.sort_unstable();
+        v.hash(h);
     }
 }
