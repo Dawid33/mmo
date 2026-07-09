@@ -91,6 +91,23 @@ fn main() {
     #[cfg(not(debug_assertions))]
     game::set_hash_mode(game::HashMode::Delta);
 
+    // Continuous profiling: build with `--features pyroscope` and set PYROSCOPE
+    // to push flamegraphs to a local Pyroscope (`just profile-client`). Off
+    // unless both the feature and the env var are present, so release runs are
+    // never instrumented.
+    #[cfg(all(feature = "pyroscope", not(target_arch = "wasm32")))]
+    let agent_running = if std::env::var("PYROSCOPE").is_ok() {
+        use pyroscope::PyroscopeAgent;
+        use pyroscope_pprofrs::{pprof_backend, PprofConfig};
+        let agent = PyroscopeAgent::builder("http://localhost:4040", "client")
+            .backend(pprof_backend(PprofConfig::new().sample_rate(100)))
+            .build()
+            .unwrap();
+        Some(agent.start().unwrap())
+    } else {
+        None
+    };
+
     // Shared debug toggles: render thread (F3) writes, game thread reads.
     let debug_flags = game::DebugFlags::default();
 
@@ -179,6 +196,12 @@ fn main() {
         .add_systems(Update, sim_driver::drive_sim);
 
     app.run();
+
+    #[cfg(all(feature = "pyroscope", not(target_arch = "wasm32")))]
+    if let Some(agent) = agent_running {
+        let agent_ready = agent.stop().unwrap();
+        agent_ready.shutdown();
+    }
 
     // Window closed: shut the sim and game threads down.
     let _ = game_send.send(GameEventKind::Quit);

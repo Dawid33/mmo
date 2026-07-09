@@ -69,7 +69,7 @@ wasm-server-runner`. See
 
 ### Profiling
 
-- `docker-compose up` starts Pyroscope (`:4040`) + Grafana (`:3000`); build client/server with the `pyroscope` feature to push profiles.
+- `just profile-up` starts Pyroscope (`:4040`) + Grafana (`:3000`); `just profile-client` / `just profile-server` then run the pair with that side built with the opt-in `pyroscope` feature (plain builds never compile the agent).
 - `scripts/perf.sh` records with `perf` and opens `hotspot`.
 
 ## Workspace Layout

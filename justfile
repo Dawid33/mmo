@@ -240,11 +240,31 @@ clippy:
 
 # Start Pyroscope (:4040) + Grafana (:3000). Build with `--features pyroscope` to push profiles.
 profile-up:
-    docker-compose up -d
+    docker compose up -d
 
 # Stop the profiling stack.
 profile-down:
-    docker-compose down
+    docker compose down
+
+# Client instrumented with pyroscope, server plain alongside; pushes to :4040 (`just profile-up` first).
+profile-client:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    RUST_BACKTRACE=1 {{cargo}} run --bin server &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    PYROSCOPE=1 RUST_BACKTRACE=1 {{cargo}} run --bin client --features pyroscope
+
+# Server instrumented with pyroscope, client plain alongside; pushes to :4040 (`just profile-up` first).
+profile-server:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    RUST_BACKTRACE=1 {{cargo}} run --bin client &
+    client_pid=$!
+    trap 'kill "$client_pid" 2>/dev/null || true' EXIT
+    PYROSCOPE=1 RUST_BACKTRACE=1 {{cargo}} run --bin server --features pyroscope
 
 # Record a perf profile of the client and open hotspot (see scripts/perf.sh).
 perf:
