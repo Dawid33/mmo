@@ -405,13 +405,24 @@ mod tests {
         let near = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
         let far = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(320.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
         app.update();
+        // The near chunk claimed the single slot. `apply_meshed_chunks` chains
+        // right after `spawn_mesh_tasks`, and the mesher is fast enough that a
+        // tiny chunk's task can spawn, complete, AND apply within this one
+        // update — so "claimed" shows as either an in-flight task or an
+        // already-attached mesh, never as a queue entry.
         assert!(
-            app.world().entity(near).contains::<MeshingTask>(),
+            app.world().entity(near).contains::<MeshingTask>()
+                || app.world().entity(near).contains::<Mesh3d>(),
             "nearest chunk claims the single task slot"
         );
         assert!(
-            !app.world().entity(far).contains::<MeshingTask>(),
-            "budget of 1 leaves the far chunk queued"
+            !app.world().resource::<RemeshQueue>().dirty.contains_key(&near),
+            "nearest chunk left the queue"
+        );
+        assert!(
+            !app.world().entity(far).contains::<MeshingTask>()
+                && !app.world().entity(far).contains::<Mesh3d>(),
+            "budget of 1 leaves the far chunk unmeshed"
         );
         assert!(app.world().resource::<RemeshQueue>().dirty.contains_key(&far));
     }
@@ -525,6 +536,7 @@ mod tests {
             "initial mesh must land"
         );
         let key = app.world().entity(e).get::<ChunkKey>().expect("keyed after first mesh").0;
+        let old_mesh = app.world().entity(e).get::<Mesh3d>().expect("meshed").0.clone();
 
         app.world_mut().entity_mut(e).remove::<VoxelData>();
         app.world_mut().entity_mut(e).insert(VoxelData(voxels_with(&[[6, 6, 6]])));
@@ -536,9 +548,15 @@ mod tests {
             Some(&e),
             "stays in the grid across same-frame remove+reinsert"
         );
+        // The swap must trigger a remesh. The remesh may complete within the
+        // same update (fast mesher + chained spawn→apply), so assert on the
+        // guaranteed end-state — a NEW mesh handle lands — not on catching the
+        // transient MeshingTask.
         assert!(
-            app.world().entity(e).contains::<MeshingTask>(),
-            "the voxel swap must queue and immediately claim a remesh, same frame"
+            wait_until(&mut app, |app| {
+                app.world().entity(e).get::<Mesh3d>().is_some_and(|m| m.0 != old_mesh)
+            }),
+            "the voxel swap must remesh (a new mesh handle must land)"
         );
     }
 
@@ -592,16 +610,31 @@ mod tests {
         assert!(wait_until_settled(&mut app), "must be settled before the despawn");
 
         app.world_mut().entity_mut(a).despawn();
-        app.update();
 
-        // `spawn_mesh_tasks` chains right after `prune_chunk_grid` in this
-        // pipeline, so a freshly re-dirtied `b` can already have been drained
-        // into a `MeshingTask` within this same update — either state is
-        // proof the re-dirty happened.
+        // The re-dirty can be queued, claimed, or fully remeshed-and-applied
+        // within a single update (fast mesher + chained systems), so assert on
+        // the guaranteed end-state the fix exists for: b re-grows its shared
+        // -X wall (a vertex at x=0 with a -X normal) instead of leaving a hole.
         assert!(
-            app.world().resource::<RemeshQueue>().dirty.contains_key(&b)
-                || app.world().entity(b).contains::<MeshingTask>(),
-            "b must be re-dirtied (queued or already claimed) after its solid neighbor a is removed"
+            wait_until(&mut app, |app| {
+                let Some(handle) = app.world().entity(b).get::<Mesh3d>().map(|m| m.0.clone()) else {
+                    return false;
+                };
+                let meshes = app.world().resource::<Assets<Mesh>>();
+                let Some(mesh) = meshes.get(&handle) else { return false };
+                let (
+                    Some(VertexAttributeValues::Float32x3(pos)),
+                    Some(VertexAttributeValues::Float32x3(nor)),
+                ) = (
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION),
+                    mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
+                )
+                else {
+                    return false;
+                };
+                pos.iter().zip(nor).any(|(p, n)| p[0] == 0.0 && n[0] == -1.0)
+            }),
+            "b must re-grow its shared-plane wall after its solid neighbor a is removed"
         );
     }
 }
