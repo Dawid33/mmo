@@ -1,103 +1,35 @@
-use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
+use bevy::mesh::Mesh;
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
-use block_mesh::ndshape::{ConstShape, ConstShape3u32};
-use block_mesh::{greedy_quads, GreedyQuadsBuffer, RIGHT_HANDED_Y_UP_CONFIG};
-use game::ChunkShape;
-use game::Voxel;
+use bevy::tasks::{block_on, futures_lite::future, Task};
 
 use super::block_textures::BlockTextureLayers;
-use super::voxel_material::{self, StandardVoxelMaterial};
+use super::voxel_material::StandardVoxelMaterial;
+use binary::PaddedVoxels;
 
-/// `greedy_quads` only emits faces for voxels strictly inside `[min, max]` —
-/// the boundary shell is padding for its 3x3x3 visibility kernel — so the
-/// 32³ chunk is meshed from the interior of a 34³ buffer.
-type PaddedChunkShape = ConstShape3u32<34, 34, 34>;
-const PAD: u32 = 1;
+pub mod ao;
+pub mod binary;
+pub mod emit;
+pub mod neighbors;
+pub mod queue;
 
-pub fn build_chunk_mesh(voxels: &[Voxel], layers: &BlockTextureLayers) -> Option<Mesh> {
-    // The padding shell stays air: without neighbour-chunk data, faces on the
-    // chunk boundary must be emitted (never culled), or chunks render with
-    // gaps — fully solid chunks would produce no mesh at all.
-    let mut padded = vec![Voxel::default(); PaddedChunkShape::SIZE as usize];
-    for (i, v) in voxels.iter().enumerate() {
-        let [x, y, z] = ChunkShape::delinearize(i as u32);
-        padded[PaddedChunkShape::linearize([x + PAD, y + PAD, z + PAD]) as usize] = *v;
-    }
-    let mut buffer = GreedyQuadsBuffer::new(padded.len());
-    greedy_quads(&padded, &PaddedChunkShape {}, [0; 3], [33; 3], &RIGHT_HANDED_Y_UP_CONFIG.faces, &mut buffer);
-    if buffer.quads.num_quads() == 0 {
-        return None;
-    }
-    let num_vertices = buffer.quads.num_quads() * 4;
-    let mut indices = Vec::with_capacity(buffer.quads.num_quads() * 6);
-    let mut positions = Vec::with_capacity(num_vertices);
-    let mut normals = Vec::with_capacity(num_vertices);
-    let mut uvs = Vec::with_capacity(num_vertices);
-    let mut tex_indices: Vec<[u32; 3]> = Vec::with_capacity(num_vertices);
-    let quad_uv = [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
-    for (group, face) in buffer.quads.groups.iter().zip(RIGHT_HANDED_Y_UP_CONFIG.faces.into_iter()) {
-        for quad in group.iter() {
-            indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
-            // Quad coords are in padded space; shift back to chunk-local.
-            positions.extend(
-                face.quad_mesh_positions(quad, 1.0)
-                    .map(|p| [p[0] - PAD as f32, p[1] - PAD as f32, p[2] - PAD as f32]),
-            );
-            normals.extend_from_slice(&face.quad_mesh_normals());
-            for uv in quad_uv {
-                uvs.push([uv[0] * quad.width as f32, uv[1] * quad.height as f32]);
-            }
-            let [qx, qy, qz] = *quad.minimum;
-            let voxel_index = ChunkShape::linearize([qx - PAD, qy - PAD, qz - PAD]) as usize;
-            let faces = layers.0.get(&voxels[voxel_index].block).copied().unwrap_or([0, 0, 0]);
-            tex_indices.extend(std::iter::repeat(faces).take(4));
-        }
-    }
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, VertexAttributeValues::Float32x3(positions));
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, VertexAttributeValues::Float32x3(normals));
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, VertexAttributeValues::Float32x2(uvs));
-    // The voxel shader unconditionally reads vertex color (see assets/shaders/voxel_texture.wgsl),
-    // which requires bevy_pbr's mesh pipeline to define VERTEX_COLORS; that only happens when the
-    // mesh actually carries this attribute, so emit an opaque-white filler rather than pruning it
-    // out of voxel_material::vertex_layout().
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, VertexAttributeValues::Float32x4(vec![[1.0; 4]; num_vertices]));
-    mesh.insert_attribute(voxel_material::ATTRIBUTE_TEX_INDEX, VertexAttributeValues::Uint32x3(tex_indices));
-    mesh.insert_indices(Indices::U32(indices));
-    Some(mesh)
+/// Mesh a padded chunk snapshot. `None` = no visible faces (don't render).
+pub fn build_chunk_mesh(padded: &PaddedVoxels, layers: &BlockTextureLayers) -> Option<Mesh> {
+    emit::quads_to_mesh(&binary::mesh_quads(padded), layers)
 }
 
 #[derive(Resource)]
 pub struct ChunkMaterial(pub Handle<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>);
 
-/// In-flight background mesh build for an entity, spawned by `queue_meshing` and
-/// polled to completion by `apply_meshed_chunks`.
+/// In-flight background mesh build for an entity, spawned by `queue::spawn_mesh_tasks`
+/// and polled to completion by `apply_meshed_chunks`.
 #[derive(Component)]
 pub struct MeshingTask(Task<Option<Mesh>>);
 
-/// Spawns a background meshing job whenever an entity's `VoxelData` changes. Inserting
-/// a fresh `MeshingTask` replaces any prior in-flight task component-wise; the old
-/// `Task` is dropped (and its background work cancelled/discarded) along with it, so
-/// stale results can never land after a newer edit.
-pub fn queue_meshing(
-    mut commands: Commands,
-    changed: Query<(Entity, &super::bridge::VoxelData), Changed<super::bridge::VoxelData>>,
-    layers: Res<BlockTextureLayers>,
-) {
-    let pool = AsyncComputeTaskPool::get();
-    for (e, voxels) in &changed {
-        let voxels = voxels.0.clone();
-        let layers = layers.0.clone();
-        let task = pool.spawn(async move { build_chunk_mesh(&voxels, &BlockTextureLayers(layers)) });
-        commands.entity(e).insert(MeshingTask(task));
-    }
-}
-
 /// Polls in-flight `MeshingTask`s to completion and attaches the resulting `Mesh3d`
-/// (or strips it, for an all-air chunk). Also handles `VoxelData` removal.
+/// (or strips it, for an all-air chunk), up to `budgets.uploads_per_frame` per frame —
+/// remaining completed tasks attach next frame. Also handles `VoxelData` removal
+/// (uncapped: a chunk that's gone must not linger with a stale mesh).
 pub fn apply_meshed_chunks(
     mut commands: Commands,
     mut tasks: Query<(Entity, &mut MeshingTask)>,
@@ -105,9 +37,15 @@ pub fn apply_meshed_chunks(
     mut meshes: ResMut<Assets<Mesh>>,
     material: Option<Res<ChunkMaterial>>,
     still_alive: Query<Entity, With<super::bridge::VoxelData>>,
+    budgets: Res<queue::MeshBudgets>,
 ) {
+    let mut applied = 0usize;
     for (e, mut task) in &mut tasks {
+        if applied >= budgets.uploads_per_frame {
+            break; // remaining completed tasks attach next frame
+        }
         let Some(result) = block_on(future::poll_once(&mut task.0)) else { continue };
+        applied += 1;
         match result {
             Some(mesh) => {
                 let mut ec = commands.entity(e);
@@ -157,22 +95,22 @@ pub fn apply_meshed_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use block_mesh::ndshape::ConstShape; // ndshape itself is no longer a direct dep (task 2)
-    use game::ChunkShape;
+    use bevy::mesh::VertexAttributeValues;
     use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
 
     #[test]
     fn empty_chunk_yields_no_mesh() {
         let voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        assert!(build_chunk_mesh(&voxels, &BlockTextureLayers::default()).is_none());
+        assert!(build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default()).is_none());
     }
 
     #[test]
     fn single_voxel_yields_cube() {
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        let idx = ChunkShape::linearize([5, 5, 5]) as usize;
+        let idx = 5 + 32 * 5 + 32 * 32 * 5;
         voxels[idx] = Voxel::new(BlockId(1));
-        let mesh = build_chunk_mesh(&voxels, &BlockTextureLayers::default()).expect("mesh");
+        let mesh = build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default())
+            .expect("mesh");
         assert_eq!(mesh.count_vertices(), 24, "6 faces x 4 verts");
         assert_eq!(mesh.indices().unwrap().len(), 36, "6 faces x 2 tris x 3");
     }
@@ -185,8 +123,8 @@ mod tests {
         // boundary shell and every chunk renders with a 2-voxel gap to its
         // neighbours.
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        voxels[ChunkShape::linearize([0, 5, 5]) as usize] = Voxel::new(BlockId(1));
-        let mesh = build_chunk_mesh(&voxels, &BlockTextureLayers::default())
+        voxels[0 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
+        let mesh = build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default())
             .expect("boundary voxel must yield a mesh");
         assert_eq!(mesh.count_vertices(), 24, "6 faces x 4 verts");
     }
@@ -196,7 +134,8 @@ mod tests {
         // A fully solid chunk must mesh as the whole 32-voxel cube, i.e. vertex
         // positions spanning [0, 32] on every axis — not shrunk to the interior.
         let voxels = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
-        let mesh = build_chunk_mesh(&voxels, &BlockTextureLayers::default()).expect("mesh");
+        let mesh = build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default())
+            .expect("mesh");
         let VertexAttributeValues::Float32x3(positions) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
         else {
@@ -216,38 +155,47 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
-            .add_systems(Update, (queue_meshing, apply_meshed_chunks));
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        voxels[ChunkShape::linearize([5, 5, 5]) as usize] = Voxel::new(BlockId(1));
+        voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
         app.update();
-        // Non-racy evidence that meshing actually went through the async path rather
-        // than, say, `queue_meshing` never running: the task must be queued (and not
-        // yet resolved, since nothing has polled it before this first `Update`) before
-        // we start looping to await its completion below.
-        assert!(app.world().entity(e).contains::<MeshingTask>(), "MeshingTask should be queued after first update");
-        for _ in 0..100 {
-            app.update();
-            if app.world().entity(e).contains::<Mesh3d>() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        panic!("mesh never attached");
+        // Evidence that meshing went through the pipeline on the first update:
+        // the task was spawned (still in flight) — or already completed AND
+        // applied, since `apply_meshed_chunks` chains right after
+        // `spawn_mesh_tasks` and a tiny chunk's task can finish within the
+        // same update. Only "neither" would mean the pipeline never ran.
+        assert!(
+            app.world().entity(e).contains::<MeshingTask>()
+                || app.world().entity(e).contains::<Mesh3d>(),
+            "meshing pipeline must have claimed the chunk on the first update"
+        );
+        settle_until_meshed(&mut app, e);
     }
 
     /// Runs `app.update()` (with a short sleep between attempts so the background
     /// meshing task gets a chance to make progress) until `e` has a `Mesh3d`, or
-    /// panics after 100 attempts.
+    /// panics after a generous wall-clock deadline. Deadline-based rather than
+    /// iteration-counted: under `--include-ignored` the slow soak tests hog the
+    /// shared AsyncComputeTaskPool, and a fixed ~500ms budget flaked ~50% of
+    /// full-suite runs while passing instantly in isolation.
     fn settle_until_meshed(app: &mut App, e: Entity) {
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             app.update();
             if app.world().entity(e).contains::<Mesh3d>() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        panic!("mesh never attached");
+        panic!("mesh never attached within deadline");
     }
 
     #[test]
@@ -261,7 +209,14 @@ mod tests {
             .init_asset::<Image>()
             .init_asset::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>()
             .init_resource::<BlockTextureLayers>()
-            .add_systems(Update, (queue_meshing, apply_meshed_chunks));
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
 
         let image_handle = app.world_mut().resource_mut::<Assets<Image>>().add(Image::default());
         let handle = app
@@ -274,7 +229,7 @@ mod tests {
         app.insert_resource(ChunkMaterial(handle));
 
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        let idx = ChunkShape::linearize([5, 5, 5]) as usize;
+        let idx = 5 + 32 * 5 + 32 * 32 * 5;
         voxels[idx] = Voxel::new(BlockId(1));
 
         let e = app.world_mut().spawn(VoxelData(voxels.clone())).id();
@@ -301,10 +256,17 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
-            .add_systems(Update, (queue_meshing, apply_meshed_chunks));
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
 
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        voxels[ChunkShape::linearize([5, 5, 5]) as usize] = Voxel::new(BlockId(1));
+        voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let e = app.world_mut().spawn(VoxelData(voxels)).id();
 
         // Queue the meshing task (MeshingTask attached after this update's commands flush),
@@ -327,7 +289,7 @@ mod tests {
     fn derives_and_meshes_a_generated_floor_chunk() {
         let chunk = game::Chunk::flat_floor(8);
         let voxels = game::derive_voxels(&chunk.blocks, &chunk.chisel);
-        let mesh = build_chunk_mesh(&voxels, &BlockTextureLayers::default());
+        let mesh = build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default());
         let mesh = mesh.expect("a floor chunk has solid voxels and must produce a mesh");
         assert!(
             mesh.indices().map(|i| i.len()).unwrap_or(0) > 0,
