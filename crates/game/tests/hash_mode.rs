@@ -146,3 +146,53 @@ fn physics_ticks_roll_back_bit_exact_under_delta() {
         "journal-digest-verified physics ticks must invert bit-exact under Delta"
     );
 }
+
+/// Perf evidence (not a CI gate — run with
+/// `cargo test -p game --test hash_mode -- --ignored --nocapture perf_evidence`).
+/// Times 100 physics ticks + full rollback under each mode. Expectation:
+/// delta ~ off (within noise), full markedly slower as the world grows.
+///
+/// Adapted from the brief's `PhysicsController`-direct version: that type is
+/// a private `game` module (not re-exported at the crate root — see the
+/// comment on `physics_ticks_roll_back_bit_exact_under_delta` above), so this
+/// drives physics through the same public `Region::handle_event(Tick)` path
+/// that test uses, with world setup done via the forgotten-transaction
+/// `with_data` hook so only the 100 ticks/rollbacks are timed.
+#[test]
+#[ignore = "perf evidence, prints numbers; run with --ignored --nocapture"]
+fn perf_evidence_hash_modes() {
+    fn run(mode: HashMode) -> (std::time::Duration, std::time::Duration) {
+        let _m = with_mode(mode);
+        let (send, _recv) = crossbeam::channel::unbounded();
+        let mut region = game::Region::new(
+            Rollback::new(None),
+            Some(send),
+            game::RegionCoords::new(0, 0),
+            None,
+        );
+        region.with_data(|r| {
+            for x in 0..4 {
+                for z in 0..4 {
+                    r.create_mesh(game::ChunkCoords::new(x, 0, z), game::Chunk::flat_floor(8));
+                }
+            }
+        });
+        region
+            .handle_event(game::GameEventKind::CreateClient(7))
+            .unwrap();
+        let t = std::time::Instant::now();
+        for _ in 0..100 {
+            region.handle_event(game::GameEventKind::Tick).unwrap();
+        }
+        let ticks = t.elapsed();
+        let t = std::time::Instant::now();
+        for _ in 0..100 {
+            region.rollback_last_event();
+        }
+        (ticks, t.elapsed())
+    }
+    for mode in [HashMode::Off, HashMode::Delta, HashMode::Full] {
+        let (ticks, rollbacks) = run(mode);
+        println!("{mode:?}: 100 ticks = {ticks:?}, 100 rollbacks = {rollbacks:?}");
+    }
+}

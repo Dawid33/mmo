@@ -176,7 +176,7 @@ test-server:
 # the wall-clock perf gates, which have their own release-mode recipes
 # (`just keepup-budget`, `just soak`) or are evidence-only printouts.
 test-full:
-    cargo test -p game -- --include-ignored --skip perf_evidence_journal_scales_with_activity
+    cargo test -p game -- --include-ignored --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
     cargo test -p client -- --include-ignored --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
     cargo test -p server -- --include-ignored
 

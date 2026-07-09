@@ -198,10 +198,12 @@ impl WorldIngress {
 }
 
 pub fn run() {
-    // Debug builds keep per-transaction hash self-verification (the rollback
-    // bar); release skips the O(state) walk — state restore is identical.
+    // Delta verification: every undo self-checks against a digest of only the
+    // data it touches — cheap enough to keep ON in production. Tests and the
+    // convergence harnesses run HashMode::Full (whole-field hashes), which is
+    // what catches footprint/capture gaps.
     #[cfg(not(debug_assertions))]
-    game::set_hash_mode(game::HashMode::Off);
+    game::set_hash_mode(game::HashMode::Delta);
 
     // Continuous profiling: build with `--features pyroscope` and set PYROSCOPE
     // to push flamegraphs to a local Pyroscope (`just profile-server`). Off
