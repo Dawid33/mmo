@@ -213,6 +213,51 @@ pub struct LodVoxelData(pub Vec<Voxel>);
 #[derive(Component, Default)]
 pub struct LodNeighbors(pub BTreeMap<[i32; 3], Entity>);
 
+/// One 2×2×2-chunk-group cell produced by a far region's async LOD build: the
+/// downsampled 32³ grid plus the region-local group coordinate it belongs to
+/// (chunk coords `div_euclid`'d by 2 on every axis, y included — see
+/// `build_far_lod_cells`).
+pub struct LodCell {
+    pub group: [i32; 3],
+    pub grid: Vec<Voxel>,
+}
+
+/// In-flight background LOD build for an entire far region's terrain,
+/// spawned by `bridge::spawn_far_region` on the far root and polled to
+/// completion by `bridge::finish_far_lod_builds`, which spawns the resulting
+/// `LodCell`s as `LodVoxelData` children.
+#[derive(Component)]
+pub struct FarLodBuild(pub Task<Vec<LodCell>>);
+
+/// Group a far region's `(ChunkCoords, Chunk)` list into 2×2×2 clusters and
+/// downsample each cluster into one `LodCell`. `coords.x`/`coords.z` are
+/// region-local `0..8` (unsigned) but `coords.y` is signed (chunks stack both
+/// above and below y=0 as the world grows) — every axis uses
+/// `div_euclid`/`rem_euclid` uniformly so the grouping and octant math stay
+/// correct regardless of sign, matching `downsample2`'s `sx + 2*sy + 4*sz`
+/// octant convention (more negative y lands in the lower octant half, same as
+/// positive y — `div_euclid`/`rem_euclid` round toward negative infinity, not
+/// toward zero, so this holds across the y=0 boundary).
+pub fn build_far_lod_cells(chunks: Vec<(game::ChunkCoords, game::Chunk)>) -> Vec<LodCell> {
+    let mut groups: BTreeMap<[i32; 3], [Option<Vec<Voxel>>; 8]> = BTreeMap::new();
+    for (coords, chunk) in chunks {
+        let cx = coords.x as i32;
+        let cz = coords.z as i32;
+        let group = [cx.div_euclid(2), coords.y.div_euclid(2), cz.div_euclid(2)];
+        let octant =
+            (cx.rem_euclid(2) + 2 * coords.y.rem_euclid(2) + 4 * cz.rem_euclid(2)) as usize;
+        let entry = groups.entry(group).or_insert_with(|| std::array::from_fn(|_| None));
+        entry[octant] = Some(game::derive_voxels(&chunk.blocks, &chunk.chisel));
+    }
+    groups
+        .into_iter()
+        .map(|(group, grids)| {
+            let sources: [Option<&[Voxel]>; 8] = std::array::from_fn(|i| grids[i].as_deref());
+            LodCell { group, grid: downsample2(&sources) }
+        })
+        .collect()
+}
+
 /// In-flight background LOD mesh build, spawned by `spawn_lod_mesh_tasks` and
 /// polled to completion by `apply_lod_meshes`.
 #[derive(Component)]
@@ -396,6 +441,42 @@ mod tests {
         let mut sources: [Option<&[Voxel]>; 8] = [None; 8];
         sources[0] = Some(&g);
         assert_eq!(downsample2(&sources), downsample2(&sources));
+    }
+
+    #[test]
+    fn build_far_lod_cells_groups_signed_y_correctly() {
+        // y=-2 and y=-1 both div_euclid(2) to group y=-1 (div_euclid rounds
+        // toward -inf, not zero), but land in different octant halves:
+        // rem_euclid(2) is 0 for y=-2 (lower half) and 1 for y=-1 (upper
+        // half) — the same ordering as the positive-y case, so a chunk
+        // stack straddling y=0 groups and orders exactly like one that
+        // doesn't.
+        let mut lower = game::Chunk::default();
+        lower.set_block(0, 0, 0, game::Block::new(BlockId(1)));
+        let mut upper = game::Chunk::default();
+        upper.set_block(0, 0, 0, game::Block::new(BlockId(2)));
+
+        let chunks = vec![
+            (game::ChunkCoords::new(0, -2, 0), lower),
+            (game::ChunkCoords::new(0, -1, 0), upper),
+        ];
+        let cells = build_far_lod_cells(chunks);
+
+        assert_eq!(cells.len(), 1, "both chunks land in the same 2x2x2 group");
+        assert_eq!(cells[0].group, [0, -1, 0], "(-2).div_euclid(2) == (-1).div_euclid(2) == -1");
+
+        // Coarse index x + 32*y + 32*32*z, at x=0, z=0: y=0 for the low half, y=16 for the high half.
+        let grid = &cells[0].grid;
+        assert_eq!(
+            grid[0].block,
+            BlockId(1),
+            "y=-2 chunk (rem_euclid 0) occupies the lower octant half"
+        );
+        assert_eq!(
+            grid[32 * 16].block,
+            BlockId(2),
+            "y=-1 chunk (rem_euclid 1) occupies the upper octant half"
+        );
     }
 
     #[test]

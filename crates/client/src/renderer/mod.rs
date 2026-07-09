@@ -70,6 +70,7 @@ impl Plugin for SimBridgePlugin {
                     input::forward_input.after(bevy::input::InputSystems),
                     (
                         bridge::drain_client_updates,
+                        bridge::finish_far_lod_builds,
                         bridge::drain_region_updates,
                         bridge::dedupe_ghosts,
                         bridge::enforce_single_active_camera,
