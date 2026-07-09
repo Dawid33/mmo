@@ -276,6 +276,27 @@ pub fn toggle_culling(keys: Res<ButtonInput<KeyCode>>, mut config: ResMut<Cullin
     }
 }
 
+/// Native-only: opt every camera into the depth prepass + HZB two-phase
+/// occlusion culling (experimental in Bevy 0.16+; REQUIRES DepthPrepass or
+/// the component is ignored; incompatible with deferred, which we don't use).
+/// Chunk meshes already prepass correctly via the packed-format prepass
+/// vertex shader (phase 2). Own commit: revert this one commit to disable.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn enable_native_occlusion(
+    mut commands: Commands,
+    cameras: Query<
+        Entity,
+        (With<Camera3d>, Without<bevy::core_pipeline::prepass::DepthPrepass>),
+    >,
+) {
+    for e in &cameras {
+        commands.entity(e).insert((
+            bevy::core_pipeline::prepass::DepthPrepass,
+            bevy::render::experimental::occlusion_culling::OcclusionCulling,
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::binary::Face;
@@ -506,5 +527,20 @@ mod tests {
             Visibility::Inherited,
             "mask-less chunk must traverse as open — nothing behind it may hide"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_cameras_get_depth_prepass_and_occlusion_culling() {
+        use bevy::core_pipeline::prepass::DepthPrepass;
+        use bevy::render::experimental::occlusion_culling::OcclusionCulling;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_systems(Update, enable_native_occlusion);
+        let cam = app.world_mut().spawn(Camera3d::default()).id();
+        app.update();
+        assert!(app.world().entity(cam).contains::<DepthPrepass>());
+        assert!(app.world().entity(cam).contains::<OcclusionCulling>());
     }
 }

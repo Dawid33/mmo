@@ -99,6 +99,8 @@ impl Plugin for SimBridgePlugin {
                     hud::update_crosshair_visibility,
                 ),
             );
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(Update, meshing::visibility::enable_native_occlusion);
     }
 }
 
