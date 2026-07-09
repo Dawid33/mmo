@@ -120,7 +120,9 @@ impl Default for CullingConfig {
 /// Hard bound on the BFS expansion (Chebyshev radius in chunk cells around
 /// the camera cell). Cells outside the expansion domain are never reached and
 /// their chunks end Hidden, so this must overshoot the largest loaded view
-/// window (3×3 regions = 24 chunks across today), never undershoot it.
+/// window — today that's near 3×3 + far ring = 5×5 regions = 40 chunks
+/// across (FAR_VIEW_RADIUS = 2). REVISIT when Phase 4 adds worldgen LOD
+/// rings: undershooting silently produces permanently hidden terrain.
 pub const CULL_BFS_MAX_CHEBYSHEV: i32 = 64;
 
 /// Entry-face sentinel for the BFS start cell: no entry face, all exits
@@ -227,6 +229,10 @@ pub fn cull_chunks(
             // Connectivity: the cell's own air must connect entry → exit face.
             // The start cell (no entry face) exits freely in every direction.
             if let Some(mask) = mask {
+                // entry == d would make pair_bit's a<b debug_assert trip, but
+                // it's unreachable: entering via `entry` put `entry^1 == d^1`
+                // in dirs, and the no-backtrack check above already skipped d.
+                debug_assert!(entry == NO_ENTRY || entry != d as u8);
                 if entry != NO_ENTRY && mask & pair_bit(entry as u32, d as u32) == 0 {
                     continue;
                 }

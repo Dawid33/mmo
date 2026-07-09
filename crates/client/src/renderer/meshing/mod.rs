@@ -114,10 +114,16 @@ pub fn apply_meshed_chunks(
             continue;
         }
         if let Ok(mut ec) = commands.get_entity(e) {
+            // ChunkConnectivity is stripped too: `mark_remesh_dirty` re-grids
+            // a reinserted entity immediately, and a mask from its previous
+            // life's content would gate BFS sight lines on geometry that no
+            // longer renders (transient under-visibility) until the remesh
+            // lands. Maskless = traverse-as-open, the conservative state.
             ec.remove::<(
                 Mesh3d,
                 MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
                 MeshingTask,
+                visibility::ChunkConnectivity,
             )>();
         }
     }
