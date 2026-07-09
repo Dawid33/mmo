@@ -16,7 +16,6 @@ game = { workspace = true }
 worldgen = { path = "../worldgen" }
 slotmapd = { workspace = true }
 log = { workspace = true }
-block-mesh = { workspace = true }
 crossbeam = { workspace = true }
 bincode = { workspace = true }
 crc32fast = { workspace = true }
@@ -42,3 +41,6 @@ web-sys = { version = "0.3", features = [
   "WritableStream", "WritableStreamDefaultWriter",
   "WebTransportReceiveStream", "WebTransportSendStream",
 ] }
+
+[dev-dependencies]
+block-mesh = { workspace = true }
