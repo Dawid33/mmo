@@ -92,6 +92,31 @@ impl Face {
         n[self.axis()] = if self.positive() { 1.0 } else { -1.0 };
         n
     }
+
+    /// Packed-format face id (see meshing/pack.rs and voxel_texture.wgsl —
+    /// the WGSL FACE_NORMALS table is indexed by this; order is locked).
+    pub fn index(self) -> u32 {
+        match self {
+            Face::PosX => 0,
+            Face::NegX => 1,
+            Face::PosY => 2,
+            Face::NegY => 3,
+            Face::PosZ => 4,
+            Face::NegZ => 5,
+        }
+    }
+
+    pub fn from_index(i: u32) -> Self {
+        match i {
+            0 => Face::PosX,
+            1 => Face::NegX,
+            2 => Face::PosY,
+            3 => Face::NegY,
+            4 => Face::PosZ,
+            5 => Face::NegZ,
+            _ => unreachable!("face index is 0..6"),
+        }
+    }
 }
 
 /// A greedy-merged rectangle of identical (block, AO) faces. `min` is the
@@ -498,6 +523,15 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn face_index_roundtrips_in_locked_order() {
+        let order = [Face::PosX, Face::NegX, Face::PosY, Face::NegY, Face::PosZ, Face::NegZ];
+        for (i, f) in order.into_iter().enumerate() {
+            assert_eq!(f.index(), i as u32);
+            assert_eq!(Face::from_index(i as u32), f);
         }
     }
 }

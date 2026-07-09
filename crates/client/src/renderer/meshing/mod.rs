@@ -11,6 +11,7 @@ pub mod ao;
 pub mod binary;
 pub mod emit;
 pub mod neighbors;
+pub mod pack;
 pub mod queue;
 
 /// Mesh a padded chunk snapshot. `None` = no visible faces (don't render).
