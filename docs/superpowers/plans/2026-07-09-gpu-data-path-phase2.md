@@ -17,7 +17,7 @@
 - The packed bit layout is LOCKED (Rust and WGSL must mirror it exactly):
   - word0: bits 0-5 `x`, 6-11 `y`, 12-17 `z` (vertex corner position, 0..=32), 18-20 `face` (0..=5, `Face::index()` order PosX,NegX,PosY,NegY,PosZ,NegZ), 21-22 `ao` (0..=3), 23 `cu`, 24 `cv`; bits 25-31 zero.
   - word1: bits 0-5 `w`, 6-11 `h` (quad extents 1..=32), 12-27 `layer` (texture array layer, 16 bits); bits 28-31 zero.
-- Shader AO shade formula `0.55 + 0.15 * ao` MUST equal `ao::AO_CURVE` (`[0.55, 0.70, 0.85, 1.0]`) — pinned by test.
+- Shader AO shade formula `0.55 + 0.15 * ao` must match `ao::AO_CURVE` (`[0.55, 0.70, 0.85, 1.0]`) within 1e-6 — pinned by test. (Bit-exact equality is unachievable: the f32 sum rounds one ulp away from the literals; shading is render-side, so ulp noise is acceptable and the pin exists to catch real retuning.)
 - Per-quad texture layer collapses the `[top, side, bottom]` triple CPU-side by face: `PosY → [0]`, `NegY → [2]`, else `[1]` (same semantics as the current shader's normal-based pick).
 - Existing behavior contracts survive: winding (cross·normal test), quad geometry spans, one shared material asset for all chunks (single batch bin), `VoxelData` liveness rule, task supersede rule.
 - Existing test suites must stay green at every task boundary (`cargo test -p client`); visual correctness is verified once at the end (controller-run smoke).
