@@ -416,13 +416,41 @@ mod tests {
         assert!(app.world().resource::<RemeshQueue>().dirty.contains_key(&far));
     }
 
+    /// Deadline-based wait: fixed-iteration polling flaked under full-suite
+    /// load (the slow soak tests starve the shared AsyncComputeTaskPool, so a
+    /// ~500ms budget failed runs that pass instantly in isolation). Returns
+    /// true iff `cond` became true before the deadline.
+    fn wait_until(app: &mut App, mut cond: impl FnMut(&mut App) -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            app.update();
+            if cond(app) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        false
+    }
+
+    /// Waits until the remesh pipeline is fully settled: dirty queue drained
+    /// and no `MeshingTask` in flight.
+    fn wait_until_settled(app: &mut App) -> bool {
+        wait_until(app, |app| {
+            let queue_empty = app.world().resource::<RemeshQueue>().dirty.is_empty();
+            let none_in_flight =
+                app.world_mut().query::<&MeshingTask>().iter(app.world()).next().is_none();
+            queue_empty && none_in_flight
+        })
+    }
+
     #[test]
     fn upload_budget_spreads_mesh_attach_over_frames() {
         let mut app = pipeline_app(MeshBudgets { max_in_flight: 64, uploads_per_frame: 1 });
         let a = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
         let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
         // Let tasks finish, then count Mesh3d arrivals per frame.
-        for _ in 0..200 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             app.update();
             let done = [a, b]
                 .iter()
@@ -430,16 +458,14 @@ mod tests {
                 .count();
             if done == 1 {
                 // Exactly one landed this frame — the cap held. Let the other land.
-                for _ in 0..200 {
-                    app.update();
-                    if app.world().entity(b).contains::<Mesh3d>()
-                        && app.world().entity(a).contains::<Mesh3d>()
-                    {
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
-                panic!("second mesh never attached");
+                assert!(
+                    wait_until(&mut app, |app| {
+                        app.world().entity(a).contains::<Mesh3d>()
+                            && app.world().entity(b).contains::<Mesh3d>()
+                    }),
+                    "second mesh never attached"
+                );
+                return;
             }
             assert!(done < 2, "both meshes attached in one frame despite uploads_per_frame=1");
             std::thread::sleep(std::time::Duration::from_millis(2));
@@ -455,29 +481,18 @@ mod tests {
         let full: Vec<Voxel> = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
         let a = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, full.clone());
         let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), full);
-        for _ in 0..200 {
-            app.update();
-            if app.world().entity(a).contains::<Mesh3d>()
-                && app.world().entity(b).contains::<Mesh3d>()
-            {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
+        assert!(
+            wait_until(&mut app, |app| {
+                app.world().entity(a).contains::<Mesh3d>()
+                    && app.world().entity(b).contains::<Mesh3d>()
+            }),
+            "both chunks must mesh"
+        );
         // Chunk a spans x 0..32: with a solid +X neighbor its mesh must have
         // no vertex at x=32 with a +X normal. (b meshed before a existed may
         // still carry its -X wall only if it meshed first without a — the
-        // zone diff re-dirties it; loop until both settle.)
-        for _ in 0..200 {
-            app.update();
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            let queue_empty = app.world().resource::<RemeshQueue>().dirty.is_empty();
-            let none_in_flight =
-                app.world_mut().query::<&MeshingTask>().iter(app.world()).next().is_none();
-            if queue_empty && none_in_flight {
-                break;
-            }
-        }
+        // zone diff re-dirties it; settle until both are final.)
+        assert!(wait_until_settled(&mut app), "pipeline must settle");
         let meshes = app.world().resource::<Assets<Mesh>>();
         let check = |e: Entity, plane_x: f32, normal_x: f32| {
             let handle = app.world().entity(e).get::<Mesh3d>().expect("meshed").0.clone();
@@ -505,14 +520,10 @@ mod tests {
         // remove-then-insert pattern).
         let mut app = pipeline_app(MeshBudgets::default());
         let e = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
-        for _ in 0..100 {
-            app.update();
-            if app.world().entity(e).contains::<Mesh3d>() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        assert!(app.world().entity(e).contains::<Mesh3d>(), "initial mesh must land");
+        assert!(
+            wait_until(&mut app, |app| app.world().entity(e).contains::<Mesh3d>()),
+            "initial mesh must land"
+        );
         let key = app.world().entity(e).get::<ChunkKey>().expect("keyed after first mesh").0;
 
         app.world_mut().entity_mut(e).remove::<VoxelData>();
@@ -570,26 +581,15 @@ mod tests {
         let full: Vec<Voxel> = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
         let a = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, full.clone());
         let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), full);
-        for _ in 0..200 {
-            app.update();
-            if app.world().entity(a).contains::<Mesh3d>() && app.world().entity(b).contains::<Mesh3d>() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
+        assert!(
+            wait_until(&mut app, |app| {
+                app.world().entity(a).contains::<Mesh3d>() && app.world().entity(b).contains::<Mesh3d>()
+            }),
+            "both chunks must mesh"
+        );
         // Settle: drain the dirty queue and let in-flight tasks finish so the
         // despawn below is the only thing left to react to.
-        for _ in 0..200 {
-            app.update();
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            let queue_empty = app.world().resource::<RemeshQueue>().dirty.is_empty();
-            let none_in_flight =
-                app.world_mut().query::<&MeshingTask>().iter(app.world()).next().is_none();
-            if queue_empty && none_in_flight {
-                break;
-            }
-        }
-        assert!(app.world().resource::<RemeshQueue>().dirty.is_empty(), "must be settled before the despawn");
+        assert!(wait_until_settled(&mut app), "must be settled before the despawn");
 
         app.world_mut().entity_mut(a).despawn();
         app.update();

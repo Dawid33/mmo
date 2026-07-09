@@ -172,28 +172,25 @@ mod tests {
         // yet resolved, since nothing has polled it before this first `Update`) before
         // we start looping to await its completion below.
         assert!(app.world().entity(e).contains::<MeshingTask>(), "MeshingTask should be queued after first update");
-        for _ in 0..100 {
-            app.update();
-            if app.world().entity(e).contains::<Mesh3d>() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        panic!("mesh never attached");
+        settle_until_meshed(&mut app, e);
     }
 
     /// Runs `app.update()` (with a short sleep between attempts so the background
     /// meshing task gets a chance to make progress) until `e` has a `Mesh3d`, or
-    /// panics after 100 attempts.
+    /// panics after a generous wall-clock deadline. Deadline-based rather than
+    /// iteration-counted: under `--include-ignored` the slow soak tests hog the
+    /// shared AsyncComputeTaskPool, and a fixed ~500ms budget flaked ~50% of
+    /// full-suite runs while passing instantly in isolation.
     fn settle_until_meshed(app: &mut App, e: Entity) {
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             app.update();
             if app.world().entity(e).contains::<Mesh3d>() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        panic!("mesh never attached");
+        panic!("mesh never attached within deadline");
     }
 
     #[test]
