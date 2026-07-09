@@ -156,6 +156,10 @@ pub struct EntityBundle {
     pub linvel: Vector<Real>,
     pub collider: ColliderSpec,
     pub has_camera: bool,
+    /// Authoritative look scalars (the body quaternion is derived from them
+    /// on every look change) — zeroes when `has_camera` is false.
+    pub yaw: Real,
+    pub pitch: Real,
     pub client: Option<(ClientId, Client)>,
     pub source_region: RegionCoords,
     pub source_key: EntityKey,

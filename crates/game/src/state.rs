@@ -827,7 +827,9 @@ impl Rollback {
         if let Some((client_id, client)) = bundle.client.clone() {
             if bundle.has_camera {
                 let handle = self.data.ecs.rigidbody.try_get(e).unwrap();
-                let cam = Camera::new(handle);
+                let mut cam = Camera::new(handle);
+                cam.yaw = bundle.yaw;
+                cam.pitch = bundle.pitch;
                 self.data.send(GameDataUpdate::new(
                     GameDataTransactionKind::Do,
                     GameDataUpdateKind::AddCameraComponent(
@@ -965,12 +967,22 @@ impl Rollback {
             .find(|(_, e)| **e == key)
             .map(|(c, _)| *c);
         let client = client_id.map(|c| (c, self.data.clients.get(&c).unwrap().clone()));
+        let (yaw, pitch) = self
+            .data
+            .ecs
+            .camera
+            .try_get(key)
+            .as_ref()
+            .map(|c| (c.yaw, c.pitch))
+            .unwrap_or_default();
         let bundle = crate::EntityBundle {
             kind,
             isometry,
             linvel,
             collider,
             has_camera: self.data.ecs.camera.try_get(key).is_some(),
+            yaw,
+            pitch,
             client,
             source_region: region,
             source_key: key,

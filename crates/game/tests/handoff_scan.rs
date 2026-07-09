@@ -261,6 +261,8 @@ fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
         linvel: game::parry::math::Vector::zeros(),
         collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
         has_camera: true,
+        yaw: 0.0.into(),
+        pitch: 0.0.into(),
         client: Some((9, game::Client::default())),
         source_region: src,
         source_key: src_key,

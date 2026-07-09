@@ -98,6 +98,8 @@ fn bundle(src: RegionCoords, key: game::EntityKey, client: game::ClientId, x: f3
         linvel: Vector::zeros(),
         collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
         has_camera: true,
+        yaw: Real::from(0.0),
+        pitch: Real::from(0.0),
         client: Some((client, Client::default())),
         source_region: src,
         source_key: key,
@@ -144,6 +146,36 @@ fn arrival_creates_player_with_client_state_and_holds_hash_bar() {
     assert_eq!(t.x, Real::from(2.0), "arrives at the (rebased) bundle pose");
     rb.rollback();
     assert_eq!(before, crc(&rb));
+}
+
+#[test]
+fn arrival_preserves_camera_look_direction() {
+    // Camera yaw/pitch are the authoritative look scalars (the body
+    // quaternion is derived from them on every look change). They must
+    // survive a region crossing, or the first mouse move after the flip
+    // snaps the camera back to the default facing.
+    let (mut donor_rb, src_key) = donor();
+    let src = RegionCoords::new(0, 0);
+
+    donor_rb.new_transaction();
+    donor_rb.data.clients.insert(9, Client::default());
+    let mut cam = donor_rb.data.ecs.camera.try_get(src_key).clone().unwrap();
+    cam.yaw = Real::from(1.25);
+    cam.pitch = Real::from(-0.5);
+    donor_rb.data.ecs.camera.set_safe(src_key, Some(cam));
+    donor_rb.forget();
+
+    donor_rb.new_transaction();
+    let bundle = donor_rb.extract_entity_safe(src_key, src);
+
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    rb.apply_arrival(bundle);
+    let e = *rb.data.player_entites.get(&9).unwrap();
+    let cam = rb.data.ecs.camera.try_get(e).clone().unwrap();
+    assert_eq!(cam.yaw, Real::from(1.25), "yaw must survive the region crossing");
+    assert_eq!(cam.pitch, Real::from(-0.5), "pitch must survive the region crossing");
 }
 
 #[test]

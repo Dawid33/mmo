@@ -59,6 +59,8 @@ fn matches_prediction_is_identity_based_for_transfers() {
         linvel: Vector::zeros(),
         collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
         has_camera: true,
+        yaw: 0.0.into(),
+        pitch: 0.0.into(),
         client: Some((7, Client::default())),
         source_region: RegionCoords::new(0, 0),
         source_key: Default::default(),
