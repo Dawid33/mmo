@@ -1139,16 +1139,138 @@ mod tests {
         assert!(app.world().resource::<FarRegionRoots>().0.get(&id).is_none());
     }
 
+    /// Shared body for the despawn-mid-build regression: send `NewFarRegion`,
+    /// let `frames_before_remove` updates run (0 = same-frame despawn, both
+    /// events drained by one `drain_client_updates` call; >0 = the root/task
+    /// exist for a real frame or more first), then `RemoveFarRegion`, then
+    /// settle. The root's despawn is only safe *today* because `.chain()`
+    /// inserts an `ApplyDeferred` between `drain_client_updates` and
+    /// `finish_far_lod_builds` — the despawn command from the first system
+    /// lands before the second ever gets a chance to poll (or, once resolved,
+    /// spawn children under) an entity that no longer exists. This test pins
+    /// that property instead of leaving it an unlocked scheduling accident.
+    fn assert_far_region_despawn_mid_build_is_clean(frames_before_remove: usize) {
+        use game::{Chunk, ChunkCoords, FarSnapshot, RegionCoords};
+
+        let (mut app, client) = far_lod_app_shell();
+        let id = RegionCoords::new(0, 0);
+        let snap = FarSnapshot { chunks: vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor(8))] };
+        client.send(ClientUpdateEvent::NewFarRegion(id, snap)).unwrap();
+        for _ in 0..frames_before_remove {
+            app.update();
+        }
+        client.send(ClientUpdateEvent::RemoveFarRegion(id)).unwrap();
+
+        // Settle whatever was in flight (build task, pending children) —
+        // the assertions below must hold no matter how the removal raced
+        // the background build.
+        for _ in 0..10 {
+            app.update();
+        }
+
+        assert!(
+            app.world().resource::<FarRegionRoots>().0.get(&id).is_none(),
+            "root removed after RemoveFarRegion (frames_before_remove={frames_before_remove})"
+        );
+        assert_eq!(
+            app.world_mut().query::<&lod::LodVoxelData>().iter(app.world()).count(),
+            0,
+            "no orphaned LodVoxelData entities survive a despawn mid-build \
+             (frames_before_remove={frames_before_remove})"
+        );
+        assert_eq!(
+            app.world_mut().query::<&lod::LodChunk>().iter(app.world()).count(),
+            0,
+            "no orphaned LodChunk entities survive a despawn mid-build \
+             (frames_before_remove={frames_before_remove})"
+        );
+    }
+
+    #[test]
+    fn despawn_same_frame_as_spawn_leaves_no_orphaned_lod_entities() {
+        assert_far_region_despawn_mid_build_is_clean(0);
+    }
+
+    #[test]
+    fn despawn_one_frame_after_spawn_leaves_no_orphaned_lod_entities() {
+        assert_far_region_despawn_mid_build_is_clean(1);
+    }
+
+    #[test]
+    fn refresh_while_first_build_in_flight_settles_to_one_roots_worth_of_lod_children() {
+        // NewFarRegion re-receipt (refresh) while the first build is still
+        // in flight: `spawn_far_region` tears the first root (and its
+        // FarLodBuild) down before spawning the second, in the same
+        // `drain_client_updates` call — the surviving build must settle to
+        // exactly one root's worth of LOD children, never a duplicated set
+        // from the torn-down first build.
+        use game::{Chunk, ChunkCoords, FarSnapshot, RegionCoords};
+        use crate::renderer::meshing::queue::tests::wait_until;
+
+        let (mut app, client) = far_lod_app_shell();
+        let id = RegionCoords::new(0, 0);
+        let snap = FarSnapshot { chunks: vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor(8))] };
+        client.send(ClientUpdateEvent::NewFarRegion(id, snap.clone())).unwrap();
+        client.send(ClientUpdateEvent::NewFarRegion(id, snap)).unwrap();
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<FarRegionRoots>().0.len(),
+            1,
+            "re-receipt leaves exactly one far root for this region"
+        );
+        let root = *app.world().resource::<FarRegionRoots>().0.get(&id).unwrap();
+
+        assert!(
+            wait_until(&mut app, |app| {
+                app.world_mut().query::<&lod::LodVoxelData>().iter(app.world()).next().is_some()
+            }),
+            "the surviving build settles into LOD children"
+        );
+
+        let lod_children: Vec<Entity> = app
+            .world_mut()
+            .query_filtered::<(Entity, &ChildOf), With<lod::LodVoxelData>>()
+            .iter(app.world())
+            .filter(|(_, c)| c.parent() == root)
+            .map(|(e, _)| e)
+            .collect();
+        assert_eq!(
+            lod_children.len(),
+            1,
+            "exactly one LOD child for the single-chunk snapshot, no duplicates"
+        );
+
+        let total_lod = app.world_mut().query::<&lod::LodVoxelData>().iter(app.world()).count();
+        assert_eq!(
+            total_lod,
+            lod_children.len(),
+            "no orphaned LOD children left over from the torn-down first build"
+        );
+    }
+
     #[test]
     fn far_snapshot_settles_to_lod_children_never_entering_chunk_grid() {
         // A flat floor spanning a full 2×2×2 chunk group: one LOD child
         // should mesh, and the old full-res far path (VoxelData children
-        // keying into ChunkGrid) must be provably gone.
+        // keying into ChunkGrid) must be provably gone. A full-res chunk
+        // spawned elsewhere (unrelated to the far region, per Task 3's
+        // `lod_chunks_mesh_and_scale_without_entering_the_grid` pattern in
+        // lod.rs) makes the ChunkGrid non-vacuously populated, so "LOD
+        // children are absent from it" is an actual check, not a vacuous one.
         use game::{Block, BlockId, Chunk, ChunkCoords, FarSnapshot, RegionCoords};
-        use crate::renderer::meshing::queue::{tests::wait_until, ChunkGrid};
+        use crate::renderer::meshing::queue::tests::{spawn_chunk, wait_until};
+        use crate::renderer::meshing::queue::ChunkGrid;
 
         let (mut app, client) = far_lod_app_shell();
         let id = RegionCoords::new(0, 0);
+
+        let keyed_full_res = spawn_chunk(
+            &mut app,
+            Vec3::new(999.0, 0.0, 0.0),
+            Vec3::ZERO,
+            vec![Voxel::new(BlockId(1)); game::CHUNK_VOXEL_COUNT],
+        );
 
         let solid = Chunk::uniform(Block::new(BlockId(1)));
         let mut chunks = Vec::new();
@@ -1176,12 +1298,30 @@ mod tests {
         );
 
         assert!(
-            app.world().resource::<ChunkGrid>().0.is_empty(),
+            app.world().resource::<ChunkGrid>().0.values().any(|&v| v == keyed_full_res),
+            "sanity: the unrelated full-res chunk keys into the grid (non-vacuous)"
+        );
+        let lod_entities: std::collections::BTreeSet<Entity> = app
+            .world_mut()
+            .query_filtered::<Entity, With<lod::LodVoxelData>>()
+            .iter(app.world())
+            .collect();
+        assert!(!lod_entities.is_empty(), "sanity: at least one LOD child exists");
+        assert!(
+            app.world().resource::<ChunkGrid>().0.values().all(|v| !lod_entities.contains(v)),
             "LOD children never key into the world-keyed ChunkGrid"
         );
-        assert!(
-            app.world_mut().query::<&VoxelData>().iter(app.world()).next().is_none(),
-            "no full-res VoxelData anywhere in this scene"
+
+        let voxel_data_entities: Vec<Entity> = app
+            .world_mut()
+            .query::<(Entity, &VoxelData)>()
+            .iter(app.world())
+            .map(|(e, _)| e)
+            .collect();
+        assert_eq!(
+            voxel_data_entities,
+            vec![keyed_full_res],
+            "the only VoxelData entity is the unrelated sanity chunk; the far region spawned none"
         );
     }
 
