@@ -104,9 +104,14 @@ pub fn downsample2(sources: &[Option<&[Voxel]>; 8]) -> Vec<Voxel> {
     output
 }
 
-/// Factor-16 fast path: each source chunk contributes its 2×2×2 `blocks` directly as coarse cells.
-/// Chiseled blocks count as their block id — chisel detail is invisible at 16×.
+/// Block-scale (factor-16) downsample: each source chunk contributes its
+/// 2×2×2 `blocks` directly as coarse cells. Chiseled blocks count as their
+/// block id — chisel detail is invisible at 16×.
 /// Output: fills only the 0..4 corner of the 32³ grid (4×4×4 cells = 8 source chunks × 8 blocks each).
+///
+/// NOTE: production factor-16 goes through `worldgen_rings::block_scale_cells`
+/// (which packs a whole region per grid); this is the test-covered reference
+/// implementation of the per-group block-read rule.
 ///
 /// **Layout contract:** LOD grids are always 32³ `Vec<Voxel>` in the standard `x + 32*y + 32*32*z` order.
 pub fn downsample_blocks(chunks: &[Option<&game::Chunk>; 8]) -> Vec<Voxel> {
