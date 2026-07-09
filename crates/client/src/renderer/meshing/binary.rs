@@ -1,12 +1,11 @@
 //! Binary greedy meshing: occupancy packed as per-axis u64 column masks over
 //! the padded 34³ space; face culling via bitshifts; greedy merging (task 3)
-//! over per-merge-key bitplanes. Pure functions — no Bevy types here.
-
-use std::collections::HashMap;
+//! over per-slice bitplanes with a flat merge-key grid. Pure functions — no
+//! Bevy types here.
 
 use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
 
-use super::ao::face_ao;
+use super::ao::VERTEX_AO_LUT;
 
 /// Padded chunk edge: 32 interior + 1 shell cell each side.
 pub const PADDED: usize = 34;
@@ -109,68 +108,110 @@ pub struct Quad {
     pub ao: [u8; 4],
 }
 
-/// Greedy-mesh a padded chunk. For each face direction and slice, visible
-/// faces are grouped by merge key (block, ao) into per-key row bitplanes,
-/// then rectangles are grown with bit scans: width along U within a row,
-/// height along V across rows.
+/// Greedy-mesh a padded chunk. Each visibility column is computed once and
+/// transposed into per-slice row bitplanes; per slice, visible cells get a
+/// packed (block, ao) merge key in a flat grid, then rectangles are grown
+/// with bit scans — width along U within a row, height along V across rows —
+/// splitting wherever the key changes.
 pub fn mesh_quads(p: &PaddedVoxels) -> Vec<Quad> {
     let occ = Occupancy::new(p);
     let mut quads = Vec::new();
 
+    // Merge-key scratch reused across all six directions: `keys[v][u]` is a
+    // packed (block, ao) key, valid only for cells whose visibility bit is
+    // set in the slice being merged.
+    let mut keys = [[0u64; 33]; 33];
+    const STRIDE: [usize; 3] = [1, PADDED, PADDED * PADDED];
+
     for axis in 0..3 {
         let (ua, va) = cross_axes(axis);
+        let cols = &occ.cols[axis];
         for positive in [true, false] {
             let face = Face::from_axis(axis, positive);
-            // Slice `a` = position along the face axis (interior 1..=32).
-            for a in 1..=32usize {
-                // rows[key][v] = bitmask over u (bits 1..=32) of visible
-                // faces in this slice whose merge key is `key`.
-                let mut rows: HashMap<(BlockId, [u8; 4]), [u64; PADDED]> = HashMap::new();
-                for v in 1..=32usize {
-                    for u in 1..=32usize {
-                        if occ.face_bits(axis, positive, u, v) >> a & 1 == 0 {
-                            continue;
-                        }
-                        let mut pos = [0usize; 3];
-                        pos[axis] = a;
-                        pos[ua] = u;
-                        pos[va] = v;
-                        let block = p.get(pos[0], pos[1], pos[2]).block;
-                        let ao = face_ao(p, axis, positive, pos);
-                        rows.entry((block, ao)).or_insert([0; PADDED])[v] |= 1 << u;
+            // Transpose: one face_bits call per column, scattered to
+            // per-slice row bitplanes (`planes[a][v]` = bits over u).
+            let mut planes = [[0u64; 33]; 33];
+            for v in 1..=32usize {
+                for u in 1..=32usize {
+                    let mut bits = occ.face_bits(axis, positive, u, v);
+                    while bits != 0 {
+                        let a = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        planes[a][v] |= 1 << u;
                     }
                 }
-                // Deterministic emission order: sort keys.
-                let mut keys: Vec<_> = rows.keys().copied().collect();
-                keys.sort_unstable_by_key(|(b, ao)| (b.0, *ao));
-                for key in keys {
-                    let plane = rows.get_mut(&key).expect("key from rows");
-                    for v in 1..=32usize {
-                        while plane[v] != 0 {
-                            let u0 = plane[v].trailing_zeros() as usize;
-                            let run = plane[v] >> u0;
-                            let w = run.trailing_ones() as usize;
-                            let mask = (((1u128 << w) - 1) as u64) << u0;
-                            plane[v] &= !mask;
-                            // Grow height while the same u-run is fully set.
-                            let mut h = 1usize;
-                            while v + h <= 32 && plane[v + h] & mask == mask {
-                                plane[v + h] &= !mask;
-                                h += 1;
-                            }
-                            let mut min = [0u32; 3];
-                            min[axis] = a as u32 - 1;
-                            min[ua] = u0 as u32 - 1;
-                            min[va] = v as u32 - 1;
-                            quads.push(Quad {
-                                min,
-                                w: w as u32,
-                                h: h as u32,
-                                face,
-                                block: key.0,
-                                ao: key.1,
-                            });
+            }
+            for a in 1..=32usize {
+                // Merge keys for this slice's visible cells. AO samples live
+                // in the layer the face looks into (bit `b` of the eight
+                // neighboring occupancy columns) — same rule as ao::face_ao,
+                // which stays the reference implementation.
+                let b = if positive { a + 1 } else { a - 1 };
+                let mut any = false;
+                for v in 1..=32usize {
+                    let mut row = planes[a][v];
+                    if row == 0 {
+                        continue;
+                    }
+                    any = true;
+                    while row != 0 {
+                        let u = row.trailing_zeros() as usize;
+                        row &= row - 1;
+                        let block =
+                            p.0[a * STRIDE[axis] + u * STRIDE[ua] + v * STRIDE[va]].block;
+                        let s = |uu: usize, vv: usize| (cols[uu][vv] >> b & 1) as usize;
+                        // Corner order (cu, cv) = (0,0), (1,0), (0,1), (1,1);
+                        // index = side_u << 2 | side_v << 1 | corner.
+                        let ao = [
+                            VERTEX_AO_LUT[s(u - 1, v) << 2 | s(u, v - 1) << 1 | s(u - 1, v - 1)],
+                            VERTEX_AO_LUT[s(u + 1, v) << 2 | s(u, v - 1) << 1 | s(u + 1, v - 1)],
+                            VERTEX_AO_LUT[s(u - 1, v) << 2 | s(u, v + 1) << 1 | s(u - 1, v + 1)],
+                            VERTEX_AO_LUT[s(u + 1, v) << 2 | s(u, v + 1) << 1 | s(u + 1, v + 1)],
+                        ];
+                        keys[v][u] =
+                            (block.0 as u64) << 32 | u32::from_le_bytes(ao) as u64;
+                    }
+                }
+                if !any {
+                    continue;
+                }
+                for v in 1..=32usize {
+                    while planes[a][v] != 0 {
+                        let row = planes[a][v];
+                        let u0 = row.trailing_zeros() as usize;
+                        let key = keys[v][u0];
+                        // Width: the visible run, split at the first key change.
+                        let run = (row >> u0).trailing_ones() as usize;
+                        let mut w = 1usize;
+                        while w < run && keys[v][u0 + w] == key {
+                            w += 1;
                         }
+                        let mask = (((1u128 << w) - 1) as u64) << u0;
+                        planes[a][v] &= !mask;
+                        // Grow height while the same u-run is fully visible
+                        // with the same key.
+                        let mut h = 1usize;
+                        'grow: while v + h <= 32 && planes[a][v + h] & mask == mask {
+                            for du in 0..w {
+                                if keys[v + h][u0 + du] != key {
+                                    break 'grow;
+                                }
+                            }
+                            planes[a][v + h] &= !mask;
+                            h += 1;
+                        }
+                        let mut min = [0u32; 3];
+                        min[axis] = a as u32 - 1;
+                        min[ua] = u0 as u32 - 1;
+                        min[va] = v as u32 - 1;
+                        quads.push(Quad {
+                            min,
+                            w: w as u32,
+                            h: h as u32,
+                            face,
+                            block: BlockId((key >> 32) as u16),
+                            ao: (key as u32).to_le_bytes(),
+                        });
                     }
                 }
             }
@@ -190,14 +231,16 @@ impl Occupancy {
     pub fn new(p: &PaddedVoxels) -> Self {
         let mut cols: Box<[[[u64; PADDED]; PADDED]; 3]> =
             vec![[[0u64; PADDED]; PADDED]; 3].try_into().unwrap();
+        let mut i = 0;
         for z in 0..PADDED {
             for y in 0..PADDED {
                 for x in 0..PADDED {
-                    if p.is_solid(x, y, z) {
+                    if !p.0[i].is_air() {
                         cols[0][y][z] |= 1 << x;
                         cols[1][x][z] |= 1 << y;
                         cols[2][x][y] |= 1 << z;
                     }
+                    i += 1;
                 }
             }
         }
@@ -410,5 +453,48 @@ mod tests {
             }
         }
         assert_eq!(covered, visible);
+    }
+
+    #[test]
+    fn hot_path_ao_matches_face_ao_reference() {
+        // The mesher computes AO from occupancy bit columns; every unit cell
+        // of every quad must carry exactly what the reference ao::face_ao
+        // gives for that cell (merging already requires uniform AO per quad).
+        let mut state = 0x9E3779B97F4A7C15u64;
+        let mut rng = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        for cell in v.iter_mut() {
+            if rng() % 4 == 0 {
+                *cell = Voxel::new(BlockId((rng() % 3 + 1) as u16));
+            }
+        }
+        let p = PaddedVoxels::from_interior(&v);
+        for q in mesh_quads(&p) {
+            let axis = q.face.axis();
+            let (ua, va) = cross_axes(axis);
+            for du in 0..q.w {
+                for dv in 0..q.h {
+                    let mut cell = q.min;
+                    cell[ua] += du;
+                    cell[va] += dv;
+                    let pos = [
+                        cell[0] as usize + 1,
+                        cell[1] as usize + 1,
+                        cell[2] as usize + 1,
+                    ];
+                    assert_eq!(
+                        q.ao,
+                        super::super::ao::face_ao(&p, axis, q.face.positive(), pos),
+                        "face {:?} cell {cell:?}",
+                        q.face
+                    );
+                }
+            }
+        }
     }
 }

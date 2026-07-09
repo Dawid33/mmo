@@ -17,6 +17,10 @@ pub fn vertex_ao(side1: bool, side2: bool, corner: bool) -> u8 {
     }
 }
 
+/// `vertex_ao` as a table indexed `side1 << 2 | side2 << 1 | corner`, for the
+/// mesher's hot loop where the three samples arrive as bits.
+pub(crate) const VERTEX_AO_LUT: [u8; 8] = [3, 2, 2, 1, 2, 1, 0, 0];
+
 /// AO for the 4 corners of the (`axis`, `positive`) face of the voxel at
 /// padded coords `pos`. Corner order (cu, cv) = (0,0), (1,0), (0,1), (1,1)
 /// over `cross_axes(axis)` — the same order emission (task 4) writes vertices.
@@ -63,6 +67,18 @@ pub fn ao_flips_quad(ao: &[u8; 4]) -> bool {
 mod tests {
     use super::*;
     use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+
+    #[test]
+    fn lut_matches_vertex_ao() {
+        for s1 in [false, true] {
+            for s2 in [false, true] {
+                for c in [false, true] {
+                    let idx = (s1 as usize) << 2 | (s2 as usize) << 1 | c as usize;
+                    assert_eq!(VERTEX_AO_LUT[idx], vertex_ao(s1, s2, c));
+                }
+            }
+        }
+    }
 
     #[test]
     fn vertex_ao_truth_table() {
