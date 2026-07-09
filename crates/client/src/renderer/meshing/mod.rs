@@ -10,6 +10,7 @@ use binary::PaddedVoxels;
 pub mod ao;
 pub mod binary;
 pub mod emit;
+pub mod lod;
 pub mod neighbors;
 pub mod pack;
 pub mod queue;
