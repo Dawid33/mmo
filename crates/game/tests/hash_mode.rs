@@ -78,3 +78,18 @@ fn undomap_ops_roll_back_bit_exact_under_delta() {
     r.rollback();
     assert_eq!(h1, game::state_hash(&r), "delta-verified map undos must be bit-exact");
 }
+
+#[test]
+fn entities_slotmap_rolls_back_bit_exact_under_delta() {
+    let _mode = with_mode(HashMode::Delta);
+    let (mut r, _recv) = new_rollback();
+    r.new_transaction();
+    let a = r.ecs.entities.insert(());
+    let h1 = game::state_hash(&r);
+
+    r.new_transaction();
+    let _b = r.ecs.entities.insert(()); // fresh-slot or reuse path
+    r.ecs.entities.remove(a);           // remove path
+    r.rollback();
+    assert_eq!(h1, game::state_hash(&r), "delta-verified slotmap undos must be bit-exact");
+}

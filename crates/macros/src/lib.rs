@@ -900,7 +900,15 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub fn insert(&mut self, v: V) -> K {
                     let (pre_hash, verify) = match hash_mode() {
                         HashMode::Off => (0u32, HashMode::Off),
-                        _ => (unsafe { self.hash_data() }, HashMode::Full),
+                        HashMode::Full => (unsafe { self.hash_data() }, HashMode::Full),
+                        HashMode::Delta => {
+                            // Pre-state footprint of an insert: the allocator state and the
+                            // (absent) value at the slot the insert will occupy.
+                            let mut hasher = ::crc32fast::Hasher::new();
+                            ::std::hash::Hash::hash(&self.data.alloc_fingerprint_head(), &mut hasher);
+                            ::std::hash::Hash::hash(&::std::option::Option::<&V>::None, &mut hasher);
+                            (hasher.finalize(), HashMode::Delta)
+                        }
                     };
                     let k = self.data.insert(v);
                     let emit = self.emit_insert.map(|mk| mk(k));
@@ -910,7 +918,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub fn remove(&mut self, k: K) -> ::std::option::Option<V> {
                     let (pre_hash, verify) = match hash_mode() {
                         HashMode::Off => (0u32, HashMode::Off),
-                        _ => (unsafe { self.hash_data() }, HashMode::Full),
+                        HashMode::Full => (unsafe { self.hash_data() }, HashMode::Full),
+                        HashMode::Delta => {
+                            let mut hasher = ::crc32fast::Hasher::new();
+                            ::std::hash::Hash::hash(&self.data.alloc_fingerprint(k), &mut hasher);
+                            ::std::hash::Hash::hash(&self.data.get(k), &mut hasher);
+                            (hasher.finalize(), HashMode::Delta)
+                        }
                     };
                     let v = self.data.remove(k)?;
                     let emit = self.emit_remove.map(|mk| mk(k));
@@ -1310,6 +1324,28 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 // Tolerate a disconnected render bridge (window closed).
                                                 let _ = client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Undo, mk(k)));
                                             }
+                                            match entry.verify {
+                                                HashMode::Off => {}
+                                                HashMode::Full => {
+                                                    let mut hasher = ::crc32fast::Hasher::new();
+                                                    ::std::hash::Hash::hash(&self.#slot_path1.data, &mut hasher);
+                                                    let new_hash = hasher.finalize();
+                                                    if new_hash != entry.pre_hash {
+                                                        panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                                    }
+                                                }
+                                                HashMode::Delta => {
+                                                    // Post-revert_insert: free_head points back at k's slot, and
+                                                    // the slot is vacant, so get(k) is None — matches the log side.
+                                                    let mut hasher = ::crc32fast::Hasher::new();
+                                                    ::std::hash::Hash::hash(&self.#slot_path1.data.alloc_fingerprint_head(), &mut hasher);
+                                                    ::std::hash::Hash::hash(&self.#slot_path1.data.get(k), &mut hasher);
+                                                    let new_hash = hasher.finalize();
+                                                    if new_hash != entry.pre_hash {
+                                                        panic!("Hash verification failed (delta) for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                                    }
+                                                }
+                                            }
                                         }
                                         SlotOp::Removed(k, v) => {
                                             self.#slot_path1.data.revert_remove(k, v);
@@ -1317,19 +1353,29 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 // Tolerate a disconnected render bridge (window closed).
                                                 let _ = client.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Undo, mk(k)));
                                             }
-                                        }
-                                    }
-                                    match entry.verify {
-                                        HashMode::Off => {}
-                                        HashMode::Full => {
-                                            let mut hasher = ::crc32fast::Hasher::new();
-                                            ::std::hash::Hash::hash(&self.#slot_path1.data, &mut hasher);
-                                            let new_hash = hasher.finalize();
-                                            if new_hash != entry.pre_hash {
-                                                panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                            match entry.verify {
+                                                HashMode::Off => {}
+                                                HashMode::Full => {
+                                                    let mut hasher = ::crc32fast::Hasher::new();
+                                                    ::std::hash::Hash::hash(&self.#slot_path1.data, &mut hasher);
+                                                    let new_hash = hasher.finalize();
+                                                    if new_hash != entry.pre_hash {
+                                                        panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                                    }
+                                                }
+                                                HashMode::Delta => {
+                                                    // Post-revert_remove: slot is occupied again with the
+                                                    // restored value — matches the log side's Some(&v).
+                                                    let mut hasher = ::crc32fast::Hasher::new();
+                                                    ::std::hash::Hash::hash(&self.#slot_path1.data.alloc_fingerprint(k), &mut hasher);
+                                                    ::std::hash::Hash::hash(&self.#slot_path1.data.get(k), &mut hasher);
+                                                    let new_hash = hasher.finalize();
+                                                    if new_hash != entry.pre_hash {
+                                                        panic!("Hash verification failed (delta) for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                                    }
+                                                }
                                             }
                                         }
-                                        HashMode::Delta => unreachable!("no Delta loggers exist yet — added per-path in later tasks"),
                                     }
                                 })*
                             }

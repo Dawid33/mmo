@@ -129,3 +129,34 @@ fn rigidbodyset_remove_does_not_restore_hash() {
     bodies.remove(handle, &mut islands, &mut colliders, &mut ij, &mut mj, true);
     assert_ne!(before, h(&bodies), "arena generation/free list are hashed");
 }
+
+#[test]
+fn alloc_fingerprint_head_roundtrips_revert_insert() {
+    let mut sm: slotmapd::SlotMap<slotmapd::DefaultKey, u32> = slotmapd::SlotMap::new();
+    // Free-list-reuse path: leave a vacant slot behind.
+    let a = sm.insert(1);
+    sm.remove(a);
+    let pre = sm.alloc_fingerprint_head();
+    let k = sm.insert(2);
+    sm.revert_insert(k);
+    assert_eq!(pre, sm.alloc_fingerprint_head(), "reused-slot insert revert must restore the fingerprint");
+    // Fresh-slot (vec growth) path.
+    let mut sm2: slotmapd::SlotMap<slotmapd::DefaultKey, u32> = slotmapd::SlotMap::new();
+    let pre2 = sm2.alloc_fingerprint_head();
+    let k2 = sm2.insert(7);
+    sm2.revert_insert(k2);
+    assert_eq!(pre2, sm2.alloc_fingerprint_head());
+}
+
+#[test]
+fn alloc_fingerprint_detects_non_lifo_remove_insert() {
+    // The known hazard: a naive "undo remove by re-inserting" bumps the slot
+    // version and moves the free head. The whole-map hash caught this; the
+    // fingerprint must too.
+    let mut sm: slotmapd::SlotMap<slotmapd::DefaultKey, u32> = slotmapd::SlotMap::new();
+    let a = sm.insert(1);
+    let pre = sm.alloc_fingerprint(a);
+    let v = sm.remove(a).unwrap();
+    let b = sm.insert(v); // wrong inverse: same value, different slot version
+    assert_ne!(pre, sm.alloc_fingerprint(b), "version drift must change the fingerprint");
+}

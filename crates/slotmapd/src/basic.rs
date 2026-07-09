@@ -549,6 +549,33 @@ impl<K: Key, V> SlotMap<K, V> {
         debug_assert_eq!(slot.version, kd.version.get());
     }
 
+    /// Allocator-state fingerprint of the slot at `idx`, plus the free-list
+    /// head and element count — exactly the allocator state a single
+    /// insert/remove touching that slot mutates. The rollback layer hashes
+    /// this instead of the whole map (delta verification).
+    fn fingerprint_at(&self, idx: u32) -> (u32, u32, u32, u32) {
+        let (version, next_free) = match self.slots.get(idx as usize) {
+            Some(slot) => match slot.get() {
+                Occupied(_) => (slot.version, 0),
+                Vacant(&next_free) => (slot.version, next_free),
+            },
+            None => (u32::MAX, u32::MAX), // fresh (not yet allocated) slot index
+        };
+        (self.free_head, self.num_elems, version, next_free)
+    }
+
+    /// Fingerprint of the slot addressed by `key`. See [`fingerprint_at`].
+    pub fn alloc_fingerprint(&self, key: K) -> (u32, u32, u32, u32) {
+        self.fingerprint_at(key.data().idx)
+    }
+
+    /// Fingerprint of the slot the NEXT `insert` will occupy. After a correct
+    /// `revert_insert(k)`, `free_head` points back at `k`'s slot, so this
+    /// reads the same slot before an insert and after its exact revert.
+    pub fn alloc_fingerprint_head(&self) -> (u32, u32, u32, u32) {
+        self.fingerprint_at(self.free_head)
+    }
+
     /// Retains only the elements specified by the predicate.
     ///
     /// In other words, remove all key-value pairs `(k, v)` such that
