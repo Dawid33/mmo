@@ -167,11 +167,16 @@ mod tests {
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
         app.update();
-        // Non-racy evidence that meshing actually went through the async path rather
-        // than, say, `spawn_mesh_tasks` never running: the task must be queued (and not
-        // yet resolved, since nothing has polled it before this first `Update`) before
-        // we start looping to await its completion below.
-        assert!(app.world().entity(e).contains::<MeshingTask>(), "MeshingTask should be queued after first update");
+        // Evidence that meshing went through the pipeline on the first update:
+        // the task was spawned (still in flight) — or already completed AND
+        // applied, since `apply_meshed_chunks` chains right after
+        // `spawn_mesh_tasks` and a tiny chunk's task can finish within the
+        // same update. Only "neither" would mean the pipeline never ran.
+        assert!(
+            app.world().entity(e).contains::<MeshingTask>()
+                || app.world().entity(e).contains::<Mesh3d>(),
+            "meshing pipeline must have claimed the chunk on the first update"
+        );
         settle_until_meshed(&mut app, e);
     }
 
