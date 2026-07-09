@@ -45,7 +45,7 @@ pub use voxel::*;
 pub use volume::*;
 pub use world_manager::*;
 
-pub const TICK_RATE: u64 = 50;
+pub const TICK_RATE: u64 = 500;
 /// TESTING KNOB — deliberately 0 in normal operation. Extra client-ahead lead
 /// (ms) the SyncClock pacing loop targets; raise it only to fabricate latency
 /// when testing the adaptive tick. Not a production pacing target and not an
