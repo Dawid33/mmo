@@ -60,3 +60,21 @@ fn mixed_mode_entries_within_one_transaction_verify_individually() {
     r.rollback();
     assert_eq!(before, game::state_hash(&r));
 }
+
+#[test]
+fn undomap_ops_roll_back_bit_exact_under_delta() {
+    let _mode = with_mode(HashMode::Delta);
+    let (mut r, _recv) = new_rollback();
+    r.new_transaction();
+    r.clients.insert(1, game::Client::default());
+    let h1 = game::state_hash(&r);
+
+    r.new_transaction();
+    r.clients.get_mut(&1).unwrap().fps_cam_mode = true; // get_mut delta
+    r.clients.insert(2, game::Client::default());        // fresh insert (prev = None)
+    r.clients.insert(1, game::Client::default());        // overwrite (prev = Some)
+    r.clients.remove(&1);                                 // remove
+    r.player_entites.insert(9, game::EntityKey::default());
+    r.rollback();
+    assert_eq!(h1, game::state_hash(&r), "delta-verified map undos must be bit-exact");
+}

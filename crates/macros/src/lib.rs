@@ -991,10 +991,19 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
                     let (pre_hash, verify) = match hash_mode() {
                         HashMode::Off => (0u32, HashMode::Off),
-                        _ => {
+                        HashMode::Full => {
                             let mut hasher = ::crc32fast::Hasher::new();
                             ::std::hash::Hash::hash(&self.data, &mut hasher);
                             (hasher.finalize(), HashMode::Full)
+                        }
+                        HashMode::Delta => {
+                            // Footprint of a single-key op: the key and its pre-mutation
+                            // value. `prev` was read from the map before mutating, so it IS
+                            // the pre-state at that key.
+                            let mut hasher = ::crc32fast::Hasher::new();
+                            ::std::hash::Hash::hash(&key, &mut hasher);
+                            ::std::hash::Hash::hash(&prev, &mut hasher);
+                            (hasher.finalize(), HashMode::Delta)
                         }
                     };
                     let make = self.make.expect("UndoMap not wired to a Delta variant");
@@ -1083,7 +1092,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
                     let (pre_hash, verify) = match hash_mode() {
                         HashMode::Off => (0u32, HashMode::Off),
-                        _ => {
+                        // A cell's footprint IS its whole value, so Full and Delta
+                        // coincide here: stamp Full and reuse the whole-cell hash.
+                        HashMode::Full | HashMode::Delta => {
                             let mut hasher = ::crc32fast::Hasher::new();
                             ::std::hash::Hash::hash(&self.data, &mut hasher);
                             (hasher.finalize(), HashMode::Full)
@@ -1257,10 +1268,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #cell_path_string1, entry.transaction, new_hash, entry.pre_hash);
                                             }
                                         }
-                                        HashMode::Delta => unreachable!("no Delta loggers exist yet — added per-path in later tasks"),
+                                        // UndoCell::log_old stamps Full (not Delta) under HashMode::Delta,
+                                        // since a cell's footprint is its whole value — see log_old.
+                                        HashMode::Delta => unreachable!("UndoCell always stamps Full; see UndoCell::log_old"),
                                     }
                                 })*
                                 #(Delta::#map_log_ident2(key, prev) => {
+                                    let vkey = key.clone();
                                     match prev {
                                         Some(v) => { self.#map_path1.data.insert(key, v); }
                                         None => { self.#map_path1.data.remove(&key); }
@@ -1275,7 +1289,17 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #map_path_string1, entry.transaction, new_hash, entry.pre_hash);
                                             }
                                         }
-                                        HashMode::Delta => unreachable!("no Delta loggers exist yet — added per-path in later tasks"),
+                                        HashMode::Delta => {
+                                            // Re-derive the entry digest from LIVE post-undo data; matches
+                                            // the log side because Option<&V> and Option<V> hash identically.
+                                            let mut hasher = ::crc32fast::Hasher::new();
+                                            ::std::hash::Hash::hash(&vkey, &mut hasher);
+                                            ::std::hash::Hash::hash(&self.#map_path1.data.get(&vkey), &mut hasher);
+                                            let new_hash = hasher.finalize();
+                                            if new_hash != entry.pre_hash {
+                                                panic!("Hash verification failed (delta) for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #map_path_string1, entry.transaction, new_hash, entry.pre_hash);
+                                            }
+                                        }
                                     }
                                 })*
                                 #(Delta::#slot_log_ident2(op) => {
