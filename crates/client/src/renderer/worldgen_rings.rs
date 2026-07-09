@@ -46,6 +46,12 @@ pub const WORLDGEN_TASKS_MAX_IN_FLIGHT: usize = 2;
 /// mesh within this many frames (~10s at 60fps), despawn the old root anyway
 /// — a late pop beats leaking an entity tree forever (e.g. a replacement
 /// whose cells are all air never produces a mesh at all).
+///
+/// The counter resets on each carry/adopt (a flip rebuilds the slot at
+/// frame 0), so a viewer ping-ponging across a boundary under budget
+/// starvation can extend one old root's life beyond this total — accepted:
+/// each flip spawns a fresh replacement and the sticky band damps the
+/// oscillation.
 pub const RETIREMENT_MAX_FRAMES: u32 = 600;
 
 /// Ring assignment with the production table and band. See `ring_factor_in`,
@@ -338,6 +344,11 @@ fn take_retired(
 /// - near takeover: `Regions` holds the region and some `ChunkKey`ed meshed
 ///   entity's key lies in the region's chunk bounds
 ///   (`r.x*REGION_CHUNKS..(r.x+1)*REGION_CHUNKS`, z likewise).
+///
+/// "≥1 meshed child" (not all children) is deliberate: all-air cells never
+/// receive a `Mesh3d`, so an all-children predicate would always fall through
+/// to the deadline; the trade is at worst a few budget-frames of partial fill
+/// instead of a guaranteed full hole.
 ///
 /// Each root also carries a frame deadline (`retirement_max_frames`): a
 /// replacement that never meshes (all-air cells, a far region removed again
