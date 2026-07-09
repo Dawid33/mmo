@@ -87,7 +87,7 @@ fn main() {
     // Debug builds keep per-transaction hash self-verification (the rollback
     // bar); release skips the O(state) walk — state restore is identical.
     #[cfg(not(debug_assertions))]
-    game::set_hash_verification(false);
+    game::set_hash_mode(game::HashMode::Off);
 
     // Shared debug toggles: render thread (F3) writes, game thread reads.
     let debug_flags = game::DebugFlags::default();

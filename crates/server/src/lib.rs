@@ -201,7 +201,7 @@ pub fn run() {
     // Debug builds keep per-transaction hash self-verification (the rollback
     // bar); release skips the O(state) walk — state restore is identical.
     #[cfg(not(debug_assertions))]
-    game::set_hash_verification(false);
+    game::set_hash_mode(game::HashMode::Off);
 
     // Continuous profiling: build with `--features pyroscope` and set PYROSCOPE
     // to push flamegraphs to a local Pyroscope (`just profile-server`). Off

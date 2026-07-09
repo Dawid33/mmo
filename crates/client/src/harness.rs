@@ -41,7 +41,7 @@ impl SimHarness {
     /// Wire a client to a fresh local authoritative server. Mirrors the
     /// local_server.rs test setup.
     pub fn new() -> Self {
-        game::set_hash_verification(true); // enforce hash(before)==hash(after undo) along the driven path
+        game::set_hash_mode(game::HashMode::Full); // enforce hash(before)==hash(after undo) along the driven path
         let (game_event_send, game_event_recv) = unbounded::<GameEventKind>();
         let (bridge_send, bridge_recv) = unbounded::<ClientUpdateEvent>();
         // Dummy address: native netcode is never constructed in the harness.

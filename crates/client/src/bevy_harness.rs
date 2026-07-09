@@ -37,7 +37,7 @@ pub struct BevyInputHarness {
 
 impl BevyInputHarness {
     pub fn new() -> Self {
-        game::set_hash_verification(true);
+        game::set_hash_mode(game::HashMode::Full);
 
         // Manager input channel (manager reads game_recv; send_tick/push_game_event write game_send).
         let (game_send, game_recv) = unbounded::<GameEventKind>();
