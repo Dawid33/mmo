@@ -44,9 +44,12 @@ pub struct ChunkMaterial(pub Handle<ExtendedMaterial<StandardMaterial, StandardV
 pub struct MeshingTask(Task<MeshOutput>);
 
 /// Polls in-flight `MeshingTask`s to completion and attaches the resulting `Mesh3d`
-/// (or strips it, for an all-air chunk), up to `budgets.uploads_per_frame` per frame —
-/// remaining completed tasks attach next frame. Also handles `VoxelData` removal
-/// (uncapped: a chunk that's gone must not linger with a stale mesh).
+/// (or strips it, for an all-air chunk), up to `budgets.uploads_per_frame` per frame,
+/// tracked via the shared `FrameUploads` counter — remaining completed tasks attach
+/// next frame. This system runs before `lod::apply_lod_meshes` in the chain and
+/// always claims its uploads first, so full-res chunks never get starved of the
+/// shared upload budget by LOD work. Also handles `VoxelData` removal (uncapped: a
+/// chunk that's gone must not linger with a stale mesh).
 pub fn apply_meshed_chunks(
     mut commands: Commands,
     mut tasks: Query<(Entity, &mut MeshingTask)>,
@@ -55,14 +58,14 @@ pub fn apply_meshed_chunks(
     material: Option<Res<ChunkMaterial>>,
     still_alive: Query<Entity, With<super::bridge::VoxelData>>,
     budgets: Res<queue::MeshBudgets>,
+    mut uploads: ResMut<queue::FrameUploads>,
 ) {
-    let mut applied = 0usize;
     for (e, mut task) in &mut tasks {
-        if applied >= budgets.uploads_per_frame {
+        if uploads.0 >= budgets.uploads_per_frame {
             break; // remaining completed tasks attach next frame
         }
         let Some(MeshOutput { mesh, connectivity }) = block_on(future::poll_once(&mut task.0)) else { continue };
-        applied += 1;
+        uploads.0 += 1;
         match mesh {
             Some(mesh) => {
                 let mut ec = commands.entity(e);
@@ -197,6 +200,7 @@ mod tests {
             .init_resource::<queue::ChunkGrid>()
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
+            .init_resource::<queue::FrameUploads>()
             .add_systems(
                 Update,
                 (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
@@ -251,6 +255,7 @@ mod tests {
             .init_resource::<queue::ChunkGrid>()
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
+            .init_resource::<queue::FrameUploads>()
             .add_systems(
                 Update,
                 (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
@@ -298,6 +303,7 @@ mod tests {
             .init_resource::<queue::ChunkGrid>()
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
+            .init_resource::<queue::FrameUploads>()
             .add_systems(
                 Update,
                 (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
@@ -347,6 +353,7 @@ mod tests {
             .init_resource::<queue::ChunkGrid>()
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
+            .init_resource::<queue::FrameUploads>()
             .add_systems(
                 Update,
                 (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
@@ -393,6 +400,7 @@ mod tests {
             .init_resource::<queue::ChunkGrid>()
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
+            .init_resource::<queue::FrameUploads>()
             .add_systems(
                 Update,
                 (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)

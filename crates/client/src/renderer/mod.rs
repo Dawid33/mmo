@@ -62,6 +62,7 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<meshing::queue::ChunkGrid>()
             .init_resource::<meshing::queue::RemeshQueue>()
             .init_resource::<meshing::queue::MeshBudgets>()
+            .init_resource::<meshing::queue::FrameUploads>()
             .init_resource::<meshing::visibility::CullingConfig>()
             .add_systems(
                 PreUpdate,
@@ -87,6 +88,8 @@ impl Plugin for SimBridgePlugin {
                         meshing::queue::prune_chunk_grid,
                         meshing::queue::spawn_mesh_tasks,
                         meshing::apply_meshed_chunks,
+                        meshing::lod::spawn_lod_mesh_tasks,
+                        meshing::lod::apply_lod_meshes,
                         meshing::visibility::cull_chunks,
                     )
                         .chain(),
