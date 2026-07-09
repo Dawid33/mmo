@@ -376,6 +376,9 @@ mod tests {
 
     use super::super::{apply_meshed_chunks, MeshingTask};
     use super::super::super::block_textures::BlockTextureLayers;
+    use super::super::super::voxel_material;
+    use super::super::binary::Face;
+    use super::super::pack;
     use bevy::mesh::VertexAttributeValues;
 
     fn pipeline_app(budgets: MeshBudgets) -> App {
@@ -500,27 +503,29 @@ mod tests {
             "both chunks must mesh"
         );
         // Chunk a spans x 0..32: with a solid +X neighbor its mesh must have
-        // no vertex at x=32 with a +X normal. (b meshed before a existed may
+        // no vertex at x=32 with a +X face. (b meshed before a existed may
         // still carry its -X wall only if it meshed first without a — the
         // zone diff re-dirties it; settle until both are final.)
         assert!(wait_until_settled(&mut app), "pipeline must settle");
         let meshes = app.world().resource::<Assets<Mesh>>();
-        let check = |e: Entity, plane_x: f32, normal_x: f32| {
+        let check = |e: Entity, plane_x: f32, expect_face: Face| {
             let handle = app.world().entity(e).get::<Mesh3d>().expect("meshed").0.clone();
             let mesh = meshes.get(&handle).unwrap();
-            let (Some(VertexAttributeValues::Float32x3(pos)), Some(VertexAttributeValues::Float32x3(nor))) = (
+            let (Some(VertexAttributeValues::Float32x3(pos)), Some(VertexAttributeValues::Uint32x2(packed))) = (
                 mesh.attribute(Mesh::ATTRIBUTE_POSITION),
-                mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
+                mesh.attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED),
             ) else {
                 panic!()
             };
             assert!(
-                !pos.iter().zip(nor).any(|(p, n)| p[0] == plane_x && n[0] == normal_x),
+                !pos.iter()
+                    .zip(packed)
+                    .any(|(p, &pk)| p[0] == plane_x && pack::unpack(pk).face == expect_face),
                 "face on the shared plane survived neighbor culling"
             );
         };
-        check(a, 32.0, 1.0);
-        check(b, 0.0, -1.0);
+        check(a, 32.0, Face::PosX);
+        check(b, 0.0, Face::NegX);
     }
 
     #[test]
@@ -614,7 +619,7 @@ mod tests {
         // The re-dirty can be queued, claimed, or fully remeshed-and-applied
         // within a single update (fast mesher + chained systems), so assert on
         // the guaranteed end-state the fix exists for: b re-grows its shared
-        // -X wall (a vertex at x=0 with a -X normal) instead of leaving a hole.
+        // -X wall (a vertex at x=0 with a -X face) instead of leaving a hole.
         assert!(
             wait_until(&mut app, |app| {
                 let Some(handle) = app.world().entity(b).get::<Mesh3d>().map(|m| m.0.clone()) else {
@@ -624,15 +629,17 @@ mod tests {
                 let Some(mesh) = meshes.get(&handle) else { return false };
                 let (
                     Some(VertexAttributeValues::Float32x3(pos)),
-                    Some(VertexAttributeValues::Float32x3(nor)),
+                    Some(VertexAttributeValues::Uint32x2(packed)),
                 ) = (
                     mesh.attribute(Mesh::ATTRIBUTE_POSITION),
-                    mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
+                    mesh.attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED),
                 )
                 else {
                     return false;
                 };
-                pos.iter().zip(nor).any(|(p, n)| p[0] == 0.0 && n[0] == -1.0)
+                pos.iter()
+                    .zip(packed)
+                    .any(|(p, &pk)| p[0] == 0.0 && pack::unpack(pk).face == Face::NegX)
             }),
             "b must re-grow its shared-plane wall after its solid neighbor a is removed"
         );
