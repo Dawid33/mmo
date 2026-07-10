@@ -213,9 +213,11 @@ impl TerrainPipeline {
     }
 
     pub fn final_density(&self, x: f64, y: f64, z: f64) -> f64 {
-        // ColumnProfile::density_at reproduces final_density_graph bit-for-bit
-        // (see `column_profile_matches_graph_bit_exact`), so the 3D entry point
-        // is just the 2D profile plus the cheap y arithmetic.
+        // ColumnProfile::density_at reproduces final_density_graph bit-for-bit,
+        // so the 3D entry point is just the 2D profile plus the cheap y
+        // arithmetic. Pinned against the graph by
+        // `column_profile_matches_graph_bit_exact` (profile vs graph) and
+        // `fused_column_matches_density_graphs_bit_exact` (this fn vs graph).
         self.column(x, z).density_at(y)
     }
 
@@ -307,7 +309,12 @@ mod tests {
 
     #[test]
     fn column_profile_matches_graph_bit_exact() {
+        // Must compare against the DensityFn graph, NEVER against
+        // p.final_density(): final_density() is itself column()-backed since
+        // the fusion, so that comparison would be X == X (tautological).
         let p = TerrainPipeline::new(999);
+        let noises = pipeline_noises(999);
+        let graph = final_density_graph();
         for i in 0..20 {
             for j in 0..20 {
                 let x = i as f64 * 13.0;
@@ -317,7 +324,7 @@ mod tests {
                     let y = -64.0 + k as f64 * 34.0; // spans the world band incl. ends
                     assert_eq!(
                         prof.density_at(y),
-                        p.final_density(x, y, z),
+                        graph.eval(x + SAMPLE_OFFSET_X_M, y, z + SAMPLE_OFFSET_Z_M, &noises),
                         "profile/graph mismatch at ({x}, {y}, {z})"
                     );
                 }
