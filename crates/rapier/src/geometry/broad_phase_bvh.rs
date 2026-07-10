@@ -58,6 +58,7 @@ impl BroadSaved {
 /// However, you can use it to create a [`QueryPipeline`](crate::pipeline::QueryPipeline) for spatial queries.
 #[derive(Default, Clone)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-serialize", serde(from = "BroadPhaseBvhDe"))]
 pub struct BroadPhaseBvh {
     pub(crate) tree: Bvh,
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
@@ -78,11 +79,49 @@ pub struct BroadPhaseBvh {
     /// (wrapping-add of [`Self::pair_entry_digest`] per entry). Lets the
     /// step-journal Delta digests avoid walking the whole map every tick.
     /// Derived data, like `workspace`: NOT part of `impl Hash` (Full mode
-    /// keeps hashing the map itself) and serde-skipped — `pairs` serializes
-    /// capacity-only (deserializes EMPTY), so the empty-multiset default of 0
-    /// matches. Journal-captured/restored via [`BroadSaved::pairs_hash`].
+    /// keeps hashing the map itself) and serde-skipped. `pairs` round-trips
+    /// its FULL content through serde, so deserialization recomputes this
+    /// cache from the restored map instead of trusting the 0 default — see
+    /// [`BroadPhaseBvhDe`]; a zeroed cache under a non-empty map would trip
+    /// [`Self::journal_save`]'s drift assert on the first dirty tick (debug)
+    /// or a false Delta-digest mismatch on rollback (release).
+    /// Journal-captured/restored via [`BroadSaved::pairs_hash`].
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pairs_hash: u64,
+}
+
+/// Deserialization twin of [`BroadPhaseBvh`] (see its `serde(from)` attr):
+/// the serialized fields in declaration order, WITHOUT the two serde-skipped
+/// caches (`workspace`, `pairs_hash`). `From` recomputes `pairs_hash` from
+/// the restored map so a deserialized broad phase can never carry a stale or
+/// zeroed cache. Adding a serialized field to `BroadPhaseBvh` fails the
+/// `From` impl below at compile time — extend both together, keeping the
+/// field order identical (bincode is positional).
+#[cfg(feature = "serde-serialize")]
+#[derive(Deserialize)]
+pub(crate) struct BroadPhaseBvhDe {
+    tree: Bvh,
+    pairs: HashMap<(ColliderHandle, ColliderHandle), u32>,
+    frame_index: u32,
+    optimization_strategy: BvhOptimizationStrategy,
+    pending_leaf_changes: bool,
+}
+
+#[cfg(feature = "serde-serialize")]
+impl From<BroadPhaseBvhDe> for BroadPhaseBvh {
+    fn from(de: BroadPhaseBvhDe) -> Self {
+        let mut bp = BroadPhaseBvh {
+            tree: de.tree,
+            workspace: BvhWorkspace::default(),
+            pairs: de.pairs,
+            frame_index: de.frame_index,
+            optimization_strategy: de.optimization_strategy,
+            pending_leaf_changes: de.pending_leaf_changes,
+            pairs_hash: 0,
+        };
+        bp.pairs_hash = bp.recompute_pairs_hash();
+        bp
+    }
 }
 
 impl std::hash::Hash for BroadPhaseBvh {
@@ -152,11 +191,19 @@ impl BroadPhaseBvh {
 
     /// From-scratch recompute of [`Self::pairs_hash`] — the verification twin
     /// of the incremental cache. Iteration order is irrelevant (wrapping-add
-    /// is commutative), so this is deterministic for any map order.
-    pub(crate) fn recompute_pairs_hash(&self) -> u64 {
+    /// is commutative), so this is deterministic for any map order. Public so
+    /// tests can assert cache/content consistency (e.g. across serde).
+    pub fn recompute_pairs_hash(&self) -> u64 {
         self.pairs
             .iter()
             .fold(0u64, |acc, (k, ts)| acc.wrapping_add(Self::pair_entry_digest(k, *ts)))
+    }
+
+    /// The incrementally-maintained [`Self::pairs_hash`] cache as-is, without
+    /// recomputing. Equal to [`Self::recompute_pairs_hash`] whenever the cache
+    /// is healthy — the pair is exposed so tests can assert exactly that.
+    pub fn cached_pairs_hash(&self) -> u64 {
+        self.pairs_hash
     }
 
     /// Insert-or-refresh one `pairs` entry, keeping `pairs_hash` in lockstep.

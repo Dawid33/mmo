@@ -270,3 +270,43 @@ fn set_parent_dynamic_to_fixed_is_allowed() {
     colliders.set_parent(c, Some(fixed), &mut bodies);
     assert_eq!(colliders.get(c).unwrap().parent(), Some(fixed));
 }
+
+#[test]
+fn broad_phase_pairs_hash_survives_serde_round_trip() {
+    // A parked region serializes its broad phase with FULL pairs content
+    // (the map has no capacity-only serde attr), so the serde-skipped
+    // pairs_hash cache must be recomputed on deserialize — a zeroed cache
+    // trips journal_save's drift assert on the first dirty tick after
+    // unpark (debug) or a false Delta-digest mismatch on rollback (release).
+    let (mut pipeline, mut broad, mut narrow, mut islands) = (
+        PhysicsPipeline::new(),
+        BroadPhaseBvh::new(),
+        NarrowPhase::new(),
+        IslandManager::new(),
+    );
+    let (mut bodies, mut colliders) = (RigidBodySet::new(), ColliderSet::new());
+    let (_ca, _cb, _cball) = two_fixed_one_ball(&mut bodies, &mut colliders, cuboid);
+
+    step(&mut pipeline, &mut broad, &mut narrow, &mut islands, &mut bodies, &mut colliders);
+
+    assert_ne!(broad.recompute_pairs_hash(), 0, "scene must have live pairs");
+    assert_eq!(
+        broad.cached_pairs_hash(),
+        broad.recompute_pairs_hash(),
+        "cache must be in sync before the round trip"
+    );
+
+    let bytes = bincode::serialize(&broad).expect("serialize broad phase");
+    let restored: BroadPhaseBvh = bincode::deserialize(&bytes).expect("deserialize broad phase");
+
+    assert_eq!(
+        restored.recompute_pairs_hash(),
+        broad.recompute_pairs_hash(),
+        "pairs content must round-trip in full"
+    );
+    assert_eq!(
+        restored.cached_pairs_hash(),
+        restored.recompute_pairs_hash(),
+        "pairs_hash cache must be recomputed on deserialize, not defaulted"
+    );
+}
