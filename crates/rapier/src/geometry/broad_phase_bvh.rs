@@ -16,6 +16,12 @@ use crate::pipeline::StepJournal;
 pub struct BroadSaved {
     pub(crate) tree: Bvh,
     pub(crate) pairs: HashMap<(ColliderHandle, ColliderHandle), u32>,
+    /// The multiset hash of `pairs` at capture time (see
+    /// [`BroadPhaseBvh::pairs_hash`]). Restored with the map so the cache
+    /// stays in lockstep across rollbacks; the pre-side digest hashes this
+    /// O(1) value while the live side recomputes from the restored map,
+    /// making the comparison a genuine content check.
+    pub(crate) pairs_hash: u64,
     pub(crate) frame_index: u32,
     pub(crate) pending_leaf_changes: bool,
 }
@@ -63,6 +69,15 @@ pub struct BroadPhaseBvh {
     /// Hashed and journal-captured like the rest of the broad-phase state so
     /// rollback and replay stay bit-exact.
     pending_leaf_changes: bool,
+    /// Incrementally-maintained commutative multiset hash of `pairs`
+    /// (wrapping-add of [`Self::pair_entry_digest`] per entry). Lets the
+    /// step-journal Delta digests avoid walking the whole map every tick.
+    /// Derived data, like `workspace`: NOT part of `impl Hash` (Full mode
+    /// keeps hashing the map itself) and serde-skipped — `pairs` serializes
+    /// capacity-only (deserializes EMPTY), so the empty-multiset default of 0
+    /// matches. Journal-captured/restored via [`BroadSaved::pairs_hash`].
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pairs_hash: u64,
 }
 
 impl std::hash::Hash for BroadPhaseBvh {
@@ -106,6 +121,70 @@ impl BroadPhaseBvh {
     /// Initializes a new empty broad-phase.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// SplitMix64 finalizer — a fixed, dependency-free 64-bit mixer used by
+    /// the pairs multiset hash.
+    #[inline]
+    fn mix64(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Digest of one `pairs` entry. Commutative-combining callers
+    /// (wrapping-add/sub into [`Self::pairs_hash`]) rely on this being a good
+    /// mixer — adding raw values would let (a+1, b) collide with (a, b+1).
+    #[inline]
+    fn pair_entry_digest(k: &(ColliderHandle, ColliderHandle), timestamp: u32) -> u64 {
+        let (i0, g0) = k.0.into_raw_parts();
+        let (i1, g1) = k.1.into_raw_parts();
+        let a = Self::mix64(((i0 as u64) << 32) | g0 as u64);
+        let b = Self::mix64(((i1 as u64) << 32) | g1 as u64);
+        Self::mix64(a ^ b.rotate_left(17) ^ (((timestamp as u64) << 1) | 1))
+    }
+
+    /// From-scratch recompute of [`Self::pairs_hash`] — the verification twin
+    /// of the incremental cache. Iteration order is irrelevant (wrapping-add
+    /// is commutative), so this is deterministic for any map order.
+    pub(crate) fn recompute_pairs_hash(&self) -> u64 {
+        self.pairs
+            .iter()
+            .fold(0u64, |acc, (k, ts)| acc.wrapping_add(Self::pair_entry_digest(k, *ts)))
+    }
+
+    /// Insert-or-refresh one `pairs` entry, keeping `pairs_hash` in lockstep.
+    /// Returns true iff the entry was newly inserted. Free-standing over the
+    /// two fields (not `&mut self`) so the BVTT pair collector — a closure
+    /// that disjointly captures `pairs`/`pairs_hash` while the tree is
+    /// borrowed by the traversal — can use the same single implementation.
+    /// The retain-based GC in [`Self::update`] is the only other `pairs`
+    /// mutation site; it subtracts [`Self::pair_entry_digest`] per removal.
+    #[inline]
+    fn pairs_insert_or_refresh(
+        pairs: &mut HashMap<(ColliderHandle, ColliderHandle), u32>,
+        pairs_hash: &mut u64,
+        key: (ColliderHandle, ColliderHandle),
+        timestamp: u32,
+    ) -> bool {
+        match pairs.entry(key) {
+            Entry::Occupied(e) => {
+                let old = *e.get();
+                if old != timestamp {
+                    *pairs_hash = pairs_hash
+                        .wrapping_sub(Self::pair_entry_digest(&key, old))
+                        .wrapping_add(Self::pair_entry_digest(&key, timestamp));
+                    *e.into_mut() = timestamp;
+                }
+                false
+            }
+            Entry::Vacant(e) => {
+                *pairs_hash = pairs_hash.wrapping_add(Self::pair_entry_digest(&key, timestamp));
+                e.insert(timestamp);
+                true
+            }
+        }
     }
 
     /// Initializes a new empty broad-phase with the specified strategy for incremental
@@ -274,14 +353,15 @@ impl BroadPhaseBvh {
                 std::mem::swap(&mut handle1, &mut handle2);
             }
 
-            match self.pairs.entry((handle1, handle2)) {
-                Entry::Occupied(e) => *e.into_mut() = self.frame_index,
-                Entry::Vacant(e) => {
-                    e.insert(self.frame_index);
-                    events.push(BroadPhasePairEvent::AddPair(ColliderPair::new(
-                        handle1, handle2,
-                    )));
-                }
+            if Self::pairs_insert_or_refresh(
+                &mut self.pairs,
+                &mut self.pairs_hash,
+                (handle1, handle2),
+                self.frame_index,
+            ) {
+                events.push(BroadPhasePairEvent::AddPair(ColliderPair::new(
+                    handle1, handle2,
+                )));
             }
         };
 
@@ -303,27 +383,33 @@ impl BroadPhaseBvh {
         // by the narrow-phase itself (or islands) once we rework it.
         //
         // let t0 = std::time::Instant::now();
+        // HashMap::retain removes entries without going through
+        // pairs_insert_or_refresh, so accumulate the removed entries' digests
+        // and subtract them from the multiset cache after the pass. Every
+        // `false` path below must be counted exactly once.
+        let mut removed_digest: u64 = 0;
         self.pairs.retain(|(h0, h1), timestamp| {
-            if *timestamp != self.frame_index {
+            let keep = if *timestamp != self.frame_index {
                 if !colliders.contains(*h0) || !colliders.contains(*h1) {
                     // At least one of the colliders no longer exist, don’t retain the pair.
-                    return false;
-                }
-
-                let Some(node0) = self.tree.leaf_node(h0.into_raw_parts().0) else {
-                    return false;
-                };
-                let Some(node1) = self.tree.leaf_node(h1.into_raw_parts().0) else {
-                    return false;
-                };
-
-                if (!Self::CHANGE_DETECTION_ENABLED || node0.is_changed() || node1.is_changed())
-                    && !node0.intersects(node1)
-                {
-                    events.push(BroadPhasePairEvent::DeletePair(ColliderPair::new(*h0, *h1)));
                     false
+                } else if let (Some(node0), Some(node1)) = (
+                    self.tree.leaf_node(h0.into_raw_parts().0),
+                    self.tree.leaf_node(h1.into_raw_parts().0),
+                ) {
+                    if (!Self::CHANGE_DETECTION_ENABLED
+                        || node0.is_changed()
+                        || node1.is_changed())
+                        && !node0.intersects(node1)
+                    {
+                        events.push(BroadPhasePairEvent::DeletePair(ColliderPair::new(*h0, *h1)));
+                        false
+                    } else {
+                        true
+                    }
                 } else {
-                    true
+                    // A leaf no longer exists in the tree.
+                    false
                 }
             } else {
                 // If the timestamps match, we already saw this pair during traversal.
@@ -332,8 +418,14 @@ impl BroadPhaseBvh {
                 // if the frame index overflowed. But this is fine, we’ll catch it
                 // in another frame.
                 true
+            };
+            if !keep {
+                removed_digest = removed_digest
+                    .wrapping_add(Self::pair_entry_digest(&(*h0, *h1), *timestamp));
             }
+            keep
         });
+        self.pairs_hash = self.pairs_hash.wrapping_sub(removed_digest);
 
         // println!(
         //     "Post-filtering: {} (added pairs: {}, removed pairs: {})",
@@ -427,9 +519,15 @@ impl BroadPhaseBvh {
     /// pending-leaf flag) for the [`StepJournal`]. The workspace is unhashed
     /// scratch and is not captured.
     pub fn journal_save(&self) -> BroadSaved {
+        debug_assert_eq!(
+            self.pairs_hash,
+            self.recompute_pairs_hash(),
+            "pairs_hash cache drifted from map content"
+        );
         BroadSaved {
             tree: self.tree.clone(),
             pairs: self.pairs.clone(),
+            pairs_hash: self.pairs_hash,
             frame_index: self.frame_index,
             pending_leaf_changes: self.pending_leaf_changes,
         }
@@ -441,6 +539,7 @@ impl BroadPhaseBvh {
     pub fn journal_restore(&mut self, s: BroadSaved) {
         self.tree = s.tree;
         self.pairs = s.pairs;
+        self.pairs_hash = s.pairs_hash;
         self.frame_index = s.frame_index;
         self.pending_leaf_changes = s.pending_leaf_changes;
     }
@@ -460,5 +559,52 @@ impl BroadPhaseBvh {
         self.pairs.hash(state);
         self.frame_index.hash(state);
         self.pending_leaf_changes.hash(state);
+    }
+}
+
+#[cfg(test)]
+mod pairs_hash_tests {
+    use super::*;
+
+    fn handle(i: u32) -> ColliderHandle {
+        ColliderHandle::from_raw_parts(i, 0)
+    }
+
+    #[test]
+    fn cached_pairs_hash_matches_recompute_after_mutations() {
+        let mut bp = BroadPhaseBvh::new();
+        assert_eq!(bp.pairs_hash, bp.recompute_pairs_hash(), "empty");
+
+        // The three mutation shapes the collector/GC perform, via the shared
+        // helper. Vacant inserts:
+        assert!(BroadPhaseBvh::pairs_insert_or_refresh(
+            &mut bp.pairs, &mut bp.pairs_hash, (handle(1), handle(2)), 7,
+        ));
+        assert!(BroadPhaseBvh::pairs_insert_or_refresh(
+            &mut bp.pairs, &mut bp.pairs_hash, (handle(1), handle(3)), 7,
+        ));
+        assert_eq!(bp.pairs_hash, bp.recompute_pairs_hash(), "inserts");
+
+        // Occupied refresh (timestamp change):
+        assert!(!BroadPhaseBvh::pairs_insert_or_refresh(
+            &mut bp.pairs, &mut bp.pairs_hash, (handle(1), handle(2)), 8,
+        ));
+        assert_eq!(bp.pairs_hash, bp.recompute_pairs_hash(), "refresh");
+
+        // Removal (retain-style: subtract the entry digest):
+        let removed = BroadPhaseBvh::pair_entry_digest(&(handle(1), handle(3)), 7);
+        bp.pairs.remove(&(handle(1), handle(3)));
+        bp.pairs_hash = bp.pairs_hash.wrapping_sub(removed);
+        assert_eq!(bp.pairs_hash, bp.recompute_pairs_hash(), "removal");
+
+        // Order independence: same content reached via a different history.
+        let mut bp2 = BroadPhaseBvh::new();
+        BroadPhaseBvh::pairs_insert_or_refresh(
+            &mut bp2.pairs, &mut bp2.pairs_hash, (handle(1), handle(2)), 3,
+        );
+        BroadPhaseBvh::pairs_insert_or_refresh(
+            &mut bp2.pairs, &mut bp2.pairs_hash, (handle(1), handle(2)), 8,
+        );
+        assert_eq!(bp.pairs_hash, bp2.pairs_hash, "content-equal maps hash equal");
     }
 }
