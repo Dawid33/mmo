@@ -14,6 +14,7 @@ pub(crate) mod bridge;
 pub(crate) mod collider_debug;
 pub(crate) mod hud;
 pub mod convert;
+pub(crate) mod grid_debug;
 pub(crate) mod input;
 mod interpolate;
 pub mod meshing;
