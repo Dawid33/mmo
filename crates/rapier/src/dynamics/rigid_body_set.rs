@@ -200,6 +200,28 @@ impl RigidBodySet {
         self.bodies.revert_insert(handle.0, prev_free_head, prev_items_len);
     }
 
+    /// Whether `handle`'s body currently carries the MODIFIED change-flag —
+    /// i.e. whether a tracked mutation (`get_mut`,
+    /// `get_mut_internal_with_modification_tracking`, an insert) would skip
+    /// its modified-list push. Capture this BEFORE an operation that goes
+    /// through modification tracking so its undo knows whether to
+    /// [`Self::pop_modified`].
+    pub fn is_marked_modified(&self, handle: RigidBodyHandle) -> bool {
+        self.bodies
+            .get(handle.0)
+            .is_some_and(|rb| rb.changes.contains(RigidBodyChanges::MODIFIED))
+    }
+
+    /// Exact inverse of the modified-list push performed on `handle` by the
+    /// MOST RECENT tracked mutation. LIFO contract: `handle` must be the
+    /// list's tail (asserted). Callers restore the body VALUE separately via
+    /// [`Self::restore_raw`] — that rewrite covers the MODIFIED flag itself,
+    /// so this only fixes the list.
+    pub fn pop_modified(&mut self, handle: RigidBodyHandle) {
+        let popped = self.modified_bodies.pop();
+        assert_eq!(popped, Some(handle), "pop_modified: not the list tail");
+    }
+
     /// Removes a rigid body from the world along with all its attached colliders and joints.
     ///
     /// This is a complete cleanup operation that removes:

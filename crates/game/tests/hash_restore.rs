@@ -160,3 +160,47 @@ fn alloc_fingerprint_detects_non_lifo_remove_insert() {
     let b = sm.insert(v); // wrong inverse: same value, different slot version
     assert_ne!(pre, sm.alloc_fingerprint(b), "version drift must change the fingerprint");
 }
+
+/// Public-API twin of the fork's `insert_with_parent_reverts_exactly_*` test:
+/// the exact inverse used by the game's `attach_collider_safe` undo closure.
+/// A freshly-inserted parent is already on the modified list (insert pushes),
+/// so this exercises the `was_modified == true` arm; the fork-internal test
+/// covers the clean-parent arm (its setup needs pub(crate) flag access).
+#[test]
+fn collider_insert_with_parent_reverts_exactly() {
+    use rapier3d::prelude::ColliderBuilder;
+
+    let mut bodies = RigidBodySet::new();
+    let mut colliders = ColliderSet::new();
+    let mut islands = IslandManager::new();
+
+    // A parent body plus collider history so the arena free list is non-trivial.
+    let parent = bodies.insert(RigidBodyBuilder::fixed().build());
+    let doomed = colliders.insert(ColliderBuilder::ball(1.0.into()).build());
+    colliders.remove(doomed, &mut islands, &mut bodies, false);
+
+    let was_modified = bodies.is_marked_modified(parent);
+    assert!(was_modified, "a freshly-inserted body is on the modified list");
+    let before_bodies = h(&bodies);
+    let before_colliders = h(&colliders);
+    let pre_parent = bodies.get(parent).unwrap().clone();
+    let (free_head, len) = colliders.alloc_state();
+
+    let ch = colliders.insert_with_parent(
+        ColliderBuilder::capsule_y(0.5.into(), 0.25.into()).build(),
+        parent,
+        &mut bodies,
+    );
+
+    // Exact LIFO inverse of insert_with_parent (parent already modified, so
+    // no pop_modified):
+    colliders.revert_insert(ch, free_head, len);
+    bodies.restore_raw(parent, pre_parent);
+
+    assert_eq!(before_bodies, h(&bodies), "parent body + modified list must restore");
+    assert_eq!(
+        before_colliders,
+        h(&colliders),
+        "collider slot + alloc + modified list must restore"
+    );
+}

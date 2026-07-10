@@ -115,6 +115,36 @@ impl ColliderSet {
             .expect("restore_raw: slot vacant") = collider;
     }
 
+    /// Allocator state to capture before `insert`/`insert_with_parent` for
+    /// [`Self::revert_insert`]. Mirrors [`RigidBodySet::alloc_state`].
+    pub fn alloc_state(&self) -> (Option<u32>, u32) {
+        self.colliders.alloc_state()
+    }
+
+    /// Exact inverse of the MOST RECENT collider insert that returned
+    /// `handle`, given the state captured by [`Self::alloc_state`] just
+    /// before it. LIFO contract: invalid if any other collider was
+    /// inserted/removed/marked modified since. Does NOT touch the parent
+    /// body — callers that used `insert_with_parent` must also restore the
+    /// parent (its collider list, mass properties and change flags changed)
+    /// and its modified-list membership
+    /// ([`RigidBodySet::is_marked_modified`] / [`RigidBodySet::pop_modified`]).
+    /// Mirrors [`RigidBodySet::revert_insert`].
+    pub fn revert_insert(
+        &mut self,
+        handle: ColliderHandle,
+        prev_free_head: Option<u32>,
+        prev_items_len: u32,
+    ) {
+        let popped = self.modified_colliders.pop();
+        assert_eq!(
+            popped,
+            Some(handle),
+            "revert_insert: not the most recent insert"
+        );
+        self.colliders.revert_insert(handle.0, prev_free_head, prev_items_len);
+    }
+
     /// Returns a handle that's guaranteed to be invalid.
     ///
     /// Useful as a sentinel/placeholder value.
@@ -485,5 +515,95 @@ impl IndexMut<ColliderHandle> for ColliderSet {
         let collider = &mut self.colliders[handle.0];
         self.modified_colliders.push_once(handle, collider);
         collider
+    }
+}
+
+#[cfg(test)]
+mod revert_insert_tests {
+    use super::*;
+    use crate::dynamics::{IslandManager, RigidBodyBuilder, RigidBodyChanges, RigidBodySet};
+    use crate::geometry::ColliderBuilder;
+    use std::hash::{Hash, Hasher};
+
+    fn h<T: Hash>(t: &T) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        t.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Exact inverse of `insert_with_parent`, both parent-tracking cases:
+    /// the parent NOT yet on the modified list (the tracking push must be
+    /// popped) and already on it (it must not be). Mirrors the game-side
+    /// `attach_collider_safe` undo closure; see also the public-API twin in
+    /// the game crate's tests/hash_restore.rs.
+    #[test]
+    fn insert_with_parent_reverts_exactly_both_tracking_cases() {
+        let mut bodies = RigidBodySet::new();
+        let mut colliders = ColliderSet::new();
+        let mut islands = IslandManager::new();
+
+        // A parent body plus some collider history so the arena free list is
+        // non-trivial (reuse-case allocation gets exercised too).
+        let parent = bodies.insert(RigidBodyBuilder::fixed().build());
+        let doomed = colliders.insert(ColliderBuilder::ball(1.0.into()).build());
+        colliders.remove(doomed, &mut islands, &mut bodies, false);
+
+        // Case A: parent NOT marked modified at attach time. Reach the clean
+        // state the way the pipeline's end-of-step sweep does: clear the
+        // flags of everything on the modified lists, then the lists.
+        for handle in bodies.take_modified().iter() {
+            if let Some(rb) = bodies.bodies.get_mut(handle.0) {
+                rb.changes = RigidBodyChanges::empty();
+            }
+        }
+        for handle in colliders.take_modified().iter() {
+            // Removed colliders stay on the modified list with a vacant slot.
+            if let Some(co) = colliders.colliders.get_mut(handle.0) {
+                co.changes = ColliderChanges::empty();
+            }
+        }
+        colliders.take_removed();
+        assert!(!bodies.is_marked_modified(parent), "setup: parent must start clean");
+
+        for was_modified_case in [false, true] {
+            let was_modified = bodies.is_marked_modified(parent);
+            assert_eq!(was_modified, was_modified_case, "case setup");
+
+            let before_bodies = h(&bodies);
+            let before_colliders = h(&colliders);
+            let pre_parent = bodies.get(parent).unwrap().clone();
+            let (free_head, len) = colliders.alloc_state();
+
+            let ch = colliders.insert_with_parent(
+                ColliderBuilder::capsule_y(0.5.into(), 0.25.into()).build(),
+                parent,
+                &mut bodies,
+            );
+            assert!(bodies.is_marked_modified(parent), "attach must mark the parent");
+
+            // Exact LIFO inverse of insert_with_parent:
+            colliders.revert_insert(ch, free_head, len);
+            bodies.restore_raw(parent, pre_parent);
+            if !was_modified {
+                bodies.pop_modified(parent);
+            }
+
+            assert_eq!(
+                before_bodies,
+                h(&bodies),
+                "parent body + modified list must restore (was_modified={was_modified})"
+            );
+            assert_eq!(
+                before_colliders,
+                h(&colliders),
+                "collider slot + alloc + modified list must restore (was_modified={was_modified})"
+            );
+
+            // Case B setup: leave the parent marked modified for the second
+            // iteration by touching it through the tracked accessor.
+            if !was_modified_case {
+                let _ = bodies.get_mut_internal_with_modification_tracking(parent);
+            }
+        }
     }
 }
