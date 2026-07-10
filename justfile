@@ -128,6 +128,14 @@ worldgen-bench:
 collider-bench:
     {{cargo}} run --release -p worldgen --example collider_profile
 
+# Micro-benchmark of TerrainPipeline::column and its share of generate_region.
+bench-column:
+    {{cargo}} run --release -p worldgen --example column_bench
+
+# Headless region-load cost breakdown (gen/derive/serde/mesh).
+bench-region:
+    {{cargo}} test -p worldgen --release --test region_load_cost -- --ignored --nocapture
+
 # ---- WASM / browser -------------------------------------------------------
 
 # Start `just server` first, or append ?offline in the browser for single-player.
