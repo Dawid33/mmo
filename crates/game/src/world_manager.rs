@@ -152,6 +152,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// subscribed keys pinned. `u64` is a monotonically increasing access
     /// stamp (not wall time — determinism).
     lod_cache: BTreeMap<LodKey, (LodPayload, u64)>,
+    /// LRU cap on `lod_cache`; defaults to `LOD_CACHE_MAX_ENTRIES`, overridable
+    /// via `set_lod_cache_max` (test hook — mirrors `WorldgenRings.table`).
+    lod_cache_max: usize,
     lod_access_counter: u64,
     /// Builds submitted, result not yet received — dedups double-requests.
     lod_in_flight: BTreeSet<LodKey>,
@@ -187,6 +190,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             region_out_send,
             lod_subscribers: BTreeMap::new(),
             lod_cache: BTreeMap::new(),
+            lod_cache_max: LOD_CACHE_MAX_ENTRIES,
             lod_access_counter: 0,
             lod_in_flight: BTreeSet::new(),
             lod_pending_terrain: BTreeMap::new(),
@@ -343,6 +347,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             RegionOutput::FarSnapshotChanged(snap) => {
                 self.far_cache.insert(rc, snap.clone());
+                self.invalidate_region_lod(rc);
                 if let Some(subs) = self.far_subscribers.get(&rc) {
                     for client in subs {
                         let _ = self
@@ -353,6 +358,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             RegionOutput::Stopped(serialized, far) => {
                 self.far_cache.insert(rc, far);
+                self.invalidate_region_lod(rc);
                 self.parked.insert(rc, serialized);
                 let pending = self
                     .regions
@@ -757,8 +763,36 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
+    /// A region's terrain changed (cadence push) or it parked: every LOD key
+    /// depending on it is stale. Drop them from the cache; rebuild the ones
+    /// with live subscribers (the fresh far_cache entry is the new source).
+    fn invalidate_region_lod(&mut self, rc: RegionCoords) {
+        for factor in crate::lod::LOD_FACTORS {
+            let key = LodKey::for_region(factor, rc);
+            self.lod_cache.remove(&key);
+            let has_subs = self.lod_subscribers.get(&key).is_some_and(|s| !s.is_empty());
+            if has_subs && !self.lod_in_flight.contains(&key) {
+                // Any subscriber works as the terrain-request correlator.
+                let client = *self.lod_subscribers[&key].iter().next().unwrap();
+                self.start_lod_build(key, client);
+            }
+        }
+    }
+
+    /// Test hook: current cache size (`lod_cache_evicts_unsubscribed_lru_but_pins_subscribed`).
+    pub fn lod_cache_len(&self) -> usize {
+        self.lod_cache.len()
+    }
+
+    /// Test hook: shrink/grow the LRU cap below `LOD_CACHE_MAX_ENTRIES` so
+    /// eviction is exercisable without filling thousands of real entries.
+    pub fn set_lod_cache_max(&mut self, n: usize) {
+        self.lod_cache_max = n;
+        self.evict_lod_cache();
+    }
+
     fn evict_lod_cache(&mut self) {
-        while self.lod_cache.len() > LOD_CACHE_MAX_ENTRIES {
+        while self.lod_cache.len() > self.lod_cache_max {
             let victim = self
                 .lod_cache
                 .iter()

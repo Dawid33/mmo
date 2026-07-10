@@ -15,6 +15,7 @@ use quinn::{
     ConnectionError, Endpoint, TransportConfig,
 };
 
+pub mod lod_workers;
 pub mod region_threads;
 pub mod webtransport;
 
@@ -256,10 +257,8 @@ pub fn run() {
     };
     let world_seed = worldgen::WORLD_SEED;
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
-    let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
-        coarse: Box::new(move |key| worldgen::coarse_tile(key, world_seed, materials)),
-        out: lod_result_send,
-    });
+    let lod_builder: Box<dyn game::LodBuilder> =
+        Box::new(lod_workers::ThreadLodBuilder::new(world_seed, materials, lod_result_send));
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::default(),
         Box::new(move |rc| worldgen::generate_region(rc, world_seed, materials)),

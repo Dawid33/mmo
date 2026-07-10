@@ -300,6 +300,150 @@ fn tile_build_overlays_regions_with_authoritative_state() {
 }
 
 #[test]
+fn terrain_change_invalidates_and_repushes_subscribed_keys() {
+    // Client 1 holds factor-4 of region (0,0) AND the factor-64 tile [0,0].
+    // A terrain change on (0,0) must drop both from the cache and push a
+    // fresh LodData for both, reflecting the new terrain. A client that
+    // released one of the same keys beforehand must get nothing.
+    let (mut m, out, region_out) = manager_with_lod();
+    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+
+    let rc = RegionCoords::new(0, 0); // SPAWN_REGION: already running (client 1's home)
+
+    let region_key = LodKey::for_region(4, rc);
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(region_key), 1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let before_region = expect_lod_data(&out, region_key);
+
+    let tile_key = LodKey { factor: 64, coords: [0, 0] }; // covers regions (0..2, 0..2)
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(tile_key), 1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let before_tile = expect_lod_data(&out, tile_key);
+
+    // Client 2 subscribes to the region key then releases it: it must NOT
+    // receive the refresh push below (Task 7's carried review obligation).
+    m.handle_server_event(ServerEvent::ClientConnected(2), 0);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(region_key), 2), 0);
+    m.pump_lod_results();
+    out.try_iter().for_each(drop); // discard client 2's cache-hit reply
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::ReleaseLod(region_key), 2), 0);
+
+    // Terrain change: a different solid material for region (0,0).
+    let below = Block::new(BlockId::AIR);
+    let above = Block::new(BlockId::AIR);
+    let sub = SubChunk::Dense(Box::new(Chunk::flat_floor_with(8, BlockId(99))));
+    let changed = vec![(ColumnCoords::new(0, 0), Column::new(0, below, above, vec![sub]))];
+    let snap2 = FarSnapshot::from_columns(changed);
+    m.handle_region_output(rc, RegionOutput::FarSnapshotChanged(snap2), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+
+    // Both rebuilds land from the same invalidation pass: snapshot every
+    // LodData in one drain rather than calling expect_lod_data twice (which
+    // would discard the second key's message while filtering for the first).
+    let pushed: Vec<(Option<ClientId>, LodKey, LodPayload)> = out
+        .try_iter()
+        .filter_map(|(target, p)| match p {
+            ServerPacket::LodData(k, payload) => Some((target, k, payload)),
+            _ => None,
+        })
+        .collect();
+
+    let region_hits: Vec<_> = pushed.iter().filter(|(_, k, _)| *k == region_key).collect();
+    assert_eq!(region_hits.len(), 1, "exactly one refresh push for the region key");
+    assert_ne!(
+        region_hits[0].2, before_region,
+        "region-key payload reflects the terrain change"
+    );
+
+    let tile_hits: Vec<_> = pushed.iter().filter(|(_, k, _)| *k == tile_key).collect();
+    assert_eq!(tile_hits.len(), 1, "exactly one refresh push for the tile key");
+    assert_ne!(tile_hits[0].2, before_tile, "tile-key payload reflects the terrain change");
+
+    assert!(
+        !pushed.iter().any(|(target, k, _)| *target == Some(2) && *k == region_key),
+        "client 2 released before the change: it must receive no refresh push"
+    );
+}
+
+#[test]
+fn terrain_change_with_no_subscribers_only_drops_cache() {
+    let (mut m, out, region_out) = manager_with_lod();
+    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+
+    let rc = RegionCoords::new(0, 0);
+    let key = LodKey::for_region(4, rc);
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let _ = expect_lod_data(&out, key);
+
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::ReleaseLod(key), 1), 0);
+
+    let below = Block::new(BlockId::AIR);
+    let above = Block::new(BlockId::AIR);
+    let sub = SubChunk::Dense(Box::new(Chunk::flat_floor_with(8, BlockId(77))));
+    let changed = vec![(ColumnCoords::new(0, 0), Column::new(0, below, above, vec![sub]))];
+    let snap2 = FarSnapshot::from_columns(changed);
+    m.handle_region_output(rc, RegionOutput::FarSnapshotChanged(snap2), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+
+    assert!(
+        out.try_iter().all(|(_, p)| !matches!(p, ServerPacket::LodData(..))),
+        "no subscribers left: cache drops silently, no push"
+    );
+
+    // Fresh request rebuilds, reflecting the post-change terrain.
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let after = expect_lod_data(&out, key);
+    let blocks = rect_blocks(&after, 0..32, 0..32);
+    assert!(blocks.iter().any(|b| *b == BlockId(77)), "rebuild reflects the post-change terrain");
+}
+
+#[test]
+fn lod_cache_evicts_unsubscribed_lru_but_pins_subscribed() {
+    let (mut m, out, region_out) = manager_with_lod();
+    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+
+    m.set_lod_cache_max(3);
+
+    // Fill past the cap with released (unsubscribed) keys.
+    for (x, z) in [(100, 100), (101, 101), (102, 102), (103, 103)] {
+        let key = LodKey::for_region(4, RegionCoords::new(x, z));
+        m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+        m.pump_lod_results();
+        out.try_iter().for_each(drop);
+        m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::ReleaseLod(key), 1), 0);
+    }
+    assert_eq!(m.lod_cache_len(), 3, "cache stays at cap under released-only pressure");
+
+    // A still-subscribed key must survive eviction pressure even past the cap.
+    let pinned = LodKey::for_region(4, RegionCoords::new(200, 200));
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(pinned), 1), 0);
+    m.pump_lod_results();
+    out.try_iter().for_each(drop);
+    assert_eq!(m.lod_cache_len(), 3, "cache stays at cap with one pinned entry added");
+
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(pinned), 1), 0);
+    let hit: Vec<_> =
+        out.try_iter().filter(|(_, p)| matches!(p, ServerPacket::LodData(..))).collect();
+    assert_eq!(hit.len(), 1, "pinned key survived: served from cache, no rebuild");
+}
+
+#[test]
 fn tile_build_waits_for_running_unseeded_regions() {
     let (mut m, out, region_out) = manager_with_lod();
     m.handle_server_event(ServerEvent::ClientConnected(1), 0);
