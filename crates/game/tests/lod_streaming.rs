@@ -52,6 +52,45 @@ fn drain_region_outputs(
     }
 }
 
+/// Exactly one LodData for `key` in `out` (draining everything else, same
+/// discard convention the other tests use); returns its payload.
+fn expect_lod_data(
+    out: &crossbeam::channel::Receiver<(Option<ClientId>, ServerPacket)>,
+    key: LodKey,
+) -> LodPayload {
+    let mut hits: Vec<LodPayload> = out
+        .try_iter()
+        .filter_map(|(_, p)| match p {
+            ServerPacket::LodData(k, payload) if k == key => Some(payload),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(hits.len(), 1, "exactly one LodData for {key:?}");
+    hits.pop().unwrap()
+}
+
+/// Every voxel's block id in the x/z rect `x_range` x `z_range` (all y),
+/// across every grid in the payload. Grid layout is always x + 32*y +
+/// 32*32*z regardless of which vertical band a grid's group indexes.
+fn rect_blocks(
+    payload: &LodPayload,
+    x_range: std::ops::Range<usize>,
+    z_range: std::ops::Range<usize>,
+) -> Vec<BlockId> {
+    let mut blocks = Vec::new();
+    for (_, packed) in payload {
+        let grid = packed.decode().expect("well-formed RLE grid");
+        for z in z_range.clone() {
+            for y in 0..32 {
+                for x in x_range.clone() {
+                    blocks.push(grid[x + 32 * y + 32 * 32 * z].block);
+                }
+            }
+        }
+    }
+    blocks
+}
+
 #[test]
 fn request_lod_pristine_region_builds_downsamples_and_caches() {
     let (mut m, out, region_out) = manager_with_lod();
@@ -193,4 +232,97 @@ fn invalid_factor_is_dropped() {
         out.try_iter().all(|(_, p)| !matches!(p, ServerPacket::LodData(..))),
         "bogus factor never builds or panics"
     );
+}
+
+#[test]
+fn tile_build_is_coarse_only_when_every_region_is_pristine() {
+    let (mut m, out, _region_out) = manager_with_lod();
+    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    let key = LodKey { factor: 64, coords: [50, 50] }; // far away, all pristine
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+    m.pump_lod_results();
+    let payload = expect_lod_data(&out, key);
+    // The fake coarse closure emits BlockId(42) everywhere; no overlay ran,
+    // so the payload is pure marker.
+    let grid = payload[0].1.decode().unwrap();
+    assert!(grid.iter().all(|v| v.block == BlockId(42)));
+}
+
+#[test]
+fn tile_build_overlays_regions_with_authoritative_state() {
+    let (mut m, out, region_out) = manager_with_lod();
+    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+
+    // Region (0,0) is SPAWN_REGION: ClientConnected already made it client
+    // 1's home, so it's running from the start. Disconnect to lift the
+    // home keep-alive, park it past the grace period (same dance as
+    // world_manager.rs's home_region_survives_zero_subscribers), then
+    // reconnect the SAME client id: `homes` already contains it, so
+    // ClientConnected takes the reconnect branch and does NOT call
+    // ensure_running — the region stays parked, with far_cache seeded
+    // from the park (the flat-floor generator's state).
+    m.handle_server_event(ServerEvent::ClientDisconnected(1), 0);
+    m.maintain(UNLOAD_GRACE_MS);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+    assert!(m.parked_regions().contains(&RegionCoords::new(0, 0)));
+
+    m.handle_server_event(ServerEvent::ClientConnected(1), UNLOAD_GRACE_MS);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+    assert!(
+        !m.running_regions().contains(&RegionCoords::new(0, 0)),
+        "reconnecting the same client must not wake the parked region"
+    );
+
+    let key = LodKey { factor: 64, coords: [0, 0] }; // covers regions (0..2, 0..2)
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let payload = expect_lod_data(&out, key);
+
+    // Region (0,0)'s cell rect (0..16, 0..16): the overlay clears the
+    // coarse marker and writes the authoritative flat floor (BlockId(1)).
+    let overlaid = rect_blocks(&payload, 0..16, 0..16);
+    assert!(overlaid.iter().all(|b| *b != BlockId(42)), "overlay must wipe the coarse marker");
+    assert!(overlaid.iter().any(|b| *b == BlockId(1)), "authoritative floor must appear");
+
+    // Region (1,1)'s cell rect (16..32, 16..32) is pristine: never
+    // generated, so untouched coarse marker (or air where the overlay's
+    // clear pass reached a shared grid) is all that's there.
+    let pristine = rect_blocks(&payload, 16..32, 16..32);
+    assert!(
+        pristine.iter().all(|b| *b == BlockId(42) || *b == BlockId::AIR),
+        "pristine region stays marker/air"
+    );
+}
+
+#[test]
+fn tile_build_waits_for_running_unseeded_regions() {
+    let (mut m, out, region_out) = manager_with_lod();
+    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+    // Region (0,0) is SPAWN_REGION: running from client 1's home, but
+    // never sampled, so far_cache has no entry for it yet.
+    assert!(m.running_regions().contains(&RegionCoords::new(0, 0)));
+
+    let key = LodKey { factor: 64, coords: [0, 0] }; // covers regions (0..2, 0..2)
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+    assert!(
+        out.try_iter().all(|(_, p)| !matches!(p, ServerPacket::LodData(..))),
+        "no LodData before the terrain reply lands"
+    );
+
+    // Pumping the spawner answers the deferred RequestFarSnapshot, seeding
+    // far_cache and re-entering the tile build that was waiting on it.
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    let payload = expect_lod_data(&out, key);
+
+    let overlaid = rect_blocks(&payload, 0..16, 0..16);
+    assert!(overlaid.iter().all(|b| *b != BlockId(42)), "overlay must wipe the coarse marker");
+    assert!(overlaid.iter().any(|b| *b == BlockId(1)), "authoritative floor must appear");
 }

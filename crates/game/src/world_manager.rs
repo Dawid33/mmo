@@ -10,9 +10,9 @@ use std::time::Duration;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
 use crate::{
-    ClientId, ClientPacket, Column, ColumnCoords, FarSnapshot, GameEventKind, LodBuildJob,
-    LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput, RegionOutput,
-    RegionRunner, RegionSeed, SerializedRegion, ServerPacket,
+    Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, FarSnapshot, GameEventKind,
+    LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput,
+    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket,
 };
 
 pub const SPAWN_REGION: RegionCoords = RegionCoords { x: 0, z: 0 };
@@ -157,6 +157,10 @@ pub struct WorldManager<S: RegionSpawner> {
     lod_in_flight: BTreeSet<LodKey>,
     /// Region-keyed builds waiting on a running region's terrain reply.
     lod_pending_terrain: BTreeMap<RegionCoords, BTreeSet<LodKey>>,
+    /// Tile-keyed builds waiting on a subset of `key.regions()` whose terrain
+    /// reply hasn't landed yet. Settled incrementally by `lod_terrain_ready`
+    /// as each awaited region's reply seeds `far_cache`.
+    lod_tile_waiting: BTreeMap<LodKey, BTreeSet<RegionCoords>>,
     lod_builder: Box<dyn LodBuilder>,
     lod_results: Receiver<LodResult>,
 }
@@ -186,6 +190,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             lod_access_counter: 0,
             lod_in_flight: BTreeSet::new(),
             lod_pending_terrain: BTreeMap::new(),
+            lod_tile_waiting: BTreeMap::new(),
             lod_builder,
             lod_results,
         }
@@ -679,16 +684,51 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Tile keys build in Task 8; this stub keeps Task 7 compiling.
-    fn start_tile_build(&mut self, key: LodKey, _client: ClientId) {
-        log::debug!("tile LOD build for {key:?} not implemented until Task 8");
+    /// Tile keys (64/256): coarse base + one overlay per region with
+    /// authoritative state. Regions running-but-unseeded are requested and
+    /// the build deferred until every such reply has landed; pristine and
+    /// parked-with-cache regions need nothing. Pristine regions are NOT
+    /// generated here — coarse sampling covers them (the point of tiles).
+    ///
+    /// Caveat: `far_cache` reflects the LAST pushed/parked terrain of a
+    /// running region — mid-cadence edits appear on the next
+    /// `FarSnapshotChanged` (which Task 9 turns into invalidation +
+    /// rebuild), matching the spec's freshness decision.
+    fn start_tile_build(&mut self, key: LodKey, client: ClientId) {
+        let mut waiting = BTreeSet::new();
+        for rc in key.regions() {
+            let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
+            if running && !self.far_cache.contains_key(&rc) {
+                waiting.insert(rc);
+                self.lod_pending_terrain.entry(rc).or_default().insert(key);
+                self.send_to_region(rc, RegionInput::RequestFarSnapshot(client));
+            }
+        }
+        if !waiting.is_empty() {
+            self.lod_tile_waiting.insert(key, waiting);
+            return;
+        }
+        let overlays: Vec<(RegionCoords, Vec<(ChunkCoords, Chunk)>)> = key
+            .regions()
+            .into_iter()
+            .filter_map(|rc| self.far_cache.get(&rc).map(|snap| (rc, snap.chunks.clone())))
+            .collect();
+        self.lod_in_flight.insert(key);
+        self.lod_builder.submit(LodBuildJob::Tile { key, overlays });
     }
 
     /// A region's terrain just landed in far_cache: submit any LOD builds
-    /// that were waiting on it.
+    /// that were waiting on it, region- or tile-keyed.
     fn lod_terrain_ready(&mut self, rc: RegionCoords, client: ClientId) {
         let Some(keys) = self.lod_pending_terrain.remove(&rc) else { return };
         for key in keys {
+            if let Some(waiting) = self.lod_tile_waiting.get_mut(&key) {
+                waiting.remove(&rc);
+                if !waiting.is_empty() {
+                    continue;
+                }
+                self.lod_tile_waiting.remove(&key);
+            }
             if !self.lod_in_flight.contains(&key) {
                 self.start_lod_build(key, client);
             }
