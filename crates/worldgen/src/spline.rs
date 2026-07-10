@@ -69,6 +69,71 @@ impl Spline {
     }
 }
 
+/// `Spline::Curve` flattened to parallel arrays for the common case where
+/// every control-point value is `Const`. Arithmetic is copied verbatim from
+/// `Spline::eval` so results are bit-identical.
+pub struct FlatSpline {
+    locations: Box<[f64]>,
+    values: Box<[f64]>,
+    derivatives: Box<[f64]>,
+}
+
+impl FlatSpline {
+    /// Panics if any control-point value is not `Spline::Const` — the v1
+    /// pipeline never nests curves; revisit if a nested spline ever lands.
+    pub fn from_spline(s: &Spline) -> FlatSpline {
+        let points = match s {
+            Spline::Const(v) => {
+                return FlatSpline {
+                    locations: Box::new([0.0]),
+                    values: Box::new([*v]),
+                    derivatives: Box::new([0.0]),
+                }
+            }
+            Spline::Curve { points } => points,
+        };
+        let values = points
+            .iter()
+            .map(|p| match p.value.as_ref() {
+                Spline::Const(v) => *v,
+                Spline::Curve { .. } => panic!("FlatSpline: nested curve control value"),
+            })
+            .collect();
+        FlatSpline {
+            locations: points.iter().map(|p| p.location).collect(),
+            values,
+            derivatives: points.iter().map(|p| p.derivative).collect(),
+        }
+    }
+
+    pub fn eval(&self, coord: f64) -> f64 {
+        let (locs, vals, ders) = (&self.locations, &self.values, &self.derivatives);
+        let n = locs.len();
+        if coord <= locs[0] {
+            return vals[0] + ders[0] * (coord - locs[0]);
+        }
+        if coord >= locs[n - 1] {
+            return vals[n - 1] + ders[n - 1] * (coord - locs[n - 1]);
+        }
+        let mut i = 0;
+        while coord >= locs[i + 1] {
+            i += 1;
+        }
+        let (l0, l1) = (locs[i], locs[i + 1]);
+        let (k0, k1) = (vals[i], vals[i + 1]);
+        let span = l1 - l0;
+        let t = (coord - l0) / span;
+        let m0 = ders[i] * span;
+        let m1 = ders[i + 1] * span;
+        let t2 = t * t;
+        let t3 = t2 * t;
+        (2.0 * t3 - 3.0 * t2 + 1.0) * k0
+            + (t3 - 2.0 * t2 + t) * m0
+            + (-2.0 * t3 + 3.0 * t2) * k1
+            + (t3 - t2) * m1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +187,28 @@ mod tests {
         };
         // Single point => returns that point's value, evaluated at the coord.
         assert_eq!(outer.eval(1.0), 100.0);
+    }
+
+    #[test]
+    fn flat_spline_matches_boxed_bit_exact() {
+        let s = Spline::Curve {
+            points: vec![
+                Spline::point(-1.0, Spline::constant(-0.9), 0.0),
+                Spline::point(-0.2, Spline::constant(-0.3), 0.5),
+                Spline::point(0.0, Spline::constant(0.02), 0.6),
+                Spline::point(0.6, Spline::constant(0.9), 1.0),
+                Spline::point(1.2, Spline::constant(1.8), 0.5),
+            ],
+        };
+        let f = FlatSpline::from_spline(&s);
+        // Dense sweep past both ends, across every segment, and exactly on knots.
+        let mut c = -2.0;
+        while c <= 2.0 {
+            assert_eq!(f.eval(c), s.eval(c), "mismatch at coord {c}");
+            c += 0.001953125; // 2^-9: exact in f64, no drift
+        }
+        for knot in [-1.0, -0.2, 0.0, 0.6, 1.2] {
+            assert_eq!(f.eval(knot), s.eval(knot));
+        }
     }
 }
