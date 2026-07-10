@@ -2,9 +2,11 @@
 //! jaggedness -> depth -> final_density. Numbers here are hand-tuned, not
 //! ported from Tectonic (see the design spec).
 
-use crate::density::{DensityFn, NoiseSet};
+use crate::density::NoiseSet;
+#[cfg(test)]
+use crate::density::DensityFn;
 use crate::noise::OctaveNoise;
-use crate::spline::Spline;
+use crate::spline::{FlatSpline, Spline};
 
 pub const SEA_LEVEL: f64 = 64.0;
 
@@ -36,56 +38,102 @@ const RAMP_TO_Y: f64 = 320.0;
 const RAMP_FROM_V: f64 = 64.0;
 const RAMP_TO_V: f64 = -320.0;
 
+// Noise xz scales (used by both the graph builders and the fused path).
+const XZ_SCALE_CONTINENTS: f64 = 0.13;
+const XZ_SCALE_EROSION: f64 = 0.25;
+const XZ_SCALE_RIDGES: f64 = 0.5;
+
+// Graph-tree builders below (`continentalness`/`erosion`/`ridges` through
+// `final_density_graph`) are the test oracle only: `TerrainPipeline::column`/
+// `final_density` no longer walk the `DensityFn` tree at runtime (see the
+// fused evaluation in `impl TerrainPipeline`), so these are `#[cfg(test)]`
+// and exist to keep `fused_column_matches_density_graphs_bit_exact` (and
+// `column_profile_matches_graph_bit_exact`) honest. They also stay as the
+// spec for future graph features (caves, continent/island `RangeChoice` —
+// see the roadmap note on `DensityFn::Min`/`Max`/`RangeChoice` in density.rs).
+#[cfg(test)]
 fn continentalness() -> DensityFn {
-    DensityFn::Noise { idx: N_CONTINENTS, xz_scale: 0.13 }
+    DensityFn::Noise { idx: N_CONTINENTS, xz_scale: XZ_SCALE_CONTINENTS }
 }
+#[cfg(test)]
 fn erosion() -> DensityFn {
-    DensityFn::Noise { idx: N_EROSION, xz_scale: 0.25 }
+    DensityFn::Noise { idx: N_EROSION, xz_scale: XZ_SCALE_EROSION }
 }
+#[cfg(test)]
 fn ridges() -> DensityFn {
-    DensityFn::Noise { idx: N_RIDGES, xz_scale: 0.5 }
+    DensityFn::Noise { idx: N_RIDGES, xz_scale: XZ_SCALE_RIDGES }
 }
 
-/// abs(continentalness) pushed through a rising curve, minus the ocean bias.
-/// Negative over most of the map (ocean); positive where |continents| is large.
-fn raw_continents() -> DensityFn {
-    let s = Spline::Curve {
+fn continents_curve_spline() -> Spline {
+    Spline::Curve {
         points: vec![
             Spline::point(0.0, Spline::constant(0.0), 0.0),
             Spline::point(0.4, Spline::constant(0.6), 1.0),
             Spline::point(1.0, Spline::constant(1.2), 0.0),
         ],
-    };
+    }
+}
+
+fn erosion_mod_spline() -> Spline {
+    Spline::Curve {
+        points: vec![
+            Spline::point(-1.0, Spline::constant(1.0), 0.0),
+            Spline::point(0.2, Spline::constant(0.5), 0.0),
+            Spline::point(1.0, Spline::constant(0.15), 0.0),
+        ],
+    }
+}
+
+fn offset_base_spline() -> Spline {
+    Spline::Curve {
+        points: vec![
+            Spline::point(-1.0, Spline::constant(-0.9), 0.0),
+            Spline::point(-0.2, Spline::constant(-0.3), 0.5),
+            Spline::point(0.0, Spline::constant(0.02), 0.6),
+            Spline::point(0.6, Spline::constant(0.9), 1.0),
+            Spline::point(1.2, Spline::constant(1.8), 0.5),
+        ],
+    }
+}
+
+fn factor_spline() -> Spline {
+    Spline::Curve {
+        points: vec![
+            Spline::point(-1.0, Spline::constant(0.6), 0.0),
+            Spline::point(0.0, Spline::constant(1.2), 0.0),
+            Spline::point(1.0, Spline::constant(3.0), 0.0),
+        ],
+    }
+}
+
+fn jaggedness_gate_spline() -> Spline {
+    Spline::Curve {
+        points: vec![
+            Spline::point(0.0, Spline::constant(0.0), 0.0),
+            Spline::point(1.0, Spline::constant(0.6), 0.0),
+        ],
+    }
+}
+
+/// abs(continentalness) pushed through a rising curve, minus the ocean bias.
+/// Negative over most of the map (ocean); positive where |continents| is large.
+#[cfg(test)]
+fn raw_continents() -> DensityFn {
     DensityFn::add(
         DensityFn::Const(OCEAN_OFFSET),
-        DensityFn::spline_of(DensityFn::abs(continentalness()), s),
+        DensityFn::spline_of(DensityFn::abs(continentalness()), continents_curve_spline()),
     )
 }
 
 /// Surface height offset (in offset units) as a spline on raw_continents,
 /// its inland high end pulled down by erosion (flat plains vs mountains).
+#[cfg(test)]
 fn offset() -> DensityFn {
-    let erosion_mod = Spline::Curve {
-        points: vec![
-            Spline::point(-1.0, Spline::constant(1.0), 0.0), // low erosion -> tall
-            Spline::point(0.2, Spline::constant(0.5), 0.0),
-            Spline::point(1.0, Spline::constant(0.15), 0.0), // high erosion -> flat
-        ],
-    };
-    let base = Spline::Curve {
-        points: vec![
-            Spline::point(-1.0, Spline::constant(-0.9), 0.0), // deep ocean
-            Spline::point(-0.2, Spline::constant(-0.3), 0.5), // shelf
-            Spline::point(0.0, Spline::constant(0.02), 0.6),  // coast ~ sea level
-            Spline::point(0.6, Spline::constant(0.9), 1.0),   // inland
-            Spline::point(1.2, Spline::constant(1.8), 0.5),   // highland
-        ],
-    };
     // offset = base(raw) * erosion_mod(erosion), clamped.
     DensityFn::clamp(
         DensityFn::mul(
-            DensityFn::spline_of(raw_continents(), base),
-            DensityFn::spline_of(erosion(), erosion_mod),
+            DensityFn::spline_of(raw_continents(), offset_base_spline()),
+            DensityFn::spline_of(erosion(), erosion_mod_spline()),
         ),
         MIN_OFFSET,
         MAX_OFFSET,
@@ -93,27 +141,16 @@ fn offset() -> DensityFn {
 }
 
 /// Vertical stretch factor (always positive): tall in low-erosion inland.
+#[cfg(test)]
 fn factor() -> DensityFn {
-    let s = Spline::Curve {
-        points: vec![
-            Spline::point(-1.0, Spline::constant(0.6), 0.0),
-            Spline::point(0.0, Spline::constant(1.2), 0.0),
-            Spline::point(1.0, Spline::constant(3.0), 0.0),
-        ],
-    };
-    DensityFn::spline_of(offset(), s)
+    DensityFn::spline_of(offset(), factor_spline())
 }
 
 /// Jaggedness: a ridges-driven bump, nonzero mainly at high offset.
+#[cfg(test)]
 fn jaggedness() -> DensityFn {
-    let gate = Spline::Curve {
-        points: vec![
-            Spline::point(0.0, Spline::constant(0.0), 0.0),
-            Spline::point(1.0, Spline::constant(0.6), 0.0),
-        ],
-    };
     DensityFn::mul(
-        DensityFn::spline_of(offset(), gate),
+        DensityFn::spline_of(offset(), jaggedness_gate_spline()),
         DensityFn::abs(ridges()),
     )
 }
@@ -122,6 +159,7 @@ fn jaggedness() -> DensityFn {
 /// `surface_height = SEA_LEVEL + offset*HEIGHT_SCALE` (meters); the value is
 /// positive below the surface, negative above. `neg_y` is a wide linear ramp
 /// carrying `-y` across the whole world band.
+#[cfg(test)]
 fn final_density_graph() -> DensityFn {
     let neg_y = DensityFn::YGradient {
         from_y: RAMP_FROM_Y,
@@ -142,47 +180,66 @@ fn final_density_graph() -> DensityFn {
     )
 }
 
+/// Noise construction shared by `TerrainPipeline::new` and the oracle test.
+/// Per-noise sub-seeds derived from the world seed; amplitudes are our own
+/// (long-wavelength continents, medium erosion, short ridges).
+fn pipeline_noises(seed: u64) -> NoiseSet {
+    NoiseSet(vec![
+        OctaveNoise::new(seed ^ 0x00C0, -10, vec![1.75, 1.0, 2.0, 3.0, 2.0, 2.0, 1.0]),
+        OctaveNoise::new(seed ^ 0x00E0, -10, vec![2.0, 1.75, 1.5, 1.5, 1.3, 1.0]),
+        OctaveNoise::new(seed ^ 0x00D0, -8, vec![1.0, 2.0, 1.0]),
+    ])
+}
+
 pub struct TerrainPipeline {
     noises: NoiseSet,
-    graph: DensityFn,
-    offset_g: DensityFn,
-    factor_g: DensityFn,
-    jaggedness_g: DensityFn,
+    continents_curve: FlatSpline,
+    offset_base: FlatSpline,
+    erosion_mod: FlatSpline,
+    factor_curve: FlatSpline,
+    jaggedness_gate: FlatSpline,
 }
 
 impl TerrainPipeline {
     pub fn new(seed: u64) -> Self {
-        // Per-noise sub-seeds derived from the world seed; amplitudes are our
-        // own (long-wavelength continents, medium erosion, short ridges).
-        let noises = NoiseSet(vec![
-            OctaveNoise::new(seed ^ 0x00C0, -10, vec![1.75, 1.0, 2.0, 3.0, 2.0, 2.0, 1.0]),
-            OctaveNoise::new(seed ^ 0x00E0, -10, vec![2.0, 1.75, 1.5, 1.5, 1.3, 1.0]),
-            OctaveNoise::new(seed ^ 0x00D0, -8, vec![1.0, 2.0, 1.0]),
-        ]);
         Self {
-            noises,
-            graph: final_density_graph(),
-            offset_g: offset(),
-            factor_g: factor(),
-            jaggedness_g: jaggedness(),
+            noises: pipeline_noises(seed),
+            continents_curve: FlatSpline::from_spline(&continents_curve_spline()),
+            offset_base: FlatSpline::from_spline(&offset_base_spline()),
+            erosion_mod: FlatSpline::from_spline(&erosion_mod_spline()),
+            factor_curve: FlatSpline::from_spline(&factor_spline()),
+            jaggedness_gate: FlatSpline::from_spline(&jaggedness_gate_spline()),
         }
     }
 
     pub fn final_density(&self, x: f64, y: f64, z: f64) -> f64 {
-        self.graph
-            .eval(x + SAMPLE_OFFSET_X_M, y, z + SAMPLE_OFFSET_Z_M, &self.noises)
+        // ColumnProfile::density_at reproduces final_density_graph bit-for-bit
+        // (see `column_profile_matches_graph_bit_exact`), so the 3D entry point
+        // is just the 2D profile plus the cheap y arithmetic.
+        self.column(x, z).density_at(y)
     }
 
-    /// Precompute the 2D profile at (x, z). The sub-graphs ignore `y`, so any y
-    /// (here 0.0) yields the same result.
+    /// Fused evaluation of the offset/factor/jaggedness graphs: each noise is
+    /// sampled ONCE (the graphs share the whole `offset` subtree, which the
+    /// tree-walk evaluator recomputed three times). Every f64 op below mirrors
+    /// the graph's op order exactly — guarded bit-for-bit by
+    /// `fused_column_matches_density_graphs_bit_exact`.
     pub fn column(&self, x: f64, z: f64) -> ColumnProfile {
         let (x, z) = (x + SAMPLE_OFFSET_X_M, z + SAMPLE_OFFSET_Z_M);
-        let offset_val = self.offset_g.eval(x, 0.0, z, &self.noises);
-        ColumnProfile {
-            offset_h: offset_val * HEIGHT_SCALE,
-            factor: self.factor_g.eval(x, 0.0, z, &self.noises),
-            jaggedness: self.jaggedness_g.eval(x, 0.0, z, &self.noises),
-        }
+        let n = &self.noises.0;
+        let cont = n[N_CONTINENTS].sample2(x * XZ_SCALE_CONTINENTS, z * XZ_SCALE_CONTINENTS);
+        let ero = n[N_EROSION].sample2(x * XZ_SCALE_EROSION, z * XZ_SCALE_EROSION);
+        let ridge = n[N_RIDGES].sample2(x * XZ_SCALE_RIDGES, z * XZ_SCALE_RIDGES);
+
+        // raw_continents = OCEAN_OFFSET + curve(|continents|)   (Add(Const, SplineOf))
+        let raw = OCEAN_OFFSET + self.continents_curve.eval(cont.abs());
+        // offset = clamp(base(raw) * erosion_mod(erosion))
+        let offset = (self.offset_base.eval(raw) * self.erosion_mod.eval(ero))
+            .clamp(MIN_OFFSET, MAX_OFFSET);
+        let factor = self.factor_curve.eval(offset);
+        let jaggedness = self.jaggedness_gate.eval(offset) * ridge.abs();
+
+        ColumnProfile { offset_h: offset * HEIGHT_SCALE, factor, jaggedness }
     }
 }
 
@@ -263,6 +320,29 @@ mod tests {
                         p.final_density(x, y, z),
                         "profile/graph mismatch at ({x}, {y}, {z})"
                     );
+                }
+            }
+        }
+    }
+
+    fn worldgen_test_seed() -> u64 { 0x00D5_C0DE_8D78 } // test helper, next to the test
+
+    #[test]
+    fn fused_column_matches_density_graphs_bit_exact() {
+        let p = TerrainPipeline::new(worldgen_test_seed());
+        let noises = pipeline_noises(worldgen_test_seed());
+        let (graph, offset_g, factor_g, jaggedness_g) =
+            (final_density_graph(), offset(), factor(), jaggedness());
+        for i in 0..64 {
+            for j in 0..64 {
+                let (x, z) = (i as f64 * 7.3 - 200.0, j as f64 * 11.1 - 150.0);
+                let (sx, sz) = (x + SAMPLE_OFFSET_X_M, z + SAMPLE_OFFSET_Z_M);
+                let prof = p.column(x, z);
+                assert_eq!(prof.offset_h, offset_g.eval(sx, 0.0, sz, &noises) * HEIGHT_SCALE);
+                assert_eq!(prof.factor, factor_g.eval(sx, 0.0, sz, &noises));
+                assert_eq!(prof.jaggedness, jaggedness_g.eval(sx, 0.0, sz, &noises));
+                for y in [-64.0, 0.0, 63.5, 64.5, 200.0, 320.0] {
+                    assert_eq!(p.final_density(x, y, z), graph.eval(sx, y, sz, &noises));
                 }
             }
         }

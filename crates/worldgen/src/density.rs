@@ -7,6 +7,16 @@ use crate::spline::Spline;
 /// owns the index assignment (see `pipeline.rs`).
 pub struct NoiseSet(pub Vec<OctaveNoise>);
 
+// The tree-walk evaluator below is now the pipeline's test oracle only:
+// `TerrainPipeline::column`/`final_density` (crates/worldgen/src/pipeline.rs)
+// fuse the graph into flat FlatSpline arithmetic at runtime instead of
+// walking `DensityFn`, so outside `#[cfg(test)]` nothing constructs most
+// variants or calls most of `impl DensityFn` below anymore. Kept (not
+// deleted) because it's still the spec `fused_column_matches_density_graphs_
+// bit_exact` checks the fused path against, and per the `Min`/`Max`/
+// `RangeChoice` note just below, the vocabulary future graph features
+// (caves, continent/island split) will build on. allow-dead accordingly.
+#[allow(dead_code)]
 pub enum DensityFn {
     Const(f64),
     /// 2D noise `idx`, sampled at `(x, z) * xz_scale` (meters).
@@ -66,6 +76,10 @@ impl Clone for DensityFn {
     }
 }
 
+// See the "tree-walk evaluator" note on the enum above: outside `#[cfg(test)]`
+// this impl block is exercised only by the pipeline's test oracle and this
+// module's own unit tests.
+#[allow(dead_code)]
 impl DensityFn {
     pub fn add(a: DensityFn, b: DensityFn) -> DensityFn { DensityFn::Add(Box::new(a), Box::new(b)) }
     pub fn mul(a: DensityFn, b: DensityFn) -> DensityFn { DensityFn::Mul(Box::new(a), Box::new(b)) }

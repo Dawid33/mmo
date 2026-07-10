@@ -25,6 +25,11 @@ impl Spline {
         Point { location, value: Box::new(value), derivative }
     }
 
+    // Boxed-recursive eval: the runtime path uses `FlatSpline::eval` instead
+    // (see pipeline.rs's fused `column()`); this stays as the oracle
+    // `Spline::eval`/`FlatSpline::eval` bit-exactness tests compare against,
+    // and for `DensityFn::SplineOf` in the (now test-only) density graph.
+    #[allow(dead_code)]
     pub fn eval(&self, coord: f64) -> f64 {
         let points = match self {
             Spline::Const(v) => return *v,
@@ -72,15 +77,12 @@ impl Spline {
 /// `Spline::Curve` flattened to parallel arrays for the common case where
 /// every control-point value is `Const`. Arithmetic is copied verbatim from
 /// `Spline::eval` so results are bit-identical.
-// Consumed by the pipeline's fused column() (next task); allow-dead until then.
-#[allow(dead_code)]
 pub struct FlatSpline {
     locations: Box<[f64]>,
     values: Box<[f64]>,
     derivatives: Box<[f64]>,
 }
 
-#[allow(dead_code)]
 impl FlatSpline {
     /// Panics if any control-point value is not `Spline::Const` — the v1
     /// pipeline never nests curves; revisit if a nested spline ever lands.
