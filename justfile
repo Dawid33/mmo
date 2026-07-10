@@ -302,15 +302,20 @@ profile-server:
 
 # Run the client with the Tracy frame profiler compiled in (bevy `trace_tracy`,
 # opt-in via the client's `tracy` feature — plain builds never compile the
-# agent). Uses the `profiling` cargo profile (release + debug info) so hot
-# loops aren't distorted. Connect a protocol-matching Tracy GUI while it runs
-# (tracy-client-sys 0.28 bundles Tracy v0.13.1); run the server separately, e.g.
-# `just server` or `just server-release`. Native only — the `tracy` feature
-# must not be enabled on wasm builds.
+# agent), with a plain server alongside (the client hard-panics if nothing
+# answers on :6466 within the QUIC handshake timeout). Client uses the
+# `profiling` cargo profile (release + debug info) so hot loops aren't
+# distorted. Connect a protocol-matching Tracy GUI while it runs
+# (tracy-client-sys 0.28 bundles Tracy v0.13.1). Native only — the `tracy`
+# feature must not be enabled on wasm builds.
 tracy-client:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    {{cargo}} build --bin server
+    RUST_BACKTRACE=1 {{cargo}} run --bin server &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     RUST_BACKTRACE=1 {{cargo}} run --bin client --profile profiling --features tracy
 
 # Record a perf profile of the client and open hotspot (see scripts/perf.sh).
