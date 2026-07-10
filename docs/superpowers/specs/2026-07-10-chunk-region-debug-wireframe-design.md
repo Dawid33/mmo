@@ -1,4 +1,8 @@
-# Chunk/Region Debug Wireframe (F4) — Design
+# Chunk/Region Debug Wireframe (F5) — Design
+
+> **Key change from the brainstorm:** the toggle is **F5**, not F4 — F4 was
+> already bound to the cave-culling toggle
+> (`meshing::visibility::toggle_culling`).
 
 **Date:** 2026-07-10
 **Status:** Approved for planning
@@ -6,7 +10,7 @@
 ## Purpose
 
 A Minecraft-F3+G-style debug view that draws chunk and region boundaries as
-colored wireframes in the client, toggled with a single key (F4). It answers
+colored wireframes in the client, toggled with a single key (F5). It answers
 "where am I relative to the chunk grid / region tiling" while playtesting and
 debugging streaming, meshing, and handoff behavior.
 
@@ -25,11 +29,11 @@ debugging streaming, meshing, and handoff behavior.
 - New module `crates/client/src/renderer/grid_debug.rs`, registered in
   `SimBridgePlugin` (`renderer/mod.rs`) alongside `collider_debug`.
 - Resource `GridDebug { enabled: bool }`, default off.
-- System `toggle_grid_debug`: flips `enabled` on `KeyCode::F4`
+- System `toggle_grid_debug`: flips `enabled` on `KeyCode::F5`
   `just_pressed`, reading `Res<ButtonInput<KeyCode>>` directly (client-only
   concern; never forwarded to the sim input path), mirroring
   `hud::toggle_debug`.
-- Fully independent of F3: F4 works with the HUD off; F3 does not affect the
+- Fully independent of F3: F5 works with the HUD off; F3 does not affect the
   grid view.
 
 ## What is drawn
@@ -117,7 +121,7 @@ rebuilt on chunk-boundary crossings — explicitly out of scope now.
   - `region_wall_lines` line count matches the interval math and spans
     `camera_y ± REGION_WALL_HALF_HEIGHT`; region origin honors
     `world_offset()` including negative region coords.
-- Headless toggle test with `MinimalPlugins`: press F4 → `enabled` flips;
+- Headless toggle test with `MinimalPlugins`: press F5 → `enabled` flips;
   press again → flips back. Mirror the existing HUD toggle test's key-edge
   handling (`reset_all()` vs `clear()` caveat documented in `hud.rs`).
 - The gizmo-emitting draw system is a thin shell over tested helpers and is
