@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
-use game::lod::{block_scale_cells, downsample_cells};
+use game::lod::{block_scale_cells, downsample_cells, ring_factor_in};
 use game::{Chunk, ChunkCoords, RegionCoords};
 use worldgen::material::Materials;
 
@@ -55,39 +55,14 @@ pub const WORLDGEN_TASKS_MAX_IN_FLIGHT: usize = 2;
 /// oscillation.
 pub const RETIREMENT_MAX_FRAMES: u32 = 600;
 
-/// Ring assignment with the production table and band. See `ring_factor_in`,
-/// which the systems call directly (the table is a resource field so tests
-/// can shrink it); this fixed-constant face exists for the exhaustive unit
-/// tests over the real table.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Ring assignment with the production table and band. See `ring_factor_in`
+/// (moved to `game::lod`), which the systems call directly (the table is a
+/// resource field so tests can shrink it); this fixed-constant face pins the
+/// old client-only 2-entry table and is currently unused — kept until Task 11
+/// deletes it along with `WORLDGEN_RINGS`.
+#[allow(dead_code)]
 pub fn ring_factor(dist: i32, current: Option<u32>) -> Option<u32> {
     ring_factor_in(WORLDGEN_RINGS, RING_STICKY_BAND, dist, current)
-}
-
-/// Pure ring assignment: the factor a region at Chebyshev distance `dist`
-/// should render at, given the factor it currently renders at (if any).
-///
-/// Fresh assignment picks the first table entry whose bound covers `dist`
-/// (`None` past the last bound). A current assignment is sticky: its ring's
-/// distance interval, widened by `band` on both edges, keeps claiming the
-/// region — both promote (moved inward) and demote (moved outward) need the
-/// distance to clear the boundary by more than `band`. The innermost ring has
-/// no inner edge: the near/far exclusion sets bound it, not distance.
-pub fn ring_factor_in(
-    table: &[(i32, u32)],
-    band: i32,
-    dist: i32,
-    current: Option<u32>,
-) -> Option<u32> {
-    if let Some(cur) = current {
-        if let Some(i) = table.iter().position(|&(_, f)| f == cur) {
-            let held_from = if i == 0 { i32::MIN } else { table[i - 1].0 + 1 - band };
-            if dist >= held_from && dist <= table[i].0 + band {
-                return Some(cur);
-            }
-        }
-    }
-    table.iter().find(|&&(bound, _)| dist <= bound).map(|&(_, f)| f)
 }
 
 /// One region's worldgen-ring state: the factor it should render at, and the
@@ -524,57 +499,6 @@ mod tests {
     use super::super::meshing::lod::{LodChunk, LodVoxelData};
     use super::super::meshing::queue::{self, MeshBudgets};
     use super::super::meshing::queue::tests::{pipeline_app, wait_until};
-
-    // --- (a) ring assignment math, exhaustive over 0..=10 ------------------
-
-    #[test]
-    fn ring_factor_fresh_assignment_over_all_distances() {
-        for d in 0..=10 {
-            let expect = match d {
-                0..=4 => Some(4),
-                5..=8 => Some(16),
-                _ => None,
-            };
-            assert_eq!(ring_factor(d, None), expect, "dist {d}, no current");
-        }
-    }
-
-    #[test]
-    fn ring_factor_sticky_band_holds_factor_4_one_past_its_bound() {
-        // Factor 4's ring is d <= 4; band 1 keeps it through d = 5. The
-        // innermost ring has no inner edge (the near/far exclusion bounds it),
-        // so small distances always keep it.
-        for d in 0..=10 {
-            let expect = match d {
-                0..=5 => Some(4),
-                6..=8 => Some(16),
-                _ => None,
-            };
-            assert_eq!(ring_factor(d, Some(4)), expect, "dist {d}, current 4");
-        }
-    }
-
-    #[test]
-    fn ring_factor_sticky_band_holds_factor_16_both_directions() {
-        // Factor 16's ring is 5..=8; band 1 keeps it in 4..=9. Below that it
-        // promotes to factor 4, beyond it the region leaves entirely.
-        for d in 0..=10 {
-            let expect = match d {
-                0..=3 => Some(4),
-                4..=9 => Some(16),
-                _ => None,
-            };
-            assert_eq!(ring_factor(d, Some(16)), expect, "dist {d}, current 16");
-        }
-    }
-
-    #[test]
-    fn ring_factor_unknown_current_falls_back_to_fresh() {
-        // A current factor not in the table (table shrank between sessions,
-        // say) gets no stickiness — plain fresh assignment.
-        assert_eq!(ring_factor(3, Some(99)), Some(4));
-        assert_eq!(ring_factor(9, Some(99)), None);
-    }
 
     // --- app harness --------------------------------------------------------
 

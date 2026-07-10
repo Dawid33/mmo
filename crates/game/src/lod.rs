@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{derive_voxels, BlockId, Chunk, ChunkCoords, Voxel, CHUNK_VOXEL_COUNT};
+use crate::{derive_voxels, BlockId, Chunk, ChunkCoords, RegionCoords, Voxel, CHUNK_VOXEL_COUNT, REGION_SIZE};
 
 /// Merge up to 2×2×2 source 32³ grids (index `sx + 2*sy + 4*sz`; `None` = all-air) into one 32³ coarse grid at 2× the cell size.
 /// Each coarse cell (x,y,z) draws from source grid `(x/16, y/16, z/16)`'s 2×2×2 voxel block at `((x%16)*2, (y%16)*2, (z%16)*2)`.
@@ -236,6 +236,100 @@ pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
     bands.into_iter().map(|(group, grid)| LodCell { group, grid }).collect()
 }
 
+/// Every streamable LOD factor. The server validates request factors
+/// against this list; `downsample_chunks` supports exactly these.
+pub const LOD_FACTORS: [u32; 5] = [2, 4, 16, 64, 256];
+
+/// Ring table: `(chebyshev_bound, lod_factor)` with ascending bounds. A
+/// region at Chebyshev distance `d` from the viewer region renders at the
+/// factor of the first entry with `d <= bound`; None past the last bound.
+pub const LOD_RING_TABLE: &[(i32, u32)] = &[(2, 2), (4, 4), (8, 16), (16, 64), (32, 256)];
+
+/// Hysteresis band for `ring_factor_in` (see that function).
+pub const LOD_STICKY_BAND: i32 = 1;
+
+/// Tile edge length in regions for a factor's `LodKey`: factors whose 32³
+/// grid fits inside one region key per-region; 64/256 key per-tile so one
+/// key is exactly one grid footprint (32 * factor == span * REGION_SIZE).
+pub fn tile_regions(factor: u32) -> i32 {
+    ((32 * factor) as i32 / REGION_SIZE as i32).max(1)
+}
+
+/// Names one streamable LOD unit: a region (factor <= 16) or a tile of
+/// `tile_regions(factor)`² regions (64/256). `coords` are region coords
+/// divided (euclid) by the tile span, so they're plain region coords for
+/// the small factors.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+    serde::Serialize, serde::Deserialize,
+)]
+pub struct LodKey {
+    pub factor: u32,
+    pub coords: [i32; 2],
+}
+
+impl LodKey {
+    pub fn for_region(factor: u32, rc: RegionCoords) -> Self {
+        let span = tile_regions(factor);
+        Self { factor, coords: [rc.x.div_euclid(span), rc.z.div_euclid(span)] }
+    }
+
+    /// Tile edge in regions (1 for factors <= 16).
+    pub fn region_span(&self) -> i32 {
+        tile_regions(self.factor)
+    }
+
+    /// The minimum-corner region this key covers.
+    pub fn origin_region(&self) -> RegionCoords {
+        let span = self.region_span();
+        RegionCoords::new(self.coords[0] * span, self.coords[1] * span)
+    }
+
+    /// Every region this key covers (span² of them).
+    pub fn regions(&self) -> Vec<RegionCoords> {
+        let o = self.origin_region();
+        let span = self.region_span();
+        let mut out = Vec::with_capacity((span * span) as usize);
+        for dx in 0..span {
+            for dz in 0..span {
+                out.push(RegionCoords::new(o.x + dx, o.z + dz));
+            }
+        }
+        out
+    }
+
+    /// World-space origin of this key's render root.
+    pub fn world_offset(&self) -> [f32; 3] {
+        self.origin_region().world_offset()
+    }
+}
+
+/// Pure ring assignment: the factor a region at Chebyshev distance `dist`
+/// should render at, given the factor it currently renders at (if any).
+///
+/// Fresh assignment picks the first table entry whose bound covers `dist`
+/// (`None` past the last bound). A current assignment is sticky: its ring's
+/// distance interval, widened by `band` on both edges, keeps claiming the
+/// region — both promote (moved inward) and demote (moved outward) need the
+/// distance to clear the boundary by more than `band`. The innermost ring has
+/// no inner edge: the near/far exclusion sets bound it, not distance.
+pub fn ring_factor_in(
+    table: &[(i32, u32)],
+    band: i32,
+    dist: i32,
+    current: Option<u32>,
+) -> Option<u32> {
+    if let Some(cur) = current {
+        if let Some(i) = table.iter().position(|&(_, f)| f == cur) {
+            let held_from = if i == 0 { i32::MIN } else { table[i - 1].0 + 1 - band };
+            if dist >= held_from && dist <= table[i].0 + band {
+                return Some(cur);
+            }
+        }
+    }
+    table.iter().find(|&&(bound, _)| dist <= bound).map(|&(_, f)| f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +508,118 @@ mod tests {
         let tile11 = cell([1, 0, 1]);
         assert_eq!(tile11.grid[2 + 32 * 32 * 8].block, BlockId(6), "cell (2, 0, 8)");
         assert_eq!(tile11.grid.iter().filter(|v| !v.is_air()).count(), 1);
+    }
+
+    #[test]
+    fn lod_key_region_to_tile_mapping_handles_negatives() {
+        use crate::RegionCoords;
+        // Factors <= 16: key coords ARE the region coords.
+        assert_eq!(LodKey::for_region(4, RegionCoords::new(-3, 7)).coords, [-3, 7]);
+        assert_eq!(tile_regions(2), 1);
+        assert_eq!(tile_regions(16), 1);
+        // Factor 64: 2x2-region tiles, div_euclid so negatives round toward -inf.
+        assert_eq!(tile_regions(64), 2);
+        assert_eq!(LodKey::for_region(64, RegionCoords::new(-1, 3)).coords, [-1, 1]);
+        // Factor 256: 8x8-region tiles.
+        assert_eq!(tile_regions(256), 8);
+        assert_eq!(LodKey::for_region(256, RegionCoords::new(-9, 15)).coords, [-2, 1]);
+    }
+
+    #[test]
+    fn lod_key_regions_and_world_offset() {
+        use crate::{RegionCoords, REGION_SIZE};
+        let key = LodKey { factor: 64, coords: [-1, 1] };
+        assert_eq!(key.origin_region(), RegionCoords::new(-2, 2));
+        let regions = key.regions();
+        assert_eq!(regions.len(), 4);
+        assert!(regions.contains(&RegionCoords::new(-2, 2)));
+        assert!(regions.contains(&RegionCoords::new(-1, 3)));
+        assert_eq!(key.world_offset(), [-2.0 * REGION_SIZE, 0.0, 2.0 * REGION_SIZE]);
+        // A tile grid spans exactly 32 cells * factor world units = span regions.
+        assert_eq!(32 * 64, 2 * REGION_SIZE as i32);
+        assert_eq!(32 * 256, 8 * REGION_SIZE as i32);
+        // Region-keyed factor: world offset == the region's own offset.
+        let rk = LodKey::for_region(4, RegionCoords::new(3, -2));
+        assert_eq!(rk.world_offset(), RegionCoords::new(3, -2).world_offset());
+    }
+
+    #[test]
+    fn ring_table_is_ascending_and_factors_valid() {
+        let mut prev = 0;
+        for &(bound, factor) in LOD_RING_TABLE {
+            assert!(bound > prev, "bounds ascend");
+            prev = bound;
+            assert!(LOD_FACTORS.contains(&factor));
+        }
+    }
+
+    #[test]
+    fn ring_factor_fresh_assignment_over_all_distances() {
+        for d in 0..=35 {
+            let expect = match d {
+                0..=2 => Some(2),
+                3..=4 => Some(4),
+                5..=8 => Some(16),
+                9..=16 => Some(64),
+                17..=32 => Some(256),
+                _ => None,
+            };
+            assert_eq!(
+                ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, d, None),
+                expect,
+                "dist {d}, no current"
+            );
+        }
+    }
+
+    #[test]
+    fn ring_factor_sticky_band_holds_factor_4_one_past_its_bound() {
+        // Factor 4's fresh band is d in 3..=4; band 1 widens the held
+        // interval to 2..=5 on both edges. Unlike the old 2-entry client
+        // table, factor 4 is no longer the innermost ring here (factor 2 is),
+        // so its lower edge is a real boundary too, not `i32::MIN`.
+        for d in 0..=10 {
+            let expect = match d {
+                0..=1 => Some(2),
+                2..=5 => Some(4),
+                6..=8 => Some(16),
+                9..=10 => Some(64),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, d, Some(4)),
+                expect,
+                "dist {d}, current 4"
+            );
+        }
+    }
+
+    #[test]
+    fn ring_factor_sticky_band_holds_factor_16_both_directions() {
+        // Factor 16's fresh band is 5..=8; band 1 widens the held interval to
+        // 4..=9 (unchanged from the old table: its neighboring bounds, 4 and
+        // 8, are the same in both tables).
+        for d in 0..=10 {
+            let expect = match d {
+                0..=2 => Some(2),
+                3 => Some(4),
+                4..=9 => Some(16),
+                10 => Some(64),
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, d, Some(16)),
+                expect,
+                "dist {d}, current 16"
+            );
+        }
+    }
+
+    #[test]
+    fn ring_factor_unknown_current_falls_back_to_fresh() {
+        // A current factor not in the table (table shrank between sessions,
+        // say) gets no stickiness — plain fresh assignment.
+        assert_eq!(ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, 3, Some(99)), Some(4));
+        assert_eq!(ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, 33, Some(99)), None);
     }
 }
