@@ -35,7 +35,10 @@ bevy = { version = "0.18", default-features = false, features = [
   "bevy_render",
   "bevy_core_pipeline",
   "bevy_pbr",
+  # bevy_gizmos alone is only the API/storage layer; without _render the
+  # Gizmos calls compile and run but nothing ever draws (Bevy 0.18 split).
   "bevy_gizmos",
+  "bevy_gizmos_render",
   "bevy_asset",
   "bevy_log",
   "bevy_ui",
