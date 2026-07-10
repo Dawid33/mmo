@@ -307,16 +307,20 @@ profile-server:
 # `profiling` cargo profile (release + debug info) so hot loops aren't
 # distorted. Connect a protocol-matching Tracy GUI while it runs
 # (tracy-client-sys 0.28 bundles Tracy v0.13.1). Native only — the `tracy`
-# feature must not be enabled on wasm builds.
-tracy-client:
+# feature must not be enabled on wasm builds. Pass `detailed` (i.e.
+# `just tracy-client detailed`) to also enable bevy's `detailed_trace` —
+# extra-verbose ECS/render-internal spans; much noisier and slower.
+tracy-client detailed="":
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    feat="tracy"
+    if [ -n "{{detailed}}" ]; then feat="tracy-detailed"; fi
     {{cargo}} build --bin server
     RUST_BACKTRACE=1 {{cargo}} run --bin server &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-    RUST_BACKTRACE=1 {{cargo}} run --bin client --profile profiling --features tracy
+    RUST_BACKTRACE=1 {{cargo}} run --bin client --profile profiling --features "$feat"
 
 # Record a perf profile of the client and open hotspot (see scripts/perf.sh).
 # Uses the `profiling` cargo profile (release + debug info): dev's opt-level 1

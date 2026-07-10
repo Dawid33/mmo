@@ -38,6 +38,10 @@ pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
 # `pyroscope` this forwards a bevy feature rather than gating a target-table
 # dep, so do NOT enable it on wasm builds — tracy-client has no wasm32 port.
 tracy = ["bevy/trace_tracy"]
+# Tracy with bevy's extra-verbose internal spans (ECS/render hot paths).
+# MUCH noisier captures and real overhead — reach for it when the normal
+# tracy view isn't fine-grained enough. `just tracy-client detailed`.
+tracy-detailed = ["tracy", "bevy/detailed_trace"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Adds to (does not replace) the base [dependencies] bevy features — target tables merge additively.
