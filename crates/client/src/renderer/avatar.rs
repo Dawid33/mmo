@@ -24,10 +24,10 @@ pub fn attach_avatars(
                     .0
                     .get_or_insert_with(|| {
                         (
-                            // Total height 28.8 units = 1.8 m at 1/16 m per
-                            // unit: mirrors the sim capsule capsule_y(8.0, 6.4)
+                            // Total height 21.6 units = 1.35 m at 1/16 m per
+                            // unit: mirrors the sim capsule capsule_y(4.4, 6.4)
                             // in create_player_safe.
-                            meshes.add(Capsule3d::new(6.4, 16.0)),
+                            meshes.add(Capsule3d::new(6.4, 8.8)),
                             materials.add(StandardMaterial {
                                 base_color: Color::srgb(0.8, 0.3, 0.3),
                                 ..Default::default()

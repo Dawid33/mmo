@@ -17,6 +17,7 @@ pub mod convert;
 pub(crate) mod input;
 mod interpolate;
 pub mod meshing;
+mod skybox;
 pub(crate) mod ui_bridge;
 pub(crate) mod ui_input;
 mod voxel_material;
@@ -83,7 +84,7 @@ impl Plugin for SimBridgePlugin {
                     .chain(),
             )
             .add_plugins(meshing::visibility::cull_plugin)
-            .add_systems(Startup, (setup_scene, hud::setup_hud))
+            .add_systems(Startup, (setup_scene, hud::setup_hud, skybox::setup_skybox))
             .add_systems(
                 Update,
                 (
@@ -110,6 +111,7 @@ impl Plugin for SimBridgePlugin {
                         .chain(),
                     interpolate::interpolate_transforms,
                     avatar::attach_avatars,
+                    skybox::attach_skybox,
                     hud::toggle_debug,
                     meshing::visibility::toggle_culling,
                     collider_debug::draw_collider_wireframes.after(hud::toggle_debug),

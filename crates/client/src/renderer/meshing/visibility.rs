@@ -191,14 +191,26 @@ pub fn cull_chunks(
         hi[axis] += 1;
     }
     let translation = camera_tf.translation();
-    let mut camera_cell = [
+    let raw_cell = [
         (translation.x / 32.0).floor() as i32,
         (translation.y / 32.0).floor() as i32,
         (translation.z / 32.0).floor() as i32,
     ];
+    let mut camera_cell = raw_cell;
     for axis in 0..3 {
         camera_cell[axis] = camera_cell[axis].clamp(lo[axis], hi[axis]);
     }
+    // A clamped start means the real camera is outside the domain (e.g.
+    // flying above the band). Sight lines to on-screen chunks then travel
+    // through out-of-domain space, so from the displaced start every BFS
+    // path would have to route through cells the frustum gate rejects
+    // (below/behind the view when looking near-horizontal or up) and the
+    // whole grid ends Hidden. Drop the gate for such frames: the domain is
+    // small, and Bevy's per-entity frustum culling still skips off-screen
+    // meshes. With the camera inside the domain the gate is safe — the
+    // staircase of cells along any in-view sight line is itself a valid
+    // BFS path and each of its cells passes the (conservative) sphere test.
+    let frustum = if camera_cell == raw_cell { frustum } else { None };
     let in_domain = |cell: [i32; 3]| {
         (0..3).all(|axis| {
             cell[axis] >= lo[axis]
@@ -578,6 +590,10 @@ mod tests {
             .id();
         let chunk =
             spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        // Anchor at cell (-2,0,0) so the grid bbox contains the camera cell:
+        // a camera outside the domain disables the frustum gate entirely
+        // (see `cull_chunks`), and this test is about the gate's timing.
+        spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(-64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
         assert!(
             wait_until(&mut app, |app| vis(app, chunk) == Visibility::Hidden),
             "premise: a chunk fully behind the camera ends Hidden"
@@ -589,6 +605,56 @@ mod tests {
             vis(&app, chunk),
             Visibility::Inherited,
             "a chunk inside the new frustum must show the same frame it enters the FOV"
+        );
+    }
+
+    /// Regression: flying above the loaded band must not hide on-screen
+    /// ground. The camera cell clamps into the grid's inflated bbox, so the
+    /// BFS starts displaced far below the real camera; with the frustum gate
+    /// applied to every step, all exits from the clamped start sit below the
+    /// bottom frustum plane when looking near-horizontal, every path dies,
+    /// and the whole live grid ends Hidden while the LOD rings behind it
+    /// still render — ground vanishes exactly when looking up or flying up.
+    #[test]
+    fn flying_above_the_band_keeps_onscreen_ground_visible() {
+        let mut app = pipeline_app(MeshBudgets::default());
+        app.add_plugins((bevy::transform::TransformPlugin, bevy::camera::CameraProjectionPlugin));
+        // Ground band: half-solid chunks along +X at cell y = 0.
+        let mut ground = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        for z in 0..32 {
+            for y in 0..16 {
+                for x in 0..32 {
+                    ground[x + 32 * y + 32 * 32 * z] = Voxel::new(BlockId(1));
+                }
+            }
+        }
+        let mut chunks = Vec::new();
+        for cx in 0..=20 {
+            chunks.push(spawn_chunk(
+                &mut app,
+                Vec3::ZERO,
+                Vec3::new(cx as f32 * 32.0, 0.0, 128.0),
+                ground.clone(),
+            ));
+        }
+        // Camera at cell (4, 6, 4) — 6 cells above the band top (cell 0) —
+        // pitched 10° below horizontal along +X. With a 45° vertical FOV the
+        // ground from ~x=417 outward (cell 13+) is inside the frustum.
+        let pitch = 10f32.to_radians();
+        app.world_mut().spawn((
+            Camera3d::default(),
+            Camera { is_active: true, ..Default::default() },
+            Projection::default(),
+            Transform::from_translation(Vec3::new(144.0, 200.0, 144.0))
+                .looking_to(Vec3::new(pitch.cos(), -pitch.sin(), 0.0), Vec3::Y),
+        ));
+        assert!(wait_until_settled(&mut app), "pipeline must settle");
+        app.update();
+        let target = chunks[15]; // cell (15, 0, 4): on screen, depression ~27.6° < 32.5°
+        assert_eq!(
+            vis(&app, target),
+            Visibility::Inherited,
+            "ground inside the frustum must stay visible when the camera flies above the band"
         );
     }
 

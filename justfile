@@ -58,6 +58,32 @@ run:
     trap 'kill "$client_pid" 2>/dev/null || true' EXIT
     RUST_BACKTRACE=1 {{cargo}} run --bin server
 
+# Release-mode variants: production performance. Undo verification defaults to
+# Delta in every build; set HASH_MODE=full (or off) on any recipe to override,
+# e.g. `HASH_MODE=full just run` when chasing a footprint/capture gap. Use
+# perf-client / perf-server when you also want a profile out of the run.
+
+# Run the QUIC server in release mode.
+server-release:
+    RUST_BACKTRACE=1 {{cargo}} run --release --bin server
+
+# Run the Bevy client in release mode.
+client-release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    RUST_BACKTRACE=1 {{cargo}} run --release --bin client
+
+# Run server + client together in release mode.
+run-release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    RUST_BACKTRACE=1 {{cargo}} run --release --bin client &
+    client_pid=$!
+    trap 'kill "$client_pid" 2>/dev/null || true' EXIT
+    RUST_BACKTRACE=1 {{cargo}} run --release --bin server
+
 # Interactive play-test: build, run server + client, and tee both to
 # target/play-test/*.log so the run can be reviewed for errors afterwards.
 # Close the client window (or Ctrl-C) to stop both; on exit it prints a
@@ -275,8 +301,11 @@ profile-server:
     PYROSCOPE=1 RUST_BACKTRACE=1 {{cargo}} run --bin server --features pyroscope
 
 # Record a perf profile of the client and open hotspot (see scripts/perf.sh).
+# Uses the `profiling` cargo profile (release + debug info): dev's opt-level 1
+# distorts hot loops ~2.5x, so debug captures don't represent production.
 perf:
-    sudo perf script record -F9997 --call-graph dwarf,16384 -e cpu-clock ./target/debug/client
+    {{cargo}} build --bin client --profile profiling
+    sudo perf script record -F9997 --call-graph dwarf,16384 -e cpu-clock ./target/profiling/client
     sudo chmod +r perf.data
     hotspot
 
@@ -289,29 +318,33 @@ perf:
 # symbols still resolve from the ELF symtab, which is all folded stacks need.
 
 # Profile the client while the server runs; close the client window to stop.
+# Both sides build with the `profiling` profile (release + debug info): dev's
+# opt-level 1 distorts hot loops ~2.5x, so debug captures don't represent
+# production costs.
 perf-client:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
-    {{cargo}} build --bin client
-    RUST_BACKTRACE=1 {{cargo}} run --bin server &
+    {{cargo}} build --bin client --bin server --profile profiling
+    RUST_BACKTRACE=1 ./target/profiling/server &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-    sudo -E perf record {{perf_flags}} ./target/debug/client
+    sudo -E perf record {{perf_flags}} ./target/profiling/client
     sudo chmod +r perf.data
     perf script --no-inline | inferno-collapse-perf > perf-folded-client.txt
     echo "wrote perf-folded-client.txt — paste it into an LLM to find hot paths"
 
 # Profile the server while the client runs; Ctrl-C the server to stop recording.
+# Same `profiling` profile rationale as perf-client.
 perf-server:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
-    {{cargo}} build --bin server
-    RUST_BACKTRACE=1 {{cargo}} run --bin client &
+    {{cargo}} build --bin client --bin server --profile profiling
+    RUST_BACKTRACE=1 ./target/profiling/client &
     client_pid=$!
     trap 'kill "$client_pid" 2>/dev/null || true' EXIT
-    sudo -E perf record {{perf_flags}} ./target/debug/server
+    sudo -E perf record {{perf_flags}} ./target/profiling/server
     sudo chmod +r perf.data
     perf script --no-inline | inferno-collapse-perf > perf-folded-server.txt
     echo "wrote perf-folded-server.txt — paste it into an LLM to find hot paths"

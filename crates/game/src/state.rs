@@ -276,6 +276,58 @@ fn collider_attach_digest(
     h.finalize()
 }
 
+/// crc32 of the exact footprint of one in-place body mutation through
+/// `RigidBodySet::get_mut`: the body's value (pose, kinematic targets,
+/// wake/sleep state and change flags all live inside it) and whether it was
+/// already on the modified list (`get_mut`'s tracking push is conditional
+/// on that).
+fn body_write_digest(body: Option<&rapier3d::prelude::RigidBody>, was_modified: bool) -> u32 {
+    use std::hash::Hash;
+    let mut h = crc32fast::Hasher::new();
+    body.hash(&mut h);
+    was_modified.hash(&mut h);
+    h.finalize()
+}
+
+impl Undo<rapier3d::prelude::RigidBodySet> {
+    /// Mutate one existing body in place, undo-safely, with a footprint-sized
+    /// log entry (no whole-`RigidBodySet` snapshot — `change()` here used to
+    /// clone AND Full-hash every body in the set, per write, re-paid on every
+    /// rollback/replay of the logging tick). The registered closure is the
+    /// exact LIFO inverse of everything a `get_mut` + setter write touches:
+    /// the body's own value (restored from the pre-write clone) and the set's
+    /// modified-list membership iff this op's tracking push added it — the
+    /// same restore_raw/pop_modified recipe as `attach_collider_safe`. Delta
+    /// digests exactly that footprint; Full mode still whole-field-hashes at
+    /// scope creation and verifies it at rollback, which is what proves the
+    /// inverse misses nothing (tests/harnesses).
+    pub fn mutate_body_safe(
+        &mut self,
+        handle: RigidBodyHandle,
+        f: impl FnOnce(&mut rapier3d::prelude::RigidBody),
+    ) {
+        let pre_body = self
+            .get(handle)
+            .expect("mutate_body_safe: body missing")
+            .clone();
+        let was_modified = self.is_marked_modified(handle);
+        let mut scope = self.undo_scope_digest();
+        let pre = if scope.wants_delta_digest() {
+            body_write_digest(Some(&pre_body), was_modified)
+        } else {
+            0
+        };
+        f(scope.get_mut(handle).expect("mutate_body_safe: body missing"));
+        scope.register(pre, move |bodies, _| {
+            bodies.restore_raw(handle, pre_body);
+            if !was_modified {
+                bodies.pop_modified(handle);
+            }
+            body_write_digest(bodies.get(handle), bodies.is_marked_modified(handle))
+        });
+    }
+}
+
 impl<T> Undo<Component<T>>
 where
     T: 'static
@@ -367,7 +419,7 @@ where
 // Player spawn / capsule tunables (voxel units; 1 unit = 1/16 m). Exposed as
 // named constants so they can be tuned without hunting through the spawn math.
 /// Half-height of the player's capsule collider.
-const PLAYER_CAPSULE_HALF_HEIGHT: f32 = 8.0;
+const PLAYER_CAPSULE_HALF_HEIGHT: f32 = 4.4;
 /// Radius of the player's capsule collider.
 const PLAYER_CAPSULE_RADIUS: f32 = 6.4;
 /// Vertical gap left between the capsule bottom and the terrain surface at spawn.
@@ -683,7 +735,8 @@ impl Rollback {
             },
         );
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
-        // 28.8 units = 1.8 m at 1 unit = 1/16 m (~29 voxels, VS proportions).
+        // 21.6 units = 1.35 m at 1 unit = 1/16 m (1.35 blocks tall — shorter
+        // side of the ~70%-of-a-2-block-ceiling human proportion).
         self.attach_capsule_collider_safe(e, handle, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS);
         let cam = Camera::new(handle);
         self.data.send(GameDataUpdate::new(
@@ -783,13 +836,15 @@ impl Rollback {
         self.data.ecs.entities.remove(key);
     }
 
-    /// Teleport a body, undo-safely. change(): whole-RigidBodySet snapshot —
-    /// set_position also wakes the body / marks it modified (hashed state a
-    /// surgical closure can't restore); same rationale as camera.rs.
+    /// Teleport a body, undo-safely. Footprint-sized entry: set_position also
+    /// wakes the body / marks it modified, but all of that lives inside the
+    /// body slot + modified-mark that `mutate_body_safe` restores.
     pub fn set_body_pose_safe(&mut self, key: EntityKey, pose: IsometryReal) {
         let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { return };
-        let bodies = self.data.physics.bodies.change();
-        bodies.get_mut(handle).unwrap().set_position(pose, true);
+        self.data
+            .physics
+            .bodies
+            .mutate_body_safe(handle, |b| b.set_position(pose, true));
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
             GameDataUpdateKind::SetEntityPosition(key, pose),
@@ -1019,7 +1074,10 @@ impl Rollback {
                 })
             })
             // Non-capsule shapes don't transfer yet; the player default.
-            .unwrap_or(crate::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 })
+            .unwrap_or(crate::ColliderSpec::CapsuleY {
+                half_height: PLAYER_CAPSULE_HALF_HEIGHT,
+                radius: PLAYER_CAPSULE_RADIUS,
+            })
     }
 
     /// Assemble the bundle, then remove the entity — all undo-tracked.

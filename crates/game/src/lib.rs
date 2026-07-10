@@ -122,6 +122,31 @@ pub trait Controller: Send {
     fn on_tick<'a>(&mut self, _t: &mut Undo<GameData>) {}
 }
 
+/// Set the undo hash-verification mode from the `HASH_MODE` env var
+/// (`off` | `delta` | `full`, case-insensitive), defaulting to Delta — the
+/// production mode — when unset (including wasm, which has no env). Client
+/// and server startup call this; tests and harnesses instead pin the mode
+/// explicitly (the process-global default stays Full for them). Run with
+/// `HASH_MODE=full` when chasing a suspected footprint/capture gap: Full
+/// whole-field-hashes every entry and catches state an undo closure missed,
+/// which Delta's declared-footprint digests structurally cannot see.
+/// Panics on an unrecognized value — a typo silently downgrading
+/// verification is worse than a startup crash.
+pub fn set_hash_mode_from_env() {
+    let mode = match std::env::var("HASH_MODE") {
+        Ok(v) => match v.to_ascii_lowercase().as_str() {
+            "off" => HashMode::Off,
+            "delta" => HashMode::Delta,
+            "full" => HashMode::Full,
+            other => panic!("HASH_MODE must be off|delta|full, got {other:?}"),
+        },
+        Err(_) => HashMode::Delta,
+    };
+    // println, not log: this runs before either binary initializes its logger.
+    println!("undo hash verification mode: {mode:?}");
+    set_hash_mode(mode);
+}
+
 pub struct World {
     pub regions: BTreeMap<RegionId, Region>,
 }

@@ -249,15 +249,13 @@ impl Controller for CameraController {
                     None => linvel,
                 };
                 if corrected != Vector3::zeros() {
-                    // change(): whole-set snapshot. Surgical field restores are
-                    // NOT exact here — set_next_kinematic_* also wakes the body
-                    // and marks it modified (hashed state the closure can't
-                    // restore); the snapshot covers all of it.
-                    let bodies = data.physics.bodies.change();
-                    bodies
-                        .get_mut(handle)
-                        .unwrap()
-                        .set_next_kinematic_translation(t + corrected);
+                    // Footprint-sized entry: set_next_kinematic_* also wakes
+                    // the body and marks it modified, but all of that lives in
+                    // the body slot + modified-mark that mutate_body_safe
+                    // restores — no whole-set snapshot.
+                    data.physics.bodies.mutate_body_safe(handle, move |b| {
+                        b.set_next_kinematic_translation(t + corrected)
+                    });
                 }
             }
 
@@ -278,15 +276,13 @@ impl Controller for CameraController {
                     c.yaw = yaw0;
                     c.pitch = pitch0;
                 });
-                // Rebuild the body's full-look rotation. change(): same
-                // whole-set snapshot rationale as the translation site above
-                // (set_next_kinematic_rotation wakes + marks the body).
+                // Rebuild the body's full-look rotation. Same footprint-sized
+                // entry as the translation site above (set_next_kinematic_
+                // rotation wakes + marks the body — all inside the footprint).
                 let r = crate::look_quat(new_yaw, new_pitch);
-                let bodies = data.physics.bodies.change();
-                bodies
-                    .get_mut(handle)
-                    .unwrap()
-                    .set_next_kinematic_rotation(r);
+                data.physics.bodies.mutate_body_safe(handle, move |b| {
+                    b.set_next_kinematic_rotation(r)
+                });
             }
         }
     }

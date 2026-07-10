@@ -147,6 +147,67 @@ fn physics_ticks_roll_back_bit_exact_under_delta() {
     );
 }
 
+/// Camera-controller body writes (kinematic translation + rotation targets)
+/// and teleports must invert bit-exact under Delta — these are the surgical
+/// body-write entries that replaced the whole-RigidBodySet `change()`
+/// snapshots. Under Delta each rollback recomputes the footprint digest
+/// (body slot + modified-mark) and panics on mismatch inside
+/// `rollback_last_event`, so this test both drives and verifies the path.
+#[test]
+fn camera_body_writes_roll_back_bit_exact_under_delta() {
+    let _mode = with_mode(HashMode::Delta);
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = game::Region::new(
+        Rollback::new(None),
+        Some(send),
+        game::RegionCoords::new(0, 0),
+        None,
+    );
+    region
+        .handle_event(game::GameEventKind::CreateClient(7))
+        .unwrap();
+    // Enable FPS cam (KeyE + a tick), then baseline.
+    region
+        .handle_event(game::GameEventKind::PlayerInput(
+            7,
+            game::InputEvent::Key { key: game::Key::KeyE, pressed: true },
+        ))
+        .unwrap();
+    region.handle_event(game::GameEventKind::Tick).unwrap();
+    let h1 = game::state_hash(region.data());
+
+    // Movement + look in the same ticks: both camera-controller write sites.
+    let events = [
+        game::GameEventKind::PlayerInput(
+            7,
+            game::InputEvent::Key { key: game::Key::KeyW, pressed: true },
+        ),
+        game::GameEventKind::PlayerInput(
+            7,
+            game::InputEvent::MouseMotion { dx: 40.0, dy: -25.0 },
+        ),
+        game::GameEventKind::Tick,
+        game::GameEventKind::PlayerInput(
+            7,
+            game::InputEvent::MouseMotion { dx: -15.0, dy: 30.0 },
+        ),
+        game::GameEventKind::Tick,
+    ];
+    let mut n = 0;
+    for ev in events {
+        region.handle_event(ev).unwrap();
+        n += 1;
+    }
+    for _ in 0..n {
+        region.rollback_last_event();
+    }
+    assert_eq!(
+        h1,
+        game::state_hash(region.data()),
+        "camera body writes must invert bit-exact under Delta"
+    );
+}
+
 /// Perf evidence (not a CI gate — run with
 /// `cargo test -p game --test hash_mode -- --ignored --nocapture perf_evidence`).
 /// Times 100 physics ticks + full rollback under each mode. Expectation:

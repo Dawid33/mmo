@@ -234,8 +234,8 @@ fn descending_player_stops_on_terrain() {
     let e = *data.player_entites.get(&0).unwrap();
     let handle = *data.ecs.rigidbody.get(e);
     let y = data.physics.bodies.get(handle).unwrap().translation().y;
-    // Floor top is y=8; capsule half-extent 14.4 -> blocked rest ~22.4+.
+    // Floor top is y=8; capsule half-extent 10.8 -> blocked rest ~18.8+.
     // Uncorrected descent from y=26 at 8 units/tick would reach y << 0.
-    assert!(y > game::parry::math::Real::from(21.0), "player tunneled through the floor: y = {y}");
-    assert!(y < game::parry::math::Real::from(23.5), "player never moved down or never got blocked: y = {y}");
+    assert!(y > game::parry::math::Real::from(17.3), "player tunneled through the floor: y = {y}");
+    assert!(y < game::parry::math::Real::from(20.3), "player never moved down or never got blocked: y = {y}");
 }

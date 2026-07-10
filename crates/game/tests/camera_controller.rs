@@ -14,8 +14,8 @@ fn crc(region: &Region) -> u32 {
 ///
 /// Built via `Region::new` with a live throwaway render-event sender rather
 /// than `Region::from_chunks` (which wires a `None` sender): rollback of a
-/// tier-2 undo entry (our camera `register()`, and the pre-existing
-/// `physics.bodies.change()` sites) unwraps that sender internally, and a
+/// tier-2 undo entry (our camera `register()`, and the surgical
+/// `mutate_body_safe` body-write sites) unwraps that sender internally, and a
 /// `None` client panics there — `Region::from_chunks` is for server regions,
 /// which only ever `forget()` transactions, never `rollback()` them. Same
 /// workaround as `handoff_scan.rs`'s `extracting_tick_holds_the_hash_bar`.
@@ -64,6 +64,31 @@ fn mouse_tick_accumulates_look_and_rebuilds_body_rotation() {
     // No roll: camera-right stays horizontal.
     let right = body_rot.transform_vector(&Vector3::<Real>::x());
     assert!(right.y.into_inner().abs() < 1e-5, "body look must not roll");
+}
+
+/// Movement path: KeyW-held ticks write `set_next_kinematic_translation`
+/// through the surgical body-write entry. Runs under the default Full mode,
+/// so each rollback whole-field-hashes the RigidBodySet — proving the
+/// footprint inverse (body slot + modified-mark) misses nothing.
+#[test]
+fn movement_ticks_roll_back_bit_exact() {
+    let (mut region, _e, _recv) = region_fps_ready();
+    let mut hashes = vec![crc(&region)];
+    let events = [
+        GameEventKind::PlayerInput(7, InputEvent::Key { key: Key::KeyW, pressed: true }),
+        GameEventKind::Tick,
+        GameEventKind::Tick,
+        GameEventKind::PlayerInput(7, InputEvent::Key { key: Key::KeyW, pressed: false }),
+        GameEventKind::Tick,
+    ];
+    for ev in events {
+        region.handle_event(ev).unwrap();
+        hashes.push(crc(&region));
+    }
+    for expected in hashes.iter().rev().skip(1) {
+        region.rollback_last_event();
+        assert_eq!(*expected, crc(&region), "rollback hash mismatch");
+    }
 }
 
 #[test]
