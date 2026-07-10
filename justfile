@@ -300,6 +300,19 @@ profile-server:
     trap 'kill "$client_pid" 2>/dev/null || true' EXIT
     PYROSCOPE=1 RUST_BACKTRACE=1 {{cargo}} run --bin server --features pyroscope
 
+# Run the client with the Tracy frame profiler compiled in (bevy `trace_tracy`,
+# opt-in via the client's `tracy` feature — plain builds never compile the
+# agent). Uses the `profiling` cargo profile (release + debug info) so hot
+# loops aren't distorted. Connect a protocol-matching Tracy GUI while it runs
+# (tracy-client-sys 0.28 bundles Tracy v0.13.1); run the server separately, e.g.
+# `just server` or `just server-release`. Native only — the `tracy` feature
+# must not be enabled on wasm builds.
+tracy-client:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    RUST_BACKTRACE=1 {{cargo}} run --bin client --profile profiling --features tracy
+
 # Record a perf profile of the client and open hotspot (see scripts/perf.sh).
 # Uses the `profiling` cargo profile (release + debug info): dev's opt-level 1
 # distorts hot loops ~2.5x, so debug captures don't represent production.
