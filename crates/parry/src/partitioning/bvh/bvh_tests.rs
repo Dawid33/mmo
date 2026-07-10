@@ -121,3 +121,60 @@ fn bvh_build_and_removal() {
         }
     }
 }
+
+/// Pins the properties of `BvhNodeVec`'s Hash impl so the bulk byte-slice
+/// implementation (see `bvh_tree.rs`) cannot regress them: content-equal
+/// trees hash equal (including the packed changed/pending flag words), and
+/// content changes are reflected. Uses std's DefaultHasher (fixed-key
+/// SipHash) — only intra-process equality matters here.
+mod node_vec_hash {
+    use super::*;
+    use crate::partitioning::Bvh;
+    use core::hash::{Hash, Hasher};
+
+    fn h<T: Hash>(t: &T) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        t.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn tree(n: usize) -> Bvh {
+        let mut t = Bvh::new();
+        for i in 0..n {
+            // Spaced 2 apart with half-extent 1: adjacent AABBs touch.
+            t.insert(make_test_aabb(i * 2), i as u32);
+        }
+        t
+    }
+
+    #[test]
+    fn equal_trees_hash_equal() {
+        assert_eq!(h(&tree(16)), h(&tree(16)));
+    }
+
+    #[test]
+    fn clone_hashes_equal() {
+        let t = tree(16);
+        assert_eq!(h(&t), h(&t.clone()));
+    }
+
+    #[test]
+    fn leaf_content_change_changes_hash() {
+        let mut a = tree(16);
+        let before = h(&a);
+        // Move one leaf far away: content must be reflected in the hash.
+        a.insert(make_test_aabb(100), 3);
+        assert_ne!(before, h(&a));
+    }
+
+    #[test]
+    fn identical_op_sequences_hash_equal() {
+        // Redundant re-inserts flip pending/changed flag bits; identical op
+        // sequences must land on identical hashed state (flags included).
+        let mut a = tree(16);
+        let mut b = tree(16);
+        a.insert(make_test_aabb(6), 3);
+        b.insert(make_test_aabb(6), 3);
+        assert_eq!(h(&a), h(&b));
+    }
+}

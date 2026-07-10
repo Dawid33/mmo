@@ -1414,7 +1414,8 @@ impl BvhNodeIndex {
     }
 }
 
-#[derive(Clone, Debug, Default, Hash)]
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(not(all(feature = "dim3", feature = "f32")), derive(Hash))]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
@@ -1422,6 +1423,44 @@ impl BvhNodeIndex {
     archive(check_bytes)
 )]
 pub(crate) struct BvhNodeVec(pub(crate) Vec<BvhNodeWide>);
+
+// SAFETY / DETERMINISM invariants for the bulk hash below, const-asserted:
+// - BvhNode is repr(C), align(16): mins (Point<Real> = 3×f32 via
+//   repr(transparent) OrderedFloat) + children u32 + maxs (3×f32) + data u32
+//   = 32 bytes, no padding. BvhNodeWide is repr(C), align(64) = exactly two
+//   BvhNodes = 64 bytes, no padding.
+// - Every field is always initialized (no MaybeUninit), so every byte is
+//   defined.
+// - Both shipping targets (x86-64, wasm32) are little-endian; the byte image
+//   of a node is therefore identical across machines for identical content.
+//   A big-endian port would need a per-field fallback here.
+// Hashing the raw bytes covers EXACTLY what the derived Hash covered (mins,
+// children, maxs, data — including the packed changed/pending flags) in one
+// Hasher::write instead of ~16 per-field calls per node. This is the hot
+// input of the rollback step-journal digests (`BroadSaved::digest` /
+// `BroadPhaseBvh::journal_digest` in the rapier fork) and of Full-mode state
+// hashing, both of which hash the whole tree.
+#[cfg(all(feature = "dim3", feature = "f32"))]
+const _: () = {
+    assert!(size_of::<BvhNode>() == 32);
+    assert!(size_of::<BvhNodeWide>() == 64);
+};
+
+#[cfg(all(feature = "dim3", feature = "f32"))]
+impl core::hash::Hash for BvhNodeVec {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        // Length first so [A, B] and [A ++ B] byte streams cannot collide;
+        // mirrors the derived Vec hash prefix.
+        state.write_usize(self.0.len());
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                self.0.as_ptr() as *const u8,
+                self.0.len() * size_of::<BvhNodeWide>(),
+            )
+        };
+        state.write(bytes);
+    }
+}
 
 impl Deref for BvhNodeVec {
     type Target = Vec<BvhNodeWide>;
