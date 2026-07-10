@@ -304,6 +304,43 @@ impl LodKey {
     }
 }
 
+/// Run-length encoding of one 32³ LOD grid in the standard layout order.
+/// Terrain grids are dominated by air/uniform-rock runs: ~64 KB raw
+/// typically packs to ~1 KB. Runs are capped at u16::MAX (< 32768 total
+/// cells, so any grid fits in <= CHUNK_VOXEL_COUNT runs).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PackedLodGrid(pub Vec<(u16, BlockId)>);
+
+impl PackedLodGrid {
+    pub fn encode(grid: &[Voxel]) -> Self {
+        debug_assert_eq!(grid.len(), CHUNK_VOXEL_COUNT);
+        let mut runs: Vec<(u16, BlockId)> = Vec::new();
+        for v in grid {
+            match runs.last_mut() {
+                Some((count, block)) if *block == v.block && *count < u16::MAX => *count += 1,
+                _ => runs.push((1, v.block)),
+            }
+        }
+        Self(runs)
+    }
+
+    /// None when the run total is not exactly one grid — wire data is
+    /// untrusted, so corrupt payloads drop instead of panicking.
+    pub fn decode(&self) -> Option<Vec<Voxel>> {
+        let total: usize = self.0.iter().map(|&(n, _)| n as usize).sum();
+        if total != CHUNK_VOXEL_COUNT {
+            return None;
+        }
+        let mut grid = Vec::with_capacity(CHUNK_VOXEL_COUNT);
+        for &(n, block) in &self.0 {
+            for _ in 0..n {
+                grid.push(Voxel::new(block));
+            }
+        }
+        Some(grid)
+    }
+}
+
 /// Pure ring assignment: the factor a region at Chebyshev distance `dist`
 /// should render at, given the factor it currently renders at (if any).
 ///
@@ -621,5 +658,36 @@ mod tests {
         // say) gets no stickiness — plain fresh assignment.
         assert_eq!(ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, 3, Some(99)), Some(4));
         assert_eq!(ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, 33, Some(99)), None);
+    }
+
+    #[test]
+    fn packed_grid_round_trips() {
+        // Mixed content incl. a lone voxel at the very end.
+        let mut grid = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        for i in 0..5000 {
+            grid[i] = Voxel::new(BlockId(1));
+        }
+        grid[9000] = Voxel::new(BlockId(7));
+        grid[CHUNK_VOXEL_COUNT - 1] = Voxel::new(BlockId(3));
+        let packed = PackedLodGrid::encode(&grid);
+        assert_eq!(packed.decode().expect("valid"), grid);
+        // All-air compresses to one run.
+        let air = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        assert_eq!(PackedLodGrid::encode(&air).0.len(), 1);
+        assert_eq!(PackedLodGrid::encode(&air).decode().unwrap(), air);
+        // Worst case: alternating ids still round-trips (u16 runs of 1).
+        let mut alt = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        for (i, v) in alt.iter_mut().enumerate() {
+            *v = Voxel::new(BlockId((i % 2) as u16));
+        }
+        assert_eq!(PackedLodGrid::encode(&alt).decode().unwrap(), alt);
+    }
+
+    #[test]
+    fn packed_grid_rejects_wrong_total() {
+        let short = PackedLodGrid(vec![(100, BlockId(1))]);
+        assert!(short.decode().is_none(), "runs must sum to CHUNK_VOXEL_COUNT");
+        let long = PackedLodGrid(vec![(u16::MAX, BlockId(0)), (u16::MAX, BlockId(0))]);
+        assert!(long.decode().is_none());
     }
 }
