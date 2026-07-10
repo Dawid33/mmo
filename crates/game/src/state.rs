@@ -256,6 +256,26 @@ fn body_slot_digest(
     h.finalize()
 }
 
+/// crc32 of the exact footprint of one `insert_with_parent`: the collider
+/// set's allocator state, the inserted collider's slot, the parent body's
+/// value (its collider list, mass properties and change flags all live
+/// inside it), and whether the parent was already on the modified list
+/// (insert_with_parent's tracking push is conditional on that).
+fn collider_attach_digest(
+    alloc: (Option<u32>, u32),
+    slot: Option<&rapier3d::prelude::Collider>,
+    parent: Option<&rapier3d::prelude::RigidBody>,
+    parent_was_modified: bool,
+) -> u32 {
+    use std::hash::Hash;
+    let mut h = crc32fast::Hasher::new();
+    alloc.hash(&mut h);
+    slot.hash(&mut h);
+    parent.hash(&mut h);
+    parent_was_modified.hash(&mut h);
+    h.finalize()
+}
+
 impl<T> Undo<Component<T>>
 where
     T: 'static
@@ -493,8 +513,8 @@ impl Rollback {
     /// Attach a voxel-grid collider to an entity's body. One cell per key;
     /// for voxel size `s`, cell g spans [g*s, (g+1)*s) in body-local space —
     /// scale 1.0 is the render mesh's voxel grid, scale `BLOCK_VOXELS` is
-    /// the block grid. Entity-generic. Undo restores the whole PhysicsState
-    /// snapshot — same rationale as attach_capsule_collider_safe.
+    /// the block grid. Entity-generic. Undo is the exact footprint inverse
+    /// (see attach_collider_safe) — no whole-PhysicsState snapshot.
     pub fn attach_voxels_collider_safe(
         &mut self,
         e: EntityKey,
@@ -505,14 +525,12 @@ impl Rollback {
         let collider = ColliderBuilder::voxels(Vector::repeat(voxel_size), coords)
             .user_data(e.data().as_ffi() as u128)
             .build();
-        let p = self.data.physics.snapshot_raw();
-        p.colliders.insert_with_parent(collider, body, p.bodies);
+        self.attach_collider_safe(body, collider);
     }
 
     /// Attach a capsule collider to an entity's body. Entity-generic: player
-    /// today, NPCs later. Undo restores the whole PhysicsState snapshot —
-    /// the vendored fork has no exact ColliderSet inverse, and
-    /// insert_with_parent also mutates the parent body's mass properties.
+    /// today, NPCs later. Undo is the exact footprint inverse (see
+    /// attach_collider_safe) — no whole-PhysicsState snapshot.
     pub fn attach_capsule_collider_safe(
         &mut self,
         e: EntityKey,
@@ -523,8 +541,65 @@ impl Rollback {
         let collider = ColliderBuilder::capsule_y(Real::from(half_height), Real::from(radius))
             .user_data(e.data().as_ffi() as u128)
             .build();
-        let p = self.data.physics.snapshot_raw();
-        p.colliders.insert_with_parent(collider, body, p.bodies);
+        self.attach_collider_safe(body, collider);
+    }
+
+    /// Attach `collider` to `body`, undo-safely, with a footprint-sized log
+    /// entry (no whole-PhysicsState snapshot — that used to clone AND
+    /// Full-hash the entire PhysicsState including the narrow-phase graphs,
+    /// re-paid on every rollback/replay of the logging tick). The registered
+    /// closure is the exact LIFO inverse of everything `insert_with_parent`
+    /// touches: collider arena slot + alloc state + modified-list entry
+    /// (ColliderSet::revert_insert), the parent body's value (collider list,
+    /// mass props, change flags — all inside the clone), and the parent's
+    /// modified-list membership iff this op's tracking push added it. Delta
+    /// digests exactly that footprint; Full mode still whole-field-hashes at
+    /// scope creation and verifies it at rollback, which is what proves the
+    /// inverse misses nothing (tests/harnesses).
+    fn attach_collider_safe(
+        &mut self,
+        body: RigidBodyHandle,
+        collider: rapier3d::prelude::Collider,
+    ) {
+        let pre_parent = self
+            .data
+            .physics
+            .bodies
+            .get(body)
+            .expect("attach_collider_safe: parent body missing")
+            .clone();
+        let parent_was_modified = self.data.physics.bodies.is_marked_modified(body);
+        let (prev_head, prev_len) = self.data.physics.colliders.alloc_state();
+
+        let mut scope = self.data.physics.undo_scope_digest();
+        let pre = if scope.wants_delta_digest() {
+            collider_attach_digest(
+                (prev_head, prev_len),
+                None, // slot vacant before the insert
+                Some(&pre_parent),
+                parent_was_modified,
+            )
+        } else {
+            0
+        };
+        let handle = {
+            let p = scope.raw_fields();
+            p.colliders.insert_with_parent(collider, body, p.bodies)
+        };
+        scope.register(pre, move |phys, _| {
+            let p = phys.raw_undo_parts();
+            p.colliders.revert_insert(handle, prev_head, prev_len);
+            p.bodies.restore_raw(body, pre_parent);
+            if !parent_was_modified {
+                p.bodies.pop_modified(body);
+            }
+            collider_attach_digest(
+                p.colliders.alloc_state(),
+                p.colliders.get(handle),
+                p.bodies.get(body),
+                p.bodies.is_marked_modified(body),
+            )
+        });
     }
 
     /// Highest solid voxel Y at region-local voxel column `(vx, vz)`, scanning
@@ -1157,6 +1232,59 @@ mod delta_digest_tests {
         r.new_transaction();
         r.ecs.camera.undo_digest(42, |_d, _s| 43);
         r.rollback();
+    }
+
+    #[test]
+    fn attach_collider_rolls_back_bit_exact() {
+        // Holds MODE_LOCK for both legs; the guard restores Full on drop.
+        let _m = delta_mode();
+        let (mut r, _recv) = rb();
+
+        // Setup (forgotten): an entity with a fixed body, inserted through
+        // the same surgical path build_kinematic_body_safe uses.
+        set_hash_mode(HashMode::Full);
+        r.new_transaction();
+        let e = r.ecs.create_entity_safe();
+        let body = {
+            let fixed = rapier3d::prelude::RigidBodyBuilder::fixed()
+                .user_data(e.data().as_ffi() as u128)
+                .build();
+            let (prev_head, prev_len) = r.data.physics.bodies.alloc_state();
+            let mut scope = r.data.physics.bodies.undo_scope_digest();
+            let handle = scope.insert(fixed);
+            scope.register(
+                body_slot_digest((prev_head, prev_len), None),
+                move |bodies, _| {
+                    bodies.revert_insert(handle, prev_head, prev_len);
+                    body_slot_digest(bodies.alloc_state(), bodies.get(handle))
+                },
+            );
+            handle
+        };
+        r.forget();
+
+        // Full leg: whole-field verification at rollback proves the surgical
+        // inverse misses no PhysicsState-wide state.
+        let before = crate::state_hash(&r);
+        r.new_transaction();
+        r.attach_capsule_collider_safe(e, body, 0.5, 0.25);
+        assert_ne!(before, crate::state_hash(&r), "attach must change state");
+        r.rollback();
+        assert_eq!(before, crate::state_hash(&r), "Full-mode attach must invert bit-exact");
+
+        // Delta leg (production mode): the footprint-digest path must verify
+        // and invert identically, for the voxels variant too.
+        set_hash_mode(HashMode::Delta);
+        let before = crate::state_hash(&r);
+        r.new_transaction();
+        r.attach_voxels_collider_safe(
+            e,
+            body,
+            &[parry3d::math::Point::new(0, 0, 0)],
+            Real::from(1.0),
+        );
+        r.rollback();
+        assert_eq!(before, crate::state_hash(&r), "Delta-mode attach must invert bit-exact");
     }
 
     #[test]
