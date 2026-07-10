@@ -44,6 +44,11 @@ pub struct GameInstanceManager {
     subscribed: std::collections::BTreeSet<RegionCoords>,
     /// Far (visual-only) regions we have requested and not released.
     far_subscribed: std::collections::BTreeSet<RegionCoords>,
+    /// Last ring-factor assignment per region (the stickiness `prev` for the
+    /// next `desired_lod` call).
+    lod_assigned: BTreeMap<RegionCoords, u32>,
+    /// LOD keys we have requested and not released.
+    lod_subscribed: std::collections::BTreeSet<game::lod::LodKey>,
     /// Events for subscribed regions whose snapshot hasn't arrived yet.
     pending_events: BTreeMap<RegionCoords, Vec<GameEvent>>,
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
@@ -183,6 +188,42 @@ fn desired_far(
     out
 }
 
+/// Ring assignment for every region in view: per-region factor via the
+/// shared `ring_factor_in` (sticky against `prev`), minus `excluded`
+/// (near-window — and, until Task 12, far-ring — members render
+/// authoritative state). Returns the region->factor map (the next `prev`)
+/// and the deduped key set to hold subscriptions for.
+pub fn desired_lod(
+    viewer: RegionCoords,
+    excluded: &std::collections::BTreeSet<RegionCoords>,
+    prev: &BTreeMap<RegionCoords, u32>,
+    table: &[(i32, u32)],
+    band: i32,
+) -> (BTreeMap<RegionCoords, u32>, std::collections::BTreeSet<game::lod::LodKey>) {
+    let radius = table.last().map_or(0, |&(bound, _)| bound) + band;
+    let mut assigned = BTreeMap::new();
+    let mut keys = std::collections::BTreeSet::new();
+    let mut candidates: std::collections::BTreeSet<RegionCoords> = prev.keys().copied().collect();
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            candidates.insert(RegionCoords::new(viewer.x + dx, viewer.z + dz));
+        }
+    }
+    for rc in candidates {
+        if excluded.contains(&rc) {
+            continue;
+        }
+        let dist = (rc.x - viewer.x).abs().max((rc.z - viewer.z).abs());
+        if let Some(factor) =
+            game::lod::ring_factor_in(table, band, dist, prev.get(&rc).copied())
+        {
+            assigned.insert(rc, factor);
+            keys.insert(game::lod::LodKey::for_region(factor, rc));
+        }
+    }
+    (assigned, keys)
+}
+
 impl GameInstanceManager {
     /// Create new GameInstanceManager
     ///
@@ -219,6 +260,8 @@ impl GameInstanceManager {
             home_region: None,
             subscribed: std::collections::BTreeSet::new(),
             far_subscribed: std::collections::BTreeSet::new(),
+            lod_assigned: BTreeMap::new(),
+            lod_subscribed: std::collections::BTreeSet::new(),
             pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
             last_hud_status: None,
@@ -313,6 +356,7 @@ impl GameInstanceManager {
                 self.apply_local_transfers();
                 self.update_window();
                 self.update_far_window();
+                self.update_lod_window();
                 self.project_ui();
                 self.emit_collider_debug_lines();
             }
@@ -681,6 +725,38 @@ impl GameInstanceManager {
             .send(ClientUpdateEvent::RemoveFarRegion(rc));
     }
 
+    /// Diff the desired LOD key set against current subscriptions. Runs
+    /// after update_far_window; until Task 12 removes the far ring, the
+    /// table skips factor 2 (`&LOD_RING_TABLE[1..]`) and far-ring regions
+    /// are excluded alongside the near window, so streamed LOD and the far
+    /// path never cover the same region.
+    fn update_lod_window(&mut self) {
+        let Some(center) = self.viewer_region() else { return };
+        let mut excluded = desired_window(center, self.home_region);
+        excluded.extend(self.far_subscribed.iter().copied());
+        let (assigned, desired) = desired_lod(
+            center,
+            &excluded,
+            &self.lod_assigned,
+            &game::lod::LOD_RING_TABLE[1..],
+            game::lod::LOD_STICKY_BAND,
+        );
+        self.lod_assigned = assigned;
+        if desired == self.lod_subscribed {
+            return;
+        }
+        for key in desired.difference(&self.lod_subscribed) {
+            self.server_game_send.send(ClientPacket::RequestLod(*key)).unwrap();
+        }
+        let stale: Vec<game::lod::LodKey> =
+            self.lod_subscribed.difference(&desired).copied().collect();
+        for key in stale {
+            self.server_game_send.send(ClientPacket::ReleaseLod(key)).unwrap();
+            let _ = self.client_event_send.send(ClientUpdateEvent::RemoveLod(key));
+        }
+        self.lod_subscribed = desired;
+    }
+
     /// Route one server-authoritative game event to the region it targets:
     /// reconcile if loaded, buffer if the snapshot is still in flight,
     /// drop if the region was released/never wanted.
@@ -841,7 +917,16 @@ impl GameInstanceManager {
                     .send(ClientUpdateEvent::NewFarRegion(id, snap))
                     .unwrap();
             }
-            game::ServerPacket::LodData(_, _) => {} // Task 7
+            game::ServerPacket::LodData(key, payload) => {
+                if !self.lod_subscribed.contains(&key) {
+                    // Raced a release: tell the server we really don't want it.
+                    let _ = self.server_game_send.send(ClientPacket::ReleaseLod(key));
+                    return Ok(());
+                }
+                let _ = self
+                    .client_event_send
+                    .send(ClientUpdateEvent::LodData(key, payload));
+            }
         }
         Ok(())
     }
@@ -2046,5 +2131,46 @@ mod manager_tests {
             ups.iter().any(|u| matches!(u, game::UiUpdate::SetCursorGrab(false))),
             "opening inventory releases the cursor, got {ups:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod lod_window_tests {
+    use super::*;
+    use game::lod::{LodKey, LOD_RING_TABLE, LOD_STICKY_BAND};
+    use game::RegionCoords;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn desired_lod_assigns_by_table_and_excludes() {
+        let viewer = RegionCoords::new(0, 0);
+        let mut excluded = BTreeSet::new();
+        excluded.insert(RegionCoords::new(0, 0)); // near window member
+        let (assigned, keys) =
+            desired_lod(viewer, &excluded, &BTreeMap::new(), LOD_RING_TABLE, 0);
+        assert!(!assigned.contains_key(&RegionCoords::new(0, 0)), "excluded");
+        assert_eq!(assigned[&RegionCoords::new(0, 1)], 2, "distance 1 -> factor 2");
+        assert_eq!(assigned[&RegionCoords::new(0, 4)], 4);
+        assert_eq!(assigned[&RegionCoords::new(0, 8)], 16);
+        assert_eq!(assigned[&RegionCoords::new(0, 16)], 64);
+        assert_eq!(assigned[&RegionCoords::new(0, 32)], 256);
+        assert!(!assigned.contains_key(&RegionCoords::new(0, 33)), "past radius");
+        // Region-keyed factors produce one key per region; tile factors dedup.
+        assert!(keys.contains(&LodKey::for_region(2, RegionCoords::new(0, 1))));
+        assert!(keys.contains(&LodKey::for_region(64, RegionCoords::new(0, 16))));
+        let f64_keys = keys.iter().filter(|k| k.factor == 64).count();
+        let f64_regions = assigned.values().filter(|&&f| f == 64).count();
+        assert!(f64_keys * 2 < f64_regions, "2x2 tiles dedup regions into fewer keys");
+    }
+
+    #[test]
+    fn desired_lod_is_sticky_across_a_boundary_step() {
+        let viewer = RegionCoords::new(0, 0);
+        let none = BTreeSet::new();
+        let (prev, _) = desired_lod(viewer, &none, &BTreeMap::new(), LOD_RING_TABLE, LOD_STICKY_BAND);
+        // Step the viewer +1x: region (-4, 0) is now distance 5 = bound 4 + band 1,
+        // held at factor 4 by stickiness even though fresh assignment says 16.
+        let (next, _) = desired_lod(RegionCoords::new(1, 0), &none, &prev, LOD_RING_TABLE, LOD_STICKY_BAND);
+        assert_eq!(next[&RegionCoords::new(-4, 0)], 4, "held by the sticky band");
     }
 }
