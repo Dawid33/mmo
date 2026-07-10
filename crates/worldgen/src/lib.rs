@@ -18,7 +18,7 @@ pub const WORLD_SEED: u64 = 0x00D5_C0DE_8D78;
 
 use game::{
     Block, BlockId, BlockIndex, ChiselData, Chunk, Column, ColumnCoords, RegionCoords, SubChunk,
-    BLOCK_VOXELS, CHUNK_BLOCKS, REGION_CHUNKS,
+    BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_VOXEL_COUNT, REGION_CHUNKS,
 };
 
 use crate::material::Materials;
@@ -38,10 +38,9 @@ fn block_center_m(b: i32) -> f64 {
     b as f64 + 0.5
 }
 
-/// Highest solid block Y in a 1 m column (world block coords), or `SCAN_BOTTOM - 1`
-/// if the whole column is air. Coarse per-block scan (design §4 step 1).
-fn surface_block_y(grid: &ProfileGrid, wx: i32, wz: i32) -> i32 {
-    let prof = grid.profile_at(block_center_m(wx), block_center_m(wz));
+/// Highest solid block Y for a precomputed profile, or `SCAN_BOTTOM - 1`
+/// if the whole column is air. Shared by full-res and coarse generation.
+fn surface_from_profile(prof: &crate::pipeline::ColumnProfile) -> i32 {
     let mut by = SCAN_TOP;
     while by >= SCAN_BOTTOM {
         if prof.density_at(block_center_m(by)) > 0.0 {
@@ -50,6 +49,12 @@ fn surface_block_y(grid: &ProfileGrid, wx: i32, wz: i32) -> i32 {
         by -= 1;
     }
     SCAN_BOTTOM - 1
+}
+
+/// Highest solid block Y in a 1 m column (world block coords), or `SCAN_BOTTOM - 1`
+/// if the whole column is air. Coarse per-block scan (design §4 step 1).
+fn surface_block_y(grid: &ProfileGrid, wx: i32, wz: i32) -> i32 {
+    surface_from_profile(&grid.profile_at(block_center_m(wx), block_center_m(wz)))
 }
 
 /// The full REGION_CHUNKS x REGION_CHUNKS column grid for one region. Pure and deterministic.
@@ -165,6 +170,71 @@ fn place_straddle(
     }
 }
 
+/// Cheap coarse LOD generation for one 64/256 tile: one profile sample per
+/// cell column (32×32), surface scan, then solid-below-surface + water to
+/// sea level. No block materialization, no chiseling. Pure and
+/// deterministic: same (key, seed, mats) → identical cells everywhere.
+/// Point-sampling is NOT bit-consistent with downsampled full generation
+/// (accepted, sub-pixel at these distances — see the design spec §3);
+/// `coarse_tile_tracks_downsampled_full_generation` bounds the divergence.
+pub fn coarse_tile(
+    key: &game::lod::LodKey,
+    seed: u64,
+    mats: Materials,
+) -> Vec<game::lod::LodCell> {
+    use game::lod::LodCell;
+    use game::Voxel;
+
+    // Blocks per cell edge: 4 at factor 64, 16 at factor 256.
+    let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
+    let span_blocks = key.region_span() * REGION_BLOCKS;
+    debug_assert_eq!(span_blocks, 32 * cb, "a tile is exactly one 32³ grid");
+
+    let p = TerrainPipeline::new(seed);
+    let origin = key.origin_region();
+    let ox = origin.x * REGION_BLOCKS;
+    let oz = origin.z * REGION_BLOCKS;
+    let grid = p.profile_grid(ox as f64, oz as f64, span_blocks as f64);
+    let sea = SEA_LEVEL as i32;
+
+    let mut bands: std::collections::BTreeMap<i32, Vec<Voxel>> = Default::default();
+    for cz in 0..32i32 {
+        for cx in 0..32i32 {
+            let mx = (ox + cx * cb) as f64 + cb as f64 * 0.5;
+            let mz = (oz + cz * cb) as f64 + cb as f64 * 0.5;
+            let prof = grid.profile_at(mx, mz);
+            let surface = surface_from_profile(&prof);
+
+            let solid_lo = (surface - MAX_SOIL_DEPTH).div_euclid(cb);
+            let solid_hi = surface.div_euclid(cb);
+            let top_cell = surface.max(sea).div_euclid(cb);
+            for cy in solid_lo..=top_cell {
+                let is_solid = cy <= solid_hi;
+                // Water only where the cell's bottom block is at/below sea.
+                if !is_solid && cy * cb > sea {
+                    continue;
+                }
+                let mat = if is_solid {
+                    let mid = cy * cb + cb / 2;
+                    mats.material_at((surface - mid).max(0), mid)
+                } else {
+                    mats.water
+                };
+                let band = cy.div_euclid(32);
+                let ly = cy.rem_euclid(32) as usize;
+                let g = bands
+                    .entry(band)
+                    .or_insert_with(|| vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+                g[cx as usize + 32 * ly + 32 * 32 * cz as usize] = Voxel::new(mat);
+            }
+        }
+    }
+    bands
+        .into_iter()
+        .map(|(band, grid)| LodCell { group: [0, band, 0], grid })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +296,82 @@ mod tests {
             (0..64).any(|y| col.get(BlockPos::new(0, y, 0)).id != BlockId::AIR)
         });
         assert!(any_solid, "expected some solid ground in the region");
+    }
+
+    #[test]
+    fn coarse_tile_is_deterministic_and_key_local() {
+        let key = game::lod::LodKey { factor: 64, coords: [0, 0] };
+        let a = coarse_tile(&key, WORLD_SEED, mats());
+        let b = coarse_tile(&key, WORLD_SEED, mats());
+        assert_eq!(a.len(), b.len());
+        for (ca, cb) in a.iter().zip(&b) {
+            assert_eq!(ca.group, cb.group);
+            assert_eq!(ca.grid, cb.grid);
+            assert_eq!((ca.group[0], ca.group[2]), (0, 0), "tile-local groups");
+        }
+        assert!(!a.is_empty(), "sea-level world always materializes at least one band");
+        // Sea level (block 64) must be covered: some cell is water or solid.
+        assert!(a.iter().any(|c| c.grid.iter().any(|v| !v.is_air())));
+    }
+
+    /// Coarse point-sampling vs exact generate+downsample: per cell column the
+    /// highest solid cell must match within one cell for the vast majority of
+    /// columns. This bounds the accepted §3 inexactness; tighten the threshold
+    /// only with measurement.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn coarse_tile_tracks_downsampled_full_generation() {
+        let key = game::lod::LodKey { factor: 64, coords: [0, 0] };
+        let coarse = coarse_tile(&key, WORLD_SEED, mats());
+
+        // Exact: generate each covered region, downsample to 64, overlay into a tile.
+        let mut exact: std::collections::BTreeMap<[i32; 3], Vec<game::Voxel>> = Default::default();
+        for rc in key.regions() {
+            let columns = generate_region(rc, WORLD_SEED, mats());
+            let chunks: Vec<(game::ChunkCoords, game::Chunk)> = columns
+                .into_iter()
+                .flat_map(|(cc, col)| {
+                    col.materialized_sub_chunks()
+                        .into_iter()
+                        .map(move |(sub_y, ch)| (game::ChunkCoords::new(cc.x, sub_y, cc.z), ch))
+                })
+                .collect();
+            let cells = game::lod::downsample_chunks(chunks, key.factor);
+            game::lod::copy_region_cells_into_tile(&mut exact, &cells, rc, &key);
+        }
+
+        let top_of = |grids: &std::collections::BTreeMap<[i32; 3], Vec<game::Voxel>>,
+                      x: usize,
+                      z: usize| {
+            grids
+                .iter()
+                .flat_map(|(g, grid)| {
+                    (0..32).rev().find_map(|y| {
+                        (!grid[x + 32 * y + 32 * 32 * z].is_air())
+                            .then(|| g[1] * 32 + y as i32)
+                    })
+                })
+                .max()
+        };
+        let coarse_map: std::collections::BTreeMap<[i32; 3], Vec<game::Voxel>> =
+            coarse.iter().map(|c| (c.group, c.grid.clone())).collect();
+
+        let (mut hits, mut total) = (0, 0);
+        for x in 0..32 {
+            for z in 0..32 {
+                let (a, b) = (top_of(&coarse_map, x, z), top_of(&exact, x, z));
+                if let (Some(a), Some(b)) = (a, b) {
+                    total += 1;
+                    if (a - b).abs() <= 1 {
+                        hits += 1;
+                    }
+                }
+            }
+        }
+        assert!(total > 200, "most columns have terrain (total={total})");
+        assert!(
+            hits * 10 >= total * 9,
+            "coarse surface within ±1 cell for >=90% of columns ({hits}/{total})"
+        );
     }
 }
