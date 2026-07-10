@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    ClientId, ClientPacket, GameEvent, GameEventKind, InputEvent, Key, RegionCoords, RegionOutput,
-    ServerEvent, ServerPacket, WorldManager, SPAWN_REGION, UNLOAD_GRACE_MS,
+    ClientId, ClientPacket, GameEvent, GameEventKind, InlineLodBuilder, InputEvent, Key,
+    LodBuilder, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldManager, SPAWN_REGION,
+    UNLOAD_GRACE_MS,
 };
 use server::region_threads::ThreadRegionSpawner;
 
@@ -53,11 +54,20 @@ impl Rig {
         };
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+            coarse: Box::new(move |key| {
+                worldgen::coarse_tile(key, worldgen::WORLD_SEED, materials)
+            }),
+            out: lod_result_send,
+        });
         let manager = WorldManager::new(
             ThreadRegionSpawner::default(),
             Box::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials)),
             out_send,
             region_out_send,
+            lod_builder,
+            lod_result_recv,
         );
         Rig { manager, region_out, packets, start: Instant::now(), seen_snapshots: BTreeSet::new() }
     }

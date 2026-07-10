@@ -10,12 +10,16 @@ use std::time::Duration;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
 use crate::{
-    ClientId, ClientPacket, Column, ColumnCoords, FarSnapshot, GameEventKind, Region, RegionCoords,
-    RegionInput, RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket,
+    ClientId, ClientPacket, Column, ColumnCoords, FarSnapshot, GameEventKind, LodBuildJob,
+    LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput, RegionOutput,
+    RegionRunner, RegionSeed, SerializedRegion, ServerPacket,
 };
 
 pub const SPAWN_REGION: RegionCoords = RegionCoords { x: 0, z: 0 };
 pub const UNLOAD_GRACE_MS: u64 = 5000;
+/// LRU cap on `lod_cache`; subscribed keys are pinned past this (see
+/// `evict_lod_cache`).
+pub const LOD_CACHE_MAX_ENTRIES: usize = 8192;
 
 /// Internal event handled by the world manager. (Moved from
 /// crates/server/src/main.rs; ServerTickTimer is gone — regions self-tick.)
@@ -110,6 +114,7 @@ impl RegionSpawner for InlineSpawner {
 struct Session {
     subscribed: BTreeSet<RegionCoords>,
     far_subscribed: BTreeSet<RegionCoords>,
+    lod_subscribed: BTreeSet<LodKey>,
 }
 
 struct RegionLink {
@@ -141,6 +146,19 @@ pub struct WorldManager<S: RegionSpawner> {
     homes: BTreeMap<ClientId, RegionCoords>,
     out: Sender<(Option<ClientId>, ServerPacket)>,
     region_out_send: Sender<(RegionCoords, RegionOutput)>,
+    /// LOD subscriptions per key, and the reverse map for disconnects.
+    lod_subscribers: BTreeMap<LodKey, BTreeSet<ClientId>>,
+    /// key -> RLE payload; LRU-evicted past LOD_CACHE_MAX_ENTRIES,
+    /// subscribed keys pinned. `u64` is a monotonically increasing access
+    /// stamp (not wall time — determinism).
+    lod_cache: BTreeMap<LodKey, (LodPayload, u64)>,
+    lod_access_counter: u64,
+    /// Builds submitted, result not yet received — dedups double-requests.
+    lod_in_flight: BTreeSet<LodKey>,
+    /// Region-keyed builds waiting on a running region's terrain reply.
+    lod_pending_terrain: BTreeMap<RegionCoords, BTreeSet<LodKey>>,
+    lod_builder: Box<dyn LodBuilder>,
+    lod_results: Receiver<LodResult>,
 }
 
 impl<S: RegionSpawner> WorldManager<S> {
@@ -149,6 +167,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         generator: RegionGenerator,
         out: Sender<(Option<ClientId>, ServerPacket)>,
         region_out_send: Sender<(RegionCoords, RegionOutput)>,
+        lod_builder: Box<dyn LodBuilder>,
+        lod_results: Receiver<LodResult>,
     ) -> Self {
         Self {
             spawner,
@@ -161,6 +181,13 @@ impl<S: RegionSpawner> WorldManager<S> {
             homes: BTreeMap::new(),
             out,
             region_out_send,
+            lod_subscribers: BTreeMap::new(),
+            lod_cache: BTreeMap::new(),
+            lod_access_counter: 0,
+            lod_in_flight: BTreeSet::new(),
+            lod_pending_terrain: BTreeMap::new(),
+            lod_builder,
+            lod_results,
         }
     }
 
@@ -196,6 +223,14 @@ impl<S: RegionSpawner> WorldManager<S> {
                             }
                         }
                     }
+                    for key in session.lod_subscribed {
+                        if let Some(set) = self.lod_subscribers.get_mut(&key) {
+                            set.remove(&id);
+                            if set.is_empty() {
+                                self.lod_subscribers.remove(&key);
+                            }
+                        }
+                    }
                 }
                 // The home region may have just lost its keep-alive reason.
                 if let Some(home) = self.homes.get(&id).copied() {
@@ -211,7 +246,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, rc, now_ms),
                 ClientPacket::RequestFarRegion(rc) => self.far_subscribe(id, rc),
                 ClientPacket::ReleaseFarRegion(rc) => self.far_unsubscribe(id, rc),
-                ClientPacket::RequestLod(_) | ClientPacket::ReleaseLod(_) => {} // Task 7
+                ClientPacket::RequestLod(key) => self.lod_subscribe(id, key, now_ms),
+                ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
                 ClientPacket::GameEvent(event) => match event.kind {
                     GameEventKind::Tick => {}
                     GameEventKind::Quit => return false,
@@ -297,6 +333,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             }
             RegionOutput::FarSnapshot(client, snap) => {
                 self.far_cache.insert(rc, snap.clone());
+                self.lod_terrain_ready(rc, client);
                 let _ = self.out.send((Some(client), ServerPacket::FarRegion(rc, snap)));
             }
             RegionOutput::FarSnapshotChanged(snap) => {
@@ -569,6 +606,131 @@ impl<S: RegionSpawner> WorldManager<S> {
         link.subscribers = subscribers.clone();
         for client in subscribers {
             let _ = link.input.send(RegionInput::RequestSnapshot(client));
+        }
+    }
+
+    fn lod_subscribe(&mut self, client: ClientId, key: LodKey, _now_ms: u64) {
+        if !crate::lod::LOD_FACTORS.contains(&key.factor) {
+            log::debug!("dropping RequestLod with invalid factor {}", key.factor);
+            return;
+        }
+        let Some(session) = self.sessions.get_mut(&client) else {
+            log::debug!("dropping RequestLod from sessionless client {client}");
+            return;
+        };
+        session.lod_subscribed.insert(key);
+        self.lod_subscribers.entry(key).or_default().insert(client);
+        self.lod_access_counter += 1;
+        let stamp = self.lod_access_counter;
+        if let Some((payload, access)) = self.lod_cache.get_mut(&key) {
+            *access = stamp;
+            let _ = self
+                .out
+                .send((Some(client), ServerPacket::LodData(key, payload.clone())));
+            return;
+        }
+        if !self.lod_in_flight.contains(&key) {
+            self.start_lod_build(key, client);
+        }
+        // else: result fans out to all subscribers when it lands.
+    }
+
+    fn lod_unsubscribe(&mut self, client: ClientId, key: LodKey) {
+        if let Some(session) = self.sessions.get_mut(&client) {
+            session.lod_subscribed.remove(&key);
+        }
+        if let Some(set) = self.lod_subscribers.get_mut(&key) {
+            set.remove(&client);
+            if set.is_empty() {
+                self.lod_subscribers.remove(&key);
+            }
+        }
+    }
+
+    /// Kick off a build for `key`. Region keys: authoritative terrain if the
+    /// region has state (running-and-seeded or parked-with-cache), request
+    /// terrain if running-but-unseeded, generate otherwise. `client` is the
+    /// requester used for terrain round-trips.
+    fn start_lod_build(&mut self, key: LodKey, client: ClientId) {
+        if key.region_span() == 1 {
+            let rc = key.origin_region();
+            let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
+            if let Some(snap) = self.far_cache.get(&rc) {
+                self.lod_in_flight.insert(key);
+                self.lod_builder.submit(LodBuildJob::Region {
+                    key,
+                    chunks: snap.chunks.clone(),
+                });
+            } else if running {
+                // Terrain reply (RegionOutput::FarSnapshot) seeds far_cache
+                // and re-enters via lod_terrain_ready.
+                self.lod_pending_terrain.entry(rc).or_default().insert(key);
+                self.send_to_region(rc, RegionInput::RequestFarSnapshot(client));
+            } else {
+                let columns = (self.generator)(rc);
+                let snap = FarSnapshot::from_columns(columns);
+                self.far_cache.insert(rc, snap.clone());
+                self.lod_in_flight.insert(key);
+                self.lod_builder
+                    .submit(LodBuildJob::Region { key, chunks: snap.chunks });
+            }
+        } else {
+            self.start_tile_build(key, client);
+        }
+    }
+
+    /// Tile keys build in Task 8; this stub keeps Task 7 compiling.
+    fn start_tile_build(&mut self, key: LodKey, _client: ClientId) {
+        log::debug!("tile LOD build for {key:?} not implemented until Task 8");
+    }
+
+    /// A region's terrain just landed in far_cache: submit any LOD builds
+    /// that were waiting on it.
+    fn lod_terrain_ready(&mut self, rc: RegionCoords, client: ClientId) {
+        let Some(keys) = self.lod_pending_terrain.remove(&rc) else { return };
+        for key in keys {
+            if !self.lod_in_flight.contains(&key) {
+                self.start_lod_build(key, client);
+            }
+        }
+    }
+
+    pub fn handle_lod_result(&mut self, key: LodKey, payload: LodPayload) {
+        self.lod_in_flight.remove(&key);
+        self.lod_access_counter += 1;
+        self.lod_cache.insert(key, (payload.clone(), self.lod_access_counter));
+        self.evict_lod_cache();
+        if let Some(subs) = self.lod_subscribers.get(&key) {
+            for client in subs {
+                let _ = self
+                    .out
+                    .send((Some(*client), ServerPacket::LodData(key, payload.clone())));
+            }
+        }
+    }
+
+    /// Drain the builder results channel (Inline path; the native server
+    /// selects on the receiver instead and calls handle_lod_result directly).
+    pub fn pump_lod_results(&mut self) {
+        while let Ok((key, payload)) = self.lod_results.try_recv() {
+            self.handle_lod_result(key, payload);
+        }
+    }
+
+    fn evict_lod_cache(&mut self) {
+        while self.lod_cache.len() > LOD_CACHE_MAX_ENTRIES {
+            let victim = self
+                .lod_cache
+                .iter()
+                .filter(|(k, _)| !self.lod_subscribers.contains_key(k))
+                .min_by_key(|(_, (_, access))| *access)
+                .map(|(k, _)| *k);
+            match victim {
+                Some(k) => {
+                    self.lod_cache.remove(&k);
+                }
+                None => break, // everything pinned by subscribers
+            }
         }
     }
 }

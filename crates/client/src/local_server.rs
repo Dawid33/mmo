@@ -44,11 +44,20 @@ impl LocalServer {
             sand: resolve("sand"),
             water: resolve("water"),
         };
+        let (lod_result_send, lod_result_recv) = unbounded();
+        let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
+            coarse: Box::new(move |key| {
+                worldgen::coarse_tile(key, worldgen::WORLD_SEED, materials)
+            }),
+            out: lod_result_send,
+        });
         let mut manager = WorldManager::new(
             InlineSpawner::default(),
             Box::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials)),
             out_send,
             region_out_send,
+            lod_builder,
+            lod_result_recv,
         );
         // Server-authoritative player creation, as on ClientConnected.
         manager.handle_server_event(ServerEvent::ClientConnected(LOCAL_CLIENT_ID), 0);
@@ -93,6 +102,7 @@ impl LocalServer {
     fn drain(&mut self) {
         for _ in 0..2 {
             self.manager.spawner_mut().pump();
+            self.manager.pump_lod_results();
             while let Ok((rc, output)) = self.region_out_recv.try_recv() {
                 self.manager.handle_region_output(rc, output, self.now_ms);
             }

@@ -255,11 +255,18 @@ pub fn run() {
         water: resolve("water"),
     };
     let world_seed = worldgen::WORLD_SEED;
+    let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
+    let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
+        coarse: Box::new(move |key| worldgen::coarse_tile(key, world_seed, materials)),
+        out: lod_result_send,
+    });
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::default(),
         Box::new(move |rc| worldgen::generate_region(rc, world_seed, materials)),
         server_send,
         region_out_send,
+        lod_builder,
+        lod_result_recv,
     );
 
     let start = std::time::Instant::now();
@@ -282,6 +289,7 @@ pub fn run() {
             default(std::time::Duration::from_millis(200)) => {}
         }
         manager.maintain(now_ms);
+        manager.pump_lod_results();
     }
 
     // Orderly exit: park everything, join region threads.
