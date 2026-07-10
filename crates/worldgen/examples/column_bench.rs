@@ -63,17 +63,33 @@ fn main() {
     let gen_t = t.elapsed();
     black_box(&cols);
 
-    // Call-count model: 64x64 block columns; surface scan = 1 column() each;
-    // every surface block straddle = 16x16 voxel columns = 256 column() each.
-    let scan_calls = 64.0 * 64.0;
-    let straddle_calls = 64.0 * 64.0 * 256.0;
-    let modeled = (scan_calls + straddle_calls) * ns_per_column / 1e6;
+    // Lattice model (post-ProfileGrid, Task 5): generate_region samples column()
+    // only on a 17x17 = 289-point PROFILE_LATTICE_BLOCKS=4 corner lattice per
+    // region and bilinearly interpolates the ~1.05M surface-scan + straddle
+    // queries (64x64 block columns for the scan, 64x64x256 voxel columns for
+    // straddles) from that lattice instead of calling column() directly.
+    let lattice_calls = 17.0 * 17.0;
+    let modeled_lattice = lattice_calls * ns_per_column / 1e6;
+    let gen_ms = gen_t.as_secs_f64() * 1e3;
     println!("generate_region: {gen_t:?}");
     println!(
-        "modeled column() share: {:.0}ms of {:.0}ms ({:.0}%)  [{:.2}M column() calls]",
-        modeled,
-        gen_t.as_secs_f64() * 1e3,
-        100.0 * modeled / (gen_t.as_secs_f64() * 1e3),
+        "modeled lattice column() cost: {:.2}ms of {:.0}ms ({:.1}%)  [{:.0} column() calls]",
+        modeled_lattice,
+        gen_ms,
+        100.0 * modeled_lattice / gen_ms,
+        lattice_calls,
+    );
+
+    // Pre-lattice reference model, kept for comparison: what the old
+    // straddle-per-voxel-column approach (64x64 surface scan + 64x64x256
+    // straddle = ~1.05M column() calls/region) would have cost at today's
+    // measured ns/call.
+    let scan_calls = 64.0 * 64.0;
+    let straddle_calls = 64.0 * 64.0 * 256.0;
+    let pre_lattice_modeled = (scan_calls + straddle_calls) * ns_per_column / 1e6;
+    println!(
+        "  (pre-lattice model would have cost: {:.0}ms  [{:.2}M column() calls])",
+        pre_lattice_modeled,
         (scan_calls + straddle_calls) / 1e6,
     );
 }

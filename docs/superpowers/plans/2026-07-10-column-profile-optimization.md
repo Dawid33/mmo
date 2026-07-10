@@ -22,6 +22,19 @@ From `cargo run -p worldgen --release --example column_bench`:
 
 **Cost anatomy of one `column()` call:** the three sub-graphs (`offset_g`, `factor_g`, `jaggedness_g`) are independent trees, and `factor`/`jaggedness` each embed a full copy of the `offset` subtree. Per call that's **42 Perlin octave samples where only 16 are unique** (continents 7, erosion 6, ridges 3) — a 2.6× pure redundancy — plus `2f64.powi()` recomputed per octave per sample, boxed-tree pointer chasing, and boxed recursive spline nodes.
 
+## Results (2026-07-10, release, this machine — all 6 tasks landed)
+
+| Metric | Baseline | Final | Factor |
+|---|---|---|---|
+| `column()` | 817.6 ns/call | 198.7 ns/call | 4.1× |
+| `column()` calls per `generate_region` | 1,052,672 | 289 (17×17 lattice) | 3642× |
+| `generate_region` | 894 ms | 65.5 ms | 13.6× |
+| `density_at()` | 2.2 ns | 2.0 ns | — |
+
+Per-task progression: `column()` ~818ns → ~217ns after the fusion (Task 3, 42→16 Perlin samples) → ~173–199ns after the noise internals (Task 4; the spread is thermal/turbo variance across runs, see Task 1 note). `generate_region` 894ms → 283ms (fusion) → ~65ms (ProfileGrid — 289 lattice `column()` calls instead of 1.05M, bilinear interpolation for the rest). The remaining ~65ms is block/chisel filling and allocation, not density evaluation (modeled residual column() cost: 0.06ms = 0.1%).
+
+Tasks 2–4 were bit-exact (world output byte-identical, pinned by oracle tests against the `DensityFn` graphs). Task 5 changed world output deterministically (sub-voxel smoothing); the spawn seed was re-verified — spawn surface y = 70 (sea 64), `WORLD_SEED` unchanged. Live GUI smoke (region-boundary seams, terrain character) pending.
+
 **Why lattice interpolation is safe:** the highest-frequency noise content is ~123–128 m wavelength (continents: 2⁻⁴ top octave × 0.13 xz_scale ≈ 1/123 m⁻¹; erosion: 2⁻⁵ × 0.25 = 1/128; ridges: 2⁻⁶ × 0.5 = 1/128). A 4 m lattice oversamples the field ~30× past Nyquist; bilinear error is O((cell/wavelength)²) ≈ 10⁻³ of amplitude — sub-voxel in height terms.
 
 ## Global Constraints
