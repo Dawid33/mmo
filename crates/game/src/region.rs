@@ -7,7 +7,7 @@ use std::{
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::Sender;
-use log::info;
+use log::{debug, info};
 use crate::input::Key;
 use crate::{Chunk, Client, ClientId, GameData, Rollback};
 
@@ -161,7 +161,7 @@ impl Region {
         // Events older than the snapshot this region was constructed from
         // are already baked into its state.
         if server_event.id < self.base_event_id {
-            info!(
+            debug!(
                 "[reconcile r={:?}] IGNORE {} below base_event_id={} (already baked in)",
                 self.id,
                 ev_desc(&server_event),
@@ -175,7 +175,7 @@ impl Region {
             panic!("Server event input buffer too big.");
         }
 
-        info!(
+        debug!(
             "[reconcile r={:?}] RECV {} | event_log.len={} front={} back={} next_id={} input_buffer.len={}",
             self.id,
             ev_desc(&server_event),
@@ -193,7 +193,7 @@ impl Region {
         );
 
         if self.event_log.len() == 0 {
-            info!(
+            debug!(
                 "[reconcile r={:?}] no predictions in event_log; {} parked in input_buffer (len={})",
                 self.id,
                 ev_desc(&server_event),
@@ -210,7 +210,7 @@ impl Region {
         'outer: while !self.input_buffer.is_empty() && !self.event_log.is_empty() {
             if let Some(server_event) = self.input_buffer.pop() {
                 if let Some(event) = self.event_log.pop_front() {
-                    info!(
+                    debug!(
                         "[reconcile r={:?}] COMPARE predicted {} vs server {}",
                         self.id,
                         ev_desc(&event),
@@ -226,7 +226,7 @@ impl Region {
                             }
                         }
                         if event != server_event.0 {
-                            info!(
+                            debug!(
                                 "[reconcile r={:?}] MISPREDICT at id={}: predicted {} != server {} -> rollback+replay",
                                 self.id,
                                 event.id,
@@ -237,7 +237,7 @@ impl Region {
                                 (&event.kind, &server_event.0.kind),
                                 (GameEventKind::PlayerInput(..), GameEventKind::PlayerInput(..))
                             ) {
-                                info!(
+                                debug!(
                                     "[reconcile r={:?}] INPUT-VS-INPUT FULL DIFF:\n  predicted: {:?}\n  server:    {:?}",
                                     self.id, event, server_event.0
                                 );
@@ -271,7 +271,7 @@ impl Region {
                                 // Another client's event is an *insertion* into
                                 // our timeline: keep every prediction, shift
                                 // them all one id later.
-                                info!(
+                                debug!(
                                     "[reconcile r={:?}] FOREIGN insert {}: keeping all {} predictions, shifting +1 id",
                                     self.id,
                                     ev_desc(&server_event.0),
@@ -304,14 +304,14 @@ impl Region {
                                     i += 1;
                                 }
                                 if len == temp_log.len() {
-                                    info!(
+                                    debug!(
                                         "[reconcile r={:?}] NO MATCHING PREDICTION for server {} — client behind; kept all {} predictions, NOTHING removed/forgotten",
                                         self.id,
                                         ev_desc(&server_event.0),
                                         len
                                     );
                                 } else {
-                                    info!(
+                                    debug!(
                                         "[reconcile r={:?}] removed local prediction id={:?} matching server {}; {} predictions remain, shifted",
                                         self.id,
                                         removed_id,
@@ -324,11 +324,11 @@ impl Region {
                             for event in &mut temp_log {
                                 let replayed = self.handle_event(event.clone().kind);
                                 match replayed {
-                                    Ok(r) if r.id != event.id => info!(
+                                    Ok(r) if r.id != event.id => debug!(
                                         "[reconcile r={:?}] REPLAY-ID-SKEW: temp_log says id={} but handle_event assigned id={}",
                                         self.id, event.id, r.id
                                     ),
-                                    Err(ref e) => info!(
+                                    Err(ref e) => debug!(
                                         "[reconcile r={:?}] REPLAY-ERR for {}: {:?}",
                                         self.id,
                                         ev_desc(event),
@@ -339,7 +339,7 @@ impl Region {
                             }
                             self.event_log = temp_log;
                         } else {
-                            info!(
+                            debug!(
                                 "[reconcile r={:?}] MATCH+FORGET {}",
                                 self.id,
                                 ev_desc(&server_event.0)
@@ -348,7 +348,7 @@ impl Region {
                         }
                     } else {
                         // IDs are incorrect, game event arrived out of order.
-                        info!(
+                        debug!(
                             "[reconcile r={:?}] OUT-OF-ORDER: predicted {} vs server {} (ids differ); re-buffer both, break",
                             self.id,
                             ev_desc(&event),
@@ -363,7 +363,7 @@ impl Region {
         }
 
         if applied_local_arrival {
-            info!(
+            debug!(
                 "[reconcile r={:?}] applied local player arrival; evicting orphan lag-window inputs",
                 self.id
             );
@@ -385,7 +385,7 @@ impl Region {
                 );
             }
         }
-        info!(
+        debug!(
             "[reconcile r={:?}] DONE: event_log.len={} input_buffer.len={} buffered_min_id={:?} mispredicts_this_pass={}",
             self.id,
             self.event_log.len(),
