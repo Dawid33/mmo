@@ -17,7 +17,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
-use game::{BlockId, Chunk, ChunkCoords, RegionCoords, Voxel, CHUNK_VOXEL_COUNT};
+use game::lod::{block_scale_cells, downsample_cells};
+use game::{Chunk, ChunkCoords, RegionCoords};
 use worldgen::material::Materials;
 
 use game::REGION_CHUNKS;
@@ -515,72 +516,10 @@ pub fn build_worldgen_lod_cells(
     }
 }
 
-/// Second `downsample2` pass: merge factor-2 cells (group key = chunk coords
-/// `div_euclid` 2) into factor-4 cells (group key = chunk coords `div_euclid`
-/// 4). Same grouping/octant math as `build_far_lod_cells`, one level up: the
-/// input group keys play the role the chunk coords played there.
-pub fn downsample_cells(cells: Vec<LodCell>) -> Vec<LodCell> {
-    let mut groups: BTreeMap<[i32; 3], [Option<Vec<Voxel>>; 8]> = BTreeMap::new();
-    for LodCell { group, grid } in cells {
-        let parent = [group[0].div_euclid(2), group[1].div_euclid(2), group[2].div_euclid(2)];
-        let octant = (group[0].rem_euclid(2)
-            + 2 * group[1].rem_euclid(2)
-            + 4 * group[2].rem_euclid(2)) as usize;
-        let entry = groups.entry(parent).or_insert_with(|| std::array::from_fn(|_| None));
-        entry[octant] = Some(grid);
-    }
-    groups
-        .into_iter()
-        .map(|(group, grids)| {
-            let sources: [Option<&[Voxel]>; 8] = std::array::from_fn(|i| grids[i].as_deref());
-            LodCell { group, grid: lod::downsample2(&sources) }
-        })
-        .collect()
-}
-
-/// Factor-16 (block scale) packing: ONE 32³ grid per 16×16-chunk x/z tile and
-/// 16-sub-chunk vertical band, group key `[cx.div_euclid(16),
-/// sub_y.div_euclid(16), cz.div_euclid(16)]` — instead of one
-/// `downsample_blocks` grid per 2×2×2-chunk group. A block cell is 16 world
-/// units, so a 16-chunk tile fills a grid's 32×32-cell x/z span exactly (the
-/// grid's full 512-unit span) and 32 cells of height cover one 16-sub-chunk
-/// band (512 units). Mapping: chunk `(cx, sub_y, cz)`, block `(bx, by, bz)` →
-/// cell `(cx.rem_euclid(16)*2 + bx, sub_y.rem_euclid(16)*2 + by,
-/// cz.rem_euclid(16)*2 + bz)`. With `REGION_CHUNKS = 32` a region spans 2×2
-/// tiles per band; a region smaller than one tile leaves the grid's excess
-/// x/z volume as air (the corner-packing trade the plan documents for
-/// `downsample_blocks`) — over-draw from the shared LOD `Aabb`, never
-/// under-draw. Chiseled blocks count as their block id — chisel detail is
-/// invisible at 16×, matching `downsample_blocks`.
-pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
-    let mut bands: BTreeMap<[i32; 3], Vec<Voxel>> = BTreeMap::new();
-    for (coords, chunk) in chunks {
-        let (cx, cz) = (coords.x as i32, coords.z as i32);
-        let group = [cx.div_euclid(16), coords.y.div_euclid(16), cz.div_euclid(16)];
-        let band =
-            bands.entry(group).or_insert_with(|| vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
-        let lx = cx.rem_euclid(16) as usize;
-        let ly = coords.y.rem_euclid(16) as usize;
-        let lz = cz.rem_euclid(16) as usize;
-        for bz in 0..2 {
-            for by in 0..2 {
-                for bx in 0..2 {
-                    let block = chunk.block_at(bx, by, bz);
-                    if block.id != BlockId::AIR {
-                        let idx = (lx * 2 + bx) + 32 * (ly * 2 + by) + 32 * 32 * (lz * 2 + bz);
-                        band[idx] = Voxel::new(block.id);
-                    }
-                }
-            }
-        }
-    }
-    bands.into_iter().map(|(group, grid)| LodCell { group, grid }).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game::{Block, GameDataUpdate};
+    use game::{BlockId, GameDataUpdate, Voxel, CHUNK_VOXEL_COUNT};
 
     use super::super::meshing::lod::{LodChunk, LodVoxelData};
     use super::super::meshing::queue::{self, MeshBudgets};
@@ -635,72 +574,6 @@ mod tests {
         // say) gets no stickiness — plain fresh assignment.
         assert_eq!(ring_factor(3, Some(99)), Some(4));
         assert_eq!(ring_factor(9, Some(99)), None);
-    }
-
-    // --- factor composition (pure) -----------------------------------------
-
-    /// One solid whole block (16³ voxels) at block coords `b` of chunk `c`.
-    fn chunk_with_block(b: [usize; 3], id: u16) -> Chunk {
-        let mut chunk = Chunk::default();
-        chunk.set_block(b[0], b[1], b[2], Block::new(BlockId(id)));
-        chunk
-    }
-
-    #[test]
-    fn factor4_two_pass_places_cells_at_world_voxel_over_4() {
-        // Chunk (3,1,2), block (1,1,1): world voxels x 112..128, y 48..64,
-        // z 80..96 → factor-4 cells x 28..32, y 12..16, z 20..24, all inside
-        // group4 [0,0,0] (chunk div 4). Chunk (7,0,7), block (1,0,1): world
-        // voxels x 240..256, y 0..16, z 240..256 → cells 60..64 / 0..4 /
-        // 60..64 → group4 [1,0,1], local cells 28..32 / 0..4 / 28..32.
-        let chunks = vec![
-            (ChunkCoords::new(3, 1, 2), chunk_with_block([1, 1, 1], 7)),
-            (ChunkCoords::new(7, 0, 7), chunk_with_block([1, 0, 1], 9)),
-        ];
-        let cells = downsample_cells(lod::build_far_lod_cells(chunks));
-        assert_eq!(cells.len(), 2, "two distinct factor-4 groups");
-
-        let cell = |g: [i32; 3]| cells.iter().find(|c| c.group == g).expect("group present");
-        let a = cell([0, 0, 0]);
-        assert_eq!(a.grid[28 + 32 * 12 + 32 * 32 * 20].block, BlockId(7), "block min corner");
-        assert_eq!(a.grid[31 + 32 * 15 + 32 * 32 * 23].block, BlockId(7), "block max corner");
-        assert_eq!(
-            a.grid.iter().filter(|v| !v.is_air()).count(),
-            4 * 4 * 4,
-            "a 16³-voxel block is exactly 4³ factor-4 cells"
-        );
-        let b = cell([1, 0, 1]);
-        assert_eq!(b.grid[28 + 32 * 32 * 28].block, BlockId(9), "group-local min corner");
-        assert_eq!(b.grid[31 + 32 * 3 + 32 * 32 * 31].block, BlockId(9), "group-local max corner");
-        assert_eq!(b.grid.iter().filter(|v| !v.is_air()).count(), 4 * 4 * 4);
-    }
-
-    #[test]
-    fn block_scale_cells_pack_the_region_into_one_grid_per_tile_and_band() {
-        // Block cells are 16 world units: chunk (cx, sub_y, cz), block
-        // (bx,by,bz) → grid cell (rem_euclid(cx,16)*2+bx,
-        // rem_euclid(sub_y,16)*2+by, rem_euclid(cz,16)*2+bz) in group
-        // [cx.div_euclid(16), sub_y.div_euclid(16), cz.div_euclid(16)].
-        let chunks = vec![
-            (ChunkCoords::new(5, 0, 7), chunk_with_block([1, 1, 0], 4)),
-            (ChunkCoords::new(0, -1, 0), chunk_with_block([0, 0, 0], 2)),
-            (ChunkCoords::new(17, 0, 20), chunk_with_block([0, 0, 0], 6)),
-        ];
-        let cells = block_scale_cells(chunks);
-        assert_eq!(cells.len(), 3, "two bands at tile (0,0) plus band 0 of tile (1,1)");
-
-        let cell = |g: [i32; 3]| cells.iter().find(|c| c.group == g).expect("group present");
-        let band0 = cell([0, 0, 0]);
-        assert_eq!(band0.grid[11 + 32 + 32 * 32 * 14].block, BlockId(4), "cell (11, 1, 14)");
-        assert_eq!(band0.grid.iter().filter(|v| !v.is_air()).count(), 1);
-        let band_neg = cell([0, -1, 0]);
-        // rem_euclid(-1, 16) = 15 → cell y = 30 (top chunk of the band below 0).
-        assert_eq!(band_neg.grid[32 * 30].block, BlockId(2));
-        assert_eq!(band_neg.grid.iter().filter(|v| !v.is_air()).count(), 1);
-        // Chunk (17, 0, 20) is tile-local (1, 0, 4) → cell (2, 0, 8).
-        let tile11 = cell([1, 0, 1]);
-        assert_eq!(tile11.grid[2 + 32 * 32 * 8].block, BlockId(6), "cell (2, 0, 8)");
-        assert_eq!(tile11.grid.iter().filter(|v| !v.is_air()).count(), 1);
     }
 
     // --- app harness --------------------------------------------------------
