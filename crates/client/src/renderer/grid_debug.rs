@@ -21,6 +21,7 @@ pub struct GridDebug {
 pub fn toggle_grid_debug(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<GridDebug>) {
     if keys.just_pressed(KeyCode::F5) {
         state.enabled = !state.enabled;
+        info!("grid debug: {}", if state.enabled { "on" } else { "off" });
     }
 }
 
@@ -124,10 +125,22 @@ pub fn draw_grid_debug(
         return;
     }
     let Some(cam) = camera.iter().next().map(|t| t.translation()) else {
+        // One-shot diagnostic on the toggle frame: enabled but nothing to
+        // anchor the grid to — the local camera hasn't spawned/been marked.
+        if state.is_changed() {
+            info!("grid debug: enabled but no IsDefaultUiCamera camera found");
+        }
         return;
     };
 
     let center = chunk_cell_of(cam);
+    if state.is_changed() {
+        info!(
+            "grid debug: drawing at cam={cam:?} cell={center:?} near_regions={} far_regions={}",
+            near.0.len(),
+            far.0.len()
+        );
+    }
     for dx in -CHUNK_GRID_RADIUS_XZ..=CHUNK_GRID_RADIUS_XZ {
         for dy in -CHUNK_GRID_RADIUS_Y..=CHUNK_GRID_RADIUS_Y {
             for dz in -CHUNK_GRID_RADIUS_XZ..=CHUNK_GRID_RADIUS_XZ {
