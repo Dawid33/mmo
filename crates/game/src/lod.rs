@@ -367,6 +367,72 @@ pub fn ring_factor_in(
     table.iter().find(|&&(bound, _)| dist <= bound).map(|&(_, f)| f)
 }
 
+/// x/z cells one region occupies in a grid at `factor` (16 at 64, 4 at 256;
+/// 32 or more for the small factors, where a region spans whole grids).
+pub fn cells_per_region(factor: u32) -> usize {
+    (REGION_SIZE as u32 / factor) as usize
+}
+
+/// Downsample one region's chunks (region-local x/z chunk coords, absolute
+/// signed y) to `factor` LOD cells with key-local group coords. Factors
+/// follow the composition: 2 = voxel 2x2x2 merge; 4 = one more merge pass;
+/// 16 = block scale; 64/256 = block scale + 2/4 more merge passes (each
+/// pass halves the group lattice, so groups stay consistent throughout).
+pub fn downsample_chunks(chunks: Vec<(ChunkCoords, Chunk)>, factor: u32) -> Vec<LodCell> {
+    match factor {
+        2 => build_far_lod_cells(chunks),
+        4 => downsample_cells(build_far_lod_cells(chunks)),
+        16 => block_scale_cells(chunks),
+        64 => downsample_cells(downsample_cells(block_scale_cells(chunks))),
+        256 => downsample_cells(downsample_cells(downsample_cells(downsample_cells(
+            block_scale_cells(chunks),
+        )))),
+        _ => panic!("unsupported LOD factor {factor} (must be one of {LOD_FACTORS:?})"),
+    }
+}
+
+/// Overlay one region's authoritative cells into a tile's grids: clear the
+/// region's x/z cell rect in EVERY band (so terrain the players removed
+/// doesn't survive as a coarse-sampled ghost), then write the region's
+/// cells. `region_cells` must come from `downsample_chunks(..., key.factor)`
+/// — content in the low-corner rect, absolute band indices in `group[1]`.
+pub fn copy_region_cells_into_tile(
+    tile: &mut BTreeMap<[i32; 3], Vec<Voxel>>,
+    region_cells: &[LodCell],
+    region: RegionCoords,
+    key: &LodKey,
+) {
+    let per = cells_per_region(key.factor);
+    let origin = key.origin_region();
+    let x_off = ((region.x - origin.x) as usize) * per;
+    let z_off = ((region.z - origin.z) as usize) * per;
+    debug_assert!(x_off + per <= 32 && z_off + per <= 32, "region outside tile");
+
+    for grid in tile.values_mut() {
+        for lz in 0..per {
+            for ly in 0..32 {
+                for lx in 0..per {
+                    grid[(x_off + lx) + 32 * ly + 32 * 32 * (z_off + lz)] = Voxel::default();
+                }
+            }
+        }
+    }
+    for cell in region_cells {
+        debug_assert_eq!((cell.group[0], cell.group[2]), (0, 0), "region cells are low-corner");
+        let grid = tile
+            .entry([0, cell.group[1], 0])
+            .or_insert_with(|| vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+        for lz in 0..per {
+            for ly in 0..32 {
+                for lx in 0..per {
+                    grid[(x_off + lx) + 32 * ly + 32 * 32 * (z_off + lz)] =
+                        cell.grid[lx + 32 * ly + 32 * 32 * lz];
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,5 +755,58 @@ mod tests {
         assert!(short.decode().is_none(), "runs must sum to CHUNK_VOXEL_COUNT");
         let long = PackedLodGrid(vec![(u16::MAX, BlockId(0)), (u16::MAX, BlockId(0))]);
         assert!(long.decode().is_none());
+    }
+
+    #[test]
+    fn downsample_chunks_dispatches_every_factor() {
+        // One solid block at chunk (0,0,0), block (0,0,0): world voxels 0..16 on
+        // each axis. Expected occupancy per factor: f cells = 16/f per axis
+        // (min 1), all in the grid at group [0,0,0].
+        for &(factor, expect_per_axis) in
+            &[(2u32, 8usize), (4, 4), (16, 1), (64, 1), (256, 1)]
+        {
+            let chunks = vec![(ChunkCoords::new(0, 0, 0), chunk_with_block([0, 0, 0], 5))];
+            let cells = downsample_chunks(chunks, factor);
+            assert_eq!(cells.len(), 1, "factor {factor}: one populated grid");
+            assert_eq!(cells[0].group, [0, 0, 0]);
+            let n = cells[0].grid.iter().filter(|v| !v.is_air()).count();
+            assert_eq!(n, expect_per_axis.pow(3), "factor {factor}");
+            assert_eq!(cells[0].grid[0].block, BlockId(5), "cell (0,0,0) solid");
+        }
+    }
+
+    #[test]
+    fn downsample_chunks_places_region_content_in_the_low_corner_rect() {
+        // Chunk (31, 0, 31) is the region's far corner. At factor 64 the region
+        // spans cells 0..16, so that chunk's block lands at cell (15, 0, 15).
+        let chunks = vec![(ChunkCoords::new(31, 0, 31), chunk_with_block([1, 0, 1], 9))];
+        let cells = downsample_chunks(chunks, 64);
+        assert_eq!(cells.len(), 1);
+        let idx = 15 + 32 * 0 + 32 * 32 * 15;
+        assert_eq!(cells[0].grid[idx].block, BlockId(9));
+        assert_eq!(cells_per_region(64), 16);
+        assert_eq!(cells_per_region(256), 4);
+    }
+
+    #[test]
+    fn copy_region_cells_overlays_and_clears() {
+        use crate::RegionCoords;
+        let key = LodKey { factor: 64, coords: [0, 0] }; // covers regions (0..2, 0..2)
+        // Coarse tile band 0: fully solid everywhere.
+        let mut tile: BTreeMap<[i32; 3], Vec<Voxel>> = BTreeMap::new();
+        tile.insert([0, 0, 0], vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT]);
+        // Region (1, 0)'s authoritative cells: a single solid cell at its local (0,0,0).
+        let mut grid = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        grid[0] = Voxel::new(BlockId(7));
+        let region_cells = vec![LodCell { group: [0, 0, 0], grid }];
+        copy_region_cells_into_tile(&mut tile, &region_cells, RegionCoords::new(1, 0), &key);
+
+        let band = &tile[&[0, 0, 0]];
+        // Region (1,0) maps to x cells 16..32, z 0..16: rect cleared, one cell rewritten.
+        assert_eq!(band[16].block, BlockId(7), "authoritative cell written at x offset 16");
+        assert!(band[17].is_air(), "rest of the region rect cleared to authoritative air");
+        assert!(band[16 + 32 * 32 * 15].is_air(), "cleared across the whole z extent");
+        assert_eq!(band[0].block, BlockId(1), "outside the region rect untouched");
+        assert_eq!(band[32 * 32 * 16].block, BlockId(1), "z >= 16 (other region row) untouched");
     }
 }
