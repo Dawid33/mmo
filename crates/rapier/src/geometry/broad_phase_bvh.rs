@@ -2,9 +2,9 @@ use ordered_float::OrderedFloat;
 
 use parry3d::partitioning::{Bvh, BvhWorkspace};
 use parry3d::utils::hashmap::{Entry, HashMap};
-use crate::dynamics::{IntegrationParameters, RigidBodySet};
+use crate::dynamics::{IntegrationParameters, RigidBodySet, RigidBodyType};
 use crate::geometry::{
-    Aabb, BroadPhasePairEvent, ColliderHandle, ColliderPair, ColliderSet,
+    Aabb, BroadPhasePairEvent, Collider, ColliderHandle, ColliderPair, ColliderSet,
 };
 use crate::math::Real;
 use crate::pipeline::StepJournal;
@@ -192,6 +192,46 @@ impl BroadPhaseBvh {
         }
     }
 
+    /// True iff a candidate broad-phase pair can never produce narrow-phase
+    /// work under its CURRENT state: both colliders sit on fixed bodies (no
+    /// parent counts as fixed, mirroring the narrow phase's
+    /// `unwrap_or(RigidBodyType::Fixed)`) and neither collider opts into
+    /// fixed-fixed interaction via `ActiveCollisionTypes::FIXED_FIXED`. This
+    /// is exactly the active-collision-types gate of `compute_contacts` /
+    /// `compute_intersections`, evaluated once at pair-creation time so the
+    /// dead pair never becomes a resident interaction-graph edge. In voxel
+    /// scenes ~99% of AABB overlaps are adjacent fixed chunk colliders, and
+    /// every resident edge is journaled, wholesale-cloned and hashed by the
+    /// rollback layer — suppression here shrinks all of those.
+    ///
+    /// Blind spots, guarded or documented:
+    /// - fixed -> non-fixed body type change: the suppressed pairs would be
+    ///   missing and nothing re-emits them (the leaf never moves, so the
+    ///   change-detection BVTT never re-visits it). `RigidBody::set_body_type`
+    ///   panics on that transition while colliders are attached — re-create
+    ///   the body instead.
+    /// - enabling FIXED_FIXED (or sensor status) at runtime on a collider
+    ///   already overlapping another fixed collider will NOT resurrect the
+    ///   suppressed pair, for the same no-revisit reason. Construct colliders
+    ///   with their final flags; do not toggle these on fixed bodies.
+    #[inline]
+    fn pair_permanently_dead(co1: &Collider, co2: &Collider, bodies: &RigidBodySet) -> bool {
+        let type1 = co1
+            .parent
+            .and_then(|p| bodies.get(p.handle))
+            .map(|rb| rb.body_type)
+            .unwrap_or(RigidBodyType::Fixed);
+        let type2 = co2
+            .parent
+            .and_then(|p| bodies.get(p.handle))
+            .map(|rb| rb.body_type)
+            .unwrap_or(RigidBodyType::Fixed);
+        type1 == RigidBodyType::Fixed
+            && type2 == RigidBodyType::Fixed
+            && !co1.flags.active_collision_types.test(type1, type2)
+            && !co2.flags.active_collision_types.test(type1, type2)
+    }
+
     /// Initializes a new empty broad-phase with the specified strategy for incremental
     /// BVH optimization.
     pub fn with_optimization_strategy(optimization_strategy: BvhOptimizationStrategy) -> Self {
@@ -347,12 +387,19 @@ impl BroadPhaseBvh {
         let mut pairs_collector = |co1: u32, co2: u32| {
             assert_ne!(co1, co2);
 
-            let Some((_, mut handle1)) = colliders.get_unknown_gen(co1) else {
+            let Some((co1_ref, mut handle1)) = colliders.get_unknown_gen(co1) else {
                 return;
             };
-            let Some((_, mut handle2)) = colliders.get_unknown_gen(co2) else {
+            let Some((co2_ref, mut handle2)) = colliders.get_unknown_gen(co2) else {
                 return;
             };
+
+            // Dead-pair suppression (see pair_permanently_dead): skip BEFORE
+            // touching the pairs map / pairs_hash / events so a suppressed
+            // pair leaves zero trace in hashed state.
+            if Self::pair_permanently_dead(co1_ref, co2_ref, bodies) {
+                return;
+            }
 
             if co1 > co2 {
                 std::mem::swap(&mut handle1, &mut handle2);
