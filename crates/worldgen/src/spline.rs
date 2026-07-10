@@ -72,12 +72,15 @@ impl Spline {
 /// `Spline::Curve` flattened to parallel arrays for the common case where
 /// every control-point value is `Const`. Arithmetic is copied verbatim from
 /// `Spline::eval` so results are bit-identical.
+// Consumed by the pipeline's fused column() (next task); allow-dead until then.
+#[allow(dead_code)]
 pub struct FlatSpline {
     locations: Box<[f64]>,
     values: Box<[f64]>,
     derivatives: Box<[f64]>,
 }
 
+#[allow(dead_code)]
 impl FlatSpline {
     /// Panics if any control-point value is not `Spline::Const` — the v1
     /// pipeline never nests curves; revisit if a nested spline ever lands.
