@@ -5,6 +5,22 @@ use bevy::color::palettes::css::{AQUA, PURPLE, RED, YELLOW};
 use bevy::prelude::*;
 use game::{RegionCoords, REGION_SIZE};
 
+/// Whether the chunk/region wireframe view is on. Client-only debug state,
+/// defaults off; F5 flips it. Independent of the F3 debug overlay.
+#[derive(Resource, Default)]
+pub struct GridDebug {
+    pub enabled: bool,
+}
+
+/// F5 toggles the wireframe view. Reads Bevy input directly (client-only
+/// concern — F5 is never forwarded to the sim input path). F3 = HUD/collider
+/// debug, F4 = cave culling; F5 is the next free debug key.
+pub fn toggle_grid_debug(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<GridDebug>) {
+    if keys.just_pressed(KeyCode::F5) {
+        state.enabled = !state.enabled;
+    }
+}
+
 /// Chunk edge length in world units (32 voxels at 1 unit each). Matches the
 /// `meshing::queue::ChunkGrid` keying (world position / 32).
 pub const CHUNK_SIZE: f32 = 32.0;
@@ -151,5 +167,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn f5_toggles_grid_debug() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<GridDebug>()
+            .add_systems(Update, toggle_grid_debug);
+        app.update();
+        assert!(!app.world().resource::<GridDebug>().enabled, "must default off");
+
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::F5);
+        app.update();
+        assert!(app.world().resource::<GridDebug>().enabled);
+
+        // reset_all() drops both the pressed set and the just_pressed edge so
+        // the second press registers as a fresh edge — clear() alone keeps the
+        // key "held" and swallows the press (same caveat as the hud.rs test).
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().reset_all();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::F5);
+        app.update();
+        assert!(!app.world().resource::<GridDebug>().enabled);
     }
 }
