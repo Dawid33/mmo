@@ -250,6 +250,18 @@ impl RigidBody {
     /// Sets the type of this rigid-body.
     pub fn set_body_type(&mut self, status: RigidBodyType, wake_up: bool) {
         if status != self.body_type {
+            // The broad phase suppresses fixed-fixed pairs at creation time
+            // (see BroadPhaseBvh::pair_permanently_dead). A fixed body leaving
+            // the Fixed type would need those suppressed pairs re-emitted, and
+            // this fork has no re-pairing path (the change-detection BVTT only
+            // re-visits moved leaves). Forbid the transition while colliders
+            // are attached; remove and re-insert the body/colliders instead.
+            assert!(
+                self.body_type != RigidBodyType::Fixed || self.colliders.0.is_empty(),
+                "set_body_type: fixed -> {status:?} with attached colliders is unsupported: \
+                 fixed-fixed pairs are suppressed at the broad phase and cannot be re-created; \
+                 remove and re-insert the body instead",
+            );
             self.changes.insert(RigidBodyChanges::TYPE);
             self.body_type = status;
 

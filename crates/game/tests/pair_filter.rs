@@ -186,3 +186,34 @@ fn fixed_sensor_with_opt_in_still_intersects_fixed() {
         "opted-in fixed sensor vs fixed solid must intersect"
     );
 }
+
+#[test]
+#[should_panic(expected = "fixed-fixed pairs are suppressed")]
+fn fixed_to_dynamic_with_colliders_panics() {
+    let (mut bodies, mut colliders) = (RigidBodySet::new(), ColliderSet::new());
+    let h = bodies.insert(RigidBodyBuilder::fixed().build());
+    let _c = colliders.insert_with_parent(cuboid().build(), h, &mut bodies);
+    // The broad phase suppressed this body's fixed-fixed pairs at creation;
+    // leaving Fixed would need a re-pairing path that does not exist.
+    bodies.get_mut(h).unwrap().set_body_type(RigidBodyType::Dynamic, true);
+}
+
+#[test]
+fn fixed_to_dynamic_without_colliders_is_allowed() {
+    let (mut bodies, _colliders) = (RigidBodySet::new(), ColliderSet::new());
+    let h = bodies.insert(RigidBodyBuilder::fixed().build());
+    // No colliders -> no pairs could have been suppressed -> legal.
+    bodies.get_mut(h).unwrap().set_body_type(RigidBodyType::Dynamic, true);
+    assert!(bodies.get(h).unwrap().is_dynamic());
+}
+
+#[test]
+fn kinematic_to_dynamic_with_colliders_is_allowed() {
+    let (mut bodies, mut colliders) = (RigidBodySet::new(), ColliderSet::new());
+    let h = bodies.insert(RigidBodyBuilder::kinematic_position_based().build());
+    let _c = colliders.insert_with_parent(cuboid().build(), h, &mut bodies);
+    // Non-fixed origins never had pairs suppressed; the fork's own
+    // physics_pipeline test (line ~1195) also relies on this transition.
+    bodies.get_mut(h).unwrap().set_body_type(RigidBodyType::Dynamic, true);
+    assert!(bodies.get(h).unwrap().is_dynamic());
+}
