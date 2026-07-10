@@ -9,7 +9,7 @@ use game::{
     ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind, Region,
     TEST_INDUCED_LATENCY_MS,
 };
-use log::{info, warn};
+use log::{debug, info, warn};
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
@@ -97,7 +97,7 @@ struct ReconMetrics {
 }
 
 /// Wall-time attribution for the game-loop thread, flushed to one
-/// `[client-budget]` INFO line alongside the reconciliation metrics every
+/// `[client-budget]` DEBUG line alongside the reconciliation metrics every
 /// `METRICS_REPORT_INTERVAL`. Directs optimization work by showing where the
 /// loop's budget goes. Categories are measured at their call sites; `other`
 /// is derived at report time as window − idle − (tick + reconcile +
@@ -918,7 +918,7 @@ impl GameInstanceManager {
         }
     }
 
-    /// Flush the rolling reconciliation / drift counters to one INFO line once
+    /// Flush the rolling reconciliation / drift counters to one DEBUG line once
     /// `METRICS_REPORT_INTERVAL` has elapsed, then reset the window. Called
     /// every loop iteration; cheap until the window fires. The `mispredicts/s`
     /// and `avg_replay` numbers show how hard the client is working to stay in
@@ -944,7 +944,7 @@ impl GameInstanceManager {
         } else {
             0.0
         };
-        info!(
+        debug!(
             "[client] mispredicts/s={:.2} avg_replay={:.1} max_replay={} evlog={} tick_rate={}ms drift={}ms",
             per_sec,
             avg_replay,
@@ -984,7 +984,7 @@ impl GameInstanceManager {
         let worst_sim = worst
             .map(|(id, avg)| format!("({},{})@{:.2}ms", id.x, id.z, ms(avg)))
             .unwrap_or_else(|| "none".into());
-        info!(
+        debug!(
             "[client-budget] window={:.1}s util={:.1}% | tick n={} total={:.0}ms avg={:.2}ms max={:.2}ms | recon total={:.0}ms replayed={} | snap n={} total={:.0}ms | idle={:.0}ms other={:.0}ms | sim n={} ctrl={:.0}ms input={:.1}ms scan={:.0}ms worst={}",
             secs,
             busy.as_secs_f32() / secs * 100.0,
