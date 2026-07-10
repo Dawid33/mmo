@@ -217,3 +217,56 @@ fn kinematic_to_dynamic_with_colliders_is_allowed() {
     bodies.get_mut(h).unwrap().set_body_type(RigidBodyType::Dynamic, true);
     assert!(bodies.get(h).unwrap().is_dynamic());
 }
+
+#[test]
+fn fixed_kinematic_pair_is_not_suppressed() {
+    let (mut pipeline, mut broad, mut narrow, mut islands) = (
+        PhysicsPipeline::new(),
+        BroadPhaseBvh::new(),
+        NarrowPhase::new(),
+        IslandManager::new(),
+    );
+    let (mut bodies, mut colliders) = (RigidBodySet::new(), ColliderSet::new());
+
+    let fixed = bodies.insert(RigidBodyBuilder::fixed().build());
+    let c_fixed = colliders.insert_with_parent(cuboid().build(), fixed, &mut bodies);
+
+    let kinematic = bodies.insert(
+        RigidBodyBuilder::kinematic_position_based()
+            .translation(Vector::new(Real::from(0.5), Real::from(0.0), Real::from(0.0)))
+            .build(),
+    );
+    let c_kinematic = colliders.insert_with_parent(cuboid().build(), kinematic, &mut bodies);
+
+    step(&mut pipeline, &mut broad, &mut narrow, &mut islands, &mut bodies, &mut colliders);
+
+    assert!(
+        narrow.contact_pair(c_fixed, c_kinematic).is_some(),
+        "fixed-kinematic pair must not be suppressed"
+    );
+}
+
+#[test]
+#[should_panic(expected = "fixed-fixed pairs are suppressed")]
+fn set_parent_fixed_to_dynamic_with_collider_panics() {
+    let (mut bodies, mut colliders) = (RigidBodySet::new(), ColliderSet::new());
+    let fixed = bodies.insert(RigidBodyBuilder::fixed().build());
+    let c = colliders.insert_with_parent(cuboid().build(), fixed, &mut bodies);
+    let dynamic = bodies.insert(RigidBodyBuilder::dynamic().build());
+    // Re-parenting off a fixed body onto a dynamic one hits the same blind
+    // spot as `set_body_type`: the broad phase never re-visits the leaf, so
+    // any pairs suppressed while it sat on `fixed` would stay missing.
+    colliders.set_parent(c, Some(dynamic), &mut bodies);
+}
+
+#[test]
+fn set_parent_dynamic_to_fixed_is_allowed() {
+    let (mut bodies, mut colliders) = (RigidBodySet::new(), ColliderSet::new());
+    let dynamic = bodies.insert(RigidBodyBuilder::dynamic().build());
+    let c = colliders.insert_with_parent(cuboid().build(), dynamic, &mut bodies);
+    let fixed = bodies.insert(RigidBodyBuilder::fixed().build());
+    // Non-fixed -> fixed never needed any pairs suppressed while on `dynamic`,
+    // so this direction stays legal.
+    colliders.set_parent(c, Some(fixed), &mut bodies);
+    assert_eq!(colliders.get(c).unwrap().parent(), Some(fixed));
+}

@@ -214,6 +214,10 @@ impl BroadPhaseBvh {
     ///   already overlapping another fixed collider will NOT resurrect the
     ///   suppressed pair, for the same no-revisit reason. Construct colliders
     ///   with their final flags; do not toggle these on fixed bodies.
+    /// - re-parenting a collider off of a fixed body (or a standalone
+    ///   collider, Fixed by convention) onto a non-fixed body: same
+    ///   no-revisit reason. `ColliderSet::set_parent` panics on that
+    ///   transition, like `set_body_type`.
     #[inline]
     fn pair_permanently_dead(co1: &Collider, co2: &Collider, bodies: &RigidBodySet) -> bool {
         let type1 = co1

@@ -1,6 +1,6 @@
 use crate::data::arena::Arena;
 use crate::data::{HasModifiedFlag, ModifiedObjects};
-use crate::dynamics::{IslandManager, RigidBodyHandle, RigidBodySet};
+use crate::dynamics::{IslandManager, RigidBodyHandle, RigidBodySet, RigidBodyType};
 use crate::geometry::{Collider, ColliderChanges, ColliderHandle, ColliderParent};
 use crate::math::Isometry;
 use std::ops::{Index, IndexMut};
@@ -314,6 +314,29 @@ impl ColliderSet {
             if new_parent_handle == curr_parent {
                 return; // Nothing to do, this is the same parent.
             }
+
+            // The broad phase suppresses fixed-fixed pairs at creation time
+            // (see BroadPhaseBvh::pair_permanently_dead) based on the leaf's
+            // AABB, which a re-parent does not move. Re-parenting a collider
+            // off of a fixed body (or with no parent, which is Fixed by
+            // convention) onto a non-fixed body would need those suppressed
+            // pairs re-emitted, and this fork has no re-pairing path. Detaching
+            // (`new_parent_handle == None`, effectively Fixed) stays legal —
+            // internal removal paths null parents through this method.
+            let curr_type = curr_parent
+                .and_then(|h| bodies.get(h))
+                .map(|rb| rb.body_type)
+                .unwrap_or(RigidBodyType::Fixed);
+            let new_type = new_parent_handle
+                .and_then(|h| bodies.get(h))
+                .map(|rb| rb.body_type)
+                .unwrap_or(RigidBodyType::Fixed);
+            assert!(
+                curr_type != RigidBodyType::Fixed || new_type == RigidBodyType::Fixed,
+                "set_parent: fixed -> {new_type:?} re-parent with attached collider is \
+                 unsupported: fixed-fixed pairs are suppressed at the broad phase and cannot \
+                 be re-created; remove and re-insert the collider instead",
+            );
 
             collider.changes |= ColliderChanges::PARENT;
 
