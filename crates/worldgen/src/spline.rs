@@ -84,6 +84,8 @@ pub struct FlatSpline {
 impl FlatSpline {
     /// Panics if any control-point value is not `Spline::Const` — the v1
     /// pipeline never nests curves; revisit if a nested spline ever lands.
+    /// An empty `Curve` yields a `FlatSpline` that evaluates to `0.0` for
+    /// every coord, matching `Spline::eval`.
     pub fn from_spline(s: &Spline) -> FlatSpline {
         let points = match s {
             Spline::Const(v) => {
@@ -110,6 +112,10 @@ impl FlatSpline {
     }
 
     pub fn eval(&self, coord: f64) -> f64 {
+        // Empty curve: Spline::eval returns 0.0.
+        if self.locations.is_empty() {
+            return 0.0;
+        }
         let (locs, vals, ders) = (&self.locations, &self.values, &self.derivatives);
         let n = locs.len();
         if coord <= locs[0] {
@@ -212,6 +218,18 @@ mod tests {
         }
         for knot in [-1.0, -0.2, 0.0, 0.6, 1.2] {
             assert_eq!(f.eval(knot), s.eval(knot));
+        }
+    }
+
+    #[test]
+    fn flat_spline_matches_boxed_for_const_and_empty() {
+        let konst = Spline::constant(3.5);
+        let flat_konst = FlatSpline::from_spline(&konst);
+        let empty = Spline::Curve { points: vec![] };
+        let flat_empty = FlatSpline::from_spline(&empty);
+        for c in [-5.0, 0.0, 7.25] {
+            assert_eq!(flat_konst.eval(c), konst.eval(c), "Const mismatch at coord {c}");
+            assert_eq!(flat_empty.eval(c), empty.eval(c), "empty-curve mismatch at coord {c}");
         }
     }
 }
