@@ -22,7 +22,7 @@ use game::{
 };
 
 use crate::material::Materials;
-use crate::pipeline::{TerrainPipeline, SEA_LEVEL};
+use crate::pipeline::{ProfileGrid, TerrainPipeline, SEA_LEVEL};
 
 // Region span in blocks: REGION_CHUNKS chunks * CHUNK_BLOCKS blocks/chunk.
 const REGION_BLOCKS: i32 = (REGION_CHUNKS * CHUNK_BLOCKS) as i32; // 64
@@ -40,8 +40,8 @@ fn block_center_m(b: i32) -> f64 {
 
 /// Highest solid block Y in a 1 m column (world block coords), or `SCAN_BOTTOM - 1`
 /// if the whole column is air. Coarse per-block scan (design §4 step 1).
-fn surface_block_y(p: &TerrainPipeline, wx: i32, wz: i32) -> i32 {
-    let prof = p.column(block_center_m(wx), block_center_m(wz));
+fn surface_block_y(grid: &ProfileGrid, wx: i32, wz: i32) -> i32 {
+    let prof = grid.profile_at(block_center_m(wx), block_center_m(wz));
     let mut by = SCAN_TOP;
     while by >= SCAN_BOTTOM {
         if prof.density_at(block_center_m(by)) > 0.0 {
@@ -55,11 +55,12 @@ fn surface_block_y(p: &TerrainPipeline, wx: i32, wz: i32) -> i32 {
 /// The full REGION_CHUNKS x REGION_CHUNKS column grid for one region. Pure and deterministic.
 pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<(ColumnCoords, Column)> {
     let p = TerrainPipeline::new(seed);
+    let region_ox = coords.x * REGION_BLOCKS; // world block origin X
+    let region_oz = coords.z * REGION_BLOCKS;
+    let grid = p.profile_grid(region_ox as f64, region_oz as f64, REGION_BLOCKS as f64);
     let sea = SEA_LEVEL as i32;
     let air = Block::new(BlockId::AIR);
     let stone = Block::new(mats.stone);
-    let region_ox = coords.x * REGION_BLOCKS; // world block origin X
-    let region_oz = coords.z * REGION_BLOCKS;
 
     let mut columns = Vec::with_capacity(REGION_CHUNKS * REGION_CHUNKS);
     for cx in 0..REGION_CHUNKS {
@@ -74,7 +75,7 @@ pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<
             let mut hi = SCAN_BOTTOM - 1;
             for lx in 0..CHUNK_BLOCKS {
                 for lz in 0..CHUNK_BLOCKS {
-                    let s = surface_block_y(&p, col_ox + lx as i32, col_oz + lz as i32);
+                    let s = surface_block_y(&grid, col_ox + lx as i32, col_oz + lz as i32);
                     surfaces[lx][lz] = s;
                     lo = lo.min(s);
                     hi = hi.max(s.max(sea)); // include the water column up to sea level
@@ -110,7 +111,7 @@ pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<
                         } else if by == surface {
                             // Surface straddle: chisel at voxel resolution (design §4 step 2).
                             let top_mat = mats.material_at(0, by);
-                            place_straddle(chunk, bi, wx, by, wz, &p, top_mat);
+                            place_straddle(chunk, bi, wx, by, wz, &grid, top_mat);
                         } else if by <= sea {
                             // Above ground but below sea level -> water.
                             chunk.blocks[bi.0 as usize] = Block::new(mats.water);
@@ -138,7 +139,7 @@ fn place_straddle(
     wx: i32,
     by: i32,
     wz: i32,
-    p: &TerrainPipeline,
+    grid: &ProfileGrid,
     top_mat: BlockId,
 ) {
     let mut chisel = ChiselData::new(vec![top_mat]);
@@ -148,7 +149,7 @@ fn place_straddle(
             // Meter coord of this voxel center: block index + (voxel + 0.5)/16.
             let mx = wx as f64 + (vx as f64 + 0.5) / BLOCK_VOXELS as f64;
             let mz = wz as f64 + (vz as f64 + 0.5) / BLOCK_VOXELS as f64;
-            let prof = p.column(mx, mz);
+            let prof = grid.profile_at(mx, mz);
             for vy in 0..BLOCK_VOXELS {
                 let my = by as f64 + (vy as f64 + 0.5) / BLOCK_VOXELS as f64;
                 let solid = prof.density_at(my) > 0.0;

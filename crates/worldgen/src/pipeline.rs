@@ -245,6 +245,84 @@ impl TerrainPipeline {
     }
 }
 
+/// Lattice spacing (blocks == meters) for per-region profile interpolation.
+/// The density field's shortest xz wavelength is ~123 m (continents top
+/// octave 2^-4 * 0.13; erosion 2^-5 * 0.25; ridges 2^-6 * 0.5 — all ~1/128),
+/// so 4 m sampling is ~30x past Nyquist. Raise for speed, lower toward 1 for
+/// fidelity; must divide the region block span (64).
+pub const PROFILE_LATTICE_BLOCKS: usize = 4;
+
+/// `column()` sampled on a K-meter corner lattice, bilinearly interpolated.
+/// Corners are pure functions of world coordinates, so grids built by
+/// neighboring regions agree bit-for-bit along shared edges (no seams).
+pub struct ProfileGrid {
+    origin_x: f64,
+    origin_z: f64,
+    step: f64,
+    n: usize, // corners per axis
+    offset_h: Vec<f64>,
+    factor: Vec<f64>,
+    jaggedness: Vec<f64>,
+}
+
+impl TerrainPipeline {
+    /// Sample column() on a (span/K + 1)^2 corner lattice starting at world
+    /// meters (origin_x, origin_z), K = PROFILE_LATTICE_BLOCKS meters.
+    pub fn profile_grid(&self, origin_x: f64, origin_z: f64, span_m: f64) -> ProfileGrid {
+        let step = PROFILE_LATTICE_BLOCKS as f64;
+        let cells = (span_m / step).ceil() as usize;
+        let n = cells + 1;
+        let mut offset_h = Vec::with_capacity(n * n);
+        let mut factor = Vec::with_capacity(n * n);
+        let mut jaggedness = Vec::with_capacity(n * n);
+        for i in 0..n {
+            for j in 0..n {
+                let prof =
+                    self.column(origin_x + i as f64 * step, origin_z + j as f64 * step);
+                offset_h.push(prof.offset_h);
+                factor.push(prof.factor);
+                jaggedness.push(prof.jaggedness);
+            }
+        }
+        ProfileGrid { origin_x, origin_z, step, n, offset_h, factor, jaggedness }
+    }
+}
+
+impl ProfileGrid {
+    /// Bilinear profile at world meters (x, z); must lie within the sampled span.
+    pub fn profile_at(&self, x: f64, z: f64) -> ColumnProfile {
+        let fx = (x - self.origin_x) / self.step;
+        let fz = (z - self.origin_z) / self.step;
+        // Clamp so queries exactly on the far edge stay in the last cell.
+        let i = (fx.floor() as usize).min(self.n - 2);
+        let j = (fz.floor() as usize).min(self.n - 2);
+        let (tx, tz) = (fx - i as f64, fz - j as f64);
+        let idx = |i: usize, j: usize| i * self.n + j;
+        let (a, b, c, d) = (idx(i, j), idx(i + 1, j), idx(i, j + 1), idx(i + 1, j + 1));
+        // Fixed op order: lerp z of (lerp x) — deterministic across machines.
+        // t==0.0/t==1.0 are special-cased: the far-edge clamp above (`.min(n - 2)`)
+        // makes t exactly 1.0 for queries on the grid's max corner, and
+        // `a + 1.0 * (b - a)` is not guaranteed bit-identical to `b` under IEEE754
+        // (float add/mul aren't associative) — without this, corner queries on the
+        // high edge would fail bit-exactness against direct column() calls.
+        fn lerp(t: f64, a: f64, b: f64) -> f64 {
+            if t == 0.0 {
+                a
+            } else if t == 1.0 {
+                b
+            } else {
+                a + t * (b - a)
+            }
+        }
+        let bilerp = |f: &[f64]| lerp(tz, lerp(tx, f[a], f[b]), lerp(tx, f[c], f[d]));
+        ColumnProfile {
+            offset_h: bilerp(&self.offset_h),
+            factor: bilerp(&self.factor),
+            jaggedness: bilerp(&self.jaggedness),
+        }
+    }
+}
+
 /// The 2D (x,z-only) part of the density field for one column, precomputed so a
 /// whole vertical column can be evaluated with cheap arithmetic. `density_at(y)`
 /// reproduces `TerrainPipeline::final_density(x, y, z)` bit-for-bit.
@@ -333,6 +411,59 @@ mod tests {
     }
 
     fn worldgen_test_seed() -> u64 { 0x00D5_C0DE_8D78 } // test helper, next to the test
+
+    fn splitmix_for_test(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    #[test]
+    fn profile_grid_exact_at_corners_and_close_between() {
+        let p = TerrainPipeline::new(worldgen_test_seed());
+        let grid = p.profile_grid(-32.0, 96.0, 64.0);
+        let k = PROFILE_LATTICE_BLOCKS as f64;
+        // Corners: bit-exact vs direct column().
+        for i in 0..=(64.0 / k) as usize {
+            for j in 0..=(64.0 / k) as usize {
+                let (x, z) = (-32.0 + i as f64 * k, 96.0 + j as f64 * k);
+                let (g, e) = (grid.profile_at(x, z), p.column(x, z));
+                assert_eq!(g.offset_h, e.offset_h);
+                assert_eq!(g.factor, e.factor);
+                assert_eq!(g.jaggedness, e.jaggedness);
+            }
+        }
+        // Interior: interpolation error tiny relative to terrain scale. The field's
+        // shortest wavelength is ~123 m, so a 4 m bilinear cell is ~30x past
+        // Nyquist; 0.5 m of height (offset_h) is a generous ceiling.
+        let mut s = 3u64;
+        let mut worst: f64 = 0.0;
+        for _ in 0..500 {
+            let x = -32.0 + ((splitmix_for_test(&mut s) % 6400) as f64) / 100.0;
+            let z = 96.0 + ((splitmix_for_test(&mut s) % 6400) as f64) / 100.0;
+            worst = worst.max((grid.profile_at(x, z).offset_h - p.column(x, z).offset_h).abs());
+        }
+        assert!(worst < 0.5, "bilinear offset_h error too large: {worst}");
+    }
+
+    #[test]
+    fn profile_grid_continuous_across_region_edges() {
+        // Adjacent regions build independent grids; along the shared edge both
+        // interpolate from identical corner samples (pure fn of world coords),
+        // so profiles must match bit-for-bit -> no terrain seams.
+        let p = TerrainPipeline::new(worldgen_test_seed());
+        let a = p.profile_grid(0.0, 0.0, 64.0); // region covering x in [0, 64]
+        let b = p.profile_grid(64.0, 0.0, 64.0); // neighbor covering x in [64, 128]
+        for j in 0..=64 {
+            let z = j as f64;
+            let (pa, pb) = (a.profile_at(64.0, z), b.profile_at(64.0, z));
+            assert_eq!(pa.offset_h, pb.offset_h);
+            assert_eq!(pa.factor, pb.factor);
+            assert_eq!(pa.jaggedness, pb.jaggedness);
+        }
+    }
 
     #[test]
     fn fused_column_matches_density_graphs_bit_exact() {
