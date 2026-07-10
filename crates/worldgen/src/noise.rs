@@ -18,17 +18,16 @@ fn lerp(t: f64, a: f64, b: f64) -> f64 {
 }
 
 /// 8-direction 2D gradient dot, chosen by the low 3 bits of the hash.
+/// Table-dot form of the old 8-way match; multiplies by ±1.0/0.0 are exact,
+/// so results are bit-identical (sign-of-zero aside, which f64 == ignores).
+const GRAD2: [(f64, f64); 8] = [
+    (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0),
+    (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
+];
+
 fn grad2(hash: u8, x: f64, y: f64) -> f64 {
-    match hash & 7 {
-        0 => x + y,
-        1 => x - y,
-        2 => -x + y,
-        3 => -x - y,
-        4 => x,
-        5 => -x,
-        6 => y,
-        _ => -y,
-    }
+    let (gx, gy) = GRAD2[(hash & 7) as usize];
+    gx * x + gy * y
 }
 
 /// Classic Perlin gradient noise over a seeded 256-entry permutation.
@@ -79,7 +78,8 @@ impl PerlinNoise {
 pub struct OctaveNoise {
     octaves: Vec<PerlinNoise>,
     amplitudes: Vec<f64>,
-    first_octave: i32,
+    /// 2^(first_octave + i) — exact powers of two, precomputed from `new()`.
+    freqs: Vec<f64>,
     norm: f64,
 }
 
@@ -89,14 +89,17 @@ impl OctaveNoise {
         let octaves = (0..amplitudes.len())
             .map(|_| PerlinNoise::new(splitmix64(&mut state)))
             .collect();
+        let freqs = (0..amplitudes.len())
+            .map(|i| 2f64.powi(first_octave + i as i32))
+            .collect();
         let norm = amplitudes.iter().sum::<f64>().max(1.0);
-        Self { octaves, amplitudes, first_octave, norm }
+        Self { octaves, amplitudes, freqs, norm }
     }
 
     pub fn sample2(&self, x: f64, z: f64) -> f64 {
         let mut acc = 0.0;
         for (i, oct) in self.octaves.iter().enumerate() {
-            let freq = 2f64.powi(self.first_octave + i as i32);
+            let freq = self.freqs[i];
             acc += self.amplitudes[i] * oct.sample2(x * freq, z * freq);
         }
         acc / self.norm
@@ -130,6 +133,55 @@ mod tests {
         for i in 0..40 {
             let v = o.sample2(i as f64 * 1.1, i as f64 * -0.7);
             assert!(v >= -1.5 && v <= 1.5, "octave out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn optimized_noise_matches_reference_bit_exact() {
+        // Frozen pre-optimization reference of grad2 + octave frequency math.
+        fn ref_grad2(hash: u8, x: f64, y: f64) -> f64 {
+            match hash & 7 {
+                0 => x + y,
+                1 => x - y,
+                2 => -x + y,
+                3 => -x - y,
+                4 => x,
+                5 => -x,
+                6 => y,
+                _ => -y,
+            }
+        }
+        for h in 0u8..=255 {
+            let mut s = h as u64 * 0x9E37_79B9 + 1;
+            for _ in 0..64 {
+                let a = splitmix64(&mut s);
+                let x = (a >> 11) as f64 / (1u64 << 53) as f64; // xf domain [0,1)
+                let y = (splitmix64(&mut s) >> 11) as f64 / (1u64 << 53) as f64;
+                for (gx, gy) in [(x, y), (x - 1.0, y), (x, y - 1.0), (x - 1.0, y - 1.0), (0.0, y), (x, 0.0)] {
+                    assert_eq!(grad2(h, gx, gy), ref_grad2(h, gx, gy), "h={h} x={gx} y={gy}");
+                }
+            }
+        }
+
+        // Octave frequency table vs on-the-fly powi across the pipeline's shapes.
+        for (first, amps) in [
+            (-10, vec![1.75, 1.0, 2.0, 3.0, 2.0, 2.0, 1.0]),
+            (-10, vec![2.0, 1.75, 1.5, 1.5, 1.3, 1.0]),
+            (-8, vec![1.0, 2.0, 1.0]),
+        ] {
+            let o = OctaveNoise::new(0xD5, first, amps.clone());
+            let mut s = 7u64;
+            for _ in 0..2048 {
+                let x = ((splitmix64(&mut s) >> 40) as f64) * 0.37 - 3000.0;
+                let z = ((splitmix64(&mut s) >> 40) as f64) * 0.53 - 2000.0;
+                // Reference: recompute with explicit powi, old-style.
+                let mut acc = 0.0;
+                for (i, oct) in o.octaves.iter().enumerate() {
+                    let freq = 2f64.powi(first + i as i32);
+                    acc += o.amplitudes[i] * oct.sample2(x * freq, z * freq);
+                }
+                assert_eq!(o.sample2(x, z), acc / o.norm, "at ({x}, {z})");
+            }
         }
     }
 }
