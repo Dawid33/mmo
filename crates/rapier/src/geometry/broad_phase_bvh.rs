@@ -32,10 +32,15 @@ impl BroadSaved {
     /// frame_index, pending_leaf_changes). `optimization_strategy` is not part of
     /// the journal snapshot, so it is excluded here too. Keep all four field lists
     /// in lockstep.
+    ///
+    /// Pairs content is represented by the multiset hash captured at save
+    /// time (O(1) here); the live twin RECOMPUTES it from the restored map,
+    /// so digest equality proves the restored pairs content matches the
+    /// captured content — and doubles as a cache-integrity check.
     pub(crate) fn digest<H: std::hash::Hasher>(&self, state: &mut H) {
         use std::hash::Hash;
         self.tree.hash(state);
-        self.pairs.hash(state);
+        state.write_u64(self.pairs_hash);
         self.frame_index.hash(state);
         self.pending_leaf_changes.hash(state);
     }
@@ -556,7 +561,11 @@ impl BroadPhaseBvh {
     pub(crate) fn journal_digest<H: std::hash::Hasher>(&self, state: &mut H) {
         use std::hash::Hash;
         self.tree.hash(state);
-        self.pairs.hash(state);
+        // Recomputed from the live map — NOT read from the cache — so this
+        // side independently verifies both the restore and the incremental
+        // cache maintenance (cf. BroadSaved::digest, which hashes the O(1)
+        // captured value).
+        state.write_u64(self.recompute_pairs_hash());
         self.frame_index.hash(state);
         self.pending_leaf_changes.hash(state);
     }
