@@ -211,6 +211,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, rc, now_ms),
                 ClientPacket::RequestFarRegion(rc) => self.far_subscribe(id, rc),
                 ClientPacket::ReleaseFarRegion(rc) => self.far_unsubscribe(id, rc),
+                ClientPacket::RequestLod(_) | ClientPacket::ReleaseLod(_) => {} // Task 7
                 ClientPacket::GameEvent(event) => match event.kind {
                     GameEventKind::Tick => {}
                     GameEventKind::Quit => return false,

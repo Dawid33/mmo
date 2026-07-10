@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::input::InputEvent;
+use crate::lod::LodKey;
 use crate::{
     Chunk, ChunkCoords, Client, ClientId, Column, ColumnCoords, EntityKey, EntityKind,
     IsometryReal, Rollback,
@@ -237,7 +238,15 @@ pub enum ClientPacket {
     RequestFarRegion(RegionId),
     /// Client no longer wants this region's far terrain (ring moved on).
     ReleaseFarRegion(RegionId),
+    /// Subscribe to one LOD key: the server replies with `LodData` (from
+    /// cache or after building) and re-pushes on terrain change.
+    RequestLod(LodKey),
+    /// Unsubscribe; removal is client-driven, there is no "gone" packet.
+    ReleaseLod(LodKey),
 }
+
+/// One LOD response: (key-local cell group, RLE grid) pairs.
+pub type LodPayload = Vec<([i32; 3], crate::lod::PackedLodGrid)>;
 
 type CurrentTickRate = u64;
 
@@ -253,6 +262,9 @@ pub enum ServerPacket {
     /// Read-only visual terrain for a far region (initial send AND refresh —
     /// replace-on-re-receipt). Removal is client-driven; no "gone" packet.
     FarRegion(RegionId, FarSnapshot),
+    /// Streamed LOD cells for one key (initial send AND refresh —
+    /// replace-on-re-receipt).
+    LodData(LodKey, LodPayload),
 }
 
 /// A Game event
@@ -333,6 +345,33 @@ impl GameEventKind {
                 a.source_region == b.source_region && a.source_key == b.source_key
             }
             _ => self == other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lod_packets_round_trip_bincode() {
+        use crate::lod::{LodKey, PackedLodGrid};
+        let key = LodKey { factor: 64, coords: [-1, 2] };
+        let req = ClientPacket::RequestLod(key);
+        let bytes = bincode::serialize(&req).unwrap();
+        assert!(matches!(
+            bincode::deserialize::<ClientPacket>(&bytes).unwrap(),
+            ClientPacket::RequestLod(k) if k == key
+        ));
+        let payload: LodPayload = vec![([0, -1, 0], PackedLodGrid(vec![(100, crate::BlockId(2))]))];
+        let data = ServerPacket::LodData(key, payload.clone());
+        let bytes = bincode::serialize(&data).unwrap();
+        match bincode::deserialize::<ServerPacket>(&bytes).unwrap() {
+            ServerPacket::LodData(k, p) => {
+                assert_eq!(k, key);
+                assert_eq!(p, payload);
+            }
+            other => panic!("wrong variant {other:?}"),
         }
     }
 }

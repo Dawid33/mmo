@@ -146,6 +146,7 @@ pub fn drain_client_updates(
                 remove_far_region(&mut commands, &mut far_roots, id);
                 info!("bridge: far region {:?} removed", id);
             }
+            ClientUpdateEvent::LodData(..) | ClientUpdateEvent::RemoveLod(_) => {} // Task 11
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
             ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {
                 hud_status.home_region = Some(home_region);

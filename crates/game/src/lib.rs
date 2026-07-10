@@ -95,6 +95,11 @@ pub enum ClientUpdateEvent {
     NewFarRegion(RegionId, FarSnapshot),
     /// The far ring moved on: tear down this region's far render state.
     RemoveFarRegion(RegionId),
+    /// Streamed LOD cells for one key (initial send or refresh —
+    /// replace-on-re-receipt). Decoded and spawned by the renderer.
+    LodData(LodKey, LodPayload),
+    /// The ring assignment moved on: retire this key's render root.
+    RemoveLod(LodKey),
     GameCrash(GameError),
     SetPlayer(ClientId),
     /// Region + connection status for the debug HUD. Edge-triggered by the

@@ -841,6 +841,7 @@ impl GameInstanceManager {
                     .send(ClientUpdateEvent::NewFarRegion(id, snap))
                     .unwrap();
             }
+            game::ServerPacket::LodData(_, _) => {} // Task 7
         }
         Ok(())
     }
