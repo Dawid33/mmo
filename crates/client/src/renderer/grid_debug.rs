@@ -3,7 +3,10 @@
 //! see docs/superpowers/specs/2026-07-10-chunk-region-debug-wireframe-design.md.
 use bevy::color::palettes::css::{AQUA, PURPLE, RED, YELLOW};
 use bevy::prelude::*;
+use bevy::ui::IsDefaultUiCamera;
 use game::{RegionCoords, REGION_SIZE};
+
+use super::bridge::{FarRegionRoots, RegionRoots};
 
 /// Whether the chunk/region wireframe view is on. Client-only debug state,
 /// defaults off; F5 flips it. Independent of the F3 debug overlay.
@@ -103,6 +106,50 @@ pub fn region_wall_lines(coords: RegionCoords, camera_y: f32) -> Vec<(Vec3, Vec3
         }
     }
     out
+}
+
+/// Draw the wireframe view while enabled: chunk cubes in a radius around the
+/// camera (current cell highlighted), and boundary walls for every loaded
+/// region — cyan for simulated (near), purple for far/LOD. All lines are
+/// re-derived per frame; the camera's `GlobalTransform` already folds in the
+/// region world offset, so everything here is true world space.
+pub fn draw_grid_debug(
+    state: Res<GridDebug>,
+    camera: Query<&GlobalTransform, With<IsDefaultUiCamera>>,
+    near: Res<RegionRoots>,
+    far: Res<FarRegionRoots>,
+    mut gizmos: Gizmos,
+) {
+    if !state.enabled {
+        return;
+    }
+    let Some(cam) = camera.iter().next().map(|t| t.translation()) else {
+        return;
+    };
+
+    let center = chunk_cell_of(cam);
+    for dx in -CHUNK_GRID_RADIUS_XZ..=CHUNK_GRID_RADIUS_XZ {
+        for dy in -CHUNK_GRID_RADIUS_Y..=CHUNK_GRID_RADIUS_Y {
+            for dz in -CHUNK_GRID_RADIUS_XZ..=CHUNK_GRID_RADIUS_XZ {
+                let cell = center + IVec3::new(dx, dy, dz);
+                let color = if cell == center { CHUNK_CURRENT_COLOR } else { CHUNK_GRID_COLOR };
+                for (a, b) in chunk_cube_lines(cell) {
+                    gizmos.line(a, b, color);
+                }
+            }
+        }
+    }
+
+    let regions = near
+        .0
+        .keys()
+        .map(|c| (*c, REGION_NEAR_COLOR))
+        .chain(far.0.keys().map(|c| (*c, REGION_FAR_COLOR)));
+    for (coords, color) in regions {
+        for (a, b) in region_wall_lines(coords, cam.y) {
+            gizmos.line(a, b, color);
+        }
+    }
 }
 
 #[cfg(test)]

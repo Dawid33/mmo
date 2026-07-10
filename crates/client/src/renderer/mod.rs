@@ -61,6 +61,7 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<ui_bridge::UiRoot>()
             .insert_resource(collider_debug::DebugFlagsRes(self.debug_flags.clone()))
             .init_resource::<collider_debug::DebugColliderLines>()
+            .init_resource::<grid_debug::GridDebug>()
             .add_observer(ui_input::on_widget_click)
             .init_resource::<meshing::queue::ChunkGrid>()
             .init_resource::<meshing::queue::RemeshQueue>()
@@ -116,6 +117,8 @@ impl Plugin for SimBridgePlugin {
                     hud::toggle_debug,
                     meshing::visibility::toggle_culling,
                     collider_debug::draw_collider_wireframes.after(hud::toggle_debug),
+                    grid_debug::toggle_grid_debug,
+                    grid_debug::draw_grid_debug.after(grid_debug::toggle_grid_debug),
                     hud::update_debug_text,
                     hud::update_crosshair_visibility,
                 ),
