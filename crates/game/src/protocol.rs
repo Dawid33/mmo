@@ -24,12 +24,12 @@ impl From<usize> for Usize {
 pub type Tick = usize;
 pub type EventId = usize;
 pub type EntityId = usize;
-/// Regions tile the horizontal plane in fixed 256-unit squares (8×8 chunks
-/// of 32 voxels). Signed and unbounded: the world grows in every direction.
-/// Sims stay region-local; the world offset exists only at the render
-/// boundary (region root Transform) and, later, in handoff rebasing.
-pub const REGION_CHUNKS: usize = 8;
-pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // 256.0, exact in f32
+/// Regions tile the horizontal plane in fixed 1024-unit squares (32×32
+/// chunks of 32 voxels). Signed and unbounded: the world grows in every
+/// direction. Sims stay region-local; the world offset exists only at the
+/// render boundary (region root Transform) and, later, in handoff rebasing.
+pub const REGION_CHUNKS: usize = 32;
+pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // 1024.0, exact in f32
 
 /// Chebyshev radius of the visual-only far ring around the viewer region.
 /// 0 → no far ring (only the near window renders); 2 → a 5×5 footprint (one

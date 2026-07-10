@@ -491,8 +491,9 @@ pub fn finish_worldgen_tasks(
 
 /// Generate one region's terrain and downsample it to `factor`'s LOD cells.
 /// Runs inside the async task — pure, owns everything it needs. Chunk coords
-/// come out region-local in x/z (column indices 0..8) with `y` the absolute
-/// (signed) sub-chunk index from `Column::materialized_sub_chunks`.
+/// come out region-local in x/z (column indices 0..REGION_CHUNKS) with `y`
+/// the absolute (signed) sub-chunk index from
+/// `Column::materialized_sub_chunks`.
 pub fn build_worldgen_lod_cells(
     coords: RegionCoords,
     seed: u64,
@@ -537,44 +538,43 @@ pub fn downsample_cells(cells: Vec<LodCell>) -> Vec<LodCell> {
         .collect()
 }
 
-/// Factor-16 (block scale) packing: ONE 32³ grid per 16-sub-chunk vertical
-/// band of the whole region, group key `[0, sub_y.div_euclid(16), 0]` —
-/// instead of one `downsample_blocks` grid per 2×2×2-chunk group. A block
-/// cell is 16 world units, so the region's 8×8 columns fill the grid's
-/// 16×16-cell x/z corner exactly (256 of the grid's 512-unit span) and 32
-/// cells of height cover one 16-sub-chunk band (512 units). Mapping: chunk
-/// `(cx, sub_y, cz)`, block `(bx, by, bz)` → cell
-/// `(cx*2 + bx, sub_y.rem_euclid(16)*2 + by, cz*2 + bz)`.
-///
-/// The unpopulated x/z half of each grid stays air — wasted volume accepted
-/// for v1 simplicity (the same trade the plan documents for
-/// `downsample_blocks`' corner packing), and the shared LOD `Aabb`
-/// (local 16±16, scaled 16×) overbounds the populated corner 2× in x/z, so
-/// frustum culling is pessimistic for these cells: over-draw, never
+/// Factor-16 (block scale) packing: ONE 32³ grid per 16×16-chunk x/z tile and
+/// 16-sub-chunk vertical band, group key `[cx.div_euclid(16),
+/// sub_y.div_euclid(16), cz.div_euclid(16)]` — instead of one
+/// `downsample_blocks` grid per 2×2×2-chunk group. A block cell is 16 world
+/// units, so a 16-chunk tile fills a grid's 32×32-cell x/z span exactly (the
+/// grid's full 512-unit span) and 32 cells of height cover one 16-sub-chunk
+/// band (512 units). Mapping: chunk `(cx, sub_y, cz)`, block `(bx, by, bz)` →
+/// cell `(cx.rem_euclid(16)*2 + bx, sub_y.rem_euclid(16)*2 + by,
+/// cz.rem_euclid(16)*2 + bz)`. With `REGION_CHUNKS = 32` a region spans 2×2
+/// tiles per band; a region smaller than one tile leaves the grid's excess
+/// x/z volume as air (the corner-packing trade the plan documents for
+/// `downsample_blocks`) — over-draw from the shared LOD `Aabb`, never
 /// under-draw. Chiseled blocks count as their block id — chisel detail is
 /// invisible at 16×, matching `downsample_blocks`.
 pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
-    let mut bands: BTreeMap<i32, Vec<Voxel>> = BTreeMap::new();
+    let mut bands: BTreeMap<[i32; 3], Vec<Voxel>> = BTreeMap::new();
     for (coords, chunk) in chunks {
-        let band = bands
-            .entry(coords.y.div_euclid(16))
-            .or_insert_with(|| vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+        let (cx, cz) = (coords.x as i32, coords.z as i32);
+        let group = [cx.div_euclid(16), coords.y.div_euclid(16), cz.div_euclid(16)];
+        let band =
+            bands.entry(group).or_insert_with(|| vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+        let lx = cx.rem_euclid(16) as usize;
         let ly = coords.y.rem_euclid(16) as usize;
+        let lz = cz.rem_euclid(16) as usize;
         for bz in 0..2 {
             for by in 0..2 {
                 for bx in 0..2 {
                     let block = chunk.block_at(bx, by, bz);
                     if block.id != BlockId::AIR {
-                        let idx = (coords.x * 2 + bx)
-                            + 32 * (ly * 2 + by)
-                            + 32 * 32 * (coords.z * 2 + bz);
+                        let idx = (lx * 2 + bx) + 32 * (ly * 2 + by) + 32 * 32 * (lz * 2 + bz);
                         band[idx] = Voxel::new(block.id);
                     }
                 }
             }
         }
     }
-    bands.into_iter().map(|(gy, grid)| LodCell { group: [0, gy, 0], grid }).collect()
+    bands.into_iter().map(|(group, grid)| LodCell { group, grid }).collect()
 }
 
 #[cfg(test)]
@@ -676,16 +676,18 @@ mod tests {
     }
 
     #[test]
-    fn block_scale_cells_pack_the_region_into_one_grid_per_vertical_band() {
+    fn block_scale_cells_pack_the_region_into_one_grid_per_tile_and_band() {
         // Block cells are 16 world units: chunk (cx, sub_y, cz), block
-        // (bx,by,bz) → grid cell (cx*2+bx, rem_euclid(sub_y,16)*2+by, cz*2+bz)
-        // in band group [0, sub_y.div_euclid(16), 0].
+        // (bx,by,bz) → grid cell (rem_euclid(cx,16)*2+bx,
+        // rem_euclid(sub_y,16)*2+by, rem_euclid(cz,16)*2+bz) in group
+        // [cx.div_euclid(16), sub_y.div_euclid(16), cz.div_euclid(16)].
         let chunks = vec![
             (ChunkCoords::new(5, 0, 7), chunk_with_block([1, 1, 0], 4)),
             (ChunkCoords::new(0, -1, 0), chunk_with_block([0, 0, 0], 2)),
+            (ChunkCoords::new(17, 0, 20), chunk_with_block([0, 0, 0], 6)),
         ];
         let cells = block_scale_cells(chunks);
-        assert_eq!(cells.len(), 2, "sub_y 0 and -1 fall in different 16-chunk bands");
+        assert_eq!(cells.len(), 3, "two bands at tile (0,0) plus band 0 of tile (1,1)");
 
         let cell = |g: [i32; 3]| cells.iter().find(|c| c.group == g).expect("group present");
         let band0 = cell([0, 0, 0]);
@@ -695,6 +697,10 @@ mod tests {
         // rem_euclid(-1, 16) = 15 → cell y = 30 (top chunk of the band below 0).
         assert_eq!(band_neg.grid[32 * 30].block, BlockId(2));
         assert_eq!(band_neg.grid.iter().filter(|v| !v.is_air()).count(), 1);
+        // Chunk (17, 0, 20) is tile-local (1, 0, 4) → cell (2, 0, 8).
+        let tile11 = cell([1, 0, 1]);
+        assert_eq!(tile11.grid[2 + 32 * 32 * 8].block, BlockId(6), "cell (2, 0, 8)");
+        assert_eq!(tile11.grid.iter().filter(|v| !v.is_air()).count(), 1);
     }
 
     // --- app harness --------------------------------------------------------
@@ -880,6 +886,11 @@ mod tests {
     fn factor_transition_keeps_the_old_root_until_the_replacement_meshes() {
         let mut app = rings_app(&[(0, 4), (1, 16)], 2);
         app.world_mut().resource_mut::<WorldgenRings>().band = 0; // flips act immediately
+        // Headless updates spin ~2ms apart while the 32×32-chunk factor-16
+        // generation runs for real, so the frame-count deadline would fire
+        // long before the replacement meshes and force the very pop this
+        // test forbids. The deadline has its own tests — disable it here.
+        app.world_mut().resource_mut::<WorldgenRings>().retirement_max_frames = u32::MAX;
         set_viewer(&mut app, 0, 0);
         let coords = RegionCoords::new(0, 0);
 
@@ -1270,10 +1281,11 @@ mod tests {
 
     // --- (c) full pipeline: real worldgen for one region ----------------------
 
-    // Runs REAL worldgen for one region — measured ~60ms in debug (3 runs),
-    // under the 100ms slow-test threshold, so it stays untagged in the fast
-    // lane. Re-measure if worldgen gains sub-100m detail and tag if it grows.
+    // Runs REAL worldgen for one region — was ~60ms in debug at 8×8 chunks;
+    // at REGION_CHUNKS = 32 a region is 16× the columns, well past the 100ms
+    // fast-lane threshold, so it's tagged slow.
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn one_region_generates_and_settles_to_meshed_lod_children() {
         let mut app = rings_app(&[(0, 16)], 2);
         set_viewer(&mut app, 1, -1);
@@ -1292,13 +1304,14 @@ mod tests {
         let root = app.world().resource::<WorldgenRings>().assigned[&coords].root.unwrap();
         assert_eq!(
             app.world().entity(root).get::<Transform>().unwrap().translation,
-            Vec3::new(256.0, 0.0, -256.0),
+            Vec3::new(game::REGION_SIZE, 0.0, -game::REGION_SIZE),
             "root at the region's world offset"
         );
         assert!(task_list(&mut app).is_empty(), "in-flight drains to zero");
 
-        // Children follow the factor-16 packing: one grid per vertical band,
-        // translation (0, band*512 - 16, 0), scale 16.
+        // Children follow the factor-16 packing: one grid per 16×16-chunk
+        // tile and vertical band, translation (tile_x*512, band*512 - 16,
+        // tile_z*512), scale 16.
         {
             let world = app.world_mut();
             let mut q = world.query::<(&Transform, &LodChunk, &LodVoxelData, &ChildOf)>();
@@ -1307,8 +1320,8 @@ mod tests {
             for (tf, lod_chunk, data, _) in children {
                 assert_eq!(lod_chunk.factor, 16);
                 assert_eq!(tf.scale, Vec3::splat(16.0));
-                assert_eq!(tf.translation.x, 0.0);
-                assert_eq!(tf.translation.z, 0.0);
+                assert_eq!((tf.translation.x as i32).rem_euclid(512), 0, "x = tile_x*512");
+                assert_eq!((tf.translation.z as i32).rem_euclid(512), 0, "z = tile_z*512");
                 assert_eq!(
                     (tf.translation.y as i32 + 16).rem_euclid(512),
                     0,

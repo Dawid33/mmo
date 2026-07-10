@@ -14,11 +14,12 @@ use server::region_threads::ThreadRegionSpawner;
 
 /// A fresh region's first build (worldgen chunks -> physics colliders,
 /// block-scale + chisel-scale voxels shapes — see `Region::from_chunks`/
-/// `seed_terrain_genesis`) costs well under a second for a flat floor; 9 in
-/// parallel on real OS threads still take a few seconds wall-clock. Steady
-/// state (ticking, shutdown of already-running regions) is fast — only the
-/// initial spawn wait needs a generous budget.
-const REGION_STARTUP_BUDGET: Duration = Duration::from_secs(20);
+/// `seed_terrain_genesis`) is 32×32 columns of real worldgen since
+/// REGION_CHUNKS grew to 32 — several seconds each in debug, and 9 build in
+/// parallel on real OS threads. Steady state (ticking, shutdown of
+/// already-running regions) is fast — only the initial spawn wait needs a
+/// generous budget.
+const REGION_STARTUP_BUDGET: Duration = Duration::from_secs(120);
 
 struct Rig {
     manager: WorldManager<ThreadRegionSpawner>,
@@ -80,9 +81,9 @@ impl Rig {
     }
     /// Drain region outputs until quiet for 100ms OR a 500ms total budget
     /// runs out, whichever comes first. The budget is load-bearing: running
-    /// regions tick every 50ms on their own threads, so once anything is
-    /// ticking the channel is NEVER quiet for 100ms and an unbounded
-    /// wait-for-quiet would spin forever. Only meaningful for steady-state
+    /// regions tick every TICK_RATE ms on their own threads, so once anything
+    /// is ticking the channel is never reliably quiet and an unbounded
+    /// wait-for-quiet could spin forever. Only meaningful for steady-state
     /// traffic — a region's first build takes far longer than this window,
     /// so brand-new spawns need `wait_for_snapshots` instead.
     fn settle(&mut self) {
@@ -238,7 +239,7 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
 
     // Player spawns at region-local (128,26,128) facing -z. Enable fps-cam,
     // then hold W: 8 units/tick along -z from z=128 crosses the -z boundary
-    // (past -FLIP_HYSTERESIS) after ~17 ticks (<1s at TICK_RATE=50ms).
+    // (past -FLIP_HYSTERESIS) after ~17 ticks (~8.5s at TICK_RATE=500ms).
     let press = |key| {
         ServerEvent::ClientPacket(
             ClientPacket::GameEvent(GameEvent::new(
@@ -253,7 +254,8 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
     rig.event(press(Key::KeyW));
 
     let arrival_region = RegionCoords::new(0, -1);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // ~8.5s of walking (17 ticks at 500ms) plus handoff propagation.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut seen_flip = false;
     let mut seen_arrival = false;
     let mut observed: Vec<String> = Vec::new();

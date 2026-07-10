@@ -25,7 +25,7 @@ use crate::material::Materials;
 use crate::pipeline::{TerrainPipeline, SEA_LEVEL};
 
 // Region span in blocks: REGION_CHUNKS chunks * CHUNK_BLOCKS blocks/chunk.
-const REGION_BLOCKS: i32 = (REGION_CHUNKS * CHUNK_BLOCKS) as i32; // 16
+const REGION_BLOCKS: i32 = (REGION_CHUNKS * CHUNK_BLOCKS) as i32; // 64
 // Coarse vertical scan bounds (blocks). Terrain lives well inside this band.
 const SCAN_TOP: i32 = 320;
 const SCAN_BOTTOM: i32 = -64;
@@ -52,7 +52,7 @@ fn surface_block_y(p: &TerrainPipeline, wx: i32, wz: i32) -> i32 {
     SCAN_BOTTOM - 1
 }
 
-/// The full 8x8 column grid for one region. Pure and deterministic.
+/// The full REGION_CHUNKS x REGION_CHUNKS column grid for one region. Pure and deterministic.
 pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<(ColumnCoords, Column)> {
     let p = TerrainPipeline::new(seed);
     let sea = SEA_LEVEL as i32;

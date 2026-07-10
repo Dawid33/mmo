@@ -806,7 +806,7 @@ mod tests {
         app.update();
         let root = *app.world().resource::<RegionRoots>().0.get(&region_id).unwrap();
         let tf = app.world().entity(root).get::<Transform>().unwrap();
-        assert_eq!(tf.translation, Vec3::new(256.0, 0.0, -512.0));
+        assert_eq!(tf.translation, Vec3::new(game::REGION_SIZE, 0.0, -2.0 * game::REGION_SIZE));
     }
 
     #[test]
@@ -1096,11 +1096,11 @@ mod tests {
         client.send(ClientUpdateEvent::NewFarRegion(id, snap)).unwrap();
         app.update();
 
-        // Root exists at the region's world offset (256, 0, -512).
+        // Root exists at the region's world offset (REGION_SIZE, 0, -2·REGION_SIZE).
         let roots = app.world().resource::<FarRegionRoots>();
         let root = *roots.0.get(&id).expect("far root");
         let tf = app.world().get::<Transform>(root).unwrap();
-        assert_eq!(tf.translation, Vec3::new(256.0, 0.0, -512.0));
+        assert_eq!(tf.translation, Vec3::new(game::REGION_SIZE, 0.0, -2.0 * game::REGION_SIZE));
 
         // Async LOD path taken: either the build task is still in flight, or
         // (if this frame's tiny single-chunk build already raced ahead of

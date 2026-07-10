@@ -424,7 +424,9 @@ const PLAYER_CAPSULE_HALF_HEIGHT: f32 = 4.4;
 const PLAYER_CAPSULE_RADIUS: f32 = 6.4;
 /// Vertical gap left between the capsule bottom and the terrain surface at spawn.
 const PLAYER_SPAWN_CLEARANCE: f32 = 3.6;
-/// Region-local voxel column the player spawns over (region center: 256/2).
+/// Region-local voxel column the player spawns over. Not tied to the region
+/// center: the world seed was scanned (examples/seed_scan.rs) for dry land at
+/// exactly this column, so it stays fixed even though REGION_SIZE grew.
 const PLAYER_SPAWN_X: f32 = 128.0;
 const PLAYER_SPAWN_Z: f32 = 128.0;
 /// Spawn height used only when the spawn column has no terrain (all air).

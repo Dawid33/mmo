@@ -161,8 +161,8 @@ impl World {
     pub fn basic() -> Self {
         let one = RegionCoords::new(0, 0);
         let mut data = Region::new(Rollback::new(None), None, one, None);
-        for x in 0..8 {
-            for z in 0..8 {
+        for x in 0..REGION_CHUNKS {
+            for z in 0..REGION_CHUNKS {
                 data.create_basic(ChunkCoords::new(x, 0, z));
             }
         }

@@ -15,7 +15,10 @@ fn departure_needs_hysteresis() {
     assert_eq!(departure_offset(REGION_SIZE + FLIP_HYSTERESIS + 0.1, 10.0), Some((1, 0)));
     assert_eq!(departure_offset(10.0, -3.0), Some((0, -1)));
     // Corner: diagonal neighbour.
-    assert_eq!(departure_offset(-3.0, 259.0), Some((-1, 1)));
+    assert_eq!(
+        departure_offset(-3.0, REGION_SIZE + FLIP_HYSTERESIS + 1.0),
+        Some((-1, 1))
+    );
 }
 
 #[test]
@@ -34,11 +37,11 @@ fn ghost_offsets_cover_edges_and_corners() {
 
 #[test]
 fn rebase_is_exact_for_boundary_walk() {
-    // Walking off A(0,0) at x=258 lands at x=2 in B(1,0), bit-exact.
+    // Walking off A(0,0) at x=REGION_SIZE+2 lands at x=2 in B(1,0), bit-exact.
     use game::na::{Quaternion, Translation3, Unit};
     use game::parry::math::Real;
     let iso = IsometryReal::from_parts(
-        Translation3::new(Real::from(258.0), Real::from(26.0), Real::from(100.0)),
+        Translation3::new(Real::from(REGION_SIZE + 2.0), Real::from(26.0), Real::from(100.0)),
         Unit::<Quaternion<Real>>::identity(),
     );
     let out = rebase_isometry(&iso, RegionCoords::new(0, 0), RegionCoords::new(1, 0));

@@ -204,8 +204,9 @@ fn create_player_attaches_capsule_collider() {
 fn chunk_gets_voxels_collider() {
     let server = World::basic();
     let data = server.data(&r0());
-    // 8x8 floor chunks, one Voxels collider each, before any player joins.
-    assert_eq!(data.physics.colliders.len(), 64);
+    // REGION_CHUNKS² floor chunks, one Voxels collider each, before any
+    // player joins.
+    assert_eq!(data.physics.colliders.len(), game::REGION_CHUNKS * game::REGION_CHUNKS);
     let (_, collider) = data.physics.colliders.iter().next().unwrap();
     assert!(collider.shape().as_voxels().is_some(), "chunk collider is a Voxels shape");
     assert!(collider.parent().is_some(), "parented to the chunk's fixed body");

@@ -236,7 +236,7 @@ pub struct FarLodBuild(pub Task<Vec<LodCell>>);
 
 /// Group a far region's `(ChunkCoords, Chunk)` list into 2×2×2 clusters and
 /// downsample each cluster into one `LodCell`. `coords.x`/`coords.z` are
-/// region-local `0..8` (unsigned) but `coords.y` is signed (chunks stack both
+/// region-local `0..REGION_CHUNKS` (unsigned) but `coords.y` is signed (chunks stack both
 /// above and below y=0 as the world grows) — every axis uses
 /// `div_euclid`/`rem_euclid` uniformly so the grouping and octant math stay
 /// correct regardless of sign, matching `downsample2`'s `sx + 2*sy + 4*sz`

@@ -2,18 +2,18 @@ use game::{RegionCoords, REGION_SIZE};
 
 #[test]
 fn world_offset_is_exact_multiples_of_region_size() {
-    assert_eq!(REGION_SIZE, 256.0);
+    assert_eq!(REGION_SIZE, 1024.0);
     assert_eq!(RegionCoords::new(0, 0).world_offset(), [0.0, 0.0, 0.0]);
-    assert_eq!(RegionCoords::new(1, -2).world_offset(), [256.0, 0.0, -512.0]);
+    assert_eq!(RegionCoords::new(1, -2).world_offset(), [1024.0, 0.0, -2048.0]);
 }
 
 #[test]
 fn from_world_floor_divides_including_negatives() {
     assert_eq!(RegionCoords::from_world(0.0, 0.0), RegionCoords::new(0, 0));
-    assert_eq!(RegionCoords::from_world(255.9, 255.9), RegionCoords::new(0, 0));
-    assert_eq!(RegionCoords::from_world(256.0, 0.0), RegionCoords::new(1, 0));
+    assert_eq!(RegionCoords::from_world(1023.9, 1023.9), RegionCoords::new(0, 0));
+    assert_eq!(RegionCoords::from_world(1024.0, 0.0), RegionCoords::new(1, 0));
     // Negative side must floor, not truncate toward zero.
-    assert_eq!(RegionCoords::from_world(-0.1, -256.1), RegionCoords::new(-1, -2));
+    assert_eq!(RegionCoords::from_world(-0.1, -1024.1), RegionCoords::new(-1, -2));
 }
 
 #[test]
