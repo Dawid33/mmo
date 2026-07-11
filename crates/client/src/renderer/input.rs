@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -29,6 +31,67 @@ fn map_button(b: MouseButton) -> game::MouseButton {
         MouseButton::Back => game::MouseButton::Other(3),
         MouseButton::Forward => game::MouseButton::Other(4),
         MouseButton::Other(n) => game::MouseButton::Other(n),
+    }
+}
+
+/// Minimum wall-clock spacing between `MouseMotion` packets. Deltas arriving
+/// inside the window are summed and emitted when it expires.
+///
+/// Must stay well under `game::TICK_RATE`: the sim sums mouse deltas and drains
+/// them once per tick (`InputState::step`), and the only consumer is the camera
+/// controller, which reads that per-tick sum. So any window shorter than a tick
+/// is simulation-neutral — it changes how many packets carry the same sum, not
+/// the sum. Without it the packet rate is bound to the frame rate, and each
+/// packet costs its own QUIC uni-stream.
+pub const MOUSE_COALESCE_MS: u64 = 16;
+
+/// The live coalescing window. Defaults to [`MOUSE_COALESCE_MS`]; a resource so
+/// tests can vary it. `Duration::ZERO` restores per-frame emission.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct MouseCoalesceWindow(pub Duration);
+
+impl Default for MouseCoalesceWindow {
+    fn default() -> Self {
+        Self(Duration::from_millis(MOUSE_COALESCE_MS))
+    }
+}
+
+/// Sums per-frame mouse deltas and releases them at most once per window.
+pub(crate) struct MouseCoalescer {
+    pending: Vec2,
+    since_send: Duration,
+}
+
+impl Default for MouseCoalescer {
+    fn default() -> Self {
+        // Saturated: the first delta of the session emits immediately, exactly
+        // like any other delta arriving after an idle period.
+        Self { pending: Vec2::ZERO, since_send: Duration::MAX }
+    }
+}
+
+impl MouseCoalescer {
+    /// Fold one frame's motion in. Returns `Some(sum)` on the frames where an
+    /// event should be emitted, having reset the accumulator.
+    pub(crate) fn accumulate(
+        &mut self,
+        delta: Vec2,
+        dt: Duration,
+        window: Duration,
+    ) -> Option<Vec2> {
+        self.pending += delta;
+        // Clamped at `window`: an idle mouse can neither drift the accumulator
+        // nor overflow it, and it leaves `since_send` armed at exactly the
+        // threshold, which is what gives the leading edge.
+        self.since_send = self.since_send.saturating_add(dt).min(window);
+
+        if self.pending == Vec2::ZERO || self.since_send < window {
+            return None;
+        }
+        let sum = self.pending;
+        self.pending = Vec2::ZERO;
+        self.since_send = Duration::ZERO;
+        Some(sum)
     }
 }
 
@@ -72,6 +135,122 @@ pub fn forward_input(
                 send(InputEvent::Resized { width: size.0, height: size.1 });
             }
             *last_size = Some(size);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const W: Duration = Duration::from_millis(16);
+    /// A frame at ~240fps: four of these fit in one 16ms window.
+    const FRAME: Duration = Duration::from_millis(4);
+
+    #[test]
+    fn first_delta_after_idle_emits_immediately() {
+        let mut c = MouseCoalescer::default();
+        assert_eq!(
+            c.accumulate(Vec2::new(3.0, -1.0), FRAME, W),
+            Some(Vec2::new(3.0, -1.0)),
+            "leading edge: a fresh coalescer must not withhold the first delta"
+        );
+    }
+
+    #[test]
+    fn deltas_inside_one_window_are_summed_into_one_emission() {
+        let mut c = MouseCoalescer::default();
+        // Leading edge consumes the first delta.
+        assert_eq!(c.accumulate(Vec2::new(1.0, 0.0), FRAME, W), Some(Vec2::new(1.0, 0.0)));
+        // Next three 4ms frames sit inside the 16ms window: withheld, summed.
+        assert_eq!(c.accumulate(Vec2::new(2.0, 1.0), FRAME, W), None);
+        assert_eq!(c.accumulate(Vec2::new(3.0, 1.0), FRAME, W), None);
+        assert_eq!(c.accumulate(Vec2::new(4.0, 1.0), FRAME, W), None);
+        // The fourth frame closes the window: one event carrying the sum.
+        assert_eq!(
+            c.accumulate(Vec2::new(5.0, 1.0), FRAME, W),
+            Some(Vec2::new(14.0, 4.0)),
+            "the withheld deltas must be summed, not dropped"
+        );
+    }
+
+    #[test]
+    fn idle_never_emits_however_long_it_waits() {
+        let mut c = MouseCoalescer::default();
+        for _ in 0..1000 {
+            assert_eq!(
+                c.accumulate(Vec2::ZERO, FRAME, W),
+                None,
+                "a still mouse must never produce a packet"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_then_motion_still_emits_immediately() {
+        let mut c = MouseCoalescer::default();
+        assert_eq!(c.accumulate(Vec2::new(1.0, 0.0), FRAME, W), Some(Vec2::new(1.0, 0.0)));
+        // Long pause: the window fully elapses while the mouse is still.
+        for _ in 0..10 {
+            assert_eq!(c.accumulate(Vec2::ZERO, FRAME, W), None);
+        }
+        // Motion resumes: leading edge again, no waiting.
+        assert_eq!(
+            c.accumulate(Vec2::new(7.0, 7.0), FRAME, W),
+            Some(Vec2::new(7.0, 7.0)),
+            "a pause must re-arm the leading edge, not add latency"
+        );
+    }
+
+    #[test]
+    fn burst_conserves_the_sum_and_cuts_the_packet_count() {
+        let mut c = MouseCoalescer::default();
+        let mut emitted = Vec::new();
+        // 240 frames at 240fps = 1s of continuous motion.
+        for _ in 0..240 {
+            if let Some(sum) = c.accumulate(Vec2::new(1.0, 0.5), FRAME, W) {
+                emitted.push(sum);
+            }
+        }
+        let mid_burst = emitted.len();
+
+        // The burst ends mid-window, so its last few frames are still pending.
+        // They must not be stranded: idle frames keep advancing the window, and
+        // the tail goes out when it expires.
+        for _ in 0..4 {
+            if let Some(sum) = c.accumulate(Vec2::ZERO, FRAME, W) {
+                emitted.push(sum);
+            }
+        }
+        assert_eq!(
+            emitted.len(),
+            mid_burst + 1,
+            "the tail of a burst must be flushed exactly once after motion stops"
+        );
+
+        let total: Vec2 = emitted.iter().copied().sum();
+        assert_eq!(
+            total,
+            Vec2::new(240.0, 120.0),
+            "conservation: emitted deltas must sum to the injected deltas"
+        );
+        // One leading edge + one per 16ms window over 960ms of frames, + the tail.
+        assert!(
+            (55..=65).contains(&emitted.len()),
+            "expected ~60 packets for 240 frames, got {}",
+            emitted.len()
+        );
+    }
+
+    #[test]
+    fn zero_window_reproduces_todays_per_frame_behavior() {
+        let mut c = MouseCoalescer::default();
+        for _ in 0..10 {
+            assert_eq!(
+                c.accumulate(Vec2::new(1.0, 1.0), FRAME, Duration::ZERO),
+                Some(Vec2::new(1.0, 1.0)),
+                "a zero window must emit every frame with motion (the pre-change behavior)"
+            );
         }
     }
 }
