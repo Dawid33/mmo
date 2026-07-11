@@ -40,14 +40,16 @@ fn harness() -> Harness {
 }
 
 impl Harness {
-    /// Route → pump runners → route outputs, twice (outputs can trigger
-    /// respawns/resubscribes that need one more pump). Mirrors LocalServer.
+    /// Route → pump runners → route outputs → pump LOD builds, twice
+    /// (outputs can trigger respawns/resubscribes that need one more pump).
+    /// Mirrors LocalServer.
     fn settle(&mut self, now_ms: u64) {
         for _ in 0..2 {
             self.manager.spawner_mut().pump();
             while let Ok((rc, out)) = self.region_out.try_recv() {
                 self.manager.handle_region_output(rc, out, now_ms);
             }
+            self.manager.pump_lod_results();
         }
     }
     fn event(&mut self, ev: ServerEvent, now_ms: u64) -> bool {
@@ -243,7 +245,7 @@ fn quit_event_stops_the_manager() {
 }
 
 /// Connect client 0 and drain the join packets, returning the harness ready
-/// for far-region assertions.
+/// for LOD-serving assertions.
 fn connected_harness() -> Harness {
     let mut h = harness();
     h.event(ServerEvent::ClientConnected(0), 0);
@@ -251,27 +253,29 @@ fn connected_harness() -> Harness {
     h
 }
 
+/// Does the packet list carry a `LodData` for `key` addressed to client 0?
+fn has_lod_data(packets: &[(Option<ClientId>, ServerPacket)], key: game::lod::LodKey) -> bool {
+    packets.iter().any(|(target, p)| {
+        *target == Some(0) && matches!(p, ServerPacket::LodData(k, _) if *k == key)
+    })
+}
+
 #[test]
-fn far_request_for_never_run_region_serves_without_waking() {
+fn lod_request_for_never_run_region_serves_without_waking() {
     let mut h = connected_harness();
     let rc = RegionCoords::new(5, 5);
-    h.event(
-        ServerEvent::ClientPacket(ClientPacket::RequestFarRegion(rc), 0),
-        0,
-    );
-    // Never spun up a sim thread for the far region.
+    let key = game::lod::LodKey::for_region(2, rc);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 0), 0);
+    // Never spun up a sim thread for the region: generate-on-miss.
     assert!(!h.manager.running_regions().contains(&rc));
-    let packets = h.drain_packets();
     assert!(
-        packets.iter().any(|(target, p)| {
-            *target == Some(0) && matches!(p, ServerPacket::FarRegion(id, _) if *id == rc)
-        }),
-        "far request must deliver a FarRegion packet"
+        has_lod_data(&h.drain_packets(), key),
+        "LOD request must deliver a LodData packet"
     );
 }
 
 #[test]
-fn far_request_for_running_region_pulls_live_snapshot() {
+fn lod_request_for_running_region_pulls_live_terrain() {
     let mut h = connected_harness();
     let rc = RegionCoords::new(1, 0);
     // Make it running via a normal (near) subscribe first.
@@ -281,48 +285,42 @@ fn far_request_for_running_region_pulls_live_snapshot() {
     );
     h.drain_packets();
     assert!(h.manager.running_regions().contains(&rc));
-    h.event(
-        ServerEvent::ClientPacket(ClientPacket::RequestFarRegion(rc), 0),
-        0,
-    );
-    let packets = h.drain_packets();
-    assert!(packets.iter().any(|(target, p)| {
-        *target == Some(0) && matches!(p, ServerPacket::FarRegion(id, _) if *id == rc)
-    }));
+    let key = game::lod::LodKey::for_region(2, rc);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 0), 0);
+    assert!(has_lod_data(&h.drain_packets(), key));
 }
 
 #[test]
-fn far_viewers_do_not_keep_a_region_alive() {
+fn lod_subscribers_do_not_keep_a_region_alive() {
     let mut h = connected_harness();
     let rc = RegionCoords::new(9, 9);
-    // Wake it (arrival-style) by near-subscribing, then release near but keep far.
+    let key = game::lod::LodKey::for_region(2, rc);
+    // Wake it (arrival-style) by near-subscribing, then release near but keep LOD.
     h.event(
         ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0),
         0,
     );
-    h.event(
-        ServerEvent::ClientPacket(ClientPacket::RequestFarRegion(rc), 0),
-        0,
-    );
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 0), 0);
     h.drain_packets();
     h.event(
         ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(rc), 0),
         0,
     );
-    // Grace timer starts; after the window, maintain must park it despite the far-viewer.
+    // Grace timer starts; after the window, maintain must park it despite
+    // the LOD subscription.
     h.manager.maintain(UNLOAD_GRACE_MS + 1);
     h.settle(UNLOAD_GRACE_MS + 1);
     assert!(
         !h.manager.running_regions().contains(&rc),
-        "a region with only far-viewers must still park"
+        "a region with only LOD subscribers must still park"
     );
     assert!(h.manager.parked_regions().contains(&rc));
 }
 
 #[test]
-fn parked_far_viewer_still_gets_served_from_cache() {
-    // After the region parks (previous scenario), a fresh far request is
-    // served from far_cache without waking it.
+fn parked_lod_request_still_gets_served_from_cache() {
+    // After the region parks (previous scenario), a fresh LOD request is
+    // served from terrain_cache without waking it.
     let mut h = connected_harness();
     let rc = RegionCoords::new(2, 3);
     h.event(
@@ -337,13 +335,11 @@ fn parked_far_viewer_still_gets_served_from_cache() {
     h.settle(UNLOAD_GRACE_MS + 1);
     assert!(h.manager.parked_regions().contains(&rc));
     h.drain_packets();
+    let key = game::lod::LodKey::for_region(2, rc);
     h.event(
-        ServerEvent::ClientPacket(ClientPacket::RequestFarRegion(rc), 0),
+        ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 0),
         UNLOAD_GRACE_MS + 2,
     );
-    assert!(!h.manager.running_regions().contains(&rc), "far serve must not wake a parked region");
-    let packets = h.drain_packets();
-    assert!(packets.iter().any(|(target, p)| {
-        *target == Some(0) && matches!(p, ServerPacket::FarRegion(id, _) if *id == rc)
-    }));
+    assert!(!h.manager.running_regions().contains(&rc), "LOD serve must not wake a parked region");
+    assert!(has_lod_data(&h.drain_packets(), key));
 }

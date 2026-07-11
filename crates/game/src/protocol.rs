@@ -32,17 +32,10 @@ pub type EntityId = usize;
 pub const REGION_CHUNKS: usize = 32;
 pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // 1024.0, exact in f32
 
-/// Chebyshev radius of the visual-only far ring around the viewer region.
-/// 0 → no far ring (only the near window renders); 2 → a 5×5 footprint (one
-/// ring outside the near 3×3 window). No UI; raise this constant (with LOD,
-/// later) to extend the horizon. 9 → a 19×19 footprint, horizon 76 chunks
-/// from the viewer's region center.
-pub const FAR_VIEW_RADIUS: i32 = 2;
-
 /// A running region checks its terrain hash this often and pushes a
-/// `FarSnapshotChanged` only when it changed — the check cadence IS the
+/// `TerrainChanged` only when it changed — the check cadence IS the
 /// refresh throttle.
-pub const FAR_SNAPSHOT_MIN_INTERVAL_TICKS: usize = 25;
+pub const TERRAIN_HASH_INTERVAL_TICKS: usize = 25;
 
 #[derive(
     Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd,
@@ -192,13 +185,14 @@ pub enum WorldId {
 
 /// The visual-only subset of a region's data: terrain chunks, nothing else.
 /// Much smaller than a `Rollback` (a `Chunk` is 8 blocks + a sparse chisel
-/// map). Served to far-viewers; never carries entities/physics/undo state.
+/// map). The source for server-side LOD builds; never carries
+/// entities/physics/undo state.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FarSnapshot {
+pub struct TerrainSnapshot {
     pub chunks: Vec<(ChunkCoords, Chunk)>,
 }
 
-impl FarSnapshot {
+impl TerrainSnapshot {
     /// Materialize worldgen columns into the same `(ChunkCoords, Chunk)` form
     /// `Region::from_columns` uses — how never-run regions are served.
     pub fn from_columns(columns: Vec<(ColumnCoords, Column)>) -> Self {
@@ -212,8 +206,9 @@ impl FarSnapshot {
             })
             .collect();
         // Sort by coordinate: keeps `terrain_hash` order-insensitive and
-        // stable relative to `Rollback::far_snapshot`'s ECS-insertion-order
-        // output, since both are hashed positionally via bincode.
+        // stable relative to `Rollback::terrain_snapshot`'s
+        // ECS-insertion-order output, since both are hashed positionally via
+        // bincode.
         chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
         Self { chunks }
     }
@@ -221,7 +216,7 @@ impl FarSnapshot {
     /// crc32 of the terrain, for cheap change detection on the region thread.
     pub fn terrain_hash(&self) -> u32 {
         let mut h = crc32fast::Hasher::new();
-        h.update(&bincode::serialize(self).expect("far snapshot serializes"));
+        h.update(&bincode::serialize(self).expect("terrain snapshot serializes"));
         h.finalize()
     }
 }
@@ -234,10 +229,6 @@ pub enum ClientPacket {
     RequestRegionConnection(RegionId),
     /// Client no longer wants this region's events (window moved on).
     ReleaseRegionConnection(RegionId),
-    /// Client wants read-only visual terrain for a far (unsimulated) region.
-    RequestFarRegion(RegionId),
-    /// Client no longer wants this region's far terrain (ring moved on).
-    ReleaseFarRegion(RegionId),
     /// Subscribe to one LOD key: the server replies with `LodData` (from
     /// cache or after building) and re-pushes on terrain change.
     RequestLod(LodKey),
@@ -259,9 +250,6 @@ pub enum ServerPacket {
     // who he is.
     Region(RegionId, Rollback),
     PlayerRegion(Option<RegionId>, ClientId),
-    /// Read-only visual terrain for a far region (initial send AND refresh —
-    /// replace-on-re-receipt). Removal is client-driven; no "gone" packet.
-    FarRegion(RegionId, FarSnapshot),
     /// Streamed LOD cells for one key (initial send AND refresh —
     /// replace-on-re-receipt).
     LodData(LodKey, LodPayload),

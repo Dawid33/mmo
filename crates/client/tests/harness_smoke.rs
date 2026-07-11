@@ -57,3 +57,37 @@ fn held_input_moves_the_player() {
     h.step();
     h.assert_progresses(game::Key::KeyW); // holding W advances tick AND moves the body
 }
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn streamed_factor2_lod_arrives_for_ring_regions() {
+    // End-to-end factor-2 check (the old far ring's replacement): the
+    // instance's ring assignment must request factor-2 LOD for a region just
+    // outside the near window, and the server's LodData reply must reach the
+    // bridge channel with decodable, non-empty grids. Only the factor-2 ring
+    // is enabled — the production table would inline-build hundreds of keys
+    // through the LocalServer (minutes of wall clock).
+    let mut h = SimHarness::with_lod_table(&[(2, 2)]);
+    h.connect();
+    h.step_n(10);
+    let lod: Vec<(game::lod::LodKey, game::LodPayload)> = h
+        .drain_bridge_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            game::ClientUpdateEvent::LodData(key, payload) => Some((key, payload)),
+            _ => None,
+        })
+        .collect();
+    // The viewer sits in SPAWN_REGION (0,0); the 3x3 near window is excluded,
+    // so the distance-2 ring renders at factor 2 — region (2,0) is in it.
+    let key = game::lod::LodKey::for_region(2, game::RegionCoords::new(2, 0));
+    let payload = lod
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, p)| p)
+        .expect("factor-2 LodData for the distance-2 ring region (2,0)");
+    assert!(!payload.is_empty(), "flat worldgen floor produces cells");
+    for (_, grid) in payload {
+        assert!(grid.decode().is_some(), "well-formed RLE grids over the wire");
+    }
+}

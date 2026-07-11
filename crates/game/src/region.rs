@@ -552,8 +552,8 @@ impl Region {
         &self.data
     }
 
-    pub fn far_snapshot(&self) -> crate::FarSnapshot {
-        self.data.far_snapshot()
+    pub fn terrain_snapshot(&self) -> crate::TerrainSnapshot {
+        self.data.terrain_snapshot()
     }
 
     pub fn create_basic(&mut self, coords: ChunkCoords) {

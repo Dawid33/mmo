@@ -9,7 +9,7 @@ use game::{
     ClientPacket, ClientUpdateEvent, GameError, GameEvent, GameEventKind, Region,
     TEST_INDUCED_LATENCY_MS,
 };
-use log::{debug, info, warn};
+use log::{info, warn};
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
@@ -42,11 +42,14 @@ pub struct GameInstanceManager {
     home_region: Option<RegionCoords>,
     /// Regions we have requested (and not released) — the desired window.
     subscribed: std::collections::BTreeSet<RegionCoords>,
-    /// Far (visual-only) regions we have requested and not released.
-    far_subscribed: std::collections::BTreeSet<RegionCoords>,
     /// Last ring-factor assignment per region (the stickiness `prev` for the
     /// next `desired_lod` call).
     lod_assigned: BTreeMap<RegionCoords, u32>,
+    /// Ring table driving `update_lod_window` — a field (defaulting to
+    /// `LOD_RING_TABLE`) so test harnesses can shrink it: every key it
+    /// yields costs the server a real build, which headless suites pay
+    /// synchronously through `InlineLodBuilder`.
+    lod_table: &'static [(i32, u32)],
     /// LOD keys we have requested and not released.
     lod_subscribed: std::collections::BTreeSet<game::lod::LodKey>,
     /// Events for subscribed regions whose snapshot hasn't arrived yet.
@@ -168,31 +171,11 @@ fn desired_window(
     desired
 }
 
-/// The far ring: every region within `radius` (Chebyshev) of `center`, minus
-/// the near window. Far and near are disjoint by construction, so a region is
-/// never both simulated and merely visualized.
-fn desired_far(
-    center: RegionCoords,
-    near: &std::collections::BTreeSet<RegionCoords>,
-    radius: i32,
-) -> std::collections::BTreeSet<RegionCoords> {
-    let mut out = std::collections::BTreeSet::new();
-    for dx in -radius..=radius {
-        for dz in -radius..=radius {
-            let rc = RegionCoords::new(center.x + dx, center.z + dz);
-            if !near.contains(&rc) {
-                out.insert(rc);
-            }
-        }
-    }
-    out
-}
-
 /// Ring assignment for every region in view: per-region factor via the
 /// shared `ring_factor_in` (sticky against `prev`), minus `excluded`
-/// (near-window — and, until Task 12, far-ring — members render
-/// authoritative state). Returns the region->factor map (the next `prev`)
-/// and the deduped key set to hold subscriptions for.
+/// (near-window members render authoritative state). Returns the
+/// region->factor map (the next `prev`) and the deduped key set to hold
+/// subscriptions for.
 pub fn desired_lod(
     viewer: RegionCoords,
     excluded: &std::collections::BTreeSet<RegionCoords>,
@@ -259,8 +242,8 @@ impl GameInstanceManager {
             client_id: None,
             home_region: None,
             subscribed: std::collections::BTreeSet::new(),
-            far_subscribed: std::collections::BTreeSet::new(),
             lod_assigned: BTreeMap::new(),
+            lod_table: game::lod::LOD_RING_TABLE,
             lod_subscribed: std::collections::BTreeSet::new(),
             pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
@@ -300,6 +283,13 @@ impl GameInstanceManager {
     /// reads outgoing ClientPackets from.
     pub fn client_packet_recv(&self) -> Receiver<ClientPacket> {
         self.server_game_recv.clone()
+    }
+
+    /// Override the LOD ring table (test/harness hook): headless suites pay
+    /// every requested key as a synchronous server-side build, so they shrink
+    /// (or empty) the table unless LOD is what they're testing.
+    pub fn set_lod_table(&mut self, table: &'static [(i32, u32)]) {
+        self.lod_table = table;
     }
 
     /// Push a game event as if it came from local input (test/harness hook).
@@ -355,7 +345,6 @@ impl GameInstanceManager {
                 // predicted home flip must land before update_window recenters.
                 self.apply_local_transfers();
                 self.update_window();
-                self.update_far_window();
                 self.update_lod_window();
                 self.project_ui();
                 self.emit_collider_debug_lines();
@@ -692,53 +681,18 @@ impl GameInstanceManager {
         }
     }
 
-    /// Diff the desired far ring against current far subscriptions; request
-    /// the new, release the stale. Runs right after `update_window` so the
-    /// near set it subtracts is already current.
-    fn update_far_window(&mut self) {
-        let Some(center) = self.viewer_region() else { return };
-        let near = desired_window(center, self.home_region);
-        let desired = desired_far(center, &near, game::FAR_VIEW_RADIUS);
-        if desired == self.far_subscribed {
-            return;
-        }
-        for rc in desired.difference(&self.far_subscribed) {
-            self.server_game_send
-                .send(ClientPacket::RequestFarRegion(*rc))
-                .unwrap();
-        }
-        let stale: Vec<RegionCoords> =
-            self.far_subscribed.difference(&desired).copied().collect();
-        for rc in stale {
-            self.server_game_send
-                .send(ClientPacket::ReleaseFarRegion(rc))
-                .unwrap();
-            self.drop_far_region(rc);
-        }
-        self.far_subscribed = desired;
-    }
-
-    /// Tell the render bridge to drop a far region.
-    fn drop_far_region(&mut self, rc: RegionCoords) {
-        let _ = self
-            .client_event_send
-            .send(ClientUpdateEvent::RemoveFarRegion(rc));
-    }
-
     /// Diff the desired LOD key set against current subscriptions. Runs
-    /// after update_far_window; until Task 12 removes the far ring, the
-    /// table skips factor 2 (`&LOD_RING_TABLE[1..]`) and far-ring regions
-    /// are excluded alongside the near window, so streamed LOD and the far
-    /// path never cover the same region.
+    /// right after `update_window`, so the near-window exclusion set it
+    /// subtracts is already current — streamed LOD and simulated regions
+    /// never cover the same region.
     fn update_lod_window(&mut self) {
         let Some(center) = self.viewer_region() else { return };
-        let mut excluded = desired_window(center, self.home_region);
-        excluded.extend(self.far_subscribed.iter().copied());
+        let excluded = desired_window(center, self.home_region);
         let (assigned, desired) = desired_lod(
             center,
             &excluded,
             &self.lod_assigned,
-            &game::lod::LOD_RING_TABLE[1..],
+            self.lod_table,
             game::lod::LOD_STICKY_BAND,
         );
         self.lod_assigned = assigned;
@@ -905,18 +859,6 @@ impl GameInstanceManager {
                     }
                 }
             }
-            game::ServerPacket::FarRegion(id, snap) => {
-                if !self.far_subscribed.contains(&id) {
-                    // Ring moved on while the snapshot was in flight.
-                    self.server_game_send
-                        .send(ClientPacket::ReleaseFarRegion(id))
-                        .unwrap();
-                    return Ok(());
-                }
-                self.client_event_send
-                    .send(ClientUpdateEvent::NewFarRegion(id, snap))
-                    .unwrap();
-            }
             game::ServerPacket::LodData(key, payload) => {
                 if !self.lod_subscribed.contains(&key) {
                     // Raced a release: tell the server we really don't want it.
@@ -1030,7 +972,7 @@ impl GameInstanceManager {
         } else {
             0.0
         };
-        debug!(
+        log::debug!(
             "[client] mispredicts/s={:.2} avg_replay={:.1} max_replay={} evlog={} tick_rate={}ms drift={}ms",
             per_sec,
             avg_replay,
@@ -1070,7 +1012,7 @@ impl GameInstanceManager {
         let worst_sim = worst
             .map(|(id, avg)| format!("({},{})@{:.2}ms", id.x, id.z, ms(avg)))
             .unwrap_or_else(|| "none".into());
-        debug!(
+        log::debug!(
             "[client-budget] window={:.1}s util={:.1}% | tick n={} total={:.0}ms avg={:.2}ms max={:.2}ms | recon total={:.0}ms replayed={} | snap n={} total={:.0}ms | idle={:.0}ms other={:.0}ms | sim n={} ctrl={:.0}ms input={:.1}ms scan={:.0}ms worst={}",
             secs,
             busy.as_secs_f32() / secs * 100.0,
@@ -1991,26 +1933,6 @@ mod manager_tests {
         // No home_region / world yet: nothing to report, no event sent.
         manager.emit_hud_status();
         assert!(client_recv.try_recv().is_err());
-    }
-
-    /// Tests the ring geometry with an explicit radius, independent of the
-    /// FAR_VIEW_RADIUS tunable.
-    #[test]
-    fn desired_far_is_ring_minus_near() {
-        use game::RegionCoords;
-        let center = RegionCoords::new(0, 0);
-        let near: std::collections::BTreeSet<RegionCoords> =
-            center.window_3x3().into_iter().collect();
-        let far = super::desired_far(center, &near, 2);
-        // Disjoint from the near window.
-        assert!(far.is_disjoint(&near));
-        // 5×5 footprint (25) minus the 3×3 near window (9) = 16 far regions.
-        assert_eq!(far.len(), 16);
-        // A ring member is present; a near member is absent.
-        assert!(far.contains(&RegionCoords::new(2, 0)));
-        assert!(!far.contains(&RegionCoords::new(1, 0)));
-        // Radius 0: no far ring at all.
-        assert!(super::desired_far(center, &near, 0).is_empty());
     }
 
     /// After a tick with a seeded local player, the manager must announce a UI

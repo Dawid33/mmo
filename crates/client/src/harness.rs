@@ -39,21 +39,32 @@ pub struct SimHarness {
 
 impl SimHarness {
     /// Wire a client to a fresh local authoritative server. Mirrors the
-    /// local_server.rs test setup.
+    /// local_server.rs test setup. LOD ring subscriptions are OFF (empty
+    /// table): every key the client requests costs the LocalServer a
+    /// synchronous full-region build, minutes of wall clock at the
+    /// production table's radius. LOD-focused tests opt back in with
+    /// `set_lod_table`.
     pub fn new() -> Self {
+        Self::with_lod_table(&[])
+    }
+
+    /// `new`, with an explicit LOD ring table (see `new` for why the
+    /// default is empty).
+    pub fn with_lod_table(lod_table: &'static [(i32, u32)]) -> Self {
         game::set_hash_mode(game::HashMode::Full); // enforce hash(before)==hash(after undo) along the driven path
         let (game_event_send, game_event_recv) = unbounded::<GameEventKind>();
         let (bridge_send, bridge_recv) = unbounded::<ClientUpdateEvent>();
         // Dummy address: native netcode is never constructed in the harness.
         let addr = "127.0.0.1:0".parse().unwrap();
         let debug = game::DebugFlags::default();
-        let client = GameInstanceManager::new(
+        let mut client = GameInstanceManager::new(
             game_event_send,
             game_event_recv,
             bridge_send,
             addr,
             debug.clone(),
         );
+        client.set_lod_table(lod_table);
 
         let client_to_server = client.client_packet_recv(); // Receiver<ClientPacket>
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();

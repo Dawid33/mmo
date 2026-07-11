@@ -12,7 +12,7 @@ use crossbeam::channel::{unbounded, Receiver};
 use game::{ClientId, ClientUpdateEvent, GameEventKind, InputEvent, Key, ServerPacket};
 
 use crate::renderer::bridge::{
-    drain_client_updates, drain_region_updates, FarRegionRoots, Regions, RegionRoots, SimEntityMap,
+    drain_client_updates, drain_region_updates, Regions, RegionRoots, SimEntityMap,
 };
 use crate::renderer::hud::HudStatus;
 use crate::renderer::input::forward_input;
@@ -67,7 +67,6 @@ impl BevyInputHarness {
             .init_resource::<LocalPlayer>()
             .init_resource::<Regions>()
             .init_resource::<RegionRoots>()
-            .init_resource::<FarRegionRoots>()
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
             .init_resource::<UiUpdates>()

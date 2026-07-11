@@ -52,7 +52,6 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<LocalPlayer>()
             .init_resource::<bridge::Regions>()
             .init_resource::<bridge::RegionRoots>()
-            .init_resource::<bridge::FarRegionRoots>()
             .init_resource::<bridge::SimEntityMap>()
             .init_resource::<hud::HudStatus>()
             .init_resource::<avatar::AvatarAssets>()
@@ -75,7 +74,6 @@ impl Plugin for SimBridgePlugin {
                     input::forward_input.after(bevy::input::InputSystems),
                     (
                         bridge::drain_client_updates,
-                        bridge::finish_far_lod_builds,
                         bridge::drain_region_updates,
                         bridge::dedupe_ghosts,
                         bridge::enforce_single_active_camera,

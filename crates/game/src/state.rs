@@ -1195,7 +1195,7 @@ impl Rollback {
     /// components; recovers each chunk's `ChunkCoords` from its fixed body
     /// translation (`create_mesh` places bodies at `(cx*32, cy*32, cz*32)`,
     /// exact). No entities/physics/undo state leaks out.
-    pub fn far_snapshot(&self) -> crate::FarSnapshot {
+    pub fn terrain_snapshot(&self) -> crate::TerrainSnapshot {
         let mut chunks = Vec::new();
         for (key, maybe_chunk) in self.data.ecs.chunk.iter() {
             let Some(chunk) = maybe_chunk else { continue };
@@ -1213,9 +1213,9 @@ impl Rollback {
         // Sort by coordinate: `terrain_hash` bincode-serializes this Vec
         // positionally, so a deterministic order keeps the hash
         // order-insensitive and stable across sources (ECS insertion order
-        // here vs. column-iteration order in `FarSnapshot::from_columns`).
+        // here vs. column-iteration order in `TerrainSnapshot::from_columns`).
         chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
-        crate::FarSnapshot { chunks }
+        crate::TerrainSnapshot { chunks }
     }
 }
 

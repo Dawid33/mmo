@@ -132,7 +132,7 @@ fn request_lod_pristine_region_builds_downsamples_and_caches() {
 fn request_lod_running_region_downsamples_authoritative_state() {
     // Subscribe a region normally (it runs), edit nothing; request factor 4
     // for it. Running + unseeded terrain cache → the manager asks the region
-    // (RequestFarSnapshot), the reply seeds far_cache, and the pending LOD
+    // (RequestTerrain), the reply seeds terrain_cache, and the pending LOD
     // request completes.
     let (mut m, out, region_out) = manager_with_lod();
     m.handle_server_event(ServerEvent::ClientConnected(1), 0);
@@ -150,8 +150,8 @@ fn request_lod_running_region_downsamples_authoritative_state() {
 
     let key = LodKey::for_region(4, rc);
     m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
-    // Pump the spawner + region outputs (answers RequestFarSnapshot, seeds
-    // far_cache, re-enters the pending LOD build) then the lod results.
+    // Pump the spawner + region outputs (answers RequestTerrain, seeds
+    // terrain_cache, re-enters the pending LOD build) then the lod results.
     drain_region_outputs(&mut m, &region_out);
     m.pump_lod_results();
 
@@ -261,7 +261,7 @@ fn tile_build_overlays_regions_with_authoritative_state() {
     // world_manager.rs's home_region_survives_zero_subscribers), then
     // reconnect the SAME client id: `homes` already contains it, so
     // ClientConnected takes the reconnect branch and does NOT call
-    // ensure_running — the region stays parked, with far_cache seeded
+    // ensure_running — the region stays parked, with terrain_cache seeded
     // from the park (the flat-floor generator's state).
     m.handle_server_event(ServerEvent::ClientDisconnected(1), 0);
     m.maintain(UNLOAD_GRACE_MS);
@@ -339,8 +339,8 @@ fn terrain_change_invalidates_and_repushes_subscribed_keys() {
     let above = Block::new(BlockId::AIR);
     let sub = SubChunk::Dense(Box::new(Chunk::flat_floor_with(8, BlockId(99))));
     let changed = vec![(ColumnCoords::new(0, 0), Column::new(0, below, above, vec![sub]))];
-    let snap2 = FarSnapshot::from_columns(changed);
-    m.handle_region_output(rc, RegionOutput::FarSnapshotChanged(snap2), 0);
+    let snap2 = TerrainSnapshot::from_columns(changed);
+    m.handle_region_output(rc, RegionOutput::TerrainChanged(snap2), 0);
     drain_region_outputs(&mut m, &region_out);
     m.pump_lod_results();
 
@@ -392,8 +392,8 @@ fn terrain_change_with_no_subscribers_only_drops_cache() {
     let above = Block::new(BlockId::AIR);
     let sub = SubChunk::Dense(Box::new(Chunk::flat_floor_with(8, BlockId(77))));
     let changed = vec![(ColumnCoords::new(0, 0), Column::new(0, below, above, vec![sub]))];
-    let snap2 = FarSnapshot::from_columns(changed);
-    m.handle_region_output(rc, RegionOutput::FarSnapshotChanged(snap2), 0);
+    let snap2 = TerrainSnapshot::from_columns(changed);
+    m.handle_region_output(rc, RegionOutput::TerrainChanged(snap2), 0);
     drain_region_outputs(&mut m, &region_out);
     m.pump_lod_results();
 
@@ -450,7 +450,7 @@ fn tile_build_waits_for_running_unseeded_regions() {
     drain_region_outputs(&mut m, &region_out);
     out.try_iter().for_each(drop);
     // Region (0,0) is SPAWN_REGION: running from client 1's home, but
-    // never sampled, so far_cache has no entry for it yet.
+    // never sampled, so terrain_cache has no entry for it yet.
     assert!(m.running_regions().contains(&RegionCoords::new(0, 0)));
 
     let key = LodKey { factor: 64, coords: [0, 0] }; // covers regions (0..2, 0..2)
@@ -460,8 +460,8 @@ fn tile_build_waits_for_running_unseeded_regions() {
         "no LodData before the terrain reply lands"
     );
 
-    // Pumping the spawner answers the deferred RequestFarSnapshot, seeding
-    // far_cache and re-entering the tile build that was waiting on it.
+    // Pumping the spawner answers the deferred RequestTerrain, seeding
+    // terrain_cache and re-entering the tile build that was waiting on it.
     drain_region_outputs(&mut m, &region_out);
     m.pump_lod_results();
     let payload = expect_lod_data(&out, key);

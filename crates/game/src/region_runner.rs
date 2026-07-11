@@ -6,8 +6,8 @@
 //! wasm build LocalServer pumps runners inline (crates/client).
 
 use crate::{
-    ClientId, Column, ColumnCoords, EntityBundle, FarSnapshot, GameEvent, GameEventKind, GhostData,
-    Region, RegionCoords, RegionId, Rollback, Tick, FAR_SNAPSHOT_MIN_INTERVAL_TICKS, TICK_RATE,
+    ClientId, Column, ColumnCoords, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, GhostData,
+    Region, RegionCoords, RegionId, Rollback, Tick, TERRAIN_HASH_INTERVAL_TICKS, TICK_RATE,
 };
 use crossbeam::channel::Sender;
 
@@ -35,9 +35,9 @@ pub enum RegionInput {
     /// A new subscriber needs the full state; replied with
     /// `RegionOutput::Snapshot(client, ...)`.
     RequestSnapshot(ClientId),
-    /// A far-viewer needs read-only terrain; replied with
-    /// `RegionOutput::FarSnapshot(client, ...)`. Does not affect sim state.
-    RequestFarSnapshot(ClientId),
+    /// An LOD build needs read-only terrain; replied with
+    /// `RegionOutput::Terrain(client, ...)`. Does not affect sim state.
+    RequestTerrain(ClientId),
     /// Graceful stop; replied with `RegionOutput::Stopped(state)`.
     Shutdown,
 }
@@ -46,12 +46,12 @@ pub enum RegionInput {
 pub enum RegionOutput {
     EventProcessed(GameEvent),
     Snapshot(ClientId, Rollback),
-    /// Reply to `RequestFarSnapshot`: read-only terrain for one far-viewer.
-    FarSnapshot(ClientId, FarSnapshot),
+    /// Reply to `RequestTerrain`: read-only terrain for one requester.
+    Terrain(ClientId, TerrainSnapshot),
     /// Throttled push when this region's terrain changed; manager fans out.
-    FarSnapshotChanged(FarSnapshot),
+    TerrainChanged(TerrainSnapshot),
     SyncClock { tick_rate: u64, tick: Tick },
-    Stopped(SerializedRegion, FarSnapshot),
+    Stopped(SerializedRegion, TerrainSnapshot),
     /// Boundary crossings this tick: bundles + ABSOLUTE target regions.
     /// Isometries are still source-local; the manager rebases.
     Departures(Vec<(EntityBundle, RegionCoords)>),
@@ -87,7 +87,7 @@ pub struct RegionRunner {
     region: Region,
     out: Sender<(RegionCoords, RegionOutput)>,
     /// Last-pushed terrain hash; a change past the throttle window pushes a
-    /// `FarSnapshotChanged`. Seeded at construction so the initial state is a
+    /// `TerrainChanged`. Seeded at construction so the initial state is a
     /// baseline, not a spurious push.
     last_terrain_hash: u32,
 }
@@ -98,7 +98,7 @@ impl RegionRunner {
         region: Region,
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Self {
-        let last_terrain_hash = region.far_snapshot().terrain_hash();
+        let last_terrain_hash = region.terrain_snapshot().terrain_hash();
         Self { id, region, out, last_terrain_hash }
     }
 
@@ -127,15 +127,15 @@ impl RegionRunner {
                     RegionOutput::Snapshot(client_id, self.region.data().clone()),
                 ));
             }
-            RegionInput::RequestFarSnapshot(client_id) => {
+            RegionInput::RequestTerrain(client_id) => {
                 let _ = self.out.send((
                     self.id,
-                    RegionOutput::FarSnapshot(client_id, self.region.far_snapshot()),
+                    RegionOutput::Terrain(client_id, self.region.terrain_snapshot()),
                 ));
             }
             RegionInput::Shutdown => {
                 let serialized = SerializedRegion::from_rollback(self.region.data());
-                let far = self.region.far_snapshot();
+                let far = self.region.terrain_snapshot();
                 let _ = self.out.send((self.id, RegionOutput::Stopped(serialized, far)));
                 return false;
             }
@@ -169,13 +169,14 @@ impl RegionRunner {
             ));
         }
         // Push-on-change, throttled: the check cadence is the throttle. The
-        // manager drops the push if the region has no far-viewers.
-        if self.region.current_tick() % FAR_SNAPSHOT_MIN_INTERVAL_TICKS == 0 {
-            let snap = self.region.far_snapshot();
+        // manager invalidates this region's LOD keys and rebuilds the
+        // subscribed ones.
+        if self.region.current_tick() % TERRAIN_HASH_INTERVAL_TICKS == 0 {
+            let snap = self.region.terrain_snapshot();
             let hash = snap.terrain_hash();
             if hash != self.last_terrain_hash {
                 self.last_terrain_hash = hash;
-                let _ = self.out.send((self.id, RegionOutput::FarSnapshotChanged(snap)));
+                let _ = self.out.send((self.id, RegionOutput::TerrainChanged(snap)));
             }
         }
     }

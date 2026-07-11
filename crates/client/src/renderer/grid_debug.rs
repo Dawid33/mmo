@@ -6,7 +6,8 @@ use bevy::prelude::*;
 use bevy::ui::IsDefaultUiCamera;
 use game::{RegionCoords, REGION_SIZE};
 
-use super::bridge::{FarRegionRoots, RegionRoots};
+use super::bridge::RegionRoots;
+use super::lod_rings::LodRings;
 
 /// Whether the chunk/region wireframe view is on. Client-only debug state,
 /// defaults off; F5 flips it. Independent of the F3 debug overlay.
@@ -44,8 +45,8 @@ pub const CHUNK_GRID_COLOR: Srgba = YELLOW;
 pub const CHUNK_CURRENT_COLOR: Srgba = RED;
 /// Walls of simulated (near/subscribed) regions.
 pub const REGION_NEAR_COLOR: Srgba = AQUA;
-/// Walls of far/LOD (read-only) regions.
-pub const REGION_FAR_COLOR: Srgba = PURPLE;
+/// Walls of streamed-LOD (read-only) regions.
+pub const REGION_LOD_COLOR: Srgba = PURPLE;
 
 /// Integer chunk-grid cell containing a world-space point. Floor division,
 /// not truncation: -0.1 is cell -1, matching `RegionCoords::from_world` and
@@ -111,14 +112,16 @@ pub fn region_wall_lines(coords: RegionCoords, camera_y: f32) -> Vec<(Vec3, Vec3
 
 /// Draw the wireframe view while enabled: chunk cubes in a radius around the
 /// camera (current cell highlighted), and boundary walls for every loaded
-/// region — cyan for simulated (near), purple for far/LOD. All lines are
-/// re-derived per frame; the camera's `GlobalTransform` already folds in the
-/// region world offset, so everything here is true world space.
+/// region — cyan for simulated (near), purple for streamed LOD. Only
+/// region-sized LOD keys (span 1, factors ≤ 16) draw walls: the 2×2/8×8
+/// tile keys sit past any distance where per-region walls help. All lines
+/// are re-derived per frame; the camera's `GlobalTransform` already folds in
+/// the region world offset, so everything here is true world space.
 pub fn draw_grid_debug(
     state: Res<GridDebug>,
     camera: Query<&GlobalTransform, With<IsDefaultUiCamera>>,
     near: Res<RegionRoots>,
-    far: Res<FarRegionRoots>,
+    lod: Res<LodRings>,
     mut gizmos: Gizmos,
 ) {
     if !state.enabled {
@@ -136,9 +139,9 @@ pub fn draw_grid_debug(
     let center = chunk_cell_of(cam);
     if state.is_changed() {
         info!(
-            "grid debug: drawing at cam={cam:?} cell={center:?} near_regions={} far_regions={}",
+            "grid debug: drawing at cam={cam:?} cell={center:?} near_regions={} lod_keys={}",
             near.0.len(),
-            far.0.len()
+            lod.roots.len()
         );
     }
     for dx in -CHUNK_GRID_RADIUS_XZ..=CHUNK_GRID_RADIUS_XZ {
@@ -153,11 +156,12 @@ pub fn draw_grid_debug(
         }
     }
 
-    let regions = near
-        .0
-        .keys()
-        .map(|c| (*c, REGION_NEAR_COLOR))
-        .chain(far.0.keys().map(|c| (*c, REGION_FAR_COLOR)));
+    let regions = near.0.keys().map(|c| (*c, REGION_NEAR_COLOR)).chain(
+        lod.roots
+            .keys()
+            .filter(|k| k.region_span() == 1)
+            .map(|k| (k.origin_region(), REGION_LOD_COLOR)),
+    );
     for (coords, color) in regions {
         for (a, b) in region_wall_lines(coords, cam.y) {
             gizmos.line(a, b, color);

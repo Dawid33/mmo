@@ -10,7 +10,7 @@ use std::time::Duration;
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
 use crate::{
-    Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, FarSnapshot, GameEventKind,
+    Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, TerrainSnapshot, GameEventKind,
     LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput,
     RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket,
 };
@@ -113,7 +113,6 @@ impl RegionSpawner for InlineSpawner {
 #[derive(Default)]
 struct Session {
     subscribed: BTreeSet<RegionCoords>,
-    far_subscribed: BTreeSet<RegionCoords>,
     lod_subscribed: BTreeSet<LodKey>,
 }
 
@@ -134,11 +133,9 @@ pub struct WorldManager<S: RegionSpawner> {
     generator: RegionGenerator,
     regions: BTreeMap<RegionCoords, RegionLink>,
     parked: BTreeMap<RegionCoords, SerializedRegion>,
-    /// Far-viewers per region, INDEPENDENT of running/parked state.
-    far_subscribers: BTreeMap<RegionCoords, BTreeSet<ClientId>>,
-    /// Frozen terrain for parked / never-run regions, so far serving never
-    /// wakes a region. Refreshed on FarSnapshotChanged and on park (Stopped).
-    far_cache: BTreeMap<RegionCoords, FarSnapshot>,
+    /// Frozen terrain for parked / never-run regions, so LOD builds never
+    /// wake a region. Refreshed on TerrainChanged and on park (Stopped).
+    terrain_cache: BTreeMap<RegionCoords, TerrainSnapshot>,
     /// Connected clients and their subscriptions.
     sessions: BTreeMap<ClientId, Session>,
     /// Survives disconnects: which region holds this client's player entity.
@@ -162,7 +159,7 @@ pub struct WorldManager<S: RegionSpawner> {
     lod_pending_terrain: BTreeMap<RegionCoords, BTreeSet<LodKey>>,
     /// Tile-keyed builds waiting on a subset of `key.regions()` whose terrain
     /// reply hasn't landed yet. Settled incrementally by `lod_terrain_ready`
-    /// as each awaited region's reply seeds `far_cache`.
+    /// as each awaited region's reply seeds `terrain_cache`.
     lod_tile_waiting: BTreeMap<LodKey, BTreeSet<RegionCoords>>,
     lod_builder: Box<dyn LodBuilder>,
     lod_results: Receiver<LodResult>,
@@ -182,8 +179,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             generator,
             regions: BTreeMap::new(),
             parked: BTreeMap::new(),
-            far_subscribers: BTreeMap::new(),
-            far_cache: BTreeMap::new(),
+            terrain_cache: BTreeMap::new(),
             sessions: BTreeMap::new(),
             homes: BTreeMap::new(),
             out,
@@ -224,14 +220,6 @@ impl<S: RegionSpawner> WorldManager<S> {
                     for rc in session.subscribed {
                         self.unsubscribe_link(id, rc, now_ms);
                     }
-                    for rc in session.far_subscribed {
-                        if let Some(set) = self.far_subscribers.get_mut(&rc) {
-                            set.remove(&id);
-                            if set.is_empty() {
-                                self.far_subscribers.remove(&rc);
-                            }
-                        }
-                    }
                     for key in session.lod_subscribed {
                         if let Some(set) = self.lod_subscribers.get_mut(&key) {
                             set.remove(&id);
@@ -253,8 +241,6 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
                 ClientPacket::RequestRegionConnection(rc) => self.subscribe(id, rc),
                 ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, rc, now_ms),
-                ClientPacket::RequestFarRegion(rc) => self.far_subscribe(id, rc),
-                ClientPacket::ReleaseFarRegion(rc) => self.far_unsubscribe(id, rc),
                 ClientPacket::RequestLod(key) => self.lod_subscribe(id, key, now_ms),
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
                 ClientPacket::GameEvent(event) => match event.kind {
@@ -340,24 +326,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                 }
             }
-            RegionOutput::FarSnapshot(client, snap) => {
-                self.far_cache.insert(rc, snap.clone());
+            RegionOutput::Terrain(client, snap) => {
+                self.terrain_cache.insert(rc, snap);
                 self.lod_terrain_ready(rc, client);
-                let _ = self.out.send((Some(client), ServerPacket::FarRegion(rc, snap)));
             }
-            RegionOutput::FarSnapshotChanged(snap) => {
-                self.far_cache.insert(rc, snap.clone());
+            RegionOutput::TerrainChanged(snap) => {
+                self.terrain_cache.insert(rc, snap);
                 self.invalidate_region_lod(rc);
-                if let Some(subs) = self.far_subscribers.get(&rc) {
-                    for client in subs {
-                        let _ = self
-                            .out
-                            .send((Some(*client), ServerPacket::FarRegion(rc, snap.clone())));
-                    }
-                }
             }
             RegionOutput::Stopped(serialized, far) => {
-                self.far_cache.insert(rc, far);
+                self.terrain_cache.insert(rc, far);
                 self.invalidate_region_lod(rc);
                 self.parked.insert(rc, serialized);
                 let pending = self
@@ -519,52 +497,6 @@ impl<S: RegionSpawner> WorldManager<S> {
         self.send_to_region(rc, RegionInput::RequestSnapshot(client));
     }
 
-    fn far_subscribe(&mut self, client: ClientId, rc: RegionCoords) {
-        let Some(session) = self.sessions.get_mut(&client) else {
-            log::debug!("dropping far subscribe from sessionless client {client} for {:?}", rc);
-            return;
-        };
-        session.far_subscribed.insert(rc);
-        self.far_subscribers.entry(rc).or_default().insert(client);
-        // Running (and not stopping) → pull live from the region.
-        let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
-        if running {
-            self.send_to_region(rc, RegionInput::RequestFarSnapshot(client));
-            return;
-        }
-        // Parked / never-run → serve from cache without waking; generate on miss.
-        //
-        // Edge case: if this far-subscribe lands during a region's `stopping`
-        // window before any `FarSnapshotChanged`/`Stopped` has seeded
-        // `far_cache` for it, the worldgen fallback below may serve
-        // pre-edit terrain (a cache miss regenerates from scratch, ignoring
-        // in-flight edits made before the region stopped ticking). This
-        // self-heals on the next `FarSnapshotChanged` once the region runs
-        // again and repopulates the cache.
-        let snap = match self.far_cache.get(&rc) {
-            Some(snap) => snap.clone(),
-            None => {
-                let columns = (self.generator)(rc);
-                let snap = FarSnapshot::from_columns(columns);
-                self.far_cache.insert(rc, snap.clone());
-                snap
-            }
-        };
-        let _ = self.out.send((Some(client), ServerPacket::FarRegion(rc, snap)));
-    }
-
-    fn far_unsubscribe(&mut self, client: ClientId, rc: RegionCoords) {
-        if let Some(session) = self.sessions.get_mut(&client) {
-            session.far_subscribed.remove(&rc);
-        }
-        if let Some(set) = self.far_subscribers.get_mut(&rc) {
-            set.remove(&client);
-            if set.is_empty() {
-                self.far_subscribers.remove(&rc);
-            }
-        }
-    }
-
     fn unsubscribe(&mut self, client: ClientId, rc: RegionCoords, now_ms: u64) {
         if let Some(session) = self.sessions.get_mut(&client) {
             session.subscribed.remove(&rc);
@@ -666,21 +598,21 @@ impl<S: RegionSpawner> WorldManager<S> {
         if key.region_span() == 1 {
             let rc = key.origin_region();
             let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
-            if let Some(snap) = self.far_cache.get(&rc) {
+            if let Some(snap) = self.terrain_cache.get(&rc) {
                 self.lod_in_flight.insert(key);
                 self.lod_builder.submit(LodBuildJob::Region {
                     key,
                     chunks: snap.chunks.clone(),
                 });
             } else if running {
-                // Terrain reply (RegionOutput::FarSnapshot) seeds far_cache
+                // Terrain reply (RegionOutput::Terrain) seeds terrain_cache
                 // and re-enters via lod_terrain_ready.
                 self.lod_pending_terrain.entry(rc).or_default().insert(key);
-                self.send_to_region(rc, RegionInput::RequestFarSnapshot(client));
+                self.send_to_region(rc, RegionInput::RequestTerrain(client));
             } else {
                 let columns = (self.generator)(rc);
-                let snap = FarSnapshot::from_columns(columns);
-                self.far_cache.insert(rc, snap.clone());
+                let snap = TerrainSnapshot::from_columns(columns);
+                self.terrain_cache.insert(rc, snap.clone());
                 self.lod_in_flight.insert(key);
                 self.lod_builder
                     .submit(LodBuildJob::Region { key, chunks: snap.chunks });
@@ -696,18 +628,18 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// parked-with-cache regions need nothing. Pristine regions are NOT
     /// generated here — coarse sampling covers them (the point of tiles).
     ///
-    /// Caveat: `far_cache` reflects the LAST pushed/parked terrain of a
+    /// Caveat: `terrain_cache` reflects the LAST pushed/parked terrain of a
     /// running region — mid-cadence edits appear on the next
-    /// `FarSnapshotChanged` (which Task 9 turns into invalidation +
-    /// rebuild), matching the spec's freshness decision.
+    /// `TerrainChanged` (invalidation + rebuild), matching the spec's
+    /// freshness decision.
     fn start_tile_build(&mut self, key: LodKey, client: ClientId) {
         let mut waiting = BTreeSet::new();
         for rc in key.regions() {
             let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
-            if running && !self.far_cache.contains_key(&rc) {
+            if running && !self.terrain_cache.contains_key(&rc) {
                 waiting.insert(rc);
                 self.lod_pending_terrain.entry(rc).or_default().insert(key);
-                self.send_to_region(rc, RegionInput::RequestFarSnapshot(client));
+                self.send_to_region(rc, RegionInput::RequestTerrain(client));
             }
         }
         if !waiting.is_empty() {
@@ -717,13 +649,13 @@ impl<S: RegionSpawner> WorldManager<S> {
         let overlays: Vec<(RegionCoords, Vec<(ChunkCoords, Chunk)>)> = key
             .regions()
             .into_iter()
-            .filter_map(|rc| self.far_cache.get(&rc).map(|snap| (rc, snap.chunks.clone())))
+            .filter_map(|rc| self.terrain_cache.get(&rc).map(|snap| (rc, snap.chunks.clone())))
             .collect();
         self.lod_in_flight.insert(key);
         self.lod_builder.submit(LodBuildJob::Tile { key, overlays });
     }
 
-    /// A region's terrain just landed in far_cache: submit any LOD builds
+    /// A region's terrain just landed in terrain_cache: submit any LOD builds
     /// that were waiting on it, region- or tile-keyed.
     fn lod_terrain_ready(&mut self, rc: RegionCoords, client: ClientId) {
         let Some(keys) = self.lod_pending_terrain.remove(&rc) else { return };
@@ -765,7 +697,7 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     /// A region's terrain changed (cadence push) or it parked: every LOD key
     /// depending on it is stale. Drop them from the cache; rebuild the ones
-    /// with live subscribers (the fresh far_cache entry is the new source).
+    /// with live subscribers (the fresh terrain_cache entry is the new source).
     fn invalidate_region_lod(&mut self, rc: RegionCoords) {
         for factor in crate::lod::LOD_FACTORS {
             let key = LodKey::for_region(factor, rc);

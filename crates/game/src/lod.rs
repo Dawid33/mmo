@@ -136,16 +136,15 @@ pub fn downsample_blocks(chunks: &[Option<&Chunk>; 8]) -> Vec<Voxel> {
     output
 }
 
-/// One 2×2×2-chunk-group cell produced by a far region's async LOD build: the
-/// downsampled 32³ grid plus the region-local group coordinate it belongs to
-/// (chunk coords `div_euclid`'d by 2 on every axis, y included — see
-/// `build_far_lod_cells`).
+/// One LOD cell: a downsampled 32³ grid plus the key-local group coordinate
+/// it belongs to (at factor 2, chunk coords `div_euclid`'d by 2 on every
+/// axis, y included — see `build_far_lod_cells`).
 pub struct LodCell {
     pub group: [i32; 3],
     pub grid: Vec<Voxel>,
 }
 
-/// Group a far region's `(ChunkCoords, Chunk)` list into 2×2×2 clusters and
+/// Group a region's `(ChunkCoords, Chunk)` list into 2×2×2 clusters and
 /// downsample each cluster into one `LodCell`. `coords.x`/`coords.z` are
 /// region-local `0..REGION_CHUNKS` (unsigned) but `coords.y` is signed (chunks stack both
 /// above and below y=0 as the world grows) — every axis uses

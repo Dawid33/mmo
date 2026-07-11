@@ -92,11 +92,6 @@ pub enum ClientUpdateEvent {
     /// The window moved on (or a region is being replaced): tear down this
     /// region's render state.
     RemoveRegion(RegionId),
-    /// Read-only visual terrain for a far region (initial send or refresh —
-    /// replace-on-re-receipt). Never becomes a local sim `Region`.
-    NewFarRegion(RegionId, FarSnapshot),
-    /// The far ring moved on: tear down this region's far render state.
-    RemoveFarRegion(RegionId),
     /// Streamed LOD cells for one key (initial send or refresh —
     /// replace-on-re-receipt). Decoded and spawned by the renderer.
     LodData(LodKey, LodPayload),

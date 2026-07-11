@@ -90,13 +90,6 @@ pub struct LodVoxelData(pub Vec<Voxel>);
 #[derive(Component, Default)]
 pub struct LodNeighbors(pub BTreeMap<[i32; 3], Entity>);
 
-/// In-flight background LOD build for an entire far region's terrain,
-/// spawned by `bridge::spawn_far_region` on the far root and polled to
-/// completion by `bridge::finish_far_lod_builds`, which spawns the resulting
-/// `LodCell`s as `LodVoxelData` children.
-#[derive(Component)]
-pub struct FarLodBuild(pub Task<Vec<LodCell>>);
-
 /// In-flight background LOD mesh build, spawned by `spawn_lod_mesh_tasks` and
 /// polled to completion by `apply_lod_meshes`.
 #[derive(Component)]
