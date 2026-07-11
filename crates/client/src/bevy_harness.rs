@@ -72,6 +72,7 @@ impl BevyInputHarness {
             .init_resource::<HudStatus>()
             .init_resource::<UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
+            .init_resource::<crate::renderer::lod_rings::LodRings>()
             .insert_resource(ClientUpdates(bridge_recv))
             .insert_resource(GameEvents(tap_send))
             // Same ordering SimBridgePlugin uses: forward_input BEFORE the drains.

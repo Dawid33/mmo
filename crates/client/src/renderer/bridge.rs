@@ -9,6 +9,7 @@ use game::{EntityKey, Voxel};
 
 use super::convert::{iso_to_transform, perspective_to_projection};
 use super::hud::HudStatus;
+use super::lod_rings;
 use super::meshing::lod;
 use super::{ClientUpdates, LocalPlayer};
 
@@ -102,6 +103,7 @@ pub fn drain_client_updates(
     mut hud_status: ResMut<HudStatus>,
     mut ui_updates: ResMut<crate::renderer::ui_bridge::UiUpdates>,
     mut debug_lines: ResMut<crate::renderer::collider_debug::DebugColliderLines>,
+    mut lod_rings: ResMut<lod_rings::LodRings>,
 ) {
     while let Ok(event) = updates.0.try_recv() {
         match event {
@@ -146,7 +148,12 @@ pub fn drain_client_updates(
                 remove_far_region(&mut commands, &mut far_roots, id);
                 info!("bridge: far region {:?} removed", id);
             }
-            ClientUpdateEvent::LodData(..) | ClientUpdateEvent::RemoveLod(_) => {} // Task 11
+            ClientUpdateEvent::LodData(key, payload) => {
+                lod_rings.pending.push(lod_rings::LodEventMsg::Data(key, payload));
+            }
+            ClientUpdateEvent::RemoveLod(key) => {
+                lod_rings.pending.push(lod_rings::LodEventMsg::Remove(key));
+            }
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
             ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {
                 hud_status.home_region = Some(home_region);
@@ -573,6 +580,7 @@ mod tests {
             .init_resource::<HudStatus>()
             .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
+            .init_resource::<lod_rings::LodRings>()
             .add_systems(PreUpdate, (drain_client_updates, drain_region_updates).chain());
         (app, client_send)
     }
@@ -603,6 +611,7 @@ mod tests {
             .init_resource::<HudStatus>()
             .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
+            .init_resource::<lod_rings::LodRings>()
             .init_resource::<ChunkGrid>()
             .init_resource::<RemeshQueue>()
             .init_resource::<FrameUploads>()
@@ -1342,6 +1351,7 @@ mod tests {
             .init_resource::<HudStatus>()
             .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
+            .init_resource::<lod_rings::LodRings>()
             .add_systems(Update, drain_client_updates);
 
         client

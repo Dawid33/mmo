@@ -153,7 +153,7 @@ pub struct WorldManager<S: RegionSpawner> {
     /// stamp (not wall time — determinism).
     lod_cache: BTreeMap<LodKey, (LodPayload, u64)>,
     /// LRU cap on `lod_cache`; defaults to `LOD_CACHE_MAX_ENTRIES`, overridable
-    /// via `set_lod_cache_max` (test hook — mirrors `WorldgenRings.table`).
+    /// via `set_lod_cache_max` (test hook — mirrors `LodRings.retirement_max_frames`).
     lod_cache_max: usize,
     lod_access_counter: u64,
     /// Builds submitted, result not yet received — dedups double-requests.
