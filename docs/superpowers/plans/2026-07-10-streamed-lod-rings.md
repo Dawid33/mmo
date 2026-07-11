@@ -55,7 +55,7 @@
   - `pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell>`
   - `pub fn downsample_blocks(chunks: &[Option<&Chunk>; 8]) -> Vec<Voxel>` (test-reference impl, moves for cohesion)
 
-- [ ] **Step 1: Create `crates/game/src/lod.rs` by moving code verbatim**
+- [x] **Step 1: Create `crates/game/src/lod.rs` by moving code verbatim**
 
 Move these items, unchanged except for import paths (`game::X` → `crate::X`):
 - From `crates/client/src/renderer/meshing/lod.rs`: `downsample2` (lines ~22–105), `downsample_blocks` (~107–149), `LodCell` (~225–228), `build_far_lod_cells` (~237–264).
@@ -76,13 +76,13 @@ use crate::{derive_voxels, BlockId, Chunk, ChunkCoords, Voxel, CHUNK_VOXEL_COUNT
 
 Note: `build_far_lod_cells` calls `game::derive_voxels` and `game::Chunk` today — inside `game` these become `crate::` paths. `block_scale_cells` uses `Chunk::block_at` and `BlockId::AIR` — already in `game`.
 
-- [ ] **Step 2: Move the pure tests**
+- [x] **Step 2: Move the pure tests**
 
 Into `#[cfg(test)] mod tests` at the bottom of `crates/game/src/lod.rs`, moved verbatim with import fixes:
 - From `meshing/lod.rs` tests: `grid_with`, `empty_sources_downsample_to_air`, `any_solid_source_voxel_makes_the_coarse_cell_solid`, `octant_placement_maps_source_grids_to_coarse_sixteenths`, `majority_material_wins_ties_to_lowest`, `downsample_is_deterministic`, `build_far_lod_cells_groups_signed_y_correctly`, `blocks_fast_path_maps_blocks_to_cells`.
 - From `worldgen_rings.rs` tests: `chunk_with_block`, `factor4_two_pass_places_cells_at_world_voxel_over_4`, `block_scale_cells_pack_the_region_into_one_grid_per_tile_and_band`.
 
-- [ ] **Step 3: Wire into `game` and re-import in the client**
+- [x] **Step 3: Wire into `game` and re-import in the client**
 
 In `crates/game/src/lib.rs`, after `pub mod input;` add `pub mod lod;`, and in the re-export block add `pub use lod::*;`.
 
@@ -90,11 +90,11 @@ In `crates/client/src/renderer/meshing/lod.rs`: delete the moved items and their
 
 In `crates/client/src/renderer/worldgen_rings.rs`: delete the moved functions + their two tests; add `use game::lod::{block_scale_cells, downsample_cells};` and delete the now-unused local definitions' imports if any become unused.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p game lod && cargo test -p client` — expect all green (moved tests pass in `game`; client compiles against re-exports).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "refactor(lod): move LodCell + downsamplers from client renderer into game::lod"
@@ -119,7 +119,7 @@ git add -A && git commit -m "refactor(lod): move LodCell + downsamplers from cli
   - `LodKey::region_span(&self) -> i32`, `LodKey::origin_region(&self) -> RegionCoords`, `LodKey::regions(&self) -> Vec<RegionCoords>`, `LodKey::world_offset(&self) -> [f32; 3]`
   - `pub fn ring_factor_in(table: &[(i32, u32)], band: i32, dist: i32, current: Option<u32>) -> Option<u32>` (moved from client)
 
-- [ ] **Step 1: Write failing tests** (append to `lod.rs` tests)
+- [x] **Step 1: Write failing tests** (append to `lod.rs` tests)
 
 ```rust
 #[test]
@@ -168,11 +168,11 @@ fn ring_table_is_ascending_and_factors_valid() {
 
 Also move the four `ring_factor*` tests from `worldgen_rings.rs` (`ring_factor_fresh_assignment_over_all_distances`, `..._sticky_band_holds_factor_4_...`, `..._holds_factor_16_...`, `..._unknown_current_falls_back_to_fresh`) into `lod.rs` — they pin the OLD 2-entry table, so rewrite their expectations against `LOD_RING_TABLE` (fresh assignment: d 0..=2 → 2, 3..=4 → 4, 5..=8 → 16, 9..=16 → 64, 17..=32 → 256, else None; sticky variants extend each held ring by 1 on both edges exactly as the old tests did for 4/16).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p game lod` — expect compile FAIL (`LodKey` not defined).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 use crate::{RegionCoords, REGION_SIZE};
@@ -248,11 +248,11 @@ impl LodKey {
 
 Then MOVE `ring_factor_in` (with its doc comment) verbatim from `crates/client/src/renderer/worldgen_rings.rs:75-90` into `lod.rs`, and in `worldgen_rings.rs` replace the definition with `use game::lod::ring_factor_in;` (the `ring_factor` test-face wrapper there keeps working; it still pins the old client table until Task 11 deletes it).
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p game lod && cargo test -p client` — expect PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(lod): LodKey + tile math + shared ring table in game::lod"
@@ -271,7 +271,7 @@ git add -A && git commit -m "feat(lod): LodKey + tile math + shared ring table i
   - `PackedLodGrid::encode(grid: &[Voxel]) -> PackedLodGrid`
   - `PackedLodGrid::decode(&self) -> Option<Vec<Voxel>>` — `None` unless runs sum to exactly `CHUNK_VOXEL_COUNT` (hostile/corrupt data drops, never panics)
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```rust
 #[test]
@@ -306,11 +306,11 @@ fn packed_grid_rejects_wrong_total() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p game packed_grid` — expect compile FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 /// Run-length encoding of one 32³ LOD grid in the standard layout order.
@@ -353,11 +353,11 @@ impl PackedLodGrid {
 
 Note: `Voxel::new(BlockId::AIR)` must equal `Voxel::default()` — check `crates/game/src/voxel.rs`; if `Voxel` carries more state than `block`, encode per-field or assert equality in a test. (Today `Voxel` is the block id; the round-trip test catches any drift.)
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p game packed_grid` — expect PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(lod): PackedLodGrid RLE wire encoding with hostile-input-safe decode"
@@ -377,7 +377,7 @@ git add -A && git commit -m "feat(lod): PackedLodGrid RLE wire encoding with hos
   - `pub fn cells_per_region(factor: u32) -> usize` — 1024/factor for coarse factors (16 at 64, 4 at 256).
   - `pub fn copy_region_cells_into_tile(tile: &mut BTreeMap<[i32; 3], Vec<Voxel>>, region_cells: &[LodCell], region: RegionCoords, key: &LodKey)` — clears the region's x/z cell rect in EVERY tile band, then writes the region's cells (authoritative overlay; clearing all bands makes edits that removed terrain win over coarse guesses).
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```rust
 #[test]
@@ -434,11 +434,11 @@ fn copy_region_cells_overlays_and_clears() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p game downsample_chunks` — expect compile FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 /// x/z cells one region occupies in a grid at `factor` (16 at 64, 4 at 256;
@@ -508,11 +508,11 @@ pub fn copy_region_cells_into_tile(
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p game lod` — expect PASS (including the moved Task 1 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(lod): downsample_chunks factor dispatch + tile overlay copy"
@@ -535,7 +535,7 @@ git add -A && git commit -m "feat(lod): downsample_chunks factor dispatch + tile
   - `ServerPacket::LodData(LodKey, LodPayload)`
   - `ClientUpdateEvent::LodData(LodKey, LodPayload)`, `ClientUpdateEvent::RemoveLod(LodKey)`
 
-- [ ] **Step 1: Write failing test** (in `crates/game/src/protocol.rs` tests, or a new `#[cfg(test)] mod` if none exists)
+- [x] **Step 1: Write failing test** (in `crates/game/src/protocol.rs` tests, or a new `#[cfg(test)] mod` if none exists)
 
 ```rust
 #[test]
@@ -561,11 +561,11 @@ fn lod_packets_round_trip_bincode() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p game lod_packets` — expect compile FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `protocol.rs`: add `use crate::lod::LodKey;`, then
 
@@ -608,11 +608,11 @@ Stub arms so exhaustive matches compile (replaced in later tasks):
 - `crates/client/src/renderer/bridge.rs` `drain_client_updates` match:
   `ClientUpdateEvent::LodData(..) | ClientUpdateEvent::RemoveLod(_) => {} // Task 11`
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p game && cargo test -p client` — expect PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(protocol): RequestLod/ReleaseLod/LodData packets + client update variants"
@@ -631,7 +631,7 @@ git add -A && git commit -m "feat(protocol): RequestLod/ReleaseLod/LodData packe
   - `pub fn coarse_tile(key: &game::lod::LodKey, seed: u64, mats: Materials) -> Vec<game::lod::LodCell>` — pure/deterministic; key-local groups `[0, band, 0]`; only valid for factors 64/256.
   - Internal refactor: `fn surface_from_profile(prof: &ColumnProfile) -> i32` extracted from `surface_block_y` and shared.
 
-- [ ] **Step 1: Refactor `surface_block_y` (no behavior change)**
+- [x] **Step 1: Refactor `surface_block_y` (no behavior change)**
 
 In `crates/worldgen/src/lib.rs`, split the scan loop out of `surface_block_y`:
 
@@ -656,7 +656,7 @@ fn surface_block_y(grid: &ProfileGrid, wx: i32, wz: i32) -> i32 {
 
 Run: `cargo test -p worldgen` — expect PASS (pure refactor; the bit-exact pins in worldgen must stay green).
 
-- [ ] **Step 2: Write failing tests**
+- [x] **Step 2: Write failing tests**
 
 ```rust
 #[test]
@@ -739,11 +739,11 @@ fn coarse_tile_tracks_downsampled_full_generation() {
 
 (`mats()` already exists in this test module.) Note `top_of` for `exact` treats water cells as occupancy too — both sides fill water to sea level, so the comparison is fair.
 
-- [ ] **Step 3: Run to verify failure**
+- [x] **Step 3: Run to verify failure**
 
 Run: `cargo test -p worldgen coarse_tile` — expect compile FAIL.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 ```rust
 /// Cheap coarse LOD generation for one 64/256 tile: one profile sample per
@@ -814,11 +814,11 @@ pub fn coarse_tile(
 
 Check `game::BLOCK_VOXELS` is exported (it's used in `crates/worldgen/src/lib.rs`'s existing imports — extend that `use game::{...}` list). Verify `Materials::material_at(depth: i32, y: i32) -> BlockId` matches the existing call in `generate_region` (`mats.material_at(depth, by)`) and reuse its exact signature.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cargo test -p worldgen && cargo test -p worldgen -- --ignored coarse_tile` — expect PASS. If the 90% tolerance fails, print the hit ratio, inspect a handful of mismatching columns for an off-by-one in band/cell math first; only lower the threshold (with a comment) if the residual is genuine point-sampling noise.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(worldgen): coarse_tile point-sampled LOD generation for 64/256 tiles"
@@ -858,7 +858,7 @@ pub struct InlineLodBuilder { pub coarse: CoarseGenerator, pub out: Sender<LodRe
 
 Callers construct it with `Box::new(move |key| worldgen::coarse_tile(key, seed, materials))`.
 
-- [ ] **Step 1: Write failing tests** (`crates/game/tests/lod_streaming.rs`)
+- [x] **Step 1: Write failing tests** (`crates/game/tests/lod_streaming.rs`)
 
 Test scaffold mirrors `crates/game/tests/world_manager.rs` — read its helper setup first (how it builds a `WorldManager<InlineSpawner>`, its flat-generator closure, and its `pump`/drain pattern) and reuse the same helpers here. Coarse closure for tests: a fake that returns one recognizable all-stone band, so tests don't need worldgen:
 
@@ -958,11 +958,11 @@ fn invalid_factor_is_dropped() {
 
 Flesh out the two sketched tests with the same helper/drain style as the neighbors in `world_manager.rs` — the assertions named in their comments are the required behavior.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p game --test lod_streaming` — expect compile FAIL.
 
-- [ ] **Step 3: Implement `lod_builder.rs`**
+- [x] **Step 3: Implement `lod_builder.rs`**
 
 ```rust
 //! LOD build execution. `WorldManager` never blocks on a build: it submits
@@ -1050,7 +1050,7 @@ impl LodBuilder for InlineLodBuilder {
 
 Add `pub mod lod_builder;` + `pub use lod_builder::*;` in `lib.rs`.
 
-- [ ] **Step 4: Implement WorldManager state + region-key flow**
+- [x] **Step 4: Implement WorldManager state + region-key flow**
 
 New fields on `WorldManager` (+ `use` items):
 
@@ -1218,11 +1218,11 @@ Update every `WorldManager::new` caller with the two new arguments:
 - `crates/client/src/local_server.rs:47` — same Inline construction; add `self.manager.pump_lod_results();` at the top of `drain()`'s per-iteration body (inside the `for _ in 0..2` loop, after `pump()`).
 - `crates/game/tests/world_manager.rs` and `crates/game/tests/handoff_manager.rs` — a fake coarse closure (`|_| Vec::new()`) in their shared setup helper.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cargo test -p game --test lod_streaming && cargo test -p game --test world_manager && just test` — expect PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(server-lod): LodBuilder + WorldManager subscriptions, cache, region-key serving"
@@ -1240,7 +1240,7 @@ git add -A && git commit -m "feat(server-lod): LodBuilder + WorldManager subscri
 - Consumes: Task 7's `start_lod_build` dispatch, `LodBuildJob::Tile`.
 - Produces: `fn start_tile_build(&mut self, key: LodKey, client: ClientId)`; new field `lod_tile_waiting: BTreeMap<LodKey, BTreeSet<RegionCoords>>`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```rust
 #[test]
@@ -1279,11 +1279,11 @@ fn tile_build_waits_for_running_unseeded_regions() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p game --test lod_streaming tile_build` — expect FAIL (`start_tile_build` unimplemented / no LodData).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
     /// Tile keys (64/256): coarse base + one overlay per region with
@@ -1341,11 +1341,11 @@ And generalize `lod_terrain_ready` to also settle tile waits:
 
 Caveat to encode as a comment: `far_cache` reflects the LAST pushed/parked terrain of a running region — mid-cadence edits appear on the next `FarSnapshotChanged` (which Task 9 turns into invalidation + rebuild), matching the spec's freshness decision.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p game --test lod_streaming && just test` — expect PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(server-lod): tile builds — coarse base, authoritative overlays, terrain waits"
@@ -1366,7 +1366,7 @@ git add -A && git commit -m "feat(server-lod): tile builds — coarse base, auth
   - `fn invalidate_region_lod(&mut self, rc: RegionCoords)` on WorldManager — called from the `FarSnapshotChanged` and `Stopped` arms
   - `server::lod_workers::ThreadLodBuilder` — `LodBuilder` over a 2-thread pool; `pub const LOD_BUILD_THREADS: usize = 2;`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```rust
 #[test]
@@ -1400,11 +1400,11 @@ fn lod_cache_evicts_unsubscribed_lru_but_pins_subscribed() {
 
 (For the third test, convert the cap into `lod_cache_max: usize` field defaulting to the const, like `WorldgenRings.table` does client-side. Add `pub fn lod_cache_len(&self) -> usize` + `pub fn set_lod_cache_max(&mut self, n: usize)` test hooks.)
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p game --test lod_streaming invalid` — expect FAIL.
 
-- [ ] **Step 3: Implement invalidation**
+- [x] **Step 3: Implement invalidation**
 
 ```rust
     /// A region's terrain changed (cadence push) or it parked: every LOD key
@@ -1428,7 +1428,7 @@ Call it from `handle_region_output`:
 - `RegionOutput::FarSnapshotChanged(snap)` arm: after the `far_cache.insert`, add `self.invalidate_region_lod(rc);` (before the far fan-out).
 - `RegionOutput::Stopped(serialized, far)` arm: after `self.far_cache.insert(rc, far);`, add `self.invalidate_region_lod(rc);` (park refreshes the frozen terrain — a final edit in the last cadence window must not be lost).
 
-- [ ] **Step 4: Implement `ThreadLodBuilder`** (`crates/server/src/lod_workers.rs`)
+- [x] **Step 4: Implement `ThreadLodBuilder`** (`crates/server/src/lod_workers.rs`)
 
 ```rust
 //! Native-server LOD build workers: a fixed pool of threads consuming
@@ -1484,11 +1484,11 @@ Wire in `crates/server/src/lib.rs`: add `mod lod_workers;`; replace the Task 7 t
 
 The results receiver stays solely inside the manager (do NOT clone it into a select arm — two receivers on one crossbeam queue would race for results). Instead, drain it on the loop's existing heartbeat: add `manager.pump_lod_results();` next to `manager.maintain(now_ms);` after the `select!`. Worst-case delivery latency is the select's 200 ms `default` timeout — fine for horizon terrain.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cargo test -p game --test lod_streaming && cargo build -p server && just test` — expect PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(server-lod): terrain-change invalidation + refresh push; thread-pool builder"
@@ -1508,7 +1508,7 @@ git add -A && git commit -m "feat(server-lod): terrain-change invalidation + ref
   - `GameInstanceManager::update_lod_window(&mut self)` — diffs and sends request/release + `ClientUpdateEvent::RemoveLod`
   - `ServerPacket::LodData` routing → `ClientUpdateEvent::LodData`
 
-- [ ] **Step 1: Write failing tests** (in `instance.rs`'s test module, or a new `#[cfg(test)] mod lod_window_tests`)
+- [x] **Step 1: Write failing tests** (in `instance.rs`'s test module, or a new `#[cfg(test)] mod lod_window_tests`)
 
 ```rust
 #[cfg(test)]
@@ -1553,11 +1553,11 @@ mod lod_window_tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p client lod_window` — expect compile FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Pure helper (free function in `instance.rs`):
 
@@ -1660,11 +1660,11 @@ Call `self.update_lod_window();` immediately after the existing `self.update_far
 
 (match the surrounding arms' control flow — if they fall through rather than early-return, do the same.)
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p client && just test` — expect PASS (renderer still runs the old worldgen rings; `LodData` events hit the Task 5 stub arm).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(client-lod): instance ring assignment drives RequestLod/ReleaseLod subscriptions"
@@ -1688,11 +1688,11 @@ git add -A && git commit -m "feat(client-lod): instance ring assignment drives R
   - `pub struct RetiredLod { pub key: LodKey, pub entity: Entity, pub frames: u32 }`
   - Systems: `apply_lod_events`, `retire_lod_roots` (registered where the three worldgen-ring systems were)
 
-- [ ] **Step 1: Delete the generation half, keep+rename what survives**
+- [x] **Step 1: Delete the generation half, keep+rename what survives**
 
 `git mv crates/client/src/renderer/worldgen_rings.rs crates/client/src/renderer/lod_rings.rs`. Delete: `WORLDGEN_VIEW_RADIUS`, `WORLDGEN_RINGS`, `RING_STICKY_BAND` (table/band now live in `game::lod`), `WORLDGEN_TASKS_MAX_IN_FLIGHT`, `ring_factor`/`ring_factor_in` re-export + their moved tests, `WorldgenRings` resource, `WorldgenTask`, `manage_worldgen_rings`, `finish_worldgen_tasks`, `build_worldgen_lod_cells`, and the seed/materials plumbing (`load_worldgen_materials` in `renderer/mod.rs` too). Keep: `RETIREMENT_MAX_FRAMES` and the retirement-shape doc comments as reference for the rewrite.
 
-- [ ] **Step 2: Write failing tests** (in `lod_rings.rs`, reusing `pipeline_app`/`wait_until` from `meshing::queue::tests` exactly as the old file did)
+- [x] **Step 2: Write failing tests** (in `lod_rings.rs`, reusing `pipeline_app`/`wait_until` from `meshing::queue::tests` exactly as the old file did)
 
 ```rust
 #[test]
@@ -1746,11 +1746,11 @@ fn undecodable_grids_are_dropped_not_spawned() {
 
 Write the small helpers (`rings_app`, `push_event` = push onto `LodRings.pending`, `slot_root`, `root_meshed`, `single_lod_child`, `child_count`, `one_solid_grid`) in the test module — model them on the old file's helpers.
 
-- [ ] **Step 3: Run to verify failure**
+- [x] **Step 3: Run to verify failure**
 
 Run: `cargo test -p client lod_rings` — expect compile FAIL.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 `apply_lod_events` (system): drain `rings.pending`; for `Data(key, payload)`:
 1. Decode each `(group, packed)` via `packed.decode()`; `warn!` and skip cells that return `None`.
@@ -1779,11 +1779,11 @@ Bridge routing (replace the Task 5 stub arms in `drain_client_updates`):
 
 Delete the old worldgen-ring test suites that tested generation/assignment (assignment now tested in Task 2/`game` and Task 10/`instance.rs`); keep/port the retirement-shape tests as rewritten above.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cargo test -p client && just test` — expect PASS. `cargo build -p client` must show no dangling `worldgen_rings` references (grep `worldgen_rings\|WorldgenRings` under `crates/client/` → only `lod_rings.rs` history).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(client-lod): network-fed lod_rings renderer replaces client-side worldgen rings"
@@ -1801,7 +1801,7 @@ git add -A && git commit -m "feat(client-lod): network-fed lod_rings renderer re
 
 This task is a coordinated deletion/rename — run `just test` only at the end of the sweep; individual steps won't compile in isolation.
 
-- [ ] **Step 1: Wire deletions**
+- [x] **Step 1: Wire deletions**
 
 - `ClientPacket`: delete `RequestFarRegion`/`ReleaseFarRegion`. `ServerPacket`: delete `FarRegion`. `ClientUpdateEvent`: delete `NewFarRegion`/`RemoveFarRegion`. Delete `FAR_VIEW_RADIUS` (`grep -rn FAR_VIEW_RADIUS` → update every reader; the ring table's `(2, 2)` entry replaces it).
 - `crates/client/src/instance.rs`: delete `far_subscribed` field, `update_far_window`, `drop_far_region`, `desired_far`, the `FarRegion` packet arm; in `update_lod_window` switch the table from `&LOD_RING_TABLE[1..]` to `game::lod::LOD_RING_TABLE` and drop the far-exclusion `extend` (near window remains the only exclusion).
@@ -1809,27 +1809,27 @@ This task is a coordinated deletion/rename — run `just test` only at the end o
 - `crates/client/src/renderer/bridge.rs`: delete `FarRegionRoots`, `spawn_far_region`, `remove_far_region`, `finish_far_lod_builds` registration + the `NewFarRegion`/`RemoveFarRegion` arms and their tests (`far_lod_app_shell` + the far suites — the behavior is covered by Task 11's `lod_rings` tests now). `crates/client/src/renderer/meshing/lod.rs`: delete `FarLodBuild`.
 - Fix `retire_lod_roots`'s near-coverage check if it referenced `FarRegionRoots` (it must not, per Task 11).
 
-- [ ] **Step 2: Renames (mechanical, workspace-wide)**
+- [x] **Step 2: Renames (mechanical, workspace-wide)**
 
 `FarSnapshot` → `TerrainSnapshot`; `RegionInput::RequestFarSnapshot` → `RegionInput::RequestTerrain`; `RegionOutput::FarSnapshot` → `RegionOutput::Terrain`; `RegionOutput::FarSnapshotChanged` → `RegionOutput::TerrainChanged`; `far_cache` → `terrain_cache`; `Region::far_snapshot()` → `Region::terrain_snapshot()`; `FAR_SNAPSHOT_MIN_INTERVAL_TICKS` → `TERRAIN_HASH_INTERVAL_TICKS`. Use `grep -rln` per identifier across `crates/{game,server,client}/src` and `crates/game/tests`; update doc comments that describe the old far ring (region_runner.rs module docs, protocol.rs comments). `git mv crates/game/tests/far_snapshot.rs crates/game/tests/terrain_snapshot.rs` and fix its imports.
 
-- [ ] **Step 3: Test updates**
+- [x] **Step 3: Test updates**
 
 - `crates/game/tests/world_manager.rs`: far-subscribe tests become LOD-subscribe tests at factor 2 (`LodKey::for_region(2, rc)`) asserting `LodData` instead of `FarRegion`; the "serve from cache without waking" and "generate on miss" behaviors are the same assertions through the new path.
 - Client convergence/harness suites (`crates/client/src/harness.rs`, `bevy_harness.rs`, headless tests referencing far packets): route factor-2 through `LodData`. Run `cargo test -p client 2>&1 | head -50` iteratively.
 - Verify the factor-2 grids end-to-end: the existing client/server convergence harness must show LOD children spawning for a distance-1..2 region (add one assertion to whichever harness test previously asserted `NewFarRegion` handling).
 
-- [ ] **Step 4: Docs**
+- [x] **Step 4: Docs**
 
 `CLAUDE.md`: update the `game` bullet (far-ring/`FarSnapshot` sentences → streamed-LOD/`TerrainSnapshot` + `LodKey` description), the `client` bullet (`worldgen_rings.rs` → `lod_rings.rs`, "renders coarse unsubscribed terrain at zero bandwidth" → "renders server-streamed LOD rings"), and the `worldgen` bullet (mention `coarse_tile`). Justfile: no changes (verify `just --list` recipes still match reality).
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `just test` then `just test-full`. Expected: all green.
 Run: `cargo check -p client --target wasm32-unknown-unknown` — the wasm build must compile (netcode_web serializes the same enums; local_server drives the same WorldManager).
 Live smoke (needs the user or a `just run` session): server + one client; fly toward the horizon; verify ring transitions and no holes; place a block near a region boundary, walk 3+ regions away, confirm the edit shows in the factor-4 ring after ~the cadence interval.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(lod)!: fold factor-2 far ring into streamed LOD; delete FarSnapshot wire path"
