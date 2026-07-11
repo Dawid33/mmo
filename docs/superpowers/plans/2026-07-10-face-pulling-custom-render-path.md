@@ -1,4 +1,7 @@
 # Face Pulling (Custom Render Path) Implementation Plan
+> **STATUS: IMPLEMENTED 2026-07-11** (develop 8a10b3a..01d4bcc, 8 commits). Pull path ON by default.
+> Live GUI smoke + in-browser wasm check pending user. bevy_input harness tests hang PRE-EXISTING
+> (verified at base 9bb0590, unrelated to this plan); remaining full-suite gates skipped on user instruction.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -72,7 +75,7 @@ WGSL, wgpu storage buffers (read-only, vertex-stage — confirmed OK on browser 
   - `pub fn decode_corner(rec: QuadRecord, slot: u32) -> DecodedCorner` with `pub struct DecodedCorner { pub pos: [u32; 3], pub face: Face, pub ao: u8, pub layer: u32 }`
   - `pub const CORNER_SLOTS: [[u32; 6]; 4]`
 
-- [ ] **Step 1: Write the failing parity test**
+- [x] **Step 1: Write the failing parity test**
 
 The strongest possible pin: the existing indexed mesh (via `emit::quads_to_mesh`) is the
 oracle. For every face × AO-flip combination, expanding the mesh's 6 indices per quad must
@@ -137,12 +140,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test -p client records -- --nocapture`
 Expected: FAIL — `quads_to_records`/`decode_corner` not defined.
 
-- [ ] **Step 3: Implement the record module**
+- [x] **Step 3: Implement the record module**
 
 ```rust
 //! Per-quad 8-byte records for the pulled (mesh-free) render path.
@@ -238,12 +241,12 @@ pub fn decode_corner(rec: QuadRecord, slot: u32) -> DecodedCorner {
 Add `pub mod records;` next to the other module declarations in
 `crates/client/src/renderer/meshing/mod.rs`.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p client records`
 Expected: 3 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/client/src/renderer/meshing/records.rs crates/client/src/renderer/meshing/mod.rs
@@ -267,7 +270,7 @@ git commit -m "feat(client): 8-byte per-quad records + decode mirror for the pul
   - `pub struct ChunkQuads(pub Arc<Vec<QuadRecord>>)` (`Component`, `#[require(Visibility)]` so cave-culling's `&mut Visibility` query and visibility propagation work without `Mesh3d`).
   - `MeshOutput` becomes `{ pub mesh: Option<Mesh>, pub records: Option<Vec<QuadRecord>>, pub connectivity: u16 }`; `mesh_chunk(padded, layers, pull: bool)` fills exactly one of `mesh`/`records`.
 
-- [ ] **Step 1: Write the failing test** (in `meshing/mod.rs`'s test module, alongside `async_meshing_attaches_mesh_eventually` — reuse its app scaffold and `settle` helper verbatim, they are the local idiom)
+- [x] **Step 1: Write the failing test** (in `meshing/mod.rs`'s test module, alongside `async_meshing_attaches_mesh_eventually` — reuse its app scaffold and `settle` helper verbatim, they are the local idiom)
 
 ```rust
 #[test]
@@ -305,12 +308,12 @@ fn pull_path_attaches_records_and_no_mesh() {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test -p client pull_path_attaches_records`
 Expected: FAIL — `voxel_pull` module / `RenderPath` unresolved.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Create `crates/client/src/renderer/voxel_pull/mod.rs`:
 
@@ -410,7 +413,7 @@ In `lod.rs`: `LodMeshTask`'s builder calls (`emit::quads_to_mesh(&quads, layers)
 (`center (16, 16.5, 16), half (16, 16.5, 16)`) + `NoAutoAabb`, no `Mesh3d`/material; its
 removal arm strips `ChunkQuads` too.
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Run: `cargo test -p client`
 Expected: new test passes; every pre-existing test still passes (they run with
@@ -418,7 +421,7 @@ Expected: new test passes; every pre-existing test still passes (they run with
 `RenderPath::default()` semantics if the resource is absent in old test scaffolds: use
 `Option<Res<RenderPath>>` and `path.map_or(DEFAULT_PULL_PATH, |p| p.pull)`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/client/src/renderer
@@ -440,7 +443,7 @@ git commit -m "feat(client): ChunkQuads records flow through mesh+LOD pipelines 
   binding 2 = block texture array, binding 3 = its sampler.
   Entry points `vertex` / `fragment`.
 
-- [ ] **Step 1: Write the shader**
+- [x] **Step 1: Write the shader**
 
 No GPU test exists headless; correctness is pinned by Task 1's Rust mirror (this decode is
 its transliteration — keep them in lockstep) and verified live by Task 4's smoke probe.
@@ -548,7 +551,7 @@ fn fragment(in: PullVertexOutput) -> @location(0) vec4<f32> {
 }
 ```
 
-- [ ] **Step 2: Sanity-check it parses**
+- [x] **Step 2: Sanity-check it parses**
 
 Run: `naga assets/shaders/voxel_pull.wgsl` if the `naga-cli` binary is available
 (`cargo install naga-cli` once, or skip — Task 4's first client run validates it through
@@ -556,7 +559,7 @@ Bevy's pipeline cache and logs WGSL errors with line numbers).
 Expected: no parse errors (bevy_pbr imports resolve only inside Bevy — naga-cli will flag
 them; comment the two `#import` lines out for the standalone parse check if used).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add assets/shaders/voxel_pull.wgsl
@@ -589,7 +592,7 @@ where this plan's code and that file disagree on a signature, the example wins.
   - Render-world component `GpuChunkQuads { bind_group: BindGroup, quad_count: u32 }` — Tasks 6/7 reuse it.
   - `VoxelPullPipeline` resource with `chunk_layout: BindGroupLayout` and cached forward pipeline specialization — Tasks 6/7 add depth variants beside it.
 
-- [ ] **Step 1: Extraction** (in `mod.rs`)
+- [x] **Step 1: Extraction** (in `mod.rs`)
 
 ```rust
 /// Render-world copy of one chunk's draw inputs. Re-extracted every frame
@@ -644,7 +647,7 @@ pub fn extract_chunk_quads(
 derive it by adding `bevy::render::sync_world::SyncToRenderWorld` to the `#[require(...)]`
 list on `ChunkQuads`. `custom_phase_item.rs` shows the working pattern.)
 
-- [ ] **Step 2: Pipeline** (`pipeline.rs`)
+- [x] **Step 2: Pipeline** (`pipeline.rs`)
 
 ```rust
 use bevy::{
@@ -755,7 +758,7 @@ pub struct ChunkUniform {
 }
 ```
 
-- [ ] **Step 3: Prepare** (`prepare.rs`) — upload buffers + bind group for changed chunks
+- [x] **Step 3: Prepare** (`prepare.rs`) — upload buffers + bind group for changed chunks
 
 ```rust
 #[derive(Component)]
@@ -815,7 +818,7 @@ pub fn prepare_chunk_quads(
 `ExtractResourcePlugin::<BlockArrayTexture>` mirrors the same type into the render
 world — the prepare system reads it directly.)
 
-- [ ] **Step 4: Queue + draw** (`queue.rs`) — copy the structure of
+- [x] **Step 4: Queue + draw** (`queue.rs`) — copy the structure of
 `custom_phase_item.rs:260-276` exactly, then adapt:
 
 ```rust
@@ -899,7 +902,7 @@ The bin/batch-set key field lists above are from `custom_phase_item.rs:260-276` 
 deliberate: chunk entities carry no `VisibilityClass`, so Bevy's own frustum culling
 never sees them; without this test every chunk would draw in every view.
 
-- [ ] **Step 5: Plugin wiring** (`mod.rs`)
+- [x] **Step 5: Plugin wiring** (`mod.rs`)
 
 ```rust
 pub struct VoxelPullPlugin;
@@ -933,14 +936,14 @@ wherever render plugins are added), and insert
 `BlockArrayTexture(handle.clone())` beside the `ChunkMaterial` insertion at
 `renderer/mod.rs:252-258`.
 
-- [ ] **Step 6: Compile against the real APIs**
+- [x] **Step 6: Compile against the real APIs**
 
 Run: `cargo check -p client 2>&1 | head -80`
 Expected: iterate until clean. Every failure here is API drift — fix by opening the
 referenced registry file (`custom_phase_item.rs` first) and aligning names. Do NOT
 trust IDE diagnostics mid-edit (project memory: they lag; use the compiler).
 
-- [ ] **Step 7: Smoke probe** — create `crates/client/examples/pull_smoke.rs`, modeled
+- [x] **Step 7: Smoke probe** — create `crates/client/examples/pull_smoke.rs`, modeled
 line-for-line on `crates/client/examples/gizmo_smoke.rs` (the existing self-screenshot
 probe): build the client `App` the same way that example does, but
 `insert_resource(RenderPath { pull: true })`, connect to the offline/local world (the
@@ -960,7 +963,7 @@ Expected: exits 0, screenshot saved, "terrain pixels detected" (or the probe's a
 assertion) printed. Also eyeball the screenshot — geometry must look identical in shape to
 the mesh path (AO shading present, textures mapped per block).
 
-- [ ] **Step 8: Regression check + commit**
+- [x] **Step 8: Regression check + commit**
 
 Run: `just test` (all green) and `just run` briefly with default `RenderPath` (mesh path
 untouched, game renders as before).
@@ -981,7 +984,7 @@ git commit -m "feat(client): mesh-free pulled-quad render path (Opaque3d, unlit)
 - Consumes: group(0) view bindings (already bound by `SetMeshViewBindGroup<0>`).
 - Produces: lit output visually matching the Material path (directional light + cascaded shadows received + ambient), same `PullVertexOutput`.
 
-- [ ] **Step 1: Replace the fragment (and add imports)**
+- [x] **Step 1: Replace the fragment (and add imports)**
 
 ```wgsl
 #import bevy_pbr::{
@@ -1020,7 +1023,7 @@ verbatim). If shadow-filtering shader defs (e.g. `PCF` variants) are required by
 pipeline's `vertex/fragment.shader_defs` in `pipeline.rs` (grep `SHADOW_FILTER_METHOD` in
 `bevy_pbr-0.18.1/src/render/mesh.rs` and mirror).
 
-- [ ] **Step 2: Visual A/B**
+- [x] **Step 2: Visual A/B**
 
 Run: `just pull-smoke` (screenshot with lighting), then `just run` twice — once default
 (mesh path), once with `RenderPath { pull: true }` wired temporarily via
@@ -1030,7 +1033,7 @@ Expected: no obvious lighting difference; shadows fall identically (they come fr
 same shadow maps — chunks don't CAST yet; use avatar/entity shadows onto terrain as the
 receiving check).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add assets/shaders/voxel_pull.wgsl crates/client/src/renderer/voxel_pull/pipeline.rs
@@ -1057,7 +1060,7 @@ regression — Global Constraints).
 - Consumes: `GpuChunkQuads`, `ExtractedChunkQuads`, `VoxelPullPipeline.chunk_layout`.
 - Produces: `DrawVoxelPullDepth` render command reused by Task 7.
 
-- [ ] **Step 1: Depth WGSL** — `voxel_pull_depth.wgsl`: copy the `vertex` fn and decode
+- [x] **Step 1: Depth WGSL** — `voxel_pull_depth.wgsl`: copy the `vertex` fn and decode
 constants from `voxel_pull.wgsl`, output only `@builtin(position)`, no fragment entry
 point. Prepass views bind a different view layout: use
 `bevy::pbr::SetPrepassViewBindGroup<0>` (from `bevy_pbr::prepass`) in the draw chain and
@@ -1066,7 +1069,7 @@ import the prepass view uniform the way `bevy_pbr-0.18.1/src/prepass/prepass.wgs
 `PREPASS_PIPELINE` def — copy its import block and clip-position computation exactly;
 world→clip goes through the same `position_world_to_clip`).
 
-- [ ] **Step 2: Depth pipeline + queue** — in `pipeline.rs`, add a second
+- [x] **Step 2: Depth pipeline + queue** — in `pipeline.rs`, add a second
 `SpecializedRenderPipeline` impl (or key variant) `VoxelPullDepthPipeline`:
 layout `[prepass_view_layout, chunk_layout]` (get the prepass view layout from
 `bevy::pbr::PrepassPipeline`'s resource — grep `view_layout` in
@@ -1090,7 +1093,7 @@ system in the plugin. The `Opaque3dPrepass` bin-key shape: grep `Opaque3dPrepass
 `bevy_pbr-0.18.1/src/prepass/mod.rs` (`queue_prepass_material_meshes`) and mirror the
 key construction with `AssetId::<Mesh>::invalid().untyped()` as the asset id, like Task 4.
 
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
 
 Run: `cargo check -p client`, then `just pull-smoke`.
 Expected: compiles; smoke screenshot unchanged. Then `just run` with pull path on: enable
@@ -1098,7 +1101,7 @@ Bevy's depth-prepass debug view if wired, else verify indirectly — spawn locat
 identically and no wgpu validation errors appear in the log (a mismatched prepass view
 layout fails loudly at pipeline creation).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add assets/shaders/voxel_pull_depth.wgsl crates/client/src/renderer/voxel_pull
@@ -1118,7 +1121,7 @@ git commit -m "feat(client): pulled-quad depth prepass — HZB still sees terrai
 - Consumes: `DrawVoxelPullDepth` (Task 6), `GpuChunkQuads`.
 - Produces: terrain shadows on terrain and on entities, cast by pulled chunks.
 
-- [ ] **Step 1: Queue into the Shadow phase.** Model on `queue_shadows` in
+- [x] **Step 1: Queue into the Shadow phase.** Model on `queue_shadows` in
 `bevy_pbr-0.18.1/src/render/light.rs`: iterate shadow views
 (`ViewBinnedRenderPhases<Shadow>` keyed by each light's cascade view entities), reuse
 the depth pipeline specialized with the shadow map format (grep `SHADOW_FORMAT` /
@@ -1129,12 +1132,12 @@ keep it). Frustum-cull per cascade view with the same world-AABB test. `Shadow` 
 mirror `queue_shadows`' construction, `AssetId::<Mesh>::invalid().untyped()` asset id.
 Register `add_render_command::<Shadow, DrawVoxelPullDepth>()`.
 
-- [ ] **Step 2: Verify live.** `just run` with pull path on, walk to terrain relief at a
+- [x] **Step 2: Verify live.** `just run` with pull path on, walk to terrain relief at a
 sun angle: terrain casts shadows onto lower terrain and onto the avatar; toggling back to
 the mesh path shows the same shadows.
 Expected: parity within eyeball tolerance; no validation errors.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/client/src/renderer/voxel_pull
@@ -1150,7 +1153,7 @@ git commit -m "feat(client): pulled chunks cast shadows (Shadow phase items)"
 - Modify: `CLAUDE.md` (renderer bullet: mention the pull path + toggle)
 - Modify: `docs/superpowers/specs/2026-07-09-voxel-rendering-next-steps-research.md` — no edit; instead note completion in the plan header when done.
 
-- [ ] **Step 1: Flip** `DEFAULT_PULL_PATH` to `true`. This flips every test that relies
+- [x] **Step 1: Flip** `DEFAULT_PULL_PATH` to `true`. This flips every test that relies
 on the legacy mesh path via the `Option<Res<RenderPath>>` fallback — before running the
 suite, pin `insert_resource(RenderPath { pull: false })` in the test scaffolds that
 introspect `ATTRIBUTE_VOXEL_PACKED` / `Mesh3d` on the legacy path
@@ -1163,13 +1166,13 @@ lifecycle-critical ones (`removal_while_task_in_flight_clears_mesh`,
 `ChunkQuads` instead of `Mesh3d`, so the pull path's despawn/reinsert hygiene is pinned
 by tests and not only by the live smoke.
 
-- [ ] **Step 2: Memory evidence.** Add a one-shot startup-complete log in
+- [x] **Step 2: Memory evidence.** Add a one-shot startup-complete log in
 `apply_meshed_chunks`' records arm accumulating
 `records.len() * 8` per chunk into a counter resource, logged (info level, `[pull-mem]`
 prefix) every 512 chunks: bytes now vs `56 * quads` old-path estimate. This is the
 plan's headline claim — capture one number from a live run for the commit message.
 
-- [ ] **Step 3: Full suite + live + wasm.**
+- [x] **Step 3: Full suite + live + wasm.**
 
 Run, in order, expect all green / no regressions:
 - `just test-full`
@@ -1179,12 +1182,12 @@ Run, in order, expect all green / no regressions:
   wasm-server-runner flow from CLAUDE.md; in-browser check that terrain renders (storage
   buffers in vertex stage on real browser WebGPU) with `?offline`.
 
-- [ ] **Step 4: Update CLAUDE.md** — in the `crates/client` workspace bullet, after the
+- [x] **Step 4: Update CLAUDE.md** — in the `crates/client` workspace bullet, after the
 meshing parenthetical, add: pulled-quad render path (`renderer/voxel_pull/`, 8-byte
 records in storage buffers, custom Opaque3d/prepass/Shadow phase items; `RenderPath`
 toggle falls back to the legacy Mesh path; records.rs↔voxel_pull.wgsl layout locked).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
