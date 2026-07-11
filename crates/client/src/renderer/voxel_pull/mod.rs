@@ -89,11 +89,16 @@ pub fn extract_chunk_quads(
             &InheritedVisibility,
         )>,
     >,
+    mut debug_frame: Local<u32>,
 ) {
+    let mut total = 0u32;
+    let mut hidden = 0u32;
     for (entity, quads, transform, aabb, vis) in &chunks {
+        total += 1;
         let mut ec = commands.entity(entity);
         // Cave-culling hides via Visibility -> InheritedVisibility=false.
         if !vis.get() {
+            hidden += 1;
             ec.remove::<ExtractedChunkQuads>();
             continue;
         }
@@ -107,6 +112,13 @@ pub fn extract_chunk_quads(
             half_extents: half,
             changed: quads.is_changed(),
         });
+    }
+    // VOXEL_PULL_DEBUG=1: once a second, where do chunks disappear — here
+    // (main-world Visibility, i.e. the cave-culling BFS) or at the per-view
+    // frustum cull (queue.rs logs the other half)?
+    *debug_frame = debug_frame.wrapping_add(1);
+    if *debug_frame % 60 == 0 && std::env::var_os("VOXEL_PULL_DEBUG").is_some() {
+        info!("[pull-cull] extract: {total} ChunkQuads entities, {hidden} hidden by cave-culling BFS");
     }
 }
 

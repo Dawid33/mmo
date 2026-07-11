@@ -41,6 +41,23 @@ use super::ExtractedChunkQuads;
 /// bind group at group 0, then bind our per-chunk group 1 and issue the draw.
 pub type DrawVoxelPull = (SetItemPipeline, SetMeshViewBindGroup<0>, DrawChunkQuads);
 
+/// The per-view frustum test for one extracted chunk, mirroring bevy's own
+/// mesh culling (`bevy_camera visibility/mod.rs:672`): test the near plane but
+/// NOT the far plane. The GPU projection is infinite-reverse-Z — nothing is
+/// far-clipped at draw time — so `PerspectiveProjection::far` (default 1000)
+/// exists only as a legacy frustum field, and culling against it here silently
+/// deleted every chunk and LOD ring beyond 1km while the mesh path (which
+/// never far-culls) rendered them. `center`/`half_extents` are world-space
+/// (extraction folded the chunk transform in), so the OBB test runs against
+/// identity.
+pub fn chunk_in_view(frustum: &Frustum, chunk_center: Vec3, chunk_half_extents: Vec3) -> bool {
+    let aabb = Aabb {
+        center: chunk_center.into(),
+        half_extents: chunk_half_extents.into(),
+    };
+    frustum.intersects_obb(&aabb, &bevy::math::Affine3A::IDENTITY, true, false)
+}
+
 pub struct DrawChunkQuads;
 
 impl<P: PhaseItem> RenderCommand<P> for DrawChunkQuads {
@@ -82,7 +99,11 @@ pub fn queue_voxel_pull(
     )>,
     chunks: Query<(Entity, &MainEntity, &ExtractedChunkQuads)>,
     mut next_tick: Local<Tick>,
+    mut debug_frame: Local<u32>,
 ) {
+    *debug_frame = debug_frame.wrapping_add(1);
+    let debug_this_frame =
+        *debug_frame % 60 == 0 && std::env::var_os("VOXEL_PULL_DEBUG").is_some();
     let draw = draw_functions.read().id::<DrawVoxelPull>();
     for (view, frustum, msaa, depth_prepass, normal_prepass, motion_prepass, deferred_prepass) in
         &views
@@ -112,16 +133,14 @@ pub fn queue_voxel_pull(
                 view_layout_key,
             },
         );
+        let mut total = 0u32;
+        let mut kept = 0u32;
         for (entity, main_entity, chunk) in &chunks {
-            // center/half_extents are already world-space (extraction folded the
-            // chunk transform in), so the frustum test runs against identity.
-            let aabb = Aabb {
-                center: chunk.center.into(),
-                half_extents: chunk.half_extents.into(),
-            };
-            if !frustum.intersects_obb_identity(&aabb) {
+            total += 1;
+            if !chunk_in_view(frustum, chunk.center, chunk.half_extents) {
                 continue;
             }
+            kept += 1;
             // Bump the change tick so the bin is rebuilt (mirrors the example).
             let this_tick = next_tick.get() + 1;
             next_tick.set(this_tick);
@@ -141,6 +160,12 @@ pub fn queue_voxel_pull(
                 InputUniformIndex::default(),
                 BinnedRenderPhaseType::NonMesh,
                 *next_tick,
+            );
+        }
+        if debug_this_frame {
+            info!(
+                "[pull-cull] forward view {:?}: {kept}/{total} chunks in frustum",
+                view.retained_view_entity
             );
         }
     }
@@ -182,11 +207,7 @@ pub fn queue_voxel_pull_prepass(
             },
         );
         for (entity, main_entity, chunk) in &chunks {
-            let aabb = Aabb {
-                center: chunk.center.into(),
-                half_extents: chunk.half_extents.into(),
-            };
-            if !frustum.intersects_obb_identity(&aabb) {
+            if !chunk_in_view(frustum, chunk.center, chunk.half_extents) {
                 continue;
             }
             let this_tick = next_tick.get() + 1;
@@ -257,11 +278,7 @@ pub fn queue_voxel_pull_shadows(
                 },
             );
             for (entity, main_entity, chunk) in &chunks {
-                let aabb = Aabb {
-                    center: chunk.center.into(),
-                    half_extents: chunk.half_extents.into(),
-                };
-                if !frustum.intersects_obb_identity(&aabb) {
+                if !chunk_in_view(frustum, chunk.center, chunk.half_extents) {
                     continue;
                 }
                 let this_tick = next_tick.get() + 1;
@@ -284,5 +301,83 @@ pub fn queue_voxel_pull_shadows(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A camera frustum built the way `update_frusta` builds the real one:
+    /// infinite-reverse-Z perspective clip matrix, far half-space patched in
+    /// from `PerspectiveProjection::far` (bevy's `Projection::compute_frustum`
+    /// via `from_clip_from_world_custom_far`). Camera at origin looking -Z.
+    fn camera_frustum(far: f32) -> Frustum {
+        let clip_from_view =
+            Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_2, 16.0 / 9.0, 0.1);
+        let view_from_world = Mat4::IDENTITY; // camera at origin, -Z forward
+        let clip_from_world = clip_from_view * view_from_world;
+        Frustum::from_clip_from_world_custom_far(
+            &clip_from_world,
+            &Vec3::ZERO,
+            &Vec3::Z, // view_backward for a -Z-forward camera
+            far,
+        )
+    }
+
+    /// The bug this pins: the GPU projection is infinite-reverse-Z (no far
+    /// clip), so terrain beyond `projection.far` (default 1000) renders on the
+    /// mesh path — the pull path's cull must not delete it. The old
+    /// `intersects_obb_identity` call tested the far plane and blanked every
+    /// chunk and LOD ring past 1km.
+    #[test]
+    fn chunks_beyond_projection_far_still_draw() {
+        let frustum = camera_frustum(1000.0);
+        let half = Vec3::splat(16.0);
+        // 2km straight ahead: beyond `far`, squarely in view.
+        assert!(
+            chunk_in_view(&frustum, Vec3::new(0.0, 0.0, -2000.0), half),
+            "chunk beyond projection.far must not be culled (GPU never far-clips)"
+        );
+        // Same chunk under the old all-planes test: culled — the regression.
+        let aabb = Aabb {
+            center: Vec3::new(0.0, 0.0, -2000.0).into(),
+            half_extents: half.into(),
+        };
+        assert!(
+            !frustum.intersects_obb_identity(&aabb),
+            "sanity: the old identity test far-culls this chunk (why the bug existed)"
+        );
+        // LOD-root sized box (factor 256 tile: half ~4096) far out but in view.
+        assert!(
+            chunk_in_view(&frustum, Vec3::new(0.0, 0.0, -20_000.0), Vec3::splat(4096.0)),
+            "distant LOD roots must survive the cull"
+        );
+    }
+
+    /// The cull must still reject what is genuinely outside the view: behind
+    /// the camera (near plane) and far off to the side (side planes).
+    #[test]
+    fn chunks_outside_the_view_are_still_culled() {
+        let frustum = camera_frustum(1000.0);
+        let half = Vec3::splat(16.0);
+        assert!(
+            !chunk_in_view(&frustum, Vec3::new(0.0, 0.0, 500.0), half),
+            "chunk behind the camera must be culled"
+        );
+        assert!(
+            !chunk_in_view(&frustum, Vec3::new(10_000.0, 0.0, -100.0), half),
+            "chunk far outside the side planes must be culled"
+        );
+        // Equivalence on the in-range case: identity test and ours agree for a
+        // chunk inside `far`, pinning that skipping the far plane changed
+        // nothing else about the test.
+        let near_center = Vec3::new(0.0, 0.0, -100.0);
+        let aabb = Aabb { center: near_center.into(), half_extents: half.into() };
+        assert_eq!(
+            chunk_in_view(&frustum, near_center, half),
+            frustum.intersects_obb_identity(&aabb),
+            "inside projection.far the two tests must agree"
+        );
     }
 }
