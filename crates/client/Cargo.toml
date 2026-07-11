@@ -22,6 +22,7 @@ crc32fast = { workspace = true }
 bevy = { workspace = true }
 image = { workspace = true }
 ordered-float = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 quinn = { workspace = true }

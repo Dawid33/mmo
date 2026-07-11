@@ -11,7 +11,8 @@ use super::ao::ao_flips_quad;
 use super::binary::{cross_axes, Face, Quad};
 use super::pack;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(transparent)]
 pub struct QuadRecord(pub [u32; 2]);
 
 /// Slot→corner tables indexed by `reversed*2 + flip`; corner order is

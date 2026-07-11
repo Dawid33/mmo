@@ -47,6 +47,7 @@ impl Plugin for SimBridgePlugin {
         app.add_plugins((
                 MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default(),
                 bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
+                voxel_pull::VoxelPullPlugin,
             ))
             .insert_resource(ClientUpdates(self.client_recv.clone()))
             .insert_resource(GameEvents(self.game_send.clone()))
@@ -228,6 +229,8 @@ fn setup_scene(
     });
     let handle = images.add(array_image);
 
+    // The pulled render path binds the same array texture directly (no material).
+    commands.insert_resource(voxel_pull::BlockArrayTexture(handle.clone()));
     commands.insert_resource(meshing::ChunkMaterial(voxel_materials.add(ExtendedMaterial {
         base: StandardMaterial { perceptual_roughness: 0.9, ..Default::default() },
         extension: StandardVoxelMaterial { voxels_texture: handle },

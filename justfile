@@ -162,6 +162,10 @@ bench-column:
 bench-region:
     {{cargo}} test -p worldgen --release --test region_load_cost -- --ignored --nocapture
 
+# Self-screenshot probe: the pulled-quad render path draws real terrain.
+pull-smoke:
+    {{cargo}} run -p client --example pull_smoke
+
 # ---- WASM / browser -------------------------------------------------------
 
 # Start `just server` first, or append ?offline in the browser for single-player.
