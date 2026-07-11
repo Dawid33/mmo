@@ -7,14 +7,15 @@ use std::sync::Arc;
 
 use bevy::{
     camera::primitives::Aabb,
-    core_pipeline::core_3d::Opaque3d,
+    core_pipeline::{core_3d::Opaque3d, prepass::Opaque3dPrepass},
+    pbr::init_prepass_pipeline,
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_phase::AddRenderCommand,
         render_resource::SpecializedRenderPipelines,
         sync_world::{RenderEntity, SyncToRenderWorld},
-        Extract, ExtractSchedule, Render, RenderApp, RenderSystems,
+        Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
 
@@ -24,9 +25,9 @@ pub mod pipeline;
 pub mod prepare;
 pub mod queue;
 
-use pipeline::VoxelPullPipeline;
+use pipeline::{init_voxel_pull_depth_pipeline, VoxelPullDepthPipeline, VoxelPullPipeline};
 use prepare::prepare_chunk_quads;
-use queue::{queue_voxel_pull, DrawVoxelPull};
+use queue::{queue_voxel_pull, queue_voxel_pull_prepass, DrawVoxelPull, DrawVoxelPullDepth};
 
 /// Default for the old-vs-pull render path toggle. Flipped to `true` once
 /// visual parity is confirmed (Task 8); kept a named constant so it is
@@ -115,13 +116,22 @@ impl Plugin for VoxelPullPlugin {
         };
         render_app
             .init_resource::<SpecializedRenderPipelines<VoxelPullPipeline>>()
+            .init_resource::<SpecializedRenderPipelines<VoxelPullDepthPipeline>>()
             .add_render_command::<Opaque3d, DrawVoxelPull>()
+            .add_render_command::<Opaque3dPrepass, DrawVoxelPullDepth>()
+            // The depth pipeline clones `PrepassPipeline`'s view layout, which
+            // only exists after `init_prepass_pipeline` runs in `RenderStartup`.
+            .add_systems(
+                RenderStartup,
+                init_voxel_pull_depth_pipeline.after(init_prepass_pipeline),
+            )
             .add_systems(ExtractSchedule, extract_chunk_quads)
             .add_systems(
                 Render,
                 (
                     prepare_chunk_quads.in_set(RenderSystems::PrepareBindGroups),
                     queue_voxel_pull.in_set(RenderSystems::Queue),
+                    queue_voxel_pull_prepass.in_set(RenderSystems::Queue),
                 ),
             );
     }

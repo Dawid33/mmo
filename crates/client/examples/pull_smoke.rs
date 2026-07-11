@@ -124,10 +124,17 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         },
     ));
 
-    // Fixed camera looking down the scene from above/behind +Z.
+    // Fixed camera looking down the scene from above/behind +Z. DepthPrepass +
+    // OcclusionCulling mirror the real camera (visibility.rs::enable_native_occlusion)
+    // so the probe exercises the pulled-quad depth prepass (Task 6) — and, because
+    // the prepass adds the DEPTH_PREPASS bit to the forward view layout, it also
+    // validates that the forward pipeline derives its group(0) layout from the
+    // view's prepass state (a mismatch fails loudly at pipeline creation).
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(16.0, 30.0, 58.0).looking_at(Vec3::new(16.0, 6.0, 14.0), Vec3::Y),
+        bevy::core_pipeline::prepass::DepthPrepass,
+        bevy::render::experimental::occlusion_culling::OcclusionCulling,
     ));
 
     // Sun, shadows on — exercises the lit fragment's directional-light +
