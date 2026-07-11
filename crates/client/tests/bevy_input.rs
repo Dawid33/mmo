@@ -3,6 +3,9 @@
 //! SetFreeCam -> cursor grab. See
 //! docs/superpowers/specs/2026-07-06-bevy-input-harness-design.md.
 
+use std::time::Duration;
+
+use bevy::math::Vec2;
 use bevy::window::CursorGrabMode;
 use client::bevy_harness::BevyInputHarness;
 
@@ -70,5 +73,50 @@ fn pressing_e_grabs_and_releases_cursor() {
         h.cursor_grab_mode(),
         CursorGrabMode::None,
         "pressing E again must release the cursor"
+    );
+}
+
+/// The pre-change contract: with the window collapsed, every frame with motion
+/// still produces exactly one MouseMotion event. Guards against the coalescer
+/// dropping deltas outright.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn zero_window_emits_one_motion_event_per_frame() {
+    let mut h = BevyInputHarness::new();
+    h.connect();
+    h.set_mouse_coalesce_window(Duration::ZERO);
+
+    for i in 0..4 {
+        h.move_mouse(Vec2::new(1.0 + i as f32, -1.0));
+        h.step();
+    }
+
+    assert_eq!(
+        h.mouse_motions(),
+        &[(1.0, -1.0), (2.0, -1.0), (3.0, -1.0), (4.0, -1.0)],
+        "a zero window must forward every frame's delta untouched"
+    );
+}
+
+/// The point of the change: a window longer than the test withholds every delta
+/// after the leading edge, and the withheld motion is summed rather than lost —
+/// so N frames of motion cost 1 packet, not N.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn long_window_coalesces_frames_into_one_packet() {
+    let mut h = BevyInputHarness::new();
+    h.connect();
+    h.set_mouse_coalesce_window(Duration::from_secs(3600));
+
+    for _ in 0..8 {
+        h.move_mouse(Vec2::new(2.0, 3.0));
+        h.step();
+    }
+
+    assert_eq!(
+        h.mouse_motions(),
+        &[(2.0, 3.0)],
+        "only the leading edge escapes a window longer than the test; the other \
+         7 frames must be held, summed, and awaiting the window's expiry"
     );
 }

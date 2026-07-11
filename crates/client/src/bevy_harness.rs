@@ -5,6 +5,8 @@
 //! `SimHarness`: no window, no GPU, no threads, no wall clock. See
 //! docs/superpowers/specs/2026-07-06-bevy-input-harness-design.md.
 
+use std::time::Duration;
+
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, Window};
@@ -31,6 +33,8 @@ pub struct BevyInputHarness {
     game_tap: Receiver<GameEventKind>,
     /// Count of `Key::KeyE` press edges `forward_input` emitted.
     e_forwarded: usize,
+    /// Every `InputEvent::MouseMotion` `forward_input` emitted, in order.
+    mouse_motions: Vec<(f32, f32)>,
     /// The stub primary-window entity carrying `Window` + `CursorOptions`.
     window: Entity,
 }
@@ -64,6 +68,7 @@ impl BevyInputHarness {
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<ButtonInput<MouseButton>>()
             .init_resource::<AccumulatedMouseMotion>()
+            .init_resource::<crate::renderer::input::MouseCoalesceWindow>()
             .init_resource::<LocalPlayer>()
             .init_resource::<Regions>()
             .init_resource::<RegionRoots>()
@@ -88,7 +93,16 @@ impl BevyInputHarness {
             .spawn((Window::default(), CursorOptions::default(), PrimaryWindow))
             .id();
 
-        Self { app, server, client, server_to_client, game_tap: tap_recv, e_forwarded: 0, window }
+        Self {
+            app,
+            server,
+            client,
+            server_to_client,
+            game_tap: tap_recv,
+            e_forwarded: 0,
+            mouse_motions: Vec::new(),
+            window,
+        }
     }
 
     /// Handshake: request the player's region, then step until `LocalPlayer` is
@@ -137,6 +151,9 @@ impl BevyInputHarness {
             if let GameEventKind::PlayerInput(_, InputEvent::Key { key: Key::KeyE, pressed: true }) = ev {
                 self.e_forwarded += 1;
             }
+            if let GameEventKind::PlayerInput(_, InputEvent::MouseMotion { dx, dy }) = ev {
+                self.mouse_motions.push((dx, dy));
+            }
             let _ = self.client.push_game_event(ev);
         }
     }
@@ -144,6 +161,11 @@ impl BevyInputHarness {
     fn clear_input_edges(&mut self) {
         self.app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
         self.app.world_mut().resource_mut::<ButtonInput<MouseButton>>().clear();
+        // Same reason: real Bevy's `InputPlugin` recomputes `AccumulatedMouseMotion`
+        // every frame and `MinimalPlugins` has none, so an injected delta would
+        // otherwise re-fire on every subsequent frame.
+        *self.app.world_mut().resource_mut::<AccumulatedMouseMotion>() =
+            AccumulatedMouseMotion::default();
     }
 
     // --- input entry points ---
@@ -161,6 +183,20 @@ impl BevyInputHarness {
         self.release_key(KeyCode::KeyE);
     }
 
+    /// Inject one frame's worth of raw mouse motion. Consumed by the next
+    /// `step()` and cleared afterwards, so one injection == one frame.
+    pub fn move_mouse(&mut self, delta: Vec2) {
+        self.app.world_mut().resource_mut::<AccumulatedMouseMotion>().delta = delta;
+    }
+
+    /// Override the coalescing window. `Duration::ZERO` = emit every frame.
+    pub fn set_mouse_coalesce_window(&mut self, window: Duration) {
+        self.app
+            .world_mut()
+            .resource_mut::<crate::renderer::input::MouseCoalesceWindow>()
+            .0 = window;
+    }
+
     // --- inspectors (one per bug suspect) ---
 
     /// suspect (c): is `LocalPlayer` set?
@@ -171,6 +207,11 @@ impl BevyInputHarness {
     /// Did `forward_input` emit the E press edge (cleared the LocalPlayer gate)?
     pub fn e_forwarded_count(&self) -> usize {
         self.e_forwarded
+    }
+
+    /// Every `MouseMotion` delta `forward_input` emitted, in order.
+    pub fn mouse_motions(&self) -> &[(f32, f32)] {
+        &self.mouse_motions
     }
 
     /// suspect (b): the local player's fps_cam_mode after the sim tick. `Some`

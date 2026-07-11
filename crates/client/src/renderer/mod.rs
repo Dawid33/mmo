@@ -12,6 +12,7 @@ mod avatar;
 mod block_textures;
 pub(crate) mod bridge;
 pub(crate) mod collider_debug;
+pub(crate) mod diag;
 pub(crate) mod hud;
 pub mod convert;
 pub(crate) mod grid_debug;
@@ -70,6 +71,7 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<meshing::queue::FrameUploads>()
             .init_resource::<meshing::visibility::CullingConfig>()
             .init_resource::<voxel_pull::RenderPath>()
+            .init_resource::<input::MouseCoalesceWindow>()
             .init_resource::<lod_rings::LodRings>()
             .add_systems(
                 PreUpdate,
@@ -121,6 +123,13 @@ impl Plugin for SimBridgePlugin {
             );
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Update, meshing::visibility::enable_native_occlusion);
+
+        // Opt-in (DIAG=1): per-render-pass GPU/CPU ms + pipeline stats, dumped to
+        // stdout. What matters is that it lands after DefaultPlugins, since
+        // RenderDiagnosticsPlugin reaches into the RenderApp sub-app.
+        if diag::enabled() {
+            app.add_plugins(diag::DiagPlugin);
+        }
     }
 }
 

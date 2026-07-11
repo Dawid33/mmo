@@ -80,10 +80,12 @@ impl MouseCoalescer {
         window: Duration,
     ) -> Option<Vec2> {
         self.pending += delta;
-        // Clamped at `window`: an idle mouse can neither drift the accumulator
-        // nor overflow it, and it leaves `since_send` armed at exactly the
-        // threshold, which is what gives the leading edge.
-        self.since_send = self.since_send.saturating_add(dt).min(window);
+        // Saturating, and deliberately NOT clamped to `window`: an idle mouse
+        // must stay armed past the threshold, so that motion resuming after a
+        // pause emits on its first frame. (Clamping to the window would tie the
+        // armed state to whichever window was in force while idling, and
+        // silently disarm the leading edge if the window were later raised.)
+        self.since_send = self.since_send.saturating_add(dt);
 
         if self.pending == Vec2::ZERO || self.since_send < window {
             return None;
@@ -99,6 +101,9 @@ pub fn forward_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
+    time: Res<Time>,
+    coalesce_window: Res<MouseCoalesceWindow>,
+    mut coalescer: Local<MouseCoalescer>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut last_size: Local<Option<(u32, u32)>>,
     player: Res<LocalPlayer>,
@@ -125,8 +130,11 @@ pub fn forward_input(
     for b in buttons.get_just_released() {
         send(InputEvent::MouseButton { button: map_button(*b), pressed: false });
     }
-    if motion.delta != Vec2::ZERO {
-        send(InputEvent::MouseMotion { dx: motion.delta.x, dy: motion.delta.y });
+    // Coalesce HERE, at the source — not at the send boundary. Each event is
+    // predicted locally and replayed by the server, so emitting N events that
+    // the server sees as 1 would give the two divergent logs and break rollback.
+    if let Some(sum) = coalescer.accumulate(motion.delta, time.delta(), coalesce_window.0) {
+        send(InputEvent::MouseMotion { dx: sum.x, dy: sum.y });
     }
     if let Ok(w) = window.single() {
         let size = (w.physical_width(), w.physical_height());
@@ -199,6 +207,23 @@ mod tests {
             c.accumulate(Vec2::new(7.0, 7.0), FRAME, W),
             Some(Vec2::new(7.0, 7.0)),
             "a pause must re-arm the leading edge, not add latency"
+        );
+    }
+
+    /// Idling accrues time against whatever window is in force, but the armed
+    /// state must not be capped by it: a still mouse stays armed, so raising the
+    /// window later cannot swallow the next leading edge.
+    #[test]
+    fn idling_under_a_short_window_still_arms_a_longer_one() {
+        let mut c = MouseCoalescer::default();
+        for _ in 0..10 {
+            assert_eq!(c.accumulate(Vec2::ZERO, FRAME, W), None);
+        }
+        let longer = Duration::from_secs(3600);
+        assert_eq!(
+            c.accumulate(Vec2::new(2.0, 3.0), FRAME, longer),
+            Some(Vec2::new(2.0, 3.0)),
+            "an idle coalescer must stay armed regardless of the window it idled under"
         );
     }
 
