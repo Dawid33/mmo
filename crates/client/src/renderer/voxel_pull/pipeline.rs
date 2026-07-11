@@ -162,6 +162,11 @@ pub struct VoxelPullDepthPipeline {
     /// which `SetPrepassViewBindGroup<0>` binds against.
     pub prepass_view_layout: BindGroupLayoutDescriptor,
     pub depth_shader: Handle<Shader>,
+    /// Whether the render device exposes `DEPTH_CLIP_CONTROL`, cloned from
+    /// `PrepassPipeline` (bevy_pbr-0.18.1/src/prepass/mod.rs). Decides, for
+    /// directional-cascade shadow views, between native unclipped depth and the
+    /// `UNCLIPPED_DEPTH_ORTHO_EMULATION` fragment-shader emulation.
+    pub depth_clip_control_supported: bool,
 }
 
 /// Populates [`VoxelPullDepthPipeline`] once `PrepassPipeline` exists. Ordered
@@ -177,6 +182,7 @@ pub fn init_voxel_pull_depth_pipeline(
         chunk_layout_desc: forward.chunk_layout_desc.clone(),
         prepass_view_layout: prepass.view_layout_no_motion_vectors.clone(),
         depth_shader: asset_server.load("shaders/voxel_pull_depth.wgsl"),
+        depth_clip_control_supported: prepass.depth_clip_control_supported,
     });
 }
 
@@ -184,14 +190,48 @@ pub fn init_voxel_pull_depth_pipeline(
 pub struct VoxelPullDepthPipelineKey {
     /// The prepass depth attachment is allocated at the view's MSAA sample count,
     /// so the depth pipeline must match it (mirrors `PrepassPipeline::specialize`,
-    /// which uses `mesh_key.msaa_samples()`).
+    /// which uses `mesh_key.msaa_samples()`). Shadow-map views are single-sampled.
     pub msaa_samples: u32,
+    /// Set for directional-light cascade shadow views, mirroring the
+    /// `MeshPipelineKey::UNCLIPPED_DEPTH_ORTHO` bit bevy sets in
+    /// `check_views_lights_need_specialization` (bevy_pbr-0.18.1/src/render/light.rs).
+    /// Enables unclipped depth (native or emulated) so shadow casters between the
+    /// light and the cascade near plane are not clipped away. Always `false` for
+    /// the camera depth prepass.
+    pub unclipped_depth_ortho: bool,
 }
 
 impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
     type Key = VoxelPullDepthPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        // Directional cascade shadow views want unclipped depth (see the key doc).
+        // Mirror `PrepassPipeline::specialize` (bevy_pbr-0.18.1/src/prepass/mod.rs
+        // lines 429-442): use the native `DEPTH_CLIP_CONTROL` device feature when
+        // present, otherwise emulate by clamping clip-space z in the vertex shader
+        // and writing the true depth to `@builtin(frag_depth)` in a fragment stage
+        // gated on `UNCLIPPED_DEPTH_ORTHO_EMULATION`. The camera prepass never sets
+        // `unclipped_depth_ortho`, so both are false there and this stays vertex-only.
+        let emulate_unclipped_depth =
+            key.unclipped_depth_ortho && !self.depth_clip_control_supported;
+        let unclipped_depth = key.unclipped_depth_ortho && self.depth_clip_control_supported;
+
+        let mut shader_defs = Vec::new();
+        if emulate_unclipped_depth {
+            shader_defs.push(ShaderDefVal::from("UNCLIPPED_DEPTH_ORTHO_EMULATION"));
+        }
+
+        // Emulation needs a fragment stage to write `frag_depth`; otherwise the
+        // pass stays depth-only with no color targets — matching
+        // `PrepassPipeline::specialize` when all prepass targets are absent.
+        let fragment = emulate_unclipped_depth.then(|| FragmentState {
+            shader: self.depth_shader.clone(),
+            entry_point: Some("fragment".into()),
+            shader_defs: shader_defs.clone(),
+            targets: vec![],
+            ..default()
+        });
+
         RenderPipelineDescriptor {
             label: Some("voxel_pull_depth".into()),
             layout: vec![
@@ -201,16 +241,14 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
             vertex: VertexState {
                 shader: self.depth_shader.clone(),
                 entry_point: Some("vertex".into()),
-                shader_defs: vec![],
+                shader_defs,
                 buffers: vec![], // geometry is pulled from the storage buffer
                 ..default()
             },
-            // Depth-only: no color/normal/motion targets, so no fragment stage —
-            // matches `PrepassPipeline::specialize` when all prepass targets are
-            // absent (bevy_pbr-0.18.1/src/prepass/mod.rs).
-            fragment: None,
+            fragment,
             primitive: PrimitiveState {
                 cull_mode: Some(Face::Back),
+                unclipped_depth,
                 ..default()
             },
             // Stencil/bias copied verbatim from `PrepassPipeline::specialize` so

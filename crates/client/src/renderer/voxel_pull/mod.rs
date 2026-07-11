@@ -8,7 +8,7 @@ use std::sync::Arc;
 use bevy::{
     camera::primitives::Aabb,
     core_pipeline::{core_3d::Opaque3d, prepass::Opaque3dPrepass},
-    pbr::init_prepass_pipeline,
+    pbr::{init_prepass_pipeline, Shadow},
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
@@ -27,7 +27,10 @@ pub mod queue;
 
 use pipeline::{init_voxel_pull_depth_pipeline, VoxelPullDepthPipeline, VoxelPullPipeline};
 use prepare::prepare_chunk_quads;
-use queue::{queue_voxel_pull, queue_voxel_pull_prepass, DrawVoxelPull, DrawVoxelPullDepth};
+use queue::{
+    queue_voxel_pull, queue_voxel_pull_prepass, queue_voxel_pull_shadows, DrawVoxelPull,
+    DrawVoxelPullDepth,
+};
 
 /// Default for the old-vs-pull render path toggle. Flipped to `true` once
 /// visual parity is confirmed (Task 8); kept a named constant so it is
@@ -119,6 +122,7 @@ impl Plugin for VoxelPullPlugin {
             .init_resource::<SpecializedRenderPipelines<VoxelPullDepthPipeline>>()
             .add_render_command::<Opaque3d, DrawVoxelPull>()
             .add_render_command::<Opaque3dPrepass, DrawVoxelPullDepth>()
+            .add_render_command::<Shadow, DrawVoxelPullDepth>()
             // The depth pipeline clones `PrepassPipeline`'s view layout, which
             // only exists after `init_prepass_pipeline` runs in `RenderStartup`.
             .add_systems(
@@ -132,6 +136,7 @@ impl Plugin for VoxelPullPlugin {
                     prepare_chunk_quads.in_set(RenderSystems::PrepareBindGroups),
                     queue_voxel_pull.in_set(RenderSystems::Queue),
                     queue_voxel_pull_prepass.in_set(RenderSystems::Queue),
+                    queue_voxel_pull_shadows.in_set(RenderSystems::Queue),
                 ),
             );
     }

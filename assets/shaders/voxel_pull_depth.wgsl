@@ -37,8 +37,20 @@ const CORNER_SLOTS = array<u32, 24>(
     0u, 2u, 1u, 1u, 2u, 3u,
 );
 
+// Directional-light cascade shadow views on GPUs without DEPTH_CLIP_CONTROL render
+// with unclipped depth emulated in the fragment stage (mirrors bevy's prepass_io.wgsl
+// / pbr_prepass.wgsl): the vertex clamps clip-space z so the near plane doesn't clip
+// the caster, and carries the true pre-clamp depth to the fragment, which writes it to
+// @builtin(frag_depth). Without the def this stays a bare-position vertex-only shader.
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+#ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
+    @location(0) unclipped_depth: f32,
+#endif // UNCLIPPED_DEPTH_ORTHO_EMULATION
+}
+
 @vertex
-fn vertex(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+fn vertex(@builtin(vertex_index) vi: u32) -> VertexOutput {
     let quad = vi / 6u;
     let slot = vi % 6u;
     let rec = quads[quad];
@@ -59,5 +71,18 @@ fn vertex(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     let local_pos = vec3<f32>(pos);
 
     let world_position = chunk.world_from_local * vec4<f32>(local_pos, 1.0);
-    return position_world_to_clip(world_position.xyz);
+    var out: VertexOutput;
+    out.position = position_world_to_clip(world_position.xyz);
+#ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
+    out.unclipped_depth = out.position.z;
+    out.position.z = min(out.position.z, 1.0); // Clamp depth to avoid clipping
+#endif // UNCLIPPED_DEPTH_ORTHO_EMULATION
+    return out;
 }
+
+#ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
+@fragment
+fn fragment(in: VertexOutput) -> @builtin(frag_depth) f32 {
+    return in.unclipped_depth;
+}
+#endif // UNCLIPPED_DEPTH_ORTHO_EMULATION

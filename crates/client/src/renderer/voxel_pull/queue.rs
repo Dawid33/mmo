@@ -15,7 +15,10 @@ use bevy::{
         query::ROQueryItem,
         system::{lifetimeless::Read, SystemParamItem},
     },
-    pbr::{MeshPipelineViewLayoutKey, SetMeshViewBindGroup, SetPrepassViewBindGroup},
+    pbr::{
+        LightEntity, MeshPipelineViewLayoutKey, SetMeshViewBindGroup, SetPrepassViewBindGroup,
+        Shadow, ShadowBatchSetKey, ShadowBinKey, ViewLightEntities,
+    },
     prelude::*,
     render::{
         render_phase::{
@@ -171,7 +174,12 @@ pub fn queue_voxel_pull_prepass(
         let pipeline_id = pipelines.specialize(
             &cache,
             &pipeline,
-            VoxelPullDepthPipelineKey { msaa_samples: msaa.samples() },
+            VoxelPullDepthPipelineKey {
+                msaa_samples: msaa.samples(),
+                // The camera depth prepass uses a perspective projection — never
+                // unclipped. Only directional shadow cascades set this.
+                unclipped_depth_ortho: false,
+            },
         );
         for (entity, main_entity, chunk) in &chunks {
             let aabb = Aabb {
@@ -199,6 +207,82 @@ pub fn queue_voxel_pull_prepass(
                 BinnedRenderPhaseType::NonMesh,
                 *next_tick,
             );
+        }
+    }
+}
+
+/// Queue pulled chunks into every shadow-map view so terrain casts shadows.
+/// Mirrors `queue_shadows` (bevy_pbr-0.18.1/src/render/light.rs): iterate each
+/// camera's `ViewLightEntities` (the per-cascade / per-face light views created
+/// by `prepare_lights`), look up the `Shadow` phase keyed by the light view's
+/// `retained_view_entity`, and add items with the depth draw chain.
+///
+/// Unlike `queue_shadows`, which walks bevy's precomputed per-cascade visible-mesh
+/// lists, mesh-less chunks aren't in those lists, so we frustum-cull every chunk
+/// against the light view's `Frustum` ourselves (the same world-AABB test the
+/// forward/prepass queues use). Directional cascade views render with unclipped
+/// depth — flagged via `LightEntity::Directional` into the pipeline key, matching
+/// the `UNCLIPPED_DEPTH_ORTHO` bit bevy sets in `check_views_lights_need_specialization`.
+pub fn queue_voxel_pull_shadows(
+    pipeline: Res<VoxelPullDepthPipeline>,
+    mut pipelines: ResMut<SpecializedRenderPipelines<VoxelPullDepthPipeline>>,
+    cache: Res<PipelineCache>,
+    draw_functions: Res<DrawFunctions<Shadow>>,
+    mut shadow_phases: ResMut<ViewBinnedRenderPhases<Shadow>>,
+    view_lights: Query<&ViewLightEntities, With<ExtractedView>>,
+    // Each light view carries its LightEntity kind, ExtractedView (for the retained
+    // id keying the shadow phase), and Frustum (for culling), inserted together in
+    // `prepare_lights`.
+    light_views: Query<(&LightEntity, &ExtractedView, &Frustum)>,
+    chunks: Query<(Entity, &MainEntity, &ExtractedChunkQuads)>,
+    mut next_tick: Local<Tick>,
+) {
+    let draw = draw_functions.read().id::<DrawVoxelPullDepth>();
+    for view_lights in &view_lights {
+        for light_view_entity in view_lights.lights.iter().copied() {
+            let Ok((light_entity, light_view, frustum)) = light_views.get(light_view_entity) else {
+                continue;
+            };
+            let Some(phase) = shadow_phases.get_mut(&light_view.retained_view_entity) else {
+                continue;
+            };
+            let is_directional = matches!(light_entity, LightEntity::Directional { .. });
+            // Shadow maps are single-sampled (light.rs allocates them at sample_count 1).
+            let pipeline_id = pipelines.specialize(
+                &cache,
+                &pipeline,
+                VoxelPullDepthPipelineKey {
+                    msaa_samples: 1,
+                    unclipped_depth_ortho: is_directional,
+                },
+            );
+            for (entity, main_entity, chunk) in &chunks {
+                let aabb = Aabb {
+                    center: chunk.center.into(),
+                    half_extents: chunk.half_extents.into(),
+                };
+                if !frustum.intersects_obb_identity(&aabb) {
+                    continue;
+                }
+                let this_tick = next_tick.get() + 1;
+                next_tick.set(this_tick);
+                phase.add(
+                    ShadowBatchSetKey {
+                        pipeline: pipeline_id,
+                        draw_function: draw,
+                        material_bind_group_index: None,
+                        vertex_slab: default(),
+                        index_slab: None,
+                    },
+                    ShadowBinKey {
+                        asset_id: AssetId::<Mesh>::invalid().untyped(),
+                    },
+                    (entity, *main_entity),
+                    InputUniformIndex::default(),
+                    BinnedRenderPhaseType::NonMesh,
+                    *next_tick,
+                );
+            }
         }
     }
 }
