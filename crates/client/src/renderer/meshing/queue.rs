@@ -407,6 +407,10 @@ pub(crate) mod tests {
             .init_resource::<FrameUploads>()
             .init_resource::<BlockTextureLayers>()
             .init_resource::<super::super::visibility::CullingConfig>()
+            // These pipeline tests introspect `Mesh3d` / `ATTRIBUTE_VOXEL_PACKED`
+            // on the legacy mesh path; pin it since `DEFAULT_PULL_PATH` is now
+            // `true`. Pull-path lifecycle coverage lives in `meshing/mod.rs`.
+            .insert_resource(super::super::super::voxel_pull::RenderPath { pull: false })
             .insert_resource(budgets)
             .add_systems(
                 Update,

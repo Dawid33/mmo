@@ -32,10 +32,11 @@ use queue::{
     DrawVoxelPullDepth,
 };
 
-/// Default for the old-vs-pull render path toggle. Flipped to `true` once
-/// visual parity is confirmed (Task 8); kept a named constant so it is
-/// findable and overridable in tests either way.
-pub const DEFAULT_PULL_PATH: bool = false;
+/// Default for the old-vs-pull render path toggle. Flipped to `true` in Task 8
+/// once forward+prepass+shadow parity was confirmed; kept a named constant so
+/// it is findable and overridable in tests either way (legacy `Mesh3d` tests
+/// pin `RenderPath { pull: false }`).
+pub const DEFAULT_PULL_PATH: bool = true;
 
 #[derive(Resource)]
 pub struct RenderPath {
@@ -114,6 +115,10 @@ pub struct VoxelPullPlugin;
 impl Plugin for VoxelPullPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ExtractResourcePlugin::<BlockArrayTexture>::default());
+        // Main-world tally driving the `[pull-mem]` headline log in
+        // `apply_meshed_chunks`. Registered here (not in `renderer/mod.rs`) so
+        // the pull path owns its own accounting resource.
+        app.init_resource::<super::meshing::PullMemStats>();
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

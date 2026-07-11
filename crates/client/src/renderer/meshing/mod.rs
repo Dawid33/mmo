@@ -52,6 +52,17 @@ pub struct ChunkMaterial(pub Handle<ExtendedMaterial<StandardMaterial, StandardV
 #[derive(Component)]
 pub struct MeshingTask(Task<MeshOutput>);
 
+/// Running tally of pull-path record memory as full-res chunks land, so a live
+/// run prints the headline number the pull path exists for: 8-byte quad records
+/// vs the legacy ~56-byte-per-quad packed vertices. Logged (`[pull-mem]`, info)
+/// every 512 chunks by `apply_meshed_chunks`. Render-derived; never hashed.
+/// Optional in the system so headless tests that skip registering it still run.
+#[derive(Resource, Default)]
+pub struct PullMemStats {
+    pub chunks: usize,
+    pub quads: u64,
+}
+
 /// Polls in-flight `MeshingTask`s to completion and attaches the resulting `Mesh3d`
 /// (or strips it, for an all-air chunk), up to `budgets.uploads_per_frame` per frame,
 /// tracked via the shared `FrameUploads` counter — remaining completed tasks attach
@@ -68,6 +79,7 @@ pub fn apply_meshed_chunks(
     still_alive: Query<Entity, With<super::bridge::VoxelData>>,
     budgets: Res<queue::MeshBudgets>,
     mut uploads: ResMut<queue::FrameUploads>,
+    mut pull_mem: Option<ResMut<PullMemStats>>,
 ) {
     for (e, mut task) in &mut tasks {
         if uploads.0 >= budgets.uploads_per_frame {
@@ -76,6 +88,25 @@ pub fn apply_meshed_chunks(
         let Some(MeshOutput { mesh, records, connectivity }) = block_on(future::poll_once(&mut task.0)) else { continue };
         uploads.0 += 1;
         if let Some(records) = records {
+            if let Some(stats) = pull_mem.as_deref_mut() {
+                stats.chunks += 1;
+                stats.quads += records.len() as u64;
+                if stats.chunks % 512 == 0 {
+                    // 8 B/record now vs the legacy path's ~56 B/quad packed
+                    // vertices (4 verts * 8 B position + 8 B packed attr,
+                    // pre-index) — the pull path's headline memory win.
+                    let pull_bytes = stats.quads * 8;
+                    let legacy_bytes = stats.quads * 56;
+                    info!(
+                        "[pull-mem] {} chunks, {} quads: {} KiB records vs {} KiB legacy-mesh estimate (56 B/quad) — {:.1}x smaller",
+                        stats.chunks,
+                        stats.quads,
+                        pull_bytes / 1024,
+                        legacy_bytes / 1024,
+                        legacy_bytes as f64 / pull_bytes.max(1) as f64,
+                    );
+                }
+            }
             let mut ec = commands.entity(e);
             ec.insert((
                 super::voxel_pull::ChunkQuads(std::sync::Arc::new(records)),
@@ -226,6 +257,9 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
+            // Legacy `Mesh3d` assertions: pin the mesh path now that
+            // `DEFAULT_PULL_PATH` is `true`. Pull-path variants are separate tests.
+            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: false })
             .add_systems(
                 Update,
                 (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
@@ -315,6 +349,9 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
+            // Legacy `Mesh3d` assertions: pin the mesh path now that
+            // `DEFAULT_PULL_PATH` is `true`. Pull-path variants are separate tests.
+            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: false })
             .add_systems(
                 Update,
                 (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
@@ -350,6 +387,56 @@ mod tests {
         assert!(app.world().entity(e).contains::<Mesh3d>(), "mesh should survive same-frame remove+reinsert");
     }
 
+    /// Pull-path twin of `same_frame_remove_and_reinsert_keeps_mesh`: the same
+    /// `still_alive`-guard hygiene must keep `ChunkQuads` (not `Mesh3d`) alive
+    /// across a same-frame VoxelData remove+reinsert. Pins the pull path's
+    /// despawn/reinsert behavior in tests, not only in the live smoke.
+    #[test]
+    fn same_frame_remove_and_reinsert_keeps_records() {
+        use super::super::bridge::VoxelData;
+        use super::super::voxel_pull::{ChunkQuads, RenderPath};
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .init_resource::<queue::FrameUploads>()
+            .insert_resource(RenderPath { pull: true })
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
+
+        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
+
+        let e = app.world_mut().spawn(VoxelData(voxels.clone())).id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !app.world().entity(e).contains::<ChunkQuads>() {
+            app.update();
+            assert!(std::time::Instant::now() < deadline, "records never attached");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // Same-frame remove-then-reinsert (see the mesh twin for the drain
+        // rationale): the pull path's records must not flicker off transiently.
+        app.world_mut().entity_mut(e).remove::<VoxelData>();
+        app.world_mut().entity_mut(e).insert(VoxelData(voxels));
+        app.update();
+        assert!(
+            app.world().entity(e).contains::<ChunkQuads>(),
+            "records should survive same-frame remove+reinsert"
+        );
+        assert!(
+            !app.world().entity(e).contains::<Mesh3d>(),
+            "pull path must never attach a mesh"
+        );
+    }
+
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
     fn removal_while_task_in_flight_clears_mesh() {
@@ -363,6 +450,9 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
+            // Legacy `Mesh3d` assertions: pin the mesh path now that
+            // `DEFAULT_PULL_PATH` is `true`. Pull-path variants are separate tests.
+            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: false })
             .add_systems(
                 Update,
                 (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
@@ -389,6 +479,53 @@ mod tests {
         assert!(!app.world().entity(e).contains::<MeshingTask>(), "in-flight task must be cancelled on VoxelData removal");
     }
 
+    /// Pull-path twin of `removal_while_task_in_flight_clears_mesh`: a permanent
+    /// VoxelData removal must leave no ghost `ChunkQuads` and cancel the
+    /// in-flight `MeshingTask`, exactly as the mesh path clears `Mesh3d`.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn removal_while_task_in_flight_clears_records() {
+        use super::super::bridge::VoxelData;
+        use super::super::voxel_pull::{ChunkQuads, RenderPath};
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .init_resource::<queue::FrameUploads>()
+            .insert_resource(RenderPath { pull: true })
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
+
+        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
+        let e = app.world_mut().spawn(VoxelData(voxels)).id();
+
+        // Queue the meshing task, then remove VoxelData permanently (no reinsert).
+        app.update();
+        app.world_mut().entity_mut(e).remove::<VoxelData>();
+
+        for _ in 0..100 {
+            app.update();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(
+            !app.world().entity(e).contains::<ChunkQuads>(),
+            "ghost records must not be attached after VoxelData removal"
+        );
+        assert!(
+            !app.world().entity(e).contains::<MeshingTask>(),
+            "in-flight task must be cancelled on VoxelData removal"
+        );
+    }
+
     #[test]
     fn derives_and_meshes_a_generated_floor_chunk() {
         let chunk = game::Chunk::flat_floor(8);
@@ -413,6 +550,9 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
+            // Legacy `Mesh3d` assertions: pin the mesh path now that
+            // `DEFAULT_PULL_PATH` is `true`. Pull-path variants are separate tests.
+            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: false })
             .add_systems(
                 Update,
                 (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
@@ -460,6 +600,9 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
+            // Legacy `Mesh3d` assertions: pin the mesh path now that
+            // `DEFAULT_PULL_PATH` is `true`. Pull-path variants are separate tests.
+            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: false })
             .add_systems(
                 Update,
                 (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
