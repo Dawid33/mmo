@@ -14,6 +14,7 @@ pub mod lod;
 pub mod neighbors;
 pub mod pack;
 pub mod queue;
+pub mod records;
 pub mod visibility;
 
 /// Mesh a padded chunk snapshot. `None` = no visible faces (don't render).
