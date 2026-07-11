@@ -92,6 +92,7 @@ fn chunk_rank(key: [i32; 3], cam: Option<(&GlobalTransform, Option<&Frustum>)>) 
 /// Drain the dirty queue into meshing tasks, nearest-first, up to the
 /// in-flight budget. Re-inserting `MeshingTask` supersedes (cancels) any
 /// prior in-flight task for that entity — same rule as the old pipeline.
+#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn spawn_mesh_tasks(
     mut commands: Commands,
     mut queue: ResMut<RemeshQueue>,
@@ -101,10 +102,12 @@ pub fn spawn_mesh_tasks(
     in_flight: Query<(), With<MeshingTask>>,
     camera: Query<(&GlobalTransform, Option<&Frustum>), With<Camera3d>>,
     layers: Res<BlockTextureLayers>,
+    path: Option<Res<super::super::voxel_pull::RenderPath>>,
 ) {
     if queue.dirty.is_empty() {
         return;
     }
+    let pull = path.map_or(super::super::voxel_pull::DEFAULT_PULL_PATH, |p| p.pull);
     // Entities that lost VoxelData while queued are stale — drop them.
     queue.dirty.retain(|e, _| chunks.contains(*e));
     let capacity = budgets.max_in_flight.saturating_sub(in_flight.iter().count());
@@ -139,7 +142,7 @@ pub fn spawn_mesh_tasks(
             None => PaddedVoxels::from_interior(&voxels.0),
         };
         let layers = layers.0.clone();
-        let task = pool.spawn(async move { mesh_chunk(&padded, &BlockTextureLayers(layers)) });
+        let task = pool.spawn(async move { mesh_chunk(&padded, &BlockTextureLayers(layers), pull) });
         commands.entity(e).insert(MeshingTask(task));
     }
 }

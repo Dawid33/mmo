@@ -22,6 +22,7 @@ mod skybox;
 pub(crate) mod ui_bridge;
 pub(crate) mod ui_input;
 mod voxel_material;
+pub mod voxel_pull;
 pub(crate) mod lod_rings;
 use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
@@ -67,6 +68,7 @@ impl Plugin for SimBridgePlugin {
             .init_resource::<meshing::queue::MeshBudgets>()
             .init_resource::<meshing::queue::FrameUploads>()
             .init_resource::<meshing::visibility::CullingConfig>()
+            .init_resource::<voxel_pull::RenderPath>()
             .init_resource::<lod_rings::LodRings>()
             .add_systems(
                 PreUpdate,

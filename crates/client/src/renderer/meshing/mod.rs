@@ -22,18 +22,26 @@ pub fn build_chunk_mesh(padded: &PaddedVoxels, layers: &BlockTextureLayers) -> O
     emit::quads_to_mesh(&binary::mesh_quads(padded), layers)
 }
 
-/// Everything the async mesh task produces for one chunk.
+/// Everything the async mesh task produces for one chunk. Exactly one of
+/// `mesh`/`records` is populated, per the `pull` flag `mesh_chunk` was called
+/// with — `mesh` for the legacy `Mesh3d` path, `records` for the pulled
+/// (mesh-free) path.
 pub struct MeshOutput {
     pub mesh: Option<Mesh>,
+    pub records: Option<Vec<records::QuadRecord>>,
     pub connectivity: u16,
 }
 
-/// Mesh + connectivity in one pass over the padded snapshot.
-pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers) -> MeshOutput {
-    MeshOutput {
-        mesh: build_chunk_mesh(padded, layers),
-        connectivity: visibility::face_connectivity(padded),
-    }
+/// Mesh OR records (per `pull`) + connectivity in one pass over the padded snapshot.
+pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers, pull: bool) -> MeshOutput {
+    let quads = binary::mesh_quads(padded);
+    let (mesh, records) = if pull {
+        let r = records::quads_to_records(&quads, layers);
+        (None, (!r.is_empty()).then_some(r))
+    } else {
+        (emit::quads_to_mesh(&quads, layers), None)
+    };
+    MeshOutput { mesh, records, connectivity: visibility::face_connectivity(padded) }
 }
 
 #[derive(Resource)]
@@ -65,8 +73,22 @@ pub fn apply_meshed_chunks(
         if uploads.0 >= budgets.uploads_per_frame {
             break; // remaining completed tasks attach next frame
         }
-        let Some(MeshOutput { mesh, connectivity }) = block_on(future::poll_once(&mut task.0)) else { continue };
+        let Some(MeshOutput { mesh, records, connectivity }) = block_on(future::poll_once(&mut task.0)) else { continue };
         uploads.0 += 1;
+        if let Some(records) = records {
+            let mut ec = commands.entity(e);
+            ec.insert((
+                super::voxel_pull::ChunkQuads(std::sync::Arc::new(records)),
+                bevy::camera::primitives::Aabb {
+                    center: bevy::math::Vec3A::splat(16.0),
+                    half_extents: bevy::math::Vec3A::splat(16.0),
+                },
+                bevy::camera::visibility::NoAutoAabb,
+                visibility::ChunkConnectivity(connectivity),
+            ));
+            ec.remove::<MeshingTask>();
+            continue;
+        }
         match mesh {
             Some(mesh) => {
                 let mut ec = commands.entity(e);
@@ -96,6 +118,7 @@ pub fn apply_meshed_chunks(
                     Mesh3d,
                     MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
                     MeshingTask,
+                    super::voxel_pull::ChunkQuads,
                 )>();
             }
         }
@@ -129,6 +152,7 @@ pub fn apply_meshed_chunks(
                 MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
                 MeshingTask,
                 visibility::ChunkConnectivity,
+                super::voxel_pull::ChunkQuads,
             )>();
         }
     }
@@ -240,6 +264,40 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("mesh never attached within deadline");
+    }
+
+    #[test]
+    fn pull_path_attaches_records_and_no_mesh() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<crate::renderer::block_textures::BlockTextureLayers>()
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .init_resource::<queue::FrameUploads>()
+            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: true })
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
+        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
+        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.update();
+            if let Some(q) = app.world().entity(e).get::<crate::renderer::voxel_pull::ChunkQuads>() {
+                assert_eq!(q.0.len(), 6, "single voxel = 6 quads");
+                assert!(!app.world().entity(e).contains::<Mesh3d>(), "pull path must not attach a mesh");
+                assert!(app.world().entity(e).contains::<Visibility>(), "required for cave-culling writes");
+                assert!(app.world().entity(e).contains::<bevy::camera::primitives::Aabb>());
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "records never attached");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     #[test]

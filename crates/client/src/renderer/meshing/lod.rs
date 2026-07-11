@@ -16,7 +16,8 @@ use super::binary::{self, Face, Quad};
 use super::emit;
 use super::neighbors::gather_padded;
 use super::queue::{FrameUploads, MeshBudgets};
-use super::{ChunkMaterial, MeshingTask};
+use super::records;
+use super::{ChunkMaterial, MeshOutput, MeshingTask};
 #[cfg(test)]
 use super::pack;
 
@@ -47,17 +48,13 @@ fn skirt_extend(q: &mut Quad) {
     }
 }
 
-/// Mesh a coarse LOD grid: gather padding from same-scale neighbors, greedy
-/// mesh, bias every quad up by one cell (`min[1] += 1`), then skirt border
-/// side-quads one cell back down to the true floor so adjacent LOD rings
-/// (or ring boundaries at different scales) never show a seam gap at y=0.
-/// Resulting mesh y range is 0..=33 — callers translate `Transform.y` down
-/// by the scale factor to compensate (Task 3).
-pub fn mesh_lod_grid(
-    grid: &[Voxel],
-    neighbors: &BTreeMap<[i32; 3], &[Voxel]>,
-    layers: &BlockTextureLayers,
-) -> Option<Mesh> {
+/// Gather padding from same-scale neighbors, greedy mesh, bias every quad up
+/// by one cell (`min[1] += 1`), then skirt border side-quads one cell back
+/// down to the true floor so adjacent LOD rings (or ring boundaries at
+/// different scales) never show a seam gap at y=0. Resulting quads span Y
+/// range 0..=33 — callers translate `Transform.y` down by the scale factor
+/// to compensate (Task 3). Shared by `mesh_lod_grid` and `mesh_lod_output`.
+fn lod_quads(grid: &[Voxel], neighbors: &BTreeMap<[i32; 3], &[Voxel]>) -> Vec<Quad> {
     let padded = gather_padded(grid, neighbors);
     let mut quads = binary::mesh_quads(&padded);
     for q in &mut quads {
@@ -68,7 +65,36 @@ pub fn mesh_lod_grid(
             skirt_extend(q);
         }
     }
-    emit::quads_to_mesh(&quads, layers)
+    quads
+}
+
+/// Mesh a coarse LOD grid. See `lod_quads` for the bias/skirt contract.
+pub fn mesh_lod_grid(
+    grid: &[Voxel],
+    neighbors: &BTreeMap<[i32; 3], &[Voxel]>,
+    layers: &BlockTextureLayers,
+) -> Option<Mesh> {
+    emit::quads_to_mesh(&lod_quads(grid, neighbors), layers)
+}
+
+/// Mesh OR records (per `pull`) for a coarse LOD grid — the pull-aware
+/// counterpart to `mesh_lod_grid`, used by `spawn_lod_mesh_tasks`.
+/// `connectivity` is always 0: LOD chunks never carry a connectivity mask
+/// (the field only exists so `MeshOutput` can be shared with full-res).
+fn mesh_lod_output(
+    grid: &[Voxel],
+    neighbors: &BTreeMap<[i32; 3], &[Voxel]>,
+    layers: &BlockTextureLayers,
+    pull: bool,
+) -> MeshOutput {
+    let quads = lod_quads(grid, neighbors);
+    let (mesh, records) = if pull {
+        let r = records::quads_to_records(&quads, layers);
+        (None, (!r.is_empty()).then_some(r))
+    } else {
+        (emit::quads_to_mesh(&quads, layers), None)
+    };
+    MeshOutput { mesh, records, connectivity: 0 }
 }
 
 /// Scale factor of this LOD chunk relative to a full-res chunk (2, 4, 8, ...).
@@ -93,7 +119,7 @@ pub struct LodNeighbors(pub BTreeMap<[i32; 3], Entity>);
 /// In-flight background LOD mesh build, spawned by `spawn_lod_mesh_tasks` and
 /// polled to completion by `apply_lod_meshes`.
 #[derive(Component)]
-pub struct LodMeshTask(Task<Option<Mesh>>);
+pub struct LodMeshTask(Task<MeshOutput>);
 
 /// Drain changed `LodVoxelData` into mesh tasks, FIFO (no distance ranking —
 /// LOD is inherently low-priority background work), sharing `MeshBudgets.max_in_flight`
@@ -118,6 +144,7 @@ pub fn spawn_lod_mesh_tasks(
     changed: Query<Entity, Changed<LodVoxelData>>,
     grids: Query<(&LodVoxelData, Option<&LodNeighbors>)>,
     layers: Res<BlockTextureLayers>,
+    path: Option<Res<super::super::voxel_pull::RenderPath>>,
 ) {
     for e in changed.iter() {
         queue.insert(e);
@@ -132,6 +159,7 @@ pub fn spawn_lod_mesh_tasks(
     if capacity == 0 {
         return;
     }
+    let pull = path.map_or(super::super::voxel_pull::DEFAULT_PULL_PATH, |p| p.pull);
 
     let pool = AsyncComputeTaskPool::get();
     let batch: Vec<Entity> = queue.iter().copied().take(capacity).collect();
@@ -151,7 +179,7 @@ pub fn spawn_lod_mesh_tasks(
         let task = pool.spawn(async move {
             let neighbor_refs: BTreeMap<[i32; 3], &[Voxel]> =
                 neigh.iter().map(|(&k, v)| (k, v.as_slice())).collect();
-            mesh_lod_grid(&grid, &neighbor_refs, &BlockTextureLayers(layers))
+            mesh_lod_output(&grid, &neighbor_refs, &BlockTextureLayers(layers), pull)
         });
         commands.entity(e).insert(LodMeshTask(task));
     }
@@ -177,19 +205,31 @@ pub fn apply_lod_meshes(
         if uploads.0 >= budgets.uploads_per_frame {
             break; // remaining completed tasks attach next frame
         }
-        let Some(mesh) = block_on(future::poll_once(&mut task.0)) else { continue };
+        let Some(MeshOutput { mesh, records, .. }) = block_on(future::poll_once(&mut task.0)) else { continue };
         uploads.0 += 1;
         let mut ec = commands.entity(e);
         ec.remove::<LodMeshTask>();
+        if let Some(records) = records {
+            ec.insert((
+                super::super::voxel_pull::ChunkQuads(std::sync::Arc::new(records)),
+                // Skirted LOD meshes span y = 0..=33 (see `lod_quads`'s doc
+                // comment): biased up one cell from the standard 0..32 cube
+                // plus the +1 unbias headroom, so the Aabb is offset and
+                // grown by half a cell on Y relative to the full-res chunk's
+                // constant Aabb.
+                Aabb {
+                    center: Vec3A::new(16.0, 16.5, 16.0),
+                    half_extents: Vec3A::new(16.0, 16.5, 16.0),
+                },
+                NoAutoAabb,
+            ));
+            continue;
+        }
         match mesh {
             Some(mesh) => {
                 ec.insert((
                     Mesh3d(meshes.add(mesh)),
-                    // Skirted LOD meshes span y = 0..=33 (see `mesh_lod_grid`'s
-                    // doc comment): biased up one cell from the standard 0..32
-                    // cube plus the +1 unbias headroom, so the Aabb is offset
-                    // and grown by half a cell on Y relative to the full-res
-                    // chunk's constant Aabb.
+                    // See the pull-path Aabb comment above for the y-bias rationale.
                     Aabb {
                         center: Vec3A::new(16.0, 16.5, 16.0),
                         half_extents: Vec3A::new(16.0, 16.5, 16.0),
@@ -204,6 +244,7 @@ pub fn apply_lod_meshes(
                 ec.remove::<(
                     Mesh3d,
                     MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
+                    super::super::voxel_pull::ChunkQuads,
                 )>();
             }
         }
