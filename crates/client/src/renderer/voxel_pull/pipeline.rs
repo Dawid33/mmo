@@ -12,6 +12,7 @@ use bevy::{
         renderer::RenderDevice,
         view::ViewTarget,
     },
+    shader::ShaderDefVal,
 };
 
 /// One `mat4x4 + u32`, `std140`-laid-out to match the WGSL `ChunkUniform`.
@@ -63,6 +64,17 @@ pub struct VoxelPullPipelineKey {
     pub hdr: bool,
 }
 
+/// `shadows.wgsl`'s `sample_shadow_map` (bevy_pbr-0.18.1/src/render/shadow_sampling.wgsl)
+/// is gated on one `SHADOW_FILTER_METHOD_*` def with no library-level default —
+/// `MeshPipeline::specialize` derives it per-view from the camera's optional
+/// `ShadowFilteringMethod` component (bevy_pbr-0.18.1/src/render/mesh.rs). We
+/// have no per-view key plumbing here, so hardcode the method's own default,
+/// `ShadowFilteringMethod::Gaussian` (bevy_light-0.18.1/src/lib.rs), which is
+/// what any camera without an explicit override — ours included — renders with.
+fn shadow_filter_shader_defs() -> Vec<ShaderDefVal> {
+    vec!["SHADOW_FILTER_METHOD_GAUSSIAN".into()]
+}
+
 impl SpecializedRenderPipeline for VoxelPullPipeline {
     type Key = VoxelPullPipelineKey;
 
@@ -83,12 +95,14 @@ impl SpecializedRenderPipeline for VoxelPullPipeline {
             vertex: VertexState {
                 shader: self.forward_shader.clone(),
                 entry_point: Some("vertex".into()),
+                shader_defs: shadow_filter_shader_defs(),
                 buffers: vec![], // no vertex buffers — geometry is pulled from the storage buffer
                 ..default()
             },
             fragment: Some(FragmentState {
                 shader: self.forward_shader.clone(),
                 entry_point: Some("fragment".into()),
+                shader_defs: shadow_filter_shader_defs(),
                 targets: vec![Some(ColorTargetState {
                     format: if key.hdr {
                         ViewTarget::TEXTURE_FORMAT_HDR

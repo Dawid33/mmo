@@ -1,8 +1,11 @@
 // Pulled voxel forward shader. Record layout mirrored from
 // crates/client/src/renderer/meshing/records.rs (the source of truth):
 //   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1   w1: w:6|h:6|layer:16
-#import bevy_pbr::mesh_view_bindings::view
+#import bevy_pbr::mesh_view_bindings::{view, lights}
+#import bevy_pbr::mesh_view_types
+#import bevy_pbr::shadows::fetch_directional_shadow
 #import bevy_pbr::view_transformations::position_world_to_clip
+#import bevy_render::maths::PI
 
 struct ChunkUniform {
     world_from_local: mat4x4<f32>,
@@ -95,6 +98,36 @@ fn vertex(@builtin(vertex_index) vi: u32) -> PullVertexOutput {
 @fragment
 fn fragment(in: PullVertexOutput) -> @location(0) vec4<f32> {
     let tex = textureSample(mat_array_texture, mat_array_texture_sampler, in.uv, in.layer);
-    // Unlit v0 — Task 5 replaces this with directional light + shadows + ambient.
-    return vec4<f32>(tex.rgb * in.shade, 1.0);
+    let base = tex.rgb * in.shade;
+    let n = normalize(in.world_normal);
+
+    // Cascade selection z, view-space depth of the fragment. Copied verbatim
+    // from the real caller (bevy_pbr-0.18.1/src/render/pbr_functions.wgsl,
+    // the directional-light block feeding fetch_directional_shadow).
+    let view_z = dot(vec4<f32>(
+        view.view_from_world[0].z,
+        view.view_from_world[1].z,
+        view.view_from_world[2].z,
+        view.view_from_world[3].z,
+    ), in.world_position);
+
+    var lit = lights.ambient_color.rgb;
+    for (var i = 0u; i < lights.n_directional_lights; i += 1u) {
+        let light = lights.directional_lights[i];
+        let ndotl = max(dot(n, light.direction_to_light), 0.0);
+        var shadow = 1.0;
+        if (ndotl > 0.0 && (light.flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+            shadow = fetch_directional_shadow(i, in.world_position, n, view_z);
+        }
+        // 1/PI: the Lambertian diffuse normalization real PBR bakes into
+        // Fd_Burley (pbr_lighting.wgsl) — dropping it overexposes by ~PI.
+        lit += light.color.rgb * ndotl * shadow / PI;
+    }
+    // light.color and ambient_color carry raw illuminance (thousands, for a
+    // default sun); real PBR scales the same accumulated sum by view.exposure
+    // before adding emissive (pbr_functions.wgsl's apply_pbr_lighting, the
+    // `view.exposure * (transmitted_light + direct_light + indirect_light)`
+    // line) — without it every pixel saturates to white.
+    lit *= view.exposure;
+    return vec4<f32>(base * lit, 1.0);
 }
