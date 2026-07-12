@@ -50,6 +50,10 @@ pub struct GameInstanceManager {
     /// yields costs the server a real build, which headless suites pay
     /// synchronously through `InlineLodBuilder`.
     lod_table: &'static [(i32, u32)],
+    /// Radius of the near (authoritative) window: 1 = the production 3x3.
+    /// Headless suites shrink it to 0 — each region costs a full worldgen +
+    /// collider genesis on the server AND a deserialized copy on the client.
+    near_radius: i32,
     /// LOD keys we have requested and not released.
     lod_subscribed: std::collections::BTreeSet<game::lod::LodKey>,
     /// Events for subscribed regions whose snapshot hasn't arrived yet.
@@ -162,9 +166,10 @@ impl ReconMetrics {
 fn desired_window(
     center: RegionCoords,
     home: Option<RegionCoords>,
+    radius: i32,
 ) -> std::collections::BTreeSet<RegionCoords> {
     let mut desired: std::collections::BTreeSet<RegionCoords> =
-        center.window_3x3().into_iter().collect();
+        center.window_radius(radius).into_iter().collect();
     if let Some(home) = home {
         desired.insert(home);
     }
@@ -244,6 +249,7 @@ impl GameInstanceManager {
             subscribed: std::collections::BTreeSet::new(),
             lod_assigned: BTreeMap::new(),
             lod_table: game::lod::LOD_RING_TABLE,
+            near_radius: 1,
             lod_subscribed: std::collections::BTreeSet::new(),
             pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
@@ -290,6 +296,13 @@ impl GameInstanceManager {
     /// (or empty) the table unless LOD is what they're testing.
     pub fn set_lod_table(&mut self, table: &'static [(i32, u32)]) {
         self.lod_table = table;
+    }
+
+    /// Shrink the near window (test/harness hook). Radius 0 subscribes to the
+    /// home region alone instead of the production 3x3, cutting the world a
+    /// headless test pays for — on both sides of the channel — by ~9x.
+    pub fn set_near_radius(&mut self, radius: i32) {
+        self.near_radius = radius;
     }
 
     /// Push a game event as if it came from local input (test/harness hook).
@@ -652,7 +665,7 @@ impl GameInstanceManager {
     /// world + render bridge. Cheap when nothing changed (set compare).
     fn update_window(&mut self) {
         let Some(center) = self.viewer_region() else { return };
-        let desired = desired_window(center, self.home_region);
+        let desired = desired_window(center, self.home_region, self.near_radius);
         if desired == self.subscribed {
             return;
         }
@@ -687,7 +700,7 @@ impl GameInstanceManager {
     /// never cover the same region.
     fn update_lod_window(&mut self) {
         let Some(center) = self.viewer_region() else { return };
-        let excluded = desired_window(center, self.home_region);
+        let excluded = desired_window(center, self.home_region, self.near_radius);
         let (assigned, desired) = desired_lod(
             center,
             &excluded,
@@ -802,11 +815,11 @@ impl GameInstanceManager {
                 let first_home = self.home_region.is_none();
                 self.home_region = Some(home);
                 if first_home {
-                    // Initial join: ask for the whole 3x3 window up front;
+                    // Initial join: ask for the whole near window up front;
                     // update_window keeps it in sync from then on. Later
                     // pushes (handoff confirmations) must NOT re-burst —
                     // that would resnapshot nine regions per crossing.
-                    for rc in home.window_3x3() {
+                    for rc in home.window_radius(self.near_radius) {
                         self.server_game_send
                             .send(ClientPacket::RequestRegionConnection(rc))
                             .unwrap();
@@ -1220,7 +1233,7 @@ mod manager_tests {
     fn desired_window_pins_home_outside_3x3() {
         let home = RegionCoords::new(0, 0);
         let far = RegionCoords::new(5, -3);
-        let desired = desired_window(far, Some(home));
+        let desired = desired_window(far, Some(home), 1);
         assert!(desired.contains(&home), "home must never leave the window");
         assert_eq!(desired.len(), 10, "3x3 around viewer plus distant home");
         for rc in far.window_3x3() {
@@ -1234,14 +1247,14 @@ mod manager_tests {
     fn desired_window_home_inside_does_not_duplicate() {
         let home = RegionCoords::new(0, 0);
         // Home adjacent to centre: inside the 3x3.
-        let desired = desired_window(RegionCoords::new(1, 0), Some(home));
+        let desired = desired_window(RegionCoords::new(1, 0), Some(home), 1);
         assert_eq!(desired.len(), 9);
         assert!(desired.contains(&home));
         // Home at centre.
-        let desired = desired_window(home, Some(home));
+        let desired = desired_window(home, Some(home), 1);
         assert_eq!(desired.len(), 9);
         // No home yet: plain 3x3.
-        assert_eq!(desired_window(RegionCoords::new(2, 2), None).len(), 9);
+        assert_eq!(desired_window(RegionCoords::new(2, 2), None, 1).len(), 9);
     }
 
     /// PlayerRegion must trigger subscription requests for the full 3x3

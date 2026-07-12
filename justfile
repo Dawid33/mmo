@@ -14,8 +14,19 @@ cargo := env_var_or_default("CARGO_CLIF", "cargo")
 # Substring passed to WGPU_ADAPTER_NAME to select a GPU (empty = wgpu default).
 adapter := ""
 
+# GPU sampled by `just gpu-log` (domain:bus:dev.func). Default is the RX 6700 XT eGPU;
+# `amdgpu_top --list` prints the ids.
+pci := "0000:40:00.0"
+
 # perf sampling flags shared by the perf-client / perf-server recipes.
 perf_flags := "-F9997 --call-graph dwarf,16384 -e cpu-clock"
+
+# Test threads used by `just test-full`. The slow tests each stand up a full 3x3
+# region window twice over (the LocalServer's copy plus the client's), which is
+# a bounded but hefty ~2.4 GB RSS at peak (measured 2026-07-11; there is no
+# leak — RSS is flat across further ticks). Cargo's default is one thread per
+# core, so this 20-core box ran ~20 x 2.4 GB and OOMed. Budget ~2.5 GB/thread.
+test_threads := "4"
 
 # Server address (informational; hardcoded to 127.0.0.1:6466 in the server).
 _default:
@@ -40,6 +51,13 @@ check:
 # Run the QUIC server (listens on 127.0.0.1:6466, WebTransport ingress on :6467).
 server:
     RUST_BACKTRACE=1 {{cargo}} run --bin server
+
+# Wipe the dev worldgen disk cache (target/worldgen-cache). The cache
+# self-invalidates when crates/worldgen or the block manifest change; use this
+# after a change elsewhere (e.g. column encoding in `game`) alters generated
+# output without touching those inputs. WORLDGEN_CACHE=0/1 forces it off/on.
+worldgen-cache-clear:
+    rm -rf target/worldgen-cache
 
 # Run the Bevy client. Override `adapter` to pin a GPU, e.g. `just adapter=6700 client`.
 client:
@@ -213,10 +231,14 @@ test-server:
 # Everything, slow tests included — run before calling work done. Still skips
 # the wall-clock perf gates, which have their own release-mode recipes
 # (`just keepup-budget`, `just soak`) or are evidence-only printouts.
+#
+# Capped at {{test_threads}} threads — see the `test_threads` variable: the slow
+# tests each hold a full 3x3 region window (~2.4 GB RSS), so cargo's default
+# parallelism OOMs the box. Raise it only if you have the RAM.
 test-full:
-    cargo test -p game -- --include-ignored --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
-    cargo test -p client -- --include-ignored --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
-    cargo test -p server -- --include-ignored
+    cargo test -p game -- --include-ignored --test-threads={{test_threads}} --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
+    cargo test -p client -- --include-ignored --test-threads={{test_threads}} --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
+    cargo test -p server -- --include-ignored --test-threads={{test_threads}}
 
 # Keep-up budget benchmark (release): measures the region-tick cost and
 # asserts the death-spiral inequality (worst frame < tick period). Fails with
@@ -275,6 +297,84 @@ clippy:
     cargo clippy --workspace --bins -- -D warnings
 
 # ---- Profiling ------------------------------------------------------------
+
+# The three recipes below produce PLAIN TEXT (unlike tracy/hotspot, which need a GUI), so
+# their output can be pasted into a bug report or an LLM session. Use them in this order:
+#
+#   1. `just diag`         — is the frame CPU-bound or GPU-bound? Per-pass GPU ms vs frame_time.
+#   2. `just gpu-log`      — second opinion from outside the process (GPU busy %), no rebuild.
+#   3. `just trace-chrome` — if CPU-bound: which ECS system eats the frame.
+#
+# All of them run RELEASE builds. The dev profile is opt-level 1 (see the root Cargo.toml
+# note: ~2.5x off release on the hot loops), so an FPS number from `just client` is not a
+# measurement of anything.
+
+# DIAG=1 adds RenderDiagnosticsPlugin (wgpu timestamp + pipeline-statistics queries):
+# every 2s it prints fps / frame_time / entity_count and, per render pass,
+# render/<pass>/elapsed_gpu, /elapsed_cpu and /fragment_shader_invocations.
+# Read it as: sum of elapsed_gpu ~= frame_time => GPU-bound (and fragment_shader_invocations
+# says whether that's overdraw); sum far below frame_time => CPU-bound, go to `just trace-chrome`.
+# GPU columns need Vulkan or DX12 (this is the native path; wasm gets CPU time only).
+# Override the dump period with DIAG_INTERVAL=<secs>.
+#
+# Frame + per-render-pass GPU/CPU timings as text -> target/diag/client.log.
+diag:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    mkdir -p target/diag
+    log=target/diag/client.log
+    {{cargo}} build --release --bin client --bin server
+    RUST_BACKTRACE=1 ./target/release/server > target/diag/server.log 2>&1 &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    sleep 1
+    echo ">> DIAG client -> $log  (play for ~30s, then close the window)"
+    DIAG=1 RUST_BACKTRACE=1 ./target/release/client > "$log" 2>&1
+    echo
+    scripts/diag_summary.py "$log"
+    echo
+    echo "(full log: $log)"
+
+# The independent check on `just diag`'s GPU numbers, measured from outside the process,
+# and it needs no rebuild. Sustained Graphics-Pipe ~100% => GPU-bound; low while a core is
+# pegged => CPU-bound. Start the client first, then run this alongside it. Needs amdgpu_top
+# (cargo install amdgpu_top) and an AMD GPU; override the target with `just pci=... gpu-log`.
+#
+# Sample GPU busy % / clocks / VRAM as JSON -> target/diag/gpu.json.
+gpu-log:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    mkdir -p target/diag
+    out=target/diag/gpu.json
+    echo ">> sampling {{pci}} at 2Hz for 30s -> $out"
+    amdgpu_top --pci {{pci}} -J --single -s 500 -n 60 > "$out"
+    echo "wrote $out — GRBM 'Graphics Pipe' busy % is the GPU-bound tell"
+
+# Runs the client with bevy's trace_chrome feature (a tracing span per ECS system, per
+# extract step and per render-graph node), writing a Chrome Trace Event JSON, then reduces
+# it to a top-N table via scripts/trace_summary.py. Use after `just diag` says CPU-bound.
+# CLOSE THE WINDOW to stop — the JSON is only flushed on a clean exit, so Ctrl-C truncates it.
+#
+# Per-ECS-system frame breakdown as text (which system eats the frame).
+trace-chrome:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    mkdir -p target/trace
+    json=target/trace/client.json
+    {{cargo}} build --release --bin server
+    RUST_BACKTRACE=1 ./target/release/server > target/trace/server.log 2>&1 &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    sleep 1
+    echo ">> tracing -> $json  (play for ~30s, then CLOSE THE WINDOW — Ctrl-C truncates it)"
+    TRACE_CHROME="$json" RUST_BACKTRACE=1 \
+        {{cargo}} run --release --bin client --features trace_chrome
+    echo
+    # Skip the first 5s: startup asset loads + pipeline compilation would otherwise
+    # dominate the totals and hide the steady-state per-frame cost.
+    scripts/trace_summary.py "$json" --skip-ms 5000 --top 40
 
 # Start Pyroscope (:4040) + Grafana (:3000). Build with `--features pyroscope` to push profiles.
 profile-up:

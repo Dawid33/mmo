@@ -267,7 +267,7 @@ mod tests {
             );
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
-        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
+        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData::new(voxels)).id();
         app.update();
         // Evidence that meshing went through the pipeline on the first update:
         // the task was spawned (still in flight) — or already completed AND
@@ -318,7 +318,7 @@ mod tests {
             );
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
-        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
+        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData::new(voxels)).id();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             app.update();
@@ -372,7 +372,7 @@ mod tests {
         let idx = 5 + 32 * 5 + 32 * 32 * 5;
         voxels[idx] = Voxel::new(BlockId(1));
 
-        let e = app.world_mut().spawn(VoxelData(voxels.clone())).id();
+        let e = app.world_mut().spawn(VoxelData::new(voxels.clone())).id();
         settle_until_meshed(&mut app, e);
         assert!(app.world().entity(e).contains::<Mesh3d>(), "mesh should exist after initial insert");
 
@@ -382,7 +382,7 @@ mod tests {
         // `still_alive` guard must skip the stale removal within this very update, since
         // the entity's VoxelData (or a freshly queued MeshingTask) is still present.
         app.world_mut().entity_mut(e).remove::<VoxelData>();
-        app.world_mut().entity_mut(e).insert(VoxelData(voxels));
+        app.world_mut().entity_mut(e).insert(VoxelData::new(voxels));
         app.update();
         assert!(app.world().entity(e).contains::<Mesh3d>(), "mesh should survive same-frame remove+reinsert");
     }
@@ -414,7 +414,7 @@ mod tests {
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
 
-        let e = app.world_mut().spawn(VoxelData(voxels.clone())).id();
+        let e = app.world_mut().spawn(VoxelData::new(voxels.clone())).id();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while !app.world().entity(e).contains::<ChunkQuads>() {
             app.update();
@@ -425,7 +425,7 @@ mod tests {
         // Same-frame remove-then-reinsert (see the mesh twin for the drain
         // rationale): the pull path's records must not flicker off transiently.
         app.world_mut().entity_mut(e).remove::<VoxelData>();
-        app.world_mut().entity_mut(e).insert(VoxelData(voxels));
+        app.world_mut().entity_mut(e).insert(VoxelData::new(voxels));
         app.update();
         assert!(
             app.world().entity(e).contains::<ChunkQuads>(),
@@ -461,7 +461,7 @@ mod tests {
 
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
-        let e = app.world_mut().spawn(VoxelData(voxels)).id();
+        let e = app.world_mut().spawn(VoxelData::new(voxels)).id();
 
         // Queue the meshing task (MeshingTask attached after this update's commands flush),
         // then remove VoxelData permanently (no reinsert) — mirroring the bridge's
@@ -505,7 +505,7 @@ mod tests {
 
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
-        let e = app.world_mut().spawn(VoxelData(voxels)).id();
+        let e = app.world_mut().spawn(VoxelData::new(voxels)).id();
 
         // Queue the meshing task, then remove VoxelData permanently (no reinsert).
         app.update();
@@ -564,7 +564,7 @@ mod tests {
         for x in 0..32 {
             voxels[x + 32 * 5 + 32 * 32 * 5] = Voxel::default();
         }
-        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
+        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData::new(voxels)).id();
         settle_until_meshed(&mut app, e);
         let mask = app.world().entity(e).get::<ChunkConnectivity>().expect("mask attached").0;
         use super::binary::Face;
@@ -572,7 +572,7 @@ mod tests {
 
         // All-air chunk: mesh stripped, mask = ALL_CONNECTED.
         let air = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        let e2 = app.world_mut().spawn(crate::renderer::bridge::VoxelData(air)).id();
+        let e2 = app.world_mut().spawn(crate::renderer::bridge::VoxelData::new(air)).id();
         // Air chunks never get Mesh3d; settle on the mask instead.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -610,7 +610,7 @@ mod tests {
             );
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
-        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData(voxels)).id();
+        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData::new(voxels)).id();
         settle_until_meshed(&mut app, e);
         let aabb = app.world().entity(e).get::<Aabb>().expect("constant chunk Aabb inserted");
         assert_eq!(aabb.center, bevy::math::Vec3A::splat(16.0));

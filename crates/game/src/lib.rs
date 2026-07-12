@@ -49,7 +49,7 @@ pub use voxel::*;
 pub use volume::*;
 pub use world_manager::*;
 
-pub const TICK_RATE: u64 = 500;
+pub const TICK_RATE: u64 = 50;
 /// TESTING KNOB — deliberately 0 in normal operation. Extra client-ahead lead
 /// (ms) the SyncClock pacing loop targets; raise it only to fabricate latency
 /// when testing the adaptive tick. Not a production pacing target and not an
@@ -127,10 +127,12 @@ pub trait Controller: Send {
 }
 
 /// Set the undo hash-verification mode from the `HASH_MODE` env var
-/// (`off` | `delta` | `full`, case-insensitive), defaulting to Delta — the
-/// production mode — when unset (including wasm, which has no env). Client
+/// (`off` | `delta` | `full`, case-insensitive), defaulting to Off — the
+/// production mode, with desync caught by the periodic tick-interval state
+/// hash instead — when unset (including wasm, which has no env). Client
 /// and server startup call this; tests and harnesses instead pin the mode
 /// explicitly (the process-global default stays Full for them). Run with
+/// `HASH_MODE=delta` for per-entry footprint digests, or
 /// `HASH_MODE=full` when chasing a suspected footprint/capture gap: Full
 /// whole-field-hashes every entry and catches state an undo closure missed,
 /// which Delta's declared-footprint digests structurally cannot see.
@@ -144,7 +146,7 @@ pub fn set_hash_mode_from_env() {
             "full" => HashMode::Full,
             other => panic!("HASH_MODE must be off|delta|full, got {other:?}"),
         },
-        Err(_) => HashMode::Delta,
+        Err(_) => HashMode::Off,
     };
     // println, not log: this runs before either binary initializes its logger.
     println!("undo hash verification mode: {mode:?}");

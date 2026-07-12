@@ -84,10 +84,11 @@ fn start_game_thread() -> Sender<Command> {
 }
 
 fn main() {
-    // Delta verification by default (every undo self-checks against a digest
-    // of only the data it touches); HASH_MODE=full opts into whole-field
-    // verification when chasing a footprint/capture gap. Tests and the
-    // convergence harnesses pin HashMode::Full themselves.
+    // Per-entry verification is off by default (desync is caught by the
+    // periodic tick-interval state hash); HASH_MODE=delta re-enables
+    // footprint-digest self-checks, HASH_MODE=full whole-field verification
+    // when chasing a footprint/capture gap. Tests and the convergence
+    // harnesses pin HashMode::Full themselves.
     game::set_hash_mode_from_env();
 
     // Continuous profiling: build with `--features pyroscope` and set PYROSCOPE

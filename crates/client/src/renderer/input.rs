@@ -43,7 +43,7 @@ fn map_button(b: MouseButton) -> game::MouseButton {
 /// is simulation-neutral — it changes how many packets carry the same sum, not
 /// the sum. Without it the packet rate is bound to the frame rate, and each
 /// packet costs its own QUIC uni-stream.
-pub const MOUSE_COALESCE_MS: u64 = 16;
+pub const MOUSE_COALESCE_MS: u64 = 30;
 
 /// The live coalescing window. Defaults to [`MOUSE_COALESCE_MS`]; a resource so
 /// tests can vary it. `Duration::ZERO` restores per-frame emission.

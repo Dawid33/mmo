@@ -51,13 +51,26 @@ impl BevyInputHarness {
         let (tap_send, tap_recv) = unbounded::<GameEventKind>();
 
         let addr = "127.0.0.1:0".parse().unwrap();
-        let client = GameInstanceManager::new(
+        let mut client = GameInstanceManager::new(
             game_send,
             game_recv,
             bridge_send,
             addr,
             game::DebugFlags::default(),
         );
+        // These tests drive input plumbing (key edge -> sim -> cursor grab), so
+        // they buy the smallest world that still has a player in it:
+        //
+        // - LOD ring subscriptions OFF, for the same reason SimHarness::new
+        //   turns them off: every requested key costs the inline LocalServer a
+        //   synchronous build, and the production table's radius (32 regions)
+        //   is thousands of keys — minutes of wall clock, gigabytes retained.
+        // - Near window radius 0 (home region only, not the 3x3). Each region
+        //   is a full worldgen + voxel-collider genesis on the server plus a
+        //   deserialized copy on the client; eight neighbours no assertion
+        //   looks at are ~9x the memory and time for nothing.
+        client.set_lod_table(&[]);
+        client.set_near_radius(0);
 
         let client_to_server = client.client_packet_recv();
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();

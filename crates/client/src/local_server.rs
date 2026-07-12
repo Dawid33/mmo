@@ -182,6 +182,11 @@ mod tests {
                 dummy_addr,
                 game::DebugFlags::default(),
             );
+        // LOD off + home region only: every ring key and every near-window
+        // region is a synchronous LocalServer build (see SimHarness::new).
+        // This test is about the handshake, not the window or LOD.
+        manager.set_lod_table(&[]);
+        manager.set_near_radius(0);
 
         let mut server = LocalServer::new(manager.client_packet_recv(), server_send).unwrap();
         manager.start();
@@ -241,6 +246,9 @@ mod tests {
                 dummy_addr,
                 game::DebugFlags::default(),
             );
+        // LOD off: every ring key is a synchronous LocalServer build (see
+        // SimHarness::new). This test is about the 3x3 window, not LOD.
+        manager.set_lod_table(&[]);
         let mut server = LocalServer::new(manager.client_packet_recv(), server_send).unwrap();
         manager.start();
 

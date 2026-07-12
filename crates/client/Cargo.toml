@@ -43,6 +43,14 @@ tracy = ["bevy/trace_tracy"]
 # MUCH noisier captures and real overhead — reach for it when the normal
 # tracy view isn't fine-grained enough. `just tracy-client detailed`.
 tracy-detailed = ["tracy", "bevy/detailed_trace"]
+# Chrome Trace Event capture: bevy's tracing spans (one per ECS system, plus
+# extract/render-graph nodes) are written to a JSON file on clean exit —
+# TRACE_CHROME=<path>, else ./trace-<nanos>.json. Unlike Tracy this needs no
+# GUI, so `scripts/trace_summary.py` can reduce it to a pasteable per-system
+# table. Run via `just trace-chrome`. Native only (tracing-chrome has no wasm
+# port), and the file is only complete if the app exits cleanly — close the
+# window, don't kill -9.
+trace_chrome = ["bevy/trace_chrome"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Adds to (does not replace) the base [dependencies] bevy features — target tables merge additively.

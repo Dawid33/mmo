@@ -69,9 +69,17 @@ impl RegionCoords {
     /// The 3×3 window of regions centered on `self` — the client's desired
     /// loaded set.
     pub fn window_3x3(&self) -> Vec<RegionCoords> {
-        let mut out = Vec::with_capacity(9);
-        for dx in -1..=1 {
-            for dz in -1..=1 {
+        self.window_radius(1)
+    }
+
+    /// The (2r+1)² window of regions centered on `self`. Radius 0 is `self`
+    /// alone — headless tests use it to avoid paying for eight neighbours they
+    /// never look at.
+    pub fn window_radius(&self, r: i32) -> Vec<RegionCoords> {
+        let span = 2 * r + 1;
+        let mut out = Vec::with_capacity((span * span) as usize);
+        for dx in -r..=r {
+            for dz in -r..=r {
                 out.push(RegionCoords::new(self.x + dx, self.z + dz));
             }
         }

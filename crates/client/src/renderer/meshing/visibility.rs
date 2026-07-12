@@ -511,9 +511,11 @@ mod tests {
         // Carve a straight X tunnel through the wall at y=5, z=5.
         {
             let mut voxels = app.world_mut().get_mut::<VoxelData>(wall).unwrap();
-            for x in 0..32 {
-                voxels.0[x + 32 * 5 + 32 * 32 * 5] = Voxel::default();
-            }
+            voxels.edit(|v| {
+                for x in 0..32 {
+                    v[x + 32 * 5 + 32 * 32 * 5] = Voxel::default();
+                }
+            });
         }
         assert!(
             wait_until(&mut app, |app| vis(app, behind) == Visibility::Inherited),

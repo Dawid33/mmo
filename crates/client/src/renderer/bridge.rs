@@ -69,8 +69,60 @@ impl SimTarget {
     }
 }
 
-#[derive(Component)]
-pub struct VoxelData(pub Vec<Voxel>);
+/// A chunk's 32³ voxel grid, run-length encoded along the linear index
+/// (`x + 32*y + 32*32*z`, so runs extend along +X).
+///
+/// The dense form is 64 KiB (32768 voxels × 2 B) and the client used to keep one
+/// alive per chunk for the whole session — at ~2800 chunks per region that was
+/// ~183 MB per region, three quarters of the client's heap, and the largest
+/// single consumer by an order of magnitude.
+///
+/// Runs are cheap here by construction: a chunk is 8 blocks of 16³, each uniform
+/// unless chiselled, so every run is ≥16 voxels and a plain air/stone chunk is
+/// one run. Nothing needs the dense array persistently — the mesher expands it
+/// transiently to build `PaddedVoxels`, then drops it — so we store the runs and
+/// hand out a dense `Vec` on demand.
+#[derive(Component, Clone, PartialEq, Eq, Debug)]
+pub struct VoxelData(Vec<(u16, game::BlockId)>);
+
+impl VoxelData {
+    /// Encode a dense 32³ grid.
+    pub fn new(voxels: impl AsRef<[Voxel]>) -> Self {
+        let voxels = voxels.as_ref();
+        debug_assert_eq!(voxels.len(), game::CHUNK_VOXEL_COUNT);
+        let mut runs: Vec<(u16, game::BlockId)> = Vec::new();
+        for v in voxels {
+            match runs.last_mut() {
+                // A run can't overflow u16: the whole chunk is 32768 voxels.
+                Some((len, id)) if *id == v.block => *len += 1,
+                _ => runs.push((1, v.block)),
+            }
+        }
+        Self(runs)
+    }
+
+    /// Expand back to the dense 32³ grid the mesher consumes.
+    pub fn decode(&self) -> Vec<Voxel> {
+        let mut out = Vec::with_capacity(game::CHUNK_VOXEL_COUNT);
+        for &(len, id) in &self.0 {
+            out.extend(std::iter::repeat_n(Voxel::new(id), len as usize));
+        }
+        out
+    }
+
+    /// Decode, mutate, re-encode. The edit path is rare (a chisel or a block
+    /// break); the read path is what had to stay cheap.
+    pub fn edit(&mut self, f: impl FnOnce(&mut Vec<Voxel>)) {
+        let mut dense = self.decode();
+        f(&mut dense);
+        *self = Self::new(dense);
+    }
+
+    /// Number of runs — the thing that actually costs memory.
+    pub fn runs(&self) -> usize {
+        self.0.len()
+    }
+}
 
 /// Mirror of the sim's `EntityKind` for this entity. Consumed by the avatar
 /// system to attach a renderable mesh.
@@ -187,7 +239,7 @@ fn spawn_region_snapshot(
             }
         }
         if let Some(chunk) = data.ecs.chunk.try_get(key) {
-            e.insert(VoxelData(game::derive_voxels(&chunk.blocks, &chunk.chisel)));
+            e.insert(VoxelData::new(game::derive_voxels(&chunk.blocks, &chunk.chisel)));
         }
         if let Some(cam) = data.ecs.camera.try_get(key) {
             if Some(key) == local_camera_key {
@@ -264,7 +316,7 @@ pub fn drain_region_updates(
                 }
                 GameDataUpdateKind::SetVoxelComponent(key, Some(voxels)) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
-                        commands.entity(e).insert(VoxelData(voxels));
+                        commands.entity(e).insert(VoxelData::new(voxels));
                     } else {
                         warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }
@@ -956,5 +1008,63 @@ mod tests {
         assert_eq!(status.home_region, Some(RegionCoords::new(2, -1)));
         assert_eq!(status.viewer_region, Some(RegionCoords::new(2, 0)));
         assert_eq!(status.connection, ConnectionState::Ready);
+    }
+}
+
+#[cfg(test)]
+mod voxel_data_tests {
+    use super::VoxelData;
+    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+
+    fn dense(f: impl Fn(usize) -> u16) -> Vec<Voxel> {
+        (0..CHUNK_VOXEL_COUNT).map(|i| Voxel::new(BlockId(f(i)))).collect()
+    }
+
+    /// The contract the mesher depends on: decode(new(v)) == v, bit for bit.
+    #[test]
+    fn round_trips_exactly() {
+        for case in [
+            dense(|_| 0),                                   // all air: 1 run
+            dense(|_| 7),                                   // uniform solid
+            dense(|i| (i % 2) as u16),                      // worst case: no runs
+            dense(|i| ((i / 16) % 3) as u16),               // block-aligned runs
+            dense(|i| if i == 12345 { 4 } else { 0 }),      // single chiselled voxel
+        ] {
+            let encoded = VoxelData::new(&case);
+            assert_eq!(encoded.decode(), case, "RLE round trip must be exact");
+        }
+    }
+
+    /// Uniform chunks — the overwhelmingly common case — must collapse to one
+    /// run. This is where the ~183 MB/region saving actually comes from.
+    #[test]
+    fn uniform_chunk_is_one_run() {
+        assert_eq!(VoxelData::new(dense(|_| 0)).runs(), 1);
+        assert_eq!(VoxelData::new(dense(|_| 9)).runs(), 1);
+    }
+
+    /// A chunk of 8 uniform 16³ blocks must never need more than 32 runs per
+    /// row of 32 voxels — runs are >= 16 by construction, so the encoding can
+    /// not silently degenerate to the dense size for ordinary terrain.
+    #[test]
+    fn block_aligned_chunk_stays_compact() {
+        // Two materials split at the x=16 block boundary.
+        let v = dense(|i| if i % 32 < 16 { 1 } else { 2 });
+        let runs = VoxelData::new(&v).runs();
+        assert_eq!(runs, 2048, "one run per 16-voxel half-row");
+        assert!(runs * 4 < CHUNK_VOXEL_COUNT * 2, "still smaller than the dense form");
+    }
+
+    /// edit() must decode, apply, and re-encode — the path chisels take.
+    #[test]
+    fn edit_round_trips() {
+        let mut d = VoxelData::new(dense(|_| 0));
+        assert_eq!(d.runs(), 1);
+        d.edit(|v| v[100] = Voxel::new(BlockId(3)));
+        let out = d.decode();
+        assert_eq!(out[100], Voxel::new(BlockId(3)));
+        assert_eq!(out[99], Voxel::new(BlockId(0)));
+        assert_eq!(out.len(), CHUNK_VOXEL_COUNT);
+        assert_eq!(d.runs(), 3, "air | one voxel | air");
     }
 }

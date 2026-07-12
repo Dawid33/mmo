@@ -126,20 +126,28 @@ pub fn spawn_mesh_tasks(
     for (_, e, key) in ranked.into_iter().take(capacity) {
         queue.dirty.remove(&e);
         let Ok(voxels) = chunks.get(e) else { continue };
+        // VoxelData is stored run-length encoded; the mesher wants dense slices.
+        // Expand this chunk and its neighbours here, build the padded copy the
+        // task owns, then drop the dense forms at the end of the iteration —
+        // they are never retained (that expansion is what used to cost ~183 MB
+        // per region).
+        let dense = voxels.decode();
         let padded = match key {
             Some(k) => {
-                let mut neigh: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
+                let mut owned: Vec<([i32; 3], Vec<Voxel>)> = Vec::new();
                 for off in zone_offsets() {
                     let nk = [k[0] + off[0], k[1] + off[1], k[2] + off[2]];
                     if let Some(&ne) = grid.0.get(&nk) {
                         if let Ok(nv) = chunks.get(ne) {
-                            neigh.insert(off, nv.0.as_slice());
+                            owned.push((off, nv.decode()));
                         }
                     }
                 }
-                gather_padded(&voxels.0, &neigh)
+                let neigh: BTreeMap<[i32; 3], &[Voxel]> =
+                    owned.iter().map(|(off, v)| (*off, v.as_slice())).collect();
+                gather_padded(&dense, &neigh)
             }
-            None => PaddedVoxels::from_interior(&voxels.0),
+            None => PaddedVoxels::from_interior(&dense),
         };
         let layers = layers.0.clone();
         let task = pool.spawn(async move { mesh_chunk(&padded, &BlockTextureLayers(layers), pull) });
@@ -219,7 +227,7 @@ pub fn mark_remesh_dirty(
         }
         queue.dirty.insert(e, key);
 
-        let new_zones = boundary_zones(&voxels.0);
+        let new_zones = boundary_zones(&voxels.decode());
         if let Some(k) = key {
             let old = zones.as_ref().map(|z| z.0);
             for (i, off) in zone_offsets().enumerate() {
@@ -331,7 +339,7 @@ pub(crate) mod tests {
             .spawn((
                 Transform::from_translation(local),
                 Visibility::default(),
-                VoxelData(voxels),
+                VoxelData::new(voxels),
                 ChildOf(root),
             ))
             .id()
@@ -358,8 +366,8 @@ pub(crate) mod tests {
         app.world_mut().resource_mut::<RemeshQueue>().dirty.clear();
 
         // Interior edit in `a`: nobody's boundary view changes except a itself.
-        app.world_mut().get_mut::<VoxelData>(a).unwrap().0
-            [6 + 32 * 6 + 32 * 32 * 6] = Voxel::new(BlockId(1));
+        app.world_mut().get_mut::<VoxelData>(a).unwrap()
+            .edit(|v| v[6 + 32 * 6 + 32 * 32 * 6] = Voxel::new(BlockId(1)));
         app.update();
         {
             let queue = app.world().resource::<RemeshQueue>();
@@ -369,8 +377,8 @@ pub(crate) mod tests {
         app.world_mut().resource_mut::<RemeshQueue>().dirty.clear();
 
         // Boundary edit on a's +X face: b's view of a changed → b dirties.
-        app.world_mut().get_mut::<VoxelData>(a).unwrap().0
-            [31 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
+        app.world_mut().get_mut::<VoxelData>(a).unwrap()
+            .edit(|v| v[31 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1)));
         app.update();
         let queue = app.world().resource::<RemeshQueue>();
         assert!(queue.dirty.contains_key(&a));
@@ -575,7 +583,7 @@ pub(crate) mod tests {
         let old_mesh = app.world().entity(e).get::<Mesh3d>().expect("meshed").0.clone();
 
         app.world_mut().entity_mut(e).remove::<VoxelData>();
-        app.world_mut().entity_mut(e).insert(VoxelData(voxels_with(&[[6, 6, 6]])));
+        app.world_mut().entity_mut(e).insert(VoxelData::new(voxels_with(&[[6, 6, 6]])));
         app.update();
 
         assert!(app.world().entity(e).contains::<ChunkKey>(), "keeps ChunkKey across same-frame remove+reinsert");
@@ -617,7 +625,7 @@ pub(crate) mod tests {
         );
         assert!(app.world().entity(e).contains::<ChunkKey>(), "ChunkKey itself survives eviction");
 
-        app.world_mut().entity_mut(e).insert(VoxelData(voxels_with(&[])));
+        app.world_mut().entity_mut(e).insert(VoxelData::new(voxels_with(&[])));
         app.update();
         assert_eq!(
             app.world().resource::<ChunkGrid>().0.get(&key),
