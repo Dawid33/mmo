@@ -18,6 +18,7 @@ use quinn::{
 pub mod lod_workers;
 pub mod region_threads;
 pub mod webtransport;
+pub mod worldgen_cache;
 
 /// One connected client's outgoing half, transport-agnostic. The router
 /// writes bincode ServerPackets; each variant frames them as one
@@ -199,10 +200,11 @@ impl WorldIngress {
 }
 
 pub fn run() {
-    // Delta verification by default (every undo self-checks against a digest
-    // of only the data it touches); HASH_MODE=full opts into whole-field
-    // verification when chasing a footprint/capture gap. Tests and the
-    // convergence harnesses pin HashMode::Full themselves.
+    // Per-entry verification is off by default (desync is caught by the
+    // periodic tick-interval state hash); HASH_MODE=delta re-enables
+    // footprint-digest self-checks, HASH_MODE=full whole-field verification
+    // when chasing a footprint/capture gap. Tests and the convergence
+    // harnesses pin HashMode::Full themselves.
     game::set_hash_mode_from_env();
 
     // Continuous profiling: build with `--features pyroscope` and set PYROSCOPE
@@ -256,12 +258,20 @@ pub fn run() {
         water: resolve("water"),
     };
     let world_seed = worldgen::WORLD_SEED;
+    let gen_cache = worldgen_cache::WorldgenCache::from_env(world_seed, &manifest);
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
     let lod_builder: Box<dyn game::LodBuilder> =
         Box::new(lod_workers::ThreadLodBuilder::new(world_seed, materials, lod_result_send));
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::default(),
-        Box::new(move |rc| worldgen::generate_region(rc, world_seed, materials)),
+        Box::new(move |rc| {
+            if let Some(columns) = gen_cache.load(rc) {
+                return columns;
+            }
+            let columns = worldgen::generate_region(rc, world_seed, materials);
+            gen_cache.store(rc, &columns);
+            columns
+        }),
         server_send,
         region_out_send,
         lod_builder,
