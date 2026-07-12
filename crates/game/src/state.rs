@@ -223,6 +223,21 @@ impl Undo<Ecs> {
         self.kind.insert_safe(key);
         key
     }
+
+    /// Raw (unlogged, no-emit) twin of `create_entity_safe`, for genesis
+    /// only: genesis is the base state and is never rolled back below
+    /// itself, so these writes must not enter the undo log (under Full
+    /// hash mode every logged entry re-hashes the whole component map —
+    /// quadratic across a region build).
+    pub(crate) fn create_entity_raw(&mut self) -> EntityKey {
+        let key = self.entities.insert_raw(());
+        self.camera.raw_mut().insert(key, None);
+        self.isometry.raw_mut().insert(key, None);
+        self.rigidbody.raw_mut().insert(key, None);
+        self.chunk.raw_mut().insert(key, None);
+        self.kind.raw_mut().insert(key, None);
+        key
+    }
 }
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, Hash)]
@@ -496,11 +511,14 @@ impl Rollback {
     /// (voxel_size = BLOCK_VOXELS) and chisel detail at voxel scale (1.0).
     /// A chunk solid purely via fully-occupied chisel no longer collapses to
     /// a cuboid (collision-identical, just uncollapsed).
+    /// The ECS writes (entity + component slots) are raw for the same reason
+    /// the physics inserts are — no undo entries, no digests, no renderer
+    /// emits.
     pub fn seed_terrain_genesis(&mut self, chunks: Vec<(ChunkCoords, Chunk)>) {
         for (coords, chunk) in chunks {
-            let e = self.ecs.create_entity_safe();
+            let e = self.ecs.create_entity_raw();
             let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
-            self.ecs.chunk.set_safe(e, Some(chunk));
+            self.ecs.chunk.raw_mut().insert(e, Some(chunk));
             let position = IsometryReal::from_parts(
                 Translation3::new(
                     Real::from((coords.x * 32) as RawReal),
@@ -515,7 +533,7 @@ impl Rollback {
                 .build();
             // Raw, unlogged insert: covered by the genesis base state.
             let handle = self.data.physics.raw_mut().bodies.raw_mut().insert(body);
-            self.ecs.rigidbody.set_safe(e, Some(handle));
+            self.ecs.rigidbody.raw_mut().insert(e, Some(handle));
             if cells.is_empty() {
                 continue;
             }

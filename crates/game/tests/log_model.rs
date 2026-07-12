@@ -206,3 +206,37 @@ fn undocell_set_is_rolled_back() {
     r.rollback();
     assert_eq!(h0, state_hash(&r));
 }
+
+#[test]
+fn genesis_is_unlogged_base_state() {
+    let (mut r, recv) = new_rollback();
+    r.new_transaction();
+    r.seed_terrain_genesis(vec![
+        (ChunkCoords::new(0, 0, 0), game::Chunk::flat_floor(8)),
+        (ChunkCoords::new(1, 0, 0), game::Chunk::flat_floor(32)),
+    ]);
+    let h_genesis = state_hash(&r);
+
+    // Genesis is the base state: it must produce no undo entries, so rolling
+    // back the enclosing transaction must not disturb it.
+    r.rollback();
+    assert_eq!(
+        h_genesis,
+        state_hash(&r),
+        "rollback must not undo genesis (genesis writes must be unlogged)"
+    );
+
+    // And no renderer emits either: the client builds a freshly loaded region
+    // from its snapshot, not from genesis-time deltas.
+    assert!(
+        recv.try_recv().is_err(),
+        "genesis must not emit GameDataUpdates"
+    );
+
+    // Post-genesis mutations still roll back exactly to the genesis boundary.
+    r.new_transaction();
+    r.create_player_safe(7);
+    assert_ne!(h_genesis, state_hash(&r));
+    r.rollback();
+    assert_eq!(h_genesis, state_hash(&r), "hash(before) == hash(after undo)");
+}

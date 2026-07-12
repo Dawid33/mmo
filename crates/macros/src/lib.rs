@@ -1059,6 +1059,14 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     self.log_op(SlotOp::Inserted(k), pre_hash, verify, emit);
                     k
                 }
+                /// Raw insert: no undo entry, no renderer emit. Only correct
+                /// for genesis writes — values that are part of the base state
+                /// a region is never rolled back below (see
+                /// `seed_terrain_genesis`). Anywhere else this desyncs the
+                /// undo log from the data.
+                pub fn insert_raw(&mut self, v: V) -> K {
+                    self.data.insert(v)
+                }
                 pub fn remove(&mut self, k: K) -> ::std::option::Option<V> {
                     let (pre_hash, verify) = match hash_mode() {
                         HashMode::Off => (0u32, HashMode::Off),
