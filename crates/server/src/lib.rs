@@ -18,7 +18,6 @@ use quinn::{
 pub mod lod_workers;
 pub mod region_threads;
 pub mod webtransport;
-pub mod worldgen_cache;
 
 /// One connected client's outgoing half, transport-agnostic. The router
 /// writes bincode ServerPackets; each variant frames them as one
@@ -258,20 +257,13 @@ pub fn run() {
         water: resolve("water"),
     };
     let world_seed = worldgen::WORLD_SEED;
-    let gen_cache = worldgen_cache::WorldgenCache::from_env(world_seed, &manifest);
+    let gen_cache = worldgen::cache::WorldgenCache::from_env(world_seed, &manifest);
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
     let lod_builder: Box<dyn game::LodBuilder> =
         Box::new(lod_workers::ThreadLodBuilder::new(world_seed, materials, lod_result_send));
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::default(),
-        Box::new(move |rc| {
-            if let Some(columns) = gen_cache.load(rc) {
-                return columns;
-            }
-            let columns = worldgen::generate_region(rc, world_seed, materials);
-            gen_cache.store(rc, &columns);
-            columns
-        }),
+        Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
         server_send,
         region_out_send,
         lod_builder,

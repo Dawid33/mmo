@@ -44,6 +44,10 @@ impl LocalServer {
             sand: resolve("sand"),
             water: resolve("water"),
         };
+        let gen_cache = worldgen::cache::WorldgenCache::from_env(
+            worldgen::WORLD_SEED,
+            &crate::blocks::manifest_src(),
+        );
         let (lod_result_send, lod_result_recv) = unbounded();
         let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
             coarse: Box::new(move |key| {
@@ -53,7 +57,7 @@ impl LocalServer {
         });
         let mut manager = WorldManager::new(
             InlineSpawner::default(),
-            Box::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials)),
+            Box::new(move |rc| gen_cache.generate_cached(rc, worldgen::WORLD_SEED, materials)),
             out_send,
             region_out_send,
             lod_builder,

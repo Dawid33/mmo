@@ -6,6 +6,7 @@
 mod noise;
 mod spline;
 mod density;
+pub mod cache;
 pub mod pipeline;
 pub mod material;
 

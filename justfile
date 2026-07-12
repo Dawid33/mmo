@@ -213,7 +213,7 @@ web-release:
 #   RUSTC_BOOTSTRAP=1 cargo test -p <crate> -- -Zunstable-options --report-time
 
 # Quick first-party suites (slow tests skipped) — the routine while-iterating check.
-test: test-game test-client test-server
+test: test-game test-client test-server test-worldgen
 
 # Rollback/undo invariants and seeded randomized rollback (quick subset).
 test-game:
@@ -228,6 +228,10 @@ test-client:
 test-server:
     cargo test -p server
 
+# Worldgen suite: pure-function generation + the dev disk cache.
+test-worldgen:
+    cargo test -p worldgen
+
 # Everything, slow tests included — run before calling work done. Still skips
 # the wall-clock perf gates, which have their own release-mode recipes
 # (`just keepup-budget`, `just soak`) or are evidence-only printouts.
@@ -239,6 +243,7 @@ test-full:
     cargo test -p game -- --include-ignored --test-threads={{test_threads}} --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
     cargo test -p client -- --include-ignored --test-threads={{test_threads}} --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
     cargo test -p server -- --include-ignored --test-threads={{test_threads}}
+    cargo test -p worldgen -- --include-ignored --test-threads={{test_threads}}
 
 # Keep-up budget benchmark (release): measures the region-tick cost and
 # asserts the death-spiral inequality (worst frame < tick period). Fails with

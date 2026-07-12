@@ -10,7 +10,8 @@ use game::BlockRegistry;
 /// The manifest embedded at build time — identical bytes to the on-disk file.
 const EMBEDDED_MANIFEST: &str = include_str!("../../../assets/blocks/blocks.ron");
 
-fn manifest_src() -> String {
+/// The manifest text used to build the registry — also the worldgen cache key input.
+pub fn manifest_src() -> String {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let path = crate::renderer::resolve_blocks_dir().join("blocks.ron");

@@ -32,11 +32,12 @@ impl WorldgenCache {
     /// cache directory. `block_manifest` is part of the key because the
     /// material ids resolved from it are baked into generated columns.
     pub fn from_env(seed: u64, block_manifest: &str) -> Self {
-        let enabled = match std::env::var("WORLDGEN_CACHE").ok().as_deref() {
-            Some("0") | Some("off") | Some("false") => false,
-            Some(_) => true,
-            None => DEFAULT_ENABLED,
-        };
+        let enabled = !cfg!(target_arch = "wasm32")
+            && match std::env::var("WORLDGEN_CACHE").ok().as_deref() {
+                Some("0") | Some("off") | Some("false") => false,
+                Some(_) => true,
+                None => DEFAULT_ENABLED,
+            };
         if !enabled {
             return Self { dir: None };
         }
@@ -98,6 +99,22 @@ impl WorldgenCache {
             info!("worldgen cache: stored {} ({} KiB)", region_file(rc), bytes.len() / 1024);
         }
     }
+
+    /// Load-or-generate-and-store. A hit is bit-identical to regeneration
+    /// (cached bytes are the exact bincode of the generated columns).
+    pub fn generate_cached(
+        &self,
+        rc: RegionCoords,
+        seed: u64,
+        materials: crate::material::Materials,
+    ) -> Vec<(ColumnCoords, Column)> {
+        if let Some(columns) = self.load(rc) {
+            return columns;
+        }
+        let columns = crate::generate_region(rc, seed, materials);
+        self.store(rc, &columns);
+        columns
+    }
 }
 
 fn region_file(rc: RegionCoords) -> String {
@@ -111,7 +128,7 @@ fn cache_key(seed: u64, block_manifest: &str) -> Option<u32> {
     let mut h = crc32fast::Hasher::new();
     h.update(&seed.to_le_bytes());
     h.update(block_manifest.as_bytes());
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../worldgen/src");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     collect_files(&src, &mut files).ok()?;
     files.sort();
