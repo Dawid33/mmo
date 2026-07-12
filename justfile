@@ -22,11 +22,14 @@ pci := "0000:40:00.0"
 perf_flags := "-F9997 --call-graph dwarf,16384 -e cpu-clock"
 
 # Test threads used by `just test-full`. The slow tests each stand up a full 3x3
-# region window twice over (the LocalServer's copy plus the client's), which is
-# a bounded but hefty ~2.4 GB RSS at peak (measured 2026-07-11; there is no
-# leak — RSS is flat across further ticks). Cargo's default is one thread per
-# core, so this 20-core box ran ~20 x 2.4 GB and OOMed. Budget ~2.5 GB/thread.
-test_threads := "4"
+# region window twice over (the LocalServer's copy plus the client's), a bounded
+# ~6.7 GB RSS at peak per rig (re-measured 2026-07-12 with /usr/bin/time -v on
+# reconcile_keepup::diag_a — the earlier ~2.4 GB note was an underestimate; the
+# value is identical before and after the genesis-cost-reduction work, so this
+# is not a leak or regression). Faster rigs now hit their peak phases together,
+# so 4 x 6.7 GB OOMed this 31 GB box where staggered starts used to survive.
+# Budget ~7 GB/thread.
+test_threads := "3"
 
 # Server address (informational; hardcoded to 127.0.0.1:6466 in the server).
 _default:
