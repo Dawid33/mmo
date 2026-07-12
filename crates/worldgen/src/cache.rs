@@ -1,5 +1,6 @@
-//! Dev-only disk cache for `worldgen::generate_region` output, so restarting
-//! the server doesn't regenerate identical pristine terrain every time.
+//! Dev-only disk cache for `worldgen::generate_region` output, so the server
+//! and the client's offline `LocalServer` don't regenerate identical pristine
+//! terrain on every restart or test run.
 //!
 //! Regions land in `target/worldgen-cache/<key>/`, one bincode file per
 //! region. The key is a crc32 over the world seed, the block manifest, and

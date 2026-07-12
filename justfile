@@ -240,8 +240,8 @@ test-worldgen:
 # (`just keepup-budget`, `just soak`) or are evidence-only printouts.
 #
 # Capped at {{test_threads}} threads — see the `test_threads` variable: the slow
-# tests each hold a full 3x3 region window (~2.4 GB RSS), so cargo's default
-# parallelism OOMs the box. Raise it only if you have the RAM.
+# tests each hold a full 3x3 region window (~6.7 GB RSS at peak), so cargo's
+# default parallelism OOMs the box. Raise it only if you have the RAM.
 test-full:
     cargo test -p game -- --include-ignored --test-threads={{test_threads}} --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
     cargo test -p client -- --include-ignored --test-threads={{test_threads}} --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
