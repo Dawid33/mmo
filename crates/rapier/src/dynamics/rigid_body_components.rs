@@ -1127,11 +1127,18 @@ impl RigidBodyColliders {
             .ccd_max_dist
             .max(shape_bsphere.center.coords.norm() + shape_bsphere.radius);
 
-        let mass_properties = co_mprops
-            .mass_properties(&**co_shape)
-            .transform_by(&co_parent.pos_wrt_parent);
         self.0.push(co_handle);
-        rb_mprops.local_mprops += mass_properties;
+        // Fixed bodies discard collider-derived mass (update_world_mass_properties
+        // zeroes their effective inverse mass/inertia), so skip the computation —
+        // for terrain Voxels shapes it is two full passes over every voxel cell.
+        // A fixed body cannot become non-fixed while colliders are attached
+        // (set_body_type asserts), so no recompute path is needed here.
+        if !rb_type.is_fixed() {
+            let mass_properties = co_mprops
+                .mass_properties(&**co_shape)
+                .transform_by(&co_parent.pos_wrt_parent);
+            rb_mprops.local_mprops += mass_properties;
+        }
         rb_mprops.update_world_mass_properties(rb_type, &rb_pos.position);
     }
 

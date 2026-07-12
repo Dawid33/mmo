@@ -174,15 +174,29 @@ pub(crate) fn handle_user_changes_to_rigid_bodies(
             // NOTE: recompute the mass-properties AFTER dealing with the rigid-body changes
             //       that imply a collider change (in particular, after propagation of the
             //       enabled/disabled status).
-            if changes
-                .intersects(RigidBodyChanges::LOCAL_MASS_PROPERTIES | RigidBodyChanges::COLLIDERS)
-            {
-                rb.mprops.recompute_mass_properties_from_colliders(
-                    colliders,
-                    &rb.colliders,
-                    rb.body_type,
-                    &rb.pos.position,
-                );
+            // Fixed bodies skip the recompute entirely: their collider-derived
+            // mass is discarded (update_world_mass_properties zeroes effective
+            // inverse mass/inertia), and for terrain chunks the recompute is
+            // O(colliders * voxel cells) — the first-tick-after-load spike.
+            // TYPE is part of the trigger so a body whose colliders were all
+            // removed while fixed recomputes (to additional-mass-only) when it
+            // later turns dynamic.
+            if changes.intersects(
+                RigidBodyChanges::LOCAL_MASS_PROPERTIES
+                    | RigidBodyChanges::COLLIDERS
+                    | RigidBodyChanges::TYPE,
+            ) {
+                if rb.body_type.is_fixed() {
+                    rb.mprops
+                        .update_world_mass_properties(rb.body_type, &rb.pos.position);
+                } else {
+                    rb.mprops.recompute_mass_properties_from_colliders(
+                        colliders,
+                        &rb.colliders,
+                        rb.body_type,
+                        &rb.pos.position,
+                    );
+                }
             }
 
             rb.ids = ids;

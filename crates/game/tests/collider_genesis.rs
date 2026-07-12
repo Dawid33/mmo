@@ -84,3 +84,23 @@ fn mixed_chunk_gets_block_and_voxel_scale_colliders() {
         "one chisel-scale and one block-scale voxels collider"
     );
 }
+
+#[test]
+fn fixed_terrain_bodies_skip_collider_mass_properties() {
+    let region = build();
+    let physics = &region.data().physics;
+    let mut checked = 0;
+    for (_, body) in physics.bodies.iter() {
+        assert!(body.is_fixed(), "genesis bodies are fixed terrain");
+        // Mass properties of fixed bodies are discarded (effective inverse
+        // mass/inertia is zeroed), so the expensive from_voxels computation
+        // must be skipped entirely: local mass stays at its default (0).
+        assert_eq!(
+            body.mass(),
+            Real::from(0.0),
+            "fixed terrain body computed collider mass properties"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 2, "one body per chunk");
+}
