@@ -19,6 +19,7 @@ use game::{LodPayload, RegionCoords, REGION_CHUNKS};
 use super::bridge::Regions;
 use super::meshing::lod;
 use super::meshing::queue::ChunkKey;
+use super::voxel_pull::ChunkQuads;
 
 /// Deadline for retiring/retired roots: if the replacement hasn't shown a
 /// mesh within this many frames (~10s at 60fps), despawn the old root anyway
@@ -218,8 +219,8 @@ pub fn retire_lod_roots(
     mut rings: ResMut<LodRings>,
     near: Res<Regions>,
     children: Query<&Children>,
-    meshed: Query<(), With<Mesh3d>>,
-    keyed_meshes: Query<&ChunkKey, With<Mesh3d>>,
+    meshed: Query<(), Or<(With<Mesh3d>, With<ChunkQuads>)>>,
+    keyed_meshes: Query<&ChunkKey, Or<(With<Mesh3d>, With<ChunkQuads>)>>,
 ) {
     if rings.retired.is_empty() && rings.roots.values().all(|s| s.retiring.is_none()) {
         return;
@@ -285,7 +286,9 @@ mod tests {
 
     use super::super::meshing::lod::{LodChunk, LodVoxelData};
     use super::super::meshing::queue::tests::{pipeline_app, wait_until};
+    use super::super::meshing::records::QuadRecord;
     use super::super::meshing::queue::MeshBudgets;
+    use super::super::voxel_pull::ChunkQuads;
 
     use bevy::asset::RenderAssetUsages;
     use bevy::mesh::{Mesh, PrimitiveTopology};
@@ -336,6 +339,51 @@ mod tests {
     fn meshed_marker(app: &mut App) -> Mesh3d {
         let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
         Mesh3d(app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh))
+    }
+
+    fn pulled_marker() -> ChunkQuads {
+        ChunkQuads(std::sync::Arc::new(vec![QuadRecord([0, 0])]))
+    }
+
+    #[test]
+    fn re_receipt_retires_old_root_when_pulled_replacement_is_visible() {
+        let mut app = rings_app();
+        let key = LodKey { factor: 4, coords: [0, 0] };
+        let old_root = app.world_mut().spawn_empty().id();
+        let new_root = app.world_mut().spawn_empty().id();
+        app.world_mut().spawn((pulled_marker(), ChildOf(new_root)));
+        app.world_mut().resource_mut::<LodRings>().roots.insert(
+            key,
+            LodSlot {
+                root: new_root,
+                retiring: Some(old_root),
+                retiring_frames: 0,
+            },
+        );
+
+        app.update();
+
+        assert!(app.world().get_entity(old_root).is_err(), "pulled replacement is renderable");
+        assert!(app.world().resource::<LodRings>().roots[&key].retiring.is_none());
+    }
+
+    #[test]
+    fn removed_key_releases_when_pulled_near_chunk_covers_its_region() {
+        let mut app = rings_app();
+        let key = LodKey { factor: 4, coords: [1, -1] };
+        let old_root = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<LodRings>()
+            .retired
+            .push(RetiredLod { key, entity: old_root, frames: 0 });
+        let (_keep_send, recv) = crossbeam::channel::unbounded::<GameDataUpdate>();
+        app.world_mut().resource_mut::<Regions>().0.insert(RegionCoords::new(1, -1), recv);
+        app.world_mut().spawn((ChunkKey([32, 0, -32]), pulled_marker()));
+
+        app.update();
+
+        assert!(app.world().get_entity(old_root).is_err(), "pulled near chunk provides coverage");
+        assert!(app.world().resource::<LodRings>().retired.is_empty());
     }
 
     #[test]
