@@ -7,13 +7,8 @@
 #import bevy_pbr::view_transformations::position_world_to_clip
 #import bevy_render::maths::PI
 
-struct ChunkUniform {
-    world_from_local: mat4x4<f32>,
-    quad_count: u32,
-}
-
 @group(1) @binding(0) var<storage, read> quads: array<vec2<u32>>;
-@group(1) @binding(1) var<uniform> chunk: ChunkUniform;
+@group(1) @binding(1) var<storage, read> chunk_transforms: array<mat4x4<f32>>;
 @group(1) @binding(2) var mat_array_texture: texture_2d_array<f32>;
 @group(1) @binding(3) var mat_array_texture_sampler: sampler;
 
@@ -58,7 +53,10 @@ struct PullVertexOutput {
 }
 
 @vertex
-fn vertex(@builtin(vertex_index) vi: u32) -> PullVertexOutput {
+fn vertex(
+    @builtin(vertex_index) vi: u32,
+    @builtin(instance_index) chunk_index: u32,
+) -> PullVertexOutput {
     let quad = vi / 6u;
     let slot = vi % 6u;
     let rec = quads[quad];
@@ -79,7 +77,7 @@ fn vertex(@builtin(vertex_index) vi: u32) -> PullVertexOutput {
     let local_pos = vec3<f32>(pos);
 
     var out: PullVertexOutput;
-    out.world_position = chunk.world_from_local * vec4<f32>(local_pos, 1.0);
+    out.world_position = chunk_transforms[chunk_index] * vec4<f32>(local_pos, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
     // Chunk transforms are translation+uniform-scale only; the normal needs no
     // inverse-transpose.

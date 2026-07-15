@@ -15,16 +15,9 @@ use bevy::{
     shader::ShaderDefVal,
 };
 
-/// One `mat4x4 + u32`, `std140`-laid-out to match the WGSL `ChunkUniform`.
-#[derive(Clone, Copy, ShaderType)]
-pub struct ChunkUniform {
-    pub world_from_local: Mat4,
-    pub quad_count: u32,
-}
-
 #[derive(Resource)]
 pub struct VoxelPullPipeline {
-    /// Real layout used to build per-chunk bind groups in `prepare`.
+    /// Real layout used to build the shared arena bind group in `prepare`.
     pub chunk_layout: BindGroupLayout,
     /// Descriptor form of the same layout, for the pipeline's `layout` vec
     /// (0.18 pipelines describe layouts, the cache realizes them).
@@ -37,12 +30,12 @@ impl FromWorld for VoxelPullPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         // Binding order LOCKED to voxel_pull.wgsl group(1):
-        //   0 storage quads, 1 uniform ChunkUniform, 2 texture_2d_array, 3 sampler.
+        //   0 storage quads, 1 storage transforms, 2 texture_2d_array, 3 sampler.
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
             (
                 bt::storage_buffer_read_only::<[u32; 2]>(false),
-                bt::uniform_buffer::<ChunkUniform>(false),
+                bt::storage_buffer_read_only::<Mat4>(false),
                 bt::texture_2d_array(TextureSampleType::Float { filterable: true }),
                 bt::sampler(SamplerBindingType::Filtering),
             ),

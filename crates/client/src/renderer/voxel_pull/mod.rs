@@ -14,13 +14,14 @@ use bevy::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_phase::AddRenderCommand,
         render_resource::SpecializedRenderPipelines,
-        sync_world::{RenderEntity, SyncToRenderWorld},
+        sync_world::{MainEntity, RenderEntity, SyncToRenderWorld},
         Extract, ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
     },
 };
 
 use super::meshing::records::QuadRecord;
 
+pub mod arena;
 pub mod pipeline;
 pub mod prepare;
 pub mod queue;
@@ -45,7 +46,9 @@ pub struct RenderPath {
 
 impl Default for RenderPath {
     fn default() -> Self {
-        Self { pull: DEFAULT_PULL_PATH }
+        Self {
+            pull: DEFAULT_PULL_PATH,
+        }
     }
 }
 
@@ -78,13 +81,38 @@ pub struct ExtractedChunkQuads {
     pub changed: bool,
 }
 
+#[derive(Resource, Default)]
+pub struct RemovedChunkQuads(pub Vec<Entity>);
+
+pub fn extract_removed_chunk_quads(
+    mut commands: Commands,
+    mut removed: Extract<RemovedComponents<ChunkQuads>>,
+    still_alive: Extract<Query<(), With<ChunkQuads>>>,
+    render_entities: Query<(Entity, &MainEntity)>,
+    mut out: ResMut<RemovedChunkQuads>,
+) {
+    out.0.clear();
+    out.0.extend(
+        removed
+            .read()
+            .filter(|entity| !still_alive.contains(*entity)),
+    );
+    for (render_entity, main_entity) in &render_entities {
+        if out.0.contains(&main_entity.id()) {
+            commands
+                .entity(render_entity)
+                .remove::<(ExtractedChunkQuads, prepare::GpuChunkQuads)>();
+        }
+    }
+}
+
 pub fn extract_chunk_quads(
     mut commands: Commands,
     chunks: Extract<
         Query<(
             RenderEntity,
             Ref<ChunkQuads>,
-            &GlobalTransform,
+            Ref<GlobalTransform>,
             &Aabb,
             &InheritedVisibility,
         )>,
@@ -110,7 +138,7 @@ pub fn extract_chunk_quads(
             world_from_local,
             center,
             half_extents: half,
-            changed: quads.is_changed(),
+            changed: quads.is_changed() || transform.is_changed(),
         });
     }
     // VOXEL_PULL_DEBUG=1: once a second, where do chunks disappear — here
@@ -118,7 +146,9 @@ pub fn extract_chunk_quads(
     // frustum cull (queue.rs logs the other half)?
     *debug_frame = debug_frame.wrapping_add(1);
     if *debug_frame % 60 == 0 && std::env::var_os("VOXEL_PULL_DEBUG").is_some() {
-        info!("[pull-cull] extract: {total} ChunkQuads entities, {hidden} hidden by cave-culling BFS");
+        info!(
+            "[pull-cull] extract: {total} ChunkQuads entities, {hidden} hidden by cave-culling BFS"
+        );
     }
 }
 
@@ -135,6 +165,8 @@ impl Plugin for VoxelPullPlugin {
             return;
         };
         render_app
+            .init_resource::<arena::GpuQuadArena>()
+            .init_resource::<RemovedChunkQuads>()
             .init_resource::<SpecializedRenderPipelines<VoxelPullPipeline>>()
             .init_resource::<SpecializedRenderPipelines<VoxelPullDepthPipeline>>()
             .add_render_command::<Opaque3d, DrawVoxelPull>()
@@ -146,7 +178,10 @@ impl Plugin for VoxelPullPlugin {
                 RenderStartup,
                 init_voxel_pull_depth_pipeline.after(init_prepass_pipeline),
             )
-            .add_systems(ExtractSchedule, extract_chunk_quads)
+            .add_systems(
+                ExtractSchedule,
+                (extract_chunk_quads, extract_removed_chunk_quads),
+            )
             .add_systems(
                 Render,
                 (

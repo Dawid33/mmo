@@ -13,7 +13,10 @@ use bevy::{
     ecs::{
         change_detection::Tick,
         query::ROQueryItem,
-        system::{lifetimeless::Read, SystemParamItem},
+        system::{
+            lifetimeless::{Read, SRes},
+            SystemParamItem,
+        },
     },
     pbr::{
         LightEntity, MeshPipelineViewLayoutKey, SetMeshViewBindGroup, SetPrepassViewBindGroup,
@@ -31,6 +34,7 @@ use bevy::{
     },
 };
 
+use super::arena::GpuQuadArena;
 use super::pipeline::{
     VoxelPullDepthPipeline, VoxelPullDepthPipelineKey, VoxelPullPipeline, VoxelPullPipelineKey,
 };
@@ -38,7 +42,7 @@ use super::prepare::GpuChunkQuads;
 use super::ExtractedChunkQuads;
 
 /// The draw chain for one pulled chunk: bind the pipeline, bind the mesh view
-/// bind group at group 0, then bind our per-chunk group 1 and issue the draw.
+/// bind group at group 0, then bind the shared arena at group 1 and issue the draw.
 pub type DrawVoxelPull = (SetItemPipeline, SetMeshViewBindGroup<0>, DrawChunkQuads);
 
 /// The per-view frustum test for one extracted chunk, mirroring bevy's own
@@ -61,7 +65,7 @@ pub fn chunk_in_view(frustum: &Frustum, chunk_center: Vec3, chunk_half_extents: 
 pub struct DrawChunkQuads;
 
 impl<P: PhaseItem> RenderCommand<P> for DrawChunkQuads {
-    type Param = ();
+    type Param = SRes<GpuQuadArena>;
     type ViewQuery = ();
     type ItemQuery = Read<GpuChunkQuads>;
 
@@ -69,15 +73,22 @@ impl<P: PhaseItem> RenderCommand<P> for DrawChunkQuads {
         _item: &P,
         _view: ROQueryItem<'w, '_, Self::ViewQuery>,
         gpu: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        _param: SystemParamItem<'w, '_, Self::Param>,
+        arena: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let Some(gpu) = gpu else {
             return RenderCommandResult::Skip;
         };
-        pass.set_bind_group(1, &gpu.bind_group, &[]);
+        let arena = arena.into_inner();
+        let Some(bind_group) = &arena.bind_group else {
+            return RenderCommandResult::Skip;
+        };
+        pass.set_bind_group(1, bind_group, &[]);
         // Six vertices per quad; the vertex shader pulls geometry from group 1.
-        pass.draw(0..gpu.quad_count * 6, 0..1);
+        pass.draw(
+            gpu.record_start * 6..(gpu.record_start + gpu.quad_count) * 6,
+            gpu.chunk_slot..gpu.chunk_slot + 1,
+        );
         RenderCommandResult::Success
     }
 }
@@ -102,8 +113,7 @@ pub fn queue_voxel_pull(
     mut debug_frame: Local<u32>,
 ) {
     *debug_frame = debug_frame.wrapping_add(1);
-    let debug_this_frame =
-        *debug_frame % 60 == 0 && std::env::var_os("VOXEL_PULL_DEBUG").is_some();
+    let debug_this_frame = *debug_frame % 60 == 0 && std::env::var_os("VOXEL_PULL_DEBUG").is_some();
     let draw = draw_functions.read().id::<DrawVoxelPull>();
     for (view, frustum, msaa, depth_prepass, normal_prepass, motion_prepass, deferred_prepass) in
         &views
@@ -122,8 +132,14 @@ pub fn queue_voxel_pull(
         let mut view_layout_key = MeshPipelineViewLayoutKey::from(*msaa);
         view_layout_key.set(MeshPipelineViewLayoutKey::DEPTH_PREPASS, depth_prepass);
         view_layout_key.set(MeshPipelineViewLayoutKey::NORMAL_PREPASS, normal_prepass);
-        view_layout_key.set(MeshPipelineViewLayoutKey::MOTION_VECTOR_PREPASS, motion_prepass);
-        view_layout_key.set(MeshPipelineViewLayoutKey::DEFERRED_PREPASS, deferred_prepass);
+        view_layout_key.set(
+            MeshPipelineViewLayoutKey::MOTION_VECTOR_PREPASS,
+            motion_prepass,
+        );
+        view_layout_key.set(
+            MeshPipelineViewLayoutKey::DEFERRED_PREPASS,
+            deferred_prepass,
+        );
         let pipeline_id = pipelines.specialize(
             &cache,
             &pipeline,
@@ -350,7 +366,11 @@ mod tests {
         );
         // LOD-root sized box (factor 256 tile: half ~4096) far out but in view.
         assert!(
-            chunk_in_view(&frustum, Vec3::new(0.0, 0.0, -20_000.0), Vec3::splat(4096.0)),
+            chunk_in_view(
+                &frustum,
+                Vec3::new(0.0, 0.0, -20_000.0),
+                Vec3::splat(4096.0)
+            ),
             "distant LOD roots must survive the cull"
         );
     }
@@ -373,7 +393,10 @@ mod tests {
         // chunk inside `far`, pinning that skipping the far plane changed
         // nothing else about the test.
         let near_center = Vec3::new(0.0, 0.0, -100.0);
-        let aabb = Aabb { center: near_center.into(), half_extents: half.into() };
+        let aabb = Aabb {
+            center: near_center.into(),
+            half_extents: half.into(),
+        };
         assert_eq!(
             chunk_in_view(&frustum, near_center, half),
             frustum.intersects_obb_identity(&aabb),

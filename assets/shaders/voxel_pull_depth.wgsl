@@ -12,17 +12,12 @@
 #import bevy_pbr::mesh_view_bindings::view
 #import bevy_pbr::view_transformations::position_world_to_clip
 
-struct ChunkUniform {
-    world_from_local: mat4x4<f32>,
-    quad_count: u32,
-}
-
-// group(1) is the same per-chunk bind group the forward path builds; the depth
-// pipeline reuses that exact layout (so GpuChunkQuads.bind_group stays valid),
-// and simply leaves bindings 2/3 (texture/sampler) undeclared — a shader may
-// reference fewer bindings than its layout provides.
+// group(1) is the same shared arena bind group used by the forward path. The
+// depth pipeline reuses that exact layout and simply leaves bindings 2/3
+// (texture/sampler) undeclared — a shader may reference fewer bindings than its
+// layout provides.
 @group(1) @binding(0) var<storage, read> quads: array<vec2<u32>>;
-@group(1) @binding(1) var<uniform> chunk: ChunkUniform;
+@group(1) @binding(1) var<storage, read> chunk_transforms: array<mat4x4<f32>>;
 
 // Locked to Face::index() order (PosX, NegX, PosY, NegY, PosZ, NegZ).
 // Per-face (U,V) axis ids from binary::cross_axes: X faces→(1,2), Y→(0,2), Z→(0,1).
@@ -50,7 +45,10 @@ struct VertexOutput {
 }
 
 @vertex
-fn vertex(@builtin(vertex_index) vi: u32) -> VertexOutput {
+fn vertex(
+    @builtin(vertex_index) vi: u32,
+    @builtin(instance_index) chunk_index: u32,
+) -> VertexOutput {
     let quad = vi / 6u;
     let slot = vi % 6u;
     let rec = quads[quad];
@@ -70,7 +68,7 @@ fn vertex(@builtin(vertex_index) vi: u32) -> VertexOutput {
     pos[FACE_VA[face]] += cv * ((w1 >> 6u) & 63u);
     let local_pos = vec3<f32>(pos);
 
-    let world_position = chunk.world_from_local * vec4<f32>(local_pos, 1.0);
+    let world_position = chunk_transforms[chunk_index] * vec4<f32>(local_pos, 1.0);
     var out: VertexOutput;
     out.position = position_world_to_clip(world_position.xyz);
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
