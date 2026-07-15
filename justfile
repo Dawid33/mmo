@@ -43,7 +43,7 @@ build:
 
 # Build with stable cargo always, ignoring any Cranelift override.
 build-stable:
-    cargo build --workspace --bins
+    {{cargo}} build --workspace --bins
 
 # Type-check the whole workspace without producing binaries.
 check:
@@ -194,12 +194,12 @@ pull-smoke:
 # Serve the wasm client via wasm-server-runner (open http://127.0.0.1:1334/).
 web:
     WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
-        cargo run -p client --target wasm32-unknown-unknown
+        {{cargo}} run -p client --target wasm32-unknown-unknown
 
 # Needs: wasm-bindgen-cli and wasm-opt (binaryen) on PATH.
 # Build the optimized wasm release bundle into public/ (see scripts/web_release.rs).
 web-release:
-    cargo build -p client --profile wasm-release --target wasm32-unknown-unknown
+    {{cargo}} build -p client --profile wasm-release --target wasm32-unknown-unknown
     wasm-bindgen --out-name client --out-dir public --target web \
         target/wasm32-unknown-unknown/wasm-release/client.wasm
     wasm-opt -O -ol 100 -s 100 -o public/client_bg.wasm public/client_bg.wasm
@@ -220,20 +220,20 @@ test: test-game test-client test-server test-worldgen
 
 # Rollback/undo invariants and seeded randomized rollback (quick subset).
 test-game:
-    cargo test -p game
+    {{cargo}} test -p game
 
 # Client headless suite: sim-bridge, conversion, interpolation, meshing (quick subset).
 test-client:
-    cargo test -p client
+    {{cargo}} test -p client
 
 # Server suite compile-check: every server test is currently tagged slow
 # (multi-second region-thread rigs), so the quick run builds them and runs 0.
 test-server:
-    cargo test -p server
+    {{cargo}} test -p server
 
 # Worldgen suite: pure-function generation + the dev disk cache.
 test-worldgen:
-    cargo test -p worldgen
+    {{cargo}} test -p worldgen
 
 # Everything, slow tests included — run before calling work done. Still skips
 # the wall-clock perf gates, which have their own release-mode recipes
@@ -243,16 +243,16 @@ test-worldgen:
 # tests each hold a full 3x3 region window (~6.7 GB RSS at peak), so cargo's
 # default parallelism OOMs the box. Raise it only if you have the RAM.
 test-full:
-    cargo test -p game -- --include-ignored --test-threads={{test_threads}} --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
-    cargo test -p client -- --include-ignored --test-threads={{test_threads}} --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
-    cargo test -p server -- --include-ignored --test-threads={{test_threads}}
-    cargo test -p worldgen -- --include-ignored --test-threads={{test_threads}}
+    {{cargo}} test -p game -- --include-ignored --test-threads={{test_threads}} --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
+    {{cargo}} test -p client -- --include-ignored --test-threads={{test_threads}} --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
+    {{cargo}} test -p server -- --include-ignored --test-threads={{test_threads}}
+    {{cargo}} test -p worldgen -- --include-ignored --test-threads={{test_threads}}
 
 # Keep-up budget benchmark (release): measures the region-tick cost and
 # asserts the death-spiral inequality (worst frame < tick period). Fails with
 # a number when a game change makes the sim too slow for the client to keep up.
 keepup-budget:
-    cargo test -p client --release --test keepup_budget -- --ignored --nocapture
+    {{cargo}} test -p client --release --test keepup_budget -- --ignored --nocapture
 
 # Wall-clock keep-up soak (release, ~40s + build): real tick cadence + 60/s
 # fabricated input; fails if the prediction log trends up (death-spiral
@@ -263,7 +263,7 @@ soak:
     #!/usr/bin/env bash
     set -uo pipefail
     log=target/soak.log
-    cargo test -p client --release --test reconcile_keepup soak_realtime_keepup -- --ignored --nocapture --test-threads=1 2>&1 | tee "$log"
+    {{cargo}} test -p client --release --test reconcile_keepup soak_realtime_keepup -- --ignored --nocapture --test-threads=1 2>&1 | tee "$log"
     rc=${PIPESTATUS[0]}
     echo
     echo "=== soak summary (full log: $log) ==="
@@ -294,15 +294,15 @@ soak:
 
 # Format all crates.
 fmt:
-    cargo fmt --all
+    {{cargo}} fmt --all
 
 # Check formatting without writing changes.
 fmt-check:
-    cargo fmt --all --check
+    {{cargo}} fmt --all --check
 
 # Clippy across the workspace (warnings as errors).
 clippy:
-    cargo clippy --workspace --bins -- -D warnings
+    {{cargo}} clippy --workspace --bins -- -D warnings
 
 # ---- Profiling ------------------------------------------------------------
 
@@ -487,4 +487,4 @@ perf-server:
 
 # Remove build artifacts.
 clean:
-    cargo clean
+    {{cargo}} clean
