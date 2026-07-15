@@ -110,6 +110,35 @@ impl VoxelData {
         out
     }
 
+    /// Visit monotonically increasing dense-grid indices without expanding the
+    /// RLE component. The meshing snapshot builder uses this for interiors and
+    /// neighbor boundary zones, where requested indices naturally arrive in
+    /// linear x-major order.
+    pub(crate) fn for_each_index_sorted(
+        &self,
+        indices: impl IntoIterator<Item = usize>,
+        mut visit: impl FnMut(usize, Voxel),
+    ) {
+        let mut runs = self.0.iter();
+        let Some(&(mut run_len, mut block)) = runs.next() else {
+            return;
+        };
+        let mut run_end = run_len as usize;
+        let mut previous = None;
+        for index in indices {
+            debug_assert!(previous.is_none_or(|p| index >= p), "RLE indices must be sorted");
+            debug_assert!(index < game::CHUNK_VOXEL_COUNT, "voxel index out of bounds");
+            previous = Some(index);
+            while index >= run_end {
+                let &(next_len, next_block) = runs.next().expect("RLE covers the full chunk");
+                run_len = next_len;
+                block = next_block;
+                run_end += run_len as usize;
+            }
+            visit(index, Voxel::new(block));
+        }
+    }
+
     /// Decode, mutate, re-encode. The edit path is rare (a chisel or a block
     /// break); the read path is what had to stay cheap.
     pub fn edit(&mut self, f: impl FnOnce(&mut Vec<Voxel>)) {
@@ -1066,5 +1095,18 @@ mod voxel_data_tests {
         assert_eq!(out[99], Voxel::new(BlockId(0)));
         assert_eq!(out.len(), CHUNK_VOXEL_COUNT);
         assert_eq!(d.runs(), 3, "air | one voxel | air");
+    }
+
+    #[test]
+    fn sorted_index_visit_reads_rle_without_dense_decode() {
+        let dense = dense(|i| (i % 11) as u16);
+        let data = VoxelData::new(&dense);
+        let indices = [0usize, 1, 31, 32, 1024, 8191, CHUNK_VOXEL_COUNT - 1];
+        let mut got = Vec::new();
+
+        data.for_each_index_sorted(indices, |index, voxel| got.push((index, voxel)));
+
+        let expected = indices.into_iter().map(|i| (i, dense[i])).collect::<Vec<_>>();
+        assert_eq!(got, expected);
     }
 }

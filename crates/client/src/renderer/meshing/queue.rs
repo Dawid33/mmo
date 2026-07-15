@@ -7,12 +7,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use bevy::camera::primitives::{Frustum, Sphere};
 use bevy::prelude::*;
 use bevy::tasks::AsyncComputeTaskPool;
-use game::{Voxel, CHUNK_VOXEL_COUNT};
 
 use super::super::bridge::VoxelData;
 use super::super::block_textures::BlockTextureLayers;
-use super::binary::PaddedVoxels;
-use super::neighbors::{gather_padded, zone_index, zone_offsets};
+use super::neighbors::{gather_padded_rle, zone_index, zone_indices, zone_offsets};
 use super::{mesh_chunk, MeshingTask};
 
 /// World-space chunk grid: key = world position / 32. Render-side spatial
@@ -126,56 +124,40 @@ pub fn spawn_mesh_tasks(
     for (_, e, key) in ranked.into_iter().take(capacity) {
         queue.dirty.remove(&e);
         let Ok(voxels) = chunks.get(e) else { continue };
-        // VoxelData is stored run-length encoded; the mesher wants dense slices.
-        // Expand this chunk and its neighbours here, build the padded copy the
-        // task owns, then drop the dense forms at the end of the iteration —
-        // they are never retained (that expansion is what used to cost ~183 MB
-        // per region).
-        let dense = voxels.decode();
-        let padded = match key {
-            Some(k) => {
-                let mut owned: Vec<([i32; 3], Vec<Voxel>)> = Vec::new();
-                for off in zone_offsets() {
-                    let nk = [k[0] + off[0], k[1] + off[1], k[2] + off[2]];
-                    if let Some(&ne) = grid.0.get(&nk) {
-                        if let Ok(nv) = chunks.get(ne) {
-                            owned.push((off, nv.decode()));
-                        }
+        // Clone only compact RLE components while ECS access is available.
+        // Expansion into the owned padded snapshot happens inside the async
+        // task, keeping join/remesh preparation off the main thread.
+        let center = voxels.clone();
+        let mut owned_neighbors: Vec<([i32; 3], VoxelData)> = Vec::new();
+        if let Some(k) = key {
+            for off in zone_offsets() {
+                let nk = [k[0] + off[0], k[1] + off[1], k[2] + off[2]];
+                if let Some(&ne) = grid.0.get(&nk) {
+                    if let Ok(nv) = chunks.get(ne) {
+                        owned_neighbors.push((off, nv.clone()));
                     }
                 }
-                let neigh: BTreeMap<[i32; 3], &[Voxel]> =
-                    owned.iter().map(|(off, v)| (*off, v.as_slice())).collect();
-                gather_padded(&dense, &neigh)
             }
-            None => PaddedVoxels::from_interior(&dense),
-        };
+        }
         let layers = layers.0.clone();
-        let task = pool.spawn(async move { mesh_chunk(&padded, &BlockTextureLayers(layers), pull) });
+        let task = pool.spawn(async move {
+            let neighbors = owned_neighbors.iter().map(|(off, data)| (*off, data)).collect();
+            let padded = gather_padded_rle(&center, &neighbors);
+            mesh_chunk(&padded, &BlockTextureLayers(layers), pull)
+        });
         commands.entity(e).insert(MeshingTask(task));
     }
 }
 
 /// Hash the 26 boundary zones of a 32³ chunk. Zones overlap on purpose: a
 /// corner voxel contributes to 3 face + 3 edge + 1 corner zone.
-pub fn boundary_zones(voxels: &[Voxel]) -> [u32; 26] {
-    debug_assert_eq!(voxels.len(), CHUNK_VOXEL_COUNT);
+pub fn boundary_zones(voxels: &VoxelData) -> [u32; 26] {
     let mut zones = [0u32; 26];
     for (i, off) in zone_offsets().enumerate() {
-        let range = |o: i32| -> std::ops::Range<usize> {
-            match o {
-                -1 => 0..1,
-                1 => 31..32,
-                _ => 0..32,
-            }
-        };
         let mut h = crc32fast::Hasher::new();
-        for z in range(off[2]) {
-            for y in range(off[1]) {
-                for x in range(off[0]) {
-                    h.update(&voxels[x + 32 * y + 32 * 32 * z].block.0.to_le_bytes());
-                }
-            }
-        }
+        voxels.for_each_index_sorted(zone_indices(off), |_, voxel| {
+            h.update(&voxel.block.0.to_le_bytes());
+        });
         zones[i] = h.finalize();
         debug_assert_eq!(zone_index(off), i);
     }
@@ -227,7 +209,7 @@ pub fn mark_remesh_dirty(
         }
         queue.dirty.insert(e, key);
 
-        let new_zones = boundary_zones(&voxels.decode());
+        let new_zones = boundary_zones(voxels);
         if let Some(k) = key {
             let old = zones.as_ref().map(|z| z.0);
             for (i, off) in zone_offsets().enumerate() {
@@ -291,7 +273,7 @@ pub fn prune_chunk_grid(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use game::BlockId;
+    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
 
     pub(crate) fn voxels_with(cells: &[[usize; 3]]) -> Vec<Voxel> {
         let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
@@ -303,17 +285,17 @@ pub(crate) mod tests {
 
     #[test]
     fn boundary_zone_reacts_only_to_its_zone() {
-        let a = boundary_zones(&voxels_with(&[[5, 5, 5]]));
-        let b = boundary_zones(&voxels_with(&[[5, 5, 6]]));
+        let a = boundary_zones(&VoxelData::new(voxels_with(&[[5, 5, 5]])));
+        let b = boundary_zones(&VoxelData::new(voxels_with(&[[5, 5, 6]])));
         assert_eq!(a, b, "interior-only changes leave every zone hash equal");
 
-        let c = boundary_zones(&voxels_with(&[[31, 5, 5]]));
+        let c = boundary_zones(&VoxelData::new(voxels_with(&[[31, 5, 5]])));
         let face_px = zone_index([1, 0, 0]);
         assert_ne!(a[face_px], c[face_px], "+X face zone changed");
         let face_nx = zone_index([-1, 0, 0]);
         assert_eq!(a[face_nx], c[face_nx], "-X face zone did not");
 
-        let d = boundary_zones(&voxels_with(&[[31, 31, 31]]));
+        let d = boundary_zones(&VoxelData::new(voxels_with(&[[31, 31, 31]])));
         assert_ne!(a[zone_index([1, 1, 1])], d[zone_index([1, 1, 1])], "corner zone changed");
         assert_ne!(a[zone_index([1, 1, 0])], d[zone_index([1, 1, 0])], "edge zone changed");
         assert_ne!(a[zone_index([1, 0, 0])], d[zone_index([1, 0, 0])], "face zone changed");
