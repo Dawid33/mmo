@@ -205,8 +205,11 @@ pub fn apply_lod_meshes(
         if uploads.0 >= budgets.uploads_per_frame {
             break; // remaining completed tasks attach next frame
         }
-        let Some(MeshOutput { mesh, records, .. }) = block_on(future::poll_once(&mut task.0)) else { continue };
-        uploads.0 += 1;
+        let Some(output) = block_on(future::poll_once(&mut task.0)) else { continue };
+        if output.requires_upload() {
+            uploads.0 += 1;
+        }
+        let MeshOutput { mesh, records, .. } = output;
         let mut ec = commands.entity(e);
         ec.remove::<LodMeshTask>();
         if let Some(records) = records {

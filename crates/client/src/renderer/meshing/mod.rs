@@ -32,6 +32,15 @@ pub struct MeshOutput {
     pub connectivity: u16,
 }
 
+impl MeshOutput {
+    /// Whether applying this output creates or replaces GPU-backed terrain data.
+    /// Empty chunks still carry connectivity, but must not consume the per-frame
+    /// upload budget that exists to smooth actual buffer creation.
+    pub fn requires_upload(&self) -> bool {
+        self.mesh.is_some() || self.records.is_some()
+    }
+}
+
 /// Mesh OR records (per `pull`) + connectivity in one pass over the padded snapshot.
 pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers, pull: bool) -> MeshOutput {
     let quads = binary::mesh_quads(padded);
@@ -85,8 +94,11 @@ pub fn apply_meshed_chunks(
         if uploads.0 >= budgets.uploads_per_frame {
             break; // remaining completed tasks attach next frame
         }
-        let Some(MeshOutput { mesh, records, connectivity }) = block_on(future::poll_once(&mut task.0)) else { continue };
-        uploads.0 += 1;
+        let Some(output) = block_on(future::poll_once(&mut task.0)) else { continue };
+        if output.requires_upload() {
+            uploads.0 += 1;
+        }
+        let MeshOutput { mesh, records, connectivity } = output;
         if let Some(records) = records {
             if let Some(stats) = pull_mem.as_deref_mut() {
                 stats.chunks += 1;
@@ -194,6 +206,27 @@ mod tests {
     use super::*;
     use bevy::mesh::VertexAttributeValues;
     use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+
+    #[test]
+    fn empty_mesh_output_requires_no_upload() {
+        let output = MeshOutput { mesh: None, records: None, connectivity: 0 };
+        assert!(!output.requires_upload());
+    }
+
+    #[test]
+    fn mesh_and_record_outputs_require_uploads() {
+        let mesh = Mesh::new(
+            bevy::mesh::PrimitiveTopology::TriangleList,
+            bevy::asset::RenderAssetUsages::RENDER_WORLD,
+        );
+        assert!(MeshOutput { mesh: Some(mesh), records: None, connectivity: 0 }.requires_upload());
+        assert!(MeshOutput {
+            mesh: None,
+            records: Some(vec![records::QuadRecord([0, 0])]),
+            connectivity: 0,
+        }
+        .requires_upload());
+    }
 
     #[test]
     fn empty_chunk_yields_no_mesh() {
