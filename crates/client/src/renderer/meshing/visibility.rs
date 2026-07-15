@@ -137,6 +137,24 @@ const NO_ENTRY: u8 = 6;
 const DIR_STEPS: [[i32; 3]; 6] =
     [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
 
+/// Allocation-retaining storage for the per-frame cave-culling traversal.
+/// `Local` ownership keeps it private to `cull_chunks` and avoids rebuilding
+/// three potentially large collections every frame.
+#[derive(Default)]
+pub struct CullingScratch {
+    reached: HashSet<[i32; 3]>,
+    visited: HashSet<([i32; 3], u8, u8)>,
+    queue: VecDeque<([i32; 3], u8, u8)>,
+}
+
+impl CullingScratch {
+    fn clear(&mut self) {
+        self.reached.clear();
+        self.visited.clear();
+        self.queue.clear();
+    }
+}
+
 /// Per-frame camera BFS over the chunk grid (Tommo cave culling): flood
 /// outward from the camera cell; a step from a cell with a connectivity mask
 /// is allowed only if the mask connects the entry face to the exit face, a
@@ -155,6 +173,7 @@ pub fn cull_chunks(
     cameras: Query<(&GlobalTransform, Option<&Frustum>, &Camera), With<Camera3d>>,
     masks: Query<&ChunkConnectivity>,
     mut chunks: Query<&mut Visibility, With<ChunkKey>>,
+    mut scratch: Local<CullingScratch>,
 ) {
     if !config.graph_enabled {
         for mut vis in &mut chunks {
@@ -227,13 +246,12 @@ pub fn cull_chunks(
     // different entry faces, and the sets of exits the mask allows for those
     // entries differ — deduping them against each other would under-visit
     // (= holes in the world).
-    let mut reached: HashSet<[i32; 3]> = HashSet::new();
-    let mut visited: HashSet<([i32; 3], u8, u8)> = HashSet::new();
-    let mut queue: VecDeque<([i32; 3], u8, u8)> = VecDeque::new();
-    visited.insert((camera_cell, 0, NO_ENTRY));
-    queue.push_back((camera_cell, 0, NO_ENTRY));
-    while let Some((cell, dirs, entry)) = queue.pop_front() {
-        reached.insert(cell);
+    scratch.clear();
+    let scratch = &mut *scratch;
+    scratch.visited.insert((camera_cell, 0, NO_ENTRY));
+    scratch.queue.push_back((camera_cell, 0, NO_ENTRY));
+    while let Some((cell, dirs, entry)) = scratch.queue.pop_front() {
+        scratch.reached.insert(cell);
         // Grid-absent cells and chunks not yet carrying a mask: fully open.
         let mask = grid.0.get(&cell).and_then(|&e| masks.get(e).ok()).map(|c| c.0);
         for d in 0..6u8 {
@@ -271,8 +289,8 @@ pub fn cull_chunks(
                 }
             }
             let node = (neighbor, dirs | (1 << d), d ^ 1);
-            if visited.insert(node) {
-                queue.push_back(node);
+            if scratch.visited.insert(node) {
+                scratch.queue.push_back(node);
             }
         }
     }
@@ -282,7 +300,7 @@ pub fn cull_chunks(
     for (key, &entity) in grid.0.iter() {
         let Ok(mut vis) = chunks.get_mut(entity) else { continue };
         let want =
-            if reached.contains(key) { Visibility::Inherited } else { Visibility::Hidden };
+            if scratch.reached.contains(key) { Visibility::Inherited } else { Visibility::Hidden };
         if *vis != want {
             *vis = want;
         }
@@ -439,6 +457,24 @@ mod tests {
     };
     use super::super::queue::MeshBudgets;
     use crate::renderer::bridge::VoxelData;
+
+    #[test]
+    fn culling_scratch_clear_reuses_capacity_without_stale_state() {
+        let mut scratch = CullingScratch::default();
+        scratch.reached.insert([1, 2, 3]);
+        scratch.visited.insert(([1, 2, 3], 1, 2));
+        scratch.queue.push_back(([1, 2, 3], 1, 2));
+        let reached_capacity = scratch.reached.capacity();
+        let visited_capacity = scratch.visited.capacity();
+
+        scratch.clear();
+
+        assert!(scratch.reached.is_empty());
+        assert!(scratch.visited.is_empty());
+        assert!(scratch.queue.is_empty());
+        assert!(scratch.reached.capacity() >= reached_capacity);
+        assert!(scratch.visited.capacity() >= visited_capacity);
+    }
 
     fn spawn_camera(app: &mut App, pos: Vec3) -> Entity {
         app.world_mut()
