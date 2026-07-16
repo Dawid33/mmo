@@ -23,7 +23,7 @@ use super::queue::MeshBudgets;
 use super::records;
 #[cfg(test)]
 use super::MeshingTask;
-use super::{ChunkMaterial, MeshOutput};
+use super::{ChunkMaterial, MeshOutput, TerrainQuadCount};
 
 /// Does `q`'s plane sit on the 32-grid's outer edge along its own face axis?
 /// Only X/Z side faces are ever skirted — Y (top/bottom) faces never are.
@@ -92,6 +92,7 @@ fn mesh_lod_output(
     pull: bool,
 ) -> MeshOutput {
     let quads = lod_quads(grid, neighbors);
+    let quad_count = u32::try_from(quads.len()).expect("terrain quad count fits u32");
     let (mesh, records) = if pull {
         let r = records::quads_to_records(&quads, layers);
         (None, (!r.is_empty()).then_some(r))
@@ -102,6 +103,7 @@ fn mesh_lod_output(
         mesh,
         records,
         connectivity: 0,
+        quad_count,
     }
 }
 
@@ -312,7 +314,12 @@ pub fn apply_lod_meshes(
         if output.requires_upload() {
             uploads.0 += 1;
         }
-        let MeshOutput { mesh, records, .. } = output;
+        let MeshOutput {
+            mesh,
+            records,
+            quad_count,
+            ..
+        } = output;
         let mut ec = commands.entity(e);
         ec.remove::<LodMeshTask>();
         ec.insert(LodRasterReady);
@@ -329,6 +336,7 @@ pub fn apply_lod_meshes(
                     half_extents: Vec3A::new(16.0, 16.5, 16.0),
                 },
                 NoAutoAabb,
+                TerrainQuadCount(quad_count),
             ));
             continue;
         }
@@ -342,6 +350,7 @@ pub fn apply_lod_meshes(
                         half_extents: Vec3A::new(16.0, 16.5, 16.0),
                     },
                     NoAutoAabb,
+                    TerrainQuadCount(quad_count),
                 ));
                 if let Some(material) = &material {
                     ec.insert(MeshMaterial3d(material.0.clone()));
@@ -352,6 +361,7 @@ pub fn apply_lod_meshes(
                     Mesh3d,
                     MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
                     super::super::voxel_pull::ChunkQuads,
+                    TerrainQuadCount,
                 )>();
             }
         }
@@ -767,6 +777,7 @@ mod tests {
                 mesh: None,
                 records: None,
                 connectivity: 0,
+                quad_count: 0,
             }
         });
         let lod = app.world_mut().spawn(LodMeshTask(task)).id();

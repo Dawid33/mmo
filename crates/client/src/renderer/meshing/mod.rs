@@ -30,7 +30,11 @@ pub struct MeshOutput {
     pub mesh: Option<Mesh>,
     pub records: Option<Vec<records::QuadRecord>>,
     pub connectivity: u16,
+    pub quad_count: u32,
 }
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerrainQuadCount(pub u32);
 
 impl MeshOutput {
     /// Whether applying this output creates or replaces GPU-backed terrain data.
@@ -44,6 +48,7 @@ impl MeshOutput {
 /// Mesh OR records (per `pull`) + connectivity in one pass over the padded snapshot.
 pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers, pull: bool) -> MeshOutput {
     let quads = binary::mesh_quads(padded);
+    let quad_count = u32::try_from(quads.len()).expect("terrain quad count fits u32");
     let (mesh, records) = if pull {
         let r = records::quads_to_records(&quads, layers);
         (None, (!r.is_empty()).then_some(r))
@@ -54,6 +59,7 @@ pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers, pull: bool
         mesh,
         records,
         connectivity: visibility::face_connectivity(padded),
+        quad_count,
     }
 }
 
@@ -107,6 +113,7 @@ pub fn apply_meshed_chunks(
             mesh,
             records,
             connectivity,
+            quad_count,
         } = output;
         if let Some(records) = records {
             if let Some(stats) = pull_mem.as_deref_mut() {
@@ -137,6 +144,7 @@ pub fn apply_meshed_chunks(
                 },
                 bevy::camera::visibility::NoAutoAabb,
                 visibility::ChunkConnectivity(connectivity),
+                TerrainQuadCount(quad_count),
             ));
             ec.remove::<MeshingTask>();
             continue;
@@ -157,6 +165,7 @@ pub fn apply_meshed_chunks(
                     },
                     bevy::camera::visibility::NoAutoAabb,
                     visibility::ChunkConnectivity(connectivity),
+                    TerrainQuadCount(quad_count),
                 ));
                 if let Some(material) = &material {
                     ec.insert(MeshMaterial3d(material.0.clone()));
@@ -171,6 +180,7 @@ pub fn apply_meshed_chunks(
                     MeshMaterial3d<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>,
                     MeshingTask,
                     super::voxel_pull::ChunkQuads,
+                    TerrainQuadCount,
                 )>();
             }
         }
@@ -205,6 +215,7 @@ pub fn apply_meshed_chunks(
                 MeshingTask,
                 visibility::ChunkConnectivity,
                 super::voxel_pull::ChunkQuads,
+                TerrainQuadCount,
             )>();
         }
     }
@@ -231,6 +242,7 @@ mod tests {
             mesh: None,
             records: None,
             connectivity: 0,
+            quad_count: 0,
         };
         assert!(!output.requires_upload());
     }
@@ -244,13 +256,15 @@ mod tests {
         assert!(MeshOutput {
             mesh: Some(mesh),
             records: None,
-            connectivity: 0
+            connectivity: 0,
+            quad_count: 0,
         }
         .requires_upload());
         assert!(MeshOutput {
             mesh: None,
             records: Some(vec![records::QuadRecord([0, 0])]),
             connectivity: 0,
+            quad_count: 1,
         }
         .requires_upload());
     }
@@ -363,6 +377,12 @@ mod tests {
             "meshing pipeline must have claimed the chunk on the first update"
         );
         settle_until_meshed(&mut app, e);
+        let quad_count = app
+            .world()
+            .entity(e)
+            .get::<TerrainQuadCount>()
+            .expect("nonempty terrain carries its quad workload");
+        assert_eq!(quad_count.0 as usize, 6);
     }
 
     /// Runs `app.update()` (with a short sleep between attempts so the background
@@ -421,6 +441,12 @@ mod tests {
                 .get::<crate::renderer::voxel_pull::ChunkQuads>()
             {
                 assert_eq!(q.0.len(), 6, "single voxel = 6 quads");
+                let quad_count = app
+                    .world()
+                    .entity(e)
+                    .get::<TerrainQuadCount>()
+                    .expect("nonempty terrain carries its quad workload");
+                assert_eq!(quad_count.0 as usize, q.0.len());
                 assert!(
                     !app.world().entity(e).contains::<Mesh3d>(),
                     "pull path must not attach a mesh"
@@ -441,6 +467,18 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn mesh_output_keeps_quad_count_for_mesh_and_pull_formats() {
+        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
+        let padded = binary::PaddedVoxels::from_interior(&voxels);
+        let layers = BlockTextureLayers::default();
+        let mesh = mesh_chunk(&padded, &layers, false);
+        let pull = mesh_chunk(&padded, &layers, true);
+        assert_eq!(mesh.quad_count, pull.quad_count);
+        assert_eq!(mesh.quad_count, 6);
     }
 
     #[test]

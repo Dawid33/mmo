@@ -58,6 +58,9 @@ pub struct NearRendererMetrics {
     /// including rejected slots whose command has zero vertices. Direct modes
     /// submit no indirect records.
     pub indirect_draw_count: Option<u32>,
+    pub resident_quads: u64,
+    pub submitted_quads: Option<u64>,
+    pub submitted_vertices: Option<u64>,
 }
 
 /// Presence enables near count-buffer readback. Only `RenderBenchmarkPlugin`
@@ -350,7 +353,7 @@ fn create_view_buffers(
     });
     let count = device.create_buffer(&BufferDescriptor {
         label: Some("voxel_pull_indirect_count"),
-        size: std::mem::size_of::<u32>() as u64,
+        size: std::mem::size_of::<[u32; 2]>() as u64,
         usage: BufferUsages::STORAGE
             | BufferUsages::INDIRECT
             | BufferUsages::COPY_DST
@@ -679,12 +682,13 @@ pub const fn forward_cull_source(hzb_available: bool) -> ForwardCullSource {
 
 const NEAR_TELEMETRY_RING_SIZE: usize = 6;
 const NEAR_TELEMETRY_STAGING_BYTES: u64 = 8;
-const NEAR_TELEMETRY_COUNT_BYTES: u64 = std::mem::size_of::<u32>() as u64;
+const NEAR_TELEMETRY_COUNT_BYTES: u64 = std::mem::size_of::<[u32; 2]>() as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NearTelemetrySample {
     sequence: u64,
     visible_chunks: u32,
+    visible_quads: u32,
     source: ForwardCullSource,
     indirect_count: bool,
     slot_count: u32,
@@ -694,6 +698,8 @@ struct NearTelemetrySample {
 struct NearTelemetryValues {
     hzb_visible_chunks: Option<u32>,
     indirect_draw_count: u32,
+    submitted_quads: u64,
+    submitted_vertices: u64,
 }
 
 const fn near_telemetry_values(sample: NearTelemetrySample) -> NearTelemetryValues {
@@ -707,6 +713,8 @@ const fn near_telemetry_values(sample: NearTelemetrySample) -> NearTelemetryValu
         } else {
             sample.slot_count
         },
+        submitted_quads: sample.visible_quads as u64,
+        submitted_vertices: (sample.visible_quads as u64).saturating_mul(6),
     }
 }
 
@@ -724,6 +732,8 @@ fn apply_near_telemetry_sample(
             let values = near_telemetry_values(sample);
             metrics.hzb_visible_chunks = values.hzb_visible_chunks;
             metrics.indirect_draw_count = Some(values.indirect_draw_count);
+            metrics.submitted_quads = Some(values.submitted_quads);
+            metrics.submitted_vertices = Some(values.submitted_vertices);
         }
     } else {
         metrics.hzb_visible_chunks = None;
@@ -996,16 +1006,24 @@ impl Node for NearTelemetryCopyNode {
                     let mapped = callback_staging
                         .slice(0..NEAR_TELEMETRY_STAGING_BYTES)
                         .get_mapped_range();
-                    let visible_chunks = u32::from_le_bytes(
-                        mapped[..NEAR_TELEMETRY_COUNT_BYTES as usize]
-                            .try_into()
-                            .expect("near telemetry count is exactly four bytes"),
-                    );
+                    let counts = [
+                        u32::from_le_bytes(
+                            mapped[..std::mem::size_of::<u32>()]
+                                .try_into()
+                                .expect("near visible chunk count is exactly four bytes"),
+                        ),
+                        u32::from_le_bytes(
+                            mapped[std::mem::size_of::<u32>()..NEAR_TELEMETRY_COUNT_BYTES as usize]
+                                .try_into()
+                                .expect("near visible quad count is exactly four bytes"),
+                        ),
+                    ];
                     drop(mapped);
                     callback_staging.unmap();
                     let _ = sender.send(NearTelemetrySample {
                         sequence,
-                        visible_chunks,
+                        visible_chunks: counts[0],
+                        visible_quads: counts[1],
                         source,
                         indirect_count,
                         slot_count,
@@ -1313,6 +1331,7 @@ mod tests {
         let count_mode = NearTelemetrySample {
             sequence: 1,
             visible_chunks: 7,
+            visible_quads: 41,
             source: ForwardCullSource::Hzb,
             indirect_count: true,
             slot_count: 20,
@@ -1322,6 +1341,8 @@ mod tests {
             NearTelemetryValues {
                 hzb_visible_chunks: Some(7),
                 indirect_draw_count: 7,
+                submitted_quads: 41,
+                submitted_vertices: 246,
             }
         );
 
@@ -1334,6 +1355,8 @@ mod tests {
             NearTelemetryValues {
                 hzb_visible_chunks: Some(7),
                 indirect_draw_count: 20,
+                submitted_quads: 41,
+                submitted_vertices: 246,
             }
         );
 
@@ -1346,6 +1369,8 @@ mod tests {
             NearTelemetryValues {
                 hzb_visible_chunks: None,
                 indirect_draw_count: 7,
+                submitted_quads: 41,
+                submitted_vertices: 246,
             }
         );
     }
@@ -1409,6 +1434,7 @@ mod tests {
         let sample = NearTelemetrySample {
             sequence: 1,
             visible_chunks: 7,
+            visible_quads: 41,
             source: ForwardCullSource::Hzb,
             indirect_count: true,
             slot_count: 20,
@@ -1425,6 +1451,7 @@ mod tests {
         let newer = NearTelemetrySample {
             sequence: 2,
             visible_chunks: 7,
+            visible_quads: 41,
             source: ForwardCullSource::Hzb,
             indirect_count: true,
             slot_count: 20,

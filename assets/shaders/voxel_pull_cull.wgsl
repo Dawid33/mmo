@@ -21,7 +21,8 @@ struct CullView {
 };
 
 struct DrawCount {
-    value: atomic<u32>,
+    visible_chunks: atomic<u32>,
+    visible_quads: atomic<u32>,
 };
 
 @group(0) @binding(0) var<storage, read> chunks: array<ChunkMeta>;
@@ -74,13 +75,15 @@ fn emit_command(slot: u32, chunk: ChunkMeta, visible: bool) {
     );
 #ifdef INDIRECT_COUNT
     if visible {
-        let output = atomicAdd(&draw_count.value, 1u);
+        let output = atomicAdd(&draw_count.visible_chunks, 1u);
+        atomicAdd(&draw_count.visible_quads, chunk.quad_count);
         commands[output] = command;
     }
 #else
     commands[slot] = command;
     if visible {
-        atomicAdd(&draw_count.value, 1u);
+        atomicAdd(&draw_count.visible_chunks, 1u);
+        atomicAdd(&draw_count.visible_quads, chunk.quad_count);
     }
 #endif
 }

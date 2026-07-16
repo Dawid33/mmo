@@ -35,20 +35,44 @@ pub fn frustum_metric_contribution(visible_chunks: usize, is_shadow_view: bool) 
     }
 }
 
+fn draw_list_workload(draws: &ViewChunkDrawList) -> (u64, u64) {
+    let quads = draws
+        .0
+        .iter()
+        .map(|draw| u64::from(draw.quad_count))
+        .fold(0u64, u64::saturating_add);
+    (quads, quads.saturating_mul(6))
+}
+
 fn update_near_metrics_for_prepare(
     mode: ActiveNearMode,
     active_chunks: u32,
     frustum_visible_chunks: u32,
+    resident_quads: u64,
+    submitted_workload: Option<(u64, u64)>,
     metrics: &mut NearRendererMetrics,
 ) {
     metrics.active_chunks = active_chunks;
     metrics.frustum_visible_chunks = frustum_visible_chunks;
+    metrics.resident_quads = resident_quads;
     // GPU telemetry is mapped asynchronously after the render graph runs.
     // Keep its latest completed values until the readback system replaces
     // them. Direct modes have exact synchronous command counts.
-    if !matches!(mode, ActiveNearMode::GpuDriven { .. }) {
-        metrics.hzb_visible_chunks = None;
-        metrics.indirect_draw_count = exact_indirect_draw_count(mode);
+    match mode {
+        ActiveNearMode::GpuDriven { .. } => {}
+        ActiveNearMode::GroupedDirect => {
+            metrics.hzb_visible_chunks = None;
+            metrics.indirect_draw_count = exact_indirect_draw_count(mode);
+            let (quads, vertices) = submitted_workload.unwrap_or_default();
+            metrics.submitted_quads = Some(quads);
+            metrics.submitted_vertices = Some(vertices);
+        }
+        ActiveNearMode::Disabled => {
+            metrics.hzb_visible_chunks = None;
+            metrics.indirect_draw_count = exact_indirect_draw_count(mode);
+            metrics.submitted_quads = None;
+            metrics.submitted_vertices = None;
+        }
     }
 }
 
@@ -74,6 +98,13 @@ pub fn prepare_view_chunk_draws(
         .count()
         .min(u32::MAX as usize) as u32;
     let mut frustum_visible_chunks = 0u32;
+    let resident_quads = arena
+        .allocations
+        .values()
+        .map(|allocation| u64::from(allocation.quad_count))
+        .fold(0u64, u64::saturating_add);
+    let mut submitted_workload =
+        matches!(*mode, ActiveNearMode::GroupedDirect).then_some((0u64, 0u64));
     for (view_entity, frustum, is_shadow_view) in &views {
         let list = grouped_draw_list(
             frustum,
@@ -93,11 +124,25 @@ pub fn prepare_view_chunk_draws(
         );
         frustum_visible_chunks = frustum_visible_chunks
             .saturating_add(frustum_metric_contribution(list.0.len(), is_shadow_view));
+        if !is_shadow_view {
+            if let Some((submitted_quads, submitted_vertices)) = &mut submitted_workload {
+                let (view_quads, view_vertices) = draw_list_workload(&list);
+                *submitted_quads = submitted_quads.saturating_add(view_quads);
+                *submitted_vertices = submitted_vertices.saturating_add(view_vertices);
+            }
+        }
         commands
             .entity(view_entity)
             .insert(ViewChunkDrawList(list.0));
     }
-    update_near_metrics_for_prepare(*mode, active_chunks, frustum_visible_chunks, &mut metrics);
+    update_near_metrics_for_prepare(
+        *mode,
+        active_chunks,
+        frustum_visible_chunks,
+        resident_quads,
+        submitted_workload,
+        &mut metrics,
+    );
 }
 
 fn geometric_capacity(required: usize) -> usize {
@@ -236,6 +281,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn draw_list_workload_sums_quads_and_vertices() {
+        let draws = ViewChunkDrawList(vec![
+            GpuChunkQuads {
+                record_start: 0,
+                quad_count: 4,
+                chunk_slot: 0,
+            },
+            GpuChunkQuads {
+                record_start: 4,
+                quad_count: 7,
+                chunk_slot: 1,
+            },
+        ]);
+        assert_eq!(draw_list_workload(&draws), (11, 66));
+    }
+
+    #[test]
     fn gpu_prepare_preserves_the_latest_asynchronous_telemetry() {
         let mut metrics = NearRendererMetrics {
             hzb_visible_chunks: Some(7),
@@ -249,11 +311,14 @@ mod tests {
             },
             17,
             11,
+            23,
+            None,
             &mut metrics,
         );
 
         assert_eq!(metrics.active_chunks, 17);
         assert_eq!(metrics.frustum_visible_chunks, 11);
+        assert_eq!(metrics.resident_quads, 23);
         assert_eq!(metrics.hzb_visible_chunks, Some(7));
         assert_eq!(metrics.indirect_draw_count, Some(3));
     }

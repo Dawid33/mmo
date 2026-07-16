@@ -889,6 +889,7 @@ mod tests {
                 frustum_visible_chunks: 11,
                 hzb_visible_chunks: Some(7),
                 indirect_draw_count: Some(3),
+                ..default()
             }),
             far_pass: Some(super::super::far_voxel::pass::FarVoxelPassMetrics {
                 indirect_draws: 1,
