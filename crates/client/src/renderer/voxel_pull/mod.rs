@@ -1,5 +1,5 @@
 //! The pulled (mesh-free) chunk render path: per-quad records in storage
-//! buffers, drawn by custom Opaque3d phase items. Main-world component + toggle
+//! buffers, drawn by custom Opaque3d phase items. Main-world components
 //! live here; the render-world half (pipeline/prepare/queue) is split into
 //! submodules. Modeled on bevy-0.18.1/examples/shader_advanced/custom_phase_item.rs.
 
@@ -7,11 +7,15 @@ use std::sync::Arc;
 
 use bevy::{
     camera::primitives::Aabb,
-    core_pipeline::{core_3d::Opaque3d, prepass::Opaque3dPrepass},
+    core_pipeline::{
+        core_3d::{graph::Core3d, Opaque3d},
+        prepass::Opaque3dPrepass,
+    },
     pbr::{init_prepass_pipeline, Shadow},
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
+        render_graph::{RenderGraph, RenderGraphExt},
         render_phase::AddRenderCommand,
         render_resource::SpecializedRenderPipelines,
         sync_world::{MainEntity, RenderEntity, SyncToRenderWorld},
@@ -22,35 +26,17 @@ use bevy::{
 use super::meshing::records::QuadRecord;
 
 pub mod arena;
+pub mod gpu;
 pub mod pipeline;
 pub mod prepare;
 pub mod queue;
 
 use pipeline::{init_voxel_pull_depth_pipeline, VoxelPullDepthPipeline, VoxelPullPipeline};
-use prepare::prepare_chunk_quads;
+use prepare::{prepare_chunk_quads, prepare_view_chunk_draws};
 use queue::{
     queue_voxel_pull, queue_voxel_pull_prepass, queue_voxel_pull_shadows, DrawVoxelPull,
     DrawVoxelPullDepth,
 };
-
-/// Default for the old-vs-pull render path toggle. Flipped to `true` in Task 8
-/// once forward+prepass+shadow parity was confirmed; kept a named constant so
-/// it is findable and overridable in tests either way (legacy `Mesh3d` tests
-/// pin `RenderPath { pull: false }`).
-pub const DEFAULT_PULL_PATH: bool = true;
-
-#[derive(Resource)]
-pub struct RenderPath {
-    pub pull: bool,
-}
-
-impl Default for RenderPath {
-    fn default() -> Self {
-        Self {
-            pull: DEFAULT_PULL_PATH,
-        }
-    }
-}
 
 /// The pull-path replacement for `Mesh3d`: every visible greedy quad of one
 /// chunk (or LOD cell), as GPU-ready records. `Arc` so render-world extraction
@@ -78,6 +64,9 @@ pub struct ExtractedChunkQuads {
     /// mesh-less chunks are not).
     pub center: Vec3,
     pub half_extents: Vec3,
+    /// Main-world cave-connectivity result. Hidden chunks keep their stable
+    /// metadata slot but are marked inactive for both CPU and GPU culling.
+    pub cave_active: bool,
     pub changed: bool,
 }
 
@@ -114,7 +103,7 @@ pub fn extract_chunk_quads(
             Ref<ChunkQuads>,
             Ref<GlobalTransform>,
             &Aabb,
-            &InheritedVisibility,
+            Ref<InheritedVisibility>,
         )>,
     >,
     mut debug_frame: Local<u32>,
@@ -125,10 +114,9 @@ pub fn extract_chunk_quads(
         total += 1;
         let mut ec = commands.entity(entity);
         // Cave-culling hides via Visibility -> InheritedVisibility=false.
-        if !vis.get() {
+        let cave_active = vis.get();
+        if !cave_active {
             hidden += 1;
-            ec.remove::<ExtractedChunkQuads>();
-            continue;
         }
         let world_from_local = transform.to_matrix();
         let center = transform.transform_point(Vec3::from(aabb.center));
@@ -138,7 +126,8 @@ pub fn extract_chunk_quads(
             world_from_local,
             center,
             half_extents: half,
-            changed: quads.is_changed() || transform.is_changed(),
+            cave_active,
+            changed: quads.is_changed() || transform.is_changed() || vis.is_changed(),
         });
     }
     // VOXEL_PULL_DEBUG=1: once a second, where do chunks disappear — here
@@ -166,6 +155,8 @@ impl Plugin for VoxelPullPlugin {
         };
         render_app
             .init_resource::<arena::GpuQuadArena>()
+            .init_resource::<gpu::ActiveNearMode>()
+            .init_resource::<gpu::NearRendererMetrics>()
             .init_resource::<RemovedChunkQuads>()
             .init_resource::<SpecializedRenderPipelines<VoxelPullPipeline>>()
             .init_resource::<SpecializedRenderPipelines<VoxelPullDepthPipeline>>()
@@ -180,12 +171,20 @@ impl Plugin for VoxelPullPlugin {
             )
             .add_systems(
                 ExtractSchedule,
-                (extract_chunk_quads, extract_removed_chunk_quads),
+                (
+                    extract_chunk_quads,
+                    extract_removed_chunk_quads,
+                    gpu::extract_requested_near_backend,
+                ),
             )
             .add_systems(
                 Render,
                 (
                     prepare_chunk_quads.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_view_chunk_draws
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .after(prepare_chunk_quads),
+                    gpu::prepare_active_near_mode.in_set(RenderSystems::PrepareResources),
                     queue_voxel_pull.in_set(RenderSystems::Queue),
                     queue_voxel_pull_prepass.in_set(RenderSystems::Queue),
                     queue_voxel_pull_shadows.in_set(RenderSystems::Queue),
@@ -198,5 +197,56 @@ impl Plugin for VoxelPullPlugin {
             return;
         };
         render_app.init_resource::<VoxelPullPipeline>();
+        let telemetry_enabled = render_app
+            .world()
+            .contains_resource::<gpu::NearTelemetryEnabled>();
+
+        let gpu_supported = {
+            let world = render_app.world();
+            gpu::runtime_capabilities(
+                world
+                    .resource::<bevy::render::batching::gpu_preprocessing::GpuPreprocessingSupport>(
+                    ),
+                world.resource::<bevy::render::renderer::RenderDevice>(),
+                world.resource::<bevy::render::renderer::RenderAdapterInfo>(),
+            )
+            .gpu_culling
+        };
+        if gpu_supported {
+            render_app
+                .init_resource::<gpu::GpuNearCullPipeline>()
+                .add_systems(
+                    Render,
+                    gpu::prepare_gpu_near_view_buffers
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .after(prepare_chunk_quads),
+                )
+                .add_render_graph_node::<gpu::NearFrustumCullNode>(
+                    Core3d,
+                    gpu::NearGpuNode::FrustumCull,
+                )
+                .add_render_graph_node::<gpu::NearLatePhaseClearNode>(
+                    Core3d,
+                    gpu::NearGpuNode::ClearLatePhases,
+                )
+                .add_render_graph_node::<gpu::NearHzbCullNode>(Core3d, gpu::NearGpuNode::HzbCull);
+            if telemetry_enabled {
+                render_app
+                    .init_resource::<gpu::NearTelemetryReadback>()
+                    .add_systems(
+                        Render,
+                        gpu::begin_near_telemetry_frame.in_set(RenderSystems::PrepareResources),
+                    )
+                    .add_render_graph_node::<gpu::NearTelemetryCopyNode>(
+                        Core3d,
+                        gpu::NearGpuNode::TelemetryCopy,
+                    );
+            }
+            let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
+            let core_3d = graph
+                .get_sub_graph_mut(Core3d)
+                .expect("Core3d render graph is initialized");
+            gpu::add_near_gpu_graph_edges(core_3d, telemetry_enabled);
+        }
     }
 }

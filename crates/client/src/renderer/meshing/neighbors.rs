@@ -27,7 +27,11 @@ pub fn zone_offsets() -> impl Iterator<Item = [i32; 3]> {
 pub fn zone_index(off: [i32; 3]) -> usize {
     let linear = (off[2] + 1) * 9 + (off[1] + 1) * 3 + (off[0] + 1);
     // Offsets after the center [0,0,0] (linear 13) shift down by one.
-    if linear > 13 { linear as usize - 1 } else { linear as usize }
+    if linear > 13 {
+        linear as usize - 1
+    } else {
+        linear as usize
+    }
 }
 
 fn shell_dir(c: usize) -> i32 {
@@ -63,7 +67,9 @@ pub fn gather_padded(center: &[Voxel], neighbors: &BTreeMap<[i32; 3], &[Voxel]>)
                 if off == [0, 0, 0] {
                     continue;
                 }
-                let Some(nv) = neighbors.get(&off) else { continue };
+                let Some(nv) = neighbors.get(&off) else {
+                    continue;
+                };
                 let (nx, ny, nz) = (
                     neighbor_coord(x, off[0]),
                     neighbor_coord(y, off[1]),
@@ -87,8 +93,11 @@ fn source_range(direction: i32) -> std::ops::Range<usize> {
 /// Linear indices belonging to one of the 26 boundary zones, ordered exactly
 /// like the chunk's dense x-major layout so an RLE cursor can stream them.
 pub fn zone_indices(off: [i32; 3]) -> impl Iterator<Item = usize> {
-    let (xr, yr, zr) =
-        (source_range(off[0]), source_range(off[1]), source_range(off[2]));
+    let (xr, yr, zr) = (
+        source_range(off[0]),
+        source_range(off[1]),
+        source_range(off[2]),
+    );
     zr.flat_map(move |z| {
         let yr = yr.clone();
         let xr = xr.clone();
@@ -134,8 +143,8 @@ pub fn gather_padded_rle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::binary::{mesh_quads, Face};
+    use super::*;
     use crate::renderer::bridge::VoxelData;
     use game::{BlockId, CHUNK_VOXEL_COUNT};
 
@@ -169,7 +178,10 @@ mod tests {
         let mut neighbors: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
         neighbors.insert([1, 0, 0], nv.as_slice());
         let p = gather_padded(&full_chunk(BlockId(1)), &neighbors);
-        assert!(p.is_solid(33, 5, 5), "neighbor (0,4,4) lands at padded (33,5,5)");
+        assert!(
+            p.is_solid(33, 5, 5),
+            "neighbor (0,4,4) lands at padded (33,5,5)"
+        );
         assert!(!p.is_solid(33, 6, 5));
     }
 
@@ -217,7 +229,10 @@ mod tests {
             dense_owned.insert(off, voxels.clone());
             rle_owned.insert(off, VoxelData::new(voxels));
         }
-        let dense_refs = dense_owned.iter().map(|(&k, v)| (k, v.as_slice())).collect();
+        let dense_refs = dense_owned
+            .iter()
+            .map(|(&k, v)| (k, v.as_slice()))
+            .collect();
         let rle_refs = rle_owned.iter().map(|(&k, v)| (k, v)).collect();
 
         let dense = gather_padded(&center_dense, &dense_refs);

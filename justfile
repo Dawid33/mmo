@@ -21,14 +21,9 @@ pci := "0000:40:00.0"
 # perf sampling flags shared by the perf-client / perf-server recipes.
 perf_flags := "-F9997 --call-graph dwarf,16384 -e cpu-clock"
 
-# Test threads used by `just test-full`. The slow tests each stand up a full 3x3
-# region window twice over (the LocalServer's copy plus the client's), a bounded
-# ~6.7 GB RSS at peak per rig (re-measured 2026-07-12 with /usr/bin/time -v on
-# reconcile_keepup::diag_a — the earlier ~2.4 GB note was an underestimate; the
-# value is identical before and after the genesis-cost-reduction work, so this
-# is not a leak or regression). Faster rigs now hit their peak phases together,
-# so 4 x 6.7 GB OOMed this 31 GB box where staggered starts used to survive.
-# Budget ~7 GB/thread.
+# Full-suite concurrency measured 2026-07-15: three threads completed in
+# ~8.3s / ~238 MiB RSS warm, while Cargo's 20-thread default took ~24.8s and
+# peaked near 5.3 GiB due to Bevy/meshing contention.
 test_threads := "3"
 
 # Server address (informational; hardcoded to 127.0.0.1:6466 in the server).
@@ -187,6 +182,79 @@ bench-region:
 pull-smoke:
     {{cargo}} run -p client --example pull_smoke
 
+# Production render benchmark: real server seed + full LOD table, fixed
+# 1920x1080 no-vsync client, three repeated JSON runs by default.
+# Pair modes: per-chunk+raster, direct+raster, gpu+raster, gpu+brick.
+# The `key=value` argument spelling intentionally matches benchmark reports:
+# `just render-bench backend=gpu+raster adapter=T600 repetitions=3 threads=4`.
+# `threads` caps both the Bevy worker pools and Tokio server workers so the
+# production-scene load leaves CPU headroom for the desktop.
+render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    backend_arg="{{backend}}"
+    adapter_arg="{{adapter}}"
+    repetitions_arg="{{repetitions}}"
+    threads_arg="{{threads}}"
+    selected_backend="${backend_arg#backend=}"
+    selected_adapter="${adapter_arg#adapter=}"
+    selected_repetitions="${repetitions_arg#repetitions=}"
+    selected_threads="${threads_arg#threads=}"
+    case "$selected_backend" in
+        per-chunk|per-chunk+raster)
+            near="per-chunk"
+            far="raster"
+            ;;
+        direct|direct+raster)
+            near="direct"
+            far="raster"
+            ;;
+        gpu|gpu+raster)
+            near="gpu"
+            far="raster"
+            ;;
+        gpu+brick)
+            near="gpu"
+            far="brick"
+            ;;
+        *)
+            echo "invalid backend '$selected_backend' (expected per-chunk+raster, direct+raster, gpu+raster, or gpu+brick)" >&2
+            exit 2
+            ;;
+    esac
+    if ! [[ "$selected_repetitions" =~ ^[1-9][0-9]*$ ]]; then
+        echo "repetitions must be a positive integer, got '$selected_repetitions'" >&2
+        exit 2
+    fi
+    if ! [[ "$selected_threads" =~ ^[0-9]+$ ]] || [ "$selected_threads" -lt 4 ]; then
+        echo "threads must be an integer >= 4, got '$selected_threads'" >&2
+        exit 2
+    fi
+    mkdir -p target/render-bench
+    {{cargo}} build --release --bin client --bin server
+    RUST_BACKTRACE=1 TOKIO_WORKER_THREADS="$selected_threads" \
+        ./target/release/server > target/render-bench/server.log 2>&1 &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    sleep 1
+    for repetition in $(seq 1 "$selected_repetitions"); do
+        adapter_slug="$selected_adapter"
+        if [ -z "$adapter_slug" ]; then adapter_slug="default"; fi
+        adapter_slug=${adapter_slug//[^[:alnum:]._-]/_}
+        output="target/render-bench/${selected_backend}-${adapter_slug}-run-${repetition}.json"
+        echo ">> render benchmark ${selected_backend} repetition ${repetition}/${selected_repetitions} -> ${output}"
+        if [ -n "$selected_adapter" ]; then export WGPU_ADAPTER_NAME="$selected_adapter"; else unset WGPU_ADAPTER_NAME || true; fi
+        RENDER_BENCH=1 \
+        RENDER_BENCH_REPETITION="$repetition" \
+        RENDER_BENCH_OUTPUT="$output" \
+        VOXEL_NEAR_RENDER="$near" \
+        VOXEL_FAR_RENDER="$far" \
+        VOXEL_CLIENT_WORKER_THREADS="$selected_threads" \
+        TOKIO_WORKER_THREADS="$selected_threads" \
+        RUST_BACKTRACE=1 \
+            ./target/release/client
+    done
+
 # ---- WASM / browser -------------------------------------------------------
 
 # Start `just server` first, or append ?offline in the browser for single-player.
@@ -235,18 +303,14 @@ test-server:
 test-worldgen:
     {{cargo}} test -p worldgen
 
-# Everything, slow tests included — run before calling work done. Still skips
-# the wall-clock perf gates, which have their own release-mode recipes
-# (`just keepup-budget`, `just soak`) or are evidence-only printouts.
-#
-# Capped at {{test_threads}} threads — see the `test_threads` variable: the slow
-# tests each hold a full 3x3 region window (~6.7 GB RSS at peak), so cargo's
-# default parallelism OOMs the box. Raise it only if you have the RAM.
+# Everything, slow correctness tests included — run before calling work done.
+# Still skips wall-clock perf gates, evidence-only tests, and the explicit
+# region-load benchmark; those retain their dedicated recipes.
 test-full:
     {{cargo}} test -p game -- --include-ignored --test-threads={{test_threads}} --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
     {{cargo}} test -p client -- --include-ignored --test-threads={{test_threads}} --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
     {{cargo}} test -p server -- --include-ignored --test-threads={{test_threads}}
-    {{cargo}} test -p worldgen -- --include-ignored --test-threads={{test_threads}}
+    {{cargo}} test -p worldgen -- --include-ignored --test-threads={{test_threads}} --skip region_load_cost
 
 # Keep-up budget benchmark (release): measures the region-tick cost and
 # asserts the death-spiral inequality (worst frame < tick period). Fails with

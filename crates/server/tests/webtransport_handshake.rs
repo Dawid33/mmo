@@ -70,7 +70,9 @@ async fn webtransport_client_full_handshake() {
     // is a no-op in this test — nothing ever drives progress_world_one_tick,
     // so the buffer the brief sketched would be dead and fail to type-infer.)
     std::thread::spawn(move || {
-        let mut world = game::World::basic();
+        let origin = RegionCoords::new(0, 0);
+        let mut world = game::World::new();
+        world.load(&origin, game::Region::from_chunks(origin, Vec::new()));
         while let Ok(event) = event_recv.recv() {
             match event {
                 ServerEvent::ClientPacket(packet, client_id) => match packet {
@@ -88,7 +90,9 @@ async fn webtransport_client_full_handshake() {
                     ClientPacket::GameEvent(ev) => {
                         let out = world.handle_region_event(ev.kind, ev.region_id).unwrap();
                         world.forget_last_event(&ev.region_id);
-                        server_send.send((None, ServerPacket::GameEvent(out))).unwrap();
+                        server_send
+                            .send((None, ServerPacket::GameEvent(out)))
+                            .unwrap();
                     }
                     ClientPacket::ReleaseRegionConnection(_) => {}
                     ClientPacket::RequestLod(_) | ClientPacket::ReleaseLod(_) => {}
@@ -103,7 +107,9 @@ async fn webtransport_client_full_handshake() {
                             )
                             .unwrap();
                         world.forget_last_event(&region);
-                        server_send.send((None, ServerPacket::GameEvent(ev))).unwrap();
+                        server_send
+                            .send((None, ServerPacket::GameEvent(ev)))
+                            .unwrap();
                     }
                 }
                 ServerEvent::ClientDisconnected(_) => {}
@@ -145,5 +151,8 @@ async fn webtransport_client_full_handshake() {
 
     send_packet(&conn, &ClientPacket::RequestRegionConnection(region_id)).await;
     let snapshot = recv_packet(&conn).await;
-    assert!(matches!(snapshot, ServerPacket::Region(..)), "got {snapshot:?}");
+    assert!(
+        matches!(snapshot, ServerPacket::Region(..)),
+        "got {snapshot:?}"
+    );
 }

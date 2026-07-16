@@ -60,16 +60,22 @@ impl Diag {
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let (server_send, server_recv) = crossbeam::channel::unbounded::<ServerPacket>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let manager =
-            GameInstanceManager::new(
-                game_send.clone(),
-                game_recv,
-                client_send,
-                dummy_addr,
-                game::DebugFlags::default(),
-            );
+        let mut manager = GameInstanceManager::new(
+            game_send.clone(),
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
+        manager.set_lod_table(&[]);
+        manager.set_near_radius(0);
         let (tap_to_server, server_side_recv) = crossbeam::channel::unbounded::<ClientPacket>();
-        let server = LocalServer::new(server_side_recv, server_send).unwrap();
+        let server = LocalServer::new_with_generator(
+            server_side_recv,
+            server_send,
+            client::local_server::lightweight_test_generator(),
+        )
+        .unwrap();
         Self {
             tap_from_manager: manager.client_packet_recv(),
             manager,
@@ -229,8 +235,11 @@ impl Diag {
             .get(&home)
             .map(|r| r.pending_event_ids())
             .unwrap_or_default();
-        let total_pending: usize =
-            world.regions.values().map(|r| r.pending_event_ids().len()).sum();
+        let total_pending: usize = world
+            .regions
+            .values()
+            .map(|r| r.pending_event_ids().len())
+            .sum();
         let server_tick = self.server.region_tick(home);
         let client_tick = world
             .regions
@@ -258,23 +267,27 @@ fn compact(ids: &[usize]) -> String {
 
 /// Scenario A: pure lockstep, one keypress. Baseline — must converge.
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn diag_a_lockstep_single_input() {
     let mut d = Diag::new();
     d.handshake();
     eprintln!("=== SCENARIO A: lockstep, single input at frame 5 ===");
     for f in 0..20 {
-        let input = (f == 5)
-            .then_some(InputEvent::Key { key: Key::KeyW, pressed: true });
+        let input = (f == 5).then_some(InputEvent::Key {
+            key: Key::KeyW,
+            pressed: true,
+        });
         d.frame(input);
         d.report("A", f);
     }
-    assert_eq!(d.home_log_len(), 0, "lockstep single input must fully confirm");
+    assert_eq!(
+        d.home_log_len(),
+        0,
+        "lockstep single input must fully confirm"
+    );
 }
 
 /// Scenario B: client runs 5 ticks ahead (induced-latency model), sparse input.
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn diag_b_client_ahead_sparse_input() {
     let mut d = Diag::new();
     d.handshake();
@@ -304,7 +317,6 @@ fn diag_b_client_ahead_sparse_input() {
 /// crossing). The prediction becomes a permanent orphan: measure what that
 /// does to reconcile forever after.
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn diag_e_one_orphaned_input() {
     let mut d = Diag::new();
     d.handshake();
@@ -323,7 +335,10 @@ fn diag_e_one_orphaned_input() {
             dy: 0.25,
         });
         let input = if f == 10 {
-            Some(InputEvent::Key { key: Key::KeyW, pressed: true })
+            Some(InputEvent::Key {
+                key: Key::KeyW,
+                pressed: true,
+            })
         } else {
             input
         };
@@ -348,7 +363,6 @@ fn diag_e_one_orphaned_input() {
 /// server keeps routing everything to A. Nothing ever confirms B's
 /// predictions and no PlayerRegion correction ever comes.
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn diag_g_mispredicted_crossing() {
     let mut d = Diag::new();
     d.handshake();
@@ -368,12 +382,18 @@ fn diag_g_mispredicted_crossing() {
             ),
             game::na::Unit::<game::na::Quaternion<game::parry::math::Real>>::identity(),
         );
-        w.regions.get_mut(&home).unwrap().with_data(|dd| dd.set_body_pose_safe(key, iso));
+        w.regions
+            .get_mut(&home)
+            .unwrap()
+            .with_data(|dd| dd.set_body_pose_safe(key, iso));
     }
     eprintln!("=== SCENARIO G: client-only boundary crossing, then input every frame ===");
     let mut len_mid = 0;
     for f in 0..60 {
-        let input = Some(InputEvent::MouseMotion { dx: f as f32, dy: 0.5 });
+        let input = Some(InputEvent::MouseMotion {
+            dx: f as f32,
+            dy: 0.5,
+        });
         d.frame(input);
         d.report("G", f);
         if f == 30 {
@@ -397,20 +417,24 @@ fn diag_g_mispredicted_crossing() {
 /// gameplay shape. Compare total MISPREDICT count vs scenario C (delay 0,
 /// 60 mispredicts for 60 inputs).
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn diag_h_latency_chase_cost() {
     let mut d = Diag::new();
     d.handshake();
     for _ in 0..5 {
         d.client_only_tick();
     }
-    eprintln!("=== SCENARIO H: client 5 ahead + 5-frame input transit delay, input every frame ===");
+    eprintln!(
+        "=== SCENARIO H: client 5 ahead + 5-frame input transit delay, input every frame ==="
+    );
     let mut queue = std::collections::VecDeque::new();
     for f in 0..60 {
         d.manager
             .push_game_event(GameEventKind::PlayerInput(
                 LOCAL_CLIENT_ID,
-                InputEvent::MouseMotion { dx: f as f32, dy: -0.5 },
+                InputEvent::MouseMotion {
+                    dx: f as f32,
+                    dy: -0.5,
+                },
             ))
             .unwrap();
         d.manager.send_tick();
@@ -434,7 +458,6 @@ fn diag_h_latency_chase_cost() {
 /// Scenario C: client ahead + continuous input (mouse-motion-like, one per
 /// frame) — the live gameplay shape.
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn diag_c_client_ahead_continuous_input() {
     let mut d = Diag::new();
     d.handshake();
@@ -443,7 +466,10 @@ fn diag_c_client_ahead_continuous_input() {
     }
     eprintln!("=== SCENARIO C: client 5 ahead, input every frame ===");
     for f in 0..60 {
-        let input = Some(InputEvent::MouseMotion { dx: 1.0 + f as f32, dy: -0.5 });
+        let input = Some(InputEvent::MouseMotion {
+            dx: 1.0 + f as f32,
+            dy: -0.5,
+        });
         d.frame(input);
         d.report("C", f);
         if f >= 15 {
@@ -461,15 +487,20 @@ fn diag_c_client_ahead_continuous_input() {
 /// frame plus a key edge every few frames — must keep the prediction log
 /// bounded, and the log must drain once input stops.
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn keeps_up_under_moderate_input() {
     let mut d = Diag::new();
     d.handshake();
     let mut max_len = 0;
     for f in 0..80 {
-        d.frame(Some(InputEvent::MouseMotion { dx: f as f32, dy: 1.0 }));
+        d.frame(Some(InputEvent::MouseMotion {
+            dx: f as f32,
+            dy: 1.0,
+        }));
         if f % 4 == 0 {
-            d.frame(Some(InputEvent::Key { key: Key::KeyW, pressed: (f / 4) % 2 == 0 }));
+            d.frame(Some(InputEvent::Key {
+                key: Key::KeyW,
+                pressed: (f / 4) % 2 == 0,
+            }));
         }
         if f >= 10 {
             max_len = max_len.max(d.home_log_len());
@@ -500,7 +531,6 @@ fn keeps_up_under_moderate_input() {
 /// optimizing the game/client so the budget is never exceeded — reconcile
 /// itself is working as designed here.
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn overload_grows_event_log_unbounded() {
     let mut d = Diag::new();
     d.handshake();
@@ -509,9 +539,18 @@ fn overload_grows_event_log_unbounded() {
     let mut len_at = [0usize; 3]; // frames 10, 25, 40
     for f in 0..40 {
         let inputs = [
-            InputEvent::MouseMotion { dx: f as f32, dy: 0.1 },
-            InputEvent::MouseMotion { dx: f as f32, dy: 0.2 },
-            InputEvent::MouseMotion { dx: f as f32, dy: 0.3 },
+            InputEvent::MouseMotion {
+                dx: f as f32,
+                dy: 0.1,
+            },
+            InputEvent::MouseMotion {
+                dx: f as f32,
+                dy: 0.2,
+            },
+            InputEvent::MouseMotion {
+                dx: f as f32,
+                dy: 0.3,
+            },
         ];
         d.frame_throttled(&inputs, 1, &mut staging, &slow_lane);
         match f {
@@ -549,7 +588,6 @@ fn overload_grows_event_log_unbounded() {
 /// the log drains back down — distinguishing "transient stall, recovers"
 /// from "sustained deficit, spirals" (overload test above).
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn transient_stall_recovers() {
     let mut d = Diag::new();
     d.handshake();
@@ -559,17 +597,32 @@ fn transient_stall_recovers() {
     // reconciled per frame.
     for f in 0..15 {
         let inputs = [
-            InputEvent::MouseMotion { dx: f as f32, dy: 0.4 },
-            InputEvent::MouseMotion { dx: f as f32, dy: 0.8 },
+            InputEvent::MouseMotion {
+                dx: f as f32,
+                dy: 0.4,
+            },
+            InputEvent::MouseMotion {
+                dx: f as f32,
+                dy: 0.8,
+            },
         ];
         d.frame_throttled(&inputs, 1, &mut staging, &slow_lane);
     }
     let deficit = d.home_log_len();
-    eprintln!("[recovery] log depth after stall: {deficit}, backlog: {}", staging.len());
-    assert!(deficit >= 20, "stall phase must build a real deficit (len {deficit})");
+    eprintln!(
+        "[recovery] log depth after stall: {deficit}, backlog: {}",
+        staging.len()
+    );
+    assert!(
+        deficit >= 20,
+        "stall phase must build a real deficit (len {deficit})"
+    );
     // Phase 2 — full budget restored, light input continues.
     for f in 0..40 {
-        let inputs = [InputEvent::MouseMotion { dx: 100.0 + f as f32, dy: 0.1 }];
+        let inputs = [InputEvent::MouseMotion {
+            dx: 100.0 + f as f32,
+            dy: 0.1,
+        }];
         d.frame_throttled(&inputs, usize::MAX, &mut staging, &slow_lane);
     }
     // Phase 3 — input stops; everything in flight confirms.
@@ -577,12 +630,19 @@ fn transient_stall_recovers() {
         d.frame_throttled(&[], usize::MAX, &mut staging, &slow_lane);
     }
     let final_len = d.home_log_len();
-    eprintln!("[recovery] log depth after recovery: {final_len}, backlog: {}", staging.len());
+    eprintln!(
+        "[recovery] log depth after recovery: {final_len}, backlog: {}",
+        staging.len()
+    );
     assert!(
         final_len <= 2,
         "log must drain once the budget is restored (len {final_len})"
     );
-    assert!(staging.is_empty(), "backlog must clear ({} left)", staging.len());
+    assert!(
+        staging.is_empty(),
+        "backlog must clear ({} left)",
+        staging.len()
+    );
 }
 
 /// WALL-CLOCK SOAK — perf gate, release only (`just soak`). Runs the real

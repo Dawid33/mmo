@@ -7,19 +7,23 @@ use bevy::mesh::Mesh;
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
-use game::Voxel;
 pub use game::lod::{build_far_lod_cells, downsample2, LodCell};
+use game::Voxel;
 
 use super::super::block_textures::BlockTextureLayers;
 use super::super::voxel_material::StandardVoxelMaterial;
 use super::binary::{self, Face, Quad};
 use super::emit;
 use super::neighbors::gather_padded;
-use super::queue::{FrameUploads, MeshBudgets};
-use super::records;
-use super::{ChunkMaterial, MeshOutput, MeshingTask};
 #[cfg(test)]
 use super::pack;
+#[cfg(test)]
+use super::queue::FrameUploads;
+use super::queue::MeshBudgets;
+use super::records;
+#[cfg(test)]
+use super::MeshingTask;
+use super::{ChunkMaterial, MeshOutput};
 
 /// Does `q`'s plane sit on the 32-grid's outer edge along its own face axis?
 /// Only X/Z side faces are ever skirted — Y (top/bottom) faces never are.
@@ -94,7 +98,11 @@ fn mesh_lod_output(
     } else {
         (emit::quads_to_mesh(&quads, layers), None)
     };
-    MeshOutput { mesh, records, connectivity: 0 }
+    MeshOutput {
+        mesh,
+        records,
+        connectivity: 0,
+    }
 }
 
 /// Scale factor of this LOD chunk relative to a full-res chunk (2, 4, 8, ...).
@@ -121,13 +129,86 @@ pub struct LodNeighbors(pub BTreeMap<[i32; 3], Entity>);
 #[derive(Component)]
 pub struct LodMeshTask(Task<MeshOutput>);
 
+/// Observable backlog shared by raster LOD meshing and native brick builds.
+/// Benchmark readiness must include queued work, not only spawned tasks.
+#[derive(Resource, Default)]
+pub struct LodBuildQueue {
+    raster: BTreeSet<Entity>,
+    brick: BTreeSet<Entity>,
+}
+
+impl LodBuildQueue {
+    pub fn enqueue_raster(&mut self, entity: Entity) {
+        self.raster.insert(entity);
+        self.brick.remove(&entity);
+    }
+
+    pub fn enqueue_brick(&mut self, entity: Entity) {
+        self.brick.insert(entity);
+        self.raster.remove(&entity);
+    }
+
+    pub fn remove(&mut self, entity: Entity) {
+        self.raster.remove(&entity);
+        self.brick.remove(&entity);
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.raster.len() + self.brick.len()
+    }
+
+    pub fn raster_pending_count(&self) -> usize {
+        self.raster.len()
+    }
+
+    pub fn brick_pending_count(&self) -> usize {
+        self.brick.len()
+    }
+
+    pub(crate) fn raster_batch(&self, capacity: usize) -> Vec<Entity> {
+        self.raster.iter().copied().take(capacity).collect()
+    }
+
+    pub(crate) fn brick_batch(&self, capacity: usize) -> Vec<Entity> {
+        self.brick.iter().copied().take(capacity).collect()
+    }
+
+    pub(crate) fn brick_entities(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.brick.iter().copied()
+    }
+
+    pub(crate) fn retain_raster(&mut self, mut keep: impl FnMut(Entity) -> bool) {
+        self.raster.retain(|entity| keep(*entity));
+    }
+
+    pub(crate) fn retain_brick(&mut self, mut keep: impl FnMut(Entity) -> bool) {
+        self.brick.retain(|entity| keep(*entity));
+    }
+}
+
+/// Raster build completion, including all-air grids which intentionally have
+/// no `Mesh3d` or `ChunkQuads` component.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct LodRasterReady;
+
+/// Far/raster GPU uploads attached this frame. This is intentionally separate
+/// from near `FrameUploads`: each lane is bounded by the same configured cap,
+/// while neither can starve the other.
+#[derive(Resource, Default)]
+pub struct FarFrameUploads(pub usize);
+
+pub(crate) fn far_task_capacity(
+    max_in_flight: usize,
+    lod_in_flight: usize,
+    brick_in_flight: usize,
+) -> usize {
+    max_in_flight.saturating_sub(lod_in_flight + brick_in_flight)
+}
+
 /// Drain changed `LodVoxelData` into mesh tasks, FIFO (no distance ranking —
-/// LOD is inherently low-priority background work), sharing `MeshBudgets.max_in_flight`
-/// with full-res: full-res never even looks at LOD's in-flight count (it always
-/// wins), so LOD's own capacity here is the budget minus BOTH full-res's and its
-/// own in-flight tasks — this keeps LOD from pushing the combined count over the
-/// cap on its own (full-res can still transiently exceed it by design, since it
-/// always wins and never defers to LOD).
+/// LOD is inherently low-priority background work). Raster LOD and brick
+/// preparation share a bounded far lane of `MeshBudgets.max_in_flight`; the
+/// independently bounded full-resolution lane does not consume this capacity.
 ///
 /// The `Local` queue (not a bare `Changed<LodVoxelData>` filter alone) matters:
 /// Bevy consumes a system's change-detection window every time it runs, so an
@@ -137,35 +218,56 @@ pub struct LodMeshTask(Task<MeshOutput>);
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn spawn_lod_mesh_tasks(
     mut commands: Commands,
-    mut queue: Local<BTreeSet<Entity>>,
+    mut queue: ResMut<LodBuildQueue>,
     budgets: Res<MeshBudgets>,
-    full_res_in_flight: Query<(), With<MeshingTask>>,
+    mut far_uploads: ResMut<FarFrameUploads>,
     lod_in_flight: Query<(), With<LodMeshTask>>,
+    brick_in_flight: Query<(), With<super::super::far_voxel::FarBrickBuildTask>>,
     changed: Query<Entity, Changed<LodVoxelData>>,
     grids: Query<(&LodVoxelData, Option<&LodNeighbors>)>,
+    raster_fallbacks: Query<(), With<super::super::far_voxel::FarRasterFallback>>,
+    new_raster_fallbacks: Query<Entity, Added<super::super::far_voxel::FarRasterFallback>>,
     layers: Res<BlockTextureLayers>,
-    path: Option<Res<super::super::voxel_pull::RenderPath>>,
+    render_config: Option<Res<super::super::config::TerrainRenderConfig>>,
 ) {
+    far_uploads.0 = 0;
+    let brick_mode = render_config
+        .as_deref()
+        .is_some_and(|config| config.far == super::super::config::FarRenderBackend::BrickRaymarch);
     for e in changed.iter() {
-        queue.insert(e);
+        commands.entity(e).remove::<LodRasterReady>();
+        if brick_mode && !raster_fallbacks.contains(e) {
+            queue.enqueue_brick(e);
+        } else {
+            queue.enqueue_raster(e);
+        }
     }
-    queue.retain(|&e| grids.contains(e));
-    if queue.is_empty() {
+    for e in new_raster_fallbacks.iter() {
+        queue.enqueue_raster(e);
+    }
+    queue.retain_raster(|e| grids.contains(e) && (!brick_mode || raster_fallbacks.contains(e)));
+    if queue.raster_pending_count() == 0 {
         return;
     }
-    let capacity = budgets
-        .max_in_flight
-        .saturating_sub(full_res_in_flight.iter().count() + lod_in_flight.iter().count());
+    let capacity = far_task_capacity(
+        budgets.max_in_flight,
+        lod_in_flight.iter().count(),
+        brick_in_flight.iter().count(),
+    );
     if capacity == 0 {
         return;
     }
-    let pull = path.map_or(super::super::voxel_pull::DEFAULT_PULL_PATH, |p| p.pull);
+    let pull = render_config
+        .as_deref()
+        .is_none_or(|config| config.near.uses_quad_records());
 
     let pool = AsyncComputeTaskPool::get();
-    let batch: Vec<Entity> = queue.iter().copied().take(capacity).collect();
+    let batch = queue.raster_batch(capacity);
     for e in batch {
-        queue.remove(&e);
-        let Ok((voxels, lod_neighbors)) = grids.get(e) else { continue };
+        queue.remove(e);
+        let Ok((voxels, lod_neighbors)) = grids.get(e) else {
+            continue;
+        };
         let mut neigh: BTreeMap<[i32; 3], Vec<Voxel>> = BTreeMap::new();
         if let Some(ln) = lod_neighbors {
             for (&off, &ne) in &ln.0 {
@@ -186,10 +288,9 @@ pub fn spawn_lod_mesh_tasks(
 }
 
 /// Poll in-flight `LodMeshTask`s to completion and attach the resulting
-/// `Mesh3d`, up to the leftover upload budget after full-res applies
-/// (`FrameUploads`, shared with `apply_meshed_chunks`, which runs first in
-/// the chain and always claims its uploads before this system sees the
-/// counter). Inserts the shared `ChunkMaterial`, a biased `Aabb` covering the
+/// `Mesh3d`, up to the independent far upload budget (`FarFrameUploads`).
+/// Near mesh attachment uses its own equally bounded counter and cannot consume
+/// this lane. Inserts the shared `ChunkMaterial`, a biased `Aabb` covering the
 /// mesh's `0..=33` Y range, and `NoAutoAabb` — no `ChunkKey`, no
 /// `ChunkConnectivity`, no grid entry: LOD chunks render but stay outside the
 /// world-keyed grid and the cave-culling BFS entirely.
@@ -199,19 +300,22 @@ pub fn apply_lod_meshes(
     mut meshes: ResMut<Assets<Mesh>>,
     material: Option<Res<ChunkMaterial>>,
     budgets: Res<MeshBudgets>,
-    mut uploads: ResMut<FrameUploads>,
+    mut uploads: ResMut<FarFrameUploads>,
 ) {
     for (e, mut task) in &mut tasks {
         if uploads.0 >= budgets.uploads_per_frame {
             break; // remaining completed tasks attach next frame
         }
-        let Some(output) = block_on(future::poll_once(&mut task.0)) else { continue };
+        let Some(output) = block_on(future::poll_once(&mut task.0)) else {
+            continue;
+        };
         if output.requires_upload() {
             uploads.0 += 1;
         }
         let MeshOutput { mesh, records, .. } = output;
         let mut ec = commands.entity(e);
         ec.remove::<LodMeshTask>();
+        ec.insert(LodRasterReady);
         if let Some(records) = records {
             ec.insert((
                 super::super::voxel_pull::ChunkQuads(std::sync::Arc::new(records)),
@@ -260,7 +364,14 @@ mod tests {
     use game::{BlockId, CHUNK_VOXEL_COUNT};
 
     fn base_quad(face: Face) -> Quad {
-        Quad { min: [10, 20, 30], w: 4, h: 7, face, block: BlockId(1), ao: [3; 4] }
+        Quad {
+            min: [10, 20, 30],
+            w: 4,
+            h: 7,
+            face,
+            block: BlockId(1),
+            ao: [3; 4],
+        }
     }
 
     #[test]
@@ -270,14 +381,22 @@ mod tests {
             let mut q = base_quad(face);
             skirt_extend(&mut q);
             assert_eq!(q.min, [10, 19, 30], "{face:?}: min[1] decrements by one");
-            assert_eq!((q.w, q.h), (5, 7), "{face:?}: w (Y-mapped) grows, h untouched");
+            assert_eq!(
+                (q.w, q.h),
+                (5, 7),
+                "{face:?}: w (Y-mapped) grows, h untouched"
+            );
         }
         // Z faces: cross_axes(2) = (U=0/X, V=1/Y) — Y rides `h`.
         for face in [Face::NegZ, Face::PosZ] {
             let mut q = base_quad(face);
             skirt_extend(&mut q);
             assert_eq!(q.min, [10, 19, 30], "{face:?}: min[1] decrements by one");
-            assert_eq!((q.w, q.h), (4, 8), "{face:?}: h (Y-mapped) grows, w untouched");
+            assert_eq!(
+                (q.w, q.h),
+                (4, 8),
+                "{face:?}: h (Y-mapped) grows, w untouched"
+            );
         }
     }
 
@@ -302,18 +421,48 @@ mod tests {
     #[test]
     fn is_border_side_quad_matches_the_four_side_faces_at_the_grid_edge() {
         // Border cases.
-        assert!(is_border_side_quad(&Quad { min: [0, 5, 5], ..base_quad(Face::NegX) }));
-        assert!(is_border_side_quad(&Quad { min: [31, 5, 5], ..base_quad(Face::PosX) }));
-        assert!(is_border_side_quad(&Quad { min: [5, 5, 0], ..base_quad(Face::NegZ) }));
-        assert!(is_border_side_quad(&Quad { min: [5, 5, 31], ..base_quad(Face::PosZ) }));
+        assert!(is_border_side_quad(&Quad {
+            min: [0, 5, 5],
+            ..base_quad(Face::NegX)
+        }));
+        assert!(is_border_side_quad(&Quad {
+            min: [31, 5, 5],
+            ..base_quad(Face::PosX)
+        }));
+        assert!(is_border_side_quad(&Quad {
+            min: [5, 5, 0],
+            ..base_quad(Face::NegZ)
+        }));
+        assert!(is_border_side_quad(&Quad {
+            min: [5, 5, 31],
+            ..base_quad(Face::PosZ)
+        }));
         // Interior (one cell in from the edge): not a border quad.
-        assert!(!is_border_side_quad(&Quad { min: [1, 5, 5], ..base_quad(Face::NegX) }));
-        assert!(!is_border_side_quad(&Quad { min: [30, 5, 5], ..base_quad(Face::PosX) }));
-        assert!(!is_border_side_quad(&Quad { min: [5, 5, 1], ..base_quad(Face::NegZ) }));
-        assert!(!is_border_side_quad(&Quad { min: [5, 5, 30], ..base_quad(Face::PosZ) }));
+        assert!(!is_border_side_quad(&Quad {
+            min: [1, 5, 5],
+            ..base_quad(Face::NegX)
+        }));
+        assert!(!is_border_side_quad(&Quad {
+            min: [30, 5, 5],
+            ..base_quad(Face::PosX)
+        }));
+        assert!(!is_border_side_quad(&Quad {
+            min: [5, 5, 1],
+            ..base_quad(Face::NegZ)
+        }));
+        assert!(!is_border_side_quad(&Quad {
+            min: [5, 5, 30],
+            ..base_quad(Face::PosZ)
+        }));
         // Y faces are never border side-quads, even sitting on the top/bottom plane.
-        assert!(!is_border_side_quad(&Quad { min: [5, 0, 5], ..base_quad(Face::NegY) }));
-        assert!(!is_border_side_quad(&Quad { min: [5, 31, 5], ..base_quad(Face::PosY) }));
+        assert!(!is_border_side_quad(&Quad {
+            min: [5, 0, 5],
+            ..base_quad(Face::NegY)
+        }));
+        assert!(!is_border_side_quad(&Quad {
+            min: [5, 31, 5],
+            ..base_quad(Face::PosY)
+        }));
     }
 
     fn packed_of(mesh: &Mesh) -> Vec<pack::UnpackedVertex> {
@@ -338,20 +487,44 @@ mod tests {
         let verts = packed_of(&mesh);
 
         for face in [Face::NegX, Face::PosX, Face::NegZ, Face::PosZ] {
-            let ys: Vec<u32> = verts.iter().filter(|v| v.face == face).map(|v| v.pos[1]).collect();
+            let ys: Vec<u32> = verts
+                .iter()
+                .filter(|v| v.face == face)
+                .map(|v| v.pos[1])
+                .collect();
             assert!(!ys.is_empty(), "{face:?} must be present");
-            assert_eq!(ys.iter().copied().min(), Some(0), "{face:?}: skirt reaches y=0");
-            assert_eq!(ys.iter().copied().max(), Some(33), "{face:?}: biased top reaches y=33");
+            assert_eq!(
+                ys.iter().copied().min(),
+                Some(0),
+                "{face:?}: skirt reaches y=0"
+            );
+            assert_eq!(
+                ys.iter().copied().max(),
+                Some(33),
+                "{face:?}: biased top reaches y=33"
+            );
         }
-        let top_ys: Vec<u32> =
-            verts.iter().filter(|v| v.face == Face::PosY).map(|v| v.pos[1]).collect();
+        let top_ys: Vec<u32> = verts
+            .iter()
+            .filter(|v| v.face == Face::PosY)
+            .map(|v| v.pos[1])
+            .collect();
         assert!(!top_ys.is_empty());
-        assert!(top_ys.iter().all(|&y| y == 33), "top face sits at biased y=33, not skirted");
+        assert!(
+            top_ys.iter().all(|&y| y == 33),
+            "top face sits at biased y=33, not skirted"
+        );
 
-        let bottom_ys: Vec<u32> =
-            verts.iter().filter(|v| v.face == Face::NegY).map(|v| v.pos[1]).collect();
+        let bottom_ys: Vec<u32> = verts
+            .iter()
+            .filter(|v| v.face == Face::NegY)
+            .map(|v| v.pos[1])
+            .collect();
         assert!(!bottom_ys.is_empty());
-        assert!(bottom_ys.iter().all(|&y| y == 1), "bottom face sits at biased y=1, not skirted");
+        assert!(
+            bottom_ys.iter().all(|&y| y == 1),
+            "bottom face sits at biased y=1, not skirted"
+        );
     }
 
     #[test]
@@ -366,11 +539,26 @@ mod tests {
         let verts = packed_of(&mesh);
 
         for face in [Face::NegX, Face::PosX, Face::NegZ, Face::PosZ] {
-            let ys: Vec<u32> = verts.iter().filter(|v| v.face == face).map(|v| v.pos[1]).collect();
+            let ys: Vec<u32> = verts
+                .iter()
+                .filter(|v| v.face == face)
+                .map(|v| v.pos[1])
+                .collect();
             assert!(!ys.is_empty(), "{face:?} must be present");
-            assert_eq!(ys.iter().copied().min(), Some(6), "{face:?}: biased, unextended");
-            assert_eq!(ys.iter().copied().max(), Some(7), "{face:?}: biased, unextended");
-            assert!(ys.iter().all(|&y| y != 0), "{face:?}: no skirt geometry at y=0");
+            assert_eq!(
+                ys.iter().copied().min(),
+                Some(6),
+                "{face:?}: biased, unextended"
+            );
+            assert_eq!(
+                ys.iter().copied().max(),
+                Some(7),
+                "{face:?}: biased, unextended"
+            );
+            assert!(
+                ys.iter().all(|&y| y != 0),
+                "{face:?}: no skirt geometry at y=0"
+            );
         }
     }
 
@@ -440,7 +628,10 @@ mod tests {
         // BFS genuinely ran and culled something in this same update.
         app.world_mut().spawn((
             Camera3d::default(),
-            Camera { is_active: true, ..Default::default() },
+            Camera {
+                is_active: true,
+                ..Default::default()
+            },
             GlobalTransform::from(Transform::from_translation(Vec3::new(8.0, 8.0, 8.0))),
         ));
         let _wall = spawn_chunk(
@@ -449,9 +640,20 @@ mod tests {
             Vec3::new(32.0, 0.0, 0.0),
             vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT],
         );
-        let behind = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        let behind = spawn_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(64.0, 0.0, 0.0),
+            voxels_with(&[[5, 5, 5]]),
+        );
 
-        let e = spawn_lod_chunk(&mut app, Vec3::new(1000.0, 0.0, 0.0), Vec3::ZERO, 2, floor_grid());
+        let e = spawn_lod_chunk(
+            &mut app,
+            Vec3::new(1000.0, 0.0, 0.0),
+            Vec3::ZERO,
+            2,
+            floor_grid(),
+        );
 
         assert!(
             wait_until(&mut app, |app| {
@@ -466,11 +668,23 @@ mod tests {
              (proof the cull pass really ran, not just that it was registered)"
         );
 
-        let tf = *app.world().entity(e).get::<Transform>().expect("has a transform");
-        assert_eq!(tf.translation, Vec3::new(0.0, -2.0, 0.0), "translation biased down by factor");
+        let tf = *app
+            .world()
+            .entity(e)
+            .get::<Transform>()
+            .expect("has a transform");
+        assert_eq!(
+            tf.translation,
+            Vec3::new(0.0, -2.0, 0.0),
+            "translation biased down by factor"
+        );
         assert_eq!(tf.scale, Vec3::splat(2.0), "scaled by factor");
 
-        let aabb = app.world().entity(e).get::<Aabb>().expect("biased Aabb attached");
+        let aabb = app
+            .world()
+            .entity(e)
+            .get::<Aabb>()
+            .expect("biased Aabb attached");
         assert_eq!(aabb.center, Vec3A::new(16.0, 16.5, 16.0));
         assert_eq!(aabb.half_extents, Vec3A::new(16.0, 16.5, 16.0));
         assert!(app.world().entity(e).contains::<NoAutoAabb>());
@@ -480,10 +694,17 @@ mod tests {
         // which is what gives the BFS something to cull) — the LOD chunk
         // specifically must never be one of its values.
         assert!(
-            app.world().resource::<ChunkGrid>().0.values().all(|&v| v != e),
+            app.world()
+                .resource::<ChunkGrid>()
+                .0
+                .values()
+                .all(|&v| v != e),
             "LOD chunks never enter the world-keyed ChunkGrid"
         );
-        assert!(!app.world().entity(e).contains::<ChunkKey>(), "LOD chunks stay keyless");
+        assert!(
+            !app.world().entity(e).contains::<ChunkKey>(),
+            "LOD chunks stay keyless"
+        );
         assert!(
             !app.world().entity(e).contains::<ChunkConnectivity>(),
             "LOD chunks carry no connectivity mask"
@@ -497,16 +718,23 @@ mod tests {
     }
 
     #[test]
-    fn full_res_tasks_starve_lod_tasks_not_vice_versa() {
+    fn saturated_full_res_lane_does_not_starve_raster_lod_lane() {
         // uploads_per_frame: 0 keeps the full-res MeshingTask attached
         // indefinitely (apply_meshed_chunks never gets to poll it away), so
-        // the single max_in_flight slot stays occupied across every
-        // subsequent update — a deterministic way to observe the LOD task
-        // never getting capacity, instead of racing the full-res task's
-        // completion within one frame.
-        let mut app = pipeline_app(MeshBudgets { max_in_flight: 1, uploads_per_frame: 0 });
+        // the near lane's single slot stays occupied across every subsequent
+        // update. Raster LOD owns a separate far lane with the same bound.
+        let mut app = pipeline_app(MeshBudgets {
+            max_in_flight: 1,
+            uploads_per_frame: 0,
+        });
         let full_res = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
-        let lod = spawn_lod_chunk(&mut app, Vec3::ZERO, Vec3::new(320.0, 0.0, 0.0), 2, floor_grid());
+        let lod = spawn_lod_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(320.0, 0.0, 0.0),
+            2,
+            floor_grid(),
+        );
 
         for _ in 0..3 {
             app.update();
@@ -517,10 +745,42 @@ mod tests {
             "full-res task holds the only slot (uploads_per_frame=0 keeps it attached)"
         );
         assert!(
-            !app.world().entity(lod).contains::<LodMeshTask>()
-                && !app.world().entity(lod).contains::<Mesh3d>(),
-            "LOD task must never claim a slot while full-res occupies the shared budget"
+            app.world().entity(lod).contains::<LodMeshTask>(),
+            "raster LOD claims its far-lane slot while the near lane is saturated"
         );
+    }
+
+    #[test]
+    fn near_upload_counter_does_not_consume_far_upload_lane() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .insert_resource(MeshBudgets {
+                max_in_flight: 1,
+                uploads_per_frame: 1,
+            })
+            .insert_resource(FrameUploads(1))
+            .init_resource::<FarFrameUploads>()
+            .add_systems(Update, apply_lod_meshes);
+        let task = AsyncComputeTaskPool::get().spawn(async {
+            MeshOutput {
+                mesh: None,
+                records: None,
+                connectivity: 0,
+            }
+        });
+        let lod = app.world_mut().spawn(LodMeshTask(task)).id();
+
+        assert!(super::super::queue::tests::wait_until(&mut app, |app| {
+            app.world().entity(lod).contains::<LodRasterReady>()
+        }));
+    }
+
+    #[test]
+    fn raster_and_brick_tasks_share_one_bounded_far_lane() {
+        assert_eq!(far_task_capacity(64, 0, 0), 64);
+        assert_eq!(far_task_capacity(64, 40, 10), 14);
+        assert_eq!(far_task_capacity(64, 64, 64), 0);
     }
 
     #[test]
@@ -531,7 +791,13 @@ mod tests {
             wait_until(&mut app, |app| app.world().entity(e).contains::<Mesh3d>()),
             "initial LOD mesh must land"
         );
-        let old_mesh = app.world().entity(e).get::<Mesh3d>().expect("meshed").0.clone();
+        let old_mesh = app
+            .world()
+            .entity(e)
+            .get::<Mesh3d>()
+            .expect("meshed")
+            .0
+            .clone();
 
         let mut changed_grid = floor_grid();
         changed_grid[5 + 32 * 20 + 32 * 32 * 5] = Voxel::new(BlockId(2));
@@ -539,9 +805,28 @@ mod tests {
 
         assert!(
             wait_until(&mut app, |app| {
-                app.world().entity(e).get::<Mesh3d>().is_some_and(|m| m.0 != old_mesh)
+                app.world()
+                    .entity(e)
+                    .get::<Mesh3d>()
+                    .is_some_and(|m| m.0 != old_mesh)
             }),
             "changed LodVoxelData must supersede the in-flight task and produce a new mesh handle"
         );
+    }
+
+    #[test]
+    fn lod_build_queue_reports_raster_and_brick_backlogs() {
+        let raster = Entity::from_bits(101);
+        let brick = Entity::from_bits(102);
+        let mut queue = LodBuildQueue::default();
+
+        queue.enqueue_raster(raster);
+        queue.enqueue_brick(brick);
+        assert_eq!(queue.pending_count(), 2);
+        assert_eq!(queue.raster_pending_count(), 1);
+        assert_eq!(queue.brick_pending_count(), 1);
+
+        queue.remove(raster);
+        assert_eq!(queue.pending_count(), 1);
     }
 }

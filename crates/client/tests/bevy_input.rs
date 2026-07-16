@@ -10,7 +10,6 @@ use bevy::window::CursorGrabMode;
 use client::bevy_harness::BevyInputHarness;
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn local_player_is_set_after_connect() {
     let mut h = BevyInputHarness::new();
     h.connect();
@@ -21,7 +20,6 @@ fn local_player_is_set_after_connect() {
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn e_press_forwards_and_toggles_sim() {
     let mut h = BevyInputHarness::new();
     h.connect();
@@ -44,7 +42,6 @@ fn e_press_forwards_and_toggles_sim() {
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn pressing_e_grabs_and_releases_cursor() {
     let mut h = BevyInputHarness::new();
     h.connect();
@@ -80,7 +77,6 @@ fn pressing_e_grabs_and_releases_cursor() {
 /// still produces exactly one MouseMotion event. Guards against the coalescer
 /// dropping deltas outright.
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn zero_window_emits_one_motion_event_per_frame() {
     let mut h = BevyInputHarness::new();
     h.connect();
@@ -102,7 +98,6 @@ fn zero_window_emits_one_motion_event_per_frame() {
 /// after the leading edge, and the withheld motion is summed rather than lost —
 /// so N frames of motion cost 1 packet, not N.
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn long_window_coalesces_frames_into_one_packet() {
     let mut h = BevyInputHarness::new();
     h.connect();

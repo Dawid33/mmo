@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 game = { workspace = true }
-worldgen = { path = "../worldgen" }
+worldgen = { workspace = true }
 slotmapd = { workspace = true }
 crossbeam = { workspace = true }
 simplelog = { workspace = true }
@@ -36,7 +36,7 @@ pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
 
 [dev-dependencies]
 game = { workspace = true }
-worldgen = { path = "../worldgen" }
+worldgen = { workspace = true }
 crossbeam = { workspace = true }
 dashmap = { workspace = true }
 bincode = { workspace = true }

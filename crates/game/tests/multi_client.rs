@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::hash::Hash;
 
-use game::{GameEventKind, InputEvent, Key, Region, RegionCoords, World};
+use game::{Chunk, ChunkCoords, GameEventKind, InputEvent, Key, Region, RegionCoords, World};
 
 fn state_hash(r: &game::Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
@@ -16,10 +16,22 @@ fn r0() -> RegionCoords {
     RegionCoords::new(0, 0)
 }
 
+fn minimal_world() -> World {
+    let mut world = World::new();
+    world.load(
+        &r0(),
+        Region::from_chunks(
+            r0(),
+            vec![(ChunkCoords::new(4, 0, 4), Chunk::flat_floor(8))],
+        ),
+    );
+    world
+}
+
 /// Server world with `n` players created on connection (the new join flow),
 /// plus the broadcast CreateClient events it produced.
 fn server_with_players(n: usize) -> (World, Vec<game::GameEvent>) {
-    let mut server = World::basic();
+    let mut server = minimal_world();
     let mut events = Vec::new();
     for client_id in 0..n {
         let ev = server
@@ -42,7 +54,10 @@ fn join_client(
     let (send, recv) = crossbeam::channel::unbounded();
     let snapshot = server.get_region_data(&r0());
     let mut world = World::new();
-    world.load(&r0(), Region::new(snapshot, Some(send), r0(), Some(client_id)));
+    world.load(
+        &r0(),
+        Region::new(snapshot, Some(send), r0(), Some(client_id)),
+    );
     (world, recv)
 }
 
@@ -57,7 +72,6 @@ fn lockstep_tick(server: &mut World, client: &mut World) {
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn join_snapshot_already_contains_player_and_stale_create_is_dropped() {
     let (mut server, events) = server_with_players(1);
     let (mut client, _recv) = join_client(&server, 0);
@@ -78,20 +92,28 @@ fn join_snapshot_already_contains_player_and_stale_create_is_dropped() {
         client.regions.get(&r0()).unwrap().pending_event_ids(),
         Vec::<usize>::new()
     );
-    assert_eq!(state_hash(client.data(&r0())), state_hash(server.data(&r0())));
+    assert_eq!(
+        state_hash(client.data(&r0())),
+        state_hash(server.data(&r0()))
+    );
 }
 
 #[test]
 fn origin_client_classifies_event_kinds() {
-    let input = InputEvent::Key { key: Key::KeyW, pressed: true };
-    assert_eq!(GameEventKind::PlayerInput(7, input).origin_client(), Some(7));
+    let input = InputEvent::Key {
+        key: Key::KeyW,
+        pressed: true,
+    };
+    assert_eq!(
+        GameEventKind::PlayerInput(7, input).origin_client(),
+        Some(7)
+    );
     assert_eq!(GameEventKind::CreateClient(3).origin_client(), Some(3));
     assert_eq!(GameEventKind::Tick.origin_client(), None);
     assert_eq!(GameEventKind::Quit.origin_client(), None);
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn foreign_create_client_inserts_into_predicted_timeline() {
     let (mut server, _) = server_with_players(1);
     let (mut client_a, _recv) = join_client(&server, 0);
@@ -128,11 +150,13 @@ fn foreign_create_client_inserts_into_predicted_timeline() {
         client_a.regions.get(&r0()).unwrap().pending_event_ids(),
         Vec::<usize>::new()
     );
-    assert_eq!(state_hash(client_a.data(&r0())), state_hash(server.data(&r0())));
+    assert_eq!(
+        state_hash(client_a.data(&r0())),
+        state_hash(server.data(&r0()))
+    );
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn foreign_player_input_converges_and_undo_stays_bit_exact() {
     let (mut server, mut events) = server_with_players(2);
     let (mut client_a, _recv) = join_client(&server, 0);
@@ -141,7 +165,10 @@ fn foreign_player_input_converges_and_undo_stays_bit_exact() {
     for ev in events.drain(..) {
         client_a.reconcile_event(ev).unwrap();
     }
-    assert_eq!(state_hash(client_a.data(&r0())), state_hash(server.data(&r0())));
+    assert_eq!(
+        state_hash(client_a.data(&r0())),
+        state_hash(server.data(&r0()))
+    );
 
     // A predicts two ticks ahead.
     let mut client_results = BTreeMap::new();
@@ -149,7 +176,10 @@ fn foreign_player_input_converges_and_undo_stays_bit_exact() {
     client_a.progress_world_one_tick(&mut client_results);
 
     // Server interleaves B's input into the same id range.
-    let input = InputEvent::Key { key: Key::KeyW, pressed: true };
+    let input = InputEvent::Key {
+        key: Key::KeyW,
+        pressed: true,
+    };
     let ev_b_input = server
         .handle_region_event(GameEventKind::PlayerInput(1, input), r0())
         .unwrap();
@@ -165,7 +195,12 @@ fn foreign_player_input_converges_and_undo_stays_bit_exact() {
     client_a.reconcile_event(ev_b_input).unwrap();
     // Both pending ticks survived, ids bumped by one.
     assert_eq!(
-        client_a.regions.get(&r0()).unwrap().pending_event_ids().len(),
+        client_a
+            .regions
+            .get(&r0())
+            .unwrap()
+            .pending_event_ids()
+            .len(),
         2
     );
     client_a.reconcile_event(ev_t1).unwrap();
@@ -174,11 +209,13 @@ fn foreign_player_input_converges_and_undo_stays_bit_exact() {
         client_a.regions.get(&r0()).unwrap().pending_event_ids(),
         Vec::<usize>::new()
     );
-    assert_eq!(state_hash(client_a.data(&r0())), state_hash(server.data(&r0())));
+    assert_eq!(
+        state_hash(client_a.data(&r0())),
+        state_hash(server.data(&r0()))
+    );
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn create_player_sets_entity_kind() {
     let (server, _) = server_with_players(1);
     let data = server.data(&r0());
@@ -187,45 +224,60 @@ fn create_player_sets_entity_kind() {
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn create_player_attaches_capsule_collider() {
     let (server, _) = server_with_players(1);
     let data = server.data(&r0());
     let e = *data.player_entites.get(&0).unwrap();
     let handle = *data.ecs.rigidbody.get(e);
     let body = data.physics.bodies.get(handle).unwrap();
-    assert_eq!(body.colliders().len(), 1, "player body carries exactly one collider");
+    assert_eq!(
+        body.colliders().len(),
+        1,
+        "player body carries exactly one collider"
+    );
     let collider = data.physics.colliders.get(body.colliders()[0]).unwrap();
     assert_eq!(collider.parent(), Some(handle));
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn chunk_gets_voxels_collider() {
-    let server = World::basic();
+    let server = minimal_world();
     let data = server.data(&r0());
-    // REGION_CHUNKS² floor chunks, one Voxels collider each, before any
-    // player joins.
-    assert_eq!(data.physics.colliders.len(), game::REGION_CHUNKS * game::REGION_CHUNKS);
+    assert_eq!(data.physics.colliders.len(), 1);
     let (_, collider) = data.physics.colliders.iter().next().unwrap();
-    assert!(collider.shape().as_voxels().is_some(), "chunk collider is a Voxels shape");
-    assert!(collider.parent().is_some(), "parented to the chunk's fixed body");
+    assert!(
+        collider.shape().as_voxels().is_some(),
+        "chunk collider is a Voxels shape"
+    );
+    assert!(
+        collider.parent().is_some(),
+        "parented to the chunk's fixed body"
+    );
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn descending_player_stops_on_terrain() {
     let (mut server, _) = server_with_players(1);
     let mut results = BTreeMap::new();
 
     // Enable fps-cam movement (E toggles it during the next tick)...
-    let e_press = InputEvent::Key { key: Key::KeyE, pressed: true };
-    server.handle_region_event(GameEventKind::PlayerInput(0, e_press), r0()).unwrap();
+    let e_press = InputEvent::Key {
+        key: Key::KeyE,
+        pressed: true,
+    };
+    server
+        .handle_region_event(GameEventKind::PlayerInput(0, e_press), r0())
+        .unwrap();
     server.forget_last_event(&r0());
     server.progress_world_one_tick(&mut results);
     // ...then hold descend.
-    let ctrl = InputEvent::Key { key: Key::ControlLeft, pressed: true };
-    server.handle_region_event(GameEventKind::PlayerInput(0, ctrl), r0()).unwrap();
+    let ctrl = InputEvent::Key {
+        key: Key::ControlLeft,
+        pressed: true,
+    };
+    server
+        .handle_region_event(GameEventKind::PlayerInput(0, ctrl), r0())
+        .unwrap();
     server.forget_last_event(&r0());
     for _ in 0..60 {
         server.progress_world_one_tick(&mut results);
@@ -237,6 +289,12 @@ fn descending_player_stops_on_terrain() {
     let y = data.physics.bodies.get(handle).unwrap().translation().y;
     // Floor top is y=8; capsule half-extent 10.8 -> blocked rest ~18.8+.
     // Uncorrected descent from y=26 at 8 units/tick would reach y << 0.
-    assert!(y > game::parry::math::Real::from(17.3), "player tunneled through the floor: y = {y}");
-    assert!(y < game::parry::math::Real::from(20.3), "player never moved down or never got blocked: y = {y}");
+    assert!(
+        y > game::parry::math::Real::from(17.3),
+        "player tunneled through the floor: y = {y}"
+    );
+    assert!(
+        y < game::parry::math::Real::from(20.3),
+        "player never moved down or never got blocked: y = {y}"
+    );
 }

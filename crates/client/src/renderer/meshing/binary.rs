@@ -182,8 +182,7 @@ pub fn mesh_quads(p: &PaddedVoxels) -> Vec<Quad> {
                     while row != 0 {
                         let u = row.trailing_zeros() as usize;
                         row &= row - 1;
-                        let block =
-                            p.0[a * STRIDE[axis] + u * STRIDE[ua] + v * STRIDE[va]].block;
+                        let block = p.0[a * STRIDE[axis] + u * STRIDE[ua] + v * STRIDE[va]].block;
                         let s = |uu: usize, vv: usize| (cols[uu][vv] >> b & 1) as usize;
                         // Corner order (cu, cv) = (0,0), (1,0), (0,1), (1,1);
                         // index = side_u << 2 | side_v << 1 | corner.
@@ -193,8 +192,7 @@ pub fn mesh_quads(p: &PaddedVoxels) -> Vec<Quad> {
                             VERTEX_AO_LUT[s(u - 1, v) << 2 | s(u, v + 1) << 1 | s(u - 1, v + 1)],
                             VERTEX_AO_LUT[s(u + 1, v) << 2 | s(u, v + 1) << 1 | s(u + 1, v + 1)],
                         ];
-                        keys[v][u] =
-                            (block.0 as u64) << 32 | u32::from_le_bytes(ao) as u64;
+                        keys[v][u] = (block.0 as u64) << 32 | u32::from_le_bytes(ao) as u64;
                     }
                 }
                 if !any {
@@ -277,7 +275,11 @@ impl Occupancy {
     /// along `axis` is air. Shell positions are masked out.
     pub fn face_bits(&self, axis: usize, positive: bool, u: usize, v: usize) -> u64 {
         let col = self.cols[axis][u][v];
-        let vis = if positive { col & !(col >> 1) } else { col & !(col << 1) };
+        let vis = if positive {
+            col & !(col >> 1)
+        } else {
+            col & !(col << 1)
+        };
         vis & INTERIOR_MASK
     }
 }
@@ -298,7 +300,10 @@ mod tests {
     #[test]
     fn padded_roundtrip_and_shell_is_air() {
         let p = PaddedVoxels::from_interior(&interior_with(&[([0, 5, 31], BlockId(1))]));
-        assert!(p.is_solid(1, 6, 32), "chunk-local (0,5,31) is padded (1,6,32)");
+        assert!(
+            p.is_solid(1, 6, 32),
+            "chunk-local (0,5,31) is padded (1,6,32)"
+        );
         assert!(!p.is_solid(0, 6, 32), "shell stays air with from_interior");
         assert!(!p.is_solid(1, 6, 33), "shell stays air with from_interior");
     }
@@ -308,12 +313,36 @@ mod tests {
         let p = PaddedVoxels::from_interior(&interior_with(&[([5, 6, 7], BlockId(1))]));
         let occ = Occupancy::new(&p);
         // padded coords (6, 7, 8)
-        assert_eq!(occ.face_bits(0, true, 7, 8) & (1 << 6), 1 << 6, "+X visible");
-        assert_eq!(occ.face_bits(0, false, 7, 8) & (1 << 6), 1 << 6, "-X visible");
-        assert_eq!(occ.face_bits(1, true, 6, 8) & (1 << 7), 1 << 7, "+Y visible");
-        assert_eq!(occ.face_bits(1, false, 6, 8) & (1 << 7), 1 << 7, "-Y visible");
-        assert_eq!(occ.face_bits(2, true, 6, 7) & (1 << 8), 1 << 8, "+Z visible");
-        assert_eq!(occ.face_bits(2, false, 6, 7) & (1 << 8), 1 << 8, "-Z visible");
+        assert_eq!(
+            occ.face_bits(0, true, 7, 8) & (1 << 6),
+            1 << 6,
+            "+X visible"
+        );
+        assert_eq!(
+            occ.face_bits(0, false, 7, 8) & (1 << 6),
+            1 << 6,
+            "-X visible"
+        );
+        assert_eq!(
+            occ.face_bits(1, true, 6, 8) & (1 << 7),
+            1 << 7,
+            "+Y visible"
+        );
+        assert_eq!(
+            occ.face_bits(1, false, 6, 8) & (1 << 7),
+            1 << 7,
+            "-Y visible"
+        );
+        assert_eq!(
+            occ.face_bits(2, true, 6, 7) & (1 << 8),
+            1 << 8,
+            "+Z visible"
+        );
+        assert_eq!(
+            occ.face_bits(2, false, 6, 7) & (1 << 8),
+            1 << 8,
+            "-Z visible"
+        );
     }
 
     #[test]
@@ -340,8 +369,16 @@ mod tests {
         let mut p = PaddedVoxels::from_interior(&interior_with(&[([31, 5, 5], BlockId(1))]));
         p.0[PaddedVoxels::index(33, 6, 6)] = Voxel::new(BlockId(1));
         let occ = Occupancy::new(&p);
-        assert_eq!(occ.face_bits(0, true, 6, 6) & (1 << 32), 0, "+X culled by neighbor");
-        assert_eq!(occ.face_bits(0, false, 6, 6) & (1 << 32), 1 << 32, "-X still visible");
+        assert_eq!(
+            occ.face_bits(0, true, 6, 6) & (1 << 32),
+            0,
+            "+X culled by neighbor"
+        );
+        assert_eq!(
+            occ.face_bits(0, false, 6, 6) & (1 << 32),
+            1 << 32,
+            "-X still visible"
+        );
     }
 
     #[test]
@@ -528,7 +565,14 @@ mod tests {
 
     #[test]
     fn face_index_roundtrips_in_locked_order() {
-        let order = [Face::PosX, Face::NegX, Face::PosY, Face::NegY, Face::PosZ, Face::NegZ];
+        let order = [
+            Face::PosX,
+            Face::NegX,
+            Face::PosY,
+            Face::NegY,
+            Face::PosZ,
+            Face::NegZ,
+        ];
         for (i, f) in order.into_iter().enumerate() {
             assert_eq!(f.index(), i as u32);
             assert_eq!(Face::from_index(i as u32), f);

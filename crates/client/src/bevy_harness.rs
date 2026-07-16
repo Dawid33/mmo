@@ -14,7 +14,7 @@ use crossbeam::channel::{unbounded, Receiver};
 use game::{ClientId, ClientUpdateEvent, GameEventKind, InputEvent, Key, ServerPacket};
 
 use crate::renderer::bridge::{
-    drain_client_updates, drain_region_updates, Regions, RegionRoots, SimEntityMap,
+    drain_client_updates, drain_region_updates, RegionRoots, Regions, SimEntityMap,
 };
 use crate::renderer::hud::HudStatus;
 use crate::renderer::input::forward_input;
@@ -74,7 +74,12 @@ impl BevyInputHarness {
 
         let client_to_server = client.client_packet_recv();
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();
-        let server = LocalServer::new(client_to_server, server_to_client_send).expect("local server");
+        let server = LocalServer::new_with_generator(
+            client_to_server,
+            server_to_client_send,
+            crate::local_server::lightweight_test_generator(),
+        )
+        .expect("local server");
 
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
@@ -95,7 +100,11 @@ impl BevyInputHarness {
             // Same ordering SimBridgePlugin uses: forward_input BEFORE the drains.
             .add_systems(
                 PreUpdate,
-                (forward_input, (drain_client_updates, drain_region_updates).chain()).chain(),
+                (
+                    forward_input,
+                    (drain_client_updates, drain_region_updates).chain(),
+                )
+                    .chain(),
             );
 
         // Stub primary window: all three components on one entity so both
@@ -147,10 +156,14 @@ impl BevyInputHarness {
         // game_recv BEFORE this Tick, so the press is registered, then the Tick
         // runs the sim toggle in the same drain.
         self.client.send_tick();
-        self.client.pump(&self.server_to_client).expect("client pump");
+        self.client
+            .pump(&self.server_to_client)
+            .expect("client pump");
         self.server.pump().expect("server pump");
         self.server.tick();
-        self.client.pump(&self.server_to_client).expect("client reconcile pump");
+        self.client
+            .pump(&self.server_to_client)
+            .expect("client reconcile pump");
 
         // Back: drain this tick's region updates -> apply the cursor grab.
         self.app.update();
@@ -161,7 +174,14 @@ impl BevyInputHarness {
     /// press edges on the way through.
     fn drain_tap(&mut self) {
         while let Ok(ev) = self.game_tap.try_recv() {
-            if let GameEventKind::PlayerInput(_, InputEvent::Key { key: Key::KeyE, pressed: true }) = ev {
+            if let GameEventKind::PlayerInput(
+                _,
+                InputEvent::Key {
+                    key: Key::KeyE,
+                    pressed: true,
+                },
+            ) = ev
+            {
                 self.e_forwarded += 1;
             }
             if let GameEventKind::PlayerInput(_, InputEvent::MouseMotion { dx, dy }) = ev {
@@ -172,22 +192,36 @@ impl BevyInputHarness {
     }
 
     fn clear_input_edges(&mut self) {
-        self.app.world_mut().resource_mut::<ButtonInput<KeyCode>>().clear();
-        self.app.world_mut().resource_mut::<ButtonInput<MouseButton>>().clear();
+        self.app
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        self.app
+            .world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
         // Same reason: real Bevy's `InputPlugin` recomputes `AccumulatedMouseMotion`
         // every frame and `MinimalPlugins` has none, so an injected delta would
         // otherwise re-fire on every subsequent frame.
-        *self.app.world_mut().resource_mut::<AccumulatedMouseMotion>() =
-            AccumulatedMouseMotion::default();
+        *self
+            .app
+            .world_mut()
+            .resource_mut::<AccumulatedMouseMotion>() = AccumulatedMouseMotion::default();
     }
 
     // --- input entry points ---
 
     pub fn press_key(&mut self, code: KeyCode) {
-        self.app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(code);
+        self.app
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(code);
     }
     pub fn release_key(&mut self, code: KeyCode) {
-        self.app.world_mut().resource_mut::<ButtonInput<KeyCode>>().release(code);
+        self.app
+            .world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .release(code);
     }
     pub fn press_e(&mut self) {
         self.press_key(KeyCode::KeyE);
@@ -199,7 +233,10 @@ impl BevyInputHarness {
     /// Inject one frame's worth of raw mouse motion. Consumed by the next
     /// `step()` and cleared afterwards, so one injection == one frame.
     pub fn move_mouse(&mut self, delta: Vec2) {
-        self.app.world_mut().resource_mut::<AccumulatedMouseMotion>().delta = delta;
+        self.app
+            .world_mut()
+            .resource_mut::<AccumulatedMouseMotion>()
+            .delta = delta;
     }
 
     /// Override the coalescing window. `Duration::ZERO` = emit every frame.

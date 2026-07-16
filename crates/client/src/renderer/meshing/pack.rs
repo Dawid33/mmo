@@ -83,8 +83,8 @@ pub fn shade(ao: u8) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ao::AO_CURVE;
+    use super::*;
 
     #[test]
     fn roundtrips_across_the_full_domain() {

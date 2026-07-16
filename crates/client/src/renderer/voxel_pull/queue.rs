@@ -35,14 +35,58 @@ use bevy::{
 };
 
 use super::arena::GpuQuadArena;
+use super::gpu::{ActiveNearMode, GpuNearViewBuffers};
 use super::pipeline::{
     VoxelPullDepthPipeline, VoxelPullDepthPipelineKey, VoxelPullPipeline, VoxelPullPipelineKey,
 };
 use super::prepare::GpuChunkQuads;
-use super::ExtractedChunkQuads;
 
-/// The draw chain for one pulled chunk: bind the pipeline, bind the mesh view
-/// bind group at group 0, then bind the shared arena at group 1 and issue the draw.
+/// View-owned CPU-visible draws used by the grouped-direct fallback. A single
+/// NonMesh phase item reads this component and emits the contained direct draws.
+#[derive(Component, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ViewChunkDrawList(pub Vec<GpuChunkQuads>);
+
+/// Small pure model used to pin phase-item grouping independently of Bevy's
+/// phase internals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupedPhasePlan {
+    view_count: usize,
+    visible_chunks_per_view: usize,
+}
+
+impl GroupedPhasePlan {
+    pub const fn new(view_count: usize, visible_chunks_per_view: usize) -> Self {
+        Self {
+            view_count,
+            visible_chunks_per_view,
+        }
+    }
+
+    pub const fn phase_item_count(self) -> usize {
+        self.view_count
+    }
+
+    pub const fn direct_draw_count(self) -> usize {
+        self.view_count * self.visible_chunks_per_view
+    }
+}
+
+pub fn grouped_draw_list(
+    frustum: &Frustum,
+    chunks: impl IntoIterator<Item = (GpuChunkQuads, Vec3, Vec3, bool)>,
+) -> ViewChunkDrawList {
+    ViewChunkDrawList(
+        chunks
+            .into_iter()
+            .filter_map(|(gpu, center, half_extents, active)| {
+                (active && chunk_in_view(frustum, center, half_extents)).then_some(gpu)
+            })
+            .collect(),
+    )
+}
+
+/// The grouped draw chain: bind the pipeline and view once, then loop the
+/// view's CPU-visible chunks while the arena bind group stays bound.
 pub type DrawVoxelPull = (SetItemPipeline, SetMeshViewBindGroup<0>, DrawChunkQuads);
 
 /// The per-view frustum test for one extracted chunk, mirroring bevy's own
@@ -65,58 +109,82 @@ pub fn chunk_in_view(frustum: &Frustum, chunk_center: Vec3, chunk_half_extents: 
 pub struct DrawChunkQuads;
 
 impl<P: PhaseItem> RenderCommand<P> for DrawChunkQuads {
-    type Param = SRes<GpuQuadArena>;
-    type ViewQuery = ();
-    type ItemQuery = Read<GpuChunkQuads>;
+    type Param = (SRes<GpuQuadArena>, SRes<ActiveNearMode>);
+    type ViewQuery = (Read<ViewChunkDrawList>, Option<Read<GpuNearViewBuffers>>);
+    type ItemQuery = ();
 
     fn render<'w>(
         _item: &P,
-        _view: ROQueryItem<'w, '_, Self::ViewQuery>,
-        gpu: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        arena: SystemParamItem<'w, '_, Self::Param>,
+        (draws, gpu_view): ROQueryItem<'w, '_, Self::ViewQuery>,
+        _item_entity: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
+        (arena, mode): SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let Some(gpu) = gpu else {
-            return RenderCommandResult::Skip;
-        };
         let arena = arena.into_inner();
+        let mode = mode.into_inner();
+        if *mode == ActiveNearMode::Disabled {
+            return RenderCommandResult::Skip;
+        }
         let Some(bind_group) = &arena.bind_group else {
             return RenderCommandResult::Skip;
         };
         pass.set_bind_group(1, bind_group, &[]);
-        // Six vertices per quad; the vertex shader pulls geometry from group 1.
-        pass.draw(
-            gpu.record_start * 6..(gpu.record_start + gpu.quad_count) * 6,
-            gpu.chunk_slot..gpu.chunk_slot + 1,
-        );
+        if let (ActiveNearMode::GpuDriven { indirect_count }, Some(gpu_view)) = (*mode, gpu_view) {
+            if indirect_count {
+                pass.multi_draw_indirect_count(
+                    &gpu_view.indirect,
+                    0,
+                    &gpu_view.count,
+                    0,
+                    gpu_view.slot_count,
+                );
+            } else {
+                pass.multi_draw_indirect(&gpu_view.indirect, 0, gpu_view.slot_count);
+            }
+            return RenderCommandResult::Success;
+        }
+        for gpu in &draws.0 {
+            // Six vertices per quad; the vertex shader pulls geometry from group 1.
+            pass.draw(
+                gpu.record_start * 6..(gpu.record_start + gpu.quad_count) * 6,
+                gpu.chunk_slot..gpu.chunk_slot + 1,
+            );
+        }
         RenderCommandResult::Success
     }
 }
 
 pub fn queue_voxel_pull(
+    mode: Res<ActiveNearMode>,
     pipeline: Res<VoxelPullPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<VoxelPullPipeline>>,
     cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<Opaque3d>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     views: Query<(
+        Entity,
         &ExtractedView,
-        &Frustum,
         &Msaa,
         Has<DepthPrepass>,
         Has<NormalPrepass>,
         Has<MotionVectorPrepass>,
         Has<DeferredPrepass>,
     )>,
-    chunks: Query<(Entity, &MainEntity, &ExtractedChunkQuads)>,
     mut next_tick: Local<Tick>,
-    mut debug_frame: Local<u32>,
 ) {
-    *debug_frame = debug_frame.wrapping_add(1);
-    let debug_this_frame = *debug_frame % 60 == 0 && std::env::var_os("VOXEL_PULL_DEBUG").is_some();
+    if *mode == ActiveNearMode::Disabled {
+        return;
+    }
     let draw = draw_functions.read().id::<DrawVoxelPull>();
-    for (view, frustum, msaa, depth_prepass, normal_prepass, motion_prepass, deferred_prepass) in
-        &views
+    for (
+        view_entity,
+        view,
+        msaa,
+        depth_prepass,
+        normal_prepass,
+        motion_prepass,
+        deferred_prepass,
+    ) in &views
     {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
             continue;
@@ -149,41 +217,27 @@ pub fn queue_voxel_pull(
                 view_layout_key,
             },
         );
-        let mut total = 0u32;
-        let mut kept = 0u32;
-        for (entity, main_entity, chunk) in &chunks {
-            total += 1;
-            if !chunk_in_view(frustum, chunk.center, chunk.half_extents) {
-                continue;
-            }
-            kept += 1;
-            // Bump the change tick so the bin is rebuilt (mirrors the example).
-            let this_tick = next_tick.get() + 1;
-            next_tick.set(this_tick);
-            phase.add(
-                Opaque3dBatchSetKey {
-                    pipeline: pipeline_id,
-                    draw_function: draw,
-                    material_bind_group_index: None,
-                    lightmap_slab: None,
-                    vertex_slab: default(),
-                    index_slab: None,
-                },
-                Opaque3dBinKey {
-                    asset_id: AssetId::<Mesh>::invalid().untyped(),
-                },
-                (entity, *main_entity),
-                InputUniformIndex::default(),
-                BinnedRenderPhaseType::NonMesh,
-                *next_tick,
-            );
-        }
-        if debug_this_frame {
-            info!(
-                "[pull-cull] forward view {:?}: {kept}/{total} chunks in frustum",
-                view.retained_view_entity
-            );
-        }
+        // One representative NonMesh item per view. Its render command loops
+        // `ViewChunkDrawList`, so chunk count no longer inflates phase bins.
+        let this_tick = next_tick.get() + 1;
+        next_tick.set(this_tick);
+        phase.add(
+            Opaque3dBatchSetKey {
+                pipeline: pipeline_id,
+                draw_function: draw,
+                material_bind_group_index: None,
+                lightmap_slab: None,
+                vertex_slab: default(),
+                index_slab: None,
+            },
+            Opaque3dBinKey {
+                asset_id: AssetId::<Mesh>::invalid().untyped(),
+            },
+            (view_entity, MainEntity::from(view_entity)),
+            InputUniformIndex::default(),
+            BinnedRenderPhaseType::NonMesh,
+            *next_tick,
+        );
     }
 }
 
@@ -198,17 +252,20 @@ pub type DrawVoxelPullDepth = (SetItemPipeline, SetPrepassViewBindGroup<0>, Draw
 /// Mirrors `queue_voxel_pull` (same per-view frustum cull, same `NonMesh` bin),
 /// but targets `Opaque3dPrepass` with the depth pipeline and prepass draw chain.
 pub fn queue_voxel_pull_prepass(
+    mode: Res<ActiveNearMode>,
     pipeline: Res<VoxelPullDepthPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<VoxelPullDepthPipeline>>,
     cache: Res<PipelineCache>,
     draw_functions: Res<DrawFunctions<Opaque3dPrepass>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3dPrepass>>,
-    views: Query<(&ExtractedView, &Frustum, &Msaa)>,
-    chunks: Query<(Entity, &MainEntity, &ExtractedChunkQuads)>,
+    views: Query<(Entity, &ExtractedView, &Msaa)>,
     mut next_tick: Local<Tick>,
 ) {
+    if *mode == ActiveNearMode::Disabled {
+        return;
+    }
     let draw = draw_functions.read().id::<DrawVoxelPullDepth>();
-    for (view, frustum, msaa) in &views {
+    for (view_entity, view, msaa) in &views {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
             continue; // this view runs no prepass
         };
@@ -222,29 +279,24 @@ pub fn queue_voxel_pull_prepass(
                 unclipped_depth_ortho: false,
             },
         );
-        for (entity, main_entity, chunk) in &chunks {
-            if !chunk_in_view(frustum, chunk.center, chunk.half_extents) {
-                continue;
-            }
-            let this_tick = next_tick.get() + 1;
-            next_tick.set(this_tick);
-            phase.add(
-                OpaqueNoLightmap3dBatchSetKey {
-                    pipeline: pipeline_id,
-                    draw_function: draw,
-                    material_bind_group_index: None,
-                    vertex_slab: default(),
-                    index_slab: None,
-                },
-                OpaqueNoLightmap3dBinKey {
-                    asset_id: AssetId::<Mesh>::invalid().untyped(),
-                },
-                (entity, *main_entity),
-                InputUniformIndex::default(),
-                BinnedRenderPhaseType::NonMesh,
-                *next_tick,
-            );
-        }
+        let this_tick = next_tick.get() + 1;
+        next_tick.set(this_tick);
+        phase.add(
+            OpaqueNoLightmap3dBatchSetKey {
+                pipeline: pipeline_id,
+                draw_function: draw,
+                material_bind_group_index: None,
+                vertex_slab: default(),
+                index_slab: None,
+            },
+            OpaqueNoLightmap3dBinKey {
+                asset_id: AssetId::<Mesh>::invalid().untyped(),
+            },
+            (view_entity, MainEntity::from(view_entity)),
+            InputUniformIndex::default(),
+            BinnedRenderPhaseType::NonMesh,
+            *next_tick,
+        );
     }
 }
 
@@ -261,6 +313,7 @@ pub fn queue_voxel_pull_prepass(
 /// depth — flagged via `LightEntity::Directional` into the pipeline key, matching
 /// the `UNCLIPPED_DEPTH_ORTHO` bit bevy sets in `check_views_lights_need_specialization`.
 pub fn queue_voxel_pull_shadows(
+    mode: Res<ActiveNearMode>,
     pipeline: Res<VoxelPullDepthPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<VoxelPullDepthPipeline>>,
     cache: Res<PipelineCache>,
@@ -270,14 +323,16 @@ pub fn queue_voxel_pull_shadows(
     // Each light view carries its LightEntity kind, ExtractedView (for the retained
     // id keying the shadow phase), and Frustum (for culling), inserted together in
     // `prepare_lights`.
-    light_views: Query<(&LightEntity, &ExtractedView, &Frustum)>,
-    chunks: Query<(Entity, &MainEntity, &ExtractedChunkQuads)>,
+    light_views: Query<(&LightEntity, &ExtractedView)>,
     mut next_tick: Local<Tick>,
 ) {
+    if *mode == ActiveNearMode::Disabled {
+        return;
+    }
     let draw = draw_functions.read().id::<DrawVoxelPullDepth>();
     for view_lights in &view_lights {
         for light_view_entity in view_lights.lights.iter().copied() {
-            let Ok((light_entity, light_view, frustum)) = light_views.get(light_view_entity) else {
+            let Ok((light_entity, light_view)) = light_views.get(light_view_entity) else {
                 continue;
             };
             let Some(phase) = shadow_phases.get_mut(&light_view.retained_view_entity) else {
@@ -293,29 +348,24 @@ pub fn queue_voxel_pull_shadows(
                     unclipped_depth_ortho: is_directional,
                 },
             );
-            for (entity, main_entity, chunk) in &chunks {
-                if !chunk_in_view(frustum, chunk.center, chunk.half_extents) {
-                    continue;
-                }
-                let this_tick = next_tick.get() + 1;
-                next_tick.set(this_tick);
-                phase.add(
-                    ShadowBatchSetKey {
-                        pipeline: pipeline_id,
-                        draw_function: draw,
-                        material_bind_group_index: None,
-                        vertex_slab: default(),
-                        index_slab: None,
-                    },
-                    ShadowBinKey {
-                        asset_id: AssetId::<Mesh>::invalid().untyped(),
-                    },
-                    (entity, *main_entity),
-                    InputUniformIndex::default(),
-                    BinnedRenderPhaseType::NonMesh,
-                    *next_tick,
-                );
-            }
+            let this_tick = next_tick.get() + 1;
+            next_tick.set(this_tick);
+            phase.add(
+                ShadowBatchSetKey {
+                    pipeline: pipeline_id,
+                    draw_function: draw,
+                    material_bind_group_index: None,
+                    vertex_slab: default(),
+                    index_slab: None,
+                },
+                ShadowBinKey {
+                    asset_id: AssetId::<Mesh>::invalid().untyped(),
+                },
+                (light_view_entity, MainEntity::from(light_view_entity)),
+                InputUniformIndex::default(),
+                BinnedRenderPhaseType::NonMesh,
+                *next_tick,
+            );
         }
     }
 }
@@ -323,6 +373,45 @@ pub fn queue_voxel_pull_shadows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouped_plan_has_one_phase_item_per_view_not_per_chunk() {
+        let plan = GroupedPhasePlan::new(3, 257);
+
+        assert_eq!(plan.phase_item_count(), 3);
+        assert_eq!(plan.direct_draw_count(), 771);
+    }
+
+    #[test]
+    fn grouped_draw_list_keeps_only_cpu_visible_chunks() {
+        let frustum = camera_frustum(1000.0);
+        let inside = GpuChunkQuads {
+            record_start: 10,
+            quad_count: 4,
+            chunk_slot: 2,
+        };
+        let behind = GpuChunkQuads {
+            record_start: 30,
+            quad_count: 8,
+            chunk_slot: 5,
+        };
+
+        let list = grouped_draw_list(
+            &frustum,
+            [
+                (inside, Vec3::new(0.0, 0.0, -100.0), Vec3::splat(16.0), true),
+                (behind, Vec3::new(0.0, 0.0, 100.0), Vec3::splat(16.0), true),
+                (
+                    behind,
+                    Vec3::new(0.0, 0.0, -100.0),
+                    Vec3::splat(16.0),
+                    false,
+                ),
+            ],
+        );
+
+        assert_eq!(list.0, vec![inside]);
+    }
 
     /// A camera frustum built the way `update_frusta` builds the real one:
     /// infinite-reverse-Z perspective clip matrix, far half-space patched in

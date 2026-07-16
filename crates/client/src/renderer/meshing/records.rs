@@ -90,23 +90,37 @@ pub fn decode_corner(rec: QuadRecord, slot: u32) -> DecodedCorner {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::super::block_textures::BlockTextureLayers;
     use super::super::binary::{Face, Quad};
     use super::super::emit;
     use super::super::pack;
-    use super::super::super::block_textures::BlockTextureLayers;
+    use super::*;
     use bevy::mesh::{Indices, VertexAttributeValues};
     use game::BlockId;
 
     fn sample_quad(face: Face, ao: [u8; 4]) -> Quad {
-        Quad { min: [5, 6, 7], w: 2, h: 3, face, block: BlockId(1), ao }
+        Quad {
+            min: [5, 6, 7],
+            w: 2,
+            h: 3,
+            face,
+            block: BlockId(1),
+            ao,
+        }
     }
 
     #[test]
     fn record_decode_matches_the_indexed_mesh_oracle() {
         let mut layers = BlockTextureLayers::default();
         layers.0.insert(BlockId(1), [10, 20, 30]);
-        for face in [Face::PosX, Face::NegX, Face::PosY, Face::NegY, Face::PosZ, Face::NegZ] {
+        for face in [
+            Face::PosX,
+            Face::NegX,
+            Face::PosY,
+            Face::NegY,
+            Face::PosZ,
+            Face::NegZ,
+        ] {
             // [3,0,0,3] triggers the AO flip rule (ao[0]+ao[3] > ao[1]+ao[2]).
             for ao in [[3u8, 3, 3, 3], [3, 0, 0, 3]] {
                 let q = sample_quad(face, ao);
@@ -114,13 +128,20 @@ mod tests {
                 let VertexAttributeValues::Uint32x2(packed) = mesh
                     .attribute(crate::renderer::voxel_material::ATTRIBUTE_VOXEL_PACKED)
                     .unwrap()
-                else { panic!("packed attribute") };
-                let Indices::U32(idx) = mesh.indices().unwrap() else { panic!("u32 indices") };
+                else {
+                    panic!("packed attribute")
+                };
+                let Indices::U32(idx) = mesh.indices().unwrap() else {
+                    panic!("u32 indices")
+                };
                 let rec = quads_to_records(&[q], &layers)[0];
                 for (slot, &i) in idx.iter().enumerate() {
                     let oracle = pack::unpack(packed[i as usize]);
                     let got = decode_corner(rec, slot as u32);
-                    assert_eq!(got.pos, oracle.pos, "{face:?} ao={ao:?} slot {slot}: position");
+                    assert_eq!(
+                        got.pos, oracle.pos,
+                        "{face:?} ao={ao:?} slot {slot}: position"
+                    );
                     assert_eq!(got.ao, oracle.ao, "{face:?} ao={ao:?} slot {slot}: ao");
                     assert_eq!(got.layer, oracle.layer, "{face:?} slot {slot}: layer");
                     assert_eq!(got.face, face, "face survives the roundtrip");

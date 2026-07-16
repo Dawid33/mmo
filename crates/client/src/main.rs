@@ -3,9 +3,9 @@
 use bevy::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use crossbeam::channel::{Receiver, Sender};
-use game::GameEventKind;
 #[cfg(not(target_arch = "wasm32"))]
 use game::ClientUpdateEvent;
+use game::GameEventKind;
 #[cfg(not(target_arch = "wasm32"))]
 use log::trace;
 #[cfg(not(target_arch = "wasm32"))]
@@ -20,13 +20,54 @@ use client::sim_driver;
 use client::GameInstanceManager;
 
 /// Share of total cores given to the AsyncCompute task pool, which runs the
-/// background chunk-meshing jobs (`renderer/meshing.rs`). Bevy's default is
-/// 25% capped at 4 threads, which throttles the join-time meshing burst
-/// (thousands of dense subchunks queued at once); we take half the cores,
-/// uncapped, and leave the rest to the Compute pool's "whatever remains".
+/// background chunk-meshing jobs (`renderer/meshing.rs`). Normal clients take
+/// half the cores; render benchmarks set `VOXEL_CLIENT_WORKER_THREADS` so the
+/// load phase cannot monopolize a development machine.
 const ASYNC_COMPUTE_PERCENT: f32 = 0.5;
 const ASYNC_COMPUTE_MIN_THREADS: usize = 1;
 const ASYNC_COMPUTE_MAX_THREADS: usize = usize::MAX;
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_CLIENT_WORKER_THREADS: usize = 4;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn client_worker_cap(value: Option<&str>) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_CLIENT_WORKER_THREADS);
+    };
+    let cap = value.parse::<usize>().map_err(|_| {
+        format!("invalid VOXEL_CLIENT_WORKER_THREADS value `{value}` (expected integer >= 4)")
+    })?;
+    if cap < 4 {
+        return Err(format!(
+            "invalid VOXEL_CLIENT_WORKER_THREADS value `{value}` (expected integer >= 4)"
+        ));
+    }
+    Ok(cap)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn client_worker_cap_from_env() -> usize {
+    let value = std::env::var("VOXEL_CLIENT_WORKER_THREADS").ok();
+    client_worker_cap(value.as_deref()).unwrap_or_else(|message| panic!("{message}"))
+}
+
+fn task_pool_options(worker_cap: Option<usize>) -> bevy::app::TaskPoolOptions {
+    let mut options = bevy::app::TaskPoolOptions {
+        async_compute: bevy::app::TaskPoolThreadAssignmentPolicy {
+            min_threads: ASYNC_COMPUTE_MIN_THREADS,
+            max_threads: ASYNC_COMPUTE_MAX_THREADS,
+            percent: ASYNC_COMPUTE_PERCENT,
+            on_thread_spawn: None,
+            on_thread_destroy: None,
+        },
+        ..Default::default()
+    };
+    if let Some(cap) = worker_cap {
+        options.max_total_threads = cap;
+        options.async_compute.max_threads = cap;
+    }
+    options
+}
 
 /// Event sent from client to game thread.
 #[cfg(not(target_arch = "wasm32"))]
@@ -81,6 +122,14 @@ fn start_game_thread() -> Sender<Command> {
         }
     });
     return command_send;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn app_exit_code(exit: &bevy::app::AppExit) -> i32 {
+    match exit {
+        bevy::app::AppExit::Success => 0,
+        bevy::app::AppExit::Error(code) => i32::from(code.get()),
+    }
 }
 
 fn main() {
@@ -150,6 +199,15 @@ fn main() {
         title: "Labour of Love".into(),
         ..Default::default()
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    if renderer::render_bench::enabled() {
+        primary_window.resolution = bevy::window::WindowResolution::new(
+            renderer::render_bench::BENCHMARK_WIDTH,
+            renderer::render_bench::BENCHMARK_HEIGHT,
+        )
+        .with_scale_factor_override(1.0);
+        primary_window.present_mode = bevy::window::PresentMode::AutoNoVsync;
+    }
     // Track the canvas's parent (the full-viewport <body> in index.html) so the
     // render buffer resizes with the browser window instead of CSS-stretching.
     #[cfg(target_arch = "wasm32")]
@@ -158,6 +216,10 @@ fn main() {
     }
 
     let mut app = App::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    let task_pool_options = task_pool_options(Some(client_worker_cap_from_env()));
+    #[cfg(target_arch = "wasm32")]
+    let task_pool_options = task_pool_options(None);
     app.add_plugins(
         DefaultPlugins
             .set(bevy::window::WindowPlugin {
@@ -172,18 +234,7 @@ fn main() {
                 file_path: asset_path.into(),
                 ..Default::default()
             })
-            .set(bevy::app::TaskPoolPlugin {
-                task_pool_options: bevy::app::TaskPoolOptions {
-                    async_compute: bevy::app::TaskPoolThreadAssignmentPolicy {
-                        min_threads: ASYNC_COMPUTE_MIN_THREADS,
-                        max_threads: ASYNC_COMPUTE_MAX_THREADS,
-                        percent: ASYNC_COMPUTE_PERCENT,
-                        on_thread_spawn: None,
-                        on_thread_destroy: None,
-                    },
-                    ..Default::default()
-                },
-            }),
+            .set(bevy::app::TaskPoolPlugin { task_pool_options }),
     )
     .add_plugins(renderer::SimBridgePlugin {
         client_recv,
@@ -195,7 +246,7 @@ fn main() {
     app.insert_resource(sim)
         .add_systems(Update, sim_driver::drive_sim);
 
-    app.run();
+    let app_exit = app.run();
 
     #[cfg(all(feature = "pyroscope", not(target_arch = "wasm32")))]
     if let Some(agent) = agent_running {
@@ -207,4 +258,55 @@ fn main() {
     let _ = game_send.send(GameEventKind::Quit);
     #[cfg(not(target_arch = "wasm32"))]
     let _ = command_send.send(Command::Quit);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let exit_code = app_exit_code(&app_exit);
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = app_exit;
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_worker_cap_defaults_to_four() {
+        assert_eq!(client_worker_cap(None), Ok(4));
+    }
+
+    #[test]
+    fn client_worker_cap_accepts_valid_override() {
+        assert_eq!(client_worker_cap(Some("6")), Ok(6));
+    }
+
+    #[test]
+    fn client_worker_cap_rejects_invalid_values() {
+        let malformed = client_worker_cap(Some("many")).unwrap_err();
+        assert!(malformed.contains("VOXEL_CLIENT_WORKER_THREADS"));
+        assert!(malformed.contains("integer >= 4"));
+
+        let undersized = client_worker_cap(Some("3")).unwrap_err();
+        assert!(undersized.contains("VOXEL_CLIENT_WORKER_THREADS"));
+        assert!(undersized.contains("integer >= 4"));
+    }
+
+    #[test]
+    fn client_worker_cap_limits_combined_bevy_pools() {
+        let options = task_pool_options(Some(client_worker_cap(None).unwrap()));
+        assert_eq!(options.max_total_threads, 4);
+        assert_eq!(options.async_compute.max_threads, 4);
+        assert_eq!(options.async_compute.percent, ASYNC_COMPUTE_PERCENT);
+    }
+
+    #[test]
+    fn bevy_app_errors_propagate_to_the_process_status() {
+        assert_eq!(app_exit_code(&bevy::app::AppExit::Success), 0);
+        assert_eq!(app_exit_code(&bevy::app::AppExit::error()), 1);
+        assert_eq!(app_exit_code(&bevy::app::AppExit::from_code(23)), 23);
+    }
 }

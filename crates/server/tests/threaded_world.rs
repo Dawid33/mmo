@@ -7,20 +7,25 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
-    ClientId, ClientPacket, GameEvent, GameEventKind, InlineLodBuilder, InputEvent, Key,
-    LodBuilder, RegionCoords, RegionOutput, ServerEvent, ServerPacket, WorldManager, SPAWN_REGION,
-    UNLOAD_GRACE_MS,
+    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind,
+    InlineLodBuilder, InputEvent, Key, LodBuilder, RegionCoords, RegionOutput, ServerEvent,
+    ServerPacket, SubChunk, WorldManager, SPAWN_REGION, UNLOAD_GRACE_MS,
 };
 use server::region_threads::ThreadRegionSpawner;
 
-/// A fresh region's first build (worldgen chunks -> physics colliders,
-/// block-scale + chisel-scale voxels shapes — see `Region::from_chunks`/
-/// `seed_terrain_genesis`) is 32×32 columns of real worldgen since
-/// REGION_CHUNKS grew to 32 — several seconds each in debug, and 9 build in
-/// parallel on real OS threads. Steady state (ticking, shutdown of
-/// already-running regions) is fast — only the initial spawn wait needs a
-/// generous budget.
-const REGION_STARTUP_BUDGET: Duration = Duration::from_secs(120);
+const REGION_STARTUP_BUDGET: Duration = Duration::from_secs(10);
+
+fn lightweight_columns() -> Vec<(ColumnCoords, Column)> {
+    vec![(
+        ColumnCoords::new(4, 4),
+        Column::new(
+            0,
+            Block::new(BlockId::AIR),
+            Block::new(BlockId::AIR),
+            vec![SubChunk::Dense(Box::new(Chunk::flat_floor(8)))],
+        ),
+    )]
+}
 
 struct Rig {
     manager: WorldManager<ThreadRegionSpawner>,
@@ -38,38 +43,28 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        let registry = game::BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron"))
-            .expect("invalid block manifest");
-        let resolve = |name: &str| {
-            registry
-                .id_of(name)
-                .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
-        };
-        let materials = worldgen::material::Materials {
-            stone: resolve("stone"),
-            dirt: resolve("dirt"),
-            grass: resolve("grass"),
-            sand: resolve("sand"),
-            water: resolve("water"),
-        };
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let (lod_result_send, lod_result_recv) = unbounded();
         let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
-            coarse: Box::new(move |key| {
-                worldgen::coarse_tile(key, worldgen::WORLD_SEED, materials)
-            }),
+            coarse: Box::new(|_| Vec::new()),
             out: lod_result_send,
         });
         let manager = WorldManager::new(
             ThreadRegionSpawner::default(),
-            Box::new(move |rc| worldgen::generate_region(rc, worldgen::WORLD_SEED, materials)),
+            Box::new(|_| lightweight_columns()),
             out_send,
             region_out_send,
             lod_builder,
             lod_result_recv,
         );
-        Rig { manager, region_out, packets, start: Instant::now(), seen_snapshots: BTreeSet::new() }
+        Rig {
+            manager,
+            region_out,
+            packets,
+            start: Instant::now(),
+            seen_snapshots: BTreeSet::new(),
+        }
     }
 
     /// Hand one drained region output to the manager, first recording it if
@@ -87,23 +82,6 @@ impl Rig {
     }
     fn event(&mut self, ev: ServerEvent) {
         assert!(self.manager.handle_server_event(ev, self.now_ms()));
-        self.settle();
-    }
-    /// Drain region outputs until quiet for 100ms OR a 500ms total budget
-    /// runs out, whichever comes first. The budget is load-bearing: running
-    /// regions tick every TICK_RATE ms on their own threads, so once anything
-    /// is ticking the channel is never reliably quiet and an unbounded
-    /// wait-for-quiet could spin forever. Only meaningful for steady-state
-    /// traffic — a region's first build takes far longer than this window,
-    /// so brand-new spawns need `wait_for_snapshots` instead.
-    fn settle(&mut self) {
-        let budget = Instant::now() + Duration::from_millis(500);
-        while Instant::now() < budget {
-            match self.region_out.recv_timeout(Duration::from_millis(100)) {
-                Ok((rc, output)) => self.absorb(rc, output),
-                Err(_) => return,
-            }
-        }
     }
     /// Drain ALL pending packets once and return the set of region ids that
     /// got a snapshot. (try_iter consumes; never call this expecting packets
@@ -132,7 +110,9 @@ impl Rig {
                 "regions never snapshotted: missing {:?}",
                 want.difference(&self.seen_snapshots).collect::<Vec<_>>()
             );
-            if let Ok((rc, output)) = self.region_out.recv_timeout(remaining.min(Duration::from_millis(200)))
+            if let Ok((rc, output)) = self
+                .region_out
+                .recv_timeout(remaining.min(Duration::from_millis(200)))
             {
                 self.absorb(rc, output);
             }
@@ -140,10 +120,8 @@ impl Rig {
     }
 }
 
-// Real-terrain region startup now fits REGION_STARTUP_BUDGET comfortably: the
-// genesis collider path (Rollback::seed_terrain_genesis) inserts colliders
-// unlogged (no O(N^2) PhysicsState snapshot) and collapses fully-solid chunks
-// to a single cuboid, so one region builds in ~1 s (was ~9-23 s).
+// These tests exercise real OS-thread routing and lifecycle behavior with a
+// one-column terrain fixture; production worldgen has its own focused suite.
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn roaming_client_cycles_regions_across_threads() {
@@ -153,7 +131,10 @@ fn roaming_client_cycles_regions_across_threads() {
     // Subscribe the 3x3 window around home.
     let window = SPAWN_REGION.window_3x3();
     for rc in &window {
-        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(*rc), 0));
+        rig.event(ServerEvent::ClientPacket(
+            ClientPacket::RequestRegionConnection(*rc),
+            0,
+        ));
     }
     let mut running = rig.manager.running_regions();
     running.sort();
@@ -172,23 +153,37 @@ fn roaming_client_cycles_regions_across_threads() {
     // Region threads tick on their own: SyncClock/GameEvent packets arrive
     // without the test doing anything. All 9 are already up (snapshots
     // arrived above), so steady-state ticking is fast.
-    std::thread::sleep(Duration::from_millis(600));
-    rig.settle();
-    let ticked = rig
-        .packets
-        .try_iter()
-        .filter(|(_, p)| matches!(p, ServerPacket::GameEvent(_)))
-        .count();
-    assert!(ticked >= 9, "all 9 regions tick independently (saw {ticked} events)");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut ticked = 0;
+    while ticked < 9 && Instant::now() < deadline {
+        if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(50)) {
+            rig.absorb(rc, output);
+        }
+        ticked += rig
+            .packets
+            .try_iter()
+            .filter(|(_, p)| matches!(p, ServerPacket::GameEvent(_)))
+            .count();
+    }
+    assert!(
+        ticked >= 9,
+        "all 9 regions tick independently (saw {ticked} events)"
+    );
 
     // Roam east: window shifts from center (0,0) to center (1,0).
     let old_column: Vec<RegionCoords> = (-1..=1).map(|z| RegionCoords::new(-1, z)).collect();
     let new_column: Vec<RegionCoords> = (-1..=1).map(|z| RegionCoords::new(2, z)).collect();
     for rc in &old_column {
-        rig.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(*rc), 0));
+        rig.event(ServerEvent::ClientPacket(
+            ClientPacket::ReleaseRegionConnection(*rc),
+            0,
+        ));
     }
     for rc in &new_column {
-        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(*rc), 0));
+        rig.event(ServerEvent::ClientPacket(
+            ClientPacket::RequestRegionConnection(*rc),
+            0,
+        ));
     }
     for rc in &new_column {
         assert!(rig.manager.running_regions().contains(rc));
@@ -207,7 +202,10 @@ fn roaming_client_cycles_regions_across_threads() {
     // regions are already up and running (built seconds ago), so
     // shutdown-and-serialize is fast — no build cost involved.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while old_column.iter().any(|rc| rig.manager.running_regions().contains(rc)) {
+    while old_column
+        .iter()
+        .any(|rc| rig.manager.running_regions().contains(rc))
+    {
         assert!(Instant::now() < deadline, "released regions failed to stop");
         if let Ok((rc, output)) = rig.region_out.recv_timeout(Duration::from_millis(100)) {
             rig.manager.handle_region_output(rc, output, future);
@@ -240,7 +238,10 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
     // (0,-1) regions are up and relaying to us.
     let window = SPAWN_REGION.window_3x3();
     for rc in &window {
-        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(*rc), 0));
+        rig.event(ServerEvent::ClientPacket(
+            ClientPacket::RequestRegionConnection(*rc),
+            0,
+        ));
     }
     rig.wait_for_snapshots(&window, REGION_STARTUP_BUDGET);
     // Clear the snapshot/sync backlog so the diagnostic list below stays

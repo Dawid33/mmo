@@ -40,12 +40,24 @@ pub fn pair_bit(a: u32, b: u32) -> u16 {
 /// order: +X = x == 31, -X = x == 0, +Y = y == 31, -Y = y == 0, +Z/-Z same.
 fn touched_faces(x: usize, y: usize, z: usize) -> u8 {
     let mut f = 0u8;
-    if x == 31 { f |= 1 << 0; }
-    if x == 0  { f |= 1 << 1; }
-    if y == 31 { f |= 1 << 2; }
-    if y == 0  { f |= 1 << 3; }
-    if z == 31 { f |= 1 << 4; }
-    if z == 0  { f |= 1 << 5; }
+    if x == 31 {
+        f |= 1 << 0;
+    }
+    if x == 0 {
+        f |= 1 << 1;
+    }
+    if y == 31 {
+        f |= 1 << 2;
+    }
+    if y == 0 {
+        f |= 1 << 3;
+    }
+    if z == 31 {
+        f |= 1 << 4;
+    }
+    if z == 0 {
+        f |= 1 << 5;
+    }
     f
 }
 
@@ -79,16 +91,30 @@ pub fn face_connectivity(p: &PaddedVoxels) -> u16 {
                             stack.push((nx, ny, nz));
                         }
                     };
-                    if x + 1 < N { push(x + 1, y, z); }
-                    if x > 0     { push(x - 1, y, z); }
-                    if y + 1 < N { push(x, y + 1, z); }
-                    if y > 0     { push(x, y - 1, z); }
-                    if z + 1 < N { push(x, y, z + 1); }
-                    if z > 0     { push(x, y, z - 1); }
+                    if x + 1 < N {
+                        push(x + 1, y, z);
+                    }
+                    if x > 0 {
+                        push(x - 1, y, z);
+                    }
+                    if y + 1 < N {
+                        push(x, y + 1, z);
+                    }
+                    if y > 0 {
+                        push(x, y - 1, z);
+                    }
+                    if z + 1 < N {
+                        push(x, y, z + 1);
+                    }
+                    if z > 0 {
+                        push(x, y, z - 1);
+                    }
                 }
                 // Union all pairs among the touched faces.
                 for a in 0..6u32 {
-                    if faces >> a & 1 == 0 { continue; }
+                    if faces >> a & 1 == 0 {
+                        continue;
+                    }
                     for b in (a + 1)..6u32 {
                         if faces >> b & 1 == 1 {
                             mask |= pair_bit(a, b);
@@ -113,7 +139,9 @@ pub struct CullingConfig {
 
 impl Default for CullingConfig {
     fn default() -> Self {
-        Self { graph_enabled: true }
+        Self {
+            graph_enabled: true,
+        }
     }
 }
 
@@ -134,8 +162,14 @@ const NO_ENTRY: u8 = 6;
 
 /// Unit steps in `Face::index()` order (PosX, NegX, PosY, NegY, PosZ, NegZ) —
 /// the locked order in which `opposite(d) = d ^ 1`.
-const DIR_STEPS: [[i32; 3]; 6] =
-    [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+const DIR_STEPS: [[i32; 3]; 6] = [
+    [1, 0, 0],
+    [-1, 0, 0],
+    [0, 1, 0],
+    [0, -1, 0],
+    [0, 0, 1],
+    [0, 0, -1],
+];
 
 /// Allocation-retaining storage for the per-frame cave-culling traversal.
 /// `Local` ownership keeps it private to `cull_chunks` and avoids rebuilding
@@ -229,7 +263,11 @@ pub fn cull_chunks(
     // meshes. With the camera inside the domain the gate is safe — the
     // staircase of cells along any in-view sight line is itself a valid
     // BFS path and each of its cells passes the (conservative) sphere test.
-    let frustum = if camera_cell == raw_cell { frustum } else { None };
+    let frustum = if camera_cell == raw_cell {
+        frustum
+    } else {
+        None
+    };
     let in_domain = |cell: [i32; 3]| {
         (0..3).all(|axis| {
             cell[axis] >= lo[axis]
@@ -253,7 +291,11 @@ pub fn cull_chunks(
     while let Some((cell, dirs, entry)) = scratch.queue.pop_front() {
         scratch.reached.insert(cell);
         // Grid-absent cells and chunks not yet carrying a mask: fully open.
-        let mask = grid.0.get(&cell).and_then(|&e| masks.get(e).ok()).map(|c| c.0);
+        let mask = grid
+            .0
+            .get(&cell)
+            .and_then(|&e| masks.get(e).ok())
+            .map(|c| c.0);
         for d in 0..6u8 {
             // No-backtrack: never step opposite to a direction already used.
             if dirs & (1 << (d ^ 1)) != 0 {
@@ -283,7 +325,10 @@ pub fn cull_chunks(
                     neighbor[1] as f32 * 32.0 + 16.0,
                     neighbor[2] as f32 * 32.0 + 16.0,
                 );
-                let sphere = Sphere { center: center.into(), radius: 16.0 * 3f32.sqrt() };
+                let sphere = Sphere {
+                    center: center.into(),
+                    radius: 16.0 * 3f32.sqrt(),
+                };
                 if !frustum.intersects_sphere(&sphere, false) {
                     continue;
                 }
@@ -298,9 +343,14 @@ pub fn cull_chunks(
     // Apply, writing only on change (like `dedupe_ghosts`) to avoid
     // change-detection churn.
     for (key, &entity) in grid.0.iter() {
-        let Ok(mut vis) = chunks.get_mut(entity) else { continue };
-        let want =
-            if scratch.reached.contains(key) { Visibility::Inherited } else { Visibility::Hidden };
+        let Ok(mut vis) = chunks.get_mut(entity) else {
+            continue;
+        };
+        let want = if scratch.reached.contains(key) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
         if *vis != want {
             *vis = want;
         }
@@ -329,7 +379,10 @@ pub fn cull_plugin(app: &mut App) {
 pub fn toggle_culling(keys: Res<ButtonInput<KeyCode>>, mut config: ResMut<CullingConfig>) {
     if keys.just_pressed(KeyCode::F4) {
         config.graph_enabled = !config.graph_enabled;
-        info!("cave culling: {}", if config.graph_enabled { "on" } else { "off" });
+        info!(
+            "cave culling: {}",
+            if config.graph_enabled { "on" } else { "off" }
+        );
     }
 }
 
@@ -343,7 +396,10 @@ pub fn enable_native_occlusion(
     mut commands: Commands,
     cameras: Query<
         Entity,
-        (With<Camera3d>, Without<bevy::core_pipeline::prepass::DepthPrepass>),
+        (
+            With<Camera3d>,
+            Without<bevy::core_pipeline::prepass::DepthPrepass>,
+        ),
     >,
 ) {
     for e in &cameras {
@@ -480,14 +536,20 @@ mod tests {
         app.world_mut()
             .spawn((
                 Camera3d::default(),
-                Camera { is_active: true, ..Default::default() },
+                Camera {
+                    is_active: true,
+                    ..Default::default()
+                },
                 GlobalTransform::from(Transform::from_translation(pos)),
             ))
             .id()
     }
 
     fn vis(app: &App, e: Entity) -> Visibility {
-        *app.world().entity(e).get::<Visibility>().expect("chunk has Visibility")
+        *app.world()
+            .entity(e)
+            .get::<Visibility>()
+            .expect("chunk has Visibility")
     }
 
     /// Camera in the (empty) cell (0,0,0), a fully solid chunk at cell
@@ -500,8 +562,12 @@ mod tests {
             Vec3::new(32.0, 0.0, 0.0),
             vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT],
         );
-        let behind =
-            spawn_chunk(app, Vec3::ZERO, Vec3::new(64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        let behind = spawn_chunk(
+            app,
+            Vec3::ZERO,
+            Vec3::new(64.0, 0.0, 0.0),
+            voxels_with(&[[5, 5, 5]]),
+        );
         (wall, behind)
     }
 
@@ -517,7 +583,11 @@ mod tests {
             wait_until(&mut app, |app| vis(app, behind) == Visibility::Hidden),
             "the chunk behind a solid wall must end Hidden"
         );
-        assert_eq!(vis(&app, wall), Visibility::Inherited, "the wall itself is entered → visible");
+        assert_eq!(
+            vis(&app, wall),
+            Visibility::Inherited,
+            "the wall itself is entered → visible"
+        );
     }
 
     #[test]
@@ -527,12 +597,24 @@ mod tests {
         let mut app = pipeline_app(MeshBudgets::default());
         spawn_camera(&mut app, Vec3::new(8.0, 8.0, 8.0));
         let near = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
-        let far =
-            spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(160.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        let far = spawn_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(160.0, 0.0, 0.0),
+            voxels_with(&[[5, 5, 5]]),
+        );
         assert!(wait_until_settled(&mut app), "pipeline must settle");
         app.update();
-        assert_eq!(vis(&app, near), Visibility::Inherited, "camera's own cell is always visible");
-        assert_eq!(vis(&app, far), Visibility::Inherited, "grid-absent gap must not block sight");
+        assert_eq!(
+            vis(&app, near),
+            Visibility::Inherited,
+            "camera's own cell is always visible"
+        );
+        assert_eq!(
+            vis(&app, far),
+            Visibility::Inherited,
+            "grid-absent gap must not block sight"
+        );
     }
 
     #[test]
@@ -567,10 +649,16 @@ mod tests {
             wait_until(&mut app, |app| vis(app, behind) == Visibility::Hidden),
             "the wall scene must hide the behind chunk first"
         );
-        app.world_mut().resource_mut::<CullingConfig>().graph_enabled = false;
+        app.world_mut()
+            .resource_mut::<CullingConfig>()
+            .graph_enabled = false;
         app.update();
         assert_eq!(vis(&app, wall), Visibility::Inherited);
-        assert_eq!(vis(&app, behind), Visibility::Inherited, "culling off ⇒ everything Inherited");
+        assert_eq!(
+            vis(&app, behind),
+            Visibility::Inherited,
+            "culling off ⇒ everything Inherited"
+        );
     }
 
     #[test]
@@ -579,8 +667,10 @@ mod tests {
         // gets a `ChunkConnectivity`. The BFS must treat the (actually solid)
         // wall as open and NOT hide anything behind it — under-visibility is
         // the failure mode.
-        let mut app =
-            pipeline_app(MeshBudgets { max_in_flight: 0, uploads_per_frame: 0 });
+        let mut app = pipeline_app(MeshBudgets {
+            max_in_flight: 0,
+            uploads_per_frame: 0,
+        });
         spawn_camera(&mut app, Vec3::new(8.0, 8.0, 8.0));
         let wall = spawn_chunk(
             &mut app,
@@ -588,16 +678,27 @@ mod tests {
             Vec3::new(32.0, 0.0, 0.0),
             vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT],
         );
-        let behind =
-            spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        let behind = spawn_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(64.0, 0.0, 0.0),
+            voxels_with(&[[5, 5, 5]]),
+        );
         for _ in 0..3 {
             app.update();
         }
         assert!(
-            app.world().entity(wall).get::<ChunkConnectivity>().is_none(),
+            app.world()
+                .entity(wall)
+                .get::<ChunkConnectivity>()
+                .is_none(),
             "premise: no mask may have landed with a zero meshing budget"
         );
-        assert_eq!(vis(&app, wall), Visibility::Inherited, "mask-less chunk stays visible");
+        assert_eq!(
+            vis(&app, wall),
+            Visibility::Inherited,
+            "mask-less chunk stays visible"
+        );
         assert_eq!(
             vis(&app, behind),
             Visibility::Inherited,
@@ -614,30 +715,49 @@ mod tests {
     #[test]
     fn turning_toward_a_chunk_reveals_it_in_the_same_frame() {
         let mut app = pipeline_app(MeshBudgets::default());
-        app.add_plugins((bevy::transform::TransformPlugin, bevy::camera::CameraProjectionPlugin));
+        app.add_plugins((
+            bevy::transform::TransformPlugin,
+            bevy::camera::CameraProjectionPlugin,
+        ));
         // Camera in cell (0,0,0) looking AWAY (-X) from a chunk at cell (2,0,0).
         let cam = app
             .world_mut()
             .spawn((
                 Camera3d::default(),
-                Camera { is_active: true, ..Default::default() },
+                Camera {
+                    is_active: true,
+                    ..Default::default()
+                },
                 Projection::default(),
                 Transform::from_translation(Vec3::new(8.0, 8.0, 8.0))
                     .looking_to(Vec3::NEG_X, Vec3::Y),
             ))
             .id();
-        let chunk =
-            spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        let chunk = spawn_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(64.0, 0.0, 0.0),
+            voxels_with(&[[5, 5, 5]]),
+        );
         // Anchor at cell (-2,0,0) so the grid bbox contains the camera cell:
         // a camera outside the domain disables the frustum gate entirely
         // (see `cull_chunks`), and this test is about the gate's timing.
-        spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(-64.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        spawn_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(-64.0, 0.0, 0.0),
+            voxels_with(&[[5, 5, 5]]),
+        );
         assert!(
             wait_until(&mut app, |app| vis(app, chunk) == Visibility::Hidden),
             "premise: a chunk fully behind the camera ends Hidden"
         );
         // Turn to face the chunk, then run exactly ONE frame.
-        app.world_mut().entity_mut(cam).get_mut::<Transform>().unwrap().look_to(Vec3::X, Vec3::Y);
+        app.world_mut()
+            .entity_mut(cam)
+            .get_mut::<Transform>()
+            .unwrap()
+            .look_to(Vec3::X, Vec3::Y);
         app.update();
         assert_eq!(
             vis(&app, chunk),
@@ -656,7 +776,10 @@ mod tests {
     #[test]
     fn flying_above_the_band_keeps_onscreen_ground_visible() {
         let mut app = pipeline_app(MeshBudgets::default());
-        app.add_plugins((bevy::transform::TransformPlugin, bevy::camera::CameraProjectionPlugin));
+        app.add_plugins((
+            bevy::transform::TransformPlugin,
+            bevy::camera::CameraProjectionPlugin,
+        ));
         // Ground band: half-solid chunks along +X at cell y = 0.
         let mut ground = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         for z in 0..32 {
@@ -681,7 +804,10 @@ mod tests {
         let pitch = 10f32.to_radians();
         app.world_mut().spawn((
             Camera3d::default(),
-            Camera { is_active: true, ..Default::default() },
+            Camera {
+                is_active: true,
+                ..Default::default()
+            },
             Projection::default(),
             Transform::from_translation(Vec3::new(144.0, 200.0, 144.0))
                 .looking_to(Vec3::new(pitch.cos(), -pitch.sin(), 0.0), Vec3::Y),

@@ -45,12 +45,22 @@ impl SimHarness {
     /// production table's radius. LOD-focused tests opt back in with
     /// `set_lod_table`.
     pub fn new() -> Self {
-        Self::with_lod_table(&[])
+        Self::with_config(&[], 0)
     }
 
     /// `new`, with an explicit LOD ring table (see `new` for why the
     /// default is empty).
     pub fn with_lod_table(lod_table: &'static [(i32, u32)]) -> Self {
+        Self::with_config(lod_table, 0)
+    }
+
+    /// Build a harness with an explicit near-region radius. Crossing tests
+    /// opt into radius 1; home-only tests keep the one-region default.
+    pub fn with_near_radius(near_radius: i32) -> Self {
+        Self::with_config(&[], near_radius)
+    }
+
+    fn with_config(lod_table: &'static [(i32, u32)], near_radius: i32) -> Self {
         game::set_hash_mode(game::HashMode::Full); // enforce hash(before)==hash(after undo) along the driven path
         let (game_event_send, game_event_recv) = unbounded::<GameEventKind>();
         let (bridge_send, bridge_recv) = unbounded::<ClientUpdateEvent>();
@@ -65,10 +75,16 @@ impl SimHarness {
             debug.clone(),
         );
         client.set_lod_table(lod_table);
+        client.set_near_radius(near_radius);
 
         let client_to_server = client.client_packet_recv(); // Receiver<ClientPacket>
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();
-        let server = LocalServer::new(client_to_server, server_to_client_send).expect("local server");
+        let server = LocalServer::new_with_generator(
+            client_to_server,
+            server_to_client_send,
+            crate::local_server::lightweight_test_generator(),
+        )
+        .expect("local server");
 
         Self {
             server,
@@ -82,8 +98,8 @@ impl SimHarness {
         }
     }
 
-    /// Handshake: client requests its region; pump until the home region
-    /// snapshot + 3x3 window have loaded.
+    /// Handshake: client requests its region and pumps until the configured
+    /// near window has loaded (home-only by default).
     pub fn connect(&mut self) {
         self.client.start();
         // Drive a handful of steps so the RequestPlayerRegion -> PlayerRegion ->
@@ -124,12 +140,17 @@ impl SimHarness {
         for &key in &self.released {
             let _ = self.client.push_game_event(GameEventKind::PlayerInput(
                 LOCAL_CLIENT_ID,
-                InputEvent::Key { key, pressed: false },
+                InputEvent::Key {
+                    key,
+                    pressed: false,
+                },
             ));
         }
         self.released.clear();
         self.client.send_tick();
-        self.client.pump(&self.server_to_client).expect("client pump");
+        self.client
+            .pump(&self.server_to_client)
+            .expect("client pump");
 
         // 2. Server ingest + advance.
         self.server.pump().expect("server pump");
@@ -146,7 +167,9 @@ impl SimHarness {
         }
 
         // 3. Client reconcile.
-        self.client.pump(&self.server_to_client).expect("client reconcile pump");
+        self.client
+            .pump(&self.server_to_client)
+            .expect("client reconcile pump");
     }
 
     pub fn step_n(&mut self, n: usize) {
@@ -166,7 +189,9 @@ impl SimHarness {
     /// Local player's body translation (region-local). Panics if called before
     /// the player exists (i.e. before `connect`).
     pub fn player_pos(&self) -> [f32; 3] {
-        self.client.local_player_translation().expect("player exists after connect")
+        self.client
+            .local_player_translation()
+            .expect("player exists after connect")
     }
     fn client_home(&self) -> RegionCoords {
         self.client.home_region()
@@ -259,8 +284,16 @@ impl SimHarness {
         self.press(key);
         self.step_n(4);
         self.release(key);
-        assert!(self.client_tick() > t0, "sim tick did not advance while holding {:?}", key);
-        assert!(self.player_pos() != p0, "player did not move while holding {:?} (input frozen?)", key);
+        assert!(
+            self.client_tick() > t0,
+            "sim tick did not advance while holding {:?}",
+            key
+        );
+        assert!(
+            self.player_pos() != p0,
+            "player did not move while holding {:?} (input frozen?)",
+            key
+        );
     }
 
     pub fn player_region(&self) -> RegionCoords {
@@ -313,7 +346,11 @@ impl SimHarness {
             }
         }
         self.release(key);
-        assert_ne!(self.player_region(), start, "player never crossed a boundary");
+        assert_ne!(
+            self.player_region(),
+            start,
+            "player never crossed a boundary"
+        );
         assert!(
             self.client.local_player_translation().is_some(),
             "player entity not queryable in the new home region after crossing"

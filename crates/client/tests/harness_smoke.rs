@@ -1,12 +1,14 @@
 use client::harness::SimHarness;
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn harness_connects_and_ticks_without_panic() {
     let mut h = SimHarness::new();
     h.connect();
     // The client must have loaded its home region from the server snapshot.
-    assert!(h.client_region_loaded(game::SPAWN_REGION), "home region loaded after connect");
+    assert!(
+        h.client_region_loaded(game::SPAWN_REGION),
+        "home region loaded after connect"
+    );
     // Advancing must not panic and must advance the client sim clock.
     let t0 = h.client_tick();
     h.step_n(20);
@@ -14,7 +16,6 @@ fn harness_connects_and_ticks_without_panic() {
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn releasing_a_key_stops_the_player() {
     // Regression: release() must emit the key-up edge, else the sim keeps the
     // key `Held` forever and a released movement key drives the player forever.
@@ -37,7 +38,6 @@ fn releasing_a_key_stops_the_player() {
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn static_world_converges_client_and_server() {
     let mut h = SimHarness::new();
     h.connect();
@@ -46,7 +46,6 @@ fn static_world_converges_client_and_server() {
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn held_input_moves_the_player() {
     let mut h = SimHarness::new();
     h.connect();
@@ -59,7 +58,6 @@ fn held_input_moves_the_player() {
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn streamed_factor2_lod_arrives_for_ring_regions() {
     // End-to-end factor-2 check (the old far ring's replacement): the
     // instance's ring assignment must request factor-2 LOD for a region just
@@ -78,8 +76,8 @@ fn streamed_factor2_lod_arrives_for_ring_regions() {
             _ => None,
         })
         .collect();
-    // The viewer sits in SPAWN_REGION (0,0); the 3x3 near window is excluded,
-    // so the distance-2 ring renders at factor 2 — region (2,0) is in it.
+    // The viewer sits in SPAWN_REGION (0,0); the home-only near window is
+    // excluded, so the distance-2 ring renders at factor 2.
     let key = game::lod::LodKey::for_region(2, game::RegionCoords::new(2, 0));
     let payload = lod
         .iter()
@@ -88,6 +86,9 @@ fn streamed_factor2_lod_arrives_for_ring_regions() {
         .expect("factor-2 LodData for the distance-2 ring region (2,0)");
     assert!(!payload.is_empty(), "flat worldgen floor produces cells");
     for (_, grid) in payload {
-        assert!(grid.decode().is_some(), "well-formed RLE grids over the wire");
+        assert!(
+            grid.decode().is_some(),
+            "well-formed RLE grids over the wire"
+        );
     }
 }

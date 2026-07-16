@@ -13,7 +13,6 @@ fn debug_line_events(evs: &[ClientUpdateEvent]) -> Vec<(game::RegionCoords, usiz
 }
 
 #[test]
-#[ignore = "slow: >100ms — run via just test-full"]
 fn debug_lines_emit_when_enabled_and_stop_when_disabled() {
     let mut h = SimHarness::new();
     h.connect();
@@ -39,7 +38,10 @@ fn debug_lines_emit_when_enabled_and_stop_when_disabled() {
             break;
         }
     }
-    assert!(saw_nonempty, "expected non-empty collider wireframes near the player");
+    assert!(
+        saw_nonempty,
+        "expected non-empty collider wireframes near the player"
+    );
 
     // Off again: silence resumes.
     h.debug.set_collider_wireframes(false);

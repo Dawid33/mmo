@@ -17,7 +17,9 @@ use game::lod::LodKey;
 use game::{LodPayload, RegionCoords, REGION_CHUNKS};
 
 use super::bridge::Regions;
+use super::far_voxel::FarVoxelReady;
 use super::meshing::lod;
+use super::meshing::lod::LodRasterReady;
 use super::meshing::queue::ChunkKey;
 use super::voxel_pull::ChunkQuads;
 
@@ -112,16 +114,26 @@ pub fn apply_lod_events(mut commands: Commands, mut rings: ResMut<LodRings>) {
                         slot.root = root;
                     }
                     std::collections::btree_map::Entry::Vacant(v) => {
-                        v.insert(LodSlot { root, retiring: None, retiring_frames: 0 });
+                        v.insert(LodSlot {
+                            root,
+                            retiring: None,
+                            retiring_frames: 0,
+                        });
                     }
                 }
             }
             LodEventMsg::Remove(key) => {
-                let Some(slot) = rings.roots.remove(&key) else { continue };
+                let Some(slot) = rings.roots.remove(&key) else {
+                    continue;
+                };
                 if let Some(prev) = slot.retiring {
                     commands.entity(prev).despawn();
                 }
-                rings.retired.push(RetiredLod { key, entity: slot.root, frames: 0 });
+                rings.retired.push(RetiredLod {
+                    key,
+                    entity: slot.root,
+                    frames: 0,
+                });
             }
         }
     }
@@ -160,7 +172,11 @@ fn spawn_lod_root(commands: &mut Commands, key: LodKey, payload: &LodPayload) ->
         );
         let child = commands
             .spawn((
-                Transform { translation, scale: Vec3::splat(factor as f32), ..default() },
+                Transform {
+                    translation,
+                    scale: Vec3::splat(factor as f32),
+                    ..default()
+                },
                 Visibility::default(),
                 lod::LodChunk { factor },
                 lod::LodVoxelData(grid),
@@ -219,15 +235,17 @@ pub fn retire_lod_roots(
     mut rings: ResMut<LodRings>,
     near: Res<Regions>,
     children: Query<&Children>,
-    meshed: Query<(), Or<(With<Mesh3d>, With<ChunkQuads>)>>,
-    keyed_meshes: Query<&ChunkKey, Or<(With<Mesh3d>, With<ChunkQuads>)>>,
+    meshed: Query<(), ReadyLodCellFilter>,
+    keyed_meshes: Query<&ChunkKey, ReadyNearChunkFilter>,
 ) {
     if rings.retired.is_empty() && rings.roots.values().all(|s| s.retiring.is_none()) {
         return;
     }
     let max = rings.retirement_max_frames;
     let has_meshed_child = |root: Entity| {
-        children.get(root).is_ok_and(|ch| ch.iter().any(|c| meshed.contains(c)))
+        children
+            .get(root)
+            .is_ok_and(|ch| ch.iter().any(|c| meshed.contains(c)))
     };
 
     // Re-receipts: the replacement is the slot's own new root.
@@ -254,9 +272,9 @@ pub fn retire_lod_roots(
             let x0 = rc.x * REGION_CHUNKS as i32;
             let z0 = rc.z * REGION_CHUNKS as i32;
             let span = REGION_CHUNKS as i32;
-            keyed_meshes.iter().any(|k| {
-                (x0..x0 + span).contains(&k.0[0]) && (z0..z0 + span).contains(&k.0[2])
-            })
+            keyed_meshes
+                .iter()
+                .any(|k| (x0..x0 + span).contains(&k.0[0]) && (z0..z0 + span).contains(&k.0[2]))
         }
     };
 
@@ -278,16 +296,25 @@ pub fn retire_lod_roots(
         .collect();
 }
 
+type ReadyLodCellFilter = Or<(
+    With<Mesh3d>,
+    With<ChunkQuads>,
+    With<FarVoxelReady>,
+    With<LodRasterReady>,
+)>;
+type ReadyNearChunkFilter = Or<(With<Mesh3d>, With<ChunkQuads>)>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use game::lod::PackedLodGrid;
     use game::{BlockId, GameDataUpdate, Voxel, CHUNK_VOXEL_COUNT};
 
+    use super::super::far_voxel::FarVoxelReady;
     use super::super::meshing::lod::{LodChunk, LodVoxelData};
     use super::super::meshing::queue::tests::{pipeline_app, wait_until};
-    use super::super::meshing::records::QuadRecord;
     use super::super::meshing::queue::MeshBudgets;
+    use super::super::meshing::records::QuadRecord;
     use super::super::voxel_pull::ChunkQuads;
 
     use bevy::asset::RenderAssetUsages;
@@ -308,7 +335,11 @@ mod tests {
     }
 
     fn slot_root(app: &App, key: LodKey) -> Option<Entity> {
-        app.world().resource::<LodRings>().roots.get(&key).map(|s| s.root)
+        app.world()
+            .resource::<LodRings>()
+            .roots
+            .get(&key)
+            .map(|s| s.root)
     }
 
     fn root_meshed(app: &mut App, root: Entity) -> bool {
@@ -337,7 +368,10 @@ mod tests {
     /// An (empty) mesh handle — `retire_lod_roots` only checks `Mesh3d`
     /// presence.
     fn meshed_marker(app: &mut App) -> Mesh3d {
-        let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+        let mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        );
         Mesh3d(app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh))
     }
 
@@ -348,7 +382,10 @@ mod tests {
     #[test]
     fn re_receipt_retires_old_root_when_pulled_replacement_is_visible() {
         let mut app = rings_app();
-        let key = LodKey { factor: 4, coords: [0, 0] };
+        let key = LodKey {
+            factor: 4,
+            coords: [0, 0],
+        };
         let old_root = app.world_mut().spawn_empty().id();
         let new_root = app.world_mut().spawn_empty().id();
         app.world_mut().spawn((pulled_marker(), ChildOf(new_root)));
@@ -363,39 +400,92 @@ mod tests {
 
         app.update();
 
-        assert!(app.world().get_entity(old_root).is_err(), "pulled replacement is renderable");
-        assert!(app.world().resource::<LodRings>().roots[&key].retiring.is_none());
+        assert!(
+            app.world().get_entity(old_root).is_err(),
+            "pulled replacement is renderable"
+        );
+        assert!(app.world().resource::<LodRings>().roots[&key]
+            .retiring
+            .is_none());
+    }
+
+    #[test]
+    fn re_receipt_retires_old_root_when_brick_replacement_is_ready() {
+        let mut app = rings_app();
+        let key = LodKey {
+            factor: 16,
+            coords: [0, 0],
+        };
+        let old_root = app.world_mut().spawn_empty().id();
+        let new_root = app.world_mut().spawn_empty().id();
+        app.world_mut().spawn((FarVoxelReady, ChildOf(new_root)));
+        app.world_mut().resource_mut::<LodRings>().roots.insert(
+            key,
+            LodSlot {
+                root: new_root,
+                retiring: Some(old_root),
+                retiring_frames: 0,
+            },
+        );
+
+        app.update();
+
+        assert!(app.world().get_entity(old_root).is_err());
+        assert!(app.world().resource::<LodRings>().roots[&key]
+            .retiring
+            .is_none());
     }
 
     #[test]
     fn removed_key_releases_when_pulled_near_chunk_covers_its_region() {
         let mut app = rings_app();
-        let key = LodKey { factor: 4, coords: [1, -1] };
+        let key = LodKey {
+            factor: 4,
+            coords: [1, -1],
+        };
         let old_root = app.world_mut().spawn_empty().id();
         app.world_mut()
             .resource_mut::<LodRings>()
             .retired
-            .push(RetiredLod { key, entity: old_root, frames: 0 });
+            .push(RetiredLod {
+                key,
+                entity: old_root,
+                frames: 0,
+            });
         let (_keep_send, recv) = crossbeam::channel::unbounded::<GameDataUpdate>();
-        app.world_mut().resource_mut::<Regions>().0.insert(RegionCoords::new(1, -1), recv);
-        app.world_mut().spawn((ChunkKey([32, 0, -32]), pulled_marker()));
+        app.world_mut()
+            .resource_mut::<Regions>()
+            .0
+            .insert(RegionCoords::new(1, -1), recv);
+        app.world_mut()
+            .spawn((ChunkKey([32, 0, -32]), pulled_marker()));
 
         app.update();
 
-        assert!(app.world().get_entity(old_root).is_err(), "pulled near chunk provides coverage");
+        assert!(
+            app.world().get_entity(old_root).is_err(),
+            "pulled near chunk provides coverage"
+        );
         assert!(app.world().resource::<LodRings>().retired.is_empty());
     }
 
     #[test]
     fn lod_data_spawns_root_and_children_per_spawner_contract() {
         let mut app = rings_app();
-        let key = LodKey { factor: 64, coords: [1, -1] };
+        let key = LodKey {
+            factor: 64,
+            coords: [1, -1],
+        };
         push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 2, 0])));
         assert!(wait_until(&mut app, |app| slot_root(app, key).is_some()));
         let root = slot_root(&app, key).unwrap();
         let off = key.world_offset();
         assert_eq!(
-            app.world().entity(root).get::<Transform>().unwrap().translation,
+            app.world()
+                .entity(root)
+                .get::<Transform>()
+                .unwrap()
+                .translation,
             Vec3::new(off[0], off[1], off[2]),
             "root sits at the key's world offset"
         );
@@ -417,7 +507,10 @@ mod tests {
     #[test]
     fn re_receipt_retires_the_old_root_until_the_replacement_meshes() {
         let mut app = rings_app();
-        let key = LodKey { factor: 4, coords: [0, 0] };
+        let key = LodKey {
+            factor: 4,
+            coords: [0, 0],
+        };
         push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 0, 0])));
         assert!(
             wait_until(&mut app, |app| slot_root(app, key)
@@ -447,14 +540,21 @@ mod tests {
             wait_until(&mut app, |app| app.world().get_entity(old_root).is_err()),
             "old root despawns once the replacement is visible"
         );
-        assert!(app.world().resource::<LodRings>().roots[&key].retiring.is_none());
+        assert!(app.world().resource::<LodRings>().roots[&key]
+            .retiring
+            .is_none());
     }
 
     #[test]
     fn remove_lod_retires_until_deadline_or_coverage() {
         let mut app = rings_app();
-        app.world_mut().resource_mut::<LodRings>().retirement_max_frames = 3;
-        let key = LodKey { factor: 16, coords: [0, 0] };
+        app.world_mut()
+            .resource_mut::<LodRings>()
+            .retirement_max_frames = 3;
+        let key = LodKey {
+            factor: 16,
+            coords: [0, 0],
+        };
         push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 0, 0])));
         assert!(wait_until(&mut app, |app| slot_root(app, key)
             .is_some_and(|r| root_meshed(app, r))));
@@ -477,8 +577,13 @@ mod tests {
     #[test]
     fn removed_key_releases_when_another_meshed_key_covers_its_region() {
         let mut app = rings_app();
-        app.world_mut().resource_mut::<LodRings>().retirement_max_frames = u32::MAX;
-        let key4 = LodKey { factor: 4, coords: [0, 0] };
+        app.world_mut()
+            .resource_mut::<LodRings>()
+            .retirement_max_frames = u32::MAX;
+        let key4 = LodKey {
+            factor: 4,
+            coords: [0, 0],
+        };
         push_event(&mut app, LodEventMsg::Data(key4, solid_payload([0, 0, 0])));
         assert!(wait_until(&mut app, |app| slot_root(app, key4)
             .is_some_and(|r| root_meshed(app, r))));
@@ -494,7 +599,10 @@ mod tests {
         );
 
         // The ring reassignment's replacement: factor 16 over the same region.
-        let key16 = LodKey { factor: 16, coords: [0, 0] };
+        let key16 = LodKey {
+            factor: 16,
+            coords: [0, 0],
+        };
         push_event(&mut app, LodEventMsg::Data(key16, solid_payload([0, 0, 0])));
         assert!(
             wait_until(&mut app, |app| app.world().get_entity(old_root).is_err()),
@@ -506,8 +614,13 @@ mod tests {
     #[test]
     fn removed_key_releases_when_a_near_chunk_meshes_inside_its_region() {
         let mut app = rings_app();
-        app.world_mut().resource_mut::<LodRings>().retirement_max_frames = u32::MAX;
-        let key = LodKey { factor: 4, coords: [1, -1] }; // chunk keys x 32..64, z -32..0
+        app.world_mut()
+            .resource_mut::<LodRings>()
+            .retirement_max_frames = u32::MAX;
+        let key = LodKey {
+            factor: 4,
+            coords: [1, -1],
+        }; // chunk keys x 32..64, z -32..0
         push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 0, 0])));
         assert!(wait_until(&mut app, |app| slot_root(app, key)
             .is_some_and(|r| root_meshed(app, r))));
@@ -516,7 +629,10 @@ mod tests {
         // Near-window takeover of the region.
         push_event(&mut app, LodEventMsg::Remove(key));
         let (_keep_send, recv) = crossbeam::channel::unbounded::<GameDataUpdate>();
-        app.world_mut().resource_mut::<Regions>().0.insert(RegionCoords::new(1, -1), recv);
+        app.world_mut()
+            .resource_mut::<Regions>()
+            .0
+            .insert(RegionCoords::new(1, -1), recv);
 
         // A meshed chunk OUTSIDE the region's bounds must not release it.
         let marker = meshed_marker(&mut app);
@@ -524,7 +640,10 @@ mod tests {
         for _ in 0..3 {
             app.update();
         }
-        assert!(app.world().get_entity(root).is_ok(), "out-of-region mesh must not count");
+        assert!(
+            app.world().get_entity(root).is_ok(),
+            "out-of-region mesh must not count"
+        );
 
         // One inside the bounds does.
         let marker = meshed_marker(&mut app);
@@ -539,11 +658,18 @@ mod tests {
     #[test]
     fn undecodable_grids_are_dropped_not_spawned() {
         let mut app = rings_app();
-        let key = LodKey { factor: 4, coords: [0, 0] };
+        let key = LodKey {
+            factor: 4,
+            coords: [0, 0],
+        };
         let bad = vec![([0, 0, 0], PackedLodGrid(vec![(3, BlockId(1))]))]; // wrong total
         push_event(&mut app, LodEventMsg::Data(key, bad));
         app.update();
         let root = slot_root(&app, key).expect("root spawns even if all cells drop");
-        assert_eq!(lod_children(&mut app, root).len(), 0, "bad cell dropped with a warning");
+        assert_eq!(
+            lod_children(&mut app, root).len(),
+            0,
+            "bad cell dropped with a warning"
+        );
     }
 }

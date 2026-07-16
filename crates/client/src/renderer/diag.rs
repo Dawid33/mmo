@@ -71,6 +71,8 @@ impl Plugin for DiagPlugin {
         // plugin twice panics — so the `tracy` build gets its GPU timings through Tracy
         // instead.
         #[cfg(not(feature = "tracy"))]
-        app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+        if !app.is_plugin_added::<bevy::render::diagnostic::RenderDiagnosticsPlugin>() {
+            app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+        }
     }
 }

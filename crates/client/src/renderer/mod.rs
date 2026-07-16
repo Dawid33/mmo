@@ -12,19 +12,23 @@ mod avatar;
 mod block_textures;
 pub(crate) mod bridge;
 pub(crate) mod collider_debug;
-pub(crate) mod diag;
-pub(crate) mod hud;
+pub mod config;
 pub mod convert;
+pub(crate) mod diag;
+pub mod far_voxel;
 pub(crate) mod grid_debug;
+pub(crate) mod hud;
 pub(crate) mod input;
 mod interpolate;
+pub(crate) mod lod_rings;
 pub mod meshing;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod render_bench;
 mod skybox;
 pub(crate) mod ui_bridge;
 pub(crate) mod ui_input;
 mod voxel_material;
 pub mod voxel_pull;
-pub(crate) mod lod_rings;
 use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
 
@@ -46,83 +50,104 @@ pub struct SimBridgePlugin {
 impl Plugin for SimBridgePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-                MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default(),
-                bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
-                voxel_pull::VoxelPullPlugin,
-            ))
-            .insert_resource(ClientUpdates(self.client_recv.clone()))
-            .insert_resource(GameEvents(self.game_send.clone()))
-            .init_resource::<LocalPlayer>()
-            .init_resource::<bridge::Regions>()
-            .init_resource::<bridge::RegionRoots>()
-            .init_resource::<bridge::SimEntityMap>()
-            .init_resource::<hud::HudStatus>()
-            .init_resource::<avatar::AvatarAssets>()
-            .init_resource::<ui_bridge::UiUpdates>()
-            .init_resource::<ui_bridge::UiWidgetMap>()
-            .init_resource::<ui_bridge::UiRoot>()
-            .insert_resource(collider_debug::DebugFlagsRes(self.debug_flags.clone()))
-            .init_resource::<collider_debug::DebugColliderLines>()
-            .init_resource::<grid_debug::GridDebug>()
-            .add_observer(ui_input::on_widget_click)
-            .init_resource::<meshing::queue::ChunkGrid>()
-            .init_resource::<meshing::queue::RemeshQueue>()
-            .init_resource::<meshing::queue::MeshBudgets>()
-            .init_resource::<meshing::queue::FrameUploads>()
-            .init_resource::<meshing::visibility::CullingConfig>()
-            .init_resource::<voxel_pull::RenderPath>()
-            .init_resource::<input::MouseCoalesceWindow>()
-            .init_resource::<lod_rings::LodRings>()
-            .add_systems(
-                PreUpdate,
+            MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default(),
+            bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
+            voxel_pull::VoxelPullPlugin,
+            far_voxel::FarVoxelPlugin,
+        ))
+        .insert_resource(ClientUpdates(self.client_recv.clone()))
+        .insert_resource(GameEvents(self.game_send.clone()))
+        .init_resource::<LocalPlayer>()
+        .init_resource::<bridge::Regions>()
+        .init_resource::<bridge::RegionRoots>()
+        .init_resource::<bridge::SimEntityMap>()
+        .init_resource::<hud::HudStatus>()
+        .init_resource::<avatar::AvatarAssets>()
+        .init_resource::<ui_bridge::UiUpdates>()
+        .init_resource::<ui_bridge::UiWidgetMap>()
+        .init_resource::<ui_bridge::UiRoot>()
+        .insert_resource(collider_debug::DebugFlagsRes(self.debug_flags.clone()))
+        .init_resource::<collider_debug::DebugColliderLines>()
+        .init_resource::<grid_debug::GridDebug>()
+        .add_observer(ui_input::on_widget_click)
+        .init_resource::<meshing::queue::ChunkGrid>()
+        .init_resource::<meshing::queue::RemeshQueue>()
+        .init_resource::<meshing::queue::MeshBudgets>()
+        .init_resource::<meshing::queue::FrameUploads>()
+        .init_resource::<meshing::lod::LodBuildQueue>()
+        .init_resource::<meshing::lod::FarFrameUploads>()
+        .init_resource::<meshing::visibility::CullingConfig>()
+        .init_resource::<config::TerrainRenderConfig>()
+        .init_resource::<input::MouseCoalesceWindow>()
+        .init_resource::<lod_rings::LodRings>()
+        .add_systems(
+            PreUpdate,
+            (
+                input::forward_input.after(bevy::input::InputSystems),
                 (
-                    input::forward_input.after(bevy::input::InputSystems),
-                    (
-                        bridge::drain_client_updates,
-                        bridge::drain_region_updates,
-                        bridge::dedupe_ghosts,
-                        bridge::enforce_single_active_camera,
-                        ui_bridge::drain_ui_updates,
-                    )
-                        .chain(),
+                    bridge::drain_client_updates,
+                    bridge::drain_region_updates,
+                    bridge::dedupe_ghosts,
+                    bridge::enforce_single_active_camera,
+                    ui_bridge::drain_ui_updates,
                 )
                     .chain(),
             )
-            .add_plugins(meshing::visibility::cull_plugin)
-            .add_systems(Startup, (setup_scene, hud::setup_hud, skybox::setup_skybox))
-            .add_systems(
-                Update,
+                .chain(),
+        )
+        .add_plugins(meshing::visibility::cull_plugin)
+        .add_systems(Startup, (setup_scene, hud::setup_hud, skybox::setup_skybox))
+        .add_systems(
+            Update,
+            (
                 (
-                    (
-                        meshing::queue::mark_remesh_dirty,
-                        meshing::queue::prune_chunk_grid,
-                        meshing::queue::spawn_mesh_tasks,
-                        meshing::apply_meshed_chunks,
-                        // LOD meshes land in the same chain; culling moved to
-                        // cull_plugin (PostUpdate) so it sees the current
-                        // frame's frustum — it runs after this chain either way.
-                        meshing::lod::spawn_lod_mesh_tasks,
-                        meshing::lod::apply_lod_meshes,
-                    )
-                        .chain(),
-                    // LOD rings run in Update but outside the meshing chain:
-                    // they only spawn/despawn LOD roots and children, which
-                    // the LOD mesh systems pick up on later frames.
-                    (lod_rings::apply_lod_events, lod_rings::retire_lod_roots).chain(),
-                    interpolate::interpolate_transforms,
-                    avatar::attach_avatars,
-                    skybox::attach_skybox,
-                    hud::toggle_debug,
-                    meshing::visibility::toggle_culling,
-                    collider_debug::draw_collider_wireframes.after(hud::toggle_debug),
-                    grid_debug::toggle_grid_debug,
-                    grid_debug::draw_grid_debug.after(grid_debug::toggle_grid_debug),
-                    hud::update_debug_text,
-                    hud::update_crosshair_visibility,
-                ),
-            );
+                    meshing::queue::mark_remesh_dirty,
+                    meshing::queue::prune_chunk_grid,
+                    meshing::queue::spawn_mesh_tasks,
+                    meshing::apply_meshed_chunks,
+                    // LOD meshes land in the same chain; culling moved to
+                    // cull_plugin (PostUpdate) so it sees the current
+                    // frame's frustum — it runs after this chain either way.
+                    far_voxel::lifecycle::sync_far_pass_readiness,
+                    far_voxel::lifecycle::resolve_far_upload_results,
+                    meshing::lod::spawn_lod_mesh_tasks,
+                    far_voxel::lifecycle::queue_far_brick_tasks,
+                    meshing::lod::apply_lod_meshes,
+                    far_voxel::lifecycle::remove_far_voxel_cells,
+                    far_voxel::lifecycle::refresh_far_neighbors,
+                    far_voxel::lifecycle::apply_far_brick_tasks,
+                    far_voxel::gpu::publish_far_uploads,
+                )
+                    .chain(),
+                // LOD rings run in Update but outside the meshing chain:
+                // they only spawn/despawn LOD roots and children, which
+                // the LOD mesh systems pick up on later frames.
+                (lod_rings::apply_lod_events, lod_rings::retire_lod_roots).chain(),
+                interpolate::interpolate_transforms,
+                avatar::attach_avatars,
+                skybox::attach_skybox,
+                hud::toggle_debug,
+                meshing::visibility::toggle_culling,
+                collider_debug::draw_collider_wireframes.after(hud::toggle_debug),
+                grid_debug::toggle_grid_debug,
+                grid_debug::draw_grid_debug.after(grid_debug::toggle_grid_debug),
+                hud::update_debug_text,
+                hud::update_crosshair_visibility,
+            ),
+        );
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_systems(Update, meshing::visibility::enable_native_occlusion);
+        app.add_systems(
+            Update,
+            (
+                meshing::visibility::enable_native_occlusion,
+                config::configure_native_antialiasing,
+            ),
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(benchmark) = render_bench::RenderBenchmarkPlugin::from_env() {
+            app.add_plugins(benchmark);
+        }
 
         // Opt-in (DIAG=1): per-render-pass GPU/CPU ms + pipeline stats, dumped to
         // stdout. What matters is that it lands after DefaultPlugins, since
@@ -211,9 +236,16 @@ fn setup_scene(
     let (rgba_layers, block_layers) = build_layers(&registry, load_block_texture);
 
     let (w, h) = (rgba_layers[0].width(), rgba_layers[0].height());
-    let data: Vec<u8> = rgba_layers.iter().flat_map(|l| l.as_raw().clone()).collect();
+    let data: Vec<u8> = rgba_layers
+        .iter()
+        .flat_map(|l| l.as_raw().clone())
+        .collect();
     let mut array_image = Image::new(
-        Extent3d { width: w, height: h, depth_or_array_layers: rgba_layers.len() as u32 },
+        Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: rgba_layers.len() as u32,
+        },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
@@ -240,14 +272,25 @@ fn setup_scene(
 
     // The pulled render path binds the same array texture directly (no material).
     commands.insert_resource(voxel_pull::BlockArrayTexture(handle.clone()));
-    commands.insert_resource(meshing::ChunkMaterial(voxel_materials.add(ExtendedMaterial {
-        base: StandardMaterial { perceptual_roughness: 0.9, ..Default::default() },
-        extension: StandardVoxelMaterial { voxels_texture: handle },
-    })));
+    commands.insert_resource(meshing::ChunkMaterial(voxel_materials.add(
+        ExtendedMaterial {
+            base: StandardMaterial {
+                perceptual_roughness: 0.9,
+                ..Default::default()
+            },
+            extension: StandardVoxelMaterial {
+                voxels_texture: handle,
+            },
+        },
+    )));
     commands.insert_resource(block_layers);
 
     commands.spawn((
-        DirectionalLight { color: Color::srgb(0.98, 0.95, 0.82), shadows_enabled: true, ..Default::default() },
+        DirectionalLight {
+            color: Color::srgb(0.98, 0.95, 0.82),
+            shadows_enabled: true,
+            ..Default::default()
+        },
         Transform::default().looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
     ));
     commands.insert_resource(GlobalAmbientLight {
@@ -263,7 +306,10 @@ fn load_block_texture(path: &str) -> Option<image::RgbaImage> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let full = resolve_blocks_dir().join(path);
-        match image::ImageReader::open(&full).ok().and_then(|r| r.decode().ok()) {
+        match image::ImageReader::open(&full)
+            .ok()
+            .and_then(|r| r.decode().ok())
+        {
             Some(img) => Some(img.to_rgba8()),
             None => {
                 warn!("could not read block texture {full:?}");
@@ -273,7 +319,10 @@ fn load_block_texture(path: &str) -> Option<image::RgbaImage> {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let bytes = EMBEDDED_BLOCK_TEXTURES.iter().find(|(n, _)| *n == path).map(|(_, b)| *b)?;
+        let bytes = EMBEDDED_BLOCK_TEXTURES
+            .iter()
+            .find(|(n, _)| *n == path)
+            .map(|(_, b)| *b)?;
         match image::load_from_memory(bytes) {
             Ok(img) => Some(img.to_rgba8()),
             Err(e) => {
@@ -309,8 +358,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         on_disk.sort();
-        let mut embedded: Vec<String> =
-            EMBEDDED_BLOCK_TEXTURES.iter().map(|(n, _)| (*n).to_string()).collect();
+        let mut embedded: Vec<String> = EMBEDDED_BLOCK_TEXTURES
+            .iter()
+            .map(|(n, _)| (*n).to_string())
+            .collect();
         embedded.sort();
         assert_eq!(
             embedded, on_disk,
@@ -361,6 +412,10 @@ mod tests {
 
         // Check that the expected dirt.png texture exists.
         let dirt_texture = blocks_path.join("dirt.png");
-        assert!(dirt_texture.exists(), "dirt.png should exist at {:?}", dirt_texture);
+        assert!(
+            dirt_texture.exists(),
+            "dirt.png should exist at {:?}",
+            dirt_texture
+        );
     }
 }

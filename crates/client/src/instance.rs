@@ -10,6 +10,8 @@ use game::{
     TEST_INDUCED_LATENCY_MS,
 };
 use log::{info, warn};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
@@ -18,8 +20,6 @@ use std::{
         Arc,
     },
 };
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::{Duration, Instant};
 
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
@@ -187,7 +187,10 @@ pub fn desired_lod(
     prev: &BTreeMap<RegionCoords, u32>,
     table: &[(i32, u32)],
     band: i32,
-) -> (BTreeMap<RegionCoords, u32>, std::collections::BTreeSet<game::lod::LodKey>) {
+) -> (
+    BTreeMap<RegionCoords, u32>,
+    std::collections::BTreeSet<game::lod::LodKey>,
+) {
     let radius = table.last().map_or(0, |&(bound, _)| bound) + band;
     let mut assigned = BTreeMap::new();
     let mut keys = std::collections::BTreeSet::new();
@@ -202,9 +205,7 @@ pub fn desired_lod(
             continue;
         }
         let dist = (rc.x - viewer.x).abs().max((rc.z - viewer.z).abs());
-        if let Some(factor) =
-            game::lod::ring_factor_in(table, band, dist, prev.get(&rc).copied())
-        {
+        if let Some(factor) = game::lod::ring_factor_in(table, band, dist, prev.get(&rc).copied()) {
             assigned.insert(rc, factor);
             keys.insert(game::lod::LodKey::for_region(factor, rc));
         }
@@ -423,12 +424,14 @@ impl GameInstanceManager {
     /// sibling regions as predicted events. Targets outside the local
     /// window are dropped — their authoritative streams cover them.
     fn apply_local_transfers(&mut self) {
-        let Some(world) = self.world.as_mut() else { return };
+        let Some(world) = self.world.as_mut() else {
+            return;
+        };
         let (departures, ghosts) = world.take_transfers();
         for (bundle, target) in departures {
             let source = bundle.source_region;
-            let is_local_player =
-                bundle.client.as_ref().map(|(c, _)| *c) == self.client_id && self.client_id.is_some();
+            let is_local_player = bundle.client.as_ref().map(|(c, _)| *c) == self.client_id
+                && self.client_id.is_some();
             if world.region_exists(&target) {
                 let mut b = bundle;
                 b.isometry = game::rebase_isometry(&b.isometry, source, target);
@@ -504,7 +507,9 @@ impl GameInstanceManager {
             return Some(home);
         }
         let data = world.data(&home);
-        let Some(client_id) = self.client_id else { return Some(home) };
+        let Some(client_id) = self.client_id else {
+            return Some(home);
+        };
         let Some(key) = data.player_entites.get(&client_id).copied() else {
             return Some(home);
         };
@@ -548,8 +553,7 @@ impl GameInstanceManager {
             return;
         }
         // Viewer = local player's body, rebased to world space via home.
-        let (Some(local), Some(home)) = (self.local_player_translation(), self.home_region)
-        else {
+        let (Some(local), Some(home)) = (self.local_player_translation(), self.home_region) else {
             // no player body yet: no lines beats wrong lines — the render side
             // keeps drawing the last buffers until the body is readable again
             // (debug-only, self-healing).
@@ -557,7 +561,9 @@ impl GameInstanceManager {
         };
         let hoff = home.world_offset();
         let world_pos = [local[0] + hoff[0], local[1] + hoff[1], local[2] + hoff[2]];
-        let Some(world) = self.world.as_ref() else { return };
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
         for (id, region) in &world.regions {
             let off = id.world_offset();
             let viewer_local = [
@@ -631,7 +637,9 @@ impl GameInstanceManager {
             return;
         };
         let tree = {
-            let Some(world) = self.world.as_ref() else { return };
+            let Some(world) = self.world.as_ref() else {
+                return;
+            };
             if !world.region_exists(&home) {
                 return;
             }
@@ -653,7 +661,9 @@ impl GameInstanceManager {
             !open
         };
         if want_grab != self.last_cursor_grab {
-            let _ = self.ui_update_send.send(game::UiUpdate::SetCursorGrab(want_grab));
+            let _ = self
+                .ui_update_send
+                .send(game::UiUpdate::SetCursorGrab(want_grab));
             self.last_cursor_grab = want_grab;
         }
 
@@ -664,7 +674,9 @@ impl GameInstanceManager {
     /// the new, release the stale, and tear stale regions out of the local
     /// world + render bridge. Cheap when nothing changed (set compare).
     fn update_window(&mut self) {
-        let Some(center) = self.viewer_region() else { return };
+        let Some(center) = self.viewer_region() else {
+            return;
+        };
         let desired = desired_window(center, self.home_region, self.near_radius);
         if desired == self.subscribed {
             return;
@@ -689,7 +701,9 @@ impl GameInstanceManager {
         self.pending_events.remove(&rc);
         if let Some(ref mut world) = self.world {
             if world.remove_region(&rc).is_some() {
-                let _ = self.client_event_send.send(ClientUpdateEvent::RemoveRegion(rc));
+                let _ = self
+                    .client_event_send
+                    .send(ClientUpdateEvent::RemoveRegion(rc));
             }
         }
     }
@@ -699,7 +713,9 @@ impl GameInstanceManager {
     /// subtracts is already current — streamed LOD and simulated regions
     /// never cover the same region.
     fn update_lod_window(&mut self) {
-        let Some(center) = self.viewer_region() else { return };
+        let Some(center) = self.viewer_region() else {
+            return;
+        };
         let excluded = desired_window(center, self.home_region, self.near_radius);
         let (assigned, desired) = desired_lod(
             center,
@@ -713,13 +729,19 @@ impl GameInstanceManager {
             return;
         }
         for key in desired.difference(&self.lod_subscribed) {
-            self.server_game_send.send(ClientPacket::RequestLod(*key)).unwrap();
+            self.server_game_send
+                .send(ClientPacket::RequestLod(*key))
+                .unwrap();
         }
         let stale: Vec<game::lod::LodKey> =
             self.lod_subscribed.difference(&desired).copied().collect();
         for key in stale {
-            self.server_game_send.send(ClientPacket::ReleaseLod(key)).unwrap();
-            let _ = self.client_event_send.send(ClientUpdateEvent::RemoveLod(key));
+            self.server_game_send
+                .send(ClientPacket::ReleaseLod(key))
+                .unwrap();
+            let _ = self
+                .client_event_send
+                .send(ClientUpdateEvent::RemoveLod(key));
         }
         self.lod_subscribed = desired;
     }
@@ -741,7 +763,10 @@ impl GameInstanceManager {
             Ok(())
         } else if self.subscribed.contains(&event.region_id) {
             // Snapshot still in flight: hold the event for replay.
-            self.pending_events.entry(event.region_id).or_default().push(event);
+            self.pending_events
+                .entry(event.region_id)
+                .or_default()
+                .push(event);
             Ok(())
         } else {
             // Released/never-wanted region: steady-state noise.
@@ -762,7 +787,9 @@ impl GameInstanceManager {
                 // rather than unwrap a missing region and kill the game thread
                 // (which froze input on every region crossing). Mirrors the
                 // region_exists guard in route_server_game_event.
-                if let Some(ref mut world) = self.world.as_mut().filter(|w| w.region_exists(&region_id)) {
+                if let Some(ref mut world) =
+                    self.world.as_mut().filter(|w| w.region_exists(&region_id))
+                {
                     let client_tick = world.current_tick(&region_id);
                     let diff: isize = client_tick as isize - server_tick as isize;
                     // this is how far behind the server is
@@ -804,7 +831,10 @@ impl GameInstanceManager {
                 self.is_caught_up = true;
             }
             game::ServerPacket::PlayerRegion(id, client_id) => {
-                if let Err(e) = self.client_event_send.send(ClientUpdateEvent::SetPlayer(client_id)) {
+                if let Err(e) = self
+                    .client_event_send
+                    .send(ClientUpdateEvent::SetPlayer(client_id))
+                {
                     // Receiver gone means the render/client-bridge thread has exited;
                     // nothing left to notify, so just log and keep going.
                     warn!("client_event_send closed while sending SetPlayer: {:?}", e);
@@ -920,8 +950,11 @@ impl GameInstanceManager {
         });
 
         let (server_send, server_recv) = crossbeam::channel::unbounded();
-        let mut conn =
-            crate::netcode::ServerConnection::new(server_send, self.server_game_recv.clone(), self.server);
+        let mut conn = crate::netcode::ServerConnection::new(
+            server_send,
+            self.server_game_recv.clone(),
+            self.server,
+        );
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -979,7 +1012,11 @@ impl GameInstanceManager {
             .unwrap_or(0);
         let m = &self.recon;
         let secs = elapsed.as_secs_f32();
-        let per_sec = if secs > 0.0 { m.mispredictions as f32 / secs } else { 0.0 };
+        let per_sec = if secs > 0.0 {
+            m.mispredictions as f32 / secs
+        } else {
+            0.0
+        };
         let avg_replay = if m.mispredictions > 0 {
             m.replay_depth_sum as f32 / m.mispredictions as f32
         } else {
@@ -1076,26 +1113,31 @@ mod manager_tests {
     use game::ClientUpdateEvent;
     use std::net::{Ipv4Addr, SocketAddrV4};
 
+    fn minimal_world() -> game::World {
+        let home = RegionCoords::new(0, 0);
+        let mut world = game::World::new();
+        world.load(&home, Region::from_chunks(home, Vec::new()));
+        world
+    }
+
     /// pump() must: load a region from a ServerPacket, then advance the sim
     /// on a Tick game event — all without blocking.
     #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
     fn pump_loads_region_and_ticks() {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let (server_send, server_recv) = crossbeam::channel::unbounded();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let mut manager =
-            GameInstanceManager::new(
-                game_send.clone(),
-                game_recv,
-                client_send,
-                dummy_addr,
-                game::DebugFlags::default(),
-            );
+        let mut manager = GameInstanceManager::new(
+            game_send.clone(),
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
 
         // Fake the server side using the same code the real server uses.
-        let world = game::World::basic();
+        let world = minimal_world();
         let region_id = RegionCoords::new(0, 0);
         server_send
             .send(ServerPacket::PlayerRegion(Some(region_id), 0))
@@ -1136,23 +1178,21 @@ mod manager_tests {
     /// the following 500ms window — measured live at 261 dropped : 1 sent.
     /// Only a sim that has not yet caught up with the server may drop input.
     #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
     fn player_input_flows_while_not_ready_once_caught_up() {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let (server_send, server_recv) = crossbeam::channel::unbounded();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let mut manager =
-            GameInstanceManager::new(
-                game_send.clone(),
-                game_recv,
-                client_send,
-                dummy_addr,
-                game::DebugFlags::default(),
-            );
+        let mut manager = GameInstanceManager::new(
+            game_send.clone(),
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
         let outgoing = manager.client_packet_recv();
 
-        let world = game::World::basic();
+        let world = minimal_world();
         let region_id = RegionCoords::new(0, 0);
         server_send
             .send(ServerPacket::PlayerRegion(Some(region_id), 0))
@@ -1179,7 +1219,10 @@ mod manager_tests {
         game_send
             .send(GameEventKind::PlayerInput(
                 0,
-                game::InputEvent::Key { key: game::Key::KeyE, pressed: true },
+                game::InputEvent::Key {
+                    key: game::Key::KeyE,
+                    pressed: true,
+                },
             ))
             .unwrap();
         assert!(manager.pump(&server_recv).unwrap());
@@ -1193,7 +1236,10 @@ mod manager_tests {
         game_send
             .send(GameEventKind::PlayerInput(
                 0,
-                game::InputEvent::Key { key: game::Key::KeyE, pressed: false },
+                game::InputEvent::Key {
+                    key: game::Key::KeyE,
+                    pressed: false,
+                },
             ))
             .unwrap();
         assert!(manager.pump(&server_recv).unwrap());
@@ -1215,14 +1261,13 @@ mod manager_tests {
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let (server_send, server_recv) = crossbeam::channel::unbounded();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let manager =
-            GameInstanceManager::new(
-                game_send.clone(),
-                game_recv,
-                client_send,
-                dummy_addr,
-                game::DebugFlags::default(),
-            );
+        let manager = GameInstanceManager::new(
+            game_send.clone(),
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
         (manager, server_send, server_recv, client_recv, game_send)
     }
 
@@ -1263,7 +1308,9 @@ mod manager_tests {
     fn player_region_requests_full_window() {
         let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
         let home = RegionCoords::new(0, 0);
-        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(home), 0))
+            .unwrap();
         assert!(manager.pump(&server_recv).unwrap());
 
         let mut requested = std::collections::BTreeSet::new();
@@ -1279,23 +1326,27 @@ mod manager_tests {
     /// Events for a subscribed-but-not-yet-loaded region are buffered and
     /// applied when the snapshot arrives, not dropped.
     #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
     fn events_for_pending_region_are_buffered_until_snapshot() {
         let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
         let home = RegionCoords::new(0, 0);
-        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(home), 0))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
 
         // Load home so `world` exists.
-        let world = game::World::basic();
-        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        let world = minimal_world();
+        server_send
+            .send(world.build_region_server_packet(&home))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
 
         // A neighbour's tick arrives before its snapshot.
         let neighbour = RegionCoords::new(1, 0);
-        let tick_from_neighbour =
-            GameEvent::new(GameEventKind::Tick, 0, neighbour);
-        server_send.send(ServerPacket::GameEvent(tick_from_neighbour)).unwrap();
+        let tick_from_neighbour = GameEvent::new(GameEventKind::Tick, 0, neighbour);
+        server_send
+            .send(ServerPacket::GameEvent(tick_from_neighbour))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         assert!(!manager.world.as_ref().unwrap().region_exists(&neighbour));
 
@@ -1304,7 +1355,9 @@ mod manager_tests {
         // server-input buffer, waiting for the matching local prediction.
         let mut neighbour_world = game::World::new();
         neighbour_world.load(&neighbour, Region::from_chunks(neighbour, Vec::new()));
-        server_send.send(neighbour_world.build_region_server_packet(&neighbour)).unwrap();
+        server_send
+            .send(neighbour_world.build_region_server_packet(&neighbour))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         assert!(manager.world.as_ref().unwrap().region_exists(&neighbour));
 
@@ -1342,23 +1395,29 @@ mod manager_tests {
     /// A snapshot for an already-loaded region replaces it (crash-respawn /
     /// resubscribe path), emitting RemoveRegion then NewRegion to the bridge.
     #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
     fn region_re_receipt_replaces_and_signals_bridge() {
         let (mut manager, server_send, server_recv, client_recv, _game) = manager_with_player();
         let home = RegionCoords::new(0, 0);
-        let world = game::World::basic();
-        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
-        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        let world = minimal_world();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(home), 0))
+            .unwrap();
+        server_send
+            .send(world.build_region_server_packet(&home))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         while client_recv.try_recv().is_ok() {} // clear initial events
 
-        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        server_send
+            .send(world.build_region_server_packet(&home))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
 
         let events: Vec<ClientUpdateEvent> = client_recv.try_iter().collect();
         assert!(
             matches!(events[0], ClientUpdateEvent::RemoveRegion(rc) if rc == home),
-            "teardown precedes rebuild, got {:?}", events
+            "teardown precedes rebuild, got {:?}",
+            events
         );
         assert!(matches!(events[1], ClientUpdateEvent::NewRegion(rc, _, _) if rc == home));
     }
@@ -1366,25 +1425,32 @@ mod manager_tests {
     /// A snapshot for a region outside the desired window is released
     /// immediately, never loaded (window moved on before it arrived).
     #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
     fn stale_snapshot_is_released_not_loaded() {
         let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
         let home = RegionCoords::new(0, 0);
-        let world = game::World::basic();
-        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
-        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        let world = minimal_world();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(home), 0))
+            .unwrap();
+        server_send
+            .send(world.build_region_server_packet(&home))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         while manager.client_packet_recv().try_recv().is_ok() {}
 
         let far = RegionCoords::new(50, 50);
         let mut far_world = game::World::new();
         far_world.load(&far, Region::from_chunks(far, Vec::new()));
-        server_send.send(far_world.build_region_server_packet(&far)).unwrap();
+        server_send
+            .send(far_world.build_region_server_packet(&far))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
 
         assert!(!manager.world.as_ref().unwrap().region_exists(&far));
         let released: Vec<ClientPacket> = manager.client_packet_recv().try_iter().collect();
-        assert!(released.iter().any(|p| matches!(p, ClientPacket::ReleaseRegionConnection(rc) if *rc == far)));
+        assert!(released
+            .iter()
+            .any(|p| matches!(p, ClientPacket::ReleaseRegionConnection(rc) if *rc == far)));
     }
 
     /// A predicted departure in one local region synthesizes a predicted
@@ -1394,19 +1460,27 @@ mod manager_tests {
         let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
         let home = RegionCoords::new(0, 0);
         let target = RegionCoords::new(1, 0);
-        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(home), 0))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
 
         // Load home (with the player) and the empty target region.
         let mut world = game::World::new();
         let mut home_region = Region::from_chunks(home, Vec::new());
-        home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        home_region
+            .handle_event(GameEventKind::CreateClient(0))
+            .unwrap();
         home_region.forget_last_event();
         world.load(&home, home_region);
-        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        server_send
+            .send(world.build_region_server_packet(&home))
+            .unwrap();
         let mut target_world = game::World::new();
         target_world.load(&target, Region::from_chunks(target, Vec::new()));
-        server_send.send(target_world.build_region_server_packet(&target)).unwrap();
+        server_send
+            .send(target_world.build_region_server_packet(&target))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         manager.is_caught_up = true;
 
@@ -1432,7 +1506,11 @@ mod manager_tests {
         manager.send_tick();
         manager.pump(&server_recv).unwrap();
 
-        assert_eq!(manager.home_region, Some(target), "home flipped on prediction");
+        assert_eq!(
+            manager.home_region,
+            Some(target),
+            "home flipped on prediction"
+        );
         let w = manager.world.as_ref().unwrap();
         assert!(
             w.data(&target).player_entites.contains_key(&0),
@@ -1450,18 +1528,24 @@ mod manager_tests {
     fn player_region_push_updates_home_without_window_burst() {
         let (mut manager, server_send, server_recv, _client_recv, _game) = manager_with_player();
         let home = RegionCoords::new(0, 0);
-        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(home), 0))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         while manager.client_packet_recv().try_recv().is_ok() {}
 
         let target = RegionCoords::new(1, 0);
-        server_send.send(ServerPacket::PlayerRegion(Some(target), 0)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(target), 0))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
 
         assert_eq!(manager.home_region, Some(target));
         let bursts: Vec<ClientPacket> = manager.client_packet_recv().try_iter().collect();
         assert!(
-            !bursts.iter().any(|p| matches!(p, ClientPacket::RequestRegionConnection(_))),
+            !bursts
+                .iter()
+                .any(|p| matches!(p, ClientPacket::RequestRegionConnection(_))),
             "no re-subscription burst on a home push: {:?}",
             bursts
         );
@@ -1493,22 +1577,31 @@ mod manager_tests {
     /// server routing them to A.
     #[test]
     fn predicted_crossing_target_region_converges_after_authoritative_catchup() {
-        let (mut manager, server_send, server_recv, _client_recv, game_send) = manager_with_player();
+        let (mut manager, server_send, server_recv, _client_recv, game_send) =
+            manager_with_player();
         let home = RegionCoords::new(0, 0); // A
         let target = RegionCoords::new(1, 0); // B
-        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(home), 0))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
 
         // Load A (with the player) and the empty target B.
         let mut world = game::World::new();
         let mut home_region = Region::from_chunks(home, Vec::new());
-        home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        home_region
+            .handle_event(GameEventKind::CreateClient(0))
+            .unwrap();
         home_region.forget_last_event();
         world.load(&home, home_region);
-        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        server_send
+            .send(world.build_region_server_packet(&home))
+            .unwrap();
         let mut target_world = game::World::new();
         target_world.load(&target, Region::from_chunks(target, Vec::new()));
-        server_send.send(target_world.build_region_server_packet(&target)).unwrap();
+        server_send
+            .send(target_world.build_region_server_packet(&target))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         manager.is_caught_up = true;
 
@@ -1540,7 +1633,11 @@ mod manager_tests {
         // Crossing tick: predicted extraction + synthesized arrival + home flip.
         manager.send_tick();
         manager.pump(&server_recv).unwrap();
-        assert_eq!(manager.home_region, Some(target), "home flipped on prediction");
+        assert_eq!(
+            manager.home_region,
+            Some(target),
+            "home flipped on prediction"
+        );
         assert!(
             manager
                 .world
@@ -1560,7 +1657,10 @@ mod manager_tests {
             game_send
                 .send(GameEventKind::PlayerInput(
                     0,
-                    game::InputEvent::Key { key: game::Key::KeyD, pressed: i % 2 == 0 },
+                    game::InputEvent::Key {
+                        key: game::Key::KeyD,
+                        pressed: i % 2 == 0,
+                    },
                 ))
                 .unwrap();
             manager.send_tick();
@@ -1585,7 +1685,9 @@ mod manager_tests {
         // bundle. Force the identity token to the client's key (the server's
         // deterministic A would allocate the same key).
         let mut server_a = Region::from_chunks(home, Vec::new());
-        server_a.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        server_a
+            .handle_event(GameEventKind::CreateClient(0))
+            .unwrap();
         server_a.forget_last_event();
         let sa_key = *server_a.data().player_entites.get(&0).unwrap();
         server_a.with_data(|d| d.set_body_pose_safe(sa_key, cross_iso));
@@ -1606,20 +1708,30 @@ mod manager_tests {
         let mut auth = Vec::new();
         auth.push(server_b.handle_event(GameEventKind::Tick).unwrap()); // Tick@0
         auth.push(server_b.handle_event(GameEventKind::Tick).unwrap()); // Tick@1
-        auth.push(server_b.handle_event(GameEventKind::EntityArrived(bundle)).unwrap()); // EA@2
+        auth.push(
+            server_b
+                .handle_event(GameEventKind::EntityArrived(bundle))
+                .unwrap(),
+        ); // EA@2
         for _ in 0..3 {
             auth.push(server_b.handle_event(GameEventKind::Tick).unwrap()); // Tick@3,4,5
         }
         eprintln!(
             "[converge] authoritative B stream: {:?}",
-            auth.iter().map(|e| (e.id, format!("{:?}", std::mem::discriminant(&e.kind)))).collect::<Vec<_>>()
+            auth.iter()
+                .map(|e| (e.id, format!("{:?}", std::mem::discriminant(&e.kind))))
+                .collect::<Vec<_>>()
         );
 
         // Deliver the authoritative catch-up, plus the server's own home flip.
         for ev in &auth {
-            server_send.send(ServerPacket::GameEvent(ev.clone())).unwrap();
+            server_send
+                .send(ServerPacket::GameEvent(ev.clone()))
+                .unwrap();
         }
-        server_send.send(ServerPacket::PlayerRegion(Some(target), 0)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(target), 0))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         // Pump again for good measure (quiescence).
         manager.pump(&server_recv).unwrap();
@@ -1707,21 +1819,30 @@ mod manager_tests {
     /// panics / no unbounded input_buffer growth.
     #[test]
     fn predicted_crossing_streaming_orphan_and_legit_inputs_coexist() {
-        let (mut manager, server_send, server_recv, _client_recv, game_send) = manager_with_player();
+        let (mut manager, server_send, server_recv, _client_recv, game_send) =
+            manager_with_player();
         let home = RegionCoords::new(0, 0); // A
         let target = RegionCoords::new(1, 0); // B
-        server_send.send(ServerPacket::PlayerRegion(Some(home), 0)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(home), 0))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
 
         let mut world = game::World::new();
         let mut home_region = Region::from_chunks(home, Vec::new());
-        home_region.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        home_region
+            .handle_event(GameEventKind::CreateClient(0))
+            .unwrap();
         home_region.forget_last_event();
         world.load(&home, home_region);
-        server_send.send(world.build_region_server_packet(&home)).unwrap();
+        server_send
+            .send(world.build_region_server_packet(&home))
+            .unwrap();
         let mut target_world = game::World::new();
         target_world.load(&target, Region::from_chunks(target, Vec::new()));
-        server_send.send(target_world.build_region_server_packet(&target)).unwrap();
+        server_send
+            .send(target_world.build_region_server_packet(&target))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         manager.is_caught_up = true;
 
@@ -1750,16 +1871,32 @@ mod manager_tests {
         // Crossing tick: predicted extraction + synthesized arrival + home flip.
         manager.send_tick();
         manager.pump(&server_recv).unwrap();
-        assert_eq!(manager.home_region, Some(target), "home flipped on prediction");
+        assert_eq!(
+            manager.home_region,
+            Some(target),
+            "home flipped on prediction"
+        );
 
         // Lag window: four DISTINCT inputs. Chronologically the first two are
         // ORPHANS (server routes to A), the last two are LEGIT (server routes
         // to B and echoes them). All four are predicted into local B.
         let inputs = [
-            game::InputEvent::Key { key: game::Key::KeyW, pressed: true }, // I1 orphan
-            game::InputEvent::Key { key: game::Key::KeyA, pressed: true }, // I2 orphan
-            game::InputEvent::Key { key: game::Key::KeyS, pressed: true }, // I3 legit
-            game::InputEvent::Key { key: game::Key::KeyD, pressed: true }, // I4 legit
+            game::InputEvent::Key {
+                key: game::Key::KeyW,
+                pressed: true,
+            }, // I1 orphan
+            game::InputEvent::Key {
+                key: game::Key::KeyA,
+                pressed: true,
+            }, // I2 orphan
+            game::InputEvent::Key {
+                key: game::Key::KeyS,
+                pressed: true,
+            }, // I3 legit
+            game::InputEvent::Key {
+                key: game::Key::KeyD,
+                pressed: true,
+            }, // I4 legit
         ];
         for ev in &inputs {
             game_send
@@ -1782,13 +1919,18 @@ mod manager_tests {
 
         // --- Faithful authoritative B stream from a real server-side region. ---
         let mut server_a = Region::from_chunks(home, Vec::new());
-        server_a.handle_event(GameEventKind::CreateClient(0)).unwrap();
+        server_a
+            .handle_event(GameEventKind::CreateClient(0))
+            .unwrap();
         server_a.forget_last_event();
         let sa_key = *server_a.data().player_entites.get(&0).unwrap();
         server_a.with_data(|d| d.set_body_pose_safe(sa_key, cross_iso));
         server_a.handle_event(GameEventKind::Tick).unwrap();
         let (departures, _ghosts) = server_a.take_transfers();
-        let (mut bundle, tgt) = departures.into_iter().next().expect("server-side departed A");
+        let (mut bundle, tgt) = departures
+            .into_iter()
+            .next()
+            .expect("server-side departed A");
         assert_eq!(tgt, target);
         bundle.isometry = game::rebase_isometry(&bundle.isometry, home, target);
         bundle.source_key = player_key;
@@ -1797,33 +1939,49 @@ mod manager_tests {
         // with the two LEGIT inputs the server routed to B and echoed back.
         let mut server_b = Region::from_chunks(target, Vec::new());
         let arrival_batch = vec![
-            server_b.handle_event(GameEventKind::Tick).unwrap(),                 // T@0
-            server_b.handle_event(GameEventKind::Tick).unwrap(),                 // T@1
-            server_b.handle_event(GameEventKind::EntityArrived(bundle)).unwrap(),// EA@2
+            server_b.handle_event(GameEventKind::Tick).unwrap(), // T@0
+            server_b.handle_event(GameEventKind::Tick).unwrap(), // T@1
+            server_b
+                .handle_event(GameEventKind::EntityArrived(bundle))
+                .unwrap(), // EA@2
         ];
         let legit_batch = vec![
-            server_b.handle_event(GameEventKind::Tick).unwrap(),                             // T@3
-            server_b.handle_event(GameEventKind::PlayerInput(0, legit[0].clone())).unwrap(), // I3@4
-            server_b.handle_event(GameEventKind::Tick).unwrap(),                             // T@5
-            server_b.handle_event(GameEventKind::PlayerInput(0, legit[1].clone())).unwrap(), // I4@6
-            server_b.handle_event(GameEventKind::Tick).unwrap(),                             // T@7
+            server_b.handle_event(GameEventKind::Tick).unwrap(), // T@3
+            server_b
+                .handle_event(GameEventKind::PlayerInput(0, legit[0].clone()))
+                .unwrap(), // I3@4
+            server_b.handle_event(GameEventKind::Tick).unwrap(), // T@5
+            server_b
+                .handle_event(GameEventKind::PlayerInput(0, legit[1].clone()))
+                .unwrap(), // I4@6
+            server_b.handle_event(GameEventKind::Tick).unwrap(), // T@7
         ];
         let server_b_counter = server_b.pending_event_ids().last().map_or(0, |_| 8);
         eprintln!(
             "[coexist] arrival batch: {:?}",
-            arrival_batch.iter().map(|e| (e.id, format!("{:?}", std::mem::discriminant(&e.kind)))).collect::<Vec<_>>()
+            arrival_batch
+                .iter()
+                .map(|e| (e.id, format!("{:?}", std::mem::discriminant(&e.kind))))
+                .collect::<Vec<_>>()
         );
         eprintln!(
             "[coexist] legit batch: {:?}",
-            legit_batch.iter().map(|e| (e.id, format!("{:?}", std::mem::discriminant(&e.kind)))).collect::<Vec<_>>()
+            legit_batch
+                .iter()
+                .map(|e| (e.id, format!("{:?}", std::mem::discriminant(&e.kind))))
+                .collect::<Vec<_>>()
         );
 
         // Pump 1: arrival only. Eviction (if any) fires here, while the legit
         // echoes are NOT yet delivered.
         for ev in &arrival_batch {
-            server_send.send(ServerPacket::GameEvent(ev.clone())).unwrap();
+            server_send
+                .send(ServerPacket::GameEvent(ev.clone()))
+                .unwrap();
         }
-        server_send.send(ServerPacket::PlayerRegion(Some(target), 0)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(target), 0))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         let after_arrival = manager
             .world
@@ -1837,7 +1995,9 @@ mod manager_tests {
 
         // Pump 2: the legit echoes, in a later pump.
         for ev in &legit_batch {
-            server_send.send(ServerPacket::GameEvent(ev.clone())).unwrap();
+            server_send
+                .send(ServerPacket::GameEvent(ev.clone()))
+                .unwrap();
         }
         manager.pump(&server_recv).unwrap();
         manager.pump(&server_recv).unwrap();
@@ -1889,7 +2049,11 @@ mod manager_tests {
         // in a state bit-identical to the authoritative server-side B region
         // (which applied both legit inputs). This is the strongest available
         // "legit preserved + consistent" assertion.
-        assert_eq!(client_b_tick, server_b.current_tick(), "B tick must match authority");
+        assert_eq!(
+            client_b_tick,
+            server_b.current_tick(),
+            "B tick must match authority"
+        );
         assert_eq!(
             client_hash, server_hash,
             "client B state must bit-match the authoritative B (legit inputs integrated)"
@@ -1901,22 +2065,27 @@ mod manager_tests {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, _client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let mut manager =
-            GameInstanceManager::new(
-                game_send,
-                game_recv,
-                client_send,
-                dummy_addr,
-                game::DebugFlags::default(),
-            );
+        let mut manager = GameInstanceManager::new(
+            game_send,
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
 
         manager.ready = false;
         manager.is_caught_up = false;
-        assert_eq!(manager.connection_state(), game::ConnectionState::Connecting);
+        assert_eq!(
+            manager.connection_state(),
+            game::ConnectionState::Connecting
+        );
 
         manager.ready = true;
         manager.is_caught_up = false;
-        assert_eq!(manager.connection_state(), game::ConnectionState::CatchingUp);
+        assert_eq!(
+            manager.connection_state(),
+            game::ConnectionState::CatchingUp
+        );
 
         manager.ready = true;
         manager.is_caught_up = true;
@@ -1928,14 +2097,13 @@ mod manager_tests {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let mut manager =
-            GameInstanceManager::new(
-                game_send,
-                game_recv,
-                client_send,
-                dummy_addr,
-                game::DebugFlags::default(),
-            );
+        let mut manager = GameInstanceManager::new(
+            game_send,
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
 
         // Drain the UiChannel announcement sent unconditionally by new().
         assert!(matches!(
@@ -1956,14 +2124,13 @@ mod manager_tests {
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let (server_send, server_recv) = crossbeam::channel::unbounded();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let mut manager =
-            GameInstanceManager::new(
-                game_send.clone(),
-                game_recv,
-                client_send,
-                dummy_addr,
-                game::DebugFlags::default(),
-            );
+        let mut manager = GameInstanceManager::new(
+            game_send.clone(),
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
 
         // Load a region whose snapshot already contains player 0 (seeded inv).
         let region_id = RegionCoords::new(0, 0);
@@ -1972,8 +2139,12 @@ mod manager_tests {
         home.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home.forget_last_event();
         world.load(&region_id, home);
-        server_send.send(ServerPacket::PlayerRegion(Some(region_id), 0)).unwrap();
-        server_send.send(world.build_region_server_packet(&region_id)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(region_id), 0))
+            .unwrap();
+        server_send
+            .send(world.build_region_server_packet(&region_id))
+            .unwrap();
         assert!(manager.pump(&server_recv).unwrap());
 
         // A UI channel must have been announced. Keep every other drained
@@ -2000,7 +2171,8 @@ mod manager_tests {
 
         let ups: Vec<game::UiUpdate> = ui_recv.try_iter().collect();
         assert!(
-            ups.iter().any(|u| matches!(u, game::UiUpdate::CreateWidget(_))),
+            ups.iter()
+                .any(|u| matches!(u, game::UiUpdate::CreateWidget(_))),
             "projection must emit widget creates, got {ups:?}"
         );
     }
@@ -2013,14 +2185,13 @@ mod manager_tests {
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let (server_send, server_recv) = crossbeam::channel::unbounded();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let mut manager =
-            GameInstanceManager::new(
-                game_send.clone(),
-                game_recv,
-                client_send,
-                dummy_addr,
-                game::DebugFlags::default(),
-            );
+        let mut manager = GameInstanceManager::new(
+            game_send.clone(),
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
 
         let region_id = RegionCoords::new(0, 0);
         let mut world = game::World::new();
@@ -2028,8 +2199,12 @@ mod manager_tests {
         home.handle_event(GameEventKind::CreateClient(0)).unwrap();
         home.forget_last_event();
         world.load(&region_id, home);
-        server_send.send(ServerPacket::PlayerRegion(Some(region_id), 0)).unwrap();
-        server_send.send(world.build_region_server_packet(&region_id)).unwrap();
+        server_send
+            .send(ServerPacket::PlayerRegion(Some(region_id), 0))
+            .unwrap();
+        server_send
+            .send(world.build_region_server_packet(&region_id))
+            .unwrap();
         manager.pump(&server_recv).unwrap();
         // Keep every other drained event alive (not just UiChannel):
         // NewRegion carries the region's GameDataUpdate receiver, and
@@ -2063,7 +2238,8 @@ mod manager_tests {
 
         let ups: Vec<game::UiUpdate> = ui_recv.try_iter().collect();
         assert!(
-            ups.iter().any(|u| matches!(u, game::UiUpdate::SetCursorGrab(false))),
+            ups.iter()
+                .any(|u| matches!(u, game::UiUpdate::SetCursorGrab(false))),
             "opening inventory releases the cursor, got {ups:?}"
         );
     }
@@ -2081,31 +2257,56 @@ mod lod_window_tests {
         let viewer = RegionCoords::new(0, 0);
         let mut excluded = BTreeSet::new();
         excluded.insert(RegionCoords::new(0, 0)); // near window member
-        let (assigned, keys) =
-            desired_lod(viewer, &excluded, &BTreeMap::new(), LOD_RING_TABLE, 0);
+        let (assigned, keys) = desired_lod(viewer, &excluded, &BTreeMap::new(), LOD_RING_TABLE, 0);
         assert!(!assigned.contains_key(&RegionCoords::new(0, 0)), "excluded");
-        assert_eq!(assigned[&RegionCoords::new(0, 1)], 2, "distance 1 -> factor 2");
+        assert_eq!(
+            assigned[&RegionCoords::new(0, 1)],
+            2,
+            "distance 1 -> factor 2"
+        );
         assert_eq!(assigned[&RegionCoords::new(0, 4)], 4);
         assert_eq!(assigned[&RegionCoords::new(0, 8)], 16);
         assert_eq!(assigned[&RegionCoords::new(0, 16)], 64);
         assert_eq!(assigned[&RegionCoords::new(0, 32)], 256);
-        assert!(!assigned.contains_key(&RegionCoords::new(0, 33)), "past radius");
+        assert!(
+            !assigned.contains_key(&RegionCoords::new(0, 33)),
+            "past radius"
+        );
         // Region-keyed factors produce one key per region; tile factors dedup.
         assert!(keys.contains(&LodKey::for_region(2, RegionCoords::new(0, 1))));
         assert!(keys.contains(&LodKey::for_region(64, RegionCoords::new(0, 16))));
         let f64_keys = keys.iter().filter(|k| k.factor == 64).count();
         let f64_regions = assigned.values().filter(|&&f| f == 64).count();
-        assert!(f64_keys * 2 < f64_regions, "2x2 tiles dedup regions into fewer keys");
+        assert!(
+            f64_keys * 2 < f64_regions,
+            "2x2 tiles dedup regions into fewer keys"
+        );
     }
 
     #[test]
     fn desired_lod_is_sticky_across_a_boundary_step() {
         let viewer = RegionCoords::new(0, 0);
         let none = BTreeSet::new();
-        let (prev, _) = desired_lod(viewer, &none, &BTreeMap::new(), LOD_RING_TABLE, LOD_STICKY_BAND);
+        let (prev, _) = desired_lod(
+            viewer,
+            &none,
+            &BTreeMap::new(),
+            LOD_RING_TABLE,
+            LOD_STICKY_BAND,
+        );
         // Step the viewer +1x: region (-4, 0) is now distance 5 = bound 4 + band 1,
         // held at factor 4 by stickiness even though fresh assignment says 16.
-        let (next, _) = desired_lod(RegionCoords::new(1, 0), &none, &prev, LOD_RING_TABLE, LOD_STICKY_BAND);
-        assert_eq!(next[&RegionCoords::new(-4, 0)], 4, "held by the sticky band");
+        let (next, _) = desired_lod(
+            RegionCoords::new(1, 0),
+            &none,
+            &prev,
+            LOD_RING_TABLE,
+            LOD_STICKY_BAND,
+        );
+        assert_eq!(
+            next[&RegionCoords::new(-4, 0)],
+            4,
+            "held by the sticky band"
+        );
     }
 }

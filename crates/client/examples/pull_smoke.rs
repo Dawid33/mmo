@@ -12,7 +12,10 @@
 //! a green frame here means the whole extract -> prepare -> queue -> draw chain
 //! works against the locked `assets/shaders/voxel_pull.wgsl` layout.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
@@ -20,8 +23,12 @@ use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
+use client::renderer::config::{FarRenderBackend, NearRenderBackend, TerrainRenderConfig};
 use client::renderer::meshing::binary::{Face, Quad};
 use client::renderer::meshing::records::{pack_record, QuadRecord};
+use client::renderer::voxel_pull::gpu::{
+    drain_near_telemetry_results, NearRendererMetrics, NearTelemetryEnabled,
+};
 use client::renderer::voxel_pull::{BlockArrayTexture, ChunkQuads, VoxelPullPlugin};
 use game::BlockId;
 
@@ -37,11 +44,26 @@ const MIN_TERRAIN_FRACTION: f32 = 0.05;
 
 /// Warm per-layer colors for the array texture (all have blue NOT dominant, so
 /// they read as terrain against the blue clear): grass-green, dirt-brown, stone.
-const LAYER_COLORS: [[u8; 4]; 3] = [[90, 140, 60, 255], [135, 100, 70, 255], [140, 132, 120, 255]];
+const LAYER_COLORS: [[u8; 4]; 3] = [
+    [90, 140, 60, 255],
+    [135, 100, 70, 255],
+    [140, 132, 120, 255],
+];
 const TEX_SIZE: u32 = 16;
 
 #[derive(Resource, Default)]
 struct ProbeResult(Option<bool>);
+
+#[derive(Resource, Clone)]
+struct ProbeNearIndirect(Arc<AtomicU32>);
+
+fn capture_near_indirect(metrics: Res<NearRendererMetrics>, indirect: Res<ProbeNearIndirect>) {
+    if let Some(count) = metrics.indirect_draw_count {
+        indirect
+            .0
+            .fetch_max(count.saturating_add(1), Ordering::AcqRel);
+    }
+}
 
 fn main() {
     // Pin the asset root to this crate's manifest dir at compile time so bevy
@@ -52,6 +74,7 @@ fn main() {
         std::env::set_var("BEVY_ASSET_ROOT", env!("CARGO_MANIFEST_DIR"));
     }
 
+    let indirect = ProbeNearIndirect(Arc::new(AtomicU32::new(0)));
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -65,11 +88,29 @@ fn main() {
             }),
     )
     .insert_resource(ClearColor(CLEAR))
+    .insert_resource(TerrainRenderConfig {
+        near: NearRenderBackend::GpuDriven,
+        far: FarRenderBackend::Raster,
+    })
+    .insert_resource(indirect.clone())
     .add_plugins(VoxelPullPlugin)
     .init_resource::<ProbeResult>()
     .add_systems(Startup, setup)
     .add_systems(Update, probe);
-    app.run();
+    app.get_sub_app_mut(bevy::render::RenderApp)
+        .expect("DefaultPlugins creates the render app")
+        .init_resource::<NearTelemetryEnabled>()
+        .insert_resource(indirect)
+        .add_systems(
+            bevy::render::Render,
+            (drain_near_telemetry_results, capture_near_indirect)
+                .chain()
+                .in_set(bevy::render::RenderSystems::Cleanup),
+        );
+    let app_exit = app.run();
+    if let AppExit::Error(code) = app_exit {
+        std::process::exit(i32::from(code.get()));
+    }
 }
 
 /// A small 3-layer 2d-array texture of solid warm colors. Mirrors the
@@ -84,7 +125,11 @@ fn array_texture(images: &mut Assets<Image>) -> Handle<Image> {
         }
     }
     let mut image = Image::new(
-        Extent3d { width: TEX_SIZE, height: TEX_SIZE, depth_or_array_layers: layers },
+        Extent3d {
+            width: TEX_SIZE,
+            height: TEX_SIZE,
+            depth_or_array_layers: layers,
+        },
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
@@ -102,13 +147,46 @@ fn array_texture(images: &mut Assets<Image>) -> Handle<Image> {
 fn scene_records() -> Vec<QuadRecord> {
     let quads = [
         // Floor across the whole 0..32 footprint, uniform bright AO. Layer 0.
-        (Quad { min: [0, 0, 0], w: 31, h: 31, face: Face::PosY, block: BlockId(1), ao: [3, 3, 3, 3] }, 0),
+        (
+            Quad {
+                min: [0, 0, 0],
+                w: 31,
+                h: 31,
+                face: Face::PosY,
+                block: BlockId(1),
+                ao: [3, 3, 3, 3],
+            },
+            0,
+        ),
         // Raised platform with a corner-to-corner AO gradient. Layer 1.
-        (Quad { min: [8, 8, 8], w: 15, h: 15, face: Face::PosY, block: BlockId(2), ao: [3, 2, 1, 0] }, 1),
+        (
+            Quad {
+                min: [8, 8, 8],
+                w: 15,
+                h: 15,
+                face: Face::PosY,
+                block: BlockId(2),
+                ao: [3, 2, 1, 0],
+            },
+            1,
+        ),
         // Back wall facing +Z. Layer 2.
-        (Quad { min: [0, 0, 0], w: 31, h: 15, face: Face::PosZ, block: BlockId(3), ao: [2, 3, 1, 2] }, 2),
+        (
+            Quad {
+                min: [0, 0, 0],
+                w: 31,
+                h: 15,
+                face: Face::PosZ,
+                block: BlockId(3),
+                ao: [2, 3, 1, 2],
+            },
+            2,
+        ),
     ];
-    quads.iter().map(|(q, layer)| pack_record(q, *layer)).collect()
+    quads
+        .iter()
+        .map(|(q, layer)| pack_record(q, *layer))
+        .collect()
 }
 
 fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
@@ -140,7 +218,10 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     // Sun, shadows on — exercises the lit fragment's directional-light +
     // shadow-receive path (Task 5), not just the ambient term.
     commands.spawn((
-        DirectionalLight { shadows_enabled: true, ..default() },
+        DirectionalLight {
+            shadows_enabled: true,
+            ..default()
+        },
         Transform::default().looking_to(Vec3::new(-0.5, -1.0, -0.4), Vec3::Y),
     ));
 }
@@ -181,7 +262,11 @@ fn probe(
 /// Screenshot observer: save the PNG and classify pixels as terrain vs the blue
 /// clear. Terrain = blue is not the dominant channel (the warm layer colors);
 /// the clear color has blue clearly dominant.
-fn analyze_screenshot(trigger: On<ScreenshotCaptured>, mut result: ResMut<ProbeResult>) {
+fn analyze_screenshot(
+    trigger: On<ScreenshotCaptured>,
+    mut result: ResMut<ProbeResult>,
+    indirect: Res<ProbeNearIndirect>,
+) {
     let dyn_img = match trigger.image.clone().try_into_dynamic() {
         Ok(d) => d,
         Err(e) => {
@@ -211,5 +296,8 @@ fn analyze_screenshot(trigger: On<ScreenshotCaptured>, mut result: ResMut<ProbeR
         "pull_smoke: {:.0} px, terrain fraction {:.3} (threshold {:.2})",
         total, fraction, MIN_TERRAIN_FRACTION
     );
-    result.0 = Some(fraction >= MIN_TERRAIN_FRACTION);
+    let encoded_indirect_count = indirect.0.load(Ordering::Acquire);
+    let indirect_count = encoded_indirect_count.saturating_sub(1);
+    info!("pull_smoke: maximum observed GPU indirect count {indirect_count}");
+    result.0 = Some(fraction >= MIN_TERRAIN_FRACTION && encoded_indirect_count > 1);
 }

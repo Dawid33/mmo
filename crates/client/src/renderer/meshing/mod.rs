@@ -50,7 +50,11 @@ pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers, pull: bool
     } else {
         (emit::quads_to_mesh(&quads, layers), None)
     };
-    MeshOutput { mesh, records, connectivity: visibility::face_connectivity(padded) }
+    MeshOutput {
+        mesh,
+        records,
+        connectivity: visibility::face_connectivity(padded),
+    }
 }
 
 #[derive(Resource)]
@@ -74,10 +78,9 @@ pub struct PullMemStats {
 
 /// Polls in-flight `MeshingTask`s to completion and attaches the resulting `Mesh3d`
 /// (or strips it, for an all-air chunk), up to `budgets.uploads_per_frame` per frame,
-/// tracked via the shared `FrameUploads` counter — remaining completed tasks attach
-/// next frame. This system runs before `lod::apply_lod_meshes` in the chain and
-/// always claims its uploads first, so full-res chunks never get starved of the
-/// shared upload budget by LOD work. Also handles `VoxelData` removal (uncapped: a
+/// tracked via the near-only `FrameUploads` counter — remaining completed tasks
+/// attach next frame. Raster LOD has its own equally bounded far upload counter,
+/// so neither lane can starve the other. Also handles `VoxelData` removal (uncapped: a
 /// chunk that's gone must not linger with a stale mesh).
 pub fn apply_meshed_chunks(
     mut commands: Commands,
@@ -94,11 +97,17 @@ pub fn apply_meshed_chunks(
         if uploads.0 >= budgets.uploads_per_frame {
             break; // remaining completed tasks attach next frame
         }
-        let Some(output) = block_on(future::poll_once(&mut task.0)) else { continue };
+        let Some(output) = block_on(future::poll_once(&mut task.0)) else {
+            continue;
+        };
         if output.requires_upload() {
             uploads.0 += 1;
         }
-        let MeshOutput { mesh, records, connectivity } = output;
+        let MeshOutput {
+            mesh,
+            records,
+            connectivity,
+        } = output;
         if let Some(records) = records {
             if let Some(stats) = pull_mem.as_deref_mut() {
                 stats.chunks += 1;
@@ -207,9 +216,22 @@ mod tests {
     use bevy::mesh::VertexAttributeValues;
     use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
 
+    fn render_config(
+        near: crate::renderer::config::NearRenderBackend,
+    ) -> crate::renderer::config::TerrainRenderConfig {
+        crate::renderer::config::TerrainRenderConfig {
+            near,
+            far: crate::renderer::config::FarRenderBackend::Raster,
+        }
+    }
+
     #[test]
     fn empty_mesh_output_requires_no_upload() {
-        let output = MeshOutput { mesh: None, records: None, connectivity: 0 };
+        let output = MeshOutput {
+            mesh: None,
+            records: None,
+            connectivity: 0,
+        };
         assert!(!output.requires_upload());
     }
 
@@ -219,7 +241,12 @@ mod tests {
             bevy::mesh::PrimitiveTopology::TriangleList,
             bevy::asset::RenderAssetUsages::RENDER_WORLD,
         );
-        assert!(MeshOutput { mesh: Some(mesh), records: None, connectivity: 0 }.requires_upload());
+        assert!(MeshOutput {
+            mesh: Some(mesh),
+            records: None,
+            connectivity: 0
+        }
+        .requires_upload());
         assert!(MeshOutput {
             mesh: None,
             records: Some(vec![records::QuadRecord([0, 0])]),
@@ -231,7 +258,11 @@ mod tests {
     #[test]
     fn empty_chunk_yields_no_mesh() {
         let voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        assert!(build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default()).is_none());
+        assert!(build_chunk_mesh(
+            &PaddedVoxels::from_interior(&voxels),
+            &BlockTextureLayers::default()
+        )
+        .is_none());
     }
 
     #[test]
@@ -239,8 +270,11 @@ mod tests {
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         let idx = 5 + 32 * 5 + 32 * 32 * 5;
         voxels[idx] = Voxel::new(BlockId(1));
-        let mesh = build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default())
-            .expect("mesh");
+        let mesh = build_chunk_mesh(
+            &PaddedVoxels::from_interior(&voxels),
+            &BlockTextureLayers::default(),
+        )
+        .expect("mesh");
         assert_eq!(mesh.count_vertices(), 24, "6 faces x 4 verts");
         assert_eq!(mesh.indices().unwrap().len(), 36, "6 faces x 2 tris x 3");
     }
@@ -254,8 +288,11 @@ mod tests {
         // neighbours.
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[0 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
-        let mesh = build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default())
-            .expect("boundary voxel must yield a mesh");
+        let mesh = build_chunk_mesh(
+            &PaddedVoxels::from_interior(&voxels),
+            &BlockTextureLayers::default(),
+        )
+        .expect("boundary voxel must yield a mesh");
         assert_eq!(mesh.count_vertices(), 24, "6 faces x 4 verts");
     }
 
@@ -264,10 +301,14 @@ mod tests {
         // A fully solid chunk must mesh as the whole 32-voxel cube, i.e. vertex
         // positions spanning [0, 32] on every axis — not shrunk to the interior.
         let voxels = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
-        let mesh = build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default())
-            .expect("mesh");
-        let VertexAttributeValues::Uint32x2(packed) =
-            mesh.attribute(crate::renderer::voxel_material::ATTRIBUTE_VOXEL_PACKED).unwrap()
+        let mesh = build_chunk_mesh(
+            &PaddedVoxels::from_interior(&voxels),
+            &BlockTextureLayers::default(),
+        )
+        .expect("mesh");
+        let VertexAttributeValues::Uint32x2(packed) = mesh
+            .attribute(crate::renderer::voxel_material::ATTRIBUTE_VOXEL_PACKED)
+            .unwrap()
         else {
             panic!("packed attribute must be Uint32x2");
         };
@@ -290,17 +331,26 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
-            // Legacy `Mesh3d` assertions: pin the mesh path now that
-            // `DEFAULT_PULL_PATH` is `true`. Pull-path variants are separate tests.
-            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: false })
+            // Legacy `Mesh3d` assertions pin the per-chunk backend.
+            .insert_resource(render_config(
+                crate::renderer::config::NearRenderBackend::PerChunk,
+            ))
             .add_systems(
                 Update,
-                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                (
+                    queue::mark_remesh_dirty,
+                    queue::prune_chunk_grid,
+                    queue::spawn_mesh_tasks,
+                    apply_meshed_chunks,
+                )
                     .chain(),
             );
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
-        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData::new(voxels)).id();
+        let e = app
+            .world_mut()
+            .spawn(crate::renderer::bridge::VoxelData::new(voxels))
+            .id();
         app.update();
         // Evidence that meshing went through the pipeline on the first update:
         // the task was spawned (still in flight) — or already completed AND
@@ -343,26 +393,52 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
-            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: true })
+            .insert_resource(render_config(
+                crate::renderer::config::NearRenderBackend::GroupedDirect,
+            ))
             .add_systems(
                 Update,
-                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                (
+                    queue::mark_remesh_dirty,
+                    queue::prune_chunk_grid,
+                    queue::spawn_mesh_tasks,
+                    apply_meshed_chunks,
+                )
                     .chain(),
             );
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
-        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData::new(voxels)).id();
+        let e = app
+            .world_mut()
+            .spawn(crate::renderer::bridge::VoxelData::new(voxels))
+            .id();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             app.update();
-            if let Some(q) = app.world().entity(e).get::<crate::renderer::voxel_pull::ChunkQuads>() {
+            if let Some(q) = app
+                .world()
+                .entity(e)
+                .get::<crate::renderer::voxel_pull::ChunkQuads>()
+            {
                 assert_eq!(q.0.len(), 6, "single voxel = 6 quads");
-                assert!(!app.world().entity(e).contains::<Mesh3d>(), "pull path must not attach a mesh");
-                assert!(app.world().entity(e).contains::<Visibility>(), "required for cave-culling writes");
-                assert!(app.world().entity(e).contains::<bevy::camera::primitives::Aabb>());
+                assert!(
+                    !app.world().entity(e).contains::<Mesh3d>(),
+                    "pull path must not attach a mesh"
+                );
+                assert!(
+                    app.world().entity(e).contains::<Visibility>(),
+                    "required for cave-culling writes"
+                );
+                assert!(app
+                    .world()
+                    .entity(e)
+                    .contains::<bevy::camera::primitives::Aabb>());
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "records never attached");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "records never attached"
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
@@ -382,22 +458,33 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
-            // Legacy `Mesh3d` assertions: pin the mesh path now that
-            // `DEFAULT_PULL_PATH` is `true`. Pull-path variants are separate tests.
-            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: false })
+            // Legacy `Mesh3d` assertions pin the per-chunk backend.
+            .insert_resource(render_config(
+                crate::renderer::config::NearRenderBackend::PerChunk,
+            ))
             .add_systems(
                 Update,
-                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                (
+                    queue::mark_remesh_dirty,
+                    queue::prune_chunk_grid,
+                    queue::spawn_mesh_tasks,
+                    apply_meshed_chunks,
+                )
                     .chain(),
             );
 
-        let image_handle = app.world_mut().resource_mut::<Assets<Image>>().add(Image::default());
+        let image_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
         let handle = app
             .world_mut()
             .resource_mut::<Assets<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>>()
             .add(ExtendedMaterial {
                 base: StandardMaterial::default(),
-                extension: StandardVoxelMaterial { voxels_texture: image_handle },
+                extension: StandardVoxelMaterial {
+                    voxels_texture: image_handle,
+                },
             });
         app.insert_resource(ChunkMaterial(handle));
 
@@ -407,7 +494,10 @@ mod tests {
 
         let e = app.world_mut().spawn(VoxelData::new(voxels.clone())).id();
         settle_until_meshed(&mut app, e);
-        assert!(app.world().entity(e).contains::<Mesh3d>(), "mesh should exist after initial insert");
+        assert!(
+            app.world().entity(e).contains::<Mesh3d>(),
+            "mesh should exist after initial insert"
+        );
 
         // Same-frame remove-then-reinsert, as `drain_region_updates` can produce when it
         // drains several buffered SetVoxelComponent(None)/Some(..) updates in one PreUpdate pass.
@@ -417,7 +507,10 @@ mod tests {
         app.world_mut().entity_mut(e).remove::<VoxelData>();
         app.world_mut().entity_mut(e).insert(VoxelData::new(voxels));
         app.update();
-        assert!(app.world().entity(e).contains::<Mesh3d>(), "mesh should survive same-frame remove+reinsert");
+        assert!(
+            app.world().entity(e).contains::<Mesh3d>(),
+            "mesh should survive same-frame remove+reinsert"
+        );
     }
 
     /// Pull-path twin of `same_frame_remove_and_reinsert_keeps_mesh`: the same
@@ -427,7 +520,7 @@ mod tests {
     #[test]
     fn same_frame_remove_and_reinsert_keeps_records() {
         use super::super::bridge::VoxelData;
-        use super::super::voxel_pull::{ChunkQuads, RenderPath};
+        use super::super::voxel_pull::ChunkQuads;
 
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
@@ -437,10 +530,17 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
-            .insert_resource(RenderPath { pull: true })
+            .insert_resource(render_config(
+                crate::renderer::config::NearRenderBackend::GroupedDirect,
+            ))
             .add_systems(
                 Update,
-                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                (
+                    queue::mark_remesh_dirty,
+                    queue::prune_chunk_grid,
+                    queue::spawn_mesh_tasks,
+                    apply_meshed_chunks,
+                )
                     .chain(),
             );
 
@@ -451,7 +551,10 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while !app.world().entity(e).contains::<ChunkQuads>() {
             app.update();
-            assert!(std::time::Instant::now() < deadline, "records never attached");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "records never attached"
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
@@ -483,12 +586,18 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
-            // Legacy `Mesh3d` assertions: pin the mesh path now that
-            // `DEFAULT_PULL_PATH` is `true`. Pull-path variants are separate tests.
-            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: false })
+            // Legacy `Mesh3d` assertions pin the per-chunk backend.
+            .insert_resource(render_config(
+                crate::renderer::config::NearRenderBackend::PerChunk,
+            ))
             .add_systems(
                 Update,
-                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                (
+                    queue::mark_remesh_dirty,
+                    queue::prune_chunk_grid,
+                    queue::spawn_mesh_tasks,
+                    apply_meshed_chunks,
+                )
                     .chain(),
             );
 
@@ -508,8 +617,14 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
-        assert!(!app.world().entity(e).contains::<Mesh3d>(), "ghost mesh must not be attached after VoxelData removal");
-        assert!(!app.world().entity(e).contains::<MeshingTask>(), "in-flight task must be cancelled on VoxelData removal");
+        assert!(
+            !app.world().entity(e).contains::<Mesh3d>(),
+            "ghost mesh must not be attached after VoxelData removal"
+        );
+        assert!(
+            !app.world().entity(e).contains::<MeshingTask>(),
+            "in-flight task must be cancelled on VoxelData removal"
+        );
     }
 
     /// Pull-path twin of `removal_while_task_in_flight_clears_mesh`: a permanent
@@ -519,7 +634,7 @@ mod tests {
     #[ignore = "slow: >100ms — run via just test-full"]
     fn removal_while_task_in_flight_clears_records() {
         use super::super::bridge::VoxelData;
-        use super::super::voxel_pull::{ChunkQuads, RenderPath};
+        use super::super::voxel_pull::ChunkQuads;
 
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
@@ -529,10 +644,17 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
-            .insert_resource(RenderPath { pull: true })
+            .insert_resource(render_config(
+                crate::renderer::config::NearRenderBackend::GroupedDirect,
+            ))
             .add_systems(
                 Update,
-                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                (
+                    queue::mark_remesh_dirty,
+                    queue::prune_chunk_grid,
+                    queue::spawn_mesh_tasks,
+                    apply_meshed_chunks,
+                )
                     .chain(),
             );
 
@@ -563,7 +685,10 @@ mod tests {
     fn derives_and_meshes_a_generated_floor_chunk() {
         let chunk = game::Chunk::flat_floor(8);
         let voxels = game::derive_voxels(&chunk.blocks, &chunk.chisel);
-        let mesh = build_chunk_mesh(&PaddedVoxels::from_interior(&voxels), &BlockTextureLayers::default());
+        let mesh = build_chunk_mesh(
+            &PaddedVoxels::from_interior(&voxels),
+            &BlockTextureLayers::default(),
+        );
         let mesh = mesh.expect("a floor chunk has solid voxels and must produce a mesh");
         assert!(
             mesh.indices().map(|i| i.len()).unwrap_or(0) > 0,
@@ -583,12 +708,18 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
-            // Legacy `Mesh3d` assertions: pin the mesh path now that
-            // `DEFAULT_PULL_PATH` is `true`. Pull-path variants are separate tests.
-            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: false })
+            // Legacy `Mesh3d` assertions pin the per-chunk backend.
+            .insert_resource(render_config(
+                crate::renderer::config::NearRenderBackend::PerChunk,
+            ))
             .add_systems(
                 Update,
-                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                (
+                    queue::mark_remesh_dirty,
+                    queue::prune_chunk_grid,
+                    queue::spawn_mesh_tasks,
+                    apply_meshed_chunks,
+                )
                     .chain(),
             );
         // A solid chunk with a single straight X tunnel: mask must be exactly
@@ -597,15 +728,29 @@ mod tests {
         for x in 0..32 {
             voxels[x + 32 * 5 + 32 * 32 * 5] = Voxel::default();
         }
-        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData::new(voxels)).id();
+        let e = app
+            .world_mut()
+            .spawn(crate::renderer::bridge::VoxelData::new(voxels))
+            .id();
         settle_until_meshed(&mut app, e);
-        let mask = app.world().entity(e).get::<ChunkConnectivity>().expect("mask attached").0;
+        let mask = app
+            .world()
+            .entity(e)
+            .get::<ChunkConnectivity>()
+            .expect("mask attached")
+            .0;
         use super::binary::Face;
-        assert_eq!(mask, super::visibility::pair_bit(Face::PosX.index(), Face::NegX.index()));
+        assert_eq!(
+            mask,
+            super::visibility::pair_bit(Face::PosX.index(), Face::NegX.index())
+        );
 
         // All-air chunk: mesh stripped, mask = ALL_CONNECTED.
         let air = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        let e2 = app.world_mut().spawn(crate::renderer::bridge::VoxelData::new(air)).id();
+        let e2 = app
+            .world_mut()
+            .spawn(crate::renderer::bridge::VoxelData::new(air))
+            .id();
         // Air chunks never get Mesh3d; settle on the mask instead.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -633,21 +778,37 @@ mod tests {
             .init_resource::<queue::RemeshQueue>()
             .init_resource::<queue::MeshBudgets>()
             .init_resource::<queue::FrameUploads>()
-            // Legacy `Mesh3d` assertions: pin the mesh path now that
-            // `DEFAULT_PULL_PATH` is `true`. Pull-path variants are separate tests.
-            .insert_resource(crate::renderer::voxel_pull::RenderPath { pull: false })
+            // Legacy `Mesh3d` assertions pin the per-chunk backend.
+            .insert_resource(render_config(
+                crate::renderer::config::NearRenderBackend::PerChunk,
+            ))
             .add_systems(
                 Update,
-                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                (
+                    queue::mark_remesh_dirty,
+                    queue::prune_chunk_grid,
+                    queue::spawn_mesh_tasks,
+                    apply_meshed_chunks,
+                )
                     .chain(),
             );
         let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
-        let e = app.world_mut().spawn(crate::renderer::bridge::VoxelData::new(voxels)).id();
+        let e = app
+            .world_mut()
+            .spawn(crate::renderer::bridge::VoxelData::new(voxels))
+            .id();
         settle_until_meshed(&mut app, e);
-        let aabb = app.world().entity(e).get::<Aabb>().expect("constant chunk Aabb inserted");
+        let aabb = app
+            .world()
+            .entity(e)
+            .get::<Aabb>()
+            .expect("constant chunk Aabb inserted");
         assert_eq!(aabb.center, bevy::math::Vec3A::splat(16.0));
         assert_eq!(aabb.half_extents, bevy::math::Vec3A::splat(16.0));
-        assert!(app.world().entity(e).contains::<NoAutoAabb>(), "auto-Aabb must not overwrite it");
+        assert!(
+            app.world().entity(e).contains::<NoAutoAabb>(),
+            "auto-Aabb must not overwrite it"
+        );
     }
 }

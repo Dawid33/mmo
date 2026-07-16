@@ -38,14 +38,19 @@ pub fn face_ao(p: &PaddedVoxels, axis: usize, positive: bool, pos: [usize; 3]) -
         // a `pos` closer to (or past) the buffer edge; out-of-buffer counts
         // as open (no occlusion) — consistent with "missing neighbor = air"
         // (task 5).
-        if c.iter().any(|&v| v < 0 || v as usize >= super::binary::PADDED) {
+        if c.iter()
+            .any(|&v| v < 0 || v as usize >= super::binary::PADDED)
+        {
             return false;
         }
         p.is_solid(c[0] as usize, c[1] as usize, c[2] as usize)
     };
 
     let mut ao = [0u8; 4];
-    for (i, (cu, cv)) in [(0i32, 0i32), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+    for (i, (cu, cv)) in [(0i32, 0i32), (1, 0), (0, 1), (1, 1)]
+        .into_iter()
+        .enumerate()
+    {
         let du = if cu == 0 { -1 } else { 1 };
         let dv = if cv == 0 { -1 } else { 1 };
         let mut s1 = layer;
@@ -119,7 +124,10 @@ mod tests {
     #[test]
     fn flip_rule_uses_diagonal_sums() {
         assert!(ao_flips_quad(&[3, 0, 0, 3]), "bright 0-3 diagonal flips");
-        assert!(!ao_flips_quad(&[0, 3, 3, 0]), "bright 1-2 diagonal keeps default");
+        assert!(
+            !ao_flips_quad(&[0, 3, 3, 0]),
+            "bright 1-2 diagonal keeps default"
+        );
         assert!(!ao_flips_quad(&[3, 3, 3, 3]), "uniform never flips");
     }
 }

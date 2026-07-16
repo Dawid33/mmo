@@ -6,8 +6,9 @@
 //! GameInstanceManager.
 use crossbeam::channel::{unbounded, Receiver, Sender};
 use game::{
-    ClientId, ClientPacket, GameError, InlineSpawner, RegionCoords, RegionOutput, ServerEvent,
-    ServerPacket, WorldManager, TICK_RATE,
+    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameError, InlineSpawner,
+    RegionCoords, RegionGenerator, RegionOutput, ServerEvent, ServerPacket, SubChunk, WorldManager,
+    TICK_RATE,
 };
 
 /// The only client in an offline world.
@@ -29,25 +30,34 @@ impl LocalServer {
         recv: Receiver<ClientPacket>,
         send: Sender<ServerPacket>,
     ) -> Result<Self, GameError> {
+        let (materials, manifest) = terrain_materials();
+        let gen_cache = worldgen::cache::WorldgenCache::from_env(worldgen::WORLD_SEED, &manifest);
+        let generator: RegionGenerator =
+            Box::new(move |rc| gen_cache.generate_cached(rc, worldgen::WORLD_SEED, materials));
+        Self::with_generator_and_materials(recv, send, generator, materials)
+    }
+
+    /// Construct the offline server with an injected region generator.
+    /// Intended for integration harnesses whose subject is networking,
+    /// reconciliation, or window management rather than production worldgen.
+    #[doc(hidden)]
+    pub fn new_with_generator(
+        recv: Receiver<ClientPacket>,
+        send: Sender<ServerPacket>,
+        generator: RegionGenerator,
+    ) -> Result<Self, GameError> {
+        let (materials, _) = terrain_materials();
+        Self::with_generator_and_materials(recv, send, generator, materials)
+    }
+
+    fn with_generator_and_materials(
+        recv: Receiver<ClientPacket>,
+        send: Sender<ServerPacket>,
+        generator: RegionGenerator,
+        materials: worldgen::material::Materials,
+    ) -> Result<Self, GameError> {
         let (out_send, out_recv) = unbounded();
         let (region_out_send, region_out_recv) = unbounded();
-        let registry = crate::blocks::load_registry();
-        let resolve = |name: &str| {
-            registry
-                .id_of(name)
-                .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
-        };
-        let materials = worldgen::material::Materials {
-            stone: resolve("stone"),
-            dirt: resolve("dirt"),
-            grass: resolve("grass"),
-            sand: resolve("sand"),
-            water: resolve("water"),
-        };
-        let gen_cache = worldgen::cache::WorldgenCache::from_env(
-            worldgen::WORLD_SEED,
-            &crate::blocks::manifest_src(),
-        );
         let (lod_result_send, lod_result_recv) = unbounded();
         let lod_builder: Box<dyn game::LodBuilder> = Box::new(game::InlineLodBuilder {
             coarse: Box::new(move |key| {
@@ -57,7 +67,7 @@ impl LocalServer {
         });
         let mut manager = WorldManager::new(
             InlineSpawner::default(),
-            Box::new(move |rc| gen_cache.generate_cached(rc, worldgen::WORLD_SEED, materials)),
+            generator,
             out_send,
             region_out_send,
             lod_builder,
@@ -120,7 +130,9 @@ impl LocalServer {
     /// (not yet spawned / already cycled out). Test/harness hook.
     pub fn region_tick(&mut self, rc: RegionCoords) -> usize {
         let mut tick = 0;
-        self.manager.spawner_mut().with_region(rc, |r| tick = r.current_tick());
+        self.manager
+            .spawner_mut()
+            .with_region(rc, |r| tick = r.current_tick());
         tick
     }
 
@@ -162,6 +174,42 @@ impl LocalServer {
     }
 }
 
+fn terrain_materials() -> (worldgen::material::Materials, String) {
+    let registry = crate::blocks::load_registry();
+    let resolve = |name: &str| {
+        registry
+            .id_of(name)
+            .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
+    };
+    (
+        worldgen::material::Materials {
+            stone: resolve("stone"),
+            dirt: resolve("dirt"),
+            grass: resolve("grass"),
+            sand: resolve("sand"),
+            water: resolve("water"),
+        },
+        crate::blocks::manifest_src(),
+    )
+}
+
+/// A one-column flat region used by integration harnesses. It retains real
+/// terrain/collider/LOD plumbing while avoiding 1,024-column production
+/// worldgen for tests whose assertions do not depend on terrain shape.
+#[doc(hidden)]
+pub fn lightweight_test_generator() -> RegionGenerator {
+    Box::new(|_| {
+        let chunk = Chunk::flat_floor(8);
+        let column = Column::new(
+            0,
+            Block::new(BlockId::AIR),
+            Block::new(BlockId::AIR),
+            vec![SubChunk::Dense(Box::new(chunk))],
+        );
+        vec![(ColumnCoords::new(4, 4), column)]
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,27 +220,30 @@ mod tests {
     /// Full offline handshake: manager + LocalServer wired over channels,
     /// pumped in lockstep like the wasm frame driver will.
     #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
     fn offline_handshake_loads_region() {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let (server_send, server_recv) = crossbeam::channel::unbounded::<ServerPacket>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let mut manager =
-            GameInstanceManager::new(
-                game_send.clone(),
-                game_recv,
-                client_send,
-                dummy_addr,
-                game::DebugFlags::default(),
-            );
+        let mut manager = GameInstanceManager::new(
+            game_send.clone(),
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
         // LOD off + home region only: every ring key and every near-window
         // region is a synchronous LocalServer build (see SimHarness::new).
         // This test is about the handshake, not the window or LOD.
         manager.set_lod_table(&[]);
         manager.set_near_radius(0);
 
-        let mut server = LocalServer::new(manager.client_packet_recv(), server_send).unwrap();
+        let mut server = LocalServer::new_with_generator(
+            manager.client_packet_recv(),
+            server_send,
+            lightweight_test_generator(),
+        )
+        .unwrap();
         manager.start();
 
         // A few frames of the wasm drive loop: server pump -> client pump.
@@ -236,24 +287,27 @@ mod tests {
     /// The offline client loads the full 3x3 window through the shared
     /// WorldManager core.
     #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
     fn offline_window_loads_nine_regions() {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let (server_send, server_recv) = crossbeam::channel::unbounded::<ServerPacket>();
         let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-        let mut manager =
-            GameInstanceManager::new(
-                game_send.clone(),
-                game_recv,
-                client_send,
-                dummy_addr,
-                game::DebugFlags::default(),
-            );
+        let mut manager = GameInstanceManager::new(
+            game_send.clone(),
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
         // LOD off: every ring key is a synchronous LocalServer build (see
         // SimHarness::new). This test is about the 3x3 window, not LOD.
         manager.set_lod_table(&[]);
-        let mut server = LocalServer::new(manager.client_packet_recv(), server_send).unwrap();
+        let mut server = LocalServer::new_with_generator(
+            manager.client_packet_recv(),
+            server_send,
+            lightweight_test_generator(),
+        )
+        .unwrap();
         manager.start();
 
         // Handshake + window subscription needs a few pump rounds:
@@ -282,13 +336,14 @@ mod tests {
     /// Release + grace parks a region offline; resubscribing restores it
     /// from the parking lot (a fresh Region packet arrives again).
     #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
     fn offline_release_parks_and_resubscribe_restores() {
         use game::{RegionCoords, TICK_RATE, UNLOAD_GRACE_MS};
 
         let (packet_send, packet_recv) = crossbeam::channel::unbounded::<ClientPacket>();
         let (out_send, out_recv) = crossbeam::channel::unbounded::<ServerPacket>();
-        let mut server = LocalServer::new(packet_recv, out_send).unwrap();
+        let mut server =
+            LocalServer::new_with_generator(packet_recv, out_send, lightweight_test_generator())
+                .unwrap();
 
         let corner = RegionCoords::new(-1, -1);
         packet_send

@@ -49,7 +49,10 @@ pub fn quads_to_mesh(quads: &[Quad], layers: &BlockTextureLayers) -> Option<Mesh
         if q.face.positive() {
             origin[axis] += 1;
         }
-        for (i, (cu, cv)) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+        for (i, (cu, cv)) in [(0u32, 0u32), (1, 0), (0, 1), (1, 1)]
+            .into_iter()
+            .enumerate()
+        {
             let mut pos = origin;
             pos[ua] += cu * q.w;
             pos[va] += cv * q.h;
@@ -60,7 +63,10 @@ pub fn quads_to_mesh(quads: &[Quad], layers: &BlockTextureLayers) -> Option<Mesh
     // CPU copy freed after GPU extraction; colliders come from rapier, tests never extract
     // (MinimalPlugins), and the entity Aabb is inserted constant by `apply_meshed_chunks`
     // so nothing reads mesh data main-world after upload.
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
     mesh.insert_attribute(
         voxel_material::ATTRIBUTE_VOXEL_PACKED,
         VertexAttributeValues::Uint32x2(packed),
@@ -76,7 +82,14 @@ mod tests {
     use game::BlockId;
 
     fn unit_quad(face: Face, ao: [u8; 4]) -> Quad {
-        Quad { min: [5, 6, 7], w: 2, h: 3, face, block: BlockId(1), ao }
+        Quad {
+            min: [5, 6, 7],
+            w: 2,
+            h: 3,
+            face,
+            block: BlockId(1),
+            ao,
+        }
     }
 
     fn tri_normals_positive(mesh: &Mesh, expected_normal: [f32; 3]) {
@@ -85,23 +98,38 @@ mod tests {
             .iter()
             .map(|v| Vec3::new(v.pos[0] as f32, v.pos[1] as f32, v.pos[2] as f32))
             .collect();
-        let Indices::U32(idx) = mesh.indices().unwrap() else { panic!("u32 indices") };
+        let Indices::U32(idx) = mesh.indices().unwrap() else {
+            panic!("u32 indices")
+        };
         let n = Vec3::from(expected_normal);
         for tri in idx.chunks(3) {
-            let [a, b, c] = [pos[tri[0] as usize], pos[tri[1] as usize], pos[tri[2] as usize]];
+            let [a, b, c] = [
+                pos[tri[0] as usize],
+                pos[tri[1] as usize],
+                pos[tri[2] as usize],
+            ];
             let cross = (b - a).cross(c - a);
-            assert!(cross.dot(n) > 0.0, "triangle {tri:?} winds against its normal");
+            assert!(
+                cross.dot(n) > 0.0,
+                "triangle {tri:?} winds against its normal"
+            );
         }
     }
 
     #[test]
     fn winding_faces_outward_for_all_six_faces_default_and_flipped() {
-        for face in [Face::PosX, Face::NegX, Face::PosY, Face::NegY, Face::PosZ, Face::NegZ] {
+        for face in [
+            Face::PosX,
+            Face::NegX,
+            Face::PosY,
+            Face::NegY,
+            Face::PosZ,
+            Face::NegZ,
+        ] {
             for ao in [[3, 3, 3, 3], [3, 0, 0, 3]] {
                 // [3,0,0,3] triggers the flip rule (ao[0]+ao[3] > ao[1]+ao[2]).
-                let mesh =
-                    quads_to_mesh(&[unit_quad(face, ao)], &BlockTextureLayers::default())
-                        .expect("one quad meshes");
+                let mesh = quads_to_mesh(&[unit_quad(face, ao)], &BlockTextureLayers::default())
+                    .expect("one quad meshes");
                 tri_normals_positive(&mesh, face.normal());
             }
         }
@@ -111,8 +139,11 @@ mod tests {
     fn quad_geometry_spans_w_by_h_at_the_face_plane() {
         // +X quad at min (5,6,7), w=2 (along Y), h=3 (along Z): the face plane
         // sits at x = 6, y spans 6..8, z spans 7..10.
-        let mesh = quads_to_mesh(&[unit_quad(Face::PosX, [3; 4])], &BlockTextureLayers::default())
-            .unwrap();
+        let mesh = quads_to_mesh(
+            &[unit_quad(Face::PosX, [3; 4])],
+            &BlockTextureLayers::default(),
+        )
+        .unwrap();
         let pos: Vec<[u32; 3]> = packed_of(&mesh).iter().map(|v| v.pos).collect();
         assert!(pos.iter().all(|p| p[0] == 6));
         assert_eq!(pos.iter().map(|p| p[1]).min(), Some(6));
@@ -122,22 +153,32 @@ mod tests {
     }
 
     fn packed_of(mesh: &Mesh) -> Vec<crate::renderer::meshing::pack::UnpackedVertex> {
-        let VertexAttributeValues::Uint32x2(packed) =
-            mesh.attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED).unwrap()
+        let VertexAttributeValues::Uint32x2(packed) = mesh
+            .attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED)
+            .unwrap()
         else {
             panic!("packed attribute is Uint32x2")
         };
-        packed.iter().map(|&p| crate::renderer::meshing::pack::unpack(p)).collect()
+        packed
+            .iter()
+            .map(|&p| crate::renderer::meshing::pack::unpack(p))
+            .collect()
     }
 
     #[test]
     fn packed_carries_ao_face_and_extent() {
-        let mesh = quads_to_mesh(&[unit_quad(Face::PosY, [0, 1, 2, 3])], &BlockTextureLayers::default())
-            .unwrap();
+        let mesh = quads_to_mesh(
+            &[unit_quad(Face::PosY, [0, 1, 2, 3])],
+            &BlockTextureLayers::default(),
+        )
+        .unwrap();
         let verts = packed_of(&mesh);
         assert_eq!(verts.len(), 4);
         for (i, v) in verts.iter().enumerate() {
-            assert_eq!(v.ao as usize, i, "corner i carries ao level i for this quad");
+            assert_eq!(
+                v.ao as usize, i,
+                "corner i carries ao level i for this quad"
+            );
             assert_eq!(v.face, Face::PosY);
             assert_eq!((v.w, v.h), (2, 3));
         }
@@ -160,8 +201,11 @@ mod tests {
 
     #[test]
     fn packed_format_is_8_bytes_per_vertex() {
-        let mesh = quads_to_mesh(&[unit_quad(Face::PosY, [3; 4])], &BlockTextureLayers::default())
-            .unwrap();
+        let mesh = quads_to_mesh(
+            &[unit_quad(Face::PosY, [3; 4])],
+            &BlockTextureLayers::default(),
+        )
+        .unwrap();
         let total: usize = mesh
             .attributes()
             .map(|(_, values)| values.get_bytes().len())

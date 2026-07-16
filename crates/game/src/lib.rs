@@ -22,13 +22,13 @@ pub mod lod;
 pub mod lod_builder;
 mod physics;
 pub mod protocol;
-pub mod registry;
 mod region;
 pub mod region_runner;
+pub mod registry;
 pub mod state;
 pub mod ui;
-pub mod voxel;
 pub mod volume;
+pub mod voxel;
 pub mod world_manager;
 pub use parry3d as parry;
 
@@ -41,12 +41,12 @@ pub use input::*;
 pub use lod::*;
 pub use lod_builder::*;
 pub use protocol::*;
-pub use registry::*;
 pub use region_runner::*;
+pub use registry::*;
 pub use state::*;
 pub use ui::*;
-pub use voxel::*;
 pub use volume::*;
+pub use voxel::*;
 pub use world_manager::*;
 
 pub const TICK_RATE: u64 = 50;
@@ -118,9 +118,9 @@ pub enum ClientUpdateEvent {
     DebugLines(RegionId, Vec<DebugLine>),
 }
 
-pub use region::{Region, ReconcileStats};
 #[cfg(not(target_arch = "wasm32"))]
 pub use region::RegionTickPerf;
+pub use region::{ReconcileStats, Region};
 
 pub trait Controller: Send {
     fn on_tick<'a>(&mut self, _t: &mut Undo<GameData>) {}
@@ -166,12 +166,12 @@ impl World {
 
     pub fn basic() -> Self {
         let one = RegionCoords::new(0, 0);
-        let mut data = Region::new(Rollback::new(None), None, one, None);
-        for x in 0..REGION_CHUNKS {
-            for z in 0..REGION_CHUNKS {
-                data.create_basic(ChunkCoords::new(x, 0, z));
-            }
-        }
+        let chunks = (0..REGION_CHUNKS)
+            .flat_map(|x| {
+                (0..REGION_CHUNKS).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(8)))
+            })
+            .collect();
+        let data = Region::from_chunks(one, chunks);
 
         return Self {
             regions: BTreeMap::from([(one, data)]),
@@ -227,7 +227,10 @@ impl World {
     /// after progress_world_one_tick and at no other time.
     pub fn take_transfers(
         &mut self,
-    ) -> (Vec<(EntityBundle, RegionCoords)>, Vec<(GhostData, RegionCoords)>) {
+    ) -> (
+        Vec<(EntityBundle, RegionCoords)>,
+        Vec<(GhostData, RegionCoords)>,
+    ) {
         let mut departures = Vec::new();
         let mut ghosts = Vec::new();
         for (_, region) in &mut self.regions {

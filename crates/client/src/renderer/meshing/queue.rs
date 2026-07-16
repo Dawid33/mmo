@@ -8,8 +8,8 @@ use bevy::camera::primitives::{Frustum, Sphere};
 use bevy::prelude::*;
 use bevy::tasks::AsyncComputeTaskPool;
 
-use super::super::bridge::VoxelData;
 use super::super::block_textures::BlockTextureLayers;
+use super::super::bridge::VoxelData;
 use super::neighbors::{gather_padded_rle, zone_index, zone_indices, zone_offsets};
 use super::{mesh_chunk, MeshingTask};
 
@@ -58,11 +58,10 @@ impl Default for MeshBudgets {
     }
 }
 
-/// Per-frame count of mesh uploads (Mesh3d insertions) so far, shared by
-/// `apply_meshed_chunks` and `lod::apply_lod_meshes` against
-/// `MeshBudgets.uploads_per_frame` — full-res always applies first in the
-/// chain, so it always gets first claim on the shared budget. Reset here by
-/// `mark_remesh_dirty`, the first system in the chained Update pipeline.
+/// Per-frame count of near mesh uploads (`Mesh3d`/quad insertions). Far raster
+/// LOD uses its own equally bounded `lod::FarFrameUploads` counter, so neither
+/// lane can starve the other. Reset here by `mark_remesh_dirty`, the first
+/// system in the chained Update pipeline.
 #[derive(Resource, Default)]
 pub struct FrameUploads(pub usize);
 
@@ -79,7 +78,10 @@ fn chunk_rank(key: [i32; 3], cam: Option<(&GlobalTransform, Option<&Frustum>)>) 
     let out = frustum
         .map(|f| {
             !f.intersects_sphere(
-                &Sphere { center: center.into(), radius: 16.0 * 3f32.sqrt() },
+                &Sphere {
+                    center: center.into(),
+                    radius: 16.0 * 3f32.sqrt(),
+                },
                 false,
             )
         })
@@ -100,15 +102,19 @@ pub fn spawn_mesh_tasks(
     in_flight: Query<(), With<MeshingTask>>,
     camera: Query<(&GlobalTransform, Option<&Frustum>), With<Camera3d>>,
     layers: Res<BlockTextureLayers>,
-    path: Option<Res<super::super::voxel_pull::RenderPath>>,
+    render_config: Option<Res<super::super::config::TerrainRenderConfig>>,
 ) {
     if queue.dirty.is_empty() {
         return;
     }
-    let pull = path.map_or(super::super::voxel_pull::DEFAULT_PULL_PATH, |p| p.pull);
+    let pull = render_config
+        .as_deref()
+        .is_none_or(|config| config.near.uses_quad_records());
     // Entities that lost VoxelData while queued are stale — drop them.
     queue.dirty.retain(|e, _| chunks.contains(*e));
-    let capacity = budgets.max_in_flight.saturating_sub(in_flight.iter().count());
+    let capacity = budgets
+        .max_in_flight
+        .saturating_sub(in_flight.iter().count());
     if capacity == 0 {
         return;
     }
@@ -141,7 +147,10 @@ pub fn spawn_mesh_tasks(
         }
         let layers = layers.0.clone();
         let task = pool.spawn(async move {
-            let neighbors = owned_neighbors.iter().map(|(off, data)| (*off, data)).collect();
+            let neighbors = owned_neighbors
+                .iter()
+                .map(|(off, data)| (*off, data))
+                .collect();
             let padded = gather_padded_rle(&center, &neighbors);
             mesh_chunk(&padded, &BlockTextureLayers(layers), pull)
         });
@@ -243,8 +252,10 @@ pub fn prune_chunk_grid(
     mut removed: RemovedComponents<VoxelData>,
     still_alive: Query<(), With<VoxelData>>,
 ) {
-    let dead: BTreeSet<Entity> =
-        removed.read().filter(|e| !still_alive.contains(*e)).collect();
+    let dead: BTreeSet<Entity> = removed
+        .read()
+        .filter(|e| !still_alive.contains(*e))
+        .collect();
     if dead.is_empty() {
         return;
     }
@@ -296,9 +307,21 @@ pub(crate) mod tests {
         assert_eq!(a[face_nx], c[face_nx], "-X face zone did not");
 
         let d = boundary_zones(&VoxelData::new(voxels_with(&[[31, 31, 31]])));
-        assert_ne!(a[zone_index([1, 1, 1])], d[zone_index([1, 1, 1])], "corner zone changed");
-        assert_ne!(a[zone_index([1, 1, 0])], d[zone_index([1, 1, 0])], "edge zone changed");
-        assert_ne!(a[zone_index([1, 0, 0])], d[zone_index([1, 0, 0])], "face zone changed");
+        assert_ne!(
+            a[zone_index([1, 1, 1])],
+            d[zone_index([1, 1, 1])],
+            "corner zone changed"
+        );
+        assert_ne!(
+            a[zone_index([1, 1, 0])],
+            d[zone_index([1, 1, 0])],
+            "edge zone changed"
+        );
+        assert_ne!(
+            a[zone_index([1, 0, 0])],
+            d[zone_index([1, 0, 0])],
+            "face zone changed"
+        );
     }
 
     fn grid_app() -> App {
@@ -312,7 +335,12 @@ pub(crate) mod tests {
     }
 
     /// Region-root + chunk child at region-local chunk coords, like the bridge builds.
-    pub(crate) fn spawn_chunk(app: &mut App, root_at: Vec3, local: Vec3, voxels: Vec<Voxel>) -> Entity {
+    pub(crate) fn spawn_chunk(
+        app: &mut App,
+        root_at: Vec3,
+        local: Vec3,
+        voxels: Vec<Voxel>,
+    ) -> Entity {
         let root = app
             .world_mut()
             .spawn((Transform::from_translation(root_at), Visibility::default()))
@@ -330,10 +358,19 @@ pub(crate) mod tests {
     #[test]
     fn chunks_key_into_the_grid_by_world_position() {
         let mut app = grid_app();
-        let e = spawn_chunk(&mut app, Vec3::new(256.0, 0.0, -512.0), Vec3::new(64.0, 32.0, 0.0), voxels_with(&[]));
+        let e = spawn_chunk(
+            &mut app,
+            Vec3::new(256.0, 0.0, -512.0),
+            Vec3::new(64.0, 32.0, 0.0),
+            voxels_with(&[]),
+        );
         app.update();
         let grid = app.world().resource::<ChunkGrid>();
-        assert_eq!(grid.0.get(&[10, 1, -16]), Some(&e), "(256+64)/32, 32/32, -512/32");
+        assert_eq!(
+            grid.0.get(&[10, 1, -16]),
+            Some(&e),
+            "(256+64)/32, 32/32, -512/32"
+        );
         assert!(app.world().resource::<RemeshQueue>().dirty.contains_key(&e));
     }
 
@@ -342,29 +379,44 @@ pub(crate) mod tests {
         let mut app = grid_app();
         // Two X-adjacent chunks under one root at origin.
         let a = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
-        let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), voxels_with(&[]));
+        let b = spawn_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(32.0, 0.0, 0.0),
+            voxels_with(&[]),
+        );
         app.update();
         // Drain the initial dirtiness.
         app.world_mut().resource_mut::<RemeshQueue>().dirty.clear();
 
         // Interior edit in `a`: nobody's boundary view changes except a itself.
-        app.world_mut().get_mut::<VoxelData>(a).unwrap()
+        app.world_mut()
+            .get_mut::<VoxelData>(a)
+            .unwrap()
             .edit(|v| v[6 + 32 * 6 + 32 * 32 * 6] = Voxel::new(BlockId(1)));
         app.update();
         {
             let queue = app.world().resource::<RemeshQueue>();
             assert!(queue.dirty.contains_key(&a));
-            assert!(!queue.dirty.contains_key(&b), "interior edit must not dirty the neighbor");
+            assert!(
+                !queue.dirty.contains_key(&b),
+                "interior edit must not dirty the neighbor"
+            );
         }
         app.world_mut().resource_mut::<RemeshQueue>().dirty.clear();
 
         // Boundary edit on a's +X face: b's view of a changed → b dirties.
-        app.world_mut().get_mut::<VoxelData>(a).unwrap()
+        app.world_mut()
+            .get_mut::<VoxelData>(a)
+            .unwrap()
             .edit(|v| v[31 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1)));
         app.update();
         let queue = app.world().resource::<RemeshQueue>();
         assert!(queue.dirty.contains_key(&a));
-        assert!(queue.dirty.contains_key(&b), "+X boundary edit must dirty the +X neighbor");
+        assert!(
+            queue.dirty.contains_key(&b),
+            "+X boundary edit must dirty the +X neighbor"
+        );
     }
 
     #[test]
@@ -378,11 +430,11 @@ pub(crate) mod tests {
         assert!(app.world().resource::<ChunkGrid>().0.is_empty());
     }
 
-    use super::super::{apply_meshed_chunks, MeshingTask};
     use super::super::super::block_textures::BlockTextureLayers;
     use super::super::super::voxel_material;
     use super::super::binary::Face;
     use super::super::pack;
+    use super::super::{apply_meshed_chunks, MeshingTask};
     use bevy::mesh::VertexAttributeValues;
 
     /// Full pipeline as production registers it in `renderer/mod.rs`,
@@ -395,12 +447,16 @@ pub(crate) mod tests {
             .init_resource::<ChunkGrid>()
             .init_resource::<RemeshQueue>()
             .init_resource::<FrameUploads>()
+            .init_resource::<super::super::lod::LodBuildQueue>()
+            .init_resource::<super::super::lod::FarFrameUploads>()
             .init_resource::<BlockTextureLayers>()
             .init_resource::<super::super::visibility::CullingConfig>()
-            // These pipeline tests introspect `Mesh3d` / `ATTRIBUTE_VOXEL_PACKED`
-            // on the legacy mesh path; pin it since `DEFAULT_PULL_PATH` is now
-            // `true`. Pull-path lifecycle coverage lives in `meshing/mod.rs`.
-            .insert_resource(super::super::super::voxel_pull::RenderPath { pull: false })
+            // These pipeline tests introspect `Mesh3d` / `ATTRIBUTE_VOXEL_PACKED`,
+            // so pin the legacy per-chunk backend.
+            .insert_resource(super::super::super::config::TerrainRenderConfig {
+                near: super::super::super::config::NearRenderBackend::PerChunk,
+                far: super::super::super::config::FarRenderBackend::Raster,
+            })
             .insert_resource(budgets)
             .add_systems(
                 Update,
@@ -420,14 +476,22 @@ pub(crate) mod tests {
 
     #[test]
     fn in_flight_budget_is_respected_and_nearest_meshes_first() {
-        let mut app = pipeline_app(MeshBudgets { max_in_flight: 1, uploads_per_frame: 32 });
+        let mut app = pipeline_app(MeshBudgets {
+            max_in_flight: 1,
+            uploads_per_frame: 32,
+        });
         // Camera at origin.
         app.world_mut().spawn((
             Camera3d::default(),
             GlobalTransform::from(Transform::from_translation(Vec3::ZERO)),
         ));
         let near = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
-        let far = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(320.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        let far = spawn_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(320.0, 0.0, 0.0),
+            voxels_with(&[[5, 5, 5]]),
+        );
         app.update();
         // The near chunk claimed the single slot. `apply_meshed_chunks` chains
         // right after `spawn_mesh_tasks`, and the mesher is fast enough that a
@@ -440,7 +504,10 @@ pub(crate) mod tests {
             "nearest chunk claims the single task slot"
         );
         assert!(
-            !app.world().resource::<RemeshQueue>().dirty.contains_key(&near),
+            !app.world()
+                .resource::<RemeshQueue>()
+                .dirty
+                .contains_key(&near),
             "nearest chunk left the queue"
         );
         assert!(
@@ -448,7 +515,11 @@ pub(crate) mod tests {
                 && !app.world().entity(far).contains::<Mesh3d>(),
             "budget of 1 leaves the far chunk unmeshed"
         );
-        assert!(app.world().resource::<RemeshQueue>().dirty.contains_key(&far));
+        assert!(app
+            .world()
+            .resource::<RemeshQueue>()
+            .dirty
+            .contains_key(&far));
     }
 
     /// Deadline-based wait: fixed-iteration polling flaked under full-suite
@@ -472,17 +543,29 @@ pub(crate) mod tests {
     pub(crate) fn wait_until_settled(app: &mut App) -> bool {
         wait_until(app, |app| {
             let queue_empty = app.world().resource::<RemeshQueue>().dirty.is_empty();
-            let none_in_flight =
-                app.world_mut().query::<&MeshingTask>().iter(app.world()).next().is_none();
+            let none_in_flight = app
+                .world_mut()
+                .query::<&MeshingTask>()
+                .iter(app.world())
+                .next()
+                .is_none();
             queue_empty && none_in_flight
         })
     }
 
     #[test]
     fn upload_budget_spreads_mesh_attach_over_frames() {
-        let mut app = pipeline_app(MeshBudgets { max_in_flight: 64, uploads_per_frame: 1 });
+        let mut app = pipeline_app(MeshBudgets {
+            max_in_flight: 64,
+            uploads_per_frame: 1,
+        });
         let a = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[[5, 5, 5]]));
-        let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), voxels_with(&[[5, 5, 5]]));
+        let b = spawn_chunk(
+            &mut app,
+            Vec3::ZERO,
+            Vec3::new(32.0, 0.0, 0.0),
+            voxels_with(&[[5, 5, 5]]),
+        );
         // Let tasks finish, then count Mesh3d arrivals per frame.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
@@ -502,7 +585,10 @@ pub(crate) mod tests {
                 );
                 return;
             }
-            assert!(done < 2, "both meshes attached in one frame despite uploads_per_frame=1");
+            assert!(
+                done < 2,
+                "both meshes attached in one frame despite uploads_per_frame=1"
+            );
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         panic!("no mesh ever attached");
@@ -530,7 +616,13 @@ pub(crate) mod tests {
         assert!(wait_until_settled(&mut app), "pipeline must settle");
         let meshes = app.world().resource::<Assets<Mesh>>();
         let check = |e: Entity, plane_x: u32, expect_face: Face| {
-            let handle = app.world().entity(e).get::<Mesh3d>().expect("meshed").0.clone();
+            let handle = app
+                .world()
+                .entity(e)
+                .get::<Mesh3d>()
+                .expect("meshed")
+                .0
+                .clone();
             let mesh = meshes.get(&handle).unwrap();
             let Some(VertexAttributeValues::Uint32x2(packed)) =
                 mesh.attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED)
@@ -561,14 +653,30 @@ pub(crate) mod tests {
             wait_until(&mut app, |app| app.world().entity(e).contains::<Mesh3d>()),
             "initial mesh must land"
         );
-        let key = app.world().entity(e).get::<ChunkKey>().expect("keyed after first mesh").0;
-        let old_mesh = app.world().entity(e).get::<Mesh3d>().expect("meshed").0.clone();
+        let key = app
+            .world()
+            .entity(e)
+            .get::<ChunkKey>()
+            .expect("keyed after first mesh")
+            .0;
+        let old_mesh = app
+            .world()
+            .entity(e)
+            .get::<Mesh3d>()
+            .expect("meshed")
+            .0
+            .clone();
 
         app.world_mut().entity_mut(e).remove::<VoxelData>();
-        app.world_mut().entity_mut(e).insert(VoxelData::new(voxels_with(&[[6, 6, 6]])));
+        app.world_mut()
+            .entity_mut(e)
+            .insert(VoxelData::new(voxels_with(&[[6, 6, 6]])));
         app.update();
 
-        assert!(app.world().entity(e).contains::<ChunkKey>(), "keeps ChunkKey across same-frame remove+reinsert");
+        assert!(
+            app.world().entity(e).contains::<ChunkKey>(),
+            "keeps ChunkKey across same-frame remove+reinsert"
+        );
         assert_eq!(
             app.world().resource::<ChunkGrid>().0.get(&key),
             Some(&e),
@@ -580,7 +688,10 @@ pub(crate) mod tests {
         // transient MeshingTask.
         assert!(
             wait_until(&mut app, |app| {
-                app.world().entity(e).get::<Mesh3d>().is_some_and(|m| m.0 != old_mesh)
+                app.world()
+                    .entity(e)
+                    .get::<Mesh3d>()
+                    .is_some_and(|m| m.0 != old_mesh)
             }),
             "the voxel swap must remesh (a new mesh handle must land)"
         );
@@ -596,7 +707,12 @@ pub(crate) mod tests {
         let mut app = grid_app();
         let e = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, voxels_with(&[]));
         app.update();
-        let key = app.world().entity(e).get::<ChunkKey>().expect("keyed on first update").0;
+        let key = app
+            .world()
+            .entity(e)
+            .get::<ChunkKey>()
+            .expect("keyed on first update")
+            .0;
         assert_eq!(app.world().resource::<ChunkGrid>().0.get(&key), Some(&e));
 
         app.world_mut().entity_mut(e).remove::<VoxelData>();
@@ -605,9 +721,14 @@ pub(crate) mod tests {
             !app.world().resource::<ChunkGrid>().0.contains_key(&key),
             "evicted once VoxelData has been gone for a full frame"
         );
-        assert!(app.world().entity(e).contains::<ChunkKey>(), "ChunkKey itself survives eviction");
+        assert!(
+            app.world().entity(e).contains::<ChunkKey>(),
+            "ChunkKey itself survives eviction"
+        );
 
-        app.world_mut().entity_mut(e).insert(VoxelData::new(voxels_with(&[])));
+        app.world_mut()
+            .entity_mut(e)
+            .insert(VoxelData::new(voxels_with(&[])));
         app.update();
         assert_eq!(
             app.world().resource::<ChunkGrid>().0.get(&key),
@@ -627,13 +748,17 @@ pub(crate) mod tests {
         let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), full);
         assert!(
             wait_until(&mut app, |app| {
-                app.world().entity(a).contains::<Mesh3d>() && app.world().entity(b).contains::<Mesh3d>()
+                app.world().entity(a).contains::<Mesh3d>()
+                    && app.world().entity(b).contains::<Mesh3d>()
             }),
             "both chunks must mesh"
         );
         // Settle: drain the dirty queue and let in-flight tasks finish so the
         // despawn below is the only thing left to react to.
-        assert!(wait_until_settled(&mut app), "must be settled before the despawn");
+        assert!(
+            wait_until_settled(&mut app),
+            "must be settled before the despawn"
+        );
 
         app.world_mut().entity_mut(a).despawn();
 
@@ -643,11 +768,14 @@ pub(crate) mod tests {
         // -X wall (a vertex at x=0 with a -X face) instead of leaving a hole.
         assert!(
             wait_until(&mut app, |app| {
-                let Some(handle) = app.world().entity(b).get::<Mesh3d>().map(|m| m.0.clone()) else {
+                let Some(handle) = app.world().entity(b).get::<Mesh3d>().map(|m| m.0.clone())
+                else {
                     return false;
                 };
                 let meshes = app.world().resource::<Assets<Mesh>>();
-                let Some(mesh) = meshes.get(&handle) else { return false };
+                let Some(mesh) = meshes.get(&handle) else {
+                    return false;
+                };
                 let Some(VertexAttributeValues::Uint32x2(packed)) =
                     mesh.attribute(voxel_material::ATTRIBUTE_VOXEL_PACKED)
                 else {
