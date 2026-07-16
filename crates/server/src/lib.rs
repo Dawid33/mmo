@@ -15,6 +15,31 @@ use quinn::{
     ConnectionError, Endpoint, TransportConfig,
 };
 
+const DEFAULT_SERVER_WORKER_THREADS: usize = 4;
+
+fn server_worker_threads(value: Option<&str>) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_SERVER_WORKER_THREADS);
+    };
+    let worker_threads = value.parse::<usize>().map_err(|_| {
+        format!("invalid TOKIO_WORKER_THREADS value `{value}` (expected positive integer)")
+    })?;
+    if worker_threads == 0 {
+        return Err(format!(
+            "invalid TOKIO_WORKER_THREADS value `{value}` (expected positive integer)"
+        ));
+    }
+    Ok(worker_threads)
+}
+
+fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
 pub mod lod_workers;
 pub mod region_threads;
 pub mod webtransport;
@@ -229,10 +254,10 @@ pub fn run() {
     let (server_send, server_recv) = crossbeam::channel::unbounded();
 
     let mut rgi = WorldIngress::new();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
+    let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
+        .unwrap_or_else(|message| panic!("{message}"));
+    let rt = build_server_runtime(worker_threads);
     let cps = client_packet_send.clone();
     std::thread::spawn(move || rt.block_on(async move { rgi.listen(cps, server_recv).await }));
 
@@ -259,8 +284,11 @@ pub fn run() {
     let world_seed = worldgen::WORLD_SEED;
     let gen_cache = worldgen::cache::WorldgenCache::from_env(world_seed, &manifest);
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
-    let lod_builder: Box<dyn game::LodBuilder> =
-        Box::new(lod_workers::ThreadLodBuilder::new(world_seed, materials, lod_result_send));
+    let lod_builder: Box<dyn game::LodBuilder> = Box::new(lod_workers::ThreadLodBuilder::new(
+        world_seed,
+        materials,
+        lod_result_send,
+    ));
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::default(),
         Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
@@ -298,7 +326,9 @@ pub fn run() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !manager.running_regions().is_empty() && std::time::Instant::now() < deadline {
         let now_ms = start.elapsed().as_millis() as u64;
-        if let Ok((rc, output)) = region_out_recv.recv_timeout(std::time::Duration::from_millis(100)) {
+        if let Ok((rc, output)) =
+            region_out_recv.recv_timeout(std::time::Duration::from_millis(100))
+        {
             manager.handle_region_output(rc, output, now_ms);
         }
     }
@@ -341,5 +371,33 @@ async fn handle_connection(
             };
             send.send(ServerEvent::ClientPacket(packet, id)).unwrap();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_worker_threads_default_runtime_has_four_workers() {
+        let worker_threads = server_worker_threads(None).unwrap();
+        let runtime = build_server_runtime(worker_threads);
+        assert_eq!(runtime.metrics().num_workers(), 4);
+    }
+
+    #[test]
+    fn server_worker_threads_accept_valid_override() {
+        assert_eq!(server_worker_threads(Some("2")), Ok(2));
+    }
+
+    #[test]
+    fn server_worker_threads_reject_invalid_values() {
+        let zero = server_worker_threads(Some("0")).unwrap_err();
+        assert!(zero.contains("TOKIO_WORKER_THREADS"));
+        assert!(zero.contains("positive integer"));
+
+        let malformed = server_worker_threads(Some("many")).unwrap_err();
+        assert!(malformed.contains("TOKIO_WORKER_THREADS"));
+        assert!(malformed.contains("positive integer"));
     }
 }
