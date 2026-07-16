@@ -23,13 +23,14 @@ use super::bridge::{RegionRoots, SimTarget};
 use super::config::TerrainRenderConfig;
 use super::far_voxel::lifecycle::FarVoxelUploadPending;
 use super::far_voxel::residency::FarVoxelResidency;
-use super::far_voxel::{FarBrickBuildTask, FarVoxelReady};
+use super::far_voxel::{FarBrickBuildTask, FarRasterFallback, FarVoxelReady};
 use super::lod_rings::LodRings;
 use super::meshing::lod::{LodBuildQueue, LodChunk, LodMeshTask, LodRasterReady};
 use super::meshing::queue::{ChunkKey, RemeshQueue};
 use super::meshing::MeshingTask;
 use super::meshing::TerrainQuadCount;
 use super::voxel_pull::gpu::{ActiveNearMode, ForwardCullSource};
+use super::voxel_pull::ChunkQuads;
 use super::{ClientUpdates, GameEvents};
 use metrics::{CountSummary, FloatSummary, RenderDiagnosticSamples};
 use output::{
@@ -151,6 +152,9 @@ pub struct BenchmarkReadiness {
     pub in_flight_tasks: usize,
     pub far_residency_pending: usize,
     pub ready_lod_counts: BTreeMap<u32, usize>,
+    backend_ready: bool,
+    near_runtime: Option<NearRuntimeMode>,
+    far_runtime: FarRuntimeBackend,
 }
 
 impl BenchmarkReadiness {
@@ -166,6 +170,7 @@ impl BenchmarkReadiness {
             && self.pending_lod_events == 0
             && self.in_flight_tasks == 0
             && self.far_residency_pending == 0
+            && self.backend_ready
             && has_full_lod_table
     }
 }
@@ -173,6 +178,7 @@ impl BenchmarkReadiness {
 #[derive(Default)]
 pub struct ReadinessTracker {
     previous_lod_counts: Option<BTreeMap<u32, usize>>,
+    previous_backends: Option<(Option<NearRuntimeMode>, FarRuntimeBackend)>,
     stable_frames: u32,
 }
 
@@ -180,13 +186,18 @@ impl ReadinessTracker {
     pub fn observe(&mut self, readiness: &BenchmarkReadiness) -> bool {
         if !readiness.gates_ready() {
             self.previous_lod_counts = None;
+            self.previous_backends = None;
             self.stable_frames = 0;
             return false;
         }
-        if self.previous_lod_counts.as_ref() == Some(&readiness.ready_lod_counts) {
+        let backends = (readiness.near_runtime, readiness.far_runtime);
+        if self.previous_lod_counts.as_ref() == Some(&readiness.ready_lod_counts)
+            && self.previous_backends == Some(backends)
+        {
             self.stable_frames = self.stable_frames.saturating_add(1);
         } else {
             self.previous_lod_counts = Some(readiness.ready_lod_counts.clone());
+            self.previous_backends = Some(backends);
             self.stable_frames = 1;
         }
         self.stable_frames >= STABLE_READY_FRAMES
@@ -205,6 +216,139 @@ pub enum BenchmarkPhase {
     Measuring,
     Complete,
     Failed,
+}
+
+const NON_AUTHORITATIVE_NEAR_REASON: &str =
+    "near renderer mode changed during benchmark measurement";
+const NON_AUTHORITATIVE_FAR_REASON: &str =
+    "far renderer entered raster fallback during benchmark measurement";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NearRuntimeMode {
+    mode: ActiveNearMode,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum FarRuntimeBackend {
+    Brick,
+    Raster,
+    Mixed,
+    #[default]
+    Unavailable,
+}
+
+impl FarRuntimeBackend {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Brick => "brick",
+            Self::Raster => "raster",
+            Self::Mixed => "mixed",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RuntimeBackendState {
+    near: Option<NearRuntimeMode>,
+    far: FarRuntimeBackend,
+    /// True only when every required far cell uses the configured backend.
+    far_ready: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthorityAction {
+    Continue,
+    RestartWarmup,
+    Fail(&'static str),
+}
+
+#[derive(Default)]
+struct RunBackendAuthority {
+    locked: Option<RuntimeBackendState>,
+}
+
+impl RunBackendAuthority {
+    fn lock(&mut self, state: RuntimeBackendState) {
+        self.locked = Some(state);
+    }
+
+    const fn locked(&self) -> Option<RuntimeBackendState> {
+        self.locked
+    }
+
+    fn observe(&mut self, phase: BenchmarkPhase, current: RuntimeBackendState) -> AuthorityAction {
+        let Some(locked) = self.locked else {
+            if current.near.is_some() && current.far_ready {
+                self.lock(current);
+            }
+            return AuthorityAction::Continue;
+        };
+        let near_changed = current.near.is_none() || current.near != locked.near;
+        let far_changed = !current.far_ready || current.far != locked.far;
+        match phase {
+            BenchmarkPhase::Warming if near_changed || far_changed => {
+                if current.near.is_some() && current.far_ready {
+                    self.lock(current);
+                }
+                AuthorityAction::RestartWarmup
+            }
+            BenchmarkPhase::Measuring if near_changed => {
+                AuthorityAction::Fail(NON_AUTHORITATIVE_NEAR_REASON)
+            }
+            BenchmarkPhase::Measuring if far_changed => {
+                AuthorityAction::Fail(NON_AUTHORITATIVE_FAR_REASON)
+            }
+            _ => AuthorityAction::Continue,
+        }
+    }
+}
+
+fn result_backend_state(
+    failed: bool,
+    authority: &RunBackendAuthority,
+    current: RuntimeBackendState,
+) -> RuntimeBackendState {
+    if failed {
+        current
+    } else {
+        authority.locked().unwrap_or(current)
+    }
+}
+
+const fn classify_far_runtime(
+    total_cells: usize,
+    brick_cells: usize,
+    raster_cells: usize,
+) -> (FarRuntimeBackend, bool) {
+    let backend = match (brick_cells > 0, raster_cells > 0) {
+        (true, true) => FarRuntimeBackend::Mixed,
+        (true, false) => FarRuntimeBackend::Brick,
+        (false, true) => FarRuntimeBackend::Raster,
+        (false, false) => FarRuntimeBackend::Unavailable,
+    };
+    (
+        backend,
+        total_cells > 0 && brick_cells.saturating_add(raster_cells) == total_cells,
+    )
+}
+
+const fn far_runtime_ready(
+    expected: FarRuntimeBackend,
+    total_cells: usize,
+    brick_cells: usize,
+    raster_cells: usize,
+    raster_ready_cells: usize,
+) -> bool {
+    if total_cells == 0 {
+        return false;
+    }
+    match expected {
+        FarRuntimeBackend::Brick => brick_cells == total_cells && raster_cells == 0,
+        FarRuntimeBackend::Raster => brick_cells == 0 && raster_ready_cells == total_cells,
+        FarRuntimeBackend::Mixed | FarRuntimeBackend::Unavailable => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +408,15 @@ impl BenchmarkController {
 
     pub const fn phase(&self) -> BenchmarkPhase {
         self.phase
+    }
+
+    fn restart_warmup(&mut self, elapsed: Duration) {
+        self.phase = BenchmarkPhase::Warming;
+        self.phase_started = elapsed;
+    }
+
+    fn fail(&mut self) {
+        self.phase = BenchmarkPhase::Failed;
     }
 
     fn phase_elapsed(&self, elapsed: Duration) -> Duration {
@@ -415,6 +568,9 @@ struct BenchmarkRuntime {
     snapshot_frozen: bool,
     output_written: bool,
     load_to_ready_ms: Option<f64>,
+    backend_authority: RunBackendAuthority,
+    current_backends: RuntimeBackendState,
+    failure_reason: Option<String>,
 }
 
 pub struct RenderBenchmarkPlugin {
@@ -482,9 +638,19 @@ struct BenchmarkScene<'w, 's> {
     in_flight_bricks: Query<'w, 's, (), With<FarBrickBuildTask>>,
     in_flight_far_uploads: Query<'w, 's, (), With<FarVoxelUploadPending>>,
     chunks: Query<'w, 's, Option<&'static TerrainQuadCount>, With<ChunkKey>>,
-    far_cells: Query<'w, 's, (), With<LodChunk>>,
-    ready_far_cells:
-        Query<'w, 's, (&'static LodChunk, Option<&'static TerrainQuadCount>), ReadyFarCellFilter>,
+    far_cells: Query<
+        'w,
+        's,
+        (
+            &'static LodChunk,
+            Option<&'static TerrainQuadCount>,
+            Has<FarVoxelReady>,
+            Has<FarRasterFallback>,
+            Has<LodRasterReady>,
+            Has<Mesh3d>,
+            Has<ChunkQuads>,
+        ),
+    >,
     far_residency: Option<Res<'w, FarVoxelResidency>>,
 }
 
@@ -513,13 +679,6 @@ fn snapshot_has_all_lod_keys(
     loaded.into_iter().collect::<BTreeSet<_>>() == expected_lod_keys(viewer, near_regions)
 }
 
-type ReadyFarCellFilter = Or<(
-    With<Mesh3d>,
-    With<super::voxel_pull::ChunkQuads>,
-    With<FarVoxelReady>,
-    With<LodRasterReady>,
-)>;
-
 #[allow(clippy::too_many_arguments)]
 fn run_benchmark(
     time: Res<Time<Real>>,
@@ -535,6 +694,61 @@ fn run_benchmark(
     mut exits: MessageWriter<AppExit>,
 ) {
     let elapsed = time.elapsed();
+    let render_snapshot = shared
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let near_runtime = render_snapshot.near.map(|near| NearRuntimeMode {
+        mode: near.active_mode,
+        generation: near.mode_generation,
+    });
+    let mut brick_cells = 0usize;
+    let mut raster_cells = 0usize;
+    let mut raster_ready_cells = 0usize;
+    let mut raster_resident_quads = 0u64;
+    let mut ready_lod_counts = BTreeMap::new();
+    let mut total_far_cells = 0usize;
+    for (lod, quads, brick_ready, fallback, raster_ready, has_mesh, has_quads) in &scene.far_cells {
+        total_far_cells = total_far_cells.saturating_add(1);
+        let raster_draw_ready = raster_ready || has_mesh || has_quads;
+        let raster_active = fallback || raster_draw_ready;
+        if brick_ready {
+            brick_cells = brick_cells.saturating_add(1);
+        }
+        if raster_active {
+            raster_cells = raster_cells.saturating_add(1);
+            raster_resident_quads =
+                raster_resident_quads.saturating_add(quads.map_or(0, |quads| u64::from(quads.0)));
+        }
+        if raster_draw_ready {
+            raster_ready_cells = raster_ready_cells.saturating_add(1);
+        }
+        let cell_ready_for_config = match render_config.far {
+            super::config::FarRenderBackend::BrickRaymarch => brick_ready && !raster_active,
+            super::config::FarRenderBackend::Raster => raster_draw_ready && !brick_ready,
+        };
+        if cell_ready_for_config {
+            *ready_lod_counts.entry(lod.factor).or_insert(0) += 1;
+        }
+    }
+    let (far_runtime, _) = classify_far_runtime(total_far_cells, brick_cells, raster_cells);
+    let expected_far_runtime = match render_config.far {
+        super::config::FarRenderBackend::BrickRaymarch => FarRuntimeBackend::Brick,
+        super::config::FarRenderBackend::Raster => FarRuntimeBackend::Raster,
+    };
+    let current_backends = RuntimeBackendState {
+        near: near_runtime,
+        far: far_runtime,
+        far_ready: far_runtime_ready(
+            expected_far_runtime,
+            total_far_cells,
+            brick_cells,
+            raster_cells,
+            raster_ready_cells,
+        ),
+    };
+    runtime.current_backends = current_backends;
     if !runtime.snapshot_frozen
         && scene.roots.0.len() >= REQUIRED_NEAR_REGIONS
         && scene.client_updates.0.is_empty()
@@ -556,10 +770,6 @@ fn run_benchmark(
             }
         }
     }
-    let mut ready_lod_counts = BTreeMap::new();
-    for (lod, _) in &scene.ready_far_cells {
-        *ready_lod_counts.entry(lod.factor).or_insert(0) += 1;
-    }
     let readiness = BenchmarkReadiness {
         near_regions: scene.roots.0.len(),
         remesh_queue_len: scene.remesh_queue.dirty.len(),
@@ -574,16 +784,36 @@ fn run_benchmark(
             .as_deref()
             .map_or(0, FarVoxelResidency::pending_work_count),
         ready_lod_counts,
+        backend_ready: current_backends.near.is_some() && current_backends.far_ready,
+        near_runtime: current_backends.near,
+        far_runtime: current_backends.far,
     };
     let ready = runtime.readiness.observe(&readiness);
     runtime.last_readiness = readiness;
 
     let previous_phase = runtime.controller.phase();
-    runtime.controller.advance(elapsed, ready);
+    let authority_action = runtime
+        .backend_authority
+        .observe(previous_phase, current_backends);
+    match authority_action {
+        AuthorityAction::Continue => runtime.controller.advance(elapsed, ready),
+        AuthorityAction::RestartWarmup => {
+            runtime.controller.restart_warmup(elapsed);
+            runtime.samples = BenchmarkSamples::default();
+            runtime.camera_base = None;
+            info!("render benchmark restarted warmup after renderer backend changed");
+        }
+        AuthorityAction::Fail(reason) => {
+            runtime.failure_reason = Some(reason.to_owned());
+            runtime.controller.fail();
+            error!("render benchmark failed: {reason}");
+        }
+    }
     let phase = runtime.controller.phase();
     if phase != previous_phase {
         info!("render benchmark phase: {previous_phase:?} -> {phase:?}");
         if phase == BenchmarkPhase::Warming {
+            runtime.backend_authority.lock(current_backends);
             runtime.load_to_ready_ms = Some(elapsed.as_secs_f64() * 1_000.0);
             far_draw_gate.enable();
             info!("render benchmark enabled the completed far scene for warmup");
@@ -615,27 +845,22 @@ fn run_benchmark(
             ),
         });
     }
-    capabilities.0.far_cells = Some(scene.far_cells.iter().count() as u64);
-    if render_config.far == super::config::FarRenderBackend::Raster {
-        capabilities.0.far_resident_quads = Some(
-            scene
-                .ready_far_cells
-                .iter()
-                .filter_map(|(_, quads)| quads)
-                .map(|quads| u64::from(quads.0))
-                .sum(),
-        );
-    }
+    capabilities.0.far_cells = Some(total_far_cells as u64);
+    capabilities.0.far_resident_quads = matches!(
+        far_runtime,
+        FarRuntimeBackend::Raster | FarRuntimeBackend::Mixed
+    )
+    .then_some(raster_resident_quads);
     if let Some(residency) = scene.far_residency.as_deref() {
         capabilities.0.unique_bricks = Some(residency.unique_bricks() as u64);
         capabilities.0.brick_dedup_ratio = residency.brick_dedup_ratio();
     }
-    let render_snapshot = shared
-        .0
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
-    let translated = translate_snapshot(&render_snapshot, render_config.far);
+    let telemetry_far_backend = if far_runtime == FarRuntimeBackend::Brick {
+        super::config::FarRenderBackend::BrickRaymarch
+    } else {
+        super::config::FarRenderBackend::Raster
+    };
+    let translated = translate_snapshot(&render_snapshot, telemetry_far_backend);
     if render_config.near.uses_quad_records() {
         capabilities.0.near_active_chunks = translated.near.active_chunks;
         capabilities.0.near_frustum_survivors = translated.near.frustum_survivors;
@@ -651,14 +876,18 @@ fn run_benchmark(
     capabilities.0.near_reserved_bytes = translated.near.reserved_bytes;
     capabilities.0.far_visible_instances = translated.far.visible_instances;
     capabilities.0.far_proxy_vertices = translated.far.proxy_vertices;
-    match render_config.far {
-        super::config::FarRenderBackend::BrickRaymarch => {
+    match far_runtime {
+        FarRuntimeBackend::Brick => {
             capabilities.0.far_direct_draws = Some(0);
             capabilities.0.far_indirect_draws = translated.far.indirect_draws;
         }
-        super::config::FarRenderBackend::Raster => {
+        FarRuntimeBackend::Raster => {
             capabilities.0.far_direct_draws = None;
             capabilities.0.far_indirect_draws = Some(0);
+        }
+        FarRuntimeBackend::Mixed | FarRuntimeBackend::Unavailable => {
+            capabilities.0.far_direct_draws = None;
+            capabilities.0.far_indirect_draws = None;
         }
     }
     capabilities.0.far_logical_bytes = translated.far.logical_bytes;
@@ -710,13 +939,18 @@ fn run_benchmark(
     {
         runtime.output_written = true;
         let completion = completion_decision(phase, !runtime.samples.frame_ms.is_empty());
+        let result_backends = result_backend_state(
+            completion.failed,
+            &runtime.backend_authority,
+            runtime.current_backends,
+        );
         let result = build_result(
             completion.failed,
             completion.missing_required_samples,
             &settings.0,
-            *render_config,
-            translated.near_mode,
+            result_backends.near.map(|near| near.mode),
             translated.near_visibility_source,
+            result_backends.far,
             &runtime,
             render_snapshot.adapter,
         );
@@ -744,9 +978,9 @@ fn build_result(
     failed: bool,
     missing_required_samples: bool,
     settings: &BenchmarkRunSettings,
-    config: TerrainRenderConfig,
     near_mode: Option<ActiveNearMode>,
     near_visibility_source: Option<ForwardCullSource>,
+    far_runtime: FarRuntimeBackend,
     runtime: &BenchmarkRuntime,
     adapter: Option<AdapterMetadata>,
 ) -> BenchmarkResult {
@@ -854,9 +1088,9 @@ fn build_result(
     });
     populate_metric_unavailability(
         &metrics,
-        config,
         near_mode,
         near_visibility_source,
+        far_runtime,
         &mut unavailable_metrics,
     );
     unavailable_metrics.sort_by(|left, right| left.path.cmp(&right.path));
@@ -864,6 +1098,9 @@ fn build_result(
     BenchmarkResult::new(
         if failed { "failed" } else { "complete" },
         failed.then(|| {
+            if let Some(reason) = &runtime.failure_reason {
+                return reason.clone();
+            }
             if missing_required_samples {
                 return "measurement completed without frame-time samples".to_owned();
             }
@@ -902,7 +1139,7 @@ fn build_result(
                 .unwrap_or("unavailable")
                 .to_owned(),
             far_backend_requested: settings.requested_far_backend.clone(),
-            far_backend_resolved: config.far.as_str().to_owned(),
+            far_backend_resolved: far_runtime.as_str().to_owned(),
             adapter,
         },
         SerializableReadiness {
@@ -922,9 +1159,9 @@ fn build_result(
 
 fn populate_metric_unavailability(
     metrics: &BenchmarkMetrics,
-    config: TerrainRenderConfig,
     near_mode: Option<ActiveNearMode>,
     near_visibility_source: Option<ForwardCullSource>,
+    far_runtime: FarRuntimeBackend,
     unavailable: &mut Vec<UnavailableMetric>,
 ) {
     let mut mark = |path: &str, missing: bool, reason: UnavailableReason, detail: Option<&str>| {
@@ -1081,7 +1318,7 @@ fn populate_metric_unavailability(
         Some("exact main-view direct draw count was not observed"),
     );
 
-    let far_is_brick = config.far == super::config::FarRenderBackend::BrickRaymarch;
+    let far_is_brick = far_runtime == FarRuntimeBackend::Brick;
     mark(
         "metrics.geometry.far.resident_quads",
         metrics.geometry.far.resident_quads.is_none(),
@@ -1217,6 +1454,12 @@ mod tests {
             in_flight_tasks: 0,
             far_residency_pending: 0,
             ready_lod_counts,
+            backend_ready: true,
+            near_runtime: Some(NearRuntimeMode {
+                mode: ActiveNearMode::GroupedDirect,
+                generation: 1,
+            }),
+            far_runtime: FarRuntimeBackend::Raster,
         }
     }
 
@@ -1285,6 +1528,27 @@ mod tests {
     }
 
     #[test]
+    fn readiness_stability_resets_when_near_runtime_generation_changes() {
+        let mut tracker = ReadinessTracker::default();
+        let initial = ready(&[]);
+        for _ in 0..(STABLE_READY_FRAMES - 1) {
+            assert!(!tracker.observe(&initial));
+        }
+        let changed = BenchmarkReadiness {
+            near_runtime: Some(NearRuntimeMode {
+                mode: ActiveNearMode::GpuDriven {
+                    indirect_count: true,
+                },
+                generation: 2,
+            }),
+            ..initial
+        };
+
+        assert!(!tracker.observe(&changed));
+        assert_eq!(tracker.stable_frames(), 1);
+    }
+
+    #[test]
     fn phase_timing_is_load_then_warm_then_fixed_measurement() {
         let mut controller = BenchmarkController::default();
         controller.advance(Duration::from_secs(5), true);
@@ -1306,6 +1570,120 @@ mod tests {
         let mut controller = BenchmarkController::default();
         controller.advance(LOAD_TIMEOUT + Duration::from_millis(1), false);
         assert_eq!(controller.phase(), BenchmarkPhase::Failed);
+    }
+
+    #[test]
+    fn backend_authority_restarts_warmup_when_near_generation_changes() {
+        let mut authority = RunBackendAuthority::default();
+        let first = RuntimeBackendState {
+            near: Some(NearRuntimeMode {
+                mode: ActiveNearMode::GroupedDirect,
+                generation: 4,
+            }),
+            far: FarRuntimeBackend::Raster,
+            far_ready: true,
+        };
+        authority.lock(first);
+
+        let changed = RuntimeBackendState {
+            near: Some(NearRuntimeMode {
+                mode: ActiveNearMode::GpuDriven {
+                    indirect_count: true,
+                },
+                generation: 5,
+            }),
+            ..first
+        };
+
+        assert_eq!(
+            authority.observe(BenchmarkPhase::Warming, changed),
+            AuthorityAction::RestartWarmup
+        );
+        assert_eq!(authority.locked(), Some(changed));
+    }
+
+    #[test]
+    fn backend_authority_fails_measurement_when_near_mode_changes() {
+        let mut authority = RunBackendAuthority::default();
+        authority.lock(RuntimeBackendState {
+            near: Some(NearRuntimeMode {
+                mode: ActiveNearMode::GroupedDirect,
+                generation: 7,
+            }),
+            far: FarRuntimeBackend::Raster,
+            far_ready: true,
+        });
+
+        assert_eq!(
+            authority.observe(
+                BenchmarkPhase::Measuring,
+                RuntimeBackendState {
+                    near: Some(NearRuntimeMode {
+                        mode: ActiveNearMode::GpuDriven {
+                            indirect_count: true,
+                        },
+                        generation: 8,
+                    }),
+                    far: FarRuntimeBackend::Raster,
+                    far_ready: true,
+                }
+            ),
+            AuthorityAction::Fail(NON_AUTHORITATIVE_NEAR_REASON)
+        );
+    }
+
+    #[test]
+    fn far_runtime_state_distinguishes_pure_brick_raster_and_mixed() {
+        assert_eq!(
+            classify_far_runtime(4, 4, 0),
+            (FarRuntimeBackend::Brick, true)
+        );
+        assert_eq!(
+            classify_far_runtime(4, 0, 4),
+            (FarRuntimeBackend::Raster, true)
+        );
+        assert_eq!(
+            classify_far_runtime(4, 3, 1),
+            (FarRuntimeBackend::Mixed, true)
+        );
+        assert_eq!(
+            classify_far_runtime(4, 3, 0),
+            (FarRuntimeBackend::Brick, false)
+        );
+        assert!(!far_runtime_ready(FarRuntimeBackend::Raster, 4, 0, 4, 0));
+        assert!(far_runtime_ready(FarRuntimeBackend::Raster, 4, 0, 4, 4));
+        assert!(far_runtime_ready(FarRuntimeBackend::Brick, 4, 4, 0, 0));
+    }
+
+    #[test]
+    fn backend_authority_restarts_on_brick_fallback_during_warmup_and_fails_during_measurement() {
+        let pure_brick = RuntimeBackendState {
+            near: Some(NearRuntimeMode {
+                mode: ActiveNearMode::GroupedDirect,
+                generation: 1,
+            }),
+            far: FarRuntimeBackend::Brick,
+            far_ready: true,
+        };
+        let mixed = RuntimeBackendState {
+            far: FarRuntimeBackend::Mixed,
+            far_ready: false,
+            ..pure_brick
+        };
+
+        let mut warming = RunBackendAuthority::default();
+        warming.lock(pure_brick);
+        assert_eq!(
+            warming.observe(BenchmarkPhase::Warming, mixed),
+            AuthorityAction::RestartWarmup
+        );
+
+        let mut measuring = RunBackendAuthority::default();
+        measuring.lock(pure_brick);
+        assert_eq!(
+            measuring.observe(BenchmarkPhase::Measuring, mixed),
+            AuthorityAction::Fail(NON_AUTHORITATIVE_FAR_REASON)
+        );
     }
 
     #[test]
@@ -1351,16 +1729,12 @@ mod tests {
     #[test]
     fn null_workload_metrics_are_explained_once_without_guessing_adapter_features() {
         let metrics = BenchmarkMetrics::default();
-        let config = TerrainRenderConfig {
-            near: super::super::config::NearRenderBackend::PerChunk,
-            far: super::super::config::FarRenderBackend::BrickRaymarch,
-        };
         let mut unavailable = Vec::new();
         populate_metric_unavailability(
             &metrics,
-            config,
             Some(ActiveNearMode::Disabled),
             None,
+            FarRuntimeBackend::Brick,
             &mut unavailable,
         );
 
@@ -1407,18 +1781,13 @@ mod tests {
             (name == "RENDER_BENCH_OUTPUT").then(|| "unused.json".to_owned())
         })
         .unwrap();
-        let config = TerrainRenderConfig {
-            near: super::super::config::NearRenderBackend::PerChunk,
-            far: super::super::config::FarRenderBackend::Raster,
-        };
-
         let result = build_result(
             true,
             true,
             &settings,
-            config,
             Some(ActiveNearMode::Disabled),
             None,
+            FarRuntimeBackend::Raster,
             &BenchmarkRuntime::default(),
             None,
         );
@@ -1447,18 +1816,13 @@ mod tests {
             _ => None,
         })
         .unwrap();
-        let config = TerrainRenderConfig {
-            near: super::super::config::NearRenderBackend::GpuDriven,
-            far: super::super::config::FarRenderBackend::Raster,
-        };
-
         let result = build_result(
             false,
             false,
             &settings,
-            config,
             Some(ActiveNearMode::GroupedDirect),
             Some(ForwardCullSource::Frustum),
+            FarRuntimeBackend::Raster,
             &BenchmarkRuntime::default(),
             None,
         );
@@ -1471,21 +1835,85 @@ mod tests {
     }
 
     #[test]
+    fn failed_artifact_reports_actual_mixed_far_fallback_and_specific_reason() {
+        let settings = BenchmarkRunSettings::from_values(|name| match name {
+            "RENDER_BENCH_OUTPUT" => Some("unused.json".to_owned()),
+            "VOXEL_FAR_RENDER" => Some("brick".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let runtime = BenchmarkRuntime {
+            failure_reason: Some(NON_AUTHORITATIVE_FAR_REASON.to_owned()),
+            ..Default::default()
+        };
+
+        let result = build_result(
+            true,
+            false,
+            &settings,
+            Some(ActiveNearMode::GpuDriven {
+                indirect_count: true,
+            }),
+            Some(ForwardCullSource::Hzb),
+            FarRuntimeBackend::Mixed,
+            &runtime,
+            None,
+        );
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.failure_reason.as_deref(),
+            Some(NON_AUTHORITATIVE_FAR_REASON)
+        );
+        assert_eq!(result.benchmark.far_backend_resolved, "mixed");
+        assert_eq!(
+            result.benchmark.far_backend_requested.as_deref(),
+            Some("brick")
+        );
+    }
+
+    #[test]
+    fn complete_result_uses_locked_backends_while_failed_result_uses_actual_backends() {
+        let locked = RuntimeBackendState {
+            near: Some(NearRuntimeMode {
+                mode: ActiveNearMode::GpuDriven {
+                    indirect_count: true,
+                },
+                generation: 9,
+            }),
+            far: FarRuntimeBackend::Brick,
+            far_ready: true,
+        };
+        let actual_fallback = RuntimeBackendState {
+            far: FarRuntimeBackend::Mixed,
+            far_ready: false,
+            ..locked
+        };
+        let mut authority = RunBackendAuthority::default();
+        authority.lock(locked);
+
+        assert_eq!(
+            result_backend_state(false, &authority, actual_fallback),
+            locked
+        );
+        assert_eq!(
+            result_backend_state(true, &authority, actual_fallback),
+            actual_fallback
+        );
+    }
+
+    #[test]
     fn hzb_unavailability_uses_actual_visibility_source() {
         let metrics = BenchmarkMetrics::default();
-        let config = TerrainRenderConfig {
-            near: super::super::config::NearRenderBackend::GpuDriven,
-            far: super::super::config::FarRenderBackend::Raster,
-        };
         let mut unavailable = Vec::new();
 
         populate_metric_unavailability(
             &metrics,
-            config,
             Some(ActiveNearMode::GpuDriven {
                 indirect_count: true,
             }),
             Some(ForwardCullSource::Frustum),
+            FarRuntimeBackend::Raster,
             &mut unavailable,
         );
 
@@ -1501,11 +1929,11 @@ mod tests {
         let mut hzb_unavailable = Vec::new();
         populate_metric_unavailability(
             &metrics,
-            config,
             Some(ActiveNearMode::GpuDriven {
                 indirect_count: true,
             }),
             Some(ForwardCullSource::Hzb),
+            FarRuntimeBackend::Raster,
             &mut hzb_unavailable,
         );
         assert_eq!(
