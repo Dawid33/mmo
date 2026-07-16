@@ -78,6 +78,7 @@ pub struct VisibilityMetrics {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DrawScopeMetrics {
+    pub direct_draws: Option<CountSummary>,
     pub indirect_draws: Option<CountSummary>,
 }
 
@@ -133,12 +134,6 @@ pub struct AdapterMetadata {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct LodRingMetadata {
-    pub bound: i32,
-    pub factor: u32,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub struct BenchmarkMetadata {
     pub repetition: u32,
     pub expected_repetitions: Option<u32>,
@@ -150,8 +145,8 @@ pub struct BenchmarkMetadata {
     pub os: Option<String>,
     pub arch: Option<String>,
     pub cpu: Option<String>,
-    pub client_worker_threads: Option<u32>,
-    pub tokio_worker_threads: Option<u32>,
+    pub client_threads: Option<u32>,
+    pub server_threads: Option<u32>,
     pub resolution: [u32; 2],
     pub vsync: bool,
     pub required_near_regions: usize,
@@ -159,14 +154,14 @@ pub struct BenchmarkMetadata {
     pub load_timeout_seconds: u64,
     pub warmup_seconds: u64,
     pub measurement_seconds: u64,
-    pub yaw_degrees: u32,
+    pub camera_path: String,
     pub simulation_snapshot_frozen: bool,
     pub world_seed: u64,
-    pub lod_ring_table: Vec<LodRingMetadata>,
-    pub requested_near_backend: Option<String>,
-    pub resolved_near_backend: String,
-    pub requested_far_backend: Option<String>,
-    pub resolved_far_backend: String,
+    pub lod_ring_table: Vec<(i32, u32)>,
+    pub near_backend_requested: Option<String>,
+    pub near_backend_resolved: String,
+    pub far_backend_requested: Option<String>,
+    pub far_backend_resolved: String,
     pub adapter: Option<AdapterMetadata>,
 }
 
@@ -262,8 +257,8 @@ mod tests {
                 os: None,
                 arch: None,
                 cpu: None,
-                client_worker_threads: None,
-                tokio_worker_threads: None,
+                client_threads: None,
+                server_threads: None,
                 resolution: [1920, 1080],
                 vsync: false,
                 required_near_regions: 9,
@@ -271,14 +266,14 @@ mod tests {
                 load_timeout_seconds: 120,
                 warmup_seconds: 10,
                 measurement_seconds: 30,
-                yaw_degrees: 360,
+                camera_path: "yaw_360".to_owned(),
                 simulation_snapshot_frozen: true,
                 world_seed: 0,
-                lod_ring_table: Vec::new(),
-                requested_near_backend: None,
-                resolved_near_backend: "gpu".to_owned(),
-                requested_far_backend: None,
-                resolved_far_backend: "raster".to_owned(),
+                lod_ring_table: vec![(2, 2)],
+                near_backend_requested: None,
+                near_backend_resolved: "gpu".to_owned(),
+                far_backend_requested: None,
+                far_backend_resolved: "raster".to_owned(),
                 adapter: None,
             },
             SerializableReadiness::default(),
@@ -306,6 +301,28 @@ mod tests {
         assert_eq!(value["benchmark"]["instrumentation"], "normal");
         assert_eq!(value["metrics"]["frame_wall_ms"]["sample_count"], 3);
         assert!(value["unavailable_metrics"].is_array());
+        assert_eq!(value["benchmark"]["camera_path"], "yaw_360");
+        assert_eq!(
+            value["benchmark"]["lod_ring_table"],
+            serde_json::json!([[2, 2]])
+        );
+        assert_eq!(value["benchmark"]["near_backend_resolved"], "gpu");
+        assert_eq!(value["benchmark"]["far_backend_resolved"], "raster");
+        assert!(value["benchmark"].get("resolved_near_backend").is_none());
+    }
+
+    #[test]
+    fn draw_scopes_serialize_direct_and_indirect_counts_separately() {
+        let mut result = fixture_result();
+        result.metrics.draws.near.direct_draws = CountSummary::from_samples(&[7]);
+        result.metrics.draws.near.indirect_draws = CountSummary::from_samples(&[0]);
+
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["metrics"]["draws"]["near"]["direct_draws"]["p50"], 7);
+        assert_eq!(
+            value["metrics"]["draws"]["near"]["indirect_draws"]["p50"],
+            0
+        );
     }
 
     #[test]
@@ -323,6 +340,24 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(parsed["schema_version"], 2);
+        assert!(!fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().extension() == Some(OsStr::new("tmp"))));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_failure_cleans_temporary_sibling() {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "mmo-render-bench-failure-{}-{sequence}",
+            std::process::id()
+        ));
+        let path = directory.join("result.json");
+        fs::create_dir_all(&path).unwrap();
+
+        assert!(write_result_atomic(&path, &fixture_result()).is_err());
         assert!(!fs::read_dir(&directory)
             .unwrap()
             .filter_map(Result::ok)

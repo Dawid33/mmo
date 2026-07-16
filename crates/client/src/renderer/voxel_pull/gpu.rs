@@ -58,6 +58,9 @@ pub struct NearRendererMetrics {
     /// including rejected slots whose command has zero vertices. Direct modes
     /// submit no indirect records.
     pub indirect_draw_count: Option<u32>,
+    /// Exact main-forward direct terrain draws. Grouped-direct mode counts
+    /// view draw records; GPU-driven mode submits no direct terrain draws.
+    pub direct_draw_count: Option<u32>,
     pub resident_quads: u64,
     pub submitted_quads: Option<u64>,
     pub submitted_vertices: Option<u64>,
@@ -734,10 +737,16 @@ fn apply_near_telemetry_sample(
             metrics.indirect_draw_count = Some(values.indirect_draw_count);
             metrics.submitted_quads = Some(values.submitted_quads);
             metrics.submitted_vertices = Some(values.submitted_vertices);
+            metrics.direct_draw_count = Some(0);
         }
     } else {
         metrics.hzb_visible_chunks = None;
         metrics.indirect_draw_count = exact_indirect_draw_count(mode);
+        metrics.direct_draw_count = match mode {
+            ActiveNearMode::GroupedDirect => metrics.direct_draw_count,
+            ActiveNearMode::Disabled => None,
+            ActiveNearMode::GpuDriven { .. } => unreachable!(),
+        };
     }
 }
 

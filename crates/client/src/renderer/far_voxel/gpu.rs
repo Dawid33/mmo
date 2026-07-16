@@ -290,25 +290,31 @@ impl GpuFarBuffers {
     }
 
     pub fn reserved_bytes(&self) -> usize {
-        self.mixed_pages
-            .iter()
-            .map(GpuSlotBuffer::reserved_bytes)
-            .sum::<usize>()
-            + self.roots.reserved_bytes()
-            + self.cells.reserved_bytes()
-            + FAR_STATIC_BINDING_OVERHEAD_BYTES
-            + self.pass_reserved_bytes
+        saturating_sum(
+            self.mixed_pages
+                .iter()
+                .map(GpuSlotBuffer::reserved_bytes)
+                .chain([
+                    self.roots.reserved_bytes(),
+                    self.cells.reserved_bytes(),
+                    FAR_STATIC_BINDING_OVERHEAD_BYTES,
+                    self.pass_reserved_bytes,
+                ]),
+        )
     }
 
     pub fn logical_used_bytes(&self) -> usize {
-        self.mixed_pages
-            .iter()
-            .map(GpuSlotBuffer::logical_used_bytes)
-            .sum::<usize>()
-            + self.roots.logical_used_bytes()
-            + self.cells.logical_used_bytes()
-            + FAR_STATIC_BINDING_OVERHEAD_BYTES
-            + self.pass_reserved_bytes
+        saturating_sum(
+            self.mixed_pages
+                .iter()
+                .map(GpuSlotBuffer::logical_used_bytes)
+                .chain([
+                    self.roots.logical_used_bytes(),
+                    self.cells.logical_used_bytes(),
+                    FAR_STATIC_BINDING_OVERHEAD_BYTES,
+                    self.pass_reserved_bytes,
+                ]),
+        )
     }
 
     pub fn set_pass_reserved_bytes(&mut self, bytes: usize) -> bool {
@@ -475,6 +481,10 @@ impl GpuFarBuffers {
         }
         Ok(())
     }
+}
+
+fn saturating_sum(values: impl IntoIterator<Item = usize>) -> usize {
+    values.into_iter().fold(0usize, usize::saturating_add)
 }
 
 fn minimum_pass_reserved_bytes(cell_capacity: usize) -> usize {
@@ -770,6 +780,11 @@ mod tests {
             buffers.logical_used_bytes(),
             FAR_STATIC_BINDING_OVERHEAD_BYTES + 4096 + std::mem::size_of::<GpuFarCell>()
         );
+    }
+
+    #[test]
+    fn byte_accumulation_saturates_instead_of_overflowing() {
+        assert_eq!(saturating_sum([usize::MAX, 1]), usize::MAX);
     }
 
     #[test]

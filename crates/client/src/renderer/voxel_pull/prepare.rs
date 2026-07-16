@@ -50,6 +50,7 @@ fn update_near_metrics_for_prepare(
     frustum_visible_chunks: u32,
     resident_quads: u64,
     submitted_workload: Option<(u64, u64)>,
+    direct_draw_count: Option<u32>,
     metrics: &mut NearRendererMetrics,
 ) {
     metrics.active_chunks = active_chunks;
@@ -59,19 +60,23 @@ fn update_near_metrics_for_prepare(
     // Keep its latest completed values until the readback system replaces
     // them. Direct modes have exact synchronous command counts.
     match mode {
-        ActiveNearMode::GpuDriven { .. } => {}
+        ActiveNearMode::GpuDriven { .. } => {
+            metrics.direct_draw_count = Some(0);
+        }
         ActiveNearMode::GroupedDirect => {
             metrics.hzb_visible_chunks = None;
             metrics.indirect_draw_count = exact_indirect_draw_count(mode);
             let (quads, vertices) = submitted_workload.unwrap_or_default();
             metrics.submitted_quads = Some(quads);
             metrics.submitted_vertices = Some(vertices);
+            metrics.direct_draw_count = direct_draw_count;
         }
         ActiveNearMode::Disabled => {
             metrics.hzb_visible_chunks = None;
             metrics.indirect_draw_count = exact_indirect_draw_count(mode);
             metrics.submitted_quads = None;
             metrics.submitted_vertices = None;
+            metrics.direct_draw_count = None;
         }
     }
 }
@@ -105,6 +110,7 @@ pub fn prepare_view_chunk_draws(
         .fold(0u64, u64::saturating_add);
     let mut submitted_workload =
         matches!(*mode, ActiveNearMode::GroupedDirect).then_some((0u64, 0u64));
+    let mut direct_draw_count = matches!(*mode, ActiveNearMode::GroupedDirect).then_some(0u32);
     for (view_entity, frustum, is_shadow_view) in &views {
         let list = grouped_draw_list(
             frustum,
@@ -130,6 +136,9 @@ pub fn prepare_view_chunk_draws(
                 *submitted_quads = submitted_quads.saturating_add(view_quads);
                 *submitted_vertices = submitted_vertices.saturating_add(view_vertices);
             }
+            if let Some(count) = &mut direct_draw_count {
+                *count = count.saturating_add(list.0.len().min(u32::MAX as usize) as u32);
+            }
         }
         commands
             .entity(view_entity)
@@ -141,6 +150,7 @@ pub fn prepare_view_chunk_draws(
         frustum_visible_chunks,
         resident_quads,
         submitted_workload,
+        direct_draw_count,
         &mut metrics,
     );
 }
@@ -313,6 +323,7 @@ mod tests {
             11,
             23,
             None,
+            None,
             &mut metrics,
         );
 
@@ -321,6 +332,7 @@ mod tests {
         assert_eq!(metrics.resident_quads, 23);
         assert_eq!(metrics.hzb_visible_chunks, Some(7));
         assert_eq!(metrics.indirect_draw_count, Some(3));
+        assert_eq!(metrics.direct_draw_count, Some(0));
     }
 
     #[test]

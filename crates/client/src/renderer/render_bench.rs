@@ -34,8 +34,8 @@ use metrics::{CountSummary, FloatSummary, RenderDiagnosticSamples};
 use output::{
     write_result_atomic, AdapterMetadata, BenchmarkMetadata, BenchmarkMetrics, BenchmarkResult,
     DrawMetrics, DrawScopeMetrics, GeometryMetrics, GeometryScopeMetrics, Instrumentation,
-    LodRingMetadata, MemoryMetrics, MemoryScopeMetrics, PipelineStatistics, SerializableReadiness,
-    TimingMetrics, UnavailableMetric, UnavailableReason, VisibilityMetrics, VisibilityScopeMetrics,
+    MemoryMetrics, MemoryScopeMetrics, PipelineStatistics, SerializableReadiness, TimingMetrics,
+    UnavailableMetric, UnavailableReason, VisibilityMetrics, VisibilityScopeMetrics,
 };
 use telemetry::{capture_render_thread_snapshot, translate_snapshot, SharedRenderThreadSnapshot};
 
@@ -255,6 +255,7 @@ pub struct BenchmarkCapabilityMetrics {
     pub near_submitted_quads: Option<u64>,
     pub near_submitted_triangles: Option<u64>,
     pub near_submitted_vertices: Option<u64>,
+    pub near_direct_draws: Option<u64>,
     pub near_indirect_draws: Option<u64>,
     pub near_logical_bytes: Option<u64>,
     pub near_reserved_bytes: Option<u64>,
@@ -262,6 +263,7 @@ pub struct BenchmarkCapabilityMetrics {
     pub far_resident_quads: Option<u64>,
     pub far_visible_instances: Option<u64>,
     pub far_proxy_vertices: Option<u64>,
+    pub far_direct_draws: Option<u64>,
     pub far_indirect_draws: Option<u64>,
     pub far_logical_bytes: Option<u64>,
     pub far_reserved_bytes: Option<u64>,
@@ -284,6 +286,7 @@ struct BenchmarkSamples {
     near_submitted_quads: Vec<u64>,
     near_submitted_triangles: Vec<u64>,
     near_submitted_vertices: Vec<u64>,
+    near_direct_draws: Vec<u64>,
     near_indirect_draws: Vec<u64>,
     near_logical_bytes: Vec<u64>,
     near_reserved_bytes: Vec<u64>,
@@ -291,6 +294,7 @@ struct BenchmarkSamples {
     far_resident_quads: Vec<u64>,
     far_visible_instances: Vec<u64>,
     far_proxy_vertices: Vec<u64>,
+    far_direct_draws: Vec<u64>,
     far_indirect_draws: Vec<u64>,
     far_logical_bytes: Vec<u64>,
     far_reserved_bytes: Vec<u64>,
@@ -312,6 +316,7 @@ impl Default for BenchmarkSamples {
             near_submitted_quads: Vec::new(),
             near_submitted_triangles: Vec::new(),
             near_submitted_vertices: Vec::new(),
+            near_direct_draws: Vec::new(),
             near_indirect_draws: Vec::new(),
             near_logical_bytes: Vec::new(),
             near_reserved_bytes: Vec::new(),
@@ -319,6 +324,7 @@ impl Default for BenchmarkSamples {
             far_resident_quads: Vec::new(),
             far_visible_instances: Vec::new(),
             far_proxy_vertices: Vec::new(),
+            far_direct_draws: Vec::new(),
             far_indirect_draws: Vec::new(),
             far_logical_bytes: Vec::new(),
             far_reserved_bytes: Vec::new(),
@@ -347,6 +353,7 @@ impl BenchmarkSamples {
             &mut self.near_submitted_vertices,
             metrics.near_submitted_vertices,
         );
+        push_optional(&mut self.near_direct_draws, metrics.near_direct_draws);
         push_optional(&mut self.near_indirect_draws, metrics.near_indirect_draws);
         push_optional(&mut self.near_logical_bytes, metrics.near_logical_bytes);
         push_optional(&mut self.near_reserved_bytes, metrics.near_reserved_bytes);
@@ -357,6 +364,7 @@ impl BenchmarkSamples {
             metrics.far_visible_instances,
         );
         push_optional(&mut self.far_proxy_vertices, metrics.far_proxy_vertices);
+        push_optional(&mut self.far_direct_draws, metrics.far_direct_draws);
         push_optional(&mut self.far_indirect_draws, metrics.far_indirect_draws);
         push_optional(&mut self.far_logical_bytes, metrics.far_logical_bytes);
         push_optional(&mut self.far_reserved_bytes, metrics.far_reserved_bytes);
@@ -571,6 +579,7 @@ fn run_benchmark(
         capabilities.0.near_submitted_quads = None;
         capabilities.0.near_submitted_triangles = None;
         capabilities.0.near_submitted_vertices = None;
+        capabilities.0.near_direct_draws = None;
         capabilities.0.near_indirect_draws = Some(0);
         capabilities.0.unavailable.push(UnavailableMetric {
             path: "metrics.geometry.near.submitted_quads".to_owned(),
@@ -610,13 +619,23 @@ fn run_benchmark(
         capabilities.0.near_submitted_quads = translated.near.submitted_quads;
         capabilities.0.near_submitted_triangles = translated.near.submitted_triangles;
         capabilities.0.near_submitted_vertices = translated.near.submitted_vertices;
+        capabilities.0.near_direct_draws = translated.near.direct_draws;
         capabilities.0.near_indirect_draws = translated.near.indirect_draws;
     }
     capabilities.0.near_logical_bytes = translated.near.logical_bytes;
     capabilities.0.near_reserved_bytes = translated.near.reserved_bytes;
     capabilities.0.far_visible_instances = translated.far.visible_instances;
     capabilities.0.far_proxy_vertices = translated.far.proxy_vertices;
-    capabilities.0.far_indirect_draws = translated.far.indirect_draws;
+    match render_config.far {
+        super::config::FarRenderBackend::BrickRaymarch => {
+            capabilities.0.far_direct_draws = Some(0);
+            capabilities.0.far_indirect_draws = translated.far.indirect_draws;
+        }
+        super::config::FarRenderBackend::Raster => {
+            capabilities.0.far_direct_draws = None;
+            capabilities.0.far_indirect_draws = Some(0);
+        }
+    }
     capabilities.0.far_logical_bytes = translated.far.logical_bytes;
     capabilities.0.far_reserved_bytes = translated.far.reserved_bytes;
     capabilities.0.unavailable.extend(translated.unavailable);
@@ -753,9 +772,11 @@ fn build_result(
         },
         draws: DrawMetrics {
             near: DrawScopeMetrics {
+                direct_draws: CountSummary::from_samples(&samples.near_direct_draws),
                 indirect_draws: CountSummary::from_samples(&samples.near_indirect_draws),
             },
             far: DrawScopeMetrics {
+                direct_draws: CountSummary::from_samples(&samples.far_direct_draws),
                 indirect_draws: CountSummary::from_samples(&samples.far_indirect_draws),
             },
         },
@@ -804,117 +825,9 @@ fn build_result(
         reason: UnavailableReason::SampleNotObserved,
         detail: Some("diagnostic span containment is not exposed; summing nested spans would double-count GPU work".to_owned()),
     });
-    match config.far {
-        super::config::FarRenderBackend::BrickRaymarch => {
-            unavailable_metrics.push(UnavailableMetric {
-                path: "metrics.geometry.far.resident_quads".to_owned(),
-                reason: UnavailableReason::NotApplicableToBackend,
-                detail: Some("brick raymarching does not store raster quads".to_owned()),
-            })
-        }
-        super::config::FarRenderBackend::Raster => unavailable_metrics.push(UnavailableMetric {
-            path: "metrics.geometry.far.proxy_vertices".to_owned(),
-            reason: UnavailableReason::NotApplicableToBackend,
-            detail: Some("raster LOD does not submit raymarch proxy geometry".to_owned()),
-        }),
-    }
-    let mut mark_missing =
-        |path: &str, missing: bool, reason: UnavailableReason, detail: Option<&str>| {
-            if missing {
-                unavailable_metrics.push(UnavailableMetric {
-                    path: path.to_owned(),
-                    reason,
-                    detail: detail.map(str::to_owned),
-                });
-            }
-        };
-    mark_missing(
-        "metrics.timing.fps",
-        metrics.timing.fps.is_none(),
-        UnavailableReason::SampleNotObserved,
-        None,
-    );
-    mark_missing(
-        "metrics.visibility.near.hzb_survivors",
-        metrics.visibility.near.hzb_survivors.is_none(),
-        UnavailableReason::TelemetryReadbackDisabled,
-        None,
-    );
-    mark_missing(
-        "metrics.geometry.near.submitted_quads",
-        metrics.geometry.near.submitted_quads.is_none(),
-        UnavailableReason::TelemetryReadbackDisabled,
-        Some("use per-pass clipper_primitives_out when exact submission readback is unavailable"),
-    );
-    mark_missing(
-        "metrics.memory.near.logical_bytes",
-        metrics.memory.near.logical_bytes.is_none(),
-        UnavailableReason::SampleNotObserved,
-        None,
-    );
-    mark_missing(
-        "metrics.memory.near.reserved_bytes",
-        metrics.memory.near.reserved_bytes.is_none(),
-        UnavailableReason::SampleNotObserved,
-        None,
-    );
-    mark_missing(
-        "metrics.memory.far.logical_bytes",
-        metrics.memory.far.logical_bytes.is_none(),
-        UnavailableReason::SampleNotObserved,
-        None,
-    );
-    mark_missing(
-        "metrics.memory.far.reserved_bytes",
-        metrics.memory.far.reserved_bytes.is_none(),
-        UnavailableReason::SampleNotObserved,
-        None,
-    );
-    mark_missing(
-        "metrics.pipeline_statistics.vertex_shader_invocations",
-        metrics
-            .pipeline_statistics
-            .vertex_shader_invocations
-            .is_empty(),
-        UnavailableReason::AdapterFeatureUnavailable,
-        None,
-    );
-    mark_missing(
-        "metrics.pipeline_statistics.clipper_invocations",
-        metrics.pipeline_statistics.clipper_invocations.is_empty(),
-        UnavailableReason::AdapterFeatureUnavailable,
-        None,
-    );
-    mark_missing(
-        "metrics.pipeline_statistics.clipper_primitives_out",
-        metrics
-            .pipeline_statistics
-            .clipper_primitives_out
-            .is_empty(),
-        UnavailableReason::AdapterFeatureUnavailable,
-        None,
-    );
-    mark_missing(
-        "metrics.pipeline_statistics.fragment_shader_invocations",
-        metrics
-            .pipeline_statistics
-            .fragment_shader_invocations
-            .is_empty(),
-        UnavailableReason::AdapterFeatureUnavailable,
-        None,
-    );
-    mark_missing(
-        "metrics.pipeline_statistics.compute_shader_invocations",
-        metrics
-            .pipeline_statistics
-            .compute_shader_invocations
-            .is_empty(),
-        UnavailableReason::AdapterFeatureUnavailable,
-        None,
-    );
+    populate_metric_unavailability(&metrics, config, &mut unavailable_metrics);
     unavailable_metrics.sort_by(|left, right| left.path.cmp(&right.path));
-    unavailable_metrics
-        .dedup_by(|left, right| left.path == right.path && left.reason == right.reason);
+    unavailable_metrics.dedup_by(|left, right| left.path == right.path);
     BenchmarkResult::new(
         if failed { "failed" } else { "complete" },
         failed.then(|| {
@@ -937,8 +850,8 @@ fn build_result(
             os: settings.os.clone(),
             arch: settings.arch.clone(),
             cpu: settings.cpu.clone(),
-            client_worker_threads: settings.client_worker_threads,
-            tokio_worker_threads: settings.tokio_worker_threads,
+            client_threads: settings.client_worker_threads,
+            server_threads: settings.tokio_worker_threads,
             resolution: [BENCHMARK_WIDTH, BENCHMARK_HEIGHT],
             vsync: false,
             required_near_regions: REQUIRED_NEAR_REGIONS,
@@ -946,17 +859,14 @@ fn build_result(
             load_timeout_seconds: LOAD_TIMEOUT.as_secs(),
             warmup_seconds: WARMUP_DURATION.as_secs(),
             measurement_seconds: MEASUREMENT_DURATION.as_secs(),
-            yaw_degrees: 360,
+            camera_path: "yaw_360".to_owned(),
             simulation_snapshot_frozen: runtime.snapshot_frozen,
             world_seed: worldgen::WORLD_SEED,
-            lod_ring_table: game::lod::LOD_RING_TABLE
-                .iter()
-                .map(|&(bound, factor)| LodRingMetadata { bound, factor })
-                .collect(),
-            requested_near_backend: settings.requested_near_backend.clone(),
-            resolved_near_backend: config.near.as_str().to_owned(),
-            requested_far_backend: settings.requested_far_backend.clone(),
-            resolved_far_backend: config.far.as_str().to_owned(),
+            lod_ring_table: game::lod::LOD_RING_TABLE.iter().copied().collect(),
+            near_backend_requested: settings.requested_near_backend.clone(),
+            near_backend_resolved: config.near.as_str().to_owned(),
+            far_backend_requested: settings.requested_far_backend.clone(),
+            far_backend_resolved: config.far.as_str().to_owned(),
             adapter,
         },
         SerializableReadiness {
@@ -972,6 +882,280 @@ fn build_result(
         metrics,
         unavailable_metrics,
     )
+}
+
+fn populate_metric_unavailability(
+    metrics: &BenchmarkMetrics,
+    config: TerrainRenderConfig,
+    unavailable: &mut Vec<UnavailableMetric>,
+) {
+    let mut mark = |path: &str, missing: bool, reason: UnavailableReason, detail: Option<&str>| {
+        if missing && !unavailable.iter().any(|entry| entry.path == path) {
+            unavailable.push(UnavailableMetric {
+                path: path.to_owned(),
+                reason,
+                detail: detail.map(str::to_owned),
+            });
+        }
+    };
+    let sample = UnavailableReason::SampleNotObserved;
+    let not_applicable = UnavailableReason::NotApplicableToBackend;
+    let readback_disabled = UnavailableReason::TelemetryReadbackDisabled;
+
+    mark(
+        "metrics.timing.fps",
+        metrics.timing.fps.is_none(),
+        sample,
+        None,
+    );
+    for (path, missing) in [
+        (
+            "metrics.memory.near.logical_bytes",
+            metrics.memory.near.logical_bytes.is_none(),
+        ),
+        (
+            "metrics.memory.near.reserved_bytes",
+            metrics.memory.near.reserved_bytes.is_none(),
+        ),
+        (
+            "metrics.memory.far.logical_bytes",
+            metrics.memory.far.logical_bytes.is_none(),
+        ),
+        (
+            "metrics.memory.far.reserved_bytes",
+            metrics.memory.far.reserved_bytes.is_none(),
+        ),
+        (
+            "metrics.geometry.near.resident_quads",
+            metrics.geometry.near.resident_quads.is_none(),
+        ),
+        (
+            "metrics.visibility.near.active_chunks",
+            metrics.visibility.near.active_chunks.is_none(),
+        ),
+        (
+            "metrics.visibility.far.active_cells",
+            metrics.visibility.far.active_cells.is_none(),
+        ),
+        (
+            "metrics.draws.near.indirect_draws",
+            metrics.draws.near.indirect_draws.is_none(),
+        ),
+        (
+            "metrics.draws.far.indirect_draws",
+            metrics.draws.far.indirect_draws.is_none(),
+        ),
+    ] {
+        mark(path, missing, sample, None);
+    }
+
+    for (path, missing) in [
+        (
+            "metrics.geometry.near.proxy_vertices",
+            metrics.geometry.near.proxy_vertices.is_none(),
+        ),
+        (
+            "metrics.geometry.near.unique_bricks",
+            metrics.geometry.near.unique_bricks.is_none(),
+        ),
+        (
+            "metrics.geometry.near.brick_dedup_ratio",
+            metrics.geometry.near.brick_dedup_ratio.is_none(),
+        ),
+        (
+            "metrics.visibility.near.active_cells",
+            metrics.visibility.near.active_cells.is_none(),
+        ),
+        (
+            "metrics.visibility.near.visible_instances",
+            metrics.visibility.near.visible_instances.is_none(),
+        ),
+        (
+            "metrics.visibility.far.active_chunks",
+            metrics.visibility.far.active_chunks.is_none(),
+        ),
+        (
+            "metrics.visibility.far.frustum_survivors",
+            metrics.visibility.far.frustum_survivors.is_none(),
+        ),
+        (
+            "metrics.visibility.far.hzb_survivors",
+            metrics.visibility.far.hzb_survivors.is_none(),
+        ),
+    ] {
+        mark(path, missing, not_applicable, None);
+    }
+
+    let near_submission_reason = if config.near == super::config::NearRenderBackend::PerChunk {
+        readback_disabled
+    } else {
+        sample
+    };
+    for (path, missing) in [
+        (
+            "metrics.geometry.near.submitted_quads",
+            metrics.geometry.near.submitted_quads.is_none(),
+        ),
+        (
+            "metrics.geometry.near.submitted_triangles",
+            metrics.geometry.near.submitted_triangles.is_none(),
+        ),
+        (
+            "metrics.geometry.near.submitted_vertices",
+            metrics.geometry.near.submitted_vertices.is_none(),
+        ),
+    ] {
+        mark(
+            path,
+            missing,
+            near_submission_reason,
+            Some("exact main-view submission sample was not available"),
+        );
+    }
+    mark(
+        "metrics.visibility.near.frustum_survivors",
+        metrics.visibility.near.frustum_survivors.is_none(),
+        if config.near == super::config::NearRenderBackend::PerChunk {
+            readback_disabled
+        } else {
+            sample
+        },
+        None,
+    );
+    mark(
+        "metrics.visibility.near.hzb_survivors",
+        metrics.visibility.near.hzb_survivors.is_none(),
+        if config.near == super::config::NearRenderBackend::GpuDriven {
+            sample
+        } else {
+            not_applicable
+        },
+        None,
+    );
+    mark(
+        "metrics.draws.near.direct_draws",
+        metrics.draws.near.direct_draws.is_none(),
+        if config.near == super::config::NearRenderBackend::PerChunk {
+            readback_disabled
+        } else {
+            sample
+        },
+        Some("exact main-view direct draw count was not observed"),
+    );
+
+    let far_is_brick = config.far == super::config::FarRenderBackend::BrickRaymarch;
+    mark(
+        "metrics.geometry.far.resident_quads",
+        metrics.geometry.far.resident_quads.is_none(),
+        if far_is_brick { not_applicable } else { sample },
+        None,
+    );
+    for (path, missing) in [
+        (
+            "metrics.geometry.far.submitted_quads",
+            metrics.geometry.far.submitted_quads.is_none(),
+        ),
+        (
+            "metrics.geometry.far.submitted_triangles",
+            metrics.geometry.far.submitted_triangles.is_none(),
+        ),
+        (
+            "metrics.geometry.far.submitted_vertices",
+            metrics.geometry.far.submitted_vertices.is_none(),
+        ),
+    ] {
+        mark(
+            path,
+            missing,
+            if far_is_brick {
+                not_applicable
+            } else {
+                readback_disabled
+            },
+            None,
+        );
+    }
+    mark(
+        "metrics.geometry.far.proxy_vertices",
+        metrics.geometry.far.proxy_vertices.is_none(),
+        if far_is_brick { sample } else { not_applicable },
+        None,
+    );
+    for (path, missing) in [
+        (
+            "metrics.geometry.far.unique_bricks",
+            metrics.geometry.far.unique_bricks.is_none(),
+        ),
+        (
+            "metrics.geometry.far.brick_dedup_ratio",
+            metrics.geometry.far.brick_dedup_ratio.is_none(),
+        ),
+    ] {
+        mark(
+            path,
+            missing,
+            if far_is_brick { sample } else { not_applicable },
+            None,
+        );
+    }
+    mark(
+        "metrics.visibility.far.visible_instances",
+        metrics.visibility.far.visible_instances.is_none(),
+        if far_is_brick { sample } else { not_applicable },
+        None,
+    );
+    mark(
+        "metrics.draws.far.direct_draws",
+        metrics.draws.far.direct_draws.is_none(),
+        if far_is_brick {
+            sample
+        } else {
+            readback_disabled
+        },
+        Some("exact main-view direct draw count was not observed"),
+    );
+
+    for (path, missing) in [
+        (
+            "metrics.pipeline_statistics.vertex_shader_invocations",
+            metrics
+                .pipeline_statistics
+                .vertex_shader_invocations
+                .is_empty(),
+        ),
+        (
+            "metrics.pipeline_statistics.clipper_invocations",
+            metrics.pipeline_statistics.clipper_invocations.is_empty(),
+        ),
+        (
+            "metrics.pipeline_statistics.clipper_primitives_out",
+            metrics
+                .pipeline_statistics
+                .clipper_primitives_out
+                .is_empty(),
+        ),
+        (
+            "metrics.pipeline_statistics.fragment_shader_invocations",
+            metrics
+                .pipeline_statistics
+                .fragment_shader_invocations
+                .is_empty(),
+        ),
+        (
+            "metrics.pipeline_statistics.compute_shader_invocations",
+            metrics
+                .pipeline_statistics
+                .compute_shader_invocations
+                .is_empty(),
+        ),
+    ] {
+        mark(
+            path,
+            missing,
+            sample,
+            Some("no diagnostic sample was observed; adapter feature absence was not proven"),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1124,5 +1308,79 @@ mod tests {
         let fps = FloatSummary::from_samples(&[100.0, 50.0]).unwrap();
         assert_eq!((frame.min, frame.max, frame.sample_count), (10.0, 20.0, 2));
         assert_eq!((fps.min, fps.max, fps.sample_count), (50.0, 100.0, 2));
+    }
+
+    #[test]
+    fn null_workload_metrics_are_explained_once_without_guessing_adapter_features() {
+        let metrics = BenchmarkMetrics::default();
+        let config = TerrainRenderConfig {
+            near: super::super::config::NearRenderBackend::PerChunk,
+            far: super::super::config::FarRenderBackend::BrickRaymarch,
+        };
+        let mut unavailable = Vec::new();
+        populate_metric_unavailability(&metrics, config, &mut unavailable);
+
+        let paths = unavailable
+            .iter()
+            .map(|metric| metric.path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            paths.len(),
+            unavailable.len(),
+            "unavailable paths are unique"
+        );
+        for required in [
+            "metrics.geometry.near.submitted_quads",
+            "metrics.geometry.near.submitted_triangles",
+            "metrics.geometry.near.submitted_vertices",
+            "metrics.geometry.far.submitted_quads",
+            "metrics.geometry.far.submitted_triangles",
+            "metrics.geometry.far.submitted_vertices",
+            "metrics.visibility.far.visible_instances",
+            "metrics.draws.near.direct_draws",
+            "metrics.pipeline_statistics.vertex_shader_invocations",
+        ] {
+            assert!(
+                paths.contains(required),
+                "missing unavailable entry for {required}"
+            );
+        }
+        assert_eq!(
+            unavailable
+                .iter()
+                .find(|metric| {
+                    metric.path == "metrics.pipeline_statistics.vertex_shader_invocations"
+                })
+                .unwrap()
+                .reason,
+            UnavailableReason::SampleNotObserved
+        );
+    }
+
+    #[test]
+    fn missing_frame_samples_produce_a_failed_result() {
+        let settings = BenchmarkRunSettings::from_values(|name| {
+            (name == "RENDER_BENCH_OUTPUT").then(|| "unused.json".to_owned())
+        })
+        .unwrap();
+        let config = TerrainRenderConfig {
+            near: super::super::config::NearRenderBackend::PerChunk,
+            far: super::super::config::FarRenderBackend::Raster,
+        };
+
+        let result = build_result(
+            true,
+            true,
+            &settings,
+            config,
+            &BenchmarkRuntime::default(),
+            None,
+        );
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.failure_reason.as_deref(),
+            Some("measurement completed without frame-time samples")
+        );
     }
 }

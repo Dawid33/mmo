@@ -35,6 +35,7 @@ pub struct ScopeTelemetry {
     pub submitted_triangles: Option<u64>,
     pub submitted_vertices: Option<u64>,
     pub proxy_vertices: Option<u64>,
+    pub direct_draws: Option<u64>,
     pub indirect_draws: Option<u64>,
     pub logical_bytes: Option<u64>,
     pub reserved_bytes: Option<u64>,
@@ -97,7 +98,7 @@ fn near_logical_used_bytes(arena: &GpuQuadArena) -> usize {
         .allocations
         .values()
         .map(|allocation| allocation.quad_count as usize)
-        .sum::<usize>()
+        .fold(0usize, usize::saturating_add)
         .saturating_mul(std::mem::size_of::<
             crate::renderer::meshing::records::QuadRecord,
         >());
@@ -146,6 +147,7 @@ pub fn translate_snapshot(
             near.submitted_quads.map(|quads| quads.saturating_mul(2));
         translated.near.submitted_vertices = near.submitted_vertices;
         translated.near.indirect_draws = near.indirect_draw_count.map(u64::from);
+        translated.near.direct_draws = near.direct_draw_count.map(u64::from);
     }
     translated.near.logical_bytes = snapshot.near_logical_bytes;
     translated.near.reserved_bytes = snapshot.near_reserved_bytes;
@@ -192,6 +194,7 @@ mod tests {
                 frustum_visible_chunks: 11,
                 hzb_visible_chunks: Some(7),
                 indirect_draw_count: Some(3),
+                direct_draw_count: Some(0),
                 resident_quads: 41,
                 submitted_quads: Some(23),
                 submitted_vertices: Some(138),
@@ -215,6 +218,7 @@ mod tests {
         assert_eq!(translated.near.submitted_quads, Some(23));
         assert_eq!(translated.near.submitted_triangles, Some(46));
         assert_eq!(translated.near.submitted_vertices, Some(138));
+        assert_eq!(translated.near.direct_draws, Some(0));
         assert_eq!(translated.far.indirect_draws, Some(1));
         assert_eq!(translated.near.logical_bytes, Some(100));
         assert_eq!(translated.far.reserved_bytes, Some(400));
