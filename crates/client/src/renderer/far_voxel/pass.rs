@@ -194,6 +194,9 @@ pub struct FarVoxelPassMetrics {
     pub indirect_draws: u32,
     pub visible_slot_capacity: u32,
     pub reserved_gpu_bytes: usize,
+    /// Exact visible proxy instance count from asynchronous indirect-argument
+    /// readback. `None` when no completed sample has been observed.
+    pub visible_instances: Option<u32>,
 }
 
 /// Shared main/render-world switch used by the benchmark harness to keep the

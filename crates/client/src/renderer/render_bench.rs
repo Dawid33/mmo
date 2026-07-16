@@ -5,11 +5,11 @@
 //! in [`BenchmarkCapabilityMetrics`]; absent inputs serialize as `null`.
 
 mod metrics;
+mod output;
+mod telemetry;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bevy::app::AppExit;
@@ -17,13 +17,10 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
-use bevy::render::renderer::RenderAdapterInfo;
 use bevy::render::{Render, RenderApp, RenderSystems};
-use serde::Serialize;
 
 use super::bridge::{RegionRoots, SimTarget};
 use super::config::TerrainRenderConfig;
-use super::far_voxel::gpu::GpuFarBuffers;
 use super::far_voxel::lifecycle::FarVoxelUploadPending;
 use super::far_voxel::residency::FarVoxelResidency;
 use super::far_voxel::{FarBrickBuildTask, FarVoxelReady};
@@ -31,9 +28,16 @@ use super::lod_rings::LodRings;
 use super::meshing::lod::{LodBuildQueue, LodChunk, LodMeshTask, LodRasterReady};
 use super::meshing::queue::{ChunkKey, RemeshQueue};
 use super::meshing::MeshingTask;
-use super::voxel_pull::arena::GpuQuadArena;
+use super::meshing::TerrainQuadCount;
 use super::{ClientUpdates, GameEvents};
-use metrics::{CountSummary, FloatSummary, PassSamples};
+use metrics::{CountSummary, FloatSummary, RenderDiagnosticSamples};
+use output::{
+    write_result_atomic, AdapterMetadata, BenchmarkMetadata, BenchmarkMetrics, BenchmarkResult,
+    DrawMetrics, DrawScopeMetrics, GeometryMetrics, GeometryScopeMetrics, Instrumentation,
+    LodRingMetadata, MemoryMetrics, MemoryScopeMetrics, PipelineStatistics, SerializableReadiness,
+    TimingMetrics, UnavailableMetric, UnavailableReason, VisibilityMetrics, VisibilityScopeMetrics,
+};
+use telemetry::{capture_render_thread_snapshot, translate_snapshot, SharedRenderThreadSnapshot};
 
 pub const BENCHMARK_WIDTH: u32 = 1920;
 pub const BENCHMARK_HEIGHT: u32 = 1080;
@@ -48,6 +52,19 @@ pub const BENCHMARK_YAW_RADIANS: f32 = std::f32::consts::TAU;
 pub struct BenchmarkRunSettings {
     pub output: PathBuf,
     pub repetition: u32,
+    pub instrumentation: Instrumentation,
+    pub git_revision: Option<String>,
+    pub git_dirty: Option<bool>,
+    pub label: Option<String>,
+    pub profile: Option<String>,
+    pub os: Option<String>,
+    pub arch: Option<String>,
+    pub cpu: Option<String>,
+    pub expected_repetitions: Option<u32>,
+    pub client_worker_threads: Option<u32>,
+    pub tokio_worker_threads: Option<u32>,
+    pub requested_near_backend: Option<String>,
+    pub requested_far_backend: Option<String>,
 }
 
 impl BenchmarkRunSettings {
@@ -55,18 +72,63 @@ impl BenchmarkRunSettings {
         if !enabled() {
             return None;
         }
-        let output = std::env::var_os("RENDER_BENCH_OUTPUT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("target/render-bench/render-bench.json"));
-        let repetition = std::env::var("RENDER_BENCH_REPETITION")
-            .ok()
-            .map(|value| {
-                value.parse::<u32>().unwrap_or_else(|_| {
-                    panic!("invalid RENDER_BENCH_REPETITION value `{value}` (expected u32)")
+        Some(
+            Self::from_values(|name| std::env::var(name).ok())
+                .unwrap_or_else(|error| panic!("{error}")),
+        )
+    }
+
+    fn from_values(mut get: impl FnMut(&str) -> Option<String>) -> Result<Self, String> {
+        let parse_u32 = |name: &str, value: Option<String>| -> Result<Option<u32>, String> {
+            value
+                .map(|value| {
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| format!("invalid {name} value `{value}` (expected u32)"))
                 })
+                .transpose()
+        };
+        let git_dirty = get("RENDER_BENCH_GIT_DIRTY")
+            .map(|value| match value.as_str() {
+                "0" => Ok(false),
+                "1" => Ok(true),
+                _ => Err(format!(
+                    "invalid RENDER_BENCH_GIT_DIRTY value `{value}` (expected 0 or 1)"
+                )),
             })
-            .unwrap_or(1);
-        Some(Self { output, repetition })
+            .transpose()?;
+        let instrumentation = match get("RENDER_BENCH_INSTRUMENTATION").as_deref().unwrap_or("normal") {
+            "normal" => Instrumentation::Normal,
+            "chrome_trace" => Instrumentation::ChromeTrace,
+            "tracy" => Instrumentation::Tracy,
+            value => return Err(format!("invalid RENDER_BENCH_INSTRUMENTATION value `{value}` (expected normal, chrome_trace, or tracy)")),
+        };
+        Ok(Self {
+            output: get("RENDER_BENCH_OUTPUT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("target/render-bench/render-bench.json")),
+            repetition: parse_u32("RENDER_BENCH_REPETITION", get("RENDER_BENCH_REPETITION"))?
+                .unwrap_or(1),
+            instrumentation,
+            git_revision: get("RENDER_BENCH_GIT_REVISION"),
+            git_dirty,
+            label: get("RENDER_BENCH_LABEL"),
+            profile: get("RENDER_BENCH_PROFILE"),
+            os: get("RENDER_BENCH_OS"),
+            arch: get("RENDER_BENCH_ARCH"),
+            cpu: get("RENDER_BENCH_CPU"),
+            expected_repetitions: parse_u32(
+                "RENDER_BENCH_EXPECTED_REPETITIONS",
+                get("RENDER_BENCH_EXPECTED_REPETITIONS"),
+            )?,
+            client_worker_threads: parse_u32(
+                "VOXEL_CLIENT_WORKER_THREADS",
+                get("VOXEL_CLIENT_WORKER_THREADS"),
+            )?,
+            tokio_worker_threads: parse_u32("TOKIO_WORKER_THREADS", get("TOKIO_WORKER_THREADS"))?,
+            requested_near_backend: get("VOXEL_NEAR_RENDER"),
+            requested_far_backend: get("VOXEL_FAR_RENDER"),
+        })
     }
 }
 
@@ -184,22 +246,28 @@ impl BenchmarkController {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default)]
 pub struct BenchmarkCapabilityMetrics {
-    pub active_chunks: Option<u64>,
-    pub frustum_chunks: Option<u64>,
-    /// Exact main-forward HZB survivor count; unavailable when the forward
-    /// source is the frustum fallback.
-    pub hzb_chunks: Option<u64>,
-    /// Total main-forward terrain indirect command records submitted across
-    /// near and far renderers. Near fixed mode counts all stable slots,
-    /// including commands whose culled vertex count is zero; the far pass
-    /// contributes one compacted proxy command when it has active cells.
-    pub indirect_draws: Option<u64>,
+    pub near_active_chunks: Option<u64>,
+    pub near_frustum_survivors: Option<u64>,
+    pub near_hzb_survivors: Option<u64>,
+    pub near_resident_quads: Option<u64>,
+    pub near_submitted_quads: Option<u64>,
+    pub near_submitted_triangles: Option<u64>,
+    pub near_submitted_vertices: Option<u64>,
+    pub near_indirect_draws: Option<u64>,
+    pub near_logical_bytes: Option<u64>,
+    pub near_reserved_bytes: Option<u64>,
     pub far_cells: Option<u64>,
+    pub far_resident_quads: Option<u64>,
+    pub far_visible_instances: Option<u64>,
+    pub far_proxy_vertices: Option<u64>,
+    pub far_indirect_draws: Option<u64>,
+    pub far_logical_bytes: Option<u64>,
+    pub far_reserved_bytes: Option<u64>,
     pub unique_bricks: Option<u64>,
     pub brick_dedup_ratio: Option<f64>,
-    pub reserved_gpu_bytes: Option<u64>,
+    pub unavailable: Vec<UnavailableMetric>,
 }
 
 #[derive(Resource, Default)]
@@ -207,46 +275,94 @@ pub struct BenchmarkCapabilityMetricsInput(pub BenchmarkCapabilityMetrics);
 
 struct BenchmarkSamples {
     frame_ms: Vec<f64>,
-    gpu_frame_ms: Vec<f64>,
-    pass_gpu_ms: PassSamples,
-    active_chunks: Vec<u64>,
-    frustum_chunks: Vec<u64>,
-    hzb_chunks: Vec<u64>,
-    indirect_draws: Vec<u64>,
+    fps: Vec<f64>,
+    diagnostics: RenderDiagnosticSamples,
+    near_active_chunks: Vec<u64>,
+    near_frustum_survivors: Vec<u64>,
+    near_hzb_survivors: Vec<u64>,
+    near_resident_quads: Vec<u64>,
+    near_submitted_quads: Vec<u64>,
+    near_submitted_triangles: Vec<u64>,
+    near_submitted_vertices: Vec<u64>,
+    near_indirect_draws: Vec<u64>,
+    near_logical_bytes: Vec<u64>,
+    near_reserved_bytes: Vec<u64>,
     far_cells: Vec<u64>,
+    far_resident_quads: Vec<u64>,
+    far_visible_instances: Vec<u64>,
+    far_proxy_vertices: Vec<u64>,
+    far_indirect_draws: Vec<u64>,
+    far_logical_bytes: Vec<u64>,
+    far_reserved_bytes: Vec<u64>,
     unique_bricks: Vec<u64>,
     brick_dedup_ratio: Vec<f64>,
-    reserved_gpu_bytes: Vec<u64>,
+    unavailable: Vec<UnavailableMetric>,
 }
 
 impl Default for BenchmarkSamples {
     fn default() -> Self {
         Self {
             frame_ms: Vec::new(),
-            gpu_frame_ms: Vec::new(),
-            pass_gpu_ms: PassSamples::with_suffix("/elapsed_gpu"),
-            active_chunks: Vec::new(),
-            frustum_chunks: Vec::new(),
-            hzb_chunks: Vec::new(),
-            indirect_draws: Vec::new(),
+            fps: Vec::new(),
+            diagnostics: default(),
+            near_active_chunks: Vec::new(),
+            near_frustum_survivors: Vec::new(),
+            near_hzb_survivors: Vec::new(),
+            near_resident_quads: Vec::new(),
+            near_submitted_quads: Vec::new(),
+            near_submitted_triangles: Vec::new(),
+            near_submitted_vertices: Vec::new(),
+            near_indirect_draws: Vec::new(),
+            near_logical_bytes: Vec::new(),
+            near_reserved_bytes: Vec::new(),
             far_cells: Vec::new(),
+            far_resident_quads: Vec::new(),
+            far_visible_instances: Vec::new(),
+            far_proxy_vertices: Vec::new(),
+            far_indirect_draws: Vec::new(),
+            far_logical_bytes: Vec::new(),
+            far_reserved_bytes: Vec::new(),
             unique_bricks: Vec::new(),
             brick_dedup_ratio: Vec::new(),
-            reserved_gpu_bytes: Vec::new(),
+            unavailable: Vec::new(),
         }
     }
 }
 
 impl BenchmarkSamples {
     fn push_capabilities(&mut self, metrics: &BenchmarkCapabilityMetrics) {
-        push_optional(&mut self.active_chunks, metrics.active_chunks);
-        push_optional(&mut self.frustum_chunks, metrics.frustum_chunks);
-        push_optional(&mut self.hzb_chunks, metrics.hzb_chunks);
-        push_optional(&mut self.indirect_draws, metrics.indirect_draws);
+        push_optional(&mut self.near_active_chunks, metrics.near_active_chunks);
+        push_optional(
+            &mut self.near_frustum_survivors,
+            metrics.near_frustum_survivors,
+        );
+        push_optional(&mut self.near_hzb_survivors, metrics.near_hzb_survivors);
+        push_optional(&mut self.near_resident_quads, metrics.near_resident_quads);
+        push_optional(&mut self.near_submitted_quads, metrics.near_submitted_quads);
+        push_optional(
+            &mut self.near_submitted_triangles,
+            metrics.near_submitted_triangles,
+        );
+        push_optional(
+            &mut self.near_submitted_vertices,
+            metrics.near_submitted_vertices,
+        );
+        push_optional(&mut self.near_indirect_draws, metrics.near_indirect_draws);
+        push_optional(&mut self.near_logical_bytes, metrics.near_logical_bytes);
+        push_optional(&mut self.near_reserved_bytes, metrics.near_reserved_bytes);
         push_optional(&mut self.far_cells, metrics.far_cells);
+        push_optional(&mut self.far_resident_quads, metrics.far_resident_quads);
+        push_optional(
+            &mut self.far_visible_instances,
+            metrics.far_visible_instances,
+        );
+        push_optional(&mut self.far_proxy_vertices, metrics.far_proxy_vertices);
+        push_optional(&mut self.far_indirect_draws, metrics.far_indirect_draws);
+        push_optional(&mut self.far_logical_bytes, metrics.far_logical_bytes);
+        push_optional(&mut self.far_reserved_bytes, metrics.far_reserved_bytes);
         push_optional(&mut self.unique_bricks, metrics.unique_bricks);
         push_optional(&mut self.brick_dedup_ratio, metrics.brick_dedup_ratio);
-        push_optional(&mut self.reserved_gpu_bytes, metrics.reserved_gpu_bytes);
+        self.unavailable.extend(metrics.unavailable.iter().cloned());
     }
 }
 
@@ -255,28 +371,6 @@ fn push_optional<T>(values: &mut Vec<T>, value: Option<T>) {
         values.push(value);
     }
 }
-
-#[derive(Clone, Debug, Default, Serialize)]
-struct AdapterMetadata {
-    name: String,
-    backend: String,
-    device_type: String,
-    driver: String,
-    driver_info: String,
-    vendor: u32,
-    device: u32,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RenderThreadSnapshot {
-    adapter: Option<AdapterMetadata>,
-    near: Option<super::voxel_pull::gpu::NearRendererMetrics>,
-    far_pass: Option<super::far_voxel::pass::FarVoxelPassMetrics>,
-    reserved_gpu_bytes: Option<u64>,
-}
-
-#[derive(Resource, Clone, Default)]
-struct SharedRenderThreadSnapshot(Arc<Mutex<RenderThreadSnapshot>>);
 
 #[derive(Resource, Default)]
 struct BenchmarkRuntime {
@@ -287,6 +381,7 @@ struct BenchmarkRuntime {
     camera_base: Option<(Entity, Quat)>,
     snapshot_frozen: bool,
     output_written: bool,
+    load_to_ready_ms: Option<f64>,
 }
 
 pub struct RenderBenchmarkPlugin {
@@ -340,60 +435,6 @@ impl Plugin for RenderBenchmarkPlugin {
     }
 }
 
-fn capture_render_thread_snapshot(
-    adapter: Res<RenderAdapterInfo>,
-    arena: Option<Res<GpuQuadArena>>,
-    near: Option<Res<super::voxel_pull::gpu::NearRendererMetrics>>,
-    far_pass: Option<Res<super::far_voxel::pass::FarVoxelPassMetrics>>,
-    far_buffers: Option<Res<GpuFarBuffers>>,
-    shared: Res<SharedRenderThreadSnapshot>,
-) {
-    let mut snapshot = shared
-        .0
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    snapshot.adapter = Some(AdapterMetadata {
-        name: adapter.name.clone(),
-        backend: format!("{:?}", adapter.backend),
-        device_type: format!("{:?}", adapter.device_type),
-        driver: adapter.driver.clone(),
-        driver_info: adapter.driver_info.clone(),
-        vendor: adapter.vendor,
-        device: adapter.device,
-    });
-    snapshot.near = near.as_deref().copied();
-    snapshot.far_pass = far_pass.as_deref().copied();
-    let near_bytes = arena.map_or(0, |arena| {
-        arena.records.capacity() * std::mem::size_of::<super::meshing::records::QuadRecord>()
-            + arena.transforms.capacity() * std::mem::size_of::<Mat4>()
-            + arena.metadata.capacity()
-                * std::mem::size_of::<super::voxel_pull::arena::GpuNearChunkMeta>()
-    });
-    let far_bytes = far_buffers
-        .as_deref()
-        .map_or(0, GpuFarBuffers::reserved_bytes);
-    snapshot.reserved_gpu_bytes = Some((near_bytes + far_bytes) as u64);
-}
-
-fn apply_render_thread_snapshot(
-    snapshot: &RenderThreadSnapshot,
-    metrics: &mut BenchmarkCapabilityMetrics,
-) {
-    let mut near_indirect_draws = None;
-    if let Some(near) = snapshot.near {
-        metrics.active_chunks = Some(u64::from(near.active_chunks));
-        metrics.frustum_chunks = Some(u64::from(near.frustum_visible_chunks));
-        metrics.hzb_chunks = near.hzb_visible_chunks.map(u64::from);
-        near_indirect_draws = near.indirect_draw_count.map(u64::from);
-    }
-    let far_indirect_draws = snapshot
-        .far_pass
-        .map_or(0, |far| u64::from(far.indirect_draws));
-    metrics.indirect_draws =
-        near_indirect_draws.map(|near| near.saturating_add(far_indirect_draws));
-    metrics.reserved_gpu_bytes = snapshot.reserved_gpu_bytes;
-}
-
 #[derive(SystemParam)]
 struct BenchmarkScene<'w, 's> {
     client_updates: Res<'w, ClientUpdates>,
@@ -407,9 +448,10 @@ struct BenchmarkScene<'w, 's> {
     in_flight_lod: Query<'w, 's, (), With<LodMeshTask>>,
     in_flight_bricks: Query<'w, 's, (), With<FarBrickBuildTask>>,
     in_flight_far_uploads: Query<'w, 's, (), With<FarVoxelUploadPending>>,
-    chunks: Query<'w, 's, (), With<ChunkKey>>,
+    chunks: Query<'w, 's, Option<&'static TerrainQuadCount>, With<ChunkKey>>,
     far_cells: Query<'w, 's, (), With<LodChunk>>,
-    ready_far_cells: Query<'w, 's, &'static LodChunk, ReadyFarCellFilter>,
+    ready_far_cells:
+        Query<'w, 's, (&'static LodChunk, Option<&'static TerrainQuadCount>), ReadyFarCellFilter>,
     far_residency: Option<Res<'w, FarVoxelResidency>>,
 }
 
@@ -482,7 +524,7 @@ fn run_benchmark(
         }
     }
     let mut ready_lod_counts = BTreeMap::new();
-    for lod in &scene.ready_far_cells {
+    for (lod, _) in &scene.ready_far_cells {
         *ready_lod_counts.entry(lod.factor).or_insert(0) += 1;
     }
     let readiness = BenchmarkReadiness {
@@ -509,18 +551,47 @@ fn run_benchmark(
     if phase != previous_phase {
         info!("render benchmark phase: {previous_phase:?} -> {phase:?}");
         if phase == BenchmarkPhase::Warming {
+            runtime.load_to_ready_ms = Some(elapsed.as_secs_f64() * 1_000.0);
             far_draw_gate.enable();
             info!("render benchmark enabled the completed far scene for warmup");
         }
     }
 
+    capabilities.0.unavailable.clear();
     if !render_config.near.uses_quad_records() {
-        capabilities.0.active_chunks = Some(scene.chunks.iter().count() as u64);
-        capabilities.0.frustum_chunks = None;
-        capabilities.0.hzb_chunks = None;
-        capabilities.0.indirect_draws = Some(0);
+        capabilities.0.near_active_chunks = Some(scene.chunks.iter().count() as u64);
+        capabilities.0.near_resident_quads = Some(
+            scene
+                .chunks
+                .iter()
+                .flatten()
+                .map(|quads| u64::from(quads.0))
+                .sum(),
+        );
+        capabilities.0.near_submitted_quads = None;
+        capabilities.0.near_submitted_triangles = None;
+        capabilities.0.near_submitted_vertices = None;
+        capabilities.0.near_indirect_draws = Some(0);
+        capabilities.0.unavailable.push(UnavailableMetric {
+            path: "metrics.geometry.near.submitted_quads".to_owned(),
+            reason: UnavailableReason::TelemetryReadbackDisabled,
+            detail: Some(
+                "legacy per-chunk submission is view-specific; use per-pass clipper_primitives_out"
+                    .to_owned(),
+            ),
+        });
     }
     capabilities.0.far_cells = Some(scene.far_cells.iter().count() as u64);
+    if render_config.far == super::config::FarRenderBackend::Raster {
+        capabilities.0.far_resident_quads = Some(
+            scene
+                .ready_far_cells
+                .iter()
+                .filter_map(|(_, quads)| quads)
+                .map(|quads| u64::from(quads.0))
+                .sum(),
+        );
+    }
     if let Some(residency) = scene.far_residency.as_deref() {
         capabilities.0.unique_bricks = Some(residency.unique_bricks() as u64);
         capabilities.0.brick_dedup_ratio = residency.brick_dedup_ratio();
@@ -530,11 +601,25 @@ fn run_benchmark(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
+    let translated = translate_snapshot(&render_snapshot, render_config.far);
     if render_config.near.uses_quad_records() {
-        apply_render_thread_snapshot(&render_snapshot, &mut capabilities.0);
-    } else {
-        capabilities.0.reserved_gpu_bytes = render_snapshot.reserved_gpu_bytes;
+        capabilities.0.near_active_chunks = translated.near.active_chunks;
+        capabilities.0.near_frustum_survivors = translated.near.frustum_survivors;
+        capabilities.0.near_hzb_survivors = translated.near.hzb_survivors;
+        capabilities.0.near_resident_quads = translated.near.resident_quads;
+        capabilities.0.near_submitted_quads = translated.near.submitted_quads;
+        capabilities.0.near_submitted_triangles = translated.near.submitted_triangles;
+        capabilities.0.near_submitted_vertices = translated.near.submitted_vertices;
+        capabilities.0.near_indirect_draws = translated.near.indirect_draws;
     }
+    capabilities.0.near_logical_bytes = translated.near.logical_bytes;
+    capabilities.0.near_reserved_bytes = translated.near.reserved_bytes;
+    capabilities.0.far_visible_instances = translated.far.visible_instances;
+    capabilities.0.far_proxy_vertices = translated.far.proxy_vertices;
+    capabilities.0.far_indirect_draws = translated.far.indirect_draws;
+    capabilities.0.far_logical_bytes = translated.far.logical_bytes;
+    capabilities.0.far_reserved_bytes = translated.far.reserved_bytes;
+    capabilities.0.unavailable.extend(translated.unavailable);
 
     if phase == BenchmarkPhase::Measuring {
         if let Some(frame_ms) = diagnostics
@@ -543,20 +628,17 @@ fn run_benchmark(
         {
             runtime.samples.frame_ms.push(frame_ms);
         }
-        let mut gpu_frame_ms = 0.0;
-        let mut has_gpu_timing = false;
+        if let Some(fps) = diagnostics
+            .get(&FrameTimeDiagnosticsPlugin::FPS)
+            .and_then(|diagnostic| diagnostic.value())
+        {
+            runtime.samples.fps.push(fps);
+        }
         for diagnostic in diagnostics.iter() {
             let path = diagnostic.path().to_string();
-            if path.starts_with("render/") && path.ends_with("/elapsed_gpu") {
-                if let Some(value) = diagnostic.value() {
-                    runtime.samples.pass_gpu_ms.observe(&path, value);
-                    gpu_frame_ms += value;
-                    has_gpu_timing = true;
-                }
+            if let Some(value) = diagnostic.value() {
+                runtime.samples.diagnostics.observe(&path, value);
             }
-        }
-        if has_gpu_timing {
-            runtime.samples.gpu_frame_ms.push(gpu_frame_ms);
         }
         let capability_snapshot = capabilities.0.clone();
         runtime.samples.push_capabilities(&capability_snapshot);
@@ -583,15 +665,18 @@ fn run_benchmark(
     if matches!(phase, BenchmarkPhase::Complete | BenchmarkPhase::Failed) && !runtime.output_written
     {
         runtime.output_written = true;
-        let failed = phase == BenchmarkPhase::Failed;
+        let missing_required_samples =
+            phase == BenchmarkPhase::Complete && runtime.samples.frame_ms.is_empty();
+        let failed = phase == BenchmarkPhase::Failed || missing_required_samples;
         let result = build_result(
             failed,
+            missing_required_samples,
             &settings.0,
             *render_config,
             &runtime,
             render_snapshot.adapter,
         );
-        match write_result(&settings.0.output, &result) {
+        match write_result_atomic(&settings.0.output, &result) {
             Ok(()) => {
                 info!("render benchmark JSON: {}", settings.0.output.display());
                 exits.write(if failed {
@@ -611,113 +696,249 @@ fn run_benchmark(
     }
 }
 
-#[derive(Serialize)]
-struct LodRingMetadata {
-    bound: i32,
-    factor: u32,
-}
-
-#[derive(Serialize)]
-struct BenchmarkMetadata {
-    repetition: u32,
-    resolution: [u32; 2],
-    vsync: bool,
-    required_near_regions: usize,
-    stable_ready_frames: u32,
-    load_timeout_seconds: u64,
-    warmup_seconds: u64,
-    measurement_seconds: u64,
-    yaw_degrees: u32,
-    simulation_snapshot_frozen: bool,
-    world_seed: u64,
-    lod_ring_table: Vec<LodRingMetadata>,
-    near_backend: &'static str,
-    far_backend: &'static str,
-    adapter: Option<AdapterMetadata>,
-}
-
-#[derive(Serialize)]
-struct BenchmarkMetricSummary {
-    frame_ms: Option<FloatSummary>,
-    gpu_frame_ms: Option<FloatSummary>,
-    pass_gpu_ms: BTreeMap<String, FloatSummary>,
-    active_chunks: Option<CountSummary>,
-    frustum_chunks: Option<CountSummary>,
-    hzb_chunks: Option<CountSummary>,
-    indirect_draws: Option<CountSummary>,
-    far_cells: Option<CountSummary>,
-    unique_bricks: Option<CountSummary>,
-    brick_dedup_ratio: Option<FloatSummary>,
-    reserved_gpu_bytes: Option<CountSummary>,
-}
-
-#[derive(Serialize)]
-struct BenchmarkResult {
-    schema_version: u32,
-    status: &'static str,
-    failure_reason: Option<String>,
-    benchmark: BenchmarkMetadata,
-    readiness_at_exit: SerializableReadiness,
-    metrics: BenchmarkMetricSummary,
-    unavailable_metrics: Vec<&'static str>,
-}
-
-#[derive(Serialize)]
-struct SerializableReadiness {
-    near_regions: usize,
-    remesh_queue_len: usize,
-    lod_build_queue_len: usize,
-    pending_lod_events: usize,
-    in_flight_tasks: usize,
-    far_residency_pending: usize,
-    ready_lod_counts: BTreeMap<u32, usize>,
-    stable_frames: u32,
-}
-
 fn build_result(
     failed: bool,
+    missing_required_samples: bool,
     settings: &BenchmarkRunSettings,
     config: TerrainRenderConfig,
     runtime: &BenchmarkRuntime,
     adapter: Option<AdapterMetadata>,
 ) -> BenchmarkResult {
     let samples = &runtime.samples;
-    let pass_gpu_ms = samples.pass_gpu_ms.summaries();
-    let metrics = BenchmarkMetricSummary {
-        frame_ms: FloatSummary::from_samples(&samples.frame_ms),
-        gpu_frame_ms: FloatSummary::from_samples(&samples.gpu_frame_ms),
-        pass_gpu_ms,
-        active_chunks: CountSummary::from_samples(&samples.active_chunks),
-        frustum_chunks: CountSummary::from_samples(&samples.frustum_chunks),
-        hzb_chunks: CountSummary::from_samples(&samples.hzb_chunks),
-        indirect_draws: CountSummary::from_samples(&samples.indirect_draws),
-        far_cells: CountSummary::from_samples(&samples.far_cells),
-        unique_bricks: CountSummary::from_samples(&samples.unique_bricks),
-        brick_dedup_ratio: FloatSummary::from_samples(&samples.brick_dedup_ratio),
-        reserved_gpu_bytes: CountSummary::from_samples(&samples.reserved_gpu_bytes),
+    let metrics = BenchmarkMetrics {
+        frame_wall_ms: FloatSummary::from_samples(&samples.frame_ms),
+        timing: TimingMetrics {
+            frame_wall_ms: FloatSummary::from_samples(&samples.frame_ms),
+            fps: FloatSummary::from_samples(&samples.fps),
+            load_to_ready_ms: runtime.load_to_ready_ms,
+            gpu_busy_estimate_ms: metrics::gpu_busy_estimate_ms(&samples.diagnostics.elapsed_gpu),
+            elapsed_cpu: RenderDiagnosticSamples::float_summaries(&samples.diagnostics.elapsed_cpu),
+            elapsed_gpu: RenderDiagnosticSamples::float_summaries(&samples.diagnostics.elapsed_gpu),
+        },
+        geometry: GeometryMetrics {
+            near: GeometryScopeMetrics {
+                resident_quads: CountSummary::from_samples(&samples.near_resident_quads),
+                submitted_quads: CountSummary::from_samples(&samples.near_submitted_quads),
+                submitted_triangles: CountSummary::from_samples(&samples.near_submitted_triangles),
+                submitted_vertices: CountSummary::from_samples(&samples.near_submitted_vertices),
+                proxy_vertices: None,
+                unique_bricks: None,
+                brick_dedup_ratio: None,
+            },
+            far: GeometryScopeMetrics {
+                resident_quads: CountSummary::from_samples(&samples.far_resident_quads),
+                submitted_quads: None,
+                submitted_triangles: None,
+                submitted_vertices: None,
+                proxy_vertices: CountSummary::from_samples(&samples.far_proxy_vertices),
+                unique_bricks: CountSummary::from_samples(&samples.unique_bricks),
+                brick_dedup_ratio: FloatSummary::from_samples(&samples.brick_dedup_ratio),
+            },
+        },
+        visibility: VisibilityMetrics {
+            near: VisibilityScopeMetrics {
+                active_chunks: CountSummary::from_samples(&samples.near_active_chunks),
+                active_cells: None,
+                frustum_survivors: CountSummary::from_samples(&samples.near_frustum_survivors),
+                hzb_survivors: CountSummary::from_samples(&samples.near_hzb_survivors),
+                visible_instances: None,
+            },
+            far: VisibilityScopeMetrics {
+                active_chunks: None,
+                active_cells: CountSummary::from_samples(&samples.far_cells),
+                frustum_survivors: None,
+                hzb_survivors: None,
+                visible_instances: CountSummary::from_samples(&samples.far_visible_instances),
+            },
+        },
+        draws: DrawMetrics {
+            near: DrawScopeMetrics {
+                indirect_draws: CountSummary::from_samples(&samples.near_indirect_draws),
+            },
+            far: DrawScopeMetrics {
+                indirect_draws: CountSummary::from_samples(&samples.far_indirect_draws),
+            },
+        },
+        memory: MemoryMetrics {
+            near: MemoryScopeMetrics {
+                logical_bytes: CountSummary::from_samples(&samples.near_logical_bytes),
+                reserved_bytes: CountSummary::from_samples(&samples.near_reserved_bytes),
+            },
+            far: MemoryScopeMetrics {
+                logical_bytes: CountSummary::from_samples(&samples.far_logical_bytes),
+                reserved_bytes: CountSummary::from_samples(&samples.far_reserved_bytes),
+            },
+        },
+        pipeline_statistics: PipelineStatistics {
+            vertex_shader_invocations: RenderDiagnosticSamples::count_summaries(
+                &samples.diagnostics.vertex_shader_invocations,
+            ),
+            clipper_invocations: RenderDiagnosticSamples::count_summaries(
+                &samples.diagnostics.clipper_invocations,
+            ),
+            clipper_primitives_out: RenderDiagnosticSamples::count_summaries(
+                &samples.diagnostics.clipper_primitives_out,
+            ),
+            fragment_shader_invocations: RenderDiagnosticSamples::count_summaries(
+                &samples.diagnostics.fragment_shader_invocations,
+            ),
+            compute_shader_invocations: RenderDiagnosticSamples::count_summaries(
+                &samples.diagnostics.compute_shader_invocations,
+            ),
+        },
     };
-    let unavailable_metrics = [
-        ("gpu_frame_ms", metrics.gpu_frame_ms.is_none()),
-        ("hzb_chunks", metrics.hzb_chunks.is_none()),
-        ("indirect_draws", metrics.indirect_draws.is_none()),
-        ("unique_bricks", metrics.unique_bricks.is_none()),
-        ("brick_dedup_ratio", metrics.brick_dedup_ratio.is_none()),
-        ("reserved_gpu_bytes", metrics.reserved_gpu_bytes.is_none()),
-    ]
-    .into_iter()
-    .filter_map(|(name, unavailable)| unavailable.then_some(name))
-    .collect();
-    BenchmarkResult {
-        schema_version: 1,
-        status: if failed { "failed" } else { "complete" },
-        failure_reason: failed.then(|| {
+    let mut unavailable_metrics = samples.unavailable.clone();
+    unavailable_metrics.extend(
+        runtime
+            .last_readiness
+            .ready_lod_counts
+            .is_empty()
+            .then_some(UnavailableMetric {
+                path: "readiness_at_exit.ready_lod_counts".to_owned(),
+                reason: UnavailableReason::SampleNotObserved,
+                detail: None,
+            }),
+    );
+    unavailable_metrics.push(UnavailableMetric {
+        path: "metrics.timing.gpu_busy_estimate_ms".to_owned(),
+        reason: UnavailableReason::SampleNotObserved,
+        detail: Some("diagnostic span containment is not exposed; summing nested spans would double-count GPU work".to_owned()),
+    });
+    match config.far {
+        super::config::FarRenderBackend::BrickRaymarch => {
+            unavailable_metrics.push(UnavailableMetric {
+                path: "metrics.geometry.far.resident_quads".to_owned(),
+                reason: UnavailableReason::NotApplicableToBackend,
+                detail: Some("brick raymarching does not store raster quads".to_owned()),
+            })
+        }
+        super::config::FarRenderBackend::Raster => unavailable_metrics.push(UnavailableMetric {
+            path: "metrics.geometry.far.proxy_vertices".to_owned(),
+            reason: UnavailableReason::NotApplicableToBackend,
+            detail: Some("raster LOD does not submit raymarch proxy geometry".to_owned()),
+        }),
+    }
+    let mut mark_missing =
+        |path: &str, missing: bool, reason: UnavailableReason, detail: Option<&str>| {
+            if missing {
+                unavailable_metrics.push(UnavailableMetric {
+                    path: path.to_owned(),
+                    reason,
+                    detail: detail.map(str::to_owned),
+                });
+            }
+        };
+    mark_missing(
+        "metrics.timing.fps",
+        metrics.timing.fps.is_none(),
+        UnavailableReason::SampleNotObserved,
+        None,
+    );
+    mark_missing(
+        "metrics.visibility.near.hzb_survivors",
+        metrics.visibility.near.hzb_survivors.is_none(),
+        UnavailableReason::TelemetryReadbackDisabled,
+        None,
+    );
+    mark_missing(
+        "metrics.geometry.near.submitted_quads",
+        metrics.geometry.near.submitted_quads.is_none(),
+        UnavailableReason::TelemetryReadbackDisabled,
+        Some("use per-pass clipper_primitives_out when exact submission readback is unavailable"),
+    );
+    mark_missing(
+        "metrics.memory.near.logical_bytes",
+        metrics.memory.near.logical_bytes.is_none(),
+        UnavailableReason::SampleNotObserved,
+        None,
+    );
+    mark_missing(
+        "metrics.memory.near.reserved_bytes",
+        metrics.memory.near.reserved_bytes.is_none(),
+        UnavailableReason::SampleNotObserved,
+        None,
+    );
+    mark_missing(
+        "metrics.memory.far.logical_bytes",
+        metrics.memory.far.logical_bytes.is_none(),
+        UnavailableReason::SampleNotObserved,
+        None,
+    );
+    mark_missing(
+        "metrics.memory.far.reserved_bytes",
+        metrics.memory.far.reserved_bytes.is_none(),
+        UnavailableReason::SampleNotObserved,
+        None,
+    );
+    mark_missing(
+        "metrics.pipeline_statistics.vertex_shader_invocations",
+        metrics
+            .pipeline_statistics
+            .vertex_shader_invocations
+            .is_empty(),
+        UnavailableReason::AdapterFeatureUnavailable,
+        None,
+    );
+    mark_missing(
+        "metrics.pipeline_statistics.clipper_invocations",
+        metrics.pipeline_statistics.clipper_invocations.is_empty(),
+        UnavailableReason::AdapterFeatureUnavailable,
+        None,
+    );
+    mark_missing(
+        "metrics.pipeline_statistics.clipper_primitives_out",
+        metrics
+            .pipeline_statistics
+            .clipper_primitives_out
+            .is_empty(),
+        UnavailableReason::AdapterFeatureUnavailable,
+        None,
+    );
+    mark_missing(
+        "metrics.pipeline_statistics.fragment_shader_invocations",
+        metrics
+            .pipeline_statistics
+            .fragment_shader_invocations
+            .is_empty(),
+        UnavailableReason::AdapterFeatureUnavailable,
+        None,
+    );
+    mark_missing(
+        "metrics.pipeline_statistics.compute_shader_invocations",
+        metrics
+            .pipeline_statistics
+            .compute_shader_invocations
+            .is_empty(),
+        UnavailableReason::AdapterFeatureUnavailable,
+        None,
+    );
+    unavailable_metrics.sort_by(|left, right| left.path.cmp(&right.path));
+    unavailable_metrics
+        .dedup_by(|left, right| left.path == right.path && left.reason == right.reason);
+    BenchmarkResult::new(
+        if failed { "failed" } else { "complete" },
+        failed.then(|| {
+            if missing_required_samples {
+                return "measurement completed without frame-time samples".to_owned();
+            }
             format!(
                 "scene did not stabilize within {} seconds",
                 LOAD_TIMEOUT.as_secs()
             )
         }),
-        benchmark: BenchmarkMetadata {
+        BenchmarkMetadata {
             repetition: settings.repetition,
+            expected_repetitions: settings.expected_repetitions,
+            instrumentation: settings.instrumentation,
+            label: settings.label.clone(),
+            profile: settings.profile.clone(),
+            git_revision: settings.git_revision.clone(),
+            git_dirty: settings.git_dirty,
+            os: settings.os.clone(),
+            arch: settings.arch.clone(),
+            cpu: settings.cpu.clone(),
+            client_worker_threads: settings.client_worker_threads,
+            tokio_worker_threads: settings.tokio_worker_threads,
             resolution: [BENCHMARK_WIDTH, BENCHMARK_HEIGHT],
             vsync: false,
             required_near_regions: REQUIRED_NEAR_REGIONS,
@@ -732,11 +953,13 @@ fn build_result(
                 .iter()
                 .map(|&(bound, factor)| LodRingMetadata { bound, factor })
                 .collect(),
-            near_backend: config.near.as_str(),
-            far_backend: config.far.as_str(),
+            requested_near_backend: settings.requested_near_backend.clone(),
+            resolved_near_backend: config.near.as_str().to_owned(),
+            requested_far_backend: settings.requested_far_backend.clone(),
+            resolved_far_backend: config.far.as_str().to_owned(),
             adapter,
         },
-        readiness_at_exit: SerializableReadiness {
+        SerializableReadiness {
             near_regions: runtime.last_readiness.near_regions,
             remesh_queue_len: runtime.last_readiness.remesh_queue_len,
             lod_build_queue_len: runtime.last_readiness.lod_build_queue_len,
@@ -748,15 +971,7 @@ fn build_result(
         },
         metrics,
         unavailable_metrics,
-    }
-}
-
-fn write_result(path: &PathBuf, result: &BenchmarkResult) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file = File::create(path)?;
-    serde_json::to_writer_pretty(file, result).map_err(std::io::Error::other)
+    )
 }
 
 #[cfg(test)]
@@ -872,67 +1087,42 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_capability_metrics_serialize_as_null() {
-        let value = serde_json::to_value(BenchmarkCapabilityMetrics::default()).unwrap();
-        assert!(value["hzb_chunks"].is_null());
-        assert!(value["indirect_draws"].is_null());
-        assert!(value["unique_bricks"].is_null());
-        assert!(value["brick_dedup_ratio"].is_null());
-        assert!(value["reserved_gpu_bytes"].is_null());
+    fn provenance_parser_accepts_valid_values_and_keeps_optional_values_absent() {
+        let values = BTreeMap::from([
+            ("RENDER_BENCH_INSTRUMENTATION", "chrome_trace"),
+            ("RENDER_BENCH_GIT_DIRTY", "1"),
+            ("RENDER_BENCH_EXPECTED_REPETITIONS", "5"),
+        ]);
+        let settings = BenchmarkRunSettings::from_values(|name| {
+            values.get(name).map(|value| (*value).to_owned())
+        })
+        .unwrap();
+        assert_eq!(settings.instrumentation, Instrumentation::ChromeTrace);
+        assert_eq!(settings.git_dirty, Some(true));
+        assert_eq!(settings.expected_repetitions, Some(5));
+        assert_eq!(settings.git_revision, None);
+        assert_eq!(settings.label, None);
     }
 
     #[test]
-    fn render_snapshot_combines_near_and_far_indirect_draws() {
-        let snapshot = RenderThreadSnapshot {
-            near: Some(super::super::voxel_pull::gpu::NearRendererMetrics {
-                active_chunks: 17,
-                frustum_visible_chunks: 11,
-                hzb_visible_chunks: Some(7),
-                indirect_draw_count: Some(3),
-                ..default()
-            }),
-            far_pass: Some(super::super::far_voxel::pass::FarVoxelPassMetrics {
-                indirect_draws: 1,
-                ..default()
-            }),
-            reserved_gpu_bytes: Some(4096),
-            ..default()
-        };
-        let mut metrics = BenchmarkCapabilityMetrics::default();
-
-        apply_render_thread_snapshot(&snapshot, &mut metrics);
-
-        assert_eq!(metrics.active_chunks, Some(17));
-        assert_eq!(metrics.frustum_chunks, Some(11));
-        assert_eq!(metrics.hzb_chunks, Some(7));
-        assert_eq!(metrics.indirect_draws, Some(4));
-        assert_eq!(metrics.reserved_gpu_bytes, Some(4096));
+    fn provenance_parser_rejects_invalid_boolean_and_instrumentation() {
+        assert!(BenchmarkRunSettings::from_values(
+            |name| (name == "RENDER_BENCH_GIT_DIRTY").then(|| "yes".to_owned())
+        )
+        .unwrap_err()
+        .contains("expected 0 or 1"));
+        assert!(BenchmarkRunSettings::from_values(
+            |name| (name == "RENDER_BENCH_INSTRUMENTATION").then(|| "trace".to_owned())
+        )
+        .unwrap_err()
+        .contains("expected normal, chrome_trace, or tracy"));
     }
 
     #[test]
-    fn partial_indirect_aggregate_treats_missing_far_as_zero_but_unknown_near_as_unknown() {
-        let mut snapshot = RenderThreadSnapshot {
-            near: Some(super::super::voxel_pull::gpu::NearRendererMetrics {
-                indirect_draw_count: Some(3),
-                ..default()
-            }),
-            ..default()
-        };
-        let mut metrics = BenchmarkCapabilityMetrics::default();
-
-        apply_render_thread_snapshot(&snapshot, &mut metrics);
-        assert_eq!(metrics.indirect_draws, Some(3));
-
-        snapshot
-            .near
-            .as_mut()
-            .expect("near metrics are present")
-            .indirect_draw_count = None;
-        snapshot.far_pass = Some(super::super::far_voxel::pass::FarVoxelPassMetrics {
-            indirect_draws: 1,
-            ..default()
-        });
-        apply_render_thread_snapshot(&snapshot, &mut metrics);
-        assert_eq!(metrics.indirect_draws, None);
+    fn frame_time_and_fps_summaries_preserve_independent_samples() {
+        let frame = FloatSummary::from_samples(&[10.0, 20.0]).unwrap();
+        let fps = FloatSummary::from_samples(&[100.0, 50.0]).unwrap();
+        assert_eq!((frame.min, frame.max, frame.sample_count), (10.0, 20.0, 2));
+        assert_eq!((fps.min, fps.max, fps.sample_count), (50.0, 100.0, 2));
     }
 }

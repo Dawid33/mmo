@@ -130,6 +130,12 @@ pub struct GpuSlotBuffer<T> {
 }
 
 impl<T: Pod + Zeroable + Copy> GpuSlotBuffer<T> {
+    pub fn logical_used_bytes(&self) -> usize {
+        self.mirror
+            .active_slots()
+            .saturating_mul(std::mem::size_of::<T>())
+    }
+
     fn new(label: &'static str, max_bytes: usize) -> Self {
         Self {
             mirror: default(),
@@ -290,6 +296,17 @@ impl GpuFarBuffers {
             .sum::<usize>()
             + self.roots.reserved_bytes()
             + self.cells.reserved_bytes()
+            + FAR_STATIC_BINDING_OVERHEAD_BYTES
+            + self.pass_reserved_bytes
+    }
+
+    pub fn logical_used_bytes(&self) -> usize {
+        self.mixed_pages
+            .iter()
+            .map(GpuSlotBuffer::logical_used_bytes)
+            .sum::<usize>()
+            + self.roots.logical_used_bytes()
+            + self.cells.logical_used_bytes()
             + FAR_STATIC_BINDING_OVERHEAD_BYTES
             + self.pass_reserved_bytes
     }
@@ -738,6 +755,20 @@ mod tests {
         assert_eq!(
             buffers.reserved_bytes(),
             FAR_STATIC_BINDING_OVERHEAD_BYTES + FAR_MATERIAL_LOOKUP_BYTES + 4_096
+        );
+    }
+
+    #[test]
+    fn logical_bytes_count_active_slots_instead_of_sparse_capacity() {
+        let mut buffers = GpuFarBuffers::new(1024 * 1024);
+        buffers.cells.mirror.write(7, GpuFarCell::INACTIVE);
+        buffers.cells.mirror.write(19, GpuFarCell::INACTIVE);
+        buffers.cells.mirror.clear(7);
+        assert!(buffers.set_pass_reserved_bytes(4096));
+
+        assert_eq!(
+            buffers.logical_used_bytes(),
+            FAR_STATIC_BINDING_OVERHEAD_BYTES + 4096 + std::mem::size_of::<GpuFarCell>()
         );
     }
 
