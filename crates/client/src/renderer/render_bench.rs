@@ -29,6 +29,7 @@ use super::meshing::lod::{LodBuildQueue, LodChunk, LodMeshTask, LodRasterReady};
 use super::meshing::queue::{ChunkKey, RemeshQueue};
 use super::meshing::MeshingTask;
 use super::meshing::TerrainQuadCount;
+use super::voxel_pull::gpu::{ActiveNearMode, ForwardCullSource};
 use super::{ClientUpdates, GameEvents};
 use metrics::{CountSummary, FloatSummary, RenderDiagnosticSamples};
 use output::{
@@ -204,6 +205,30 @@ pub enum BenchmarkPhase {
     Measuring,
     Complete,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CompletionDecision {
+    failed: bool,
+    missing_required_samples: bool,
+}
+
+impl CompletionDecision {
+    const fn exit_successfully(self) -> bool {
+        !self.failed
+    }
+}
+
+const fn completion_decision(
+    phase: BenchmarkPhase,
+    has_required_frame_samples: bool,
+) -> CompletionDecision {
+    let missing_required_samples =
+        matches!(phase, BenchmarkPhase::Complete) && !has_required_frame_samples;
+    CompletionDecision {
+        failed: matches!(phase, BenchmarkPhase::Failed) || missing_required_samples,
+        missing_required_samples,
+    }
 }
 
 #[derive(Default)]
@@ -684,24 +709,24 @@ fn run_benchmark(
     if matches!(phase, BenchmarkPhase::Complete | BenchmarkPhase::Failed) && !runtime.output_written
     {
         runtime.output_written = true;
-        let missing_required_samples =
-            phase == BenchmarkPhase::Complete && runtime.samples.frame_ms.is_empty();
-        let failed = phase == BenchmarkPhase::Failed || missing_required_samples;
+        let completion = completion_decision(phase, !runtime.samples.frame_ms.is_empty());
         let result = build_result(
-            failed,
-            missing_required_samples,
+            completion.failed,
+            completion.missing_required_samples,
             &settings.0,
             *render_config,
+            translated.near_mode,
+            translated.near_visibility_source,
             &runtime,
             render_snapshot.adapter,
         );
         match write_result_atomic(&settings.0.output, &result) {
             Ok(()) => {
                 info!("render benchmark JSON: {}", settings.0.output.display());
-                exits.write(if failed {
-                    AppExit::error()
-                } else {
+                exits.write(if completion.exit_successfully() {
                     AppExit::Success
+                } else {
+                    AppExit::error()
                 });
             }
             Err(error) => {
@@ -720,6 +745,8 @@ fn build_result(
     missing_required_samples: bool,
     settings: &BenchmarkRunSettings,
     config: TerrainRenderConfig,
+    near_mode: Option<ActiveNearMode>,
+    near_visibility_source: Option<ForwardCullSource>,
     runtime: &BenchmarkRuntime,
     adapter: Option<AdapterMetadata>,
 ) -> BenchmarkResult {
@@ -825,7 +852,13 @@ fn build_result(
         reason: UnavailableReason::SampleNotObserved,
         detail: Some("diagnostic span containment is not exposed; summing nested spans would double-count GPU work".to_owned()),
     });
-    populate_metric_unavailability(&metrics, config, &mut unavailable_metrics);
+    populate_metric_unavailability(
+        &metrics,
+        config,
+        near_mode,
+        near_visibility_source,
+        &mut unavailable_metrics,
+    );
     unavailable_metrics.sort_by(|left, right| left.path.cmp(&right.path));
     unavailable_metrics.dedup_by(|left, right| left.path == right.path);
     BenchmarkResult::new(
@@ -864,7 +897,10 @@ fn build_result(
             world_seed: worldgen::WORLD_SEED,
             lod_ring_table: game::lod::LOD_RING_TABLE.iter().copied().collect(),
             near_backend_requested: settings.requested_near_backend.clone(),
-            near_backend_resolved: config.near.as_str().to_owned(),
+            near_backend_resolved: near_mode
+                .map(ActiveNearMode::as_str)
+                .unwrap_or("unavailable")
+                .to_owned(),
             far_backend_requested: settings.requested_far_backend.clone(),
             far_backend_resolved: config.far.as_str().to_owned(),
             adapter,
@@ -887,6 +923,8 @@ fn build_result(
 fn populate_metric_unavailability(
     metrics: &BenchmarkMetrics,
     config: TerrainRenderConfig,
+    near_mode: Option<ActiveNearMode>,
+    near_visibility_source: Option<ForwardCullSource>,
     unavailable: &mut Vec<UnavailableMetric>,
 ) {
     let mut mark = |path: &str, missing: bool, reason: UnavailableReason, detail: Option<&str>| {
@@ -986,10 +1024,9 @@ fn populate_metric_unavailability(
         mark(path, missing, not_applicable, None);
     }
 
-    let near_submission_reason = if config.near == super::config::NearRenderBackend::PerChunk {
-        readback_disabled
-    } else {
-        sample
+    let near_submission_reason = match near_mode {
+        Some(ActiveNearMode::Disabled) => readback_disabled,
+        Some(ActiveNearMode::GroupedDirect | ActiveNearMode::GpuDriven { .. }) | None => sample,
     };
     for (path, missing) in [
         (
@@ -1015,30 +1052,31 @@ fn populate_metric_unavailability(
     mark(
         "metrics.visibility.near.frustum_survivors",
         metrics.visibility.near.frustum_survivors.is_none(),
-        if config.near == super::config::NearRenderBackend::PerChunk {
-            readback_disabled
-        } else {
-            sample
+        match near_mode {
+            Some(ActiveNearMode::Disabled) => readback_disabled,
+            Some(ActiveNearMode::GroupedDirect | ActiveNearMode::GpuDriven { .. }) | None => sample,
         },
         None,
     );
     mark(
         "metrics.visibility.near.hzb_survivors",
         metrics.visibility.near.hzb_survivors.is_none(),
-        if config.near == super::config::NearRenderBackend::GpuDriven {
-            sample
-        } else {
-            not_applicable
+        match (near_mode, near_visibility_source) {
+            (Some(ActiveNearMode::GpuDriven { .. }), Some(ForwardCullSource::Frustum)) => {
+                not_applicable
+            }
+            (Some(ActiveNearMode::GpuDriven { .. }), Some(ForwardCullSource::Hzb) | None) => sample,
+            (Some(ActiveNearMode::Disabled | ActiveNearMode::GroupedDirect), _) => not_applicable,
+            (None, _) => sample,
         },
         None,
     );
     mark(
         "metrics.draws.near.direct_draws",
         metrics.draws.near.direct_draws.is_none(),
-        if config.near == super::config::NearRenderBackend::PerChunk {
-            readback_disabled
-        } else {
-            sample
+        match near_mode {
+            Some(ActiveNearMode::Disabled) => readback_disabled,
+            Some(ActiveNearMode::GroupedDirect | ActiveNearMode::GpuDriven { .. }) | None => sample,
         },
         Some("exact main-view direct draw count was not observed"),
     );
@@ -1318,7 +1356,13 @@ mod tests {
             far: super::super::config::FarRenderBackend::BrickRaymarch,
         };
         let mut unavailable = Vec::new();
-        populate_metric_unavailability(&metrics, config, &mut unavailable);
+        populate_metric_unavailability(
+            &metrics,
+            config,
+            Some(ActiveNearMode::Disabled),
+            None,
+            &mut unavailable,
+        );
 
         let paths = unavailable
             .iter()
@@ -1373,6 +1417,8 @@ mod tests {
             true,
             &settings,
             config,
+            Some(ActiveNearMode::Disabled),
+            None,
             &BenchmarkRuntime::default(),
             None,
         );
@@ -1381,6 +1427,94 @@ mod tests {
         assert_eq!(
             result.failure_reason.as_deref(),
             Some("measurement completed without frame-time samples")
+        );
+    }
+
+    #[test]
+    fn missing_required_samples_fail_both_the_result_and_exit_decision() {
+        let decision = completion_decision(BenchmarkPhase::Complete, false);
+
+        assert!(decision.failed);
+        assert!(decision.missing_required_samples);
+        assert!(!decision.exit_successfully());
+    }
+
+    #[test]
+    fn artifact_uses_render_world_backend_when_requested_gpu_falls_back_to_direct() {
+        let settings = BenchmarkRunSettings::from_values(|name| match name {
+            "RENDER_BENCH_OUTPUT" => Some("unused.json".to_owned()),
+            "VOXEL_NEAR_RENDER" => Some("gpu".to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let config = TerrainRenderConfig {
+            near: super::super::config::NearRenderBackend::GpuDriven,
+            far: super::super::config::FarRenderBackend::Raster,
+        };
+
+        let result = build_result(
+            false,
+            false,
+            &settings,
+            config,
+            Some(ActiveNearMode::GroupedDirect),
+            Some(ForwardCullSource::Frustum),
+            &BenchmarkRuntime::default(),
+            None,
+        );
+
+        assert_eq!(
+            result.benchmark.near_backend_requested.as_deref(),
+            Some("gpu")
+        );
+        assert_eq!(result.benchmark.near_backend_resolved, "direct");
+    }
+
+    #[test]
+    fn hzb_unavailability_uses_actual_visibility_source() {
+        let metrics = BenchmarkMetrics::default();
+        let config = TerrainRenderConfig {
+            near: super::super::config::NearRenderBackend::GpuDriven,
+            far: super::super::config::FarRenderBackend::Raster,
+        };
+        let mut unavailable = Vec::new();
+
+        populate_metric_unavailability(
+            &metrics,
+            config,
+            Some(ActiveNearMode::GpuDriven {
+                indirect_count: true,
+            }),
+            Some(ForwardCullSource::Frustum),
+            &mut unavailable,
+        );
+
+        assert_eq!(
+            unavailable
+                .iter()
+                .find(|metric| metric.path == "metrics.visibility.near.hzb_survivors")
+                .unwrap()
+                .reason,
+            UnavailableReason::NotApplicableToBackend
+        );
+
+        let mut hzb_unavailable = Vec::new();
+        populate_metric_unavailability(
+            &metrics,
+            config,
+            Some(ActiveNearMode::GpuDriven {
+                indirect_count: true,
+            }),
+            Some(ForwardCullSource::Hzb),
+            &mut hzb_unavailable,
+        );
+        assert_eq!(
+            hzb_unavailable
+                .iter()
+                .find(|metric| metric.path == "metrics.visibility.near.hzb_survivors")
+                .unwrap()
+                .reason,
+            UnavailableReason::SampleNotObserved
         );
     }
 }

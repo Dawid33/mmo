@@ -94,8 +94,8 @@ pub const fn far_view_allocation_bytes(visible_slot_capacity: u32) -> usize {
         visible_slot_capacity
     };
     std::mem::size_of::<GpuFarCullUniform>()
-        + std::mem::size_of::<[u32; 4]>()
-        + allocated_slots as usize * std::mem::size_of::<u32>()
+        .saturating_add(std::mem::size_of::<[u32; 4]>())
+        .saturating_add((allocated_slots as usize).saturating_mul(std::mem::size_of::<u32>()))
 }
 
 pub fn far_pass_allocation_bytes(
@@ -107,11 +107,17 @@ pub fn far_pass_allocation_bytes(
     } else {
         0
     };
-    lookup_bytes
-        + visible_slot_capacities
-            .into_iter()
-            .map(far_view_allocation_bytes)
-            .sum::<usize>()
+    saturating_allocation_sum(
+        std::iter::once(lookup_bytes).chain(
+            visible_slot_capacities
+                .into_iter()
+                .map(far_view_allocation_bytes),
+        ),
+    )
+}
+
+fn saturating_allocation_sum(values: impl IntoIterator<Item = usize>) -> usize {
+    values.into_iter().fold(0usize, usize::saturating_add)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -689,6 +695,17 @@ mod tests {
         assert_eq!(
             far_pass_allocation_bytes(true, [0, 73]),
             material_lut_bytes() + far_view_allocation_bytes(0) + far_view_allocation_bytes(73)
+        );
+    }
+
+    #[test]
+    fn pass_allocation_bytes_saturate_on_overflow() {
+        assert_eq!(saturating_allocation_sum([usize::MAX, 1]), usize::MAX);
+        assert_eq!(
+            far_view_allocation_bytes(u32::MAX),
+            std::mem::size_of::<GpuFarCullUniform>()
+                .saturating_add(std::mem::size_of::<[u32; 4]>())
+                .saturating_add((u32::MAX as usize).saturating_mul(std::mem::size_of::<u32>()))
         );
     }
 

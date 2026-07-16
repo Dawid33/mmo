@@ -8,7 +8,7 @@ use crate::renderer::config::FarRenderBackend;
 use crate::renderer::far_voxel::gpu::GpuFarBuffers;
 use crate::renderer::far_voxel::pass::FarVoxelPassMetrics;
 use crate::renderer::voxel_pull::arena::GpuQuadArena;
-use crate::renderer::voxel_pull::gpu::NearRendererMetrics;
+use crate::renderer::voxel_pull::gpu::{ActiveNearMode, ForwardCullSource, NearRendererMetrics};
 
 #[derive(Clone, Debug, Default)]
 pub struct RenderThreadSnapshot {
@@ -43,6 +43,9 @@ pub struct ScopeTelemetry {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TranslatedTelemetry {
+    pub near_mode: Option<ActiveNearMode>,
+    pub near_backend_resolved: Option<String>,
+    pub near_visibility_source: Option<ForwardCullSource>,
     pub near: ScopeTelemetry,
     pub far: ScopeTelemetry,
     pub unavailable: Vec<UnavailableMetric>,
@@ -138,6 +141,9 @@ pub fn translate_snapshot(
 ) -> TranslatedTelemetry {
     let mut translated = TranslatedTelemetry::default();
     if let Some(near) = snapshot.near {
+        translated.near_mode = Some(near.active_mode);
+        translated.near_backend_resolved = Some(near.active_mode.as_str().to_owned());
+        translated.near_visibility_source = near.visibility_source;
         translated.near.active_chunks = Some(u64::from(near.active_chunks));
         translated.near.frustum_survivors = Some(u64::from(near.frustum_visible_chunks));
         translated.near.hzb_survivors = near.hzb_visible_chunks.map(u64::from);
@@ -190,6 +196,11 @@ mod tests {
     fn translates_exact_near_geometry_without_scope_ambiguity() {
         let snapshot = RenderThreadSnapshot {
             near: Some(NearRendererMetrics {
+                active_mode: ActiveNearMode::GpuDriven {
+                    indirect_count: true,
+                },
+                mode_generation: 1,
+                visibility_source: Some(ForwardCullSource::Hzb),
                 active_chunks: 17,
                 frustum_visible_chunks: 11,
                 hzb_visible_chunks: Some(7),
@@ -222,6 +233,28 @@ mod tests {
         assert_eq!(translated.far.indirect_draws, Some(1));
         assert_eq!(translated.near.logical_bytes, Some(100));
         assert_eq!(translated.far.reserved_bytes, Some(400));
+    }
+
+    #[test]
+    fn translation_carries_the_actual_render_world_backend_and_visibility_source() {
+        let snapshot = RenderThreadSnapshot {
+            near: Some(NearRendererMetrics {
+                active_mode: crate::renderer::voxel_pull::gpu::ActiveNearMode::GroupedDirect,
+                visibility_source: Some(
+                    crate::renderer::voxel_pull::gpu::ForwardCullSource::Frustum,
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let translated = translate_snapshot(&snapshot, FarRenderBackend::Raster);
+
+        assert_eq!(translated.near_backend_resolved.as_deref(), Some("direct"));
+        assert_eq!(
+            translated.near_visibility_source,
+            Some(crate::renderer::voxel_pull::gpu::ForwardCullSource::Frustum)
+        );
     }
 
     #[test]

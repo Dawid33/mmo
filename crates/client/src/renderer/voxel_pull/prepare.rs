@@ -14,7 +14,10 @@ use bevy::{
 };
 
 use super::arena::GpuQuadArena;
-use super::gpu::{exact_indirect_draw_count, ActiveNearMode, NearRendererMetrics};
+use super::gpu::{
+    exact_indirect_draw_count, synchronize_near_metric_mode, ActiveNearMode, ForwardCullSource,
+    NearRendererMetrics,
+};
 use super::pipeline::VoxelPullPipeline;
 use super::queue::{grouped_draw_list, ViewChunkDrawList};
 use super::{BlockArrayTexture, ExtractedChunkQuads, RemovedChunkQuads};
@@ -53,6 +56,7 @@ fn update_near_metrics_for_prepare(
     direct_draw_count: Option<u32>,
     metrics: &mut NearRendererMetrics,
 ) {
+    synchronize_near_metric_mode(mode, metrics);
     metrics.active_chunks = active_chunks;
     metrics.frustum_visible_chunks = frustum_visible_chunks;
     metrics.resident_quads = resident_quads;
@@ -64,6 +68,7 @@ fn update_near_metrics_for_prepare(
             metrics.direct_draw_count = Some(0);
         }
         ActiveNearMode::GroupedDirect => {
+            metrics.visibility_source = Some(ForwardCullSource::Frustum);
             metrics.hzb_visible_chunks = None;
             metrics.indirect_draw_count = exact_indirect_draw_count(mode);
             let (quads, vertices) = submitted_workload.unwrap_or_default();
@@ -309,23 +314,17 @@ mod tests {
 
     #[test]
     fn gpu_prepare_preserves_the_latest_asynchronous_telemetry() {
+        let mode = ActiveNearMode::GpuDriven {
+            indirect_count: true,
+        };
         let mut metrics = NearRendererMetrics {
+            active_mode: mode,
             hzb_visible_chunks: Some(7),
             indirect_draw_count: Some(3),
             ..default()
         };
 
-        update_near_metrics_for_prepare(
-            ActiveNearMode::GpuDriven {
-                indirect_count: true,
-            },
-            17,
-            11,
-            23,
-            None,
-            None,
-            &mut metrics,
-        );
+        update_near_metrics_for_prepare(mode, 17, 11, 23, None, None, &mut metrics);
 
         assert_eq!(metrics.active_chunks, 17);
         assert_eq!(metrics.frustum_visible_chunks, 11);

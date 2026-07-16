@@ -43,11 +43,29 @@ pub enum ActiveNearMode {
     },
 }
 
+impl ActiveNearMode {
+    /// Stable benchmark/report name for the renderer that is actually drawing.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "per-chunk",
+            Self::GroupedDirect => "direct",
+            Self::GpuDriven { .. } => "gpu",
+        }
+    }
+}
+
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RequestedNearBackend(pub NearRenderBackend);
 
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NearRendererMetrics {
+    /// Render-world mode that produced the mode-sensitive fields below.
+    pub active_mode: ActiveNearMode,
+    /// Changes whenever `active_mode` changes, invalidating delayed readbacks.
+    pub mode_generation: u64,
+    /// Visibility source for the current mode/sample. GPU mode remains `None`
+    /// until a matching asynchronous sample is observed.
+    pub visibility_source: Option<ForwardCullSource>,
     pub active_chunks: u32,
     pub frustum_visible_chunks: u32,
     /// Exact main-forward HZB survivor count. `None` when HZB was not the
@@ -690,6 +708,8 @@ const NEAR_TELEMETRY_COUNT_BYTES: u64 = std::mem::size_of::<[u32; 2]>() as u64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NearTelemetrySample {
     sequence: u64,
+    mode: ActiveNearMode,
+    mode_generation: u64,
     visible_chunks: u32,
     visible_quads: u32,
     source: ForwardCullSource,
@@ -726,13 +746,17 @@ fn apply_near_telemetry_sample(
     sample: Option<NearTelemetrySample>,
     metrics: &mut NearRendererMetrics,
 ) {
+    synchronize_near_metric_mode(mode, metrics);
     if matches!(mode, ActiveNearMode::GpuDriven { .. }) {
         // Mapping is asynchronous and does not necessarily complete every
         // render frame. Retain the newest completed sample until a newer one
         // arrives instead of exposing one-frame pulses that the main-world
         // benchmark can easily miss.
-        if let Some(sample) = sample {
+        if let Some(sample) = sample.filter(|sample| {
+            sample.mode == mode && sample.mode_generation == metrics.mode_generation
+        }) {
             let values = near_telemetry_values(sample);
+            metrics.visibility_source = Some(sample.source);
             metrics.hzb_visible_chunks = values.hzb_visible_chunks;
             metrics.indirect_draw_count = Some(values.indirect_draw_count);
             metrics.submitted_quads = Some(values.submitted_quads);
@@ -740,6 +764,11 @@ fn apply_near_telemetry_sample(
             metrics.direct_draw_count = Some(0);
         }
     } else {
+        metrics.visibility_source = match mode {
+            ActiveNearMode::GroupedDirect => Some(ForwardCullSource::Frustum),
+            ActiveNearMode::Disabled => None,
+            ActiveNearMode::GpuDriven { .. } => unreachable!(),
+        };
         metrics.hzb_visible_chunks = None;
         metrics.indirect_draw_count = exact_indirect_draw_count(mode);
         metrics.direct_draw_count = match mode {
@@ -748,6 +777,26 @@ fn apply_near_telemetry_sample(
             ActiveNearMode::GpuDriven { .. } => unreachable!(),
         };
     }
+}
+
+/// Synchronizes mode-sensitive telemetry with the renderer that is currently
+/// drawing. Delayed GPU callbacks carry this generation and are ignored after
+/// any transition, including a GPU -> direct -> GPU cycle.
+pub(crate) fn synchronize_near_metric_mode(
+    mode: ActiveNearMode,
+    metrics: &mut NearRendererMetrics,
+) {
+    if metrics.active_mode == mode {
+        return;
+    }
+    metrics.active_mode = mode;
+    metrics.mode_generation = metrics.mode_generation.wrapping_add(1);
+    metrics.visibility_source = None;
+    metrics.hzb_visible_chunks = None;
+    metrics.indirect_draw_count = None;
+    metrics.direct_draw_count = None;
+    metrics.submitted_quads = None;
+    metrics.submitted_vertices = None;
 }
 
 struct NearTelemetryReservation {
@@ -999,6 +1048,8 @@ impl Node for NearTelemetryCopyNode {
         };
 
         let source = forward_cull_source(buffers.hzb_bind_group.is_some());
+        let metrics = world.resource::<NearRendererMetrics>();
+        let mode_generation = metrics.mode_generation;
         let slot_count = buffers.slot_count;
         let sequence = reservation.sequence;
         let staging = telemetry.slots[reservation.slot_index].staging.clone();
@@ -1031,6 +1082,8 @@ impl Node for NearTelemetryCopyNode {
                     callback_staging.unmap();
                     let _ = sender.send(NearTelemetrySample {
                         sequence,
+                        mode: ActiveNearMode::GpuDriven { indirect_count },
+                        mode_generation,
                         visible_chunks: counts[0],
                         visible_quads: counts[1],
                         source,
@@ -1339,6 +1392,10 @@ mod tests {
     fn telemetry_values_distinguish_hzb_survivors_from_submitted_commands() {
         let count_mode = NearTelemetrySample {
             sequence: 1,
+            mode: ActiveNearMode::GpuDriven {
+                indirect_count: true,
+            },
+            mode_generation: 1,
             visible_chunks: 7,
             visible_quads: 41,
             source: ForwardCullSource::Hzb,
@@ -1356,6 +1413,9 @@ mod tests {
         );
 
         let fixed_mode = NearTelemetrySample {
+            mode: ActiveNearMode::GpuDriven {
+                indirect_count: false,
+            },
             indirect_count: false,
             ..count_mode
         };
@@ -1390,6 +1450,7 @@ mod tests {
             indirect_count: true,
         };
         let mut metrics = NearRendererMetrics {
+            active_mode: mode,
             hzb_visible_chunks: Some(17),
             indirect_draw_count: Some(17),
             ..default()
@@ -1399,6 +1460,63 @@ mod tests {
 
         assert_eq!(metrics.hzb_visible_chunks, Some(17));
         assert_eq!(metrics.indirect_draw_count, Some(17));
+    }
+
+    #[test]
+    fn grouped_to_gpu_transition_clears_direct_telemetry_until_matching_sample_arrives() {
+        let mut metrics = NearRendererMetrics {
+            active_mode: ActiveNearMode::GroupedDirect,
+            visibility_source: Some(ForwardCullSource::Frustum),
+            indirect_draw_count: Some(0),
+            direct_draw_count: Some(9),
+            submitted_quads: Some(41),
+            submitted_vertices: Some(246),
+            ..default()
+        };
+
+        synchronize_near_metric_mode(
+            ActiveNearMode::GpuDriven {
+                indirect_count: true,
+            },
+            &mut metrics,
+        );
+
+        assert_eq!(metrics.active_mode.as_str(), "gpu");
+        assert_eq!(metrics.visibility_source, None);
+        assert_eq!(metrics.hzb_visible_chunks, None);
+        assert_eq!(metrics.indirect_draw_count, None);
+        assert_eq!(metrics.submitted_quads, None);
+        assert_eq!(metrics.submitted_vertices, None);
+        assert_eq!(metrics.direct_draw_count, None);
+    }
+
+    #[test]
+    fn delayed_gpu_sample_from_an_older_mode_generation_is_ignored() {
+        let mode = ActiveNearMode::GpuDriven {
+            indirect_count: true,
+        };
+        let mut metrics = NearRendererMetrics {
+            active_mode: mode,
+            mode_generation: 8,
+            ..default()
+        };
+        let stale = NearTelemetrySample {
+            sequence: 1,
+            mode,
+            mode_generation: 7,
+            visible_chunks: 7,
+            visible_quads: 41,
+            source: ForwardCullSource::Hzb,
+            indirect_count: true,
+            slot_count: 20,
+        };
+
+        apply_near_telemetry_sample(mode, Some(stale), &mut metrics);
+
+        assert_eq!(metrics.visibility_source, None);
+        assert_eq!(metrics.hzb_visible_chunks, None);
+        assert_eq!(metrics.indirect_draw_count, None);
+        assert_eq!(metrics.submitted_quads, None);
     }
 
     #[test]
@@ -1442,6 +1560,10 @@ mod tests {
         let mut latest = NearTelemetryLatest::default();
         let sample = NearTelemetrySample {
             sequence: 1,
+            mode: ActiveNearMode::GpuDriven {
+                indirect_count: true,
+            },
+            mode_generation: 1,
             visible_chunks: 7,
             visible_quads: 41,
             source: ForwardCullSource::Hzb,
@@ -1459,6 +1581,10 @@ mod tests {
         let mut latest = NearTelemetryLatest::default();
         let newer = NearTelemetrySample {
             sequence: 2,
+            mode: ActiveNearMode::GpuDriven {
+                indirect_count: true,
+            },
+            mode_generation: 1,
             visible_chunks: 7,
             visible_quads: 41,
             source: ForwardCullSource::Hzb,
