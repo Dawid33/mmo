@@ -4,6 +4,8 @@
 //! that only a renderer implementation can know are explicit optional inputs
 //! in [`BenchmarkCapabilityMetrics`]; absent inputs serialize as `null`.
 
+mod metrics;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::PathBuf;
@@ -31,6 +33,7 @@ use super::meshing::queue::{ChunkKey, RemeshQueue};
 use super::meshing::MeshingTask;
 use super::voxel_pull::arena::GpuQuadArena;
 use super::{ClientUpdates, GameEvents};
+use metrics::{CountSummary, FloatSummary, PassSamples};
 
 pub const BENCHMARK_WIDTH: u32 = 1920;
 pub const BENCHMARK_HEIGHT: u32 = 1080;
@@ -202,67 +205,10 @@ pub struct BenchmarkCapabilityMetrics {
 #[derive(Resource, Default)]
 pub struct BenchmarkCapabilityMetricsInput(pub BenchmarkCapabilityMetrics);
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Percentiles {
-    pub p50: f64,
-    pub p95: f64,
-    pub p99: f64,
-}
-
-impl Percentiles {
-    pub fn from_samples(samples: &[f64]) -> Option<Self> {
-        if samples.is_empty() {
-            return None;
-        }
-        let mut sorted = samples.to_vec();
-        sorted.sort_by(f64::total_cmp);
-        let nearest_rank = |percent: usize| {
-            let rank = (percent * sorted.len()).div_ceil(100).max(1);
-            sorted[rank - 1]
-        };
-        Some(Self {
-            p50: nearest_rank(50),
-            p95: nearest_rank(95),
-            p99: nearest_rank(99),
-        })
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct CountSummary {
-    pub min: u64,
-    pub p50: u64,
-    pub p95: u64,
-    pub p99: u64,
-    pub max: u64,
-}
-
-impl CountSummary {
-    fn from_samples(samples: &[u64]) -> Option<Self> {
-        if samples.is_empty() {
-            return None;
-        }
-        let mut sorted = samples.to_vec();
-        sorted.sort_unstable();
-        let nearest_rank = |percent: usize| {
-            let rank = (percent * sorted.len()).div_ceil(100).max(1);
-            sorted[rank - 1]
-        };
-        Some(Self {
-            min: sorted[0],
-            p50: nearest_rank(50),
-            p95: nearest_rank(95),
-            p99: nearest_rank(99),
-            max: *sorted.last().expect("non-empty checked above"),
-        })
-    }
-}
-
-#[derive(Default)]
 struct BenchmarkSamples {
     frame_ms: Vec<f64>,
     gpu_frame_ms: Vec<f64>,
-    pass_gpu_ms: BTreeMap<String, Vec<f64>>,
+    pass_gpu_ms: PassSamples,
     active_chunks: Vec<u64>,
     frustum_chunks: Vec<u64>,
     hzb_chunks: Vec<u64>,
@@ -271,6 +217,24 @@ struct BenchmarkSamples {
     unique_bricks: Vec<u64>,
     brick_dedup_ratio: Vec<f64>,
     reserved_gpu_bytes: Vec<u64>,
+}
+
+impl Default for BenchmarkSamples {
+    fn default() -> Self {
+        Self {
+            frame_ms: Vec::new(),
+            gpu_frame_ms: Vec::new(),
+            pass_gpu_ms: PassSamples::with_suffix("/elapsed_gpu"),
+            active_chunks: Vec::new(),
+            frustum_chunks: Vec::new(),
+            hzb_chunks: Vec::new(),
+            indirect_draws: Vec::new(),
+            far_cells: Vec::new(),
+            unique_bricks: Vec::new(),
+            brick_dedup_ratio: Vec::new(),
+            reserved_gpu_bytes: Vec::new(),
+        }
+    }
 }
 
 impl BenchmarkSamples {
@@ -585,12 +549,7 @@ fn run_benchmark(
             let path = diagnostic.path().to_string();
             if path.starts_with("render/") && path.ends_with("/elapsed_gpu") {
                 if let Some(value) = diagnostic.value() {
-                    runtime
-                        .samples
-                        .pass_gpu_ms
-                        .entry(path)
-                        .or_default()
-                        .push(value);
+                    runtime.samples.pass_gpu_ms.observe(&path, value);
                     gpu_frame_ms += value;
                     has_gpu_timing = true;
                 }
@@ -679,16 +638,16 @@ struct BenchmarkMetadata {
 
 #[derive(Serialize)]
 struct BenchmarkMetricSummary {
-    frame_ms: Option<Percentiles>,
-    gpu_frame_ms: Option<Percentiles>,
-    pass_gpu_ms: BTreeMap<String, Percentiles>,
+    frame_ms: Option<FloatSummary>,
+    gpu_frame_ms: Option<FloatSummary>,
+    pass_gpu_ms: BTreeMap<String, FloatSummary>,
     active_chunks: Option<CountSummary>,
     frustum_chunks: Option<CountSummary>,
     hzb_chunks: Option<CountSummary>,
     indirect_draws: Option<CountSummary>,
     far_cells: Option<CountSummary>,
     unique_bricks: Option<CountSummary>,
-    brick_dedup_ratio: Option<Percentiles>,
+    brick_dedup_ratio: Option<FloatSummary>,
     reserved_gpu_bytes: Option<CountSummary>,
 }
 
@@ -723,16 +682,10 @@ fn build_result(
     adapter: Option<AdapterMetadata>,
 ) -> BenchmarkResult {
     let samples = &runtime.samples;
-    let pass_gpu_ms = samples
-        .pass_gpu_ms
-        .iter()
-        .filter_map(|(path, samples)| {
-            Percentiles::from_samples(samples).map(|summary| (path.clone(), summary))
-        })
-        .collect();
+    let pass_gpu_ms = samples.pass_gpu_ms.summaries();
     let metrics = BenchmarkMetricSummary {
-        frame_ms: Percentiles::from_samples(&samples.frame_ms),
-        gpu_frame_ms: Percentiles::from_samples(&samples.gpu_frame_ms),
+        frame_ms: FloatSummary::from_samples(&samples.frame_ms),
+        gpu_frame_ms: FloatSummary::from_samples(&samples.gpu_frame_ms),
         pass_gpu_ms,
         active_chunks: CountSummary::from_samples(&samples.active_chunks),
         frustum_chunks: CountSummary::from_samples(&samples.frustum_chunks),
@@ -740,7 +693,7 @@ fn build_result(
         indirect_draws: CountSummary::from_samples(&samples.indirect_draws),
         far_cells: CountSummary::from_samples(&samples.far_cells),
         unique_bricks: CountSummary::from_samples(&samples.unique_bricks),
-        brick_dedup_ratio: Percentiles::from_samples(&samples.brick_dedup_ratio),
+        brick_dedup_ratio: FloatSummary::from_samples(&samples.brick_dedup_ratio),
         reserved_gpu_bytes: CountSummary::from_samples(&samples.reserved_gpu_bytes),
     };
     let unavailable_metrics = [
@@ -916,20 +869,6 @@ mod tests {
         let mut controller = BenchmarkController::default();
         controller.advance(LOAD_TIMEOUT + Duration::from_millis(1), false);
         assert_eq!(controller.phase(), BenchmarkPhase::Failed);
-    }
-
-    #[test]
-    fn percentile_summary_uses_nearest_rank() {
-        let values: Vec<f64> = (1..=100).map(f64::from).collect();
-        assert_eq!(
-            Percentiles::from_samples(&values),
-            Some(Percentiles {
-                p50: 50.0,
-                p95: 95.0,
-                p99: 99.0,
-            })
-        );
-        assert_eq!(Percentiles::from_samples(&[]), None);
     }
 
     #[test]
