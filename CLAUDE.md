@@ -15,7 +15,7 @@ A voxel MMO in Rust with client/server architecture over QUIC, built around dete
 Common tasks are wrapped in the root `justfile` — prefer it over retyping raw
 `cargo`/`cargo-clif` invocations. `just` (or `just --list`) shows every recipe;
 the important ones are `just build`, `just run` (server + client together),
-`just server`, `just client`, `just test`, `just test-full`, `just web`, and
+`just server`, `just client`, `just smoke`, `just test-one`, `just web`, and
 `just clippy`. Machine-specific bits are overridable variables: `cargo` selects the
 toolchain (defaults to stable `cargo`; set `cargo=$CARGO_CLIF` or export `CARGO_CLIF`
 to opt into the Cranelift `cargo-clif` wrapper for faster builds), and `adapter=6700`
@@ -42,11 +42,20 @@ cargo run --bin server
 cargo run --bin client
 ```
 
-The server listens on `127.0.0.1:6466` (hardcoded in `crates/server/src/lib.rs`); the client connects to localhost. Run the server before/alongside the client.
+The server listens on `127.0.0.1:6466` (hardcoded in `crates/server/src/lib.rs`); the client connects to localhost and retries the connect for up to two minutes (`CONNECT_DEADLINE` in `crates/client/src/netcode.rs`), so start order no longer matters. `just run` / `just run-release` build both binaries first, start the server in the background, and stop it when the client window closes.
+
+**World size** is a client-side dial (`crates/client/src/world_scale.rs`); the server only generates what clients subscribe to, so it shrinks both sides. `just world=tiny run` (1 simulated region, no LOD rings), `world=small` (1 region + one factor-2 ring), default `full` (3×3 regions + all five rings, ~570 LOD keys). The variable exports `VOXEL_WORLD`; `VOXEL_NEAR_RADIUS=0..3` and `VOXEL_LOD_RINGS=off|small|full|"2:2,4:4"` override its halves. Chunk (32³) and region (1024) dimensions are baked into packed records, shaders and the LOD math — shrink the window, not those. `just render-bench` honours it too (its readiness gates and JSON metadata follow the active scale; `RENDER_BENCH_LOAD_TIMEOUT_SECS` stretches the 120 s load budget for slow adapters). Use a small world for iteration on weak GPUs, but compare benchmark numbers only within one scale.
+
+**Builds and tests are capped at 80% of cores** so they never take the whole desktop. A job count alone does not do it — each rustc runs multi-threaded codegen, and 16 jobs still saturated all 20 cores — so the justfile's `cap` variable prefixes every build/test/check/clippy invocation with `nice -n 10 taskset -c 0-<jobs-1>`, pinning the whole process tree (test binaries and their thread pools included) to the first `jobs` cores. `cargo run` and directly-launched binaries are never pinned, so the game and its perf numbers are unaffected. Tune with `just cpu_percent=50 build` or `just jobs=4 smoke`. **Raw `cargo` outside `just` is not pinned** (`.cargo/config.toml` only sets `jobs = -4`, and `cargo test` threads are uncapped) — go through `just`, or prefix `nice -n 10 taskset -c 0-15` yourself. Server-side, `LOD_BUILD_THREADS` (default 2) sizes the LOD worker pool.
 
 The game crate has the rollback test suite: `cargo test -p game` (transaction/undo invariants in `tests/log_model.rs` and `tests/simple.rs`, seeded randomized rollback in `tests/random_ops.rs`, vendored-container inverse-op guarantees in `tests/hash_restore.rs`). Rollback correctness bar: `hash(before) == hash(after undo)`, bit-exact. The client has its own headless test suite: `cargo test -p client` (sim-bridge, coordinate conversion, interpolation, async chunk meshing, and full client/server convergence harnesses, run via `MinimalPlugins`/`AssetPlugin` with no window or GPU).
 
-Tests measured slower than 100ms are tagged `#[ignore = "slow: >100ms — run via just test-full"]`, so `just test` (plain `cargo test`) is the fast loop and `just test-full` (`--include-ignored`, minus the release-mode perf gates) is the complete suite. **Use `just test` for routine checks while iterating; run `just test-full` as the final check before declaring work done.** Tag any new test that takes >100ms the same way.
+**Do not run the whole game / server / client suites as a routine check — they take far too long** (even the "quick" `just test` links ~30 game test binaries and ~9 Bevy-sized client ones). Verify a change with:
+
+- `just test-one <crate> "<cargo test args>"` for exactly the tests the change touches, always naming the target so nothing else gets built — e.g. `just test-one game "--test lod_streaming pristine"`, `just test-one client "--lib world_scale::"`.
+- `just smoke` as the general sanity check — **this is the default verification, and it is hard-limited to 60 s** (`smoke_timeout`; ~12 s warm): two game test binaries, the server lib tests, and a *type-check* of the client (lib + bin + tests). It never builds a client test binary, because that means a full Bevy codegen + link (many minutes cold). Running client unit tests is an explicit, slow opt-in (`just test-one client "--lib <filter>"`) — ask before doing it.
+
+`just test` (whole quick suites) and `just test-full` (`--include-ignored`, minus the release-mode perf gates) still exist for a deliberate broad sweep; run them only when the user asks or a change is wide enough to need them, and say so first. Tests measured slower than 100ms are tagged `#[ignore = "slow: >100ms — run via just test-full"]`, which keeps them out of `smoke`, `test-one` and `just test`; tag any new test that takes >100ms the same way.
 
 Bevy is pinned to `0.18` in the root `Cargo.toml`; Bevy's API surface moves fast between minor versions, so treat upgrades as a deliberate, tested migration rather than a routine bump — API drift (renamed types/traits, moved modules, changed system-set names) is a known hazard.
 

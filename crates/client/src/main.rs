@@ -16,6 +16,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use client::renderer;
 #[cfg(target_arch = "wasm32")]
 use client::sim_driver;
+use client::world_scale::WorldScale;
 #[cfg(not(target_arch = "wasm32"))]
 use client::GameInstanceManager;
 
@@ -79,6 +80,7 @@ pub enum Command {
         Sender<ClientUpdateEvent>,
         SocketAddr,
         game::DebugFlags,
+        WorldScale,
     ),
     /// Quit the game thread. Should only be send when quitting the application.
     Quit,
@@ -96,6 +98,7 @@ fn start_game_thread() -> Sender<Command> {
                     client_sender,
                     server,
                     debug_flags,
+                    world_scale,
                 ) => {
                     let mut manager = GameInstanceManager::new(
                         sender,
@@ -104,6 +107,7 @@ fn start_game_thread() -> Sender<Command> {
                         server,
                         debug_flags,
                     );
+                    manager.set_world_scale(world_scale);
                     if let Err(e) = manager.connect_and_run() {
                         warn!("Game Crashed: {:?}", e);
                     };
@@ -157,6 +161,11 @@ fn main() {
         None
     };
 
+    // World-size knobs (VOXEL_WORLD / VOXEL_NEAR_RADIUS / VOXEL_LOD_RINGS):
+    // resolved once here so a typo fails before any window or socket opens.
+    // The game thread subscribes by it; the render benchmark gates on it.
+    let world_scale = WorldScale::from_env().unwrap_or_else(|error| panic!("{error}"));
+
     // Shared debug toggles: render thread (F3) writes, game thread reads.
     let debug_flags = game::DebugFlags::default();
 
@@ -175,6 +184,7 @@ fn main() {
                 client_send,
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466)),
                 debug_flags.clone(),
+                world_scale,
             ))
             .unwrap();
         (command_send, game_send, client_recv)
@@ -236,6 +246,7 @@ fn main() {
             })
             .set(bevy::app::TaskPoolPlugin { task_pool_options }),
     )
+    .insert_resource(world_scale)
     .add_plugins(renderer::SimBridgePlugin {
         client_recv,
         game_send: game_send.clone(),

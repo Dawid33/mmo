@@ -14,12 +14,46 @@ cargo := env_var_or_default("CARGO_CLIF", "cargo")
 # Substring passed to WGPU_ADAPTER_NAME to select a GPU (empty = wgpu default).
 adapter := ""
 
+# World size the client subscribes to (empty = production `full`). The server
+# only generates what clients request, so this shrinks both sides:
+#   tiny  = 1 simulated region, no LOD rings      (cheapest world that loads)
+#   small = 1 simulated region + one factor-2 ring (24 LOD keys)
+#   full  = 3x3 simulated regions + all five rings (~570 LOD keys)
+# e.g. `just world=tiny run`, `just world=small render-bench`. Finer control:
+# export VOXEL_NEAR_RADIUS=0..3 / VOXEL_LOD_RINGS=off|small|full|"2:2,4:4"
+# (see crates/client/src/world_scale.rs). Every recipe inherits it; tests
+# ignore it (GameInstanceManager::new is env-free).
+world := ""
+export VOXEL_WORLD := world
+
 # GPU sampled by `just gpu-log` (domain:bus:dev.func). Default is the RX 6700 XT eGPU;
 # `amdgpu_top --list` prints the ids.
 pci := "0000:40:00.0"
 
 # perf sampling flags shared by the perf-client / perf-server recipes.
 perf_flags := "-F9997 --call-graph dwarf,16384 -e cpu-clock"
+
+# Share of logical cores that builds and test runs may use, so a compile or a
+# test run never takes the whole machine. `jobs` is the resolved count; override
+# either one: `just cpu_percent=50 build`, `just jobs=4 test`.
+cpu_percent := "80"
+jobs := shell('n=$(( $(nproc) * $1 / 100 )); echo $(( n > 0 ? n : 1 ))', cpu_percent)
+
+# Every recipe inherits these: cargo (and the cargo-clif wrapper) reads
+# CARGO_BUILD_JOBS for rustc parallelism, libtest reads RUST_TEST_THREADS for
+# test threads (an explicit `--test-threads`, as in `test-full`, still wins).
+# Raw `cargo` outside `just` is capped by `[build] jobs` in .cargo/config.toml.
+export CARGO_BUILD_JOBS := jobs
+export RUST_TEST_THREADS := jobs
+
+# The job count alone does NOT cap CPU: each rustc runs multi-threaded codegen
+# (100-200% apiece), and test binaries spawn their own pools (Bevy tasks, region
+# threads), so 16 jobs still saturated all 20 cores (measured 2026-09-19). `cap`
+# is the real limit — it pins the whole process tree to the first `jobs` cores
+# and lowers its priority, leaving the rest free for the desktop. Prefixed to
+# every build/test/check/clippy invocation; deliberately NOT to `cargo run`, so
+# the game itself is never pinned or niced. Empty where `taskset` is missing.
+cap := shell('if command -v taskset >/dev/null 2>&1; then echo "nice -n 10 taskset -c 0-$(( $1 - 1 ))"; fi', jobs)
 
 # Full-suite concurrency measured 2026-07-15: three threads completed in
 # ~8.3s / ~238 MiB RSS warm, while Cargo's 20-thread default took ~24.8s and
@@ -34,15 +68,15 @@ _default:
 
 # Build the whole workspace (all bins) with the configured cargo (stable by default).
 build:
-    {{cargo}} build --workspace --bins
+    {{cap}} {{cargo}} build --workspace --bins
 
 # Build with stable cargo always, ignoring any Cranelift override.
 build-stable:
-    {{cargo}} build --workspace --bins
+    {{cap}} {{cargo}} build --workspace --bins
 
 # Type-check the whole workspace without producing binaries.
 check:
-    {{cargo}} check --workspace
+    {{cap}} {{cargo}} check --workspace
 
 # ---- Run ------------------------------------------------------------------
 
@@ -64,15 +98,18 @@ client:
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client
 
-# Run server + client together (client in background, mirrors scripts/run.sh).
+# Run server + client together. Both are built up front (no build-lock race
+# between two `cargo run`s), the server starts first in the background, and
+# closing the client window (or Ctrl-C) stops both.
 run:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
-    RUST_BACKTRACE=1 {{cargo}} run --bin client &
-    client_pid=$!
-    trap 'kill "$client_pid" 2>/dev/null || true' EXIT
-    RUST_BACKTRACE=1 {{cargo}} run --bin server
+    {{cap}} {{cargo}} build --bin client --bin server
+    RUST_BACKTRACE=1 ./target/debug/server &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    RUST_BACKTRACE=1 ./target/debug/client
 
 # Release-mode variants: production performance. Undo verification defaults to
 # Delta in every build; set HASH_MODE=full (or off) on any recipe to override,
@@ -90,15 +127,16 @@ client-release:
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --release --bin client
 
-# Run server + client together in release mode.
+# Run server + client together in release mode (same shape as `run`).
 run-release:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
-    RUST_BACKTRACE=1 {{cargo}} run --release --bin client &
-    client_pid=$!
-    trap 'kill "$client_pid" 2>/dev/null || true' EXIT
-    RUST_BACKTRACE=1 {{cargo}} run --release --bin server
+    {{cap}} {{cargo}} build --release --bin client --bin server
+    RUST_BACKTRACE=1 ./target/release/server &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    RUST_BACKTRACE=1 ./target/release/client
 
 # Interactive play-test: build, run server + client, and tee both to
 # target/play-test/*.log so the run can be reviewed for errors afterwards.
@@ -114,7 +152,7 @@ play-test:
     : > "$srv_log"; : > "$cli_log"
 
     echo ">> building workspace..."
-    if ! {{cargo}} build --workspace --bins 2>&1 | tee "$log_dir/build.log"; then
+    if ! {{cap}} {{cargo}} build --workspace --bins 2>&1 | tee "$log_dir/build.log"; then
         echo "!! BUILD FAILED — see $log_dir/build.log" >&2
         exit 1
     fi
@@ -176,7 +214,7 @@ bench-column:
 
 # Headless region-load cost breakdown (gen/derive/serde/mesh).
 bench-region:
-    {{cargo}} test -p worldgen --release --test region_load_cost -- --ignored --nocapture
+    {{cap}} {{cargo}} test -p worldgen --release --test region_load_cost -- --ignored --nocapture
 
 # Self-screenshot probe: the pulled-quad render path draws real terrain.
 pull-smoke:
@@ -231,7 +269,7 @@ render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
         exit 2
     fi
     mkdir -p target/render-bench
-    {{cargo}} build --release --bin client --bin server
+    {{cap}} {{cargo}} build --release --bin client --bin server
     RUST_BACKTRACE=1 TOKIO_WORKER_THREADS="$selected_threads" \
         ./target/release/server > target/render-bench/server.log 2>&1 &
     server_pid=$!
@@ -241,7 +279,9 @@ render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
         adapter_slug="$selected_adapter"
         if [ -z "$adapter_slug" ]; then adapter_slug="default"; fi
         adapter_slug=${adapter_slug//[^[:alnum:]._-]/_}
-        output="target/render-bench/${selected_backend}-${adapter_slug}-run-${repetition}.json"
+        world_slug="{{world}}"
+        if [ -n "$world_slug" ]; then world_slug="-${world_slug}"; fi
+        output="target/render-bench/${selected_backend}-${adapter_slug}${world_slug}-run-${repetition}.json"
         echo ">> render benchmark ${selected_backend} repetition ${repetition}/${selected_repetitions} -> ${output}"
         if [ -n "$selected_adapter" ]; then export WGPU_ADAPTER_NAME="$selected_adapter"; else unset WGPU_ADAPTER_NAME || true; fi
         RENDER_BENCH=1 \
@@ -267,7 +307,7 @@ web:
 # Needs: wasm-bindgen-cli and wasm-opt (binaryen) on PATH.
 # Build the optimized wasm release bundle into public/ (see scripts/web_release.rs).
 web-release:
-    {{cargo}} build -p client --profile wasm-release --target wasm32-unknown-unknown
+    {{cap}} {{cargo}} build -p client --profile wasm-release --target wasm32-unknown-unknown
     wasm-bindgen --out-name client --out-dir public --target web \
         target/wasm32-unknown-unknown/wasm-release/client.wasm
     wasm-opt -O -ol 100 -s 100 -o public/client_bg.wasm public/client_bg.wasm
@@ -283,40 +323,79 @@ web-release:
 # Tag new slow tests the same way; re-measure with:
 #   RUSTC_BOOTSTRAP=1 cargo test -p <crate> -- -Zunstable-options --report-time
 
-# Quick first-party suites (slow tests skipped) — the routine while-iterating check.
+# The routine check, hard-limited to `smoke_timeout` seconds (default 60). Even
+# the "quick" per-crate suites below link ~30 game test binaries and ~9
+# Bevy-sized client ones, which is far too slow for a while-iterating loop. So
+# smoke runs two game test binaries (undo/rollback invariants, region
+# park/restore) and the server lib tests, and only TYPE-CHECKS the client
+# (lib + bin + tests): building or linking a client test binary means a full
+# Bevy codegen, which can never fit the budget. Client unit tests are an
+# explicit opt-in via `just test-one client "--lib <filter>"`.
+smoke_timeout := "60"
+smoke:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    deadline=$(( $(date +%s) + {{smoke_timeout}} ))
+    step() {
+        local left=$(( deadline - $(date +%s) ))
+        if [ "$left" -le 0 ]; then left=1; fi
+        echo ">> $*"
+        timeout --foreground "$left" {{cap}} "$@"
+        local rc=$?
+        if [ "$rc" -eq 124 ]; then
+            echo "!! smoke exceeded {{smoke_timeout}}s (cold build?). Finished crates stay cached:" >&2
+            echo "!! rerun, or raise the limit once with: just smoke_timeout=600 smoke" >&2
+        fi
+        if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+    }
+    step {{cargo}} test -q -p game --test simple --test region_runner
+    step {{cargo}} test -q -p server --lib
+    step {{cargo}} check -q -p client --lib --bins --tests
+    echo ">> smoke ok in $(( $(date +%s) - deadline + {{smoke_timeout}} ))s"
+
+# Run exactly the tests a change touches, by crate + cargo-test arguments:
+#   just test-one game "--test lod_streaming pristine"
+#   just test-one client "--lib world_scale::"
+# Naming `--lib` / `--test <target>` matters: it skips building (and linking)
+# every other test binary in the crate.
+test-one crate *args:
+    {{cap}} {{cargo}} test -p {{crate}} {{args}}
+
+# Whole quick suites (slow tests skipped). Minutes, not seconds — reach for
+# `smoke` / `test-one` while iterating and keep this for a broader sweep.
 test: test-game test-client test-server test-worldgen
 
 # Rollback/undo invariants and seeded randomized rollback (quick subset).
 test-game:
-    {{cargo}} test -p game
+    {{cap}} {{cargo}} test -p game
 
 # Client headless suite: sim-bridge, conversion, interpolation, meshing (quick subset).
 test-client:
-    {{cargo}} test -p client
+    {{cap}} {{cargo}} test -p client
 
 # Server suite compile-check: every server test is currently tagged slow
 # (multi-second region-thread rigs), so the quick run builds them and runs 0.
 test-server:
-    {{cargo}} test -p server
+    {{cap}} {{cargo}} test -p server
 
 # Worldgen suite: pure-function generation + the dev disk cache.
 test-worldgen:
-    {{cargo}} test -p worldgen
+    {{cap}} {{cargo}} test -p worldgen
 
 # Everything, slow correctness tests included — run before calling work done.
 # Still skips wall-clock perf gates, evidence-only tests, and the explicit
 # region-load benchmark; those retain their dedicated recipes.
 test-full:
-    {{cargo}} test -p game -- --include-ignored --test-threads={{test_threads}} --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
-    {{cargo}} test -p client -- --include-ignored --test-threads={{test_threads}} --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
-    {{cargo}} test -p server -- --include-ignored --test-threads={{test_threads}}
-    {{cargo}} test -p worldgen -- --include-ignored --test-threads={{test_threads}} --skip region_load_cost
+    {{cap}} {{cargo}} test -p game -- --include-ignored --test-threads={{test_threads}} --skip perf_evidence_journal_scales_with_activity --skip perf_evidence_hash_modes
+    {{cap}} {{cargo}} test -p client -- --include-ignored --test-threads={{test_threads}} --skip region_tick_cost_fits_keepup_budget --skip soak_realtime_keepup
+    {{cap}} {{cargo}} test -p server -- --include-ignored --test-threads={{test_threads}}
+    {{cap}} {{cargo}} test -p worldgen -- --include-ignored --test-threads={{test_threads}} --skip region_load_cost
 
 # Keep-up budget benchmark (release): measures the region-tick cost and
 # asserts the death-spiral inequality (worst frame < tick period). Fails with
 # a number when a game change makes the sim too slow for the client to keep up.
 keepup-budget:
-    {{cargo}} test -p client --release --test keepup_budget -- --ignored --nocapture
+    {{cap}} {{cargo}} test -p client --release --test keepup_budget -- --ignored --nocapture
 
 # Wall-clock keep-up soak (release, ~40s + build): real tick cadence + 60/s
 # fabricated input; fails if the prediction log trends up (death-spiral
@@ -327,7 +406,7 @@ soak:
     #!/usr/bin/env bash
     set -uo pipefail
     log=target/soak.log
-    {{cargo}} test -p client --release --test reconcile_keepup soak_realtime_keepup -- --ignored --nocapture --test-threads=1 2>&1 | tee "$log"
+    {{cap}} {{cargo}} test -p client --release --test reconcile_keepup soak_realtime_keepup -- --ignored --nocapture --test-threads=1 2>&1 | tee "$log"
     rc=${PIPESTATUS[0]}
     echo
     echo "=== soak summary (full log: $log) ==="
@@ -366,7 +445,7 @@ fmt-check:
 
 # Clippy across the workspace (warnings as errors).
 clippy:
-    {{cargo}} clippy --workspace --bins -- -D warnings
+    {{cap}} {{cargo}} clippy --workspace --bins -- -D warnings
 
 # ---- Profiling ------------------------------------------------------------
 
@@ -396,7 +475,7 @@ diag:
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/diag
     log=target/diag/client.log
-    {{cargo}} build --release --bin client --bin server
+    {{cap}} {{cargo}} build --release --bin client --bin server
     RUST_BACKTRACE=1 ./target/release/server > target/diag/server.log 2>&1 &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
@@ -435,7 +514,7 @@ trace-chrome:
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/trace
     json=target/trace/client.json
-    {{cargo}} build --release --bin server
+    {{cap}} {{cargo}} build --release --bin server
     RUST_BACKTRACE=1 ./target/release/server > target/trace/server.log 2>&1 &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
@@ -492,7 +571,7 @@ tracy-client detailed="":
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     feat="tracy"
     if [ -n "{{detailed}}" ]; then feat="tracy-detailed"; fi
-    {{cargo}} build --bin server
+    {{cap}} {{cargo}} build --bin server
     RUST_BACKTRACE=1 {{cargo}} run --bin server &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
@@ -502,7 +581,7 @@ tracy-client detailed="":
 # Uses the `profiling` cargo profile (release + debug info): dev's opt-level 1
 # distorts hot loops ~2.5x, so debug captures don't represent production.
 perf:
-    {{cargo}} build --bin client --profile profiling
+    {{cap}} {{cargo}} build --bin client --profile profiling
     sudo perf script record -F9997 --call-graph dwarf,16384 -e cpu-clock ./target/profiling/client
     sudo chmod +r perf.data
     hotspot
@@ -523,7 +602,7 @@ perf-client:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
-    {{cargo}} build --bin client --bin server --profile profiling
+    {{cap}} {{cargo}} build --bin client --bin server --profile profiling
     RUST_BACKTRACE=1 ./target/profiling/server &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
@@ -538,7 +617,7 @@ perf-server:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
-    {{cargo}} build --bin client --bin server --profile profiling
+    {{cap}} {{cargo}} build --bin client --bin server --profile profiling
     RUST_BACKTRACE=1 ./target/profiling/client &
     client_pid=$!
     trap 'kill "$client_pid" 2>/dev/null || true' EXIT

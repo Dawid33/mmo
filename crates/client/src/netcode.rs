@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crossbeam::channel::{Receiver, Sender};
 use game::{ClientPacket, ServerPacket};
@@ -12,10 +16,40 @@ use quinn::{
     ClientConfig, Endpoint,
 };
 
+/// Longest one connect attempt may take. A localhost handshake is
+/// milliseconds; without this an attempt against a not-yet-listening server
+/// sits in quinn's retransmit backoff (1s, 2s, 4s, ...) until the 30s idle
+/// timeout, so the client would notice a late server many seconds late.
+pub const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Pause between connect attempts.
+pub const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+/// Give up connecting after this long. Generous on purpose: `cargo run` may
+/// still be linking a debug server, which then builds its spawn regions.
+pub const CONNECT_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How long and how often `connect_and_handle` retries the initial connect.
+#[derive(Clone, Copy, Debug)]
+pub struct ConnectPolicy {
+    pub attempt_timeout: Duration,
+    pub retry_interval: Duration,
+    pub deadline: Duration,
+}
+
+impl Default for ConnectPolicy {
+    fn default() -> Self {
+        Self {
+            attempt_timeout: CONNECT_ATTEMPT_TIMEOUT,
+            retry_interval: CONNECT_RETRY_INTERVAL,
+            deadline: CONNECT_DEADLINE,
+        }
+    }
+}
+
 pub struct ServerConnection {
     send: Sender<ServerPacket>,
     recv: Receiver<ClientPacket>,
     server: SocketAddr,
+    connect_policy: ConnectPolicy,
 }
 
 impl ServerConnection {
@@ -24,7 +58,54 @@ impl ServerConnection {
         recv: Receiver<ClientPacket>,
         server: SocketAddr,
     ) -> Self {
-        Self { send, recv, server }
+        Self {
+            send,
+            recv,
+            server,
+            connect_policy: ConnectPolicy::default(),
+        }
+    }
+
+    /// Override the connect retry policy (test hook).
+    pub fn with_connect_policy(mut self, policy: ConnectPolicy) -> Self {
+        self.connect_policy = policy;
+        self
+    }
+
+    /// Connect, retrying until the policy's deadline: the server may still be
+    /// starting (or not started yet) when the client comes up.
+    async fn connect_with_retry(
+        &self,
+        endpoint: &Endpoint,
+    ) -> Result<quinn::Connection, std::io::Error> {
+        let policy = self.connect_policy;
+        let started = Instant::now();
+        let mut attempt = 1u32;
+        loop {
+            let connecting = endpoint.connect(self.server, "localhost").unwrap();
+            let failure = match tokio::time::timeout(policy.attempt_timeout, connecting).await {
+                Ok(Ok(connection)) => return Ok(connection),
+                Ok(Err(error)) => error.to_string(),
+                Err(_) => format!("no answer within {:?}", policy.attempt_timeout),
+            };
+            if started.elapsed() >= policy.deadline {
+                error!(
+                    "[client] giving up on {} after {attempt} attempts over {:?}: {failure}",
+                    self.server,
+                    started.elapsed()
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("could not connect to server {}: {failure}", self.server),
+                ));
+            }
+            warn!(
+                "[client] connect attempt {attempt} to {} failed ({failure}); is the server running? retrying",
+                self.server
+            );
+            attempt += 1;
+            tokio::time::sleep(policy.retry_interval).await;
+        }
     }
 
     /// Connect to the server and handle sending / receiving.
@@ -43,11 +124,7 @@ impl ServerConnection {
         info!("client endpoint at {:?}", endpoint.local_addr().unwrap());
         info!("connecting to server...");
         // Receive events over the wire and send them to the instance manager.
-        let connection = endpoint
-            .connect(self.server, "localhost")
-            .unwrap()
-            .await
-            .unwrap();
+        let connection = self.connect_with_retry(&endpoint).await?;
         info!("[client] connected: addr={}", connection.remote_address());
         let sender = self.send.clone();
         let recv_conn = connection.clone();
@@ -152,5 +229,39 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No server listening: the connect must retry, then return a `TimedOut`
+    /// error at the deadline — the old single attempt panicked the netcode
+    /// thread ~30s in, which is what `just run` hit when the server was slow.
+    #[test]
+    fn connect_gives_up_with_timed_out_instead_of_panicking() {
+        // Bind then drop a UDP socket to get a port nothing listens on.
+        let dead = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let (send, _server_packets) = crossbeam::channel::unbounded();
+        let (_client_packets, recv) = crossbeam::channel::unbounded();
+        let mut connection =
+            ServerConnection::new(send, recv, dead).with_connect_policy(ConnectPolicy {
+                attempt_timeout: Duration::from_millis(15),
+                retry_interval: Duration::from_millis(5),
+                deadline: Duration::from_millis(40),
+            });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(connection.connect_and_handle())
+            .expect_err("nothing is listening");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains(&dead.to_string()));
     }
 }

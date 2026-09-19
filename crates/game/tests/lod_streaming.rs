@@ -443,6 +443,49 @@ fn lod_cache_evicts_unsubscribed_lru_but_pins_subscribed() {
     assert_eq!(hit.len(), 1, "pinned key survived: served from cache, no rebuild");
 }
 
+/// Pristine snapshots (generated only to feed a never-run region's LOD build)
+/// are LRU-capped, while a region's own reported terrain is never evicted.
+#[test]
+fn pristine_terrain_cache_is_lru_capped_but_authoritative_terrain_is_kept() {
+    let (mut m, out, region_out) = manager_with_lod();
+    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    out.try_iter().for_each(drop);
+
+    // SPAWN_REGION is running: its LOD build round-trips RequestTerrain, so
+    // its cache entry is authoritative.
+    let home = LodKey::for_region(4, RegionCoords::new(0, 0));
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(home), 1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    m.pump_lod_results();
+    assert_eq!(m.terrain_cache_len(), 1);
+
+    m.set_pristine_terrain_max(2);
+    for x in 100..105 {
+        let key = LodKey::for_region(4, RegionCoords::new(x, x));
+        m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+        m.pump_lod_results();
+    }
+    assert_eq!(
+        m.terrain_cache_len(),
+        3,
+        "two pristine snapshots at the cap plus the authoritative home entry"
+    );
+    let built = out
+        .try_iter()
+        .filter(|(_, p)| matches!(p, ServerPacket::LodData(..)))
+        .count();
+    assert_eq!(built, 6, "eviction never costs a build its payload");
+
+    // An evicted pristine region still serves a different factor: it just
+    // regenerates instead of hitting the cache.
+    let again = LodKey::for_region(2, RegionCoords::new(100, 100));
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(again), 1), 0);
+    m.pump_lod_results();
+    expect_lod_data(&out, again);
+    assert_eq!(m.terrain_cache_len(), 3);
+}
+
 #[test]
 fn tile_build_waits_for_running_unseeded_regions() {
     let (mut m, out, region_out) = manager_with_lod();

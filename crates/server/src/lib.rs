@@ -284,10 +284,14 @@ pub fn run() {
     let world_seed = worldgen::WORLD_SEED;
     let gen_cache = worldgen::cache::WorldgenCache::from_env(world_seed, &manifest);
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
+    let configured_lod_threads = std::env::var("LOD_BUILD_THREADS").ok();
+    let lod_threads = lod_workers::lod_build_threads(configured_lod_threads.as_deref())
+        .unwrap_or_else(|message| panic!("{message}"));
     let lod_builder: Box<dyn game::LodBuilder> = Box::new(lod_workers::ThreadLodBuilder::new(
         world_seed,
         materials,
         lod_result_send,
+        lod_threads,
     ));
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::default(),

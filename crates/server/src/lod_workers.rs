@@ -5,9 +5,23 @@
 use crossbeam::channel::{unbounded, Sender};
 use game::{build_lod_job, LodBuildJob, LodBuilder, LodResult};
 
-/// Named constant per the tunables convention. Two threads: LOD fill is
-/// background work; region sim threads keep priority on cores.
+/// Default worker count. Two threads: LOD fill is background work; region sim
+/// threads keep priority on cores. `LOD_BUILD_THREADS` in the environment
+/// overrides it (a production-scale join queues ~570 builds, ~280 of them full
+/// region generations, so this is the knob for join-to-horizon latency).
 pub const LOD_BUILD_THREADS: usize = 2;
+
+/// Resolve the optional `LOD_BUILD_THREADS` environment value.
+pub fn lod_build_threads(value: Option<&str>) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Ok(LOD_BUILD_THREADS);
+    };
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|&threads| threads >= 1)
+        .ok_or_else(|| format!("invalid LOD_BUILD_THREADS value `{value}` (expected integer >= 1)"))
+}
 
 pub struct ThreadLodBuilder {
     jobs: Sender<LodBuildJob>,
@@ -20,9 +34,10 @@ impl ThreadLodBuilder {
         seed: u64,
         materials: worldgen::material::Materials,
         out: Sender<LodResult>,
+        threads: usize,
     ) -> Self {
         let (jobs, job_recv) = unbounded::<LodBuildJob>();
-        for i in 0..LOD_BUILD_THREADS {
+        for i in 0..threads {
             let recv = job_recv.clone();
             let out = out.clone();
             std::thread::Builder::new()
@@ -43,5 +58,20 @@ impl ThreadLodBuilder {
 impl LodBuilder for ThreadLodBuilder {
     fn submit(&mut self, job: LodBuildJob) {
         let _ = self.jobs.send(job);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lod_build_threads_defaults_and_validates() {
+        assert_eq!(lod_build_threads(None), Ok(LOD_BUILD_THREADS));
+        assert_eq!(lod_build_threads(Some("6")), Ok(6));
+        for bad in ["0", "-1", "two", ""] {
+            let error = lod_build_threads(Some(bad)).unwrap_err();
+            assert!(error.contains("LOD_BUILD_THREADS"), "{error}");
+        }
     }
 }

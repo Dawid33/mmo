@@ -20,6 +20,13 @@ pub const UNLOAD_GRACE_MS: u64 = 5000;
 /// LRU cap on `lod_cache`; subscribed keys are pinned past this (see
 /// `evict_lod_cache`).
 pub const LOD_CACHE_MAX_ENTRIES: usize = 8192;
+/// LRU cap on *pristine* `terrain_cache` entries — full-resolution snapshots
+/// generated only to feed a factor 2/4/16 LOD build for a region that has
+/// never run. One production-scale join touches ~280 of them and nothing
+/// used to drop them. They are pure worldgen output, so eviction only costs a
+/// regeneration; authoritative entries (running/parked regions) are never
+/// evicted — they are the only copy of edited terrain outside the region.
+pub const PRISTINE_TERRAIN_CACHE_MAX: usize = 64;
 
 /// Internal event handled by the world manager. (Moved from
 /// crates/server/src/main.rs; ServerTickTimer is gone — regions self-tick.)
@@ -136,6 +143,12 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Frozen terrain for parked / never-run regions, so LOD builds never
     /// wake a region. Refreshed on TerrainChanged and on park (Stopped).
     terrain_cache: BTreeMap<RegionCoords, TerrainSnapshot>,
+    /// Which `terrain_cache` entries are pristine worldgen output (evictable),
+    /// with their last-use stamp from `lod_access_counter`.
+    pristine_terrain: BTreeMap<RegionCoords, u64>,
+    /// LRU cap on `pristine_terrain`; defaults to `PRISTINE_TERRAIN_CACHE_MAX`,
+    /// overridable via `set_pristine_terrain_max` (test hook).
+    pristine_terrain_max: usize,
     /// Connected clients and their subscriptions.
     sessions: BTreeMap<ClientId, Session>,
     /// Survives disconnects: which region holds this client's player entity.
@@ -180,6 +193,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             regions: BTreeMap::new(),
             parked: BTreeMap::new(),
             terrain_cache: BTreeMap::new(),
+            pristine_terrain: BTreeMap::new(),
+            pristine_terrain_max: PRISTINE_TERRAIN_CACHE_MAX,
             sessions: BTreeMap::new(),
             homes: BTreeMap::new(),
             out,
@@ -327,15 +342,15 @@ impl<S: RegionSpawner> WorldManager<S> {
                 }
             }
             RegionOutput::Terrain(client, snap) => {
-                self.terrain_cache.insert(rc, snap);
+                self.cache_authoritative_terrain(rc, snap);
                 self.lod_terrain_ready(rc, client);
             }
             RegionOutput::TerrainChanged(snap) => {
-                self.terrain_cache.insert(rc, snap);
+                self.cache_authoritative_terrain(rc, snap);
                 self.invalidate_region_lod(rc);
             }
             RegionOutput::Stopped(serialized, far) => {
-                self.terrain_cache.insert(rc, far);
+                self.cache_authoritative_terrain(rc, far);
                 self.invalidate_region_lod(rc);
                 self.parked.insert(rc, serialized);
                 let pending = self
@@ -599,6 +614,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             let rc = key.origin_region();
             let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
             if let Some(snap) = self.terrain_cache.get(&rc) {
+                if let Some(stamp) = self.pristine_terrain.get_mut(&rc) {
+                    self.lod_access_counter += 1;
+                    *stamp = self.lod_access_counter;
+                }
                 self.lod_in_flight.insert(key);
                 self.lod_builder.submit(LodBuildJob::Region {
                     key,
@@ -613,6 +632,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                 let columns = (self.generator)(rc);
                 let snap = TerrainSnapshot::from_columns(columns);
                 self.terrain_cache.insert(rc, snap.clone());
+                self.lod_access_counter += 1;
+                self.pristine_terrain.insert(rc, self.lod_access_counter);
+                self.evict_pristine_terrain();
                 self.lod_in_flight.insert(key);
                 self.lod_builder
                     .submit(LodBuildJob::Region { key, chunks: snap.chunks });
@@ -721,6 +743,42 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn set_lod_cache_max(&mut self, n: usize) {
         self.lod_cache_max = n;
         self.evict_lod_cache();
+    }
+
+    /// A region reported its own terrain: the entry is now authoritative and
+    /// must never be evicted as pristine worldgen output.
+    fn cache_authoritative_terrain(&mut self, rc: RegionCoords, snap: TerrainSnapshot) {
+        self.pristine_terrain.remove(&rc);
+        self.terrain_cache.insert(rc, snap);
+    }
+
+    /// Test hook: total `terrain_cache` entries (pristine + authoritative).
+    pub fn terrain_cache_len(&self) -> usize {
+        self.terrain_cache.len()
+    }
+
+    /// Test hook: shrink the pristine cap so eviction is exercisable without
+    /// generating dozens of regions.
+    pub fn set_pristine_terrain_max(&mut self, n: usize) {
+        self.pristine_terrain_max = n;
+        self.evict_pristine_terrain();
+    }
+
+    /// Drop least-recently-used pristine snapshots past the cap. In-flight
+    /// builds own a clone of the chunks, so eviction never races a job.
+    fn evict_pristine_terrain(&mut self) {
+        while self.pristine_terrain.len() > self.pristine_terrain_max {
+            let Some(victim) = self
+                .pristine_terrain
+                .iter()
+                .min_by_key(|(_, stamp)| **stamp)
+                .map(|(rc, _)| *rc)
+            else {
+                break;
+            };
+            self.pristine_terrain.remove(&victim);
+            self.terrain_cache.remove(&victim);
+        }
     }
 
     fn evict_lod_cache(&mut self) {

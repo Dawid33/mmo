@@ -21,6 +21,7 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 
 use super::bridge::{RegionRoots, SimTarget};
 use super::config::TerrainRenderConfig;
+use crate::world_scale::WorldScale;
 use super::far_voxel::lifecycle::FarVoxelUploadPending;
 use super::far_voxel::residency::FarVoxelResidency;
 use super::far_voxel::{FarBrickBuildTask, FarRasterFallback, FarVoxelReady};
@@ -43,8 +44,10 @@ use telemetry::{capture_render_thread_snapshot, translate_snapshot, SharedRender
 
 pub const BENCHMARK_WIDTH: u32 = 1920;
 pub const BENCHMARK_HEIGHT: u32 = 1080;
-pub const REQUIRED_NEAR_REGIONS: usize = 9;
 pub const STABLE_READY_FRAMES: u32 = 120;
+/// Default load budget; `RENDER_BENCH_LOAD_TIMEOUT_SECS` overrides it. The
+/// readiness gate counts *frames* (`STABLE_READY_FRAMES`) while this counts
+/// wall-clock seconds, so a slow adapter needs a longer budget, not a fix.
 pub const LOAD_TIMEOUT: Duration = Duration::from_secs(120);
 pub const WARMUP_DURATION: Duration = Duration::from_secs(10);
 pub const MEASUREMENT_DURATION: Duration = Duration::from_secs(30);
@@ -67,6 +70,7 @@ pub struct BenchmarkRunSettings {
     pub tokio_worker_threads: Option<u32>,
     pub requested_near_backend: Option<String>,
     pub requested_far_backend: Option<String>,
+    pub load_timeout: Duration,
 }
 
 impl BenchmarkRunSettings {
@@ -130,6 +134,11 @@ impl BenchmarkRunSettings {
             tokio_worker_threads: parse_u32("TOKIO_WORKER_THREADS", get("TOKIO_WORKER_THREADS"))?,
             requested_near_backend: get("VOXEL_NEAR_RENDER"),
             requested_far_backend: get("VOXEL_FAR_RENDER"),
+            load_timeout: parse_u32(
+                "RENDER_BENCH_LOAD_TIMEOUT_SECS",
+                get("RENDER_BENCH_LOAD_TIMEOUT_SECS"),
+            )?
+            .map_or(LOAD_TIMEOUT, |seconds| Duration::from_secs(u64::from(seconds))),
         })
     }
 }
@@ -158,13 +167,13 @@ pub struct BenchmarkReadiness {
 }
 
 impl BenchmarkReadiness {
-    fn gates_ready(&self) -> bool {
-        let has_full_lod_table = game::lod::LOD_RING_TABLE.iter().all(|&(_, factor)| {
+    fn gates_ready(&self, scale: &WorldScale) -> bool {
+        let has_full_lod_table = scale.lod_table.iter().all(|&(_, factor)| {
             self.ready_lod_counts
                 .get(&factor)
                 .is_some_and(|&count| count > 0)
         });
-        self.near_regions >= REQUIRED_NEAR_REGIONS
+        self.near_regions >= scale.near_region_count()
             && self.remesh_queue_len == 0
             && self.lod_build_queue_len == 0
             && self.pending_lod_events == 0
@@ -177,6 +186,8 @@ impl BenchmarkReadiness {
 
 #[derive(Default)]
 pub struct ReadinessTracker {
+    /// The world the run subscribed to: sizes the near-region and LOD gates.
+    scale: WorldScale,
     previous_lod_counts: Option<BTreeMap<u32, usize>>,
     previous_backends: Option<(Option<NearRuntimeMode>, FarRuntimeBackend)>,
     stable_frames: u32,
@@ -184,7 +195,7 @@ pub struct ReadinessTracker {
 
 impl ReadinessTracker {
     pub fn observe(&mut self, readiness: &BenchmarkReadiness) -> bool {
-        if !readiness.gates_ready() {
+        if !readiness.gates_ready(&self.scale) {
             self.previous_lod_counts = None;
             self.previous_backends = None;
             self.stable_frames = 0;
@@ -336,11 +347,17 @@ const fn classify_far_runtime(
 
 const fn far_runtime_ready(
     expected: FarRuntimeBackend,
+    far_expected: bool,
     total_cells: usize,
     brick_cells: usize,
     raster_cells: usize,
     raster_ready_cells: usize,
 ) -> bool {
+    if !far_expected {
+        // No LOD rings subscribed (`VOXEL_LOD_RINGS=off` / the tiny world):
+        // there is no far backend to wait for, and stray cells are not ready.
+        return total_cells == 0;
+    }
     if total_cells == 0 {
         return false;
     }
@@ -375,10 +392,20 @@ const fn completion_decision(
     }
 }
 
-#[derive(Default)]
 pub struct BenchmarkController {
     phase: BenchmarkPhase,
     phase_started: Duration,
+    load_timeout: Duration,
+}
+
+impl Default for BenchmarkController {
+    fn default() -> Self {
+        Self {
+            phase: BenchmarkPhase::default(),
+            phase_started: Duration::ZERO,
+            load_timeout: LOAD_TIMEOUT,
+        }
+    }
 }
 
 impl BenchmarkController {
@@ -388,7 +415,7 @@ impl BenchmarkController {
                 self.phase = BenchmarkPhase::Warming;
                 self.phase_started = elapsed;
             }
-            BenchmarkPhase::Loading if elapsed > LOAD_TIMEOUT => {
+            BenchmarkPhase::Loading if elapsed > self.load_timeout => {
                 self.phase = BenchmarkPhase::Failed;
             }
             BenchmarkPhase::Warming
@@ -573,6 +600,22 @@ struct BenchmarkRuntime {
     failure_reason: Option<String>,
 }
 
+impl BenchmarkRuntime {
+    fn new(scale: WorldScale, load_timeout: Duration) -> Self {
+        Self {
+            controller: BenchmarkController {
+                load_timeout,
+                ..Default::default()
+            },
+            readiness: ReadinessTracker {
+                scale,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
 pub struct RenderBenchmarkPlugin {
     settings: BenchmarkRunSettings,
 }
@@ -591,11 +634,15 @@ impl Plugin for RenderBenchmarkPlugin {
 
         let shared = SharedRenderThreadSnapshot::default();
         let far_draw_gate = super::far_voxel::pass::FarVoxelDrawGate::disabled();
+        // The binary inserts the env-resolved scale before this plugin; a bare
+        // app (tests) falls back to the production scale.
+        let scale = *app.init_resource::<WorldScale>().world().resource::<WorldScale>();
+        info!("render benchmark world scale: {scale}");
         app.insert_resource(BenchmarkSettingsResource(self.settings.clone()))
             .insert_resource(shared.clone())
             .insert_resource(far_draw_gate.clone())
             .init_resource::<BenchmarkCapabilityMetricsInput>()
-            .init_resource::<BenchmarkRuntime>()
+            .insert_resource(BenchmarkRuntime::new(scale, self.settings.load_timeout))
             .add_systems(
                 Update,
                 run_benchmark
@@ -657,12 +704,13 @@ struct BenchmarkScene<'w, 's> {
 fn expected_lod_keys(
     viewer: game::RegionCoords,
     near_regions: &BTreeSet<game::RegionCoords>,
+    lod_table: &[(i32, u32)],
 ) -> BTreeSet<game::lod::LodKey> {
     crate::instance::desired_lod(
         viewer,
         near_regions,
         &BTreeMap::new(),
-        game::lod::LOD_RING_TABLE,
+        lod_table,
         game::lod::LOD_STICKY_BAND,
     )
     .1
@@ -671,12 +719,14 @@ fn expected_lod_keys(
 fn snapshot_has_all_lod_keys(
     viewer: Option<game::RegionCoords>,
     near_regions: &BTreeSet<game::RegionCoords>,
+    lod_table: &[(i32, u32)],
     loaded: impl IntoIterator<Item = game::lod::LodKey>,
 ) -> bool {
     let Some(viewer) = viewer else {
         return false;
     };
-    loaded.into_iter().collect::<BTreeSet<_>>() == expected_lod_keys(viewer, near_regions)
+    loaded.into_iter().collect::<BTreeSet<_>>()
+        == expected_lod_keys(viewer, near_regions, lod_table)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -742,6 +792,7 @@ fn run_benchmark(
         far: far_runtime,
         far_ready: far_runtime_ready(
             expected_far_runtime,
+            !runtime.readiness.scale.lod_table.is_empty(),
             total_far_cells,
             brick_cells,
             raster_cells,
@@ -750,7 +801,7 @@ fn run_benchmark(
     };
     runtime.current_backends = current_backends;
     if !runtime.snapshot_frozen
-        && scene.roots.0.len() >= REQUIRED_NEAR_REGIONS
+        && scene.roots.0.len() >= runtime.readiness.scale.near_region_count()
         && scene.client_updates.0.is_empty()
         && scene.lod_rings.pending.is_empty()
     {
@@ -758,6 +809,7 @@ fn run_benchmark(
         if snapshot_has_all_lod_keys(
             scene.hud_status.viewer_region,
             &near_regions,
+            runtime.readiness.scale.lod_table,
             scene.lod_rings.roots.keys().copied(),
         ) {
             runtime.snapshot_frozen = true;
@@ -1106,7 +1158,7 @@ fn build_result(
             }
             format!(
                 "scene did not stabilize within {} seconds",
-                LOAD_TIMEOUT.as_secs()
+                runtime.controller.load_timeout.as_secs()
             )
         }),
         BenchmarkMetadata {
@@ -1124,15 +1176,15 @@ fn build_result(
             server_threads: settings.tokio_worker_threads,
             resolution: [BENCHMARK_WIDTH, BENCHMARK_HEIGHT],
             vsync: false,
-            required_near_regions: REQUIRED_NEAR_REGIONS,
+            required_near_regions: runtime.readiness.scale.near_region_count(),
             stable_ready_frames: STABLE_READY_FRAMES,
-            load_timeout_seconds: LOAD_TIMEOUT.as_secs(),
+            load_timeout_seconds: runtime.controller.load_timeout.as_secs(),
             warmup_seconds: WARMUP_DURATION.as_secs(),
             measurement_seconds: MEASUREMENT_DURATION.as_secs(),
             camera_path: "yaw_360".to_owned(),
             simulation_snapshot_frozen: runtime.snapshot_frozen,
             world_seed: worldgen::WORLD_SEED,
-            lod_ring_table: game::lod::LOD_RING_TABLE.iter().copied().collect(),
+            lod_ring_table: runtime.readiness.scale.lod_table.to_vec(),
             near_backend_requested: settings.requested_near_backend.clone(),
             near_backend_resolved: near_mode
                 .map(ActiveNearMode::as_str)
@@ -1447,7 +1499,7 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         ready_lod_counts.extend(counts.iter().copied());
         BenchmarkReadiness {
-            near_regions: REQUIRED_NEAR_REGIONS,
+            near_regions: WorldScale::FULL.near_region_count(),
             remesh_queue_len: 0,
             lod_build_queue_len: 0,
             pending_lod_events: 0,
@@ -1467,12 +1519,14 @@ mod tests {
     fn production_snapshot_requires_every_expected_lod_key() {
         let viewer = game::RegionCoords::new(0, 0);
         let near_regions = viewer.window_3x3().into_iter().collect::<BTreeSet<_>>();
-        let expected = expected_lod_keys(viewer, &near_regions);
+        let table = game::lod::LOD_RING_TABLE;
+        let expected = expected_lod_keys(viewer, &near_regions, table);
 
         assert!(!expected.is_empty());
         assert!(snapshot_has_all_lod_keys(
             Some(viewer),
             &near_regions,
+            table,
             expected.iter().copied(),
         ));
 
@@ -1481,13 +1535,66 @@ mod tests {
         assert!(!snapshot_has_all_lod_keys(
             Some(viewer),
             &near_regions,
+            table,
             incomplete.iter().copied(),
         ));
         assert!(!snapshot_has_all_lod_keys(
             None,
             &near_regions,
+            table,
             incomplete.iter().copied(),
         ));
+    }
+
+    /// The tiny world (one region, no LOD rings) must be able to pass every
+    /// gate: no far cells is "far ready", and an empty ring table expects no
+    /// keys and no per-factor ready counts.
+    #[test]
+    fn tiny_world_scale_passes_the_gates_without_any_lod() {
+        let viewer = game::RegionCoords::new(0, 0);
+        let near_regions = BTreeSet::from([viewer]);
+        assert!(snapshot_has_all_lod_keys(
+            Some(viewer),
+            &near_regions,
+            WorldScale::TINY.lod_table,
+            std::iter::empty(),
+        ));
+        assert!(far_runtime_ready(FarRuntimeBackend::Raster, false, 0, 0, 0, 0));
+        assert!(!far_runtime_ready(FarRuntimeBackend::Raster, false, 1, 0, 1, 1));
+        assert!(!far_runtime_ready(FarRuntimeBackend::Raster, true, 0, 0, 0, 0));
+
+        let one_region = BenchmarkReadiness {
+            near_regions: 1,
+            ready_lod_counts: BTreeMap::new(),
+            far_runtime: FarRuntimeBackend::Unavailable,
+            ..ready(&[])
+        };
+        assert!(one_region.gates_ready(&WorldScale::TINY));
+        assert!(!one_region.gates_ready(&WorldScale::SMALL), "small needs a factor-2 cell");
+        assert!(!one_region.gates_ready(&WorldScale::FULL), "full needs 9 regions");
+
+        let mut tracker = BenchmarkRuntime::new(WorldScale::TINY, LOAD_TIMEOUT).readiness;
+        for _ in 0..(STABLE_READY_FRAMES - 1) {
+            assert!(!tracker.observe(&one_region));
+        }
+        assert!(tracker.observe(&one_region));
+    }
+
+    #[test]
+    fn load_timeout_is_configurable() {
+        let mut controller = BenchmarkRuntime::new(WorldScale::FULL, Duration::from_secs(600)).controller;
+        controller.advance(LOAD_TIMEOUT + Duration::from_millis(1), false);
+        assert_eq!(controller.phase(), BenchmarkPhase::Loading);
+        controller.advance(Duration::from_secs(601), false);
+        assert_eq!(controller.phase(), BenchmarkPhase::Failed);
+
+        let settings = BenchmarkRunSettings::from_values(|name| {
+            (name == "RENDER_BENCH_LOAD_TIMEOUT_SECS").then(|| "300".to_owned())
+        })
+        .unwrap();
+        assert_eq!(settings.load_timeout, Duration::from_secs(300));
+        let default = BenchmarkRunSettings::from_values(|_| None).unwrap();
+        assert_eq!(default.load_timeout, LOAD_TIMEOUT);
     }
 
     #[test]
@@ -1650,9 +1757,9 @@ mod tests {
             classify_far_runtime(4, 3, 0),
             (FarRuntimeBackend::Brick, false)
         );
-        assert!(!far_runtime_ready(FarRuntimeBackend::Raster, 4, 0, 4, 0));
-        assert!(far_runtime_ready(FarRuntimeBackend::Raster, 4, 0, 4, 4));
-        assert!(far_runtime_ready(FarRuntimeBackend::Brick, 4, 4, 0, 0));
+        assert!(!far_runtime_ready(FarRuntimeBackend::Raster, true, 4, 0, 4, 0));
+        assert!(far_runtime_ready(FarRuntimeBackend::Raster, true, 4, 0, 4, 4));
+        assert!(far_runtime_ready(FarRuntimeBackend::Brick, true, 4, 4, 0, 0));
     }
 
     #[test]

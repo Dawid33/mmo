@@ -90,6 +90,13 @@ const KEEPUP_TREND_WINDOWS: usize = 3;
 const KEEPUP_WARN_MIN_DEPTH: usize = 24;
 const KEEPUP_WARN_HARD_DEPTH: usize = 64;
 
+/// New `RequestLod` subscriptions sent per client tick. The production ring
+/// table wants ~570 keys at join; firing them in one burst floods the server's
+/// LOD builders and the QUIC stream-credit window (100 concurrent uni streams)
+/// with replies the client then has to ingest at once. 32/tick drains the full
+/// table in ~1s at the 50ms tick and leaves any table up to 32 keys unpaced.
+pub const LOD_REQUESTS_PER_TICK: usize = 32;
+
 /// Client-side rolling counters for reconciliation load and clock drift,
 /// flushed to one INFO line every `METRICS_REPORT_INTERVAL`. The window start
 /// is lazily set on the first native report so construction stays wasm-safe
@@ -304,6 +311,14 @@ impl GameInstanceManager {
     /// headless test pays for — on both sides of the channel — by ~9x.
     pub fn set_near_radius(&mut self, radius: i32) {
         self.near_radius = radius;
+    }
+
+    /// Apply the binary's resolved world-size knobs (`VOXEL_WORLD` & co.).
+    /// Call before `start()`: the join burst reads both halves.
+    pub fn set_world_scale(&mut self, scale: crate::world_scale::WorldScale) {
+        info!("[client] world scale: {scale}");
+        self.lod_table = scale.lod_table;
+        self.near_radius = scale.near_radius;
     }
 
     /// Push a game event as if it came from local input (test/harness hook).
@@ -728,11 +743,6 @@ impl GameInstanceManager {
         if desired == self.lod_subscribed {
             return;
         }
-        for key in desired.difference(&self.lod_subscribed) {
-            self.server_game_send
-                .send(ClientPacket::RequestLod(*key))
-                .unwrap();
-        }
         let stale: Vec<game::lod::LodKey> =
             self.lod_subscribed.difference(&desired).copied().collect();
         for key in stale {
@@ -742,8 +752,22 @@ impl GameInstanceManager {
             let _ = self
                 .client_event_send
                 .send(ClientUpdateEvent::RemoveLod(key));
+            self.lod_subscribed.remove(&key);
         }
-        self.lod_subscribed = desired;
+        // Paced: the rest of the diff is picked up by the following ticks.
+        // `LodKey` orders by factor first, and factors grow with ring
+        // distance, so the set's own order is nearest-first.
+        let wanted: Vec<game::lod::LodKey> = desired
+            .difference(&self.lod_subscribed)
+            .take(LOD_REQUESTS_PER_TICK)
+            .copied()
+            .collect();
+        for key in wanted {
+            self.server_game_send
+                .send(ClientPacket::RequestLod(key))
+                .unwrap();
+            self.lod_subscribed.insert(key);
+        }
     }
 
     /// Route one server-authoritative game event to the region it targets:
@@ -2114,6 +2138,90 @@ mod manager_tests {
         // No home_region / world yet: nothing to report, no event sent.
         manager.emit_hud_status();
         assert!(client_recv.try_recv().is_err());
+    }
+
+    /// The join burst is paced: each tick requests at most
+    /// `LOD_REQUESTS_PER_TICK` new keys, nearest ring first, and the full
+    /// production set is still reached with no key requested twice.
+    #[test]
+    fn lod_requests_are_paced_nearest_first() {
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, _client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
+        let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+        let mut manager = GameInstanceManager::new(
+            game_send,
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
+        let home = RegionCoords::new(0, 0);
+        manager.home_region = Some(home);
+        let packets = manager.client_packet_recv();
+        let excluded = desired_window(home, Some(home), manager.near_radius);
+        let (_, expected) = desired_lod(
+            home,
+            &excluded,
+            &BTreeMap::new(),
+            game::lod::LOD_RING_TABLE,
+            game::lod::LOD_STICKY_BAND,
+        );
+        assert!(expected.len() > LOD_REQUESTS_PER_TICK, "table must need pacing");
+
+        let mut requested = Vec::new();
+        let max_ticks = expected.len().div_ceil(LOD_REQUESTS_PER_TICK);
+        for _ in 0..max_ticks {
+            manager.update_lod_window();
+            let batch: Vec<_> = packets
+                .try_iter()
+                .map(|packet| match packet {
+                    ClientPacket::RequestLod(key) => key,
+                    _ => panic!("only RequestLod expected"),
+                })
+                .collect();
+            assert!(!batch.is_empty() && batch.len() <= LOD_REQUESTS_PER_TICK);
+            requested.extend(batch);
+        }
+        // Settled: a further tick sends nothing.
+        manager.update_lod_window();
+        assert!(packets.try_recv().is_err());
+
+        assert!(
+            requested.windows(2).all(|pair| pair[0].factor <= pair[1].factor),
+            "nearest (smallest-factor) rings must be requested first"
+        );
+        assert_eq!(requested.len(), expected.len(), "no key requested twice");
+        assert_eq!(
+            requested.into_iter().collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+    }
+
+    /// `set_world_scale` drives both halves of the subscription window.
+    #[test]
+    fn world_scale_tiny_subscribes_home_only_and_no_lod() {
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, _client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
+        let dummy_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+        let mut manager = GameInstanceManager::new(
+            game_send,
+            game_recv,
+            client_send,
+            dummy_addr,
+            game::DebugFlags::default(),
+        );
+        manager.set_world_scale(crate::world_scale::WorldScale::TINY);
+        let home = RegionCoords::new(0, 0);
+        manager.home_region = Some(home);
+        let packets = manager.client_packet_recv();
+        manager.update_window();
+        manager.update_lod_window();
+        let sent: Vec<_> = packets.try_iter().collect();
+        assert!(
+            matches!(sent.as_slice(), [ClientPacket::RequestRegionConnection(rc)] if *rc == home),
+            "tiny world must request the home region alone, got {} packets",
+            sent.len()
+        );
     }
 
     /// After a tick with a seeded local player, the manager must announce a UI
