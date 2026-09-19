@@ -53,8 +53,14 @@ pub struct ChunkQuads(pub Arc<Vec<QuadRecord>>);
 #[derive(Resource, Clone, ExtractResource)]
 pub struct BlockArrayTexture(pub Handle<Image>);
 
-/// Render-world copy of one chunk's draw inputs. Re-extracted every frame
-/// (cheap: `Arc` clone + matrices); buffer upload happens only when `changed`.
+/// Render-world copy of one chunk's draw inputs. The render world is
+/// retained, so this is (re-)inserted ONLY when the chunk's quads, transform
+/// or inherited visibility changed — re-inserting all ~57k chunk entities
+/// every frame measured 17.6 ms/frame at the production world size
+/// (2026-09-19 trace), 13 ms of it just applying the insert commands.
+/// `prepare_chunk_quads` keys its uploads off `Changed<ExtractedChunkQuads>`,
+/// i.e. off that insert; there is deliberately no stored "changed" flag, which
+/// would go stale the first frame a chunk is NOT re-extracted.
 #[derive(Component)]
 pub struct ExtractedChunkQuads {
     pub records: Arc<Vec<QuadRecord>>,
@@ -67,7 +73,6 @@ pub struct ExtractedChunkQuads {
     /// Main-world cave-connectivity result. Hidden chunks keep their stable
     /// metadata slot but are marked inactive for both CPU and GPU culling.
     pub cave_active: bool,
-    pub changed: bool,
 }
 
 #[derive(Resource, Default)]
@@ -86,8 +91,13 @@ pub fn extract_removed_chunk_quads(
             .read()
             .filter(|entity| !still_alive.contains(*entity)),
     );
+    // The common frame removes nothing: don't walk every render entity for it.
+    if out.0.is_empty() {
+        return;
+    }
+    let removed: bevy::platform::collections::HashSet<Entity> = out.0.iter().copied().collect();
     for (render_entity, main_entity) in &render_entities {
-        if out.0.contains(&main_entity.id()) {
+        if removed.contains(&main_entity.id()) {
             commands
                 .entity(render_entity)
                 .remove::<(ExtractedChunkQuads, prepare::GpuChunkQuads)>();
@@ -95,29 +105,24 @@ pub fn extract_removed_chunk_quads(
     }
 }
 
+#[allow(clippy::type_complexity)] // Bevy system: params are DI, not an API
 pub fn extract_chunk_quads(
     mut commands: Commands,
     chunks: Extract<
-        Query<(
-            RenderEntity,
-            Ref<ChunkQuads>,
-            Ref<GlobalTransform>,
-            &Aabb,
-            Ref<InheritedVisibility>,
-        )>,
+        Query<
+            (RenderEntity, &ChunkQuads, &GlobalTransform, &Aabb, &InheritedVisibility),
+            Or<(Changed<ChunkQuads>, Changed<GlobalTransform>, Changed<InheritedVisibility>)>,
+        >,
     >,
+    all_chunks: Extract<Query<&InheritedVisibility, With<ChunkQuads>>>,
     mut debug_frame: Local<u32>,
 ) {
-    let mut total = 0u32;
-    let mut hidden = 0u32;
+    let mut extracted = 0u32;
     for (entity, quads, transform, aabb, vis) in &chunks {
-        total += 1;
+        extracted += 1;
         let mut ec = commands.entity(entity);
         // Cave-culling hides via Visibility -> InheritedVisibility=false.
         let cave_active = vis.get();
-        if !cave_active {
-            hidden += 1;
-        }
         let world_from_local = transform.to_matrix();
         let center = transform.transform_point(Vec3::from(aabb.center));
         let half = transform.scale() * Vec3::from(aabb.half_extents);
@@ -127,7 +132,6 @@ pub fn extract_chunk_quads(
             center,
             half_extents: half,
             cave_active,
-            changed: quads.is_changed() || transform.is_changed() || vis.is_changed(),
         });
     }
     // VOXEL_PULL_DEBUG=1: once a second, where do chunks disappear — here
@@ -135,8 +139,11 @@ pub fn extract_chunk_quads(
     // frustum cull (queue.rs logs the other half)?
     *debug_frame = debug_frame.wrapping_add(1);
     if *debug_frame % 60 == 0 && std::env::var_os("VOXEL_PULL_DEBUG").is_some() {
+        let total = all_chunks.iter().count();
+        let hidden = all_chunks.iter().filter(|vis| !vis.get()).count();
         info!(
-            "[pull-cull] extract: {total} ChunkQuads entities, {hidden} hidden by cave-culling BFS"
+            "[pull-cull] extract: {total} ChunkQuads entities, {hidden} hidden by cave-culling BFS, \
+             {extracted} re-extracted this frame"
         );
     }
 }

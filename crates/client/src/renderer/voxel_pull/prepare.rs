@@ -116,23 +116,33 @@ pub fn prepare_view_chunk_draws(
     let mut submitted_workload =
         matches!(*mode, ActiveNearMode::GroupedDirect).then_some((0u64, 0u64));
     let mut direct_draw_count = matches!(*mode, ActiveNearMode::GroupedDirect).then_some(0u32);
+    // Resolved ONCE per frame, not once per view: there are five views (the
+    // camera plus four shadow cascades), and the allocation lookup per chunk
+    // per view was most of this system's 18 ms/frame at the production world
+    // size (2026-09-19 trace). Cave-hidden chunks are dropped here for the
+    // same reason; per view only the frustum test remains. Query order is
+    // stable within a frame, so every view still sees the same sequence.
+    let resolved: Vec<(GpuChunkQuads, Vec3, Vec3, bool)> = chunks
+        .iter()
+        .filter_map(|(main_entity, chunk)| {
+            if !chunk.cave_active {
+                return None;
+            }
+            let allocation = arena.allocations.get(&main_entity.id())?;
+            Some((
+                GpuChunkQuads {
+                    record_start: allocation.record_start,
+                    quad_count: allocation.quad_count,
+                    chunk_slot: allocation.chunk_slot,
+                },
+                chunk.center,
+                chunk.half_extents,
+                true,
+            ))
+        })
+        .collect();
     for (view_entity, frustum, is_shadow_view) in &views {
-        let list = grouped_draw_list(
-            frustum,
-            chunks.iter().filter_map(|(main_entity, chunk)| {
-                let allocation = arena.allocations.get(&main_entity.id())?;
-                Some((
-                    GpuChunkQuads {
-                        record_start: allocation.record_start,
-                        quad_count: allocation.quad_count,
-                        chunk_slot: allocation.chunk_slot,
-                    },
-                    chunk.center,
-                    chunk.half_extents,
-                    chunk.cave_active,
-                ))
-            }),
-        );
+        let list = grouped_draw_list(frustum, resolved.iter().copied());
         frustum_visible_chunks = frustum_visible_chunks
             .saturating_add(frustum_metric_contribution(list.0.len(), is_shadow_view));
         if !is_shadow_view {
@@ -172,8 +182,9 @@ fn grow_to<T: Clone>(values: &mut Vec<T>, required_len: usize, fill: T) {
 
 pub fn prepare_chunk_quads(
     mut commands: Commands,
-    chunks: Query<(Entity, &MainEntity, &ExtractedChunkQuads)>,
-    existing: Query<&GpuChunkQuads>,
+    // Only chunks (re-)extracted since this system last ran: extraction
+    // inserts `ExtractedChunkQuads` exactly when something changed.
+    chunks: Query<(Entity, &MainEntity, &ExtractedChunkQuads), Changed<ExtractedChunkQuads>>,
     pipeline: Res<VoxelPullPipeline>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -190,9 +201,6 @@ pub fn prepare_chunk_quads(
 
     let mut rebuild_bind_group = arena.bind_group.is_none();
     for (entity, main_entity, extracted) in &chunks {
-        if !extracted.changed && existing.contains(entity) {
-            continue;
-        }
         let quad_count = extracted.records.len() as u32;
         if quad_count == 0 {
             arena.release(main_entity.id());
