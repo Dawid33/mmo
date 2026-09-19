@@ -5,7 +5,7 @@
 //! remesh, never rollback-hashed.
 //! Reference: https://tomcc.github.io/2014/08/31/visibility-1.html
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use bevy::camera::primitives::{Frustum, Sphere};
 use bevy::prelude::*;
@@ -162,6 +162,7 @@ const NO_ENTRY: u8 = 6;
 
 /// Unit steps in `Face::index()` order (PosX, NegX, PosY, NegY, PosZ, NegZ) —
 /// the locked order in which `opposite(d) = d ^ 1`.
+#[cfg(test)]
 const DIR_STEPS: [[i32; 3]; 6] = [
     [1, 0, 0],
     [-1, 0, 0],
@@ -171,25 +172,228 @@ const DIR_STEPS: [[i32; 3]; 6] = [
     [0, 0, -1],
 ];
 
-/// Allocation-retaining storage for the per-frame cave-culling traversal.
-/// `Local` ownership keeps it private to `cull_chunks` and avoids rebuilding
-/// three potentially large collections every frame.
+/// Run/skip counters for `cull_chunks`, so tests (and a curious profiler) can
+/// see the change gate working. Optional: harnesses that never insert it pay
+/// nothing.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CullingStats {
+    /// Frames where the flood actually ran.
+    pub runs: u64,
+    /// Frames where every input was unchanged and last frame's result stood.
+    pub skipped: u64,
+}
+
+/// Everything the flood's result depends on besides the grid contents and the
+/// connectivity masks (those are tracked by change detection). Two frames with
+/// equal inputs, an unchanged grid and unchanged masks reach the same cells.
+///
+/// The cell is the RAW camera cell and the frustum is the camera's own: the
+/// clamped start cell and the "drop the gate when outside the domain" decision
+/// are functions of these plus the grid's bounding box, and a grid change
+/// already forces a recompute.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct CullInputs {
+    raw_cell: [i32; 3],
+    /// `None` = the camera has no `Frustum` (headless).
+    frustum: Option<[[f32; 4]; 6]>,
+}
+
+/// One BFS node: cell (dense index + box-relative position), the direction
+/// bits used on the path so far, and the face it was entered through.
+#[derive(Clone, Copy)]
+struct Node {
+    index: u32,
+    pos: [u8; 3],
+    dirs: u8,
+    entry: u8,
+}
+
+/// Allocation-retaining, DENSE storage for the cave-culling traversal, indexed
+/// by cell offset inside the expansion box (`x + dx * (y + dy * z)`). The flood
+/// used to key `HashSet`s by `(cell, dirs, entry)`; at the production 3x3
+/// window (96 chunks across) that was ~10^6 hash operations per frame and
+/// measured 34-115 ms per frame (2026-09-19 trace). `Local` ownership keeps it
+/// private to `cull_chunks`.
 #[derive(Default)]
 pub struct CullingScratch {
-    reached: HashSet<[i32; 3]>,
-    visited: HashSet<([i32; 3], u8, u8)>,
-    queue: VecDeque<([i32; 3], u8, u8)>,
+    /// Per cell, one bit per BFS state `(dirs, entry)` — see `state_bit`.
+    /// A cell is reached iff any bit is set.
+    visited: Vec<u128>,
+    /// Per cell connectivity mask; `ALL_CONNECTED` for grid-absent cells and
+    /// chunks that carry no mask yet (both traverse as fully-open air).
+    masks: Vec<u16>,
+    /// Per cell frustum verdict, computed lazily: 0 unknown, 1 inside, 2 outside.
+    in_frustum: Vec<u8>,
+    queue: VecDeque<Node>,
+    /// Box origin and dimensions of the last flood (for `is_reached`).
+    lo: [i32; 3],
+    dims: [usize; 3],
+    /// Inputs of the last flood that was applied; `None` forces a recompute.
+    last: Option<CullInputs>,
+}
+
+/// Bit of BFS state `(dirs, entry)` inside a cell's `u128`. No-backtrack means
+/// each axis contributes at most one direction, so `dirs` has 27 legal values
+/// (per axis: unused / + / -), and the entry face is always the opposite of
+/// one of the used directions — identified by its axis alone. 27 * 3 = 81
+/// states. The start node (`dirs == 0`, `NO_ENTRY`) takes bit 0, which no
+/// other state can produce (a real entry implies `dirs != 0`).
+fn state_bit(dirs: u8, entry: u8) -> u128 {
+    let code = (dirs & 3) as u32 + 3 * ((dirs >> 2) & 3) as u32 + 9 * ((dirs >> 4) & 3) as u32;
+    let axis = if entry == NO_ENTRY { 0 } else { (entry / 2) as u32 };
+    1u128 << (code * 3 + axis)
 }
 
 impl CullingScratch {
-    fn clear(&mut self) {
-        self.reached.clear();
+    /// Whether the last flood reached `cell`.
+    fn is_reached(&self, cell: [i32; 3]) -> bool {
+        let mut index = 0usize;
+        let mut stride = 1usize;
+        for axis in 0..3 {
+            let rel = cell[axis] - self.lo[axis];
+            if rel < 0 || rel as usize >= self.dims[axis] {
+                return false;
+            }
+            index += rel as usize * stride;
+            stride *= self.dims[axis];
+        }
+        self.visited[index] != 0
+    }
+
+    /// The camera BFS (see `cull_chunks` for the rules), over the box
+    /// `lo..=hi` intersected with the Chebyshev ball around `camera_cell`
+    /// (which must lie inside `lo..=hi`). `masks` yields the connectivity of
+    /// every chunk that has one; everything else is fully open.
+    fn flood(
+        &mut self,
+        lo: [i32; 3],
+        hi: [i32; 3],
+        camera_cell: [i32; 3],
+        frustum: Option<&Frustum>,
+        masks: impl Iterator<Item = ([i32; 3], u16)>,
+    ) {
+        let mut dims = [0usize; 3];
+        let mut box_lo = [0i32; 3];
+        for axis in 0..3 {
+            box_lo[axis] = lo[axis].max(camera_cell[axis] - CULL_BFS_MAX_CHEBYSHEV);
+            let box_hi = hi[axis].min(camera_cell[axis] + CULL_BFS_MAX_CHEBYSHEV);
+            dims[axis] = (box_hi - box_lo[axis] + 1).max(0) as usize;
+        }
+        self.lo = box_lo;
+        self.dims = dims;
+        let cells = dims[0] * dims[1] * dims[2];
         self.visited.clear();
+        self.visited.resize(cells, 0);
+        self.masks.clear();
+        self.masks.resize(cells, ALL_CONNECTED);
+        self.in_frustum.clear();
+        self.in_frustum.resize(cells, 0);
         self.queue.clear();
+        if cells == 0 {
+            return;
+        }
+        let strides = [1usize, dims[0], dims[0] * dims[1]];
+        let index_of = |cell: [i32; 3]| -> Option<usize> {
+            let mut index = 0usize;
+            for axis in 0..3 {
+                let rel = cell[axis] - box_lo[axis];
+                if rel < 0 || rel as usize >= dims[axis] {
+                    return None;
+                }
+                index += rel as usize * strides[axis];
+            }
+            Some(index)
+        };
+        for (cell, mask) in masks {
+            if let Some(index) = index_of(cell) {
+                self.masks[index] = mask;
+            }
+        }
+
+        let Some(start) = index_of(camera_cell) else {
+            return;
+        };
+        // Box dimensions never exceed 2 * CULL_BFS_MAX_CHEBYSHEV + 1 = 129.
+        let start_pos = [
+            (camera_cell[0] - box_lo[0]) as u8,
+            (camera_cell[1] - box_lo[1]) as u8,
+            (camera_cell[2] - box_lo[2]) as u8,
+        ];
+        self.visited[start] |= state_bit(0, NO_ENTRY);
+        self.queue.push_back(Node { index: start as u32, pos: start_pos, dirs: 0, entry: NO_ENTRY });
+        while let Some(Node { index, pos, dirs, entry }) = self.queue.pop_front() {
+            let mask = self.masks[index as usize];
+            for d in 0..6u8 {
+                // No-backtrack: never step opposite to a direction already used.
+                if dirs & (1 << (d ^ 1)) != 0 {
+                    continue;
+                }
+                // Connectivity: the cell's own air must connect entry -> exit
+                // face. The start cell (no entry face) exits freely. (An
+                // all-open mask has every pair bit set, so absent cells and
+                // mask-less chunks need no special case.)
+                //
+                // entry == d would make pair_bit's a<b debug_assert trip, but
+                // it's unreachable: entering via `entry` put `entry^1 == d^1`
+                // in dirs, and the no-backtrack check above already skipped d.
+                debug_assert!(entry == NO_ENTRY || entry != d);
+                if entry != NO_ENTRY && mask & pair_bit(entry as u32, d as u32) == 0 {
+                    continue;
+                }
+                let axis = (d / 2) as usize;
+                let forward = d & 1 == 0;
+                if forward {
+                    if pos[axis] as usize + 1 >= dims[axis] {
+                        continue;
+                    }
+                } else if pos[axis] == 0 {
+                    continue;
+                }
+                let mut next_pos = pos;
+                let next_index = if forward {
+                    next_pos[axis] += 1;
+                    index as usize + strides[axis]
+                } else {
+                    next_pos[axis] -= 1;
+                    index as usize - strides[axis]
+                };
+                // Frustum: reject neighbors fully outside the camera's view. No
+                // Frustum (headless / ungated) => everything counts as inside.
+                if let Some(frustum) = frustum {
+                    if self.in_frustum[next_index] == 0 {
+                        let center = Vec3::new(
+                            (box_lo[0] + next_pos[0] as i32) as f32 * 32.0 + 16.0,
+                            (box_lo[1] + next_pos[1] as i32) as f32 * 32.0 + 16.0,
+                            (box_lo[2] + next_pos[2] as i32) as f32 * 32.0 + 16.0,
+                        );
+                        let sphere = Sphere {
+                            center: center.into(),
+                            radius: 16.0 * 3f32.sqrt(),
+                        };
+                        self.in_frustum[next_index] =
+                            if frustum.intersects_sphere(&sphere, false) { 1 } else { 2 };
+                    }
+                    if self.in_frustum[next_index] == 2 {
+                        continue;
+                    }
+                }
+                let next_dirs = dirs | (1 << d);
+                let bit = state_bit(next_dirs, d ^ 1);
+                if self.visited[next_index] & bit == 0 {
+                    self.visited[next_index] |= bit;
+                    self.queue.push_back(Node {
+                        index: next_index as u32,
+                        pos: next_pos,
+                        dirs: next_dirs,
+                        entry: d ^ 1,
+                    });
+                }
+            }
+        }
     }
 }
 
-/// Per-frame camera BFS over the chunk grid (Tommo cave culling): flood
+/// Camera BFS over the chunk grid (Tommo cave culling): flood
 /// outward from the camera cell; a step from a cell with a connectivity mask
 /// is allowed only if the mask connects the entry face to the exit face, a
 /// direction whose opposite was already used on the path is banned
@@ -201,15 +405,26 @@ impl CullingScratch {
 /// missing `Frustum` (headless) counts as everything-inside; the camera cell
 /// is clamped into the grid's inflated bounding box when outside it (flying
 /// above the band still sees down into it).
+///
+/// Change-gated: the flood only re-runs when something it depends on changed
+/// — the camera cell, the frustum planes, the grid, any connectivity mask, or
+/// the config. A still camera over a settled world costs a few comparisons.
+#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn cull_chunks(
     config: Res<CullingConfig>,
     grid: Res<ChunkGrid>,
     cameras: Query<(&GlobalTransform, Option<&Frustum>, &Camera), With<Camera3d>>,
     masks: Query<&ChunkConnectivity>,
+    changed_masks: Query<(), Changed<ChunkConnectivity>>,
+    mut removed_masks: RemovedComponents<ChunkConnectivity>,
     mut chunks: Query<&mut Visibility, With<ChunkKey>>,
     mut scratch: Local<CullingScratch>,
+    mut stats: Option<ResMut<CullingStats>>,
 ) {
+    // Always drain the removal events, or they pile up across skipped frames.
+    let masks_changed = removed_masks.read().count() > 0 || !changed_masks.is_empty();
     if !config.graph_enabled {
+        scratch.last = None;
         for mut vis in &mut chunks {
             if *vis != Visibility::Inherited {
                 *vis = Visibility::Inherited;
@@ -220,9 +435,11 @@ pub fn cull_chunks(
     // No active camera: leave visibility unchanged rather than flashing the
     // world hidden (startup, camera handoff mid-flight).
     let Some((camera_tf, frustum, _)) = cameras.iter().find(|(_, _, cam)| cam.is_active) else {
+        scratch.last = None;
         return;
     };
     if grid.0.is_empty() {
+        scratch.last = None;
         return;
     }
 
@@ -231,6 +448,23 @@ pub fn cull_chunks(
     // intersected with the Chebyshev ball around the camera cell. The camera
     // cell is clamped into the box first, which also keeps the ball centered
     // on the effective start cell.
+    let translation = camera_tf.translation();
+    let raw_cell = [
+        (translation.x / 32.0).floor() as i32,
+        (translation.y / 32.0).floor() as i32,
+        (translation.z / 32.0).floor() as i32,
+    ];
+    // Change gate. A NaN plane never compares equal, which errs toward
+    // recomputing.
+    let inputs = CullInputs { raw_cell, frustum: frustum.map(frustum_planes) };
+    let world_unchanged = !grid.is_changed() && !config.is_changed() && !masks_changed;
+    if world_unchanged && scratch.last == Some(inputs) {
+        if let Some(stats) = stats.as_deref_mut() {
+            stats.skipped += 1;
+        }
+        return;
+    }
+
     let mut lo = [i32::MAX; 3];
     let mut hi = [i32::MIN; 3];
     for key in grid.0.keys() {
@@ -243,12 +477,6 @@ pub fn cull_chunks(
         lo[axis] -= 1;
         hi[axis] += 1;
     }
-    let translation = camera_tf.translation();
-    let raw_cell = [
-        (translation.x / 32.0).floor() as i32,
-        (translation.y / 32.0).floor() as i32,
-        (translation.z / 32.0).floor() as i32,
-    ];
     let mut camera_cell = raw_cell;
     for axis in 0..3 {
         camera_cell[axis] = camera_cell[axis].clamp(lo[axis], hi[axis]);
@@ -268,13 +496,6 @@ pub fn cull_chunks(
     } else {
         None
     };
-    let in_domain = |cell: [i32; 3]| {
-        (0..3).all(|axis| {
-            cell[axis] >= lo[axis]
-                && cell[axis] <= hi[axis]
-                && (cell[axis] - camera_cell[axis]).abs() <= CULL_BFS_MAX_CHEBYSHEV
-        })
-    };
 
     // Node = (cell, dirs_used bitmask, entry face). dirs_used only gains bits
     // along a path and no-backtrack caps it at one direction per axis, so at
@@ -284,60 +505,18 @@ pub fn cull_chunks(
     // different entry faces, and the sets of exits the mask allows for those
     // entries differ — deduping them against each other would under-visit
     // (= holes in the world).
-    scratch.clear();
-    let scratch = &mut *scratch;
-    scratch.visited.insert((camera_cell, 0, NO_ENTRY));
-    scratch.queue.push_back((camera_cell, 0, NO_ENTRY));
-    while let Some((cell, dirs, entry)) = scratch.queue.pop_front() {
-        scratch.reached.insert(cell);
-        // Grid-absent cells and chunks not yet carrying a mask: fully open.
-        let mask = grid
-            .0
-            .get(&cell)
-            .and_then(|&e| masks.get(e).ok())
-            .map(|c| c.0);
-        for d in 0..6u8 {
-            // No-backtrack: never step opposite to a direction already used.
-            if dirs & (1 << (d ^ 1)) != 0 {
-                continue;
-            }
-            // Connectivity: the cell's own air must connect entry → exit face.
-            // The start cell (no entry face) exits freely in every direction.
-            if let Some(mask) = mask {
-                // entry == d would make pair_bit's a<b debug_assert trip, but
-                // it's unreachable: entering via `entry` put `entry^1 == d^1`
-                // in dirs, and the no-backtrack check above already skipped d.
-                debug_assert!(entry == NO_ENTRY || entry != d as u8);
-                if entry != NO_ENTRY && mask & pair_bit(entry as u32, d as u32) == 0 {
-                    continue;
-                }
-            }
-            let step = DIR_STEPS[d as usize];
-            let neighbor = [cell[0] + step[0], cell[1] + step[1], cell[2] + step[2]];
-            if !in_domain(neighbor) {
-                continue;
-            }
-            // Frustum: reject neighbors fully outside the camera's view. No
-            // Frustum component (headless) ⇒ everything counts as inside.
-            if let Some(frustum) = frustum {
-                let center = Vec3::new(
-                    neighbor[0] as f32 * 32.0 + 16.0,
-                    neighbor[1] as f32 * 32.0 + 16.0,
-                    neighbor[2] as f32 * 32.0 + 16.0,
-                );
-                let sphere = Sphere {
-                    center: center.into(),
-                    radius: 16.0 * 3f32.sqrt(),
-                };
-                if !frustum.intersects_sphere(&sphere, false) {
-                    continue;
-                }
-            }
-            let node = (neighbor, dirs | (1 << d), d ^ 1);
-            if scratch.visited.insert(node) {
-                scratch.queue.push_back(node);
-            }
-        }
+    scratch.flood(
+        lo,
+        hi,
+        camera_cell,
+        frustum,
+        grid.0
+            .iter()
+            .filter_map(|(key, &entity)| masks.get(entity).ok().map(|mask| (*key, mask.0))),
+    );
+    scratch.last = Some(inputs);
+    if let Some(stats) = stats.as_deref_mut() {
+        stats.runs += 1;
     }
 
     // Apply, writing only on change (like `dedupe_ghosts`) to avoid
@@ -346,7 +525,7 @@ pub fn cull_chunks(
         let Ok(mut vis) = chunks.get_mut(entity) else {
             continue;
         };
-        let want = if scratch.reached.contains(key) {
+        let want = if scratch.is_reached(*key) {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -355,6 +534,11 @@ pub fn cull_chunks(
             *vis = want;
         }
     }
+}
+
+/// The frustum as plain numbers, for the change gate (`Frustum` has no `PartialEq`).
+fn frustum_planes(frustum: &Frustum) -> [[f32; 4]; 6] {
+    std::array::from_fn(|i| frustum.half_spaces[i].normal_d().to_array())
 }
 
 /// Registers `cull_chunks` at its one correct slot: `PostUpdate`, after
@@ -367,7 +551,7 @@ pub fn cull_chunks(
 /// headless pipeline tests so the schedules cannot drift apart.
 pub fn cull_plugin(app: &mut App) {
     use bevy::camera::visibility::VisibilitySystems;
-    app.add_systems(
+    app.init_resource::<CullingStats>().add_systems(
         PostUpdate,
         cull_chunks
             .after(VisibilitySystems::UpdateFrusta)
@@ -414,6 +598,7 @@ pub fn enable_native_occlusion(
 mod tests {
     use super::super::binary::Face;
     use super::*;
+    use std::collections::HashSet;
     use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
 
     fn interior(cells: &[[usize; 3]]) -> PaddedVoxels {
@@ -514,22 +699,193 @@ mod tests {
     use super::super::queue::MeshBudgets;
     use crate::renderer::bridge::VoxelData;
 
+    /// The pre-2026-09-19 flood, verbatim in structure: `HashSet`s keyed by
+    /// `(cell, dirs, entry)`, a grid lookup per popped node, a frustum test per
+    /// step. Kept as the behavioural reference for the dense rewrite.
+    fn reference_reached(
+        lo: [i32; 3],
+        hi: [i32; 3],
+        camera_cell: [i32; 3],
+        frustum: Option<&Frustum>,
+        masks: &std::collections::BTreeMap<[i32; 3], u16>,
+    ) -> HashSet<[i32; 3]> {
+        let in_domain = |cell: [i32; 3]| {
+            (0..3).all(|axis| {
+                cell[axis] >= lo[axis]
+                    && cell[axis] <= hi[axis]
+                    && (cell[axis] - camera_cell[axis]).abs() <= CULL_BFS_MAX_CHEBYSHEV
+            })
+        };
+        let mut reached = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        visited.insert((camera_cell, 0u8, NO_ENTRY));
+        queue.push_back((camera_cell, 0u8, NO_ENTRY));
+        while let Some((cell, dirs, entry)) = queue.pop_front() {
+            reached.insert(cell);
+            let mask = masks.get(&cell).copied();
+            for d in 0..6u8 {
+                if dirs & (1 << (d ^ 1)) != 0 {
+                    continue;
+                }
+                if let Some(mask) = mask {
+                    if entry != NO_ENTRY && mask & pair_bit(entry as u32, d as u32) == 0 {
+                        continue;
+                    }
+                }
+                let step = DIR_STEPS[d as usize];
+                let neighbor = [cell[0] + step[0], cell[1] + step[1], cell[2] + step[2]];
+                if !in_domain(neighbor) {
+                    continue;
+                }
+                if let Some(frustum) = frustum {
+                    let center = Vec3::new(
+                        neighbor[0] as f32 * 32.0 + 16.0,
+                        neighbor[1] as f32 * 32.0 + 16.0,
+                        neighbor[2] as f32 * 32.0 + 16.0,
+                    );
+                    let sphere = Sphere { center: center.into(), radius: 16.0 * 3f32.sqrt() };
+                    if !frustum.intersects_sphere(&sphere, false) {
+                        continue;
+                    }
+                }
+                let node = (neighbor, dirs | (1 << d), d ^ 1);
+                if visited.insert(node) {
+                    queue.push_back(node);
+                }
+            }
+        }
+        reached
+    }
+
     #[test]
-    fn culling_scratch_clear_reuses_capacity_without_stale_state() {
+    fn state_bits_are_distinct_for_every_legal_bfs_state() {
+        let mut seen = HashSet::new();
+        assert!(seen.insert(state_bit(0, NO_ENTRY)));
+        for dirs in 1u8..64 {
+            // Legal `dirs`: never both directions of one axis.
+            if (0..3).any(|axis| (dirs >> (2 * axis)) & 3 == 3) {
+                continue;
+            }
+            for d in 0..6u8 {
+                // The entry face is the opposite of a direction that was used.
+                if dirs & (1 << d) == 0 {
+                    continue;
+                }
+                let bit = state_bit(dirs, d ^ 1);
+                assert_eq!(bit.count_ones(), 1);
+                assert!(seen.insert(bit), "dirs={dirs:#08b} entry={} collides", d ^ 1);
+            }
+        }
+        // 1 start + 6*1 + 12*2 + 8*3 states.
+        assert_eq!(seen.len(), 55);
+    }
+
+    /// The dense flood must reach EXACTLY the cells the reference reaches: one
+    /// cell fewer is a hole in the world, one more is lost culling.
+    #[test]
+    fn dense_flood_reaches_exactly_what_the_reference_bfs_reaches() {
+        // Small deterministic generator — no `rand` dependency in this crate.
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |modulus: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % modulus
+        };
         let mut scratch = CullingScratch::default();
-        scratch.reached.insert([1, 2, 3]);
-        scratch.visited.insert(([1, 2, 3], 1, 2));
-        scratch.queue.push_back(([1, 2, 3], 1, 2));
-        let reached_capacity = scratch.reached.capacity();
-        let visited_capacity = scratch.visited.capacity();
+        for round in 0..60 {
+            let size = [3 + next(9) as i32, 2 + next(5) as i32, 3 + next(9) as i32];
+            let origin = [next(40) as i32 - 20, next(10) as i32 - 5, next(40) as i32 - 20];
+            let mut masks = std::collections::BTreeMap::new();
+            let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+            for x in 0..size[0] {
+                for y in 0..size[1] {
+                    for z in 0..size[2] {
+                        // ~1/6 of the box has no chunk at all.
+                        if next(6) == 0 {
+                            continue;
+                        }
+                        let cell = [origin[0] + x, origin[1] + y, origin[2] + z];
+                        for axis in 0..3 {
+                            lo[axis] = lo[axis].min(cell[axis]);
+                            hi[axis] = hi[axis].max(cell[axis]);
+                        }
+                        // Mix of solid (0), open, random masks, and mask-less chunks.
+                        match next(5) {
+                            0 => {
+                                masks.insert(cell, 0u16);
+                            }
+                            1 => {
+                                masks.insert(cell, ALL_CONNECTED);
+                            }
+                            2 => {} // chunk present but not meshed yet: no mask
+                            _ => {
+                                masks.insert(cell, next(0x8000) as u16);
+                            }
+                        }
+                    }
+                }
+            }
+            if lo[0] == i32::MAX {
+                continue;
+            }
+            for axis in 0..3 {
+                lo[axis] -= 1;
+                hi[axis] += 1;
+            }
+            let camera_cell = [
+                lo[0] + next((hi[0] - lo[0] + 1) as u64) as i32,
+                lo[1] + next((hi[1] - lo[1] + 1) as u64) as i32,
+                lo[2] + next((hi[2] - lo[2] + 1) as u64) as i32,
+            ];
+            // Every other round is frustum-gated, looking along a random axis.
+            let frustum = (round % 2 == 0).then(|| {
+                let eye = Vec3::new(
+                    camera_cell[0] as f32 * 32.0 + 16.0,
+                    camera_cell[1] as f32 * 32.0 + 16.0,
+                    camera_cell[2] as f32 * 32.0 + 16.0,
+                );
+                let forward = [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z, Vec3::new(1.0, -0.4, 0.3)]
+                    [next(5) as usize];
+                let view = Transform::from_translation(eye).looking_to(forward, Vec3::Y);
+                let projection = Mat4::perspective_infinite_reverse_rh(1.0, 16.0 / 9.0, 0.1);
+                Frustum::from_clip_from_world(&(projection * view.to_matrix().inverse()))
+            });
 
-        scratch.clear();
+            let expected = reference_reached(lo, hi, camera_cell, frustum.as_ref(), &masks);
+            scratch.flood(lo, hi, camera_cell, frustum.as_ref(), masks.iter().map(|(k, v)| (*k, *v)));
+            for x in lo[0] - 1..=hi[0] + 1 {
+                for y in lo[1] - 1..=hi[1] + 1 {
+                    for z in lo[2] - 1..=hi[2] + 1 {
+                        let cell = [x, y, z];
+                        assert_eq!(
+                            scratch.is_reached(cell),
+                            expected.contains(&cell),
+                            "round {round}: cell {cell:?}, camera {camera_cell:?}, gated {}",
+                            frustum.is_some()
+                        );
+                    }
+                }
+            }
+        }
+    }
 
-        assert!(scratch.reached.is_empty());
-        assert!(scratch.visited.is_empty());
-        assert!(scratch.queue.is_empty());
-        assert!(scratch.reached.capacity() >= reached_capacity);
-        assert!(scratch.visited.capacity() >= visited_capacity);
+    /// The Chebyshev bound must clip the dense box exactly as `in_domain` did.
+    #[test]
+    fn dense_flood_respects_the_chebyshev_bound() {
+        let mut masks = std::collections::BTreeMap::new();
+        let far = CULL_BFS_MAX_CHEBYSHEV + 40;
+        masks.insert([0, 0, 0], ALL_CONNECTED);
+        masks.insert([far, 0, 0], ALL_CONNECTED);
+        let (lo, hi) = ([-1, -1, -1], [far + 1, 1, 1]);
+        let mut scratch = CullingScratch::default();
+        scratch.flood(lo, hi, [0, 0, 0], None, masks.iter().map(|(k, v)| (*k, *v)));
+        let expected = reference_reached(lo, hi, [0, 0, 0], None, &masks);
+        assert!(scratch.is_reached([CULL_BFS_MAX_CHEBYSHEV, 0, 0]));
+        assert!(!scratch.is_reached([CULL_BFS_MAX_CHEBYSHEV + 1, 0, 0]));
+        assert!(!scratch.is_reached([far, 0, 0]));
+        assert_eq!(expected.contains(&[far, 0, 0]), scratch.is_reached([far, 0, 0]));
     }
 
     fn spawn_camera(app: &mut App, pos: Vec3) -> Entity {
@@ -638,6 +994,66 @@ mod tests {
         assert!(
             wait_until(&mut app, |app| vis(app, behind) == Visibility::Inherited),
             "carving a tunnel must remesh the wall and reveal the room behind it"
+        );
+    }
+
+    /// The change gate: a settled world and a still camera must not re-run the
+    /// flood, and every input it depends on must wake it up again.
+    #[test]
+    fn flood_is_skipped_until_camera_masks_or_grid_change() {
+        let mut app = pipeline_app(MeshBudgets::default());
+        let (wall, behind) = wall_scene(&mut app);
+        assert!(wait_until(&mut app, |app| vis(app, behind) == Visibility::Hidden));
+        assert!(wait_until_settled(&mut app));
+        // A few more frames so every change-detection window has passed.
+        for _ in 0..3 {
+            app.update();
+        }
+        let stats = |app: &App| *app.world().resource::<CullingStats>();
+
+        let before = stats(&app);
+        for _ in 0..5 {
+            app.update();
+        }
+        let idle = stats(&app);
+        assert_eq!(idle.runs, before.runs, "nothing changed: the flood must not re-run");
+        assert_eq!(idle.skipped, before.skipped + 5);
+        assert_eq!(vis(&app, behind), Visibility::Hidden, "a skipped frame keeps the result");
+
+        // Moving WITHIN the camera's cell changes nothing the flood depends on
+        // (no Frustum component in this harness); crossing into another cell does.
+        let camera = app
+            .world_mut()
+            .query_filtered::<Entity, With<Camera3d>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(GlobalTransform::from(Transform::from_xyz(9.0, 9.0, 9.0)));
+        app.update();
+        assert_eq!(stats(&app).runs, idle.runs, "same cell: still skipped");
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(GlobalTransform::from(Transform::from_xyz(8.0, 40.0, 8.0)));
+        app.update();
+        assert_eq!(stats(&app).runs, idle.runs + 1, "new camera cell: re-run");
+
+        // A connectivity change (edit -> remesh -> new mask) must re-run it too.
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(GlobalTransform::from(Transform::from_xyz(8.0, 8.0, 8.0)));
+        assert!(wait_until(&mut app, |app| vis(app, behind) == Visibility::Hidden));
+        {
+            let mut voxels = app.world_mut().get_mut::<VoxelData>(wall).unwrap();
+            voxels.edit(|v| {
+                for x in 0..32 {
+                    v[x + 32 * 5 + 32 * 32 * 5] = Voxel::default();
+                }
+            });
+        }
+        assert!(
+            wait_until(&mut app, |app| vis(app, behind) == Visibility::Inherited),
+            "a mask change must wake the gated flood"
         );
     }
 
