@@ -684,6 +684,7 @@ struct BenchmarkScene<'w, 's> {
     in_flight_lod: Query<'w, 's, (), With<LodMeshTask>>,
     in_flight_bricks: Query<'w, 's, (), With<FarBrickBuildTask>>,
     in_flight_far_uploads: Query<'w, 's, (), With<FarVoxelUploadPending>>,
+    pending_snapshot_voxels: Query<'w, 's, (), With<super::bridge::PendingSnapshotVoxels>>,
     chunks: Query<'w, 's, Option<&'static TerrainQuadCount>, With<ChunkKey>>,
     far_cells: Query<
         'w,
@@ -830,7 +831,10 @@ fn run_benchmark(
         in_flight_tasks: scene.in_flight_near.iter().count()
             + scene.in_flight_lod.iter().count()
             + scene.in_flight_bricks.iter().count()
-            + scene.in_flight_far_uploads.iter().count(),
+            + scene.in_flight_far_uploads.iter().count()
+            // Region chunks whose snapshot voxels are still being derived
+            // off-thread: not queued for meshing yet, but not loaded either.
+            + scene.pending_snapshot_voxels.iter().count(),
         far_residency_pending: scene
             .far_residency
             .as_deref()

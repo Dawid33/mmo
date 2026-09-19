@@ -62,6 +62,7 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<bridge::Regions>()
         .init_resource::<bridge::RegionRoots>()
         .init_resource::<bridge::SimEntityMap>()
+        .init_resource::<bridge::SnapshotVoxelQueue>()
         .init_resource::<hud::HudStatus>()
         .init_resource::<avatar::AvatarAssets>()
         .init_resource::<ui_bridge::UiUpdates>()
@@ -88,6 +89,7 @@ impl Plugin for SimBridgePlugin {
                 (
                     bridge::drain_client_updates,
                     bridge::drain_region_updates,
+                    bridge::apply_snapshot_voxels,
                     bridge::dedupe_ghosts,
                     bridge::enforce_single_active_camera,
                     ui_bridge::drain_ui_updates,

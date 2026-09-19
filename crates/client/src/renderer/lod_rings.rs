@@ -91,13 +91,36 @@ impl Default for LodRings {
     }
 }
 
+/// Decoded LOD cells `apply_lod_events` may spawn per frame before deferring
+/// the remaining messages: about one factor-2 region payload, ~100 ms worst
+/// case. The real fix is to keep cells packed and decode in the LOD mesh task;
+/// this only stops several payloads from stacking into one frame.
+pub const LOD_APPLY_CELLS_PER_FRAME: usize = 512;
+
 /// Drain `LodRings.pending`: spawn a root per `Data` payload (decoding the
 /// RLE grids; undecodable cells drop with a warning — wire data is
 /// untrusted), retire the old root on re-receipt, and move `Remove`d keys'
 /// roots to the retirement list.
 pub fn apply_lod_events(mut commands: Commands, mut rings: ResMut<LodRings>) {
-    let pending = std::mem::take(&mut rings.pending);
-    // Unbudgeted: every LOD payload received this frame is decoded here.
+    let mut pending = std::mem::take(&mut rings.pending);
+    // Budgeted by decoded cells: `spawn_lod_root` expands every cell of a
+    // payload to a dense 32^3 grid on this thread (~0.2 ms per cell, a
+    // factor-2 region is ~480 cells). Unbudgeted, a burst of payloads was one
+    // 0.7-0.9 s frame (2026-09-19 captures). Messages stay in arrival order;
+    // whatever exceeds the budget waits in `pending` for the next frame, and
+    // at least one message always makes progress.
+    let mut cells = 0usize;
+    let take = pending
+        .iter()
+        .position(|msg| {
+            let over = cells >= LOD_APPLY_CELLS_PER_FRAME;
+            if let LodEventMsg::Data(_, payload) = msg {
+                cells += payload.len();
+            }
+            over
+        })
+        .unwrap_or(pending.len());
+    rings.pending = pending.split_off(take);
     let mut stall = game::perf::StallGuard::new("apply_lod_events");
     stall.add_work(pending.len() as u32);
     for msg in pending {
@@ -366,6 +389,34 @@ mod tests {
 
     fn solid_payload(group: [i32; 3]) -> LodPayload {
         vec![(group, PackedLodGrid::encode(&one_solid_grid()))]
+    }
+
+    /// A burst of payloads must not stack into one frame: the cell budget
+    /// defers the excess, in arrival order, and every key still gets its root.
+    #[test]
+    fn a_payload_burst_is_spread_over_frames_in_arrival_order() {
+        let mut app = rings_app();
+        let packed = PackedLodGrid::encode(&one_solid_grid());
+        let big: LodPayload = (0..LOD_APPLY_CELLS_PER_FRAME as i32)
+            .map(|x| ([x, 0, 0], packed.clone()))
+            .collect();
+        let keys: Vec<LodKey> = (0..3).map(|x| LodKey::for_region(2, game::RegionCoords::new(10 + x, 0))).collect();
+        for key in &keys {
+            push_event(&mut app, LodEventMsg::Data(*key, big.clone()));
+        }
+
+        app.update();
+        assert!(slot_root(&app, keys[0]).is_some(), "the first payload always makes progress");
+        assert!(slot_root(&app, keys[1]).is_none(), "a full budget defers the rest");
+        assert_eq!(app.world().resource::<LodRings>().pending.len(), 2);
+
+        app.update();
+        assert!(slot_root(&app, keys[1]).is_some(), "deferred payloads keep arrival order");
+        assert!(slot_root(&app, keys[2]).is_none());
+
+        app.update();
+        assert!(slot_root(&app, keys[2]).is_some());
+        assert!(app.world().resource::<LodRings>().pending.is_empty());
     }
 
     /// An (empty) mesh handle — `retire_lod_roots` only checks `Mesh3d`

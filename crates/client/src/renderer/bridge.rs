@@ -1,6 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use bevy::prelude::*;
+use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use crossbeam::channel::Receiver;
 use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, RegionId};
@@ -164,6 +166,77 @@ pub struct SimKind(pub game::EntityKind);
 #[derive(Component, Clone, Copy)]
 pub struct GhostSource(pub RegionId);
 
+/// Chunks derived per snapshot-voxel task. A region is ~2800 chunks at
+/// ~0.3 ms each, so a batch is ~20 ms of worker time: small enough that the
+/// first terrain shows up quickly and (on wasm, where tasks run on the main
+/// thread) that no single task is a long hitch.
+pub const SNAPSHOT_VOXEL_TASK_CHUNKS: usize = 64;
+
+/// Derived snapshot voxels handed to chunk entities per frame. Each insert
+/// makes `mark_remesh_dirty` fingerprint that chunk (~0.15 ms), so this is the
+/// main-thread budget of a joining region: 64 ≈ 10 ms per frame, and still
+/// twice the mesher's upload budget, so it never starves meshing.
+pub const SNAPSHOT_VOXELS_PER_FRAME: usize = 64;
+
+/// A chunk entity spawned from a region snapshot whose `VoxelData` is still
+/// being derived off-thread. Removed when the voxels land — or when an
+/// incremental `SetVoxelComponent` gets there first, which then wins: the
+/// late snapshot result is older and must not overwrite it.
+#[derive(Component)]
+pub struct PendingSnapshotVoxels;
+
+/// One batch of snapshot-voxel derivation. Child of the region root, so
+/// removing (or replacing) the region despawns — and thereby cancels — it.
+#[derive(Component)]
+pub struct SnapshotVoxelTask(Task<Vec<(Entity, VoxelData)>>);
+
+/// Derived voxels waiting for their per-frame insert budget.
+#[derive(Resource, Default)]
+pub struct SnapshotVoxelQueue {
+    ready: VecDeque<(Entity, VoxelData)>,
+    /// Inserted since the queue was last empty (for the `[perf]` line).
+    applied: u32,
+}
+
+/// Collect finished snapshot-voxel batches and insert up to
+/// [`SNAPSHOT_VOXELS_PER_FRAME`] of them. Spawning a region used to derive and
+/// RLE-encode every chunk inside `drain_client_updates`: one 0.5-2 s frame per
+/// region, 8.9 s for the production 3x3 join (2026-09-19 capture).
+pub fn apply_snapshot_voxels(
+    mut commands: Commands,
+    mut tasks: Query<(Entity, &mut SnapshotVoxelTask)>,
+    pending: Query<(), With<PendingSnapshotVoxels>>,
+    mut queue: ResMut<SnapshotVoxelQueue>,
+) {
+    for (task_entity, mut task) in &mut tasks {
+        if let Some(batch) = block_on(future::poll_once(&mut task.0)) {
+            queue.ready.extend(batch);
+            commands.entity(task_entity).despawn();
+        }
+    }
+    let mut budget = SNAPSHOT_VOXELS_PER_FRAME;
+    while budget > 0 {
+        let Some((entity, voxels)) = queue.ready.pop_front() else {
+            break;
+        };
+        // No marker: the entity is gone (region removed/replaced) or an
+        // incremental update already wrote newer voxels. Costs no budget.
+        if !pending.contains(entity) {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .insert(voxels)
+            .remove::<PendingSnapshotVoxels>();
+        queue.applied += 1;
+        budget -= 1;
+    }
+    if queue.applied > 0 && queue.ready.is_empty() && tasks.is_empty() {
+        game::perf_event!("snapshot_voxels_applied", "chunks={}", queue.applied);
+        queue.applied = 0;
+    }
+}
+
 pub fn drain_client_updates(
     mut commands: Commands,
     updates: Res<ClientUpdates>,
@@ -197,9 +270,11 @@ pub fn drain_client_updates(
                 roots.0.insert(id, root);
                 regions.0.insert(id, receiver);
                 let spawn = game::perf::Stopwatch::start();
+                let data = Arc::new(data);
                 spawn_region_snapshot(&mut commands, root, id, &data, &mut map, player.0);
-                // Main-thread cost of one region: an entity per sim entity and a
-                // `derive_voxels` per chunk, all inside this frame.
+                // Main-thread cost of one region: an entity per sim entity.
+                // The per-chunk voxel derivation runs off-thread (see
+                // `apply_snapshot_voxels`).
                 game::perf_event!(
                     "bridge_region_spawned",
                     "region={},{} spawn_ms={} entities={} chunks={} regions={}",
@@ -263,10 +338,11 @@ fn spawn_region_snapshot(
     commands: &mut Commands,
     root: Entity,
     region: RegionId,
-    data: &GameData,
+    data: &Arc<GameData>,
     map: &mut SimEntityMap,
     local_player: Option<game::ClientId>,
 ) {
+    let mut chunk_entities: Vec<(Entity, EntityKey)> = Vec::new();
     // Every player in the snapshot has a sim camera, but only the local
     // player's may become this window's active Camera3d.
     let local_camera_key = local_player.and_then(|id| data.player_entites.get(&id).copied());
@@ -283,8 +359,9 @@ fn spawn_region_snapshot(
                 e.insert((tf, SimTarget::body(tf.translation, tf.rotation)));
             }
         }
-        if let Some(chunk) = data.ecs.chunk.try_get(key) {
-            e.insert(VoxelData::new(game::derive_voxels(&chunk.blocks, &chunk.chisel)));
+        if data.ecs.chunk.try_get(key).is_some() {
+            e.insert(PendingSnapshotVoxels);
+            chunk_entities.push((e.id(), key));
         }
         if let Some(cam) = data.ecs.camera.try_get(key) {
             if Some(key) == local_camera_key {
@@ -308,6 +385,25 @@ fn spawn_region_snapshot(
             e.insert(SimKind(kind));
         }
         map.0.insert((region, key), e.id());
+    }
+
+    // Derive + RLE-encode the chunks' voxels off the main thread, in batches
+    // that share the snapshot through the `Arc` (no per-chunk clone).
+    let pool = AsyncComputeTaskPool::get();
+    for batch in chunk_entities.chunks(SNAPSHOT_VOXEL_TASK_CHUNKS) {
+        let batch = batch.to_vec();
+        let data = Arc::clone(data);
+        let task = pool.spawn(async move {
+            batch
+                .into_iter()
+                .filter_map(|(entity, key)| {
+                    let chunk = data.ecs.chunk.try_get(key).as_ref()?;
+                    let voxels = game::derive_voxels(&chunk.blocks, &chunk.chisel);
+                    Some((entity, VoxelData::new(voxels)))
+                })
+                .collect()
+        });
+        commands.spawn((SnapshotVoxelTask(task), ChildOf(root)));
     }
 }
 
@@ -361,14 +457,20 @@ pub fn drain_region_updates(
                 }
                 GameDataUpdateKind::SetVoxelComponent(key, Some(voxels)) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
-                        commands.entity(e).insert(VoxelData::new(voxels));
+                        // Newer than any snapshot voxels still in flight.
+                        commands
+                            .entity(e)
+                            .insert(VoxelData::new(voxels))
+                            .remove::<PendingSnapshotVoxels>();
                     } else {
                         warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }
                 }
                 GameDataUpdateKind::SetVoxelComponent(key, None) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
-                        commands.entity(e).remove::<VoxelData>();
+                        commands
+                            .entity(e)
+                            .remove::<(VoxelData, PendingSnapshotVoxels)>();
                     } else {
                         warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }
@@ -559,7 +661,11 @@ mod tests {
             .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<lod_rings::LodRings>()
-            .add_systems(PreUpdate, (drain_client_updates, drain_region_updates).chain());
+            .init_resource::<SnapshotVoxelQueue>()
+            .add_systems(
+                PreUpdate,
+                (drain_client_updates, drain_region_updates, apply_snapshot_voxels).chain(),
+            );
         (app, client_send)
     }
 
@@ -728,6 +834,89 @@ mod tests {
         let e1 = *map.0.get(&(region_id, k1)).unwrap();
         assert!(app.world().entity(e0).contains::<SimKind>());
         assert!(app.world().entity(e1).contains::<SimKind>());
+    }
+
+    /// A snapshot with one terrain chunk; returns the chunk's sim key and the
+    /// voxels its `VoxelData` must eventually hold.
+    fn chunk_snapshot() -> (game::GameData, EntityKey, VoxelData) {
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        let chunk = game::Chunk::flat_floor(8);
+        let expected = VoxelData::new(game::derive_voxels(&chunk.blocks, &chunk.chisel));
+        let key = rb.create_mesh(game::ChunkCoords::new(0, 0, 0), chunk);
+        ((*rb.data).clone(), key, expected)
+    }
+
+    fn wait_for(app: &mut App, mut done: impl FnMut(&App) -> bool) -> bool {
+        for _ in 0..500 {
+            app.update();
+            if done(app) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        false
+    }
+
+    /// Voxel derivation left `drain_client_updates` (it was a 0.5-2 s frame per
+    /// region): the chunk entity exists at once, flagged pending, and its
+    /// voxels land a few frames later from the task pool.
+    #[test]
+    fn snapshot_chunk_voxels_arrive_off_thread_and_clear_the_marker() {
+        let (mut app, client) = app_shell();
+        let (_update_send, update_recv) = crossbeam::channel::unbounded();
+        let (data, key, expected) = chunk_snapshot();
+        let region_id = RegionCoords::new(0, 0);
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        app.update();
+
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, key)).expect("chunk mapped");
+        assert!(
+            wait_for(&mut app, |app| app.world().entity(e).contains::<VoxelData>()),
+            "snapshot voxels never arrived"
+        );
+        assert_eq!(app.world().entity(e).get::<VoxelData>(), Some(&expected));
+        assert!(!app.world().entity(e).contains::<PendingSnapshotVoxels>());
+        let mut tasks = app.world_mut().query::<&SnapshotVoxelTask>();
+        assert_eq!(tasks.iter(app.world()).count(), 0, "finished task entities are despawned");
+    }
+
+    /// An edit that reaches the bridge before the derived snapshot voxels do is
+    /// NEWER than them; the late result must be dropped, not applied on top.
+    #[test]
+    fn incremental_voxel_update_beats_the_late_snapshot_result() {
+        let (mut app, client) = app_shell();
+        let (update_send, update_recv) = crossbeam::channel::unbounded();
+        let (data, key, snapshot_voxels) = chunk_snapshot();
+        let region_id = RegionCoords::new(0, 0);
+        let edited = vec![Voxel::new(game::BlockId(9)); game::CHUNK_VOXEL_COUNT];
+        assert_ne!(VoxelData::new(&edited), snapshot_voxels);
+        // Same frame as the snapshot: independent of how fast the task runs.
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        update_send
+            .send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetVoxelComponent(key, Some(edited.clone())),
+            ))
+            .unwrap();
+        app.update();
+
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, key)).expect("chunk mapped");
+        // Let the task finish and the queue drain, then look at what survived.
+        let mut drained = false;
+        for _ in 0..500 {
+            app.update();
+            let mut tasks = app.world_mut().query::<&SnapshotVoxelTask>();
+            if tasks.iter(app.world()).count() == 0 {
+                drained = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(drained, "the snapshot voxel task never finished");
+        app.update(); // one more frame: anything it queued has been applied or dropped
+        assert!(!app.world().entity(e).contains::<PendingSnapshotVoxels>());
+        assert_eq!(app.world().entity(e).get::<VoxelData>(), Some(&VoxelData::new(&edited)));
     }
 
     #[test]

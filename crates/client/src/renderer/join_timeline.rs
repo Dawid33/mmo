@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::*;
 
-use super::bridge::RegionRoots;
+use super::bridge::{PendingSnapshotVoxels, RegionRoots};
 use super::far_voxel::lifecycle::FarVoxelUploadPending;
 use super::far_voxel::FarBrickBuildTask;
 use super::hud::HudStatus;
@@ -96,6 +96,7 @@ pub fn track_join_timeline(
     in_flight_bricks: Query<(), With<FarBrickBuildTask>>,
     in_flight_far_uploads: Query<(), With<FarVoxelUploadPending>>,
     meshed_chunks: Query<(), (With<ChunkKey>, With<TerrainQuadCount>)>,
+    pending_snapshot_voxels: Query<(), With<PendingSnapshotVoxels>>,
     lod_cells: Query<(
         &LodChunk,
         &ChildOf,
@@ -135,7 +136,10 @@ pub fn track_join_timeline(
         }
     }
 
-    let in_flight_near_tasks = in_flight_near.iter().count();
+    // Chunks still waiting for their off-thread snapshot voxels are not in the
+    // remesh queue yet, but they are very much unfinished near-mesh work.
+    let in_flight_near_tasks =
+        in_flight_near.iter().count() + pending_snapshot_voxels.iter().count();
     let depths = LoadDepths {
         near_regions: roots.0.len(),
         required_near_regions: scale.near_region_count(),
