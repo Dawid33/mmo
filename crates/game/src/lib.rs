@@ -20,6 +20,7 @@ pub mod debug_render;
 pub mod input;
 pub mod lod;
 pub mod lod_builder;
+pub mod perf;
 mod physics;
 pub mod protocol;
 mod region;

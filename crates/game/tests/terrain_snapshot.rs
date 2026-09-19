@@ -55,3 +55,40 @@ fn from_columns_materializes_same_chunks_as_region() {
     let from_region = Region::from_chunks(RegionCoords::new(0, 0), flat_chunks()).terrain_snapshot();
     assert_eq!(from_cols.terrain_hash(), from_region.terrain_hash());
 }
+
+/// The in-place fingerprint is what the region thread polls every
+/// `TERRAIN_HASH_INTERVAL_TICKS`; it must detect exactly what
+/// `terrain_snapshot().terrain_hash()` detects, without building a snapshot.
+#[test]
+fn terrain_fingerprint_is_stable_content_sensitive_and_order_insensitive() {
+    let id = RegionCoords::new(0, 0);
+    let a = Region::from_chunks(id, flat_chunks());
+    let b = Region::from_chunks(id, flat_chunks());
+    assert_eq!(a.terrain_fingerprint(), b.terrain_fingerprint());
+
+    // ECS insertion order must not matter (the snapshot sorts for the same reason).
+    let mut reversed = flat_chunks();
+    reversed.reverse();
+    let c = Region::from_chunks(id, reversed);
+    assert_eq!(a.terrain_fingerprint(), c.terrain_fingerprint());
+
+    let taller: Vec<(ChunkCoords, Chunk)> = (0..2)
+        .flat_map(|x| (0..2).map(move |z| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(12))))
+        .collect();
+    let d = Region::from_chunks(id, taller);
+    assert_ne!(a.terrain_fingerprint(), d.terrain_fingerprint());
+
+    // Same content at a different coordinate is different terrain.
+    let mut moved = flat_chunks();
+    moved[0].0 = ChunkCoords::new(5, 0, 5);
+    let e = Region::from_chunks(id, moved);
+    assert_ne!(a.terrain_fingerprint(), e.terrain_fingerprint());
+}
+
+#[test]
+fn terrain_fingerprint_changes_when_a_chunk_is_added() {
+    let mut region = Region::from_chunks(RegionCoords::new(0, 0), flat_chunks());
+    let before = region.terrain_fingerprint();
+    region.create_basic(ChunkCoords::new(0, 1, 0));
+    assert_ne!(before, region.terrain_fingerprint());
+}

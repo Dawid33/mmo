@@ -60,6 +60,7 @@ pub async fn serve(
                 Err(e) => return warn!("webtransport session failed: {e:?}"),
             };
             info!("webtransport client {id} connected");
+            game::perf_event!("client_connected", "client={id} transport=webtransport");
             sinks.insert(id, ClientSink::Web(session.clone()));
             // Announce before reading any packets, mirroring the quinn path:
             // guarantees the player exists before its first request is served.

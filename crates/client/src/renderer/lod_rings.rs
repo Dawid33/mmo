@@ -97,6 +97,9 @@ impl Default for LodRings {
 /// roots to the retirement list.
 pub fn apply_lod_events(mut commands: Commands, mut rings: ResMut<LodRings>) {
     let pending = std::mem::take(&mut rings.pending);
+    // Unbudgeted: every LOD payload received this frame is decoded here.
+    let mut stall = game::perf::StallGuard::new("apply_lod_events");
+    stall.add_work(pending.len() as u32);
     for msg in pending {
         match msg {
             LodEventMsg::Data(key, payload) => {

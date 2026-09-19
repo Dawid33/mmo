@@ -91,6 +91,27 @@ Vulkan devices (Intel iGPU, an NVIDIA T600 on the NVK driver, the RX 6700 XT, an
 
 Text-emitting (readable in a terminal, pasteable into a bug report or an LLM session):
 
+- `just perf-capture` — **the capture to hand to an analysis session.** Release server + one
+  client, everything in one self-describing directory
+  `target/perf-capture/<utc>-<adapter>-<world>/`: `summary.txt` (read first), `manifest.json`
+  (git rev + dirty, profile, adapter asked for *and* selected, world scale, env knobs, host),
+  both full logs, `rss.csv` (1 Hz RSS/threads/CPU), `gpu.csv` (1 Hz, no root: the client's own
+  GPU engine time + GPU memory from DRM fdinfo — works on i915 and amdgpu, not NVK — plus sysfs
+  whole-GPU counters) and `diag.txt` (the `diag` verdict + a per-dump timeline). It sets
+  `DIAG=1` and `PERF_LOG=1`. `PERF_CAPTURE_SECONDS=90` closes the client by itself;
+  `scripts/perf_capture_report.py <dir>` re-summarises an old capture.
+- **The `[perf]` join timeline** (`crates/game/src/perf.rs`) is always on, in every log:
+  `[perf] event=<name> t_ms=<ms since process start> key=value …` on both sides (client:
+  `endpoint_up`, `connected`, `player_region`, `snapshot_received`, `region_loaded`,
+  `bridge_region_spawned`, `first_update`, `first_near_mesh`, `near_meshing_drained`,
+  `lod_requests_done`, `lod_all_received`, `connection_ready`, `load_progress` every 2 s until
+  `world_ready`, and `main_stall` for any >8 ms call of the unbudgeted bridge systems; server:
+  `client_connected`, `region_generate`, `region_genesis`, `snapshot_sent`). Volume is part of
+  the contract — per process / region / batch, never per chunk, LOD key or frame; high-rate work
+  goes into the periodic `[server]` counters line (`crates/server/src/perf.rs`: manager-thread
+  worldgen, LOD latency vs build time, writer-task send time + `timeouts`, channel backlogs).
+  `PERF_LOG=1` additionally raises the DEBUG `[client-budget]` / `[client] mispredicts/s` lines
+  (their own `perf_budget` log target; `RUST_LOG` would replace Bevy's whole filter instead).
 - `just diag` — release client with `DIAG=1`, which adds Bevy's `RenderDiagnosticsPlugin`
   (`crates/client/src/renderer/diag.rs`, gated on the env var because the wgpu timestamp and
   pipeline-statistics queries cost a little). Every 2s (`DIAG_INTERVAL`) it dumps `fps`,
@@ -106,8 +127,18 @@ Text-emitting (readable in a terminal, pasteable into a bug report or an LLM ses
   feature (a tracing span per ECS system / extract step / render-graph node), writes a Chrome
   Trace Event JSON, and reduces it to a per-system table via `scripts/trace_summary.py`. The JSON
   only flushes on a clean exit, so close the window rather than Ctrl-C.
+- `just trace-join` — the same capture reduced to ONLY its first `join_ms` (default 30 s): the
+  load/join phase `trace-chrome` deliberately skips. Read the `max ms` column — one multi-second
+  call is a main-thread stall. (`scripts/trace_summary.py <json> --until-ms N` on an existing trace.)
+  `trace_summary.py` STREAMS the file (traces reach several GB — the rapier fork traces its solver
+  internals, ~25 MB/s; never `json.load` one), sorts by **self time** (children excluded; schedule
+  spans otherwise double count), prints a per-thread busy table, and takes `--thread <name>` and
+  `--skip-cat rapier3d` (the recipes pass it). The tracing features include `bevy/debug`, without
+  which release builds name every system `<Enable the debug feature to see the name>`.
 - `just perf-client` / `just perf-server` — `perf` + inferno folded stacks (`perf-folded-*.txt`),
-  the whole-process native CPU profile.
+  the whole-process native CPU profile. The folded files are tens of MB — never open them whole;
+  both recipes end with `scripts/perf_summary.py` (thread / crate / self / inclusive top-N), and
+  `just perf-summary client --thread game --prefix rapier3d::` re-cuts it.
 
 GUI-only (a human has to look at them):
 

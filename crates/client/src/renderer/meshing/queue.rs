@@ -194,7 +194,10 @@ pub fn mark_remesh_dirty(
     roots: Query<&Transform, Without<VoxelData>>,
 ) {
     uploads.0 = 0;
+    // Unbudgeted: every chunk changed this frame is fingerprinted here.
+    let mut stall = game::perf::StallGuard::new("mark_remesh_dirty");
     for (e, voxels, tf, parent, key, mut zones) in &mut changed {
+        stall.add_work(1);
         // Resolve (or compute) the grid key. Bare test entities (no parented
         // transform) stay unkeyed and skip all neighbor logic.
         let key: Option<[i32; 3]> = key.map(|k| k.0).or_else(|| {

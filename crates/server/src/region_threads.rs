@@ -26,7 +26,22 @@ impl RegionSpawner for ThreadRegionSpawner {
             .spawn(move || {
                 // Deserialize/generate on the region's own thread so a big
                 // region never stalls the manager.
-                let runner = RegionRunner::new(id, seed.into_region(id), out);
+                let genesis_started = Instant::now();
+                let parked = matches!(seed, RegionSeed::Parked(..));
+                let region = seed.into_region(id);
+                let build = genesis_started.elapsed();
+                let runner = RegionRunner::new(id, region, out);
+                // `build_ms` = deserialize (parked) or chunk flatten + collider
+                // genesis (fresh); the rest of `ms` is the baseline terrain hash.
+                game::perf_event!(
+                    "region_genesis",
+                    "region={},{} ms={} build_ms={} terrain_hash_ms={} parked={parked}",
+                    id.x,
+                    id.z,
+                    game::perf::ms(genesis_started.elapsed()),
+                    game::perf::ms(build),
+                    game::perf::ms(genesis_started.elapsed() - build)
+                );
                 region_thread_loop(id, runner, recv);
             })
             .expect("failed to spawn region thread");
@@ -52,6 +67,7 @@ pub fn region_thread_loop(id: RegionCoords, mut runner: RegionRunner, recv: Rece
     let tick = Duration::from_millis(game::TICK_RATE);
     let mut next = Instant::now() + tick;
     let mut metrics = TickMetrics::new();
+    let mut first_tick = true;
     loop {
         match recv.recv_deadline(next) {
             Ok(input) => {
@@ -63,6 +79,18 @@ pub fn region_thread_loop(id: RegionCoords, mut runner: RegionRunner, recv: Rece
                 let compute_start = Instant::now();
                 runner.tick();
                 metrics.record_tick(compute_start.elapsed());
+                if first_tick {
+                    // The first step after genesis pays one-off physics setup
+                    // (broad-phase build, mass properties) the averages hide.
+                    first_tick = false;
+                    game::perf_event!(
+                        "region_first_tick",
+                        "region={},{} ms={}",
+                        id.x,
+                        id.z,
+                        game::perf::ms(compute_start.elapsed())
+                    );
+                }
                 next += tick;
                 let now = Instant::now();
                 if next < now {
@@ -71,7 +99,7 @@ pub fn region_thread_loop(id: RegionCoords, mut runner: RegionRunner, recv: Rece
                     metrics.overruns += 1;
                     next = now + tick;
                 }
-                metrics.maybe_report(id);
+                metrics.maybe_report(id, &mut runner);
             }
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -109,7 +137,7 @@ impl TickMetrics {
         }
     }
 
-    fn maybe_report(&mut self, id: RegionCoords) {
+    fn maybe_report(&mut self, id: RegionCoords, runner: &mut RegionRunner) {
         if self.window_start.elapsed() < game::METRICS_REPORT_INTERVAL {
             return;
         }
@@ -118,8 +146,11 @@ impl TickMetrics {
             let avg_ms = avg.as_secs_f32() * 1000.0;
             // Share of the tick period the sim actually spent computing.
             let budget = avg_ms / game::TICK_RATE as f32 * 100.0;
+            // The cadence terrain snapshot + hash runs inside a tick; reported
+            // beside `max` because it is the prime suspect when they match.
+            let (hash_checks, hash_total, hash_max) = runner.take_terrain_hash_cost();
             log::info!(
-                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% overruns={}",
+                "[region ({},{})] ticks={} avg={:.2}ms max={:.2}ms budget={:.1}% overruns={} | terrain_hash n={} sum={:.1}ms max={:.1}ms",
                 id.x,
                 id.z,
                 self.ticks,
@@ -127,7 +158,12 @@ impl TickMetrics {
                 self.compute_max.as_secs_f32() * 1000.0,
                 budget,
                 self.overruns,
+                hash_checks,
+                game::perf::ms(hash_total),
+                game::perf::ms(hash_max),
             );
+        } else {
+            let _ = runner.take_terrain_hash_cost();
         }
         *self = TickMetrics::new();
     }

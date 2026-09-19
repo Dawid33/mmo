@@ -449,9 +449,11 @@ clippy:
 
 # ---- Profiling ------------------------------------------------------------
 
-# The three recipes below produce PLAIN TEXT (unlike tracy/hotspot, which need a GUI), so
+# The recipes below produce PLAIN TEXT (unlike tracy/hotspot, which need a GUI), so
 # their output can be pasted into a bug report or an LLM session. Use them in this order:
 #
+#   0. `just perf-capture` — everything below's log-based half in one self-describing
+#                            directory (manifest, join timeline, RSS, budgets, diag verdict).
 #   1. `just diag`         — is the frame CPU-bound or GPU-bound? Per-pass GPU ms vs frame_time.
 #   2. `just gpu-log`      — second opinion from outside the process (GPU busy %), no rebuild.
 #   3. `just trace-chrome` — if CPU-bound: which ECS system eats the frame.
@@ -487,6 +489,27 @@ diag:
     echo
     echo "(full log: $log)"
 
+# THE capture to hand to an analysis session. Release server + client, one client, with
+# everything in one self-describing directory:
+#   target/perf-capture/<utc-timestamp>-<adapter>-<world>/
+#     summary.txt    READ FIRST: provenance, join timeline, resources, budgets, verdict, errors
+#     manifest.json  git rev + dirty flag, profile, adapter asked for AND selected, world
+#                    scale, backend/thread env knobs, host, duration, exit codes
+#     client.log / server.log   full logs: `[perf] event=… t_ms=…` join timeline on both
+#                    sides, `[client-budget]` (DEBUG, enabled here via PERF_LOG=1),
+#                    `[server]` counters, `[region …]` tick lines, DIAG per-pass dumps
+#     rss.csv        1 Hz VmRSS / VmHWM / threads / CPU ticks for both processes
+#     diag.txt       scripts/diag_summary.py CPU-vs-GPU verdict
+# Let the world load, play ~30 s, close the window. Or run it hands-off for a fixed time:
+#   PERF_CAPTURE_SECONDS=90 just adapter=Intel world=tiny perf-capture
+# PERF_CAPTURE_DIAG=0 drops the wgpu timestamp queries. Compare captures only within one
+# adapter + world scale. Re-summarise an old capture: scripts/perf_capture_report.py <dir>.
+#
+# One-directory release perf capture (logs + manifest + RSS + verdict) -> target/perf-capture/.
+perf-capture:
+    {{cap}} {{cargo}} build --release --bin client --bin server
+    scripts/perf_capture.sh "{{adapter}}" "{{world}}"
+
 # The independent check on `just diag`'s GPU numbers, measured from outside the process,
 # and it needs no rebuild. Sustained Graphics-Pipe ~100% => GPU-bound; low while a core is
 # pegged => CPU-bound. Start the client first, then run this alongside it. Needs amdgpu_top
@@ -506,6 +529,8 @@ gpu-log:
 # extract step and per render-graph node), writing a Chrome Trace Event JSON, then reduces
 # it to a top-N table via scripts/trace_summary.py. Use after `just diag` says CPU-bound.
 # CLOSE THE WINDOW to stop — the JSON is only flushed on a clean exit, so Ctrl-C truncates it.
+# The feature build lands in target/release/client like any other (the next plain release
+# recipe relinks it); it is built under `cap` and launched directly, never via `cargo run`.
 #
 # Per-ECS-system frame breakdown as text (which system eats the frame).
 trace-chrome:
@@ -515,17 +540,47 @@ trace-chrome:
     mkdir -p target/trace
     json=target/trace/client.json
     {{cap}} {{cargo}} build --release --bin server
+    {{cap}} {{cargo}} build --release --bin client --features trace_chrome
     RUST_BACKTRACE=1 ./target/release/server > target/trace/server.log 2>&1 &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     sleep 1
     echo ">> tracing -> $json  (play for ~30s, then CLOSE THE WINDOW — Ctrl-C truncates it)"
-    TRACE_CHROME="$json" RUST_BACKTRACE=1 \
-        {{cargo}} run --release --bin client --features trace_chrome
+    TRACE_CHROME="$json" RUST_BACKTRACE=1 ./target/release/client
     echo
     # Skip the first 5s: startup asset loads + pipeline compilation would otherwise
     # dominate the totals and hide the steady-state per-frame cost.
-    scripts/trace_summary.py "$json" --skip-ms 5000 --top 40
+    scripts/trace_summary.py "$json" --skip-ms 5000 --top 40 --skip-cat rapier3d --skip-cat parry3d
+
+# Length of the join window `trace-join` summarises, in ms: `just join_ms=90000 trace-join`.
+join_ms := "30000"
+
+# The opposite cut of `trace-chrome`: the same capture, but summarising ONLY the first
+# `join_ms` of it — the load/join phase that the steady-state table deliberately hides.
+# Read the `max ms` column: one multi-second call of a bridge system (drain_client_updates,
+# mark_remesh_dirty, apply_lod_events) is a main-thread stall. Close the window once the
+# world has loaded (or has visibly failed to); the trace grows ~1 MB/s, so don't linger.
+# Re-reduce an existing capture without re-running:
+#   scripts/trace_summary.py target/trace/client.json --until-ms 60000
+#
+# Per-ECS-system breakdown of the join phase only (first `join_ms` of the capture).
+trace-join:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    mkdir -p target/trace
+    json=target/trace/client.json
+    {{cap}} {{cargo}} build --release --bin server
+    {{cap}} {{cargo}} build --release --bin client --features trace_chrome
+    RUST_BACKTRACE=1 ./target/release/server > target/trace/server.log 2>&1 &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    sleep 1
+    echo ">> tracing the join -> $json  (wait for the world to load, then CLOSE THE WINDOW)"
+    TRACE_CHROME="$json" RUST_BACKTRACE=1 ./target/release/client
+    echo
+    # The rapier fork traces its solver internals: most of the file, none of the frame.
+    scripts/trace_summary.py "$json" --until-ms {{join_ms}} --top 40 --skip-cat rapier3d --skip-cat parry3d
 
 # Start Pyroscope (:4040) + Grafana (:3000). Build with `--features pyroscope` to push profiles.
 profile-up:
@@ -587,8 +642,9 @@ perf:
     hotspot
 
 # Both perf-* recipes need inferno on PATH: `cargo install inferno`. They record
-# folded stacks (perf-folded-{client,server}.txt) to paste into an LLM for hot-path
-# analysis, running the other side (like `just run`) to make the load representative.
+# folded stacks (perf-folded-{client,server}.txt), running the other side (like
+# `just run`) to make the load representative. The folded files run to tens of MB —
+# never paste or open them whole; `just perf-summary` reduces one to top-N tables.
 # NOTE: `perf script --no-inline` is required — perf's inline-frame expansion drives
 # an addr2line coprocess that livelocks on these Rust binaries ("could not read first
 # record"), regardless of Cranelift vs stable. --no-inline skips it; function-level
@@ -609,7 +665,8 @@ perf-client:
     sudo -E perf record {{perf_flags}} ./target/profiling/client
     sudo chmod +r perf.data
     perf script --no-inline | inferno-collapse-perf > perf-folded-client.txt
-    echo "wrote perf-folded-client.txt — paste it into an LLM to find hot paths"
+    echo "wrote perf-folded-client.txt — too big to read whole; the reduced tables follow"
+    scripts/perf_summary.py perf-folded-client.txt
 
 # Profile the server while the client runs; Ctrl-C the server to stop recording.
 # Same `profiling` profile rationale as perf-client.
@@ -624,7 +681,15 @@ perf-server:
     sudo -E perf record {{perf_flags}} ./target/profiling/server
     sudo chmod +r perf.data
     perf script --no-inline | inferno-collapse-perf > perf-folded-server.txt
-    echo "wrote perf-folded-server.txt — paste it into an LLM to find hot paths"
+    echo "wrote perf-folded-server.txt — too big to read whole; the reduced tables follow"
+    scripts/perf_summary.py perf-folded-server.txt
+
+# Extra args filter the tables, e.g.
+#   just perf-summary client --thread game --prefix rapier3d:: --prefix parry3d::
+#
+# Reduce perf-folded-<side>.txt to thread / crate / self / inclusive top-N tables.
+perf-summary side="client" *args:
+    scripts/perf_summary.py perf-folded-{{side}}.txt {{args}}
 
 # ---- Housekeeping ---------------------------------------------------------
 

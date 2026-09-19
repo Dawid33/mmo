@@ -84,7 +84,14 @@ impl ServerConnection {
         loop {
             let connecting = endpoint.connect(self.server, "localhost").unwrap();
             let failure = match tokio::time::timeout(policy.attempt_timeout, connecting).await {
-                Ok(Ok(connection)) => return Ok(connection),
+                Ok(Ok(connection)) => {
+                    game::perf_event!(
+                        "connected",
+                        "attempts={attempt} connect_ms={}",
+                        game::perf::ms(started.elapsed())
+                    );
+                    return Ok(connection);
+                }
                 Ok(Err(error)) => error.to_string(),
                 Err(_) => format!("no answer within {:?}", policy.attempt_timeout),
             };
@@ -123,6 +130,7 @@ impl ServerConnection {
         endpoint.set_default_client_config(config);
         info!("client endpoint at {:?}", endpoint.local_addr().unwrap());
         info!("connecting to server...");
+        game::perf_event!("endpoint_up");
         // Receive events over the wire and send them to the instance manager.
         let connection = self.connect_with_retry(&endpoint).await?;
         info!("[client] connected: addr={}", connection.remote_address());
@@ -131,7 +139,10 @@ impl ServerConnection {
 
         tokio::spawn(async move {
             while let Ok(mut recv) = recv_conn.accept_uni().await {
+                let read_started = Instant::now();
                 let bytes = recv.read_to_end(usize::MAX).await.unwrap();
+                let read = read_started.elapsed();
+                let decode_started = Instant::now();
                 let packet = bincode::deserialize(&bytes[..]);
                 let packet: ServerPacket = match packet {
                     Ok(e) => e,
@@ -140,6 +151,19 @@ impl ServerConnection {
                         continue;
                     }
                 };
+                // Region snapshots are the join's big packets (MBs each); the
+                // per-tick traffic is far too frequent for the timeline.
+                if let ServerPacket::Region(id, _) = &packet {
+                    game::perf_event!(
+                        "snapshot_received",
+                        "region={},{} bytes={} read_ms={} decode_ms={}",
+                        id.x,
+                        id.z,
+                        bytes.len(),
+                        game::perf::ms(read),
+                        game::perf::ms(decode_started.elapsed())
+                    );
+                }
 
                 let packet = match packet {
                     ServerPacket::SyncClock(region_id, server_tick_rate, server_tick, _) => {

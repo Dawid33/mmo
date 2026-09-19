@@ -176,7 +176,10 @@ pub fn drain_client_updates(
     mut debug_lines: ResMut<crate::renderer::collider_debug::DebugColliderLines>,
     mut lod_rings: ResMut<lod_rings::LodRings>,
 ) {
+    // Unbudgeted: drains everything the game thread queued since last frame.
+    let mut stall = game::perf::StallGuard::new("drain_client_updates");
     while let Ok(event) = updates.0.try_recv() {
+        stall.add_work(1);
         match event {
             ClientUpdateEvent::NewRegion(id, data, receiver) => {
                 if roots.0.contains_key(&id) {
@@ -193,7 +196,20 @@ pub fn drain_client_updates(
                     .id();
                 roots.0.insert(id, root);
                 regions.0.insert(id, receiver);
+                let spawn = game::perf::Stopwatch::start();
                 spawn_region_snapshot(&mut commands, root, id, &data, &mut map, player.0);
+                // Main-thread cost of one region: an entity per sim entity and a
+                // `derive_voxels` per chunk, all inside this frame.
+                game::perf_event!(
+                    "bridge_region_spawned",
+                    "region={},{} spawn_ms={} entities={} chunks={} regions={}",
+                    id.x,
+                    id.z,
+                    game::perf::ms(spawn.elapsed()),
+                    data.ecs.entities.len(),
+                    data.ecs.chunk.iter().filter(|(_, chunk)| chunk.is_some()).count(),
+                    roots.0.len()
+                );
                 info!("bridge: region {:?} loaded", id);
             }
             ClientUpdateEvent::SetPlayer(client_id) => player.0 = Some(client_id),

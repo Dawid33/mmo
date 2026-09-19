@@ -23,6 +23,7 @@ use log::{info, warn};
 /// generation. `WORLDGEN_CACHE=1|0` overrides in either direction.
 const DEFAULT_ENABLED: bool = cfg!(debug_assertions);
 
+#[derive(Clone)]
 pub struct WorldgenCache {
     /// `None` = caching disabled; every load misses and every store is a no-op.
     dir: Option<PathBuf>,
@@ -92,7 +93,11 @@ impl WorldgenCache {
         // Write-then-rename so a server killed mid-write never leaves a
         // truncated region file for the next run to trip over.
         let path = dir.join(region_file(rc));
-        let tmp = dir.join(format!("{}.tmp.{}", region_file(rc), std::process::id()));
+        // Unique per writer: LOD workers and the manager share one cache
+        // directory and may generate the same region at the same time.
+        let thread = format!("{:?}", std::thread::current().id());
+        let thread: String = thread.chars().filter(char::is_ascii_digit).collect();
+        let tmp = dir.join(format!("{}.tmp.{}.{thread}", region_file(rc), std::process::id()));
         if let Err(e) = fs::write(&tmp, &bytes).and_then(|()| fs::rename(&tmp, &path)) {
             warn!("worldgen cache: cannot write {}: {e}", path.display());
             let _ = fs::remove_file(&tmp);

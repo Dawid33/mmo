@@ -31,6 +31,9 @@ BARE = re.compile(r"(?P<name>[\w/ ]+?)\s*:\s*(?P<val>[\d.]+)\s*$")
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("log", help="log from `just diag` (DIAG=1 client run)")
+    ap.add_argument("--timeline", action="store_true",
+                    help="also print one row per dump (frame time, GPU total, costliest pass): "
+                         "how the GPU load moved through the join, which the last-dump table hides")
     args = ap.parse_args()
 
     # Keep only bevy_diagnostic lines, and split into dumps: a new dump starts whenever a
@@ -103,6 +106,21 @@ def main() -> int:
         frag = last.get(f"render/{name}/fragment_shader_invocations", 0.0)
         pct = 100 * ms / frame_time if frame_time else 0
         print(f"{ms:9.3f}  {pct:5.1f}%  {frag:17,.0f}  {name}")
+
+    if args.timeline:
+        print()
+        print("per dump (one every DIAG_INTERVAL, default 2s; values are Bevy's smoothed averages)")
+        print(f"{'dump':>5}  {'frame ms':>9}  {'fps':>6}  {'gpu ms':>8}  {'gpu %':>6}  {'entities':>9}  costliest pass")
+        print("-" * 84)
+        for i, dump in enumerate(d for d in dumps if d):
+            passes = {k[len("render/"):-len("/elapsed_gpu")]: v
+                      for k, v in dump.items() if k.startswith("render/") and k.endswith("/elapsed_gpu")}
+            total = sum(passes.values())
+            ft = dump.get("frame_time", 0.0)
+            top = max(passes.items(), key=lambda kv: kv[1], default=("-", 0.0))
+            print(f"{i:5d}  {ft:9.2f}  {dump.get('fps', 0.0):6.1f}  {total:8.2f}  "
+                  f"{100 * total / ft if ft else 0:5.0f}%  {dump.get('entity_count', 0):9.0f}  "
+                  f"{top[0]} ({top[1]:.2f} ms)")
     return 0
 
 

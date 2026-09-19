@@ -1209,6 +1209,35 @@ impl Rollback {
         (departures, ghosts)
     }
 
+    /// Change detector for the terrain `terrain_snapshot` would return, without
+    /// building it: no chunk is cloned and nothing is serialized. The region
+    /// thread polls this every `TERRAIN_HASH_INTERVAL_TICKS`, so its cost is
+    /// paid forever on every running region — the clone + bincode of a full
+    /// snapshot measured 45–110 ms per check against a 50 ms tick (2026-09-19
+    /// capture), which is why the snapshot is now built only on a change.
+    ///
+    /// Each chunk contributes `crc32(coords, content)`; contributions are
+    /// summed, so ECS iteration order does not matter (the snapshot sorts for
+    /// the same reason). Coordinates are unique per chunk, so equal content in
+    /// two places cannot cancel out. Only ever compared with an earlier value
+    /// from the same process — not a wire or cross-machine hash.
+    pub fn terrain_fingerprint(&self) -> u32 {
+        use std::hash::Hash;
+        let mut sum = 0u32;
+        for (key, maybe_chunk) in self.data.ecs.chunk.iter() {
+            let Some(chunk) = maybe_chunk else { continue };
+            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
+            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
+            let t = body.translation();
+            let mut h = crc32fast::Hasher::new();
+            // Same coordinate derivation as `terrain_snapshot`.
+            ((t.x.0 / 32.0) as i64, (t.y.0 / 32.0) as i64, (t.z.0 / 32.0) as i64).hash(&mut h);
+            chunk.hash(&mut h);
+            sum = sum.wrapping_add(h.finalize());
+        }
+        sum
+    }
+
     /// Terrain-only extraction for far-region views. Iterates chunk
     /// components; recovers each chunk's `ChunkCoords` from its fixed body
     /// translation (`create_mesh` places bodies at `(cx*32, cy*32, cz*32)`,

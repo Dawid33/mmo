@@ -6,10 +6,64 @@
 
 **HEAD at handoff:** `c1c497a` (`feat(client): world-size knobs, join robustness, capped builds and smoke check`)
 
-**Status:** Groundwork landed (small worlds, join robustness, capped builds, smoke check). No
-performance data has been collected yet, and no optimisation has started. The next session's
+**Status:** Groundwork landed (small worlds, join robustness, capped builds, smoke check), and
+the measurement tooling below is now built (see "Progress"). No performance data has been
+collected yet, and no optimisation has started. The next session's
 job is to make the client, server and game **produce performance data an LLM session can read
 and analyse**, then use it.
+
+## Progress — instrumentation landed (2026-09-19, second session)
+
+Steps 2 and 3 of "Suggested order" are implemented (uncommitted on `develop` at the time of
+writing — check `git log`). **Step 1 and step 4 still need the user: no capture has been run
+with a real client yet.** Gap status:
+
+| Gap | Status |
+|---|---|
+| 1 single capture | **Done.** `just perf-capture` → `target/perf-capture/<utc>-<adapter>-<world>/` with `summary.txt` (read first), `manifest.json`, `client.log`, `server.log`, `rss.csv`, `gpu.csv`, `diag.txt`. `scripts/perf_capture.sh` orchestrates, `scripts/perf_sample.py` samples, `scripts/perf_capture_report.py` summarises (re-runnable on an old directory). `PERF_CAPTURE_SECONDS=<n>` makes it hands-off. |
+| 2 join phase invisible | **Done.** `[perf] event=… t_ms=…` timeline on both sides (`crates/game/src/perf.rs`; event list in `CLAUDE.md` → Profiling). `process_start` carries `unix_ms`, so the report merges client and server onto one clock. `load_progress` heartbeats every 2 s until `world_ready` — the evidence for a load that never completes. `just trace-join` / `trace_summary.py --until-ms` summarise only the start of a Chrome trace, with a `max ms` column. |
+| 3 budget line hidden | **Done.** `[client-budget]` and `[client] mispredicts/s` moved to their own log target `perf_budget`; `PERF_LOG=1` (set by `perf-capture`) raises only that target to DEBUG. `RUST_LOG` replaces Bevy's whole filter, so it was not used. |
+| 4 main-thread join burst | **Instrumented, not yet measured.** `game::perf::StallGuard` reports any call of `drain_client_updates`, `mark_remesh_dirty`, `apply_lod_events` over 8 ms as `main_stall system=… ms=… work=…`; `bridge_region_spawned` carries `spawn_ms` per region. Still hypotheses until a capture exists. |
+| 5 server visibility | **Done.** Periodic `[server]` line (`crates/server/src/perf.rs`): manager-thread worldgen count/ms, LOD cache hits / submitted / built / in-flight / waiting-on-terrain, LOD submit→result latency vs worker build time, writer-task packets / bytes / send ms / `timeouts`, and the three channel backlogs. Per-event: `client_connected`, `region_generate`, `region_genesis`, `snapshot_sent` (bytes, serialize ms, send ms, timed_out). |
+| 6 no memory data | **Done.** `rss.csv`: 1 Hz VmRSS / VmHWM / threads / CPU ticks for both processes; the summary prints peak RSS, CPU % and an RSS-over-time series. |
+| 7 iGPU GPU signal | **Done without root.** `gpu.csv` reads the client's DRM fdinfo (`/proc/<pid>/fdinfo`): per-engine busy ns → busy %, plus GPU memory. Verified live on this box's i915; amdgpu exposes the same; **nouveau/NVK exposes no engine time** (the T600 gets `diag` timings only). sysfs adds amdgpu `gpu_busy_percent`/VRAM and i915 clock frequency. `intel_gpu_top` is not needed. |
+| 8 raw artefacts too big | **Done.** `scripts/perf_summary.py` + `just perf-summary <side> [--thread … --prefix …]`; `perf-client`/`perf-server` print it. |
+| 9 trace-chrome uncapped | **Done.** Builds under `{{cap}}`, launches the binary directly. |
+
+Also: `diag_summary.py --timeline` prints one row per DIAG dump (frame ms, GPU ms, costliest
+pass), so GPU cost *during* the join is visible, not just the last steady-state dump.
+
+### Verified vs not
+
+- Verified: `just smoke` green; `game --lib perf::` and `game --test lod_streaming` green; client
+  type-checks native **and** `wasm32-unknown-unknown`; the debug server run headless prints
+  `process_start` and the `[server]` line; sampler + report exercised on a live i915 process and
+  on synthetic logs; `trace_summary.py`, `perf_summary.py`, `diag_summary.py --timeline` exercised
+  on synthetic inputs.
+- **First real capture done** (user-run, `PERF_CAPTURE_SECONDS=60 just adapter=Intel world=tiny
+  perf-capture` → `target/perf-capture/20260919T150349Z-Intel-tiny/`): the whole pipeline worked
+  end to end, `world_ready` fired at 14.7 s, and the ranking is in
+  `docs/superpowers/specs/2026-09-19-client-perf-findings.md`. Headline: the join is 73% **server
+  region genesis (10.7 s, release)**, steady state is **CPU-bound outside the game thread** (GPU
+  22% of a 19 ms frame), and the client loads fine on the iGPU at `tiny`/release. The run exposed
+  four report bugs, all fixed afterwards (lost `world scale` line, collapsed `load_progress` /
+  `main_stall` rows, noisy `[server]` tail, a 0-RSS exit sample), and prompted three more probes
+  that no capture has exercised yet: `region_genesis build_ms/terrain_hash_ms`,
+  `region_first_tick`, and `terrain_hash n/sum/max` on the `[region]` line.
+- **Superseded — was:** not verified: anything that needs a client window. No `[perf]` client line has been seen in
+  a real log, `world_ready` has never fired for real, and `perf-capture` has not run end to end.
+  First real run: `PERF_CAPTURE_SECONDS=90 just adapter=Intel world=tiny perf-capture`, then read
+  `summary.txt`. If `world_ready` never appears, the last `load_progress` line says which gate
+  is stuck.
+- The new client unit tests (`join_timeline::tests`, `main::tests::perf_log_raises_only_the_budget_target`)
+  are compile-checked only, like the ones from `c1c497a` (client test binaries need a full Bevy build).
+
+### Next
+
+Step 4: the capture matrix `{Intel, 6700} × {tiny, small, full}` (the 6700 eGPU was not attached
+during this session). Then the findings doc and ranking (step 5). The "Open questions" below are
+now narrower: `intel_gpu_top` is moot; `sudo perf` stays a separate manual step (`perf-client` +
+`perf-summary`); camera driving and the target are still open.
 
 ## Objective
 

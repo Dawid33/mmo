@@ -90,6 +90,9 @@ pub struct RegionRunner {
     /// `TerrainChanged`. Seeded at construction so the initial state is a
     /// baseline, not a spurious push.
     last_terrain_hash: u32,
+    /// Cost of the cadence terrain-hash checks since the last
+    /// `take_terrain_hash_cost` (metrics only): count, total, slowest.
+    terrain_hash_cost: (u32, std::time::Duration, std::time::Duration),
 }
 
 impl RegionRunner {
@@ -98,8 +101,15 @@ impl RegionRunner {
         region: Region,
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Self {
-        let last_terrain_hash = region.terrain_snapshot().terrain_hash();
-        Self { id, region, out, last_terrain_hash }
+        let last_terrain_hash = region.terrain_fingerprint();
+        Self { id, region, out, last_terrain_hash, terrain_hash_cost: Default::default() }
+    }
+
+    /// `(checks, total, slowest)` of the every-`TERRAIN_HASH_INTERVAL_TICKS`
+    /// terrain snapshot + hash since the previous call; resets it. Each check
+    /// runs inside a tick, so `slowest` is a floor on that tick's duration.
+    pub fn take_terrain_hash_cost(&mut self) -> (u32, std::time::Duration, std::time::Duration) {
+        std::mem::take(&mut self.terrain_hash_cost)
     }
 
     /// Returns false when the runner should stop (after Shutdown).
@@ -172,10 +182,17 @@ impl RegionRunner {
         // manager invalidates this region's LOD keys and rebuilds the
         // subscribed ones.
         if self.region.current_tick() % TERRAIN_HASH_INTERVAL_TICKS == 0 {
-            let snap = self.region.terrain_snapshot();
-            let hash = snap.terrain_hash();
+            let watch = crate::perf::Stopwatch::start();
+            // In-place fingerprint: the (large) snapshot is only built below,
+            // once something actually changed.
+            let hash = self.region.terrain_fingerprint();
+            let took = watch.elapsed();
+            self.terrain_hash_cost.0 += 1;
+            self.terrain_hash_cost.1 += took;
+            self.terrain_hash_cost.2 = self.terrain_hash_cost.2.max(took);
             if hash != self.last_terrain_hash {
                 self.last_terrain_hash = hash;
+                let snap = self.region.terrain_snapshot();
                 let _ = self.out.send((self.id, RegionOutput::TerrainChanged(snap)));
             }
         }

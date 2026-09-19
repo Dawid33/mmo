@@ -29,10 +29,14 @@ pub struct ThreadLodBuilder {
 
 impl ThreadLodBuilder {
     /// `coarse` must be Clone-able across workers — pass seed + materials
-    /// and rebuild the closure per thread.
+    /// and rebuild the closure per thread. `gen_cache` is the same worldgen
+    /// disk cache the manager uses for region starts; each worker gets its
+    /// own handle and generates pristine LOD sources through it
+    /// (`LodBuildJob::Pristine`).
     pub fn new(
         seed: u64,
         materials: worldgen::material::Materials,
+        gen_cache: worldgen::cache::WorldgenCache,
         out: Sender<LodResult>,
         threads: usize,
     ) -> Self {
@@ -40,13 +44,19 @@ impl ThreadLodBuilder {
         for i in 0..threads {
             let recv = job_recv.clone();
             let out = out.clone();
+            let gen_cache = gen_cache.clone();
             std::thread::Builder::new()
                 .name(format!("lod-worker-{i}"))
                 .spawn(move || {
                     let coarse =
                         move |key: &game::lod::LodKey| worldgen::coarse_tile(key, seed, materials);
+                    let generate =
+                        move |rc: game::RegionCoords| gen_cache.generate_cached(rc, seed, materials);
                     while let Ok(job) = recv.recv() {
-                        let _ = out.send(build_lod_job(job, &coarse));
+                        let started = std::time::Instant::now();
+                        let result = build_lod_job(job, &coarse, &generate);
+                        crate::perf::EDGE.record_lod_build(started.elapsed());
+                        let _ = out.send(result);
                     }
                 })
                 .expect("spawn lod worker");
@@ -58,6 +68,12 @@ impl ThreadLodBuilder {
 impl LodBuilder for ThreadLodBuilder {
     fn submit(&mut self, job: LodBuildJob) {
         let _ = self.jobs.send(job);
+    }
+
+    /// Worldgen for never-run regions runs on the workers, never on the
+    /// manager thread.
+    fn generates_pristine(&self) -> bool {
+        true
     }
 }
 

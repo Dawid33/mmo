@@ -556,6 +556,11 @@ impl Region {
         self.data.terrain_snapshot()
     }
 
+    /// See [`Rollback::terrain_fingerprint`].
+    pub fn terrain_fingerprint(&self) -> u32 {
+        self.data.terrain_fingerprint()
+    }
+
     pub fn create_basic(&mut self, coords: ChunkCoords) {
         self.data.create_mesh(coords, Chunk::flat_floor(8));
     }

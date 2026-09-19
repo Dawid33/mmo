@@ -17,6 +17,10 @@ use quinn::{
 
 const DEFAULT_SERVER_WORKER_THREADS: usize = 4;
 
+/// How long the shared writer task waits on one client send before dropping
+/// the packet. Counted per window as `timeouts=` in the `[server]` line.
+const SEND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn server_worker_threads(value: Option<&str>) -> Result<usize, String> {
     let Some(value) = value else {
         return Ok(DEFAULT_SERVER_WORKER_THREADS);
@@ -41,6 +45,7 @@ fn build_server_runtime(worker_threads: usize) -> tokio::runtime::Runtime {
 }
 
 pub mod lod_workers;
+pub mod perf;
 pub mod region_threads;
 pub mod webtransport;
 
@@ -146,24 +151,44 @@ impl WorldIngress {
             // undetected dead connections stop yielding stream credit, so an
             // unbounded send here would freeze outgoing traffic for EVERY
             // client. Cleanup itself is the read task's job (idle timeout).
-            async fn send_bounded(sink: ClientSink, packet: Vec<u8>) {
-                let deadline = std::time::Duration::from_secs(2);
-                if tokio::time::timeout(deadline, sink.send_packet(packet))
+            // Returns whether the send timed out (the packet is then lost).
+            async fn send_bounded(sink: ClientSink, packet: Vec<u8>) -> bool {
+                let bytes = packet.len();
+                let started = std::time::Instant::now();
+                let timed_out = tokio::time::timeout(SEND_DEADLINE, sink.send_packet(packet))
                     .await
-                    .is_err()
-                {
+                    .is_err();
+                if timed_out {
                     log::warn!("send to client timed out; skipping (peer stalled or gone)");
                 }
+                crate::perf::EDGE.record_send(bytes, started.elapsed(), timed_out);
+                timed_out
             }
 
             while let Ok((target, event)) = server_recv.recv() {
+                let serialize_started = std::time::Instant::now();
                 let packet = bincode::serialize(&event).unwrap();
+                let serialize = serialize_started.elapsed();
                 match target {
                     // Directed packet: if the client is gone, drop it.
                     Some(id) => {
                         let sink = writer_sinks.get(&id).map(|e| e.value().clone());
                         if let Some(sink) = sink {
-                            send_bounded(sink, packet.clone()).await;
+                            let send_started = std::time::Instant::now();
+                            let timed_out = send_bounded(sink, packet.clone()).await;
+                            // Region snapshots are the join's big packets (MBs
+                            // each); everything else is summed into `[server]`.
+                            if let ServerPacket::Region(rc, _) = &event {
+                                game::perf_event!(
+                                    "snapshot_sent",
+                                    "region={},{} client={id} bytes={} serialize_ms={} send_ms={} timed_out={timed_out}",
+                                    rc.x,
+                                    rc.z,
+                                    packet.len(),
+                                    game::perf::ms(serialize),
+                                    game::perf::ms(send_started.elapsed())
+                                );
+                            }
                         }
                     }
                     None => {
@@ -202,6 +227,7 @@ impl WorldIngress {
             tokio::spawn(async move {
                 info!("accepting connection");
                 let connection = conn.await.unwrap();
+                game::perf_event!("client_connected", "client={id} transport=quic");
                 sinks.insert(id, ClientSink::Quinn(connection.clone()));
                 // Announce before any of this client's packets can be read:
                 // guarantees the player exists before its first request is
@@ -224,6 +250,7 @@ impl WorldIngress {
 }
 
 pub fn run() {
+    game::perf::pin_origin();
     // Per-entry verification is off by default (desync is caught by the
     // periodic tick-interval state hash); HASH_MODE=delta re-enables
     // footprint-digest self-checks, HASH_MODE=full whole-field verification
@@ -249,6 +276,7 @@ pub fn run() {
     };
 
     simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default()).unwrap();
+    game::perf::init("server");
 
     let (client_packet_send, client_packet_recv) = crossbeam::channel::unbounded();
     let (server_send, server_recv) = crossbeam::channel::unbounded();
@@ -290,9 +318,12 @@ pub fn run() {
     let lod_builder: Box<dyn game::LodBuilder> = Box::new(lod_workers::ThreadLodBuilder::new(
         world_seed,
         materials,
+        gen_cache.clone(),
         lod_result_send,
         lod_threads,
     ));
+    // Kept only to read the manager→writer backlog for the `[server]` line.
+    let writer_backlog = server_send.clone();
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::default(),
         Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
@@ -303,6 +334,7 @@ pub fn run() {
     );
 
     let start = std::time::Instant::now();
+    let mut report = perf::ServerReport::new();
     'main: loop {
         let now_ms = start.elapsed().as_millis() as u64;
         crossbeam::channel::select! {
@@ -323,6 +355,14 @@ pub fn run() {
         }
         manager.maintain(now_ms);
         manager.pump_lod_results();
+        report.maybe_report(
+            &mut manager,
+            perf::Backlog {
+                client_events: client_packet_recv.len(),
+                region_outputs: region_out_recv.len(),
+                writer: writer_backlog.len(),
+            },
+        );
     }
 
     // Orderly exit: park everything, join region threads.

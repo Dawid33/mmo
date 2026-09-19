@@ -22,7 +22,10 @@ pub const UNLOAD_GRACE_MS: u64 = 5000;
 pub const LOD_CACHE_MAX_ENTRIES: usize = 8192;
 /// LRU cap on *pristine* `terrain_cache` entries — full-resolution snapshots
 /// generated only to feed a factor 2/4/16 LOD build for a region that has
-/// never run. One production-scale join touches ~280 of them and nothing
+/// never run. Only reached with a builder that does not
+/// `generates_pristine()` (the synchronous `InlineLodBuilder`: wasm, tests);
+/// the native server's thread pool generates in its workers and retains
+/// nothing here (each snapshot measured ~43 MB). One production-scale join touches ~280 of them and nothing
 /// used to drop them. They are pure worldgen output, so eviction only costs a
 /// regeneration; authoritative entries (running/parked regions) are never
 /// evicted — they are the only copy of edited terrain outside the region.
@@ -135,6 +138,39 @@ struct RegionLink {
     resubscribe_pending: Vec<ClientId>,
 }
 
+/// Manager-thread work done since the last [`WorldManager::take_perf_counters`]
+/// — the inputs to the server's periodic `[server]` line. Wall-clock timings,
+/// so this is observability only: nothing in the simulation may read it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ManagerPerfCounters {
+    /// Synchronous worldgen calls on the manager thread (region starts and
+    /// pristine LOD sources) and their cost — while one runs, no packet routes.
+    pub generated: u32,
+    pub generate_total: std::time::Duration,
+    pub generate_max: std::time::Duration,
+    /// `RequestLod`s answered straight from `lod_cache`.
+    pub lod_cache_hits: u32,
+    /// LOD builds handed to the builder, and results received back.
+    pub lod_submitted: u32,
+    pub lod_built: u32,
+    /// Submit → result latency of those results (queueing + build).
+    pub lod_latency_total: std::time::Duration,
+    pub lod_latency_max: std::time::Duration,
+}
+
+/// Point-in-time queue/cache depths for the same line.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ManagerDepths {
+    pub sessions: usize,
+    pub running: usize,
+    pub parked: usize,
+    pub lod_in_flight: usize,
+    /// LOD keys parked behind a terrain reply (region- plus tile-keyed).
+    pub lod_waiting_terrain: usize,
+    pub lod_cache: usize,
+    pub terrain_cache: usize,
+}
+
 pub struct WorldManager<S: RegionSpawner> {
     spawner: S,
     generator: RegionGenerator,
@@ -168,6 +204,9 @@ pub struct WorldManager<S: RegionSpawner> {
     lod_access_counter: u64,
     /// Builds submitted, result not yet received — dedups double-requests.
     lod_in_flight: BTreeSet<LodKey>,
+    /// When each in-flight build was submitted (metrics only, see `perf`).
+    lod_submitted_at: BTreeMap<LodKey, crate::perf::Stopwatch>,
+    perf: ManagerPerfCounters,
     /// Region-keyed builds waiting on a running region's terrain reply.
     lod_pending_terrain: BTreeMap<RegionCoords, BTreeSet<LodKey>>,
     /// Tile-keyed builds waiting on a subset of `key.regions()` whose terrain
@@ -204,6 +243,8 @@ impl<S: RegionSpawner> WorldManager<S> {
             lod_cache_max: LOD_CACHE_MAX_ENTRIES,
             lod_access_counter: 0,
             lod_in_flight: BTreeSet::new(),
+            lod_submitted_at: BTreeMap::new(),
+            perf: ManagerPerfCounters::default(),
             lod_pending_terrain: BTreeMap::new(),
             lod_tile_waiting: BTreeMap::new(),
             lod_builder,
@@ -270,7 +311,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                         let home = self.homes.get(&cid).copied();
                         match home {
                             Some(home) if self.regions.contains_key(&home) => {
-                                log::info!(
+                                // DEBUG: one line per player input drowned the
+                                // server log (1618 of 1648 lines in a 60 s capture).
+                                log::debug!(
                                     "[server] recv {kind:?} from cid={cid:?} -> route to home {home:?}"
                                 );
                                 self.send_to_region(home, RegionInput::Event(kind));
@@ -314,7 +357,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             RegionOutput::EventProcessed(event) => {
                 if let Some(link) = self.regions.get(&rc) {
                     if let GameEventKind::PlayerInput(_, ev) = &event.kind {
-                        log::info!(
+                        log::debug!(
                             "[server] region {rc:?} processed PlayerInput id={} input={ev:?} -> echo to {} subscriber(s): {:?}",
                             event.id,
                             link.subscribers.len(),
@@ -461,11 +504,57 @@ impl<S: RegionSpawner> WorldManager<S> {
         &mut self.spawner
     }
 
+    /// Counters accumulated since the previous call; resets them.
+    pub fn take_perf_counters(&mut self) -> ManagerPerfCounters {
+        std::mem::take(&mut self.perf)
+    }
+
+    pub fn depths(&self) -> ManagerDepths {
+        ManagerDepths {
+            sessions: self.sessions.len(),
+            running: self.regions.len(),
+            parked: self.parked.len(),
+            lod_in_flight: self.lod_in_flight.len(),
+            lod_waiting_terrain: self.lod_pending_terrain.values().map(BTreeSet::len).sum::<usize>()
+                + self.lod_tile_waiting.len(),
+            lod_cache: self.lod_cache.len(),
+            terrain_cache: self.terrain_cache.len(),
+        }
+    }
+
+    /// The injected generator, timed. It runs synchronously on the manager
+    /// thread, so its cost is routing latency for every connected client.
+    fn generate_timed(&mut self, rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
+        let watch = crate::perf::Stopwatch::start();
+        let columns = (self.generator)(rc);
+        let took = watch.elapsed();
+        self.perf.generated += 1;
+        self.perf.generate_total += took;
+        self.perf.generate_max = self.perf.generate_max.max(took);
+        columns
+    }
+
+    fn mark_lod_in_flight(&mut self, key: LodKey) {
+        self.lod_in_flight.insert(key);
+        self.lod_submitted_at.insert(key, crate::perf::Stopwatch::start());
+        self.perf.lod_submitted += 1;
+    }
+
     fn ensure_running(&mut self, rc: RegionCoords) {
         if self.regions.contains_key(&rc) {
             return;
         }
-        let columns = (self.generator)(rc); // now Vec<(ColumnCoords, Column)>
+        let watch = crate::perf::Stopwatch::start();
+        let columns = self.generate_timed(rc); // now Vec<(ColumnCoords, Column)>
+        let parked = self.parked.contains_key(&rc);
+        crate::perf_event!(
+            "region_generate",
+            "region={},{} ms={} columns={} parked={parked}",
+            rc.x,
+            rc.z,
+            crate::perf::ms(watch.elapsed()),
+            columns.len()
+        );
         let seed = match self.parked.remove(&rc) {
             Some(serialized) => RegionSeed::Parked(serialized, columns),
             None => RegionSeed::Fresh(columns),
@@ -582,6 +671,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         let stamp = self.lod_access_counter;
         if let Some((payload, access)) = self.lod_cache.get_mut(&key) {
             *access = stamp;
+            self.perf.lod_cache_hits += 1;
             let _ = self
                 .out
                 .send((Some(client), ServerPacket::LodData(key, payload.clone())));
@@ -618,24 +708,29 @@ impl<S: RegionSpawner> WorldManager<S> {
                     self.lod_access_counter += 1;
                     *stamp = self.lod_access_counter;
                 }
-                self.lod_in_flight.insert(key);
-                self.lod_builder.submit(LodBuildJob::Region {
-                    key,
-                    chunks: snap.chunks.clone(),
-                });
+                let chunks = snap.chunks.clone();
+                self.mark_lod_in_flight(key);
+                self.lod_builder.submit(LodBuildJob::Region { key, chunks });
             } else if running {
                 // Terrain reply (RegionOutput::Terrain) seeds terrain_cache
                 // and re-enters via lod_terrain_ready.
                 self.lod_pending_terrain.entry(rc).or_default().insert(key);
                 self.send_to_region(rc, RegionInput::RequestTerrain(client));
+            } else if self.lod_builder.generates_pristine() {
+                // Never-run region: the builder's own threads generate it.
+                // Nothing full-resolution is kept here — the LOD payload is
+                // what gets cached (`lod_cache`), and a region that later
+                // runs or parks reports authoritative terrain itself.
+                self.mark_lod_in_flight(key);
+                self.lod_builder.submit(LodBuildJob::Pristine { key, region: rc });
             } else {
-                let columns = (self.generator)(rc);
+                let columns = self.generate_timed(rc);
                 let snap = TerrainSnapshot::from_columns(columns);
                 self.terrain_cache.insert(rc, snap.clone());
                 self.lod_access_counter += 1;
                 self.pristine_terrain.insert(rc, self.lod_access_counter);
                 self.evict_pristine_terrain();
-                self.lod_in_flight.insert(key);
+                self.mark_lod_in_flight(key);
                 self.lod_builder
                     .submit(LodBuildJob::Region { key, chunks: snap.chunks });
             }
@@ -673,7 +768,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             .into_iter()
             .filter_map(|rc| self.terrain_cache.get(&rc).map(|snap| (rc, snap.chunks.clone())))
             .collect();
-        self.lod_in_flight.insert(key);
+        self.mark_lod_in_flight(key);
         self.lod_builder.submit(LodBuildJob::Tile { key, overlays });
     }
 
@@ -697,6 +792,12 @@ impl<S: RegionSpawner> WorldManager<S> {
 
     pub fn handle_lod_result(&mut self, key: LodKey, payload: LodPayload) {
         self.lod_in_flight.remove(&key);
+        self.perf.lod_built += 1;
+        if let Some(watch) = self.lod_submitted_at.remove(&key) {
+            let took = watch.elapsed();
+            self.perf.lod_latency_total += took;
+            self.perf.lod_latency_max = self.perf.lod_latency_max.max(took);
+        }
         self.lod_access_counter += 1;
         self.lod_cache.insert(key, (payload.clone(), self.lod_access_counter));
         self.evict_lod_cache();

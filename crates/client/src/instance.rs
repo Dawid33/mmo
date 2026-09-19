@@ -21,6 +21,18 @@ use std::{
     },
 };
 
+/// Game-thread half of the join timeline (`game::perf`). Every flag latches:
+/// each milestone is reported once per process, so steady-state play (window
+/// moves, LOD rebuild pushes, clock-drift `ready` flips) adds no lines.
+#[derive(Default)]
+struct JoinTimeline {
+    /// LOD keys whose payload has arrived at least once.
+    lod_received: std::collections::BTreeSet<game::lod::LodKey>,
+    lod_requests_done: bool,
+    lod_all_received: bool,
+    connection_ready: bool,
+}
+
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
     game_event_send: Sender<GameEventKind>,
@@ -56,6 +68,8 @@ pub struct GameInstanceManager {
     near_radius: i32,
     /// LOD keys we have requested and not released.
     lod_subscribed: std::collections::BTreeSet<game::lod::LodKey>,
+    /// One-shot join milestones for the `[perf]` timeline.
+    join: JoinTimeline,
     /// Events for subscribed regions whose snapshot hasn't arrived yet.
     pending_events: BTreeMap<RegionCoords, Vec<GameEvent>>,
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
@@ -259,6 +273,7 @@ impl GameInstanceManager {
             lod_table: game::lod::LOD_RING_TABLE,
             near_radius: 1,
             lod_subscribed: std::collections::BTreeSet::new(),
+            join: JoinTimeline::default(),
             pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
             last_hud_status: None,
@@ -631,6 +646,11 @@ impl GameInstanceManager {
             return;
         };
         let conn = self.connection_state();
+        if conn == game::ConnectionState::Ready && !self.join.connection_ready {
+            // First time clock-synced AND caught up on the event stream.
+            self.join.connection_ready = true;
+            game::perf_event!("connection_ready", "home={},{}", home.x, home.z);
+        }
         let snapshot = (home, viewer, conn);
         if self.last_hud_status == Some(snapshot) {
             return;
@@ -741,6 +761,15 @@ impl GameInstanceManager {
         );
         self.lod_assigned = assigned;
         if desired == self.lod_subscribed {
+            if !self.join.lod_requests_done && !desired.is_empty() {
+                // The paced RequestLod diff has fully drained for the first time.
+                self.join.lod_requests_done = true;
+                game::perf_event!(
+                    "lod_requests_done",
+                    "keys={} per_tick={LOD_REQUESTS_PER_TICK}",
+                    desired.len()
+                );
+            }
             return;
         }
         let stale: Vec<game::lod::LodKey> =
@@ -869,6 +898,13 @@ impl GameInstanceManager {
                 let first_home = self.home_region.is_none();
                 self.home_region = Some(home);
                 if first_home {
+                    game::perf_event!(
+                        "player_region",
+                        "home={},{} near_radius={}",
+                        home.x,
+                        home.z,
+                        self.near_radius
+                    );
                     // Initial join: ask for the whole near window up front;
                     // update_window keeps it in sync from then on. Later
                     // pushes (handoff confirmations) must NOT re-burst —
@@ -902,6 +938,17 @@ impl GameInstanceManager {
                 {
                     self.perf.snapshot_count += 1;
                     self.perf.snapshot_total += snap_start.elapsed();
+                    // Game-thread cost of one snapshot: teardown + the two
+                    // `Rollback` clones in `new_region` + world insert.
+                    game::perf_event!(
+                        "region_loaded",
+                        "region={},{} load_ms={} loaded={} subscribed={}",
+                        id.x,
+                        id.z,
+                        game::perf::ms(snap_start.elapsed()),
+                        self.perf.snapshot_count,
+                        self.subscribed.len()
+                    );
                 }
                 // Replay events that raced ahead of the snapshot; reconcile
                 // skips anything already baked in (base_event_id).
@@ -931,6 +978,19 @@ impl GameInstanceManager {
                     // Raced a release: tell the server we really don't want it.
                     let _ = self.server_game_send.send(ClientPacket::ReleaseLod(key));
                     return Ok(());
+                }
+                if !self.join.lod_all_received {
+                    if self.join.lod_received.is_empty() {
+                        game::perf_event!("lod_first_received", "factor={}", key.factor);
+                    }
+                    self.join.lod_received.insert(key);
+                    if self.join.lod_requests_done
+                        && self.lod_subscribed.is_subset(&self.join.lod_received)
+                    {
+                        self.join.lod_all_received = true;
+                        game::perf_event!("lod_all_received", "keys={}", self.lod_subscribed.len());
+                        self.join.lod_received.clear();
+                    }
                 }
                 let _ = self
                     .client_event_send
@@ -1047,6 +1107,7 @@ impl GameInstanceManager {
             0.0
         };
         log::debug!(
+            target: game::perf::BUDGET_TARGET,
             "[client] mispredicts/s={:.2} avg_replay={:.1} max_replay={} evlog={} tick_rate={}ms drift={}ms",
             per_sec,
             avg_replay,
@@ -1087,6 +1148,7 @@ impl GameInstanceManager {
             .map(|(id, avg)| format!("({},{})@{:.2}ms", id.x, id.z, ms(avg)))
             .unwrap_or_else(|| "none".into());
         log::debug!(
+            target: game::perf::BUDGET_TARGET,
             "[client-budget] window={:.1}s util={:.1}% | tick n={} total={:.0}ms avg={:.2}ms max={:.2}ms | recon total={:.0}ms replayed={} | snap n={} total={:.0}ms | idle={:.0}ms other={:.0}ms | sim n={} ctrl={:.0}ms input={:.1}ms scan={:.0}ms worst={}",
             secs,
             busy.as_secs_f32() / secs * 100.0,

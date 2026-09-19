@@ -513,3 +513,101 @@ fn tile_build_waits_for_running_unseeded_regions() {
     assert!(overlaid.iter().all(|b| *b != BlockId(42)), "overlay must wipe the coarse marker");
     assert!(overlaid.iter().any(|b| *b == BlockId(1)), "authoritative floor must appear");
 }
+
+/// Stand-in for the native server's thread pool: it generates pristine
+/// terrain itself (`generates_pristine`), and records jobs instead of building.
+struct RecordingBuilder {
+    jobs: std::sync::Arc<std::sync::Mutex<Vec<LodBuildJob>>>,
+}
+
+impl LodBuilder for RecordingBuilder {
+    fn submit(&mut self, job: LodBuildJob) {
+        self.jobs.lock().unwrap().push(job);
+    }
+
+    fn generates_pristine(&self) -> bool {
+        true
+    }
+}
+
+/// Worldgen for a never-run region's LOD must not run on the manager thread
+/// (it measured up to 522 ms per call, during which no packet routes), and the
+/// full-resolution result must not be parked in `terrain_cache`.
+#[test]
+fn pristine_lod_source_is_generated_by_the_builder_not_the_manager() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let (out_send, out) = unbounded();
+    let (region_out_send, region_out) = unbounded();
+    let generated = Arc::new(AtomicUsize::new(0));
+    let counter = generated.clone();
+    let generator = Box::new(move |_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
+        counter.fetch_add(1, Ordering::SeqCst);
+        let air = Block::new(BlockId::AIR);
+        let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
+        vec![(ColumnCoords::new(0, 0), Column::new(0, air, air, vec![sub]))]
+    });
+    let jobs = Arc::new(Mutex::new(Vec::new()));
+    let (_lod_result_send, lod_result_recv) = unbounded::<LodResult>();
+    let mut m = WorldManager::new(
+        InlineSpawner::default(),
+        generator,
+        out_send,
+        region_out_send,
+        Box::new(RecordingBuilder { jobs: jobs.clone() }),
+        lod_result_recv,
+    );
+    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    drain_region_outputs(&mut m, &region_out);
+    let after_join = generated.load(Ordering::SeqCst);
+    assert_eq!(after_join, 1, "the home region itself still generates on the manager");
+    let cached_before = m.terrain_cache_len();
+
+    let far = RegionCoords::new(100, 100);
+    let key = LodKey::for_region(4, far);
+    m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+
+    assert_eq!(generated.load(Ordering::SeqCst), after_join, "manager must not run worldgen for LOD");
+    assert_eq!(m.terrain_cache_len(), cached_before, "no full-resolution pristine snapshot is retained");
+    {
+        let jobs = jobs.lock().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(
+            matches!(&jobs[0], LodBuildJob::Pristine { key: k, region } if *k == key && *region == far),
+            "expected a Pristine job, got {:?}",
+            jobs[0]
+        );
+    }
+
+    // The result path is unchanged: the payload fans out to the subscriber.
+    out.try_iter().for_each(drop);
+    m.handle_lod_result(key, Vec::new());
+    expect_lod_data(&out, key);
+}
+
+/// A `Pristine` job is the old two-step (generate, then downsample the
+/// materialized chunks) moved into the builder — same payload, bit for bit.
+#[test]
+fn pristine_job_builds_the_same_payload_as_generate_then_region_job() {
+    let generate = |_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
+        let air = Block::new(BlockId::AIR);
+        (0..2usize)
+            .map(|x| {
+                let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8 + x as u32)));
+                (ColumnCoords::new(x, 0), Column::new(0, air, air, vec![sub]))
+            })
+            .collect()
+    };
+    let coarse = |_key: &LodKey| -> Vec<LodCell> { Vec::new() };
+    let region = RegionCoords::new(3, -2);
+    let key = LodKey::for_region(2, region);
+
+    let chunks = TerrainSnapshot::from_columns(generate(region)).chunks;
+    let (_, expected) = build_lod_job(LodBuildJob::Region { key, chunks }, &coarse, &generate);
+    let (got_key, got) = build_lod_job(LodBuildJob::Pristine { key, region }, &coarse, &generate);
+
+    assert_eq!(got_key, key);
+    assert!(!got.is_empty(), "the flat floors must produce LOD cells");
+    assert_eq!(bincode::serialize(&got).unwrap(), bincode::serialize(&expected).unwrap());
+}

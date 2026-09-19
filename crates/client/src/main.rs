@@ -128,6 +128,18 @@ fn start_game_thread() -> Sender<Command> {
     return command_send;
 }
 
+/// `LogPlugin` filter. `RUST_LOG`, when set, replaces it wholesale (Bevy's
+/// rule), so `PERF_LOG=1` is the supported way to see the DEBUG-level
+/// `[client-budget]` / `[client] mispredicts/s` lines: it raises only their
+/// dedicated target, not every `debug!` in the workspace.
+fn log_filter(budget_lines: bool) -> String {
+    let mut filter = String::from("wgpu=error,naga=warn");
+    if budget_lines {
+        filter.push_str(&format!(",{}=debug", game::perf::BUDGET_TARGET));
+    }
+    filter
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn app_exit_code(exit: &bevy::app::AppExit) -> i32 {
     match exit {
@@ -137,6 +149,7 @@ fn app_exit_code(exit: &bevy::app::AppExit) -> i32 {
 }
 
 fn main() {
+    game::perf::pin_origin();
     // Per-entry verification is off by default (desync is caught by the
     // periodic tick-interval state hash); HASH_MODE=delta re-enables
     // footprint-digest self-checks, HASH_MODE=full whole-field verification
@@ -237,7 +250,7 @@ fn main() {
                 ..Default::default()
             })
             .set(bevy::log::LogPlugin {
-                filter: "wgpu=error,naga=warn".into(),
+                filter: log_filter(game::perf::budget_lines_requested()),
                 ..Default::default()
             })
             .set(bevy::asset::AssetPlugin {
@@ -246,8 +259,14 @@ fn main() {
             })
             .set(bevy::app::TaskPoolPlugin { task_pool_options }),
     )
-    .insert_resource(world_scale)
-    .add_plugins(renderer::SimBridgePlugin {
+    .insert_resource(world_scale);
+    // The logger exists from here on: announce the perf timeline and flush the
+    // events the game/netcode threads emitted while Bevy was still starting.
+    game::perf::init("client");
+    // Repeated here because the game thread's own `world scale` line is logged
+    // before the logger exists; capture manifests read this one.
+    info!("[client] world scale: {world_scale}");
+    app.add_plugins(renderer::SimBridgePlugin {
         client_recv,
         game_send: game_send.clone(),
         debug_flags: debug_flags.clone(),
@@ -284,6 +303,12 @@ fn main() {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perf_log_raises_only_the_budget_target() {
+        assert_eq!(log_filter(false), "wgpu=error,naga=warn");
+        assert_eq!(log_filter(true), "wgpu=error,naga=warn,perf_budget=debug");
+    }
 
     #[test]
     fn client_worker_cap_defaults_to_four() {
