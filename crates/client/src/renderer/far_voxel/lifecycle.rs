@@ -179,9 +179,13 @@ pub fn queue_far_brick_tasks(
         if brick_mode {
             queue.enqueue_brick(entity);
             commands.entity(entity).remove::<LodMeshTask>();
-        } else {
-            queue.remove(entity);
         }
+        // Raster mode: leave the queue alone. `spawn_lod_mesh_tasks` (earlier
+        // in this chain) just enqueued this cell on the RASTER lane, and
+        // `LodBuildQueue::remove` clears both lanes — calling it here dropped
+        // every cell beyond the first task batch of each LOD root, for good.
+        // The brick lane needs no per-entity cleanup: `retain_brick` below
+        // empties it whenever brick mode is off.
     }
     if brick_mode && readiness.became_ready {
         for entity in &fallback_cells {
@@ -694,6 +698,54 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         false
+    }
+
+    /// Production system order in RASTER mode: `queue_far_brick_tasks` sits
+    /// between `spawn_lod_mesh_tasks` and `apply_lod_meshes` (`renderer/mod.rs`).
+    fn raster_app() -> App {
+        let mut app = brick_app(FarVoxelLimits::for_tests());
+        app.add_plugins(bevy::asset::AssetPlugin::default())
+            .init_asset::<Mesh>()
+            .insert_resource(TerrainRenderConfig {
+                near: NearRenderBackend::GroupedDirect,
+                far: FarRenderBackend::Raster,
+            })
+            .add_systems(
+                Update,
+                crate::renderer::meshing::lod::apply_lod_meshes.after(queue_far_brick_tasks),
+            );
+        app
+    }
+
+    /// Regression (2026-09-19, live): a LOD root arrives as hundreds of cells
+    /// in one frame. The raster lane meshes `max_in_flight` of them per batch
+    /// and must keep the rest queued. `queue_far_brick_tasks` used to call
+    /// `queue.remove()` — which clears BOTH lanes — on every changed cell in
+    /// raster mode, in the same frame, so only the first batch of each root
+    /// was ever meshed: neighbouring regions rendered as a thin strip.
+    #[test]
+    fn raster_mode_meshes_every_cell_of_a_root_larger_than_the_task_budget() {
+        let mut app = raster_app();
+        let budget = app.world().resource::<MeshBudgets>().max_in_flight;
+        let cells: Vec<Entity> = (0..budget * 3)
+            .map(|i| spawn_cell(&mut app, Vec3::X * 64.0 * i as f32, 2, BlockId(7)))
+            .collect();
+
+        let all_ready = |app: &App| {
+            cells
+                .iter()
+                .all(|&cell| app.world().entity(cell).contains::<LodRasterReady>())
+        };
+        assert!(
+            wait_until(&mut app, all_ready),
+            "only {} of {} cells were ever meshed",
+            cells
+                .iter()
+                .filter(|&&cell| app.world().entity(cell).contains::<LodRasterReady>())
+                .count(),
+            cells.len()
+        );
+        assert_eq!(app.world().resource::<LodBuildQueue>().pending_count(), 0);
     }
 
     #[test]
