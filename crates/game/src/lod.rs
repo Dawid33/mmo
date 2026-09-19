@@ -154,23 +154,105 @@ pub struct LodCell {
 /// positive y — `div_euclid`/`rem_euclid` round toward negative infinity, not
 /// toward zero, so this holds across the y=0 boundary).
 pub fn build_far_lod_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
-    let mut groups: BTreeMap<[i32; 3], [Option<Vec<Voxel>>; 8]> = BTreeMap::new();
+    let mut groups: BTreeMap<[i32; 3], Vec<Voxel>> = BTreeMap::new();
     for (coords, chunk) in chunks {
         let cx = coords.x as i32;
         let cz = coords.z as i32;
         let group = [cx.div_euclid(2), coords.y.div_euclid(2), cz.div_euclid(2)];
-        let octant =
-            (cx.rem_euclid(2) + 2 * coords.y.rem_euclid(2) + 4 * cz.rem_euclid(2)) as usize;
-        let entry = groups.entry(group).or_insert_with(|| std::array::from_fn(|_| None));
-        entry[octant] = Some(derive_voxels(&chunk.blocks, &chunk.chisel));
+        let octant = [
+            cx.rem_euclid(2) as usize,
+            coords.y.rem_euclid(2) as usize,
+            cz.rem_euclid(2) as usize,
+        ];
+        let grid = groups
+            .entry(group)
+            .or_insert_with(|| vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+        write_chunk_at_half_scale(grid, octant, &chunk);
     }
     groups
         .into_iter()
-        .map(|(group, grids)| {
-            let sources: [Option<&[Voxel]>; 8] = std::array::from_fn(|i| grids[i].as_deref());
-            LodCell { group, grid: downsample2(&sources) }
-        })
+        .map(|(group, grid)| LodCell { group, grid })
         .collect()
+}
+
+/// Write `chunk`, downsampled 2x, into its octant of a coarse 32^3 grid —
+/// exactly what `downsample2` produces from `derive_voxels(chunk)`, without
+/// ever materializing the dense 32^3 source. That expansion was ~70% of a
+/// factor-2/4 server LOD build (690 of ~950 ms per region, 2026-09-19
+/// profile), and LOD delivery is what paces the horizon filling after a join.
+///
+/// It works per block: the 2x2x2 source groups sit on even coordinates, so
+/// none straddles a 16-voxel block boundary. An un-chiseled block is uniform,
+/// hence so is its 8^3 image (one fill); only chiseled blocks need the
+/// majority rule, read straight from their occupancy bitset. The whole octant
+/// is overwritten, air included, so a later chunk at the same coordinates
+/// replaces an earlier one just as the old octant table did.
+fn write_chunk_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], chunk: &Chunk) {
+    use crate::{BlockIndex, BLOCK_VOXELS};
+    debug_assert_eq!(chunk.blocks.len(), crate::CHUNK_BLOCK_COUNT);
+    let half = BLOCK_VOXELS / 2; // coarse cells per block axis (8)
+    for (idx, block) in chunk.blocks.iter().enumerate() {
+        let bi = BlockIndex(idx as u8);
+        let (bx, by, bz) = bi.xyz();
+        let base = [
+            octant[0] * 16 + bx * half,
+            octant[1] * 16 + by * half,
+            octant[2] * 16 + bz * half,
+        ];
+        let chisel = chunk.chisel.get(&bi);
+        for z in 0..half {
+            for y in 0..half {
+                let row = (base[1] + y) * 32 + (base[2] + z) * 32 * 32 + base[0];
+                match chisel {
+                    None => grid[row..row + half].fill(Voxel::new(block.id)),
+                    Some(chisel) => {
+                        for x in 0..half {
+                            let mut samples = [BlockId::AIR; 8];
+                            let mut n = 0;
+                            for dz in 0..2 {
+                                for dy in 0..2 {
+                                    for dx in 0..2 {
+                                        let (vx, vy, vz) = (2 * x + dx, 2 * y + dy, 2 * z + dz);
+                                        if chisel.is_solid(vx, vy, vz) {
+                                            samples[n] = chisel.material_at(vx, vy, vz);
+                                            n += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            grid[row + x] = majority_solid(&samples[..n]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `downsample2`'s material rule for one coarse cell: air iff no sample is
+/// solid; otherwise the most frequent non-air `BlockId`, ties to the lowest.
+fn majority_solid(samples: &[BlockId]) -> Voxel {
+    let mut counts: [(BlockId, u8); 8] = [(BlockId::AIR, 0); 8];
+    let mut len = 0;
+    for &id in samples {
+        if id == BlockId::AIR {
+            continue;
+        }
+        match counts[..len].iter_mut().find(|(seen, _)| *seen == id) {
+            Some((_, count)) => *count += 1,
+            None => {
+                counts[len] = (id, 1);
+                len += 1;
+            }
+        }
+    }
+    let mut winner: Option<(BlockId, u8)> = None;
+    for &(id, count) in &counts[..len] {
+        if winner.is_none_or(|(best, best_count)| count > best_count || (count == best_count && id < best)) {
+            winner = Some((id, count));
+        }
+    }
+    winner.map_or_else(Voxel::default, |(id, _)| Voxel::new(id))
 }
 
 /// Second `downsample2` pass: merge factor-2 cells (group key = chunk coords
@@ -496,6 +578,72 @@ mod tests {
         let mut sources: [Option<&[Voxel]>; 8] = [None; 8];
         sources[0] = Some(&g);
         assert_eq!(downsample2(&sources), downsample2(&sources));
+    }
+
+    /// The pre-2026-09-19 implementation, kept as the behavioural reference:
+    /// dense `derive_voxels` per chunk, then `downsample2` over the octants.
+    fn reference_far_lod_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
+        let mut groups: BTreeMap<[i32; 3], [Option<Vec<Voxel>>; 8]> = BTreeMap::new();
+        for (coords, chunk) in chunks {
+            let cx = coords.x as i32;
+            let cz = coords.z as i32;
+            let group = [cx.div_euclid(2), coords.y.div_euclid(2), cz.div_euclid(2)];
+            let octant =
+                (cx.rem_euclid(2) + 2 * coords.y.rem_euclid(2) + 4 * cz.rem_euclid(2)) as usize;
+            let entry = groups.entry(group).or_insert_with(|| std::array::from_fn(|_| None));
+            entry[octant] = Some(derive_voxels(&chunk.blocks, &chunk.chisel));
+        }
+        groups
+            .into_iter()
+            .map(|(group, grids)| {
+                let sources: [Option<&[Voxel]>; 8] = std::array::from_fn(|i| grids[i].as_deref());
+                LodCell { group, grid: downsample2(&sources) }
+            })
+            .collect()
+    }
+
+    /// The block-wise path must be bit-identical to the dense one: LOD
+    /// payloads are cached, compared and streamed, so "close" is not enough.
+    #[test]
+    fn block_wise_far_lod_cells_match_the_dense_reference_exactly() {
+        use crate::{BlockIndex, ChiselData};
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |modulus: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % modulus
+        };
+        for round in 0..12 {
+            let mut chunks = Vec::new();
+            for _ in 0..(3 + next(10)) {
+                let coords = ChunkCoords::new(next(4) as usize, next(5) as i32 - 2, next(4) as usize);
+                let mut chunk = Chunk::default();
+                for b in 0..crate::CHUNK_BLOCK_COUNT {
+                    let bi = BlockIndex(b as u8);
+                    let (bx, by, bz) = bi.xyz();
+                    chunk.set_block(bx, by, bz, Block::new(BlockId(next(4) as u16)));
+                    // ~1/3 of the blocks carry chisel detail, some with an AIR
+                    // palette entry (solid bit set, air material).
+                    if next(3) == 0 {
+                        let mut chisel = ChiselData::new(vec![BlockId(1), BlockId(2), BlockId::AIR, BlockId(7)]);
+                        for _ in 0..next(3000) {
+                            let (vx, vy, vz) = (next(16) as usize, next(16) as usize, next(16) as usize);
+                            chisel.set(vx, vy, vz, next(4) != 0, next(4) as u8);
+                        }
+                        chunk.chisel.insert(bi, chisel);
+                    }
+                }
+                chunks.push((coords, chunk));
+            }
+            let expected = reference_far_lod_cells(chunks.clone());
+            let got = build_far_lod_cells(chunks);
+            assert_eq!(got.len(), expected.len(), "round {round}: cell count");
+            for (g, e) in got.iter().zip(&expected) {
+                assert_eq!(g.group, e.group, "round {round}");
+                assert!(g.grid == e.grid, "round {round}: grid of group {:?} differs", g.group);
+            }
+        }
     }
 
     #[test]

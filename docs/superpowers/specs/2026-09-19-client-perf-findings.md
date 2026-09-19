@@ -287,6 +287,104 @@ modes share; that (re-inserting a component per chunk entity per frame, ~57k ent
 next client-side frame cost worth fixing, in either mode. The join itself is unchanged: it is
 paced by server LOD delivery.
 
+**Pull-path per-entity costs — before / after** (`full`, Intel iGPU, release, untraced, 120 s,
+`GroupedDirect`, n = 1 each: `20260919T165432Z-Intel-full` → `20260919T171550Z-Intel-full`):
+
+| | Before | After |
+|---|---|---|
+| Steady frame once loaded | 39.6 ms (26.4 fps) | **24.8 ms (40.7 fps)** |
+| GPU pass total / share | 12.1 ms / 31% | 9.3 ms / 37% — still CPU-bound (15.5 ms not GPU) |
+| Frame time while the join streams | 47–70 ms | **30–50 ms** |
+| `near_meshing_drained` | 62.2 s | **51.3 s** |
+| `world_ready` | 104.6 s | **85.2 s** |
+| Chunks re-extracted per frame (`[pull-cull]`) | all (~38k) | **0 when idle, tens while streaming** |
+| LOD cells meshed / WARN lines / KEEP-UP / send timeouts | 20 631 of 20 631 / 0 / 0 / 0 | same |
+
+This beats the GPU-driven near mode measured earlier the same day (34.4 ms) while staying on
+`GroupedDirect`; that mode should be re-measured on top of this change. Visual correctness
+(terrain draws, updates on edits and on cave-culling flips while turning) was NOT checkable from
+the capture — confirm by eye.
+
+**One-frame join stalls — confirmed** (`20260919T174643Z-Intel-full` vs `…171550Z…`): region
+spawn in `drain_client_updates` 8.9 s → **34 ms total, 5 ms max** (no `main_stall` line at all);
+`mark_remesh_dirty` one 3.5 s frame → slices of ≤ 28 ms; `apply_lod_events` max 886 → 124 ms;
+`first_near_mesh` 25.7 s → **12.0 s**; all 23 372 snapshot voxels applied by 31 s;
+`near_meshing_drained` unchanged at 51 s. `world_ready` was 107 s vs 85 s, but the client's LOD
+backlog was 0 throughout both runs — the difference is server LOD build time that run
+(1.4–2.7 s per key vs 1.0–2.0 s), i.e. the next item:
+
+**Server LOD build cost — confirmed** (`20260919T175838Z-Intel-full` vs `…174643Z…`, `full`, Intel
+iGPU, release, n = 1 each):
+
+| | Before | After |
+|---|---|---|
+| Server LOD `build avg` for the expensive keys | 1.4–2.7 s | **0.26–0.31 s** (0.6–1.0 s while nine regions run genesis) |
+| Keys built per 5 s window (factor-2/4 phase) | 3–9 | **14–37** |
+| `lod_all_received` | 105.9 s | **65.1 s** |
+| `world_ready` | 107.1 s | **66.1 s** |
+| Server peak / final RSS | 2767 / 1401 MB | **978 / 789 MB** (no dense 217 MB-per-job grids on the workers) |
+| `near_meshing_drained` | 51.4 s | 64.8 s — LOD now arrives ~4× faster and shares the client's compute pool; near and far finish together |
+| LOD cells meshed / send timeouts / server WARNs | 20 631 of 20 631 / 0 / 0 | same |
+
+`world_ready` history at `full` on this adapter: not within 60 s (morning) → 104.6 s (cull
+rewrite) → 85–107 s (pull path + stall fixes, LOD-paced) → **66.1 s**. What remains in those
+66 s: server genesis 11–16 s before anything arrives, then near meshing and LOD in parallel.
+
+**Known netcode issue visible in that run (not caused by this work):** 5 KEEP-UP warnings with no
+region crossing — `drift=+1100ms tick_rate=55ms`, 20 mispredicts/s (= every server tick),
+`avg_replay≈36`, prediction log plateauing at ~39 (stable, not diverging), game thread 20–43%
+utilised. The client joined ~1.1 s ahead of the server and the ±10% tick-rate pacing never
+converges it; earlier the same day it joined ~0.3 s behind with `avg_replay≈10`. This is the
+`client-prediction-runaway` problem (join/pacing by confirmed position): which side of the
+server the client lands on depends on how busy the join was. Worth its own session; the
+`[client-budget]` + `[client] mispredicts/s` lines are the measurement.
+
+**Server LOD build cost — implementation notes.** Headless attribution
+(`cargo run --release -p worldgen --example lod_build_profile`): a factor-2/4 build for a
+never-run region was ~980 ms = downsample 690 (70%) + generate 190 + encode 95; factor 16 is
+already cheap (block-scale path). The 690 ms was `build_far_lod_cells` expanding every chunk to a
+dense 32³ grid (`derive_voxels`) before `downsample2`. It now writes each chunk straight into its
+octant at half scale, per block: 2×2×2 source groups never straddle a 16-voxel block, so an
+un-chiseled block is one uniform 8³ fill and only chiseled blocks run the majority rule, read
+from their occupancy bitset. Bit-identical by a randomized test against the old implementation
+(kept as a test-only reference; chiseled blocks, air-material chisel voxels and duplicate chunk
+coordinates included). Result: downsample **694 → 45 ms** (factor 2), **687 → 68 ms** (factor
+4); whole build ≈ 980 → ≈ 200 ms, now dominated by `generate_region`. Expect the ~72 expensive
+keys that paced `world_ready` (~60 s on two workers) to take ~15 s.
+
+**One-frame join stalls — implementation notes.** Measured before: all nine region
+snapshots spawned inside one `drain_client_updates` call (6.3-8.9 s frame), then
+`mark_remesh_dirty` fingerprinting all 23 372 chunks at once (2.6-3.5 s), and `apply_lod_events`
+stacking payload bursts (0.7-0.9 s).
+- Region spawn: entities still spawn synchronously (cheap), but each chunk's
+  `derive_voxels` + RLE encode moved to `AsyncComputeTaskPool` batches
+  (`SNAPSHOT_VOXEL_TASK_CHUNKS = 64`) sharing the snapshot through an `Arc`;
+  `bridge::apply_snapshot_voxels` inserts results at `SNAPSHOT_VOXELS_PER_FRAME = 64`, which
+  also caps `mark_remesh_dirty` at ~10 ms/frame. Chunk entities carry `PendingSnapshotVoxels`
+  until then; an incremental `SetVoxelComponent` that arrives first clears the marker and wins
+  (test proven red with the guard removed). Task entities are children of the region root, so
+  removing/replacing a region cancels them. Pending voxels count as in-flight work in both
+  readiness gates (`join_timeline`, `render_bench`), and the headless harness runs the same chain.
+- LOD apply: `apply_lod_events` defers messages beyond `LOD_APPLY_CELLS_PER_FRAME = 512` decoded
+  cells per frame, in arrival order (at least one message always progresses). A stop-gap: one
+  factor-2 payload is still ~100 ms; the real fix is to keep LOD cells packed and decode in the
+  LOD mesh task (which would also cut the client's LOD memory).
+Verified: 59 + 33 client tests across `renderer::bridge::`, `lod_rings::`, `join_timeline::`,
+`voxel_pull::`; `just smoke`. Expect in the next `full` capture: no multi-second `main_stall`
+lines, a `snapshot_voxels_applied` event, first terrain earlier than 25 s.
+
+**Pull-path per-entity costs — implementation notes.** (1) `extract_chunk_quads`
+now extracts only chunks whose `ChunkQuads`, `GlobalTransform` or `InheritedVisibility` changed
+(`Or<(Changed<…>,…)>` on the `Extract` query); the stored `changed` flag is gone and
+`prepare_chunk_quads` filters on `Changed<ExtractedChunkQuads>` instead, because a flag would go
+stale the first frame a chunk is not re-extracted. (2) `extract_removed_chunk_quads` returns early
+when nothing was removed instead of walking every render entity each frame. (3)
+`prepare_view_chunk_draws` resolves each chunk's arena allocation once per frame rather than once
+per view (5 views), and drops cave-hidden chunks up front. Verified: type-check, `just smoke`, 33
+`voxel_pull::` unit tests. **Not verifiable headlessly:** that terrain still draws correctly and
+updates on edits / cave-culling flips — check visually, then compare a `full` capture against
+`20260919T165432Z-Intel-full` (39.6 ms) and a `trace-chrome` against 18.4 + 17.6 ms.
+
 **Implemented (options 2 + 1), 2026-09-19.**
 `CullingScratch::flood` is now dense: one `u128` per cell inside the expansion box holds the
 visited bit of every legal BFS state (`state_bit`: 27 direction codes × 3 entry axes — the entry
@@ -432,6 +530,9 @@ Still open from the server side: genesis (#1, measure with `just collider-bench`
 
 | Capture directory | Adapter (selected) | World | Rev | Notes |
 |---|---|---|---|---|
+| `target/perf-capture/20260919T175838Z-Intel-full/` | same | full | + block-wise LOD downsample (uncommitted) | 120 s; `world_ready` 66.1 s, server RSS < 1 GB; 5 KEEP-UP warnings (pacing, drift +1100 ms) |
+| `target/perf-capture/20260919T174643Z-Intel-full/` | same | full | + async snapshot voxels, LOD apply budget (uncommitted) | 120 s; no multi-second stalls, first terrain 12.0 s |
+| `target/perf-capture/20260919T171550Z-Intel-full/` | same | full | `43d5ddb` + extract-only-changed (uncommitted) | 120 s; steady 24.8 ms, `world_ready` 85.2 s |
 | `target/perf-capture/20260919T170442Z-Intel-full/` | same | full | same, `VOXEL_NEAR_RENDER=gpu` | 120 s; GpuDriven near mode: steady 34.4 ms vs 39.6 ms |
 | `target/perf-capture/20260919T165432Z-Intel-full/` | same | full | same + dense/gated `cull_chunks` | 120 s; `world_ready` at 104.6 s, steady 26 fps |
 | `target/perf-capture/20260919T155459Z-Intel-full/` | same | full (9 regions, 570 LOD keys) | same | first `full` capture; not loaded after 60 s (55/570 LOD roots, 7.5 fps) |
