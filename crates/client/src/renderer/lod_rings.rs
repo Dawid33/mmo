@@ -187,10 +187,12 @@ fn spawn_lod_root(commands: &mut Commands, key: LodKey, payload: &LodPayload) ->
     let span = 32 * factor as i32;
     let mut spawned: BTreeMap<[i32; 3], Entity> = BTreeMap::new();
     for (group, packed) in payload {
-        let Some(grid) = packed.decode() else {
+        // Validate, don't decode: the run total is O(runs); the 64 KiB dense
+        // expansion is left to the mesh task (`LodVoxelData` stays packed).
+        if !packed.is_well_formed() {
             warn!("lod: dropping undecodable grid {group:?} for {key:?}");
             continue;
-        };
+        }
         let translation = Vec3::new(
             (group[0] * span) as f32,
             (group[1] * span - factor as i32) as f32,
@@ -205,7 +207,7 @@ fn spawn_lod_root(commands: &mut Commands, key: LodKey, payload: &LodPayload) ->
                 },
                 Visibility::default(),
                 lod::LodChunk { factor },
-                lod::LodVoxelData(grid),
+                lod::LodVoxelData(packed.clone()),
                 ChildOf(root),
             ))
             .id();

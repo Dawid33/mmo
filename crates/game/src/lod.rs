@@ -405,11 +405,18 @@ impl PackedLodGrid {
         Self(runs)
     }
 
+    /// Whether the runs add up to exactly one 32^3 grid — i.e. whether
+    /// [`decode`](Self::decode) will succeed. O(runs), no allocation: lets the
+    /// client validate untrusted wire data on its main thread and leave the
+    /// 64 KiB expansion to the mesh task.
+    pub fn is_well_formed(&self) -> bool {
+        self.0.iter().map(|&(n, _)| n as usize).sum::<usize>() == CHUNK_VOXEL_COUNT
+    }
+
     /// None when the run total is not exactly one grid — wire data is
     /// untrusted, so corrupt payloads drop instead of panicking.
     pub fn decode(&self) -> Option<Vec<Voxel>> {
-        let total: usize = self.0.iter().map(|&(n, _)| n as usize).sum();
-        if total != CHUNK_VOXEL_COUNT {
+        if !self.is_well_formed() {
             return None;
         }
         let mut grid = Vec::with_capacity(CHUNK_VOXEL_COUNT);
@@ -581,6 +588,22 @@ mod tests {
     }
 
     use crate::derive_voxels;
+
+    #[test]
+    fn packed_grid_well_formedness_matches_decodability() {
+        let grid = vec![Voxel::new(BlockId(3)); CHUNK_VOXEL_COUNT];
+        let good = PackedLodGrid::encode(&grid);
+        assert!(good.is_well_formed());
+        assert!(good.decode().is_some());
+        for bad in [
+            PackedLodGrid(vec![]),
+            PackedLodGrid(vec![(100, BlockId(1))]),
+            PackedLodGrid(vec![(u16::MAX, BlockId(1)), (u16::MAX, BlockId(2))]),
+        ] {
+            assert!(!bad.is_well_formed());
+            assert!(bad.decode().is_none());
+        }
+    }
 
     /// The pre-2026-09-19 implementation, kept as the behavioural reference:
     /// dense `derive_voxels` per chunk, then `downsample2` over the octants.

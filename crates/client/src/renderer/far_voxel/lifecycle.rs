@@ -245,10 +245,14 @@ pub fn queue_far_brick_tasks(
             queue.remove(entity);
             continue;
         };
-        let voxels = voxels.0.clone();
+        // Packed clone; the dense expansion happens in the task.
+        let packed = voxels.0.clone();
         let revision = revisions.current(entity);
         queue.remove(entity);
-        let task = pool.spawn(async move { PreparedBrickRoot::from_voxels(&voxels) });
+        let task = pool.spawn(async move {
+            let voxels = crate::renderer::meshing::lod::decode_lod_grid(&packed);
+            PreparedBrickRoot::from_voxels(&voxels)
+        });
         commands
             .entity(entity)
             .insert(FarBrickBuildTask { task, revision });
@@ -676,7 +680,7 @@ mod tests {
             .spawn((
                 Transform::from_translation(local - Vec3::Y * factor as f32),
                 LodChunk { factor },
-                LodVoxelData(grid(material)),
+                LodVoxelData::from_dense(&grid(material)),
                 ChildOf(root),
             ))
             .id()
@@ -806,7 +810,8 @@ mod tests {
             max_in_flight: 8,
             uploads_per_frame: 8,
         });
-        app.world_mut().get_mut::<LodVoxelData>(entity).unwrap().0 = grid(BlockId(12));
+        app.world_mut().get_mut::<LodVoxelData>(entity).unwrap()
+            .0 = LodVoxelData::from_dense(&grid(BlockId(12))).0;
         app.update();
         assert!(
             app.world()
@@ -965,7 +970,7 @@ mod tests {
         app.world_mut()
             .get_mut::<LodVoxelData>(entities[0])
             .unwrap()
-            .0 = grid(BlockId(31));
+            .0 = LodVoxelData::from_dense(&grid(BlockId(31))).0;
         app.update();
         assert!(
             app.world()
@@ -1047,7 +1052,7 @@ mod tests {
             .world_mut()
             .spawn(VoxelData::new(grid(BlockId(27))))
             .id();
-        let far = app.world_mut().spawn(LodVoxelData(grid(BlockId(28)))).id();
+        let far = app.world_mut().spawn(LodVoxelData::from_dense(&grid(BlockId(28)))).id();
 
         app.update();
 
@@ -1092,7 +1097,7 @@ mod tests {
             })
             .insert_resource(residency)
             .add_systems(Update, queue_far_brick_tasks);
-        let queued = app.world_mut().spawn(LodVoxelData(grid(BlockId(21)))).id();
+        let queued = app.world_mut().spawn(LodVoxelData::from_dense(&grid(BlockId(21)))).id();
 
         app.update();
 
@@ -1212,7 +1217,8 @@ mod tests {
             .entity(entity)
             .get::<FarVoxelResident>()
             .unwrap();
-        app.world_mut().get_mut::<LodVoxelData>(entity).unwrap().0 = grid(BlockId(9));
+        app.world_mut().get_mut::<LodVoxelData>(entity).unwrap()
+            .0 = LodVoxelData::from_dense(&grid(BlockId(9))).0;
         assert!(wait_until(&mut app, |app| {
             !app.world().entity(entity).contains::<FarBrickBuildTask>()
                 && app.world().resource::<LodBuildQueue>().pending_count() == 0
@@ -1296,12 +1302,12 @@ mod tests {
         residency.resolve_upload(FarUploadResult::ack(batch_id));
         app.world_mut().entity_mut(first).insert((
             LodChunk { factor: 2 },
-            LodVoxelData(grid(BlockId(21))),
+            LodVoxelData::from_dense(&grid(BlockId(21))),
             FarVoxelResident::from_resident(first_resident, 2),
         ));
         app.world_mut().entity_mut(second).insert((
             LodChunk { factor: 2 },
-            LodVoxelData(grid(BlockId(22))),
+            LodVoxelData::from_dense(&grid(BlockId(22))),
             FarVoxelResident::from_resident(second_resident, 2),
         ));
         let mut queue = LodBuildQueue::default();

@@ -115,10 +115,36 @@ pub struct LodChunk {
     pub factor: u32,
 }
 
-/// The 32³ coarse voxel grid for one LOD chunk cell, same layout contract as
-/// full-res `VoxelData` (`x + 32*y + 32*32*z`).
+/// One LOD chunk cell's coarse voxel grid, kept PACKED (the RLE it arrived
+/// in). Same layout contract as full-res `VoxelData` once decoded
+/// (`x + 32*y + 32*32*z`), and the same reasoning as `bridge::VoxelData`: a
+/// dense grid is 64 KiB, the production ring table holds ~20 000 cells
+/// (~1.3 GB, over half the client's RSS when measured 2026-09-20), and only
+/// the async mesh / brick tasks ever need the expansion — so they do it.
 #[derive(Component)]
-pub struct LodVoxelData(pub Vec<Voxel>);
+pub struct LodVoxelData(pub game::lod::PackedLodGrid);
+
+impl LodVoxelData {
+    pub fn from_dense(grid: &[Voxel]) -> Self {
+        Self(game::lod::PackedLodGrid::encode(grid))
+    }
+
+    /// The dense 32^3 grid. Payloads are validated when spawned
+    /// (`PackedLodGrid::is_well_formed`), so a malformed run list cannot get
+    /// here in practice; if one did, it reads as air instead of panicking
+    /// inside a task.
+    pub fn decode(&self) -> Vec<Voxel> {
+        decode_lod_grid(&self.0)
+    }
+}
+
+/// See [`LodVoxelData::decode`]; free function so tasks can decode the packed
+/// grids they were handed without borrowing the component.
+pub fn decode_lod_grid(packed: &game::lod::PackedLodGrid) -> Vec<Voxel> {
+    packed
+        .decode()
+        .unwrap_or_else(|| vec![Voxel::default(); game::CHUNK_VOXEL_COUNT])
+}
 
 /// Optional same-batch neighbor refs for padding gather, set by the spawner.
 /// Entities named here must be LOD siblings at the same `factor` — offsets
@@ -270,17 +296,25 @@ pub fn spawn_lod_mesh_tasks(
         let Ok((voxels, lod_neighbors)) = grids.get(e) else {
             continue;
         };
-        let mut neigh: BTreeMap<[i32; 3], Vec<Voxel>> = BTreeMap::new();
+        // Packed clones only (a few hundred bytes each); the 64 KiB dense
+        // expansions of this cell and its up-to-26 neighbors happen in the
+        // task, off the main thread.
+        let mut packed_neigh: BTreeMap<[i32; 3], game::lod::PackedLodGrid> = BTreeMap::new();
         if let Some(ln) = lod_neighbors {
             for (&off, &ne) in &ln.0 {
                 if let Ok((nv, _)) = grids.get(ne) {
-                    neigh.insert(off, nv.0.clone());
+                    packed_neigh.insert(off, nv.0.clone());
                 }
             }
         }
-        let grid = voxels.0.clone();
+        let packed = voxels.0.clone();
         let layers = layers.0.clone();
         let task = pool.spawn(async move {
+            let grid = decode_lod_grid(&packed);
+            let neigh: BTreeMap<[i32; 3], Vec<Voxel>> = packed_neigh
+                .iter()
+                .map(|(&off, packed)| (off, decode_lod_grid(packed)))
+                .collect();
             let neighbor_refs: BTreeMap<[i32; 3], &[Voxel]> =
                 neigh.iter().map(|(&k, v)| (k, v.as_slice())).collect();
             mesh_lod_output(&grid, &neighbor_refs, &BlockTextureLayers(layers), pull)
@@ -382,6 +416,28 @@ mod tests {
             block: BlockId(1),
             ao: [3; 4],
         }
+    }
+
+    /// LOD cells stay packed in the ECS: a dense grid is 64 KiB per cell, and
+    /// the production ring table holds ~20 000 cells (~1.3 GB, more than half
+    /// the client's RSS when this was measured).
+    #[test]
+    fn lod_voxel_data_is_packed_and_round_trips_exactly() {
+        let mut grid = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        for (i, v) in grid.iter_mut().enumerate() {
+            let y = (i / 32) % 32;
+            if y < 12 {
+                *v = Voxel::new(BlockId(if y < 10 { 1 } else { 3 }));
+            }
+        }
+        let data = LodVoxelData::from_dense(&grid);
+        assert_eq!(data.decode(), grid, "packed storage must decode to the exact grid");
+        let bytes = data.0 .0.len() * std::mem::size_of::<(u16, BlockId)>();
+        assert!(bytes < 2048, "a layered terrain cell packs to {bytes} B, not 64 KiB");
+        // A malformed run list (only possible if validation was skipped) decodes
+        // to air rather than panicking inside a mesh task.
+        let broken = LodVoxelData(game::lod::PackedLodGrid(vec![(7, BlockId(1))]));
+        assert_eq!(broken.decode(), vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
     }
 
     #[test]
@@ -618,7 +674,7 @@ mod tests {
                 },
                 Visibility::default(),
                 LodChunk { factor },
-                LodVoxelData(grid),
+                LodVoxelData::from_dense(&grid),
                 ChildOf(root),
             ))
             .id()
@@ -812,7 +868,7 @@ mod tests {
 
         let mut changed_grid = floor_grid();
         changed_grid[5 + 32 * 20 + 32 * 32 * 5] = Voxel::new(BlockId(2));
-        app.world_mut().get_mut::<LodVoxelData>(e).unwrap().0 = changed_grid;
+        *app.world_mut().get_mut::<LodVoxelData>(e).unwrap() = LodVoxelData::from_dense(&changed_grid);
 
         assert!(
             wait_until(&mut app, |app| {

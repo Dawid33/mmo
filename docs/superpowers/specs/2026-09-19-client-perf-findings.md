@@ -52,6 +52,45 @@ What now paces a `full` join: near meshing (20.0 s; the snapshot-voxel apply bud
 finishes at 10.4 s, the mesher's 32 uploads/frame after it) — LOD is done by 14.3 s. With the
 frame vsync-capped, per-frame budgets are the knob, not CPU.
 
+## Packed LOD cells + tightened budget ceilings — confirmed 2026-09-20
+
+`20260920T153227Z-Intel-full` (`full`, Intel iGPU, release, unclamped, 90 s, no region crossings)
+against the same day's earlier `full` captures:
+
+| | `…121828Z…` (per-frame budgets, dense LOD) | `…123228Z…` (rate budgets, loose ceilings) | this run (tight ceilings, packed LOD) |
+|---|---|---|---|
+| Client peak RSS | 2441 MB | 3194 MB (with region crossings) | **1134 MB** |
+| Client GPU memory | — | 522 MB | 456 MB |
+| `apply_lod_events` stalls | 27, max 46 ms | 46, max 37 ms | **none** |
+| `mark_remesh_dirty` stalls | few | 105, max 31 ms (`work=512`) | 51, max 15 ms (`work=160`) |
+| Frame time in the first seconds of the join | 20–27 ms | 37–49 ms | **17–23 ms** |
+| `snapshot_voxels_applied` | 10.4 s | 5.9 s | 6.1 s |
+| `near_meshing_drained` | 20.0 s | 10.8 s | **12.6 s** |
+| `lod_all_received` / `world_ready` | 14.3 / 20.5 s | 14.6 / 15.1 s | 17.6 / 18.2 s (LOD-paced; server-side variance) |
+| Steady frame | 16.67 ms (vsync) | 20.5 ms | 16.8 ms (vsync), GPU 5.6 ms |
+| LOD cells meshed / KEEP-UP / send timeouts | 20 631 of 20 631 / 0 / 0 | same / 1 / 0 | same / 0 / 0 |
+
+So the tighter ceilings kept almost all of the drain-time win (12.6 s vs 10.8 s vs 20.0 s) while
+making join frames *smoother than before the budgets changed*, and packing LOD cells removed
+1.3 GB of client memory and the last main-thread LOD stall. `world_ready` is now set by LOD
+delivery (server: two `LOD_BUILD_THREADS`), not by anything on the client.
+
+### Packed LOD cells — implementation notes
+
+`LodVoxelData` held a dense `Vec<Voxel>` per LOD cell: 2 bytes × 32³ = 64 KiB, × 20 631 cells at
+`full` ≈ **1.29 GB — over half the client's 2.4 GB RSS** — and `spawn_lod_root` produced it by
+decoding every cell on the main thread (the last remaining `main_stall` category:
+`apply_lod_events`, 37 ms unclamped, 124–886 ms clamped). It now stores the `PackedLodGrid` RLE
+exactly as it arrived (the same move `bridge::VoxelData` made for near chunks). Only two
+consumers ever read voxels, and both already ran in async tasks — the LOD mesh task and the
+far-voxel brick task — so they clone the packed grid (a few hundred bytes) and decode there,
+neighbours included. `spawn_lod_root` validates untrusted wire data with the new O(runs)
+`PackedLodGrid::is_well_formed()` instead of decoding. Tests: packed round trip + footprint
+(< 2 KiB for a layered terrain cell), well-formedness ⇔ decodability, and the existing 226
+meshing / LOD-ring / far-voxel / bridge tests (the malformed-payload test included) unchanged
+in behaviour. Expect: client peak RSS down by roughly 1 GB at `full`, `apply_lod_events` stalls
+gone or tiny, LOD mesh-task time slightly up (27 decodes per task, on workers).
+
 ## Meshing budgets — confirmed 2026-09-20, then ceilings tightened
 
 `20260920T123228Z-Intel-full` vs `…121828Z…` (same day, same unclamped machine, `full`, n = 1
@@ -657,6 +696,8 @@ Still open from the server side: genesis (#1, measure with `just collider-bench`
 
 | Capture directory | Adapter (selected) | World | Rev | Notes |
 |---|---|---|---|---|
+| `target/perf-capture/20260920T153227Z-Intel-full/` | same, unclamped | full | `880bd85` + packed LOD cells (uncommitted) | 90 s; client RSS 1134 MB, join frames 17–23 ms, `world_ready` 18.2 s |
+| `target/perf-capture/20260920T123228Z-Intel-full/` | same, unclamped | full | rate budgets, loose ceilings (pre-`880bd85`) | 120 s with rapid region crossings; near drained 10.8 s, join frames 37–49 ms |
 | `target/perf-capture/20260920T121828Z-Intel-full/` | same, **~130 W power source, unclamped** | full | + parry voxel patch, deferred region worldgen (uncommitted) | 120 s; `world_ready` 20.5 s, 60 fps vsync-capped; not comparable in seconds with 2026-09-19 |
 | `target/perf-capture/20260919T175838Z-Intel-full/` | same | full | + block-wise LOD downsample (uncommitted) | 120 s; `world_ready` 66.1 s, server RSS < 1 GB; 5 KEEP-UP warnings (pacing, drift +1100 ms) |
 | `target/perf-capture/20260919T174643Z-Intel-full/` | same | full | + async snapshot voxels, LOD apply budget (uncommitted) | 120 s; no multi-second stalls, first terrain 12.0 s |
