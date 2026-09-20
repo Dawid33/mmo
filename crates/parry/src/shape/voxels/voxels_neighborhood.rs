@@ -56,7 +56,85 @@ impl Voxels {
         }
     }
 
+    /// Recomputes every voxel's neighborhood state from the occupancy alone.
+    ///
+    /// LOCAL PATCH (voxel MMO fork): the straightforward version (kept below as
+    /// `recompute_all_voxels_states_reference`) resolves each voxel and each of
+    /// its `2 * DIM` neighbors through `linear_index`, i.e. a `chunk_headers`
+    /// hash lookup per neighbor per voxel slot. Building the terrain colliders
+    /// of one game region spent ~72% of its time there (2026-09-19 profile).
+    /// A neighbor is almost always in the same internal chunk, so resolve the
+    /// chunk and its `2 * DIM` adjacent chunks ONCE, then index directly.
+    ///
+    /// The result is identical: a state depends only on which neighbors are
+    /// empty, and emptiness (`EMPTY_FACE_MASK`) never changes here — computed
+    /// states only use the low `2 * DIM` face bits — so evaluation order and
+    /// the in-place update cannot matter.
     pub(super) fn recompute_all_voxels_states(&mut self) {
+        const D: usize = VoxelsChunk::VOXELS_PER_CHUNK_DIM;
+        let mut strides = [1usize; DIM];
+        for k in 1..DIM {
+            strides[k] = strides[k - 1] * D;
+        }
+        let chunk_ids: alloc::vec::Vec<(Point<i32>, usize)> = self
+            .chunk_headers
+            .iter()
+            .map(|(key, header)| (*key, header.id))
+            .collect();
+
+        for (chunk_key, chunk_id) in chunk_ids {
+            // [axis][0 = next (+1), 1 = prev (-1)]
+            let mut adjacent = [[None::<usize>; 2]; DIM];
+            for k in 0..DIM {
+                let (mut next, mut prev) = (chunk_key, chunk_key);
+                next[k] += 1;
+                prev[k] -= 1;
+                adjacent[k][0] = self.chunk_headers.get(&next).map(|h| h.id);
+                adjacent[k][1] = self.chunk_headers.get(&prev).map(|h| h.id);
+            }
+
+            let mut states = self.chunks[chunk_id].states;
+            for id_in_chunk in 0..VoxelsChunk::VOXELS_PER_CHUNK {
+                if self.chunks[chunk_id].states[id_in_chunk].is_empty() {
+                    states[id_in_chunk] = VoxelState::EMPTY;
+                    continue;
+                }
+                let mut occupied_faces = 0;
+                for k in 0..DIM {
+                    let local = (id_in_chunk / strides[k]) % D;
+                    // +1 along k: same chunk, or the first layer of the next chunk.
+                    let next_filled = if local + 1 < D {
+                        !self.chunks[chunk_id].states[id_in_chunk + strides[k]].is_empty()
+                    } else {
+                        adjacent[k][0].is_some_and(|c| {
+                            !self.chunks[c].states[id_in_chunk - (D - 1) * strides[k]].is_empty()
+                        })
+                    };
+                    // -1 along k: same chunk, or the last layer of the previous chunk.
+                    let prev_filled = if local > 0 {
+                        !self.chunks[chunk_id].states[id_in_chunk - strides[k]].is_empty()
+                    } else {
+                        adjacent[k][1].is_some_and(|c| {
+                            !self.chunks[c].states[id_in_chunk + (D - 1) * strides[k]].is_empty()
+                        })
+                    };
+                    if next_filled {
+                        occupied_faces |= 1 << (k * 2);
+                    }
+                    if prev_filled {
+                        occupied_faces |= 1 << (k * 2 + 1);
+                    }
+                }
+                states[id_in_chunk] = VoxelState::new(occupied_faces);
+            }
+            self.chunks[chunk_id].states = states;
+        }
+    }
+
+    /// The upstream per-voxel implementation; the behavioural reference for
+    /// the patched `recompute_all_voxels_states`.
+    #[cfg(test)]
+    pub(super) fn recompute_all_voxels_states_reference(&mut self) {
         for (chunk_key, chunk_header) in self.chunk_headers.iter() {
             for id_in_chunk in 0..VoxelsChunk::VOXELS_PER_CHUNK {
                 let voxel_key = VoxelsChunk::voxel_key_at_id(*chunk_key, id_in_chunk as u32);
@@ -66,6 +144,7 @@ impl Voxels {
         }
     }
 
+    #[cfg(test)]
     fn compute_voxel_state(&self, key: Point<i32>) -> VoxelState {
         let Some(id) = self.linear_index(key) else {
             return VoxelState::EMPTY;
@@ -199,6 +278,56 @@ impl Voxels {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "dim3"))]
+mod local_patch_tests {
+    use crate::math::{Point, Vector};
+    use crate::shape::Voxels;
+
+    /// The patched whole-shape recompute must produce exactly the states the
+    /// upstream per-voxel version does — they end up in collision detection and
+    /// in the shape's cached hash.
+    #[test]
+    fn patched_recompute_matches_the_upstream_reference() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |modulus: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % modulus
+        };
+        for round in 0..40 {
+            // Dense-ish blobs spanning several internal 8^3 chunks, negative
+            // coordinates included, plus a few far-away stragglers.
+            let extent = 4 + next(30) as i32;
+            let origin = [next(40) as i32 - 20, next(40) as i32 - 20, next(40) as i32 - 20];
+            let fill = 2 + next(6);
+            let mut points = alloc::vec::Vec::new();
+            for x in 0..extent {
+                for y in 0..(1 + extent / 3) {
+                    for z in 0..extent {
+                        if next(fill) != 0 {
+                            points.push(Point::new(origin[0] + x, origin[1] + y, origin[2] + z));
+                        }
+                    }
+                }
+            }
+            for _ in 0..next(5) {
+                points.push(Point::new(next(200) as i32 - 100, next(200) as i32 - 100, next(200) as i32 - 100));
+            }
+            if points.is_empty() {
+                continue;
+            }
+            let patched = Voxels::new(Vector::repeat(crate::math::Real::from(1.0)), &points);
+            let mut reference = patched.clone();
+            reference.recompute_all_voxels_states_reference();
+            assert_eq!(patched.chunks.len(), reference.chunks.len());
+            for (id, (a, b)) in patched.chunks.iter().zip(&reference.chunks).enumerate() {
+                assert!(a.states == b.states, "round {round}: states of internal chunk {id} differ");
             }
         }
     }
