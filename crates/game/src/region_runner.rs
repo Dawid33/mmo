@@ -32,6 +32,12 @@ pub enum RegionInput {
     /// A routed client event or a manager-authoritative event
     /// (CreateClient). The region assigns the authoritative event id.
     Event(GameEventKind),
+    /// A client event the client predicted right after its own tick number
+    /// `.1` of this region. Held until this region has run that tick, so it
+    /// lands in the slot the client predicted instead of wherever the two
+    /// clocks happen to stand on arrival; a client level with or behind the
+    /// server gets it applied on arrival, like [`RegionInput::Event`].
+    EventAfterTick(GameEventKind, u64),
     /// A new subscriber needs the full state; replied with
     /// `RegionOutput::Snapshot(client, ...)`.
     RequestSnapshot(ClientId),
@@ -121,7 +127,15 @@ pub struct RegionRunner {
     /// Cost of the cadence terrain-hash checks since the last
     /// `take_terrain_hash_cost` (metrics only): count, total, slowest.
     terrain_hash_cost: (u32, std::time::Duration, std::time::Duration),
+    /// Client events waiting for the tick they were predicted after, in
+    /// arrival order.
+    held: std::collections::VecDeque<(GameEventKind, u64)>,
 }
+
+/// Furthest ahead of a region's tick a client event may be stamped and still
+/// be held for it (one second). Past that the stamp is a runaway client
+/// clock or a lie, and the event applies on arrival rather than parking.
+pub const MAX_INPUT_LEAD_TICKS: u64 = 1000 / TICK_RATE;
 
 impl RegionRunner {
     pub fn new(
@@ -130,7 +144,14 @@ impl RegionRunner {
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Self {
         let last_terrain_hash = region.terrain_fingerprint();
-        Self { id, region, out, last_terrain_hash, terrain_hash_cost: Default::default() }
+        Self {
+            id,
+            region,
+            out,
+            last_terrain_hash,
+            terrain_hash_cost: Default::default(),
+            held: Default::default(),
+        }
     }
 
     /// `(checks, total, slowest)` of the every-`TERRAIN_HASH_INTERVAL_TICKS`
@@ -147,18 +168,16 @@ impl RegionRunner {
                 // The manager filters these; drop defensively rather than
                 // double-ticking or stopping on a stray packet.
                 GameEventKind::Tick | GameEventKind::Quit => {}
-                kind => {
-                    // Server-side regions never roll back: forget each
-                    // event's transaction immediately (undo log stays
-                    // bounded), same policy as the old main loop.
-                    let event = self
-                        .region
-                        .handle_event(kind)
-                        .expect("region event processing failed");
-                    self.region.forget_last_event();
-                    let _ = self.out.send((self.id, RegionOutput::EventProcessed(event)));
-                }
+                kind => self.apply(kind),
             },
+            RegionInput::EventAfterTick(kind, after_tick) => {
+                let now = self.region.current_tick() as u64;
+                if after_tick > now && after_tick - now <= MAX_INPUT_LEAD_TICKS {
+                    self.held.push_back((kind, after_tick));
+                } else {
+                    self.apply(kind);
+                }
+            }
             RegionInput::RequestSnapshot(client_id) => {
                 let _ = self.out.send((
                     self.id,
@@ -172,6 +191,10 @@ impl RegionRunner {
                 ));
             }
             RegionInput::Shutdown => {
+                // Input must not be lost to a park.
+                for (kind, _) in std::mem::take(&mut self.held) {
+                    self.apply(kind);
+                }
                 let serialized = SerializedRegion::from_rollback(self.region.data());
                 let far = self.region.terrain_snapshot();
                 let _ = self.out.send((self.id, RegionOutput::Stopped(serialized, far)));
@@ -179,6 +202,18 @@ impl RegionRunner {
             }
         }
         true
+    }
+
+    fn apply(&mut self, kind: GameEventKind) {
+        // Server-side regions never roll back: forget each event's
+        // transaction immediately (undo log stays bounded), same policy as
+        // the old main loop.
+        let event = self
+            .region
+            .handle_event(kind)
+            .expect("region event processing failed");
+        self.region.forget_last_event();
+        let _ = self.out.send((self.id, RegionOutput::EventProcessed(event)));
     }
 
     /// One sim tick + the every-10-ticks SyncClock self-report. The caller
@@ -190,6 +225,17 @@ impl RegionRunner {
             .expect("region tick failed");
         self.region.forget_last_event();
         let _ = self.out.send((self.id, RegionOutput::EventProcessed(event)));
+        // Events predicted after the tick that just ran, in arrival order.
+        let now = self.region.current_tick() as u64;
+        let mut i = 0;
+        while i < self.held.len() {
+            if self.held[i].1 <= now {
+                let (kind, _) = self.held.remove(i).expect("index checked");
+                self.apply(kind);
+            } else {
+                i += 1;
+            }
+        }
         let (departures, ghosts) = self.region.take_transfers();
         if !departures.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::Departures(departures)));

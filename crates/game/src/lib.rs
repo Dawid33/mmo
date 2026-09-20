@@ -213,9 +213,22 @@ impl World {
         &mut self,
         results: &mut BTreeMap<RegionId, Result<GameEvent, GameError>>,
     ) {
+        self.progress_world_one_tick_except(results, |_| false);
+    }
+
+    /// [`Self::progress_world_one_tick`] that leaves out the regions `skip`
+    /// picks: a client holding one back whose timeline has run too far ahead
+    /// of its server counterpart.
+    pub fn progress_world_one_tick_except(
+        &mut self,
+        results: &mut BTreeMap<RegionId, Result<GameEvent, GameError>>,
+        skip: impl Fn(&RegionId) -> bool,
+    ) {
         results.clear();
         for (id, region) in &mut self.regions {
-            results.insert(*id, region.handle_event(GameEventKind::Tick));
+            if !skip(id) {
+                results.insert(*id, region.handle_event(GameEventKind::Tick));
+            }
         }
     }
 

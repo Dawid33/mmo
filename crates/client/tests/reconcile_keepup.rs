@@ -93,7 +93,7 @@ impl Diag {
     fn forward_packets(&mut self) {
         while let Ok(p) = self.tap_from_manager.try_recv() {
             if self.drop_next_input {
-                if let ClientPacket::GameEvent(ev) = &p {
+                if let ClientPacket::GameEvent(ev) | ClientPacket::GameEventAfterTick(ev, _) = &p {
                     if matches!(ev.kind, GameEventKind::PlayerInput(..)) {
                         eprintln!("[diag] DROPPING in transit: input event id={}", ev.id);
                         self.drop_next_input = false;
@@ -115,7 +115,7 @@ impl Diag {
         delay: usize,
     ) {
         while let Ok(p) = self.tap_from_manager.try_recv() {
-            if matches!(&p, ClientPacket::GameEvent(_)) {
+            if matches!(&p, ClientPacket::GameEvent(_) | ClientPacket::GameEventAfterTick(..)) {
                 queue.push_back((now + delay, p));
             } else {
                 self.tap_to_server.send(p).unwrap();

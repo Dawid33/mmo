@@ -20,6 +20,7 @@ pub(crate) mod grid_debug;
 pub(crate) mod hud;
 pub(crate) mod input;
 mod interpolate;
+mod motion_probe;
 pub(crate) mod join_timeline;
 pub(crate) mod lod_rings;
 pub mod meshing;
@@ -131,6 +132,7 @@ impl Plugin for SimBridgePlugin {
                 // the LOD mesh systems pick up on later frames.
                 (lod_rings::apply_lod_events, lod_rings::retire_lod_roots).chain(),
                 interpolate::interpolate_transforms,
+                motion_probe::probe_camera_motion.after(interpolate::interpolate_transforms),
                 join_timeline::track_join_timeline,
                 avatar::attach_avatars,
                 skybox::attach_skybox,

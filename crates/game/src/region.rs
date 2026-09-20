@@ -82,6 +82,27 @@ pub struct ReconcileStats {
     pub replay_depth_sum: usize,
     /// Deepest single rollback in this pass.
     pub max_replay_depth: usize,
+    /// Mispredictions by what was predicted at the id and what the server
+    /// had there instead: `by_kinds[predicted][server]`, indexed by
+    /// [`ReconcileStats::kind_slot`]. Says which way the timelines disagree —
+    /// a predicted tick displaced by our own input is the client running
+    /// ahead of the server, the reverse is it running behind.
+    pub by_kinds: [[u32; 3]; 3],
+}
+
+impl ReconcileStats {
+    /// Names of the [`Self::by_kinds`] slots.
+    pub const KIND_NAMES: [&'static str; 3] = ["tick", "input", "transfer"];
+
+    /// Slot of an event kind in [`Self::by_kinds`]: ticks, client-originated
+    /// events, and everything relayed between regions.
+    pub fn kind_slot(kind: &GameEventKind) -> usize {
+        match kind {
+            GameEventKind::Tick => 0,
+            GameEventKind::PlayerInput(..) | GameEventKind::UiAction(..) => 1,
+            _ => 2,
+        }
+    }
 }
 
 /// A region represents an portion of the world that processes game events at
@@ -242,6 +263,8 @@ impl Region {
                                     self.id, event, server_event.0
                                 );
                             }
+                            stats.by_kinds[ReconcileStats::kind_slot(&event.kind)]
+                                [ReconcileStats::kind_slot(&server_event.0.kind)] += 1;
                             self.event_log.push_front(event);
                             // Replay depth = predicted ticks about to be rolled
                             // back and re-simulated for this misprediction.

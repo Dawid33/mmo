@@ -50,6 +50,9 @@ pub struct GameInstanceManager {
     tick_rate: Arc<AtomicU64>,
     ready: bool,
     is_caught_up: bool,
+    /// Ticks each region still has to sit out: its timeline ran further
+    /// ahead of the server's than the lead band allows. See `align_region`.
+    stalled: BTreeMap<RegionId, usize>,
     client_id: Option<ClientId>,
     home_region: Option<RegionCoords>,
     /// Regions we have requested (and not released) — the desired window.
@@ -124,6 +127,21 @@ struct ReconMetrics {
     /// Latest RTT-adjusted client-vs-server tick drift, in ms (negative =
     /// client is behind the server). Snapshotted from each `SyncClock`.
     last_drift_ms: isize,
+    /// Mispredictions by (predicted kind, server kind); see
+    /// `ReconcileStats::by_kinds`.
+    by_kinds: [[u32; 3]; 3],
+    /// Mispredictions in the home region: the ones that can move the player.
+    home_mispredictions: u32,
+    /// How far home-region reconcile passes moved the local player from
+    /// where it was predicted (world units): count, sum, largest.
+    corrections: u32,
+    correction_sum: f32,
+    correction_max: f32,
+    /// Regions stepped into the lead band (`align_region`): steps, ticks
+    /// added or sat out over them, and how many of the steps were home's.
+    align_steps: u32,
+    align_ticks: usize,
+    home_align_steps: u32,
     /// Home-region prediction-log depth, sampled once per report window;
     /// keeps the last `KEEPUP_TREND_WINDOWS` samples for the tripwire.
     log_depth_samples: Vec<usize>,
@@ -171,12 +189,33 @@ impl ReconMetrics {
     /// Fold in the cost of one `reconcile()` pass.
     fn record(&mut self, s: ReconcileStats) {
         self.mispredictions += s.mispredictions;
+        for (total, row) in self.by_kinds.iter_mut().zip(s.by_kinds) {
+            for (total, n) in total.iter_mut().zip(row) {
+                *total += n;
+            }
+        }
         self.replay_depth_sum += s.replay_depth_sum;
         if s.max_replay_depth > self.max_replay_depth {
             self.max_replay_depth = s.max_replay_depth;
         }
     }
 }
+
+/// How far ahead of the server the client's timeline is paced, in ms beyond
+/// the round trip: the margin an input has to reach the server before the
+/// tick it was predicted after. One and a half ticks.
+const CLIENT_LEAD_MS: isize = game::TICK_RATE as isize * 3 / 2;
+/// Half-width of the band around [`CLIENT_LEAD_MS`] in which the tick rate is
+/// left alone. The lead is measured in whole ticks, so anything narrower than
+/// a tick flaps.
+const CLIENT_LEAD_BAND_MS: isize = game::TICK_RATE as isize;
+
+/// How far past the band the home region's lead has to be before it is
+/// stepped rather than left to the clock. A step shows: the player jumps a
+/// few ticks of movement, or stands still for them.
+const HOME_STEP_ALIGN_MS: isize = game::TICK_RATE as isize * 3;
+/// Most ticks one alignment step adds or sits out (two seconds).
+const MAX_ALIGN_TICKS: usize = 2000 / game::TICK_RATE as usize;
 
 /// The client's desired subscription set: the 3x3 window around the viewer,
 /// plus the home region. Home must NEVER be released while the free-cam
@@ -264,6 +303,7 @@ impl GameInstanceManager {
             tick_rate: Arc::new(AtomicU64::new(game::TICK_RATE)),
             ready: false,
             is_caught_up: false,
+            stalled: BTreeMap::new(),
             server_game_send,
             server_game_recv,
             client_id: None,
@@ -378,10 +418,17 @@ impl GameInstanceManager {
             GameEventKind::Tick => {
                 #[cfg(not(target_arch = "wasm32"))]
                 let tick_start = Instant::now();
+                let stalled = &mut self.stalled;
                 self.world
                     .as_mut()
                     .unwrap()
-                    .progress_world_one_tick(&mut self.results_buffer);
+                    .progress_world_one_tick_except(&mut self.results_buffer, |id| {
+                        stalled.contains_key(id)
+                    });
+                stalled.retain(|_, ticks| {
+                    *ticks -= 1;
+                    *ticks > 0
+                });
                 #[cfg(not(target_arch = "wasm32"))]
                 self.perf.record_tick(tick_start.elapsed());
                 // MUST run here and only here: transfer buffers reflect the
@@ -412,13 +459,17 @@ impl GameInstanceManager {
                         warn!("dropping PlayerInput: home region {:?} not loaded", home);
                         return Ok(true);
                     }
+                    // Predicted right after this many ticks of home: the
+                    // server applies it in that same slot if it gets there
+                    // first (which the pacing below sees to).
+                    let after_tick = self.world.as_ref().unwrap().current_tick(&home) as u64;
                     let event = self.world.as_mut().unwrap().handle_region_event(e, home)?;
                     info!(
                         "[client] predicted PlayerInput id={} in home {:?}; sending to server",
                         event.id, home
                     );
                     self.server_game_send
-                        .send(game::ClientPacket::GameEvent(event))
+                        .send(game::ClientPacket::GameEventAfterTick(event, after_tick))
                         .unwrap();
                 }
             }
@@ -439,9 +490,10 @@ impl GameInstanceManager {
                         warn!("dropping UiAction: home region {:?} not loaded", home);
                         return Ok(true);
                     }
+                    let after_tick = self.world.as_ref().unwrap().current_tick(&home) as u64;
                     let event = self.world.as_mut().unwrap().handle_region_event(e, home)?;
                     self.server_game_send
-                        .send(game::ClientPacket::GameEvent(event))
+                        .send(game::ClientPacket::GameEventAfterTick(event, after_tick))
                         .unwrap();
                 }
             }
@@ -799,10 +851,39 @@ impl GameInstanceManager {
         }
     }
 
+    /// Step one region's timeline into the lead band: predict `ticks` more
+    /// of it now when it trails (`error_ms < 0`), or have it sit the next
+    /// `ticks` out when it has run ahead.
+    fn align_region(&mut self, region: RegionId, error_ms: isize, ticks: usize) {
+        if ticks == 0 {
+            return;
+        }
+        self.recon.align_steps += 1;
+        self.recon.align_ticks += ticks;
+        if self.home_region == Some(region) {
+            self.recon.home_align_steps += 1;
+        }
+        if error_ms > 0 {
+            self.stalled.insert(region, ticks);
+            return;
+        }
+        self.stalled.remove(&region);
+        for _ in 0..ticks {
+            let Some(world) = self.world.as_mut().filter(|w| w.region_exists(&region)) else {
+                return;
+            };
+            let _ = world.handle_region_event(GameEventKind::Tick, region);
+            // Transfer buffers hold the last tick only.
+            self.apply_local_transfers();
+        }
+    }
+
     /// Route one server-authoritative game event to the region it targets:
     /// reconcile if loaded, buffer if the snapshot is still in flight,
     /// drop if the region was released/never wanted.
     fn route_server_game_event(&mut self, event: GameEvent) -> Result<(), GameError> {
+        let in_home = self.home_region == Some(event.region_id);
+        let predicted_at = if in_home { self.local_player_translation() } else { None };
         let world = self.world.as_mut().expect("routed only when world exists");
         if world.region_exists(&event.region_id) {
             let stats = match world.reconcile_event(event) {
@@ -813,6 +894,15 @@ impl GameInstanceManager {
                 }
             };
             self.recon.record(stats);
+            if in_home && stats.mispredictions > 0 {
+                self.recon.home_mispredictions += stats.mispredictions;
+                if let (Some(a), Some(b)) = (predicted_at, self.local_player_translation()) {
+                    let moved = (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt();
+                    self.recon.corrections += 1;
+                    self.recon.correction_sum += moved;
+                    self.recon.correction_max = self.recon.correction_max.max(moved);
+                }
+            }
             Ok(())
         } else if self.subscribed.contains(&event.region_id) {
             // Snapshot still in flight: hold the event for replay.
@@ -834,6 +924,8 @@ impl GameInstanceManager {
     ) -> Result<(), GameError> {
         match server_msg.unwrap() {
             game::ServerPacket::SyncClock(region_id, server_tick_rate, server_tick, rtt) => {
+                // (lead error in ms, whole ticks to step) when out of band.
+                let mut step = None;
                 // With a moving 3×3 window a SyncClock can arrive for a region
                 // we no longer hold (released mid-shift) or don't hold yet
                 // (snapshot still in flight). Skip it — steady-state noise —
@@ -849,20 +941,52 @@ impl GameInstanceManager {
                     let milisecond_diff = diff * server_tick_rate as isize;
                     // we subract the rtt to get a more accurate approximation of how far behind the server is.
                     let total_mili_diff = milisecond_diff - rtt.as_millis() as isize;
-                    self.recon.last_drift_ms = total_mili_diff;
-
-                    if total_mili_diff < TEST_INDUCED_LATENCY_MS {
-                        self.ready = false;
-                        self.tick_rate
-                            .store((server_tick_rate as f32 * 0.9) as u64, Ordering::SeqCst);
-                    } else if total_mili_diff > TEST_INDUCED_LATENCY_MS {
-                        self.ready = true;
-                        self.tick_rate
-                            .store((server_tick_rate as f32 * 1.1) as u64, Ordering::SeqCst);
-                    } else {
-                        self.ready = true;
-                        self.tick_rate.store(server_tick_rate, Ordering::SeqCst);
+                    if self.home_region == Some(region_id) {
+                        self.recon.last_drift_ms = total_mili_diff;
                     }
+
+                    // Hold a lead over the server, within a band: an input
+                    // that reaches the server before the tick it was
+                    // predicted after is applied in exactly that slot, one
+                    // that arrives late is a rollback. The band keeps the
+                    // rate from flapping on the measurement's one-tick grain.
+                    let lead = total_mili_diff - TEST_INDUCED_LATENCY_MS;
+                    let error = lead - CLIENT_LEAD_MS;
+                    let is_home = self.home_region == Some(region_id);
+                    let rate = (server_tick_rate as isize).max(1);
+
+                    // One clock ticks every region, but each region's offset
+                    // to its server counterpart dates from when its snapshot
+                    // loaded, and a fresh one is always behind. Were every
+                    // region to steer the clock, the stream of fresh regions
+                    // would keep speeding it up and run the lead of all the
+                    // older ones away — home included, a second ahead within
+                    // a minute of roaming. So the clock follows home alone,
+                    // and any other region is stepped into the band on its
+                    // own. Home is stepped too when it is far out (the join,
+                    // a flip into a region not yet aligned): at the clock's
+                    // 10% slew a second of error would take ten to close.
+                    let far = if is_home { CLIENT_LEAD_BAND_MS + HOME_STEP_ALIGN_MS } else { CLIENT_LEAD_BAND_MS };
+                    if error.abs() > far {
+                        step = Some((error, ((error.abs() + rate / 2) / rate) as usize));
+                    }
+                    if is_home {
+                        if error < -CLIENT_LEAD_BAND_MS {
+                            self.ready = false;
+                            self.tick_rate
+                                .store((server_tick_rate as f32 * 0.9) as u64, Ordering::SeqCst);
+                        } else if error > CLIENT_LEAD_BAND_MS {
+                            self.ready = true;
+                            self.tick_rate
+                                .store((server_tick_rate as f32 * 1.1) as u64, Ordering::SeqCst);
+                        } else {
+                            self.ready = true;
+                            self.tick_rate.store(server_tick_rate, Ordering::SeqCst);
+                        }
+                    }
+                }
+                if let Some((error, ticks)) = step {
+                    self.align_region(region_id, error, ticks.min(MAX_ALIGN_TICKS));
                 }
             }
             game::ServerPacket::GameEvent(game_event) => {
@@ -1108,14 +1232,37 @@ impl GameInstanceManager {
         };
         log::debug!(
             target: game::perf::BUDGET_TARGET,
-            "[client] mispredicts/s={:.2} avg_replay={:.1} max_replay={} evlog={} tick_rate={}ms drift={}ms",
+            "[client] mispredicts/s={:.2} avg_replay={:.1} max_replay={} evlog={} tick_rate={}ms drift={}ms aligned={}({}t,home={})",
             per_sec,
             avg_replay,
             m.max_replay_depth,
             log_depth,
             self.tick_rate.load(Ordering::SeqCst),
             m.last_drift_ms,
+            m.align_steps,
+            m.align_ticks,
+            m.home_align_steps,
         );
+        if m.mispredictions > 0 {
+            // What was mispredicted (predicted>server), and how far the ones
+            // in the home region actually moved the player.
+            let names = ReconcileStats::KIND_NAMES;
+            let kinds: Vec<String> = (0..3)
+                .flat_map(|p| (0..3).map(move |s| (p, s)))
+                .filter(|&(p, s)| m.by_kinds[p][s] > 0)
+                .map(|(p, s)| format!("{}>{}={}", names[p], names[s], m.by_kinds[p][s]))
+                .collect();
+            log::debug!(
+                target: game::perf::BUDGET_TARGET,
+                "[client-mispredict] {} | home={} of {} | corrected n={} avg={:.3}u max={:.3}u",
+                kinds.join(" "),
+                m.home_mispredictions,
+                m.mispredictions,
+                m.corrections,
+                if m.corrections > 0 { m.correction_sum / m.corrections as f32 } else { 0.0 },
+                m.correction_max,
+            );
+        }
         // ---- perf-budget attribution: where the game-loop wall time went ----
         // Drain the per-region sim accumulators. These include reconcile
         // replays, so `sim n=` exceeds `tick n=` × loaded regions whenever the
@@ -1190,6 +1337,14 @@ impl GameInstanceManager {
         self.recon.mispredictions = 0;
         self.recon.replay_depth_sum = 0;
         self.recon.max_replay_depth = 0;
+        self.recon.align_steps = 0;
+        self.recon.align_ticks = 0;
+        self.recon.home_align_steps = 0;
+        self.recon.by_kinds = Default::default();
+        self.recon.home_mispredictions = 0;
+        self.recon.corrections = 0;
+        self.recon.correction_sum = 0.0;
+        self.recon.correction_max = 0.0;
     }
 }
 
@@ -1313,7 +1468,7 @@ mod manager_tests {
             .unwrap();
         assert!(manager.pump(&server_recv).unwrap());
         assert!(
-            matches!(outgoing.try_recv(), Ok(ClientPacket::GameEvent(_))),
+            matches!(outgoing.try_recv(), Ok(ClientPacket::GameEventAfterTick(..))),
             "PlayerInput must be predicted + sent while ready=false once caught up"
         );
 

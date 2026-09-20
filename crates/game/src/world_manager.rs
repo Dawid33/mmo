@@ -308,7 +308,13 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, rc, now_ms),
                 ClientPacket::RequestLod(key) => self.lod_subscribe(id, key, now_ms),
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
-                ClientPacket::GameEvent(event) => match event.kind {
+                packet @ (ClientPacket::GameEvent(_) | ClientPacket::GameEventAfterTick(..)) => {
+                    let (event, after_tick) = match packet {
+                        ClientPacket::GameEventAfterTick(event, tick) => (event, Some(tick)),
+                        ClientPacket::GameEvent(event) => (event, None),
+                        _ => unreachable!(),
+                    };
+                    match event.kind {
                     GameEventKind::Tick => {}
                     GameEventKind::Quit => return false,
                     kind @ (GameEventKind::PlayerInput(..) | GameEventKind::UiAction(..)) => {
@@ -325,7 +331,16 @@ impl<S: RegionSpawner> WorldManager<S> {
                                 log::debug!(
                                     "[server] recv {kind:?} from cid={cid:?} -> route to home {home:?}"
                                 );
-                                self.send_to_region(home, RegionInput::Event(kind));
+                                // The stamp counts ticks of the region the
+                                // client predicted into; after a flip the
+                                // home it routes to counts its own.
+                                let input = match after_tick {
+                                    Some(tick) if event.region_id == home => {
+                                        RegionInput::EventAfterTick(kind, tick)
+                                    }
+                                    _ => RegionInput::Event(kind),
+                                };
+                                self.send_to_region(home, input);
                             }
                             _ => log::info!(
                                 "[server] DROP {kind:?} from cid={cid:?}: home={home:?} not running (loaded regions: {:?})",
@@ -355,7 +370,8 @@ impl<S: RegionSpawner> WorldManager<S> {
                             );
                         }
                     }
-                },
+                    }
+                }
             },
         }
         true

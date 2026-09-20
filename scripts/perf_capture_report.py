@@ -353,6 +353,10 @@ def main() -> int:
     s += ["", "CLIENT GAME THREAD  ([client-budget]: where the game loop's wall time goes)", ""]
     s += busiest(client, "[client-budget]", lambda l: field_sum(l, r"util=([\d.]+)%"))
     s += [""] + tail(client, "[client] mispredicts/s")
+    # What mispredicted and how far it moved the player; then what that and
+    # the frame pacing did to the camera on screen.
+    s += [""] + tail(client, "[client-mispredict]", 12)
+    s += [""] + tail(client, "[client-motion]", 12)
     warnings = sum("KEEP-UP WARNING" in l for l in client)
     s.append(f"KEEP-UP WARNING lines: {warnings}{'   <-- prediction log is running away' if warnings else ''}")
     s += ["  " + l[l.index("KEEP-UP WARNING"):][:150] for l in client if "KEEP-UP WARNING" in l][:5]
