@@ -35,12 +35,13 @@ pub struct RemeshQueue {
     pub dirty: BTreeMap<Entity, Option<[i32; 3]>>,
 }
 
-/// Cap on concurrently queued meshing tasks. Each task owns a ~77 KB padded
+/// Floor on concurrently queued meshing tasks (the live cap scales with the
+/// upload budget, see [`MeshBudgetPolicy`]). Each task owns a ~77 KB padded
 /// snapshot; the cap bounds join-burst memory and lets priority reordering
 /// act on everything not yet started. Tunable.
 pub const MAX_IN_FLIGHT_MESH_TASKS: usize = 64;
-/// Cap on finished meshes attached per frame — bounds per-frame GPU upload
-/// spikes during bursts. Tunable.
+/// Floor on finished meshes attached per frame, and the fixed value wherever
+/// no [`MeshBudgetPolicy`] runs (tests). Tunable.
 pub const MESH_UPLOADS_PER_FRAME: usize = 32;
 
 #[derive(Resource)]
@@ -55,6 +56,78 @@ impl Default for MeshBudgets {
             max_in_flight: MAX_IN_FLIGHT_MESH_TASKS,
             uploads_per_frame: MESH_UPLOADS_PER_FRAME,
         }
+    }
+}
+
+/// Target rate for attaching finished meshes, in chunks per second. The
+/// per-frame cap is derived from it and the real frame delta
+/// ([`per_frame_budget`]): ~50 per frame at 60 Hz, more when frames are long.
+///
+/// Why a rate: a fixed per-frame count throttles hardest exactly when frames
+/// are slow. Measured 2026-09-19/20 at the production world size, the near
+/// window drained at `MESH_UPLOADS_PER_FRAME x fps` — ~260 chunks/s at 8 fps,
+/// ~1600/s at 45 fps — with the in-flight task cap pinned full the whole time,
+/// i.e. the workers were never the limit. Tunable.
+pub const MESH_UPLOADS_PER_SECOND: f32 = 3000.0;
+/// Ceiling on the derived per-frame upload cap: twice a 60 Hz frame's worth.
+/// A budget proportional to the frame delta is a feedback loop — a long frame
+/// earns more work, which makes the next frame longer — so the ceiling is what
+/// keeps it bounded. The first version allowed 256 (and 512 snapshot inserts)
+/// and the first seconds of a join ran at 37-49 ms per frame with 31 ms
+/// `mark_remesh_dirty` stalls (2026-09-20 capture).
+pub const MAX_MESH_UPLOADS_PER_FRAME: usize = 100;
+/// In-flight tasks allowed per upload slot: a finished task holds its slot
+/// until it is attached, so the lane needs headroom beyond one frame's worth.
+pub const IN_FLIGHT_PER_UPLOAD: usize = 2;
+
+/// A per-second work rate as a per-frame count for a frame that took `dt`,
+/// clamped to `min..=max`. `min` keeps high refresh rates from starving the
+/// work; `max` bounds what a single long frame may take on.
+pub fn per_frame_budget(per_second: f32, dt: std::time::Duration, min: usize, max: usize) -> usize {
+    let scaled = (per_second * dt.as_secs_f32()).round();
+    // NaN / negative / huge all land inside the clamp.
+    (scaled.max(0.0) as usize).clamp(min, max.max(min))
+}
+
+/// The rate policy behind [`MeshBudgets`]. Production inserts it and runs
+/// [`scale_mesh_budgets`]; harnesses that pin `MeshBudgets` by hand simply
+/// don't, and keep their fixed per-frame numbers.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct MeshBudgetPolicy {
+    pub uploads_per_second: f32,
+    pub min_uploads_per_frame: usize,
+    pub max_uploads_per_frame: usize,
+    pub min_in_flight: usize,
+}
+
+impl Default for MeshBudgetPolicy {
+    fn default() -> Self {
+        Self {
+            uploads_per_second: MESH_UPLOADS_PER_SECOND,
+            min_uploads_per_frame: MESH_UPLOADS_PER_FRAME,
+            max_uploads_per_frame: MAX_MESH_UPLOADS_PER_FRAME,
+            min_in_flight: MAX_IN_FLIGHT_MESH_TASKS,
+        }
+    }
+}
+
+/// Re-derive this frame's [`MeshBudgets`] from the policy and the real frame
+/// delta. First in the meshing chain, so every lane sees the same numbers.
+pub fn scale_mesh_budgets(
+    time: Res<Time<Real>>,
+    policy: Res<MeshBudgetPolicy>,
+    mut budgets: ResMut<MeshBudgets>,
+) {
+    let uploads = per_frame_budget(
+        policy.uploads_per_second,
+        time.delta(),
+        policy.min_uploads_per_frame,
+        policy.max_uploads_per_frame,
+    );
+    let in_flight = policy.min_in_flight.max(uploads * IN_FLIGHT_PER_UPLOAD);
+    if budgets.uploads_per_frame != uploads || budgets.max_in_flight != in_flight {
+        budgets.uploads_per_frame = uploads;
+        budgets.max_in_flight = in_flight;
     }
 }
 
@@ -287,6 +360,46 @@ pub fn prune_chunk_grid(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn per_frame_budget_scales_with_frame_time_inside_its_clamp() {
+        use std::time::Duration;
+        let budget = |ms: u64| per_frame_budget(3000.0, Duration::from_millis(ms), 32, 256);
+        assert_eq!(budget(16), 48, "~60 Hz");
+        assert_eq!(budget(25), 75, "40 fps: more per frame, same per second");
+        assert_eq!(budget(5), 32, "high refresh rates hit the floor");
+        assert_eq!(budget(0), 32, "first frame / zero delta");
+        assert_eq!(budget(125), 256, "an 8 fps frame hits the ceiling, not 375");
+        assert_eq!(budget(10_000), 256);
+        // Throughput no longer collapses with the frame rate (it used to be
+        // 32 x fps): every delta between the clamps yields ~3000/s.
+        for ms in [12u64, 16, 25, 33, 50, 80] {
+            let per_second = budget(ms) as f32 * 1000.0 / ms as f32;
+            assert!((2900.0..=3100.0).contains(&per_second), "{ms} ms -> {per_second}/s");
+        }
+        assert_eq!(per_frame_budget(f32::NAN, Duration::from_millis(16), 8, 64), 8);
+        assert_eq!(per_frame_budget(3000.0, Duration::from_millis(16), 64, 8), 64, "min wins over a lower max");
+    }
+
+    #[test]
+    fn scale_mesh_budgets_tracks_the_policy_and_keeps_in_flight_headroom() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<MeshBudgets>()
+            .insert_resource(MeshBudgetPolicy {
+                uploads_per_second: 10_000.0,
+                min_uploads_per_frame: 4,
+                max_uploads_per_frame: 100,
+                min_in_flight: 16,
+            })
+            .add_systems(Update, scale_mesh_budgets);
+        app.update();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        app.update(); // ~20 ms frame at 10k/s => ~200, clamped to 100
+        let budgets = app.world().resource::<MeshBudgets>();
+        assert_eq!(budgets.uploads_per_frame, 100);
+        assert_eq!(budgets.max_in_flight, 100 * IN_FLIGHT_PER_UPLOAD);
+    }
     use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
 
     pub(crate) fn voxels_with(cells: &[[usize; 3]]) -> Vec<Voxel> {

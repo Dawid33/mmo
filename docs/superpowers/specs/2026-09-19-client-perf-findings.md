@@ -52,6 +52,57 @@ What now paces a `full` join: near meshing (20.0 s; the snapshot-voxel apply bud
 finishes at 10.4 s, the mesher's 32 uploads/frame after it) — LOD is done by 14.3 s. With the
 frame vsync-capped, per-frame budgets are the knob, not CPU.
 
+## Meshing budgets — confirmed 2026-09-20, then ceilings tightened
+
+`20260920T123228Z-Intel-full` vs `…121828Z…` (same day, same unclamped machine, `full`, n = 1
+each; user's verdict: "significantly improved"):
+
+| | Per-frame budgets | Rate-based budgets (first version) |
+|---|---|---|
+| `snapshot_voxels_applied` (23 372 chunks) | 10.4 s | **5.9 s** |
+| `near_meshing_drained` (18 876 chunks) | 20.0 s | **10.8 s** |
+| `lod_all_received` / `world_ready` | 14.3 s / 20.5 s | 14.6 s / **15.1 s** (LOD-paced again) |
+| Frame time in the first ~6 s of the join | 20–27 ms (37–50 fps) | **37–49 ms** — worse |
+| `mark_remesh_dirty` stalls | few | 105, max 31 ms at `work=512` (the ceiling) |
+| Region crossings later in the run | — | each new region loads in 8–25 ms, its voxels in 2–9 s, no stalls |
+
+The regression is the feedback loop a delta-proportional budget creates: a long frame earns more
+work, which makes the next frame longer; the 256 / 512 ceilings were far too loose to bound it.
+**Fixed after this capture (not yet re-captured):** ceilings are now about twice a 60 Hz frame's
+worth — `MAX_MESH_UPLOADS_PER_FRAME = 100`, `MAX_SNAPSHOT_VOXELS_PER_FRAME = 160` (~45 µs per
+snapshot insert ⇒ ≤ ~7 ms). Expect join frames back near 25 ms with most of the drain-time win
+kept (the rates, not the ceilings, set throughput at normal frame times).
+
+Also seen in that run, not investigated: one `KEEP-UP WARNING` and one Bevy warning `Two or more
+Entities with IsDefaultUiCamera found` during rapid back-and-forth region crossings — the
+snapshot path and `AddCameraComponent` both tag the local camera, and for a frame the old and new
+home regions' cameras coexist. Cosmetic, pre-existing, separate from performance.
+
+### Meshing budgets — implementation notes
+
+What paced near meshing in `20260920T121828Z-Intel-full`: from 11 s to 19 s the remesh queue
+drained at ~1600 chunks/s while the join ran at 37–50 fps, i.e. ~36 per frame = the
+`MESH_UPLOADS_PER_FRAME = 32` cap (+ empty meshes, which do not count as uploads), with the
+in-flight task count pinned at its cap of 64 the whole time — the four worker threads were never
+the limit. The clamped runs the day before showed the same law at the other end: ~260 chunks/s
+at 8 fps. A fixed per-frame count throttles hardest exactly when frames are slow.
+
+Change: budgets are now **rates**. `meshing::queue::per_frame_budget(per_second, dt, min, max)`
+turns a chunks-per-second target into this frame's count from the real frame delta.
+- `MeshBudgetPolicy` + `scale_mesh_budgets` (first in the meshing chain) re-derive `MeshBudgets`
+  each frame: `MESH_UPLOADS_PER_SECOND = 3000` (≈ 50/frame at 60 Hz, 75 at 40 fps), floor = the
+  old 32, ceiling `MAX_MESH_UPLOADS_PER_FRAME = 256`; `max_in_flight = max(64, 2 × uploads)` so
+  finished-but-unattached tasks do not starve the lane. The far/LOD raster lane reads the same
+  `MeshBudgets`, so it scales with it. Harnesses that pin `MeshBudgets` by hand do not run the
+  policy and keep fixed numbers — none of the ~145 meshing/bridge/LOD tests changed.
+- `apply_snapshot_voxels` uses `SNAPSHOT_VOXELS_PER_SECOND = 4800` (floor 64, ceiling 512), kept
+  above the mesh rate so the remesh queue always holds everything pending and its nearest-first
+  ranking decides the order.
+Expect: `near_meshing_drained` well under the 20.0 s of the reference capture (the queue held
+~18.9k meshable chunks: ~6–7 s at 3000/s if the workers keep up — if `in_flight` no longer sits at
+its cap in `load_progress`, the workers have become the limit and
+`VOXEL_CLIENT_WORKER_THREADS` (default 4) is the next knob), with join fps not much lower.
+
 ## Region start (server) — implementation notes (2026-09-19)
 
 Attribution (`perf record` on the new `worldgen` example `genesis_profile`, reduced with

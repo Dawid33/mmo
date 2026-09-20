@@ -75,6 +75,7 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<meshing::queue::ChunkGrid>()
         .init_resource::<meshing::queue::RemeshQueue>()
         .init_resource::<meshing::queue::MeshBudgets>()
+        .init_resource::<meshing::queue::MeshBudgetPolicy>()
         .init_resource::<meshing::queue::FrameUploads>()
         .init_resource::<meshing::lod::LodBuildQueue>()
         .init_resource::<meshing::lod::FarFrameUploads>()
@@ -104,6 +105,9 @@ impl Plugin for SimBridgePlugin {
             Update,
             (
                 (
+                    // Rate-based budgets: re-derived from the real frame delta
+                    // before any lane reads them.
+                    meshing::queue::scale_mesh_budgets,
                     meshing::queue::mark_remesh_dirty,
                     meshing::queue::prune_chunk_grid,
                     meshing::queue::spawn_mesh_tasks,

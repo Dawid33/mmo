@@ -172,11 +172,20 @@ pub struct GhostSource(pub RegionId);
 /// thread) that no single task is a long hitch.
 pub const SNAPSHOT_VOXEL_TASK_CHUNKS: usize = 64;
 
-/// Derived snapshot voxels handed to chunk entities per frame. Each insert
-/// makes `mark_remesh_dirty` fingerprint that chunk (~0.15 ms), so this is the
-/// main-thread budget of a joining region: 64 ≈ 10 ms per frame, and still
-/// twice the mesher's upload budget, so it never starves meshing.
+/// Floor on derived snapshot voxels handed to chunk entities per frame (the
+/// live count follows [`SNAPSHOT_VOXELS_PER_SECOND`]). Each insert makes
+/// `mark_remesh_dirty` fingerprint that chunk (~0.15 ms on a power-clamped
+/// machine, far less otherwise), so this is the main-thread cost of a joining
+/// region.
 pub const SNAPSHOT_VOXELS_PER_FRAME: usize = 64;
+/// Target insert rate. Kept above the mesher's `MESH_UPLOADS_PER_SECOND` so
+/// voxels always arrive faster than they can be meshed: the remesh queue then
+/// holds everything pending and its nearest-first ranking decides the order.
+pub const SNAPSHOT_VOXELS_PER_SECOND: f32 = 4800.0;
+/// Ceiling per frame: twice a 60 Hz frame's worth, so a long frame cannot
+/// snowball (each insert costs `mark_remesh_dirty` ~45 us unclamped; 512 per
+/// frame measured 31 ms stalls). See `MAX_MESH_UPLOADS_PER_FRAME`.
+pub const MAX_SNAPSHOT_VOXELS_PER_FRAME: usize = 160;
 
 /// A chunk entity spawned from a region snapshot whose `VoxelData` is still
 /// being derived off-thread. Removed when the voxels land — or when an
@@ -204,6 +213,7 @@ pub struct SnapshotVoxelQueue {
 /// region, 8.9 s for the production 3x3 join (2026-09-19 capture).
 pub fn apply_snapshot_voxels(
     mut commands: Commands,
+    time: Res<Time<Real>>,
     mut tasks: Query<(Entity, &mut SnapshotVoxelTask)>,
     pending: Query<(), With<PendingSnapshotVoxels>>,
     mut queue: ResMut<SnapshotVoxelQueue>,
@@ -214,7 +224,12 @@ pub fn apply_snapshot_voxels(
             commands.entity(task_entity).despawn();
         }
     }
-    let mut budget = SNAPSHOT_VOXELS_PER_FRAME;
+    let mut budget = super::meshing::queue::per_frame_budget(
+        SNAPSHOT_VOXELS_PER_SECOND,
+        time.delta(),
+        SNAPSHOT_VOXELS_PER_FRAME,
+        MAX_SNAPSHOT_VOXELS_PER_FRAME,
+    );
     while budget > 0 {
         let Some((entity, voxels)) = queue.ready.pop_front() else {
             break;
