@@ -2,7 +2,7 @@ use crate::bounding_volume::BoundingVolume;
 use crate::math::{Isometry, Point, RawReal, Real, Translation, Vector, DIM};
 use crate::query::shape_cast::shape_cast_support_map_support_map::GRAZING_START_MARGIN;
 use crate::query::{QueryDispatcher, ShapeCastHit, ShapeCastOptions, ShapeCastStatus};
-use crate::shape::{AxisMask, Cuboid, Shape, Voxels};
+use crate::shape::{AxisMask, Cuboid, Shape, SupportMap, Voxels};
 use na::Unit;
 
 /// Looks for solid geometry a shape does not know about itself (a neighbouring
@@ -92,6 +92,37 @@ pub fn without_internal_edges(
     Unit::try_new(fixed, snap).unwrap_or(normal1)
 }
 
+/// A lower bound of the distance between a voxel and a support-mapped shape:
+/// their gap along the line between their centres. Two support evaluations,
+/// against the GJK run it spares the many voxels under a shape's AABB that
+/// are nowhere near the shape itself.
+fn separation_bound(
+    center: &Point<Real>,
+    half_extents: &Vector<Real>,
+    pos12: &Isometry<Real>,
+    g2: &dyn SupportMap,
+) -> Real {
+    let Some(dir) = Unit::try_new(pos12.translation.vector - center.coords, Real::from(1.0e-6)) else {
+        return Real::from(0.0);
+    };
+    let nearest2 = g2.support_point(pos12, &-*dir);
+    (nearest2 - center).dot(&dir) - half_extents.dot(&dir.abs())
+}
+
+/// Does any face in `free_faces` look into a motion along `vel`?
+fn faces_motion(free_faces: AxisMask, vel: &Vector<Real>) -> bool {
+    (0..DIM).any(|i| {
+        let facing = if vel[i] > Real::from(0.0) {
+            1 << (i * 2 + 1)
+        } else if vel[i] < Real::from(0.0) {
+            1 << (i * 2)
+        } else {
+            return false;
+        };
+        free_faces.contains(AxisMask::from_bits_truncate(facing))
+    })
+}
+
 /// [`cast_shapes_voxels_shape`] that also asks `probe` whether a voxel face
 /// the shape believes exposed is covered by other geometry.
 pub fn cast_shapes_voxels_shape_with_probe<D>(
@@ -109,7 +140,6 @@ where
     use num_traits::Bounded;
 
     let mut hit = None;
-    let mut smallest_t = options.max_time_of_impact;
     // The shape touches whatever comes within the target distance (and the
     // per-voxel cast counts a start slightly beyond it as within), so the
     // voxels in play are those its loosened AABB sweeps through. A shape
@@ -127,47 +157,98 @@ where
         ..options
     };
 
+    let half_extents = g1.voxel_size() / Real::from(2.0);
+    let cuboid = Cuboid::new(half_extents);
+    let mut search_domain = g1.voxel_range_intersecting_local_aabb(&start_aabb2_1);
+
+    // A shape already within the target distance of a voxel is the usual
+    // start of a character's cast, and nothing can beat its time of impact of
+    // zero: look for it first, which takes no ray cast at all. Same voxel
+    // order as the casts below, so the same voxel wins as would there.
+    if options.target_distance > Real::from(0.0)
+        && (options.compute_impact_geometry_on_penetration || !options.stop_at_penetration)
+    {
+        let within = options.target_distance * Real::from(1.0 + GRAZING_START_MARGIN);
+        let support_map2 = g2.as_support_map();
+        for vox in g1.voxels_in_range(search_domain[0], search_domain[1]) {
+            if vox.state.is_empty() {
+                continue;
+            }
+            let center = g1.voxel_center(vox.grid_coords);
+            if support_map2.is_some_and(|g2| {
+                separation_bound(&center, &half_extents, pos12, g2) > within
+            }) {
+                continue;
+            }
+            let vox_pos12 = Translation::from(center).inverse() * pos12;
+            let Ok(Some(contact)) = dispatcher.contact(&vox_pos12, &cuboid, g2, within) else {
+                continue;
+            };
+            let witness1 = contact.point1 + center.coords;
+            let normal1 =
+                without_internal_edges(contact.normal1, &witness1, vox.state.free_faces(), probe);
+            if !options.stop_at_penetration && normal1.dot(vel12) >= Real::from(0.0) {
+                continue;
+            }
+            return Some(ShapeCastHit {
+                time_of_impact: Real::from(0.0),
+                normal1,
+                normal2: pos12.inverse_transform_unit_vector(&-normal1),
+                witness1,
+                witness2: contact.point2,
+                status: ShapeCastStatus::PenetratingOrWithinTargetDist,
+            });
+        }
+    }
+
+    let smallest_t = core::cell::Cell::new(options.max_time_of_impact);
     let mut check_voxels_in_range = |search_domain: [Point<i32>; 2]| {
         for vox in g1.voxels_in_range(search_domain[0], search_domain[1]) {
-            if !vox.state.is_empty() {
-                // PERF: could we check the canonical shape instead, and deduplicate accordingly?
-                let center = g1.voxel_center(vox.grid_coords);
-                let cuboid = Cuboid::new(g1.voxel_size() / Real::from(2.0));
-                let vox_pos12 = Translation::from(center).inverse() * pos12;
-                if let Some(mut new_hit) = dispatcher
-                    .cast_shapes(&vox_pos12, vel12, &cuboid, g2, voxel_options)
-                    .ok()
-                    .flatten()
-                {
-                    if new_hit.time_of_impact >= smallest_t {
-                        continue;
-                    }
-                    let witness1 = new_hit.witness1 + center.coords;
-                    let normal1 = without_internal_edges(
-                        new_hit.normal1,
-                        &witness1,
-                        vox.state.free_faces(),
-                        probe,
-                    );
-                    if normal1 != new_hit.normal1 {
-                        new_hit.normal1 = normal1;
-                        new_hit.normal2 = pos12.inverse_transform_unit_vector(&-normal1);
-                    }
-                    if !options.stop_at_penetration
-                        && new_hit.status == ShapeCastStatus::PenetratingOrWithinTargetDist
-                        && new_hit.normal1.dot(vel12) >= Real::from(0.0)
-                    {
-                        continue;
-                    }
-                    smallest_t = new_hit.time_of_impact;
-                    new_hit.witness1 = witness1;
-                    hit = Some(new_hit);
+            // A voxel is reached through a face that looks into the motion.
+            // With all of those covered, the neighbours covering them are
+            // reached first (and are in this search too).
+            if vox.state.is_empty() || !faces_motion(vox.state.free_faces(), vel12) {
+                continue;
+            }
+            // PERF: could we check the canonical shape instead, and deduplicate accordingly?
+            let center = g1.voxel_center(vox.grid_coords);
+            let vox_pos12 = Translation::from(center).inverse() * pos12;
+            let capped = ShapeCastOptions {
+                max_time_of_impact: smallest_t.get(),
+                ..voxel_options
+            };
+            if let Some(mut new_hit) = dispatcher
+                .cast_shapes(&vox_pos12, vel12, &cuboid, g2, capped)
+                .ok()
+                .flatten()
+            {
+                if new_hit.time_of_impact >= smallest_t.get() {
+                    continue;
                 }
+                let witness1 = new_hit.witness1 + center.coords;
+                let normal1 = without_internal_edges(
+                    new_hit.normal1,
+                    &witness1,
+                    vox.state.free_faces(),
+                    probe,
+                );
+                if normal1 != new_hit.normal1 {
+                    new_hit.normal1 = normal1;
+                    new_hit.normal2 = pos12.inverse_transform_unit_vector(&-normal1);
+                }
+                if !options.stop_at_penetration
+                    && new_hit.status == ShapeCastStatus::PenetratingOrWithinTargetDist
+                    && new_hit.normal1.dot(vel12) >= Real::from(0.0)
+                {
+                    continue;
+                }
+                smallest_t.set(new_hit.time_of_impact);
+                new_hit.witness1 = witness1;
+                hit = Some(new_hit);
             }
         }
     };
 
-    let mut search_domain = g1.voxel_range_intersecting_local_aabb(&start_aabb2_1);
     check_voxels_in_range(search_domain);
 
     // Run the propagation.
@@ -216,6 +297,11 @@ where
         }
 
         let imin = Vector::from(toi.map(|t| t.0)).imin();
+
+        if toi[imin].0 > smallest_t.get() {
+            // Whatever lies further is reached after the hit already found.
+            break;
+        }
 
         // Rows the swept AABB has fully left were all checked when it entered
         // them. Rows it still overlaps stay in the search: the next row added

@@ -407,7 +407,7 @@ impl KinematicCharacterController {
         // Only a body that means to stay down: `result` can't tell, a clean
         // slide along level ground has no downward part left in it.
         let heading_down = desired_translation.dot(&self.up) < Real::from(0.0);
-        if grounded_at_starting_pos && heading_down {
+        if grounded_at_starting_pos && heading_down && !result.grounded {
             self.snap_to_ground(
                 queries,
                 character_shape,
