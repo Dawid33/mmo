@@ -371,3 +371,95 @@ mod tests {
         }
     }
 }
+
+// ---- Wire framing -----------------------------------------------------------
+
+/// Payloads at or below this many bincode bytes go out raw. Tick traffic
+/// (inputs, game events, clock syncs) is tens of bytes and must not pay for
+/// compression; region snapshots and LOD payloads are far above it.
+pub const PACKET_COMPRESS_THRESHOLD: usize = 4096;
+
+/// Cap on the decompressed size a frame may claim. The length prefix is
+/// untrusted wire data and is what sizes the decode buffer, so it is checked
+/// before anything is allocated. A region snapshot is ~40 MiB.
+pub const MAX_DECOMPRESSED_PACKET_BYTES: usize = 256 * 1024 * 1024;
+
+const FRAME_RAW: u8 = 0;
+const FRAME_LZ4: u8 = 1;
+
+#[derive(Debug)]
+pub enum PacketError {
+    Empty,
+    UnknownFormat(u8),
+    /// A compressed frame shorter than its own header.
+    Truncated,
+    /// A compressed frame claiming more than [`MAX_DECOMPRESSED_PACKET_BYTES`].
+    TooLarge(usize),
+    Decompress(lz4_flex::block::DecompressError),
+    Decode(bincode::Error),
+}
+
+impl std::fmt::Display for PacketError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PacketError::Empty => write!(f, "empty packet"),
+            PacketError::UnknownFormat(tag) => write!(f, "unknown packet format tag {tag}"),
+            PacketError::Truncated => write!(f, "compressed packet shorter than its header"),
+            PacketError::TooLarge(n) => write!(f, "packet claims {n} decompressed bytes (cap {MAX_DECOMPRESSED_PACKET_BYTES})"),
+            PacketError::Decompress(e) => write!(f, "lz4: {e}"),
+            PacketError::Decode(e) => write!(f, "bincode: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for PacketError {}
+
+/// Frame `value` for the wire: one format byte, then either the bincode bytes
+/// (`0`) or a little-endian `u32` decompressed length and an lz4 block (`1`).
+///
+/// Every transport edge uses this pair — server, native client, wasm client —
+/// so they must change together. Why it exists: a region snapshot is ~40 MiB
+/// of highly redundant state (voxel collider shapes, per-voxel chisel material
+/// arrays) and a production join ships nine; lz4 packs one 43x in ~7 ms, which
+/// is a net win even on loopback (2026-09-20 measurement,
+/// `worldgen` example `snapshot_size`).
+pub fn encode_packet<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, bincode::Error> {
+    let raw = bincode::serialize(value)?;
+    if raw.len() > PACKET_COMPRESS_THRESHOLD && raw.len() <= MAX_DECOMPRESSED_PACKET_BYTES {
+        let compressed = lz4_flex::block::compress(&raw);
+        // Incompressible payloads go out raw: never grow a packet.
+        if compressed.len() + 4 < raw.len() {
+            let mut frame = Vec::with_capacity(5 + compressed.len());
+            frame.push(FRAME_LZ4);
+            frame.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+            frame.extend_from_slice(&compressed);
+            return Ok(frame);
+        }
+    }
+    let mut frame = Vec::with_capacity(1 + raw.len());
+    frame.push(FRAME_RAW);
+    frame.extend_from_slice(&raw);
+    Ok(frame)
+}
+
+/// Inverse of [`encode_packet`]. Wire data is untrusted: every malformed input
+/// is an error, never a panic or an unbounded allocation.
+pub fn decode_packet<T: serde::de::DeserializeOwned>(frame: &[u8]) -> Result<T, PacketError> {
+    let (&tag, body) = frame.split_first().ok_or(PacketError::Empty)?;
+    match tag {
+        FRAME_RAW => bincode::deserialize(body).map_err(PacketError::Decode),
+        FRAME_LZ4 => {
+            if body.len() < 4 {
+                return Err(PacketError::Truncated);
+            }
+            let (len, block) = body.split_at(4);
+            let len = u32::from_le_bytes([len[0], len[1], len[2], len[3]]) as usize;
+            if len > MAX_DECOMPRESSED_PACKET_BYTES {
+                return Err(PacketError::TooLarge(len));
+            }
+            let raw = lz4_flex::block::decompress(block, len).map_err(PacketError::Decompress)?;
+            bincode::deserialize(&raw).map_err(PacketError::Decode)
+        }
+        other => Err(PacketError::UnknownFormat(other)),
+    }
+}

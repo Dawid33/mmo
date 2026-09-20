@@ -63,6 +63,10 @@ macros = { path = "crates/macros" }
 worldgen = { path = "crates/worldgen" }
 log = { version = "0.4.22", default-features = false }
 bincode = { version = "1.3.3", default-features = false }
+# Wire compression for large packets (region snapshots are ~40 MiB of highly
+# redundant state; lz4 packs them 43x in ~7 ms). Pure Rust, builds for wasm32;
+# block API only, safe encode/decode.
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 crossbeam = { version = "0.8.4", features = [
   "std",
   "alloc",

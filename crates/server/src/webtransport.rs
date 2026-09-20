@@ -88,7 +88,7 @@ pub async fn serve(
                     warn!("oversized packet from client {id}, dropping");
                     continue;
                 }
-                match bincode::deserialize::<ClientPacket>(&buf) {
+                match game::decode_packet::<ClientPacket>(&buf) {
                     Ok(packet) => send.send(ServerEvent::ClientPacket(packet, id)).unwrap(),
                     Err(e) => warn!("failed deserializing packet {e:?}"),
                 }

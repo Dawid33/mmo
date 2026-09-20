@@ -166,8 +166,10 @@ impl WorldIngress {
             }
 
             while let Ok((target, event)) = server_recv.recv() {
+                // Serialize + frame (large packets are lz4-compressed; see
+                // `game::encode_packet`). `serialize_ms` covers both.
                 let serialize_started = std::time::Instant::now();
-                let packet = bincode::serialize(&event).unwrap();
+                let packet = game::encode_packet(&event).unwrap();
                 let serialize = serialize_started.elapsed();
                 match target {
                     // Directed packet: if the client is gone, drop it.
@@ -414,7 +416,7 @@ async fn handle_connection(
 
         tokio::spawn(async move {
             let req = stream.read_to_end(usize::MAX).await.unwrap();
-            let packet = bincode::deserialize(&req[..]);
+            let packet = game::decode_packet(&req[..]);
             let packet: ClientPacket = match packet {
                 Ok(e) => e,
                 Err(e) => {

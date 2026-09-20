@@ -143,7 +143,9 @@ impl ServerConnection {
                 let bytes = recv.read_to_end(usize::MAX).await.unwrap();
                 let read = read_started.elapsed();
                 let decode_started = Instant::now();
-                let packet = bincode::deserialize(&bytes[..]);
+                // Unframe (+ lz4-decompress large packets) and deserialize;
+                // `decode_ms` below covers both. `bytes` is the wire size.
+                let packet = game::decode_packet(&bytes[..]);
                 let packet: ServerPacket = match packet {
                     Ok(e) => e,
                     Err(e) => {
@@ -189,7 +191,7 @@ impl ServerConnection {
             }
             connection.handshake_data().unwrap();
             let mut send = connection.open_uni().await.unwrap();
-            let payload = bincode::serialize(&e).unwrap();
+            let payload = game::encode_packet(&e).unwrap();
             send.write_all(&payload).await.unwrap();
             send.finish().unwrap();
             tokio::spawn(async move {

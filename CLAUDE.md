@@ -169,7 +169,7 @@ First-party crates (workspace members):
 
 ## Conventions
 
-- Serialization over the wire is `bincode`; state hashing uses `crc32fast`.
+- Serialization over the wire is `bincode`, framed by `game::encode_packet` / `decode_packet` (`crates/game/src/protocol.rs`): one format byte, and packets above `PACKET_COMPRESS_THRESHOLD` are lz4-compressed (`lz4_flex`; a region snapshot goes 40 MiB → 0.9 MiB). Every transport edge — server writer + QUIC/WebTransport ingress, native client, wasm client — must use that pair; never call `bincode` on the wire directly. State hashing uses `crc32fast`.
 - Cross-thread communication uses `crossbeam` channels (game loop ↔ network loop ↔ render loop); async (tokio) is confined to the QUIC networking edges.
 - Editions are mixed intentionally: older crates are 2021, newer ones (`macros`, `worldgen`) are 2024.
 - `TODO.md` tracks the current high-level direction (multi-region/chunk-grid simulation instances).

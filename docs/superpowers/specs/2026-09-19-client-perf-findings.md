@@ -52,6 +52,80 @@ What now paces a `full` join: near meshing (20.0 s; the snapshot-voxel apply bud
 finishes at 10.4 s, the mesher's 32 uploads/frame after it) — LOD is done by 14.3 s. With the
 frame vsync-capped, per-frame budgets are the knob, not CPU.
 
+## Wire compression — confirmed 2026-09-20
+
+`20260920T155521Z-Intel-full` vs `…154225Z…` (same code without the codec; `full`, unclamped):
+
+| | bincode on the wire | framed + lz4 |
+|---|---|---|
+| Nine region snapshots | 380.0 MB (42.3 MB each) | **11.6 MB** (≤ 1.7 MB each, 33×) |
+| Everything the server sent in 60 s | 395.6 MB | **14.2 MB** |
+| Client `read_ms` (sum of nine) | 885 ms | **17 ms** |
+| Server `send_ms` (sum) | 988 ms | 284 ms |
+| Server `serialize_ms` (sum; now includes lz4) | 361 ms | 515 ms |
+| Client `decode_ms` (sum; now includes lz4) | 475 ms | 846 ms |
+| Last snapshot received | 1.83 s | **1.29 s** |
+| `lod_all_received` / `near_meshing_drained` / `world_ready` | 8.9 / 13.0 / 13.5 s | 8.2 / 12.5 / 13.1 s (within noise) |
+| LOD cells meshed / WARN / KEEP-UP / send timeouts | 20 631 of 20 631 / 1 / 0 / 0 | same / **0** / 0 / 0 |
+
+On loopback the join time barely moves (the snapshots were never what paced it); the point is
+the 27× less traffic, which is what a real network would feel. One side effect to know about:
+`first_near_mesh` came at 1.9 s instead of 0.9 s — all nine regions now arrive within 0.8 s, so
+their ~365 snapshot-voxel batches hit the FIFO compute pool together and the first mesh tasks
+queue behind them. Total meshing time is unchanged; if first-pixels latency matters, cap the
+outstanding voxel batches or spawn the home region's first.
+
+### Wire compression — implementation notes
+
+`game::encode_packet` / `decode_packet` (`crates/game/src/protocol.rs`): one format byte, then
+raw bincode (`0`) or a little-endian `u32` decompressed length + an lz4 block (`1`). Compression
+only above `PACKET_COMPRESS_THRESHOLD = 4096` bytes, and only if it actually shrinks the packet,
+so tick traffic is untouched. The length prefix is untrusted: it is checked against
+`MAX_DECOMPRESSED_PACKET_BYTES` (256 MiB) before any allocation, and every malformed input is a
+`PacketError`, never a panic. All seven transport sites use the pair (server writer, QUIC +
+WebTransport ingress, native client send/recv, wasm client send/recv); `lz4_flex` 0.11 (block
+API, safe encode/decode) builds for `wasm32`. Tests: `crates/game/tests/packet_codec.rs` (raw
+small packets, compressed large ones, incompressible fallback, hostile input) and the
+end-to-end `webtransport_handshake` test — whose hand-rolled raw-bincode writer failed cleanly
+(`Decompress(OffsetZero)`) until it used the codec too, i.e. old and new binaries do not
+silently mis-parse each other. Headless, a real `ServerPacket::Region`: **40.3 → 0.90 MiB**,
+encode 38 ms, decode 46 ms (bincode included). Expect in a capture: `snapshot_sent bytes≈0.9M`,
+`send_ms` / `read_ms` near zero instead of ~130 / ~110 ms, a `full` join ~9 MB instead of ~380 MB.
+
+## Region snapshot size — measured 2026-09-20 (the analysis behind the choice)
+
+`cargo run --release -p worldgen --example snapshot_size` (region (0,0), 2791 chunks): the
+`ServerPacket::Region` payload is **40.3 MiB**, of which **20.9 MiB are physics colliders**
+(derived data: the voxel shapes of the chiseled surface), **18.1 MiB chunk chisel data** (4096
+chiseled blocks × 4.5 KiB, mostly a 4096-byte per-voxel material array that is nearly uniform),
+1.0 MiB rigid bodies, and 0.13 MiB the actual block grid. A `full` join ships nine of them:
+~380 MB. On loopback that costs ~0.35 s per region (serialize 46 + send 132 + read 110 + decode
+74 ms); on a real network it is the whole join.
+
+It is extremely redundant. Same bytes (`SNAPSHOT_DUMP=<path>` on the example):
+lz4 → **0.94 MiB (43×), 7 ms compress / 25 ms decompress**; zstd -1 → 0.35 MiB (113×), 25 ms;
+zlib/deflate level 1 → 1.28 MiB (31×), 70 / 46 ms.
+
+Options, with trade-offs:
+1. **Compress at the transport edge** (recommended). A shared `encode_packet` / `decode_packet`
+   in `game::protocol`: one header byte (raw | compressed), compression only above a size
+   threshold so tick traffic stays raw and free. Seven call sites (server writer + two ingress
+   readers, native client send/recv, wasm client send/recv). With `lz4_flex` (pure Rust, builds
+   for wasm32, not yet in the tree — a new dependency) it is a net *win even on loopback*
+   (−240 ms of send/read for +32 ms of codec per region) and ~40× less join traffic. `flate2` /
+   `miniz_oxide` are already in the tree via Bevy (no new dependency) but cost ~10× more CPU for
+   a worse ratio. Cost: a wire-format break between old and new binaries (fine pre-release),
+   and the wasm client must take the same change.
+2. **Stop shipping derived colliders** and rebuild them client-side (genesis is ~0.23 s per
+   region now). Halves the payload with no codec — but rollback needs bit-exact state, and a
+   region whose colliders were edited since genesis no longer matches a fresh build (slotmap
+   generations / free lists), so this is only sound for never-edited terrain or with an explicit
+   "pristine colliders" marker. Invasive, determinism-critical; not a tuning change.
+3. **Compact `ChiselData` serialization** (elide or RLE the per-voxel material array): 18 → ~2.5
+   MiB, colliders untouched. Changes the serialized state format (parked-region blobs too) for
+   less than option 1 gives.
+Options 2 and 3 compose with 1 later; 1 alone takes the join from ~380 MB to ~9 MB.
+
 ## LOD worker count — confirmed 2026-09-20
 
 `20260920T154225Z-Intel-full` (5 workers) vs `…153227Z…` (2 workers), same day, unclamped, `full`:
@@ -729,6 +803,7 @@ Still open from the server side: genesis (#1, measure with `just collider-bench`
 
 | Capture directory | Adapter (selected) | World | Rev | Notes |
 |---|---|---|---|---|
+| `target/perf-capture/20260920T155521Z-Intel-full/` | same, unclamped | full | `4a57a97` + lz4 wire framing (uncommitted) | 60 s; snapshots 380 → 11.6 MB, server tx 396 → 14 MB, `world_ready` 13.1 s |
 | `target/perf-capture/20260920T154225Z-Intel-full/` | same, unclamped | full | `34f355c` + core-scaled LOD workers = 5 (uncommitted) | 60 s; LOD complete 8.9 s, `world_ready` 13.5 s, region ticks ≤ 12 ms |
 | `target/perf-capture/20260920T153227Z-Intel-full/` | same, unclamped | full | `880bd85` + packed LOD cells (uncommitted) | 90 s; client RSS 1134 MB, join frames 17–23 ms, `world_ready` 18.2 s |
 | `target/perf-capture/20260920T123228Z-Intel-full/` | same, unclamped | full | rate budgets, loose ceilings (pre-`880bd85`) | 120 s with rapid region crossings; near drained 10.8 s, join frames 37–49 ms |

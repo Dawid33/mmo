@@ -122,7 +122,7 @@ async fn run(
                     }
                 };
             match read_stream_to_end(stream).await {
-                Ok(bytes) => match bincode::deserialize::<ServerPacket>(&bytes) {
+                Ok(bytes) => match game::decode_packet::<ServerPacket>(&bytes) {
                     Ok(packet) => {
                         let _ = read_send.send(packet);
                     }
@@ -142,7 +142,7 @@ async fn run(
                 return;
             }
             while let Ok(packet) = client_recv.try_recv() {
-                let payload = bincode::serialize(&packet).unwrap();
+                let payload = game::encode_packet(&packet).unwrap();
                 // `create_unidirectional_stream` resolves to a typed
                 // `WebTransportSendStream`, which `extends WritableStream` —
                 // the dyn_into upcast below always succeeds.

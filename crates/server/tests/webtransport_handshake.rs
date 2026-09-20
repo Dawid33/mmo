@@ -15,12 +15,12 @@ async fn recv_packet(conn: &wtransport::Connection) -> ServerPacket {
     tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf)
         .await
         .expect("read failed");
-    bincode::deserialize(&buf).expect("bad packet")
+    game::decode_packet(&buf).expect("bad packet")
 }
 
 async fn send_packet(conn: &wtransport::Connection, packet: &ClientPacket) {
     let mut stream = conn.open_uni().await.unwrap().await.unwrap();
-    tokio::io::AsyncWriteExt::write_all(&mut stream, &bincode::serialize(packet).unwrap())
+    tokio::io::AsyncWriteExt::write_all(&mut stream, &game::encode_packet(packet).unwrap())
         .await
         .unwrap();
     stream.finish().await.unwrap();
@@ -38,7 +38,7 @@ async fn webtransport_client_full_handshake() {
     let writer_sinks = sinks.clone();
     tokio::spawn(async move {
         while let Ok((target, event)) = server_recv.recv() {
-            let packet = bincode::serialize(&event).unwrap();
+            let packet = game::encode_packet(&event).unwrap();
             match target {
                 Some(id) => {
                     let sink = writer_sinks.get(&id).map(|e| e.value().clone());
