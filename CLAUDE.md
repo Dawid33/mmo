@@ -89,6 +89,13 @@ Vulkan devices (Intel iGPU, an NVIDIA T600 on the NVK driver, the RX 6700 XT, an
 *software* rendering), and with no `WGPU_ADAPTER_NAME` wgpu chooses for you — pin it with
 `just adapter=6700 …` and confirm against the `AdapterInfo` line in the log.
 
+**Check the power source too.** On 2026-09-19 this laptop was fed by an ~88 W USB-C PD source
+(`/sys/class/power_supply/ucsi-source-psy-*`) and the firmware clamped every core to ~400-700 MHz
+under multi-threaded load (one busy P-core: 2-3 GHz of 4.6). Bursts run fast, then the clamp
+bites, so anything multi-threaded (joins, region genesis, builds) measured several times slower
+and noisier than the hardware allows — compare ratios, not seconds, until re-baselined on the
+real adapter. Watch `scaling_cur_freq` under load to tell.
+
 Text-emitting (readable in a terminal, pasteable into a bug report or an LLM session):
 
 - `just perf-capture` — **the capture to hand to an analysis session.** Release server + one

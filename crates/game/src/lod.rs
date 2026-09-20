@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{derive_voxels, BlockId, Chunk, ChunkCoords, RegionCoords, Voxel, CHUNK_VOXEL_COUNT, REGION_SIZE};
+use crate::{BlockId, Chunk, ChunkCoords, RegionCoords, Voxel, CHUNK_VOXEL_COUNT, REGION_SIZE};
 
 /// Merge up to 2×2×2 source 32³ grids (index `sx + 2*sy + 4*sz`; `None` = all-air) into one 32³ coarse grid at 2× the cell size.
 /// Each coarse cell (x,y,z) draws from source grid `(x/16, y/16, z/16)`'s 2×2×2 voxel block at `((x%16)*2, (y%16)*2, (z%16)*2)`.
@@ -579,6 +579,8 @@ mod tests {
         sources[0] = Some(&g);
         assert_eq!(downsample2(&sources), downsample2(&sources));
     }
+
+    use crate::derive_voxels;
 
     /// The pre-2026-09-19 implementation, kept as the behavioural reference:
     /// dense `derive_voxels` per chunk, then `downsample2` over the octants.

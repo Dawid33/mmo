@@ -8,9 +8,24 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use game::{RegionCoords, RegionInput, RegionOutput, RegionRunner, RegionSeed, RegionSpawner};
 
+/// Worldgen shared by every region thread.
+pub type SharedRegionGenerator =
+    std::sync::Arc<dyn Fn(RegionCoords) -> Vec<(game::ColumnCoords, game::Column)> + Send + Sync>;
+
 #[derive(Default)]
 pub struct ThreadRegionSpawner {
     handles: BTreeMap<RegionCoords, JoinHandle<()>>,
+    /// `Some` = regions generate their own columns on their own thread, so the
+    /// manager hands out `RegionSeed::Deferred` (see `generates_columns`).
+    /// `None` (the `Default`, used by tests that pass ready-made seeds) keeps
+    /// worldgen with the manager.
+    generator: Option<SharedRegionGenerator>,
+}
+
+impl ThreadRegionSpawner {
+    pub fn with_generator(generator: SharedRegionGenerator) -> Self {
+        Self { handles: BTreeMap::new(), generator: Some(generator) }
+    }
 }
 
 impl RegionSpawner for ThreadRegionSpawner {
@@ -21,32 +36,50 @@ impl RegionSpawner for ThreadRegionSpawner {
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
+        let generator = self.generator.clone();
         let handle = std::thread::Builder::new()
             .name(format!("region {},{}", id.x, id.z))
             .spawn(move || {
                 // Deserialize/generate on the region's own thread so a big
                 // region never stalls the manager.
                 let genesis_started = Instant::now();
-                let parked = matches!(seed, RegionSeed::Parked(..));
-                let region = seed.into_region(id);
-                let build = genesis_started.elapsed();
+                let parked = matches!(seed, RegionSeed::Parked(..) | RegionSeed::Deferred(Some(_)));
+                // Deferred seeds generate here, timed separately from the build.
+                let generate_time = std::cell::Cell::new(Duration::ZERO);
+                let region = seed.into_region_with(id, &|rc| {
+                    let started = Instant::now();
+                    let columns = match &generator {
+                        Some(generate) => generate(rc),
+                        None => unreachable!("Deferred seed without a region generator"),
+                    };
+                    generate_time.set(started.elapsed());
+                    columns
+                });
+                let generate_time = generate_time.get();
+                let build = genesis_started.elapsed() - generate_time;
                 let runner = RegionRunner::new(id, region, out);
+                // `generate_ms` = worldgen on this thread (deferred seeds);
                 // `build_ms` = deserialize (parked) or chunk flatten + collider
                 // genesis (fresh); the rest of `ms` is the baseline terrain hash.
                 game::perf_event!(
                     "region_genesis",
-                    "region={},{} ms={} build_ms={} terrain_hash_ms={} parked={parked}",
+                    "region={},{} ms={} generate_ms={} build_ms={} terrain_hash_ms={} parked={parked}",
                     id.x,
                     id.z,
                     game::perf::ms(genesis_started.elapsed()),
+                    game::perf::ms(generate_time),
                     game::perf::ms(build),
-                    game::perf::ms(genesis_started.elapsed() - build)
+                    game::perf::ms(genesis_started.elapsed() - build - generate_time)
                 );
                 region_thread_loop(id, runner, recv);
             })
             .expect("failed to spawn region thread");
         self.handles.insert(id, handle);
         send
+    }
+
+    fn generates_columns(&self) -> bool {
+        self.generator.is_some()
     }
 
     fn reap(&mut self, id: RegionCoords) {

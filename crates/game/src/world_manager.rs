@@ -53,6 +53,15 @@ pub trait RegionSpawner {
     /// Reclaim a stopped region's resources (join its thread). Called after
     /// `RegionOutput::Stopped` or when a dead region is detected.
     fn reap(&mut self, _id: RegionCoords) {}
+
+    /// Whether this spawner runs worldgen itself, on the region's own thread.
+    /// `true` makes the manager hand out [`RegionSeed::Deferred`] instead of
+    /// generating the columns synchronously in `ensure_running`. `false` (the
+    /// inline spawner: wasm, tests) keeps the manager generating — there is no
+    /// other thread to move the work to.
+    fn generates_columns(&self) -> bool {
+        false
+    }
 }
 
 /// Runs regions inline in the caller's thread: the wasm LocalServer and the
@@ -544,20 +553,26 @@ impl<S: RegionSpawner> WorldManager<S> {
         if self.regions.contains_key(&rc) {
             return;
         }
-        let watch = crate::perf::Stopwatch::start();
-        let columns = self.generate_timed(rc); // now Vec<(ColumnCoords, Column)>
-        let parked = self.parked.contains_key(&rc);
-        crate::perf_event!(
-            "region_generate",
-            "region={},{} ms={} columns={} parked={parked}",
-            rc.x,
-            rc.z,
-            crate::perf::ms(watch.elapsed()),
-            columns.len()
-        );
-        let seed = match self.parked.remove(&rc) {
-            Some(serialized) => RegionSeed::Parked(serialized, columns),
-            None => RegionSeed::Fresh(columns),
+        let seed = if self.spawner.generates_columns() {
+            // Worldgen happens on the region's thread (and not at all for a
+            // parked region with a healthy blob).
+            RegionSeed::Deferred(self.parked.remove(&rc))
+        } else {
+            let watch = crate::perf::Stopwatch::start();
+            let columns = self.generate_timed(rc); // now Vec<(ColumnCoords, Column)>
+            let parked = self.parked.contains_key(&rc);
+            crate::perf_event!(
+                "region_generate",
+                "region={},{} ms={} columns={} parked={parked}",
+                rc.x,
+                rc.z,
+                crate::perf::ms(watch.elapsed()),
+                columns.len()
+            );
+            match self.parked.remove(&rc) {
+                Some(serialized) => RegionSeed::Parked(serialized, columns),
+                None => RegionSeed::Fresh(columns),
+            }
         };
         let input = self.spawner.spawn(rc, seed, self.region_out_send.clone());
         self.regions.insert(

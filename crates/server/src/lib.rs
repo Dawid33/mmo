@@ -324,8 +324,13 @@ pub fn run() {
     ));
     // Kept only to read the manager→writer backlog for the `[server]` line.
     let writer_backlog = server_send.clone();
+    // Region starts generate on their own thread; the manager's copy of the
+    // generator is only reached by paths that stay synchronous by design.
+    let region_gen_cache = gen_cache.clone();
+    let region_generator: region_threads::SharedRegionGenerator =
+        std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials));
     let mut manager = game::WorldManager::new(
-        region_threads::ThreadRegionSpawner::default(),
+        region_threads::ThreadRegionSpawner::with_generator(region_generator),
         Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
         server_send,
         region_out_send,

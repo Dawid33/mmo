@@ -343,3 +343,106 @@ fn parked_lod_request_still_gets_served_from_cache() {
     assert!(!h.manager.running_regions().contains(&rc), "LOD serve must not wake a parked region");
     assert!(has_lod_data(&h.drain_packets(), key));
 }
+
+/// Stand-in for the native server's thread spawner: it generates a region's
+/// columns on the region's own thread (`generates_columns`), and records the
+/// seeds it is handed instead of running anything.
+struct DeferringSpawner {
+    seeds: std::sync::Arc<std::sync::Mutex<Vec<(RegionCoords, &'static str)>>>,
+}
+
+impl game::RegionSpawner for DeferringSpawner {
+    fn spawn(
+        &mut self,
+        id: RegionCoords,
+        seed: game::RegionSeed,
+        _out: crossbeam::channel::Sender<(RegionCoords, RegionOutput)>,
+    ) -> crossbeam::channel::Sender<game::RegionInput> {
+        let kind = match seed {
+            game::RegionSeed::Fresh(_) => "fresh",
+            game::RegionSeed::Parked(..) => "parked",
+            game::RegionSeed::Deferred(None) => "deferred-fresh",
+            game::RegionSeed::Deferred(Some(_)) => "deferred-parked",
+        };
+        self.seeds.lock().unwrap().push((id, kind));
+        let (send, recv) = unbounded();
+        // Keep the channel alive so the manager does not see a dead region.
+        std::mem::forget(recv);
+        send
+    }
+
+    fn generates_columns(&self) -> bool {
+        true
+    }
+}
+
+/// Worldgen for a region start must not run on the manager thread (it measured
+/// 0.1-0.9 s per region, sequentially, 6-7 s for a 3x3 join — all of it
+/// routing latency): a spawner that generates columns itself gets a deferred
+/// seed and the manager's generator is never called.
+#[test]
+fn region_start_defers_worldgen_to_a_spawner_that_generates_columns() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let (out_send, _packets) = unbounded();
+    let (region_out_send, _region_out) = unbounded();
+    let generated = Arc::new(AtomicUsize::new(0));
+    let counter = generated.clone();
+    let generator = Box::new(move |_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Vec::new()
+    });
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        out: lod_result_send,
+    });
+    let seeds = Arc::new(Mutex::new(Vec::new()));
+    let mut manager = WorldManager::new(
+        DeferringSpawner { seeds: seeds.clone() },
+        generator,
+        out_send,
+        region_out_send,
+        lod_builder,
+        lod_result_recv,
+    );
+
+    manager.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    manager.handle_server_event(
+        ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(RegionCoords::new(5, 5)), 1),
+        0,
+    );
+
+    assert_eq!(generated.load(Ordering::SeqCst), 0, "the manager must not run worldgen");
+    let seeds = seeds.lock().unwrap();
+    assert_eq!(
+        *seeds,
+        vec![(SPAWN_REGION, "deferred-fresh"), (RegionCoords::new(5, 5), "deferred-fresh")]
+    );
+}
+
+/// A deferred seed generates exactly when it has to: a fresh region once, a
+/// parked region never (the old eager path regenerated the columns on every
+/// resubscribe just to have a fallback for a corrupt blob).
+#[test]
+fn deferred_seed_generates_only_for_fresh_regions() {
+    use std::cell::Cell;
+    let id = RegionCoords::new(2, -3);
+    let calls = Cell::new(0);
+    let generate = |_rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
+        calls.set(calls.get() + 1);
+        let air = Block::new(BlockId::AIR);
+        let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
+        vec![(ColumnCoords::new(0, 0), Column::new(0, air, air, vec![sub]))]
+    };
+
+    let fresh = game::RegionSeed::Deferred(None).into_region_with(id, &generate);
+    assert_eq!(calls.get(), 1);
+    assert_eq!(fresh.terrain_snapshot().chunks.len(), 1);
+
+    let parked = game::SerializedRegion::from_rollback(fresh.data());
+    let restored = game::RegionSeed::Deferred(Some(parked)).into_region_with(id, &generate);
+    assert_eq!(calls.get(), 1, "a valid parked region restores without worldgen");
+    assert_eq!(restored.terrain_fingerprint(), fresh.terrain_fingerprint());
+}

@@ -65,19 +65,47 @@ pub enum RegionOutput {
 pub enum RegionSeed {
     Fresh(Vec<(ColumnCoords, Column)>),
     Parked(SerializedRegion, Vec<(ColumnCoords, Column)>),
+    /// The spawner generates the columns itself, on the region's own thread
+    /// (`RegionSpawner::generates_columns`): `None` = never run, `Some` = the
+    /// parked blob to restore. Worldgen then costs the manager thread nothing
+    /// (it measured 0.1-0.9 s per region start, sequentially — 6-7 s for a 3x3
+    /// join), and a parked region generates only if its blob is corrupt.
+    Deferred(Option<SerializedRegion>),
 }
 
 impl RegionSeed {
+    /// For spawners that never receive a [`RegionSeed::Deferred`] (they do not
+    /// `generates_columns`).
     pub fn into_region(self, id: RegionId) -> Region {
-        match self {
-            RegionSeed::Fresh(columns) => Region::from_columns(id, columns),
-            RegionSeed::Parked(serialized, fallback) => match serialized.to_rollback() {
+        self.into_region_with(id, &|rc| {
+            unreachable!("Deferred seed for {rc:?} reached a spawner that does not generate columns")
+        })
+    }
+
+    /// `generate` is only called for a deferred seed that actually needs
+    /// columns: a never-run region, or a parked one whose blob is corrupt.
+    pub fn into_region_with(
+        self,
+        id: RegionId,
+        generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
+    ) -> Region {
+        let restore = |serialized: SerializedRegion, fallback: &mut dyn FnMut() -> Vec<(ColumnCoords, Column)>| {
+            match serialized.to_rollback() {
                 Ok(rollback) => Region::new(rollback, None, id, None),
                 Err(e) => {
                     log::error!("parked region {:?} corrupt ({e}); regenerating", id);
-                    Region::from_columns(id, fallback)
+                    Region::from_columns(id, fallback())
                 }
-            },
+            }
+        };
+        match self {
+            RegionSeed::Fresh(columns) => Region::from_columns(id, columns),
+            RegionSeed::Parked(serialized, fallback) => {
+                let mut fallback = Some(fallback);
+                restore(serialized, &mut || fallback.take().unwrap_or_default())
+            }
+            RegionSeed::Deferred(None) => Region::from_columns(id, generate(id)),
+            RegionSeed::Deferred(Some(serialized)) => restore(serialized, &mut || generate(id)),
         }
     }
 }

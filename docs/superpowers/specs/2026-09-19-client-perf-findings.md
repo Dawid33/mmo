@@ -8,6 +8,82 @@ the top current. Produced by `just perf-capture` (see `CLAUDE.md` → Profiling 
 below is **n = 1** until a capture is repeated. Captures were taken with `DIAG=1` (wgpu timestamp
 queries on) and a dirty tree (the instrumentation itself, uncommitted at the time).
 
+## READ FIRST: this machine was power-clamped for every number in this document
+
+Found 2026-09-19 while chasing why region genesis took 10 s live but 2 s headless. The laptop
+(i7-12700H) was running from a **USB-C PD source: 19.5 V × 4.5 A ≈ 88 W**
+(`/sys/class/power_supply/ucsi-source-psy-*`), not its own adapter. Under sustained multi-core
+load the firmware clamps the CPU hard: **16 busy threads ⇒ every core at ~400–700 MHz** (at 57 °C,
+so not thermal), and even one busy P-core only reaches 2.0–3.1 GHz of its 4.6 GHz. A short burst
+runs fast, then the clamp bites — a region build measured 2.3 s right after a compile and 0.6 s
+after a pause, same binary.
+
+Consequences: (1) every multi-threaded phase here — builds, the 9-region join, LOD workers vs
+region threads vs the client — ran several times slower than this hardware can do, and
+*contention* effects are exaggerated; (2) single-capture comparisons are noisier than they look,
+especially right after a rebuild (`perf-capture` rebuilds first); (3) ratios between runs at the
+same scale are still meaningful, absolute seconds are not. Re-baseline on the real adapter
+before quoting any absolute number. Quick check: `for c in 0 4 8 12; do cat
+/sys/devices/system/cpu/cpu$c/cpufreq/scaling_cur_freq; done` while something multi-threaded runs.
+
+## 2026-09-20: first capture on an UNCLAMPED machine (and with the region-start work)
+
+`target/perf-capture/20260920T121828Z-Intel-full/` — `full`, Intel iGPU, release, 120 s. The power
+source negotiated **19.5 V × 6.66 A ≈ 130 W** this day and 16 busy threads held ~3.5 GHz (vs
+0.4–0.7 GHz on 2026-09-19), so this is **not a clean A/B** against the previous day's captures:
+the numbers below mix the region-start code with a machine running several times faster.
+
+| | 2026-09-19 (clamped, before region-start work) | 2026-09-20 (unclamped, with it) |
+|---|---|---|
+| Manager-thread `region_generate` | 9 calls, 6.2–6.9 s sequential | **none** (deferred to region threads) |
+| `region_genesis` per region | 11–16 s | **≤ 0.58 s** (`generate_ms` ≤ 143, `build_ms` ≤ 433) |
+| All nine `snapshot_sent` | 12–20 s | **0.5–1.7 s** |
+| `first_near_mesh` | 12.0–12.4 s | **1.1 s** |
+| `snapshot_voxels_applied` (23 372 chunks) | 31–37 s | 10.4 s |
+| `lod_all_received` (570 keys) | 65.1 s | 14.3 s (server `build avg` 68–157 ms) |
+| `near_meshing_drained` / `world_ready` | 64.8 s / 66.1 s | **20.0 s / 20.5 s** |
+| Steady frame | 25–45 ms, CPU-bound | **16.67 ms — vsync-capped at 60 fps**, GPU 7.2 ms |
+| Client / server peak RSS | 2358 / 978 MB | 2441 / 985 MB |
+| WARN lines / KEEP-UP / send timeouts | 14 / 5 / 0 | **0 / 0 / 0** |
+
+Machine-independent, from the same day's machine (region (0,0), 2791 chunks, three rounds each,
+±3 ms): `Region::from_columns` **1277 ms with upstream parry → 231 ms with the patch (5.5×)**.
+What now paces a `full` join: near meshing (20.0 s; the snapshot-voxel apply budget of 64/frame
+finishes at 10.4 s, the mesher's 32 uploads/frame after it) — LOD is done by 14.3 s. With the
+frame vsync-capped, per-frame budgets are the knob, not CPU.
+
+## Region start (server) — implementation notes (2026-09-19)
+
+Attribution (`perf record` on the new `worldgen` example `genesis_profile`, reduced with
+`scripts/perf_summary.py`): **88% of `Region::from_columns` was
+`parry3d::shape::voxels::Voxels::new`**, 72% in `compute_voxel_neighborhood_bits` and 35% (self) in
+`hashbrown` `find` — the vendored parry fork resolved every voxel *and each of its six
+neighbours* through a `chunk_headers` hash lookup, per voxel slot. The project's own code was
+small (`collider_cells` 1.7%, worldgen 3.9%).
+
+1. **Parry fork patch** (`crates/parry/src/shape/voxels/voxels_neighborhood.rs`):
+   `recompute_all_voxels_states` resolves each internal 8³ chunk and its six adjacent chunks
+   once, then indexes directly. Identical output — emptiness is a sentinel (`0b0100_0000`)
+   outside the six face bits, so in-place evaluation order cannot matter. Pinned by a randomized
+   test against the upstream implementation (kept as a `#[cfg(test)]` reference) and end to end:
+   region (0,0) state hash **`0x0ed71dbf` before and after**, determinism check OK. Also green:
+   parry voxel tests, game `hash_restore` / `simple` / `log_model` / `region_runner` /
+   `collider_genesis` / `voxels_hash_cache` (ignored ones included).
+   **`Region::from_columns`: 2371 → 342 ms** (region (0,0), 2791 chunks).
+2. **Worldgen off the manager thread for region starts**: `RegionSeed::Deferred(Option<SerializedRegion>)`
+   + `RegionSpawner::generates_columns()` (same opt-in shape as the LOD `Pristine` job). The
+   server's `ThreadRegionSpawner::with_generator` runs worldgen on the region's own thread;
+   `InlineSpawner` (wasm, tests) and `ThreadRegionSpawner::default()` keep the old path. A parked
+   region now generates **only if its blob is corrupt** — the eager path regenerated the columns
+   on every resubscribe just to have a fallback. `region_genesis` reports `generate_ms`.
+   Tests: `world_manager.rs` (manager's generator never called, deferred seeds handed out;
+   deferred seed generates once for a fresh region, never for a healthy parked one).
+
+Headless result (`cargo run --release -p server --example genesis_probe -- 9`, the production
+spawn path, same machine state): nine regions to first tick **6.0–8.4 s → 1.2–1.7 s**; one region
+3.3 s → ~0.6 s. Live before: 11–16 s of genesis after 6–7 s of sequential manager-thread worldgen.
+Expect `snapshot_sent` for all nine regions within a few seconds of connecting.
+
 ## Headline after two captures (Intel iGPU, release; `tiny` then `small`)
 
 Nothing measured so far points at the GPU. In cost order, with what settles or fixes each:
@@ -530,6 +606,7 @@ Still open from the server side: genesis (#1, measure with `just collider-bench`
 
 | Capture directory | Adapter (selected) | World | Rev | Notes |
 |---|---|---|---|---|
+| `target/perf-capture/20260920T121828Z-Intel-full/` | same, **~130 W power source, unclamped** | full | + parry voxel patch, deferred region worldgen (uncommitted) | 120 s; `world_ready` 20.5 s, 60 fps vsync-capped; not comparable in seconds with 2026-09-19 |
 | `target/perf-capture/20260919T175838Z-Intel-full/` | same | full | + block-wise LOD downsample (uncommitted) | 120 s; `world_ready` 66.1 s, server RSS < 1 GB; 5 KEEP-UP warnings (pacing, drift +1100 ms) |
 | `target/perf-capture/20260919T174643Z-Intel-full/` | same | full | + async snapshot voxels, LOD apply budget (uncommitted) | 120 s; no multi-second stalls, first terrain 12.0 s |
 | `target/perf-capture/20260919T171550Z-Intel-full/` | same | full | `43d5ddb` + extract-only-changed (uncommitted) | 120 s; steady 24.8 ms, `world_ready` 85.2 s |
