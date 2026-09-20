@@ -5,16 +5,33 @@
 use crossbeam::channel::{unbounded, Sender};
 use game::{build_lod_job, LodBuildJob, LodBuilder, LodResult};
 
-/// Default worker count. Two threads: LOD fill is background work; region sim
-/// threads keep priority on cores. `LOD_BUILD_THREADS` in the environment
-/// overrides it (a production-scale join queues ~570 builds, ~280 of them full
-/// region generations, so this is the knob for join-to-horizon latency).
+/// Floor on the default worker count (and the old fixed value).
 pub const LOD_BUILD_THREADS: usize = 2;
+/// Ceiling on the default worker count. Past the point where the client's own
+/// near meshing takes as long as the LOD fill, more workers buy nothing.
+pub const MAX_DEFAULT_LOD_BUILD_THREADS: usize = 6;
+/// The default takes one core in this many: LOD fill is background work, and
+/// region sim threads, the network edge and (on a dev box) the client keep
+/// the rest.
+pub const LOD_BUILD_CORE_SHARE: usize = 4;
+
+/// Default worker count for a machine with `cores` logical cores.
+///
+/// Why it scales: a production-scale join queues ~570 builds (~72 factor-2/4
+/// keys at ~0.22 s, ~120 factor-16 keys at ~0.09 s — both dominated by a full
+/// region generation — and ~380 cheap tile keys): ~34 worker-seconds. With
+/// the old fixed two workers that paced `world_ready` at ~17 s while the
+/// server sat at 55% of ONE core on a 20-thread machine (2026-09-20 capture).
+/// `LOD_BUILD_THREADS` in the environment overrides it either way.
+pub fn default_lod_build_threads(cores: usize) -> usize {
+    (cores / LOD_BUILD_CORE_SHARE).clamp(LOD_BUILD_THREADS, MAX_DEFAULT_LOD_BUILD_THREADS)
+}
 
 /// Resolve the optional `LOD_BUILD_THREADS` environment value.
 pub fn lod_build_threads(value: Option<&str>) -> Result<usize, String> {
     let Some(value) = value else {
-        return Ok(LOD_BUILD_THREADS);
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        return Ok(default_lod_build_threads(cores));
     };
     value
         .parse::<usize>()
@@ -81,9 +98,19 @@ impl LodBuilder for ThreadLodBuilder {
 mod tests {
     use super::*;
 
+    /// A quarter of the machine, never fewer than the old fixed two, never
+    /// more than six: LOD fill is background work next to region sim threads.
+    #[test]
+    fn default_lod_build_threads_is_a_clamped_quarter_of_the_cores() {
+        for (cores, expected) in [(1, 2), (4, 2), (8, 2), (11, 2), (12, 3), (16, 4), (20, 5), (24, 6), (128, 6)] {
+            assert_eq!(default_lod_build_threads(cores), expected, "{cores} cores");
+        }
+    }
+
     #[test]
     fn lod_build_threads_defaults_and_validates() {
-        assert_eq!(lod_build_threads(None), Ok(LOD_BUILD_THREADS));
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert_eq!(lod_build_threads(None), Ok(default_lod_build_threads(cores)));
         assert_eq!(lod_build_threads(Some("6")), Ok(6));
         for bad in ["0", "-1", "two", ""] {
             let error = lod_build_threads(Some(bad)).unwrap_err();

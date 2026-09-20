@@ -52,6 +52,39 @@ What now paces a `full` join: near meshing (20.0 s; the snapshot-voxel apply bud
 finishes at 10.4 s, the mesher's 32 uploads/frame after it) — LOD is done by 14.3 s. With the
 frame vsync-capped, per-frame budgets are the knob, not CPU.
 
+## LOD worker count — confirmed 2026-09-20
+
+`20260920T154225Z-Intel-full` (5 workers) vs `…153227Z…` (2 workers), same day, unclamped, `full`:
+
+| | 2 LOD workers | 5 LOD workers |
+|---|---|---|
+| `lod_all_received` (570 keys) | 17.6 s | **8.9 s** |
+| `world_ready` | 18.2 s | **13.5 s** — paced by near meshing again (drained 13.0 s) |
+| Server LOD latency avg, last window | 15.8 s | 6.8 s |
+| Region ticks while LOD builds | max ≤ 23 ms, 0 overruns | **max ≤ 12 ms, 0 overruns** — sims unaffected |
+| Server avg CPU / peak RSS | 55% / 949 MB | 89% / 1197 MB |
+| Join frame times, first dumps | 23 / 20 / 22 ms | 30 / 33 / 25 ms, then 17–20 ms (LOD lands ~2× faster, more LOD meshing early) |
+| LOD cells meshed / KEEP-UP / send timeouts | 20 631 of 20 631 / 0 / 0 | same |
+
+`world_ready` history at `full` on this adapter: not within 60 s → 104.6 → 66.1 s (2026-09-19,
+power-clamped) → 20.5 → 15.1 → 18.2 → **13.5 s** (2026-09-20, unclamped). Client and server now
+finish at about the same time (near meshing 13.0 s, LOD 8.9 s); neither side has an obvious
+single bottleneck left at this scale.
+
+### LOD worker count — implementation notes
+
+`world_ready` (18.2 s) was set by `lod_all_received` (17.6 s), and that by arithmetic: the
+`[server]` windows of `20260920T153227Z-Intel-full` add up to ~34 worker-seconds (73 factor-2/4
+keys × ~0.22 s, 118 factor-16 keys × ~0.09 s, 379 tile keys × ~0.02 s) on a fixed **two** LOD
+workers ≈ 17 s — while the server averaged 55% of ONE core on a 20-thread machine. The default is
+now `default_lod_build_threads(cores) = clamp(cores / 4, 2, 6)` (5 here); `LOD_BUILD_THREADS`
+still overrides, the server logs the resolved count at startup and capture summaries show it
+(`lod workers:`). Expect `lod_all_received` near 7–8 s, which hands the pacing of `world_ready`
+back to the client's near meshing (~12.6 s). Beyond that, the remaining LOD cost is generation:
+every factor-2/4/16 key for a never-run region runs a full `generate_region` (~0.1 s) — a
+block-scale generator for factor 16 would cut ~120 of those, but it is a worldgen feature with
+seam risk, not a tuning change.
+
 ## Packed LOD cells + tightened budget ceilings — confirmed 2026-09-20
 
 `20260920T153227Z-Intel-full` (`full`, Intel iGPU, release, unclamped, 90 s, no region crossings)
@@ -696,6 +729,7 @@ Still open from the server side: genesis (#1, measure with `just collider-bench`
 
 | Capture directory | Adapter (selected) | World | Rev | Notes |
 |---|---|---|---|---|
+| `target/perf-capture/20260920T154225Z-Intel-full/` | same, unclamped | full | `34f355c` + core-scaled LOD workers = 5 (uncommitted) | 60 s; LOD complete 8.9 s, `world_ready` 13.5 s, region ticks ≤ 12 ms |
 | `target/perf-capture/20260920T153227Z-Intel-full/` | same, unclamped | full | `880bd85` + packed LOD cells (uncommitted) | 90 s; client RSS 1134 MB, join frames 17–23 ms, `world_ready` 18.2 s |
 | `target/perf-capture/20260920T123228Z-Intel-full/` | same, unclamped | full | rate budgets, loose ceilings (pre-`880bd85`) | 120 s with rapid region crossings; near drained 10.8 s, join frames 37–49 ms |
 | `target/perf-capture/20260920T121828Z-Intel-full/` | same, **~130 W power source, unclamped** | full | + parry voxel patch, deferred region worldgen (uncommitted) | 120 s; `world_ready` 20.5 s, 60 fps vsync-capped; not comparable in seconds with 2026-09-19 |

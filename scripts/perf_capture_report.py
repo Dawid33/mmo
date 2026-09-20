@@ -335,6 +335,8 @@ def main() -> int:
     s.append(f"host       : {host.get('cpu')} x{host.get('logical_cores')}, {host.get('mem_total_mb')} MB, Linux {host.get('kernel')}")
     s.append(f"run        : {manifest.get('duration_s')} s, client exit {manifest.get('client_exit_code')}, "
              f"server exit {manifest.get('server_exit_code')}  (143 = closed by PERF_CAPTURE_SECONDS)")
+    lod_workers = next((l.split("lod workers:", 1)[1].strip() for l in server if "lod workers:" in l), "")
+    s.append(f"lod workers: {lod_workers or '(not logged — server predates the core-scaled default)'}")
     s.append(f"loaded     : {'YES — client reached world_ready' if 'world_ready' in reached else 'NO world_ready event — the join did not complete (or the binaries predate the timeline)'}")
 
     s += ["", "JOIN TIMELINE  (ms since client process start; repeated events collapsed)", ""]

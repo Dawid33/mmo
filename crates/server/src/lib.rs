@@ -315,6 +315,10 @@ pub fn run() {
     let configured_lod_threads = std::env::var("LOD_BUILD_THREADS").ok();
     let lod_threads = lod_workers::lod_build_threads(configured_lod_threads.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
+    info!(
+        "[server] lod workers: {lod_threads} ({})",
+        if configured_lod_threads.is_some() { "LOD_BUILD_THREADS" } else { "default: cores / 4, clamped 2..=6" }
+    );
     let lod_builder: Box<dyn game::LodBuilder> = Box::new(lod_workers::ThreadLodBuilder::new(
         world_seed,
         materials,
