@@ -124,17 +124,22 @@ pub fn forward_input(
             send(InputEvent::Key { key, pressed: false });
         }
     }
+    // Coalesce HERE, at the source — not at the send boundary. Each event is
+    // predicted locally and replayed by the server, so emitting N events that
+    // the server sees as 1 would give the two divergent logs and break rollback.
+    // A press flushes the window first: the camera shows the per-frame look
+    // (`look.rs`), so a click must reach the sim after all the motion that
+    // aimed it, or an edit would hit the block the crosshair just left.
+    let pressing = buttons.get_just_pressed().next().is_some();
+    let window_len = if pressing { Duration::ZERO } else { coalesce_window.0 };
+    if let Some(sum) = coalescer.accumulate(motion.delta, time.delta(), window_len) {
+        send(InputEvent::MouseMotion { dx: sum.x, dy: sum.y });
+    }
     for b in buttons.get_just_pressed() {
         send(InputEvent::MouseButton { button: map_button(*b), pressed: true });
     }
     for b in buttons.get_just_released() {
         send(InputEvent::MouseButton { button: map_button(*b), pressed: false });
-    }
-    // Coalesce HERE, at the source — not at the send boundary. Each event is
-    // predicted locally and replayed by the server, so emitting N events that
-    // the server sees as 1 would give the two divergent logs and break rollback.
-    if let Some(sum) = coalescer.accumulate(motion.delta, time.delta(), coalesce_window.0) {
-        send(InputEvent::MouseMotion { dx: sum.x, dy: sum.y });
     }
     if let Ok(w) = window.single() {
         let size = (w.physical_width(), w.physical_height());

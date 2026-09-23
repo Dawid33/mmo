@@ -57,9 +57,10 @@ impl SimTarget {
         Self { pos, rot, pos_smoothing: 0.5, rot_smoothing: 0.5, pos_snap: 1.6, rot_snap: 0.1 }
     }
     pub fn camera(pos: Vec3, rot: Quat) -> Self {
-        // Look lives in the 50Hz sim; the render camera SNAPS its rotation
-        // (rot_smoothing = 1.0) so there's no slerp-arc tilt during turns,
-        // but LERPS its position so movement glides instead of stepping.
+        // The render camera SNAPS its rotation (rot_smoothing = 1.0) so
+        // there's no slerp-arc tilt during turns, but LERPS its position so
+        // movement glides instead of stepping. The snapped per-tick sim look
+        // is then overwritten by the per-frame local look (`look.rs`).
         Self {
             pos,
             rot,

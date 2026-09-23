@@ -20,6 +20,7 @@ pub(crate) mod grid_debug;
 pub(crate) mod hud;
 pub(crate) mod input;
 mod interpolate;
+mod look;
 mod motion_probe;
 pub(crate) mod join_timeline;
 pub(crate) mod lod_rings;
@@ -83,11 +84,13 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<meshing::visibility::CullingConfig>()
         .init_resource::<config::TerrainRenderConfig>()
         .init_resource::<input::MouseCoalesceWindow>()
+        .init_resource::<look::LocalLook>()
         .init_resource::<lod_rings::LodRings>()
         .add_systems(
             PreUpdate,
             (
                 input::forward_input.after(bevy::input::InputSystems),
+                look::integrate_local_look.after(bevy::input::InputSystems),
                 (
                     bridge::drain_client_updates,
                     bridge::drain_region_updates,
@@ -132,7 +135,10 @@ impl Plugin for SimBridgePlugin {
                 // the LOD mesh systems pick up on later frames.
                 (lod_rings::apply_lod_events, lod_rings::retire_lod_roots).chain(),
                 interpolate::interpolate_transforms,
-                motion_probe::probe_camera_motion.after(interpolate::interpolate_transforms),
+                // Per-frame mouse look replaces the per-tick sim look that
+                // interpolate_transforms just snapped the camera to.
+                look::apply_local_look.after(interpolate::interpolate_transforms),
+                motion_probe::probe_camera_motion.after(look::apply_local_look),
                 join_timeline::track_join_timeline,
                 avatar::attach_avatars,
                 skybox::attach_skybox,
