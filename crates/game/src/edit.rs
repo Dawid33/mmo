@@ -16,7 +16,6 @@
 //! Scope: whole blocks only (a break clears chisel detail), and only inside
 //! the player's home region. A ray that leaves the region finds nothing.
 
-use std::collections::BTreeMap;
 
 use parry3d::math::{Isometry, Real, Vector};
 use rapier3d::prelude::ColliderBuilder;
@@ -81,32 +80,9 @@ fn cell_solid(chunk: &Chunk, (bx, by, bz): (usize, usize, usize)) -> bool {
 }
 
 impl Rollback {
-    /// Chunk entities by coordinates. Chunks don't store their coordinates;
-    /// they are recovered from the fixed body translation (`coords * 32`,
-    /// exact), as `terrain_snapshot` does. A scan per edit is cheap next to
-    /// the edit itself.
-    fn chunk_index(&self) -> BTreeMap<ChunkCoords, EntityKey> {
-        let mut index = BTreeMap::new();
-        for (key, maybe_chunk) in self.data.ecs.chunk.iter() {
-            if maybe_chunk.is_none() {
-                continue;
-            }
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
-            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
-            let t = body.translation();
-            let coords = ChunkCoords::new(
-                (t.x.0 / 32.0) as usize,
-                (t.y.0 / 32.0).floor() as i32,
-                (t.z.0 / 32.0) as usize,
-            );
-            index.insert(coords, key);
-        }
-        index
-    }
-
-    fn block_solid(&self, index: &BTreeMap<ChunkCoords, EntityKey>, pos: BlockPos) -> bool {
+    fn block_solid(&self, pos: BlockPos) -> bool {
         let Some((coords, local)) = locate(pos) else { return false };
-        let Some(&e) = index.get(&coords) else { return false };
+        let Some(e) = self.chunk_key_at(coords) else { return false };
         self.data.ecs.chunk.try_get(e).as_ref().is_some_and(|c| cell_solid(c, local))
     }
 
@@ -114,13 +90,11 @@ impl Rollback {
     /// normalised) and returns the first solid block within `reach` metres.
     /// Amanatides–Woo voxel traversal at block scale.
     pub fn raycast_block(&self, origin: Vector<Real>, dir: Vector<Real>, reach: f32) -> Option<BlockHit> {
-        let index = self.chunk_index();
-        self.raycast_block_in(&index, origin, dir, reach)
+        self.raycast_block_in(origin, dir, reach)
     }
 
     fn raycast_block_in(
         &self,
-        index: &BTreeMap<ChunkCoords, EntityKey>,
         origin: Vector<Real>,
         dir: Vector<Real>,
         reach: f32,
@@ -145,7 +119,7 @@ impl Rollback {
         }
         let mut normal = [0i32; 3];
         loop {
-            if self.block_solid(index, cell) {
+            if self.block_solid(cell) {
                 return Some(BlockHit { block: cell, normal });
             }
             // Fixed tie order (x, then y, then z) keeps the walk deterministic.
@@ -195,11 +169,10 @@ impl Rollback {
     /// colliders. Creates the chunk entity if a placed block lands in a chunk
     /// slot that has none. Returns whether anything changed.
     pub fn set_block_safe(&mut self, pos: BlockPos, block: Block) -> bool {
-        let index = self.chunk_index();
-        self.set_block_in(&index, pos, block)
+        self.set_block_in(pos, block)
     }
 
-    fn set_block_in(&mut self, index: &BTreeMap<ChunkCoords, EntityKey>, pos: BlockPos, block: Block) -> bool {
+    fn set_block_in(&mut self, pos: BlockPos, block: Block) -> bool {
         // Cell mode: a dormant cell's terrain lives in the server store; an
         // edit here would create a chunk the store never sees. Gated here, the
         // one funnel of both set_block_safe and player_edit_safe.
@@ -207,7 +180,7 @@ impl Rollback {
             return false;
         }
         let Some((coords, (bx, by, bz))) = locate(pos) else { return false };
-        let Some(&e) = index.get(&coords) else {
+        let Some(e) = self.chunk_key_at(coords) else {
             if block.id == BlockId::AIR {
                 return false;
             }
@@ -320,10 +293,9 @@ impl Rollback {
         // Cameras look down -Z, as the renderer's Camera3d does.
         let dir = crate::look_quat(camera.yaw, camera.pitch)
             .transform_vector(&Vector::new(Real::from(0.0), Real::from(0.0), Real::from(-1.0)));
-        let index = self.chunk_index();
-        let Some(hit) = self.raycast_block_in(&index, eye, dir, REACH) else { return false };
+        let Some(hit) = self.raycast_block_in(eye, dir, REACH) else { return false };
         match action {
-            EditAction::Break => self.set_block_in(&index, hit.block, Block::new(BlockId::AIR)),
+            EditAction::Break => self.set_block_in(hit.block, Block::new(BlockId::AIR)),
             EditAction::Place => {
                 if hit.normal == [0; 3] {
                     return false;
@@ -333,10 +305,10 @@ impl Rollback {
                     hit.block[1] + hit.normal[1],
                     hit.block[2] + hit.normal[2],
                 ];
-                if self.block_solid(&index, target) || self.block_overlaps_body(target) {
+                if self.block_solid(target) || self.block_overlaps_body(target) {
                     return false;
                 }
-                self.set_block_in(&index, target, Block::new(PLACE_BLOCK))
+                self.set_block_in(target, Block::new(PLACE_BLOCK))
             }
         }
     }

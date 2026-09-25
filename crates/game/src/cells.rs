@@ -180,7 +180,7 @@ impl CellChanges {
 }
 
 impl Rollback {
-    fn chunk_coords_of(&self, key: EntityKey) -> Option<ChunkCoords> {
+    pub(crate) fn chunk_coords_of(&self, key: EntityKey) -> Option<ChunkCoords> {
         let handle = (*self.data.ecs.rigidbody.try_get(key))?;
         let t = self.data.physics.bodies.get(handle)?.translation();
         // Chunk bodies sit at exact multiples of 32 (seed_terrain_genesis / create_mesh).
@@ -191,20 +191,25 @@ impl Rollback {
         ))
     }
 
-    /// Chunk entities in `cell`, sorted by coordinates.
+    /// Chunk entities in `cell`, sorted by coordinates. One index range per
+    /// chunk column x of the cell — never a scan of the whole region.
     pub fn cell_chunk_keys(&self, cell: CellCoords) -> Vec<(ChunkCoords, EntityKey)> {
         let cc = self.data.cells.cell_chunks;
-        let mut out: Vec<_> = self
-            .data
-            .ecs
-            .chunk
-            .iter()
-            .filter(|(_, c)| c.is_some())
-            .filter_map(|(k, _)| self.chunk_coords_of(k).map(|c| (c, k)))
-            .filter(|(c, _)| cell_of_chunk(*c, cc) == cell)
-            .collect();
+        let (x0, z0) = (cell.x as usize * cc, cell.z as usize * cc);
+        let mut out = Vec::new();
+        for x in x0..x0 + cc {
+            let range = (x, z0, i32::MIN)..(x, z0 + cc, i32::MIN);
+            out.extend(
+                self.data.chunk_index.range(range).map(|(k, e)| (crate::chunk_coords_of_index_key(*k), *e)),
+            );
+        }
         out.sort_by_key(|(c, _)| (c.x, c.y, c.z));
         out
+    }
+
+    /// The terrain chunk entity at `coords`, if any.
+    pub fn chunk_key_at(&self, coords: ChunkCoords) -> Option<EntityKey> {
+        self.data.chunk_index.get(&crate::chunk_index_key(coords)).copied()
     }
 
     /// Kind-bearing entities (players, mobs) whose body is in `cell`,
@@ -281,13 +286,8 @@ impl Rollback {
         let raw: Vec<(ChunkCoords, Chunk)> = if render { chunks.clone() } else { Vec::new() };
         self.seed_terrain_genesis(chunks);
         if render {
-            let index: std::collections::BTreeMap<(usize, i32, usize), EntityKey> = self
-                .cell_chunk_keys(payload.cell)
-                .into_iter()
-                .map(|(c, k)| ((c.x, c.y, c.z), k))
-                .collect();
             for (c, chunk) in raw {
-                let e = index[&(c.x, c.y, c.z)];
+                let e = self.chunk_key_at(c).expect("genesis indexed the chunk");
                 let pose = crate::IsometryReal::translation(
                     parry3d::math::Real::from((c.x * 32) as f32),
                     parry3d::math::Real::from((c.y * 32) as f32),
@@ -324,7 +324,7 @@ impl Rollback {
                     crate::GameDataUpdateKind::RemoveEntity(key),
                 ));
             }
-            self.remove_chunk_raw(key);
+            self.remove_chunk_raw(coords, key);
         }
         self.data.cells.raw_mut().active.remove(&cell);
         DormantCell { chunks, entities }
@@ -386,7 +386,8 @@ impl Rollback {
 
     /// Raw inverse of one `seed_terrain_genesis` chunk: body + attached
     /// colliders, component slots, entity slot.
-    fn remove_chunk_raw(&mut self, key: EntityKey) {
+    fn remove_chunk_raw(&mut self, coords: ChunkCoords, key: EntityKey) {
+        self.data.chunk_index.remove_raw(&crate::chunk_index_key(coords));
         if let Some(handle) = *self.data.ecs.rigidbody.try_get(key) {
             let p = self.data.physics.raw_mut();
             p.bodies.raw_mut().remove(

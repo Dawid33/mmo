@@ -216,6 +216,55 @@ fn edits_in_dormant_cells_are_refused() {
 }
 
 #[test]
+fn the_chunk_index_follows_activation_and_release() {
+    let mut s = Region::new_cells(r0(), CC, None, None);
+    server_apply(&mut s, activate(&[CellCoords::new(0, 0), CellCoords::new(1, 0)]));
+    let per_cell = cell_content(CellCoords::new(0, 0)).chunks.len();
+    assert_eq!(s.data().data.chunk_index.len(), 2 * per_cell);
+    for cell in [CellCoords::new(0, 0), CellCoords::new(1, 0)] {
+        let keys = s.data().cell_chunk_keys(cell);
+        let coords: Vec<ChunkCoords> = keys.iter().map(|(c, _)| *c).collect();
+        let expected: Vec<ChunkCoords> = cell_content(cell).chunks.iter().map(|(c, _)| *c).collect();
+        assert_eq!(coords, expected, "sorted, and only this cell's chunks");
+        for (c, key) in keys {
+            assert_eq!(s.data().chunk_key_at(c), Some(key));
+        }
+    }
+    server_apply(&mut s, deactivate(&[CellCoords::new(0, 0)]));
+    assert_eq!(s.data().data.chunk_index.len(), per_cell);
+    assert_eq!(s.data().chunk_key_at(ChunkCoords::new(0, 0, 0)), None);
+}
+
+#[test]
+fn an_edit_created_chunk_is_indexed_and_released_with_its_cell() {
+    let mut s = Region::new_cells(r0(), CC, None, None);
+    server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
+    let n = s.data().data.chunk_index.len();
+    let mut placed = false;
+    // Block y = 40 is chunk y = 20: air above the floor, no chunk yet.
+    s.with_data(|rb| placed = rb.set_block_safe([1, 40, 1], game::Block::new(game::BlockId(1))));
+    assert!(placed);
+    assert_eq!(s.data().data.chunk_index.len(), n + 1);
+    let new_chunk = ChunkCoords::new(0, 20, 0);
+    assert!(s.data().chunk_key_at(new_chunk).is_some());
+    let ev = server_apply(&mut s, deactivate(&[CellCoords::new(0, 0)]));
+    assert!(matches!(ev.kind, GameEventKind::CellChanges(_)));
+    let dormant = s.take_dormant();
+    assert!(dormant[0].1.chunks.iter().any(|(c, _)| *c == new_chunk), "the edit-made chunk is stored");
+    assert!(s.data().data.chunk_index.is_empty());
+}
+
+#[test]
+fn the_chunk_index_survives_a_snapshot_round_trip() {
+    let mut s = Region::new_cells(r0(), CC, None, None);
+    server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
+    let bytes = bincode::serialize(s.data()).unwrap();
+    let back: game::Rollback = bincode::deserialize(&bytes).unwrap();
+    assert_eq!(*back.data.chunk_index, *s.data().data.chunk_index);
+    assert_eq!(state_hash(&back), state_hash(s.data()));
+}
+
+#[test]
 fn slime_spawns_are_gated_to_active_cells() {
     let mut s = Region::new_cells(r0(), CC, None, None);
     server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));

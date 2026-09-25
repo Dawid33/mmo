@@ -164,8 +164,8 @@ mod game_data {
     };
 
     use super::{
-        Camera, CellState, Chunk, Client, ClientId, Component, EntityKey, EntityKind, GhostEntry,
-        IsometryReal, RigidBodyHandle, RollbackInfo, SlotMap,
+        Camera, CellState, Chunk, ChunkIndexKey, Client, ClientId, Component, EntityKey,
+        EntityKind, GhostEntry, IsometryReal, RigidBodyHandle, RollbackInfo, SlotMap,
     };
     use std::collections::BTreeMap;
 
@@ -189,6 +189,11 @@ mod game_data {
         arrivals: BTreeMap<(crate::RegionCoords, EntityKey), EntityKey>,
         /// Cell loading (cell-mode regions); default = legacy region.
         cells: CellState,
+        /// Terrain chunk entity by [`ChunkIndexKey`]. Column-major, so one
+        /// cell is `cell_chunks` contiguous ranges. Replaces the scans that
+        /// recovered chunk coordinates from body translations.
+        #[undo(map)]
+        chunk_index: BTreeMap<ChunkIndexKey, EntityKey>,
     }
 
     pub struct Ecs {
@@ -219,6 +224,17 @@ mod game_data {
 }
 
 pub use game_data::*;
+
+/// `(x, z, y)` of a chunk — the key of `GameData::chunk_index`.
+pub type ChunkIndexKey = (usize, usize, i32);
+
+pub fn chunk_index_key(c: ChunkCoords) -> ChunkIndexKey {
+    (c.x, c.z, c.y)
+}
+
+pub fn chunk_coords_of_index_key((x, z, y): ChunkIndexKey) -> ChunkCoords {
+    ChunkCoords::new(x, y, z)
+}
 
 impl GameData {
     pub fn into_game_update_iter(self) {}
@@ -537,6 +553,7 @@ impl Rollback {
         // derive_voxels' solid cells.
         let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
         self.ecs.chunk.set_safe(e, Some(chunk));
+        self.chunk_index.insert(chunk_index_key(coords), e);
         let position = IsometryReal::from_parts(
             Translation3::new(
                 Real::from((coords.x * 32) as RawReal),
@@ -587,6 +604,7 @@ impl Rollback {
             let e = self.ecs.create_entity_raw();
             let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
             self.ecs.chunk.raw_mut().insert(e, Some(chunk));
+            self.chunk_index.insert_raw(chunk_index_key(coords), e);
             let position = IsometryReal::from_parts(
                 Translation3::new(
                     Real::from((coords.x * 32) as RawReal),
@@ -891,6 +909,13 @@ impl Rollback {
                 GameDataTransactionKind::Undo,
                 GameDataUpdateKind::SetEntityKind(key, Some(kind)),
             ));
+        }
+        // A terrain chunk leaves the index (before its body goes: the body
+        // is where its coordinates come from).
+        if self.data.ecs.chunk.try_get(key).is_some() {
+            if let Some(coords) = self.chunk_coords_of(key) {
+                self.data.chunk_index.remove(&chunk_index_key(coords));
+            }
         }
         // Physics: remove body + attached colliders under a full snapshot.
         if let Some(handle) = *self.data.ecs.rigidbody.try_get(key) {
