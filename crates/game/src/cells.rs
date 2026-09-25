@@ -264,6 +264,47 @@ impl Rollback {
         DormantCell { chunks, entities }
     }
 
+    /// Cell-mode only: whether block `pos` lies in an active cell.
+    /// Legacy regions: always true.
+    pub fn block_in_active_cell(&self, pos: [i32; 3]) -> bool {
+        let cc = self.data.cells.cell_chunks;
+        if cc == 0 {
+            return true;
+        }
+        cell_of_block(pos, cc).is_some_and(|c| self.data.cells.active.contains(&c))
+    }
+
+    /// End-of-tick backstop: every non-player, non-ghost entity standing in
+    /// a dormant cell is extracted (undo-tracked, so clients predict it) and
+    /// returned for the server's store. Legacy regions: no-op.
+    pub fn freeze_strays_safe(&mut self, region: RegionCoords) -> Vec<(CellCoords, EntityBundle)> {
+        let cc = self.data.cells.cell_chunks;
+        if cc == 0 {
+            return Vec::new();
+        }
+        let players: BTreeSet<EntityKey> = self.data.player_entites.values().copied().collect();
+        let ghosts: BTreeSet<EntityKey> = self.data.ghosts.iter().map(|(_, g)| g.entity).collect();
+        let mut strays = Vec::new();
+        for (k, kind) in self.data.ecs.kind.iter() {
+            if kind.is_none() || players.contains(&k) || ghosts.contains(&k) {
+                continue;
+            }
+            let Some(h) = *self.data.ecs.rigidbody.try_get(k) else { continue };
+            let Some(body) = self.data.physics.bodies.get(h) else { continue };
+            let t = body.translation();
+            // Outside the region is the departure scan's job.
+            if let Some(cell) = cell_of_pos(t.x.0, t.z.0, cc) {
+                if !self.data.cells.active.contains(&cell) {
+                    strays.push((cell, k));
+                }
+            }
+        }
+        strays
+            .into_iter()
+            .map(|(cell, k)| (cell, self.extract_entity_safe(k, region)))
+            .collect()
+    }
+
     /// Raw inverse of one `seed_terrain_genesis` chunk: body + attached
     /// colliders, component slots, entity slot.
     fn remove_chunk_raw(&mut self, key: EntityKey) {

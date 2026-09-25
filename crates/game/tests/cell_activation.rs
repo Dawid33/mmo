@@ -154,3 +154,72 @@ fn a_cell_holding_a_player_is_not_deactivated() {
     assert!(s.data().player_entites.contains_key(&0));
     assert!(s.take_dormant().is_empty());
 }
+
+use game::parry::math::{Real, Vector};
+
+fn slime_in_cell_2_2(s: &mut Region) {
+    // Centre of dormant cell (2,2), well above ground.
+    let at = 2.5 * game::cell_size_units(CC);
+    s.with_data(|rb| {
+        rb.spawn_slime_safe(
+            Vector::new(Real::from(at), Real::from(40.0), Real::from(at)),
+            1,
+            Real::from(0.0),
+            0,
+        );
+    });
+}
+
+#[test]
+fn a_mob_in_a_dormant_cell_is_frozen_by_the_tick() {
+    let mut s = Region::new_cells(r0(), CC, None, None);
+    server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
+    slime_in_cell_2_2(&mut s);
+    server_apply(&mut s, GameEventKind::Tick);
+    let frozen = s.take_frozen();
+    assert_eq!(frozen.len(), 1);
+    assert_eq!(frozen[0].0, CellCoords::new(2, 2));
+    assert_eq!(s.data().ecs.slime.iter().filter(|(_, x)| x.is_some()).count(), 0);
+}
+
+#[test]
+fn freezing_a_stray_rolls_back_bit_exact() {
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut s = Region::new_cells(r0(), CC, None, None);
+    server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
+    slime_in_cell_2_2(&mut s);
+    let mut c = Region::new(s.data().clone(), Some(send), r0(), Some(0));
+    let before = state_hash(c.data());
+    c.handle_event(GameEventKind::Tick).unwrap();
+    assert_eq!(c.take_frozen().len(), 1, "the client predicts the freeze too");
+    c.rollback_last_event();
+    assert_eq!(before, state_hash(c.data()));
+}
+
+#[test]
+fn edits_in_dormant_cells_are_refused() {
+    let mut s = Region::new_cells(r0(), CC, None, None);
+    server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
+    let block = game::Block::new(game::BlockId(1));
+    let mut placed_dormant = true;
+    let mut placed_active = false;
+    s.with_data(|rb| {
+        // Cell (3,3) starts at chunk 24 = block 48.
+        placed_dormant = rb.set_block_safe([50, 3, 50], block);
+        placed_active = rb.set_block_safe([3, 20, 3], block);
+    });
+    assert!(!placed_dormant, "no chunk may be created in a dormant cell");
+    assert!(placed_active);
+    assert!(s.data().cell_chunk_keys(CellCoords::new(3, 3)).is_empty());
+}
+
+#[test]
+fn slime_spawns_are_gated_to_active_cells() {
+    let mut s = Region::new_cells(r0(), CC, None, None);
+    server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
+    // Voxel (100,100) is cell (0,0); voxel (700,700) is cell (2,2).
+    assert!(s.data().slime_spawn_allowed(100, 100));
+    assert!(!s.data().slime_spawn_allowed(700, 700));
+    let legacy = Region::from_chunks(r0(), Vec::new());
+    assert!(legacy.data().slime_spawn_allowed(700, 700), "legacy regions are ungated");
+}

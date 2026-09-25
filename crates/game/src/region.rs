@@ -127,6 +127,9 @@ pub struct Region {
     /// never read (see the plan's read-after-progress invariant).
     pending_departures: Vec<(EntityBundle, RegionCoords)>,
     pending_ghosts: Vec<(GhostData, RegionCoords)>,
+    /// Entities frozen into dormant cells by the LAST tick; replaced every
+    /// tick, like `pending_departures`.
+    pending_frozen: Vec<(crate::CellCoords, EntityBundle)>,
     /// Server only: cells dematerialized by `CellChanges`, for the store.
     pending_dormant: Vec<(crate::CellCoords, crate::DormantCell)>,
     /// Wall-time attribution for Tick executions, drained by the client's
@@ -176,6 +179,7 @@ impl Region {
             pending_departures: Vec::new(),
             pending_ghosts: Vec::new(),
             pending_dormant: Vec::new(),
+            pending_frozen: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             tick_perf: RegionTickPerf::default(),
         }
@@ -512,6 +516,7 @@ impl Region {
                 self.pending_departures = departures;
                 self.pending_ghosts = ghosts;
                 self.data.expire_ghosts();
+                self.pending_frozen = self.data.freeze_strays_safe(self.id);
                 self.data.tick.update(|t| *t += 1);
                 #[cfg(not(target_arch = "wasm32"))]
                 self.tick_perf.record(tick_start, controllers_done, input_done);
@@ -666,6 +671,12 @@ impl Region {
         let mut data = Rollback::new(None);
         data.cells.raw_mut().cell_chunks = cell_chunks;
         Region::new(data, game_update_send, id, local_client_id)
+    }
+
+    /// Entities frozen into dormant cells by the LAST tick (server: to the
+    /// store; client: discard). Read right after driving a tick.
+    pub fn take_frozen(&mut self) -> Vec<(crate::CellCoords, EntityBundle)> {
+        std::mem::take(&mut self.pending_frozen)
     }
 
     /// Server: cells dematerialized since the last call, for the store.
