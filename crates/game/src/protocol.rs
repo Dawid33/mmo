@@ -32,6 +32,31 @@ pub type EntityId = usize;
 pub const REGION_CHUNKS: usize = 32;
 pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // 1024.0, exact in f32
 
+/// Cell loading (spec 2026-09-25-island-regions-cell-loading-design): every
+/// region runs in cell mode with `CELL_CHUNKS`-chunk cells when non-zero. A
+/// BUILD-time dial like `REGION_CHUNKS`, for the same reason: server, client
+/// and the wasm LocalServer must agree. `just cells=16 …`; 0/unset = off.
+pub const CELL_CHUNKS: usize = parse_cell_chunks(option_env!("VOXEL_CELL_CHUNKS"));
+
+/// Unset/empty/0 = off; otherwise a power of two dividing `REGION_CHUNKS`
+/// (checked at BUILD time).
+pub(crate) const fn parse_cell_chunks(var: Option<&str>) -> usize {
+    let Some(text) = var else { return 0 };
+    let bytes = text.as_bytes();
+    let mut value = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        assert!(bytes[i].is_ascii_digit(), "VOXEL_CELL_CHUNKS must be a number");
+        value = value * 10 + (bytes[i] - b'0') as usize;
+        i += 1;
+    }
+    assert!(
+        value == 0 || (value.is_power_of_two() && REGION_CHUNKS % value == 0),
+        "VOXEL_CELL_CHUNKS must be 0 or a power of two dividing REGION_CHUNKS"
+    );
+    value
+}
+
 /// A running region checks its terrain hash this often and pushes a
 /// `TerrainChanged` only when it changed — the check cadence IS the
 /// refresh throttle.
@@ -357,6 +382,16 @@ impl GameEventKind {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cell_chunks_parse() {
+        assert_eq!(parse_cell_chunks(None), 0);
+        assert_eq!(parse_cell_chunks(Some("")), 0);
+        assert_eq!(parse_cell_chunks(Some("0")), 0);
+        assert_eq!(parse_cell_chunks(Some("8")), 8);
+        assert_eq!(parse_cell_chunks(Some("32")), 32);
+        assert_eq!(CELL_CHUNKS, parse_cell_chunks(option_env!("VOXEL_CELL_CHUNKS")));
+    }
+
     use super::*;
 
     #[test]

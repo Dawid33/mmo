@@ -26,6 +26,14 @@ adapter := ""
 world := ""
 export VOXEL_WORLD := world
 
+# Cell loading (phase 1b of docs/superpowers/specs/2026-09-25-island-regions-cell-loading-design.md):
+# a BUILD-time constant (`game::CELL_CHUNKS`), 0 = off. Every region then loads
+# terrain in `cells`×`cells`-chunk cells around players; must be a power of two
+# dividing `region_chunks`. The client forces near radius 0 in cell mode.
+#   just region_chunks=128 cells=16 world=tiny run
+cells := env_var_or_default("VOXEL_CELL_CHUNKS", "0")
+export VOXEL_CELL_CHUNKS := cells
+
 # GPU sampled by `just gpu-log` (domain:bus:dev.func). Default is the RX 6700 XT eGPU;
 # `amdgpu_top --list` prints the ids.
 pci := "0000:40:00.0"
