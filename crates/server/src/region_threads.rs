@@ -71,10 +71,12 @@ impl RegionSpawner for ThreadRegionSpawner {
                     cell_chunks,
                 );
                 let generate_time = generate_time.get();
-                let build = genesis_started.elapsed() - generate_time;
+                let hash_time = runner.baseline_hash_time();
+                let build = genesis_started.elapsed() - generate_time - hash_time;
                 // `generate_ms` = worldgen on this thread (deferred seeds);
                 // `build_ms` = deserialize (parked) or chunk flatten + collider
-                // genesis (fresh); the rest of `ms` is the baseline terrain hash.
+                // genesis (fresh); `terrain_hash_ms` = the runner's baseline
+                // terrain hash (timed inside `RegionRunner::new`).
                 game::perf_event!(
                     "region_genesis",
                     "region={},{} ms={} generate_ms={} build_ms={} terrain_hash_ms={} parked={parked}",
@@ -83,7 +85,7 @@ impl RegionSpawner for ThreadRegionSpawner {
                     game::perf::ms(genesis_started.elapsed()),
                     game::perf::ms(generate_time),
                     game::perf::ms(build),
-                    game::perf::ms(genesis_started.elapsed() - build - generate_time)
+                    game::perf::ms(hash_time)
                 );
                 region_thread_loop(id, runner, recv);
             })

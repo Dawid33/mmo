@@ -651,3 +651,46 @@ fn a_server_region_has_no_render_sink() {
     let c = Region::new(s.data().clone(), Some(send), r0(), Some(0));
     assert!(c.data().data.has_render_sink());
 }
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn terrain_requests_include_dormant_cells() {
+    // LOD builds read a region's terrain through RequestTerrain/TerrainChanged:
+    // a cell region must report its dormant cells too, or released cells
+    // turn into holes in the LOD rings.
+    let (mut runner, rx) = cell_runner();
+    runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+    for _ in 0..8 {
+        runner.tick();
+    }
+    runner.region_mut().with_data(|rb| {
+        let key = *rb.data.player_entites.get(&0).unwrap();
+        rb.remove_entity_safe(key, Some(0));
+        rb.data.player_entites.remove(&0);
+    });
+    for _ in 0..game::CELL_RELEASE_GRACE_TICKS + 2 {
+        runner.tick();
+    }
+    assert!(runner.region_mut().data().cells.active.is_empty());
+    let _ = rx.try_iter().count();
+    runner.handle_input(RegionInput::RequestTerrain(7));
+    let terrain = rx
+        .try_iter()
+        .find_map(|(_, o)| match o {
+            RegionOutput::Terrain(7, t) => Some(t),
+            _ => None,
+        })
+        .expect("terrain reply");
+    assert_eq!(
+        terrain.chunks.len(),
+        game::REGION_CHUNKS * game::REGION_CHUNKS,
+        "every generated chunk, active or dormant"
+    );
+}
+
+#[test]
+fn a_runner_times_its_baseline_terrain_hash() {
+    let (out, _rx) = unbounded();
+    let runner = RegionRunner::new(r0(), Region::from_chunks(r0(), vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor(8))]), out);
+    assert!(runner.baseline_hash_time() > std::time::Duration::ZERO);
+}

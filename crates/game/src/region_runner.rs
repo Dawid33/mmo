@@ -174,6 +174,8 @@ pub struct RegionRunner {
     held: std::collections::VecDeque<(GameEventKind, u64)>,
     /// `Some` for a cell-mode region (`RegionRunner::new_with_cells`).
     cells: Option<CellMode>,
+    /// See [`RegionRunner::baseline_hash_time`].
+    baseline_hash_time: std::time::Duration,
 }
 
 /// Furthest ahead of a region's tick a client event may be stamped and still
@@ -187,7 +189,9 @@ impl RegionRunner {
         region: Region,
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Self {
+        let hash_started = crate::perf::Stopwatch::start();
         let last_terrain_hash = region.terrain_fingerprint();
+        let baseline_hash_time = hash_started.elapsed();
         Self {
             id,
             region,
@@ -196,6 +200,7 @@ impl RegionRunner {
             terrain_hash_cost: Default::default(),
             held: Default::default(),
             cells: None,
+            baseline_hash_time,
         }
     }
 
@@ -216,6 +221,24 @@ impl RegionRunner {
         let mut runner = Self::new(id, region, out);
         runner.cells = Some(CellMode { store, tickets: CellTickets::default(), config });
         runner
+    }
+
+    /// Wall time of the baseline `terrain_fingerprint` taken in `new`
+    /// (the `terrain_hash_ms` of the server's `region_genesis` line).
+    pub fn baseline_hash_time(&self) -> std::time::Duration {
+        self.baseline_hash_time
+    }
+
+    /// The region's whole terrain, for LOD: the sim's chunks, plus — in cell
+    /// mode — every dormant cell's stored chunks. Without the dormant part a
+    /// released cell would become a hole in the LOD rings.
+    fn terrain(&self) -> TerrainSnapshot {
+        let mut snap = self.region.terrain_snapshot();
+        if let Some(mode) = self.cells.as_ref() {
+            snap.chunks.extend(mode.store.dormant_chunks(&self.region.data().cells.active));
+            snap.chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
+        }
+        snap
     }
 
     pub fn cell_store(&self) -> Option<&CellStore> {
@@ -312,7 +335,7 @@ impl RegionRunner {
             RegionInput::RequestTerrain(client_id) => {
                 let _ = self.out.send((
                     self.id,
-                    RegionOutput::Terrain(client_id, self.region.terrain_snapshot()),
+                    RegionOutput::Terrain(client_id, self.terrain()),
                 ));
             }
             RegionInput::Shutdown => {
@@ -321,7 +344,7 @@ impl RegionRunner {
                     self.apply(kind);
                 }
                 let serialized = SerializedRegion::from_rollback(self.region.data());
-                let far = self.region.terrain_snapshot();
+                let far = self.terrain();
                 let _ = self.out.send((self.id, RegionOutput::Stopped(serialized, far)));
                 return false;
             }
@@ -398,7 +421,7 @@ impl RegionRunner {
             self.terrain_hash_cost.2 = self.terrain_hash_cost.2.max(took);
             if hash != self.last_terrain_hash {
                 self.last_terrain_hash = hash;
-                let snap = self.region.terrain_snapshot();
+                let snap = self.terrain();
                 let _ = self.out.send((self.id, RegionOutput::TerrainChanged(snap)));
             }
         }

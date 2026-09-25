@@ -85,6 +85,19 @@ impl CellStore {
         }
     }
 
+    /// Chunks of every stored cell NOT in `active` (active cells' truth is
+    /// the sim), for whole-region terrain views such as LOD.
+    pub fn dormant_chunks(
+        &self,
+        active: &std::collections::BTreeSet<CellCoords>,
+    ) -> Vec<(ChunkCoords, Chunk)> {
+        self.cells
+            .iter()
+            .filter(|(c, _)| !active.contains(c))
+            .flat_map(|(_, s)| s.content.chunks.iter().cloned())
+            .collect()
+    }
+
     pub fn version(&self, cell: CellCoords) -> Option<u64> {
         self.cells.get(&cell).map(|s| s.version)
     }
