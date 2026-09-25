@@ -134,6 +134,23 @@ fn drive_autopilot(
     mut pilot: ResMut<Autopilot>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    // The run's deadline holds even while the world is not ready: a region
+    // flip mid-flight clears `WorldReady`, and in cell mode a neighbouring
+    // region never becomes ready — the probe then flew on for minutes.
+    let now = time.elapsed();
+    if let (Some(started), Some(cruise)) = (pilot.started, pilot.cruise_for) {
+        if now - started >= Duration::from_millis(CRUISE_AT_MS) + cruise {
+            game::perf_event!(
+                "autopilot_done",
+                "cruise_s={} reversals={} ready={}",
+                cruise.as_secs(),
+                pilot.reversals,
+                ready.0
+            );
+            exit.write(AppExit::Success);
+            return;
+        }
+    }
     let (true, Some(player)) = (ready.0, player.0) else {
         return;
     };
@@ -141,7 +158,6 @@ fn drive_autopilot(
         let _ = game.0.send(GameEventKind::PlayerInput(player, input));
     };
     let key = |key: Key, pressed: bool| send(InputEvent::Key { key, pressed });
-    let now = time.elapsed();
     let started = *pilot.started.get_or_insert_with(|| {
         game::perf_event!("autopilot_start", "");
         now
@@ -210,18 +226,6 @@ fn drive_autopilot(
                 }
                 _ => {}
             }
-        }
-    }
-
-    if let Some(cruise) = pilot.cruise_for {
-        if since >= cruise_at + cruise {
-            game::perf_event!(
-                "autopilot_done",
-                "cruise_s={} reversals={}",
-                cruise.as_secs(),
-                pilot.reversals
-            );
-            exit.write(AppExit::Success);
         }
     }
 }
