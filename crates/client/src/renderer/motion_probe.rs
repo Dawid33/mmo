@@ -149,6 +149,73 @@ pub fn probe_camera_motion(
     };
 }
 
+/// Does anything on screen change while the player stands still? A static
+/// camera over static geometry renders identical frames, so flicker "while
+/// standing still" needs one of: sub-threshold camera motion (the motion
+/// probe above ignores steps under `MIN_STEP`), or render geometry changing
+/// under it. One `[client-still]` line per window counts both.
+#[derive(Default)]
+pub struct StillProbe {
+    window_start: Option<Instant>,
+    last: Option<(Vec3, Quat)>,
+    frames: u32,
+    camera_moved: u32,
+    pos_max: f32,
+    angle_max: f32,
+    lod_frames: u32,
+    lod_cells: u32,
+}
+
+type LodRenderChanged = Or<(
+    Changed<super::voxel_pull::ChunkQuads>,
+    Changed<Mesh3d>,
+    Changed<super::meshing::lod::LodVoxelData>,
+    Changed<Visibility>,
+)>;
+
+pub fn probe_still_frames(
+    cameras: Query<&GlobalTransform, (With<Camera3d>, With<SimTarget>)>,
+    lod_changed: Query<(), (With<super::meshing::lod::LodChunk>, LodRenderChanged)>,
+    mut state: Local<StillProbe>,
+) {
+    let Some(cam) = cameras.iter().next() else {
+        return;
+    };
+    let now = Instant::now();
+    let s = &mut *state;
+    let start = *s.window_start.get_or_insert(now);
+    let (_, rot, pos) = cam.to_scale_rotation_translation();
+    s.frames += 1;
+    if let Some((last_pos, last_rot)) = s.last {
+        let (dp, da) = (pos.distance(last_pos), rot.angle_between(last_rot));
+        if dp > 0.0 || da > 0.0 {
+            s.camera_moved += 1;
+            s.pos_max = s.pos_max.max(dp);
+            s.angle_max = s.angle_max.max(da);
+        }
+    }
+    s.last = Some((pos, rot));
+    let n = lod_changed.iter().count() as u32;
+    if n > 0 {
+        s.lod_frames += 1;
+        s.lod_cells += n;
+    }
+    if now.duration_since(start) < REPORT_INTERVAL {
+        return;
+    }
+    log::debug!(
+        target: game::perf::BUDGET_TARGET,
+        "[client-still] frames={} camera moved={} pos max={:.5}u angle max={:.6}rad | lod changed frames={} cells={}",
+        s.frames,
+        s.camera_moved,
+        s.pos_max,
+        s.angle_max,
+        s.lod_frames,
+        s.lod_cells,
+    );
+    *s = StillProbe { window_start: Some(now), last: s.last, ..Default::default() };
+}
+
 /// How long after a home-region flip frames still count toward that crossing.
 const REGION_CROSSING_WINDOW: Duration = Duration::from_secs(2);
 

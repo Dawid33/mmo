@@ -17,7 +17,7 @@ use bevy_egui::{
 use super::collider_debug::DebugFlagsRes;
 use super::config::TerrainRenderConfig;
 use super::cursor::CursorPolicy;
-use super::grid_debug::GridDebug;
+use super::grid_debug::{GridDebug, TerrainDebug};
 use super::hud::HudStatus;
 use super::meshing::visibility::CullingConfig;
 
@@ -86,6 +86,7 @@ fn draw_dev_ui(
     terrain: Res<TerrainRenderConfig>,
     mut grid: ResMut<GridDebug>,
     mut culling: ResMut<CullingConfig>,
+    mut terrain_debug: ResMut<TerrainDebug>,
     debug_flags: Res<DebugFlagsRes>,
     entities: Query<()>,
 ) -> Result {
@@ -140,6 +141,8 @@ fn draw_dev_ui(
             ui.separator();
             ui.checkbox(&mut grid.enabled, "Chunk grid (F5)");
             ui.checkbox(&mut culling.graph_enabled, "Cave culling (F4)");
+            ui.checkbox(&mut terrain_debug.hide_lod, "Hide LOD (F6)");
+            ui.checkbox(&mut terrain_debug.hide_near, "Hide near terrain (F7)");
             // Shared with the game thread, which only builds lines while on.
             let mut colliders = debug_flags.0.collider_wireframes();
             if ui.checkbox(&mut colliders, "Collider wireframes").changed() {

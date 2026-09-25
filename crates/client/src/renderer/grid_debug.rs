@@ -26,6 +26,52 @@ pub fn toggle_grid_debug(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<Grid
     }
 }
 
+/// Debug view: hide the LOD or the near (full-detail) terrain wholesale, to
+/// tell which layer a visual artifact belongs to. F6 / F7 or the F3 panel.
+#[derive(Resource, Default, Debug)]
+pub struct TerrainDebug {
+    pub hide_lod: bool,
+    pub hide_near: bool,
+}
+
+/// F6 toggles LOD, F7 near terrain (client-only keys, never sent to the sim).
+pub fn toggle_terrain_debug(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<TerrainDebug>) {
+    if keys.just_pressed(KeyCode::F6) {
+        state.hide_lod = !state.hide_lod;
+        info!("terrain debug: LOD {}", if state.hide_lod { "hidden" } else { "shown" });
+    }
+    if keys.just_pressed(KeyCode::F7) {
+        state.hide_near = !state.hide_near;
+        info!("terrain debug: near {}", if state.hide_near { "hidden" } else { "shown" });
+    }
+}
+
+/// Apply `TerrainDebug` to the LOD roots (live and retiring) and the near
+/// region roots. Every frame: roots come and go, and there are only a few.
+pub fn apply_terrain_debug(
+    state: Res<TerrainDebug>,
+    rings: Res<super::lod_rings::LodRings>,
+    near: Res<super::bridge::RegionRoots>,
+    mut vis: Query<&mut Visibility>,
+) {
+    let want = |hide: bool| if hide { Visibility::Hidden } else { Visibility::Inherited };
+    let lod = rings
+        .roots
+        .values()
+        .flat_map(|s| std::iter::once(s.root).chain(s.retiring))
+        .chain(rings.retired.iter().map(|r| r.entity));
+    for e in lod {
+        if let Ok(mut v) = vis.get_mut(e) {
+            v.set_if_neq(want(state.hide_lod));
+        }
+    }
+    for &e in near.0.values() {
+        if let Ok(mut v) = vis.get_mut(e) {
+            v.set_if_neq(want(state.hide_near));
+        }
+    }
+}
+
 /// Chunk edge length in world units (32 voxels at 1 unit each). Matches the
 /// `meshing::queue::ChunkGrid` keying (world position / 32).
 pub const CHUNK_SIZE: f32 = 32.0;

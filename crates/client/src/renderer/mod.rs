@@ -115,6 +115,7 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<look::LocalLook>()
         .init_resource::<lod_rings::LodRings>()
         .init_resource::<lod_rings::HomeCellMask>()
+        .init_resource::<grid_debug::TerrainDebug>()
         .init_resource::<join_timeline::WorldReady>()
         .add_systems(
             PreUpdate,
@@ -176,6 +177,7 @@ impl Plugin for SimBridgePlugin {
                 // interpolate_transforms just snapped the camera to.
                 look::apply_local_look.after(interpolate::interpolate_transforms),
                 motion_probe::probe_camera_motion.after(look::apply_local_look),
+                motion_probe::probe_still_frames.after(look::apply_local_look),
                 join_timeline::track_join_timeline,
                 avatar::attach_avatars,
                 avatar::squish_slimes.after(interpolate::interpolate_transforms),
@@ -185,6 +187,7 @@ impl Plugin for SimBridgePlugin {
                 collider_debug::draw_collider_wireframes,
                 grid_debug::toggle_grid_debug,
                 grid_debug::draw_grid_debug.after(grid_debug::toggle_grid_debug),
+                (grid_debug::toggle_terrain_debug, grid_debug::apply_terrain_debug).chain(),
                 hud::update_crosshair_visibility,
             ),
         );
