@@ -873,6 +873,12 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     ::log::info!("{:?}", entries);
                 }
 
+                /// Whether a render bridge is attached (client regions).
+                /// Lets raw paths skip building updates nobody receives.
+                pub fn has_render_sink(&self) -> bool {
+                    self.global_log.lock().unwrap().client.is_some()
+                }
+
                 pub fn send(&self, value: crate::GameDataUpdate) {
                     let mut global = self.global_log.lock().unwrap();
                     global.client.as_ref().inspect(move |s| {

@@ -584,3 +584,70 @@ fn a_stray_freeze_under_prediction_converges() {
     assert_eq!(h.client.data().ecs.slime.iter().filter(|(_, x)| x.is_some()).count(), 0);
     assert_eq!(h.runner.cell_store().unwrap().version(CellCoords::new(3, 3)), Some(1));
 }
+
+fn render_kinds(recv: &Receiver<game::GameDataUpdate>) -> Vec<&'static str> {
+    recv.try_iter()
+        .map(|u| match u.update_kind {
+            game::GameDataUpdateKind::CreateEntity(_) => "create",
+            game::GameDataUpdateKind::SetEntityPosition(..) => "pos",
+            game::GameDataUpdateKind::SetVoxelComponent(..) => "voxels",
+            game::GameDataUpdateKind::RemoveEntity(_) => "remove",
+            _ => "other",
+        })
+        .collect()
+}
+
+#[test]
+fn a_client_tells_the_renderer_about_activated_and_released_terrain() {
+    let (send, recv) = unbounded();
+    let mut s = Region::new_cells(r0(), CC, None, None);
+    let mut c = Region::new(s.data().clone(), Some(send), r0(), Some(0));
+    let _ = recv.try_iter().count();
+    let ev = server_apply(&mut s, activate(&[CellCoords::new(1, 1)]));
+    c.handle_event(ev.kind).unwrap();
+    c.forget_last_event();
+    // cell_content has two chunks.
+    assert_eq!(render_kinds(&recv), vec!["create", "pos", "voxels", "create", "pos", "voxels"]);
+    let ev = server_apply(&mut s, deactivate(&[CellCoords::new(1, 1)]));
+    c.handle_event(ev.kind).unwrap();
+    c.forget_last_event();
+    assert_eq!(render_kinds(&recv), vec!["remove", "remove"]);
+}
+
+#[test]
+fn a_reused_chunk_key_is_removed_before_it_is_recreated() {
+    let (send, recv) = unbounded();
+    let mut s = Region::new_cells(r0(), CC, None, None);
+    let mut c = Region::new(s.data().clone(), Some(send), r0(), Some(0));
+    let ev = server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
+    c.handle_event(ev.kind).unwrap();
+    c.forget_last_event();
+    let _ = recv.try_iter().count();
+    // One event: release (0,0), load (2,2) — the freed keys are reused.
+    let ev = server_apply(
+        &mut s,
+        GameEventKind::CellChanges(CellChanges {
+            deactivate: vec![CellCoords::new(0, 0)],
+            activate: vec![CellPayload {
+                cell: CellCoords::new(2, 2),
+                version: 1,
+                materialized_hash: 0,
+                content: cell_content(CellCoords::new(2, 2)),
+            }],
+        }),
+    );
+    c.handle_event(ev.kind).unwrap();
+    c.forget_last_event();
+    let kinds = render_kinds(&recv);
+    assert_eq!(&kinds[..2], &["remove", "remove"], "removals come first: {kinds:?}");
+    assert_eq!(state_hash(s.data()), state_hash(c.data()));
+}
+
+#[test]
+fn a_server_region_has_no_render_sink() {
+    let s = Region::new_cells(r0(), CC, None, None);
+    assert!(!s.data().data.has_render_sink(), "server regions derive and send nothing");
+    let (send, _recv) = unbounded();
+    let c = Region::new(s.data().clone(), Some(send), r0(), Some(0));
+    assert!(c.data().data.has_render_sink());
+}
