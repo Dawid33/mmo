@@ -49,6 +49,21 @@ pub enum DensityFn {
         in_range: Box<DensityFn>,
         out_range: Box<DensityFn>,
     },
+    /// The island layer (`pipeline::island_terms`) at the point: sampled at
+    /// sample coordinates minus the pipeline's sample offsets, exactly as
+    /// `TerrainPipeline::column` computes them.
+    Island { field: std::sync::Arc<crate::islands::IslandField>, value: IslandValue },
+}
+
+/// Which island term a `DensityFn::Island` yields (test oracle only, like
+/// the rest of the tree-walk evaluator).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IslandValue {
+    /// Pseudo-|continentalness| (0 deep sea … `ISLAND_CORE_C` at the centre).
+    Continent,
+    /// Land relief multiplier in `ISLAND_MIN_RELIEF..=1`.
+    Relief,
 }
 
 impl Clone for DensityFn {
@@ -83,6 +98,7 @@ impl Clone for DensityFn {
                 in_range: in_range.clone(),
                 out_range: out_range.clone(),
             },
+            DensityFn::Island { field, value } => DensityFn::Island { field: field.clone(), value: *value },
         }
     }
 }
@@ -142,6 +158,13 @@ impl DensityFn {
                     in_range.eval(x, y, z, noises)
                 } else {
                     out_range.eval(x, y, z, noises)
+                }
+            }
+            DensityFn::Island { field, value } => {
+                let (c, k) = crate::pipeline::island_terms(field, noises, x, z);
+                match value {
+                    IslandValue::Continent => c,
+                    IslandValue::Relief => k,
                 }
             }
         }

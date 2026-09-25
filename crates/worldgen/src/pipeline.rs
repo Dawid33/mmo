@@ -1,13 +1,22 @@
-//! Our tuned density graph: continentalness/erosion/warped ridges ->
+//! Our tuned density graph: island falloff/erosion/warped ridges ->
 //! offset/factor/jaggedness -> depth -> final_density. The mechanism follows
 //! Tectonic (continent noise folded through `abs`, erosion flattening, a
 //! peaks-and-valleys fold of a domain-warped ridge noise for mountain ranges);
 //! the numbers are hand-tuned against `just world-map`, not ported (see the
 //! design spec and docs/superpowers/specs/2026-09-20-worldgen-continents-findings.md).
+//! Since the island phase (plan 2026-09-25-cell-loading-phase3-island-worldgen)
+//! the continent term is the island falloff of `islands.rs` — see
+//! `island_terms`; the continents noise only warps coasts.
+
+use std::sync::Arc;
 
 use crate::density::NoiseSet;
 #[cfg(test)]
-use crate::density::DensityFn;
+use crate::density::{DensityFn, IslandValue};
+use crate::islands::{
+    IslandField, FULL_RELIEF_M, ISLAND_COAST_WARP, ISLAND_COAST_WAVELENGTH, ISLAND_MIN_RELIEF,
+    ISLAND_REACH, ISLAND_RELIEF_FRAC,
+};
 use crate::noise::OctaveNoise;
 use crate::spline::{FlatSpline, Spline};
 
@@ -96,11 +105,40 @@ const RAMP_TO_V: f64 = -320.0;
 // Noise xz scales (used by both the graph builders and the fused path).
 // Wavelength of a noise's first octave = 2^-first_octave / xz_scale meters.
 // Wavelengths quoted at FEATURE_SCALE = 1; multiply by it for the real ones.
-const XZ_SCALE_CONTINENTS: f64 = 0.13 / (CONTINENT_SCALE * FEATURE_SCALE); // ~23.6 km
 const XZ_SCALE_EROSION: f64 = 0.25 / (CONTINENT_SCALE * FEATURE_SCALE); // ~12.3 km
 const XZ_SCALE_RIDGES: f64 = 0.22 / FEATURE_SCALE; // ~1.2 km between parallel ranges
 const XZ_SCALE_WARP: f64 = 0.35 / FEATURE_SCALE; // ~1.5 km
 const XZ_SCALE_JAGGED: f64 = 1.0; // 64 m and 32 m
+
+/// Wavelength (m) of an `OctaveNoise`'s base octave per unit of input scale
+/// (the continents noise: 0.0867 scale ↔ ~23.6 km).
+const NOISE_UNIT_WAVELENGTH_M: f64 = 2048.0;
+/// The continents curve's coastline (raw continents = 0).
+const COAST_C: f64 = 0.55;
+/// Island centre's pseudo-continentalness, chosen so the linear falloff hits
+/// deep sea (c = 0) at exactly `ISLAND_REACH` warped radii.
+const ISLAND_CORE_C: f64 = COAST_C * ISLAND_REACH / (ISLAND_REACH - 1.0);
+
+/// The island layer at SAMPLE coordinates `(sx, sz)` (world + sample offset):
+/// `(c, k)` — pseudo-|continentalness| for the continents curve (0 = deep
+/// sea, `COAST_C` = the coast, `ISLAND_CORE_C` = the centre) and the land
+/// relief multiplier. Outside any island: deep sea, full relief. The coast
+/// radius is warped by the continents noise at a wavelength proportional to
+/// the island, so every size gets a comparably ragged coast. Shared by
+/// `column()` and the `DensityFn::Island` oracle node, so both paths are one
+/// function (bit-exact by construction).
+pub(crate) fn island_terms(field: &IslandField, noises: &NoiseSet, sx: f64, sz: f64) -> (f64, f64) {
+    let (x, z) = (sx - SAMPLE_OFFSET_X_M, sz - SAMPLE_OFFSET_Z_M);
+    let Some(island) = field.island_at(x, z) else { return (0.0, 1.0) };
+    let scale = NOISE_UNIT_WAVELENGTH_M / (ISLAND_COAST_WAVELENGTH * island.radius);
+    let coast = noises.0[N_CONTINENTS].sample2(x * scale, z * scale).clamp(-1.0, 1.0);
+    let radius = island.radius * (1.0 + ISLAND_COAST_WARP * coast);
+    let (dx, dz) = (x - island.centre[0], z - island.centre[1]);
+    let d = (dx * dx + dz * dz).sqrt() / radius;
+    let c = (ISLAND_CORE_C - (ISLAND_CORE_C - COAST_C) * d).max(0.0);
+    let k = (ISLAND_RELIEF_FRAC * island.radius / FULL_RELIEF_M).clamp(ISLAND_MIN_RELIEF, 1.0);
+    (c, k)
+}
 
 // Graph-tree builders below (`continentalness`/`erosion`/`ridges` through
 // `final_density_graph`) are the test oracle only: `TerrainPipeline::column`/
@@ -110,9 +148,15 @@ const XZ_SCALE_JAGGED: f64 = 1.0; // 64 m and 32 m
 // `column_profile_matches_graph_bit_exact`) honest. They also stay as the
 // spec for future graph features (caves, continent/island `RangeChoice` —
 // see the roadmap note on `DensityFn::Min`/`Max`/`RangeChoice` in density.rs).
+/// Island pseudo-|continentalness| (the continents noise now only warps
+/// coasts, inside `island_terms`).
 #[cfg(test)]
-fn continentalness() -> DensityFn {
-    DensityFn::Noise { idx: N_CONTINENTS, xz_scale: XZ_SCALE_CONTINENTS }
+fn island_continent(f: &Arc<IslandField>) -> DensityFn {
+    DensityFn::Island { field: f.clone(), value: IslandValue::Continent }
+}
+#[cfg(test)]
+fn island_relief(f: &Arc<IslandField>) -> DensityFn {
+    DensityFn::Island { field: f.clone(), value: IslandValue::Relief }
 }
 #[cfg(test)]
 fn erosion() -> DensityFn {
@@ -213,11 +257,11 @@ fn jaggedness_gate_spline() -> Spline {
     curve(&[(0.0, 0.0, 0.0), (1.0, 0.6, 0.0)])
 }
 
-/// abs(continentalness) through the continents curve. Negative over most of
-/// the map (ocean); positive where |continents| is large.
+/// Island falloff through the continents curve: -1 deep sea between islands,
+/// 0 at the coast, rising to the island centre.
 #[cfg(test)]
-fn raw_continents() -> DensityFn {
-    DensityFn::spline_of(DensityFn::abs(continentalness()), continents_curve_spline())
+fn raw_continents(f: &Arc<IslandField>) -> DensityFn {
+    DensityFn::spline_of(island_continent(f), continents_curve_spline())
 }
 
 #[cfg(test)]
@@ -242,9 +286,9 @@ fn peaks_and_valleys() -> DensityFn {
 
 /// Mountain strength in 0..=1: inland AND low erosion AND on a ridge line.
 #[cfg(test)]
-fn mountains() -> DensityFn {
+fn mountains(f: &Arc<IslandField>) -> DensityFn {
     DensityFn::mul(
-        DensityFn::mul(DensityFn::spline_of(raw_continents(), inland_gate_spline()), erosion_gate()),
+        DensityFn::mul(DensityFn::spline_of(raw_continents(f), inland_gate_spline()), erosion_gate()),
         DensityFn::spline_of(DensityFn::clamp(peaks_and_valleys(), -1.0, 1.0), peaks_spline()),
     )
 }
@@ -252,18 +296,29 @@ fn mountains() -> DensityFn {
 /// Surface height offset (in offset units): the continent's base elevation,
 /// partly flattened by erosion, plus the mountain ranges.
 #[cfg(test)]
-fn offset() -> DensityFn {
-    // offset = clamp(base(raw) * (floor + swing * egate) + mountains * MOUNTAIN_OFFSET)
+fn offset(f: &Arc<IslandField>) -> DensityFn {
+    // b = base(raw) * (floor + swing * egate)
+    let b = || {
+        DensityFn::mul(
+            DensityFn::spline_of(raw_continents(f), offset_base_spline()),
+            DensityFn::add(
+                DensityFn::Const(EROSION_BASE_FLOOR),
+                DensityFn::mul(DensityFn::Const(EROSION_BASE_SWING), erosion_gate()),
+            ),
+        )
+    };
+    // offset = clamp((max(b, 0) * k + min(b, 0)) + (mountains * MOUNTAIN_OFFSET) * k):
+    // island relief k scales land only, never the sea floor.
     DensityFn::clamp(
         DensityFn::add(
-            DensityFn::mul(
-                DensityFn::spline_of(raw_continents(), offset_base_spline()),
-                DensityFn::add(
-                    DensityFn::Const(EROSION_BASE_FLOOR),
-                    DensityFn::mul(DensityFn::Const(EROSION_BASE_SWING), erosion_gate()),
-                ),
+            DensityFn::add(
+                DensityFn::mul(DensityFn::max(b(), DensityFn::Const(0.0)), island_relief(f)),
+                DensityFn::min(b(), DensityFn::Const(0.0)),
             ),
-            DensityFn::mul(mountains(), DensityFn::Const(MOUNTAIN_OFFSET)),
+            DensityFn::mul(
+                DensityFn::mul(mountains(f), DensityFn::Const(MOUNTAIN_OFFSET)),
+                island_relief(f),
+            ),
         ),
         MIN_OFFSET,
         MAX_OFFSET,
@@ -272,16 +327,16 @@ fn offset() -> DensityFn {
 
 /// Vertical stretch factor (always positive): tall in low-erosion inland.
 #[cfg(test)]
-fn factor() -> DensityFn {
-    DensityFn::spline_of(offset(), factor_spline())
+fn factor(f: &Arc<IslandField>) -> DensityFn {
+    DensityFn::spline_of(offset(f), factor_spline())
 }
 
 /// Jaggedness: short-wavelength surface roughness, nonzero mainly at high
 /// offset — a few meters on mountain flanks, centimeters on the plains.
 #[cfg(test)]
-fn jaggedness() -> DensityFn {
+fn jaggedness(f: &Arc<IslandField>) -> DensityFn {
     DensityFn::mul(
-        DensityFn::spline_of(offset(), jaggedness_gate_spline()),
+        DensityFn::spline_of(offset(f), jaggedness_gate_spline()),
         DensityFn::abs(jagged()),
     )
 }
@@ -291,7 +346,7 @@ fn jaggedness() -> DensityFn {
 /// positive below the surface, negative above. `neg_y` is a wide linear ramp
 /// carrying `-y` across the whole world band.
 #[cfg(test)]
-fn final_density_graph() -> DensityFn {
+fn final_density_graph(f: &Arc<IslandField>) -> DensityFn {
     let neg_y = DensityFn::YGradient {
         from_y: RAMP_FROM_Y,
         to_y: RAMP_TO_Y,
@@ -299,15 +354,15 @@ fn final_density_graph() -> DensityFn {
         to_v: RAMP_TO_V,
     };
     let surface = DensityFn::add(
-        DensityFn::mul(offset(), DensityFn::Const(HEIGHT_SCALE)),
+        DensityFn::mul(offset(f), DensityFn::Const(HEIGHT_SCALE)),
         DensityFn::add(DensityFn::Const(SEA_LEVEL), neg_y),
     );
     DensityFn::add(
         DensityFn::mul(
             DensityFn::mul(surface, DensityFn::Const(DEPTH_PER_BLOCK)),
-            factor(),
+            factor(f),
         ),
-        jaggedness(),
+        jaggedness(f),
     )
 }
 
@@ -328,6 +383,7 @@ fn pipeline_noises(seed: u64) -> NoiseSet {
 
 pub struct TerrainPipeline {
     noises: NoiseSet,
+    islands: Arc<IslandField>,
     continents_curve: FlatSpline,
     offset_base: FlatSpline,
     inland_gate: FlatSpline,
@@ -339,8 +395,15 @@ pub struct TerrainPipeline {
 
 impl TerrainPipeline {
     pub fn new(seed: u64) -> Self {
+        Self::with_islands(seed, IslandField::new(seed))
+    }
+
+    /// A pipeline with an explicit island layout (tests, tools: other spawn
+    /// island sizes than the build dial's).
+    pub fn with_islands(seed: u64, islands: IslandField) -> Self {
         Self {
             noises: pipeline_noises(seed),
+            islands: Arc::new(islands),
             continents_curve: FlatSpline::from_spline(&continents_curve_spline()),
             offset_base: FlatSpline::from_spline(&offset_base_spline()),
             inland_gate: FlatSpline::from_spline(&inland_gate_spline()),
@@ -368,7 +431,7 @@ impl TerrainPipeline {
     pub fn column(&self, x: f64, z: f64) -> ColumnProfile {
         let (x, z) = (x + SAMPLE_OFFSET_X_M, z + SAMPLE_OFFSET_Z_M);
         let n = &self.noises.0;
-        let cont = n[N_CONTINENTS].sample2(x * XZ_SCALE_CONTINENTS, z * XZ_SCALE_CONTINENTS);
+        let (c, k) = island_terms(&self.islands, &self.noises, x, z);
         let ero = n[N_EROSION].sample2(x * XZ_SCALE_EROSION, z * XZ_SCALE_EROSION);
         // WarpedNoise: shift = Mul(Noise, Const(RIDGE_WARP_M)), sampled at (x + shift) * scale.
         let wx = x + n[N_WARP_X].sample2(x * XZ_SCALE_WARP, z * XZ_SCALE_WARP) * RIDGE_WARP_M;
@@ -376,14 +439,14 @@ impl TerrainPipeline {
         let ridge = n[N_RIDGES].sample2(wx * XZ_SCALE_RIDGES, wz * XZ_SCALE_RIDGES);
         let jag = n[N_JAGGED].sample2(x * XZ_SCALE_JAGGED, z * XZ_SCALE_JAGGED);
 
-        let raw = self.continents_curve.eval(cont.abs());
+        let raw = self.continents_curve.eval(c);
         let egate = self.erosion_gate.eval(ero);
         // pv = Min(Add(Mul(RISE, |r|), -1), Add(BACK_TOP, Mul(-BACK, |r|)))
         let pv = (PV_RISE * ridge.abs() + -1.0).min(PV_BACK_TOP + -PV_BACK * ridge.abs());
         let mountains = (self.inland_gate.eval(raw) * egate) * self.peaks.eval(pv.clamp(-1.0, 1.0));
-        // offset = clamp(base(raw) * (floor + swing * egate) + mountains * MOUNTAIN_OFFSET)
-        let offset = (self.offset_base.eval(raw) * (EROSION_BASE_FLOOR + EROSION_BASE_SWING * egate)
-            + mountains * MOUNTAIN_OFFSET)
+        // offset = clamp((max(b, 0) * k + min(b, 0)) + (mountains * MOUNTAIN_OFFSET) * k)
+        let b = self.offset_base.eval(raw) * (EROSION_BASE_FLOOR + EROSION_BASE_SWING * egate);
+        let offset = ((b.max(0.0) * k + b.min(0.0)) + (mountains * MOUNTAIN_OFFSET) * k)
             .clamp(MIN_OFFSET, MAX_OFFSET);
         let factor = self.factor_curve.eval(offset);
         let jaggedness = self.jaggedness_gate.eval(offset) * jag.abs();
@@ -550,29 +613,94 @@ mod tests {
         assert!(low > high, "low={low} high={high}");
     }
 
-    /// The shape of the world, over an area wide enough to hold many
-    /// continents (~190 km): mostly ocean, a real share of land, and mountains
-    /// on that land. This is the test that would have caught the 99.7%-ocean
-    /// world (noise spread too small for the splines' control points).
+    /// The shape of the world over ~190 km (several root slots): islands in
+    /// open sea — a small land share, and mountains only on the big islands.
     #[test]
-    fn world_is_ocean_with_continents_and_mountains() {
+    fn world_is_islands_in_open_sea() {
         for seed in [7, worldgen_test_seed()] {
             let p = TerrainPipeline::new(seed);
             let (mut land, mut mountain, mut total) = (0, 0, 0);
-            let step = 3137.0; // meters; ~1/8 of the continent wavelength
+            let step = 3137.0;
             for i in 0..60 {
                 for j in 0..60 {
-                    let prof = p.column(i as f64 * step, j as f64 * step);
+                    let prof = p.column(i as f64 * step - 90_000.0, j as f64 * step - 90_000.0);
                     land += (prof.density_at(SEA_LEVEL + 2.0) > 0.0) as usize;
                     mountain += (prof.density_at(SEA_LEVEL + 100.0) > 0.0) as usize;
                     total += 1;
                 }
             }
             let share = land as f64 / total as f64;
-            assert!((0.15..0.45).contains(&share), "seed {seed}: land share {share:.3}");
-            assert!(mountain * 200 >= land, "seed {seed}: {mountain} mountain columns in {land} land");
+            assert!((0.01..0.2).contains(&share), "seed {seed}: land share {share:.3}");
             assert!(mountain * 4 <= land, "seed {seed}: {mountain}/{land} — mountains everywhere");
         }
+    }
+
+    #[test]
+    fn the_spawn_island_is_land_ringed_by_sea() {
+        for cells in [1, 4, 16, 64] {
+            let field = IslandField::with_spawn_cells(crate::WORLD_SEED, cells);
+            let island = field.spawn_island();
+            let p = TerrainPipeline::with_islands(crate::WORLD_SEED, field);
+            let [cx, cz] = island.centre;
+            assert!(p.column(cx, cz).density_at(SEA_LEVEL + 0.5) > 0.0, "{cells} cells: centre is land");
+            for a in 0..16 {
+                let t = a as f64 * std::f64::consts::TAU / 16.0;
+                let r = island.reach() * 1.05;
+                let (x, z) = (cx + r * t.cos(), cz + r * t.sin());
+                assert!(p.column(x, z).density_at(SEA_LEVEL - 0.5) < 0.0, "{cells} cells: sea at ({x}, {z})");
+            }
+        }
+    }
+
+    #[test]
+    fn small_islands_have_small_relief() {
+        let field = IslandField::with_spawn_cells(crate::WORLD_SEED, 4); // 256 m
+        let island = field.spawn_island();
+        let p = TerrainPipeline::with_islands(crate::WORLD_SEED, field);
+        let mut top: f64 = f64::MIN;
+        for i in -20..=20 {
+            for j in -20..=20 {
+                let (x, z) = (island.centre[0] + i as f64 * 8.0, island.centre[1] + j as f64 * 8.0);
+                top = top.max(p.column(x, z).offset_h);
+            }
+        }
+        assert!(top < 40.0, "a 256 m island rises {top:.1} m above sea level");
+    }
+
+    #[test]
+    fn terrain_is_continuous_across_slot_edges() {
+        let field = IslandField::new(worldgen_test_seed());
+        let p = TerrainPipeline::new(worldgen_test_seed());
+        let mut edges = 0;
+        for i in 0..200 {
+            let (x, z) = (i as f64 * 977.0 - 97_000.0, i as f64 * 613.0 + 41_000.0);
+            let Some(island) = field.island_at(x, z) else { continue };
+            let ex = island.slot_min[0];
+            for k in 0..10 {
+                let ez = island.slot_min[1] + (k as f64 + 0.5) * island.slot_size / 10.0;
+                let (a, b) = (p.column(ex - 0.01, ez), p.column(ex + 0.01, ez));
+                assert!((a.offset_h - b.offset_h).abs() < 0.05, "step at slot edge x={ex} z={ez}");
+                edges += 1;
+            }
+        }
+        assert!(edges > 100);
+    }
+
+    #[test]
+    fn legacy_spawn_column_is_land() {
+        // Legacy (non-cell) regions spawn at the constant column; the default
+        // spawn island must cover it.
+        let p = TerrainPipeline::new(crate::WORLD_SEED);
+        let blocks = |units: f32| units as f64 / game::BLOCK_VOXELS as f64;
+        let (x, z) = (blocks(game::PLAYER_SPAWN_X), blocks(game::PLAYER_SPAWN_Z));
+        assert!(p.column(x, z).density_at(SEA_LEVEL + 0.5) > 0.0);
+    }
+
+    /// Oracle fixtures: a 256 m spawn island, so the sample grids below cross
+    /// its coast into the sea.
+    fn oracle(seed: u64) -> (TerrainPipeline, Arc<IslandField>) {
+        let field = IslandField::with_spawn_cells(seed, 4);
+        (TerrainPipeline::with_islands(seed, field.clone()), Arc::new(field))
     }
 
     #[test]
@@ -580,9 +708,9 @@ mod tests {
         // Must compare against the DensityFn graph, NEVER against
         // p.final_density(): final_density() is itself column()-backed since
         // the fusion, so that comparison would be X == X (tautological).
-        let p = TerrainPipeline::new(999);
+        let (p, field) = oracle(999);
         let noises = pipeline_noises(999);
-        let graph = final_density_graph();
+        let graph = final_density_graph(&field);
         for i in 0..20 {
             for j in 0..20 {
                 let x = i as f64 * 13.0;
@@ -657,10 +785,10 @@ mod tests {
 
     #[test]
     fn fused_column_matches_density_graphs_bit_exact() {
-        let p = TerrainPipeline::new(worldgen_test_seed());
+        let (p, field) = oracle(worldgen_test_seed());
         let noises = pipeline_noises(worldgen_test_seed());
         let (graph, offset_g, factor_g, jaggedness_g) =
-            (final_density_graph(), offset(), factor(), jaggedness());
+            (final_density_graph(&field), offset(&field), factor(&field), jaggedness(&field));
         for i in 0..64 {
             for j in 0..64 {
                 let (x, z) = (i as f64 * 7.3 - 200.0, j as f64 * 11.1 - 150.0);

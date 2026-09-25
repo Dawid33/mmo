@@ -19,16 +19,25 @@ pub const ISLAND_CELL_M: f64 = 64.0;
 pub const ISLAND_MAX_CELLS: u32 = 1024;
 /// Slots never split below this edge (512 m).
 pub const ISLAND_MIN_SLOT_CELLS: u32 = 8;
-/// Chance that a slot above the minimum splits into four.
-pub const ISLAND_SPLIT_CHANCE: f64 = 0.75;
+/// Chance that a root slot splits into four; each level down multiplies it
+/// by `ISLAND_SPLIT_DECAY`, so small slots come in scattered groups rather
+/// than whole squares packed with specks.
+pub const ISLAND_SPLIT_CHANCE: f64 = 0.85;
+pub const ISLAND_SPLIT_DECAY: f64 = 0.72;
 /// Chance that a leaf slot is open sea.
 pub const ISLAND_EMPTY_CHANCE: f64 = 0.35;
 /// Island radius as a fraction of its slot edge, (min, max).
 pub const ISLAND_RADIUS_FRAC: (f64, f64) = (0.08, 0.18);
 /// Coast warp: the effective radius swings by up to ± this share.
 pub const ISLAND_COAST_WARP: f64 = 0.25;
-/// Coast-noise wavelengths per island radius (higher = more ragged coast).
-pub const ISLAND_COAST_FREQ: f64 = 0.35;
+/// Coast-noise base wavelength in island radii (smaller = more ragged coast).
+pub const ISLAND_COAST_WAVELENGTH: f64 = 0.8;
+/// Land relief of an island of radius R: `ISLAND_RELIEF_FRAC * R`, as a share
+/// of the full procedural relief `FULL_RELIEF_M`, clamped to
+/// `ISLAND_MIN_RELIEF..=1` — a 500 m island gets ~75 m hills, not 190 m peaks.
+pub const ISLAND_RELIEF_FRAC: f64 = 0.15;
+pub const FULL_RELIEF_M: f64 = 190.0;
+pub const ISLAND_MIN_RELIEF: f64 = 0.1;
 /// The falloff reaches deep sea at this many (warped) radii.
 pub const ISLAND_REACH: f64 = 2.0;
 /// Spawn island diameter when `VOXEL_ISLAND_CELLS` is unset or 0 (1 km).
@@ -144,7 +153,8 @@ impl IslandField {
         }
         loop {
             let h = slot_hash(self.seed, level, ix, iz);
-            if size > MIN_SLOT_M && unit(h, 0) < ISLAND_SPLIT_CHANCE {
+            let split = ISLAND_SPLIT_CHANCE * ISLAND_SPLIT_DECAY.powi(level as i32);
+            if size > MIN_SLOT_M && unit(h, 0) < split {
                 level += 1;
                 size /= 2.0;
                 ix = (qx / size).floor() as i64;
