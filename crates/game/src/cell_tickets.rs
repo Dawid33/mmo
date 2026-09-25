@@ -14,6 +14,21 @@ pub const CELL_HYSTERESIS: u32 = 1;
 pub const CELL_RELEASE_GRACE_TICKS: u32 = 40;
 /// Wanted (non-required) activations per tick.
 pub const MAX_CELL_ACTIVATIONS_PER_TICK: usize = 1;
+/// Rings past `SIM_RADIUS_CELLS` whose worldgen runs ahead in the background
+/// (server), so an activation rarely waits for generation.
+pub const PREFETCH_CELLS: u32 = 1;
+
+/// Every cell within `sim_radius + PREFETCH_CELLS` of a player, sorted —
+/// what the server's store should have generated before it is wanted.
+pub fn prefetch_cells(players: &[(f32, f32)], cfg: &CellConfig) -> Vec<CellCoords> {
+    let mut out = BTreeSet::new();
+    for p in players {
+        if let Some(c) = cell_of_pos(p.0, p.1, cfg.cell_chunks) {
+            out.extend(cells_within(c, cfg.sim_radius + PREFETCH_CELLS, cfg.cell_chunks));
+        }
+    }
+    out.into_iter().collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct CellConfig {
@@ -174,6 +189,16 @@ mod tests {
         for _ in 0..CELL_RELEASE_GRACE_TICKS - 2 {
             assert!(t.plan(&active, &[], &cfg()).deactivate.is_empty());
         }
+    }
+
+    #[test]
+    fn prefetch_reaches_one_ring_past_the_wanted_radius() {
+        let cells = prefetch_cells(&[centre(0, 0)], &cfg());
+        // 4×4 grid: radius 2 + PREFETCH_CELLS (1) = 3 covers every cell from (0,0).
+        assert_eq!(cells.len(), 16);
+        let near = prefetch_cells(&[centre(1, 1)], &CellConfig { sim_radius: 0, ..cfg() });
+        assert_eq!(near.len(), 9, "radius 0 + 1 = the 3×3");
+        assert!(prefetch_cells(&[], &cfg()).is_empty());
     }
 
     #[test]

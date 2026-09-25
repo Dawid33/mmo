@@ -296,6 +296,9 @@ impl RegionRunner {
     fn run_tickets(&mut self) {
         let Some(mode) = self.cells.as_mut() else { return };
         let players = self.region.data().player_positions();
+        // Worldgen ahead of the wanted ring runs on the store's worker thread.
+        mode.store.poll_prefetch();
+        mode.store.prefetch(&crate::prefetch_cells(&players, &mode.config));
         let plan = mode.tickets.plan(&self.region.data().cells.active, &players, &mode.config);
         self.apply_cell_changes(plan.deactivate, plan.activate);
     }

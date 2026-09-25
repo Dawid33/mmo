@@ -28,8 +28,30 @@ pub struct CellStore {
     cells: BTreeMap<CellCoords, StoredCell>,
     /// Cells per region edge.
     side: u32,
-    /// Lazy stores: generates a missing in-grid cell on first request.
-    generate: Option<CellGenerator>,
+    /// Lazy stores: produces missing in-grid cells.
+    generate: Option<Generate>,
+    /// Cells requested from the worker and not yet received.
+    in_flight: std::collections::BTreeSet<CellCoords>,
+    /// Cells received from the worker so far (metrics, tests).
+    prefetched: usize,
+}
+
+/// Where a lazy store's cells come from: the generator itself (wasm has no
+/// threads), or a worker thread running it (native: generation never costs
+/// the region's tick once a cell was prefetched).
+enum Generate {
+    Local(CellGenerator),
+    #[cfg(not(target_arch = "wasm32"))]
+    Worker {
+        req: crossbeam::channel::Sender<CellCoords>,
+        done: crossbeam::channel::Receiver<(CellCoords, Vec<(ChunkCoords, Chunk)>)>,
+    },
+}
+
+fn generated_chunks(generate: &CellGenerator, cell: CellCoords) -> Vec<(ChunkCoords, Chunk)> {
+    let mut chunks = TerrainSnapshot::from_columns(generate(cell)).chunks;
+    chunks.sort_by_key(|(k, _)| (k.x, k.y, k.z));
+    chunks
 }
 
 impl std::fmt::Debug for CellStore {
@@ -68,14 +90,85 @@ impl CellStore {
         for c in cells.values_mut() {
             c.content.chunks.sort_by_key(|(k, _)| (k.x, k.y, k.z));
         }
-        Self { cells, side: n, generate: None }
+        Self { cells, side: n, generate: None, in_flight: Default::default(), prefetched: 0 }
     }
 
     /// A store that generates each cell the first time it is needed — the
     /// whole region is never built up front (large regions: 2 km+ would take
     /// minutes and gigabytes).
     pub fn lazy(cell_chunks: usize, generate: CellGenerator) -> Self {
-        Self { cells: BTreeMap::new(), side: cells_per_side(cell_chunks), generate: Some(generate) }
+        #[cfg(not(target_arch = "wasm32"))]
+        let generate = {
+            let (req, req_rx) = crossbeam::channel::unbounded::<CellCoords>();
+            let (done_tx, done) = crossbeam::channel::unbounded();
+            // Exits when the store (the request sender) is dropped.
+            std::thread::Builder::new()
+                .name("cell-gen".into())
+                .spawn(move || {
+                    for cell in req_rx {
+                        if done_tx.send((cell, generated_chunks(&generate, cell))).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .expect("spawn cell generation worker");
+            Generate::Worker { req, done }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let generate = Generate::Local(generate);
+        Self {
+            cells: BTreeMap::new(),
+            side: cells_per_side(cell_chunks),
+            generate: Some(generate),
+            in_flight: Default::default(),
+            prefetched: 0,
+        }
+    }
+
+    /// Queue `cells` for background generation (native). Already materialized,
+    /// in-flight or out-of-grid cells are skipped; a no-op on wasm.
+    pub fn prefetch(&mut self, cells: &[CellCoords]) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(Generate::Worker { req, .. }) = &self.generate {
+            for &cell in cells {
+                if self.cells.contains_key(&cell) || self.in_flight.contains(&cell) {
+                    continue;
+                }
+                if cell.x < self.side && cell.z < self.side && req.send(cell).is_ok() {
+                    self.in_flight.insert(cell);
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = cells;
+    }
+
+    /// Take in any finished background generations (never blocks).
+    pub fn poll_prefetch(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut finished = Vec::new();
+            if let Some(Generate::Worker { done, .. }) = &self.generate {
+                finished.extend(done.try_iter());
+            }
+            for (cell, chunks) in finished {
+                self.receive(cell, chunks);
+            }
+        }
+    }
+
+    /// Cells received from the background worker so far.
+    pub fn prefetched(&self) -> usize {
+        self.prefetched
+    }
+
+    fn receive(&mut self, cell: CellCoords, chunks: Vec<(ChunkCoords, Chunk)>) {
+        self.in_flight.remove(&cell);
+        self.prefetched += 1;
+        self.cells.entry(cell).or_insert(StoredCell {
+            version: 0,
+            content: DormantCell { chunks, entities: Vec::new() },
+        });
     }
 
     fn in_grid(&self, cell: CellCoords) -> bool {
@@ -88,13 +181,31 @@ impl CellStore {
             if !self.in_grid(cell) {
                 return None;
             }
-            let generate = self.generate.as_ref()?;
-            let mut chunks = TerrainSnapshot::from_columns(generate(cell)).chunks;
-            chunks.sort_by_key(|(k, _)| (k.x, k.y, k.z));
-            self.cells.insert(
-                cell,
-                StoredCell { version: 0, content: DormantCell { chunks, entities: Vec::new() } },
-            );
+            self.poll_prefetch();
+            if !self.cells.contains_key(&cell) {
+                match self.generate.as_ref()? {
+                    Generate::Local(generate) => {
+                        let chunks = generated_chunks(generate, cell);
+                        self.cells.insert(
+                            cell,
+                            StoredCell { version: 0, content: DormantCell { chunks, entities: Vec::new() } },
+                        );
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    Generate::Worker { req, done } => {
+                        // Not prefetched in time: ask now and wait for it.
+                        if !self.in_flight.contains(&cell) {
+                            req.send(cell).ok()?;
+                            self.in_flight.insert(cell);
+                        }
+                        let done = done.clone();
+                        while !self.cells.contains_key(&cell) {
+                            let (got, chunks) = done.recv().ok()?;
+                            self.receive(got, chunks);
+                        }
+                    }
+                }
+            }
         }
         self.cells.get_mut(&cell)
     }
@@ -240,6 +351,26 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         s.payload(CellCoords::new(0, 0));
         assert_eq!(s.dormant_chunks(&Default::default()).len(), 1);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn prefetched_cells_are_generated_off_the_callers_thread() {
+        use std::sync::atomic::Ordering;
+        let (mut s, calls) = counting_store(8);
+        let caller = std::thread::current().id();
+        s.prefetch(&[CellCoords::new(1, 1), CellCoords::new(1, 1), CellCoords::new(2, 2)]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while s.prefetched() < 2 {
+            assert!(std::time::Instant::now() < deadline, "prefetch never finished");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            s.poll_prefetch();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "each prefetched cell generated once");
+        let p = s.payload(CellCoords::new(1, 1)).unwrap();
+        assert_eq!(p.content.chunks.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "payload served from the prefetch");
+        assert_eq!(std::thread::current().id(), caller);
     }
 
     #[test]
