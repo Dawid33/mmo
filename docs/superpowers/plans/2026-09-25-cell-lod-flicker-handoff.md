@@ -24,7 +24,7 @@ plans `docs/superpowers/plans/2026-09-25-cell-loading-phase{1,1b,2-large-regions
 
 ## What landed this session
 
-- `d68867e` — revert of `395a9b7`. Why it was wrong: near chunks treat missing
+- `e280b50` — revert of `395a9b7`. Why it was wrong: near chunks treat missing
   neighbours as air and draw only OUTWARD-facing edge walls (culled from inside). The
   walls you see from inside are the LOD's inward-facing walls toward masked cells —
   so masked cells MUST stay air to their LOD neighbours. Making them solid removed
@@ -51,7 +51,7 @@ how it looks** — first thing to ask.
 
 ## Open / next steps
 
-1. **Get the visual verdict** on aae81f9 + d68867e: is the distance flicker gone? is
+1. **Get the visual verdict** on aae81f9 + e280b50: is the distance flicker gone? is
    the near/LOD gap gone? Try both `VOXEL_FAR_RENDER=raster` and `brick`.
 2. If flicker remains while standing still: it is not churn any more (server shows no
    rebuilds). Candidates, in order:
