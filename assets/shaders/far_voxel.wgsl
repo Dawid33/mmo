@@ -37,9 +37,7 @@ fn cull(@builtin(global_invocation_id) invocation: vec3<u32>) {
         return;
     }
     let cell = cells[cell_slot];
-    // 1 = drawn; 2 = hidden but still solid to its neighbours (home-region
-    // LOD under active cells); 0 = free slot.
-    if cell.is_active != 1u || cell.factor == 0u {
+    if cell.is_active == 0u || cell.factor == 0u {
         return;
     }
 
