@@ -633,3 +633,36 @@ fn pristine_job_builds_the_same_payload_as_generate_then_region_job() {
     assert!(!got.is_empty(), "the flat floors must produce LOD cells");
     assert_eq!(bincode::serialize(&got).unwrap(), bincode::serialize(&expected).unwrap());
 }
+
+#[test]
+fn a_partial_overlay_keeps_pristine_terrain_where_it_has_no_columns() {
+    // Cell-mode regions only hold generated cells: the LOD of such a region
+    // must fall back to pristine coarse terrain everywhere else, not go empty.
+    use game::lod::{LodCell, LodKey};
+    use game::{BlockId, Chunk, ChunkCoords, Voxel, CHUNK_VOXEL_COUNT};
+    let key = LodKey::for_region(16, game::RegionCoords::new(0, 0));
+    assert_eq!(key.region_span(), 1, "fixture: a one-region factor-16 key");
+    let per_side = (game::lod::cells_per_region(16) / 32).max(1) as i32;
+    let coarse = move |_: &LodKey| -> Vec<LodCell> {
+        let mut cells = Vec::new();
+        for x in 0..per_side {
+            for z in 0..per_side {
+                cells.push(LodCell { group: [x, 0, z], grid: vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT] });
+            }
+        }
+        cells
+    };
+    // Authoritative terrain: one chunk in group (0,0,0) only.
+    let overlay = vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor_with(8, BlockId(7)))];
+    let (_, payload) = game::build_lod_job(
+        game::LodBuildJob::Tile { key, overlays: vec![(game::RegionCoords::new(0, 0), overlay)] },
+        &coarse,
+        &game::no_pristine_generator,
+    );
+    let groups: std::collections::BTreeSet<[i32; 3]> = payload.iter().map(|(g, _)| *g).collect();
+    assert_eq!(groups.len() as i32, per_side * per_side, "every column keeps terrain: {groups:?}");
+    let g0 = payload.iter().find(|(g, _)| *g == [0, 0, 0]).unwrap();
+    let grid = g0.1.decode().unwrap();
+    assert!(grid.iter().any(|v| v.block == BlockId(7)), "the overlaid column is authoritative");
+    assert!(!grid.iter().all(|v| v.block == BlockId(1)), "not the coarse fill");
+}

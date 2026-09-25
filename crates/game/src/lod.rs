@@ -330,11 +330,11 @@ pub const LOD_RING_TABLE: &[(i32, u32)] = match crate::REGION_CHUNKS {
     32 => &[(2, 2), (3, 4), (6, 8), (13, 16), (16, 32)],
     64 => &[(2, 4), (3, 8), (6, 16), (8, 32)],
     128 => &[(2, 8), (3, 16), (4, 32)],
-    // Cell-mode regions above 128 chunks (up to 65.5 km): the viewer's own
-    // region at LARGE_HOME_FACTOR, one coarse ring of neighbours. Placeholder —
-    // LOD for large regions is to be revisited (user, 2026-09-25); the pixel
-    // budget and 1 km horizon do not hold here.
-    _ => &[(0, LARGE_HOME_FACTOR), (1, 32)],
+    // Cell-mode regions above 128 chunks (up to 65.5 km): ONLY the viewer's
+    // own region, at LARGE_HOME_FACTOR — no neighbouring regions load in any
+    // world preset (user, 2026-09-25: the region is the whole world now).
+    // The pixel budget and 1 km horizon do not hold here.
+    _ => &[(0, LARGE_HOME_FACTOR)],
 };
 
 /// How far the LOD rings reach, in world units: the last ring's Chebyshev
@@ -1045,7 +1045,7 @@ mod tests {
         }
         let home = ring_factor_in(LOD_RING_TABLE, 0, 0, None).expect("home ring");
         assert!(home as usize <= crate::CELL_CHUNKS.max(2), "home factor {home} > cell {}", crate::CELL_CHUNKS);
-        assert_eq!(ring_factor_in(LOD_RING_TABLE, 0, 1, None), Some(32));
+        assert_eq!(ring_factor_in(LOD_RING_TABLE, 0, 1, None), None, "no neighbouring regions");
     }
 
     #[test]

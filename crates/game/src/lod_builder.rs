@@ -81,10 +81,24 @@ pub fn build_lod_job(
             (key, encode_cells(cells))
         }
         LodBuildJob::Tile { key, overlays } if key.region_span() == 1 => {
-            // One region, possibly several grids per band (factor 16): an
-            // overlay replaces the key wholesale, so there is nothing to merge.
+            // One region, possibly several grids per band (factor 16). The
+            // overlay is authoritative for every grid COLUMN it has chunks in;
+            // columns it lacks keep the pristine coarse terrain. A legacy
+            // region covers every column (same as replacing the key); a
+            // cell-mode region only holds its generated cells, and its LOD
+            // must not go empty everywhere else.
             let cells = match overlays.into_iter().next() {
-                Some((_, chunks)) => downsample_chunks(chunks, key.factor),
+                Some((_, chunks)) => {
+                    let authoritative = downsample_chunks(chunks, key.factor);
+                    let covered: std::collections::BTreeSet<(i32, i32)> =
+                        authoritative.iter().map(|c| (c.group[0], c.group[2])).collect();
+                    let mut cells: Vec<LodCell> = coarse(&key)
+                        .into_iter()
+                        .filter(|c| !covered.contains(&(c.group[0], c.group[2])))
+                        .collect();
+                    cells.extend(authoritative);
+                    cells
+                }
                 None => coarse(&key),
             };
             (key, encode_cells(cells))
