@@ -445,6 +445,19 @@ const PLAYER_SPAWN_CLEARANCE: f32 = 3.6;
 /// Region-local voxel column the player spawns over. Not tied to the region
 /// center: the world seed was scanned (examples/seed_scan.rs) for dry land at
 /// exactly this column, so it stays fixed even though REGION_SIZE grew.
+/// Region-local spawn column. Legacy regions: `(PLAYER_SPAWN_X, PLAYER_SPAWN_Z)`,
+/// near the region corner. Cell mode: the middle of the region (centred in a
+/// block), so the loaded cells are not clipped by the region edge and the
+/// player can walk half a region in any direction before a crossing.
+pub fn player_spawn_xz(cell_mode: bool) -> (f32, f32) {
+    if cell_mode {
+        let c = crate::REGION_SIZE / 2.0 + (crate::BLOCK_VOXELS / 2) as f32;
+        (c, c)
+    } else {
+        (PLAYER_SPAWN_X, PLAYER_SPAWN_Z)
+    }
+}
+
 pub const PLAYER_SPAWN_X: f32 = 128.0;
 pub const PLAYER_SPAWN_Z: f32 = 128.0;
 /// Spawn height used only when the spawn column has no terrain (all air).
@@ -714,12 +727,13 @@ impl Rollback {
     }
 
     pub fn create_player_safe(&mut self, client_id: ClientId) {
+        let (spawn_x, spawn_z) = player_spawn_xz(self.data.cells.enabled());
         // Spawn on the terrain surface at the region-local spawn column, clear
         // of the capsule — real terrain has real elevation, so the old
         // hardcoded flat-floor height would bury the player. `surface + 1` is
         // the surface voxel's top face; capsule half-extent + clearance sits
         // the body above it. Falls back only if the column is all air.
-        let spawn_y = match self.surface_voxel_y(PLAYER_SPAWN_X as i32, PLAYER_SPAWN_Z as i32) {
+        let spawn_y = match self.surface_voxel_y(spawn_x as i32, spawn_z as i32) {
             Some(surface) => {
                 (surface + 1) as f32
                     + PLAYER_CAPSULE_HALF_HEIGHT
@@ -731,9 +745,9 @@ impl Rollback {
         let e = self.ecs.create_entity_safe();
         let position = IsometryReal::from_parts(
             Translation3::new(
-                Real::from(PLAYER_SPAWN_X as RawReal),
+                Real::from(spawn_x as RawReal),
                 Real::from(spawn_y as RawReal),
-                Real::from(PLAYER_SPAWN_Z as RawReal),
+                Real::from(spawn_z as RawReal),
             ),
             Unit::<Quaternion<Real>>::identity(),
         );

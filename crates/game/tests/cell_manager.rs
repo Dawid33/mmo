@@ -84,7 +84,7 @@ fn a_joining_player_gets_a_cell_mode_home_with_its_cells_active() {
     let mut cell_chunks = 0;
     h.manager.spawner_mut().with_region(SPAWN_REGION, |r| cell_chunks = r.data().cells.cell_chunks);
     assert_eq!(cell_chunks, CC);
-    assert_eq!(h.active_cells(SPAWN_REGION), 4, "spawn cell (0,0) + clipped 3×3");
+    assert_eq!(h.active_cells(SPAWN_REGION), 9, "the centre spawn cell's full 3×3");
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn the_join_snapshot_holds_the_active_cells() {
         _ => None,
     });
     let rb = snap.expect("snapshot delivered");
-    assert_eq!(rb.data.cells.active.len(), 4);
+    assert_eq!(rb.data.cells.active.len(), 9);
     assert!(rb.data.ecs.chunk.iter().filter(|(_, c)| c.is_some()).count() > 0);
 }
 
@@ -177,10 +177,9 @@ mod convergence {
         assert!(c.region.is_some(), "snapshot delivered");
         let mut now = 0u64;
         input(&mut h, &mut c, InputEvent::FpsCam(true), now);
-        // Face +Z (1208 px × 0.0026 rad/px ≈ π) so the walk stays inside the region.
-        input(&mut h, &mut c, InputEvent::MouseMotion { dx: 1208.0, dy: 0.0 }, now);
         input(&mut h, &mut c, InputEvent::Key { key: Key::KeyW, pressed: true }, now);
-        for i in 0..160usize {
+        // −Z from the centre spawn: ~21 m, inside the region, across cell edges.
+        for i in 0..100usize {
             predict(&mut c, 1 + i % 3);
             now += 50;
             h.tick(now);
@@ -199,6 +198,6 @@ mod convergence {
         let mut server_hash = 0;
         h.manager.spawner_mut().with_region(SPAWN_REGION, |s| server_hash = game::state_hash(s.data()));
         assert_eq!(server_hash, game::state_hash(r.data()), "client diverged from the server");
-        assert!(r.data().cells.active.len() > 4, "cells loaded around the walking player");
+        assert!(r.data().cells.active.len() > 9, "cells loaded around the walking player");
     }
 }

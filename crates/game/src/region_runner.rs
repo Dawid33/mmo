@@ -8,7 +8,7 @@
 use crate::{
     required_cells, CellChanges, CellConfig, CellCoords, CellStore, CellTickets, ClientId, Column,
     ColumnCoords, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, GhostData, Region,
-    RegionCoords, RegionId, Rollback, Tick, PLAYER_SPAWN_X, PLAYER_SPAWN_Z,
+    RegionCoords, RegionId, Rollback, Tick,
     TERRAIN_HASH_INTERVAL_TICKS, TICK_RATE,
 };
 use crossbeam::channel::Sender;
@@ -307,7 +307,7 @@ impl RegionRunner {
                     // under it before it lands.
                     match &kind {
                         GameEventKind::CreateClient(_) => {
-                            self.ensure_required((PLAYER_SPAWN_X, PLAYER_SPAWN_Z))
+                            self.ensure_required(crate::player_spawn_xz(true))
                         }
                         GameEventKind::EntityArrived(b) => {
                             let t = b.isometry.translation;

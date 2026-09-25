@@ -146,11 +146,13 @@ fn reactivation_round_trips_content() {
 #[test]
 fn a_cell_holding_a_player_is_not_deactivated() {
     let mut s = Region::new_cells(r0(), CC, None, None);
-    // PLAYER_SPAWN_X/Z = 128 voxels → cell (0,0) at 256-unit cells.
-    server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
+    // Cell mode spawns in the region's centre cell (player_spawn_xz).
+    let (sx, sz) = game::player_spawn_xz(true);
+    let spawn = game::cell_of_pos(sx, sz, CC).unwrap();
+    server_apply(&mut s, activate(&[spawn]));
     server_apply(&mut s, GameEventKind::CreateClient(0));
-    server_apply(&mut s, deactivate(&[CellCoords::new(0, 0)]));
-    assert!(s.data().cells.active.contains(&CellCoords::new(0, 0)));
+    server_apply(&mut s, deactivate(&[spawn]));
+    assert!(s.data().cells.active.contains(&spawn));
     assert!(s.data().player_entites.contains_key(&0));
     assert!(s.take_dormant().is_empty());
 }
@@ -266,8 +268,8 @@ fn create_client_activates_the_spawn_cells_first() {
     let evs = processed(&rx);
     assert!(matches!(evs[0].kind, GameEventKind::CellChanges(_)));
     assert!(matches!(evs[1].kind, GameEventKind::CreateClient(0)));
-    // Spawn (128,128) is cell (0,0): required = (0,0),(0,1),(1,0),(1,1).
-    assert_eq!(runner.region_mut().data().cells.active.len(), 4);
+    // Spawn is the centre cell: its full 3×3 is required.
+    assert_eq!(runner.region_mut().data().cells.active.len(), 9);
 }
 
 #[test]
@@ -277,15 +279,16 @@ fn ticks_grow_the_active_set_one_wanted_cell_at_a_time() {
     runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
     let _ = processed(&rx);
     let mut sizes = Vec::new();
-    for _ in 0..6 {
+    for _ in 0..8 {
         runner.tick();
         sizes.push(runner.region_mut().data().cells.active.len());
     }
-    // Radius 2 from cell (0,0) = 3×3 = 9 cells; 4 required, then +1 per tick.
-    assert_eq!(sizes, vec![5, 6, 7, 8, 9, 9]);
+    // Radius 2 from the centre cell (2,2) covers the whole 4×4 grid: 9
+    // required, then +1 wanted cell per tick.
+    assert_eq!(sizes, vec![10, 11, 12, 13, 14, 15, 16, 16]);
     let evs = processed(&rx);
     let cell_events = evs.iter().filter(|e| matches!(e.kind, GameEventKind::CellChanges(_))).count();
-    assert_eq!(cell_events, 5, "no empty CellChanges once the set is complete");
+    assert_eq!(cell_events, 7, "no empty CellChanges once the set is complete");
 }
 
 #[test]
@@ -406,7 +409,7 @@ fn a_predicting_client_converges_while_cells_load() {
         h.step(2, None);
     }
     h.settle_and_compare();
-    assert_eq!(h.client.data().cells.active.len(), 9);
+    assert_eq!(h.client.data().cells.active.len(), 16);
 }
 
 #[test]
@@ -447,11 +450,8 @@ fn walking_across_cells_converges_for_every_seed() {
         let start = player_cell(&h);
         // Enter fps mode, then hold W with random prediction leads.
         h.step(1, Some(InputEvent::FpsCam(true)));
-        // Face +Z (yaw π: 1208 px × 0.0026 rad/px at the default sensitivity, as block_edit.rs measures pitch) so the walk crosses the
-        // region's interior cells instead of leaving the region at z = 0.
-        h.step(1, Some(InputEvent::MouseMotion { dx: 1208.0, dy: 0.0 }));
         h.step(1, Some(InputEvent::Key { key: Key::KeyW, pressed: true }));
-        for _ in 0..200 {
+        for _ in 0..100 {
             let lead = 1 + (next() % 3) as usize;
             h.step(lead, None);
         }
@@ -551,11 +551,8 @@ fn cells_deactivate_under_prediction_and_replicas_stay_bit_exact() {
     let mut h = Harness::with_config(eager_release());
     let mut released = 0usize;
     h.step(1, Some(InputEvent::FpsCam(true)));
-    // Face +Z (yaw π: 1208 px × 0.0026 rad/px at the default sensitivity, as block_edit.rs measures pitch) so the walk crosses the
-    // region's interior cells instead of leaving the region at z = 0.
-    h.step(1, Some(InputEvent::MouseMotion { dx: 1208.0, dy: 0.0 }));
     h.step(1, Some(InputEvent::Key { key: Key::KeyW, pressed: true }));
-    for i in 0..200 {
+    for i in 0..100 {
         let before = h.client.data().cells.active.clone();
         h.step(1 + i % 3, None);
         released += before.difference(&h.client.data().cells.active).count();
@@ -568,9 +565,10 @@ fn cells_deactivate_under_prediction_and_replicas_stay_bit_exact() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn a_stray_freeze_under_prediction_converges() {
-    let mut h = Harness::new();
-    // A slime in dormant cell (3,3), placed on both replicas identically.
-    let at = 3.5 * game::cell_size_units(CC);
+    // Radius 0: only the spawn cell's 3×3 (cells 1..=3) is active, so (0,0)
+    // stays dormant. A slime there, placed on both replicas identically.
+    let mut h = Harness::with_config(eager_release());
+    let at = 0.5 * game::cell_size_units(CC);
     let spawn = |rb: &mut game::Rollback| {
         rb.spawn_slime_safe(Vector::new(Real::from(at), Real::from(40.0), Real::from(at)), 1, Real::from(0.0), 0);
     };
@@ -582,7 +580,7 @@ fn a_stray_freeze_under_prediction_converges() {
     }
     h.settle_and_compare();
     assert_eq!(h.client.data().ecs.slime.iter().filter(|(_, x)| x.is_some()).count(), 0);
-    assert_eq!(h.runner.cell_store().unwrap().version(CellCoords::new(3, 3)), Some(1));
+    assert_eq!(h.runner.cell_store().unwrap().version(CellCoords::new(0, 0)), Some(1));
 }
 
 fn render_kinds(recv: &Receiver<game::GameDataUpdate>) -> Vec<&'static str> {
@@ -693,4 +691,17 @@ fn a_runner_times_its_baseline_terrain_hash() {
     let (out, _rx) = unbounded();
     let runner = RegionRunner::new(r0(), Region::from_chunks(r0(), vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor(8))]), out);
     assert!(runner.baseline_hash_time() > std::time::Duration::ZERO);
+}
+
+#[test]
+fn a_cell_mode_player_spawns_in_the_region_centre_cell() {
+    let (mut runner, _rx) = cell_runner();
+    runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+    let d = runner.region_mut().data();
+    let (x, z) = d.player_positions()[0];
+    let n = game::cells_per_side(CC);
+    assert_eq!(game::cell_of_pos(x, z, CC), Some(CellCoords::new(n / 2, n / 2)));
+    // Not clipped by the region edge: the full 3×3 is active around it.
+    assert_eq!(d.cells.active.len(), 9);
+    assert_eq!(game::player_spawn_xz(false), (game::PLAYER_SPAWN_X, game::PLAYER_SPAWN_Z));
 }
