@@ -1,6 +1,6 @@
 # Cell loading phase 2 — cheaper activation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Take the O(whole active set) work out of cell activation, release,
 block edits and the periodic terrain-hash check, and measure what is left.
@@ -75,7 +75,7 @@ fingerprint (15–20 ms measured live). Genesis itself (entity + body +
 
 **Files:** Create `crates/worldgen/examples/cell_profile.rs` (already written).
 
-- [ ] Commit: `git add crates/worldgen/examples/cell_profile.rs docs/superpowers/plans/2026-09-25-cell-loading-phase2-cheaper-activation.md && git commit -m "feat(worldgen): cell_profile example — cell composition + activation timing"`
+- [x] Commit: `git add crates/worldgen/examples/cell_profile.rs docs/superpowers/plans/2026-09-25-cell-loading-phase2-cheaper-activation.md && git commit -m "feat(worldgen): cell_profile example — cell composition + activation timing"`
 
 ### Task 1: persistent chunk index
 
@@ -96,7 +96,7 @@ fingerprint (15–20 ms measured live). Genesis itself (entity + body +
   `Rollback::cell_chunk_keys(cell)` unchanged signature, output still sorted
   by `(x, y, z)`.
 
-- [ ] **Step 1: tests** (in `cell_activation.rs`):
+- [x] **Step 1: tests** (in `cell_activation.rs`):
 
 ```rust
 #[test]
@@ -142,8 +142,8 @@ fn the_index_survives_a_snapshot_round_trip() {
 `&mut` capture as elsewhere in the file; undo is whatever the file's
 existing rollback tests use.)
 
-- [ ] **Step 2:** `just test-one game "--test cell_activation chunk_index"` → FAIL (no field).
-- [ ] **Step 3: macro** — add to the `impl UndoMap` block:
+- [x] **Step 2:** `just test-one game "--test cell_activation chunk_index"` → FAIL (no field).
+- [x] **Step 3: macro** — add to the `impl UndoMap` block:
 
 ```rust
 /// Unlogged insert, for raw (genesis / confirmed-head) paths only.
@@ -155,7 +155,7 @@ pub fn remove_raw(&mut self, k: &K) -> ::std::option::Option<V> {
 }
 ```
 
-- [ ] **Step 4: field + maintenance** — in `GameData`:
+- [x] **Step 4: field + maintenance** — in `GameData`:
 
 ```rust
 /// Terrain chunk entity by `(x, z, y)` chunk coordinates (column-major so
@@ -174,16 +174,16 @@ Genesis: `self.chunk_index.insert_raw(chunk_index_key(coords), e)`.
 (as today) and `remove` (logged) before the component removals.
 `Rollback::chunk_key_at(c) = self.data.chunk_index.get(&chunk_index_key(c)).copied()`.
 
-- [ ] **Step 5: consumers** — `cell_chunk_keys`: for each x in the cell,
+- [x] **Step 5: consumers** — `cell_chunk_keys`: for each x in the cell,
   `range((x, z0, i32::MIN)..(x, z0 + cc, i32::MIN))`, map back to
   `ChunkCoords`, then sort by `(x, y, z)`. `edit.rs`: delete `chunk_index()`;
   `block_solid` / `raycast_block_in` / `set_block_in` drop the `index`
   parameter and call `chunk_key_at`. `materialize_cell`'s render path uses
   `chunk_key_at` instead of building its own map.
-- [ ] **Step 6:** run `just test-one game "--test cell_activation"`,
+- [x] **Step 6:** run `just test-one game "--test cell_activation"`,
   `"--test cell_activation -- --include-ignored"`, `"--test block_edit"`,
   `"--test hash_restore"`, `"--test random_ops"` → PASS.
-- [ ] **Step 7:** commit `perf(cells): persistent chunk index replaces full chunk scans`.
+- [x] **Step 7:** commit `perf(cells): persistent chunk index replaces full chunk scans`.
 
 ### Task 2: incremental terrain fingerprint
 
@@ -200,7 +200,7 @@ Genesis: `self.chunk_index.insert_raw(chunk_index_key(coords), e)`.
   number of successful edits ever (wrapping); `RegionRunner::terrain_fingerprint`
   unchanged meaning.
 
-- [ ] **Step 1: tests**
+- [x] **Step 1: tests**
 
 ```rust
 #[test]
@@ -228,11 +228,11 @@ Write the second test body out in full from the existing
 `an_edit_pushes_one_terrain_change_that_survives_release`, moving
 `remove_player` directly after the edit.
 
-- [ ] **Step 2:** run → FAIL.
-- [ ] **Step 3:** field `#[undo(map)] cell_edits: BTreeMap<crate::CellCoords, u32>`;
+- [x] **Step 2:** run → FAIL.
+- [x] **Step 3:** field `#[undo(map)] cell_edits: BTreeMap<crate::CellCoords, u32>`;
   in `set_block_in`, on each `return true`, if cell mode:
   `let n = self.data.cell_edits.get(&cell).copied().unwrap_or(0); self.data.cell_edits.insert(cell, n.wrapping_add(1));`
-- [ ] **Step 4:** runner — `CellTerms { pristine, dormant, live, edits }`.
+- [x] **Step 4:** runner — `CellTerms { pristine, dormant, live, edits }`.
   Activation: first time `live = pristine = dormant = cell_terrain_term`;
   re-activation `live = dormant`; both record `edits = cell_edits[cell]`.
   Release: `dormant = cell_terrain_term(cell)` (computed before the event —
@@ -241,14 +241,14 @@ Write the second test body out in full from the existing
   recompute `live` (needs `&mut self`: fingerprint becomes `&mut`);
   sum `(active ? live : dormant) - pristine`. Legacy regions keep
   `self.region.terrain_fingerprint()`.
-- [ ] **Step 5:** run `--test cell_activation -- --include-ignored`,
+- [x] **Step 5:** run `--test cell_activation -- --include-ignored`,
   `--test region_runner -- --include-ignored` → PASS.
-- [ ] **Step 6:** commit `perf(cells): incremental terrain fingerprint from per-cell edit counters`.
+- [x] **Step 6:** commit `perf(cells): incremental terrain fingerprint from per-cell edit counters`.
 
 ### Task 3: wrap-up
 
-- [ ] `just smoke`; `just test-threads` (manager/runner touched).
-- [ ] TODO.md + handoff status (phase 2: scans + fingerprint done; genesis
+- [x] `just smoke`; `just test-threads` (manager/runner touched).
+- [x] TODO.md + handoff status (phase 2: scans + fingerprint done; genesis
   timing pending the user's `--time` run; water collapse deferred to 3/6).
-- [ ] `just region_chunks=1024 cells=16 build`.
-- [ ] commit docs.
+- [x] `just region_chunks=1024 cells=16 build`.
+- [x] commit docs.

@@ -36,7 +36,7 @@ is NOT the spec's phase 2 ("cheaper activation").
 |---|---|
 | 1 Cells inside one region | DONE (+1b wiring into server/client, +1c centre spawn & home-LOD masking) |
 | (extra) Large regions | DONE: lazy per-cell worldgen (`worldgen::generate_cell`, bit-identical to `generate_region`), `CellStore::lazy` + worker-thread prefetch, sizes to 32768 chunks, only the home region loads (`LOD_RING_TABLE` >128 = `[(0, LARGE_HOME_FACTOR)]`), pristine coarse LOD for ungenerated cells, cell LOD churn fix `aae81f9` |
-| 2 Cheaper activation | NOT STARTED — next |
+| 2 Cheaper activation | PARTLY DONE (plan `2026-09-25-cell-loading-phase2-cheaper-activation.md`): chunk index + incremental fingerprint landed; genesis timing pending the user's `cell_profile --time` run; water collapse deferred to 3/6 |
 | 3 Island worldgen | NOT STARTED |
 | 4 Wire (zstd, framed snapshot, catch-up) | NOT STARTED (packet cap overflow on wasm32 was fixed in phase-2-large) |
 | 5 Postgres cell store + wind-down | NOT STARTED |
@@ -49,7 +49,22 @@ Run it: `just region_chunks=1024 cells=16 run` (2 km region) or
 Alternating configs once produced "undefined hidden symbol" link errors — fix is
 `cargo clean -p game -p server`.
 
-## Next: spec phase 2 — cheaper activation (write its plan first)
+## Phase 2 status (2026-09-25, second session)
+
+Landed: `25233b7` `cell_profile` example (composition; `--time` for timings),
+`6f690d2` persistent `GameData.chunk_index` (no more whole-region scans in
+activation / release / `cell_hash` / `cell_terrain_term` / block edits),
+`297f0dc` incremental terrain fingerprint via `GameData.cell_edits`.
+Measured (1024/16, 5×5 around spawn): ≈770 chunks per 32 m cell, 19 k
+chunks, 24 k colliders, 0 all-water chunks, ≈70 KiB raw / 15 KiB lz4 per
+cell payload. Still open: run
+`VOXEL_REGION_CHUNKS=1024 VOXEL_CELL_CHUNKS=16 cargo run --release -p worldgen --example cell_profile -- --time`
+(user's call — benchmarks) to see what genesis per cell costs now; then
+decide on compact `Voxels`. Pre-existing unrelated failure:
+`collider_genesis::mixed_chunk_gets_block_and_voxel_scale_colliders`
+(expects a 1.0-scale collider, gets the 8.0 half-block grid since 6736620).
+
+## (Original notes) spec phase 2 — cheaper activation
 
 Known costs from live runs (server `[server]` lines / perf logs, 1024/16):
 - Server tick spikes up to ~64 ms from cell genesis inside the tick
