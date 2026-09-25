@@ -20,11 +20,20 @@ pub struct ThreadRegionSpawner {
     /// `None` (the `Default`, used by tests that pass ready-made seeds) keeps
     /// worldgen with the manager.
     generator: Option<SharedRegionGenerator>,
+    /// Non-zero: spawn cell-mode runners with this cell size
+    /// (`game::CELL_CHUNKS`).
+    cell_chunks: usize,
 }
 
 impl ThreadRegionSpawner {
     pub fn with_generator(generator: SharedRegionGenerator) -> Self {
-        Self { handles: BTreeMap::new(), generator: Some(generator) }
+        Self { handles: BTreeMap::new(), generator: Some(generator), cell_chunks: 0 }
+    }
+
+    /// Run every spawned region in cell mode (`cell_chunks` = 0: legacy).
+    pub fn with_cells(mut self, cell_chunks: usize) -> Self {
+        self.cell_chunks = cell_chunks;
+        self
     }
 }
 
@@ -37,6 +46,7 @@ impl RegionSpawner for ThreadRegionSpawner {
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
         let generator = self.generator.clone();
+        let cell_chunks = self.cell_chunks;
         let handle = std::thread::Builder::new()
             .name(format!("region {},{}", id.x, id.z))
             .spawn(move || {
@@ -46,18 +56,22 @@ impl RegionSpawner for ThreadRegionSpawner {
                 let parked = matches!(seed, RegionSeed::Parked(..) | RegionSeed::Deferred(Some(_)));
                 // Deferred seeds generate here, timed separately from the build.
                 let generate_time = std::cell::Cell::new(Duration::ZERO);
-                let region = seed.into_region_with(id, &|rc| {
-                    let started = Instant::now();
-                    let columns = match &generator {
-                        Some(generate) => generate(rc),
-                        None => unreachable!("Deferred seed without a region generator"),
-                    };
-                    generate_time.set(started.elapsed());
-                    columns
-                });
+                let runner = seed.into_runner(
+                    id,
+                    out,
+                    &|rc| {
+                        let started = Instant::now();
+                        let columns = match &generator {
+                            Some(generate) => generate(rc),
+                            None => unreachable!("Deferred seed without a region generator"),
+                        };
+                        generate_time.set(started.elapsed());
+                        columns
+                    },
+                    cell_chunks,
+                );
                 let generate_time = generate_time.get();
                 let build = genesis_started.elapsed() - generate_time;
-                let runner = RegionRunner::new(id, region, out);
                 // `generate_ms` = worldgen on this thread (deferred seeds);
                 // `build_ms` = deserialize (parked) or chunk flatten + collider
                 // genesis (fresh); the rest of `ms` is the baseline terrain hash.
@@ -80,6 +94,10 @@ impl RegionSpawner for ThreadRegionSpawner {
 
     fn generates_columns(&self) -> bool {
         self.generator.is_some()
+    }
+
+    fn cell_mode(&self) -> bool {
+        self.cell_chunks != 0
     }
 
     fn reap(&mut self, id: RegionCoords) {

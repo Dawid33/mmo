@@ -66,7 +66,7 @@ impl LocalServer {
             out: lod_result_send,
         });
         let mut manager = WorldManager::new(
-            InlineSpawner::default(),
+            InlineSpawner::with_cells(game::CELL_CHUNKS),
             generator,
             out_send,
             region_out_send,

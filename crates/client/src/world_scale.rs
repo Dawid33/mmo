@@ -80,6 +80,17 @@ impl WorldScale {
     /// Resolve the process environment on native. Browser builds have no
     /// environment and always run the production scale.
     pub fn from_env() -> Result<Self, WorldScaleError> {
+        let mut scale = Self::from_env_unforced()?;
+        if game::CELL_CHUNKS != 0 && scale.near_radius != 0 {
+            // Cells replace the near window for the home region; neighbours
+            // would be cell regions with no player, i.e. empty.
+            log::info!("cell mode: near radius {} -> 0", scale.near_radius);
+            scale.near_radius = 0;
+        }
+        Ok(scale)
+    }
+
+    fn from_env_unforced() -> Result<Self, WorldScaleError> {
         #[cfg(target_arch = "wasm32")]
         {
             Ok(Self::FULL)

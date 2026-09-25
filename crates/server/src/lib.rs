@@ -335,8 +335,16 @@ pub fn run() {
     let region_gen_cache = gen_cache.clone();
     let region_generator: region_threads::SharedRegionGenerator =
         std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials));
+    info!(
+        "[server] cell mode: {}",
+        match game::CELL_CHUNKS {
+            0 => "off".to_string(),
+            cc => format!("{cc}-chunk cells (VOXEL_CELL_CHUNKS)"),
+        }
+    );
     let mut manager = game::WorldManager::new(
-        region_threads::ThreadRegionSpawner::with_generator(region_generator),
+        region_threads::ThreadRegionSpawner::with_generator(region_generator)
+            .with_cells(game::CELL_CHUNKS),
         Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
         server_send,
         region_out_send,
