@@ -118,6 +118,39 @@ impl RegionSeed {
     }
 }
 
+impl RegionSeed {
+    /// Build this seed's runner: legacy (fully materialized) when
+    /// `cell_chunks == 0`, else a cell-mode runner whose store holds the
+    /// generated columns. Cell regions never park, so a parked seed in cell
+    /// mode is unexpected and restores legacy.
+    pub fn into_runner(
+        self,
+        id: RegionId,
+        out: Sender<(RegionCoords, RegionOutput)>,
+        generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
+        cell_chunks: usize,
+    ) -> RegionRunner {
+        if cell_chunks == 0 {
+            return RegionRunner::new(id, self.into_region_with(id, generate), out);
+        }
+        let columns = match self {
+            RegionSeed::Fresh(columns) => columns,
+            RegionSeed::Deferred(None) => generate(id),
+            parked => {
+                log::error!("cell-mode region {id:?} got a parked seed; restoring legacy");
+                return RegionRunner::new(id, parked.into_region_with(id, generate), out);
+            }
+        };
+        RegionRunner::new_with_cells(
+            id,
+            Region::new_cells(id, cell_chunks, None, None),
+            out,
+            CellStore::from_columns(columns, cell_chunks),
+            CellConfig::new(cell_chunks),
+        )
+    }
+}
+
 /// Cell-mode state of a runner (spec §1, §3): tickets + the dormant store.
 pub struct CellMode {
     store: CellStore,
