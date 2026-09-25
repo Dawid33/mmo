@@ -194,6 +194,11 @@ mod game_data {
         /// recovered chunk coordinates from body translations.
         #[undo(map)]
         chunk_index: BTreeMap<ChunkIndexKey, EntityKey>,
+        /// Cell mode: successful block edits per cell, ever (wrapping). The
+        /// server's terrain fingerprint recomputes a cell's term only when
+        /// its count moved.
+        #[undo(map)]
+        cell_edits: BTreeMap<crate::CellCoords, u32>,
     }
 
     pub struct Ecs {

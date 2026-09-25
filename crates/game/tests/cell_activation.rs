@@ -255,6 +255,27 @@ fn an_edit_created_chunk_is_indexed_and_released_with_its_cell() {
 }
 
 #[test]
+fn an_edit_counts_against_its_cell_and_rolls_back() {
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut s = Region::new_cells(r0(), CC, None, None);
+    server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
+    let mut placed = false;
+    s.with_data(|rb| placed = rb.set_block_safe([1, 0, 1], game::Block::new(game::BlockId(0))));
+    assert!(placed);
+    assert_eq!(s.data().data.cell_edits.get(&CellCoords::new(0, 0)), Some(&1));
+    // A predicted edit rolls the counter back with it (a standalone replica
+    // with its own undo log; Full hash mode verifies every entry).
+    let mut rb: game::Rollback = bincode::deserialize(&bincode::serialize(s.data()).unwrap()).unwrap();
+    rb.reinitialize(Some(send));
+    let before = state_hash(&rb);
+    rb.new_transaction();
+    assert!(rb.set_block_safe([0, 0, 1], game::Block::new(game::BlockId(0))));
+    assert_eq!(rb.data.cell_edits.get(&CellCoords::new(0, 0)), Some(&2));
+    rb.rollback();
+    assert_eq!(before, state_hash(&rb));
+}
+
+#[test]
 fn the_chunk_index_survives_a_snapshot_round_trip() {
     let mut s = Region::new_cells(r0(), CC, None, None);
     server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
@@ -814,4 +835,46 @@ fn an_edit_pushes_one_terrain_change_that_survives_release() {
     }
     assert!(runner.region_mut().data().cells.active.is_empty());
     assert_eq!(terrain_changes(&rx), 0, "releasing the edited cell changes nothing the LOD shows");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_edit_released_in_the_same_tick_is_still_pushed() {
+    // The fingerprint caches each active cell's terrain term and recomputes
+    // only edited cells at the check. An edit made in the tick that releases
+    // its cell never meets a check while active: the released term must
+    // still carry it.
+    let released_after = {
+        let (mut runner, _rx) = cell_runner();
+        runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+        for _ in 0..8 {
+            runner.tick();
+        }
+        remove_player(&mut runner);
+        let mut n = 0;
+        while !runner.region_mut().data().cells.active.is_empty() {
+            runner.tick();
+            n += 1;
+        }
+        n
+    };
+    let (mut runner, rx) = cell_runner();
+    runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+    for _ in 0..8 {
+        runner.tick();
+    }
+    remove_player(&mut runner);
+    for _ in 0..released_after - 1 {
+        runner.tick();
+    }
+    let _ = rx.try_iter().count();
+    let mut placed = false;
+    runner.region_mut().with_data(|rb| placed = rb.set_block_safe([40, 1, 40], game::Block::new(game::BlockId(1))));
+    assert!(placed, "the cell is still active one tick before release");
+    runner.tick();
+    assert!(runner.region_mut().data().cells.active.is_empty());
+    for _ in 0..game::TERRAIN_HASH_INTERVAL_TICKS * 2 {
+        runner.tick();
+    }
+    assert_eq!(terrain_changes(&rx), 1, "the released edit is pushed once");
 }

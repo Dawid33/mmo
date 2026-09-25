@@ -168,15 +168,23 @@ pub struct CellMode {
     store: CellStore,
     tickets: CellTickets,
     config: CellConfig,
-    /// Per cell ever materialized: its terrain term as generated, and as
-    /// last released. See [`RegionRunner::terrain_fingerprint`].
+    /// Per cell ever materialized: its terrain terms. See
+    /// [`RegionRunner::terrain_fingerprint`].
     terms: std::collections::HashMap<CellCoords, CellTerms>,
 }
 
+/// A cell's share of the terrain fingerprint (`Rollback::cell_terrain_term`).
 #[derive(Clone, Copy)]
 struct CellTerms {
+    /// As generated.
     pristine: u32,
+    /// As last released.
     dormant: u32,
+    /// While active: as of `edits` below — recomputed only when the cell's
+    /// `GameData::cell_edits` count moves, so a check costs nothing for
+    /// unedited cells.
+    live: u32,
+    edits: u32,
 }
 
 pub struct RegionRunner {
@@ -303,10 +311,18 @@ impl RegionRunner {
             }
         }
         for cell in activated {
-            if !mode.terms.contains_key(&cell) {
-                // First materialization: straight from worldgen, pristine.
-                let term = self.region.data().cell_terrain_term(cell);
-                mode.terms.insert(cell, CellTerms { pristine: term, dormant: term });
+            let edits = self.region.data().data.cell_edits.get(&cell).copied().unwrap_or(0);
+            match mode.terms.get_mut(&cell) {
+                // Re-activation materializes exactly what was released.
+                Some(t) => {
+                    t.live = t.dormant;
+                    t.edits = edits;
+                }
+                None => {
+                    // First materialization: straight from worldgen, pristine.
+                    let term = self.region.data().cell_terrain_term(cell);
+                    mode.terms.insert(cell, CellTerms { pristine: term, dormant: term, live: term, edits });
+                }
             }
         }
     }
@@ -317,17 +333,29 @@ impl RegionRunner {
     /// shows (dormant cells are part of `terrain()`), so it must not push a
     /// `TerrainChanged`: each push rebuilds and re-sends the region's whole
     /// LOD key, which at large region sizes is thousands of cells.
-    fn terrain_fingerprint(&self) -> u32 {
-        let mut sum = self.region.terrain_fingerprint();
-        if let Some(mode) = self.cells.as_ref() {
-            let active = &self.region.data().cells.active;
-            for (cell, t) in &mode.terms {
-                sum = if active.contains(cell) {
-                    sum.wrapping_sub(t.pristine)
-                } else {
-                    sum.wrapping_add(t.dormant).wrapping_sub(t.pristine)
-                };
-            }
+    ///
+    /// Cell mode never walks the region's chunks: the sum is kept per cell,
+    /// and only cells edited since the last check are re-hashed. (Their
+    /// terms are the same `chunk_terrain_term`s the legacy sum adds up, so
+    /// the value equals the old whole-region formula.)
+    fn terrain_fingerprint(&mut self) -> u32 {
+        let Some(mode) = self.cells.as_mut() else {
+            return self.region.terrain_fingerprint();
+        };
+        let data = self.region.data();
+        let mut sum = 0u32;
+        for (cell, t) in mode.terms.iter_mut() {
+            let term = if data.cells.active.contains(cell) {
+                let edits = data.data.cell_edits.get(cell).copied().unwrap_or(0);
+                if edits != t.edits {
+                    t.live = data.cell_terrain_term(*cell);
+                    t.edits = edits;
+                }
+                t.live
+            } else {
+                t.dormant
+            };
+            sum = sum.wrapping_add(term).wrapping_sub(t.pristine);
         }
         sum
     }

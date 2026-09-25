@@ -173,6 +173,18 @@ impl Rollback {
     }
 
     fn set_block_in(&mut self, pos: BlockPos, block: Block) -> bool {
+        let changed = self.set_block_uncounted(pos, block);
+        if changed {
+            let cc = self.data.cells.cell_chunks;
+            if let Some(cell) = (cc != 0).then(|| crate::cell_of_block(pos, cc)).flatten() {
+                let n = self.data.cell_edits.get(&cell).copied().unwrap_or(0);
+                self.data.cell_edits.insert(cell, n.wrapping_add(1));
+            }
+        }
+        changed
+    }
+
+    fn set_block_uncounted(&mut self, pos: BlockPos, block: Block) -> bool {
         // Cell mode: a dormant cell's terrain lives in the server store; an
         // edit here would create a chunk the store never sees. Gated here, the
         // one funnel of both set_block_safe and player_edit_safe.
