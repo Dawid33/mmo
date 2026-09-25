@@ -3,7 +3,7 @@
 //! A cell is a `cell_chunks` × `cell_chunks` square of chunk columns; the
 //! server activates cells around players through `CellChanges` events.
 
-use crate::{ChunkCoords, REGION_CHUNKS, REGION_SIZE};
+use crate::{Chunk, ChunkCoords, EntityBundle, REGION_CHUNKS, REGION_SIZE};
 
 /// Region-local cell address, `0..cells_per_side` on each axis.
 #[derive(
@@ -80,6 +80,58 @@ pub fn cells_within(center: CellCoords, radius: u32, cell_chunks: usize) -> Vec<
     out
 }
 
+/// A cell's full content while it is not in the sim: the server's store
+/// entry, and the activation payload clients materialize.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DormantCell {
+    /// Sorted by `ChunkCoords`.
+    pub chunks: Vec<(ChunkCoords, Chunk)>,
+    /// Frozen non-player entities, in extraction order.
+    pub entities: Vec<EntityBundle>,
+}
+
+impl DormantCell {
+    /// crc32 of the bincode encoding — the store's change detector.
+    pub fn content_crc(&self) -> u32 {
+        let mut h = crc32fast::Hasher::new();
+        h.update(&bincode::serialize(self).expect("dormant cell serializes"));
+        h.finalize()
+    }
+}
+
+// `Chunk` has no PartialEq; compare cells by their encoding.
+impl PartialEq for DormantCell {
+    fn eq(&self, other: &Self) -> bool {
+        bincode::serialize(self).ok() == bincode::serialize(other).ok()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CellPayload {
+    pub cell: CellCoords,
+    /// Store version this payload was cut from.
+    pub version: u64,
+    /// `Rollback::cell_hash` of the cell as materialized in the SERVER sim.
+    /// 0 when the server builds the event; the server's `handle_event`
+    /// fills it before broadcast; clients verify it.
+    pub materialized_hash: u32,
+    pub content: DormantCell,
+}
+
+/// The one server-authored cell event per tick: deactivations first, then
+/// activations, each sorted by `CellCoords`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CellChanges {
+    pub deactivate: Vec<CellCoords>,
+    pub activate: Vec<CellPayload>,
+}
+
+impl CellChanges {
+    pub fn is_empty(&self) -> bool {
+        self.deactivate.is_empty() && self.activate.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod geometry_tests {
     use super::*;
@@ -136,5 +188,49 @@ mod geometry_tests {
         let all = cells_within(CellCoords::new(1, 1), 10, 8);
         assert_eq!(all.len() as u32, n * n);
         assert!(all.windows(2).all(|w| w[0] < w[1]));
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    use crate::{Chunk, GameEventKind};
+
+    fn sample() -> CellChanges {
+        CellChanges {
+            deactivate: vec![CellCoords::new(2, 3)],
+            activate: vec![CellPayload {
+                cell: CellCoords::new(0, 0),
+                version: 4,
+                materialized_hash: 0,
+                content: DormantCell {
+                    chunks: vec![(ChunkCoords::new(1, 0, 1), Chunk::flat_floor(8))],
+                    entities: vec![],
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn cell_changes_are_a_server_event() {
+        assert_eq!(GameEventKind::CellChanges(sample()).origin_client(), None);
+    }
+
+    #[test]
+    fn cell_changes_round_trip_through_the_wire_codec() {
+        let kind = GameEventKind::CellChanges(sample());
+        let bytes = bincode::serialize(&kind).unwrap();
+        let back: GameEventKind = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back, kind);
+    }
+
+    #[test]
+    fn content_crc_tracks_content() {
+        let a = sample().activate.remove(0).content;
+        let mut b = a.clone();
+        assert_eq!(a.content_crc(), b.content_crc());
+        b.chunks.clear();
+        assert_ne!(a.content_crc(), b.content_crc());
+        assert!(CellChanges::default().is_empty());
     }
 }

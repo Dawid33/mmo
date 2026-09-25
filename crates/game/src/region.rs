@@ -145,6 +145,9 @@ fn ev_desc(e: &GameEvent) -> String {
             format!("EntityArrived(c={:?})", b.client.as_ref().map(|(c, _)| *c))
         }
         GameEventKind::GhostUpdate(_) => "GhostUpdate".to_string(),
+        GameEventKind::CellChanges(c) => {
+            format!("CellChanges(-{} +{})", c.deactivate.len(), c.activate.len())
+        }
     };
     format!("[id={} r=({},{}) {}]", e.id, e.region_id.x, e.region_id.z, kind)
 }
@@ -525,6 +528,8 @@ impl Region {
                 );
                 self.data.create_player_safe(client_id);
             }
+            // Materialization lands in the next change (cell-loading plan Task 4).
+            GameEventKind::CellChanges(_) => {}
             GameEventKind::EntityArrived(bundle) => {
                 self.data.apply_arrival(bundle);
             }
