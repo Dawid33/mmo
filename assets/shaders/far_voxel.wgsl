@@ -77,6 +77,13 @@ const RootEntryKind_UNIFORM: u32 = 1u;
 const RootEntryKind_PAGE_0: u32 = 2u;
 const RootEntryKind_PAGE_1: u32 = 3u;
 const DDA_EPSILON: f32 = 0.00001;
+// LOD depth is written this far BEHIND its true hit (world units: a constant
+// plus a fraction of the ray length), so full-detail terrain wins every tie
+// where the two overlap — the seam between loaded cells and the home region's
+// LOD z-fought at distance, where depth precision can't separate coplanar
+// surfaces computed two different ways. Colour and fog use the true hit.
+const FAR_DEPTH_PUSH_MIN: f32 = 0.5;
+const FAR_DEPTH_PUSH_REL: f32 = 0.002;
 const AO_CURVE: array<f32, 4> = array(0.55, 0.70, 0.85, 1.0);
 
 struct GpuFarCell {
@@ -671,7 +678,9 @@ fn fragment(
     }
     lit *= view_bindings::view.exposure;
 
-    let clip_position = position_world_to_clip(world_position);
+    let depth_position =
+        world_position + ray_direction * (FAR_DEPTH_PUSH_MIN + FAR_DEPTH_PUSH_REL * hit.t);
+    let clip_position = position_world_to_clip(depth_position);
     var out: FragmentOutput;
     out.color = vec4(apply_distance_fog(tex.rgb * shade * lit, world_position), 1.0);
     out.depth = clip_position.z / clip_position.w;
