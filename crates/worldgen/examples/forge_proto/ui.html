@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>World forge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@400;500;600&family=Newsreader:ital,opsz,wght@1,6..72,400;1,6..72,500&display=swap" rel="stylesheet">
+<style>
+  /* A chart table: cool chart paper, ink, hydrographic blue, contour sepia,
+     and chart magenta — the colour nautical charts overprint notes in — used
+     for exactly one thing: what you changed. */
+  :root {
+    --paper: #DDE3E0;
+    --sheet: #EDF0EE;
+    --ink: #1E2B2F;
+    --ink-soft: #55656A;
+    --rule: #B4C0BC;
+    --hydro: #2F6F8F;
+    --sepia: #8A5A3C;
+    --magenta: #B5175E;
+    --sans: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+    --serif: "Newsreader", Georgia, "Times New Roman", serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 400 15px/1.4 var(--sans);
+  }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--magenta); outline-offset: 2px; }
+
+  .table {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 372px;
+    height: 100vh;
+  }
+
+  /* ---- the sheet ---- */
+  .sheet {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 18px 22px 16px;
+    min-width: 0;
+    overflow: auto;
+  }
+  .sheet-head { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
+  h1 {
+    margin: 0;
+    font: italic 400 30px/1.1 var(--serif);
+    letter-spacing: 0.005em;
+  }
+  h1 code { font: inherit; color: var(--hydro); }
+  .views { display: flex; gap: 2px; margin-left: auto; }
+  .views button {
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: none;
+    padding: 4px 9px;
+    cursor: pointer;
+    color: var(--ink-soft);
+  }
+  .views button[aria-pressed="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+
+  .frame {
+    position: relative;
+    align-self: center;
+    width: min(100%, calc(100vh - 250px));
+    min-width: 260px;
+    aspect-ratio: 1;
+    background: #12357a;
+    border: 1px solid var(--ink);
+    outline: 4px solid var(--sheet);
+    outline-offset: 0;
+    box-shadow: 0 0 0 5px var(--ink);
+    margin: 6px;
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+  }
+  .frame img { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: auto; display: block; }
+  .frame img[hidden] { display: none; }
+  .frame .empty {
+    position: absolute; inset: 0; display: grid; place-content: center; text-align: center;
+    color: #cfe0ea; font: italic 400 19px/1.35 var(--serif); padding: 24px;
+  }
+  .frame .flag {
+    position: absolute; left: 10px; top: 10px;
+    background: var(--magenta); color: #fff; padding: 2px 8px; font-weight: 500;
+  }
+  .frame .flag[hidden], .frame .empty[hidden] { display: none; }
+  .progress { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; overflow: hidden; }
+  .progress[hidden] { display: none; }
+  .progress::after {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 35%;
+    background: var(--magenta);
+    animation: sweep 1.1s linear infinite;
+  }
+  @keyframes sweep { from { left: -35%; } to { left: 100%; } }
+  @media (prefers-reduced-motion: reduce) { .progress::after { animation: none; left: 0; width: 100%; opacity: .7; } }
+
+  .under { display: flex; align-items: flex-end; gap: 22px; flex-wrap: wrap; }
+  .scale { flex: 0 0 auto; }
+  .scale .bar { display: flex; height: 7px; border: 1px solid var(--ink); }
+  .scale .bar i { flex: 1; }
+  .scale .bar i:nth-child(odd) { background: var(--ink); }
+  .scale .ticks { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--ink-soft); }
+  .status { color: var(--ink-soft); min-height: 1.4em; }
+  .status.bad { color: var(--magenta); font-weight: 500; }
+
+  /* margin notes: the world's statistics */
+  .notes {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px 22px;
+    border-top: 1px solid var(--rule);
+    padding-top: 10px;
+  }
+  .note dt { color: var(--ink-soft); font-size: 13px; }
+  .note dd { margin: 0; font-size: 19px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .note dd small { display: block; font-size: 13px; font-weight: 400; color: var(--ink-soft); }
+  .rocks { grid-column: 1 / -1; }
+  .rocks .strip { display: flex; height: 12px; border: 1px solid var(--ink); }
+  .rocks .legend { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 13px; color: var(--ink-soft); margin-top: 3px; }
+  .rocks .legend i { display: inline-block; width: 10px; height: 10px; border: 1px solid var(--ink); margin-right: 5px; vertical-align: -1px; }
+  .criteria { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--ink-soft); }
+  .criteria b { font-weight: 500; color: var(--ink); }
+  .criteria .weak { color: var(--magenta); }
+  .criteria .weak b { color: var(--magenta); }
+
+  /* ---- the knob rail ---- */
+  .rail {
+    background: var(--sheet);
+    border-left: 1px solid var(--ink);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  /* minmax(0, …): grid items default to min-width auto, and a <select> is as
+     wide as its longest option — without this the rows push past the rail. */
+  .rail-top { padding: 16px 18px 12px; border-bottom: 1px solid var(--rule); display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .row { display: flex; gap: 8px; align-items: center; min-width: 0; }
+  .row > label:not(.check) { color: var(--ink-soft); flex: 0 0 62px; }
+  .row input[type="text"], .row select {
+    flex: 1; min-width: 0; padding: 5px 7px; border: 1px solid var(--rule); background: #fff;
+    font-variant-numeric: tabular-nums;
+  }
+  .btn {
+    border: 1px solid var(--ink); background: none; padding: 5px 11px; cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover { background: var(--ink); color: var(--sheet); }
+  .btn.primary { background: var(--ink); color: var(--sheet); }
+  .btn.primary:hover { background: var(--hydro); border-color: var(--hydro); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .check { display: flex; gap: 7px; align-items: center; color: var(--ink-soft); }
+  .hint { margin: -4px 0 0 70px; font-size: 13px; line-height: 1.3; color: var(--ink-soft); }
+
+  .groups { overflow: auto; padding: 4px 18px 14px; flex: 1; min-height: 0; }
+  details { border-bottom: 1px solid var(--rule); }
+  summary {
+    list-style: none; cursor: pointer; padding: 11px 0 9px;
+    font: italic 500 21px/1.1 var(--serif); color: var(--hydro);
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary .count { font: 500 13px var(--sans); color: var(--magenta); }
+  summary .count:empty { display: none; }
+  .knob { padding: 0 0 12px; }
+  .knob-head { display: flex; align-items: baseline; gap: 8px; }
+  .knob-head label { flex: 1; }
+  .knob-head input {
+    width: 96px; padding: 2px 5px; border: 1px solid var(--rule); background: #fff;
+    text-align: right; font-variant-numeric: tabular-nums;
+  }
+  .knob-head .undo {
+    border: 0; background: none; color: var(--magenta); cursor: pointer; padding: 0 2px; font-size: 13px;
+    visibility: hidden;
+  }
+  .knob.changed label { color: var(--magenta); font-weight: 500; }
+  .knob.changed .undo { visibility: visible; }
+  .knob input[type="range"] { width: 100%; margin: 5px 0 0; accent-color: var(--ink); }
+  .knob.changed input[type="range"] { accent-color: var(--magenta); }
+  .knob p { margin: 3px 0 0; font-size: 13px; line-height: 1.3; color: var(--ink-soft); max-width: 44ch; }
+
+  .rail-foot { border-top: 1px solid var(--ink); padding: 12px 18px 14px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .rail-foot .row { flex-wrap: wrap; }
+  .saved { font-size: 13px; color: var(--ink-soft); word-break: break-all; }
+  .saved code { color: var(--ink); background: #fff; padding: 1px 4px; border: 1px solid var(--rule); }
+
+  @media (max-width: 920px) {
+    .table { grid-template-columns: 1fr; height: auto; }
+    .sheet { overflow: visible; }
+    .frame { width: min(100%, 640px); }
+    .rail { border-left: 0; border-top: 1px solid var(--ink); }
+    .groups { overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<div class="table">
+  <main class="sheet">
+    <div class="sheet-head">
+      <h1>Island <code id="title-seed">…</code></h1>
+      <div class="views" role="group" aria-label="Map layer">
+        <button data-view="rivers" aria-pressed="true">Rivers</button>
+        <button data-view="relief" aria-pressed="false">Relief</button>
+        <button data-view="geology" aria-pressed="false">Geology</button>
+        <button data-view="rain" aria-pressed="false">Rain</button>
+        <button data-view="initial" aria-pressed="false">Before erosion</button>
+      </div>
+    </div>
+
+    <div class="frame" id="frame" title="Press and hold to see the previous render">
+      <img id="map" alt="Forged world map" hidden>
+      <img id="previous" alt="Previous render" hidden>
+      <div class="empty" id="empty">Forging the first world…</div>
+      <div class="flag" id="flag" hidden>Previous render</div>
+      <div class="progress" id="progress" hidden></div>
+    </div>
+
+    <div class="under">
+      <div class="scale" id="scale" aria-hidden="true">
+        <div class="bar"><i></i><i></i><i></i><i></i></div>
+        <div class="ticks"><span>0</span><span>1</span><span>2</span><span>3</span><span>4 km</span></div>
+      </div>
+      <div class="status" id="status" role="status"></div>
+    </div>
+
+    <dl class="notes" id="notes"></dl>
+  </main>
+
+  <aside class="rail" aria-label="World knobs">
+    <div class="rail-top">
+      <div class="row">
+        <label for="seed">Seed</label>
+        <input id="seed" type="text" spellcheck="false" autocomplete="off">
+        <button class="btn" id="reroll" title="Try another island">New seed</button>
+      </div>
+      <div class="row">
+        <label for="detail">Preview</label>
+        <select id="detail">
+          <option value="64">Fast, 64 m cells (about 1 s)</option>
+          <option value="32">Medium, 32 m cells (about 5 s)</option>
+          <option value="16">Full, 16 m cells (about 30 s)</option>
+        </select>
+      </div>
+      <p class="hint">Coarse previews show the island's shape and drainage, but under-count lakes and flatten peaks. Check at 16 m before saving.</p>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="auto" checked> Forge as I change things</label>
+        <button class="btn primary" id="forge" style="margin-left:auto">Forge</button>
+      </div>
+    </div>
+
+    <div class="groups" id="groups"></div>
+
+    <div class="rail-foot">
+      <div class="row">
+        <button class="btn" id="copy">Copy as flags</button>
+        <button class="btn" id="reset">Reset all knobs</button>
+        <button class="btn primary" id="save" title="Forges at 16 m cells and writes a world file the game can load">Save world file</button>
+      </div>
+      <div class="saved" id="saved"></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const state = { knobs: [], values: {}, seed: "", view: "rivers", id: null, previousSrc: null,
+                  inFlight: false, dirty: false, rocks: [], sizeM: 16000, timer: null };
+  const STORE = "world-forge-ui";
+
+  // ---- slider <-> value: log scale when the range spans more than ~1.5 decades
+  const isLog = (k) => k.min > 0 && k.max / k.min > 40;
+  const toSlider = (k, v) => {
+    const t = isLog(k) ? Math.log(v / k.min) / Math.log(k.max / k.min) : (v - k.min) / (k.max - k.min);
+    return Math.round(Math.min(1, Math.max(0, t)) * 1000);
+  };
+  const fromSlider = (k, s) => {
+    const t = s / 1000;
+    const v = isLog(k) ? k.min * Math.pow(k.max / k.min, t) : k.min + (k.max - k.min) * t;
+    return tidy(k, v);
+  };
+  // Keep ~3 significant digits so values read (and copy) cleanly.
+  const tidy = (k, v) => {
+    v = Math.min(k.max, Math.max(k.min, v));
+    if (v === 0) return 0;
+    const digits = Math.max(0, 2 - Math.floor(Math.log10(Math.abs(v))));
+    const rounded = Number(v.toFixed(Math.min(12, digits)));
+    return Number.isInteger(k.default) && k.max - k.min > 20 ? Math.round(rounded) : rounded;
+  };
+  const show = (v) => (Math.abs(v) >= 1e-3 && Math.abs(v) < 1e6) || v === 0 ? String(v) : v.toExponential(2);
+
+  function persist() {
+    try { localStorage.setItem(STORE, JSON.stringify({ values: state.values, seed: state.seed, detail: $("detail").value, auto: $("auto").checked })); } catch (e) {}
+  }
+  function restore() {
+    try { return JSON.parse(localStorage.getItem(STORE) || "null"); } catch (e) { return null; }
+  }
+
+  // ---- build the rail
+  function buildRail() {
+    const groups = $("groups");
+    groups.textContent = "";
+    const byGroup = new Map();
+    for (const k of state.knobs) { if (!byGroup.has(k.group)) byGroup.set(k.group, []); byGroup.get(k.group).push(k); }
+    let index = 0;
+    for (const [name, knobs] of byGroup) {
+      const details = document.createElement("details");
+      details.open = index++ < 3;
+      const summary = document.createElement("summary");
+      summary.append(name);
+      const count = document.createElement("span");
+      count.className = "count";
+      summary.append(count);
+      details.append(summary);
+      details.dataset.group = name;
+      for (const k of knobs) details.append(knobRow(k));
+      groups.append(details);
+    }
+    refreshChanged();
+  }
+
+  function knobRow(k) {
+    const row = document.createElement("div");
+    row.className = "knob";
+    row.dataset.key = k.key;
+    const head = document.createElement("div");
+    head.className = "knob-head";
+    const label = document.createElement("label");
+    label.htmlFor = "n-" + k.key;
+    label.textContent = k.label;
+    const undo = document.createElement("button");
+    undo.className = "undo";
+    undo.textContent = "Reset";
+    undo.title = "Back to " + show(k.default);
+    const number = document.createElement("input");
+    number.id = "n-" + k.key;
+    number.type = "text";
+    number.inputMode = "decimal";
+    const range = document.createElement("input");
+    range.type = "range";
+    range.min = 0; range.max = 1000; range.step = 1;
+    range.setAttribute("aria-label", k.label);
+    const help = document.createElement("p");
+    help.textContent = k.help;
+    head.append(label, undo, number);
+    row.append(head, range, help);
+
+    const paint = () => { number.value = show(state.values[k.key]); range.value = toSlider(k, state.values[k.key]); };
+    const set = (v, fromNumber) => {
+      state.values[k.key] = fromNumber ? Math.min(k.max, Math.max(k.min, v)) : v;
+      paint(); refreshChanged(); persist(); changed();
+    };
+    range.addEventListener("input", () => set(fromSlider(k, Number(range.value))));
+    number.addEventListener("change", () => { const v = Number(number.value); if (Number.isFinite(v)) set(v, true); else paint(); });
+    undo.addEventListener("click", () => set(k.default));
+    row._paint = paint;
+    paint();
+    return row;
+  }
+
+  function refreshChanged() {
+    for (const details of $("groups").children) {
+      let n = 0;
+      for (const row of details.querySelectorAll(".knob")) {
+        const k = state.knobs.find((x) => x.key === row.dataset.key);
+        const on = state.values[k.key] !== k.default;
+        row.classList.toggle("changed", on);
+        n += on ? 1 : 0;
+      }
+      details.querySelector(".count").textContent = n ? n + " changed" : "";
+    }
+  }
+
+  // ---- forging
+  function query(cell) {
+    const q = new URLSearchParams({ cell: String(cell), seed: state.seed });
+    for (const k of state.knobs) if (state.values[k.key] !== k.default) q.set(k.key, String(state.values[k.key]));
+    return q.toString();
+  }
+
+  function changed() {
+    if (!$("auto").checked) { status("Knobs changed. Forge to see them."); return; }
+    clearTimeout(state.timer);
+    state.timer = setTimeout(forge, 280);
+  }
+
+  function status(text, bad) { const s = $("status"); s.textContent = text; s.classList.toggle("bad", !!bad); }
+
+  async function forge() {
+    clearTimeout(state.timer);
+    if (state.inFlight) { state.dirty = true; return; }
+    state.inFlight = true; state.dirty = false;
+    $("progress").hidden = false;
+    $("title-seed").textContent = state.seed;
+    const cell = $("detail").value;
+    try {
+      const reply = await fetch("/forge?" + query(cell));
+      const world = await reply.json();
+      if (world.error) throw new Error(world.error);
+      state.id = world.id;
+      showImage(true);
+      notes(world);
+      status(`Forged in ${(world.ms / 1000).toFixed(1)} s at ${world.cell_m} m cells. Press and hold the map for the previous render.`);
+    } catch (e) {
+      status(e instanceof TypeError ? "The forge did not answer. Is `just forge-ui` still running?" : "Could not forge: " + e.message, true);
+    } finally {
+      state.inFlight = false;
+      $("progress").hidden = true;
+      if (state.dirty) forge();
+    }
+  }
+
+  function showImage(isNewWorld) {
+    if (!state.id) return;
+    const map = $("map");
+    if (isNewWorld && !map.hidden && map.src) { state.previousSrc = map.src; $("previous").src = map.src; }
+    map.src = `/image?id=${state.id}&view=${state.view}`;
+    map.hidden = false;
+    $("empty").hidden = true;
+  }
+
+  // ---- margin notes
+  function notes(w) {
+    const dl = $("notes");
+    dl.textContent = "";
+    const add = (term, value, small) => {
+      const div = document.createElement("div"); div.className = "note";
+      const dt = document.createElement("dt"); dt.textContent = term;
+      const dd = document.createElement("dd"); dd.textContent = value;
+      if (small) { const s = document.createElement("small"); s.textContent = small; dd.append(s); }
+      div.append(dt, dd); dl.append(div);
+    };
+    const f = (v, d = 0) => v == null ? "–" : Number(v).toFixed(d);
+    add("Land", f(w.land_share * 100) + " %", f(w.land_km2) + " km²");
+    add("Highest peak", f(w.heights[4]) + " m",
+        w.height_fit < 1 ? `simulated ${f(w.simulated_peak_m)} m, scaled ×${f(w.height_fit, 2)}` : "fits the height band");
+    add("Median land height", f(w.heights[1]) + " m", `90 % under ${f(w.heights[2])} m`);
+    add("Longest river", f(w.longest_river_km, 1) + " km", `${w.mouths} mouths, ${f(w.channel_km)} km of channel`);
+    add("Biggest basin", f(w.biggest_basin_km2, 1) + " km²", "stream order up to " + w.max_order);
+    add("Lakes", String(w.lakes), "largest " + f(w.largest_lake_km2, 2) + " km²");
+    add("Buildable land", f(w.buildable_km2) + " km²", "gentle, low, dry");
+    add("Slope", f(w.slopes[0], 3), `1 % steeper than ${f(w.slopes[2], 2)}, max ${f(w.slopes[3], 2)}`);
+    add("Drainage", "θ " + f(w.theta, 2), "Hack " + f(w.hack, 2) + " (nature 0.5 to 0.6)");
+    add("World score", f(w.score, 2), w.margin_share > 0.002 ? "the island is pressing on the ocean margin" : "");
+
+    const rocks = document.createElement("div"); rocks.className = "note rocks";
+    const dt = document.createElement("dt"); dt.textContent = "Rock at the surface";
+    const strip = document.createElement("div"); strip.className = "strip";
+    const legend = document.createElement("div"); legend.className = "legend";
+    w.rock_shares.forEach((share, i) => {
+      const rock = state.rocks[i]; if (!rock || share < 0.003) return;
+      const colour = `rgb(${rock.rgb.join(",")})`;
+      const seg = document.createElement("span"); seg.style.cssText = `flex:${share};background:${colour}`; strip.append(seg);
+      const item = document.createElement("span"); const sw = document.createElement("i"); sw.style.background = colour;
+      item.append(sw, `${rock.name} ${f(share * 100)} %`); legend.append(item);
+    });
+    rocks.append(dt, strip, legend); dl.append(rocks);
+
+    const criteria = document.createElement("div"); criteria.className = "criteria";
+    const weakest = Math.min(...w.criteria.map((c) => c.value));
+    for (const c of w.criteria) {
+      const span = document.createElement("span");
+      if (c.value === weakest && weakest < 0.95) span.className = "weak";
+      const b = document.createElement("b"); b.textContent = f(c.value, 2);
+      span.append(c.name + " ", b); criteria.append(span);
+    }
+    dl.append(criteria);
+  }
+
+  // ---- scale bar: 4 km of a world `sizeM` wide
+  function sizeScale() { $("scale").style.width = ($("frame").clientWidth * 4000 / state.sizeM) + "px"; }
+  new ResizeObserver(sizeScale).observe($("frame"));
+
+  // ---- press and hold: previous render
+  const frame = $("frame");
+  const peek = (on) => { if (!state.previousSrc) return; $("previous").hidden = !on; $("flag").hidden = !on; };
+  frame.addEventListener("pointerdown", (e) => { frame.setPointerCapture(e.pointerId); peek(true); });
+  for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) frame.addEventListener(name, () => peek(false));
+
+  // ---- controls
+  for (const button of document.querySelectorAll(".views button")) {
+    button.addEventListener("click", () => {
+      state.view = button.dataset.view;
+      for (const b of document.querySelectorAll(".views button")) b.setAttribute("aria-pressed", String(b === button));
+      state.previousSrc = null;
+      showImage(false);
+    });
+  }
+  $("seed").addEventListener("change", () => {
+    const hex = $("seed").value.trim().replace(/^0x/i, "").replace(/_/g, "").toUpperCase();
+    if (/^[0-9A-F]{1,16}$/.test(hex)) { state.seed = hex; persist(); changed(); } else status("A seed is up to 16 hexadecimal digits.", true);
+    $("seed").value = state.seed;
+  });
+  $("reroll").addEventListener("click", () => {
+    state.seed = Math.floor(Math.random() * 0xFFFFFFFFFFFF).toString(16).toUpperCase();
+    $("seed").value = state.seed; persist(); forge();
+  });
+  $("detail").addEventListener("change", () => { persist(); forge(); });
+  $("auto").addEventListener("change", persist);
+  $("forge").addEventListener("click", forge);
+  $("reset").addEventListener("click", () => {
+    for (const k of state.knobs) state.values[k.key] = k.default;
+    for (const row of document.querySelectorAll(".knob")) row._paint();
+    refreshChanged(); persist(); changed();
+  });
+  $("copy").addEventListener("click", async () => {
+    const flags = ["--seed " + state.seed];
+    for (const k of state.knobs) if (state.values[k.key] !== k.default) flags.push(`--set ${k.key}=${state.values[k.key]}`);
+    const line = "just forge-proto " + flags.join(" ");
+    try { await navigator.clipboard.writeText(line); status("Copied: " + line); }
+    catch (e) { $("saved").textContent = line; status("Could not reach the clipboard, so the command is shown under the buttons."); }
+  });
+  $("save").addEventListener("click", async () => {
+    const button = $("save");
+    button.disabled = true; $("progress").hidden = false;
+    status("Forging at 16 m cells and writing the world file. This takes about half a minute.");
+    try {
+      const reply = await fetch("/export?" + query(16));
+      const out = await reply.json();
+      if (out.error) throw new Error(out.error);
+      const saved = $("saved"); saved.textContent = "";
+      const code = document.createElement("code"); code.textContent = `just world_file=${out.path} run`;
+      saved.append(`Saved ${out.path} (${out.mib.toFixed(1)} MiB). Play it with `, code);
+      status(`Saved the world file in ${(out.ms / 1000).toFixed(0)} s.`);
+    } catch (e) { status("Could not save: " + e.message, true); }
+    finally { button.disabled = false; $("progress").hidden = true; }
+  });
+
+  // ---- start
+  (async () => {
+    try {
+      const table = await (await fetch("/knobs")).json();
+      state.knobs = table.knobs; state.rocks = table.rocks; state.sizeM = table.size_m;
+      const kept = restore();
+      for (const k of state.knobs) {
+        const v = kept && kept.values ? kept.values[k.key] : undefined;
+        state.values[k.key] = Number.isFinite(v) ? Math.min(k.max, Math.max(k.min, v)) : k.value;
+      }
+      state.seed = (kept && kept.seed) || table.seed;
+      if (kept && kept.detail) $("detail").value = kept.detail;
+      if (kept && kept.auto === false) $("auto").checked = false;
+      $("seed").value = state.seed;
+      buildRail(); sizeScale(); forge();
+    } catch (e) {
+      $("empty").textContent = "The forge did not answer. Start it with `just forge-ui`, then reload.";
+    }
+  })();
+})();
+</script>
+</body>
+</html>

@@ -483,12 +483,37 @@ impl Region {
             GameEventKind::Tick => {
                 #[cfg(not(target_arch = "wasm32"))]
                 let tick_start = Instant::now();
+                // Mobs set kinematic targets, like the camera controller;
+                // the physics controller's step consumes them.
+                self.data.tick_slimes_safe(self.id);
                 for c in self.controllers.iter_mut() {
                     let data = self.data.as_refs_mut();
                     c.on_tick(data.data);
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 let controllers_done = Instant::now();
+                // Block edits: a click this tick breaks or places, from the
+                // pose the controllers just produced, before the input step
+                // consumes the press.
+                let edits: Vec<(ClientId, crate::edit::EditAction)> = self
+                    .data
+                    .clients
+                    .iter()
+                    // Not while the inventory is open: its clicks are UI.
+                    .filter(|(_, c)| c.fps_cam_mode && !c.inventory_open)
+                    .filter_map(|(id, c)| {
+                        if c.input.mouse_pressed(&crate::edit::BREAK_BUTTON) {
+                            Some((*id, crate::edit::EditAction::Break))
+                        } else if c.input.mouse_pressed(&crate::edit::PLACE_BUTTON) {
+                            Some((*id, crate::edit::EditAction::Place))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for (client_id, action) in edits {
+                    self.data.player_edit_safe(client_id, action);
+                }
                 let data: &mut GameData = self.data.deref_mut();
                 let keys: Vec<ClientId> = data.clients.keys().cloned().collect();
                 for client_id in keys {
@@ -524,7 +549,13 @@ impl Region {
             GameEventKind::PlayerInput(client_id, player_event) => {
                 let data: &mut GameData = self.data.deref_mut();
                 if let Some(c) = data.clients.get_mut(&client_id) {
-                    let _ = c.input.update(player_event.clone());
+                    // get_mut logged the prior Client: both arms undo.
+                    match player_event {
+                        crate::InputEvent::FpsCam(on) => c.fps_cam_mode = on,
+                        _ => {
+                            let _ = c.input.update(player_event.clone());
+                        }
+                    }
                 }
             }
             GameEventKind::Quit => return Err(GameError::QuitRequested),

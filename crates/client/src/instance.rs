@@ -55,6 +55,8 @@ pub struct GameInstanceManager {
     stalled: BTreeMap<RegionId, usize>,
     client_id: Option<ClientId>,
     home_region: Option<RegionCoords>,
+    /// Sticky centre of the near window + LOD rings; see `advance_window_center`.
+    window_center: Option<RegionCoords>,
     /// Regions we have requested (and not released) — the desired window.
     subscribed: std::collections::BTreeSet<RegionCoords>,
     /// Last ring-factor assignment per region (the stickiness `prev` for the
@@ -65,7 +67,8 @@ pub struct GameInstanceManager {
     /// yields costs the server a real build, which headless suites pay
     /// synchronously through `InlineLodBuilder`.
     lod_table: &'static [(i32, u32)],
-    /// Radius of the near (authoritative) window: 1 = the production 3x3.
+    /// Radius of the near (authoritative) window: 1 = 3x3 here; the binaries
+    /// apply the production `WorldScale` (5x5) via `set_world_scale`.
     /// Headless suites shrink it to 0 — each region costs a full worldgen +
     /// collider genesis on the server AND a deserialized copy on the client.
     near_radius: i32,
@@ -78,13 +81,15 @@ pub struct GameInstanceManager {
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
     /// Last HUD status sent, for edge-triggered emission (avoid channel spam).
     last_hud_status: Option<(RegionCoords, RegionCoords, game::ConnectionState)>,
+    /// Last home active-cell set pushed to the renderer (cell mode).
+    last_active_cells: Option<(RegionCoords, std::collections::BTreeSet<game::CellCoords>)>,
     /// Sender half of the client-side UI projection channel (widget deltas).
     ui_update_send: Sender<game::UiUpdate>,
     /// Last widget tree emitted, for diffing the next projection.
     prev_ui_tree: game::WidgetTree,
     /// Last-emitted cursor-grab intent, for edge-triggered SetCursorGrab.
     last_cursor_grab: bool,
-    /// Shared debug toggles; the render thread's F3 handler flips them.
+    /// Shared debug toggles; the render thread's F3 dev panel flips them.
     /// Process-local — not sim state.
     debug_flags: game::DebugFlags,
     /// Rapier debug-render wrapper (caches unit outlines across calls).
@@ -94,6 +99,8 @@ pub struct GameInstanceManager {
     /// Rolling wall-time budget attribution (native only).
     #[cfg(not(target_arch = "wasm32"))]
     perf: PerfBudget,
+    #[cfg(not(target_arch = "wasm32"))]
+    crossing: CrossingProbe,
 }
 
 /// Death-spiral tripwire tunables. The spiral's early signature (root-caused
@@ -108,10 +115,11 @@ const KEEPUP_WARN_MIN_DEPTH: usize = 24;
 const KEEPUP_WARN_HARD_DEPTH: usize = 64;
 
 /// New `RequestLod` subscriptions sent per client tick. The production ring
-/// table wants ~570 keys at join; firing them in one burst floods the server's
-/// LOD builders and the QUIC stream-credit window (100 concurrent uni streams)
-/// with replies the client then has to ingest at once. 32/tick drains the full
-/// table in ~1s at the 50ms tick and leaves any table up to 32 keys unpaced.
+/// table wants ~1,080 keys at join (the default-size 1 km horizon);
+/// firing them in one burst floods the server's LOD builders and the QUIC
+/// stream-credit window (100 concurrent uni streams) with replies the client
+/// then has to ingest at once. 32/tick, nearest ring first, drains the full
+/// table in ~2s at the 50ms tick and leaves any table up to 32 keys unpaced.
 pub const LOD_REQUESTS_PER_TICK: usize = 32;
 
 /// Client-side rolling counters for reconciliation load and clock drift,
@@ -185,6 +193,141 @@ impl PerfBudget {
     }
 }
 
+/// How long after a home-region flip the game thread keeps attributing work
+/// to that crossing (matches the render side's `REGION_CROSSING_WINDOW`).
+#[cfg(not(target_arch = "wasm32"))]
+const CROSSING_WINDOW: Duration = Duration::from_secs(2);
+
+/// Game-thread view of one region crossing — a handoff of the local player
+/// between two region threads, which also shifts the near window by a row.
+/// Opened at the home flip (predicted or authoritative), reported once as
+/// `[perf] event=region_crossing` after [`CROSSING_WINDOW`]. The thread also
+/// runs prediction, so `tick_gap_max_ms` is how long the player's own pose
+/// went without a tick; `before_tick_gap_max_ms` is the same measure over the
+/// flight since the previous crossing.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct CrossingProbe {
+    open: Option<(Instant, RegionCoords, RegionCoords)>,
+    /// Ticks the new home still had to sit out (`stalled`) at the flip.
+    stalled_at_flip: usize,
+    last_home_tick: Option<Instant>,
+    tick_gap_max: Duration,
+    before_tick_gap_max: Duration,
+    /// Home ticks skipped by `stalled` inside the window.
+    home_stalled_ticks: u32,
+    /// `align_region` on home inside the window: steps, and ticks predicted
+    /// at once (+) or sat out (-).
+    home_align_steps: u32,
+    home_align_ticks: isize,
+    corrections: u32,
+    correction_max: f32,
+    snapshots: u32,
+    snapshot_time: Duration,
+    snapshot_max: Duration,
+    /// Flip to the server's `PlayerRegion` naming the new home.
+    confirm: Option<Duration>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl CrossingProbe {
+    fn flip(&mut self, from: RegionCoords, to: RegionCoords, stalled_at_flip: usize) {
+        // Crossed again inside the window: close the old one early.
+        self.report();
+        *self = CrossingProbe {
+            open: Some((Instant::now(), from, to)),
+            stalled_at_flip,
+            last_home_tick: self.last_home_tick,
+            before_tick_gap_max: self.before_tick_gap_max,
+            ..Default::default()
+        };
+    }
+
+    fn home_tick(&mut self, stalled: bool) {
+        let now = Instant::now();
+        if stalled {
+            if self.open.is_some() {
+                self.home_stalled_ticks += 1;
+            }
+            return;
+        }
+        if let Some(last) = self.last_home_tick {
+            let gap = now - last;
+            if self.open.is_some() {
+                self.tick_gap_max = self.tick_gap_max.max(gap);
+            } else {
+                self.before_tick_gap_max = self.before_tick_gap_max.max(gap);
+            }
+        }
+        self.last_home_tick = Some(now);
+    }
+
+    fn snapshot(&mut self, took: Duration) {
+        if self.open.is_some() {
+            self.snapshots += 1;
+            self.snapshot_time += took;
+            self.snapshot_max = self.snapshot_max.max(took);
+        }
+    }
+
+    fn correction(&mut self, moved: f32) {
+        if self.open.is_some() {
+            self.corrections += 1;
+            self.correction_max = self.correction_max.max(moved);
+        }
+    }
+
+    fn align_home(&mut self, error_ms: isize, ticks: usize) {
+        if self.open.is_some() {
+            self.home_align_steps += 1;
+            self.home_align_ticks += if error_ms > 0 { -(ticks as isize) } else { ticks as isize };
+        }
+    }
+
+    fn confirmed(&mut self, home: RegionCoords) {
+        if let Some((at, _, to)) = self.open {
+            if to == home && self.confirm.is_none() {
+                self.confirm = Some(at.elapsed());
+            }
+        }
+    }
+
+    fn maybe_report(&mut self) {
+        if self.open.is_some_and(|(at, _, _)| at.elapsed() >= CROSSING_WINDOW) {
+            self.report();
+        }
+    }
+
+    fn report(&mut self) {
+        let Some((at, from, to)) = self.open.take() else { return };
+        game::perf_event!(
+            "region_crossing",
+            "from={},{} to={},{} window_ms={} confirm_ms={} stalled_at_flip={} tick_gap_max_ms={} \
+             before_tick_gap_max_ms={} home_stalled_ticks={} home_align={}({:+}t) corrections={} \
+             correction_max={:.2}u snapshots={} snapshot_ms={} snapshot_max_ms={}",
+            from.x,
+            from.z,
+            to.x,
+            to.z,
+            game::perf::ms(at.elapsed()),
+            self.confirm.map_or(-1.0, game::perf::ms),
+            self.stalled_at_flip,
+            game::perf::ms(self.tick_gap_max),
+            game::perf::ms(self.before_tick_gap_max),
+            self.home_stalled_ticks,
+            self.home_align_steps,
+            self.home_align_ticks,
+            self.corrections,
+            self.correction_max,
+            self.snapshots,
+            game::perf::ms(self.snapshot_time),
+            game::perf::ms(self.snapshot_max)
+        );
+        // The next crossing's baseline starts now.
+        self.before_tick_gap_max = Duration::ZERO;
+    }
+}
+
 impl ReconMetrics {
     /// Fold in the cost of one `reconcile()` pass.
     fn record(&mut self, s: ReconcileStats) {
@@ -215,9 +358,40 @@ const CLIENT_LEAD_BAND_MS: isize = game::TICK_RATE as isize;
 /// few ticks of movement, or stands still for them.
 const HOME_STEP_ALIGN_MS: isize = game::TICK_RATE as isize * 3;
 /// Most ticks one alignment step adds or sits out (two seconds).
+/// How far into a neighbouring region the viewer must be before the near
+/// window (and the LOD rings) recentre on it. Hovering near a seam then keeps
+/// one window; flying straight shifts it this much later. Under half a region,
+/// or the band around one seam would reach the next.
+/// `VOXEL_WINDOW_MARGIN_M` overrides it at startup (`0` = recentre at the seam,
+/// the old behaviour — for A/B runs of `just shuttle-probe`), clamped under the
+/// half region.
+const WINDOW_RECENTER_MARGIN_M: f32 = 16.0;
+const _: () = assert!(WINDOW_RECENTER_MARGIN_M * game::movement::UNITS_PER_METER < game::REGION_SIZE / 2.0);
+
+/// [`WINDOW_RECENTER_MARGIN_M`] or its env override, in world units.
+fn window_recenter_margin() -> f32 {
+    static MARGIN: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *MARGIN.get_or_init(|| {
+        let metres = std::env::var("VOXEL_WINDOW_MARGIN_M")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(WINDOW_RECENTER_MARGIN_M);
+        let units = metres.max(0.0) * game::movement::UNITS_PER_METER;
+        let max = game::REGION_SIZE / 2.0 - 1.0;
+        if units > max {
+            log::warn!("VOXEL_WINDOW_MARGIN_M={metres} is past half a region; clamped");
+        }
+        units.min(max)
+    })
+}
+
+/// How far ahead of the band home must run before it is sat out rather than
+/// slewed: the server holds an input stamped up to this far ahead
+/// (`MAX_INPUT_LEAD_TICKS`), so any lead inside it still lands in its slot.
+const HOME_STALL_MIN_MS: isize = (game::MAX_INPUT_LEAD_TICKS * game::TICK_RATE) as isize;
 const MAX_ALIGN_TICKS: usize = 2000 / game::TICK_RATE as usize;
 
-/// The client's desired subscription set: the 3x3 window around the viewer,
+/// The client's desired subscription set: the near window around the viewer,
 /// plus the home region. Home must NEVER be released while the free-cam
 /// roams — PlayerInput routes to it (World::handle_region_event unwraps on a
 /// missing region) and it anchors viewer_region's pose read; this also
@@ -308,6 +482,7 @@ impl GameInstanceManager {
             server_game_recv,
             client_id: None,
             home_region: None,
+            window_center: None,
             subscribed: std::collections::BTreeSet::new(),
             lod_assigned: BTreeMap::new(),
             lod_table: game::lod::LOD_RING_TABLE,
@@ -317,6 +492,7 @@ impl GameInstanceManager {
             pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
             last_hud_status: None,
+            last_active_cells: None,
             ui_update_send,
             prev_ui_tree: game::WidgetTree::empty(),
             last_cursor_grab: true,
@@ -325,6 +501,8 @@ impl GameInstanceManager {
             recon: ReconMetrics::default(),
             #[cfg(not(target_arch = "wasm32"))]
             perf: PerfBudget::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            crossing: CrossingProbe::default(),
         }
     }
 
@@ -418,6 +596,10 @@ impl GameInstanceManager {
             GameEventKind::Tick => {
                 #[cfg(not(target_arch = "wasm32"))]
                 let tick_start = Instant::now();
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(home) = self.home_region {
+                    self.crossing.home_tick(self.stalled.contains_key(&home));
+                }
                 let stalled = &mut self.stalled;
                 self.world
                     .as_mut()
@@ -525,6 +707,11 @@ impl GameInstanceManager {
             if is_local_player {
                 // Predicted home flip: reroute input now; the server's
                 // PlayerRegion push confirms (or corrects) it.
+                #[cfg(not(target_arch = "wasm32"))]
+                if self.home_region != Some(target) {
+                    let stalled = self.stalled.get(&target).copied().unwrap_or(0);
+                    self.crossing.flip(source, target, stalled);
+                }
                 self.home_region = Some(target);
             }
         }
@@ -548,11 +735,15 @@ impl GameInstanceManager {
                 return Ok(false);
             }
         }
+        self.emit_active_cells();
         self.emit_hud_status();
         // Surface the metrics/budget lines from pump()-driven harnesses too
         // (soak test); on wasm there is no Instant, so no reporting.
         #[cfg(not(target_arch = "wasm32"))]
-        self.maybe_report_metrics();
+        {
+            self.maybe_report_metrics();
+            self.crossing.maybe_report();
+        }
         Ok(true)
     }
 
@@ -561,8 +752,16 @@ impl GameInstanceManager {
     /// `handle_server` can call `drop_region` first without fighting the
     /// borrow checker over `self`.
     fn new_region(&mut self, id: RegionId, raw_game_data: Rollback) {
+        let Some(client_id) = self.client_id else {
+            // PlayerRegion always precedes region snapshots; a region built
+            // without our id would act as the server (cell-hash checks off).
+            log::error!("region {id:?} snapshot before PlayerRegion: dropped");
+            return;
+        };
         let (send, recv) = crossbeam::channel::unbounded();
-        let data = Region::new(raw_game_data.clone(), Some(send), id, self.client_id);
+        // The bridge gets a copy; the decoded snapshot itself becomes the
+        // region (it was cloned for that too: a whole `Rollback` copy per
+        // snapshot on the thread that runs prediction).
         self.client_event_send
             .send(ClientUpdateEvent::NewRegion(
                 id,
@@ -570,6 +769,7 @@ impl GameInstanceManager {
                 recv,
             ))
             .unwrap();
+        let data = Region::new(raw_game_data, Some(send), id, Some(client_id));
         if let Some(ref mut w) = self.world {
             w.load(&id, data);
         } else {
@@ -587,27 +787,50 @@ impl GameInstanceManager {
     /// isn't readable yet.
     fn viewer_region(&self) -> Option<RegionCoords> {
         let home = self.home_region?;
+        Some(match self.viewer_world_xz() {
+            Some((x, z)) => RegionCoords::from_world(x, z),
+            None => home,
+        })
+    }
+
+    /// The viewer's world-space (x, z): the local player's sim body in the
+    /// home region, rebased by home's offset. `None` until that body exists.
+    fn viewer_world_xz(&self) -> Option<(f32, f32)> {
+        let home = self.home_region?;
         let world = self.world.as_ref()?;
         if !world.region_exists(&home) {
-            return Some(home);
+            return None;
         }
         let data = world.data(&home);
-        let Some(client_id) = self.client_id else {
-            return Some(home);
-        };
-        let Some(key) = data.player_entites.get(&client_id).copied() else {
-            return Some(home);
-        };
-        let Some(handle) = *data.ecs.rigidbody.try_get(key) else {
-            return Some(home);
-        };
-        let Some(body) = data.physics.bodies.get(handle) else {
-            return Some(home);
-        };
-        let t = body.translation();
+        let key = data.player_entites.get(&self.client_id?).copied()?;
+        let handle = (*data.ecs.rigidbody.try_get(key))?;
+        let t = data.physics.bodies.get(handle)?.translation();
         let off = home.world_offset();
         // Real = OrderedFloat<f32>; .0 unwraps to f32 (same as convert.rs).
-        Some(RegionCoords::from_world(t.x.0 + off[0], t.z.0 + off[2]))
+        Some((t.x.0 + off[0], t.z.0 + off[2]))
+    }
+
+    /// Centre of the near window and the LOD rings: the viewer's region, but
+    /// sticky — it moves only once the viewer is [`WINDOW_RECENTER_MARGIN_M`]
+    /// into another region (`RegionCoords::recentered`). Without it every
+    /// crossing of a seam released and re-requested a whole row, and going back
+    /// and forth over one reloaded five regions per crossing
+    /// (`just shuttle-probe`, 2026-09-23). Updated once per tick by
+    /// `update_window`; `update_lod_window` reads the same value, so the near
+    /// window and the rings' exclusion never disagree.
+    fn advance_window_center(&mut self) -> Option<RegionCoords> {
+        let center = match self.viewer_world_xz() {
+            Some((x, z)) => Some(RegionCoords::recentered(
+                self.window_center,
+                x,
+                z,
+                window_recenter_margin(),
+            )),
+            // No readable body yet (join) or mid-handoff: keep what we have.
+            None => self.window_center.or(self.home_region),
+        };
+        self.window_center = center;
+        center
     }
 
     /// Local player's body translation in its home region's local space
@@ -696,6 +919,25 @@ impl GameInstanceManager {
     /// Push region + connection status to the render bridge, but only when it
     /// changed since the last push (edge-triggered). No-op until we know our
     /// home region and can resolve the viewer region.
+    /// Cell mode: push the home region's active cells to the renderer when
+    /// they (or the home region) changed. Edge-triggered like `emit_hud_status`.
+    fn emit_active_cells(&mut self) {
+        if game::CELL_CHUNKS == 0 {
+            return;
+        }
+        let Some(home) = self.home_region else { return };
+        let Some(world) = self.world.as_ref() else { return };
+        if !world.region_exists(&home) {
+            return;
+        }
+        let active = world.data(&home).cells.active.clone();
+        if self.last_active_cells.as_ref() == Some(&(home, active.clone())) {
+            return;
+        }
+        self.last_active_cells = Some((home, active.clone()));
+        let _ = self.client_event_send.send(ClientUpdateEvent::ActiveCells(home, active));
+    }
+
     fn emit_hud_status(&mut self) {
         let (Some(home), Some(viewer)) = (self.home_region, self.viewer_region()) else {
             return;
@@ -764,7 +1006,7 @@ impl GameInstanceManager {
     /// the new, release the stale, and tear stale regions out of the local
     /// world + render bridge. Cheap when nothing changed (set compare).
     fn update_window(&mut self) {
-        let Some(center) = self.viewer_region() else {
+        let Some(center) = self.advance_window_center() else {
             return;
         };
         let desired = desired_window(center, self.home_region, self.near_radius);
@@ -803,10 +1045,18 @@ impl GameInstanceManager {
     /// subtracts is already current — streamed LOD and simulated regions
     /// never cover the same region.
     fn update_lod_window(&mut self) {
-        let Some(center) = self.viewer_region() else {
+        let Some(center) = self.window_center.or_else(|| self.viewer_region()) else {
             return;
         };
-        let excluded = desired_window(center, self.home_region, self.near_radius);
+        let mut excluded = desired_window(center, self.home_region, self.near_radius);
+        if game::CELL_CHUNKS != 0 {
+            // Cell mode: the home region's dormant terrain renders as LOD,
+            // with holes where active cells render from the sim
+            // (renderer/lod_rings.rs `mask_home_lod`).
+            if let Some(home) = self.home_region {
+                excluded.remove(&home);
+            }
+        }
         let (assigned, desired) = desired_lod(
             center,
             &excluded,
@@ -833,9 +1083,10 @@ impl GameInstanceManager {
             self.server_game_send
                 .send(ClientPacket::ReleaseLod(key))
                 .unwrap();
+            let near_takeover = key.regions().iter().any(|rc| excluded.contains(rc));
             let _ = self
                 .client_event_send
-                .send(ClientUpdateEvent::RemoveLod(key));
+                .send(ClientUpdateEvent::RemoveLod { key, near_takeover });
             self.lod_subscribed.remove(&key);
         }
         // Paced: the rest of the diff is picked up by the following ticks.
@@ -865,6 +1116,8 @@ impl GameInstanceManager {
         self.recon.align_ticks += ticks;
         if self.home_region == Some(region) {
             self.recon.home_align_steps += 1;
+            #[cfg(not(target_arch = "wasm32"))]
+            self.crossing.align_home(error_ms, ticks);
         }
         if error_ms > 0 {
             self.stalled.insert(region, ticks);
@@ -904,6 +1157,8 @@ impl GameInstanceManager {
                     self.recon.corrections += 1;
                     self.recon.correction_sum += moved;
                     self.recon.correction_max = self.recon.correction_max.max(moved);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.crossing.correction(moved);
                 }
             }
             Ok(())
@@ -970,7 +1225,16 @@ impl GameInstanceManager {
                     // a flip into a region not yet aligned): at the clock's
                     // 10% slew a second of error would take ten to close.
                     let far = if is_home { CLIENT_LEAD_BAND_MS + HOME_STEP_ALIGN_MS } else { CLIENT_LEAD_BAND_MS };
-                    if error.abs() > far {
+                    // Home is never frozen for running AHEAD within the
+                    // server's input-hold horizon: a sample goes stale behind
+                    // the region snapshots a window shift queues on the same
+                    // path, so right after a crossing it read ~350 ms ahead
+                    // and sat the player out for 6-10 ticks — the crossing
+                    // pause (`just fly-probe`, 2026-09-23). Ahead only means
+                    // the server holds each input a little longer; the slew
+                    // below closes it.
+                    let home_ahead_ok = is_home && error > 0 && error <= HOME_STALL_MIN_MS;
+                    if error.abs() > far && !home_ahead_ok {
                         step = Some((error, ((error.abs() + rate / 2) / rate) as usize));
                     }
                     if is_home {
@@ -1023,6 +1287,16 @@ impl GameInstanceManager {
 
                 let home = id.unwrap_or(RegionCoords::new(0, 0));
                 let first_home = self.home_region.is_none();
+                #[cfg(not(target_arch = "wasm32"))]
+                match self.home_region {
+                    // The server flipped first (no predicted crossing yet).
+                    Some(prev) if prev != home => {
+                        let stalled = self.stalled.get(&home).copied().unwrap_or(0);
+                        self.crossing.flip(prev, home, stalled);
+                        self.crossing.confirmed(home);
+                    }
+                    _ => self.crossing.confirmed(home),
+                }
                 self.home_region = Some(home);
                 if first_home {
                     game::perf_event!(
@@ -1065,6 +1339,7 @@ impl GameInstanceManager {
                 {
                     self.perf.snapshot_count += 1;
                     self.perf.snapshot_total += snap_start.elapsed();
+                    self.crossing.snapshot(snap_start.elapsed());
                     // Game-thread cost of one snapshot: teardown + the two
                     // `Rollback` clones in `new_region` + world insert.
                     game::perf_event!(
@@ -1085,11 +1360,17 @@ impl GameInstanceManager {
                     let mut acc = ReconcileStats::default();
                     if let Some(ref mut world) = self.world {
                         for ev in pending {
-                            if let Ok(stats) = world.reconcile_event(ev) {
-                                acc.mispredictions += stats.mispredictions;
-                                acc.replay_depth_sum += stats.replay_depth_sum;
-                                acc.max_replay_depth =
-                                    acc.max_replay_depth.max(stats.max_replay_depth);
+                            match world.reconcile_event(ev) {
+                                Ok(stats) => {
+                                    acc.mispredictions += stats.mispredictions;
+                                    acc.replay_depth_sum += stats.replay_depth_sum;
+                                    acc.max_replay_depth =
+                                        acc.max_replay_depth.max(stats.max_replay_depth);
+                                }
+                                // A cell built differently from the server is
+                                // a desync: fail hard, as the live path does.
+                                Err(e @ GameError::CellHashMismatch(_)) => return Err(e),
+                                Err(e) => warn!("replayed event failed to reconcile: {e:?}"),
                             }
                         }
                     }
@@ -1198,8 +1479,10 @@ impl GameInstanceManager {
                     }
                 }
             }
+            self.emit_active_cells();
             self.emit_hud_status();
             self.maybe_report_metrics();
+            self.crossing.maybe_report();
         }
     }
 
@@ -2576,9 +2859,14 @@ mod manager_tests {
 #[cfg(test)]
 mod lod_window_tests {
     use super::*;
-    use game::lod::{LodKey, LOD_RING_TABLE, LOD_STICKY_BAND};
+    use game::lod::{LodKey, LOD_STICKY_BAND};
     use game::RegionCoords;
     use std::collections::{BTreeMap, BTreeSet};
+
+    /// The default-size production table, as a fixture: these tests pin the
+    /// assignment algorithm, and `game::lod::LOD_RING_TABLE` is re-cut per
+    /// `REGION_CHUNKS`.
+    const LOD_RING_TABLE: &[(i32, u32)] = &[(2, 2), (3, 4), (6, 8), (13, 16), (27, 32), (32, 64)];
 
     #[test]
     fn desired_lod_assigns_by_table_and_excludes() {
@@ -2592,17 +2880,18 @@ mod lod_window_tests {
             2,
             "distance 1 -> factor 2"
         );
-        assert_eq!(assigned[&RegionCoords::new(0, 4)], 4);
-        assert_eq!(assigned[&RegionCoords::new(0, 8)], 16);
-        assert_eq!(assigned[&RegionCoords::new(0, 16)], 64);
-        assert_eq!(assigned[&RegionCoords::new(0, 32)], 256);
+        assert_eq!(assigned[&RegionCoords::new(0, 3)], 4);
+        assert_eq!(assigned[&RegionCoords::new(0, 6)], 8);
+        assert_eq!(assigned[&RegionCoords::new(0, 13)], 16);
+        assert_eq!(assigned[&RegionCoords::new(0, 27)], 32);
+        assert_eq!(assigned[&RegionCoords::new(0, 32)], 64);
         assert!(
             !assigned.contains_key(&RegionCoords::new(0, 33)),
             "past radius"
         );
         // Region-keyed factors produce one key per region; tile factors dedup.
         assert!(keys.contains(&LodKey::for_region(2, RegionCoords::new(0, 1))));
-        assert!(keys.contains(&LodKey::for_region(64, RegionCoords::new(0, 16))));
+        assert!(keys.contains(&LodKey::for_region(64, RegionCoords::new(0, 30))));
         let f64_keys = keys.iter().filter(|k| k.factor == 64).count();
         let f64_regions = assigned.values().filter(|&&f| f == 64).count();
         assert!(
@@ -2622,8 +2911,8 @@ mod lod_window_tests {
             LOD_RING_TABLE,
             LOD_STICKY_BAND,
         );
-        // Step the viewer +1x: region (-4, 0) is now distance 5 = bound 4 + band 1,
-        // held at factor 4 by stickiness even though fresh assignment says 16.
+        // Step the viewer +1x: region (-3, 0) is now distance 4 = bound 3 + band 1,
+        // held at factor 4 by stickiness even though fresh assignment says 8.
         let (next, _) = desired_lod(
             RegionCoords::new(1, 0),
             &none,
@@ -2632,7 +2921,7 @@ mod lod_window_tests {
             LOD_STICKY_BAND,
         );
         assert_eq!(
-            next[&RegionCoords::new(-4, 0)],
+            next[&RegionCoords::new(-3, 0)],
             4,
             "held by the sticky band"
         );

@@ -3,15 +3,15 @@ use std::ops::Range;
 
 use bevy::{
     prelude::*,
-    render::render_resource::{BindGroup, BufferUsages, RawBufferVec},
+    render::render_resource::{BindGroup, Buffer, BufferUsages, RawBufferVec},
 };
 
-use super::super::meshing::records::QuadRecord;
+use super::super::meshing::records::{QuadRecord, QUAD_INDEX_PATTERN};
 
 /// One stable, shader-readable chunk record indexed by `chunk_slot`.
 ///
 /// The vec4-shaped AABB fields keep the following u32 range block at the same
-/// offsets in Rust and WGSL storage layouts (0, 16, and 32 bytes).
+/// offsets in Rust and WGSL storage layouts (0, 16, 32 and 48 bytes; 80 total).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuNearChunkMeta {
@@ -21,6 +21,10 @@ pub struct GpuNearChunkMeta {
     pub quad_count: u32,
     pub transform_slot: u32,
     pub cave_active: u32,
+    /// `records::face_ends` of the chunk's records (relative to
+    /// `record_start`): per-face range ends, then the unsorted flag + pad.
+    /// Two `vec4<u32>` in WGSL.
+    pub face_ends: [u32; 8],
 }
 
 impl GpuNearChunkMeta {
@@ -31,6 +35,7 @@ impl GpuNearChunkMeta {
         quad_count: 0,
         transform_slot: 0,
         cave_active: 0,
+        face_ends: [0; 8],
     };
 
     fn from_allocation(
@@ -38,6 +43,7 @@ impl GpuNearChunkMeta {
         center: Vec3,
         half_extents: Vec3,
         cave_active: bool,
+        face_ends: [u32; 8],
     ) -> Self {
         Self {
             center: [center.x, center.y, center.z, 0.0],
@@ -46,6 +52,7 @@ impl GpuNearChunkMeta {
             quad_count: allocation.quad_count,
             transform_slot: allocation.chunk_slot,
             cave_active: u32::from(cave_active),
+            face_ends,
         }
     }
 }
@@ -104,6 +111,11 @@ impl RangeAllocator {
     pub fn high_water(&self) -> u32 {
         self.high_water
     }
+
+    /// Free-list fragments and the records they hold, for `[pull-arena]`.
+    pub fn free_stats(&self) -> (usize, u64) {
+        (self.free.len(), self.free.values().map(|&len| len as u64).sum())
+    }
 }
 
 /// Stable allocator for fixed-size chunk-transform slots.
@@ -140,6 +152,28 @@ pub struct GpuQuadArena {
     pub metadata_dirty: BTreeSet<u32>,
     pub metadata_generation: u64,
     pub bind_group: Option<BindGroup>,
+    /// The `top_layers` table (`BlockTopLayers`) and whether it came from the
+    /// real resource (`false`: a one-entry identity stand-in, replaced once
+    /// the resource shows up).
+    pub top_layers: Option<(Buffer, bool)>,
+    /// Shared u32 index buffer for the indexed pulled draw and how many quads
+    /// it covers. Every draw indexes it from 0 (`base_vertex` selects the
+    /// chunk's records), so it only needs the largest single chunk's quad
+    /// count; it grows, never shrinks.
+    pub quad_indices: Option<(Buffer, u32)>,
+}
+
+/// The shared quad index buffer's size for a chunk of `quads` quads: at least
+/// one 32³ chunk's worth of a typical surface, then powers of two.
+pub fn quad_index_capacity(quads: u32) -> u32 {
+    quads.max(16_384).next_power_of_two()
+}
+
+/// `QUAD_INDEX_PATTERN` repeated for `quads` quads, 4 vertices apart.
+pub fn quad_index_data(quads: u32) -> Vec<u32> {
+    (0..quads)
+        .flat_map(|quad| QUAD_INDEX_PATTERN.map(|local| quad * 4 + local))
+        .collect()
 }
 
 impl Default for GpuQuadArena {
@@ -160,11 +194,37 @@ impl Default for GpuQuadArena {
             metadata_dirty: default(),
             metadata_generation: 0,
             bind_group: None,
+            top_layers: None,
+            quad_indices: None,
         }
     }
 }
 
 impl GpuQuadArena {
+    /// One `[pull-arena]` line: live chunk slots, allocator high-water marks and
+    /// fragmentation, and the GPU buffer capacities they drive. The arena only
+    /// grows, so a run whose numbers climb while the window stays the same size
+    /// is leaking slots or records.
+    pub fn log_stats(&self) {
+        let (fragments, free_records) = self.record_allocator.free_stats();
+        let mib = |elems: usize, size: usize| (elems * size) as f64 / (1024.0 * 1024.0);
+        log::debug!(
+            target: game::perf::BUDGET_TARGET,
+            "[pull-arena] live_chunks={} slot_high_water={} free_slots={} | records live={} high_water={} \
+             free={} in {} fragments | capacity MiB records={:.1} transforms={:.1} metadata={:.1}",
+            self.allocations.len(),
+            self.slot_allocator.high_water(),
+            self.slot_allocator.free_count(),
+            self.allocations.values().map(|a| a.quad_count as u64).sum::<u64>(),
+            self.record_allocator.high_water(),
+            free_records,
+            fragments,
+            mib(self.records.capacity(), std::mem::size_of::<QuadRecord>()),
+            mib(self.transforms.capacity(), std::mem::size_of::<Mat4>()),
+            mib(self.metadata.capacity(), std::mem::size_of::<GpuNearChunkMeta>()),
+        );
+    }
+
     /// Returns an allocation while keeping the transform/metadata slot stable
     /// when only the variable-length quad-record range changes.
     pub fn ensure_allocation(&mut self, entity: Entity, quad_count: u32) -> ArenaAllocation {
@@ -214,13 +274,20 @@ impl GpuQuadArena {
         center: Vec3,
         half_extents: Vec3,
         cave_active: bool,
+        face_ends: [u32; 8],
     ) {
         let allocation = *self
             .allocations
             .get(&entity)
             .expect("metadata update requires an arena allocation");
         self.metadata.values_mut()[allocation.chunk_slot as usize] =
-            GpuNearChunkMeta::from_allocation(allocation, center, half_extents, cave_active);
+            GpuNearChunkMeta::from_allocation(
+                allocation,
+                center,
+                half_extents,
+                cave_active,
+                face_ends,
+            );
         self.metadata_dirty.insert(allocation.chunk_slot);
     }
 
@@ -258,6 +325,11 @@ impl SlotAllocator {
         self.free.insert(slot);
     }
 
+    /// Freed slots waiting for reuse, for `[pull-arena]`.
+    pub fn free_count(&self) -> usize {
+        self.free.len()
+    }
+
     pub fn high_water(&self) -> u32 {
         self.high_water
     }
@@ -265,6 +337,13 @@ impl SlotAllocator {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quad_indices_repeat_the_pattern_four_vertices_apart() {
+        assert_eq!(quad_index_data(2), vec![0, 1, 2, 2, 1, 3, 4, 5, 6, 6, 5, 7]);
+        assert_eq!(quad_index_capacity(1), 16_384);
+        assert_eq!(quad_index_capacity(20_000), 32_768);
+    }
+
     use super::*;
 
     #[test]
@@ -277,6 +356,7 @@ mod tests {
             Vec3::new(1.0, 2.0, 3.0),
             Vec3::new(4.0, 5.0, 6.0),
             true,
+            [9; 8],
         );
 
         let resized = arena.ensure_allocation(entity, 9);
@@ -291,6 +371,7 @@ mod tests {
                 quad_count: 9,
                 transform_slot: first.chunk_slot,
                 cave_active: 1,
+                face_ends: [9; 8],
             }
         );
     }
@@ -303,8 +384,8 @@ mod tests {
         let replacement_entity = Entity::from_raw_u32(12).unwrap();
         let first = arena.ensure_allocation(first_entity, 2);
         let second = arena.ensure_allocation(second_entity, 3);
-        arena.update_metadata(first_entity, Vec3::ONE, Vec3::splat(2.0), true);
-        arena.update_metadata(second_entity, Vec3::splat(3.0), Vec3::splat(4.0), true);
+        arena.update_metadata(first_entity, Vec3::ONE, Vec3::splat(2.0), true, [0; 8]);
+        arena.update_metadata(second_entity, Vec3::splat(3.0), Vec3::splat(4.0), true, [0; 8]);
 
         arena.release(first_entity);
 
@@ -322,7 +403,9 @@ mod tests {
 
     #[test]
     fn near_chunk_metadata_has_wgsl_storage_layout() {
-        assert_eq!(std::mem::size_of::<GpuNearChunkMeta>(), 48);
+        // WGSL: two vec4<f32>, four u32, two vec4<u32> (face_ends) = 80 bytes.
+        assert_eq!(std::mem::size_of::<GpuNearChunkMeta>(), 80);
+        assert_eq!(std::mem::offset_of!(GpuNearChunkMeta, face_ends), 48);
         assert!(
             bytemuck::try_cast_slice::<GpuNearChunkMeta, u8>(&[GpuNearChunkMeta::INACTIVE]).is_ok()
         );

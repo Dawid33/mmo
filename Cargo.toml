@@ -28,7 +28,7 @@ inherits = "release"
 debug = "full"
 
 [workspace.dependencies]
-bevy = { version = "0.18", default-features = false, features = [
+bevy = { version = "0.19.1", default-features = false, features = [
   "std",
   "bevy_winit",
   "bevy_window",

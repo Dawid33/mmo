@@ -20,14 +20,14 @@ pub type PristineGenerator = Box<dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Colu
 
 #[derive(Debug)]
 pub enum LodBuildJob {
-    /// Region-keyed factors (2/4/16): downsample this region's chunks
+    /// Sub-block factors (below `COARSE_MIN_FACTOR`): downsample this region's chunks
     /// (authoritative when the region has state, generated otherwise —
     /// the manager resolves the source, the builder just computes).
     Region {
         key: LodKey,
         chunks: Vec<(ChunkCoords, Chunk)>,
     },
-    /// Region-keyed factors for a region with NO authoritative state (never
+    /// Sub-block factors for a region with NO authoritative state (never
     /// run, not parked): the builder generates the terrain itself, then
     /// downsamples it. Only submitted to builders that
     /// [`generates_pristine`](LodBuilder::generates_pristine) — worldgen costs
@@ -35,8 +35,10 @@ pub enum LodBuildJob {
     /// latency for every client (measured 24 calls / 8.7 s for one LOD ring,
     /// tripping the client's keep-up warning).
     Pristine { key: LodKey, region: RegionCoords },
-    /// Tile-keyed factors (64/256): coarse-generate the tile, then overlay
-    /// each region that has authoritative state.
+    /// Block-scale and coarser factors (`COARSE_MIN_FACTOR` and up):
+    /// coarse-generate the key, then overlay each region that has
+    /// authoritative state. Pristine regions never pay for full generation
+    /// here, which is what keeps the wide outer rings affordable.
     Tile {
         key: LodKey,
         overlays: Vec<(RegionCoords, Vec<(ChunkCoords, Chunk)>)>,
@@ -76,6 +78,15 @@ pub fn build_lod_job(
         }
         LodBuildJob::Region { key, chunks } => {
             let cells = downsample_chunks(chunks, key.factor);
+            (key, encode_cells(cells))
+        }
+        LodBuildJob::Tile { key, overlays } if key.region_span() == 1 => {
+            // One region, possibly several grids per band (factor 16): an
+            // overlay replaces the key wholesale, so there is nothing to merge.
+            let cells = match overlays.into_iter().next() {
+                Some((_, chunks)) => downsample_chunks(chunks, key.factor),
+                None => coarse(&key),
+            };
             (key, encode_cells(cells))
         }
         LodBuildJob::Tile { key, overlays } => {

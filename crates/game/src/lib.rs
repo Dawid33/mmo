@@ -20,15 +20,18 @@ pub mod cell_store;
 pub mod cell_tickets;
 pub mod cells;
 pub mod debug_render;
+pub mod edit;
 pub mod input;
 pub mod lod;
 pub mod lod_builder;
+pub mod movement;
 pub mod perf;
 mod physics;
 pub mod protocol;
 mod region;
 pub mod region_runner;
 pub mod registry;
+pub mod slime;
 pub mod state;
 pub mod ui;
 pub mod volume;
@@ -47,6 +50,7 @@ pub use debug_render::{ColliderDebug, DebugFlags, DebugLine, DEBUG_COLLIDER_RADI
 pub use input::*;
 pub use lod::*;
 pub use lod_builder::*;
+pub use movement::Motion;
 pub use protocol::*;
 pub use region_runner::*;
 pub use registry::*;
@@ -103,7 +107,11 @@ pub enum ClientUpdateEvent {
     /// replace-on-re-receipt). Decoded and spawned by the renderer.
     LodData(LodKey, LodPayload),
     /// The ring assignment moved on: retire this key's render root.
-    RemoveLod(LodKey),
+    /// `near_takeover`: (one of) the key's regions just joined the near
+    /// window, so the replacement is authoritative terrain still on its way
+    /// — the renderer keeps the LOD until that region is fully meshed rather
+    /// than on a frame deadline.
+    RemoveLod { key: LodKey, near_takeover: bool },
     GameCrash(GameError),
     SetPlayer(ClientId),
     /// Cell mode: the home region's active cells (edge-triggered). The

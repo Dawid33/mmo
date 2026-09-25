@@ -56,17 +56,8 @@ impl Chunk {
                         // stays Air
                     } else {
                         blocks[bi.0 as usize] = Block::new(solid);
-                        let mut c = ChiselData::new(vec![solid]);
-                        for vy in 0..BLOCK_VOXELS {
-                            if y0 + vy < depth {
-                                for vx in 0..BLOCK_VOXELS {
-                                    for vz in 0..BLOCK_VOXELS {
-                                        c.set(vx, vy, vz, true, 0);
-                                    }
-                                }
-                            }
-                        }
-                        chisel.insert(bi, c);
+                        let top = [BLOCK_VOXELS, depth - y0, BLOCK_VOXELS];
+                        chisel.insert(bi, ChiselData::cuboid(solid, [0, 0, 0], top));
                     }
                 }
             }

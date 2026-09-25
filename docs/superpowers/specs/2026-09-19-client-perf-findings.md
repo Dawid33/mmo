@@ -52,6 +52,47 @@ What now paces a `full` join: near meshing (20.0 s; the snapshot-voxel apply bud
 finishes at 10.4 s, the mesher's 32 uploads/frame after it) — LOD is done by 14.3 s. With the
 frame vsync-capped, per-frame budgets are the knob, not CPU.
 
+## Why a bare `just run` is slow — measured 2026-09-20
+
+`PERF_CAPTURE_PROFILE=debug … just world=full perf-capture` with no `adapter=`
+(`20260920T160806Z-default-full`) reproduces `just run`: debug binaries, wgpu's own adapter choice.
+- **It is the GPU choice, not the debug profile.** wgpu picked the **NVIDIA T600 on NVK**; the
+  frame went 15 → 211 ms as terrain loaded (4.7 fps), GPU-bound at 86%, with
+  `main_opaque_pass_3d` = **162 ms** for 921 605 fragment invocations (one per pixel — it is
+  geometry/vertex-pull cost, not overdraw). The Intel iGPU draws the same scene's opaque pass in
+  ~5 ms. `near_meshing_drained` 31.5 s and `world_ready` 37.6 s follow from the frame rate.
+- **The debug build itself is fine now**: server genesis ≤ 1.17 s per region, all snapshots
+  received by 3.3 s, LOD complete 10.6 s, client game thread ≤ 1.4 ms per tick at 8–20% util.
+- The five KEEP-UP warnings are the pacing bug, not load: ticks cost ~1 ms while `drift` grows
+  monotonically 100 → 1750 ms at `tick_rate=55ms` — the slow-down never converges the lead.
+  (An earlier debug run, set aside at the user's request, additionally showed client tick cost
+  for region (0,0) climbing 27 → 372 ms a few seconds after a region crossing; this run had no
+  crossing and did not reproduce it. Worth a deliberate repro: debug build, cross a region.)
+Fix for day-to-day use: pin the adapter. The justfile's `adapter` now defaults to
+`$VOXEL_ADAPTER`, so `export VOXEL_ADAPTER=Intel` (or `6700`) once pins every recipe.
+
+## First-terrain latency — confirmed 2026-09-20
+
+`20260920T160235Z-Intel-full` vs `…155521Z…` (both with wire compression; `full`, unclamped):
+`first_near_mesh` **1.91 → 1.07 s**; `snapshot_voxels_applied` 6.9 → 6.1 s (the cap did not slow
+the batch pipeline — eight outstanding keeps four workers fed); first DIAG dump 40 → 27 ms;
+`near_meshing_drained` 12.5 → 12.9 s and `world_ready` 13.1 → 13.5 s (noise); a region crossing
+at ~14 s applied its 8370 chunks in under 2 s; 0 warnings, 0 KEEP-UP, all 20 631 LOD cells meshed.
+
+### First-terrain latency — implementation notes
+
+The side effect noted under wire compression below: with all nine regions arriving within 0.8 s,
+`spawn_region_snapshot` put ~365 snapshot-voxel batches on the FIFO compute pool at once and the
+first mesh tasks queued behind them (`first_near_mesh` 0.9 → 1.9 s). Batches are now only
+*queued* (`SnapshotVoxelQueue.batches`); `apply_snapshot_voxels` keeps at most
+`MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS = 8` on the pool and always dispatches the batch whose
+chunk centroid is nearest the active camera (arrival order until a camera exists — the local
+camera itself arrives in the home region's snapshot). Batches of a removed or replaced region are
+retired when `RegionRoots` changes, so they do not pin the ~40 MiB snapshot `Arc`. Tests: the
+picker (`nearest_batch`), and an app-level test that a 700-chunk snapshot never has more than the
+cap outstanding and still ends with every chunk's voxels applied; 350 renderer/harness tests
+green. Expect `first_near_mesh` back under ~1 s and terrain filling outward from the player.
+
 ## Wire compression — confirmed 2026-09-20
 
 `20260920T155521Z-Intel-full` vs `…154225Z…` (same code without the codec; `full`, unclamped):
@@ -803,6 +844,8 @@ Still open from the server side: genesis (#1, measure with `just collider-bench`
 
 | Capture directory | Adapter (selected) | World | Rev | Notes |
 |---|---|---|---|---|
+| `target/perf-capture/20260920T160806Z-default-full/` | **NVK T600 (unpinned)**, debug build | full | same as below | reproduces `just run`: GPU-bound 4.7 fps, opaque pass 162 ms; `world_ready` 37.6 s |
+| `target/perf-capture/20260920T160235Z-Intel-full/` | same, unclamped | full | `9b778d6` + nearest-first capped voxel batches (uncommitted) | 45 s incl. one region crossing; first terrain 1.07 s, `world_ready` 13.5 s |
 | `target/perf-capture/20260920T155521Z-Intel-full/` | same, unclamped | full | `4a57a97` + lz4 wire framing (uncommitted) | 60 s; snapshots 380 → 11.6 MB, server tx 396 → 14 MB, `world_ready` 13.1 s |
 | `target/perf-capture/20260920T154225Z-Intel-full/` | same, unclamped | full | `34f355c` + core-scaled LOD workers = 5 (uncommitted) | 60 s; LOD complete 8.9 s, `world_ready` 13.5 s, region ticks ≤ 12 ms |
 | `target/perf-capture/20260920T153227Z-Intel-full/` | same, unclamped | full | `880bd85` + packed LOD cells (uncommitted) | 90 s; client RSS 1134 MB, join frames 17–23 ms, `world_ready` 18.2 s |

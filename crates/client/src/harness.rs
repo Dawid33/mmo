@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crossbeam::channel::{unbounded, Receiver};
+use crossbeam::channel::{unbounded, Receiver, Sender};
 use game::{
     state_hash, ClientUpdateEvent, GameEventKind, InputEvent, Key, RegionCoords, ServerPacket,
 };
@@ -18,7 +18,7 @@ pub struct SimHarness {
     server_to_client: Receiver<ServerPacket>,
     bridge_recv: Receiver<ClientUpdateEvent>,
     /// Debug toggles shared with the manager — tests flip these the way the
-    /// render thread's F3 handler would.
+    /// render thread's F3 dev panel would.
     pub debug: game::DebugFlags,
     held: BTreeSet<Key>,
     /// Keys released since the last `step()`, awaiting their one-shot key-up
@@ -33,9 +33,22 @@ pub struct SimHarness {
     /// forward before the client observes the snapshot), so convergence is
     /// checked tick-aligned: the client's `(region, tick)` must equal the
     /// server's authoritative hash recorded FOR THAT SAME TICK — not the
-    /// server's live (already-advanced) hash.
+    /// server's live (already-advanced) hash. (That describes a client that
+    /// trails; one that leads is aligned by `catch_up`.)
     server_hashes: HashMap<(RegionCoords, usize), u32>,
+    /// What the client actually reads: `server_to_client` forwarded through
+    /// `forward()`, which can withhold `SyncClock` (see `catch_up`).
+    client_in_send: Sender<ServerPacket>,
+    client_in: Receiver<ServerPacket>,
 }
+
+/// Most server-only ticks `catch_up` runs — comfortably more than the
+/// client's lead band (`CLIENT_LEAD_MS` in instance.rs).
+const CATCH_UP_MAX_TICKS: usize = 8;
+
+/// Ticks `cross_boundary` spends ascending before it heads for the seam
+/// (20 ticks of creative flight ≈ 7.5 blocks).
+const CROSSING_CLIMB_TICKS: usize = 20;
 
 impl SimHarness {
     /// Wire a client to a fresh local authoritative server. Mirrors the
@@ -79,6 +92,7 @@ impl SimHarness {
 
         let client_to_server = client.client_packet_recv(); // Receiver<ClientPacket>
         let (server_to_client_send, server_to_client) = unbounded::<ServerPacket>();
+        let (client_in_send, client_in) = unbounded::<ServerPacket>();
         let server = LocalServer::new_with_generator(
             client_to_server,
             server_to_client_send,
@@ -95,6 +109,8 @@ impl SimHarness {
             held: BTreeSet::new(),
             released: BTreeSet::new(),
             server_hashes: HashMap::new(),
+            client_in_send,
+            client_in,
         }
     }
 
@@ -112,6 +128,15 @@ impl SimHarness {
     /// Drain everything the manager has sent to the (absent) render bridge.
     pub fn drain_bridge_events(&mut self) -> Vec<ClientUpdateEvent> {
         self.bridge_recv.try_iter().collect()
+    }
+
+    /// Jitter the server's region scheduling from a seed, standing in for
+    /// real region threads. Use `InlineSchedule::late` (or `shuffled`): they
+    /// keep every region's tick count in lockstep with the client, which the
+    /// tick-aligned `assert_converged` needs. `jittery` makes regions miss
+    /// ticks, and this harness's client cannot pace itself against that.
+    pub fn set_schedule(&mut self, schedule: game::InlineSchedule) {
+        self.server.set_schedule(Some(schedule));
     }
 
     pub fn press(&mut self, key: Key) {
@@ -148,28 +173,39 @@ impl SimHarness {
         }
         self.released.clear();
         self.client.send_tick();
-        self.client
-            .pump(&self.server_to_client)
-            .expect("client pump");
+        self.pump_client(true);
 
         // 2. Server ingest + advance.
+        self.tick_server();
+
+        // 3. Client reconcile.
+        self.pump_client(true);
+    }
+
+    /// Server ingest + one authoritative tick, recording each region's hash at
+    /// its new tick so convergence can be checked tick-aligned (see
+    /// `server_hashes` / `assert_converged`).
+    fn tick_server(&mut self) {
         self.server.pump().expect("server pump");
         self.server.tick();
-
-        // Record the server's authoritative per-region hash at its new tick, so
-        // convergence can be checked tick-aligned against the ~1-tick-delayed
-        // client (see `server_hashes` / `assert_converged`).
         for rc in self.server.running_regions() {
             let t = self.server.region_tick(rc);
             if let Some(hash) = self.server.region_hash(rc) {
                 self.server_hashes.insert((rc, t), hash);
             }
         }
+    }
 
-        // 3. Client reconcile.
-        self.client
-            .pump(&self.server_to_client)
-            .expect("client reconcile pump");
+    /// Deliver the server's packets and let the client process them (plus any
+    /// queued `Tick`). `with_clock: false` withholds `SyncClock`, so the
+    /// client reconciles without re-pacing itself against the server.
+    fn pump_client(&mut self, with_clock: bool) {
+        for packet in self.server_to_client.try_iter() {
+            if with_clock || !matches!(packet, ServerPacket::SyncClock(..)) {
+                let _ = self.client_in_send.send(packet);
+            }
+        }
+        self.client.pump(&self.client_in).expect("client pump");
     }
 
     pub fn step_n(&mut self, n: usize) {
@@ -198,9 +234,10 @@ impl SimHarness {
     }
 
     /// Step with no new input until the client has drained all buffered server
-    /// events (no snapshot/event still in flight). The client stays ~1 tick
-    /// behind the server by construction, so we settle on "nothing pending",
-    /// not on tick equality (which can never hold in this lockstep).
+    /// events (no snapshot/event still in flight). Client and server ticks
+    /// never line up by construction (the client trails a fresh snapshot by a
+    /// tick, then holds a lead over the server), so we settle on "nothing
+    /// pending", not on tick equality.
     pub fn settle(&mut self) {
         for _ in 0..64 {
             self.step();
@@ -232,27 +269,23 @@ impl SimHarness {
     pub fn assert_converged(&mut self) {
         self.settle();
         const HEAL_BOUND: usize = 8;
+        let home = self.client.home_region();
+        let mut aligned = self.catch_up();
         for _ in 0..HEAL_BOUND {
-            if self.home_converged_now() == Some(true) {
+            if aligned.get(&home).is_some_and(|(_, client, server)| client == server) {
                 break;
             }
             self.step();
+            aligned = self.catch_up();
         }
-        let home = self.client.home_region();
-        let mut home_checked = false;
         for rc in self.client.world_ref().loaded_regions() {
-            let t = self.client.world_ref().current_tick(&rc);
-            let client_hash = state_hash(self.client.world_ref().data(&rc));
-            match self.server_hashes.get(&(rc, t)) {
-                Some(&server_hash) => {
+            match aligned.get(&rc) {
+                Some(&(t, client_hash, server_hash)) => {
                     assert_eq!(
                         client_hash, server_hash,
                         "client region {:?} @tick {} diverges from the server's authoritative state at that tick",
                         rc, t
                     );
-                    if rc == home {
-                        home_checked = true;
-                    }
                 }
                 None => {
                     // The home region is the region under test — it MUST be
@@ -264,14 +297,16 @@ impl SimHarness {
                     // (e.g. right after cross_boundary / teleport_player).
                     assert!(
                         rc != home,
-                        "home region {:?} @tick {} has no matching server-authoritative tick after settle — client is ahead of / out of sync with the authority (convergence unverified)",
-                        rc, t
+                        "home region {:?} @tick {} could not be tick-aligned with the server within {} catch-up ticks — out of sync with the authority (convergence unverified)",
+                        rc,
+                        self.client.world_ref().current_tick(&rc),
+                        CATCH_UP_MAX_TICKS
                     );
                 }
             }
         }
         assert!(
-            home_checked,
+            aligned.contains_key(&home),
             "home region {:?} was not tick-aligned+verified against the server — convergence is vacuous",
             home
         );
@@ -306,7 +341,7 @@ impl SimHarness {
         self.settle();
     }
 
-    /// Hold the movement key for `dir` and step (bounded) until the client's
+    /// Fly in `dir` and step (bounded) until the client's
     /// home region changes AND the player entity is actually queryable there
     /// — i.e. the player crossed a seam and the crossing has fully landed.
     ///
@@ -337,6 +372,17 @@ impl SimHarness {
         self.press(Key::KeyE);
         self.step();
         self.release(Key::KeyE);
+        self.step();
+        // Fly there: a walking body stops at the first ledge taller than a
+        // step. Double-tap Space enters flight; holding the second tap climbs
+        // clear of the terrain around the spawn.
+        self.press(Key::Space);
+        self.step();
+        self.release(Key::Space);
+        self.step();
+        self.press(Key::Space);
+        self.step_n(CROSSING_CLIMB_TICKS);
+        self.release(Key::Space);
         self.step();
         self.press(key);
         for _ in 0..400 {
@@ -371,11 +417,51 @@ impl SimHarness {
     /// Does the client's home region currently match the server's authoritative
     /// hash recorded at the client's home tick? `Some(true|false)`, or `None` if
     /// the server never recorded that region at that tick.
-    fn home_converged_now(&self) -> Option<bool> {
-        let home = self.client.home_region();
-        let t = self.client.world_ref().current_tick(&home);
-        let ch = state_hash(self.client.world_ref().data(&home));
-        self.server_hashes.get(&(home, t)).map(|&sh| ch == sh)
+    /// Tick-align client and server and return, per client region,
+    /// `(tick, client hash, server hash)` AT THE CLIENT'S CURRENT TICK.
+    ///
+    /// The client holds a lead over the server (`CLIENT_LEAD_MS` in
+    /// instance.rs; window regions are stepped into the lead band), so a
+    /// region's client tick is usually one the server has not reached. The
+    /// client's past states can't be read back, and a hash noted when a tick
+    /// was first predicted is no substitute — the server's per-tick events (a
+    /// ghost mirror refreshing while the player stands in a seam margin)
+    /// rewrite every predicted tick on arrival. So the CLIENT is frozen while
+    /// the server alone ticks up to it, the client reconciling what arrives;
+    /// `SyncClock` is withheld for the duration, or the client would step
+    /// itself forward to win its lead back. Both sides then hold final state
+    /// for the same tick, and the comparison is as strict as it ever was.
+    /// Afterwards the client predicts the same number of ticks alone, which
+    /// restores the lead it had — the run continues as if uninterrupted.
+    fn catch_up(&mut self) -> HashMap<RegionCoords, (usize, u32, u32)> {
+        let regions = self.client.world_ref().loaded_regions();
+        let mut steps = 0;
+        while steps < CATCH_UP_MAX_TICKS
+            && regions.iter().any(|rc| {
+                let t = self.client.world_ref().current_tick(rc);
+                !self.server_hashes.contains_key(&(*rc, t)) && self.server.region_tick(*rc) < t
+            })
+        {
+            self.tick_server();
+            self.pump_client(false);
+            steps += 1;
+        }
+
+        let world = self.client.world_ref();
+        let aligned = regions
+            .iter()
+            .filter_map(|rc| {
+                let t = world.current_tick(rc);
+                let server = *self.server_hashes.get(&(*rc, t))?;
+                Some((*rc, (t, state_hash(world.data(rc)), server)))
+            })
+            .collect();
+
+        for _ in 0..steps {
+            self.client.send_tick();
+            self.pump_client(false);
+        }
+        aligned
     }
 }
 

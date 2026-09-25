@@ -13,14 +13,15 @@ use bevy::{
     },
 };
 
-use super::arena::GpuQuadArena;
+use super::super::meshing::records::face_ends;
+use super::arena::{quad_index_capacity, quad_index_data, GpuQuadArena};
 use super::gpu::{
     exact_indirect_draw_count, synchronize_near_metric_mode, ActiveNearMode, ForwardCullSource,
     NearRendererMetrics,
 };
 use super::pipeline::VoxelPullPipeline;
 use super::queue::{grouped_draw_list, ViewChunkDrawList};
-use super::{BlockArrayTexture, ExtractedChunkQuads, RemovedChunkQuads};
+use super::{BlockArrayTexture, BlockTopLayers, ExtractedChunkQuads, RemovedChunkQuads};
 
 /// Per-entity draw metadata into the shared arena.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +51,7 @@ fn draw_list_workload(draws: &ViewChunkDrawList) -> (u64, u64) {
 fn update_near_metrics_for_prepare(
     mode: ActiveNearMode,
     active_chunks: u32,
-    frustum_visible_chunks: u32,
+    frustum_visible_chunks: Option<u32>,
     resident_quads: u64,
     submitted_workload: Option<(u64, u64)>,
     direct_draw_count: Option<u32>,
@@ -86,6 +87,13 @@ fn update_near_metrics_for_prepare(
     }
 }
 
+/// Whether GPU-driven mode still computes the CPU frustum-survivor metric
+/// (`VOXEL_PULL_DEBUG`). Read once.
+fn frustum_metric_wanted() -> bool {
+    static WANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WANTED.get_or_init(|| std::env::var_os("VOXEL_PULL_DEBUG").is_some())
+}
+
 /// Finalizes the view-owned grouped-direct lists after arena allocation, so a
 /// chunk uploaded this frame is eligible to draw in the same frame.
 pub fn prepare_view_chunk_draws(
@@ -94,6 +102,7 @@ pub fn prepare_view_chunk_draws(
         Entity,
         &bevy::camera::primitives::Frustum,
         Has<bevy::pbr::ShadowView>,
+        Has<ViewChunkDrawList>,
     )>,
     chunks: Query<(&MainEntity, &ExtractedChunkQuads)>,
     arena: Res<GpuQuadArena>,
@@ -113,6 +122,30 @@ pub fn prepare_view_chunk_draws(
         .values()
         .map(|allocation| u64::from(allocation.quad_count))
         .fold(0u64, u64::saturating_add);
+    // GPU-driven draws come from the cull compute's indirect buffers and never
+    // read the per-view lists; building them anyway (a frustum test per chunk
+    // and LOD cell per view, five views) was 6 ms/frame at `full` (2026-09-22
+    // trace) spent only on the `frustum_visible_chunks` metric — kept behind
+    // VOXEL_PULL_DEBUG (compare it with the HZB survivors to see what
+    // occlusion culling buys). Views still need the (empty) component
+    // `DrawChunkQuads` queries.
+    if matches!(*mode, ActiveNearMode::GpuDriven { .. }) && !frustum_metric_wanted() {
+        for (view_entity, _, _, has_list) in &views {
+            if !has_list {
+                commands.entity(view_entity).insert(ViewChunkDrawList::default());
+            }
+        }
+        update_near_metrics_for_prepare(
+            *mode,
+            active_chunks,
+            None,
+            resident_quads,
+            None,
+            None,
+            &mut metrics,
+        );
+        return;
+    }
     let mut submitted_workload =
         matches!(*mode, ActiveNearMode::GroupedDirect).then_some((0u64, 0u64));
     let mut direct_draw_count = matches!(*mode, ActiveNearMode::GroupedDirect).then_some(0u32);
@@ -141,7 +174,7 @@ pub fn prepare_view_chunk_draws(
             ))
         })
         .collect();
-    for (view_entity, frustum, is_shadow_view) in &views {
+    for (view_entity, frustum, is_shadow_view, _) in &views {
         let list = grouped_draw_list(frustum, resolved.iter().copied());
         frustum_visible_chunks = frustum_visible_chunks
             .saturating_add(frustum_metric_contribution(list.0.len(), is_shadow_view));
@@ -162,7 +195,7 @@ pub fn prepare_view_chunk_draws(
     update_near_metrics_for_prepare(
         *mode,
         active_chunks,
-        frustum_visible_chunks,
+        Some(frustum_visible_chunks),
         resident_quads,
         submitted_workload,
         direct_draw_count,
@@ -190,6 +223,7 @@ pub fn prepare_chunk_quads(
     queue: Res<RenderQueue>,
     images: Res<RenderAssets<GpuImage>>,
     block_texture: Res<BlockArrayTexture>,
+    top_layers: Option<Res<BlockTopLayers>>,
     mut arena: ResMut<GpuQuadArena>,
     removed: Res<RemovedChunkQuads>,
 ) {
@@ -200,6 +234,33 @@ pub fn prepare_chunk_quads(
     let texture = images.get(&block_texture.0);
 
     let mut rebuild_bind_group = arena.bind_group.is_none();
+    // Static after startup: uploaded once (again only if a stand-in was
+    // uploaded before the resource existed).
+    if arena.top_layers.as_ref().is_none_or(|(_, real)| !real && top_layers.is_some()) {
+        let lut = top_layers.as_ref().map_or_else(|| vec![0], |l| l.0.to_vec());
+        let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("voxel_pull_top_layers"),
+            contents: bytemuck::cast_slice(&lut),
+            usage: BufferUsages::STORAGE,
+        });
+        arena.top_layers = Some((buffer, top_layers.is_some()));
+        rebuild_bind_group = true;
+    }
+    // The shared quad index buffer must cover the largest single chunk.
+    let largest = chunks
+        .iter()
+        .map(|(_, _, extracted)| extracted.records.len() as u32)
+        .max()
+        .unwrap_or(0);
+    if arena.quad_indices.as_ref().is_none_or(|(_, covered)| *covered < largest) {
+        let quads = quad_index_capacity(largest);
+        let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("voxel_pull_quad_indices"),
+            contents: bytemuck::cast_slice(&quad_index_data(quads)),
+            usage: BufferUsages::INDEX,
+        });
+        arena.quad_indices = Some((buffer, quads));
+    }
     for (entity, main_entity, extracted) in &chunks {
         let quad_count = extracted.records.len() as u32;
         if quad_count == 0 {
@@ -214,6 +275,7 @@ pub fn prepare_chunk_quads(
             extracted.center,
             extracted.half_extents,
             extracted.cave_active,
+            face_ends(&extracted.records),
         );
 
         let record_end = allocation.record_start as usize + quad_count as usize;
@@ -281,8 +343,8 @@ pub fn prepare_chunk_quads(
         let Some(texture) = texture else {
             return;
         };
-        let (Some(records), Some(transforms)) =
-            (arena.records.binding(), arena.transforms.binding())
+        let (Some(records), Some(transforms), Some((top_layers, _))) =
+            (arena.records.binding(), arena.transforms.binding(), arena.top_layers.as_ref())
         else {
             return;
         };
@@ -294,6 +356,7 @@ pub fn prepare_chunk_quads(
                 transforms,
                 &texture.texture_view,
                 &texture.sampler,
+                top_layers.as_entire_binding(),
             )),
         ));
     }
@@ -332,10 +395,10 @@ mod tests {
             ..default()
         };
 
-        update_near_metrics_for_prepare(mode, 17, 11, 23, None, None, &mut metrics);
+        update_near_metrics_for_prepare(mode, 17, Some(11), 23, None, None, &mut metrics);
 
         assert_eq!(metrics.active_chunks, 17);
-        assert_eq!(metrics.frustum_visible_chunks, 11);
+        assert_eq!(metrics.frustum_visible_chunks, Some(11));
         assert_eq!(metrics.resident_quads, 23);
         assert_eq!(metrics.hzb_visible_chunks, Some(7));
         assert_eq!(metrics.indirect_draw_count, Some(3));

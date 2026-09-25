@@ -85,7 +85,8 @@ fn main() {
             .set(bevy::log::LogPlugin {
                 filter: "wgpu=error,naga=warn".into(),
                 ..default()
-            }),
+            })
+            .set(client::renderer::render_plugin()),
     )
     .insert_resource(ClearColor(CLEAR))
     .insert_resource(TerrainRenderConfig {
@@ -212,14 +213,14 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         Camera3d::default(),
         Transform::from_xyz(16.0, 30.0, 58.0).looking_at(Vec3::new(16.0, 6.0, 14.0), Vec3::Y),
         bevy::core_pipeline::prepass::DepthPrepass,
-        bevy::render::experimental::occlusion_culling::OcclusionCulling,
+        bevy::render::occlusion_culling::OcclusionCulling,
     ));
 
     // Sun, shadows on — exercises the lit fragment's directional-light +
     // shadow-receive path (Task 5), not just the ambient term.
     commands.spawn((
         DirectionalLight {
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::default().looking_to(Vec3::new(-0.5, -1.0, -0.4), Vec3::Y),

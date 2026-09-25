@@ -8,14 +8,14 @@ use std::sync::Arc;
 use bevy::{
     camera::primitives::Aabb,
     core_pipeline::{
-        core_3d::{graph::Core3d, Opaque3d},
+        core_3d::Opaque3d,
+        Core3d,
         prepass::Opaque3dPrepass,
     },
     pbr::{init_prepass_pipeline, Shadow},
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
-        render_graph::{RenderGraph, RenderGraphExt},
         render_phase::AddRenderCommand,
         render_resource::SpecializedRenderPipelines,
         sync_world::{MainEntity, RenderEntity, SyncToRenderWorld},
@@ -53,6 +53,12 @@ pub struct ChunkQuads(pub Arc<Vec<QuadRecord>>);
 #[derive(Resource, Clone, ExtractResource)]
 pub struct BlockArrayTexture(pub Handle<Image>);
 
+/// Side-face layer -> top-face layer of the same block
+/// (`BlockTextureLayers::side_to_top`), bound as `voxel_pull.wgsl`'s
+/// `top_layers` so distant risers can fade to their block's top.
+#[derive(Resource, Clone, ExtractResource)]
+pub struct BlockTopLayers(pub Arc<Vec<u32>>);
+
 /// Render-world copy of one chunk's draw inputs. The render world is
 /// retained, so this is (re-)inserted ONLY when the chunk's quads, transform
 /// or inherited visibility changed — re-inserting all ~57k chunk entities
@@ -77,6 +83,18 @@ pub struct ExtractedChunkQuads {
 
 #[derive(Resource, Default)]
 pub struct RemovedChunkQuads(pub Vec<Entity>);
+
+/// `[pull-arena]` every [`ARENA_LOG_INTERVAL`] (`PERF_LOG=1` only).
+const ARENA_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn log_arena_stats(arena: Res<arena::GpuQuadArena>, mut last: Local<Option<std::time::Instant>>) {
+    let now = std::time::Instant::now();
+    if last.is_some_and(|t| now - t < ARENA_LOG_INTERVAL) {
+        return;
+    }
+    *last = Some(now);
+    arena.log_stats();
+}
 
 pub fn extract_removed_chunk_quads(
     mut commands: Commands,
@@ -148,11 +166,35 @@ pub fn extract_chunk_quads(
     }
 }
 
+/// Storage buffers the pull path binds in its busiest shader stage, the
+/// fragment stage: quad records and chunk transforms (`voxel_pull.wgsl`
+/// group(1) bindings 0 and 1, visible to both stages) plus the fragment-only
+/// top-layer table (binding 4).
+pub const PULL_STORAGE_BUFFERS_PER_STAGE: u32 = 3;
+
+/// Whether the device can run the quad-record backends at all. They read the
+/// records from storage buffers in the VERTEX stage, which WebGL2 (the wasm
+/// build's `webgl2` backend) and GLES 3.0 do not have — creating
+/// `voxel_pull_chunk_layout` there is a fatal wgpu validation error.
+pub fn device_supports_quad_records(
+    device: &bevy::render::renderer::RenderDevice,
+    adapter: &bevy::render::renderer::RenderAdapter,
+) -> bool {
+    adapter
+        .get_downlevel_capabilities()
+        .flags
+        .contains(bevy::render::render_resource::DownlevelFlags::VERTEX_STORAGE)
+        && device.limits().max_storage_buffers_per_shader_stage >= PULL_STORAGE_BUFFERS_PER_STAGE
+}
+
 pub struct VoxelPullPlugin;
 
 impl Plugin for VoxelPullPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(ExtractResourcePlugin::<BlockArrayTexture>::default());
+        app.add_plugins((
+            ExtractResourcePlugin::<BlockArrayTexture>::default(),
+            ExtractResourcePlugin::<BlockTopLayers>::default(),
+        ));
         // Main-world tally driving the `[pull-mem]` headline log in
         // `apply_meshed_chunks`. Registered here (not in `renderer/mod.rs`) so
         // the pull path owns its own accounting resource.
@@ -187,23 +229,75 @@ impl Plugin for VoxelPullPlugin {
             .add_systems(
                 Render,
                 (
-                    prepare_chunk_quads.in_set(RenderSystems::PrepareBindGroups),
+                    // The pipelines exist only on a device that can run the
+                    // pull path (see `finish`); without them nothing is drawn
+                    // from records and these have no work.
+                    prepare_chunk_quads
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .run_if(resource_exists::<VoxelPullPipeline>),
                     prepare_view_chunk_draws
                         .in_set(RenderSystems::PrepareBindGroups)
                         .after(prepare_chunk_quads),
                     gpu::prepare_active_near_mode.in_set(RenderSystems::PrepareResources),
-                    queue_voxel_pull.in_set(RenderSystems::Queue),
-                    queue_voxel_pull_prepass.in_set(RenderSystems::Queue),
-                    queue_voxel_pull_shadows.in_set(RenderSystems::Queue),
+                    log_arena_stats
+                        .after(prepare_chunk_quads)
+                        .run_if(|| game::perf::budget_lines_requested()),
+                    queue_voxel_pull
+                        .in_set(RenderSystems::Queue)
+                        .run_if(resource_exists::<VoxelPullPipeline>),
+                    queue_voxel_pull_prepass
+                        .in_set(RenderSystems::Queue)
+                        .run_if(resource_exists::<VoxelPullDepthPipeline>),
+                    queue_voxel_pull_shadows
+                        .in_set(RenderSystems::Queue)
+                        .run_if(resource_exists::<VoxelPullDepthPipeline>),
                 ),
             );
     }
 
     fn finish(&self, app: &mut App) {
+        let Some(render_app) = app.get_sub_app(RenderApp) else {
+            return;
+        };
+        let quad_records_supported = {
+            let world = render_app.world();
+            device_supports_quad_records(
+                world.resource::<bevy::render::renderer::RenderDevice>(),
+                world.resource::<bevy::render::renderer::RenderAdapter>(),
+            )
+        };
+        if !quad_records_supported {
+            // `finish` runs before the first `Update`, so no chunk has been
+            // meshed as records yet: meshing reads the downgraded config.
+            if let Some(mut config) = app
+                .world_mut()
+                .get_resource_mut::<super::config::TerrainRenderConfig>()
+            {
+                let resolved = config.for_device(false);
+                if *config != resolved {
+                    warn!(
+                        "[render] no vertex-stage storage buffers on this device (WebGL2?): \
+                         near backend {} -> {}",
+                        config.near.as_str(),
+                        resolved.near.as_str()
+                    );
+                    *config = resolved;
+                }
+            }
+            return;
+        }
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app.init_resource::<VoxelPullPipeline>();
+        // Bevy 0.19 builds `MeshPipelineViewLayouts` in `RenderStartup`, after
+        // `finish`, so the forward pipeline (which clones them) is created there
+        // too — ahead of the depth pipeline, which reads it.
+        render_app.add_systems(
+            RenderStartup,
+            init_voxel_pull_pipeline
+                .after(bevy::pbr::init_mesh_pipeline_view_layouts)
+                .before(init_voxel_pull_depth_pipeline),
+        );
         let telemetry_enabled = render_app
             .world()
             .contains_resource::<gpu::NearTelemetryEnabled>();
@@ -227,33 +321,23 @@ impl Plugin for VoxelPullPlugin {
                     gpu::prepare_gpu_near_view_buffers
                         .in_set(RenderSystems::PrepareBindGroups)
                         .after(prepare_chunk_quads),
-                )
-                .add_render_graph_node::<gpu::NearFrustumCullNode>(
-                    Core3d,
-                    gpu::NearGpuNode::FrustumCull,
-                )
-                .add_render_graph_node::<gpu::NearLatePhaseClearNode>(
-                    Core3d,
-                    gpu::NearGpuNode::ClearLatePhases,
-                )
-                .add_render_graph_node::<gpu::NearHzbCullNode>(Core3d, gpu::NearGpuNode::HzbCull);
+                );
             if telemetry_enabled {
                 render_app
                     .init_resource::<gpu::NearTelemetryReadback>()
                     .add_systems(
                         Render,
                         gpu::begin_near_telemetry_frame.in_set(RenderSystems::PrepareResources),
-                    )
-                    .add_render_graph_node::<gpu::NearTelemetryCopyNode>(
-                        Core3d,
-                        gpu::NearGpuNode::TelemetryCopy,
                     );
             }
-            let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
-            let core_3d = graph
-                .get_sub_graph_mut(Core3d)
-                .expect("Core3d render graph is initialized");
-            gpu::add_near_gpu_graph_edges(core_3d, telemetry_enabled);
+            let mut schedules = render_app
+                .world_mut()
+                .resource_mut::<bevy::ecs::schedule::Schedules>();
+            gpu::add_near_gpu_systems(schedules.entry(Core3d), telemetry_enabled);
         }
     }
+}
+
+fn init_voxel_pull_pipeline(world: &mut World) {
+    world.init_resource::<VoxelPullPipeline>();
 }

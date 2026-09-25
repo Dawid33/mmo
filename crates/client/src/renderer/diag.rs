@@ -54,7 +54,7 @@ impl Plugin for DiagPlugin {
         );
 
         // `FrameTimeDiagnosticsPlugin` (fps / frame_time / frame_count) is registered
-        // unconditionally by `SimBridgePlugin` for the F3 HUD, so it is not repeated
+        // unconditionally by `SimBridgePlugin` for the F3 dev panel, so it is not repeated
         // here — adding a plugin twice panics. Its diagnostics still get logged below.
         app.add_plugins((
             EntityCountDiagnosticsPlugin::default(),

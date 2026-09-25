@@ -255,46 +255,168 @@ fn chunk_gets_voxels_collider() {
     );
 }
 
-#[test]
-fn descending_player_stops_on_terrain() {
-    let (mut server, _) = server_with_players(1);
-    let mut results = BTreeMap::new();
+/// Feeds one key edge to player 0 on the server.
+fn key(server: &mut World, key: Key, pressed: bool) {
+    server
+        .handle_region_event(GameEventKind::PlayerInput(0, InputEvent::Key { key, pressed }), r0())
+        .unwrap();
+    server.forget_last_event(&r0());
+}
 
-    // Enable fps-cam movement (E toggles it during the next tick)...
-    let e_press = InputEvent::Key {
-        key: Key::KeyE,
-        pressed: true,
-    };
-    server
-        .handle_region_event(GameEventKind::PlayerInput(0, e_press), r0())
-        .unwrap();
-    server.forget_last_event(&r0());
-    server.progress_world_one_tick(&mut results);
-    // ...then hold descend.
-    let ctrl = InputEvent::Key {
-        key: Key::ControlLeft,
-        pressed: true,
-    };
-    server
-        .handle_region_event(GameEventKind::PlayerInput(0, ctrl), r0())
-        .unwrap();
-    server.forget_last_event(&r0());
-    for _ in 0..60 {
+fn ticks(server: &mut World, n: usize) {
+    let mut results = BTreeMap::new();
+    for _ in 0..n {
         server.progress_world_one_tick(&mut results);
     }
+}
 
+fn player_y(server: &World) -> f32 {
     let data = server.data(&r0());
     let e = *data.player_entites.get(&0).unwrap();
     let handle = *data.ecs.rigidbody.get(e);
-    let y = data.physics.bodies.get(handle).unwrap().translation().y;
-    // Floor top is y=8; capsule half-extent 10.8 -> blocked rest ~18.8+.
-    // Uncorrected descent from y=26 at 8 units/tick would reach y << 0.
+    data.physics.bodies.get(handle).unwrap().translation().y.0
+}
+
+fn player_motion(server: &World) -> game::Motion {
+    let data = server.data(&r0());
+    let e = *data.player_entites.get(&0).unwrap();
+    data.ecs.motion.try_get(e).expect("players carry movement state")
+}
+
+/// Floor top is y=8 and the capsule half-extent is 14.4, so a resting body
+/// sits a hair (the controller's skin offset) above y=22.4.
+const REST_Y: f32 = 8.0 + game::movement::PLAYER_CAPSULE_HALF_HEIGHT + game::movement::PLAYER_CAPSULE_RADIUS;
+
+/// A server player standing on the floor with input enabled (E pressed).
+fn grounded_player() -> World {
+    let (mut server, _) = server_with_players(1);
+    key(&mut server, Key::KeyE, true);
+    key(&mut server, Key::KeyE, false);
+    ticks(&mut server, 30);
+    assert!(player_motion(&server).grounded, "player must settle on the floor");
+    server
+}
+
+#[test]
+fn idle_player_falls_under_gravity_and_rests_on_terrain() {
+    // No input at all — not even the E that enables controls.
+    let (mut server, _) = server_with_players(1);
+    let spawn_y = player_y(&server);
+    ticks(&mut server, 2);
+    assert!(player_y(&server) < spawn_y, "gravity pulls an idle body down");
+    ticks(&mut server, 60);
+
+    let y = player_y(&server);
+    assert!(y > REST_Y - 0.01, "player tunneled through the floor: y = {y}");
+    assert!(y < REST_Y + 1.0, "player never reached the floor: y = {y}");
+    let motion = player_motion(&server);
+    assert!(motion.grounded);
+    assert_eq!(motion.vel_y.0, 0.0, "a resting body carries no fall speed");
+}
+
+#[test]
+fn space_jumps_over_a_block_height_and_lands_again() {
+    let mut server = grounded_player();
+    let rest = player_y(&server);
+    key(&mut server, Key::Space, true);
+    ticks(&mut server, 1);
+    key(&mut server, Key::Space, false);
+
+    let mut peak = rest;
+    for _ in 0..40 {
+        ticks(&mut server, 1);
+        peak = peak.max(player_y(&server));
+    }
+    assert!(peak - rest > 16.0, "jump peaked {} units up, under one block", peak - rest);
+    assert!(peak - rest < 24.0, "jump peaked {} units up", peak - rest);
+    assert!((player_y(&server) - rest).abs() < 0.5, "must land back on the floor");
+    let motion = player_motion(&server);
+    assert!(motion.grounded && !motion.flying);
+}
+
+#[test]
+fn double_tap_space_flies_and_shift_lands() {
+    let mut server = grounded_player();
+    let rest = player_y(&server);
+    for _ in 0..2 {
+        key(&mut server, Key::Space, true);
+        ticks(&mut server, 1);
+        key(&mut server, Key::Space, false);
+        ticks(&mut server, 1);
+    }
+    assert!(player_motion(&server).flying, "double-tapping Space starts flight");
+
+    // Hovering: no gravity.
+    let hover = player_y(&server);
+    ticks(&mut server, 20);
+    assert_eq!(player_y(&server), hover, "a flying body does not fall");
+
+    // Space ascends.
+    key(&mut server, Key::Space, true);
+    ticks(&mut server, 10);
+    key(&mut server, Key::Space, false);
+    ticks(&mut server, 1);
+    let high = player_y(&server);
+    assert!(high > hover + 40.0, "Space must ascend while flying: {hover} -> {high}");
+    assert!(player_motion(&server).flying, "holding Space is not a double tap");
+
+    // Shift descends, and touching down ends flight.
+    key(&mut server, Key::ShiftLeft, true);
+    ticks(&mut server, 40);
+    assert!((player_y(&server) - rest).abs() < 0.5, "Shift must descend to the floor");
+    let motion = player_motion(&server);
+    assert!(!motion.flying && motion.grounded, "landing ends flight: {motion:?}");
+}
+
+#[test]
+fn walking_holds_the_floor_at_walk_speed() {
+    let mut server = grounded_player();
+    let pos = |s: &World| {
+        let data = s.data(&r0());
+        let e = *data.player_entites.get(&0).unwrap();
+        let h = *data.ecs.rigidbody.get(e);
+        *data.physics.bodies.get(h).unwrap().translation()
+    };
+    let start = pos(&server);
+    // Yaw 0 faces -z; S backs away from the slab's edge onto its interior.
+    key(&mut server, Key::KeyS, true);
+    ticks(&mut server, 4);
+    let end = pos(&server);
+    let expected = 4.0 * game::movement::WALK_SPEED * game::movement::UNITS_PER_METER * game::movement::TICK_DT;
+    let walked = end.z.0 - start.z.0;
+    assert!((walked - expected).abs() < 0.2, "walked {walked}, expected {expected}");
+    assert!((end.y.0 - start.y.0).abs() < 0.1, "flat ground stays level");
+    assert!(player_motion(&server).grounded);
+}
+
+/// Jump, land, double-tap into flight and back: every tick writes the
+/// movement component and the body, and each must undo bit-exact (Full mode).
+#[test]
+fn jump_and_flight_ticks_roll_back_bit_exact() {
+    let server = grounded_player();
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(server.get_region_data(&r0()), Some(send), r0(), Some(0));
+    let crc = |r: &Region| state_hash(r.data());
+
+    let space = |pressed| GameEventKind::PlayerInput(0, InputEvent::Key { key: Key::Space, pressed });
+    let mut events = vec![space(true), GameEventKind::Tick, space(false)];
+    events.extend(std::iter::repeat_with(|| GameEventKind::Tick).take(14));
+    // Double tap, including a press+release inside one tick (Tapped).
+    events.extend([space(true), space(false), GameEventKind::Tick]);
+    events.extend([space(true), GameEventKind::Tick, space(false), GameEventKind::Tick]);
+
+    let mut hashes = vec![crc(&region)];
+    for ev in events {
+        region.handle_event(ev).unwrap();
+        hashes.push(crc(&region));
+    }
+    let e = *region.data().player_entites.get(&0).unwrap();
     assert!(
-        y > game::parry::math::Real::from(17.3),
-        "player tunneled through the floor: y = {y}"
+        region.data().ecs.motion.try_get(e).unwrap().flying,
+        "the sequence must actually reach flight"
     );
-    assert!(
-        y < game::parry::math::Real::from(20.3),
-        "player never moved down or never got blocked: y = {y}"
-    );
+    for expected in hashes.iter().rev().skip(1) {
+        region.rollback_last_event();
+        assert_eq!(*expected, crc(&region), "rollback hash mismatch");
+    }
 }

@@ -6,12 +6,11 @@ use bevy::{
     core_pipeline::{
         core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey},
         prepass::{
-            DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass, Opaque3dPrepass,
+            Opaque3dPrepass,
             OpaqueNoLightmap3dBatchSetKey, OpaqueNoLightmap3dBinKey,
         },
     },
     ecs::{
-        change_detection::Tick,
         query::ROQueryItem,
         system::{
             lifetimeless::{Read, SRes},
@@ -20,7 +19,7 @@ use bevy::{
     },
     pbr::{
         LightEntity, MeshPipelineViewLayoutKey, SetMeshViewBindGroup, SetPrepassViewBindGroup,
-        Shadow, ShadowBatchSetKey, ShadowBinKey, ViewLightEntities,
+        Shadow, ShadowBatchSetKey, ShadowBinKey, ViewKeyCache, ViewLightEntities,
     },
     prelude::*,
     render::{
@@ -28,14 +27,14 @@ use bevy::{
             BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem, RenderCommand,
             RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewBinnedRenderPhases,
         },
-        render_resource::{PipelineCache, SpecializedRenderPipelines},
+        render_resource::{IndexFormat, PipelineCache, SpecializedRenderPipelines},
         sync_world::MainEntity,
         view::ExtractedView,
     },
 };
 
 use super::arena::GpuQuadArena;
-use super::gpu::{ActiveNearMode, GpuNearViewBuffers};
+use super::gpu::{ActiveNearMode, GpuNearViewBuffers, FACES_PER_SLOT};
 use super::pipeline::{
     VoxelPullDepthPipeline, VoxelPullDepthPipelineKey, VoxelPullPipeline, VoxelPullPipelineKey,
 };
@@ -125,28 +124,37 @@ impl<P: PhaseItem> RenderCommand<P> for DrawChunkQuads {
         if *mode == ActiveNearMode::Disabled {
             return RenderCommandResult::Skip;
         }
-        let Some(bind_group) = &arena.bind_group else {
+        let (Some(bind_group), Some((quad_indices, _))) = (&arena.bind_group, &arena.quad_indices)
+        else {
             return RenderCommandResult::Skip;
         };
         pass.set_bind_group(1, bind_group, &[]);
+        // Indexed: 4 pulled vertices per quad, `QUAD_INDEX_PATTERN` from the
+        // shared buffer, `base_vertex` = record_start * 4 per draw.
+        pass.set_index_buffer(quad_indices.slice(..), IndexFormat::Uint32);
         if let (ActiveNearMode::GpuDriven { indirect_count }, Some(gpu_view)) = (*mode, gpu_view) {
             if indirect_count {
-                pass.multi_draw_indirect_count(
+                pass.multi_draw_indexed_indirect_count(
                     &gpu_view.indirect,
                     0,
                     &gpu_view.count,
                     0,
-                    gpu_view.slot_count,
+                    gpu_view.slot_count * FACES_PER_SLOT,
                 );
             } else {
-                pass.multi_draw_indirect(&gpu_view.indirect, 0, gpu_view.slot_count);
+                pass.multi_draw_indexed_indirect(
+                    &gpu_view.indirect,
+                    0,
+                    gpu_view.slot_count * FACES_PER_SLOT,
+                );
             }
             return RenderCommandResult::Success;
         }
         for gpu in &draws.0 {
-            // Six vertices per quad; the vertex shader pulls geometry from group 1.
-            pass.draw(
-                gpu.record_start * 6..(gpu.record_start + gpu.quad_count) * 6,
+            // The vertex shader pulls geometry from group 1.
+            pass.draw_indexed(
+                0..gpu.quad_count * 6,
+                (gpu.record_start * 4) as i32,
                 gpu.chunk_slot..gpu.chunk_slot + 1,
             );
         }
@@ -159,76 +167,50 @@ pub fn queue_voxel_pull(
     pipeline: Res<VoxelPullPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<VoxelPullPipeline>>,
     cache: Res<PipelineCache>,
+    view_key_cache: Res<ViewKeyCache>,
     draw_functions: Res<DrawFunctions<Opaque3d>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     views: Query<(
         Entity,
         &ExtractedView,
         &Msaa,
-        Has<DepthPrepass>,
-        Has<NormalPrepass>,
-        Has<MotionVectorPrepass>,
-        Has<DeferredPrepass>,
     )>,
-    mut next_tick: Local<Tick>,
 ) {
     if *mode == ActiveNearMode::Disabled {
         return;
     }
     let draw = draw_functions.read().id::<DrawVoxelPull>();
-    for (
-        view_entity,
-        view,
-        msaa,
-        depth_prepass,
-        normal_prepass,
-        motion_prepass,
-        deferred_prepass,
-    ) in &views
+    for (view_entity, view, msaa) in &views
     {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
             continue;
         };
-        // Derive the group(0) view-layout key from the view's prepass *components*,
-        // exactly as `check_views_need_specialization` builds the mesh pipeline key
-        // (bevy_pbr-0.18.1/src/render/mesh.rs) — not from `ViewPrepassTextures`,
-        // which isn't populated until Prepare (after this Queue step). Our camera
-        // runs `DepthPrepass`, so this adds the `DEPTH_PREPASS` bit and the
-        // pipeline's group(0) matches the `mesh_view_bind_group` (built for the
-        // `_depth` layout) that `SetMeshViewBindGroup<0>` binds. (OIT / atmosphere
-        // bits aren't derived — no camera in this app uses them.)
-        let mut view_layout_key = MeshPipelineViewLayoutKey::from(*msaa);
-        view_layout_key.set(MeshPipelineViewLayoutKey::DEPTH_PREPASS, depth_prepass);
-        view_layout_key.set(MeshPipelineViewLayoutKey::NORMAL_PREPASS, normal_prepass);
-        view_layout_key.set(
-            MeshPipelineViewLayoutKey::MOTION_VECTOR_PREPASS,
-            motion_prepass,
-        );
-        view_layout_key.set(
-            MeshPipelineViewLayoutKey::DEFERRED_PREPASS,
-            deferred_prepass,
-        );
+        // The group(0) layout must be the one `prepare_mesh_view_bind_groups` built
+        // for this view. Bevy 0.19 keys it on many view features (distance fog,
+        // tonemapping, environment maps, prepasses, …); `ViewKeyCache` holds the
+        // same `MeshPipelineKey` Bevy's own mesh pipelines specialize from.
+        let Some(view_key) = view_key_cache.get(&view.retained_view_entity) else {
+            continue;
+        };
+        let view_layout_key = MeshPipelineViewLayoutKey::from(*view_key);
         let pipeline_id = pipelines.specialize(
             &cache,
             &pipeline,
             VoxelPullPipelineKey {
                 msaa_samples: msaa.samples(),
-                hdr: view.hdr,
+                target_format: view.target_format,
                 view_layout_key,
             },
         );
         // One representative NonMesh item per view. Its render command loops
         // `ViewChunkDrawList`, so chunk count no longer inflates phase bins.
-        let this_tick = next_tick.get() + 1;
-        next_tick.set(this_tick);
         phase.add(
             Opaque3dBatchSetKey {
                 pipeline: pipeline_id,
                 draw_function: draw,
                 material_bind_group_index: None,
                 lightmap_slab: None,
-                vertex_slab: default(),
-                index_slab: None,
+                slabs: default(),
             },
             Opaque3dBinKey {
                 asset_id: AssetId::<Mesh>::invalid().untyped(),
@@ -236,7 +218,6 @@ pub fn queue_voxel_pull(
             (view_entity, MainEntity::from(view_entity)),
             InputUniformIndex::default(),
             BinnedRenderPhaseType::NonMesh,
-            *next_tick,
         );
     }
 }
@@ -259,7 +240,6 @@ pub fn queue_voxel_pull_prepass(
     draw_functions: Res<DrawFunctions<Opaque3dPrepass>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3dPrepass>>,
     views: Query<(Entity, &ExtractedView, &Msaa)>,
-    mut next_tick: Local<Tick>,
 ) {
     if *mode == ActiveNearMode::Disabled {
         return;
@@ -279,15 +259,12 @@ pub fn queue_voxel_pull_prepass(
                 unclipped_depth_ortho: false,
             },
         );
-        let this_tick = next_tick.get() + 1;
-        next_tick.set(this_tick);
         phase.add(
             OpaqueNoLightmap3dBatchSetKey {
                 pipeline: pipeline_id,
                 draw_function: draw,
                 material_bind_group_index: None,
-                vertex_slab: default(),
-                index_slab: None,
+                slabs: default(),
             },
             OpaqueNoLightmap3dBinKey {
                 asset_id: AssetId::<Mesh>::invalid().untyped(),
@@ -295,7 +272,6 @@ pub fn queue_voxel_pull_prepass(
             (view_entity, MainEntity::from(view_entity)),
             InputUniformIndex::default(),
             BinnedRenderPhaseType::NonMesh,
-            *next_tick,
         );
     }
 }
@@ -324,7 +300,6 @@ pub fn queue_voxel_pull_shadows(
     // id keying the shadow phase), and Frustum (for culling), inserted together in
     // `prepare_lights`.
     light_views: Query<(&LightEntity, &ExtractedView)>,
-    mut next_tick: Local<Tick>,
 ) {
     if *mode == ActiveNearMode::Disabled {
         return;
@@ -348,15 +323,12 @@ pub fn queue_voxel_pull_shadows(
                     unclipped_depth_ortho: is_directional,
                 },
             );
-            let this_tick = next_tick.get() + 1;
-            next_tick.set(this_tick);
             phase.add(
                 ShadowBatchSetKey {
                     pipeline: pipeline_id,
                     draw_function: draw,
                     material_bind_group_index: None,
-                    vertex_slab: default(),
-                    index_slab: None,
+                    slabs: default(),
                 },
                 ShadowBinKey {
                     asset_id: AssetId::<Mesh>::invalid().untyped(),
@@ -364,7 +336,6 @@ pub fn queue_voxel_pull_shadows(
                 (light_view_entity, MainEntity::from(light_view_entity)),
                 InputUniformIndex::default(),
                 BinnedRenderPhaseType::NonMesh,
-                *next_tick,
             );
         }
     }
@@ -422,12 +393,12 @@ mod tests {
             Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_2, 16.0 / 9.0, 0.1);
         let view_from_world = Mat4::IDENTITY; // camera at origin, -Z forward
         let clip_from_world = clip_from_view * view_from_world;
-        Frustum::from_clip_from_world_custom_far(
+        Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world_custom_far(
             &clip_from_world,
             &Vec3::ZERO,
             &Vec3::Z, // view_backward for a -Z-forward camera
             far,
-        )
+        ))
     }
 
     /// The bug this pins: the GPU projection is infinite-reverse-Z (no far

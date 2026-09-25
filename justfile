@@ -12,19 +12,50 @@
 cargo := env_var_or_default("CARGO_CLIF", "cargo")
 
 # Substring passed to WGPU_ADAPTER_NAME to select a GPU (empty = wgpu default).
-adapter := ""
+# Defaults to $VOXEL_ADAPTER, so `export VOXEL_ADAPTER=Intel` (or 6700) in your
+# shell profile pins every recipe for good. It matters on this box: unpinned,
+# wgpu picks the NVIDIA T600 on the NVK driver, where the pulled-quad opaque
+# pass measured 162 ms per frame against ~5 ms on the Intel iGPU (2026-09-20) —
+# that, not the debug profile, is what makes a bare `just run` crawl.
+adapter := env_var_or_default("VOXEL_ADAPTER", "")
 
 # World size the client subscribes to (empty = production `full`). The server
 # only generates what clients request, so this shrinks both sides:
 #   tiny  = 1 simulated region, no LOD rings      (cheapest world that loads)
 #   small = 1 simulated region + one factor-2 ring (24 LOD keys)
-#   full  = 3x3 simulated regions + all five rings (~570 LOD keys)
+#   full  = 5x5 simulated regions + the rings beyond them (~1,060 LOD keys)
 # e.g. `just world=tiny run`, `just world=small render-bench`. Finer control:
 # export VOXEL_NEAR_RADIUS=0..3 / VOXEL_LOD_RINGS=off|small|full|"2:2,4:4"
 # (see crates/client/src/world_scale.rs). Every recipe inherits it; tests
 # ignore it (GameInstanceManager::new is env-free).
 world := ""
 export VOXEL_WORLD := world
+
+# Forged world file to serve instead of procedural terrain (empty = procedural).
+# A world file is one finite pre-generated world (16 km, ocean all round) written
+# by `just forge-proto`; the server (and the offline local server) read it via
+# VOXEL_WORLD_FILE — see crates/worldgen/src/forged.rs. e.g.
+#   just forge-proto --seed D5C0DE021A --out target/world-forge/best
+#   just world_file=target/world-forge/best.world run
+# Defaults to $VOXEL_WORLD_FILE. Relative paths resolve from the repo root.
+world_file := env_var_or_default("VOXEL_WORLD_FILE", "")
+export VOXEL_WORLD_FILE := world_file
+
+# Region edge in chunks — a BUILD-time constant (`game::REGION_CHUNKS`), unlike
+# `world`: 32 = 1024-unit / 64 m regions (default), 64 = 2048-unit, 128 =
+# 4096-unit regions, each with the ring table re-cut to the same pixel budget
+# and horizon. In cell mode (`cells=`) it goes on up to 32768 (65.5 km, powers of
+# two; cells generate lazily), e.g. `just region_chunks=1024 cells=16 run`; above
+# 128 without `cells=` the build fails. Nothing else is legal (see crates/game/src/protocol.rs); 128 is
+# the practical ceiling (~7 GB of server state for one 3x3 window).
+#   just region_chunks=64 run
+# Switching recompiles `game` and everything downstream (not Bevy or the forks),
+# and server + client MUST come from the same value — nothing refuses a
+# mismatched pair. The default mirrors `[env]` in .cargo/config.toml so `just`
+# and raw `cargo` share one build fingerprint. Per-region costs scale with
+# AREA (x4 at 64, ~x15 at 128): compare perf numbers only within one region size.
+region_chunks := env_var_or_default("VOXEL_REGION_CHUNKS", "32")
+export VOXEL_REGION_CHUNKS := region_chunks
 
 # Cell loading (phase 1b of docs/superpowers/specs/2026-09-25-island-regions-cell-loading-design.md):
 # a BUILD-time constant (`game::CELL_CHUNKS`), 0 = off. Every region then loads
@@ -146,6 +177,64 @@ run-release:
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     RUST_BACKTRACE=1 ./target/release/client
 
+# Scripted flight across region seams (release): server + client, the client
+# flying a straight line under VOXEL_AUTOPILOT once the world is ready, closing
+# itself after `seconds` of cruise (a seam every ~3 s at fly-sprint). Logs go to
+# target/fly-probe/; prints one pair of lines per crossing — game thread
+# (`region_crossing`: tick gaps, stalled/aligned home ticks, corrections,
+# snapshot loads) and render (`region_crossing_render`: worst frame, longest
+# sim-pose hold) — plus any main-thread stalls. e.g. `just adapter=6700 fly-probe 60`.
+# Scripted straight-line flight across region seams, one report per crossing.
+# Extra client features for fly-probe / shuttle-probe builds, e.g.
+# `just probe_features=gpu_error_panic shuttle-probe` (panic at the failing
+# Vulkan call on a device loss).
+probe_features := ""
+
+fly-probe seconds="45":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    out="target/fly-probe"; mkdir -p "$out"
+    {{cap}} {{cargo}} build --release --bin server
+    {{cap}} {{cargo}} build --release --bin client --features "{{probe_features}}"
+    RUST_BACKTRACE=1 ./target/release/server > "$out/server.log" 2>&1 &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    VOXEL_AUTOPILOT=1 VOXEL_AUTOPILOT_SECONDS={{seconds}} RUST_BACKTRACE=1 \
+        ./target/release/client > "$out/client.log" 2>&1 || true
+    grep -h "AdapterInfo" "$out/client.log" | head -1 || true
+    grep -hE "event=(world_ready|autopilot_start|region_crossing|region_crossing_render|main_stall|bridge_region_spawned|region_loaded)" \
+        "$out/client.log" | sed -n '/autopilot_start/,$p' || true
+    echo
+    scripts/crossing_summary.py "$out/client.log"
+    echo "logs: $out/client.log $out/server.log"
+
+# The same benchmark for crossing ONE boundary back and forth, fast: the client
+# flies to the first boundary, then reverses `overshoot` metres past it each leg
+# (VOXEL_AUTOPILOT=shuttle). `boundary=region` (default) shuttles across the seam
+# between two region threads — every leg is a handoff and a near-window shift
+# that releases and re-requests a row; `boundary=chunk` shuttles across a 32-unit
+# chunk edge inside one region (no handoff; PERF_LOG=1 adds the per-chunk-crossing
+# `[client-motion]` lines). Ends with the `scripts/crossing_summary.py` table;
+# logs in target/shuttle-probe/. e.g. `just adapter=6700 shuttle-probe chunk 30 0.5`.
+# Back and forth across one region seam (or chunk edge), one report per crossing.
+shuttle-probe boundary="region" seconds="45" overshoot="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    if [ -n "{{overshoot}}" ]; then export VOXEL_AUTOPILOT_OVERSHOOT_M="{{overshoot}}"; fi
+    out="target/shuttle-probe"; mkdir -p "$out"
+    {{cap}} {{cargo}} build --release --bin server
+    {{cap}} {{cargo}} build --release --bin client --features "{{probe_features}}"
+    RUST_BACKTRACE=1 ./target/release/server > "$out/server.log" 2>&1 &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    VOXEL_AUTOPILOT=shuttle VOXEL_AUTOPILOT_BOUNDARY={{boundary}} VOXEL_AUTOPILOT_SECONDS={{seconds}} \
+        PERF_LOG=1 RUST_BACKTRACE=1 ./target/release/client > "$out/client.log" 2>&1 || true
+    grep -h "AdapterInfo" "$out/client.log" | head -1 || true
+    scripts/crossing_summary.py "$out/client.log"
+    echo "logs: $out/client.log $out/server.log"
+
 # Interactive play-test: build, run server + client, and tee both to
 # target/play-test/*.log so the run can be reviewed for errors afterwards.
 # Close the client window (or Ctrl-C) to stop both; on exit it prints a
@@ -220,12 +309,53 @@ collider-bench:
 bench-column:
     {{cargo}} run --release -p worldgen --example column_bench
 
+# Top-down PNG map of the generated world: colour relief + 16-bit heightmap +
+# terrain stats, into target/world-map/. Flags: --span <m> --size <px>
+# --center <x,z> --out <path stem> --seed <hex> --relief <factor>, e.g.
+# `just world-map --span 65536 --size 2048`.
+world-map *args:
+    {{cap}} {{cargo}} run --release -p worldgen --example world_map -- {{args}}
+
+# Feature census of Blockbench/Bedrock model files (.bbmodel, .geo.json,
+# .animation.json): which format features each file uses, so a model loader
+# knows what it must handle. Defaults to the local test corpus in
+# target/test-models/ (gitignored; see its MANIFEST.tsv for sources/licences).
+model-census *paths="target/test-models":
+    scripts/bbmodel_census.py {{paths}}
+
+# World forge prototype (F1): simulate a whole finite 16 km world offline —
+# geology-controlled stream-power erosion, orographic rain, depression filling,
+# planed valley floors, spill-level lakes — and write relief / rivers / geology
+# / rain maps, a 16-bit heightmap, river+lake objects (JSON), drainage
+# statistics and the WORLD FILE `<stem>.world` into target/world-forge/ (serve it
+# with `just world_file=<path> run`). Never changes procedural output. Flags:
+# --cell <m> --iters <n> --seed <hex> --out <stem> --size --dt --uplift --k
+# --diffusivity --no-geology --no-climate, and --search <n> to forge n seeds at
+# 32 m cells and rank them (generate-and-test). e.g. `just forge-proto --cell 32`
+# for a 5 s look, `just forge-proto --search 64`.
+forge-proto *args:
+    {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- {{args}}
+
+# Tuning page for the world forge: every knob (examples/forge_proto/knobs.rs) as
+# a slider with a live map preview, on http://127.0.0.1:<port>/. A change
+# re-forges at a coarse preview cell size (64 m is about a second); "Save world
+# file" forges at 16 m and writes a .world the game can load; "Copy as flags"
+# gives the matching `just forge-proto --set …` line. Extra args are forge flags,
+# e.g. `just forge-ui --seed D5C0DE021A`. Localhost only.
+forge-ui port="8787" *args:
+    {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- --serve {{port}} {{args}}
+
 # Headless region-load cost breakdown (gen/derive/serde/mesh).
 bench-region:
     {{cap}} {{cargo}} test -p worldgen --release --test region_load_cost -- --ignored --nocapture
 
-# Self-screenshot probe: the pulled-quad render path draws real terrain.
+# Self-screenshot probe: the pulled-quad render path draws real terrain. Run it
+# on a real adapter after a Bevy bump (`just adapter=6700 pull-smoke`) — the
+# shader tests compose against stubs and miss upstream WGSL changes.
 pull-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cargo}} run -p client --example pull_smoke
 
 # Production render benchmark: real server seed + full LOD table, fixed
@@ -335,7 +465,9 @@ web-release:
 # the "quick" per-crate suites below link ~30 game test binaries and ~9
 # Bevy-sized client ones, which is far too slow for a while-iterating loop. So
 # smoke runs two game test binaries (undo/rollback invariants, region
-# park/restore) and the server lib tests, and only TYPE-CHECKS the client
+# park/restore) and the server lib tests, TYPE-CHECKS the server's integration
+# tests (all tagged slow, so nothing else would notice them rotting — a new
+# `ClientPacket` variant once left one uncompilable), and only TYPE-CHECKS the client
 # (lib + bin + tests): building or linking a client test binary means a full
 # Bevy codegen, which can never fit the budget. Client unit tests are an
 # explicit opt-in via `just test-one client "--lib <filter>"`.
@@ -358,6 +490,7 @@ smoke:
     }
     step {{cargo}} test -q -p game --test simple --test region_runner
     step {{cargo}} test -q -p server --lib
+    step {{cargo}} check -q -p server --tests
     step {{cargo}} check -q -p client --lib --bins --tests
     echo ">> smoke ok in $(( $(date +%s) - deadline + {{smoke_timeout}} ))s"
 
@@ -368,6 +501,84 @@ smoke:
 # every other test binary in the crate.
 test-one crate *args:
     {{cap}} {{cargo}} test -p {{crate}} {{args}}
+
+# Region threading: a player walking across the seam between two regions that
+# run on different threads. Two layers, both tagged slow (so smoke / test-one /
+# test skip them and only the long `test-full` sweep ran them):
+#   - game `handoff_schedule`: the walk there and back under SEEDED scheduling
+#     jitter (permuted tick order, late inputs, missed ticks) — a failure
+#     names a seed that replays exactly;
+#   - server `threaded_world`: the same walk on real OS threads. Serial on
+#     purpose: each test already spawns 9+ region threads.
+# ~10s warm. Run after touching handoff, the WorldManager or region_threads.
+# The client-side twin (bit-exact convergence under late scheduling) needs a
+# Bevy-sized test binary, so it stays an explicit opt-in:
+#   just test-one client "--test crossing -- --include-ignored late_region"
+test-threads:
+    {{cap}} {{cargo}} test -p game --test handoff_schedule -- --include-ignored
+    {{cap}} {{cargo}} test -p server --test threaded_world -- --include-ignored --test-threads=1
+
+# ---------------------------------------------------------------------------
+# Local deployment environment: a single-node k0s cluster in docker (the same
+# distribution as the planned single-node k0s host), configured by the
+# OpenTofu roots under deploy/envs/local. Everyday work does NOT need it —
+# `run` / `run-durable` stay native; this is for exercising the deployment
+# (Agones game servers, CloudNativePG, storage). Design + findings:
+# docs/superpowers/specs/2026-09-22-local-deployment-environment-design.md.
+tofu := "tofu"
+dev_cluster := "mmo-k0s"
+k0s_image := "docker.io/k0sproject/k0s:v1.35.8-k0s.1"
+dev_kubeconfig := justfile_directory() / "target/dev-cluster/kubeconfig"
+
+# Start (or create) the local k0s node. Kubelet eviction thresholds are
+# ABSOLUTE: the default "<15% disk free" taints the node disk-pressure on a
+# large, fairly full laptop disk and nothing schedules.
+dev-cluster-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! docker start {{dev_cluster}} >/dev/null 2>&1; then
+        docker run -d --name {{dev_cluster}} --hostname {{dev_cluster}} --privileged --cgroupns=host \
+            -v {{dev_cluster}}-data:/var/lib/k0s -v {{dev_cluster}}-openebs:/var/openebs \
+            -p 127.0.0.1:16443:6443 {{k0s_image}} \
+            k0s controller --enable-worker --no-taints \
+            '--kubelet-extra-args=--eviction-hard=nodefs.available<5Gi,imagefs.available<5Gi,memory.available<500Mi --eviction-minimum-reclaim=nodefs.available=1Gi' >/dev/null
+    fi
+    mkdir -p "$(dirname {{dev_kubeconfig}})"
+    until docker exec {{dev_cluster}} k0s kubeconfig admin > {{dev_kubeconfig}}.tmp 2>/dev/null; do sleep 2; done
+    sed 's#server: https://.*:6443#server: https://127.0.0.1:16443#' {{dev_kubeconfig}}.tmp > {{dev_kubeconfig}} && rm {{dev_kubeconfig}}.tmp
+    until KUBECONFIG={{dev_kubeconfig}} kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 2; done
+    echo "k0s node ready at $(docker inspect -f '{{{{range .NetworkSettings.Networks}}{{{{.IPAddress}}{{{{end}}' {{dev_cluster}}) (game server ports are reachable there); KUBECONFIG={{dev_kubeconfig}}"
+
+# Stop the node, keeping its state (volumes {{dev_cluster}}-data / -openebs).
+dev-cluster-down:
+    docker stop {{dev_cluster}}
+
+# DESTRUCTIVE: remove the node and its volumes (database included) and the
+# local OpenTofu state that described them.
+dev-cluster-destroy:
+    -docker rm -f {{dev_cluster}}
+    -docker volume rm {{dev_cluster}}-data {{dev_cluster}}-openebs
+    rm -f deploy/envs/local/platform/terraform.tfstate* deploy/envs/local/world/terraform.tfstate* {{dev_kubeconfig}}
+
+# Apply the local environment: operators first (their CRDs must exist before
+# the world root can plan its custom resources), then the world.
+deploy-local: dev-cluster-up
+    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/platform init -input=false
+    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/platform apply -input=false -auto-approve
+    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/world init -input=false
+    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/world apply -input=false -auto-approve
+
+# Show what deploy-local would change, without changing anything.
+deploy-local-plan: dev-cluster-up
+    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/platform init -input=false
+    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/platform plan -input=false
+    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/world init -input=false
+    TF_VAR_kubeconfig={{dev_kubeconfig}} {{tofu}} -chdir=deploy/envs/local/world plan -input=false
+
+# kubectl against the local cluster, e.g. `just kube get gs -A`.
+[positional-arguments]
+kube *args:
+    KUBECONFIG={{dev_kubeconfig}} kubectl "$@"
 
 # Whole quick suites (slow tests skipped). Minutes, not seconds — reach for
 # `smoke` / `test-one` while iterating and keep this for a broader sweep.

@@ -140,6 +140,10 @@ pub struct Client {
 pub enum EntityKind {
     #[default]
     Player,
+    /// Ambient hopping wildlife (`slime.rs`). `size` is Minecraft's 1, 2 or 4:
+    /// it never changes, so it lives in the kind, which also carries it to
+    /// the renderer and onto ghosts.
+    Slime { size: u8 },
 }
 
 /// A live ghost mirror in this region, keyed in `GameData::ghosts` by its
@@ -196,6 +200,8 @@ mod game_data {
         rigidbody: Component<RigidBodyHandle>,
         chunk: Component<Chunk>,
         kind: Component<EntityKind>,
+        motion: Component<crate::Motion>,
+        slime: Component<crate::slime::Slime>,
     }
 
     pub struct PhysicsState {
@@ -228,6 +234,8 @@ impl Undo<Ecs> {
         self.rigidbody.insert_safe(key);
         self.chunk.insert_safe(key);
         self.kind.insert_safe(key);
+        self.motion.insert_safe(key);
+        self.slime.insert_safe(key);
         key
     }
 
@@ -243,6 +251,8 @@ impl Undo<Ecs> {
         self.rigidbody.raw_mut().insert(key, None);
         self.chunk.raw_mut().insert(key, None);
         self.kind.raw_mut().insert(key, None);
+        self.motion.raw_mut().insert(key, None);
+        self.slime.raw_mut().insert(key, None);
         key
     }
 }
@@ -350,6 +360,52 @@ impl Undo<rapier3d::prelude::RigidBodySet> {
     }
 }
 
+/// crc32 of the exact footprint of one in-place collider mutation through
+/// `ColliderSet::get_mut`: the collider's value and whether it was already on
+/// the modified list. The collider twin of [`body_write_digest`].
+fn collider_write_digest(collider: Option<&rapier3d::prelude::Collider>, was_modified: bool) -> u32 {
+    use std::hash::Hash;
+    let mut h = crc32fast::Hasher::new();
+    collider.hash(&mut h);
+    was_modified.hash(&mut h);
+    h.finalize()
+}
+
+impl Undo<rapier3d::prelude::ColliderSet> {
+    /// Mutate one existing collider in place (shape, enabled flag, pose
+    /// relative to its parent), undo-safely, with a footprint-sized log
+    /// entry. The collider twin of [`Undo::<RigidBodySet>::mutate_body_safe`]:
+    /// the inverse restores the collider's value from a pre-write clone and
+    /// pops the modified-list push iff this write made it. Shape changes are
+    /// picked up by the next physics step, whose journal rolls back its own
+    /// broad/narrow-phase updates.
+    pub fn mutate_collider_safe(
+        &mut self,
+        handle: rapier3d::prelude::ColliderHandle,
+        f: impl FnOnce(&mut rapier3d::prelude::Collider),
+    ) {
+        let pre_collider = self
+            .get(handle)
+            .expect("mutate_collider_safe: collider missing")
+            .clone();
+        let was_modified = self.is_marked_modified(handle);
+        let mut scope = self.undo_scope_digest();
+        let pre = if scope.wants_delta_digest() {
+            collider_write_digest(Some(&pre_collider), was_modified)
+        } else {
+            0
+        };
+        f(scope.get_mut(handle).expect("mutate_collider_safe: collider missing"));
+        scope.register(pre, move |colliders, _| {
+            colliders.restore_raw(handle, pre_collider);
+            if !was_modified {
+                colliders.pop_modified(handle);
+            }
+            collider_write_digest(colliders.get(handle), colliders.is_marked_modified(handle))
+        });
+    }
+}
+
 impl<T> Undo<Component<T>>
 where
     T: 'static
@@ -440,10 +496,8 @@ where
 
 // Player spawn / capsule tunables (voxel units; 1 unit = 1/16 m). Exposed as
 // named constants so they can be tuned without hunting through the spawn math.
-/// Half-height of the player's capsule collider.
-const PLAYER_CAPSULE_HALF_HEIGHT: f32 = 4.4;
-/// Radius of the player's capsule collider.
-const PLAYER_CAPSULE_RADIUS: f32 = 6.4;
+// The capsule dimensions derive from the metre tunables in `movement.rs`.
+use crate::movement::{PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
 /// Vertical gap left between the capsule bottom and the terrain surface at spawn.
 const PLAYER_SPAWN_CLEARANCE: f32 = 3.6;
 /// Region-local voxel column the player spawns over. Not tied to the region
@@ -468,7 +522,7 @@ pub const PLAYER_SPAWN_Z: f32 = 128.0;
 const PLAYER_SPAWN_FALLBACK_Y: f32 = 26.0;
 
 impl Rollback {
-    /// Runtime chunk insertion (undo-safe): two-scale decomposition only,
+    /// Runtime chunk insertion (undo-safe): multi-scale decomposition only,
     /// unlike `seed_terrain_genesis`. Deliberately never collapses a
     /// fully-solid chunk to a single cuboid, so the same chunk content can
     /// yield a different collider shape depending on which path built it.
@@ -478,8 +532,9 @@ impl Rollback {
     /// unifying the two paths would shift state hashes.
     pub fn create_mesh(&mut self, coords: ChunkCoords, chunk: Chunk) -> EntityKey {
         let e = self.ecs.create_entity_safe();
-        // Two-scale decomposition: whole solid blocks at block scale, chisel
-        // detail at voxel scale. Covers exactly derive_voxels' solid cells.
+        // Multi-scale decomposition: whole solid blocks at block scale, solid
+        // 8³ chisel octants at half-block scale, other chisel detail at voxel scale. Covers exactly
+        // derive_voxels' solid cells.
         let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
         self.ecs.chunk.set_safe(e, Some(chunk));
         let position = IsometryReal::from_parts(
@@ -507,16 +562,8 @@ impl Rollback {
             },
         );
         self.ecs.rigidbody.set_safe(e, Some(handle));
-        if !cells.blocks.is_empty() {
-            self.attach_voxels_collider_safe(
-                e,
-                handle,
-                &cells.blocks,
-                Real::from(crate::BLOCK_VOXELS as RawReal),
-            );
-        }
-        if !cells.voxels.is_empty() {
-            self.attach_voxels_collider_safe(e, handle, &cells.voxels, Real::from(1.0));
+        for (size, keys) in cells.grids() {
+            self.attach_voxels_collider_safe(e, handle, keys, Real::from(size as RawReal));
         }
         e
     }
@@ -527,8 +574,9 @@ impl Rollback {
     /// state and is never rolled back below itself, so raw (unlogged) inserts
     /// are correct and turn the build from O(N^2) (a growing clone per chunk)
     /// into O(N). Fully-solid chunks get a single cuboid; partial chunks get
-    /// up to two parry `Voxels` shapes — whole solid blocks at block scale
-    /// (voxel_size = BLOCK_VOXELS) and chisel detail at voxel scale (1.0).
+    /// up to three parry `Voxels` shapes — whole solid blocks at block scale
+    /// (voxel_size = BLOCK_VOXELS), solid 8³ chisel octants at half-block scale
+    /// (HALF_BLOCK_VOXELS) and chisel detail at voxel scale (1.0).
     /// A chunk solid purely via fully-occupied chisel no longer collapses to
     /// a cuboid (collision-identical, just uncollapsed).
     /// The ECS writes (entity + component slots) are raw for the same reason
@@ -558,7 +606,7 @@ impl Rollback {
                 continue;
             }
             let user_data = e.data().as_ffi() as u128;
-            let mut colliders = Vec::with_capacity(2);
+            let mut colliders = Vec::with_capacity(3);
             if cells.is_full_cube() {
                 // A fully-solid 32^3 chunk's collision surface is exactly a
                 // 32x32x32 cuboid (half-extents 16, centered body-local 16,16,16).
@@ -573,21 +621,12 @@ impl Rollback {
                         .build(),
                 );
             } else {
-                // Two-scale decomposition: whole solid blocks at block scale
-                // (voxel_size = BLOCK_VOXELS), chisel detail at voxel scale.
-                if !cells.blocks.is_empty() {
+                // Multi-scale decomposition: whole solid blocks at block
+                // scale, solid 8³ chisel octants at half-block scale, other
+                // chisel detail at voxel scale.
+                for (size, keys) in cells.grids() {
                     colliders.push(
-                        ColliderBuilder::voxels(
-                            Vector::repeat(Real::from(crate::BLOCK_VOXELS as RawReal)),
-                            &cells.blocks,
-                        )
-                        .user_data(user_data)
-                        .build(),
-                    );
-                }
-                if !cells.voxels.is_empty() {
-                    colliders.push(
-                        ColliderBuilder::voxels(Vector::repeat(Real::from(1.0)), &cells.voxels)
+                        ColliderBuilder::voxels(Vector::repeat(Real::from(size as RawReal)), keys)
                             .user_data(user_data)
                             .build(),
                     );
@@ -648,7 +687,7 @@ impl Rollback {
     /// digests exactly that footprint; Full mode still whole-field-hashes at
     /// scope creation and verifies it at rollback, which is what proves the
     /// inverse misses nothing (tests/harnesses).
-    fn attach_collider_safe(
+    pub(crate) fn attach_collider_safe(
         &mut self,
         body: RigidBodyHandle,
         collider: rapier3d::prelude::Collider,
@@ -702,9 +741,14 @@ impl Rollback {
     /// (`coords * 32`). Pure read of built terrain, hence deterministic: client
     /// and server derive the same surface height.
     pub fn surface_voxel_y(&self, vx: i32, vz: i32) -> Option<i32> {
+        self.surface_voxel(vx, vz).map(|(y, _)| y)
+    }
+
+    /// [`Self::surface_voxel_y`] plus the material of that topmost voxel.
+    pub fn surface_voxel(&self, vx: i32, vz: i32) -> Option<(i32, BlockId)> {
         let (cx, cz) = (vx.div_euclid(32), vz.div_euclid(32));
         let (lx, lz) = (vx.rem_euclid(32) as u32, vz.rem_euclid(32) as u32);
-        let mut best: Option<i32> = None;
+        let mut best: Option<(i32, BlockId)> = None;
         for (key, chunk) in self.data.ecs.chunk.iter() {
             let Some(chunk) = chunk else { continue };
             let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else {
@@ -720,9 +764,12 @@ impl Rollback {
             }
             let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
             for ly in (0..32u32).rev() {
-                if voxels[ChunkShape::linearize([lx, ly, lz]) as usize].block != BlockId::AIR {
+                let block = voxels[ChunkShape::linearize([lx, ly, lz]) as usize].block;
+                if block != BlockId::AIR {
                     let abs = by + ly as i32;
-                    best = Some(best.map_or(abs, |b| b.max(abs)));
+                    if best.is_none_or(|(b, _)| abs > b) {
+                        best = Some((abs, block));
+                    }
                     break;
                 }
             }
@@ -776,8 +823,7 @@ impl Rollback {
             },
         );
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
-        // 21.6 units = 1.35 m at 1 unit = 1/16 m (1.35 blocks tall — shorter
-        // side of the ~70%-of-a-2-block-ceiling human proportion).
+        // movement::PLAYER_HEIGHT tall (1.8 m = 28.8 units): two blocks.
         self.attach_capsule_collider_safe(e, handle, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS);
         let cam = Camera::new(handle);
         self.data.send(GameDataUpdate::new(
@@ -800,6 +846,7 @@ impl Rollback {
             GameDataUpdateKind::SetEntityKind(e, None),
         ));
         self.data.ecs.kind.set_safe(e, Some(EntityKind::Player));
+        self.data.ecs.motion.set_safe(e, Some(crate::Motion::default()));
         self.data.player_entites.insert(client_id, e);
     }
 
@@ -859,7 +906,7 @@ impl Rollback {
         }
         // Remove every component slot this entity owns (symmetric to
         // create_entity_safe's insert_safe for camera/isometry/rigidbody/
-        // chunk/kind). Removing the slots — not just nulling their values —
+        // chunk/kind/motion/slime). Removing the slots — not just nulling their values —
         // keeps the component maps in sync with the entities slotmap, so the
         // freed index can be reused later and still roll back bit-exact.
         // This MUST be unconditional: camera/kind carry a None slot for every
@@ -872,6 +919,8 @@ impl Rollback {
         self.data.ecs.isometry.remove_safe(key);
         self.data.ecs.chunk.remove_safe(key);
         self.data.ecs.kind.remove_safe(key);
+        self.data.ecs.motion.remove_safe(key);
+        self.data.ecs.slime.remove_safe(key);
         // ECS slot last: the slotmap #[emit] fires RemoveEntity on the delta
         // (and CreateEntity again on undo).
         self.data.ecs.entities.remove(key);
@@ -897,7 +946,7 @@ impl Rollback {
     /// shared build used by transfer arrivals (`inject_body_safe`) and stage-2
     /// ghost hosting (`apply_ghost`): both need the same kinematic body from a
     /// pose + collider spec, so the builder chain lives here, once.
-    fn build_kinematic_body_safe(
+    pub(crate) fn build_kinematic_body_safe(
         &mut self,
         e: EntityKey,
         pose: IsometryReal,
@@ -993,6 +1042,11 @@ impl Rollback {
         } else {
             self.inject_body_safe(e, &bundle);
         }
+
+        // Movement state (velocity, flight) carries across the seam.
+        self.data.ecs.motion.set_safe(e, bundle.motion);
+        // So does a mob's behaviour state.
+        self.data.ecs.slime.set_safe(e, bundle.slime);
 
         // Camera + client attachment (players).
         if let Some((client_id, client)) = bundle.client.clone() {
@@ -1157,6 +1211,8 @@ impl Rollback {
             has_camera: self.data.ecs.camera.try_get(key).is_some(),
             yaw,
             pitch,
+            motion: *self.data.ecs.motion.try_get(key),
+            slime: *self.data.ecs.slime.try_get(key),
             client,
             source_region: region,
             source_key: key,

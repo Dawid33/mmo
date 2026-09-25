@@ -41,10 +41,14 @@ pub struct LocalLook {
 pub fn integrate_local_look(
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
-    cursor: Query<&CursorOptions, With<PrimaryWindow>>,
+    cursor: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     mut look: ResMut<LocalLook>,
 ) {
-    let grabbed = cursor.single().is_ok_and(|c| c.grab_mode != CursorGrabMode::None);
+    // Same gate as `input::forward_input`: raw motion from an unfocused window
+    // must not turn this camera either.
+    let grabbed = cursor
+        .single()
+        .is_ok_and(|(w, c)| w.focused && c.grab_mode != CursorGrabMode::None);
     let delta = if grabbed { motion.delta } else { Vec2::ZERO };
     if delta == Vec2::ZERO {
         look.idle = look.idle.saturating_add(time.delta());

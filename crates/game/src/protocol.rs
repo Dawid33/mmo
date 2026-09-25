@@ -25,12 +25,65 @@ impl From<usize> for Usize {
 pub type Tick = usize;
 pub type EventId = usize;
 pub type EntityId = usize;
-/// Regions tile the horizontal plane in fixed 1024-unit squares (32×32
-/// chunks of 32 voxels). Signed and unbounded: the world grows in every
-/// direction. Sims stay region-local; the world offset exists only at the
-/// render boundary (region root Transform) and, later, in handoff rebasing.
-pub const REGION_CHUNKS: usize = 32;
-pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // 1024.0, exact in f32
+/// Regions tile the horizontal plane in fixed squares of `REGION_CHUNKS`²
+/// chunks of 32 voxels — 1024 units (64 m) at the default 32. Signed and
+/// unbounded: the world grows in every direction. Sims stay region-local; the
+/// world offset exists only at the render boundary (region root Transform)
+/// and, later, in handoff rebasing.
+///
+/// A BUILD-time dial for experiments: `VOXEL_REGION_CHUNKS=64` (or 128) in
+/// the environment of the build (`just region_chunks=64 …`) compiles every
+/// crate for 2048-unit (4096-unit) regions. It is a constant rather than a runtime setting
+/// because client, server and the wasm `LocalServer` must agree on it
+/// bit-exactly (region-local coordinates, handoff rebasing, `LodKey` tiling
+/// all derive from it) and it sizes const expressions. Two builds with
+/// different values cannot talk to each other and NOTHING refuses the
+/// connection yet (there is no connect handshake to carry a build tag) —
+/// build server and client in one `just` invocation, as the recipes do.
+///
+/// Legal values are the ones `lod.rs`'s tiling holds for — see
+/// [`REGION_CHUNKS_CHOICES`].
+pub const REGION_CHUNKS: usize = parse_region_chunks(option_env!("VOXEL_REGION_CHUNKS"));
+pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // power of two: exact in f32
+
+/// Region edges this build has been made to work at. The LOD tiling contract
+/// (`lod.rs`) only needs a power of two, but each size also needs its own
+/// `LOD_RING_TABLE`, and the fixtures and budgets below were checked at
+/// exactly these. 128 is the practical ceiling: a region snapshot is ~640 MiB
+/// raw there (see `MAX_DECOMPRESSED_PACKET_BYTES`) and a 3×3 window is ~95k
+/// chunks per client.
+///
+/// Above 128 only cell mode is legal (`VOXEL_CELL_CHUNKS`, see [`CELL_CHUNKS`]):
+/// cells generate lazily, so the region is never built whole. Up to 32768
+/// chunks = 1 048 576 units ≈ 65.5 km (f32 region-local positions keep ~8 mm
+/// steps at the far edge). Those sizes get a minimal LOD table (`lod.rs`).
+pub const REGION_CHUNKS_CHOICES: [usize; 11] =
+    [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+
+/// `option_env!` hands over a string; unset or empty means the default.
+/// Anything outside [`REGION_CHUNKS_CHOICES`] fails the BUILD, not the run.
+const fn parse_region_chunks(var: Option<&str>) -> usize {
+    let Some(text) = var else { return 32 };
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return 32;
+    }
+    let mut value = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        assert!(bytes[i].is_ascii_digit(), "VOXEL_REGION_CHUNKS must be a number");
+        value = value * 10 + (bytes[i] - b'0') as usize;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < REGION_CHUNKS_CHOICES.len() {
+        if REGION_CHUNKS_CHOICES[i] == value {
+            return value;
+        }
+        i += 1;
+    }
+    panic!("VOXEL_REGION_CHUNKS must be one of REGION_CHUNKS_CHOICES (a power of two, 32..=32768)")
+}
 
 /// Cell loading (spec 2026-09-25-island-regions-cell-loading-design): every
 /// region runs in cell mode with `CELL_CHUNKS`-chunk cells when non-zero. A
@@ -40,6 +93,13 @@ pub const CELL_CHUNKS: usize = parse_cell_chunks(option_env!("VOXEL_CELL_CHUNKS"
 
 /// Unset/empty/0 = off; otherwise a power of two dividing `REGION_CHUNKS`
 /// (checked at BUILD time).
+// Regions above 128 chunks exist only in cell mode: building one whole is
+// minutes and gigabytes.
+const _: () = assert!(
+    REGION_CHUNKS <= 128 || CELL_CHUNKS != 0,
+    "VOXEL_REGION_CHUNKS above 128 requires cell mode (VOXEL_CELL_CHUNKS)"
+);
+
 pub(crate) const fn parse_cell_chunks(var: Option<&str>) -> usize {
     let Some(text) = var else { return 0 };
     let bytes = text.as_bytes();
@@ -76,7 +136,7 @@ impl RegionCoords {
         Self { x, z }
     }
 
-    /// World-space origin of this region: `(x*256, 0, z*256)`. Exactly
+    /// World-space origin of this region: `(x, 0, z) * REGION_SIZE`. Exactly
     /// representable in f32, so render offsets are lossless.
     pub fn world_offset(&self) -> [f32; 3] {
         [self.x as f32 * REGION_SIZE, 0.0, self.z as f32 * REGION_SIZE]
@@ -89,6 +149,20 @@ impl RegionCoords {
             x: (x / REGION_SIZE).floor() as i32,
             z: (z / REGION_SIZE).floor() as i32,
         }
+    }
+
+    /// [`from_world`](Self::from_world) with hysteresis, for a window centre:
+    /// `prev` stays the answer while `(x, z)` is inside it or less than
+    /// `margin` world units past any of its edges; only then does the centre
+    /// move to the region that owns the point. A viewer going back and forth
+    /// across a seam therefore keeps one centre (and one window), where the
+    /// plain floor division would recentre on every crossing.
+    pub fn recentered(prev: Option<RegionCoords>, x: f32, z: f32, margin: f32) -> Self {
+        let owner = Self::from_world(x, z);
+        let Some(prev) = prev else { return owner };
+        let [ox, _, oz] = prev.world_offset();
+        let near = |p: f32, o: f32| p >= o - margin && p < o + REGION_SIZE + margin;
+        if near(x, ox) && near(z, oz) { prev } else { owner }
     }
 
     /// The 3×3 window of regions centered on `self` — the client's desired
@@ -187,6 +261,11 @@ pub struct EntityBundle {
     /// on every look change) — zeroes when `has_camera` is false.
     pub yaw: Real,
     pub pitch: Real,
+    /// Movement state (fall speed, flight) — `None` for entities that don't move
+    /// under the character controller.
+    pub motion: Option<crate::Motion>,
+    /// Slime behaviour state — `None` for every other kind.
+    pub slime: Option<crate::slime::Slime>,
     pub client: Option<(ClientId, Client)>,
     pub source_region: RegionCoords,
     pub source_key: EntityKey,
@@ -383,6 +462,18 @@ impl GameEventKind {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn large_region_sizes_parse() {
+        assert_eq!(parse_region_chunks(Some("1024")), 1024);
+        assert_eq!(parse_region_chunks(Some("32768")), 32768);
+    }
+
+    #[test]
+    fn the_packet_cap_never_overflows() {
+        assert_eq!(max_decompressed_packet_bytes(32), 256 * 1024 * 1024);
+        assert_eq!(max_decompressed_packet_bytes(32768), 2 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
     fn cell_chunks_parse() {
         assert_eq!(parse_cell_chunks(None), 0);
         assert_eq!(parse_cell_chunks(Some("")), 0);
@@ -393,6 +484,27 @@ mod tests {
     }
 
     use super::*;
+
+    /// The window centre moves only `margin` past its region, both ways, and
+    /// a far jump lands straight on the owner.
+    #[test]
+    fn recentered_holds_the_centre_inside_the_margin() {
+        let m = 256.0;
+        let a = RegionCoords::new(0, 0);
+        assert_eq!(RegionCoords::recentered(None, -1.0, 5.0, m), RegionCoords::new(-1, 0));
+        // Just across the seam into (0,-1), and back: still a.
+        assert_eq!(RegionCoords::recentered(Some(a), 10.0, -1.0, m), a);
+        assert_eq!(RegionCoords::recentered(Some(a), 10.0, -m + 1.0, m), a);
+        // Past the margin: the owner.
+        assert_eq!(RegionCoords::recentered(Some(a), 10.0, -m - 1.0, m), RegionCoords::new(0, -1));
+        // Far side, too, and on x.
+        assert_eq!(RegionCoords::recentered(Some(a), REGION_SIZE + m - 1.0, 5.0, m), a);
+        assert_eq!(RegionCoords::recentered(Some(a), REGION_SIZE + m, 5.0, m), RegionCoords::new(1, 0));
+        // Teleport.
+        assert_eq!(RegionCoords::recentered(Some(a), 10.0 * REGION_SIZE, 0.0, m), RegionCoords::new(10, 0));
+        // Zero margin is plain from_world.
+        assert_eq!(RegionCoords::recentered(Some(a), 5.0, -0.5, 0.0), RegionCoords::new(0, -1));
+    }
 
     #[test]
     fn lod_packets_round_trip_bincode() {
@@ -426,8 +538,21 @@ pub const PACKET_COMPRESS_THRESHOLD: usize = 4096;
 
 /// Cap on the decompressed size a frame may claim. The length prefix is
 /// untrusted wire data and is what sizes the decode buffer, so it is checked
-/// before anything is allocated. A region snapshot is ~40 MiB.
-pub const MAX_DECOMPRESSED_PACKET_BYTES: usize = 256 * 1024 * 1024;
+/// before anything is allocated. A region snapshot is ~40 MiB at the default
+/// `REGION_CHUNKS` and scales with region AREA (~160 MiB at 64, ~640 MiB at
+/// 128), so the cap scales with it: 256 MiB × (REGION_CHUNKS / 32)², held
+/// under the u32 length prefix (and wasm32's address space) at 2 GiB.
+pub const MAX_DECOMPRESSED_PACKET_BYTES: usize = max_decompressed_packet_bytes(REGION_CHUNKS);
+
+/// Computed in u64: at large region sizes the unclamped product overflows
+/// wasm32's usize (it did at compile time from 256 up).
+pub(crate) const fn max_decompressed_packet_bytes(region_chunks: usize) -> usize {
+    let r = (region_chunks / 32) as u64;
+    let scaled = 256 * 1024 * 1024 * r * r;
+    let cap: u64 = 2 * 1024 * 1024 * 1024;
+    let v = if scaled > cap { cap } else { scaled };
+    if v > usize::MAX as u64 { usize::MAX } else { v as usize }
+}
 
 const FRAME_RAW: u8 = 0;
 const FRAME_LZ4: u8 = 1;

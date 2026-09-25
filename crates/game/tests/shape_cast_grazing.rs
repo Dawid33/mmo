@@ -8,9 +8,9 @@ use game::parry::query::{cast_shapes, ShapeCastOptions, ShapeCastStatus};
 use game::parry::shape::{Capsule, Cuboid, Voxels};
 
 /// The player capsule and the character controller's skin for it.
-const HALF_HEIGHT: f32 = 4.4;
-const RADIUS: f32 = 6.4;
-const SKIN: f32 = 0.216;
+const HALF_HEIGHT: f32 = game::movement::PLAYER_CAPSULE_HALF_HEIGHT;
+const RADIUS: f32 = game::movement::PLAYER_CAPSULE_RADIUS;
+const SKIN: f32 = game::movement::CHARACTER_SKIN;
 
 fn r(x: f32) -> Real {
     Real::from(x)

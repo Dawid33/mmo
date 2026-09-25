@@ -1,36 +1,34 @@
 //! Collider wireframe debug view, render side: per-region line buffers
 //! shipped from the game thread (`ClientUpdateEvent::DebugLines`), drawn as
-//! world-space gizmos while the F3 overlay is visible. See
+//! world-space gizmos while the F3 dev panel's collider toggle is on. See
 //! docs/superpowers/specs/2026-07-08-collider-debug-render-design.md.
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 use game::{DebugLine, RegionId};
 
-use super::hud::DebugOverlay;
-
 /// Latest collider wireframe buffer per region, region-local coordinates.
 /// Written by `bridge::drain_client_updates` (replace-on-receipt); entries
-/// drop on RemoveRegion; cleared wholesale when the overlay hides.
+/// drop on RemoveRegion; cleared wholesale when the toggle goes off.
 #[derive(Resource, Default)]
 pub struct DebugColliderLines(pub BTreeMap<RegionId, Vec<DebugLine>>);
 
 /// Render-side handle to the shared debug toggles. The same
-/// `game::DebugFlags` lives in the game thread's manager; F3 flips it here.
+/// `game::DebugFlags` lives in the game thread's manager; the F3 dev panel
+/// flips it here.
 #[derive(Resource, Clone)]
 pub struct DebugFlagsRes(pub game::DebugFlags);
 
-/// Draw the buffered wireframes while the F3 overlay is visible, shifting
+/// Draw the buffered wireframes while the collider toggle is on, shifting
 /// each region's lines by its world offset (the sim is region-local; the
-/// world offset exists only at this render boundary). When hidden, clear
+/// world offset exists only at this render boundary). When off, clear
 /// the buffers once so stale geometry never flashes on the next toggle.
 pub fn draw_collider_wireframes(
-    overlay: Query<&Visibility, With<DebugOverlay>>,
+    flags: Res<DebugFlagsRes>,
     mut lines: ResMut<DebugColliderLines>,
     mut gizmos: Gizmos,
 ) {
-    let visible = overlay.iter().any(|v| *v == Visibility::Visible);
-    if !visible {
+    if !flags.0.collider_wireframes() {
         if !lines.0.is_empty() {
             lines.0.clear();
         }

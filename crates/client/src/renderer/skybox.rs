@@ -101,7 +101,7 @@ pub fn attach_skybox(
     let Some(cubemap) = cubemap else { return };
     for e in &cameras {
         commands.entity(e).insert(Skybox {
-            image: cubemap.0.clone(),
+            image: Some(cubemap.0.clone()),
             brightness: BRIGHTNESS,
             ..Default::default()
         });

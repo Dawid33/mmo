@@ -2,11 +2,14 @@ use game::{RegionCoords, REGION_SIZE};
 
 #[test]
 fn world_offset_is_exact_multiples_of_region_size() {
-    assert_eq!(REGION_SIZE, 1024.0);
+    // A power of two (1024 by default), so every offset is exact in f32.
+    assert_eq!(REGION_SIZE, (game::REGION_CHUNKS * 32) as f32);
+    assert!(game::REGION_CHUNKS_CHOICES.contains(&game::REGION_CHUNKS));
+    assert!((REGION_SIZE as u32).is_power_of_two());
     assert_eq!(RegionCoords::new(0, 0).world_offset(), [0.0, 0.0, 0.0]);
     assert_eq!(
         RegionCoords::new(1, -2).world_offset(),
-        [1024.0, 0.0, -2048.0]
+        [REGION_SIZE, 0.0, -2.0 * REGION_SIZE]
     );
 }
 
@@ -14,16 +17,16 @@ fn world_offset_is_exact_multiples_of_region_size() {
 fn from_world_floor_divides_including_negatives() {
     assert_eq!(RegionCoords::from_world(0.0, 0.0), RegionCoords::new(0, 0));
     assert_eq!(
-        RegionCoords::from_world(1023.9, 1023.9),
+        RegionCoords::from_world(REGION_SIZE - 0.1, REGION_SIZE - 0.1),
         RegionCoords::new(0, 0)
     );
     assert_eq!(
-        RegionCoords::from_world(1024.0, 0.0),
+        RegionCoords::from_world(REGION_SIZE, 0.0),
         RegionCoords::new(1, 0)
     );
     // Negative side must floor, not truncate toward zero.
     assert_eq!(
-        RegionCoords::from_world(-0.1, -1024.1),
+        RegionCoords::from_world(-0.1, -REGION_SIZE - 0.1),
         RegionCoords::new(-1, -2)
     );
 }

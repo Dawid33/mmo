@@ -14,8 +14,8 @@ use crossbeam::channel::{unbounded, Receiver};
 use game::{ClientId, ClientUpdateEvent, GameEventKind, InputEvent, Key, ServerPacket};
 
 use crate::renderer::bridge::{
-    apply_snapshot_voxels, drain_client_updates, drain_region_updates, RegionRoots, Regions,
-    SimEntityMap, SnapshotVoxelQueue,
+    apply_snapshot_voxels, despawn_retired_regions, drain_client_updates, drain_region_updates,
+    RegionRoots, Regions, RetiredRegionRoots, SimEntityMap, SnapshotVoxelQueue,
 };
 use crate::renderer::hud::HudStatus;
 use crate::renderer::input::forward_input;
@@ -97,6 +97,8 @@ impl BevyInputHarness {
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<crate::renderer::lod_rings::LodRings>()
             .init_resource::<SnapshotVoxelQueue>()
+            .init_resource::<RetiredRegionRoots>()
+            .init_resource::<crate::renderer::cursor::CursorPolicy>()
             .insert_resource(ClientUpdates(bridge_recv))
             .insert_resource(GameEvents(tap_send))
             // Same ordering SimBridgePlugin uses: forward_input BEFORE the drains.
@@ -104,7 +106,14 @@ impl BevyInputHarness {
                 PreUpdate,
                 (
                     forward_input,
-                    (drain_client_updates, drain_region_updates, apply_snapshot_voxels).chain(),
+                    (
+                        drain_client_updates,
+                        despawn_retired_regions,
+                        drain_region_updates,
+                        apply_snapshot_voxels,
+                        crate::renderer::cursor::apply_cursor_policy,
+                    )
+                        .chain(),
                 )
                     .chain(),
             );

@@ -10,15 +10,15 @@ use super::bridge::RegionRoots;
 use super::lod_rings::LodRings;
 
 /// Whether the chunk/region wireframe view is on. Client-only debug state,
-/// defaults off; F5 flips it. Independent of the F3 debug overlay.
+/// defaults off; F5 flips it. Also a checkbox in the F3 dev panel.
 #[derive(Resource, Default)]
 pub struct GridDebug {
     pub enabled: bool,
 }
 
 /// F5 toggles the wireframe view. Reads Bevy input directly (client-only
-/// concern — F5 is never forwarded to the sim input path). F3 = HUD/collider
-/// debug, F4 = cave culling; F5 is the next free debug key.
+/// concern — F5 is never forwarded to the sim input path). F3 = dev panel,
+/// F4 = cave culling; F5 is the next free debug key.
 pub fn toggle_grid_debug(keys: Res<ButtonInput<KeyCode>>, mut state: ResMut<GridDebug>) {
     if keys.just_pressed(KeyCode::F5) {
         state.enabled = !state.enabled;

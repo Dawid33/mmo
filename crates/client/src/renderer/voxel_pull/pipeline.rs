@@ -10,7 +10,6 @@ use bevy::{
     render::{
         render_resource::{binding_types as bt, *},
         renderer::RenderDevice,
-        view::ViewTarget,
     },
     shader::ShaderDefVal,
 };
@@ -30,7 +29,9 @@ impl FromWorld for VoxelPullPipeline {
     fn from_world(world: &mut World) -> Self {
         let device = world.resource::<RenderDevice>();
         // Binding order LOCKED to voxel_pull.wgsl group(1):
-        //   0 storage quads, 1 storage transforms, 2 texture_2d_array, 3 sampler.
+        //   0 storage quads, 1 storage transforms, 2 texture_2d_array, 3 sampler,
+        //   4 storage top_layers (fragment only — keeps the vertex stage at two
+        //   storage buffers).
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
             (
@@ -38,6 +39,7 @@ impl FromWorld for VoxelPullPipeline {
                 bt::storage_buffer_read_only::<Mat4>(false),
                 bt::texture_2d_array(TextureSampleType::Float { filterable: true }),
                 bt::sampler(SamplerBindingType::Filtering),
+                bt::storage_buffer_read_only::<u32>(false).visibility(ShaderStages::FRAGMENT),
             ),
         );
         let chunk_layout = device.create_bind_group_layout("voxel_pull_chunk_layout", &entries);
@@ -54,14 +56,15 @@ impl FromWorld for VoxelPullPipeline {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VoxelPullPipelineKey {
     pub msaa_samples: u32,
-    pub hdr: bool,
+    /// The view's colour target format (Bevy 0.19 dropped the `hdr` flag).
+    pub target_format: TextureFormat,
     /// The group(0) view-layout key. Must be derived from the view's *actual*
     /// prepass state (MSAA + which prepass textures exist), exactly as
     /// `prepare_mesh_view_bind_groups` does (bevy_pbr-0.18.1/src/render/
     /// mesh_view_bindings.rs) — the view bind group `SetMeshViewBindGroup<0>`
     /// binds is built for that layout, and our pipeline's group(0) must match it
-    /// or wgpu rejects the draw. Our camera runs `DepthPrepass`, so this carries
-    /// the `DEPTH_PREPASS` bit (adds the depth-texture binding to the layout);
+    /// or wgpu rejects the draw. With `VOXEL_OCCLUSION=on` the camera runs
+    /// `DepthPrepass`, so this carries the `DEPTH_PREPASS` bit (adds the depth-texture binding to the layout);
     /// omitting it — as the first cut did — only worked because the pull-smoke
     /// probe had no prepass, reducing the key to bare MSAA.
     pub view_layout_key: MeshPipelineViewLayoutKey,
@@ -76,6 +79,19 @@ pub struct VoxelPullPipelineKey {
 /// what any camera without an explicit override — ours included — renders with.
 fn shadow_filter_shader_defs() -> Vec<ShaderDefVal> {
     vec!["SHADOW_FILTER_METHOD_GAUSSIAN".into()]
+}
+
+/// Forward-pass defs: the shadow filter plus `DISTANCE_FOG` when the view
+/// binds a fog uniform (Bevy 0.19 only binds it for views with `DistanceFog`).
+fn forward_shader_defs(key: VoxelPullPipelineKey) -> Vec<ShaderDefVal> {
+    let mut defs = shadow_filter_shader_defs();
+    if key
+        .view_layout_key
+        .contains(MeshPipelineViewLayoutKey::DISTANCE_FOG)
+    {
+        defs.push("DISTANCE_FOG".into());
+    }
+    defs
 }
 
 impl SpecializedRenderPipeline for VoxelPullPipeline {
@@ -97,20 +113,16 @@ impl SpecializedRenderPipeline for VoxelPullPipeline {
             vertex: VertexState {
                 shader: self.forward_shader.clone(),
                 entry_point: Some("vertex".into()),
-                shader_defs: shadow_filter_shader_defs(),
+                shader_defs: forward_shader_defs(key),
                 buffers: vec![], // no vertex buffers — geometry is pulled from the storage buffer
                 ..default()
             },
             fragment: Some(FragmentState {
                 shader: self.forward_shader.clone(),
                 entry_point: Some("fragment".into()),
-                shader_defs: shadow_filter_shader_defs(),
+                shader_defs: forward_shader_defs(key),
                 targets: vec![Some(ColorTargetState {
-                    format: if key.hdr {
-                        ViewTarget::TEXTURE_FORMAT_HDR
-                    } else {
-                        TextureFormat::bevy_default()
-                    },
+                    format: key.target_format,
                     blend: None,
                     write_mask: ColorWrites::ALL,
                 })],
@@ -122,8 +134,8 @@ impl SpecializedRenderPipeline for VoxelPullPipeline {
             },
             depth_stencil: Some(DepthStencilState {
                 format: CORE_3D_DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: CompareFunction::GreaterEqual, // Bevy reverse-Z
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::GreaterEqual), // Bevy reverse-Z
                 stencil: default(),
                 bias: default(),
             }),
@@ -167,10 +179,14 @@ pub struct VoxelPullDepthPipeline {
 /// ready to clone.
 pub fn init_voxel_pull_depth_pipeline(
     mut commands: Commands,
-    forward: Res<VoxelPullPipeline>,
+    forward: Option<Res<VoxelPullPipeline>>,
     prepass: Res<PrepassPipeline>,
     asset_server: Res<AssetServer>,
 ) {
+    // Absent on a device that cannot run the pull path (`VoxelPullPlugin::finish`).
+    let Some(forward) = forward else {
+        return;
+    };
     commands.insert_resource(VoxelPullDepthPipeline {
         chunk_layout_desc: forward.chunk_layout_desc.clone(),
         prepass_view_layout: prepass.view_layout_no_motion_vectors.clone(),
@@ -248,8 +264,8 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
             // the depth attachment's write path matches the mesh prepass.
             depth_stencil: Some(DepthStencilState {
                 format: CORE_3D_DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: CompareFunction::GreaterEqual, // Bevy reverse-Z
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::GreaterEqual), // Bevy reverse-Z
                 stencil: StencilState {
                     front: StencilFaceState::IGNORE,
                     back: StencilFaceState::IGNORE,
@@ -267,6 +283,122 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
                 ..default()
             },
             ..default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::renderer::far_voxel::pipeline::tests::validate_shader;
+
+    /// Minimal stand-ins for the Bevy modules `voxel_pull.wgsl` imports:
+    /// only the names and types it uses, so a typo or a type/uniformity error
+    /// in the shader's own code fails here instead of at pipeline creation.
+    const IMPORTS: [(&str, &str); 6] = [
+        (
+            "mesh_view_types.wgsl",
+            r#"
+#define_import_path bevy_pbr::mesh_view_types
+struct Fog { base_color: vec4<f32>, be: vec3<f32>, mode: u32 }
+const FOG_MODE_OFF: u32 = 0u;
+const FOG_MODE_LINEAR: u32 = 1u;
+const FOG_MODE_EXPONENTIAL: u32 = 2u;
+const FOG_MODE_EXPONENTIAL_SQUARED: u32 = 3u;
+const FOG_MODE_ATMOSPHERIC: u32 = 4u;
+const DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT: u32 = 1u;
+"#,
+        ),
+        (
+            "mesh_view_bindings.wgsl",
+            r#"
+#define_import_path bevy_pbr::mesh_view_bindings
+#import bevy_pbr::mesh_view_types::Fog
+struct TestView {
+    clip_from_view: mat4x4<f32>,
+    view_from_world: mat4x4<f32>,
+    viewport: vec4<f32>,
+    world_position: vec3<f32>,
+    exposure: f32,
+}
+struct TestDirectionalLight { color: vec4<f32>, direction_to_light: vec3<f32>, flags: u32 }
+struct TestLights {
+    ambient_color: vec4<f32>,
+    n_directional_lights: u32,
+    directional_lights: array<TestDirectionalLight, 16>,
+}
+@group(0) @binding(0) var<uniform> view: TestView;
+@group(0) @binding(1) var<uniform> lights: TestLights;
+@group(0) @binding(12) var<uniform> fog: Fog;
+"#,
+        ),
+        (
+            "fog.wgsl",
+            r#"
+#define_import_path bevy_pbr::fog
+#import bevy_pbr::mesh_view_types::Fog
+fn linear_fog(f: Fog, c: vec4<f32>, d: f32, s: vec3<f32>) -> vec4<f32> { return c; }
+fn exponential_fog(f: Fog, c: vec4<f32>, d: f32, s: vec3<f32>) -> vec4<f32> { return c; }
+fn exponential_squared_fog(f: Fog, c: vec4<f32>, d: f32, s: vec3<f32>) -> vec4<f32> { return c; }
+fn atmospheric_fog(f: Fog, c: vec4<f32>, d: f32, s: vec3<f32>) -> vec4<f32> { return c; }
+"#,
+        ),
+        (
+            "shadows.wgsl",
+            r#"
+#define_import_path bevy_pbr::shadows
+fn fetch_directional_shadow(light_id: u32, frag_position: vec4<f32>, surface_normal: vec3<f32>, view_z: f32, frag_coord_xy: vec2<f32>) -> f32 {
+    return 1.0;
+}
+"#,
+        ),
+        (
+            "view_transformations.wgsl",
+            r#"
+#define_import_path bevy_pbr::view_transformations
+fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(position, 1.0); }
+"#,
+        ),
+        (
+            "maths.wgsl",
+            "#define_import_path bevy_render::maths\nconst PI: f32 = 3.141592653589793;\n",
+        ),
+    ];
+
+    #[test]
+    fn forward_shader_is_valid_wgsl_after_imports() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/voxel_pull.wgsl"
+        ))
+        .expect("voxel_pull.wgsl");
+        validate_shader(source, &[], &IMPORTS).expect("voxel_pull.wgsl must compose and validate");
+    }
+
+    #[test]
+    fn depth_shader_is_valid_wgsl_after_imports() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/voxel_pull_depth.wgsl"
+        ))
+        .expect("voxel_pull_depth.wgsl");
+        validate_shader(source, &[], &IMPORTS)
+            .expect("voxel_pull_depth.wgsl must compose and validate");
+    }
+
+    /// Every def combination the four cull pipelines compile with.
+    #[test]
+    fn cull_shader_is_valid_wgsl_for_every_pipeline_variant() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/voxel_pull_cull.wgsl"
+        ))
+        .expect("voxel_pull_cull.wgsl");
+        let variants: [&[&str]; 4] = [&[], &["INDIRECT_COUNT"], &["HZB"], &["HZB", "INDIRECT_COUNT"]];
+        for defs in variants {
+            let defs: Vec<bevy::shader::ShaderDefVal> =
+                defs.iter().map(|d| (*d).into()).collect();
+            validate_shader(source.clone(), &defs, &[])
+                .unwrap_or_else(|e| panic!("cull shader with {defs:?}: {e:?}"));
         }
     }
 }

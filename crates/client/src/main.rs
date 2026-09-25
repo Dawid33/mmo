@@ -27,13 +27,27 @@ use client::GameInstanceManager;
 const ASYNC_COMPUTE_PERCENT: f32 = 0.5;
 const ASYNC_COMPUTE_MIN_THREADS: usize = 1;
 const ASYNC_COMPUTE_MAX_THREADS: usize = usize::MAX;
+/// Bounds on the default Bevy thread cap: half the logical cores, clamped.
+/// The floor is the old fixed default; the ceiling keeps a many-core box from
+/// being monopolized. 8 threads (vs 4) cut `full` join time 19% (2026-09-22
+/// capture) — the join's snapshot-voxel derivation and meshing share the
+/// async pool, so they were paced by it. Tunable.
 #[cfg(not(target_arch = "wasm32"))]
-const DEFAULT_CLIENT_WORKER_THREADS: usize = 4;
+const MIN_CLIENT_WORKER_THREADS: usize = 4;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_CLIENT_WORKER_THREADS: usize = 8;
+
+/// The default cap for a machine with `cores` logical cores.
+#[cfg(not(target_arch = "wasm32"))]
+fn default_client_worker_threads(cores: usize) -> usize {
+    (cores / 2).clamp(MIN_CLIENT_WORKER_THREADS, MAX_CLIENT_WORKER_THREADS)
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn client_worker_cap(value: Option<&str>) -> Result<usize, String> {
     let Some(value) = value else {
-        return Ok(DEFAULT_CLIENT_WORKER_THREADS);
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        return Ok(default_client_worker_threads(cores));
     };
     let cap = value.parse::<usize>().map_err(|_| {
         format!("invalid VOXEL_CLIENT_WORKER_THREADS value `{value}` (expected integer >= 4)")
@@ -179,7 +193,7 @@ fn main() {
     // The game thread subscribes by it; the render benchmark gates on it.
     let world_scale = WorldScale::from_env().unwrap_or_else(|error| panic!("{error}"));
 
-    // Shared debug toggles: render thread (F3) writes, game thread reads.
+    // Shared debug toggles: render thread (F3 dev panel) writes, game thread reads.
     let debug_flags = game::DebugFlags::default();
 
     #[cfg(target_arch = "wasm32")]
@@ -257,7 +271,8 @@ fn main() {
                 file_path: asset_path.into(),
                 ..Default::default()
             })
-            .set(bevy::app::TaskPoolPlugin { task_pool_options }),
+            .set(bevy::app::TaskPoolPlugin { task_pool_options })
+            .set(renderer::render_plugin()),
     )
     .insert_resource(world_scale);
     // The logger exists from here on: announce the perf timeline and flush the
@@ -271,6 +286,8 @@ fn main() {
         game_send: game_send.clone(),
         debug_flags: debug_flags.clone(),
     });
+    #[cfg(feature = "dev_ui")]
+    app.add_plugins(renderer::dev_ui::DevUiPlugin);
 
     #[cfg(target_arch = "wasm32")]
     app.insert_resource(sim)
@@ -311,11 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn client_worker_cap_defaults_to_four() {
-        assert_eq!(client_worker_cap(None), Ok(4));
-    }
-
-    #[test]
     fn client_worker_cap_accepts_valid_override() {
         assert_eq!(client_worker_cap(Some("6")), Ok(6));
     }
@@ -333,10 +345,21 @@ mod tests {
 
     #[test]
     fn client_worker_cap_limits_combined_bevy_pools() {
-        let options = task_pool_options(Some(client_worker_cap(None).unwrap()));
-        assert_eq!(options.max_total_threads, 4);
-        assert_eq!(options.async_compute.max_threads, 4);
+        let options = task_pool_options(Some(client_worker_cap(Some("6")).unwrap()));
+        assert_eq!(options.max_total_threads, 6);
+        assert_eq!(options.async_compute.max_threads, 6);
         assert_eq!(options.async_compute.percent, ASYNC_COMPUTE_PERCENT);
+    }
+
+    #[test]
+    fn default_worker_cap_is_half_the_cores_clamped() {
+        assert_eq!(default_client_worker_threads(1), 4, "floor");
+        assert_eq!(default_client_worker_threads(8), 4);
+        assert_eq!(default_client_worker_threads(12), 6);
+        assert_eq!(default_client_worker_threads(20), 8, "this dev box");
+        assert_eq!(default_client_worker_threads(64), 8, "ceiling");
+        let unset = client_worker_cap(None).unwrap();
+        assert!((MIN_CLIENT_WORKER_THREADS..=MAX_CLIENT_WORKER_THREADS).contains(&unset));
     }
 
     #[test]

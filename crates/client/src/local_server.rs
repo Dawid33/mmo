@@ -104,6 +104,13 @@ impl LocalServer {
         Ok(server)
     }
 
+    /// Jitter the inline regions' scheduling from a seed (see
+    /// `game::InlineSchedule`); `None` restores lockstep. Harness hook.
+    #[doc(hidden)]
+    pub fn set_schedule(&mut self, schedule: Option<game::InlineSchedule>) {
+        self.manager.spawner_mut().set_schedule(schedule);
+    }
+
     /// Drain pending client packets without blocking.
     pub fn pump(&mut self) -> Result<(), GameError> {
         while let Ok(packet) = self.recv.try_recv() {

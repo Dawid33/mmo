@@ -28,7 +28,7 @@ fn player_spawns_above_terrain_surface() {
     let y = player_body_y(&region);
     // Must be clear of the surface (top face at 128), not the old hardcoded 26.
     assert!(y > 128.0, "player must spawn above the terrain surface, got y={y}");
-    // Spawn math: (surface_top) + capsule_half_extent(4.4 + 6.4 = 10.8) + clear(3.6).
-    // Surface top = 128 -> 128 + 14.4 = 142.4.
-    assert!((y - 142.4).abs() < 0.01, "expected ~142.4, got {y}");
+    // Spawn math: (surface_top) + capsule_half_extent(8.0 + 6.4 = 14.4) + clear(3.6).
+    // Surface top = 128 -> 128 + 18.0 = 146.0.
+    assert!((y - 146.0).abs() < 0.01, "expected ~146.0, got {y}");
 }

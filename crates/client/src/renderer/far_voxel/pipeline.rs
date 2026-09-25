@@ -5,7 +5,6 @@ use bevy::{
     render::{
         render_resource::{binding_types as bt, *},
         renderer::{RenderAdapter, RenderDevice},
-        view::ViewTarget,
     },
     shader::ShaderDefVal,
 };
@@ -160,7 +159,8 @@ fn cull_layout_entries() -> Vec<BindGroupLayoutEntry> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FarVoxelPipelineKey {
     pub msaa_samples: u32,
-    pub hdr: bool,
+    /// The view's colour target format (Bevy 0.19 dropped the `hdr` flag).
+    pub target_format: TextureFormat,
     pub view_layout_key: MeshPipelineViewLayoutKey,
 }
 
@@ -178,6 +178,13 @@ pub fn render_shader_defs(key: FarVoxelPipelineKey) -> Vec<ShaderDefVal> {
     }
     if key.msaa_samples > 1 {
         defs.push("MULTISAMPLED".into());
+    }
+    // Bevy 0.19 binds the fog uniform only for views with `DistanceFog`.
+    if key
+        .view_layout_key
+        .contains(MeshPipelineViewLayoutKey::DISTANCE_FOG)
+    {
+        defs.push("DISTANCE_FOG".into());
     }
     defs
 }
@@ -262,11 +269,7 @@ impl SpecializedRenderPipeline for FarVoxelPipeline {
                 entry_point: Some("fragment".into()),
                 shader_defs,
                 targets: vec![Some(ColorTargetState {
-                    format: if key.hdr {
-                        ViewTarget::TEXTURE_FORMAT_HDR
-                    } else {
-                        TextureFormat::bevy_default()
-                    },
+                    format: key.target_format,
                     blend: None,
                     write_mask: ColorWrites::ALL,
                 })],
@@ -274,8 +277,8 @@ impl SpecializedRenderPipeline for FarVoxelPipeline {
             primitive: far_proxy_primitive_state(),
             depth_stencil: Some(DepthStencilState {
                 format: CORE_3D_DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: CompareFunction::GreaterEqual,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::GreaterEqual),
                 stencil: default(),
                 bias: default(),
             }),
@@ -289,13 +292,13 @@ impl SpecializedRenderPipeline for FarVoxelPipeline {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
 
     use bevy::{
         asset::{uuid::Uuid, AssetId},
         render::render_resource::{DownlevelFlags, ShaderStages, WgpuFeatures},
-        shader::{PipelineCacheError, ShaderCache, ShaderCacheSource, ValidateShader},
+        shader::{ShaderCacheError, ShaderCache, ShaderCacheSource, ValidateShader},
     };
     use game::BlockId;
 
@@ -310,22 +313,24 @@ mod tests {
         .expect("Task 5 must provide the far voxel shader")
     }
 
-    fn validate_shader(
+    /// Compose `source` against stub `imports` and run naga validation on the
+    /// result. Shared with `voxel_pull::pipeline`'s shader test.
+    pub(crate) fn validate_shader(
         source: String,
         shader_defs: &[ShaderDefVal],
         imports: &[(&str, &str)],
-    ) -> Result<(), PipelineCacheError> {
+    ) -> Result<(), ShaderCacheError> {
         fn accept_module(
             _: &(),
             source: ShaderCacheSource<'_>,
             _: &ValidateShader,
-        ) -> Result<(), PipelineCacheError> {
+        ) -> Result<(), ShaderCacheError> {
             let module = match source {
                 ShaderCacheSource::Naga(module) => module,
                 ShaderCacheSource::Wgsl(source) => naga::front::wgsl::parse_str(&source)
-                    .map_err(|error| PipelineCacheError::CreateShaderModule(error.to_string()))?,
+                    .map_err(|error| ShaderCacheError::CreateShaderModule(error.to_string()))?,
                 ShaderCacheSource::SpirV(_) => {
-                    return Err(PipelineCacheError::CreateShaderModule(
+                    return Err(ShaderCacheError::CreateShaderModule(
                         "unexpected SPIR-V shader in WGSL validation test".into(),
                     ));
                 }
@@ -336,11 +341,11 @@ mod tests {
             )
             .validate(&module)
             .map(|_| ())
-            .map_err(|error| PipelineCacheError::CreateShaderModule(error.to_string()))
+            .map_err(|error| ShaderCacheError::CreateShaderModule(error.to_string()))
         }
 
         let mut cache =
-            ShaderCache::new(WgpuFeatures::empty(), DownlevelFlags::all(), accept_module);
+            ShaderCache::new((), WgpuFeatures::empty(), DownlevelFlags::all(), accept_module);
         for (index, (path, source)) in imports.iter().enumerate() {
             cache.set_shader(
                 AssetId::Uuid {
@@ -353,17 +358,21 @@ mod tests {
             uuid: Uuid::from_u128(imports.len() as u128 + 1),
         };
         cache.set_shader(shader_id, Shader::from_wgsl(source, "far_voxel_test.wgsl"));
-        cache.get(&(), 0, shader_id, shader_defs).map(drop)
+        cache.get(0, shader_id, shader_defs).map(drop)
     }
 
-    fn render_validation_imports() -> [(&'static str, &'static str); 4] {
+    fn render_validation_imports() -> [(&'static str, &'static str); 5] {
         [
             (
                 "mesh_view_bindings.wgsl",
                 r#"
 #define_import_path bevy_pbr::mesh_view_bindings
 
+#import bevy_pbr::mesh_view_types::Fog
+
 struct TestView {
+    clip_from_view: mat4x4<f32>,
+    viewport: vec4<f32>,
     world_position: vec3<f32>,
     exposure: f32,
 }
@@ -383,6 +392,7 @@ struct TestLights {
 
 @group(0) @binding(0) var<uniform> view: TestView;
 @group(0) @binding(1) var<uniform> lights: TestLights;
+@group(0) @binding(12) var<uniform> fog: Fog;
 #ifdef DEPTH_PREPASS
 #ifdef MULTISAMPLED
 @group(0) @binding(2) var depth_prepass_texture: texture_depth_multisampled_2d;
@@ -394,7 +404,33 @@ struct TestLights {
             ),
             (
                 "mesh_view_types.wgsl",
-                "#define_import_path bevy_pbr::mesh_view_types\n",
+                r#"
+#define_import_path bevy_pbr::mesh_view_types
+
+struct Fog {
+    base_color: vec4<f32>,
+    be: vec3<f32>,
+    mode: u32,
+}
+
+const FOG_MODE_OFF: u32 = 0u;
+const FOG_MODE_LINEAR: u32 = 1u;
+const FOG_MODE_EXPONENTIAL: u32 = 2u;
+const FOG_MODE_EXPONENTIAL_SQUARED: u32 = 3u;
+const FOG_MODE_ATMOSPHERIC: u32 = 4u;
+"#,
+            ),
+            (
+                "fog.wgsl",
+                r#"
+#define_import_path bevy_pbr::fog
+#import bevy_pbr::mesh_view_types::Fog
+
+fn linear_fog(f: Fog, c: vec4<f32>, d: f32, s: vec3<f32>) -> vec4<f32> { return c; }
+fn exponential_fog(f: Fog, c: vec4<f32>, d: f32, s: vec3<f32>) -> vec4<f32> { return c; }
+fn exponential_squared_fog(f: Fog, c: vec4<f32>, d: f32, s: vec3<f32>) -> vec4<f32> { return c; }
+fn atmospheric_fog(f: Fog, c: vec4<f32>, d: f32, s: vec3<f32>) -> vec4<f32> { return c; }
+"#,
             ),
             (
                 "view_transformations.wgsl",
@@ -560,7 +596,7 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> {
 
         let depth_key = FarVoxelPipelineKey {
             msaa_samples: 1,
-            hdr: true,
+            target_format: TextureFormat::Rgba16Float,
             view_layout_key: MeshPipelineViewLayoutKey::DEPTH_PREPASS,
         };
         assert_eq!(
@@ -573,7 +609,7 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> {
 
         let multisampled = FarVoxelPipelineKey {
             msaa_samples: 4,
-            hdr: false,
+            target_format: TextureFormat::Bgra8UnormSrgb,
             view_layout_key: MeshPipelineViewLayoutKey::DEPTH_PREPASS
                 | MeshPipelineViewLayoutKey::NORMAL_PREPASS,
         };

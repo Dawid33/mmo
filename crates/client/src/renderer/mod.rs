@@ -8,10 +8,16 @@ use bevy::render::render_resource::{
 use crossbeam::channel::{Receiver, Sender};
 use game::{ClientId, ClientUpdateEvent, GameEventKind};
 
+mod atmosphere;
+#[cfg(not(target_arch = "wasm32"))]
+mod autopilot;
 mod avatar;
 mod block_textures;
-pub(crate) mod bridge;
+pub mod bridge;
 pub(crate) mod collider_debug;
+pub(crate) mod cursor;
+#[cfg(feature = "dev_ui")]
+pub mod dev_ui;
 pub mod config;
 pub mod convert;
 pub(crate) mod diag;
@@ -34,6 +40,23 @@ mod voxel_material;
 pub mod voxel_pull;
 use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
+
+/// `RenderPlugin` with Bevy's default (env-driven) `WgpuSettings`, minus the
+/// adapter features that break device creation. Bevy requests every feature
+/// the adapter advertises; Mesa's NVK driver (this box's T600) advertises
+/// `EXPERIMENTAL_COOPERATIVE_MATRIX` under wgpu 29 but then fails
+/// `vkCreateDevice` with it, so an unpinned launch would panic instead of
+/// running. Nothing here uses cooperative matrices.
+pub fn render_plugin() -> bevy::render::RenderPlugin {
+    use bevy::render::settings::{RenderCreation, WgpuFeatures, WgpuSettings};
+    bevy::render::RenderPlugin {
+        render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+            disabled_features: Some(WgpuFeatures::EXPERIMENTAL_COOPERATIVE_MATRIX),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
 
 #[derive(Resource)]
 pub struct ClientUpdates(pub Receiver<ClientUpdateEvent>);
@@ -65,6 +88,7 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<bridge::RegionRoots>()
         .init_resource::<bridge::SimEntityMap>()
         .init_resource::<bridge::SnapshotVoxelQueue>()
+        .init_resource::<bridge::RetiredRegionRoots>()
         .init_resource::<hud::HudStatus>()
         .init_resource::<avatar::AvatarAssets>()
         .init_resource::<ui_bridge::UiUpdates>()
@@ -73,6 +97,7 @@ impl Plugin for SimBridgePlugin {
         .insert_resource(collider_debug::DebugFlagsRes(self.debug_flags.clone()))
         .init_resource::<collider_debug::DebugColliderLines>()
         .init_resource::<grid_debug::GridDebug>()
+        .init_resource::<cursor::CursorPolicy>()
         .add_observer(ui_input::on_widget_click)
         .init_resource::<meshing::queue::ChunkGrid>()
         .init_resource::<meshing::queue::RemeshQueue>()
@@ -81,11 +106,16 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<meshing::queue::FrameUploads>()
         .init_resource::<meshing::lod::LodBuildQueue>()
         .init_resource::<meshing::lod::FarFrameUploads>()
-        .init_resource::<meshing::visibility::CullingConfig>()
+        // Cave culling starts OFF: the world has no caves yet, and the flood
+        // cost 5-8.5 ms per turning frame at the 5x5 window (2026-09-23
+        // bench) for nothing to hide. F4 / the F3 dev panel turn it on.
+        .insert_resource(meshing::visibility::CullingConfig { graph_enabled: false })
         .init_resource::<config::TerrainRenderConfig>()
         .init_resource::<input::MouseCoalesceWindow>()
         .init_resource::<look::LocalLook>()
         .init_resource::<lod_rings::LodRings>()
+        .init_resource::<lod_rings::HomeCellMask>()
+        .init_resource::<join_timeline::WorldReady>()
         .add_systems(
             PreUpdate,
             (
@@ -93,11 +123,13 @@ impl Plugin for SimBridgePlugin {
                 look::integrate_local_look.after(bevy::input::InputSystems),
                 (
                     bridge::drain_client_updates,
+                    bridge::despawn_retired_regions,
                     bridge::drain_region_updates,
                     bridge::apply_snapshot_voxels,
                     bridge::dedupe_ghosts,
                     bridge::enforce_single_active_camera,
                     ui_bridge::drain_ui_updates,
+                    cursor::apply_cursor_policy,
                 )
                     .chain(),
             )
@@ -133,7 +165,12 @@ impl Plugin for SimBridgePlugin {
                 // LOD rings run in Update but outside the meshing chain:
                 // they only spawn/despawn LOD roots and children, which
                 // the LOD mesh systems pick up on later frames.
-                (lod_rings::apply_lod_events, lod_rings::retire_lod_roots).chain(),
+                (
+                    lod_rings::apply_lod_events,
+                    lod_rings::mask_home_lod,
+                    lod_rings::retire_lod_roots,
+                )
+                    .chain(),
                 interpolate::interpolate_transforms,
                 // Per-frame mouse look replaces the per-tick sim look that
                 // interpolate_transforms just snapped the camera to.
@@ -141,24 +178,31 @@ impl Plugin for SimBridgePlugin {
                 motion_probe::probe_camera_motion.after(look::apply_local_look),
                 join_timeline::track_join_timeline,
                 avatar::attach_avatars,
+                avatar::squish_slimes.after(interpolate::interpolate_transforms),
                 skybox::attach_skybox,
-                hud::toggle_debug,
+                atmosphere::attach_fog,
                 meshing::visibility::toggle_culling,
-                collider_debug::draw_collider_wireframes.after(hud::toggle_debug),
+                collider_debug::draw_collider_wireframes,
                 grid_debug::toggle_grid_debug,
                 grid_debug::draw_grid_debug.after(grid_debug::toggle_grid_debug),
-                hud::update_debug_text,
                 hud::update_crosshair_visibility,
             ),
         );
-        #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(
             Update,
-            (
-                meshing::visibility::enable_native_occlusion,
-                config::configure_native_antialiasing,
-            ),
+            motion_probe::probe_region_crossing.after(interpolate::interpolate_transforms),
         );
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(Update, config::configure_native_antialiasing);
+        #[cfg(not(target_arch = "wasm32"))]
+        if meshing::visibility::native_occlusion_enabled() {
+            app.add_systems(Update, meshing::visibility::enable_native_occlusion);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(pilot) = autopilot::Autopilot::from_env() {
+            autopilot::plugin(app, pilot);
+        }
 
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(benchmark) = render_bench::RenderBenchmarkPlugin::from_env() {
@@ -239,6 +283,9 @@ const EMBEDDED_BLOCK_TEXTURES: &[(&str, &[u8])] = &[
     ),
 ];
 
+/// Anisotropic filtering samples for the block array texture (wgpu's maximum).
+pub const BLOCK_TEXTURE_ANISOTROPY: u16 = 16;
+
 fn setup_scene(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -252,25 +299,41 @@ fn setup_scene(
     let (rgba_layers, block_layers) = build_layers(&registry, load_block_texture);
 
     let (w, h) = (rgba_layers[0].width(), rgba_layers[0].height());
-    let data: Vec<u8> = rgba_layers
-        .iter()
-        .flat_map(|l| l.as_raw().clone())
-        .collect();
-    let mut array_image = Image::new(
+    // Every layer carries its full mip chain (see `block_textures::mip_chain`),
+    // laid out layer-major — each layer's levels back to back — which is the
+    // order `Image::data_order`'s default uploads.
+    let mut mip_level_count = 1;
+    let mut data: Vec<u8> = Vec::new();
+    for layer in &rgba_layers {
+        let chain = block_textures::mip_chain(layer);
+        mip_level_count = chain.len() as u32;
+        for level in &chain {
+            data.extend_from_slice(level.as_raw());
+        }
+    }
+    // `new_uninit`, not `new`: `new` asserts the data is exactly one mip level.
+    let mut array_image = Image::new_uninit(
         Extent3d {
             width: w,
             height: h,
             depth_or_array_layers: rgba_layers.len() as u32,
         },
         TextureDimension::D2,
-        data,
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
-    // `ImageSampler::nearest()` alone leaves clamp-to-edge addressing, which breaks
-    // the shader's block-cell UVs (position / BLOCK_VOXELS exceeds 1.0 past the first
-    // block); force repeat addressing on top of nearest filtering.
-    let mut sampler = ImageSamplerDescriptor::nearest();
+    array_image.texture_descriptor.mip_level_count = mip_level_count;
+    array_image.data = Some(data);
+    // Repeat addressing: the shader's block-cell UVs (position / BLOCK_VOXELS)
+    // exceed 1.0 past the first block. All filters linear because anisotropic
+    // filtering requires it (wgpu rejects anisotropy with a nearest filter),
+    // and grazing-angle ground needs anisotropy or trilinear smears it into
+    // shimmering noise. The crisp near look is kept in the shaders instead:
+    // `crisp_uv` snaps magnified samples to texel centres, antialiasing only
+    // the one-pixel seam between texels. Minification blends texels and mip
+    // levels so distant terrain converges on each block's average colour.
+    let mut sampler = ImageSamplerDescriptor::linear();
+    sampler.anisotropy_clamp = BLOCK_TEXTURE_ANISOTROPY;
     sampler.address_mode_u = ImageAddressMode::Repeat;
     sampler.address_mode_v = ImageAddressMode::Repeat;
     sampler.address_mode_w = ImageAddressMode::Repeat;
@@ -288,6 +351,9 @@ fn setup_scene(
 
     // The pulled render path binds the same array texture directly (no material).
     commands.insert_resource(voxel_pull::BlockArrayTexture(handle.clone()));
+    commands.insert_resource(voxel_pull::BlockTopLayers(std::sync::Arc::new(
+        block_layers.side_to_top(),
+    )));
     commands.insert_resource(meshing::ChunkMaterial(voxel_materials.add(
         ExtendedMaterial {
             base: StandardMaterial {
@@ -301,19 +367,7 @@ fn setup_scene(
     )));
     commands.insert_resource(block_layers);
 
-    commands.spawn((
-        DirectionalLight {
-            color: Color::srgb(0.98, 0.95, 0.82),
-            shadows_enabled: true,
-            ..Default::default()
-        },
-        Transform::default().looking_at(Vec3::new(-0.15, -0.1, 0.15), Vec3::Y),
-    ));
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.98, 0.95, 0.82),
-        brightness: 100.0,
-        ..Default::default()
-    });
+    atmosphere::spawn_lights(&mut commands);
 }
 
 /// Load one block texture as RGBA8. Native reads `assets/blocks/<path>`; wasm

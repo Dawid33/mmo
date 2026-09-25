@@ -72,37 +72,63 @@ impl PerlinNoise {
     }
 }
 
-/// Sum of Perlin octaves at doubling frequencies, amplitude-weighted and
-/// normalized. `first_octave` sets the base frequency `2^first_octave`
-/// (negative => long wavelength); octave `i` runs at `2^(first_octave + i)`.
+/// Second-stack input scale (Minecraft's `NormalNoise`): the two stacks are
+/// sampled at slightly different frequencies so their lattices never line up.
+const SECOND_STACK_SCALE: f64 = 1.0181268882175227;
+
+/// Two summed stacks of Perlin octaves at doubling frequencies, weighted the
+/// way Minecraft's `NormalNoise` weights them — which is what the octave tables
+/// and spline control points in `pipeline.rs` assume:
+///
+/// - octave `i` weighs `amplitudes[i] * 2^-i` (times a constant), so the FIRST
+///   octave — the longest wavelength — dominates and the rest is detail. With
+///   flat `amplitudes[i]` weights the 250 m..1 km octaves drowned the 8 km
+///   one and no landmass held together above ~1 km.
+/// - the sum is scaled by a value factor instead of divided by the amplitude
+///   sum, so a 6-9 octave noise has a standard deviation of ~0.5 and reaches
+///   ±1.2. Normalizing to the amplitude sum gave sd ~0.1: the splines' land
+///   and mountain points were never reached and the world was 99.7% ocean.
+///
+/// `first_octave` sets the base frequency `2^first_octave` (negative => long
+/// wavelength); octave `i` runs at `2^(first_octave + i)`.
 pub struct OctaveNoise {
-    octaves: Vec<PerlinNoise>,
-    amplitudes: Vec<f64>,
+    first: Vec<PerlinNoise>,
+    second: Vec<PerlinNoise>,
+    /// `amplitudes[i] * 2^(n-1-i) / (2^n - 1)`, precomputed from `new()`.
+    weights: Vec<f64>,
     /// 2^(first_octave + i) — exact powers of two, precomputed from `new()`.
     freqs: Vec<f64>,
-    norm: f64,
+    /// `(1/6) / (0.1 * (1 + 1/n))` — Minecraft's expected-deviation rescale.
+    value_factor: f64,
 }
 
 impl OctaveNoise {
     pub fn new(seed: u64, first_octave: i32, amplitudes: Vec<f64>) -> Self {
+        let n = amplitudes.len();
         let mut state = seed;
-        let octaves = (0..amplitudes.len())
-            .map(|_| PerlinNoise::new(splitmix64(&mut state)))
+        let first = (0..n).map(|_| PerlinNoise::new(splitmix64(&mut state))).collect();
+        let second = (0..n).map(|_| PerlinNoise::new(splitmix64(&mut state))).collect();
+        let lowest = 2f64.powi(n as i32 - 1) / (2f64.powi(n as i32) - 1.0);
+        let weights = (0..n)
+            .map(|i| amplitudes[i] * lowest / 2f64.powi(i as i32))
             .collect();
-        let freqs = (0..amplitudes.len())
+        let freqs = (0..n)
             .map(|i| 2f64.powi(first_octave + i as i32))
             .collect();
-        let norm = amplitudes.iter().sum::<f64>().max(1.0);
-        Self { octaves, amplitudes, freqs, norm }
+        let value_factor = (1.0 / 6.0) / (0.1 * (1.0 + 1.0 / n as f64));
+        Self { first, second, weights, freqs, value_factor }
     }
 
     pub fn sample2(&self, x: f64, z: f64) -> f64 {
         let mut acc = 0.0;
-        for (i, oct) in self.octaves.iter().enumerate() {
+        for i in 0..self.weights.len() {
             let freq = self.freqs[i];
-            acc += self.amplitudes[i] * oct.sample2(x * freq, z * freq);
+            let a = self.first[i].sample2(x * freq, z * freq);
+            let b = self.second[i]
+                .sample2(x * freq * SECOND_STACK_SCALE, z * freq * SECOND_STACK_SCALE);
+            acc += self.weights[i] * (a + b);
         }
-        acc / self.norm
+        acc * self.value_factor
     }
 }
 
@@ -132,8 +158,28 @@ mod tests {
         assert_eq!(o.sample2(10.0, 20.0), o.sample2(10.0, 20.0)); // deterministic
         for i in 0..40 {
             let v = o.sample2(i as f64 * 1.1, i as f64 * -0.7);
-            assert!(v >= -1.5 && v <= 1.5, "octave out of range: {v}");
+            assert!(v >= -2.0 && v <= 2.0, "octave out of range: {v}");
         }
+    }
+
+    /// The pipeline's splines are laid out on THIS distribution: a standard
+    /// deviation near 0.5 with the longest octave dominant. Amplitude-sum
+    /// normalization (sd ~0.1) silently turned the whole world into ocean.
+    #[test]
+    fn pipeline_noises_have_minecraft_like_spread() {
+        let o = OctaveNoise::new(0xD5, -10, vec![1.75, 1.0, 2.0, 3.0, 2.0, 2.0, 1.0]);
+        let (mut sum, mut sum_sq, mut n) = (0.0, 0.0, 0.0);
+        for i in 0..200 {
+            for j in 0..200 {
+                let v = o.sample2(i as f64 * 97.3, j as f64 * 89.1);
+                sum += v;
+                sum_sq += v * v;
+                n += 1.0;
+            }
+        }
+        let mean: f64 = sum / n;
+        let sd = (sum_sq / n - mean * mean).sqrt();
+        assert!((0.3..0.8).contains(&sd), "continent noise sd {sd}");
     }
 
     #[test]
@@ -176,11 +222,14 @@ mod tests {
                 let z = ((splitmix64(&mut s) >> 40) as f64) * 0.53 - 2000.0;
                 // Reference: recompute with explicit powi, old-style.
                 let mut acc = 0.0;
-                for (i, oct) in o.octaves.iter().enumerate() {
+                for i in 0..amps.len() {
                     let freq = 2f64.powi(first + i as i32);
-                    acc += o.amplitudes[i] * oct.sample2(x * freq, z * freq);
+                    let a = o.first[i].sample2(x * freq, z * freq);
+                    let b = o.second[i]
+                        .sample2(x * freq * SECOND_STACK_SCALE, z * freq * SECOND_STACK_SCALE);
+                    acc += o.weights[i] * (a + b);
                 }
-                assert_eq!(o.sample2(x, z), acc / o.norm, "at ({x}, {z})");
+                assert_eq!(o.sample2(x, z), acc * o.value_factor, "at ({x}, {z})");
             }
         }
     }

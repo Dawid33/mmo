@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use crossbeam::channel::Receiver;
 use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, RegionId};
 use game::{EntityKey, Voxel};
@@ -18,6 +17,27 @@ pub struct Regions(pub BTreeMap<RegionId, Receiver<GameDataUpdate>>);
 
 #[derive(Resource, Default)]
 pub struct RegionRoots(pub BTreeMap<RegionId, Entity>);
+
+/// Region roots released from the window but not yet despawned, oldest first.
+/// A window shift releases a whole row at once — five regions of ~20k chunk
+/// entities at the 5x5 window — and despawning all of them in the crossing
+/// frame cost up to 372 ms of command application (2026-09-23 `fly-probe`
+/// trace). [`despawn_retired_regions`] takes [`REGION_DESPAWNS_PER_FRAME`] a
+/// frame instead. A retired root is already out of every map, so nothing
+/// reads or updates it; it just stays drawn for those few frames.
+#[derive(Resource, Default)]
+pub struct RetiredRegionRoots(pub std::collections::VecDeque<(RegionId, Entity)>);
+
+/// Region trees despawned per frame by [`despawn_retired_regions`].
+pub const REGION_DESPAWNS_PER_FRAME: usize = 1;
+
+pub fn despawn_retired_regions(mut commands: Commands, mut retired: ResMut<RetiredRegionRoots>) {
+    for _ in 0..REGION_DESPAWNS_PER_FRAME {
+        let Some((_, root)) = retired.0.pop_front() else { break };
+        // despawn() removes descendants via ChildOf relationships.
+        commands.entity(root).despawn();
+    }
+}
 
 #[derive(Resource, Default)]
 pub struct SimEntityMap(pub BTreeMap<(RegionId, EntityKey), Entity>);
@@ -48,13 +68,25 @@ pub struct SimTarget {
     pub rot_smoothing: f32,
     pub pos_snap: f32,
     pub rot_snap: f32,
+    /// Added to `pos` to get where the `Transform` settles. Zero for bodies;
+    /// the eye height for the local player's camera, whose sim pose is the
+    /// capsule centre.
+    pub offset: Vec3,
 }
 
 impl SimTarget {
     // pos_snap values are world-unit distances (1 unit = 1/16 m); smoothing
     // factors and rotation snaps are dimensionless/radians.
     pub fn body(pos: Vec3, rot: Quat) -> Self {
-        Self { pos, rot, pos_smoothing: 0.5, rot_smoothing: 0.5, pos_snap: 1.6, rot_snap: 0.1 }
+        Self {
+            pos,
+            rot,
+            pos_smoothing: 0.5,
+            rot_smoothing: 0.5,
+            pos_snap: 1.6,
+            rot_snap: 0.1,
+            offset: Vec3::ZERO,
+        }
     }
     pub fn camera(pos: Vec3, rot: Quat) -> Self {
         // The render camera SNAPS its rotation (rot_smoothing = 1.0) so
@@ -68,9 +100,18 @@ impl SimTarget {
             rot_smoothing: 1.0,
             pos_snap: 0.008,
             rot_snap: 0.001,
+            offset: EYE_OFFSET,
         }
     }
+
+    /// Where the `Transform` converges: the sim pose plus `offset`.
+    pub fn goal(&self) -> Vec3 {
+        self.pos + self.offset
+    }
 }
+
+/// The first-person eye sits this far above the player's body origin.
+pub const EYE_OFFSET: Vec3 = Vec3::new(0.0, game::movement::PLAYER_EYE_OFFSET, 0.0);
 
 /// A chunk's 32³ voxel grid, run-length encoded along the linear index
 /// (`x + 32*y + 32*32*z`, so runs extend along +X).
@@ -85,8 +126,21 @@ impl SimTarget {
 /// one run. Nothing needs the dense array persistently — the mesher expands it
 /// transiently to build `PaddedVoxels`, then drops it — so we store the runs and
 /// hand out a dense `Vec` on demand.
-#[derive(Component, Clone, PartialEq, Eq, Debug)]
-pub struct VoxelData(Vec<(u16, game::BlockId)>);
+///
+/// The second field caches the chunk's 26 boundary-zone hashes
+/// (`meshing::queue::boundary_zones`) when they were computed off the main
+/// thread (`with_boundary_zones`, in the snapshot-voxel task); `new` — and so
+/// `edit` — start without it. Equality ignores it.
+#[derive(Component, Clone, Debug)]
+pub struct VoxelData(Vec<(u16, game::BlockId)>, Option<[u32; 26]>);
+
+impl PartialEq for VoxelData {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for VoxelData {}
 
 impl VoxelData {
     /// Encode a dense 32³ grid.
@@ -101,7 +155,68 @@ impl VoxelData {
                 _ => runs.push((1, v.block)),
             }
         }
-        Self(runs)
+        Self(runs, None)
+    }
+
+    /// Encode a chunk straight from its 8 blocks — identical to
+    /// `VoxelData::new(game::derive_voxels(blocks, chisel))` without building
+    /// the dense 32³ array. Each 32-voxel x-row is two 16-voxel halves, one per
+    /// block: an unchiselled block adds one 16-run, a chiselled one its row of
+    /// materials. Derivation was ~65 µs/chunk of the join's worker time.
+    pub fn from_blocks(
+        blocks: &[game::Block],
+        chisel: &std::collections::BTreeMap<game::BlockIndex, game::ChiselData>,
+    ) -> Self {
+        use game::{BlockIndex, BLOCK_VOXELS, CHUNK_BLOCKS};
+        debug_assert_eq!(blocks.len(), game::CHUNK_BLOCK_COUNT);
+        fn push(runs: &mut Vec<(u16, game::BlockId)>, len: u16, id: game::BlockId) {
+            match runs.last_mut() {
+                Some((run, last)) if *last == id => *run += len,
+                _ => runs.push((len, id)),
+            }
+        }
+        let materials: Vec<Option<Vec<game::BlockId>>> = (0..game::CHUNK_BLOCK_COUNT)
+            .map(|i| chisel.get(&BlockIndex(i as u8)).map(game::ChiselData::materials))
+            .collect();
+        let edge = BLOCK_VOXELS * CHUNK_BLOCKS;
+        let mut runs: Vec<(u16, game::BlockId)> = Vec::new();
+        for z in 0..edge {
+            for y in 0..edge {
+                for bx in 0..CHUNK_BLOCKS {
+                    let bi = BlockIndex::from_xyz(bx, y / BLOCK_VOXELS, z / BLOCK_VOXELS);
+                    match &materials[bi.0 as usize] {
+                        None => push(&mut runs, BLOCK_VOXELS as u16, blocks[bi.0 as usize].id),
+                        Some(m) => {
+                            let (ly, lz) = (y % BLOCK_VOXELS, z % BLOCK_VOXELS);
+                            let row = (ly + lz * BLOCK_VOXELS) * BLOCK_VOXELS;
+                            for id in &m[row..row + BLOCK_VOXELS] {
+                                push(&mut runs, 1, *id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Self(runs, None)
+    }
+
+    /// Compute and cache the boundary-zone hashes now — for a caller already
+    /// off the main thread, so `mark_remesh_dirty` needn't (~2 s of main-thread
+    /// hashing per `full` join, 2026-09-22 findings).
+    pub fn with_boundary_zones(mut self) -> Self {
+        self.1 = Some(super::meshing::queue::compute_boundary_zones(&self));
+        self
+    }
+
+    /// No air voxel anywhere in the chunk (the mesher treats every non-air
+    /// voxel as solid, water included).
+    pub fn has_no_air(&self) -> bool {
+        self.0.iter().all(|&(_, id)| id != game::BlockId::AIR)
+    }
+
+    /// The cached boundary-zone hashes, if `with_boundary_zones` ran.
+    pub fn cached_boundary_zones(&self) -> Option<[u32; 26]> {
+        self.1
     }
 
     /// Expand back to the dense 32³ grid the mesher consumes.
@@ -182,11 +297,19 @@ pub const SNAPSHOT_VOXELS_PER_FRAME: usize = 64;
 /// Target insert rate. Kept above the mesher's `MESH_UPLOADS_PER_SECOND` so
 /// voxels always arrive faster than they can be meshed: the remesh queue then
 /// holds everything pending and its nearest-first ranking decides the order.
-pub const SNAPSHOT_VOXELS_PER_SECOND: f32 = 4800.0;
+pub const SNAPSHOT_VOXELS_PER_SECOND: f32 = 9600.0;
 /// Ceiling per frame: twice a 60 Hz frame's worth, so a long frame cannot
 /// snowball (each insert costs `mark_remesh_dirty` ~45 us unclamped; 512 per
 /// frame measured 31 ms stalls). See `MAX_MESH_UPLOADS_PER_FRAME`.
 pub const MAX_SNAPSHOT_VOXELS_PER_FRAME: usize = 160;
+
+/// Snapshot-voxel tasks allowed on the compute pool at once. The pool is FIFO
+/// and shared with the mesher: when wire compression made all nine regions of
+/// a join arrive within a second, their ~365 batches were spawned together and
+/// the first mesh tasks queued behind them (first terrain 0.9 s -> 1.9 s).
+/// Twice the default worker count keeps the workers fed without burying
+/// everything else; the rest wait in `SnapshotVoxelQueue`, nearest first.
+pub const MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS: usize = 8;
 
 /// A chunk entity spawned from a region snapshot whose `VoxelData` is still
 /// being derived off-thread. Removed when the voxels land — or when an
@@ -203,9 +326,44 @@ pub struct SnapshotVoxelTask(Task<Vec<(Entity, VoxelData)>>);
 /// Derived voxels waiting for their per-frame insert budget.
 #[derive(Resource, Default)]
 pub struct SnapshotVoxelQueue {
+    /// Batches not yet handed to the compute pool (see
+    /// [`MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS`]).
+    batches: VecDeque<PendingVoxelBatch>,
     ready: VecDeque<(Entity, VoxelData)>,
     /// Inserted since the queue was last empty (for the `[perf]` line).
     applied: u32,
+}
+
+/// One batch of a region snapshot's chunks, waiting for a compute-pool slot.
+struct PendingVoxelBatch {
+    region: RegionId,
+    /// The region root the chunks were spawned under; a replaced or removed
+    /// region has a different (or no) root, which retires the batch.
+    root: Entity,
+    /// World-space centroid of the batch's chunks, for nearest-first dispatch.
+    center: Vec3,
+    chunks: BatchChunks,
+}
+
+/// Where a voxel batch's chunks come from.
+enum BatchChunks {
+    /// A region snapshot, shared by its batches (no per-chunk clone).
+    Snapshot(Arc<GameData>, Vec<(Entity, EntityKey)>),
+    /// Chunks of a cell activated after the snapshot (`AddTerrainChunk`).
+    Owned(Vec<(Entity, game::Chunk)>),
+}
+
+/// Index of the batch to dispatch next: the one nearest the camera, or simply
+/// the oldest while no camera exists yet (the local camera itself arrives in
+/// the home region's snapshot).
+fn nearest_batch(centers: impl Iterator<Item = Vec3>, camera: Option<Vec3>) -> Option<usize> {
+    let mut centers = centers.enumerate();
+    let Some(camera) = camera else {
+        return centers.next().map(|(index, _)| index);
+    };
+    centers
+        .min_by(|(_, a), (_, b)| a.distance_squared(camera).total_cmp(&b.distance_squared(camera)))
+        .map(|(index, _)| index)
 }
 
 /// Collect finished snapshot-voxel batches and insert up to
@@ -217,13 +375,58 @@ pub fn apply_snapshot_voxels(
     time: Res<Time<Real>>,
     mut tasks: Query<(Entity, &mut SnapshotVoxelTask)>,
     pending: Query<(), With<PendingSnapshotVoxels>>,
+    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
+    roots: Res<RegionRoots>,
     mut queue: ResMut<SnapshotVoxelQueue>,
 ) {
+    let mut outstanding = 0usize;
     for (task_entity, mut task) in &mut tasks {
         if let Some(batch) = block_on(future::poll_once(&mut task.0)) {
             queue.ready.extend(batch);
             commands.entity(task_entity).despawn();
+        } else {
+            outstanding += 1;
         }
+    }
+
+    // Retire batches of regions that were removed or replaced since (their
+    // entities are gone; holding the `Arc` would keep ~40 MiB alive each).
+    if roots.is_changed() {
+        queue.batches.retain(|batch| roots.0.get(&batch.region) == Some(&batch.root));
+    }
+    // Hand out compute-pool slots, nearest batch to the camera first.
+    let camera = cameras
+        .iter()
+        .find(|(_, camera)| camera.is_active)
+        .map(|(transform, _)| transform.translation());
+    let pool = AsyncComputeTaskPool::get();
+    while outstanding < MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS {
+        let Some(index) = nearest_batch(queue.batches.iter().map(|batch| batch.center), camera) else {
+            break;
+        };
+        let Some(PendingVoxelBatch { root, chunks, .. }) = queue.batches.remove(index) else {
+            break;
+        };
+        let task = pool.spawn(async move {
+            let voxels = |chunk: &game::Chunk| {
+                VoxelData::from_blocks(&chunk.blocks, &chunk.chisel).with_boundary_zones()
+            };
+            match chunks {
+                BatchChunks::Snapshot(data, items) => items
+                    .into_iter()
+                    .filter_map(|(entity, key)| {
+                        let chunk = data.ecs.chunk.try_get(key).as_ref()?;
+                        Some((entity, voxels(chunk)))
+                    })
+                    .collect(),
+                BatchChunks::Owned(items) => {
+                    items.iter().map(|(entity, chunk)| (*entity, voxels(chunk))).collect()
+                }
+            }
+        });
+        // Child of the region root: removing the region cancels the task.
+        commands.spawn((SnapshotVoxelTask(task), ChildOf(root)));
+        outstanding += 1;
     }
     let mut budget = super::meshing::queue::per_frame_budget(
         SNAPSHOT_VOXELS_PER_SECOND,
@@ -247,7 +450,7 @@ pub fn apply_snapshot_voxels(
         queue.applied += 1;
         budget -= 1;
     }
-    if queue.applied > 0 && queue.ready.is_empty() && tasks.is_empty() {
+    if queue.applied > 0 && queue.ready.is_empty() && queue.batches.is_empty() && outstanding == 0 {
         game::perf_event!("snapshot_voxels_applied", "chunks={}", queue.applied);
         queue.applied = 0;
     }
@@ -264,13 +467,30 @@ pub fn drain_client_updates(
     mut ui_updates: ResMut<crate::renderer::ui_bridge::UiUpdates>,
     mut debug_lines: ResMut<crate::renderer::collider_debug::DebugColliderLines>,
     mut lod_rings: ResMut<lod_rings::LodRings>,
+    mut snapshot_voxels: ResMut<SnapshotVoxelQueue>,
+    mut retired_roots: ResMut<RetiredRegionRoots>,
+    mut home_cells: ResMut<lod_rings::HomeCellMask>,
 ) {
     // Unbudgeted: drains everything the game thread queued since last frame.
     let mut stall = game::perf::StallGuard::new("drain_client_updates");
-    while let Ok(event) = updates.0.try_recv() {
+    // One region tree spawned per frame (~20k entities at the 5x5 window):
+    // a slow frame that collected several snapshots spent up to 233 ms here
+    // (2026-09-23 `fly-probe` trace). Later events wait, in order.
+    let mut spawned_region = false;
+    while !spawned_region {
+        let Ok(event) = updates.0.try_recv() else { break };
         stall.add_work(1);
         match event {
             ClientUpdateEvent::NewRegion(id, data, receiver) => {
+                spawned_region = true;
+                // Back before its old tree was despawned: finish that first,
+                // so two trees of one region never share the chunk grid.
+                retired_roots.0.retain(|&(rc, root)| {
+                    if rc == id {
+                        commands.entity(root).despawn();
+                    }
+                    rc != id
+                });
                 if roots.0.contains_key(&id) {
                     // Replace-on-re-receipt: resubscribe/crash-respawn resync.
                     remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
@@ -287,7 +507,15 @@ pub fn drain_client_updates(
                 regions.0.insert(id, receiver);
                 let spawn = game::perf::Stopwatch::start();
                 let data = Arc::new(data);
-                spawn_region_snapshot(&mut commands, root, id, &data, &mut map, player.0);
+                spawn_region_snapshot(
+                    &mut commands,
+                    root,
+                    id,
+                    &data,
+                    &mut map,
+                    player.0,
+                    &mut snapshot_voxels,
+                );
                 // Main-thread cost of one region: an entity per sim entity.
                 // The per-chunk voxel derivation runs off-thread (see
                 // `apply_snapshot_voxels`).
@@ -305,15 +533,24 @@ pub fn drain_client_updates(
             }
             ClientUpdateEvent::SetPlayer(client_id) => player.0 = Some(client_id),
             ClientUpdateEvent::RemoveRegion(id) => {
-                remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
+                // Unmapped now, despawned over the next frames.
+                if let Some(root) = unmap_region(&mut regions, &mut roots, &mut map, id) {
+                    retired_roots.0.push_back((id, root));
+                }
                 debug_lines.0.remove(&id);
                 info!("bridge: region {:?} removed", id);
             }
             ClientUpdateEvent::LodData(key, payload) => {
                 lod_rings.pending.push(lod_rings::LodEventMsg::Data(key, payload));
             }
-            ClientUpdateEvent::RemoveLod(key) => {
-                lod_rings.pending.push(lod_rings::LodEventMsg::Remove(key));
+            ClientUpdateEvent::RemoveLod { key, near_takeover } => {
+                lod_rings
+                    .pending
+                    .push(lod_rings::LodEventMsg::Remove { key, near_takeover });
+            }
+            ClientUpdateEvent::ActiveCells(region, cells) => {
+                home_cells.region = Some(region);
+                home_cells.cells = cells;
             }
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
             ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {
@@ -341,12 +578,23 @@ fn remove_region(
     map: &mut SimEntityMap,
     id: RegionId,
 ) {
-    if let Some(root) = roots.0.remove(&id) {
+    if let Some(root) = unmap_region(regions, roots, map, id) {
         // despawn() removes descendants via ChildOf relationships (Bevy 0.16+).
         commands.entity(root).despawn();
     }
+}
+
+/// Take a region out of every bridge map and return its root, which the
+/// caller despawns.
+fn unmap_region(
+    regions: &mut Regions,
+    roots: &mut RegionRoots,
+    map: &mut SimEntityMap,
+    id: RegionId,
+) -> Option<Entity> {
     regions.0.remove(&id);
     map.0.retain(|(region, _), _| *region != id);
+    roots.0.remove(&id)
 }
 
 /// Port of the old `TrueWorld::new` snapshot walk.
@@ -357,8 +605,9 @@ fn spawn_region_snapshot(
     data: &Arc<GameData>,
     map: &mut SimEntityMap,
     local_player: Option<game::ClientId>,
+    voxel_queue: &mut SnapshotVoxelQueue,
 ) {
-    let mut chunk_entities: Vec<(Entity, EntityKey)> = Vec::new();
+    let mut chunk_entities: Vec<(Entity, EntityKey, Vec3)> = Vec::new();
     // Every player in the snapshot has a sim camera, but only the local
     // player's may become this window's active Camera3d.
     let local_camera_key = local_player.and_then(|id| data.player_entites.get(&id).copied());
@@ -369,26 +618,30 @@ fn spawn_region_snapshot(
             Visibility::default(),
             ChildOf(root),
         ));
+        let mut local_position = Vec3::ZERO;
         if let Some(handle) = data.ecs.rigidbody.try_get(key) {
             if let Some(body) = data.physics.bodies.get(*handle) {
                 let tf = iso_to_transform(body.position());
+                local_position = tf.translation;
                 e.insert((tf, SimTarget::body(tf.translation, tf.rotation)));
             }
         }
         if data.ecs.chunk.try_get(key).is_some() {
             e.insert(PendingSnapshotVoxels);
-            chunk_entities.push((e.id(), key));
+            chunk_entities.push((e.id(), key, local_position));
         }
         if let Some(cam) = data.ecs.camera.try_get(key) {
             if Some(key) == local_camera_key {
                 if let Some(handle) = cam.view_matrix {
                     if let Some(body) = data.physics.bodies.get(handle) {
-                        let tf = iso_to_transform(body.position());
+                        let mut tf = iso_to_transform(body.position());
+                        let target = SimTarget::camera(tf.translation, tf.rotation);
+                        tf.translation = target.goal();
                         e.insert((
                             Camera3d::default(),
                             Projection::Perspective(perspective_to_projection(&cam.proj_matrix)),
                             tf,
-                            SimTarget::camera(tf.translation, tf.rotation),
+                            target,
                             bevy::ui::IsDefaultUiCamera,
                         ));
                     }
@@ -403,23 +656,24 @@ fn spawn_region_snapshot(
         map.0.insert((region, key), e.id());
     }
 
-    // Derive + RLE-encode the chunks' voxels off the main thread, in batches
-    // that share the snapshot through the `Arc` (no per-chunk clone).
-    let pool = AsyncComputeTaskPool::get();
+    // The chunks' voxels are derived + RLE-encoded off the main thread, in
+    // batches that share the snapshot through the `Arc` (no per-chunk clone).
+    // Batches are only QUEUED here; `apply_snapshot_voxels` hands them to the
+    // compute pool a few at a time, nearest to the camera first.
+    let offset = region.world_offset();
+    let offset = Vec3::new(offset[0], offset[1], offset[2]);
     for batch in chunk_entities.chunks(SNAPSHOT_VOXEL_TASK_CHUNKS) {
-        let batch = batch.to_vec();
-        let data = Arc::clone(data);
-        let task = pool.spawn(async move {
-            batch
-                .into_iter()
-                .filter_map(|(entity, key)| {
-                    let chunk = data.ecs.chunk.try_get(key).as_ref()?;
-                    let voxels = game::derive_voxels(&chunk.blocks, &chunk.chisel);
-                    Some((entity, VoxelData::new(voxels)))
-                })
-                .collect()
+        let center = batch.iter().map(|(_, _, position)| *position).sum::<Vec3>() / batch.len() as f32;
+        voxel_queue.batches.push_back(PendingVoxelBatch {
+            region,
+            root,
+            // Chunk origin -> chunk centre, region-local -> world.
+            center: offset + center + Vec3::splat(16.0),
+            chunks: BatchChunks::Snapshot(
+                Arc::clone(data),
+                batch.iter().map(|(entity, key, _)| (*entity, *key)).collect(),
+            ),
         });
-        commands.spawn((SnapshotVoxelTask(task), ChildOf(root)));
     }
 }
 
@@ -428,15 +682,42 @@ pub fn drain_region_updates(
     regions: Res<Regions>,
     roots: Res<RegionRoots>,
     mut map: ResMut<SimEntityMap>,
-    mut targets: Query<&mut SimTarget>,
+    mut targets: Query<(
+        &mut SimTarget,
+        &mut Transform,
+        Has<super::meshing::queue::ChunkKey>,
+    )>,
     local_player: Res<LocalPlayer>,
-    mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut cursor_policy: ResMut<super::cursor::CursorPolicy>,
+    mut voxel_queue: ResMut<SnapshotVoxelQueue>,
 ) {
+    // Local cameras inserted by Commands this drain, not yet queryable: a
+    // position update for one must keep its camera target (eye offset,
+    // smoothing) rather than overwrite it with a body target.
+    let mut new_cameras: Vec<Entity> = Vec::new();
     for (&region, receiver) in regions.0.iter() {
         let root = *roots.0.get(&region).expect("RegionRoots co-populated with Regions");
+        // Cell terrain loaded this drain: voxels are derived off-thread in the
+        // snapshot queue's batches (nearest first, budgeted per frame).
+        let mut new_terrain: Vec<(Entity, game::Chunk, Vec3)> = Vec::new();
         while let Ok(update) = receiver.try_recv() {
             // Do and Undo both applied: see SimTarget doc comment.
             match update.update_kind {
+                GameDataUpdateKind::AddTerrainChunk(key, iso, chunk) => {
+                    let tf = iso_to_transform(&iso);
+                    let e = commands
+                        .spawn((
+                            SimEntity { region, key },
+                            tf,
+                            Visibility::default(),
+                            SimTarget::body(tf.translation, tf.rotation),
+                            PendingSnapshotVoxels,
+                            ChildOf(root),
+                        ))
+                        .id();
+                    map.0.insert((region, key), e);
+                    new_terrain.push((e, *chunk, tf.translation));
+                }
                 GameDataUpdateKind::CreateEntity(key) => {
                     let e = commands
                         .spawn((
@@ -462,13 +743,30 @@ pub fn drain_region_updates(
                         continue;
                     };
                     let tf = iso_to_transform(&iso);
-                    if let Ok(mut target) = targets.get_mut(e) {
+                    if let Ok((mut target, mut transform, keyed_chunk)) = targets.get_mut(e) {
                         target.pos = tf.translation;
                         target.rot = tf.rotation;
+                        // `interpolate_transforms` skips keyed chunks (they
+                        // never move, and there are ~64k of them), so one
+                        // that does get a new pose snaps to it here.
+                        if keyed_chunk {
+                            let goal = target.goal();
+                            let rot = target.rot;
+                            transform.set_if_neq(Transform { translation: goal, rotation: rot, ..*transform });
+                        }
                     } else {
                         // Entity spawned via Commands earlier this same drain —
-                        // not yet queryable. Insert (overwrites on apply).
-                        commands.entity(e).insert(SimTarget::body(tf.translation, tf.rotation));
+                        // not yet queryable. Insert (overwrites on apply), and
+                        // start it at its first pose rather than gliding in
+                        // from the region origin: a chunk created at runtime
+                        // is keyed for meshing by where its Transform is.
+                        let target = if new_cameras.contains(&e) {
+                            SimTarget::camera(tf.translation, tf.rotation)
+                        } else {
+                            SimTarget::body(tf.translation, tf.rotation)
+                        };
+                        let start = Transform { translation: target.goal(), ..tf };
+                        commands.entity(e).insert((start, target));
                     }
                 }
                 GameDataUpdateKind::SetVoxelComponent(key, Some(voxels)) => {
@@ -498,11 +796,14 @@ pub fn drain_region_updates(
                     };
                     let tf = iso_to_transform(&iso);
                     if local_player.0 == Some(client_id) {
+                        let target = SimTarget::camera(tf.translation, tf.rotation);
+                        let tf = Transform { translation: target.goal(), ..tf };
+                        new_cameras.push(e);
                         commands.entity(e).insert((
                             Camera3d::default(),
                             Projection::Perspective(perspective_to_projection(&proj)),
                             tf,
-                            SimTarget::camera(tf.translation, tf.rotation),
+                            target,
                             bevy::ui::IsDefaultUiCamera,
                         ));
                     } else {
@@ -531,7 +832,7 @@ pub fn drain_region_updates(
                         continue;
                     };
                     let tf = iso_to_transform(&iso);
-                    if let Ok(mut target) = targets.get_mut(e) {
+                    if let Ok((mut target, _, _)) = targets.get_mut(e) {
                         target.pos = tf.translation;
                         target.rot = tf.rotation;
                     } else {
@@ -563,25 +864,28 @@ pub fn drain_region_updates(
                     if local_player.0 != Some(client_id) {
                         continue;
                     }
-                    let (want_grab, want_visible) = if enabled {
-                        (CursorGrabMode::Locked, false)
-                    } else {
-                        (CursorGrabMode::None, true)
-                    };
-                    if let Ok(mut cursor) = windows.single_mut() {
-                        // Idempotent: SetFreeCam is emitted Do-only (no Undo
-                        // pairing), so every reconcile that replays the toggle
-                        // tick re-delivers the SAME value. `single_mut()` + a
-                        // field write trips Bevy change detection unconditionally,
-                        // which re-issues the winit cursor grab each time — an X11
-                        // re-grab loop ("already confined by another client" spam)
-                        // when the grab is contended. Only write on a real change.
-                        if cursor.grab_mode != want_grab || cursor.visible != want_visible {
-                            cursor.grab_mode = want_grab;
-                            cursor.visible = want_visible;
-                        }
-                    }
+                    // Idempotent: SetFreeCam is emitted Do-only (no Undo
+                    // pairing), so every reconcile that replays the toggle tick
+                    // re-delivers the SAME value; `apply_cursor_policy` only
+                    // writes the window on a real change.
+                    cursor_policy.sim_grab = enabled;
                 }
+            }
+        }
+        if !new_terrain.is_empty() {
+            // Region-local centroid -> world, chunk origin -> centre.
+            let offset = region.world_offset();
+            let offset = Vec3::new(offset[0], offset[1], offset[2]);
+            for batch in new_terrain.chunks(SNAPSHOT_VOXEL_TASK_CHUNKS) {
+                let center = batch.iter().map(|(_, _, p)| *p).sum::<Vec3>() / batch.len() as f32;
+                voxel_queue.batches.push_back(PendingVoxelBatch {
+                    region,
+                    root,
+                    center: offset + center + Vec3::splat(16.0),
+                    chunks: BatchChunks::Owned(
+                        batch.iter().map(|(e, chunk, _)| (*e, chunk.clone())).collect(),
+                    ),
+                });
             }
         }
     }
@@ -677,10 +981,19 @@ mod tests {
             .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<lod_rings::LodRings>()
+            .init_resource::<lod_rings::HomeCellMask>()
             .init_resource::<SnapshotVoxelQueue>()
+            .init_resource::<crate::renderer::cursor::CursorPolicy>()
+            .init_resource::<RetiredRegionRoots>()
             .add_systems(
                 PreUpdate,
-                (drain_client_updates, drain_region_updates, apply_snapshot_voxels).chain(),
+                (
+                    drain_client_updates,
+                    despawn_retired_regions,
+                    drain_region_updates,
+                    apply_snapshot_voxels,
+                )
+                    .chain(),
             );
         (app, client_send)
     }
@@ -897,6 +1210,57 @@ mod tests {
         assert_eq!(tasks.iter(app.world()).count(), 0, "finished task entities are despawned");
     }
 
+    #[test]
+    fn nearest_batch_is_fifo_without_a_camera_and_nearest_first_with_one() {
+        let centers = [Vec3::new(500.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 10.0), Vec3::new(-300.0, 40.0, 0.0)];
+        assert_eq!(nearest_batch(centers.iter().copied(), None), Some(0), "no camera yet: arrival order");
+        assert_eq!(nearest_batch(centers.iter().copied(), Some(Vec3::ZERO)), Some(1));
+        assert_eq!(nearest_batch(centers.iter().copied(), Some(Vec3::new(-290.0, 40.0, 0.0))), Some(2));
+        assert_eq!(nearest_batch(std::iter::empty(), Some(Vec3::ZERO)), None);
+    }
+
+    /// A join delivers every region within a second; their voxel batches must
+    /// not all hit the FIFO compute pool at once, or the first mesh tasks queue
+    /// behind hundreds of them (first terrain moved 0.9 s -> 1.9 s when wire
+    /// compression made the regions arrive together).
+    #[test]
+    fn snapshot_voxel_tasks_are_capped_and_every_chunk_still_gets_voxels() {
+        let (mut app, client) = app_shell();
+        let (_update_send, update_recv) = crossbeam::channel::unbounded();
+        let mut rb = Rollback::new(None);
+        rb.new_transaction();
+        let chunk_count = SNAPSHOT_VOXEL_TASK_CHUNKS * (MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS + 3) + 1;
+        let keys: Vec<EntityKey> = (0..chunk_count)
+            .map(|i| rb.create_mesh(game::ChunkCoords::new(i % 32, (i / 1024) as i32, (i / 32) % 32), game::Chunk::flat_floor(8)))
+            .collect();
+        let region_id = RegionCoords::new(0, 0);
+        client
+            .send(ClientUpdateEvent::NewRegion(region_id, (*rb.data).clone(), update_recv))
+            .unwrap();
+
+        let mut peak = 0;
+        let mut done = false;
+        for _ in 0..2000 {
+            app.update();
+            let mut tasks = app.world_mut().query::<&SnapshotVoxelTask>();
+            peak = peak.max(tasks.iter(app.world()).count());
+            let map = app.world().resource::<SimEntityMap>();
+            if keys.iter().all(|k| {
+                map.0.get(&(region_id, *k)).is_some_and(|&e| app.world().entity(e).contains::<VoxelData>())
+            }) {
+                done = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(done, "not every chunk received its snapshot voxels");
+        assert!(peak >= 1);
+        assert!(
+            peak <= MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS,
+            "{peak} voxel tasks outstanding at once (cap {MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS})"
+        );
+    }
+
     /// An edit that reaches the bridge before the derived snapshot voxels do is
     /// NEWER than them; the late result must be dropped, not applied on top.
     #[test]
@@ -990,6 +1354,43 @@ mod tests {
         assert!(!app.world().resource::<RegionRoots>().0.contains_key(&region_id));
         assert!(!app.world().resource::<Regions>().0.contains_key(&region_id));
         assert!(app.world().resource::<SimEntityMap>().0.keys().all(|(r, _)| *r != region_id));
+    }
+
+    /// A window shift releases a row of regions at once; their trees go one
+    /// per frame, and a region re-received meanwhile loses its old tree first.
+    #[test]
+    fn released_regions_despawn_one_per_frame_and_rereceipt_flushes() {
+        let (mut app, client, _updates, a) = test_app();
+        let b = RegionCoords::new(1, 0);
+        let c = RegionCoords::new(2, 0);
+        for id in [b, c] {
+            let (_send, recv) = crossbeam::channel::unbounded();
+            let rb = Rollback::new(None);
+            client.send(ClientUpdateEvent::NewRegion(id, (*rb.data).clone(), recv)).unwrap();
+        }
+        // One tree spawns per frame.
+        for _ in 0..3 {
+            app.update();
+        }
+        let root = |app: &App, id| *app.world().resource::<RegionRoots>().0.get(&id).unwrap();
+        let (ra, rb_, rc) = (root(&app, a), root(&app, b), root(&app, c));
+
+        for id in [a, b, c] {
+            client.send(ClientUpdateEvent::RemoveRegion(id)).unwrap();
+        }
+        app.update();
+        assert!(app.world().resource::<RegionRoots>().0.is_empty(), "unmapped at once");
+        assert!(app.world().get_entity(ra).is_err(), "first tree despawned this frame");
+        assert!(app.world().get_entity(rb_).is_ok(), "the rest wait their frame");
+
+        // c comes straight back before its old tree's turn.
+        let (_send, recv) = crossbeam::channel::unbounded();
+        let rb = Rollback::new(None);
+        client.send(ClientUpdateEvent::NewRegion(c, (*rb.data).clone(), recv)).unwrap();
+        app.update();
+        assert!(app.world().get_entity(rc).is_err(), "old tree flushed by the re-receipt");
+        assert!(app.world().get_entity(rb_).is_err(), "b's turn came");
+        assert_ne!(root(&app, c), rc);
     }
 
     #[test]
@@ -1139,6 +1540,8 @@ mod tests {
                 connection: ConnectionState::Ready,
             })
             .unwrap();
+        // One region tree spawns per frame; a frame more for the second.
+        app.update();
         app.update();
         app.update();
 
@@ -1198,6 +1601,8 @@ mod tests {
             connection: ConnectionState::Ready,
         };
         client.send(hud(region_a)).unwrap();
+        // One region tree spawns per frame; a frame more for the second.
+        app.update();
         app.update();
         app.update();
 
@@ -1242,6 +1647,8 @@ mod tests {
             .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<lod_rings::LodRings>()
+            .init_resource::<lod_rings::HomeCellMask>()
+            .init_resource::<SnapshotVoxelQueue>()
             .add_systems(Update, drain_client_updates);
 
         client
@@ -1316,6 +1723,38 @@ mod voxel_data_tests {
         assert_eq!(out[99], Voxel::new(BlockId(0)));
         assert_eq!(out.len(), CHUNK_VOXEL_COUNT);
         assert_eq!(d.runs(), 3, "air | one voxel | air");
+    }
+
+    #[test]
+    fn from_blocks_matches_dense_derivation_exactly() {
+        // xorshift: no `rand` dependency in this crate.
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |modulus: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % modulus
+        };
+        for round in 0..500 {
+            // Few ids, so neighbouring blocks often match and runs merge
+            // across block and row boundaries.
+            let blocks: Vec<game::Block> =
+                (0..game::CHUNK_BLOCK_COUNT).map(|_| game::Block::new(BlockId(next(3) as u16))).collect();
+            let mut chisel = std::collections::BTreeMap::new();
+            for i in 0..game::CHUNK_BLOCK_COUNT {
+                if next(3) == 0 {
+                    let min: [usize; 3] = std::array::from_fn(|_| next(16) as usize);
+                    let max: [usize; 3] = std::array::from_fn(|a| min[a] + 1 + next((16 - min[a]) as u64) as usize);
+                    chisel.insert(
+                        game::BlockIndex(i as u8),
+                        game::ChiselData::cuboid(BlockId(next(3) as u16), min, max),
+                    );
+                }
+            }
+            let dense = VoxelData::new(game::derive_voxels(&blocks, &chisel));
+            let direct = VoxelData::from_blocks(&blocks, &chisel);
+            assert_eq!(direct.0, dense.0, "round {round}: runs must match exactly");
+        }
     }
 
     #[test]

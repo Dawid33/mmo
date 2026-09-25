@@ -115,12 +115,27 @@ impl WorldgenCache {
         materials: crate::material::Materials,
     ) -> Vec<(ColumnCoords, Column)> {
         if let Some(columns) = self.load(rc) {
-            return columns;
+            if fits_this_build(&columns) {
+                return columns;
+            }
+            // Written by a build with another REGION_CHUNKS (older caches
+            // were not keyed by it): regenerate instead of serving a corner.
+            warn!(
+                "worldgen cache: {} holds {} columns, this build needs {}; regenerating",
+                region_file(rc),
+                columns.len(),
+                game::REGION_CHUNKS * game::REGION_CHUNKS
+            );
         }
         let columns = crate::generate_region(rc, seed, materials);
         self.store(rc, &columns);
         columns
     }
+}
+
+/// Whether cached columns are a whole region of THIS build's size.
+fn fits_this_build(columns: &[(ColumnCoords, Column)]) -> bool {
+    columns.len() == game::REGION_CHUNKS * game::REGION_CHUNKS
 }
 
 fn region_file(rc: RegionCoords) -> String {
@@ -131,9 +146,22 @@ fn region_file(rc: RegionCoords) -> String {
 /// (sorted by path). `None` if the source tree is unreadable (e.g. a binary
 /// deployed away from the repo) — the cache just disables itself then.
 fn cache_key(seed: u64, block_manifest: &str) -> Option<u32> {
+    cache_key_for(seed, block_manifest, game::REGION_CHUNKS)
+}
+
+/// `cache_key` for an explicit region edge: a region file holds exactly
+/// `region_chunks²` columns, so builds with different `REGION_CHUNKS` must
+/// never share a cache directory.
+fn cache_key_for(seed: u64, block_manifest: &str, region_chunks: usize) -> Option<u32> {
     let mut h = crc32fast::Hasher::new();
     h.update(&seed.to_le_bytes());
     h.update(block_manifest.as_bytes());
+    h.update(&(region_chunks as u64).to_le_bytes());
+    // A forged world replaces the seed as the source of terrain: regions of
+    // different world files must never share a cache directory.
+    if let Some(world) = crate::forged::active() {
+        h.update(&world.content_crc().to_le_bytes());
+    }
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     collect_files(&src, &mut files).ok()?;
@@ -186,6 +214,25 @@ mod tests {
             bincode::serialize(&columns).unwrap()
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn builds_with_different_region_sizes_never_share_a_cache() {
+        // A 32-chunk region file loaded by a 128-chunk build is a 64 m corner
+        // of terrain inside a 256 m region (cell-loading live bug, 2026-09-25).
+        let a = cache_key_for(7, "manifest", 32).unwrap();
+        let b = cache_key_for(7, "manifest", 128).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_cached_region_must_have_this_builds_column_count() {
+        let column = || Column::new(2, Block::default(), Block::default(), vec![]);
+        let one = vec![(ColumnCoords::new(0, 0), column())];
+        assert!(!fits_this_build(&one));
+        let n = game::REGION_CHUNKS;
+        let full: Vec<_> = (0..n * n).map(|i| (ColumnCoords::new(i % n, i / n), column())).collect();
+        assert!(fits_this_build(&full));
     }
 
     #[test]

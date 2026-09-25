@@ -25,6 +25,23 @@ pub const CORNER_SLOTS: [[u32; 6]; 4] = [
     [0, 2, 1, 1, 2, 3], // reversed winding, AO-flipped diagonal
 ];
 
+/// Index pattern shared by every quad of the indexed pulled draw: four
+/// vertices per quad (`vertex_index = quad * 4 + local`), two triangles split
+/// along the local 1–2 diagonal. One static index buffer repeats it.
+pub const QUAD_INDEX_PATTERN: [u32; 6] = [0, 1, 2, 2, 1, 3];
+
+/// Local vertex (0..4) → corner, per `reversed*2 + flip` variant: the
+/// permutation that makes `QUAD_INDEX_PATTERN` produce exactly the triangles
+/// (and winding) of the matching `CORNER_SLOTS` row. Indexed drawing shades 4
+/// vertices per quad instead of 6. Mirrored in voxel_pull.wgsl and
+/// voxel_pull_depth.wgsl; `indexed_corners_rebuild_the_slot_triangles` pins it.
+pub const CORNER_PERM: [[u32; 4]; 4] = [
+    [1, 3, 0, 2],
+    [0, 1, 2, 3],
+    [1, 0, 3, 2],
+    [0, 2, 1, 3],
+];
+
 pub fn pack_record(q: &Quad, layer: u32) -> QuadRecord {
     // The face plane sits at min[axis] for negative faces, +1 for positive —
     // same origin rule as emit::quads_to_mesh.
@@ -48,14 +65,50 @@ pub fn pack_record(q: &Quad, layer: u32) -> QuadRecord {
     QuadRecord([w0, w1])
 }
 
+/// Records come out grouped by face id (`Face::index()` order, stable within a
+/// face), so the GPU cull can draw each face direction as its own range and
+/// skip the ones facing away from the camera — see `face_ends`.
 pub fn quads_to_records(quads: &[Quad], layers: &BlockTextureLayers) -> Vec<QuadRecord> {
-    quads
+    let mut records: Vec<QuadRecord> = quads
         .iter()
         .map(|q| {
             let faces = layers.0.get(&q.block).copied().unwrap_or([0, 0, 0]);
             pack_record(q, pack::layer_for_face(faces, q.face))
         })
-        .collect()
+        .collect();
+    records.sort_by_key(|r| record_face(*r));
+    records
+}
+
+/// The face id (`Face::index()`) packed into a record's w0 bits 18..21.
+pub fn record_face(rec: QuadRecord) -> u32 {
+    (rec.0[0] >> 18) & 7
+}
+
+/// Cumulative end of each face's range in face-grouped records: face `f`
+/// occupies `ends[f-1]..ends[f]` (with `ends[-1]` = 0). Entry 6 is a flag:
+/// records NOT grouped by face (a producer that skipped `quads_to_records`)
+/// set it, and the cull then draws the chunk whole with no face culling.
+/// Entry 7 pads the GPU struct.
+pub fn face_ends(records: &[QuadRecord]) -> [u32; 8] {
+    let len = records.len() as u32;
+    let grouped = records.windows(2).all(|w| record_face(w[0]) <= record_face(w[1]));
+    if !grouped {
+        return [len, len, len, len, len, len, 1, 0];
+    }
+    let mut ends = [0u32; 8];
+    for rec in records {
+        let face = record_face(*rec) as usize;
+        if face < 6 {
+            ends[face] += 1;
+        }
+    }
+    for f in 1..6 {
+        ends[f] += ends[f - 1];
+    }
+    ends[6] = 0;
+    ends[7] = 0;
+    ends
 }
 
 /// Decoded corner — the Rust mirror of the WGSL reconstruction, used by tests
@@ -147,6 +200,55 @@ mod tests {
                     assert_eq!(got.face, face, "face survives the roundtrip");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn records_are_grouped_by_face_with_matching_ends() {
+        let layers = BlockTextureLayers::default();
+        let quads: Vec<Quad> = [Face::NegZ, Face::PosX, Face::PosY, Face::PosX, Face::NegZ]
+            .into_iter()
+            .map(|f| sample_quad(f, [3, 3, 3, 3]))
+            .collect();
+        let records = quads_to_records(&quads, &layers);
+        let faces: Vec<u32> = records.iter().map(|r| record_face(*r)).collect();
+        assert_eq!(faces, vec![0, 0, 2, 5, 5]);
+        // PosX 0..2, NegX empty, PosY 2..3, NegY/PosZ empty, NegZ 3..5.
+        assert_eq!(face_ends(&records), [2, 2, 3, 3, 3, 5, 0, 0]);
+    }
+
+    #[test]
+    fn ungrouped_records_fall_back_to_one_whole_range() {
+        let layers = BlockTextureLayers::default();
+        let a = quads_to_records(&[sample_quad(Face::NegZ, [3, 3, 3, 3])], &layers)[0];
+        let b = quads_to_records(&[sample_quad(Face::PosX, [3, 3, 3, 3])], &layers)[0];
+        assert_eq!(face_ends(&[a, b]), [2, 2, 2, 2, 2, 2, 1, 0], "flagged: draw whole");
+    }
+
+    #[test]
+    fn indexed_corners_rebuild_the_slot_triangles() {
+        // A triangle up to rotation (rotation keeps the winding).
+        fn canon(t: [u32; 3]) -> [u32; 3] {
+            let i = (0..3).min_by_key(|&i| t[i]).unwrap();
+            [t[i], t[(i + 1) % 3], t[(i + 2) % 3]]
+        }
+        for (variant, slots) in CORNER_SLOTS.iter().enumerate() {
+            let perm = CORNER_PERM[variant];
+            let tri = |k: usize| {
+                canon([
+                    perm[QUAD_INDEX_PATTERN[k] as usize],
+                    perm[QUAD_INDEX_PATTERN[k + 1] as usize],
+                    perm[QUAD_INDEX_PATTERN[k + 2] as usize],
+                ])
+            };
+            let mut got = [tri(0), tri(3)];
+            let mut want = [
+                canon([slots[0], slots[1], slots[2]]),
+                canon([slots[3], slots[4], slots[5]]),
+            ];
+            got.sort();
+            want.sort();
+            assert_eq!(got, want, "variant {variant}");
         }
     }
 

@@ -23,6 +23,9 @@ bevy = { workspace = true }
 image = { workspace = true }
 ordered-float = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
+# F3 developer panel (`renderer/dev_ui.rs`). Dev tooling only — player-facing
+# UI is bevy_ui. The clipboard/open_url defaults are left out (extra deps).
+bevy_egui = { version = "0.42", default-features = false, features = ["render", "default_fonts", "picking"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 quinn = { workspace = true }
@@ -31,11 +34,23 @@ serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
+# Only for the `gpu_error_panic` diagnostic feature; the version must be the one
+# Bevy's wgpu already resolves to, so no second copy is built.
+wgpu-hal = { version = "29.0.4", optional = true }
 
 [features]
+default = ["dev_ui"]
+# egui developer panel (F3). `--no-default-features` builds without egui.
+dev_ui = ["dep:bevy_egui"]
 # Continuous profiling (native only): the deps live in the non-wasm target
 # table, so enabling this on a wasm build is a harmless no-op.
 pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
+# Diagnostic: make wgpu-hal PANIC at the Vulkan call that fails instead of
+# reporting a lost device, naming the VkResult. A `DeviceLost` whose reason is
+# "Unknown ... Unexpected error variant" is wgpu turning an unmapped VkResult
+# into a lost device — this shows which call and which result (2026-09-25).
+# Native only; `just probe_features=gpu_error_panic shuttle-probe`.
+gpu_error_panic = ["dep:wgpu-hal", "wgpu-hal/internal_error_panic", "wgpu-hal/device_lost_panic"]
 # Tracy frame profiler: compiles bevy's tracing-tracy layer in (span + frame
 # data streamed to a running Tracy GUI). Run via `just tracy-client`. Unlike
 # `pyroscope` this forwards a bevy feature rather than gating a target-table
@@ -74,4 +89,4 @@ web-sys = { version = "0.3", features = [
 
 [dev-dependencies]
 block-mesh = { workspace = true }
-naga = { version = "27.0", features = ["wgsl-in"] }
+naga = { version = "29.0", features = ["wgsl-in"] }

@@ -16,3 +16,8 @@ perf-folded-server.txt
 
 # Claude Code local state + worktrees
 .claude/
+
+# OpenTofu: provider cache and local (dev) state
+deploy/**/.terraform/
+deploy/**/*.tfstate
+deploy/**/*.tfstate.*

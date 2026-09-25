@@ -31,7 +31,7 @@ pub struct DebugLine {
     pub color: [f32; 4],
 }
 
-/// Process-local debug toggles shared between the render thread (F3 handler)
+/// Process-local debug toggles shared between the render thread (F3 dev panel)
 /// and the game thread (line generation). Deliberately NOT sim state: never
 /// serialized, never hashed, never in the rollback log. Clones share state.
 #[derive(Clone, Default, Debug)]

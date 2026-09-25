@@ -21,7 +21,7 @@ fn releasing_a_key_stops_the_player() {
     // key `Held` forever and a released movement key drives the player forever.
     let mut h = SimHarness::new();
     h.connect();
-    // fps-cam on (movement applies only in fps-cam mode): press KeyE, tick, release.
+    // Controls on (input applies only in fps-cam mode): press KeyE, tick, release.
     h.press(game::Key::KeyE);
     h.step();
     h.release(game::Key::KeyE);
@@ -34,7 +34,8 @@ fn releasing_a_key_stops_the_player() {
     let a = h.player_pos();
     h.step_n(3);
     let b = h.player_pos();
-    assert_eq!(a, b, "player must stop after key release (up-edge sent)");
+    // Horizontal only: gravity may still be settling the body vertically.
+    assert_eq!((a[0], a[2]), (b[0], b[2]), "player must stop after key release (up-edge sent)");
 }
 
 #[test]

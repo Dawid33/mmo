@@ -11,8 +11,21 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
   converges bit-exact but has a transient rubber-band under active input (spec-accepted
   flip-tick divergence). Proper fix needs a protocol-level design (server-side input
   routing / predicted-authority-transfer); see docs/superpowers/2026-07-06-seamless-local-crossing-followup.md.
-  - Deterministic headless coverage: `crates/client/tests/crossing.rs::walking_across_a_region_boundary_keeps_input_and_converges`
-    (PASSING). Root-caused via SimHarness: the flip-tick divergence at the just-crossed home
+  - **REGRESSED — FAILING as of 2026-09-20** (was PASSING): `crates/client/tests/crossing.rs::walking_across_a_region_boundary_keeps_input_and_converges`.
+    Red since 8e90481 (client tick lead), which no run of this slow client test covered. Two layers:
+    (1) harness — `assert_converged` assumed the client TRAILS the server and panicked "no matching
+    server-authoritative tick"; FIXED: `SimHarness::catch_up` freezes the client, ticks the server up
+    to it with `SyncClock` withheld, compares live state at the same tick, then restores the lead.
+    (2) real, OPEN — under that strict check the pre-crossing baseline matches on all 9 regions for
+    40 ticks, and after the crossing 8 of 9 still match (old home with its ghost mirror, fresh
+    neighbours), but the NEW HOME region is bit-inexact on every one of 40 idle ticks: permanent,
+    not the ~1-tick flip transient described below. Suspects: the 1.5-tick lead putting the client's
+    predicted arrival at a different tick than the server's with state the correction path never
+    fixes (`apply_arrival`'s replay branch only corrects the pose — not `Motion`, yaw/pitch,
+    `Client` input state; `cross_boundary` flies, so `Motion`/`last_jump_tap` are live), or
+    `align_region` stepping the flipped home. Repro: `just test-one client "--test crossing walking_across"`.
+    Next step: diff the two `GameData`s field by field at the aligned tick (hash per `#[rollback]` field).
+  - Previous status, kept for the root-cause notes: deterministic headless coverage in the same test. Root-caused via SimHarness: the flip-tick divergence at the just-crossed home
     region is genuinely TRANSIENT — it reconciles bit-exact within ~1 tick once input stops
     (measured: diverged at the flip tick, converged the next tick, stable 240+ ticks after).
     The earlier "not self-healing" reading was the harness asserting one tick too early
@@ -21,6 +34,11 @@ Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-wo
     region and never settles in the tight lockstep — the real protocol-level case above. Needs
     the server-side input stamp-routing / predicted-authority-transfer design, not a harness or
     client-side patch.
+  - Validation tool for that design, when it lands: `game::InlineSchedule` (seeded region-scheduling
+    jitter on the `InlineSpawner`; `SimHarness::set_schedule`). Lockstep is the one schedule the
+    threaded server never runs, so judge a candidate protocol by `crossing.rs` convergence across
+    `InlineSchedule::late` seeds, not by the lockstep run alone. `jittery` (missed ticks) needs the
+    client per-region clock tracking item above first — the harness aligns client and server by tick.
 
 In-engine UI (spec docs/superpowers/specs/2026-07-07-in-engine-ui-design.md,
 plan docs/superpowers/plans/2026-07-07-in-engine-ui.md): inventory/hotbar landed

@@ -147,14 +147,19 @@ impl Default for CullingConfig {
 
 /// Hard bound on the BFS expansion (Chebyshev radius in chunk cells around
 /// the camera cell). Cells outside the expansion domain are never reached and
-/// their chunks end Hidden, so this must overshoot the largest loaded view
-/// window — today that's the near 3×3 region window alone, ≈24 chunks across
-/// (`ChunkGrid`, keyed by `ChunkKey`, holds only near-window chunks). The far
-/// ring and the worldgen rings beyond it (Phase 4) render `LodChunk` entities,
-/// which carry no `ChunkKey` and so are keyless to this BFS: `cull_chunks`
-/// queries `With<ChunkKey>` and never reaches or hides them, at any view
-/// distance. 64 overshoots the near window by more than 2×.
-pub const CULL_BFS_MAX_CHEBYSHEV: i32 = 64;
+/// their chunks end Hidden, so this must cover the largest loaded view
+/// window: a camera on the edge of its home region is `radius + 1` whole
+/// regions from the far side of the near window, hence
+/// `(MAX_NEAR_RADIUS + 1) * REGION_CHUNKS` (128 chunks at the default region
+/// size — exactly enough for `VOXEL_NEAR_RADIUS=3`, not a margin). The flood
+/// box is also clipped to the loaded grid's bounding box, so a smaller window
+/// pays only for what it loaded. (`ChunkGrid`, keyed by `ChunkKey`, holds only
+/// near-window chunks.) The far ring and the worldgen rings beyond it
+/// (Phase 4) render `LodChunk` entities, which carry no `ChunkKey` and so are
+/// keyless to this BFS: `cull_chunks` queries `With<ChunkKey>` and never
+/// reaches or hides them, at any view distance.
+pub const CULL_BFS_MAX_CHEBYSHEV: i32 =
+    (crate::world_scale::MAX_NEAR_RADIUS + 1) * game::REGION_CHUNKS as i32;
 
 /// Entry-face sentinel for the BFS start cell: no entry face, all exits
 /// allowed regardless of the cell's connectivity mask.
@@ -181,6 +186,78 @@ pub struct CullingStats {
     pub runs: u64,
     /// Frames where every input was unchanged and last frame's result stood.
     pub skipped: u64,
+    /// Floods that had to rebuild the cached grid table (the chunk grid
+    /// changed); every other flood reuses it.
+    pub grid_rebuilds: u64,
+    /// Summed wall time of the floods since the last `[client-cull]` report.
+    pub flood_us: u64,
+}
+
+/// Floods between two `[client-cull]` DEBUG reports (`perf_budget` target,
+/// raised by `PERF_LOG=1`): per-report volume, never per frame.
+const CULL_REPORT_EVERY: u64 = 128;
+
+/// `cull_chunks`' flat copy of the chunk grid: key, entity and connectivity
+/// mask per near chunk, plus the grid's bounding box. At the 5x5 window that
+/// is ~64k chunks, and re-deriving it from the `BTreeMap` + a random ECS mask
+/// lookup per chunk, plus a `get_mut` per chunk to write back, cost ~9 ms of a
+/// 12 ms run (2026-09-23 trace; the flood itself is ~3 ms). Rebuilt only when
+/// `ChunkGrid` changes; masks are patched per changed entity.
+#[derive(Default)]
+pub struct GridCache {
+    valid: bool,
+    keys: Vec<[i32; 3]>,
+    entities: Vec<Entity>,
+    /// `ALL_CONNECTED` for chunks without a `ChunkConnectivity` yet — the same
+    /// fully-open default the flood uses for grid-absent cells.
+    masks: Vec<u16>,
+    index: bevy::platform::collections::HashMap<Entity, u32>,
+    lo: [i32; 3],
+    hi: [i32; 3],
+    /// What the last run wrote per entry: 0 unknown (write it), 1 reached
+    /// (`Inherited`), 2 not reached (`Hidden`). Writes are diffed against it,
+    /// so a turning camera touches only chunks whose visibility flips. Safe
+    /// because `cull_chunks` is the only writer of chunk `Visibility`.
+    applied: Vec<u8>,
+    /// Bumped on every rebuild and mask patch: keys `CullingScratch`'s dense
+    /// mask grid, which is refilled only when this moves.
+    generation: u64,
+}
+
+impl GridCache {
+    fn rebuild(&mut self, grid: &ChunkGrid, masks: &Query<&ChunkConnectivity>) {
+        self.keys.clear();
+        self.entities.clear();
+        self.masks.clear();
+        self.index.clear();
+        let mut lo = [i32::MAX; 3];
+        let mut hi = [i32::MIN; 3];
+        for (key, &entity) in grid.0.iter() {
+            for axis in 0..3 {
+                lo[axis] = lo[axis].min(key[axis]);
+                hi[axis] = hi[axis].max(key[axis]);
+            }
+            self.index.insert(entity, self.keys.len() as u32);
+            self.keys.push(*key);
+            self.entities.push(entity);
+            self.masks.push(masks.get(entity).map_or(ALL_CONNECTED, |m| m.0));
+        }
+        self.lo = lo;
+        self.hi = hi;
+        self.applied.clear();
+        self.applied.resize(self.keys.len(), 0);
+        self.valid = true;
+        self.generation += 1;
+    }
+
+    fn set_mask(&mut self, entity: Entity, mask: u16) {
+        if let Some(&i) = self.index.get(&entity) {
+            if self.masks[i as usize] != mask {
+                self.masks[i as usize] = mask;
+                self.generation += 1;
+            }
+        }
+    }
 }
 
 /// Everything the flood's result depends on besides the grid contents and the
@@ -203,7 +280,7 @@ struct CullInputs {
 #[derive(Clone, Copy)]
 struct Node {
     index: u32,
-    pos: [u8; 3],
+    pos: [u16; 3],
     dirs: u8,
     entry: u8,
 }
@@ -224,6 +301,17 @@ pub struct CullingScratch {
     masks: Vec<u16>,
     /// Per cell frustum verdict, computed lazily: 0 unknown, 1 inside, 2 outside.
     in_frustum: Vec<u8>,
+    /// Per cell: the flood (`epoch`) that last touched it. `visited` and
+    /// `in_frustum` are only meaningful where `stamp == epoch`; a cell is
+    /// reset on its first touch in a flood (`touch`) instead of clearing all
+    /// three arrays up front — at the 5x5 window the box is ~0.9 M cells
+    /// (~17 MB) but a flood touches a few hundred thousand.
+    stamp: Vec<u32>,
+    epoch: u32,
+    /// `(box origin, box dims, GridCache generation)` the dense `masks` were
+    /// filled for; a match skips the refill (the box is the whole grid's
+    /// bounding box at production window sizes, so it rarely moves).
+    masks_key: Option<([i32; 3], [usize; 3], u64)>,
     queue: VecDeque<Node>,
     /// Box origin and dimensions of the last flood (for `is_reached`).
     lo: [i32; 3],
@@ -244,6 +332,60 @@ fn state_bit(dirs: u8, entry: u8) -> u128 {
     1u128 << (code * 3 + axis)
 }
 
+/// Every visited-state bit at a cell that makes an arrival in state
+/// `(dirs, entry)` redundant, including that state's own bit.
+///
+/// State `(D, e)` dominates `(D', e)` when `D ⊆ D'`: fewer used directions
+/// ban fewer exits (no-backtrack), and the cell's mask sees the same entry, so
+/// every move open to `D'` is open to `D`, landing in a successor state with
+/// the same entry and a subset of directions — dominance carries on down the
+/// path. In a fully open cell (`ALL_CONNECTED`) the entry face constrains
+/// nothing, so a subset-direction state with ANY entry dominates. The frustum
+/// and box bounds are per cell, not per state, so they don't break it. Pruned
+/// arrivals therefore never reach a cell the dominating state won't; the
+/// reached set is exactly the unpruned one (`dense_flood_reaches_exactly_…`
+/// checks it against the reference BFS). The start state (bit 0) is never
+/// counted as a dominator.
+fn dominators(dirs: u8, entry: u8, open: bool) -> u128 {
+    static TABLE: std::sync::OnceLock<Vec<[u128; 2]>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        // Legal: at most one direction per axis, and the entry face is the
+        // opposite of a used direction.
+        let legal = |dirs: u8, entry: u8| {
+            (0..3).all(|axis| (dirs >> (2 * axis)) & 3 != 3) && dirs & (1 << (entry ^ 1)) != 0
+        };
+        let mut table = vec![[0u128; 2]; 64 * 6];
+        for dirs in 0..64u8 {
+            for entry in 0..6u8 {
+                if !legal(dirs, entry) {
+                    continue;
+                }
+                let mut same_entry = 0u128;
+                let mut any_entry = 0u128;
+                // Every submask of `dirs`, including `dirs` itself.
+                let mut sub = dirs;
+                loop {
+                    for e in 0..6u8 {
+                        if legal(sub, e) {
+                            any_entry |= state_bit(sub, e);
+                            if e == entry {
+                                same_entry |= state_bit(sub, e);
+                            }
+                        }
+                    }
+                    if sub == 0 {
+                        break;
+                    }
+                    sub = (sub - 1) & dirs;
+                }
+                table[dirs as usize * 6 + entry as usize] = [same_entry, any_entry];
+            }
+        }
+        table
+    });
+    table[dirs as usize * 6 + entry as usize][open as usize]
+}
+
 impl CullingScratch {
     /// Whether the last flood reached `cell`.
     fn is_reached(&self, cell: [i32; 3]) -> bool {
@@ -257,19 +399,58 @@ impl CullingScratch {
             index += rel as usize * stride;
             stride *= self.dims[axis];
         }
-        self.visited[index] != 0
+        self.stamp[index] == self.epoch && self.visited[index] != 0
+    }
+
+    /// Cells the last flood reached, and their summed BFS states (reporting
+    /// and tests; walks the whole box).
+    fn reached_counts(&self) -> (usize, u32) {
+        let mut cells = 0;
+        let mut states = 0;
+        for (visited, stamp) in self.visited.iter().zip(&self.stamp) {
+            if *stamp == self.epoch && *visited != 0 {
+                cells += 1;
+                states += visited.count_ones();
+            }
+        }
+        (cells, states)
+    }
+
+    /// First touch of `index` in this flood resets its per-flood state.
+    #[inline]
+    fn touch(&mut self, index: usize) {
+        if self.stamp[index] != self.epoch {
+            self.stamp[index] = self.epoch;
+            self.visited[index] = 0;
+            self.in_frustum[index] = 0;
+        }
     }
 
     /// The camera BFS (see `cull_chunks` for the rules), over the box
     /// `lo..=hi` intersected with the Chebyshev ball around `camera_cell`
     /// (which must lie inside `lo..=hi`). `masks` yields the connectivity of
     /// every chunk that has one; everything else is fully open.
+    #[cfg(test)]
     fn flood(
         &mut self,
         lo: [i32; 3],
         hi: [i32; 3],
         camera_cell: [i32; 3],
         frustum: Option<&Frustum>,
+        masks: impl Iterator<Item = ([i32; 3], u16)>,
+    ) {
+        self.flood_cached(lo, hi, camera_cell, frustum, None, masks);
+    }
+
+    /// `flood`, but `masks` is only consumed when the dense mask grid is stale
+    /// for this box and `masks_generation` (`None` always refills).
+    fn flood_cached(
+        &mut self,
+        lo: [i32; 3],
+        hi: [i32; 3],
+        camera_cell: [i32; 3],
+        frustum: Option<&Frustum>,
+        masks_generation: Option<u64>,
         masks: impl Iterator<Item = ([i32; 3], u16)>,
     ) {
         let mut dims = [0usize; 3];
@@ -279,15 +460,26 @@ impl CullingScratch {
             let box_hi = hi[axis].min(camera_cell[axis] + CULL_BFS_MAX_CHEBYSHEV);
             dims[axis] = (box_hi - box_lo[axis] + 1).max(0) as usize;
         }
+        let cells = dims[0] * dims[1] * dims[2];
+        if self.stamp.len() != cells || self.dims != dims {
+            // New box shape: fresh arrays (rare — the grid's bounding box moved).
+            self.visited.clear();
+            self.visited.resize(cells, 0);
+            self.in_frustum.clear();
+            self.in_frustum.resize(cells, 0);
+            self.stamp.clear();
+            self.stamp.resize(cells, 0);
+            self.epoch = 0;
+            self.masks_key = None;
+        }
         self.lo = box_lo;
         self.dims = dims;
-        let cells = dims[0] * dims[1] * dims[2];
-        self.visited.clear();
-        self.visited.resize(cells, 0);
-        self.masks.clear();
-        self.masks.resize(cells, ALL_CONNECTED);
-        self.in_frustum.clear();
-        self.in_frustum.resize(cells, 0);
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            // Wrapped: stamps from 2^32 floods ago would alias. Start over.
+            self.stamp.fill(0);
+            self.epoch = 1;
+        }
         self.queue.clear();
         if cells == 0 {
             return;
@@ -304,21 +496,29 @@ impl CullingScratch {
             }
             Some(index)
         };
-        for (cell, mask) in masks {
-            if let Some(index) = index_of(cell) {
-                self.masks[index] = mask;
+        let key = masks_generation.map(|generation| (box_lo, dims, generation));
+        if key.is_none() || self.masks_key != key {
+            self.masks.clear();
+            self.masks.resize(cells, ALL_CONNECTED);
+            for (cell, mask) in masks {
+                if let Some(index) = index_of(cell) {
+                    self.masks[index] = mask;
+                }
             }
+            self.masks_key = key;
         }
 
         let Some(start) = index_of(camera_cell) else {
             return;
         };
-        // Box dimensions never exceed 2 * CULL_BFS_MAX_CHEBYSHEV + 1 = 129.
+        // Box dimensions never exceed 2 * CULL_BFS_MAX_CHEBYSHEV + 1 (257, or
+        // 1025 with `REGION_CHUNKS = 128` — past u8, inside u16).
         let start_pos = [
-            (camera_cell[0] - box_lo[0]) as u8,
-            (camera_cell[1] - box_lo[1]) as u8,
-            (camera_cell[2] - box_lo[2]) as u8,
+            (camera_cell[0] - box_lo[0]) as u16,
+            (camera_cell[1] - box_lo[1]) as u16,
+            (camera_cell[2] - box_lo[2]) as u16,
         ];
+        self.touch(start);
         self.visited[start] |= state_bit(0, NO_ENTRY);
         self.queue.push_back(Node { index: start as u32, pos: start_pos, dirs: 0, entry: NO_ENTRY });
         while let Some(Node { index, pos, dirs, entry }) = self.queue.pop_front() {
@@ -357,6 +557,7 @@ impl CullingScratch {
                     next_pos[axis] -= 1;
                     index as usize - strides[axis]
                 };
+                self.touch(next_index);
                 // Frustum: reject neighbors fully outside the camera's view. No
                 // Frustum (headless / ungated) => everything counts as inside.
                 if let Some(frustum) = frustum {
@@ -379,7 +580,19 @@ impl CullingScratch {
                 }
                 let next_dirs = dirs | (1 << d);
                 let bit = state_bit(next_dirs, d ^ 1);
-                if self.visited[next_index] & bit == 0 {
+                // Skip the arrival if the cell already holds a state that
+                // dominates it (see `dominators`) — the same reach, far fewer
+                // re-expansions of open air.
+                let open = self.masks[next_index] == ALL_CONNECTED;
+                #[cfg(test)]
+                let redundant = if tests::PRUNING_OFF.load(std::sync::atomic::Ordering::Relaxed) {
+                    bit
+                } else {
+                    dominators(next_dirs, d ^ 1, open)
+                };
+                #[cfg(not(test))]
+                let redundant = dominators(next_dirs, d ^ 1, open);
+                if self.visited[next_index] & redundant == 0 {
                     self.visited[next_index] |= bit;
                     self.queue.push_back(Node {
                         index: next_index as u32,
@@ -415,21 +628,38 @@ pub fn cull_chunks(
     grid: Res<ChunkGrid>,
     cameras: Query<(&GlobalTransform, Option<&Frustum>, &Camera), With<Camera3d>>,
     masks: Query<&ChunkConnectivity>,
-    changed_masks: Query<(), Changed<ChunkConnectivity>>,
+    changed_masks: Query<(Entity, &ChunkConnectivity), Changed<ChunkConnectivity>>,
     mut removed_masks: RemovedComponents<ChunkConnectivity>,
     mut chunks: Query<&mut Visibility, With<ChunkKey>>,
     mut scratch: Local<CullingScratch>,
+    mut cache: Local<GridCache>,
     mut stats: Option<ResMut<CullingStats>>,
 ) {
     // Always drain the removal events, or they pile up across skipped frames.
-    let masks_changed = removed_masks.read().count() > 0 || !changed_masks.is_empty();
+    // A grid change rebuilds the whole cache below, so patching is only for a
+    // still-valid cache. Removals first: a remove + re-add in one frame shows
+    // up in both, and the re-added mask must win.
+    let mut masks_changed = false;
+    for entity in removed_masks.read() {
+        masks_changed = true;
+        cache.set_mask(entity, ALL_CONNECTED);
+    }
+    for (entity, mask) in &changed_masks {
+        masks_changed = true;
+        cache.set_mask(entity, mask.0);
+    }
     if !config.graph_enabled {
-        scratch.last = None;
-        for mut vis in &mut chunks {
-            if *vis != Visibility::Inherited {
-                *vis = Visibility::Inherited;
+        // Restore everything once, when the switch flips; after that there is
+        // nothing to do (new chunks spawn `Inherited`).
+        if config.is_changed() || cache.valid {
+            for mut vis in &mut chunks {
+                if *vis != Visibility::Inherited {
+                    *vis = Visibility::Inherited;
+                }
             }
         }
+        scratch.last = None;
+        cache.valid = false;
         return;
     }
     // No active camera: leave visibility unchanged rather than flashing the
@@ -465,14 +695,13 @@ pub fn cull_chunks(
         return;
     }
 
-    let mut lo = [i32::MAX; 3];
-    let mut hi = [i32::MIN; 3];
-    for key in grid.0.keys() {
-        for axis in 0..3 {
-            lo[axis] = lo[axis].min(key[axis]);
-            hi[axis] = hi[axis].max(key[axis]);
+    if !cache.valid || grid.is_changed() {
+        cache.rebuild(&grid, &masks);
+        if let Some(stats) = stats.as_deref_mut() {
+            stats.grid_rebuilds += 1;
         }
     }
+    let (mut lo, mut hi) = (cache.lo, cache.hi);
     for axis in 0..3 {
         lo[axis] -= 1;
         hi[axis] += 1;
@@ -505,34 +734,58 @@ pub fn cull_chunks(
     // different entry faces, and the sets of exits the mask allows for those
     // entries differ — deduping them against each other would under-visit
     // (= holes in the world).
-    scratch.flood(
+    let flood_start = std::time::Instant::now();
+    scratch.flood_cached(
         lo,
         hi,
         camera_cell,
         frustum,
-        grid.0
-            .iter()
-            .filter_map(|(key, &entity)| masks.get(entity).ok().map(|mask| (*key, mask.0))),
+        Some(cache.generation),
+        cache.keys.iter().copied().zip(cache.masks.iter().copied()),
     );
+    let flood_us = flood_start.elapsed().as_micros() as u64;
     scratch.last = Some(inputs);
     if let Some(stats) = stats.as_deref_mut() {
         stats.runs += 1;
+        stats.flood_us += flood_us;
+        if stats.runs % CULL_REPORT_EVERY == 0 {
+            // The counts walk the whole box, so only on report runs.
+            let (reached, states) = scratch.reached_counts();
+            log::debug!(
+                target: "perf_budget",
+                "[client-cull] floods={} avg_flood_ms={:.2} box={:?} ({} cells) grid_chunks={} reached={} states={} skipped={} grid_rebuilds={}",
+                CULL_REPORT_EVERY,
+                stats.flood_us as f64 / CULL_REPORT_EVERY as f64 / 1000.0,
+                scratch.dims,
+                scratch.visited.len(),
+                cache.keys.len(),
+                reached,
+                states,
+                stats.skipped,
+                stats.grid_rebuilds,
+            );
+            stats.flood_us = 0;
+        }
     }
 
-    // Apply, writing only on change (like `dedupe_ghosts`) to avoid
-    // change-detection churn.
-    for (key, &entity) in grid.0.iter() {
-        let Ok(mut vis) = chunks.get_mut(entity) else {
+    // Apply only what flipped since the last applied run (see
+    // `GridCache::applied`), and write only on change (like `dedupe_ghosts`)
+    // to avoid change-detection churn.
+    let GridCache { keys, entities, applied, .. } = &mut *cache;
+    for ((key, entity), applied) in keys.iter().zip(entities.iter()).zip(applied.iter_mut()) {
+        let reached = scratch.is_reached(*key);
+        let state = if reached { 1 } else { 2 };
+        if *applied == state {
+            continue;
+        }
+        let Ok(mut vis) = chunks.get_mut(*entity) else {
             continue;
         };
-        let want = if scratch.is_reached(*key) {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
+        let want = if reached { Visibility::Inherited } else { Visibility::Hidden };
         if *vis != want {
             *vis = want;
         }
+        *applied = state;
     }
 }
 
@@ -574,7 +827,7 @@ pub fn toggle_culling(keys: Res<ButtonInput<KeyCode>>, mut config: ResMut<Cullin
 /// occlusion culling (experimental in Bevy 0.16+; REQUIRES DepthPrepass or
 /// the component is ignored; incompatible with deferred, which we don't use).
 /// Chunk meshes already prepass correctly via the packed-format prepass
-/// vertex shader (phase 2). Own commit: revert this one commit to disable.
+/// vertex shader (phase 2). Registered only when `native_occlusion_enabled`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn enable_native_occlusion(
     mut commands: Commands,
@@ -589,9 +842,28 @@ pub fn enable_native_occlusion(
     for e in &cameras {
         commands.entity(e).insert((
             bevy::core_pipeline::prepass::DepthPrepass,
-            bevy::render::experimental::occlusion_culling::OcclusionCulling,
+            bevy::render::occlusion_culling::OcclusionCulling,
         ));
     }
+}
+
+/// Depth prepass + HZB occlusion culling is OFF by default;
+/// `VOXEL_OCCLUSION=on|1|true` turns it back on. The prepass re-draws every
+/// submitted quad, and on open terrain the HZB culled only ~3% of chunks:
+/// 2026-09-22 render bench (`full`, 1080p, Intel iGPU) went 27.7 -> 21.1 ms
+/// p50 and 52.9 -> 39.1 ms p95 without it, for 1.3x -> 1.8x overdraw.
+/// Re-measure in cave-heavy scenes or on a discrete GPU before flipping back.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn native_occlusion_enabled() -> bool {
+    occlusion_from_env(std::env::var("VOXEL_OCCLUSION").ok().as_deref())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn occlusion_from_env(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::to_ascii_lowercase).as_deref(),
+        Some("on" | "1" | "true")
+    )
 }
 
 #[cfg(test)]
@@ -794,7 +1066,7 @@ mod tests {
             seed % modulus
         };
         let mut scratch = CullingScratch::default();
-        for round in 0..60 {
+        for round in 0..300 {
             let size = [3 + next(9) as i32, 2 + next(5) as i32, 3 + next(9) as i32];
             let origin = [next(40) as i32 - 20, next(10) as i32 - 5, next(40) as i32 - 20];
             let mut masks = std::collections::BTreeMap::new();
@@ -850,25 +1122,94 @@ mod tests {
                     [next(5) as usize];
                 let view = Transform::from_translation(eye).looking_to(forward, Vec3::Y);
                 let projection = Mat4::perspective_infinite_reverse_rh(1.0, 16.0 / 9.0, 0.1);
-                Frustum::from_clip_from_world(&(projection * view.to_matrix().inverse()))
+                Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world(&(projection * view.to_matrix().inverse())))
             });
 
             let expected = reference_reached(lo, hi, camera_cell, frustum.as_ref(), &masks);
             scratch.flood(lo, hi, camera_cell, frustum.as_ref(), masks.iter().map(|(k, v)| (*k, *v)));
-            for x in lo[0] - 1..=hi[0] + 1 {
-                for y in lo[1] - 1..=hi[1] + 1 {
-                    for z in lo[2] - 1..=hi[2] + 1 {
-                        let cell = [x, y, z];
-                        assert_eq!(
-                            scratch.is_reached(cell),
-                            expected.contains(&cell),
-                            "round {round}: cell {cell:?}, camera {camera_cell:?}, gated {}",
-                            frustum.is_some()
-                        );
+            let check = |scratch: &CullingScratch, expected: &HashSet<[i32; 3]>, camera: [i32; 3], what: &str| {
+                for x in lo[0] - 1..=hi[0] + 1 {
+                    for y in lo[1] - 1..=hi[1] + 1 {
+                        for z in lo[2] - 1..=hi[2] + 1 {
+                            let cell = [x, y, z];
+                            assert_eq!(
+                                scratch.is_reached(cell),
+                                expected.contains(&cell),
+                                "round {round} ({what}): cell {cell:?}, camera {camera:?}, gated {}",
+                                frustum.is_some()
+                            );
+                        }
                     }
+                }
+            };
+            check(&scratch, &expected, camera_cell, "fresh");
+
+            // The production path: fill the dense masks under a generation,
+            // then flood again from another cell with an EMPTY mask iterator —
+            // only a correctly reused (and correctly epoch-reset) grid passes.
+            let generation = Some(round as u64);
+            scratch.flood_cached(lo, hi, camera_cell, frustum.as_ref(), generation, masks.iter().map(|(k, v)| (*k, *v)));
+            let second_cell = [
+                lo[0] + next((hi[0] - lo[0] + 1) as u64) as i32,
+                lo[1] + next((hi[1] - lo[1] + 1) as u64) as i32,
+                lo[2] + next((hi[2] - lo[2] + 1) as u64) as i32,
+            ];
+            let expected = reference_reached(lo, hi, second_cell, None, &masks);
+            scratch.flood_cached(lo, hi, second_cell, None, generation, std::iter::empty());
+            check(&scratch, &expected, second_cell, "reused masks");
+        }
+    }
+
+    /// Test-only switch: flood without dominance pruning (exact-state dedupe
+    /// only), for the timing comparison below.
+    pub(super) static PRUNING_OFF: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// Timing, not correctness: a production-sized window (the 5x5 `full`
+    /// window, 160 x 10 x 160 chunks; open air above a solid/random band), camera above the ground
+    /// looking along +X. `just test-one client "--release --lib flood_timing -- --ignored --nocapture"`.
+    #[test]
+    #[ignore = "timing: run by hand with --release --nocapture"]
+    fn flood_timing_with_and_without_dominance_pruning() {
+        let mut masks = std::collections::BTreeMap::new();
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        for x in 0..160 {
+            for y in 0..10 {
+                for z in 0..160 {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let mask = match y {
+                        0..=2 => 0u16,
+                        3..=5 => (seed % 0x8000) as u16,
+                        _ => ALL_CONNECTED,
+                    };
+                    masks.insert([x, y, z], mask);
                 }
             }
         }
+        let (lo, hi) = ([-1, -1, -1], [160, 10, 160]);
+        let camera = [80, 7, 80];
+        let eye = Vec3::new(80.0 * 32.0 + 16.0, 7.0 * 32.0 + 16.0, 80.0 * 32.0 + 16.0);
+        let view = Transform::from_translation(eye).looking_to(Vec3::new(1.0, -0.3, 0.2), Vec3::Y);
+        let projection = Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.1);
+        let frustum = Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world(&(projection * view.to_matrix().inverse())));
+        let mut reached = Vec::new();
+        for pruning_off in [true, false] {
+            PRUNING_OFF.store(pruning_off, std::sync::atomic::Ordering::Relaxed);
+            let mut scratch = CullingScratch::default();
+            let runs = 20;
+            let start = std::time::Instant::now();
+            for _ in 0..runs {
+                scratch.flood(lo, hi, camera, Some(&frustum), masks.iter().map(|(k, v)| (*k, *v)));
+            }
+            let per_run = start.elapsed() / runs;
+            let (count, states) = scratch.reached_counts();
+            println!("pruning_off={pruning_off}: {per_run:?}/flood, {count} cells reached, {states} states");
+            reached.push(count);
+        }
+        PRUNING_OFF.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(reached[0], reached[1], "pruning must not change the reached set");
     }
 
     /// The Chebyshev bound must clip the dense box exactly as `in_domain` did.
@@ -995,6 +1336,55 @@ mod tests {
             wait_until(&mut app, |app| vis(app, behind) == Visibility::Inherited),
             "carving a tunnel must remesh the wall and reveal the room behind it"
         );
+    }
+
+    /// `cull_chunks`' cached grid table: camera moves reuse it, and a
+    /// connectivity-only change (no grid change) is patched into it — the
+    /// result still flips, with no rebuild. Removing a mask reverts the chunk
+    /// to fully open, like a chunk that was never meshed.
+    #[test]
+    fn mask_only_changes_patch_the_cached_grid_without_a_rebuild() {
+        let mut app = pipeline_app(MeshBudgets::default());
+        let (wall, behind) = wall_scene(&mut app);
+        assert!(wait_until(&mut app, |app| vis(app, behind) == Visibility::Hidden));
+        assert!(wait_until_settled(&mut app));
+        for _ in 0..3 {
+            app.update();
+        }
+        let stats = |app: &App| *app.world().resource::<CullingStats>();
+        let settled = stats(&app);
+
+        let camera = app
+            .world_mut()
+            .query_filtered::<Entity, With<Camera3d>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(GlobalTransform::from(Transform::from_xyz(8.0, 40.0, 8.0)));
+        app.update();
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(GlobalTransform::from(Transform::from_xyz(8.0, 8.0, 8.0)));
+        app.update();
+        assert_eq!(stats(&app).runs, settled.runs + 2, "each new camera cell re-floods");
+        assert_eq!(stats(&app).grid_rebuilds, settled.grid_rebuilds, "camera moves reuse the cache");
+        assert_eq!(vis(&app, behind), Visibility::Hidden);
+
+        // Open the wall by swapping ONLY its mask (the grid is untouched).
+        app.world_mut().entity_mut(wall).insert(ChunkConnectivity(ALL_CONNECTED));
+        app.update();
+        assert_eq!(vis(&app, behind), Visibility::Inherited, "patched mask must reveal the room");
+        assert_eq!(stats(&app).grid_rebuilds, settled.grid_rebuilds, "mask patch, not a rebuild");
+
+        // Close it again, then remove the mask: mask-less = fully open.
+        app.world_mut().entity_mut(wall).insert(ChunkConnectivity(0));
+        app.update();
+        assert_eq!(vis(&app, behind), Visibility::Hidden, "a solid mask hides it again");
+        app.world_mut().entity_mut(wall).remove::<ChunkConnectivity>();
+        app.update();
+        assert_eq!(vis(&app, behind), Visibility::Inherited, "no mask traverses as open air");
+        assert_eq!(stats(&app).grid_rebuilds, settled.grid_rebuilds);
     }
 
     /// The change gate: a settled world and a still camera must not re-run the
@@ -1240,9 +1630,19 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn occlusion_is_off_unless_opted_in() {
+        assert!(!occlusion_from_env(None));
+        assert!(!occlusion_from_env(Some("off")));
+        assert!(!occlusion_from_env(Some("")));
+        assert!(occlusion_from_env(Some("on")));
+        assert!(occlusion_from_env(Some("TRUE")));
+        assert!(occlusion_from_env(Some("1")));
+    }
+
+    #[test]
     fn native_cameras_get_depth_prepass_and_occlusion_culling() {
         use bevy::core_pipeline::prepass::DepthPrepass;
-        use bevy::render::experimental::occlusion_culling::OcclusionCulling;
+        use bevy::render::occlusion_culling::OcclusionCulling;
 
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)

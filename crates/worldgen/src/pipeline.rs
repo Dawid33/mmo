@@ -1,6 +1,9 @@
-//! Our tuned density graph: continentalness/erosion/ridges -> offset/factor/
-//! jaggedness -> depth -> final_density. Numbers here are hand-tuned, not
-//! ported from Tectonic (see the design spec).
+//! Our tuned density graph: continentalness/erosion/warped ridges ->
+//! offset/factor/jaggedness -> depth -> final_density. The mechanism follows
+//! Tectonic (continent noise folded through `abs`, erosion flattening, a
+//! peaks-and-valleys fold of a domain-warped ridge noise for mountain ranges);
+//! the numbers are hand-tuned against `just world-map`, not ported (see the
+//! design spec and docs/superpowers/specs/2026-09-20-worldgen-continents-findings.md).
 
 use crate::density::NoiseSet;
 #[cfg(test)]
@@ -10,17 +13,69 @@ use crate::spline::{FlatSpline, Spline};
 
 pub const SEA_LEVEL: f64 = 64.0;
 
+/// Topmost block of the water column: water fills `by <= SEA_TOP_BLOCK`, so
+/// the water SURFACE is the plane `y = SEA_LEVEL` — the density field's own
+/// zero-height reference, and a multiple of every LOD cell size (64 blocks =
+/// 1024 voxels; `sea_surface_sits_on_every_lod_lattice`). Any-solid LOD
+/// downsampling rounds a surface up to its cell's top, so a sea one block
+/// higher (water through block 64, surface at 65) stood 3 and 15 blocks proud
+/// in the factor-64/256 rings: a dark wall along every ring boundary at sea.
+pub const SEA_TOP_BLOCK: i32 = SEA_LEVEL as i32 - 1;
+
 // Noise indices into NoiseSet.
 const N_CONTINENTS: usize = 0;
 const N_EROSION: usize = 1;
 const N_RIDGES: usize = 2;
+const N_WARP_X: usize = 3;
+const N_WARP_Z: usize = 4;
+const N_JAGGED: usize = 5;
 
-// Tuning constants (hand-picked, not ported).
-const OCEAN_OFFSET: f64 = -0.5;
+// Tuning constants (hand-picked, not ported). Re-render with `just world-map`
+// (try --span 65536 and --span 12000) and re-run examples/seed_scan.rs after
+// touching any of them or the splines below.
 const MIN_OFFSET: f64 = -1.0;
 const MAX_OFFSET: f64 = 2.0;
 const HEIGHT_SCALE: f64 = 96.0; // meters of surface swing per offset unit
 const DEPTH_PER_BLOCK: f64 = 1.0 / 32.0; // density falloff per meter of height
+
+/// Landmass size relative to Tectonic's. At 1.0 the continent noise's longest
+/// wavelength is 1024 / 0.13 ≈ 7.9 km and landmasses come out 5-10 km across —
+/// big islands, with a 2 km LOD horizon. 3.0 gives 15-25 km continents with
+/// room for mountain belts inland. Scales erosion with it, so plains and
+/// highlands stay continent-sized features.
+const CONTINENT_SCALE: f64 = 3.0;
+/// Horizontal size of every macro feature — continents, erosion basins,
+/// mountain ranges and the ridge warp — as a wavelength multiplier: 0.5 packs
+/// the same landscape into half the distance (heights unchanged, so slopes
+/// steepen ×2). Tuned against the region size: at 2048-unit (128 m) regions
+/// the 1.0 world read as too spread out. Block-scale jaggedness is local
+/// detail and does not follow it.
+const FEATURE_SCALE: f64 = 0.5;
+/// Offset units the mountain term adds at full strength (deep inland, lowest
+/// erosion, on a ridge line): × HEIGHT_SCALE = 168 m on top of the base
+/// plateau, for peaks around SEA_LEVEL + 190 m. The world band tops out at
+/// y = 320, so ~2.3 is the ceiling before MAX_OFFSET flattens summits.
+const MOUNTAIN_OFFSET: f64 = 1.75;
+/// How far (meters) the ridge noise's sample point is pushed around by the
+/// warp noises. This is what bends round ridge loops into long sinuous ranges;
+/// 0 gives ring-shaped mountains, much more than the ridge wavelength (~1.2 km)
+/// smears them into marble.
+const RIDGE_WARP_M: f64 = 1400.0 * FEATURE_SCALE;
+/// Share of the base (non-mountain) elevation that survives maximum erosion:
+/// `base * (EROSION_BASE_FLOOR + (1 - EROSION_BASE_FLOOR) * erosion_gate)`.
+const EROSION_BASE_FLOOR: f64 = 0.55;
+const EROSION_BASE_SWING: f64 = 1.0 - EROSION_BASE_FLOOR;
+/// Peaks-and-valleys fold of |ridges|, after vanilla's but asymmetric:
+/// `pv = min(PV_RISE * |r| - 1, PV_BACK_TOP - PV_BACK * |r|)`. pv = -1 (a
+/// valley floor) at ridges = 0, climbing to pv = 1 (a crest) along the contour
+/// |ridges| = PV_CREST — contour LINES of the noise become ridge lines, with
+/// valleys between them. Past the crest vanilla falls back at the same rate,
+/// which sinks a crater into every wide ridge; the gentle PV_BACK slope leaves
+/// a high massif behind the crest line instead.
+const PV_CREST: f64 = 0.6666667;
+const PV_RISE: f64 = 2.0 / PV_CREST; // -1 at 0 -> 1 at the crest
+const PV_BACK: f64 = 0.8;
+const PV_BACK_TOP: f64 = 1.0 + PV_BACK * PV_CREST;
 
 // Noise-sampling offset (meters), applied to (x, z) before every noise read.
 // The world origin must NOT sit on the noise lattice zero: Perlin noise is 0
@@ -39,9 +94,13 @@ const RAMP_FROM_V: f64 = 64.0;
 const RAMP_TO_V: f64 = -320.0;
 
 // Noise xz scales (used by both the graph builders and the fused path).
-const XZ_SCALE_CONTINENTS: f64 = 0.13;
-const XZ_SCALE_EROSION: f64 = 0.25;
-const XZ_SCALE_RIDGES: f64 = 0.5;
+// Wavelength of a noise's first octave = 2^-first_octave / xz_scale meters.
+// Wavelengths quoted at FEATURE_SCALE = 1; multiply by it for the real ones.
+const XZ_SCALE_CONTINENTS: f64 = 0.13 / (CONTINENT_SCALE * FEATURE_SCALE); // ~23.6 km
+const XZ_SCALE_EROSION: f64 = 0.25 / (CONTINENT_SCALE * FEATURE_SCALE); // ~12.3 km
+const XZ_SCALE_RIDGES: f64 = 0.22 / FEATURE_SCALE; // ~1.2 km between parallel ranges
+const XZ_SCALE_WARP: f64 = 0.35 / FEATURE_SCALE; // ~1.5 km
+const XZ_SCALE_JAGGED: f64 = 1.0; // 64 m and 32 m
 
 // Graph-tree builders below (`continentalness`/`erosion`/`ridges` through
 // `final_density_graph`) are the test oracle only: `TerrainPipeline::column`/
@@ -59,81 +118,152 @@ fn continentalness() -> DensityFn {
 fn erosion() -> DensityFn {
     DensityFn::Noise { idx: N_EROSION, xz_scale: XZ_SCALE_EROSION }
 }
+/// Ridge noise, domain-warped by two independent low-frequency noises.
 #[cfg(test)]
 fn ridges() -> DensityFn {
-    DensityFn::Noise { idx: N_RIDGES, xz_scale: XZ_SCALE_RIDGES }
+    let shift = |idx| {
+        Box::new(DensityFn::mul(
+            DensityFn::Noise { idx, xz_scale: XZ_SCALE_WARP },
+            DensityFn::Const(RIDGE_WARP_M),
+        ))
+    };
+    DensityFn::WarpedNoise {
+        idx: N_RIDGES,
+        xz_scale: XZ_SCALE_RIDGES,
+        shift_x: shift(N_WARP_X),
+        shift_z: shift(N_WARP_Z),
+    }
+}
+#[cfg(test)]
+fn jagged() -> DensityFn {
+    DensityFn::Noise { idx: N_JAGGED, xz_scale: XZ_SCALE_JAGGED }
 }
 
+fn curve(points: &[(f64, f64, f64)]) -> Spline {
+    Spline::Curve {
+        points: points
+            .iter()
+            .map(|&(location, value, derivative)| Spline::point(location, Spline::constant(value), derivative))
+            .collect(),
+    }
+}
+
+/// |continentalness| -> raw continents: -1 deep ocean, 0 the coastline, 1+ deep
+/// interior. Laid out on the noise's measured distribution (sd ~0.5, so |c| has
+/// median ~0.37 and p90 ~0.9): the coast at |c| = 0.55 puts ~30% of the world
+/// above water. Move that point to trade land for ocean.
 fn continents_curve_spline() -> Spline {
-    Spline::Curve {
-        points: vec![
-            Spline::point(0.0, Spline::constant(0.0), 0.0),
-            Spline::point(0.4, Spline::constant(0.6), 1.0),
-            Spline::point(1.0, Spline::constant(1.2), 0.0),
-        ],
-    }
+    curve(&[
+        (0.0, -1.0, 0.0),
+        (0.35, -0.5, 1.6),
+        (0.55, 0.0, 2.2),
+        (0.9, 0.5, 1.2),
+        (1.5, 1.0, 0.6),
+        (2.2, 1.2, 0.0),
+    ])
 }
 
-fn erosion_mod_spline() -> Spline {
-    Spline::Curve {
-        points: vec![
-            Spline::point(-1.0, Spline::constant(1.0), 0.0),
-            Spline::point(0.2, Spline::constant(0.5), 0.0),
-            Spline::point(1.0, Spline::constant(0.15), 0.0),
-        ],
-    }
-}
-
+/// raw continents -> base elevation in offset units (× HEIGHT_SCALE meters):
+/// abyss, shelf, a drop-off just offshore, low coastal plains, then a slow
+/// climb to an interior plateau at ~+58 m. Mountains are added on top, not here.
+///
+/// The drop-off (-0.03 -> 0) is there for the LOD rings: any-solid
+/// downsampling rounds the sea floor up a cell, so water shallower than a cell
+/// (16 m at factor 256) reads as sand flats from afar. raw moves ~0.0002 per
+/// meter, so without it that band was ~1 km wide; with it, ~150 m.
 fn offset_base_spline() -> Spline {
-    Spline::Curve {
-        points: vec![
-            Spline::point(-1.0, Spline::constant(-0.9), 0.0),
-            Spline::point(-0.2, Spline::constant(-0.3), 0.5),
-            Spline::point(0.0, Spline::constant(0.02), 0.6),
-            Spline::point(0.6, Spline::constant(0.9), 1.0),
-            Spline::point(1.2, Spline::constant(1.8), 0.5),
-        ],
-    }
+    curve(&[
+        (-1.0, -0.62, 0.0),
+        (-0.5, -0.45, 0.3),
+        (-0.12, -0.34, 0.5),
+        (-0.03, -0.27, 1.5),
+        (0.0, 0.015, 0.9),
+        (0.12, 0.07, 0.3),
+        (0.5, 0.22, 0.4),
+        (1.0, 0.5, 0.5),
+        (1.2, 0.6, 0.0),
+    ])
+}
+
+/// raw continents -> mountain strength: none within ~a kilometer of the
+/// coast, full strength deep inland.
+fn inland_gate_spline() -> Spline {
+    curve(&[(0.1, 0.0, 0.0), (0.35, 0.35, 1.8), (0.7, 1.0, 0.0)])
+}
+
+/// erosion -> how much relief survives: 1 in low-erosion highlands, down to a
+/// floor in heavily eroded lowlands. Scales mountains fully and the base
+/// partly. The floor is what keeps inland lowlands rolling (ridge lines ~20 m
+/// high) instead of dead flat.
+fn erosion_gate_spline() -> Spline {
+    curve(&[(-0.9, 1.0, 0.0), (-0.35, 0.75, -0.8), (0.1, 0.25, -0.8), (0.6, 0.12, 0.0)])
+}
+
+/// peaks-and-valleys -> height share: flat valley floors (slope 0 at pv = -1),
+/// broad shoulders, sharp crests (slope stays positive into pv = 1).
+fn peaks_spline() -> Spline {
+    curve(&[(-1.0, 0.0, 0.0), (-0.3, 0.12, 0.4), (0.4, 0.55, 0.9), (1.0, 1.0, 0.6)])
 }
 
 fn factor_spline() -> Spline {
-    Spline::Curve {
-        points: vec![
-            Spline::point(-1.0, Spline::constant(0.6), 0.0),
-            Spline::point(0.0, Spline::constant(1.2), 0.0),
-            Spline::point(1.0, Spline::constant(3.0), 0.0),
-        ],
-    }
+    curve(&[(-1.0, 0.6, 0.0), (0.0, 1.2, 0.0), (1.0, 3.0, 0.0)])
 }
 
 fn jaggedness_gate_spline() -> Spline {
-    Spline::Curve {
-        points: vec![
-            Spline::point(0.0, Spline::constant(0.0), 0.0),
-            Spline::point(1.0, Spline::constant(0.6), 0.0),
-        ],
-    }
+    curve(&[(0.0, 0.0, 0.0), (1.0, 0.6, 0.0)])
 }
 
-/// abs(continentalness) pushed through a rising curve, minus the ocean bias.
-/// Negative over most of the map (ocean); positive where |continents| is large.
+/// abs(continentalness) through the continents curve. Negative over most of
+/// the map (ocean); positive where |continents| is large.
 #[cfg(test)]
 fn raw_continents() -> DensityFn {
-    DensityFn::add(
-        DensityFn::Const(OCEAN_OFFSET),
-        DensityFn::spline_of(DensityFn::abs(continentalness()), continents_curve_spline()),
+    DensityFn::spline_of(DensityFn::abs(continentalness()), continents_curve_spline())
+}
+
+#[cfg(test)]
+fn erosion_gate() -> DensityFn {
+    DensityFn::spline_of(erosion(), erosion_gate_spline())
+}
+
+/// `min(PV_RISE * |r| - 1, PV_BACK_TOP - PV_BACK * |r|)`, see PV_CREST.
+#[cfg(test)]
+fn peaks_and_valleys() -> DensityFn {
+    DensityFn::min(
+        DensityFn::add(
+            DensityFn::mul(DensityFn::Const(PV_RISE), DensityFn::abs(ridges())),
+            DensityFn::Const(-1.0),
+        ),
+        DensityFn::add(
+            DensityFn::Const(PV_BACK_TOP),
+            DensityFn::mul(DensityFn::Const(-PV_BACK), DensityFn::abs(ridges())),
+        ),
     )
 }
 
-/// Surface height offset (in offset units) as a spline on raw_continents,
-/// its inland high end pulled down by erosion (flat plains vs mountains).
+/// Mountain strength in 0..=1: inland AND low erosion AND on a ridge line.
+#[cfg(test)]
+fn mountains() -> DensityFn {
+    DensityFn::mul(
+        DensityFn::mul(DensityFn::spline_of(raw_continents(), inland_gate_spline()), erosion_gate()),
+        DensityFn::spline_of(DensityFn::clamp(peaks_and_valleys(), -1.0, 1.0), peaks_spline()),
+    )
+}
+
+/// Surface height offset (in offset units): the continent's base elevation,
+/// partly flattened by erosion, plus the mountain ranges.
 #[cfg(test)]
 fn offset() -> DensityFn {
-    // offset = base(raw) * erosion_mod(erosion), clamped.
+    // offset = clamp(base(raw) * (floor + swing * egate) + mountains * MOUNTAIN_OFFSET)
     DensityFn::clamp(
-        DensityFn::mul(
-            DensityFn::spline_of(raw_continents(), offset_base_spline()),
-            DensityFn::spline_of(erosion(), erosion_mod_spline()),
+        DensityFn::add(
+            DensityFn::mul(
+                DensityFn::spline_of(raw_continents(), offset_base_spline()),
+                DensityFn::add(
+                    DensityFn::Const(EROSION_BASE_FLOOR),
+                    DensityFn::mul(DensityFn::Const(EROSION_BASE_SWING), erosion_gate()),
+                ),
+            ),
+            DensityFn::mul(mountains(), DensityFn::Const(MOUNTAIN_OFFSET)),
         ),
         MIN_OFFSET,
         MAX_OFFSET,
@@ -146,12 +276,13 @@ fn factor() -> DensityFn {
     DensityFn::spline_of(offset(), factor_spline())
 }
 
-/// Jaggedness: a ridges-driven bump, nonzero mainly at high offset.
+/// Jaggedness: short-wavelength surface roughness, nonzero mainly at high
+/// offset — a few meters on mountain flanks, centimeters on the plains.
 #[cfg(test)]
 fn jaggedness() -> DensityFn {
     DensityFn::mul(
         DensityFn::spline_of(offset(), jaggedness_gate_spline()),
-        DensityFn::abs(ridges()),
+        DensityFn::abs(jagged()),
     )
 }
 
@@ -181,13 +312,17 @@ fn final_density_graph() -> DensityFn {
 }
 
 /// Noise construction shared by `TerrainPipeline::new` and the oracle test.
-/// Per-noise sub-seeds derived from the world seed; amplitudes are our own
-/// (long-wavelength continents, medium erosion, short ridges).
+/// Per-noise sub-seeds derived from the world seed. The continents/erosion/
+/// ridges octave tables are Minecraft's (`OctaveNoise` weighs them the way
+/// Minecraft does); the warp and jagged noises are our own.
 fn pipeline_noises(seed: u64) -> NoiseSet {
     NoiseSet(vec![
         OctaveNoise::new(seed ^ 0x00C0, -10, vec![1.75, 1.0, 2.0, 3.0, 2.0, 2.0, 1.0]),
         OctaveNoise::new(seed ^ 0x00E0, -10, vec![2.0, 1.75, 1.5, 1.5, 1.3, 1.0]),
         OctaveNoise::new(seed ^ 0x00D0, -8, vec![1.0, 2.0, 1.0]),
+        OctaveNoise::new(seed ^ 0x00A1, -9, vec![1.0, 0.5]),
+        OctaveNoise::new(seed ^ 0x00A2, -9, vec![1.0, 0.5]),
+        OctaveNoise::new(seed ^ 0x00A3, -6, vec![1.0, 1.0]),
     ])
 }
 
@@ -195,7 +330,9 @@ pub struct TerrainPipeline {
     noises: NoiseSet,
     continents_curve: FlatSpline,
     offset_base: FlatSpline,
-    erosion_mod: FlatSpline,
+    inland_gate: FlatSpline,
+    erosion_gate: FlatSpline,
+    peaks: FlatSpline,
     factor_curve: FlatSpline,
     jaggedness_gate: FlatSpline,
 }
@@ -206,7 +343,9 @@ impl TerrainPipeline {
             noises: pipeline_noises(seed),
             continents_curve: FlatSpline::from_spline(&continents_curve_spline()),
             offset_base: FlatSpline::from_spline(&offset_base_spline()),
-            erosion_mod: FlatSpline::from_spline(&erosion_mod_spline()),
+            inland_gate: FlatSpline::from_spline(&inland_gate_spline()),
+            erosion_gate: FlatSpline::from_spline(&erosion_gate_spline()),
+            peaks: FlatSpline::from_spline(&peaks_spline()),
             factor_curve: FlatSpline::from_spline(&factor_spline()),
             jaggedness_gate: FlatSpline::from_spline(&jaggedness_gate_spline()),
         }
@@ -223,33 +362,43 @@ impl TerrainPipeline {
 
     /// Fused evaluation of the offset/factor/jaggedness graphs: each noise is
     /// sampled ONCE (the graphs share the whole `offset` subtree, which the
-    /// tree-walk evaluator recomputed three times). Every f64 op below mirrors
-    /// the graph's op order exactly — guarded bit-for-bit by
+    /// tree-walk evaluator recomputes many times over). Every f64 op below
+    /// mirrors the graph's op order exactly — guarded bit-for-bit by
     /// `fused_column_matches_density_graphs_bit_exact`.
     pub fn column(&self, x: f64, z: f64) -> ColumnProfile {
         let (x, z) = (x + SAMPLE_OFFSET_X_M, z + SAMPLE_OFFSET_Z_M);
         let n = &self.noises.0;
         let cont = n[N_CONTINENTS].sample2(x * XZ_SCALE_CONTINENTS, z * XZ_SCALE_CONTINENTS);
         let ero = n[N_EROSION].sample2(x * XZ_SCALE_EROSION, z * XZ_SCALE_EROSION);
-        let ridge = n[N_RIDGES].sample2(x * XZ_SCALE_RIDGES, z * XZ_SCALE_RIDGES);
+        // WarpedNoise: shift = Mul(Noise, Const(RIDGE_WARP_M)), sampled at (x + shift) * scale.
+        let wx = x + n[N_WARP_X].sample2(x * XZ_SCALE_WARP, z * XZ_SCALE_WARP) * RIDGE_WARP_M;
+        let wz = z + n[N_WARP_Z].sample2(x * XZ_SCALE_WARP, z * XZ_SCALE_WARP) * RIDGE_WARP_M;
+        let ridge = n[N_RIDGES].sample2(wx * XZ_SCALE_RIDGES, wz * XZ_SCALE_RIDGES);
+        let jag = n[N_JAGGED].sample2(x * XZ_SCALE_JAGGED, z * XZ_SCALE_JAGGED);
 
-        // raw_continents = OCEAN_OFFSET + curve(|continents|)   (Add(Const, SplineOf))
-        let raw = OCEAN_OFFSET + self.continents_curve.eval(cont.abs());
-        // offset = clamp(base(raw) * erosion_mod(erosion))
-        let offset = (self.offset_base.eval(raw) * self.erosion_mod.eval(ero))
+        let raw = self.continents_curve.eval(cont.abs());
+        let egate = self.erosion_gate.eval(ero);
+        // pv = Min(Add(Mul(RISE, |r|), -1), Add(BACK_TOP, Mul(-BACK, |r|)))
+        let pv = (PV_RISE * ridge.abs() + -1.0).min(PV_BACK_TOP + -PV_BACK * ridge.abs());
+        let mountains = (self.inland_gate.eval(raw) * egate) * self.peaks.eval(pv.clamp(-1.0, 1.0));
+        // offset = clamp(base(raw) * (floor + swing * egate) + mountains * MOUNTAIN_OFFSET)
+        let offset = (self.offset_base.eval(raw) * (EROSION_BASE_FLOOR + EROSION_BASE_SWING * egate)
+            + mountains * MOUNTAIN_OFFSET)
             .clamp(MIN_OFFSET, MAX_OFFSET);
         let factor = self.factor_curve.eval(offset);
-        let jaggedness = self.jaggedness_gate.eval(offset) * ridge.abs();
+        let jaggedness = self.jaggedness_gate.eval(offset) * jag.abs();
 
         ColumnProfile { offset_h: offset * HEIGHT_SCALE, factor, jaggedness }
     }
 }
 
 /// Lattice spacing (blocks == meters) for per-region profile interpolation.
-/// The density field's shortest xz wavelength is ~123 m (continents top
-/// octave 2^-4 * 0.13; erosion 2^-5 * 0.25; ridges 2^-6 * 0.5 — all ~1/128),
-/// so 4 m sampling is ~30x past Nyquist. Raise for speed, lower toward 1 for
-/// fidelity; must divide the region block span (64).
+/// The height field's shortest xz wavelength is ~290 m (ridges top octave
+/// 2^-6 * 0.22), though the peaks-and-valleys fold creases it along crests;
+/// the jagged noise's shortest is 32 m, so 4 m sampling is 4x past ITS
+/// Nyquist — roughness, not shape, is what a coarser lattice would lose.
+/// Raise for speed, lower toward 1 for fidelity; must divide the region block
+/// span (64).
 pub const PROFILE_LATTICE_BLOCKS: usize = 4;
 
 /// `column()` sampled on a K-meter corner lattice, bilinearly interpolated.
@@ -289,6 +438,30 @@ impl TerrainPipeline {
 }
 
 impl ProfileGrid {
+    /// The same corner lattice as `TerrainPipeline::profile_grid`, filled from
+    /// any per-point profile function (forged worlds).
+    pub fn from_fn(
+        origin_x: f64,
+        origin_z: f64,
+        span_m: f64,
+        profile: impl Fn(f64, f64) -> ColumnProfile,
+    ) -> ProfileGrid {
+        let step = PROFILE_LATTICE_BLOCKS as f64;
+        let n = (span_m / step).ceil() as usize + 1;
+        let mut offset_h = Vec::with_capacity(n * n);
+        let mut factor = Vec::with_capacity(n * n);
+        let mut jaggedness = Vec::with_capacity(n * n);
+        for i in 0..n {
+            for j in 0..n {
+                let prof = profile(origin_x + i as f64 * step, origin_z + j as f64 * step);
+                offset_h.push(prof.offset_h);
+                factor.push(prof.factor);
+                jaggedness.push(prof.jaggedness);
+            }
+        }
+        ProfileGrid { origin_x, origin_z, step, n, offset_h, factor, jaggedness }
+    }
+
     /// Bilinear profile at world meters (x, z); must lie within the sampled span.
     pub fn profile_at(&self, x: f64, z: f64) -> ColumnProfile {
         let fx = (x - self.origin_x) / self.step;
@@ -333,6 +506,19 @@ pub struct ColumnProfile {
 }
 
 impl ColumnProfile {
+    /// A profile whose surface is exactly `surface_y` (world meters), with no
+    /// jaggedness: what a forged world (`forged.rs`) hands the generator, which
+    /// knows the height outright instead of deriving it from noise.
+    pub fn from_surface(surface_y: f64) -> Self {
+        ColumnProfile { offset_h: surface_y - SEA_LEVEL, factor: 1.0, jaggedness: 0.0 }
+    }
+
+    /// Height where the density crosses zero, valid inside the ramp band
+    /// (RAMP_FROM_Y..RAMP_TO_Y), where `neg_y` is exactly `-y`.
+    pub fn surface_y(&self) -> f64 {
+        SEA_LEVEL + self.offset_h + self.jaggedness / (DEPTH_PER_BLOCK * self.factor)
+    }
+
     pub fn density_at(&self, y: f64) -> f64 {
         // Must match final_density_graph's arithmetic EXACTLY, including float
         // grouping/associativity (f64 add/mul are not associative). The graph does:
@@ -364,25 +550,29 @@ mod tests {
         assert!(low > high, "low={low} high={high}");
     }
 
+    /// The shape of the world, over an area wide enough to hold many
+    /// continents (~190 km): mostly ocean, a real share of land, and mountains
+    /// on that land. This is the test that would have caught the 99.7%-ocean
+    /// world (noise spread too small for the splines' control points).
     #[test]
-    fn ocean_is_the_majority() {
-        // Over a wide area at sea level, most columns' surface is below sea
-        // level (ocean): sample density just above sea level and expect mostly air.
-        let p = TerrainPipeline::new(7);
-        let mut air = 0;
-        let mut total = 0;
-        let step = 47.0; // meters, coprime-ish with wavelengths to spread samples
-        for i in 0..40 {
-            for j in 0..40 {
-                let x = i as f64 * step;
-                let z = j as f64 * step;
-                if p.final_density(x, SEA_LEVEL + 2.0, z) <= 0.0 {
-                    air += 1;
+    fn world_is_ocean_with_continents_and_mountains() {
+        for seed in [7, worldgen_test_seed()] {
+            let p = TerrainPipeline::new(seed);
+            let (mut land, mut mountain, mut total) = (0, 0, 0);
+            let step = 3137.0; // meters; ~1/8 of the continent wavelength
+            for i in 0..60 {
+                for j in 0..60 {
+                    let prof = p.column(i as f64 * step, j as f64 * step);
+                    land += (prof.density_at(SEA_LEVEL + 2.0) > 0.0) as usize;
+                    mountain += (prof.density_at(SEA_LEVEL + 100.0) > 0.0) as usize;
+                    total += 1;
                 }
-                total += 1;
             }
+            let share = land as f64 / total as f64;
+            assert!((0.15..0.45).contains(&share), "seed {seed}: land share {share:.3}");
+            assert!(mountain * 200 >= land, "seed {seed}: {mountain} mountain columns in {land} land");
+            assert!(mountain * 4 <= land, "seed {seed}: {mountain}/{land} — mountains everywhere");
         }
-        assert!(air * 2 > total, "expected majority air above sea level, got {air}/{total}");
     }
 
     #[test]

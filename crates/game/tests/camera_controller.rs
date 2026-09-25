@@ -114,3 +114,36 @@ fn look_ticks_roll_back_bit_exact() {
         assert_eq!(*expected, crc(&region), "rollback hash mismatch");
     }
 }
+
+/// `InputEvent::FpsCam` (the client autopilot's way in): sets the mode to
+/// exactly the value — twice is still on, unlike the E toggle — emits no
+/// `SetFreeCam` (that is what grabs the user's cursor), and rolls back
+/// bit-exact.
+#[test]
+fn fps_cam_input_sets_mode_without_free_cam_event_and_rolls_back() {
+    let (send, recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(Rollback::new(None), Some(send), RegionCoords::new(0, 0), None);
+    region.handle_event(GameEventKind::CreateClient(7)).unwrap();
+    region.handle_event(GameEventKind::Tick).unwrap();
+    while recv.try_recv().is_ok() {}
+    let before = crc(&region);
+
+    for _ in 0..2 {
+        region
+            .handle_event(GameEventKind::PlayerInput(7, InputEvent::FpsCam(true)))
+            .unwrap();
+        assert!(region.data().clients.get(&7).unwrap().fps_cam_mode, "FpsCam(true) sets the mode");
+    }
+    region.handle_event(GameEventKind::Tick).unwrap();
+    assert!(region.data().clients.get(&7).unwrap().fps_cam_mode, "setting it twice is not a toggle");
+    assert!(
+        !recv.try_iter().any(|u| matches!(u.update_kind, game::GameDataUpdateKind::SetFreeCam(..))),
+        "FpsCam must not ask the window for the pointer"
+    );
+
+    for _ in 0..3 {
+        region.rollback_last_event();
+    }
+    assert_eq!(before, crc(&region), "rollback hash mismatch");
+    assert!(!region.data().clients.get(&7).unwrap().fps_cam_mode);
+}

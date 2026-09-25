@@ -68,7 +68,10 @@ impl Default for MeshBudgets {
 /// window drained at `MESH_UPLOADS_PER_FRAME x fps` — ~260 chunks/s at 8 fps,
 /// ~1600/s at 45 fps — with the in-flight task cap pinned full the whole time,
 /// i.e. the workers were never the limit. Tunable.
-pub const MESH_UPLOADS_PER_SECOND: f32 = 3000.0;
+///
+/// 2026-09-23: 3000 -> 6000 once `boundary_zones` moved off the main thread
+/// (the 5x5 window's ~55k near chunks drained at exactly 3000/s, 18+ s).
+pub const MESH_UPLOADS_PER_SECOND: f32 = 6000.0;
 /// Ceiling on the derived per-frame upload cap: twice a 60 Hz frame's worth.
 /// A budget proportional to the frame delta is a feedback loop — a long frame
 /// earns more work, which makes the next frame longer — so the ceiling is what
@@ -220,6 +223,9 @@ pub fn spawn_mesh_tasks(
         }
         let layers = layers.0.clone();
         let task = pool.spawn(async move {
+            if is_buried(&center, &owned_neighbors) {
+                return buried_mesh_output();
+            }
             let neighbors = owned_neighbors
                 .iter()
                 .map(|(off, data)| (*off, data))
@@ -231,9 +237,47 @@ pub fn spawn_mesh_tasks(
     }
 }
 
+/// A chunk with no air whose 6 face neighbours all exist and present no air
+/// on the shared plane: the mesher would emit no face (faces only border air)
+/// and find no air to connect, so `mesh_chunk` is known without running it.
+/// ~30% of a join's chunks (2026-09-22 findings); skipping the padded gather,
+/// mesher and connectivity flood saves ~160 µs of worker time each. Edges and
+/// corners are irrelevant: they only feed AO, which needs a face. Checked in
+/// the task, not the main thread: the plane scans are ~6k voxel visits.
+pub fn is_buried(center: &VoxelData, neighbors: &[([i32; 3], VoxelData)]) -> bool {
+    if !center.has_no_air() {
+        return false;
+    }
+    let faces = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    faces.into_iter().all(|off| {
+        neighbors.iter().find(|(o, _)| *o == off).is_some_and(|(_, neighbor)| {
+            if neighbor.has_no_air() {
+                return true;
+            }
+            let mut solid = true;
+            neighbor.for_each_index_sorted(zone_indices([-off[0], -off[1], -off[2]]), |_, voxel| {
+                solid &= !voxel.is_air();
+            });
+            solid
+        })
+    })
+}
+
+/// What `mesh_chunk` returns for a buried chunk, in either render mode.
+pub fn buried_mesh_output() -> super::MeshOutput {
+    super::MeshOutput { mesh: None, records: None, connectivity: 0, quad_count: 0 }
+}
+
 /// Hash the 26 boundary zones of a 32³ chunk. Zones overlap on purpose: a
 /// corner voxel contributes to 3 face + 3 edge + 1 corner zone.
 pub fn boundary_zones(voxels: &VoxelData) -> [u32; 26] {
+    voxels
+        .cached_boundary_zones()
+        .unwrap_or_else(|| compute_boundary_zones(voxels))
+}
+
+/// The uncached hashing behind `boundary_zones`.
+pub fn compute_boundary_zones(voxels: &VoxelData) -> [u32; 26] {
     let mut zones = [0u32; 26];
     for (i, off) in zone_offsets().enumerate() {
         let mut h = crc32fast::Hasher::new();
@@ -361,6 +405,68 @@ pub fn prune_chunk_grid(
 pub(crate) mod tests {
     use super::*;
 
+    /// `is_buried` must only claim chunks the full mesher agrees are empty:
+    /// no quads, no connectivity, in both render modes.
+    #[test]
+    fn buried_shortcut_matches_the_full_mesher() {
+        use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |modulus: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % modulus
+        };
+        let idx = |x: usize, y: usize, z: usize| x + 32 * y + 32 * 32 * z;
+        // 0: all stone, 1: stone + water (both non-air), 2: stone with one
+        // air voxel at a random spot (interior, face, edge or corner).
+        let chunk = |next: &mut dyn FnMut(u64) -> u64, kind: u64| -> VoxelData {
+            let mut v = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+            match kind {
+                1 => {
+                    for i in 0..CHUNK_VOXEL_COUNT / 2 {
+                        v[i] = Voxel::new(BlockId(7));
+                    }
+                }
+                2 => {
+                    let pick = |next: &mut dyn FnMut(u64) -> u64| [0, 31, 1 + next(30) as usize][next(3) as usize];
+                    let (x, y, z) = (pick(next), pick(next), pick(next));
+                    v[idx(x, y, z)] = Voxel::default();
+                }
+                _ => {}
+            }
+            VoxelData::new(v)
+        };
+        let layers = BlockTextureLayers::default();
+        let mut buried_cases = 0;
+        for round in 0..400 {
+            let center_kind = [0, 0, 1, 2][next(4) as usize];
+            let center = chunk(&mut next, center_kind);
+            let mut neighbors: Vec<([i32; 3], VoxelData)> = Vec::new();
+            for off in zone_offsets() {
+                // Mostly solid; sometimes missing or holed (anywhere).
+                match next(8) {
+                    0 => {}
+                    1 => neighbors.push((off, chunk(&mut next, 2))),
+                    k => neighbors.push((off, chunk(&mut next, k % 2))),
+                }
+            }
+            let buried = is_buried(&center, &neighbors);
+            let refs: BTreeMap<[i32; 3], &VoxelData> = neighbors.iter().map(|(o, v)| (*o, v)).collect();
+            let padded = gather_padded_rle(&center, &refs);
+            for pull in [true, false] {
+                let full = mesh_chunk(&padded, &layers, pull);
+                if buried {
+                    assert_eq!(full.quad_count, 0, "round {round} pull={pull}: buried chunk has faces");
+                    assert_eq!(full.connectivity, 0, "round {round}: buried chunk connects");
+                    assert!(full.records.is_none() && full.mesh.is_none(), "round {round}");
+                }
+            }
+            buried_cases += usize::from(buried);
+        }
+        assert!(buried_cases >= 20, "too few buried cases to mean anything: {buried_cases}");
+    }
+
     #[test]
     fn per_frame_budget_scales_with_frame_time_inside_its_clamp() {
         use std::time::Duration;
@@ -438,6 +544,14 @@ pub(crate) mod tests {
             d[zone_index([1, 0, 0])],
             "face zone changed"
         );
+        // The cache (warmed off-thread by the snapshot-voxel task) must agree
+        // with the on-demand hashing, and an edit must drop it.
+        let warm = VoxelData::new(voxels_with(&[[31, 31, 31]])).with_boundary_zones();
+        assert_eq!(warm.cached_boundary_zones(), Some(d));
+        assert_eq!(boundary_zones(&warm), d);
+        let mut edited = warm.clone();
+        edited.edit(|v| v[0] = Voxel::new(game::BlockId(1)));
+        assert_eq!(edited.cached_boundary_zones(), None, "edit re-encodes without the cache");
     }
 
     fn grid_app() -> App {

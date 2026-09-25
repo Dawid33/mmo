@@ -29,7 +29,14 @@ pub const LOD_CACHE_MAX_ENTRIES: usize = 8192;
 /// used to drop them. They are pure worldgen output, so eviction only costs a
 /// regeneration; authoritative entries (running/parked regions) are never
 /// evicted — they are the only copy of edited terrain outside the region.
-pub const PRISTINE_TERRAIN_CACHE_MAX: usize = 64;
+/// A snapshot grows with region AREA, so the entry count shrinks with it and
+/// the memory ceiling (~2.7 GB) stays where it was: 64 entries at the default
+/// `REGION_CHUNKS`, 16 at 64.
+pub const PRISTINE_TERRAIN_CACHE_MAX: usize = {
+    // Never 0 (it was from 512 chunks up: every insert evicted at once).
+    let n = 64 * (32 * 32) / (crate::REGION_CHUNKS * crate::REGION_CHUNKS);
+    if n == 0 { 1 } else { n }
+};
 
 /// Internal event handled by the world manager. (Moved from
 /// crates/server/src/main.rs; ServerTickTimer is gone — regions self-tick.)
@@ -62,18 +69,127 @@ pub trait RegionSpawner {
     fn generates_columns(&self) -> bool {
         false
     }
+
+    /// Whether spawned regions run in cell mode (never parked: their dormant
+    /// store is runner-private until persistence lands).
+    fn cell_mode(&self) -> bool {
+        false
+    }
+}
+
+/// Chance (per mille, per region per round) that [`InlineSchedule::jittery`]
+/// delivers a region's inputs a tick late.
+pub const SCHEDULE_LATE_PER_MILLE: u32 = 300;
+/// Chance (per mille, per region per round) that [`InlineSchedule::jittery`]
+/// makes a region miss its tick.
+pub const SCHEDULE_SKIP_PER_MILLE: u32 = 100;
+
+/// Seeded stand-in for OS thread scheduling, so the inline spawner can replay
+/// the timing real region threads produce — reproducibly, from a seed.
+///
+/// Plain `pump()`/`tick_all()` is one fixed schedule: every region ticks once
+/// per round, and everything a region emitted reaches its neighbours before
+/// their next tick. On real threads (`server::region_threads`) each region
+/// has its own timer. A constant phase offset between two regions is
+/// indistinguishable from lockstep, so what this models is the JITTER:
+///
+/// - tick order is permuted, which permutes the order the manager sees region
+///   outputs in (two regions handing off in the same round);
+/// - a *late* region does not look at its input queue until after its next
+///   tick — a handoff, ghost update or player input that lost the race with
+///   the tick it would have preceded in lockstep;
+/// - a *skipped* region misses a round entirely, the way
+///   `region_thread_loop` drops an overrun deadline instead of replaying it,
+///   so its tick count drifts against its neighbours for good.
+#[derive(Debug, Clone)]
+pub struct InlineSchedule {
+    rng: u64,
+    /// Chance, per region per round, that its inputs arrive a tick late.
+    pub late_per_mille: u32,
+    /// Chance, per region per round, that it misses its tick.
+    pub skip_per_mille: u32,
+}
+
+impl InlineSchedule {
+    /// Permuted tick order only — every region still ticks once per round and
+    /// nothing arrives late.
+    pub fn shuffled(seed: u64) -> Self {
+        Self { rng: seed, late_per_mille: 0, skip_per_mille: 0 }
+    }
+
+    /// Permuted order plus late inputs; tick counts stay in lockstep (for
+    /// harnesses that align client and server by tick).
+    pub fn late(seed: u64) -> Self {
+        Self { late_per_mille: SCHEDULE_LATE_PER_MILLE, ..Self::shuffled(seed) }
+    }
+
+    /// Everything: permuted order, late inputs and missed ticks.
+    pub fn jittery(seed: u64) -> Self {
+        Self { skip_per_mille: SCHEDULE_SKIP_PER_MILLE, ..Self::late(seed) }
+    }
+
+    /// splitmix64 — the schedule must not depend on a platform RNG.
+    fn next(&mut self) -> u64 {
+        self.rng = self.rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.rng;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn roll(&mut self, per_mille: u32) -> bool {
+        per_mille > 0 && self.next() % 1000 < u64::from(per_mille)
+    }
+
+    fn shuffle(&mut self, ids: &mut [RegionCoords]) {
+        for i in (1..ids.len()).rev() {
+            let j = (self.next() % (i as u64 + 1)) as usize;
+            ids.swap(i, j);
+        }
+    }
 }
 
 /// Runs regions inline in the caller's thread: the wasm LocalServer and the
-/// headless tests. `pump()`/`tick_all()` stand in for thread scheduling.
+/// headless tests. `pump()`/`tick_all()` stand in for thread scheduling —
+/// in lockstep by default, or jittered by an [`InlineSchedule`].
 #[derive(Default)]
 pub struct InlineSpawner {
     runners: BTreeMap<RegionCoords, (Receiver<RegionInput>, RegionRunner)>,
+    schedule: Option<InlineSchedule>,
+    /// Regions whose input queue stays untouched until after their next tick
+    /// (see [`InlineSchedule`]). Always empty without a schedule.
+    late: BTreeSet<RegionCoords>,
+    /// Non-zero: spawn cell-mode runners with this cell size.
+    cell_chunks: usize,
+    /// Lazy cell mode: per-cell generation (the manager then never builds a
+    /// whole region for this spawner).
+    cell_generator: Option<crate::CellGeneratorFactory>,
 }
 
 impl InlineSpawner {
+    pub fn with_cells(cell_chunks: usize) -> Self {
+        Self { cell_chunks, ..Self::default() }
+    }
+
+    /// Cell mode with lazy per-cell generation.
+    pub fn with_cell_generator(cell_chunks: usize, factory: crate::CellGeneratorFactory) -> Self {
+        Self { cell_chunks, cell_generator: Some(factory), ..Self::default() }
+    }
+
+    pub fn with_schedule(schedule: InlineSchedule) -> Self {
+        Self { schedule: Some(schedule), ..Self::default() }
+    }
+
+    /// Swap the schedule on a live spawner (`None` = back to lockstep), for
+    /// harnesses that construct their server before choosing one.
+    pub fn set_schedule(&mut self, schedule: Option<InlineSchedule>) {
+        self.schedule = schedule;
+        self.late.clear();
+    }
+
     pub fn pump(&mut self) {
-        let ids: Vec<RegionCoords> = self.runners.keys().copied().collect();
+        let ids: Vec<RegionCoords> =
+            self.runners.keys().copied().filter(|id| !self.late.contains(id)).collect();
         for id in ids {
             let mut stopped = false;
             if let Some((recv, runner)) = self.runners.get_mut(&id) {
@@ -91,8 +207,26 @@ impl InlineSpawner {
     }
 
     pub fn tick_all(&mut self) {
-        for (_, (_, runner)) in self.runners.iter_mut() {
-            runner.tick();
+        let Some(schedule) = self.schedule.as_mut() else {
+            for (_, (_, runner)) in self.runners.iter_mut() {
+                runner.tick();
+            }
+            return;
+        };
+        let mut ids: Vec<RegionCoords> = self.runners.keys().copied().collect();
+        schedule.shuffle(&mut ids);
+        // Last round's late regions tick here without having seen their
+        // inputs, then catch up at the next `pump()`.
+        self.late.clear();
+        for id in ids {
+            if !schedule.roll(schedule.skip_per_mille) {
+                if let Some((_, runner)) = self.runners.get_mut(&id) {
+                    runner.tick();
+                }
+            }
+            if schedule.roll(schedule.late_per_mille) {
+                self.late.insert(id);
+            }
         }
     }
 
@@ -123,9 +257,25 @@ impl RegionSpawner for InlineSpawner {
         out: Sender<(RegionCoords, RegionOutput)>,
     ) -> Sender<RegionInput> {
         let (send, recv) = unbounded();
-        let runner = RegionRunner::new(id, seed.into_region(id), out);
+        let runner = seed.into_runner(
+            id,
+            out,
+            &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"),
+            self.cell_chunks,
+            self.cell_generator.as_ref(),
+        );
         self.runners.insert(id, (recv, runner));
         send
+    }
+
+    fn cell_mode(&self) -> bool {
+        self.cell_chunks != 0
+    }
+
+    /// A lazy cell spawner builds its own cells, so the manager must hand it
+    /// deferred seeds rather than generating whole regions.
+    fn generates_columns(&self) -> bool {
+        self.cell_generator.is_some()
     }
 }
 
@@ -478,6 +628,9 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Grace-period unloads: a region with no subscribers and no connected
     /// client's player entity parks after UNLOAD_GRACE_MS.
     pub fn maintain(&mut self, now_ms: u64) {
+        if self.spawner.cell_mode() {
+            return;
+        }
         let connected_homes: BTreeSet<RegionCoords> = self
             .sessions
             .keys()
@@ -728,12 +881,14 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Kick off a build for `key`. Region keys: authoritative terrain if the
-    /// region has state (running-and-seeded or parked-with-cache), request
-    /// terrain if running-but-unseeded, generate otherwise. `client` is the
-    /// requester used for terrain round-trips.
+    /// Kick off a build for `key`. Sub-block factors: authoritative terrain if
+    /// the region has state (running-and-seeded or parked-with-cache), request
+    /// terrain if running-but-unseeded, generate otherwise. Block-scale and
+    /// coarser factors coarse-sample instead (`start_tile_build`). `client` is
+    /// the requester used for terrain round-trips.
     fn start_lod_build(&mut self, key: LodKey, client: ClientId) {
-        if key.region_span() == 1 {
+        if key.factor < crate::lod::COARSE_MIN_FACTOR {
+            debug_assert_eq!(key.region_span(), 1, "sub-block factors key per region");
             let rc = key.origin_region();
             let running = self.regions.get(&rc).map_or(false, |l| !l.stopping);
             if let Some(snap) = self.terrain_cache.get(&rc) {
@@ -772,7 +927,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
     }
 
-    /// Tile keys (64/256): coarse base + one overlay per region with
+    /// Coarse keys (`COARSE_MIN_FACTOR` and up, region- or tile-keyed): coarse
+    /// base + one overlay per region with
     /// authoritative state. Regions running-but-unseeded are requested and
     /// the build deferred until every such reply has landed; pristine and
     /// parked-with-cache regions need nothing. Pristine regions are NOT

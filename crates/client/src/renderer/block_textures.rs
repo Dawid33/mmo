@@ -18,6 +18,23 @@ use image::{Rgba, RgbaImage};
 #[derive(Resource, Default, Clone)]
 pub struct BlockTextureLayers(pub BTreeMap<BlockId, [u32; 3]>);
 
+impl BlockTextureLayers {
+    /// Lookup table from a side-face layer to the top-face layer of its block,
+    /// identity for every other layer. The pull shader fades distant side faces
+    /// — terrace risers too thin to resolve — toward their block's top, so a
+    /// grass slope far away reads as grass, not as moiré bands of dirt sides.
+    /// A side texture shared by blocks with different tops maps to the last
+    /// such block in id order; harmless for a sub-pixel fade.
+    pub fn side_to_top(&self) -> Vec<u32> {
+        let len = self.0.values().flatten().max().map_or(1, |&max| max as usize + 1);
+        let mut lut: Vec<u32> = (0..len as u32).collect();
+        for &[top, side, _] in self.0.values() {
+            lut[side as usize] = top;
+        }
+        lut
+    }
+}
+
 /// A high-contrast magenta/black checkerboard, sized to match the block
 /// textures so the array texture stays uniform. Reserved as layer 0.
 pub fn missing_texture_image(size: u32) -> RgbaImage {
@@ -107,6 +124,67 @@ pub fn build_layers<F: FnMut(&str) -> Option<RgbaImage>>(
     (layers, BlockTextureLayers(map))
 }
 
+/// Full mip chain for one block texture layer, level 0 (the image itself)
+/// down to 1x1. Distant terrain minifies a block texture far below one texel
+/// per pixel; without mips the nearest sampler picks one arbitrary texel per
+/// pixel and far ground shimmers as noise, with them it settles on the
+/// block's average colour — which is what the real chunk looks like from
+/// there. Box-filtered in LINEAR light (the array is sRGB; averaging encoded
+/// values darkens) and alpha-weighted, so a transparent texel's hidden colour
+/// never bleeds into its neighbours.
+pub fn mip_chain(base: &RgbaImage) -> Vec<RgbaImage> {
+    let mut levels = vec![base.clone()];
+    loop {
+        let prev = levels.last().expect("chain starts non-empty");
+        let (pw, ph) = prev.dimensions();
+        if pw <= 1 && ph <= 1 {
+            break;
+        }
+        let (w, h) = ((pw / 2).max(1), (ph / 2).max(1));
+        let next = RgbaImage::from_fn(w, h, |x, y| {
+            let (mut rgb, mut alpha, mut n) = ([0.0f32; 3], 0.0f32, 0.0f32);
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let p = prev.get_pixel((2 * x + dx).min(pw - 1), (2 * y + dy).min(ph - 1));
+                    let a = p[3] as f32 / 255.0;
+                    for c in 0..3 {
+                        rgb[c] += srgb_to_linear(p[c]) * a;
+                    }
+                    alpha += a;
+                    n += 1.0;
+                }
+            }
+            let mut out = [0u8; 4];
+            for c in 0..3 {
+                out[c] = linear_to_srgb(if alpha > 0.0 { rgb[c] / alpha } else { 0.0 });
+            }
+            out[3] = (alpha / n * 255.0).round() as u8;
+            Rgba(out)
+        });
+        levels.push(next);
+    }
+    levels
+}
+
+fn srgb_to_linear(v: u8) -> f32 {
+    let c = v as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let v = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (v * 255.0).round() as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +246,18 @@ mod tests {
     }
 
     #[test]
+    fn side_to_top_maps_side_layers_to_their_block_top() {
+        let reg = registry();
+        let (layers, map) = build_layers(&reg, loader);
+        let lut = map.side_to_top();
+        assert_eq!(lut.len(), layers.len(), "one entry per array layer");
+        let grass = map.0[&BlockId(2)];
+        assert_eq!(lut[grass[1] as usize], grass[0], "grass side -> grass top");
+        assert_eq!(lut[grass[0] as usize], grass[0], "a top maps to itself");
+        assert_eq!(lut[0], 0, "missing-texture layer is identity");
+    }
+
+    #[test]
     fn missing_texture_resolves_to_layer_zero() {
         let reg = BlockRegistry::from_ron(
             r#"(blocks:[(id:0,name:"air",textures:Untextured),(id:1,name:"ghost",textures:All("nope.png"))])"#,
@@ -211,5 +301,38 @@ mod tests {
         let (layers, map) = build_layers(&reg, loader);
         assert_eq!(layers.len(), 1, "just the checkerboard");
         assert!(map.0.is_empty());
+    }
+
+    #[test]
+    fn mip_chain_halves_down_to_one_texel() {
+        let chain = mip_chain(&solid(16, [100, 60, 20, 255]));
+        let sizes: Vec<u32> = chain.iter().map(|l| l.width()).collect();
+        assert_eq!(sizes, [16, 8, 4, 2, 1]);
+        // A flat colour survives every level exactly.
+        for level in &chain {
+            assert!(level.pixels().all(|p| p.0 == [100, 60, 20, 255]));
+        }
+    }
+
+    #[test]
+    fn mip_chain_averages_in_linear_light() {
+        // Black/white checker: the encoded-value mean would be 128; the
+        // linear-light mean of 0.0 and 1.0 is 0.5 -> sRGB 188.
+        let checker = RgbaImage::from_fn(2, 2, |x, y| {
+            let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+            Rgba([v, v, v, 255])
+        });
+        let chain = mip_chain(&checker);
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[1].get_pixel(0, 0).0, [188, 188, 188, 255]);
+    }
+
+    #[test]
+    fn mip_chain_ignores_the_colour_of_transparent_texels() {
+        let cutout = RgbaImage::from_fn(2, 2, |x, _| {
+            if x == 0 { Rgba([0, 200, 0, 255]) } else { Rgba([255, 0, 255, 0]) }
+        });
+        let top = mip_chain(&cutout)[1].get_pixel(0, 0).0;
+        assert_eq!(top, [0, 200, 0, 128], "hidden magenta must not bleed in");
     }
 }

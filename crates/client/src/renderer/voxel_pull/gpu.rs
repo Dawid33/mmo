@@ -3,17 +3,16 @@ use std::sync::{
     Arc,
 };
 
-use bevy::ecs::system::lifetimeless::Read;
 use bevy::{
     camera::primitives::Frustum,
-    core_pipeline::{core_3d::graph::Node3d, experimental::mip_generation::ViewDepthPyramid},
-    pbr::{graph::NodePbr, ViewLightEntities},
+    core_pipeline::mip_generation::experimental::depth::ViewDepthPyramid,
+    ecs::schedule::Schedule,
+    pbr::ViewLightEntities,
     prelude::*,
     render::{
         batching::gpu_preprocessing::GpuPreprocessingSupport,
-        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{binding_types as bt, *},
-        renderer::{RenderAdapterInfo, RenderContext, RenderDevice, RenderQueue},
+        renderer::{RenderAdapterInfo, RenderContext, RenderDevice, RenderQueue, ViewQuery},
         settings::WgpuFeatures,
         view::ExtractedView,
     },
@@ -67,7 +66,10 @@ pub struct NearRendererMetrics {
     /// until a matching asynchronous sample is observed.
     pub visibility_source: Option<ForwardCullSource>,
     pub active_chunks: u32,
-    pub frustum_visible_chunks: u32,
+    /// CPU frustum survivors summed over views. `None` in GPU-driven mode
+    /// unless `VOXEL_PULL_DEBUG` is set: the GPU culls there, and the CPU
+    /// count would cost a frustum test per chunk per view every frame.
+    pub frustum_visible_chunks: Option<u32>,
     /// Exact main-forward HZB survivor count. `None` when HZB was not the
     /// forward cull source or benchmark-only asynchronous readback is disabled.
     pub hzb_visible_chunks: Option<u32>,
@@ -193,13 +195,16 @@ pub fn prepare_active_near_mode(
     }
 }
 
-/// WebGPU's non-indexed indirect draw ABI.
+/// WebGPU's indexed indirect draw ABI. Every command indexes the shared quad
+/// index buffer (`QuadIndexBuffer`) from 0; `base_vertex` = `record_start * 4`
+/// picks the chunk's records (4 pulled vertices per quad).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct DrawIndirectArgs {
-    pub vertex_count: u32,
+pub struct DrawIndexedIndirectArgs {
+    pub index_count: u32,
     pub instance_count: u32,
-    pub first_vertex: u32,
+    pub first_index: u32,
+    pub base_vertex: i32,
     pub first_instance: u32,
 }
 
@@ -208,7 +213,25 @@ pub struct DrawIndirectArgs {
 struct GpuNearCullView {
     clip_from_world: [f32; 16],
     viewport_and_capacity: [u32; 4],
+    /// Eye position; w = 1 lets the cull drop back-facing face ranges
+    /// (perspective views), w = 0 keeps every face (orthographic shadow
+    /// cascades, whose casters must not depend on the camera).
+    camera: [f32; 4],
 }
+
+/// `VOXEL_FACE_CULL=off|0|false` keeps every face range (A/B runs, or a
+/// quick fallback if face culling ever leaves holes). On by default. Read once.
+fn face_culling_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let value = std::env::var("VOXEL_FACE_CULL").unwrap_or_default();
+        !matches!(value.to_ascii_lowercase().as_str(), "off" | "0" | "false")
+    })
+}
+
+/// Command slots per chunk slot: one indexed draw per face direction
+/// (`records::face_ends`), so ranges facing away from the camera are skipped.
+pub const FACES_PER_SLOT: u32 = 6;
 
 fn resolve_clip_from_world(
     explicit: Option<Mat4>,
@@ -233,6 +256,13 @@ impl GpuNearCullView {
                 chunk_capacity,
                 hzb_mip_count,
             ],
+            camera: {
+                let eye = view.world_from_view.translation();
+                // Perspective projections have w_axis.w == 0.
+                let perspective = view.clip_from_view.w_axis.w == 0.0;
+                let cull = perspective && face_culling_enabled();
+                [eye.x, eye.y, eye.z, if cull { 1.0 } else { 0.0 }]
+            },
         }
     }
 }
@@ -365,7 +395,9 @@ fn create_view_buffers(
     sizes: GpuNearBufferSizes,
 ) -> GpuNearViewBuffers {
     let command_bytes =
-        u64::from(sizes.capacity.max(1)) * std::mem::size_of::<DrawIndirectArgs>() as u64;
+        u64::from(sizes.capacity.max(1))
+            * u64::from(FACES_PER_SLOT)
+            * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
     let indirect = device.create_buffer(&BufferDescriptor {
         label: Some("voxel_pull_indirect_commands"),
         size: command_bytes,
@@ -374,7 +406,9 @@ fn create_view_buffers(
     });
     let count = device.create_buffer(&BufferDescriptor {
         label: Some("voxel_pull_indirect_count"),
-        size: std::mem::size_of::<[u32; 2]>() as u64,
+        // [commands, visible_quads, visible_chunks, pad]; the indirect-count
+        // draw reads the command count at offset 0.
+        size: std::mem::size_of::<[u32; 4]>() as u64,
         usage: BufferUsages::STORAGE
             | BufferUsages::INDIRECT
             | BufferUsages::COPY_DST
@@ -496,38 +530,48 @@ pub fn prepare_gpu_near_view_buffers(
     }
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub enum NearGpuNode {
-    FrustumCull,
-    ClearLatePhases,
-    HzbCull,
-    TelemetryCopy,
-}
+/// Installs the ordering contract for the shared near-terrain indirect buffers
+/// as `Core3d` systems (Bevy 0.19 replaced the render graph with per-camera
+/// schedules). Frustum results feed only the early depth/shadow consumers.
+/// Both consumers must finish before the buffers are cleared; both late
+/// consumers must observe that clear. HZB then repopulates only the main-view
+/// buffer for the forward pass. Benchmark readback, when enabled, copies the
+/// final count before the main pass consumes it.
+pub fn add_near_gpu_systems(schedule: &mut Schedule, telemetry_enabled: bool) {
+    use bevy::core_pipeline::{
+        mip_generation::experimental::depth::early_downsample_depth,
+        prepass::node::{early_prepass, late_prepass},
+        Core3dSystems,
+    };
+    use bevy::pbr::{per_view_shadow_pass, shared_shadow_pass, EARLY_SHADOW_PASS, LATE_SHADOW_PASS};
 
-/// Installs the ordering contract for the shared near-terrain indirect buffers.
-/// Frustum results feed only the early depth/shadow consumers. Both consumers
-/// must finish before the buffers are cleared; both late consumers must observe
-/// that clear. HZB then repopulates only the main-view buffer for the forward
-/// pass. Benchmark readback, when enabled, copies the final count before the
-/// main pass consumes it.
-pub fn add_near_gpu_graph_edges(graph: &mut RenderGraph, telemetry_enabled: bool) {
-    graph.add_node_edge(NearGpuNode::FrustumCull, Node3d::EarlyPrepass);
-    graph.add_node_edge(NearGpuNode::FrustumCull, NodePbr::EarlyShadowPass);
-    graph.add_node_edge(Node3d::EarlyDownsampleDepth, NearGpuNode::ClearLatePhases);
-    graph.add_node_edge(NodePbr::EarlyShadowPass, NearGpuNode::ClearLatePhases);
-    graph.add_node_edge(NearGpuNode::ClearLatePhases, Node3d::LatePrepass);
-    graph.add_node_edge(NearGpuNode::ClearLatePhases, NodePbr::LateShadowPass);
-    graph.add_node_edge(Node3d::LatePrepass, NearGpuNode::HzbCull);
+    schedule.add_systems((
+        near_frustum_cull
+            .before(early_prepass)
+            .before(per_view_shadow_pass::<EARLY_SHADOW_PASS>)
+            .before(shared_shadow_pass::<EARLY_SHADOW_PASS>),
+        near_clear_late_phases
+            .after(early_downsample_depth)
+            .after(per_view_shadow_pass::<EARLY_SHADOW_PASS>)
+            .after(shared_shadow_pass::<EARLY_SHADOW_PASS>)
+            .before(late_prepass)
+            .before(per_view_shadow_pass::<LATE_SHADOW_PASS>)
+            .before(shared_shadow_pass::<LATE_SHADOW_PASS>),
+        near_hzb_cull
+            .after(late_prepass)
+            .before(Core3dSystems::MainPass),
+    ));
     if telemetry_enabled {
-        graph.add_node_edge(NearGpuNode::HzbCull, NearGpuNode::TelemetryCopy);
-        graph.add_node_edge(NearGpuNode::TelemetryCopy, Node3d::StartMainPass);
-    } else {
-        graph.add_node_edge(NearGpuNode::HzbCull, Node3d::StartMainPass);
+        schedule.add_systems(
+            near_telemetry_copy
+                .after(near_hzb_cull)
+                .before(Core3dSystems::MainPass),
+        );
     }
 }
 
 fn dispatch_cull(
-    render_context: &mut RenderContext<'_>,
+    render_context: &mut RenderContext<'_, '_>,
     pipeline_cache: &PipelineCache,
     pipeline_id: CachedComputePipelineId,
     buffers: &GpuNearViewBuffers,
@@ -551,140 +595,103 @@ fn dispatch_cull(
     pass.dispatch_workgroups(buffers.slot_count.div_ceil(64), 1, 1);
 }
 
-pub struct NearFrustumCullNode {
-    view_query: QueryState<(Read<GpuNearViewBuffers>, Option<Read<ViewLightEntities>>)>,
-    light_view_query: QueryState<Read<GpuNearViewBuffers>>,
-}
-
-impl FromWorld for NearFrustumCullNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            view_query: QueryState::new(world),
-            light_view_query: QueryState::new(world),
-        }
+pub fn near_frustum_cull(
+    world: &World,
+    view: ViewQuery<()>,
+    views: Query<(&GpuNearViewBuffers, Option<&ViewLightEntities>)>,
+    light_view_buffers: Query<&GpuNearViewBuffers>,
+    mut render_context: RenderContext,
+) {
+    if !matches!(
+        *world.resource::<ActiveNearMode>(),
+        ActiveNearMode::GpuDriven { .. }
+    ) {
+        return;
     }
-}
-
-impl Node for NearFrustumCullNode {
-    fn update(&mut self, world: &mut World) {
-        self.view_query.update_archetypes(world);
-        self.light_view_query.update_archetypes(world);
-    }
-
-    fn run<'w>(
-        &self,
-        graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        if !matches!(
-            *world.resource::<ActiveNearMode>(),
-            ActiveNearMode::GpuDriven { .. }
-        ) {
-            return Ok(());
+    let pipeline = world.resource::<GpuNearCullPipeline>();
+    let cache = world.resource::<PipelineCache>();
+    let indirect_count = matches!(
+        *world.resource::<ActiveNearMode>(),
+        ActiveNearMode::GpuDriven {
+            indirect_count: true
         }
-        let pipeline = world.resource::<GpuNearCullPipeline>();
-        let cache = world.resource::<PipelineCache>();
-        let indirect_count = matches!(
-            *world.resource::<ActiveNearMode>(),
-            ActiveNearMode::GpuDriven {
-                indirect_count: true
-            }
-        );
-        let pipeline_id = if indirect_count {
-            pipeline.frustum_count_pipeline
-        } else {
-            pipeline.frustum_fixed_pipeline
-        };
-        let Ok((buffers, light_views)) = self.view_query.get_manual(world, graph.view_entity())
-        else {
-            return Ok(());
-        };
-        dispatch_cull(
-            render_context,
-            cache,
-            pipeline_id,
-            buffers,
-            &buffers.frustum_bind_group,
-            "voxel_pull_frustum_cull",
-        );
-        if let Some(light_views) = light_views {
-            for light_view in light_views.lights.iter().copied() {
-                if let Ok(buffers) = self.light_view_query.get_manual(world, light_view) {
-                    dispatch_cull(
-                        render_context,
-                        cache,
-                        pipeline_id,
-                        buffers,
-                        &buffers.frustum_bind_group,
-                        "voxel_pull_shadow_frustum_cull",
-                    );
-                }
+    );
+    let pipeline_id = if indirect_count {
+        pipeline.frustum_count_pipeline
+    } else {
+        pipeline.frustum_fixed_pipeline
+    };
+    let Ok((buffers, light_views)) = views.get(view.entity())
+    else {
+        return;
+    };
+    dispatch_cull(
+        &mut render_context,
+        cache,
+        pipeline_id,
+        buffers,
+        &buffers.frustum_bind_group,
+        "voxel_pull_frustum_cull",
+    );
+    if let Some(light_views) = light_views {
+        for light_view in light_views.lights.iter().copied() {
+            if let Ok(buffers) = light_view_buffers.get(light_view) {
+                dispatch_cull(
+                    &mut render_context,
+                    cache,
+                    pipeline_id,
+                    buffers,
+                    &buffers.frustum_bind_group,
+                    "voxel_pull_shadow_frustum_cull",
+                );
             }
         }
-        Ok(())
     }
 }
 
-fn clear_cull_arguments(render_context: &mut RenderContext<'_>, buffers: &GpuNearViewBuffers) {
+/// Indirect-count draws read their draw count from `count`, so zeroing it
+/// alone empties the late passes. Only fixed-slot mode (the count is ignored,
+/// every command slot is drawn) must zero the commands themselves — a buffer
+/// of `capacity * FACES_PER_SLOT` commands per view, ~8 MB each at `full`
+/// (~39 MB a frame over five views).
+fn clear_cull_arguments(
+    render_context: &mut RenderContext<'_, '_>,
+    buffers: &GpuNearViewBuffers,
+    indirect_count: bool,
+) {
     let encoder = render_context.command_encoder();
-    encoder.clear_buffer(&buffers.indirect, 0, None);
+    if !indirect_count {
+        encoder.clear_buffer(&buffers.indirect, 0, None);
+    }
     encoder.clear_buffer(&buffers.count, 0, None);
 }
 
 /// Clears the shared phase item's arguments after both early consumers. Bevy
 /// executes the same binned prepass/shadow phase again in its late passes, so
 /// leaving the frustum commands resident would draw every near chunk twice.
-pub struct NearLatePhaseClearNode {
-    view_query: QueryState<(Read<GpuNearViewBuffers>, Option<Read<ViewLightEntities>>)>,
-    light_view_query: QueryState<Read<GpuNearViewBuffers>>,
-}
-
-impl FromWorld for NearLatePhaseClearNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            view_query: QueryState::new(world),
-            light_view_query: QueryState::new(world),
-        }
-    }
-}
-
-impl Node for NearLatePhaseClearNode {
-    fn update(&mut self, world: &mut World) {
-        self.view_query.update_archetypes(world);
-        self.light_view_query.update_archetypes(world);
-    }
-
-    fn run<'w>(
-        &self,
-        graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        if !matches!(
-            *world.resource::<ActiveNearMode>(),
-            ActiveNearMode::GpuDriven { .. }
-        ) {
-            return Ok(());
-        }
-        let Ok((buffers, light_views)) = self.view_query.get_manual(world, graph.view_entity())
-        else {
-            return Ok(());
-        };
-        clear_cull_arguments(render_context, buffers);
-        if let Some(light_views) = light_views {
-            for light_view in light_views.lights.iter().copied() {
-                if let Ok(buffers) = self.light_view_query.get_manual(world, light_view) {
-                    clear_cull_arguments(render_context, buffers);
-                }
+pub fn near_clear_late_phases(
+    world: &World,
+    view: ViewQuery<()>,
+    views: Query<(&GpuNearViewBuffers, Option<&ViewLightEntities>)>,
+    light_view_buffers: Query<&GpuNearViewBuffers>,
+    mut render_context: RenderContext,
+) {
+    let ActiveNearMode::GpuDriven { indirect_count } = *world.resource::<ActiveNearMode>()
+    else {
+        return;
+    };
+    let Ok((buffers, light_views)) = views.get(view.entity())
+    else {
+        return;
+    };
+    clear_cull_arguments(&mut render_context, buffers, indirect_count);
+    if let Some(light_views) = light_views {
+        for light_view in light_views.lights.iter().copied() {
+            if let Ok(buffers) = light_view_buffers.get(light_view) {
+                clear_cull_arguments(&mut render_context, buffers, indirect_count);
             }
         }
-        Ok(())
     }
-}
-
-pub struct NearHzbCullNode {
-    view_query: QueryState<Read<GpuNearViewBuffers>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -702,14 +709,15 @@ pub const fn forward_cull_source(hzb_available: bool) -> ForwardCullSource {
 }
 
 const NEAR_TELEMETRY_RING_SIZE: usize = 6;
-const NEAR_TELEMETRY_STAGING_BYTES: u64 = 8;
-const NEAR_TELEMETRY_COUNT_BYTES: u64 = std::mem::size_of::<[u32; 2]>() as u64;
+const NEAR_TELEMETRY_STAGING_BYTES: u64 = 16;
+const NEAR_TELEMETRY_COUNT_BYTES: u64 = std::mem::size_of::<[u32; 4]>() as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NearTelemetrySample {
     sequence: u64,
     mode: ActiveNearMode,
     mode_generation: u64,
+    commands: u32,
     visible_chunks: u32,
     visible_quads: u32,
     source: ForwardCullSource,
@@ -732,12 +740,13 @@ const fn near_telemetry_values(sample: NearTelemetrySample) -> NearTelemetryValu
             ForwardCullSource::Frustum => None,
         },
         indirect_draw_count: if sample.indirect_count {
-            sample.visible_chunks
+            sample.commands
         } else {
-            sample.slot_count
+            sample.slot_count.saturating_mul(FACES_PER_SLOT)
         },
         submitted_quads: sample.visible_quads as u64,
-        submitted_vertices: (sample.visible_quads as u64).saturating_mul(6),
+        // Indexed: four shaded vertices per quad.
+        submitted_vertices: (sample.visible_quads as u64).saturating_mul(4),
     }
 }
 
@@ -939,163 +948,122 @@ pub fn drain_near_telemetry_results(
     apply_near_telemetry_sample(*mode, sample, &mut metrics);
 }
 
-impl FromWorld for NearHzbCullNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            view_query: QueryState::new(world),
-        }
+pub fn near_hzb_cull(
+    world: &World,
+    view: ViewQuery<()>,
+    views: Query<&GpuNearViewBuffers>,
+    mut render_context: RenderContext,
+) {
+    if !matches!(
+        *world.resource::<ActiveNearMode>(),
+        ActiveNearMode::GpuDriven { .. }
+    ) {
+        return;
     }
+    let Ok(buffers) = views.get(view.entity()) else {
+        return;
+    };
+    let pipeline = world.resource::<GpuNearCullPipeline>();
+    let indirect_count = matches!(
+        *world.resource::<ActiveNearMode>(),
+        ActiveNearMode::GpuDriven {
+            indirect_count: true
+        }
+    );
+    let (pipeline_id, bind_group, label) =
+        match forward_cull_source(buffers.hzb_bind_group.is_some()) {
+            ForwardCullSource::Hzb => (
+                if indirect_count {
+                    pipeline.hzb_count_pipeline
+                } else {
+                    pipeline.hzb_fixed_pipeline
+                },
+                buffers
+                    .hzb_bind_group
+                    .as_ref()
+                    .expect("HZB source requires an HZB bind group"),
+                "voxel_pull_hzb_cull",
+            ),
+            ForwardCullSource::Frustum => (
+                if indirect_count {
+                    pipeline.frustum_count_pipeline
+                } else {
+                    pipeline.frustum_fixed_pipeline
+                },
+                &buffers.frustum_bind_group,
+                "voxel_pull_forward_frustum_cull",
+            ),
+        };
+    dispatch_cull(
+        &mut render_context,
+        world.resource::<PipelineCache>(),
+        pipeline_id,
+        buffers,
+        bind_group,
+        label,
+    );
 }
 
-impl Node for NearHzbCullNode {
-    fn update(&mut self, world: &mut World) {
-        self.view_query.update_archetypes(world);
-    }
+pub fn near_telemetry_copy(
+    world: &World,
+    view: ViewQuery<()>,
+    views: Query<&GpuNearViewBuffers>,
+    mut render_context: RenderContext,
+) {
+    let Some(telemetry) = world.get_resource::<NearTelemetryReadback>() else {
+        return;
+    };
+    let ActiveNearMode::GpuDriven { indirect_count } = *world.resource::<ActiveNearMode>()
+    else {
+        return;
+    };
+    let Ok(buffers) = views.get(view.entity()) else {
+        return;
+    };
+    let Some(reservation) = telemetry.arbiter.try_reserve() else {
+        return;
+    };
 
-    fn run<'w>(
-        &self,
-        graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        if !matches!(
-            *world.resource::<ActiveNearMode>(),
-            ActiveNearMode::GpuDriven { .. }
-        ) {
-            return Ok(());
-        }
-        let Ok(buffers) = self.view_query.get_manual(world, graph.view_entity()) else {
-            return Ok(());
-        };
-        let pipeline = world.resource::<GpuNearCullPipeline>();
-        let indirect_count = matches!(
-            *world.resource::<ActiveNearMode>(),
-            ActiveNearMode::GpuDriven {
-                indirect_count: true
+    let source = forward_cull_source(buffers.hzb_bind_group.is_some());
+    let metrics = world.resource::<NearRendererMetrics>();
+    let mode_generation = metrics.mode_generation;
+    let slot_count = buffers.slot_count;
+    let sequence = reservation.sequence;
+    let staging = telemetry.slots[reservation.slot_index].staging.clone();
+    let callback_staging = staging.clone();
+    let sender = telemetry.sender.clone();
+    let encoder = render_context.command_encoder();
+    encoder.copy_buffer_to_buffer(&buffers.count, 0, &staging, 0, NEAR_TELEMETRY_COUNT_BYTES);
+    encoder.map_buffer_on_submit(
+        &staging,
+        MapMode::Read,
+        0..NEAR_TELEMETRY_STAGING_BYTES,
+        move |result| {
+            if result.is_ok() {
+                let mapped = callback_staging
+                    .slice(0..NEAR_TELEMETRY_STAGING_BYTES)
+                    .get_mapped_range();
+                let counts: Vec<u32> = mapped[..NEAR_TELEMETRY_COUNT_BYTES as usize]
+                    .chunks_exact(4)
+                    .map(|word| u32::from_le_bytes(word.try_into().expect("four bytes")))
+                    .collect();
+                drop(mapped);
+                callback_staging.unmap();
+                let _ = sender.send(NearTelemetrySample {
+                    sequence,
+                    mode: ActiveNearMode::GpuDriven { indirect_count },
+                    mode_generation,
+                    commands: counts[0],
+                    visible_quads: counts[1],
+                    visible_chunks: counts[2],
+                    source,
+                    indirect_count,
+                    slot_count,
+                });
             }
-        );
-        let (pipeline_id, bind_group, label) =
-            match forward_cull_source(buffers.hzb_bind_group.is_some()) {
-                ForwardCullSource::Hzb => (
-                    if indirect_count {
-                        pipeline.hzb_count_pipeline
-                    } else {
-                        pipeline.hzb_fixed_pipeline
-                    },
-                    buffers
-                        .hzb_bind_group
-                        .as_ref()
-                        .expect("HZB source requires an HZB bind group"),
-                    "voxel_pull_hzb_cull",
-                ),
-                ForwardCullSource::Frustum => (
-                    if indirect_count {
-                        pipeline.frustum_count_pipeline
-                    } else {
-                        pipeline.frustum_fixed_pipeline
-                    },
-                    &buffers.frustum_bind_group,
-                    "voxel_pull_forward_frustum_cull",
-                ),
-            };
-        dispatch_cull(
-            render_context,
-            world.resource::<PipelineCache>(),
-            pipeline_id,
-            buffers,
-            bind_group,
-            label,
-        );
-        Ok(())
-    }
-}
-
-pub struct NearTelemetryCopyNode {
-    view_query: QueryState<Read<GpuNearViewBuffers>>,
-}
-
-impl FromWorld for NearTelemetryCopyNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            view_query: QueryState::new(world),
-        }
-    }
-}
-
-impl Node for NearTelemetryCopyNode {
-    fn update(&mut self, world: &mut World) {
-        self.view_query.update_archetypes(world);
-    }
-
-    fn run<'w>(
-        &self,
-        graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        let Some(telemetry) = world.get_resource::<NearTelemetryReadback>() else {
-            return Ok(());
-        };
-        let ActiveNearMode::GpuDriven { indirect_count } = *world.resource::<ActiveNearMode>()
-        else {
-            return Ok(());
-        };
-        let Ok(buffers) = self.view_query.get_manual(world, graph.view_entity()) else {
-            return Ok(());
-        };
-        let Some(reservation) = telemetry.arbiter.try_reserve() else {
-            return Ok(());
-        };
-
-        let source = forward_cull_source(buffers.hzb_bind_group.is_some());
-        let metrics = world.resource::<NearRendererMetrics>();
-        let mode_generation = metrics.mode_generation;
-        let slot_count = buffers.slot_count;
-        let sequence = reservation.sequence;
-        let staging = telemetry.slots[reservation.slot_index].staging.clone();
-        let callback_staging = staging.clone();
-        let sender = telemetry.sender.clone();
-        let encoder = render_context.command_encoder();
-        encoder.copy_buffer_to_buffer(&buffers.count, 0, &staging, 0, NEAR_TELEMETRY_COUNT_BYTES);
-        encoder.map_buffer_on_submit(
-            &staging,
-            MapMode::Read,
-            0..NEAR_TELEMETRY_STAGING_BYTES,
-            move |result| {
-                if result.is_ok() {
-                    let mapped = callback_staging
-                        .slice(0..NEAR_TELEMETRY_STAGING_BYTES)
-                        .get_mapped_range();
-                    let counts = [
-                        u32::from_le_bytes(
-                            mapped[..std::mem::size_of::<u32>()]
-                                .try_into()
-                                .expect("near visible chunk count is exactly four bytes"),
-                        ),
-                        u32::from_le_bytes(
-                            mapped[std::mem::size_of::<u32>()..NEAR_TELEMETRY_COUNT_BYTES as usize]
-                                .try_into()
-                                .expect("near visible quad count is exactly four bytes"),
-                        ),
-                    ];
-                    drop(mapped);
-                    callback_staging.unmap();
-                    let _ = sender.send(NearTelemetrySample {
-                        sequence,
-                        mode: ActiveNearMode::GpuDriven { indirect_count },
-                        mode_generation,
-                        visible_chunks: counts[0],
-                        visible_quads: counts[1],
-                        source,
-                        indirect_count,
-                        slot_count,
-                    });
-                }
-                reservation.release();
-            },
-        );
-        Ok(())
-    }
+            reservation.release();
+        },
+    );
 }
 
 /// CPU mirror of the compute shader's command construction. Returning `None`
@@ -1105,17 +1073,18 @@ pub fn indirect_command(
     visible: bool,
     record_capacity: u32,
     transform_capacity: u32,
-) -> Option<DrawIndirectArgs> {
+) -> Option<DrawIndexedIndirectArgs> {
     let record_end = metadata.record_start.checked_add(metadata.quad_count)?;
     if record_end > record_capacity || metadata.transform_slot >= transform_capacity {
         return None;
     }
-    let first_vertex = metadata.record_start.checked_mul(6)?;
-    let visible_vertex_count = metadata.quad_count.checked_mul(6)?;
-    Some(DrawIndirectArgs {
-        vertex_count: if visible { visible_vertex_count } else { 0 },
+    let base_vertex = i32::try_from(metadata.record_start.checked_mul(4)?).ok()?;
+    let visible_index_count = metadata.quad_count.checked_mul(6)?;
+    Some(DrawIndexedIndirectArgs {
+        index_count: if visible { visible_index_count } else { 0 },
         instance_count: 1,
-        first_vertex,
+        first_index: 0,
+        base_vertex,
         first_instance: metadata.transform_slot,
     })
 }
@@ -1269,6 +1238,7 @@ mod tests {
             quad_count,
             transform_slot,
             cave_active: 1,
+            face_ends: [quad_count, quad_count, quad_count, quad_count, quad_count, quad_count, 0, 0],
         }
     }
 
@@ -1277,10 +1247,11 @@ mod tests {
         let command = indirect_command(metadata(10, 5, 3), true, 20, 4).unwrap();
         assert_eq!(
             command,
-            DrawIndirectArgs {
-                vertex_count: 30,
+            DrawIndexedIndirectArgs {
+                index_count: 30,
                 instance_count: 1,
-                first_vertex: 60,
+                first_index: 0,
+                base_vertex: 40,
                 first_instance: 3,
             }
         );
@@ -1290,7 +1261,7 @@ mod tests {
         assert_eq!(
             indirect_command(metadata(10, 5, 3), false, 20, 4)
                 .unwrap()
-                .vertex_count,
+                .index_count,
             0,
             "fixed-slot fallback must zero culled commands"
         );
@@ -1396,6 +1367,7 @@ mod tests {
                 indirect_count: true,
             },
             mode_generation: 1,
+            commands: 12,
             visible_chunks: 7,
             visible_quads: 41,
             source: ForwardCullSource::Hzb,
@@ -1406,9 +1378,9 @@ mod tests {
             near_telemetry_values(count_mode),
             NearTelemetryValues {
                 hzb_visible_chunks: Some(7),
-                indirect_draw_count: 7,
+                indirect_draw_count: 12,
                 submitted_quads: 41,
-                submitted_vertices: 246,
+                submitted_vertices: 164,
             }
         );
 
@@ -1423,9 +1395,9 @@ mod tests {
             near_telemetry_values(fixed_mode),
             NearTelemetryValues {
                 hzb_visible_chunks: Some(7),
-                indirect_draw_count: 20,
+                indirect_draw_count: 120,
                 submitted_quads: 41,
-                submitted_vertices: 246,
+                submitted_vertices: 164,
             }
         );
 
@@ -1437,9 +1409,9 @@ mod tests {
             near_telemetry_values(frustum_fallback),
             NearTelemetryValues {
                 hzb_visible_chunks: None,
-                indirect_draw_count: 7,
+                indirect_draw_count: 12,
                 submitted_quads: 41,
-                submitted_vertices: 246,
+                submitted_vertices: 164,
             }
         );
     }
@@ -1504,6 +1476,7 @@ mod tests {
             sequence: 1,
             mode,
             mode_generation: 7,
+            commands: 12,
             visible_chunks: 7,
             visible_quads: 41,
             source: ForwardCullSource::Hzb,
@@ -1564,6 +1537,7 @@ mod tests {
                 indirect_count: true,
             },
             mode_generation: 1,
+            commands: 12,
             visible_chunks: 7,
             visible_quads: 41,
             source: ForwardCullSource::Hzb,
@@ -1585,6 +1559,7 @@ mod tests {
                 indirect_count: true,
             },
             mode_generation: 1,
+            commands: 12,
             visible_chunks: 7,
             visible_quads: 41,
             source: ForwardCullSource::Hzb,
@@ -1603,74 +1578,93 @@ mod tests {
         assert_eq!(latest.take(), None);
     }
 
-    #[test]
-    fn graph_clear_is_after_both_early_consumers_and_before_both_late_consumers() {
-        use bevy::render::render_graph::{EmptyNode, RenderGraphError};
+    use bevy::core_pipeline::{
+        mip_generation::experimental::depth::early_downsample_depth,
+        prepass::node::{early_prepass, late_prepass},
+    };
+    use bevy::pbr::{per_view_shadow_pass, EARLY_SHADOW_PASS, LATE_SHADOW_PASS};
+    use std::any::TypeId;
 
-        let mut graph = RenderGraph::default();
-        graph.add_node(NearGpuNode::FrustumCull, EmptyNode);
-        graph.add_node(NearGpuNode::ClearLatePhases, EmptyNode);
-        graph.add_node(NearGpuNode::HzbCull, EmptyNode);
-        graph.add_node(NearGpuNode::TelemetryCopy, EmptyNode);
-        graph.add_node(Node3d::EarlyPrepass, EmptyNode);
-        graph.add_node(Node3d::EarlyDownsampleDepth, EmptyNode);
-        graph.add_node(Node3d::LatePrepass, EmptyNode);
-        graph.add_node(Node3d::StartMainPass, EmptyNode);
-        graph.add_node(NodePbr::EarlyShadowPass, EmptyNode);
-        graph.add_node(NodePbr::LateShadowPass, EmptyNode);
+    fn main_pass_marker() {}
 
-        add_near_gpu_graph_edges(&mut graph, true);
+    /// Identity of a function system. Names are blanked without `bevy/debug`,
+    /// so the order checks compare system types instead.
+    fn id<M>(system: impl IntoSystem<(), (), M>) -> TypeId {
+        IntoSystem::into_system(system).system_type()
+    }
 
-        macro_rules! assert_direct_edge {
-            ($from:expr, $to:expr) => {
-                assert!(matches!(
-                    graph.try_add_node_edge($from, $to),
-                    Err(RenderGraphError::EdgeAlreadyExists(_))
-                ));
-            };
-        }
-        assert_direct_edge!(Node3d::EarlyDownsampleDepth, NearGpuNode::ClearLatePhases);
-        assert_direct_edge!(NodePbr::EarlyShadowPass, NearGpuNode::ClearLatePhases);
-        assert_direct_edge!(NearGpuNode::ClearLatePhases, Node3d::LatePrepass);
-        assert_direct_edge!(NearGpuNode::ClearLatePhases, NodePbr::LateShadowPass);
-        assert_direct_edge!(Node3d::LatePrepass, NearGpuNode::HzbCull);
-        assert_direct_edge!(NearGpuNode::HzbCull, NearGpuNode::TelemetryCopy);
-        assert_direct_edge!(NearGpuNode::TelemetryCopy, Node3d::StartMainPass);
+    /// Topologically sorted systems of a `Core3d` schedule holding the
+    /// near-GPU systems and the Bevy passes they are ordered against.
+    fn near_gpu_system_order(telemetry_enabled: bool) -> Vec<TypeId> {
+        use bevy::core_pipeline::{Core3d, Core3dSystems};
+        use bevy::pbr::shared_shadow_pass;
+
+        let mut world = World::new();
+        let mut schedule = Core3d::base_schedule();
+        schedule.add_systems((
+            early_prepass.in_set(Core3dSystems::Prepass),
+            early_downsample_depth.after(early_prepass).before(late_prepass),
+            late_prepass.in_set(Core3dSystems::Prepass),
+            per_view_shadow_pass::<EARLY_SHADOW_PASS>,
+            shared_shadow_pass::<EARLY_SHADOW_PASS>,
+            per_view_shadow_pass::<LATE_SHADOW_PASS>,
+            shared_shadow_pass::<LATE_SHADOW_PASS>,
+            main_pass_marker.in_set(Core3dSystems::MainPass),
+        ));
+        add_near_gpu_systems(&mut schedule, telemetry_enabled);
+        schedule.initialize(&mut world).expect("schedule builds");
+        schedule
+            .systems()
+            .expect("initialized")
+            .map(|(_, system)| system.system_type())
+            .collect()
+    }
+
+    fn position(order: &[TypeId], system: TypeId) -> usize {
+        order
+            .iter()
+            .position(|id| *id == system)
+            .expect("system is scheduled")
     }
 
     #[test]
-    fn graph_bypasses_telemetry_when_benchmark_readback_is_disabled() {
-        use bevy::render::render_graph::{EmptyNode, RenderGraphError};
+    fn clear_is_after_both_early_consumers_and_before_both_late_consumers() {
+        let order = near_gpu_system_order(true);
+        let at = |system: TypeId| position(&order, system);
+        let frustum = at(id(near_frustum_cull));
+        let clear = at(id(near_clear_late_phases));
+        let hzb = at(id(near_hzb_cull));
+        let telemetry = at(id(near_telemetry_copy));
+        let early_shadow = at(id(per_view_shadow_pass::<EARLY_SHADOW_PASS>));
+        let late_shadow = at(id(per_view_shadow_pass::<LATE_SHADOW_PASS>));
+        assert!(frustum < at(id(early_prepass)));
+        assert!(frustum < early_shadow);
+        assert!(at(id(early_downsample_depth)) < clear);
+        assert!(early_shadow < clear);
+        assert!(clear < at(id(late_prepass)));
+        assert!(clear < late_shadow);
+        assert!(at(id(late_prepass)) < hzb);
+        assert!(hzb < telemetry);
+        assert!(telemetry < at(id(main_pass_marker)));
+    }
 
-        let mut graph = RenderGraph::default();
-        graph.add_node(NearGpuNode::FrustumCull, EmptyNode);
-        graph.add_node(NearGpuNode::ClearLatePhases, EmptyNode);
-        graph.add_node(NearGpuNode::HzbCull, EmptyNode);
-        graph.add_node(Node3d::EarlyPrepass, EmptyNode);
-        graph.add_node(Node3d::EarlyDownsampleDepth, EmptyNode);
-        graph.add_node(Node3d::LatePrepass, EmptyNode);
-        graph.add_node(Node3d::StartMainPass, EmptyNode);
-        graph.add_node(NodePbr::EarlyShadowPass, EmptyNode);
-        graph.add_node(NodePbr::LateShadowPass, EmptyNode);
-
-        add_near_gpu_graph_edges(&mut graph, false);
-
-        assert!(matches!(
-            graph.try_add_node_edge(NearGpuNode::HzbCull, Node3d::StartMainPass),
-            Err(RenderGraphError::EdgeAlreadyExists(_))
-        ));
+    #[test]
+    fn schedule_omits_telemetry_when_benchmark_readback_is_disabled() {
+        let order = near_gpu_system_order(false);
+        assert!(!order.contains(&id(near_telemetry_copy)));
+        assert!(position(&order, id(near_hzb_cull)) < position(&order, id(main_pass_marker)));
     }
 
     #[test]
     fn conservative_frustum_mirror_keeps_intersections_and_ignores_far_plane() {
         let clip_from_world =
             Mat4::perspective_infinite_reverse_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.1);
-        let frustum = bevy::camera::primitives::Frustum::from_clip_from_world_custom_far(
+        let frustum = bevy::camera::primitives::Frustum(bevy::math::primitives::ViewFrustum::from_clip_from_world_custom_far(
             &clip_from_world,
             &Vec3::ZERO,
             &Vec3::Z,
             1000.0,
-        );
+        ));
         assert!(conservative_frustum_visible(
             &frustum,
             Vec3::new(0.0, 0.0, -2000.0),

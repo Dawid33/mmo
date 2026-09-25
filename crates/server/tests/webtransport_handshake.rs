@@ -87,7 +87,8 @@ async fn webtransport_client_full_handshake() {
                             .send((Some(client_id), world.build_region_server_packet(&id)))
                             .unwrap();
                     }
-                    ClientPacket::GameEvent(ev) => {
+                    // The tick stamp only matters to a ticking server; this one never ticks.
+                    ClientPacket::GameEvent(ev) | ClientPacket::GameEventAfterTick(ev, _) => {
                         let out = world.handle_region_event(ev.kind, ev.region_id).unwrap();
                         world.forget_last_event(&ev.region_id);
                         server_send

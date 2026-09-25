@@ -248,6 +248,28 @@ fn tile_build_is_coarse_only_when_every_region_is_pristine() {
     assert!(grid.iter().all(|v| v.block == BlockId(42)));
 }
 
+/// Block-scale and coarser region keys (16/32) take the coarse path too: the
+/// wide outer rings hold thousands of pristine regions, and full generation
+/// for each would cost ~40x what sampling the profile does.
+#[test]
+fn pristine_region_keyed_coarse_factors_are_sampled_not_generated() {
+    let (mut m, out, _region_out) = manager_with_lod();
+    m.handle_server_event(ServerEvent::ClientConnected(1), 0);
+    for factor in [16, 32] {
+        let key = LodKey::for_region(factor, RegionCoords::new(50, 50)); // far away, pristine
+        assert_eq!(key.region_span(), 1);
+        m.handle_server_event(ServerEvent::ClientPacket(ClientPacket::RequestLod(key), 1), 0);
+        m.pump_lod_results();
+        let payload = expect_lod_data(&out, key);
+        let grid = payload[0].1.decode().unwrap();
+        assert!(
+            grid.iter().all(|v| v.block == BlockId(42)),
+            "factor {factor}: payload is the coarse generator's marker, not generated terrain"
+        );
+    }
+    assert_eq!(m.terrain_cache_len(), 0, "no pristine terrain was generated for them");
+}
+
 #[test]
 fn tile_build_overlays_regions_with_authoritative_state() {
     let (mut m, out, region_out) = manager_with_lod();

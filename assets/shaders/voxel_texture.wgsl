@@ -52,6 +52,12 @@ const FACE_NORMALS = array<vec3<f32>, 6>(
 // Voxels per block edge — one texture repeat spans one block face. Must match
 // game::block::BLOCK_VOXELS.
 const BLOCK_VOXELS: f32 = 16.0;
+// Baked AO fades out as LOD cells coarsen — see voxel_pull.wgsl.
+const AO_FADE_LOG2: f32 = 4.0;
+// Hemisphere ambient — locked to voxel_pull.wgsl's SKY_SIDE. (Its distant
+// riser fade needs the pull path's top-layer table; this fallback path has
+// none, and gets distance fog from PBR's post-lighting step instead.)
+const SKY_SIDE: f32 = 0.75;
 
 // Per-face UV sampling axes, indexed by the packed face id. This is a
 // sampling-orientation choice (nothing else reads these UVs), NOT tied to
@@ -118,6 +124,15 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 
 #else // PREPASS_PIPELINE
 
+// Nearest-looking magnification from the linear sampler — copy of
+// voxel_pull.wgsl's crisp_uv.
+fn crisp_uv(uv: vec2<f32>, texels: vec2<f32>) -> vec2<f32> {
+    let px = uv * texels;
+    let seam = floor(px + 0.5);
+    let footprint = max(fwidth(px), vec2<f32>(1e-5));
+    return (seam + clamp((px - seam) / footprint, vec2<f32>(-0.5), vec2<f32>(0.5))) / texels;
+}
+
 struct CustomVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
@@ -143,17 +158,23 @@ fn vertex(vertex: Vertex) -> CustomVertexOutput {
     out.position = position_world_to_clip(out.world_position.xyz);
     out.world_normal = mesh_functions::mesh_normal_local_to_world(
         FACE_NORMALS[face], vertex.instance_index);
-    // Block-cell UVs from the decoded chunk-local corner position: affine in
-    // position, so interpolation across greedy quads of any extent is exact,
-    // and block bounds land on integer UVs so the Repeat sampler wraps the
-    // texture once per block face. The packed cu/cv/w/h fields are no longer
-    // read here (layout unchanged, see pack.rs).
+    // Block-cell UVs from the corner position in WORLD voxels (local cells
+    // times the chunk's scale — LOD chunks scale by their ring factor — plus
+    // the origin's offset within its block; same rule as voxel_pull.wgsl):
+    // affine in position, so interpolation across greedy quads of any extent
+    // is exact, and block bounds land on integer UVs so the Repeat sampler
+    // wraps the texture once per block face at every LOD factor. The packed
+    // cu/cv/w/h fields are no longer read here (layout unchanged, see pack.rs).
+    let scale = vec3<f32>(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
+    let origin = model[3].xyz;
+    let tex_pos = local_pos * scale + (origin - BLOCK_VOXELS * floor(origin / BLOCK_VOXELS));
     out.uv = vec2<f32>(
-        dot(local_pos, FACE_U_MASK[face]),
-        dot(local_pos, FACE_V_MASK[face]),
+        dot(tex_pos, FACE_U_MASK[face]),
+        dot(tex_pos, FACE_V_MASK[face]),
     ) / BLOCK_VOXELS;
     // Baked AO — must match ao::AO_CURVE (0.55 + 0.15 * ao); test-pinned in pack.rs.
-    out.shade = 0.55 + 0.15 * f32(ao);
+    let ao_strength = clamp(1.0 - log2(max(scale.x, 1.0)) / AO_FADE_LOG2, 0.0, 1.0);
+    out.shade = mix(1.0, 0.55 + 0.15 * f32(ao), ao_strength);
     out.layer = (w1 >> 12u) & 65535u;
     out.instance_index = vertex.instance_index;
     return out;
@@ -164,6 +185,12 @@ fn fragment(
     in: CustomVertexOutput,
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
+    // Derivatives first, in uniform control flow.
+    let texels = vec2<f32>(textureDimensions(mat_array_texture).xy);
+    let tex = textureSampleGrad(
+        mat_array_texture, mat_array_texture_sampler,
+        crisp_uv(in.uv, texels), in.layer, dpdx(in.uv), dpdy(in.uv));
+
     var standard_in: VertexOutput;
     standard_in.position = in.position;
     standard_in.world_normal = in.world_normal;
@@ -171,7 +198,7 @@ fn fragment(
     standard_in.instance_index = in.instance_index;
     var pbr_input = pbr_input_from_standard_material(standard_in, is_front);
 
-    let tex = textureSample(mat_array_texture, mat_array_texture_sampler, in.uv, in.layer);
+    pbr_input.diffuse_occlusion = vec3<f32>(SKY_SIDE + (1.0 - SKY_SIDE) * normalize(in.world_normal).y);
     pbr_input.material.base_color = tex * vec4<f32>(in.shade, in.shade, in.shade, 1.0);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 

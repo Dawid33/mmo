@@ -1,0 +1,139 @@
+//! Every tunable of the forge in ONE runtime table, so the CLI (`--set
+//! key=value`) and the tuning page (`--serve`, serve.rs) can change them
+//! without a rebuild. A knob is always an f64; counts are rounded where used.
+//! The defaults here ARE the forge's tuning — when a value found in the page
+//! should stick, change its default below.
+
+macro_rules! knobs {
+    ($( $group:literal { $( $field:ident : $default:expr, [$min:expr, $max:expr], $label:literal, $help:literal; )* } )*) => {
+        #[derive(Clone, Debug)]
+        pub struct Knobs { $( $( pub $field: f64, )* )* }
+
+        impl Default for Knobs {
+            fn default() -> Self { Knobs { $( $( $field: $default, )* )* } }
+        }
+
+        pub struct Spec {
+            pub key: &'static str,
+            pub group: &'static str,
+            pub label: &'static str,
+            pub help: &'static str,
+            pub default: f64,
+            pub min: f64,
+            pub max: f64,
+        }
+
+        pub const SPECS: &[Spec] = &[ $( $( Spec {
+            key: stringify!($field), group: $group, label: $label, help: $help,
+            default: $default, min: $min, max: $max,
+        }, )* )* ];
+
+        impl Knobs {
+            /// Set a knob by key; false if there is no such knob.
+            pub fn set(&mut self, key: &str, value: f64) -> bool {
+                match key { $( $( stringify!($field) => self.$field = value, )* )* _ => return false }
+                true
+            }
+
+            pub fn get(&self, key: &str) -> Option<f64> {
+                match key { $( $( stringify!($field) => Some(self.$field), )* )* _ => None }
+            }
+        }
+    };
+}
+
+knobs! {
+    "Island" {
+        layout: 0.0, [0.0, 2.0], "Layout", "One island fills the world; an archipelago scatters several; an island arc strings them along a curve, largest in the middle.";
+        island_extent: 0.66, [0.35, 0.95], "Island size", "One island: the coast sits about this share of the half-width out, before noise warps it. Several islands: scales all of them.";
+        island_count: 6.0, [2.0, 14.0], "Islands", "How many islands an archipelago or arc is given (neighbours may merge, small ones may drown).";
+        island_spread: 0.62, [0.25, 0.8], "Spread", "How far from the world center islands are placed, as a share of the half-width.";
+        island_size_variation: 0.6, [0.0, 1.0], "Size variation", "0 = islands of similar size; 1 = one main island and a scatter of small ones.";
+        island_separation: 1.0, [0.5, 1.8], "Separation", "Below 1 neighbouring islands overlap and merge across isthmuses; above 1 open channels stay between them.";
+        coast_noise_lo: 0.75, [0.0, 1.6], "Coast wander (8 km)", "Strength of the 8 km noise that pushes the coast in and out: bays, peninsulas, the overall outline.";
+        coast_noise_hi: 0.18, [0.0, 0.7], "Coast detail (1 km)", "Strength of the 1 km noise on the coastline: coves and headlands.";
+        ocean_margin_start: 0.84, [0.55, 0.95], "Ocean margin", "Land is forced under the sea beyond this share of the half-width; guarantees ocean all round.";
+    }
+    "Uplift" {
+        uplift: 4.6e-4, [5.0e-5, 1.5e-3], "Uplift rate (m/yr)", "Peak rock uplift in the mountain belts. Relief scales with uplift / erodibility.";
+        lowland_uplift_share: 0.10, [0.0, 0.6], "Lowland uplift share", "Uplift outside the belts as a share of the peak rate: rolling lowlands vs flat ones.";
+        belt_width: 0.22, [0.04, 0.7], "Belt width", "How far from the belt noise's zero contour the mountains reach: ribbons vs broad ranges.";
+        belt_scale: 1.0, [0.3, 3.0], "Belt frequency", "Spatial frequency of the belt noise (1 = 4 km wavelength): few long ranges vs many short ones.";
+        inland_gate: 0.30, [0.08, 0.7], "Mountains inland by", "Landness by which belts reach full strength: keeps ranges off the coast.";
+    }
+    "Erosion" {
+        erodibility: 2.5e-5, [4.0e-6, 1.2e-4], "Erodibility K", "Stream-power erodibility of a rock of hardness 1. Higher = lower, more dissected land.";
+        diffusivity: 0.012, [0.0, 0.06], "Hillslope diffusion (m²/yr)", "Rounds ridges and valley walls. 0 = knife edges.";
+        hillslope_area_m2: 6_000.0, [500.0, 40_000.0], "Channel head area (m²)", "Drainage area below which a cell is hillslope, not channel: spacing of the finest valleys.";
+        depression_fill: 0.15, [0.0, 1.0], "Depression silting", "Share of a depression's depth that sediment fills per iteration.";
+        iters: 500.0, [50.0, 1000.0], "Iterations", "Time steps. Relief approaches steady state around 450 at the default rates.";
+        dt_years: 2_500.0, [500.0, 10_000.0], "Years per iteration", "The incision step is implicit, so this is limited by routing refresh, not stability.";
+    }
+    "Geology" {
+        geology_strength: 1.0, [0.0, 2.0], "Rock contrast", "0 = uniform rock; 1 = hardnesses as listed; 2 = doubled contrast (more scarps and cliffs).";
+        regional_dip: 0.04, [0.0, 0.15], "Regional dip", "Tilt of the strata (rise/run): how many formations outcrop across the island.";
+        fold_amplitude_m: 45.0, [0.0, 160.0], "Fold amplitude (m)", "Height of the 2 km folds in the strata.";
+        formation_min_m: 18.0, [4.0, 80.0], "Thinnest formation (m)", "Sedimentary formations are between this and the thickest.";
+        formation_max_m: 64.0, [10.0, 200.0], "Thickest formation (m)", "Sedimentary formations are between the thinnest and this.";
+        basement_top_s: -520.0, [-1_500.0, -80.0], "Basement depth (m)", "Stratigraphic level of the crystalline basement: shallower = more granite in the range cores.";
+        hard_sandstone: 1.0, [0.2, 3.0], "Sandstone erodibility", "Erodibility multiplier; below 1 resists (steeper, higher), above 1 weathers away.";
+        hard_shale: 1.7, [0.2, 3.0], "Shale erodibility", "Erodibility multiplier; shale is the soft one that floors valleys.";
+        hard_limestone: 0.75, [0.2, 3.0], "Limestone erodibility", "Erodibility multiplier.";
+        hard_conglomerate: 0.65, [0.2, 3.0], "Conglomerate erodibility", "Erodibility multiplier.";
+        hard_basalt: 0.5, [0.2, 3.0], "Basalt erodibility", "Erodibility multiplier of the thin sills.";
+        hard_granite: 0.6, [0.2, 3.0], "Granite erodibility", "Erodibility multiplier of the basement.";
+    }
+    "Climate" {
+        climate_strength: 1.0, [0.0, 1.0], "Rain shadow strength", "0 = uniform rain; 1 = full orographic rain from the west.";
+        land_depletion_m: 9_000.0, [1_500.0, 60_000.0], "Rain-out distance (m)", "How far moist air travels over flat land before it has rained out.";
+        orographic_scale_m: 650.0, [100.0, 3_000.0], "Orographic scale (m)", "Rise that rains out about two thirds of the air's moisture: lower = sharper wet/dry contrast.";
+        sea_recharge_m: 5_000.0, [500.0, 20_000.0], "Sea recharge (m)", "Distance over open sea in which the air regains its moisture.";
+        rain_min: 0.4, [0.05, 1.0], "Driest rain", "Lower bound of rain relative to the land mean.";
+        rain_max: 3.0, [1.0, 6.0], "Wettest rain", "Upper bound of rain relative to the land mean.";
+    }
+    "Shaping" {
+        max_peak_m: 236.0, [80.0, 256.0], "Tallest peak allowed (m)", "Land is scaled down if the simulated relief overshoots this (engine band ends at +256 m).";
+        floodplain_m_per_sqrt_km2: 28.0, [0.0, 90.0], "Valley floor width", "Half-width of the planed valley floor per sqrt(km²) of discharge.";
+        floodplain_max_m: 180.0, [0.0, 500.0], "Widest valley floor (m)", "Cap on the valley-floor half-width.";
+        lake_basins: 9.0, [0.0, 40.0], "Lake basins", "How many overdeepened basins are excavated on valley floors.";
+        lake_spacing_m: 1_500.0, [300.0, 5_000.0], "Lake spacing (m)", "Lake sites keep at least this far apart.";
+        lake_radius_max_m: 420.0, [150.0, 1_200.0], "Largest lake radius (m)", "Basin radii run from 140 m to this.";
+        lake_depth_max_m: 14.0, [5.0, 40.0], "Deepest lake basin (m)", "Basin depths run from 5 m to this.";
+    }
+    "Rivers" {
+        river_min_discharge_m2: 400_000.0, [50_000.0, 4_000_000.0], "River threshold (m²)", "A cell is a river once this much rain-weighted land drains through it.";
+        river_width_m: 5.5, [1.0, 20.0], "River width factor", "Channel width in meters per sqrt(km²) of discharge.";
+    }
+}
+
+/// Knobs that are a choice, not a quantity: the page shows a list, and the
+/// value is the index.
+pub const CHOICES: &[(&str, &[&str])] = &[("layout", &["One island", "Archipelago", "Island arc"])];
+
+pub const LAYOUT_ONE_ISLAND: u32 = 0;
+pub const LAYOUT_ARCHIPELAGO: u32 = 1;
+pub const LAYOUT_ARC: u32 = 2;
+
+impl Knobs {
+    pub fn layout(&self) -> u32 {
+        self.layout.round().clamp(0.0, 2.0) as u32
+    }
+
+    pub fn iterations(&self) -> usize {
+        self.iters.round().max(1.0) as usize
+    }
+
+    /// Erodibility multiplier of rock `id` (index into geology::ROCKS), with
+    /// the contrast knob applied around 1.
+    pub fn rock_erodibility(&self, id: u8) -> f64 {
+        let base = [
+            self.hard_sandstone,
+            self.hard_shale,
+            self.hard_limestone,
+            self.hard_conglomerate,
+            self.hard_basalt,
+            self.hard_granite,
+        ][id as usize];
+        (1.0 + self.geology_strength * (base - 1.0)).max(0.05)
+    }
+}

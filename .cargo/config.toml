@@ -7,3 +7,13 @@ rustflags = ["--cfg", "web_sys_unstable_apis"]
 # computes exactly via CARGO_BUILD_JOBS, which overrides this when set.
 [build]
 jobs = -4
+
+# Region edge in chunks, read at BUILD time by `game::REGION_CHUNKS`
+# (crates/game/src/protocol.rs; legal values there). It lives here so raw
+# `cargo`, rust-analyzer and `just` all compile with the SAME value — cargo
+# fingerprints the variable, and "unset" vs "32" would rebuild `game` and
+# everything downstream each time you alternated. A value already in the
+# environment wins, which is how `just region_chunks=64 …` overrides it.
+[env]
+VOXEL_REGION_CHUNKS = "32"
+VOXEL_CELL_CHUNKS = "0"

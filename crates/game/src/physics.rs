@@ -65,6 +65,13 @@ impl Controller for PhysicsController {
                     crate::GameDataTransactionKind::Do,
                     crate::GameDataUpdateKind::UpdateCameraViewMatrix(e_id, *b.position()),
                 ));
+            } else if data.ecs.motion.try_get(e_id).is_some() {
+                // Camera-less movers (mobs): their pose reaches the renderer
+                // only through this.
+                data.send(GameDataUpdate::new(
+                    crate::GameDataTransactionKind::Do,
+                    crate::GameDataUpdateKind::SetEntityPosition(e_id, *b.position()),
+                ));
             }
         }
     }

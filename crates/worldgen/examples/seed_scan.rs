@@ -1,9 +1,17 @@
-//! Scan candidate world seeds for dry land at the spawn column (world block
-//! (8,8) = center of region (0,0)). Used to pick WORLD_SEED; keep around for
-//! the next time the terrain shaping changes.
+//! Scan candidate world seeds for a good spawn (world block (8,8) = center of
+//! region (0,0)): dry and flat underfoot, with a mountain and the sea both
+//! inside the LOD horizon so the first view shows what the world is. Used to
+//! pick WORLD_SEED; keep around for the next time the terrain shaping changes.
+//! Check the winner with `just world-map --span 4096`.
 //! Run: cargo run -p worldgen --example seed_scan --release
 
 use worldgen::pipeline::{TerrainPipeline, SEA_LEVEL};
+
+/// Scenery search window around spawn: ±(VIEW_STEPS * VIEW_STEP_M) meters.
+const VIEW_STEPS: i32 = 15;
+const VIEW_STEP_M: f64 = 100.0;
+/// A peak this far above the sea must stand inside that window.
+const MIN_PEAK_ABOVE_SEA: i32 = 110;
 
 fn surface_y(p: &TerrainPipeline, wx: f64, wz: f64) -> i32 {
     let prof = p.column(wx, wz);
@@ -47,8 +55,24 @@ fn main() {
                 max_h = max_h.max(h);
             }
         }
-        if min_h >= sea + 2 && max_h - min_h <= 12 {
-            println!("  candidate {seed:#018X}: spawn y={spawn}, ±48m min={min_h} max={max_h}");
+        if min_h < sea + 2 || max_h - min_h > 12 {
+            continue;
+        }
+        // Scenery inside the ~2 km LOD horizon: a real mountain and open sea.
+        let (mut peak, mut lowest) = (i32::MIN, i32::MAX);
+        for gx in -VIEW_STEPS..=VIEW_STEPS {
+            for gz in -VIEW_STEPS..=VIEW_STEPS {
+                let h = surface_y(&p, 8.5 + gx as f64 * VIEW_STEP_M, 8.5 + gz as f64 * VIEW_STEP_M);
+                peak = peak.max(h);
+                lowest = lowest.min(h);
+            }
+        }
+        if peak >= sea + MIN_PEAK_ABOVE_SEA && lowest < sea - 4 {
+            println!(
+                "  candidate {seed:#018X}: spawn y={spawn}, ±48m min={min_h} max={max_h}, \
+                 ±{}m peak={peak} lowest={lowest}",
+                VIEW_STEPS as f64 * VIEW_STEP_M
+            );
             found += 1;
             if found >= 10 {
                 break;

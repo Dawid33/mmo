@@ -36,6 +36,11 @@ pub const LOAD_PROGRESS_INTERVAL_SECS: f64 = 2.0;
 /// becomes ready cannot fill the log.
 pub const LOAD_PROGRESS_MAX_LINES: u32 = 300;
 
+/// Set once `world_ready` has fired (and never cleared): the autopilot waits
+/// on it so a scripted run starts from the same loaded state every time.
+#[derive(Resource, Default)]
+pub struct WorldReady(pub bool);
+
 #[derive(Default)]
 pub struct JoinTimelineState {
     frames: u32,
@@ -84,7 +89,8 @@ impl LoadDepths {
 #[allow(clippy::too_many_arguments)]
 pub fn track_join_timeline(
     mut state: Local<JoinTimelineState>,
-    time: Res<Time<Real>>,
+    // Paired: the function is at Bevy's 16-parameter limit.
+    (time, mut world_ready): (Res<Time<Real>>, ResMut<WorldReady>),
     scale: Option<Res<WorldScale>>,
     hud: Res<HudStatus>,
     roots: Res<RegionRoots>,
@@ -179,6 +185,7 @@ pub fn track_join_timeline(
         state.stable_frames += 1;
         if state.stable_frames >= WORLD_READY_STABLE_FRAMES {
             state.done = true;
+            world_ready.0 = true;
             game::perf_event!(
                 "world_ready",
                 "first_green_ms={} stable_frames={} regions={} lod_roots={} frames={}",

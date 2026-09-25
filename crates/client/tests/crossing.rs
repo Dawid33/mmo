@@ -45,3 +45,39 @@ fn crossing_is_deterministic() {
     }
     assert_eq!(run(), run(), "harness must be deterministic");
 }
+
+/// Seeds swept by `crossing_converges_under_late_region_scheduling`.
+const SCHEDULE_SEEDS: u64 = 6;
+
+/// The same crossing, with the server's regions scheduled the way real region
+/// threads schedule them rather than in lockstep: tick order permuted and, per
+/// round, some regions seeing their inputs (the player's own input, the
+/// `EntityArrived` handoff, ghost updates) one tick LATE. The lockstep harness
+/// only ever exercises one schedule; the production server never runs that
+/// one. A failure names its seed, which replays exactly.
+///
+/// NOTE 2026-09-20: fails together with the lockstep test above, and for the
+/// same reason — the new home region stays bit-inexact after a crossing (see
+/// TODO.md, "REGRESSED"). Once that is fixed, this is the test that says
+/// whether the fix also holds off the lockstep schedule.
+///
+/// `InlineSchedule::late`, not `jittery`: missed ticks desynchronise region
+/// tick counts from the client, which this harness's tick-aligned
+/// `assert_converged` cannot follow (server-only coverage of missed ticks is
+/// `crates/game/tests/handoff_schedule.rs`).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn crossing_converges_under_late_region_scheduling() {
+    for seed in 0..SCHEDULE_SEEDS {
+        let run = std::panic::catch_unwind(|| {
+            let mut h = SimHarness::with_near_radius(1);
+            h.connect();
+            h.set_schedule(game::InlineSchedule::late(seed));
+            h.cross_boundary(Dir::East);
+            h.assert_progresses(game::Key::KeyW);
+            h.assert_converged();
+            assert_ne!(h.player_region(), game::SPAWN_REGION, "player actually crossed");
+        });
+        assert!(run.is_ok(), "crossing broke under InlineSchedule::late({seed})");
+    }
+}

@@ -115,6 +115,27 @@ impl ColliderSet {
             .expect("restore_raw: slot vacant") = collider;
     }
 
+    /// Whether `handle`'s collider currently carries the MODIFIED change-flag,
+    /// i.e. whether a tracked mutation (`get_mut`) would skip its
+    /// modified-list push. Capture this BEFORE such a mutation so its undo
+    /// knows whether to [`Self::pop_modified`]. Mirrors
+    /// [`RigidBodySet::is_marked_modified`].
+    pub fn is_marked_modified(&self, handle: ColliderHandle) -> bool {
+        self.colliders
+            .get(handle.0)
+            .is_some_and(|co| co.changes.contains(ColliderChanges::MODIFIED))
+    }
+
+    /// Exact inverse of the modified-list push performed on `handle` by the
+    /// MOST RECENT tracked mutation. LIFO contract: `handle` must be the
+    /// list's tail (asserted). Callers restore the collider VALUE separately
+    /// via [`Self::restore_raw`], which covers the MODIFIED flag itself.
+    /// Mirrors [`RigidBodySet::pop_modified`].
+    pub fn pop_modified(&mut self, handle: ColliderHandle) {
+        let popped = self.modified_colliders.pop();
+        assert_eq!(popped, Some(handle), "pop_modified: not the list tail");
+    }
+
     /// Allocator state to capture before `insert`/`insert_with_parent` for
     /// [`Self::revert_insert`]. Mirrors [`RigidBodySet::alloc_state`].
     pub fn alloc_state(&self) -> (Option<u32>, u32) {

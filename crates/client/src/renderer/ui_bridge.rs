@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use crossbeam::channel::Receiver;
 use game::{
     AlignItems as UiAlign, Color as UiColor, Content, FlexDirection, JustifyContent as UiJustify,
@@ -100,7 +99,7 @@ pub fn drain_ui_updates(
     updates: Res<UiUpdates>,
     mut map: ResMut<UiWidgetMap>,
     mut root: ResMut<UiRoot>,
-    mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut cursor_policy: ResMut<super::cursor::CursorPolicy>,
 ) {
     let Some(receiver) = updates.0.as_ref() else { return };
     // Ensure the screen-space root and the root widget (WidgetId(0)) exist.
@@ -208,15 +207,7 @@ pub fn drain_ui_updates(
                 }
             }
             UiUpdate::SetCursorGrab(grab) => {
-                if let Ok(mut cursor) = windows.single_mut() {
-                    if grab {
-                        cursor.grab_mode = CursorGrabMode::Locked;
-                        cursor.visible = false;
-                    } else {
-                        cursor.grab_mode = CursorGrabMode::None;
-                        cursor.visible = true;
-                    }
-                }
+                cursor_policy.sim_grab = grab;
             }
         }
     }
@@ -234,6 +225,7 @@ mod tests {
             .insert_resource(UiUpdates(Some(recv)))
             .init_resource::<UiWidgetMap>()
             .init_resource::<UiRoot>()
+            .init_resource::<crate::renderer::cursor::CursorPolicy>()
             .add_systems(Update, drain_ui_updates);
         (app, send)
     }

@@ -8,17 +8,42 @@ use super::bridge::SimTarget;
 /// camera can snap its look (factor 1.0) while its position still glides.
 /// If tick timestamps are ever added to SetEntityPosition, replace with
 /// two-snapshot interpolation.
-pub fn interpolate_transforms(mut query: Query<(&mut Transform, &SimTarget)>) {
+///
+/// Writes only when the pose actually changes: every terrain chunk is a
+/// fixed-body sim entity with a `SimTarget`, and an unconditional write
+/// marked ~68k settled transforms changed each frame, which made
+/// `propagate_parent_transforms` re-walk them all (4.5 ms/frame at `full`,
+/// 2026-09-22 trace).
+///
+/// Keyed chunks are skipped: they are fixed bodies that never move, and at the
+/// 5x5 window just visiting ~64k of them cost ~1 ms/frame (2026-09-23 trace).
+/// A chunk that does get a new pose snaps in `drain_region_updates`. Chunks
+/// whose snapshot voxels are still being derived are not keyed yet, so they are
+/// skipped by their `PendingSnapshotVoxels` marker — while flying, that backlog
+/// is ~100k chunks (5 regions per seam), and visiting it cost 4.6 ms/frame
+/// (2026-09-23 `fly-probe` trace).
+pub fn interpolate_transforms(
+    mut query: Query<
+        (&mut Transform, &SimTarget),
+        (
+            Without<super::meshing::queue::ChunkKey>,
+            Without<super::bridge::PendingSnapshotVoxels>,
+        ),
+    >,
+) {
     for (mut tf, target) in &mut query {
-        let close = tf.translation.distance(target.pos) <= target.pos_snap
+        let goal = target.goal();
+        let close = tf.translation.distance(goal) <= target.pos_snap
             && tf.rotation.angle_between(target.rot) <= target.rot_snap;
+        let mut next = *tf;
         if close {
-            tf.translation = target.pos;
-            tf.rotation = target.rot;
+            next.translation = goal;
+            next.rotation = target.rot;
         } else {
-            tf.translation = tf.translation.lerp(target.pos, target.pos_smoothing);
-            tf.rotation = tf.rotation.slerp(target.rot, target.rot_smoothing);
+            next.translation = tf.translation.lerp(goal, target.pos_smoothing);
+            next.rotation = tf.rotation.slerp(target.rot, target.rot_smoothing);
         }
+        tf.set_if_neq(next);
     }
 }
 
@@ -35,6 +60,10 @@ mod tests {
         (app, e)
     }
 
+    fn target_goal() -> Vec3 {
+        SimTarget::camera(Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY).goal()
+    }
+
     #[test]
     fn converges_and_snaps_exactly() {
         let target = SimTarget::camera(Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY);
@@ -43,7 +72,36 @@ mod tests {
             app.update();
         }
         let t = app.world().entity(e).get::<Transform>().unwrap();
-        assert_eq!(t.translation, Vec3::new(1.0, 0.0, 0.0), "must snap bit-exact, not hover nearby");
+        assert_eq!(t.translation, target_goal(), "must snap bit-exact, not hover nearby");
+    }
+
+    #[test]
+    fn settled_transform_is_not_marked_changed() {
+        let target = SimTarget::body(Vec3::new(3.0, 0.0, 0.0), Quat::IDENTITY);
+        let (mut app, e) = app_with(target, Transform::from_xyz(3.0, 0.0, 0.0));
+        app.update();
+        app.world_mut().clear_trackers();
+        app.update();
+        let changed = app.world().entity(e).get_ref::<Transform>().unwrap().is_changed();
+        assert!(!changed, "an entity already at its target must not dirty its Transform");
+    }
+
+    #[test]
+    fn keyed_chunks_are_not_interpolated() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_systems(Update, interpolate_transforms);
+        let e = app
+            .world_mut()
+            .spawn((
+                Transform::IDENTITY,
+                SimTarget::body(Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY),
+                crate::renderer::meshing::queue::ChunkKey([0, 0, 0]),
+            ))
+            .id();
+        app.update();
+        let t = app.world().entity(e).get::<Transform>().unwrap();
+        assert_eq!(t.translation, Vec3::ZERO, "fixed chunks are skipped, never lerped");
     }
 
     #[test]
@@ -74,7 +132,7 @@ mod tests {
         // Position: moved toward the target but not all the way there.
         assert!(
             t.translation.length() > 0.0
-                && t.translation.distance(Vec3::new(5.0, -3.0, 2.0)) > 0.008,
+                && t.translation.distance(Vec3::new(5.0, -3.0, 2.0) + crate::renderer::bridge::EYE_OFFSET) > 0.008,
             "position must lerp partway, not snap: {:?}",
             t.translation
         );

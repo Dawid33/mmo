@@ -8,19 +8,21 @@
 //! here touches the full-res pipeline. A key that is refreshed (re-receipt)
 //! or removed keeps its old root rendering until a replacement is visibly
 //! meshed (`retire_lod_roots`), so transitions never pop the horizon to
-//! empty.
+//! empty. A key handed over to the near window stays until that region's
+//! authoritative chunks have ALL meshed — the switch is one swap, not a LOD
+//! that vanishes while the near terrain fills in chunk by chunk.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::*;
 use game::lod::LodKey;
-use game::{LodPayload, RegionCoords, REGION_CHUNKS};
+use game::{LodPayload, RegionCoords};
 
-use super::bridge::Regions;
+use super::bridge::{PendingSnapshotVoxels, RegionRoots, VoxelData};
 use super::far_voxel::FarVoxelReady;
 use super::meshing::lod;
 use super::meshing::lod::LodRasterReady;
-use super::meshing::queue::ChunkKey;
+use super::meshing::visibility::ChunkConnectivity;
 use super::voxel_pull::ChunkQuads;
 
 /// Deadline for retiring/retired roots: if the replacement hasn't shown a
@@ -34,6 +36,12 @@ use super::voxel_pull::ChunkQuads;
 /// fresh replacement and terrain-change pushes are cadence-limited.
 pub const RETIREMENT_MAX_FRAMES: u32 = 600;
 
+/// Consecutive frames a near region must stay fully meshed before it
+/// replaces a LOD key: a chunk's quads are extracted and uploaded on the
+/// render sub-app a frame after they land (pipelined rendering), so despawning
+/// the LOD on the very frame the last mesh attached would flash that chunk.
+pub const NEAR_HANDOFF_HOLD_FRAMES: u32 = 3;
+
 /// A LOD event routed from the bridge (`drain_client_updates`), applied by
 /// `apply_lod_events` the same frame.
 pub enum LodEventMsg {
@@ -41,7 +49,8 @@ pub enum LodEventMsg {
     /// (replace-on-re-receipt).
     Data(LodKey, LodPayload),
     /// The ring assignment moved on: retire this key's render root.
-    Remove(LodKey),
+    /// `near_takeover` as on `ClientUpdateEvent::RemoveLod`.
+    Remove { key: LodKey, near_takeover: bool },
 }
 
 /// One key's render state: the live root, plus the superseded root while a
@@ -65,6 +74,13 @@ pub struct RetiredLod {
     pub entity: Entity,
     /// Frames since retirement — the deadline clock.
     pub frames: u32,
+    /// Retired because its region joined the near window: released only
+    /// once every region of the key is replaced (fully meshed near region or
+    /// meshed LOD cover), and exempt from the deadline — the server may take
+    /// seconds to generate the region, and a hole is the failure mode this
+    /// exists to prevent. Cannot leak: a region that leaves the near window
+    /// again is re-requested as LOD, and that key's mesh releases this one.
+    pub near_takeover: bool,
 }
 
 #[derive(Resource)]
@@ -96,6 +112,65 @@ impl Default for LodRings {
 /// case. The real fix is to keep cells packed and decode in the LOD mesh task;
 /// this only stops several payloads from stacking into one frame.
 pub const LOD_APPLY_CELLS_PER_FRAME: usize = 512;
+
+/// Cell mode: the home region's active cells, from
+/// `ClientUpdateEvent::ActiveCells`. Home-region LOD cells under them are
+/// hidden — those cells render at full detail from the sim.
+#[derive(Resource, Default, Debug)]
+pub struct HomeCellMask {
+    pub region: Option<RegionCoords>,
+    pub cells: BTreeSet<game::CellCoords>,
+}
+
+/// A masked LOD cell's grid, parked off `LodVoxelData` so both LOD paths
+/// drop it (brick residency reacts to the removal; raster also hides it).
+#[derive(Component)]
+pub struct LodMaskStash(pub game::lod::PackedLodGrid);
+
+/// Hide/unhide LOD cells under the home region's active cells (cell mode).
+/// Re-evaluates everything when the mask changed, else only new LOD cells.
+pub fn mask_home_lod(
+    mut commands: Commands,
+    mask: Res<HomeCellMask>,
+    cells: Query<(
+        Entity,
+        &lod::LodChunk,
+        &Transform,
+        &ChildOf,
+        Option<&lod::LodVoxelData>,
+        Option<&LodMaskStash>,
+        Ref<lod::LodChunk>,
+    )>,
+    roots: Query<&Transform, Without<lod::LodChunk>>,
+) {
+    let Some(home) = mask.region else { return };
+    let all = mask.is_changed();
+    for (e, chunk, tf, parent, data, stash, added) in &cells {
+        if !all && !added.is_added() {
+            continue;
+        }
+        let Ok(root) = roots.get(parent.parent()) else { continue };
+        let min = root.translation + tf.translation;
+        let size = (32 * chunk.factor) as f32;
+        let masked =
+            game::lod_cell_masked(home, &mask.cells, game::CELL_CHUNKS, [min.x, min.z], size);
+        match (masked, data, stash) {
+            (true, Some(d), None) => {
+                commands
+                    .entity(e)
+                    .insert((LodMaskStash(d.0.clone()), Visibility::Hidden))
+                    .remove::<lod::LodVoxelData>();
+            }
+            (false, None, Some(st)) => {
+                commands
+                    .entity(e)
+                    .insert((lod::LodVoxelData(st.0.clone()), Visibility::Inherited))
+                    .remove::<LodMaskStash>();
+            }
+            _ => {}
+        }
+    }
+}
 
 /// Drain `LodRings.pending`: spawn a root per `Data` payload (decoding the
 /// RLE grids; undecodable cells drop with a warning — wire data is
@@ -148,7 +223,7 @@ pub fn apply_lod_events(mut commands: Commands, mut rings: ResMut<LodRings>) {
                     }
                 }
             }
-            LodEventMsg::Remove(key) => {
+            LodEventMsg::Remove { key, near_takeover } => {
                 let Some(slot) = rings.roots.remove(&key) else {
                     continue;
                 };
@@ -159,6 +234,7 @@ pub fn apply_lod_events(mut commands: Commands, mut rings: ResMut<LodRings>) {
                     key,
                     entity: slot.root,
                     frames: 0,
+                    near_takeover,
                 });
             }
         }
@@ -247,8 +323,9 @@ fn spawn_lod_root(commands: &mut Commands, key: LodKey, payload: &LodPayload) ->
 /// Hence:
 /// - re-receipt: the slot's new `root` has a child carrying `Mesh3d`;
 /// - removal: some live slot with a meshed child covers one of the retired
-///   key's regions, OR the near window holds one of those regions and some
-///   `ChunkKey`ed meshed entity's key lies in its chunk bounds.
+///   key's regions, OR the near window holds one of those regions and it is
+///   fully meshed ([`near_regions_meshed`]) — for a near-window takeover,
+///   every region of the key must be replaced one of those two ways.
 ///
 /// "≥1 meshed child" (not all children) is deliberate: all-air cells never
 /// receive a `Mesh3d`, so an all-children predicate would always fall
@@ -257,16 +334,19 @@ fn spawn_lod_root(commands: &mut Commands, key: LodKey, payload: &LodPayload) ->
 ///
 /// Each root also carries a frame deadline (`retirement_max_frames`): a
 /// replacement that never meshes (all-air cells, a key released with no
-/// successor in view) must not pin the old root forever.
+/// successor in view) must not pin the old root forever. Near-window
+/// takeovers are exempt (see `RetiredLod::near_takeover`).
 pub fn retire_lod_roots(
     mut commands: Commands,
     mut rings: ResMut<LodRings>,
-    near: Res<Regions>,
+    near: Res<RegionRoots>,
     children: Query<&Children>,
     meshed: Query<(), ReadyLodCellFilter>,
-    keyed_meshes: Query<&ChunkKey, ReadyNearChunkFilter>,
+    unmeshed_near: Query<&ChildOf, UnmeshedNearChunkFilter>,
+    mut hold: Local<BTreeMap<RegionCoords, (Entity, u32)>>,
 ) {
     if rings.retired.is_empty() && rings.roots.values().all(|s| s.retiring.is_none()) {
+        hold.clear();
         return;
     }
     let max = rings.retirement_max_frames;
@@ -295,16 +375,17 @@ pub fn retire_lod_roots(
             covered.extend(key.regions());
         }
     }
-    let near_meshed = |rc: &RegionCoords| {
-        near.0.contains_key(rc) && {
-            let x0 = rc.x * REGION_CHUNKS as i32;
-            let z0 = rc.z * REGION_CHUNKS as i32;
-            let span = REGION_CHUNKS as i32;
-            keyed_meshes
-                .iter()
-                .any(|k| (x0..x0 + span).contains(&k.0[0]) && (z0..z0 + span).contains(&k.0[2]))
-        }
+    // Only a near-takeover retirement asks the near window; the scan behind
+    // it walks every unmeshed near chunk, which is the whole backlog while
+    // flying (~100k), so skip it when nobody needs the answer.
+    let near_ready = if rings.retired.iter().any(|r| r.near_takeover) {
+        near_regions_meshed(&near, &unmeshed_near, &mut hold)
+    } else {
+        // Unwatched frames break a stability streak.
+        hold.clear();
+        BTreeSet::new()
     };
+    let replaced_region = |rc: &RegionCoords| covered.contains(rc) || near_ready.contains(rc);
 
     let retired = std::mem::take(&mut rings.retired);
     rings.retired = retired
@@ -312,9 +393,12 @@ pub fn retire_lod_roots(
         .filter_map(|mut r| {
             r.frames += 1;
             let regions = r.key.regions();
-            let replaced =
-                regions.iter().any(|rc| covered.contains(rc)) || regions.iter().any(near_meshed);
-            if replaced || r.frames >= max {
+            let (replaced, expired) = if r.near_takeover {
+                (regions.iter().all(replaced_region), false)
+            } else {
+                (regions.iter().any(replaced_region), r.frames >= max)
+            };
+            if replaced || expired {
                 commands.entity(r.entity).despawn();
                 None
             } else {
@@ -330,13 +414,57 @@ type ReadyLodCellFilter = Or<(
     With<FarVoxelReady>,
     With<LodRasterReady>,
 )>;
-type ReadyNearChunkFilter = Or<(With<Mesh3d>, With<ChunkQuads>)>;
+/// A near chunk not yet on screen: its snapshot voxels are still being
+/// derived, or it has voxels but its first mesh has not attached
+/// (`apply_meshed_chunks` inserts `ChunkConnectivity` for every finished
+/// mesh, all-air ones included, and strips it when the voxels go away).
+type UnmeshedNearChunkFilter = Or<(
+    With<PendingSnapshotVoxels>,
+    (With<VoxelData>, Without<ChunkConnectivity>),
+)>;
+
+/// Near regions whose every chunk has meshed, stably for
+/// [`NEAR_HANDOFF_HOLD_FRAMES`]. `hold` tracks each region's streak against
+/// its root entity, so a replaced region (new root) starts over and a region
+/// that regresses (a chunk re-inserted before the LOD was released) resets.
+/// Remeshes of already-meshed chunks don't count against it: they keep their
+/// previous quads on screen until the new ones attach.
+fn near_regions_meshed(
+    near: &RegionRoots,
+    unmeshed: &Query<&ChildOf, UnmeshedNearChunkFilter>,
+    hold: &mut BTreeMap<RegionCoords, (Entity, u32)>,
+) -> BTreeSet<RegionCoords> {
+    // A region's chunks mostly iterate together: dedupe runs before the set
+    // insert (7.4 ms/frame over the flight backlog without it).
+    let mut busy: BTreeSet<Entity> = BTreeSet::new();
+    let mut last = None;
+    for parent in unmeshed.iter().map(ChildOf::parent) {
+        if last != Some(parent) {
+            busy.insert(parent);
+            last = Some(parent);
+        }
+    }
+    hold.retain(|rc, _| near.0.contains_key(rc));
+    let mut ready = BTreeSet::new();
+    for (&rc, &root) in &near.0 {
+        let streak = hold.entry(rc).or_insert((root, 0));
+        if streak.0 != root || busy.contains(&root) {
+            *streak = (root, 0);
+            continue;
+        }
+        streak.1 = streak.1.saturating_add(1);
+        if streak.1 >= NEAR_HANDOFF_HOLD_FRAMES {
+            ready.insert(rc);
+        }
+    }
+    ready
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use game::lod::PackedLodGrid;
-    use game::{BlockId, GameDataUpdate, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
 
     use super::super::far_voxel::FarVoxelReady;
     use super::super::meshing::lod::{LodChunk, LodVoxelData};
@@ -345,16 +473,15 @@ mod tests {
     use super::super::meshing::records::QuadRecord;
     use super::super::voxel_pull::ChunkQuads;
 
-    use bevy::asset::RenderAssetUsages;
-    use bevy::mesh::{Mesh, PrimitiveTopology};
 
     /// The full meshing/LOD pipeline (`pipeline_app`) plus the two LOD-ring
     /// systems and the near-window exclusion resource.
     fn rings_app() -> App {
         let mut app = pipeline_app(MeshBudgets::default());
-        app.init_resource::<Regions>()
+        app.init_resource::<RegionRoots>()
             .init_resource::<LodRings>()
-            .add_systems(Update, (apply_lod_events, retire_lod_roots).chain());
+            .init_resource::<HomeCellMask>()
+            .add_systems(Update, (apply_lod_events, mask_home_lod, retire_lod_roots).chain());
         app
     }
 
@@ -421,16 +548,6 @@ mod tests {
         assert!(app.world().resource::<LodRings>().pending.is_empty());
     }
 
-    /// An (empty) mesh handle — `retire_lod_roots` only checks `Mesh3d`
-    /// presence.
-    fn meshed_marker(app: &mut App) -> Mesh3d {
-        let mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        Mesh3d(app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh))
-    }
-
     fn pulled_marker() -> ChunkQuads {
         ChunkQuads(std::sync::Arc::new(vec![QuadRecord([0, 0])]))
     }
@@ -490,39 +607,6 @@ mod tests {
         assert!(app.world().resource::<LodRings>().roots[&key]
             .retiring
             .is_none());
-    }
-
-    #[test]
-    fn removed_key_releases_when_pulled_near_chunk_covers_its_region() {
-        let mut app = rings_app();
-        let key = LodKey {
-            factor: 4,
-            coords: [1, -1],
-        };
-        let old_root = app.world_mut().spawn_empty().id();
-        app.world_mut()
-            .resource_mut::<LodRings>()
-            .retired
-            .push(RetiredLod {
-                key,
-                entity: old_root,
-                frames: 0,
-            });
-        let (_keep_send, recv) = crossbeam::channel::unbounded::<GameDataUpdate>();
-        app.world_mut()
-            .resource_mut::<Regions>()
-            .0
-            .insert(RegionCoords::new(1, -1), recv);
-        app.world_mut()
-            .spawn((ChunkKey([32, 0, -32]), pulled_marker()));
-
-        app.update();
-
-        assert!(
-            app.world().get_entity(old_root).is_err(),
-            "pulled near chunk provides coverage"
-        );
-        assert!(app.world().resource::<LodRings>().retired.is_empty());
     }
 
     #[test]
@@ -616,7 +700,7 @@ mod tests {
             .is_some_and(|r| root_meshed(app, r))));
         let root = slot_root(&app, key).unwrap();
 
-        push_event(&mut app, LodEventMsg::Remove(key));
+        push_event(&mut app, LodEventMsg::Remove { key, near_takeover: false });
         app.update();
         assert!(slot_root(&app, key).is_none(), "slot gone after Remove");
         assert!(
@@ -645,7 +729,7 @@ mod tests {
             .is_some_and(|r| root_meshed(app, r))));
         let old_root = slot_root(&app, key4).unwrap();
 
-        push_event(&mut app, LodEventMsg::Remove(key4));
+        push_event(&mut app, LodEventMsg::Remove { key: key4, near_takeover: false });
         for _ in 0..5 {
             app.update();
         }
@@ -667,48 +751,166 @@ mod tests {
         assert!(app.world().resource::<LodRings>().retired.is_empty());
     }
 
+    /// A near region as the bridge spawns it from a snapshot: a root at the
+    /// region's world offset and one chunk child per `chunk_origins` entry
+    /// (region-local), each still waiting for its off-thread voxels.
+    fn spawn_near_region(app: &mut App, rc: RegionCoords, chunk_origins: &[[f32; 3]]) -> Vec<Entity> {
+        let offset = rc.world_offset();
+        let root = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2])),
+                Visibility::default(),
+            ))
+            .id();
+        app.world_mut().resource_mut::<RegionRoots>().0.insert(rc, root);
+        chunk_origins
+            .iter()
+            .map(|&origin| {
+                app.world_mut()
+                    .spawn((
+                        Transform::from_translation(Vec3::from_array(origin)),
+                        Visibility::default(),
+                        PendingSnapshotVoxels,
+                        ChildOf(root),
+                    ))
+                    .id()
+            })
+            .collect()
+    }
+
+    /// The snapshot voxels land, as `bridge::apply_snapshot_voxels` does it.
+    fn land_voxels(app: &mut App, chunk: Entity, voxels: Vec<Voxel>) {
+        app.world_mut()
+            .entity_mut(chunk)
+            .insert(VoxelData::new(voxels))
+            .remove::<PendingSnapshotVoxels>();
+    }
+
+    fn meshed_lod_root(app: &mut App, key: LodKey) -> Entity {
+        push_event(app, LodEventMsg::Data(key, solid_payload([0, 0, 0])));
+        assert!(wait_until(app, |app| slot_root(app, key)
+            .is_some_and(|r| root_meshed(app, r))));
+        slot_root(app, key).unwrap()
+    }
+
+    /// The handoff this module exists for: a LOD key taken over by the near
+    /// window keeps rendering while the region's chunks mesh one by one, and
+    /// is released only once ALL of them (all-air ones included) are on
+    /// screen — not when the first one lands.
     #[test]
-    fn removed_key_releases_when_a_near_chunk_meshes_inside_its_region() {
+    fn near_takeover_keeps_lod_until_the_whole_region_is_meshed() {
+        let mut app = rings_app();
+        let rc = RegionCoords::new(1, -1);
+        let key = LodKey {
+            factor: 4,
+            coords: [rc.x, rc.z],
+        };
+        let lod_root = meshed_lod_root(&mut app, key);
+
+        push_event(&mut app, LodEventMsg::Remove { key, near_takeover: true });
+        let chunks = spawn_near_region(&mut app, rc, &[[0.0; 3], [32.0, 0.0, 0.0], [0.0, 32.0, 0.0]]);
+
+        // Two of three chunks mesh (one solid, one all air): the third is
+        // still waiting for voxels, so the LOD must stay.
+        land_voxels(&mut app, chunks[0], one_solid_grid());
+        land_voxels(&mut app, chunks[2], vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+        assert!(wait_until(&mut app, |app| {
+            [chunks[0], chunks[2]]
+                .iter()
+                .all(|&c| app.world().entity(c).contains::<ChunkConnectivity>())
+        }));
+        for _ in 0..NEAR_HANDOFF_HOLD_FRAMES + 5 {
+            app.update();
+        }
+        assert!(
+            app.world().get_entity(lod_root).is_ok(),
+            "a partly meshed region must not release its LOD"
+        );
+
+        // Voxels without a mesh yet still count as not rendered.
+        land_voxels(&mut app, chunks[1], one_solid_grid());
+        app.update();
+        assert!(app.world().get_entity(lod_root).is_ok());
+
+        assert!(
+            wait_until(&mut app, |app| app.world().get_entity(lod_root).is_err()),
+            "LOD released once every chunk of the region is meshed"
+        );
+        assert!(app.world().entity(chunks[1]).contains::<ChunkConnectivity>());
+        assert!(app.world().resource::<LodRings>().retired.is_empty());
+    }
+
+    /// Server genesis can take seconds: a takeover waits for the region
+    /// however long that is, instead of popping on the frame deadline.
+    #[test]
+    fn near_takeover_ignores_the_retirement_deadline() {
+        let mut app = rings_app();
+        app.world_mut()
+            .resource_mut::<LodRings>()
+            .retirement_max_frames = 3;
+        let rc = RegionCoords::new(0, 0);
+        let key = LodKey {
+            factor: 2,
+            coords: [0, 0],
+        };
+        let lod_root = meshed_lod_root(&mut app, key);
+
+        push_event(&mut app, LodEventMsg::Remove { key, near_takeover: true });
+        for _ in 0..20 {
+            app.update();
+        }
+        assert!(
+            app.world().get_entity(lod_root).is_ok(),
+            "region not even arrived yet: the LOD must keep rendering"
+        );
+
+        let chunks = spawn_near_region(&mut app, rc, &[[0.0; 3]]);
+        land_voxels(&mut app, chunks[0], one_solid_grid());
+        assert!(wait_until(&mut app, |app| app.world().get_entity(lod_root).is_err()));
+    }
+
+    /// A takeover whose region leaves the near window again before it
+    /// arrives is released by the LOD key re-requested for it instead.
+    #[test]
+    fn near_takeover_releases_on_returning_lod_cover() {
+        let mut app = rings_app();
+        let key = LodKey {
+            factor: 2,
+            coords: [3, 3],
+        };
+        let lod_root = meshed_lod_root(&mut app, key);
+        push_event(&mut app, LodEventMsg::Remove { key, near_takeover: true });
+        app.update();
+        let new_root = meshed_lod_root(&mut app, key);
+        assert_ne!(new_root, lod_root);
+        assert!(wait_until(&mut app, |app| app.world().get_entity(lod_root).is_err()));
+        assert!(app.world().resource::<LodRings>().retired.is_empty());
+    }
+
+    /// A ring reassignment (not a takeover) still releases on a meshed chunk
+    /// of a complete near region — and never on an incomplete one.
+    #[test]
+    fn plain_removal_waits_for_a_fully_meshed_near_region() {
         let mut app = rings_app();
         app.world_mut()
             .resource_mut::<LodRings>()
             .retirement_max_frames = u32::MAX;
+        let rc = RegionCoords::new(-2, 1);
         let key = LodKey {
             factor: 4,
-            coords: [1, -1],
-        }; // chunk keys x 32..64, z -32..0
-        push_event(&mut app, LodEventMsg::Data(key, solid_payload([0, 0, 0])));
-        assert!(wait_until(&mut app, |app| slot_root(app, key)
-            .is_some_and(|r| root_meshed(app, r))));
-        let root = slot_root(&app, key).unwrap();
-
-        // Near-window takeover of the region.
-        push_event(&mut app, LodEventMsg::Remove(key));
-        let (_keep_send, recv) = crossbeam::channel::unbounded::<GameDataUpdate>();
-        app.world_mut()
-            .resource_mut::<Regions>()
-            .0
-            .insert(RegionCoords::new(1, -1), recv);
-
-        // A meshed chunk OUTSIDE the region's bounds must not release it.
-        let marker = meshed_marker(&mut app);
-        app.world_mut().spawn((ChunkKey([0, 0, 0]), marker));
-        for _ in 0..3 {
+            coords: [rc.x, rc.z],
+        };
+        let lod_root = meshed_lod_root(&mut app, key);
+        push_event(&mut app, LodEventMsg::Remove { key, near_takeover: false });
+        let chunks = spawn_near_region(&mut app, rc, &[[0.0; 3], [0.0, 0.0, 32.0]]);
+        land_voxels(&mut app, chunks[0], one_solid_grid());
+        for _ in 0..20 {
             app.update();
         }
-        assert!(
-            app.world().get_entity(root).is_ok(),
-            "out-of-region mesh must not count"
-        );
-
-        // One inside the bounds does.
-        let marker = meshed_marker(&mut app);
-        app.world_mut().spawn((ChunkKey([32, 0, -32]), marker));
-        assert!(
-            wait_until(&mut app, |app| app.world().get_entity(root).is_err()),
-            "retired root despawns once a region chunk is meshed"
-        );
-        assert!(app.world().resource::<LodRings>().retired.is_empty());
+        assert!(app.world().get_entity(lod_root).is_ok());
+        land_voxels(&mut app, chunks[1], one_solid_grid());
+        assert!(wait_until(&mut app, |app| app.world().get_entity(lod_root).is_err()));
     }
 
     #[test]

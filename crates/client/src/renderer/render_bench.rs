@@ -168,7 +168,13 @@ pub struct BenchmarkReadiness {
 
 impl BenchmarkReadiness {
     fn gates_ready(&self, scale: &WorldScale) -> bool {
-        let has_full_lod_table = scale.lod_table.iter().all(|&(_, factor)| {
+        // A ring whose bound the near window already reaches has no keys to
+        // wait for (the 5x5 window absorbs the whole factor-2 ring).
+        let has_full_lod_table = scale
+            .lod_table
+            .iter()
+            .filter(|&&(bound, _)| bound > scale.near_radius)
+            .all(|&(_, factor)| {
             self.ready_lod_counts
                 .get(&factor)
                 .is_some_and(|&count| count > 0)
@@ -1522,7 +1528,10 @@ mod tests {
     #[test]
     fn production_snapshot_requires_every_expected_lod_key() {
         let viewer = game::RegionCoords::new(0, 0);
-        let near_regions = viewer.window_3x3().into_iter().collect::<BTreeSet<_>>();
+        let near_regions = viewer
+            .window_radius(WorldScale::FULL.near_radius)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let table = game::lod::LOD_RING_TABLE;
         let expected = expected_lod_keys(viewer, &near_regions, table);
 
@@ -1575,7 +1584,7 @@ mod tests {
         };
         assert!(one_region.gates_ready(&WorldScale::TINY));
         assert!(!one_region.gates_ready(&WorldScale::SMALL), "small needs a factor-2 cell");
-        assert!(!one_region.gates_ready(&WorldScale::FULL), "full needs 9 regions");
+        assert!(!one_region.gates_ready(&WorldScale::FULL), "full needs 25 regions");
 
         let mut tracker = BenchmarkRuntime::new(WorldScale::TINY, LOAD_TIMEOUT).readiness;
         for _ in 0..(STABLE_READY_FRAMES - 1) {

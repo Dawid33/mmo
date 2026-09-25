@@ -4,14 +4,11 @@ use log::info;
 use na::{clamp, Matrix4, Perspective3, UnitQuaternion, Vector3, Vector4};
 use ordered_float::OrderedFloat;
 use parry3d::math::Real;
-use rapier3d::math::Vector;
 use rapier3d::prelude::RigidBodyHandle;
 use std::f32::consts::FRAC_PI_2;
 
-use rapier3d::control::KinematicCharacterController;
-use rapier3d::prelude::QueryFilter;
-
 use crate::input::Key;
+use crate::movement::{self, MoveKeys};
 use crate::{Controller, GameData, GameDataUpdate, Undo};
 
 pub const ASPECT: f32 = 16.0 / 9.0;
@@ -176,10 +173,9 @@ impl Controller for CameraController {
                 ));
             }
 
-            if !client.fps_cam_mode {
-                continue;
-            }
-
+            // The body obeys gravity whether or not the client is driving it;
+            // a released cursor (menus, startup) only silences the input.
+            let active = client.fps_cam_mode;
             let handle = ecs.rigidbody.get(e_id).clone();
             // Look scalars are authoritative; the body quaternion is derived.
             let (yaw0, pitch0) = {
@@ -187,76 +183,51 @@ impl Controller for CameraController {
                 (cam.yaw, cam.pitch)
             };
             let b = data.physics.bodies.get(handle).unwrap();
-            let mut linvel = Vector::zeros();
-            // 0.1 * 80 = 8 units/tick = 0.5 m/tick = 10 m/s at 1/16 m units.
-            const SPEED: Real = OrderedFloat(80.0);
 
-            if client.input.key_held(&Key::KeyW) {
-                linvel.z = Real::from(-0.1) * SPEED
+            let motion0 = (*ecs.motion.try_get(e_id)).unwrap_or_default();
+            let mut motion = motion0;
+            let held = |key: Key| active && client.input.key_held(&key);
+            let keys = MoveKeys {
+                forward: held(Key::KeyW),
+                back: held(Key::KeyS),
+                left: held(Key::KeyA),
+                right: held(Key::KeyD),
+                jump_pressed: active && client.input.key_pressed(&Key::Space),
+                jump_held: held(Key::Space),
+                descend: held(Key::ShiftLeft),
+                sprint: held(Key::ControlLeft),
+            };
+            let desired = movement::plan(&mut motion, &keys, yaw0, **data.tick as u64);
+            let t = b.translation().clone();
+            // Collision-corrected movement: slide along / stop at terrain
+            // instead of teleporting through it. Queries are read-only; the
+            // body write below is the footprint-sized mutate_body_safe entry.
+            let (corrected, grounded) = movement::sweep_character(
+                &data.physics.broad_phase,
+                &data.physics.narrow_phase,
+                &data.physics.bodies,
+                &data.physics.colliders,
+                handle,
+                &motion,
+                desired,
+            );
+            movement::settle(&mut motion, &desired, &corrected, grounded);
+            if motion != motion0 {
+                // set_safe, not an undo_scope on the value: a body that
+                // arrived without movement state has an empty slot.
+                ecs.motion.set_safe(e_id, Some(motion));
             }
-            if client.input.key_held(&Key::KeyS) {
-                linvel.z = Real::from(0.1) * SPEED
+            if corrected != Vector3::zeros() {
+                // Footprint-sized entry: set_next_kinematic_* also wakes
+                // the body and marks it modified, but all of that lives in
+                // the body slot + modified-mark that mutate_body_safe
+                // restores — no whole-set snapshot.
+                data.physics.bodies.mutate_body_safe(handle, move |b| {
+                    b.set_next_kinematic_translation(t + corrected)
+                });
             }
-            if client.input.key_held(&Key::KeyA) {
-                linvel.x = Real::from(-0.1) * SPEED
-            }
-            if client.input.key_held(&Key::KeyD) {
-                linvel.x = Real::from(0.1) * SPEED
-            }
-            // Horizontal movement follows yaw only — walk speed stays full
-            // regardless of pitch (Minecraft behavior).
-            let mut linvel = crate::yaw_quat(yaw0).transform_vector(&linvel);
-            linvel.y = Real::from(0.0);
-
-            if client.input.key_held(&Key::Space) {
-                linvel.y = Real::from(0.1) * SPEED
-            }
-            if client.input.key_held(&Key::ControlLeft) {
-                linvel.y = Real::from(-0.1) * SPEED
-            }
-            if linvel != Vector3::zeros() {
-                let t = b.translation().clone();
-                // Collision-corrected movement: slide along / stop at terrain
-                // instead of teleporting through it. Queries are read-only;
-                // the sole write below stays under the change() snapshot.
-                let corrected = match b.colliders().first().copied() {
-                    Some(collider_handle) => {
-                        let collider = data.physics.colliders.get(collider_handle).unwrap();
-                        let queries = data.physics.broad_phase.as_query_pipeline(
-                            data.physics.narrow_phase.query_dispatcher(),
-                            &data.physics.bodies,
-                            &data.physics.colliders,
-                            QueryFilter::default().exclude_rigid_body(handle),
-                        );
-                        let controller = KinematicCharacterController {
-                            // Pure fly movement: no downward snap while
-                            // skimming the ground.
-                            snap_to_ground: None,
-                            ..Default::default()
-                        };
-                        controller
-                            .move_shape(
-                                Real::from(1.0),
-                                &queries,
-                                collider.shape(),
-                                collider.position(),
-                                linvel,
-                                |_| {},
-                            )
-                            .translation
-                    }
-                    // No collider on the mover: keep the uncorrected motion.
-                    None => linvel,
-                };
-                if corrected != Vector3::zeros() {
-                    // Footprint-sized entry: set_next_kinematic_* also wakes
-                    // the body and marks it modified, but all of that lives in
-                    // the body slot + modified-mark that mutate_body_safe
-                    // restores — no whole-set snapshot.
-                    data.physics.bodies.mutate_body_safe(handle, move |b| {
-                        b.set_next_kinematic_translation(t + corrected)
-                    });
-                }
+            if !active {
+                continue;
             }
 
             // --- Look: accumulate mouse delta into yaw/pitch scalars ---

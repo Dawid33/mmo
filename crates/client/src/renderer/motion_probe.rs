@@ -77,7 +77,7 @@ pub fn probe_camera_motion(
     let s = &mut *state;
     let start = *s.window_start.get_or_insert(now);
 
-    let cell = (target.pos / CHUNK).floor().as_ivec3();
+    let cell = (target.goal() / CHUNK).floor().as_ivec3();
     if s.last_cell.is_some_and(|last| last != cell) {
         s.crossings += 1;
         s.crossing_frames_left = CROSSING_FRAMES;
@@ -90,7 +90,7 @@ pub fn probe_camera_motion(
     if crossing { s.crossing_frame_ms.add(frame_ms) } else { s.frame_ms.add(frame_ms) }
 
     if let Some(last) = s.last_target {
-        let step = target.pos - last;
+        let step = target.goal() - last;
         if step.length() > MIN_STEP {
             if let Some(heading) = s.heading {
                 let along = step.dot(heading);
@@ -107,11 +107,11 @@ pub fn probe_camera_motion(
             s.camera_back.add(-along);
         }
     }
-    let trail = tf.translation.distance(target.pos);
+    let trail = tf.translation.distance(target.goal());
     if trail > MIN_STEP {
         if crossing { s.crossing_trail.add(trail) } else { s.trail.add(trail) }
     }
-    s.last_target = Some(target.pos);
+    s.last_target = Some(target.goal());
     s.last_camera = Some(tf.translation);
 
     if now.duration_since(start) < REPORT_INTERVAL {
@@ -147,4 +147,133 @@ pub fn probe_camera_motion(
         last_cell: s.last_cell,
         ..Default::default()
     };
+}
+
+/// How long after a home-region flip frames still count toward that crossing.
+const REGION_CROSSING_WINDOW: Duration = Duration::from_secs(2);
+
+/// Motion of the sim pose between frames. The pose only moves when a tick lands
+/// (`TICK_RATE`), so a `hold` of about one tick is the steady state; a pause
+/// shows as a hold several ticks long.
+#[derive(Default)]
+struct MotionStats {
+    frames: u32,
+    frame_max_ms: f32,
+    /// Frames over 25 ms.
+    long_frames: u32,
+    hold_max_ms: f32,
+    /// Largest single-frame step of the sim pose (a catch-up snap).
+    jump_max: f32,
+    back_n: u32,
+    back_max: f32,
+}
+
+#[derive(Default)]
+pub struct RegionCrossingProbe {
+    home: Option<game::RegionCoords>,
+    last_goal: Option<Vec3>,
+    heading: Option<Vec3>,
+    held_since: Option<Instant>,
+    /// Open crossing: flip instant, (from, to).
+    open: Option<(Instant, game::RegionCoords, game::RegionCoords)>,
+    before: MotionStats,
+    after: MotionStats,
+}
+
+/// One `[perf] event=region_crossing_render` line per home-region flip (a
+/// handoff between two region threads, which also shifts the near window): the
+/// [`REGION_CROSSING_WINDOW`] after the flip against the flight before it.
+/// Pairs with the game thread's `region_crossing` line.
+pub fn probe_region_crossing(
+    time: Res<Time<Real>>,
+    hud: Res<super::hud::HudStatus>,
+    cameras: Query<(&Camera, &SimTarget), With<Camera3d>>,
+    mut state: Local<RegionCrossingProbe>,
+) {
+    let Some(target) = cameras.iter().find(|(c, _)| c.is_active).map(|(_, t)| t) else {
+        return;
+    };
+    let now = Instant::now();
+    let s = &mut *state;
+    let goal = target.goal();
+
+    if let (Some(home), Some(prev)) = (hud.home_region, s.home) {
+        if home != prev {
+            if let Some((at, from, to)) = s.open.take() {
+                // Crossed again inside the window: close the old one early.
+                report_region_crossing(at, from, to, &s.before, &s.after);
+                s.before = std::mem::take(&mut s.after);
+            }
+            s.open = Some((now, prev, home));
+        }
+    }
+    s.home = hud.home_region.or(s.home);
+
+    let stats = if s.open.is_some() { &mut s.after } else { &mut s.before };
+    let frame_ms = time.delta_secs() * 1000.0;
+    stats.frames += 1;
+    stats.frame_max_ms = stats.frame_max_ms.max(frame_ms);
+    if frame_ms > 25.0 {
+        stats.long_frames += 1;
+    }
+    if let Some(last) = s.last_goal {
+        let step = goal - last;
+        if step.length() > MIN_STEP {
+            if let Some(since) = s.held_since.take() {
+                stats.hold_max_ms = stats.hold_max_ms.max(now.duration_since(since).as_secs_f32() * 1000.0);
+            }
+            stats.jump_max = stats.jump_max.max(step.length());
+            if let Some(heading) = s.heading {
+                let along = step.dot(heading);
+                if along < 0.0 {
+                    stats.back_n += 1;
+                    stats.back_max = stats.back_max.max(-along);
+                }
+            }
+            s.heading = Some(step.normalize());
+        } else if s.heading.is_some() {
+            s.held_since.get_or_insert(now);
+        }
+    }
+    s.last_goal = Some(goal);
+
+    if let Some((at, from, to)) = s.open {
+        if now.duration_since(at) >= REGION_CROSSING_WINDOW {
+            report_region_crossing(at, from, to, &s.before, &s.after);
+            s.open = None;
+            s.before = std::mem::take(&mut s.after);
+        }
+    }
+}
+
+fn report_region_crossing(
+    _at: Instant,
+    from: game::RegionCoords,
+    to: game::RegionCoords,
+    before: &MotionStats,
+    after: &MotionStats,
+) {
+    game::perf_event!(
+        "region_crossing_render",
+        "from={},{} to={},{} | after: frames={} frame_max_ms={:.1} long_frames={} hold_max_ms={:.0} \
+         jump_max={:.1}u back={} back_max={:.1}u | before: frames={} frame_max_ms={:.1} long_frames={} \
+         hold_max_ms={:.0} jump_max={:.1}u back={}",
+        from.x,
+        from.z,
+        to.x,
+        to.z,
+        after.frames,
+        after.frame_max_ms,
+        after.long_frames,
+        after.hold_max_ms,
+        after.jump_max,
+        after.back_n,
+        after.back_max,
+        before.frames,
+        before.frame_max_ms,
+        before.long_frames,
+        before.hold_max_ms,
+        before.jump_max,
+        before.back_n
+    );
 }

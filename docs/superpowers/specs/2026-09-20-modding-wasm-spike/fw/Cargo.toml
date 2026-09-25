@@ -1,0 +1,8 @@
+[package]
+name = "fw"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+finite-wasm = { version = "0.6.1", features = ["instrument"] }
+wasm-encoder = { version = "0.228.0", features = ["wasmparser"] }
+[workspace]

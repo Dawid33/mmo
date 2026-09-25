@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use game::{GameEventKind, InputEvent};
 
 use super::{GameEvents, LocalPlayer};
@@ -104,12 +104,17 @@ pub fn forward_input(
     time: Res<Time>,
     coalesce_window: Res<MouseCoalesceWindow>,
     mut coalescer: Local<MouseCoalescer>,
-    window: Query<&Window, With<PrimaryWindow>>,
+    window: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     mut last_size: Local<Option<(u32, u32)>>,
     player: Res<LocalPlayer>,
     game: Res<GameEvents>,
+    cursor: Option<Res<super::cursor::CursorPolicy>>,
 ) {
     let Some(player) = player.0 else { return };
+    // A client-local overlay (dev panel, chat) owns the pointer: its clicks and
+    // the mouse travel to reach it must not break blocks or turn the camera.
+    // Releases still go through so a button held when it opened never sticks.
+    let overlay_open = cursor.is_some_and(|c| c.overlay_open);
     let send = |ev: InputEvent| {
         let _ = game.0.send(GameEventKind::PlayerInput(player, ev));
     };
@@ -130,18 +135,29 @@ pub fn forward_input(
     // A press flushes the window first: the camera shows the per-frame look
     // (`look.rs`), so a click must reach the sim after all the motion that
     // aimed it, or an edit would hit the block the crosshair just left.
-    let pressing = buttons.get_just_pressed().next().is_some();
+    // Raw mouse motion arrives from the device whether or not this window has
+    // the pointer: only a grabbed cursor in a focused window turns the camera
+    // (as `look::integrate_local_look`). Otherwise moving the mouse over
+    // another window — alt-tabbed away, or beside an autopilot run, whose
+    // `FpsCam` input never grabs — turned the player.
+    let pointer_ours = window
+        .single()
+        .is_ok_and(|(w, c)| w.focused && c.grab_mode != CursorGrabMode::None);
+    let delta = if overlay_open || !pointer_ours { Vec2::ZERO } else { motion.delta };
+    let pressing = !overlay_open && buttons.get_just_pressed().next().is_some();
     let window_len = if pressing { Duration::ZERO } else { coalesce_window.0 };
-    if let Some(sum) = coalescer.accumulate(motion.delta, time.delta(), window_len) {
+    if let Some(sum) = coalescer.accumulate(delta, time.delta(), window_len) {
         send(InputEvent::MouseMotion { dx: sum.x, dy: sum.y });
     }
-    for b in buttons.get_just_pressed() {
-        send(InputEvent::MouseButton { button: map_button(*b), pressed: true });
+    if !overlay_open {
+        for b in buttons.get_just_pressed() {
+            send(InputEvent::MouseButton { button: map_button(*b), pressed: true });
+        }
     }
     for b in buttons.get_just_released() {
         send(InputEvent::MouseButton { button: map_button(*b), pressed: false });
     }
-    if let Ok(w) = window.single() {
+    if let Ok((w, _)) = window.single() {
         let size = (w.physical_width(), w.physical_height());
         if *last_size != Some(size) {
             if last_size.is_some() {

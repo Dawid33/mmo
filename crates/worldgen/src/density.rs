@@ -21,6 +21,11 @@ pub enum DensityFn {
     Const(f64),
     /// 2D noise `idx`, sampled at `(x, z) * xz_scale` (meters).
     Noise { idx: usize, xz_scale: f64 },
+    /// 2D noise `idx` sampled at `((x + shift_x) * xz_scale, (z + shift_z) *
+    /// xz_scale)`: a domain warp, shifts in meters. Shifting by another
+    /// low-frequency noise bends round noise blobs into long coherent lines
+    /// (the pipeline's mountain ranges).
+    WarpedNoise { idx: usize, xz_scale: f64, shift_x: Box<DensityFn>, shift_z: Box<DensityFn> },
     /// Linear ramp in `y` from `from_v` at `from_y` to `to_v` at `to_y`, clamped.
     YGradient { from_y: f64, to_y: f64, from_v: f64, to_v: f64 },
     Add(Box<DensityFn>, Box<DensityFn>),
@@ -51,6 +56,12 @@ impl Clone for DensityFn {
         match self {
             DensityFn::Const(v) => DensityFn::Const(*v),
             DensityFn::Noise { idx, xz_scale } => DensityFn::Noise { idx: *idx, xz_scale: *xz_scale },
+            DensityFn::WarpedNoise { idx, xz_scale, shift_x, shift_z } => DensityFn::WarpedNoise {
+                idx: *idx,
+                xz_scale: *xz_scale,
+                shift_x: shift_x.clone(),
+                shift_z: shift_z.clone(),
+            },
             DensityFn::YGradient { from_y, to_y, from_v, to_v } => {
                 DensityFn::YGradient { from_y: *from_y, to_y: *to_y, from_v: *from_v, to_v: *to_v }
             }
@@ -109,6 +120,11 @@ impl DensityFn {
         match self {
             DensityFn::Const(v) => *v,
             DensityFn::Noise { idx, xz_scale } => noises.0[*idx].sample2(x * xz_scale, z * xz_scale),
+            DensityFn::WarpedNoise { idx, xz_scale, shift_x, shift_z } => {
+                let wx = x + shift_x.eval(x, y, z, noises);
+                let wz = z + shift_z.eval(x, y, z, noises);
+                noises.0[*idx].sample2(wx * xz_scale, wz * xz_scale)
+            }
             DensityFn::YGradient { from_y, to_y, from_v, to_v } => {
                 let t = ((y - from_y) / (to_y - from_y)).clamp(0.0, 1.0);
                 from_v + t * (to_v - from_v)
@@ -192,6 +208,19 @@ mod tests {
         };
         let d = DensityFn::spline_of(DensityFn::Const(1.0), s);
         assert_eq!(d.eval(0.0, 0.0, 0.0, &n), 10.0);
+    }
+
+    #[test]
+    fn warped_noise_shifts_the_sample_point() {
+        let noises = NoiseSet(vec![OctaveNoise::new(1, -2, vec![1.0])]);
+        let warped = DensityFn::WarpedNoise {
+            idx: 0,
+            xz_scale: 0.5,
+            shift_x: Box::new(DensityFn::Const(3.0)),
+            shift_z: Box::new(DensityFn::Const(-7.0)),
+        };
+        let plain = DensityFn::Noise { idx: 0, xz_scale: 0.5 };
+        assert_eq!(warped.eval(5.0, 0.0, 6.0, &noises), plain.eval(8.0, 0.0, -1.0, &noises));
     }
 
     #[test]

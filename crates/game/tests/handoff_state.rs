@@ -100,6 +100,8 @@ fn bundle(src: RegionCoords, key: game::EntityKey, client: game::ClientId, x: f3
         has_camera: true,
         yaw: Real::from(0.0),
         pitch: Real::from(0.0),
+        motion: Some(game::Motion::default()),
+        slime: None,
         client: Some((client, Client::default())),
         source_region: src,
         source_key: key,
@@ -146,6 +148,36 @@ fn arrival_creates_player_with_client_state_and_holds_hash_bar() {
     assert_eq!(t.x, Real::from(2.0), "arrives at the (rebased) bundle pose");
     rb.rollback();
     assert_eq!(before, crc(&rb));
+}
+
+#[test]
+fn arrival_preserves_movement_state() {
+    // A player flying (or falling) across a seam must keep flying (or keep
+    // its fall speed) in the receiving region.
+    let (mut donor_rb, src_key) = donor();
+    let src = RegionCoords::new(0, 0);
+    let motion = game::Motion {
+        vel_y: Real::from(-12.5),
+        grounded: false,
+        flying: true,
+        last_jump_tap: Some(41),
+    };
+
+    donor_rb.new_transaction();
+    donor_rb.data.clients.insert(9, Client::default());
+    donor_rb.data.ecs.motion.set_safe(src_key, Some(motion));
+    donor_rb.forget();
+
+    donor_rb.new_transaction();
+    let bundle = donor_rb.extract_entity_safe(src_key, src);
+    assert_eq!(bundle.motion, Some(motion));
+
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut rb = Rollback::new(Some(send));
+    rb.new_transaction();
+    rb.apply_arrival(bundle);
+    let e = *rb.data.player_entites.get(&9).unwrap();
+    assert_eq!(*rb.data.ecs.motion.try_get(e), Some(motion));
 }
 
 #[test]

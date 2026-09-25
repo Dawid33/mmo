@@ -59,6 +59,7 @@ fn cull(@builtin(global_invocation_id) invocation: vec3<u32>) {
 
 #import bevy_pbr::mesh_view_bindings as view_bindings
 #import bevy_pbr::mesh_view_types
+#import bevy_pbr::fog::{linear_fog, exponential_fog, exponential_squared_fog, atmospheric_fog}
 #import bevy_pbr::view_transformations::{
     frag_coord_to_ndc,
     position_ndc_to_world,
@@ -539,6 +540,34 @@ fn ao_shade(levels: vec4<u32>, local_position: vec3<f32>, normal: vec3<i32>) -> 
     return mix(a, b, uv.y);
 }
 
+// Same fade as voxel_pull.wgsl: baked AO gone at one block per cell.
+const AO_FADE_LOG2: f32 = 4.0;
+// Hemisphere ambient and distant-riser fade — locked to voxel_pull.wgsl.
+const SKY_SIDE: f32 = 0.75;
+const RISER_FADE_START_PX: f32 = 24.0;
+const RISER_FADE_END_PX: f32 = 6.0;
+
+// Bevy's distance fog without directional in-scattering — copy of
+// voxel_pull.wgsl's apply_distance_fog.
+fn apply_distance_fog(color: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> {
+#ifdef DISTANCE_FOG
+    let fog = view_bindings::fog;
+    let distance = length(world_position - view_bindings::view.world_position);
+    let c = vec4<f32>(color, 1.0);
+    let none = vec3<f32>(0.0);
+    if (fog.mode == mesh_view_types::FOG_MODE_LINEAR) {
+        return linear_fog(fog, c, distance, none).rgb;
+    } else if (fog.mode == mesh_view_types::FOG_MODE_EXPONENTIAL) {
+        return exponential_fog(fog, c, distance, none).rgb;
+    } else if (fog.mode == mesh_view_types::FOG_MODE_EXPONENTIAL_SQUARED) {
+        return exponential_squared_fog(fog, c, distance, none).rgb;
+    } else if (fog.mode == mesh_view_types::FOG_MODE_ATMOSPHERIC) {
+        return atmospheric_fog(fog, c, distance, none).rgb;
+    }
+#endif
+    return color;
+}
+
 fn face_uv(local_position: vec3<f32>, normal: vec3<i32>) -> vec2<f32> {
     let axis = normal_axis(normal);
     if axis == 0u {
@@ -612,22 +641,39 @@ fn fragment(
     let world_position = ray_origin + ray_direction * hit.t;
     let local_position = (world_position - cell.origin) / f32(cell.factor);
     let levels = corner_ao_levels(in.cell_slot, hit.voxel, hit.normal);
-    let shade = ao_shade(levels, local_position, hit.normal);
+    // AO fades out as cells coarsen, and texture coordinates are in WORLD
+    // voxels so one repeat is one block at every factor — both locked to the
+    // raster path's rule (voxel_pull.wgsl).
+    let cell_scale = f32(cell.factor);
+    let ao_strength = clamp(1.0 - log2(cell_scale) / AO_FADE_LOG2, 0.0, 1.0);
+    let shade = mix(1.0, ao_shade(levels, local_position, hit.normal), ao_strength);
     let layer = material_layer(hit.material, hit.normal);
-    let tex = textureSample(block_texture, block_sampler, face_uv(local_position, hit.normal), i32(layer));
+    let tex_position = local_position * cell_scale + (cell.origin - 16.0 * floor(cell.origin / 16.0));
+    let uv = face_uv(tex_position, hit.normal);
+    var tex = textureSample(block_texture, block_sampler, uv, i32(layer));
+    // Sampled unconditionally: implicit-derivative sampling must stay in
+    // uniform control flow. Equals `tex` on top faces.
+    let top_tex = textureSample(
+        block_texture, block_sampler, uv, i32(material_layer(hit.material, vec3<i32>(0, 1, 0))));
     let normal = normalize(vec3<f32>(hit.normal));
+    let block_px = 16.0 * view_bindings::view.clip_from_view[1][1] * view_bindings::view.viewport.w
+        / (2.0 * max(hit.t, 1e-3));
+    let riser_fade = (1.0 - abs(normal.y))
+        * (1.0 - smoothstep(RISER_FADE_END_PX, RISER_FADE_START_PX, block_px));
+    tex = mix(tex, top_tex, riser_fade);
+    let light_n = normalize(mix(normal, vec3<f32>(0.0, 1.0, 0.0), riser_fade));
 
-    var lit = view_bindings::lights.ambient_color.rgb;
+    var lit = view_bindings::lights.ambient_color.rgb * (SKY_SIDE + (1.0 - SKY_SIDE) * light_n.y);
     for (var i = 0u; i < view_bindings::lights.n_directional_lights; i += 1u) {
         let light = view_bindings::lights.directional_lights[i];
-        let ndotl = max(dot(normal, light.direction_to_light), 0.0);
+        let ndotl = max(dot(light_n, light.direction_to_light), 0.0);
         lit += light.color.rgb * ndotl / PI;
     }
     lit *= view_bindings::view.exposure;
 
     let clip_position = position_world_to_clip(world_position);
     var out: FragmentOutput;
-    out.color = vec4(tex.rgb * shade * lit, 1.0);
+    out.color = vec4(apply_distance_fog(tex.rgb * shade * lit, world_position), 1.0);
     out.depth = clip_position.z / clip_position.w;
     return out;
 }

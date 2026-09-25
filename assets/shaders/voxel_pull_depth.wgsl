@@ -24,12 +24,14 @@
 const FACE_UA = array<u32, 6>(1u, 1u, 0u, 0u, 0u, 0u);
 const FACE_VA = array<u32, 6>(2u, 2u, 2u, 2u, 1u, 1u);
 
-// CORNER_SLOTS from records.rs, flattened: variant*6 + slot.
-const CORNER_SLOTS = array<u32, 24>(
-    0u, 1u, 3u, 0u, 3u, 2u,
-    0u, 1u, 2u, 1u, 3u, 2u,
-    0u, 3u, 1u, 0u, 2u, 3u,
-    0u, 2u, 1u, 1u, 2u, 3u,
+// CORNER_PERM from records.rs, flattened: variant*4 + local vertex. Drawn
+// indexed: 4 vertices per quad (vertex_index = quad*4 + local, base_vertex =
+// record_start*4) and QUAD_INDEX_PATTERN 0,1,2, 2,1,3 from one shared buffer.
+const CORNER_PERM = array<u32, 16>(
+    1u, 3u, 0u, 2u,
+    0u, 1u, 2u, 3u,
+    1u, 0u, 3u, 2u,
+    0u, 2u, 1u, 3u,
 );
 
 // Directional-light cascade shadow views on GPUs without DEPTH_CLIP_CONTROL render
@@ -49,8 +51,8 @@ fn vertex(
     @builtin(vertex_index) vi: u32,
     @builtin(instance_index) chunk_index: u32,
 ) -> VertexOutput {
-    let quad = vi / 6u;
-    let slot = vi % 6u;
+    let quad = vi / 4u;
+    let local = vi % 4u;
     let rec = quads[quad];
     let w0 = rec.x;
     let w1 = rec.y;
@@ -59,7 +61,7 @@ fn vertex(
     // Reversed winding faces: NegX(1), PosY(2), NegZ(5).
     var reversed = 0u;
     if (face == 1u || face == 2u || face == 5u) { reversed = 1u; }
-    let corner = CORNER_SLOTS[(reversed * 2u + flip) * 6u + slot];
+    let corner = CORNER_PERM[(reversed * 2u + flip) * 4u + local];
     let cu = corner & 1u;
     let cv = corner >> 1u;
 

@@ -1,0 +1,18 @@
+[package]
+name = "host"
+version = "0.0.0"
+edition = "2021"
+[lib]
+crate-type = ["cdylib", "rlib"]
+[features]
+det = ["wasmi/deterministic", "wasmi/libm"]
+portable = ["wasmi/portable-dispatch"]
+[dependencies]
+wasmi = { version = "2.0.0", default-features = false, features = ["std", "stable", "validate", "auto-dispatch"] }
+libm = "0.2"
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+[workspace]

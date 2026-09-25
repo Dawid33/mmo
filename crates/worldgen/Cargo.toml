@@ -8,11 +8,15 @@ game = { workspace = true }
 bincode = { workspace = true }
 crc32fast = { workspace = true }
 log = { workspace = true }
+serde = { workspace = true }
+lz4_flex = { workspace = true }
 
 [dev-dependencies]
+crossbeam = { workspace = true }
 rapier3d = { workspace = true, features = ["profiler"] }
 slotmapd = { workspace = true }
 block-mesh = { workspace = true }
+image = { workspace = true }
 
 [[bin]]
 path = "src/main.rs"

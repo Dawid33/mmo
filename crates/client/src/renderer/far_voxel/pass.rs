@@ -6,27 +6,21 @@ use std::sync::{
 use bevy::{
     camera::{primitives::Frustum, MainPassResolutionOverride, Viewport},
     core_pipeline::{
-        core_3d::graph::{Core3d, Node3d},
-        prepass::{DeferredPrepass, DepthPrepass, MotionVectorPrepass, NormalPrepass},
+        Core3d, Core3dSystems,
     },
-    ecs::{query::QueryItem, world::World},
+    ecs::world::World,
     pbr::{
-        MeshPipelineViewLayoutKey, MeshViewBindGroup, ViewEnvironmentMapUniformOffset,
-        ViewFogUniformOffset, ViewLightProbesUniformOffset, ViewLightsUniformOffset,
-        ViewScreenSpaceReflectionsUniformOffset,
+        MeshPipelineViewLayoutKey, MeshViewBindGroup, ViewKeyCache,
     },
     prelude::*,
     render::{
         diagnostic::RecordDiagnostics,
         render_asset::RenderAssets,
-        render_graph::{
-            NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
-        },
         render_resource::*,
-        renderer::{RenderContext, RenderDevice, RenderQueue},
+        renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
         texture::GpuImage,
-        view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget, ViewUniformOffset},
-        Extract, ExtractSchedule, Render, RenderSystems,
+        view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget},
+        Extract, ExtractSchedule, Render, RenderStartup, RenderSystems,
     },
 };
 use bytemuck::{Pod, Zeroable};
@@ -247,15 +241,8 @@ type FarVoxelViewQuery = (
     &'static ExtractedView,
     &'static Frustum,
     &'static Msaa,
-    Has<DepthPrepass>,
-    Has<NormalPrepass>,
-    Has<MotionVectorPrepass>,
-    Has<DeferredPrepass>,
     Option<&'static mut FarVoxelViewResources>,
 );
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct FarVoxelPassLabel;
 
 fn extract_far_pass_inputs(
     mut commands: Commands,
@@ -312,6 +299,7 @@ fn prepare_far_voxel_views(
     pipeline: Res<FarVoxelPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<FarVoxelPipeline>>,
     cache: Res<PipelineCache>,
+    view_key_cache: Res<ViewKeyCache>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     buffers: Res<GpuFarBuffers>,
@@ -347,30 +335,23 @@ fn prepare_far_voxel_views(
         view,
         frustum,
         msaa,
-        depth_prepass,
-        normal_prepass,
-        motion_prepass,
-        deferred_prepass,
         existing,
     ) in &mut views
     {
-        let mut view_layout_key = MeshPipelineViewLayoutKey::from(*msaa);
-        view_layout_key.set(MeshPipelineViewLayoutKey::DEPTH_PREPASS, depth_prepass);
-        view_layout_key.set(MeshPipelineViewLayoutKey::NORMAL_PREPASS, normal_prepass);
-        view_layout_key.set(
-            MeshPipelineViewLayoutKey::MOTION_VECTOR_PREPASS,
-            motion_prepass,
-        );
-        view_layout_key.set(
-            MeshPipelineViewLayoutKey::DEFERRED_PREPASS,
-            deferred_prepass,
-        );
+        // The group(0) layout must be the one `prepare_mesh_view_bind_groups` built
+        // for this view. Bevy 0.19 keys it on many view features (distance fog,
+        // tonemapping, environment maps, prepasses, …); `ViewKeyCache` holds the
+        // same `MeshPipelineKey` Bevy's own mesh pipelines specialize from.
+        let Some(view_key) = view_key_cache.get(&view.retained_view_entity) else {
+            continue;
+        };
+        let view_layout_key = MeshPipelineViewLayoutKey::from(*view_key);
         let render_pipeline = pipelines.specialize(
             &cache,
             &pipeline,
             FarVoxelPipelineKey {
                 msaa_samples: msaa.samples(),
-                hdr: view.hdr,
+                target_format: view.target_format,
                 view_layout_key,
             },
         );
@@ -483,113 +464,91 @@ fn publish_far_pipeline_readiness(
     channel.publish_render_status(ready, visible_slot_capacity, reserved_gpu_bytes);
 }
 
-#[derive(Default)]
-pub struct FarVoxelPassNode;
-
-impl ViewNode for FarVoxelPassNode {
-    type ViewQuery = (
-        &'static bevy::render::camera::ExtractedCamera,
-        &'static ViewTarget,
-        &'static ViewDepthTexture,
-        &'static MeshViewBindGroup,
-        &'static ViewUniformOffset,
-        &'static ViewLightsUniformOffset,
-        &'static ViewFogUniformOffset,
-        &'static ViewLightProbesUniformOffset,
-        &'static ViewScreenSpaceReflectionsUniformOffset,
-        &'static ViewEnvironmentMapUniformOffset,
-        Option<&'static MainPassResolutionOverride>,
-        &'static FarVoxelViewResources,
-    );
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (
-            camera,
-            target,
-            depth,
-            mesh_view_bind_group,
-            view_uniform,
-            view_lights,
-            view_fog,
-            view_light_probes,
-            view_ssr,
-            view_environment_map,
-            resolution_override,
-            resources,
-        ): QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        if !world.resource::<FarVoxelDrawGate>().enabled() {
-            return Ok(());
-        }
-        let buffers = world.resource::<GpuFarBuffers>();
-        if resources.capacity == 0 || buffers.active_cell_count() == 0 {
-            return Ok(());
-        }
-        let pipeline = world.resource::<FarVoxelPipeline>();
-        let cache = world.resource::<PipelineCache>();
-        let (Some(cull_pipeline), Some(render_pipeline)) = (
-            cache.get_compute_pipeline(pipeline.cull_pipeline),
-            cache.get_render_pipeline(resources.render_pipeline),
-        ) else {
-            return Ok(());
-        };
-        let diagnostics = render_context.diagnostic_recorder();
-        {
-            let mut pass =
-                render_context
-                    .command_encoder()
-                    .begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("far_voxel_cull"),
-                        timestamp_writes: None,
-                    });
-            let pass_span = diagnostics.pass_span(&mut pass, "far_voxel_cull");
-            pass.set_pipeline(cull_pipeline);
-            pass.set_bind_group(0, &resources.cull_bind_group, &[]);
-            pass.dispatch_workgroups(cull_dispatch_count(resources.capacity), 1, 1);
-            pass_span.end(&mut pass);
-        }
-
-        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-            label: Some("far_voxel_pass"),
-            color_attachments: &[Some(target.get_color_attachment())],
-            depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Store)),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-        let pass_span = diagnostics.pass_span(&mut pass, "far_voxel_pass");
-        if let Some(viewport) =
-            Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)
-        {
-            pass.set_camera_viewport(&viewport);
-        }
-        pass.set_render_pipeline(render_pipeline);
-        pass.set_bind_group(
-            0,
-            &mesh_view_bind_group.main,
-            &[
-                view_uniform.offset,
-                view_lights.offset,
-                view_fog.offset,
-                **view_light_probes,
-                **view_ssr,
-                **view_environment_map,
-            ],
-        );
-        pass.set_bind_group(1, &resources.far_bind_group, &[]);
-        pass.draw_indirect(&resources.indirect, 0);
-        pass_span.end(&mut pass);
-        Ok(())
+/// Draws the far-voxel rings for the current camera, ahead of Bevy's main
+/// opaque pass (see `install_render_pass`).
+pub fn far_voxel_pass(
+    world: &World,
+    view: ViewQuery<(
+        &bevy::render::camera::ExtractedCamera,
+        &ViewTarget,
+        &ViewDepthTexture,
+        &MeshViewBindGroup,
+        Option<&MainPassResolutionOverride>,
+        &FarVoxelViewResources,
+    )>,
+    mut ctx: RenderContext,
+) {
+    let (camera, target, depth, mesh_view_bind_group, resolution_override, resources) =
+        view.into_inner();
+    if !world.resource::<FarVoxelDrawGate>().enabled() {
+        return;
     }
+    let buffers = world.resource::<GpuFarBuffers>();
+    if resources.capacity == 0 || buffers.active_cell_count() == 0 {
+        return;
+    }
+    let pipeline = world.resource::<FarVoxelPipeline>();
+    let cache = world.resource::<PipelineCache>();
+    let (Some(cull_pipeline), Some(render_pipeline)) = (
+        cache.get_compute_pipeline(pipeline.cull_pipeline),
+        cache.get_render_pipeline(resources.render_pipeline),
+    ) else {
+        return;
+    };
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    {
+        let mut pass = ctx
+            .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("far_voxel_cull"),
+                    timestamp_writes: None,
+                });
+        let pass_span = diagnostics.pass_span(&mut pass, "far_voxel_cull");
+        pass.set_pipeline(cull_pipeline);
+        pass.set_bind_group(0, &resources.cull_bind_group, &[]);
+        pass.dispatch_workgroups(cull_dispatch_count(resources.capacity), 1, 1);
+        pass_span.end(&mut pass);
+    }
+
+    let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+        label: Some("far_voxel_pass"),
+        color_attachments: &[Some(target.get_color_attachment())],
+        depth_stencil_attachment: Some(depth.get_attachment(StoreOp::Store)),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    let pass_span = diagnostics.pass_span(&mut pass, "far_voxel_pass");
+    if let Some(viewport) =
+        Viewport::from_viewport_and_override(camera.viewport.as_ref(), resolution_override)
+    {
+        pass.set_camera_viewport(&viewport);
+    }
+    pass.set_render_pipeline(render_pipeline);
+    pass.set_bind_group(
+        0,
+        &mesh_view_bind_group.main,
+        &mesh_view_bind_group.main_offsets,
+    );
+    pass.set_bind_group(1, &resources.far_bind_group, &[]);
+    pass.draw_indirect(&resources.indirect, 0);
+    pass_span.end(&mut pass);
+}
+
+fn init_far_voxel_pipeline(world: &mut World) {
+    world.init_resource::<FarVoxelPipeline>();
 }
 
 pub fn install_render_pass(render_app: &mut SubApp, channel: FarPassStatusChannel) {
     render_app
         .insert_resource(channel)
-        .init_resource::<FarVoxelPipeline>()
+        // Clones `MeshPipelineViewLayouts`, which Bevy 0.19 builds in
+        // `RenderStartup` (after plugin `finish`).
+        .add_systems(
+            RenderStartup,
+            init_far_voxel_pipeline.after(bevy::pbr::init_mesh_pipeline_view_layouts),
+        )
         .init_resource::<SpecializedRenderPipelines<FarVoxelPipeline>>()
         .init_resource::<ExtractedFarMaterialLayers>()
         .init_resource::<GpuFarMaterialLookup>()
@@ -609,20 +568,17 @@ pub fn install_render_pass(render_app: &mut SubApp, channel: FarPassStatusChanne
                     .after(prepare_far_voxel_views),
             ),
         )
-        .add_render_graph_node::<ViewNodeRunner<FarVoxelPassNode>>(Core3d, FarVoxelPassLabel)
-        .add_render_graph_edges(
+        .add_systems(
             Core3d,
-            (
-                Node3d::StartMainPass,
-                FarVoxelPassLabel,
-                Node3d::MainOpaquePass,
-            ),
+            far_voxel_pass
+                .in_set(Core3dSystems::MainPass)
+                .before(bevy::core_pipeline::core_3d::main_opaque_pass_3d),
         );
 }
 
 #[cfg(test)]
 mod tests {
-    use bevy::{camera::primitives::HalfSpace, prelude::*};
+    use bevy::{math::primitives::HalfSpace, prelude::*};
 
     use super::*;
 
@@ -637,11 +593,11 @@ mod tests {
 
     #[test]
     fn cull_uniform_copies_world_planes_and_cell_capacity() {
-        let frustum = bevy::camera::primitives::Frustum {
+        let frustum = bevy::camera::primitives::Frustum(bevy::math::primitives::ViewFrustum {
             half_spaces: std::array::from_fn(|index| {
                 HalfSpace::new(Vec4::new(1.0, 0.0, 0.0, index as f32 + 1.0))
             }),
-        };
+        });
 
         let uniform = GpuFarCullUniform::new(&frustum, 73);
 

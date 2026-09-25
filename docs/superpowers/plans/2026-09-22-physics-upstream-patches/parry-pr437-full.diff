@@ -1,0 +1,4629 @@
+diff --git a/.github/workflows/parry-ci-build.yml b/.github/workflows/parry-ci-build.yml
+index 1b36bb57..cd21cd70 100644
+--- a/.github/workflows/parry-ci-build.yml
++++ b/.github/workflows/parry-ci-build.yml
+@@ -57,6 +57,11 @@ jobs:
+     steps:
+       - uses: actions/checkout@v4
+       - run: sudo apt-get install -y cmake libxcb-composite0-dev
++      # WORKAROUND: zune-core 0.5.2 made its `warn!` macro expand to nothing, which breaks
++      # zune-jpeg (all 0.5.x), where it is called in expression position. Reached through the
++      # kiss3d -> gltf/image dev-dependency. Remove once upstream is fixed.
++      - name: Pin zune-core (0.5.2 breaks zune-jpeg)
++        run: cargo update -p zune-core@0.5 --precise 0.5.1
+       - name: Run tests
+         run: cargo test --features wavefront
+       - name: Run tests (parallel)
+@@ -107,5 +112,8 @@ jobs:
+         uses: dtolnay/rust-toolchain@master
+         with:
+           toolchain: nightly
++      # See the `tests` job: zune-core 0.5.2 breaks zune-jpeg. Remove once upstream is fixed.
++      - name: Pin zune-core (0.5.2 breaks zune-jpeg)
++        run: cargo update -p zune-core@0.5 --precise 0.5.1
+       - name: check benchmarks
+         run: cargo +nightly check --benches
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ac30111f..76d4d5f9 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,60 @@
++## Unreleased
++
++### Added
++
++- `Debug` for `TriMesh` now prints a summary instead of just the type name
++  ([#177](https://github.com/dimforge/parry/issues/177)).
++- `query::contact` now supports heightfields, instead of returning `Err(Unsupported)`
++  ([#274](https://github.com/dimforge/parry/issues/274)).
++
++### Fixed
++
++- Fix GJK reporting overlapping axisymmetric shapes as disjoint when the simplex stalls on a
++  degenerate support direction ([#396](https://github.com/dimforge/parry/issues/396)).
++- Fix wrong shape-cast normals and distances for stalled GJK simplices, now classified as touching
++  or penetrating from the solver's own distance bound ([#193](https://github.com/dimforge/parry/issues/193)).
++- Fix shape-casts missing grazing hits at large coordinates, by scaling the GJK ray-cast tolerance
++  with the support magnitude ([#180](https://github.com/dimforge/parry/issues/180)).
++- Fix shape-cast time of impact being short by an amount scaling with the shape's extent
++  ([#429](https://github.com/dimforge/parry/issues/429)).
++- Fix `ShapeCastStatus::PenetratingOrWithinTargetDist` being reported for merely touching support-map
++  casts ([#106](https://github.com/dimforge/parry/issues/106)).
++- Fix `contact` between exactly-touching shapes returning witness points at the shapes' centers
++  ([#315](https://github.com/dimforge/parry/issues/315)).
++- Fix `Triangle::area` returning wildly wrong values for degenerate triangles
++  ([#111](https://github.com/dimforge/parry/issues/111)).
++- Fix point projection on degenerate triangles reporting the point as inside
++  ([#76](https://github.com/dimforge/parry/issues/76)).
++- Fix `segments_intersection2d` classifying exact segment endpoints as `OnEdge` instead of `OnVertex`
++  ([#109](https://github.com/dimforge/parry/issues/109)).
++- Fix composite-shape point projection panicking on non-finite points
++  ([#395](https://github.com/dimforge/parry/issues/395)).
++- Fix `HeightField::project_local_point` iterating on every element, making it O(rows * cols)
++  ([rapier#332](https://github.com/dimforge/rapier/issues/332)).
++- Fix single-point contact manifolds on cylinder and cone caps, by orienting the cap's polygonal
++  approximation toward the contact ([rapier#810](https://github.com/dimforge/rapier/issues/810)).
++- Fix missing speculative contacts between a `Voxels` shape and a shape within the prediction
++  distance ([#404](https://github.com/dimforge/parry/issues/404)).
++- Fix `Voxels` shape-cast `witness1` not being expressed in the voxels shape's local frame
++  ([#373](https://github.com/dimforge/parry/issues/373)).
++- Fix an out-of-bounds panic in the binned BVH builder on degenerate leaf AABBs
++  ([rapier#961](https://github.com/dimforge/rapier/issues/961)).
++- Fix out-of-bounds indices in `to_outline` for round shapes with a zero border radius
++  ([rapier#969](https://github.com/dimforge/rapier/issues/969)).
++- Fix the quadratic polygon removal in `hertel_mehlhorn`
++  ([#408](https://github.com/dimforge/parry/issues/408)).
++- Require `spade` 2.15, the minimum version providing `try_bulk_load_cdt`
++  ([#428](https://github.com/dimforge/parry/issues/428)).
++
++### Modified
++
++- Document the frame conventions of the `ShapeCastHit` fields
++  ([rapier#933](https://github.com/dimforge/rapier/issues/933)).
++- Document that the `Voxels` iterators only yield non-empty voxels
++  ([#382](https://github.com/dimforge/parry/issues/382)).
++- Document that `BoundingVolume::merge`/`merged` don't guarantee strict containment of their inputs
++  ([#260](https://github.com/dimforge/parry/issues/260)).
++
+ ## 0.30.1
+ 
+ ### Fixed
+diff --git a/Cargo.toml b/Cargo.toml
+index 34a977fa..c4348303 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -52,7 +52,7 @@ indexmap = { version = "2", features = ["serde"] }
+ hashbrown = { version = "0.17", default-features = false, features = [
+     "default-hasher",
+ ] }
+-spade = { version = "2.9", default-features = false }
++spade = { version = "2.15", default-features = false }
+ rayon = "1"
+ bytemuck = { version = "1", features = ["derive"] }
+ log = "0.4"
+diff --git a/crates/parry2d/tests/issue_109_segments_intersection_endpoints.rs b/crates/parry2d/tests/issue_109_segments_intersection_endpoints.rs
+new file mode 100644
+index 00000000..e965ceb1
+--- /dev/null
++++ b/crates/parry2d/tests/issue_109_segments_intersection_endpoints.rs
+@@ -0,0 +1,94 @@
++// Regression test for https://github.com/dimforge/parry/issues/109
++//
++// `segments_intersection2d` used to classify exact segment endpoints as `OnEdge`
++// instead of `OnVertex`, in both the collinear and the non-parallel branches.
++
++use parry2d::math::Vector;
++use parry2d::shape::SegmentPointLocation;
++use parry2d::utils::{segments_intersection2d, SegmentsIntersection};
++
++#[test]
++fn identical_segments_intersect_on_vertices() {
++    // Exact case from the issue.
++    let a = Vector::new(10.0, 0.0);
++    let b = Vector::new(10.0, 10.0);
++
++    let intersection = segments_intersection2d(a, b, a, b, 0.0).unwrap();
++
++    let SegmentsIntersection::Segment {
++        first_loc1,
++        first_loc2,
++        second_loc1,
++        second_loc2,
++    } = intersection
++    else {
++        panic!("the intersection should be a Segment intersection");
++    };
++
++    assert_eq!(first_loc1, SegmentPointLocation::OnVertex(0));
++    assert_eq!(first_loc2, SegmentPointLocation::OnVertex(0));
++    assert_eq!(second_loc1, SegmentPointLocation::OnVertex(1));
++    assert_eq!(second_loc2, SegmentPointLocation::OnVertex(1));
++}
++
++#[test]
++fn identical_horizontal_segments_intersect_on_vertices() {
++    // Same check through the non-vertical code path of `between()`.
++    let a = Vector::new(-3.0, 2.0);
++    let b = Vector::new(5.0, 2.0);
++
++    let intersection = segments_intersection2d(a, b, a, b, 0.0).unwrap();
++
++    let SegmentsIntersection::Segment {
++        first_loc1,
++        first_loc2,
++        second_loc1,
++        second_loc2,
++    } = intersection
++    else {
++        panic!("the intersection should be a Segment intersection");
++    };
++
++    assert_eq!(first_loc1, SegmentPointLocation::OnVertex(0));
++    assert_eq!(first_loc2, SegmentPointLocation::OnVertex(0));
++    assert_eq!(second_loc1, SegmentPointLocation::OnVertex(1));
++    assert_eq!(second_loc2, SegmentPointLocation::OnVertex(1));
++}
++
++#[test]
++fn crossing_at_endpoint_is_on_vertex() {
++    // Two non-parallel segments touching at seg1's vertex 1 == seg2's vertex 0.
++    // Exercises the `s == 1.0` fix (previously `s == denom`, so `OnVertex(1)`
++    // was unreachable).
++    let a = Vector::new(0.0, 0.0);
++    let b = Vector::new(1.0, 1.0);
++    let c = Vector::new(1.0, 1.0);
++    let d = Vector::new(2.0, 0.0);
++
++    let intersection = segments_intersection2d(a, b, c, d, 0.0).unwrap();
++
++    let SegmentsIntersection::Point { loc1, loc2 } = intersection else {
++        panic!("the intersection should be a Point intersection");
++    };
++
++    assert_eq!(loc1, SegmentPointLocation::OnVertex(1));
++    assert_eq!(loc2, SegmentPointLocation::OnVertex(0));
++}
++
++#[test]
++fn crossing_at_interior_point_is_on_edge() {
++    // Proper crossing in both interiors: still `OnEdge`.
++    let a = Vector::new(-1.0, 0.0);
++    let b = Vector::new(1.0, 0.0);
++    let c = Vector::new(0.0, -1.0);
++    let d = Vector::new(0.0, 1.0);
++
++    let intersection = segments_intersection2d(a, b, c, d, 0.0).unwrap();
++
++    let SegmentsIntersection::Point { loc1, loc2 } = intersection else {
++        panic!("the intersection should be a Point intersection");
++    };
++
++    assert_eq!(loc1, SegmentPointLocation::OnEdge([0.5, 0.5]));
++    assert_eq!(loc2, SegmentPointLocation::OnEdge([0.5, 0.5]));
++}
+diff --git a/crates/parry2d/tests/issue_111_triangle_area_degenerate.rs b/crates/parry2d/tests/issue_111_triangle_area_degenerate.rs
+new file mode 100644
+index 00000000..babd9a66
+--- /dev/null
++++ b/crates/parry2d/tests/issue_111_triangle_area_degenerate.rs
+@@ -0,0 +1,81 @@
++// Regression test for https://github.com/dimforge/parry/issues/111 (2D version).
++//
++// `Triangle::area` now uses half the perp-product magnitude in 2D, which is
++// exact (0.0) when the vertices are bitwise collinear.
++
++use parry2d::math::{Real, Vector};
++use parry2d::shape::Triangle;
++
++/// The previous implementation (Kahan's formula on side lengths).
++fn kahan_area(tri: &Triangle) -> Real {
++    let mut s = [
++        tri.b.distance(tri.a),
++        tri.c.distance(tri.b),
++        tri.a.distance(tri.c),
++    ];
++    s.sort_by(|x, y| x.partial_cmp(y).unwrap());
++    let (c, b, a) = (s[0], s[1], s[2]); // a >= b >= c
++
++    let sqr = (a + (b + c)) * (c - (a - b)) * (c + (a - b)) * (a + (b - c));
++    sqr.max(0.0).sqrt() * 0.25
++}
++
++#[test]
++fn degenerate_triangle_area_is_exactly_zero() {
++    // The issue's collinear triangle, projected to 2D (all points share x, so
++    // use the (y, z) coordinates).
++    let tri = Triangle::new(
++        Vector::new(-2.871, 17.464),
++        Vector::new(1.629, 17.464),
++        Vector::new(-1.521, 17.464),
++    );
++    assert_eq!(tri.area(), 0.0);
++
++    // Two identical vertices.
++    let tri = Triangle::new(
++        Vector::new(2.277, -7.9),
++        Vector::new(-0.57, -8.1),
++        Vector::new(-0.57, -8.1),
++    );
++    assert_eq!(tri.area(), 0.0);
++}
++
++#[test]
++fn area_matches_kahan_for_well_conditioned_triangles() {
++    let tris = [
++        Triangle::new(
++            Vector::new(0.0, 0.0),
++            Vector::new(1.0, 0.0),
++            Vector::new(0.0, 1.0),
++        ),
++        Triangle::new(
++            Vector::new(1.0, 2.0),
++            Vector::new(4.0, 0.0),
++            Vector::new(2.0, 5.0),
++        ),
++        Triangle::new(
++            Vector::new(-3.0, 1.0),
++            Vector::new(0.0, 4.0),
++            Vector::new(5.0, -1.0),
++        ),
++    ];
++
++    for tri in &tris {
++        let expected = kahan_area(tri);
++        let area = tri.area();
++        assert!(
++            (area - expected).abs() <= expected * 1.0e-6,
++            "area {area} != kahan area {expected}"
++        );
++    }
++
++    assert_eq!(
++        Triangle::new(
++            Vector::new(0.0, 0.0),
++            Vector::new(1.0, 0.0),
++            Vector::new(0.0, 1.0),
++        )
++        .area(),
++        0.5
++    );
++}
+diff --git a/crates/parry2d/tests/issue_168_ball_polyline_endpoint_normal.rs b/crates/parry2d/tests/issue_168_ball_polyline_endpoint_normal.rs
+new file mode 100644
+index 00000000..b67bb51f
+--- /dev/null
++++ b/crates/parry2d/tests/issue_168_ball_polyline_endpoint_normal.rs
+@@ -0,0 +1,84 @@
++// Regression test for https://github.com/dimforge/rapier/issues/168
++//
++// A ball contacting a polyline exactly at (or beyond) its endpoint vertex used
++// to produce a zero contact normal. The ball-vs-convex manifold computation now
++// has a degenerate fallback so the normal is always finite and non-zero.
++
++use parry2d::math::{Pose, Real, Vector};
++use parry2d::query::{ContactManifold, DefaultQueryDispatcher, PersistentQueryDispatcher};
++use parry2d::shape::{Ball, Polyline};
++
++fn check_manifold_normals(pos12: Pose, prediction: Real) -> usize {
++    let polyline = Polyline::new(vec![Vector::new(-10.0, 0.0), Vector::new(10.0, 0.0)], None);
++    let ball = Ball::new(1.0);
++
++    let dispatcher = DefaultQueryDispatcher;
++    let mut manifolds: Vec<ContactManifold<(), ()>> = Vec::new();
++    let mut workspace = None;
++
++    dispatcher
++        .contact_manifolds(
++            &pos12,
++            &polyline,
++            &ball,
++            prediction,
++            &mut manifolds,
++            &mut workspace,
++        )
++        .unwrap();
++
++    let mut num_contacts = 0;
++
++    for manifold in &manifolds {
++        if manifold.points.is_empty() {
++            continue;
++        }
++
++        num_contacts += manifold.points.len();
++
++        for local_n in [manifold.local_n1, manifold.local_n2] {
++            assert!(
++                local_n.is_finite(),
++                "non-finite contact normal: {local_n:?} (pos12: {pos12:?})"
++            );
++            assert!(
++                local_n.length() > 0.9,
++                "degenerate contact normal: {local_n:?} (pos12: {pos12:?})"
++            );
++        }
++    }
++
++    num_contacts
++}
++
++#[test]
++fn ball_beyond_polyline_endpoint() {
++    // The geometry from the issue: the polyline ends at x = 10.0, the ball
++    // (radius 1) is at x = 11.0, y = 1.0, so it barely misses the endpoint but
++    // is within the contact prediction distance.
++    let num_contacts = check_manifold_normals(Pose::translation(11.0, 1.0), 1.0);
++    assert!(num_contacts > 0);
++}
++
++#[test]
++fn ball_aligned_with_polyline_beyond_endpoint() {
++    // The `______o` case from the issue: ball right beside the line, aligned
++    // with it but not touching it.
++    let num_contacts = check_manifold_normals(Pose::translation(11.5, 0.0), 1.0);
++    assert!(num_contacts > 0);
++}
++
++#[test]
++fn ball_centered_on_polyline_endpoint() {
++    // Fully degenerate case: the ball center lies exactly on the endpoint
++    // vertex, so the projection distance is zero.
++    let num_contacts = check_manifold_normals(Pose::translation(10.0, 0.0), 0.1);
++    assert!(num_contacts > 0);
++}
++
++#[test]
++fn ball_overlapping_polyline_endpoint() {
++    // Overlap case without prediction: the ball overlaps the endpoint vertex.
++    let num_contacts = check_manifold_normals(Pose::translation(10.5, 0.5), 0.0);
++    assert!(num_contacts > 0);
++}
+diff --git a/crates/parry2d/tests/issue_180_shape_cast_grazing_none.rs b/crates/parry2d/tests/issue_180_shape_cast_grazing_none.rs
+new file mode 100644
+index 00000000..a670eb0c
+--- /dev/null
++++ b/crates/parry2d/tests/issue_180_shape_cast_grazing_none.rs
+@@ -0,0 +1,84 @@
++// Regression test for https://github.com/dimforge/parry/issues/180
++// (MRE from the issue + the capsule-vs-segment repro of PR #410)
++//
++// Grazing casts returned `None` on 1-ulp-sensitive inputs: the GJK Minkowski ray-cast
++// reached a full-dimensional simplex with `min_bound` barely above the absolute
++// tolerance and rejected the valid hit found so far.
++
++use parry2d::math::{Pose, Vector};
++use parry2d::query::details::cast_shapes_support_map_support_map;
++use parry2d::query::{self, ShapeCastOptions};
++use parry2d::shape::{Capsule, Cuboid, Segment};
++
++fn cast(pos12: Pose, vel12: Vector, segment: &Segment, cuboid: &Cuboid) -> bool {
++    cast_shapes_support_map_support_map(&pos12, vel12, segment, cuboid, ShapeCastOptions::default())
++        .is_some()
++}
++
++#[test]
++fn grazing_cast_is_not_ulp_sensitive() {
++    let vel = Vector::new(0.0081385, -0.999966);
++    let segment = Segment::new(Vector::new(1.0, 1.0), Vector::new(124.0, 1.0));
++    let cuboid = Cuboid::new(Vector::new(2.0, 2.0));
++
++    // These two always worked.
++    assert!(cast(
++        Pose::translation(15.689464, 54.00709),
++        vel,
++        &segment,
++        &cuboid
++    ));
++    assert!(cast(
++        Pose::translation(15.689466, 54.00709),
++        vel,
++        &segment,
++        &cuboid
++    ));
++
++    // This one, 1 ulp away from the previous two, used to return `None`.
++    assert!(cast(
++        Pose::translation(15.689465, 54.00709),
++        vel,
++        &segment,
++        &cuboid
++    ));
++}
++
++// From PR #410: a capsule 0.1 units away from a steep segment, moving straight
++// toward it, must produce a hit.
++#[test]
++fn capsule_segment_steep_slope_toi() {
++    // Segment in local space (centered at entity transform [-648, -288]).
++    let segment = Segment::new(Vector::new(-24.0, 48.0), Vector::new(24.0, -48.0));
++    let capsule = Capsule::new_y(14.0, 8.0);
++
++    // Exact game positions.
++    let segment_pose = Pose::translation(-648.0, -288.0);
++    let capsule_pose = Pose::translation(-653.3891, -245.08746);
++
++    // Per-frame remaining velocity (vel / 60fps).
++    let capsule_vel = Vector::new(-3.3333337, -5.4166675);
++
++    let options = ShapeCastOptions {
++        max_time_of_impact: capsule_vel.length(),
++        ..Default::default()
++    };
++
++    let result = query::cast_shapes(
++        &capsule_pose,
++        capsule_vel,
++        &capsule,
++        &segment_pose,
++        Vector::ZERO,
++        &segment,
++        options,
++    )
++    .unwrap();
++
++    assert!(
++        result.is_some(),
++        "GJK missed a collision: capsule is 0.1 units from a steep segment \
++         and moving directly toward it. This is a clear hit that should \
++         never be missed.",
++    );
++}
+diff --git a/crates/parry2d/tests/issue_274_contact_heightfield.rs b/crates/parry2d/tests/issue_274_contact_heightfield.rs
+new file mode 100644
+index 00000000..aaeaba22
+--- /dev/null
++++ b/crates/parry2d/tests/issue_274_contact_heightfield.rs
+@@ -0,0 +1,58 @@
++// Regression test for https://github.com/dimforge/parry/issues/274 (2D variant)
++//
++// `query::contact` with a heightfield used to return `Err(Unsupported)`.
++
++use parry2d::math::{Pose, Vector};
++use parry2d::query::contact;
++use parry2d::shape::{Ball, HeightField};
++
++const EPS: f32 = 1.0e-4;
++
++#[test]
++fn ball_vs_heightfield_both_orders() {
++    // A flat heightfield at y = 0 spanning x in [-5, 5].
++    let hf = HeightField::new(vec![0.0, 0.0, 0.0], Vector::new(10.0, 1.0));
++    let ball = Ball::new(0.5);
++    let pos_hf = Pose::identity();
++    let pos_ball = Pose::from_translation(Vector::new(1.0, 0.3));
++
++    let c = contact(&pos_hf, &hf, &pos_ball, &ball, 0.0)
++        .unwrap()
++        .unwrap();
++    assert!(
++        (c.dist + 0.2).abs() < EPS,
++        "expected dist ~ -0.2, got {}",
++        c.dist
++    );
++    assert!(
++        (c.normal1 - Vector::Y).length() < EPS,
++        "normal1 should be +Y, got {:?}",
++        c.normal1
++    );
++    assert!((c.point1 - Vector::new(1.0, 0.0)).length() < EPS);
++
++    let c = contact(&pos_ball, &ball, &pos_hf, &hf, 0.0)
++        .unwrap()
++        .unwrap();
++    assert!((c.dist + 0.2).abs() < EPS);
++    assert!(
++        (c.normal1 + Vector::Y).length() < EPS,
++        "normal1 should be -Y, got {:?}",
++        c.normal1
++    );
++
++    // Separated within prediction.
++    let pos_ball = Pose::from_translation(Vector::new(-2.0, 1.0));
++    let c = contact(&pos_hf, &hf, &pos_ball, &ball, 1.0)
++        .unwrap()
++        .unwrap();
++    assert!(
++        (c.dist - 0.5).abs() < EPS,
++        "expected dist ~ 0.5, got {}",
++        c.dist
++    );
++
++    // Separated beyond prediction: None, not Unsupported.
++    let c = contact(&pos_hf, &hf, &pos_ball, &ball, 0.1).unwrap();
++    assert!(c.is_none());
++}
+diff --git a/crates/parry2d/tests/issue_315_touching_cuboids_contact.rs b/crates/parry2d/tests/issue_315_touching_cuboids_contact.rs
+new file mode 100644
+index 00000000..4fa03e14
+--- /dev/null
++++ b/crates/parry2d/tests/issue_315_touching_cuboids_contact.rs
+@@ -0,0 +1,53 @@
++// Regression test for https://github.com/dimforge/parry/issues/315 (2D variant)
++//
++// `contact()` between two exactly-touching cuboids used to return both witness points
++// at the shapes' centers, fabricated by EPA's degenerate 0-dimensional simplex
++// fallback. It now returns the actual witness points.
++
++use parry2d::math::{Pose, Vector};
++use parry2d::query::contact;
++use parry2d::shape::Cuboid;
++
++const EPS: f32 = 1.0e-5;
++
++#[test]
++fn exactly_touching_cuboids() {
++    let box1 = Cuboid::new(Vector::new(0.5, 0.5));
++    let pos1 = Pose::from_translation(Vector::new(0.5, 0.5));
++    let pos2 = Pose::from_translation(Vector::new(1.5, 0.5));
++
++    let c = contact(&pos1, &box1, &pos2, &box1, 0.0).unwrap().unwrap();
++
++    assert!(c.dist.abs() < EPS, "expected touching dist, got {}", c.dist);
++    assert!(
++        (c.point1.x - 1.0).abs() < EPS,
++        "point1 not on the touching line: {:?}",
++        c.point1
++    );
++    assert!(
++        (c.point2.x - 1.0).abs() < EPS,
++        "point2 not on the touching line: {:?}",
++        c.point2
++    );
++    assert!(
++        (c.normal1 - Vector::X).length() < EPS,
++        "normal1 should be +X, got {:?}",
++        c.normal1
++    );
++}
++
++#[test]
++fn overlapping_cuboids() {
++    let box1 = Cuboid::new(Vector::new(0.5, 0.5));
++    let pos1 = Pose::from_translation(Vector::new(0.5, 0.5));
++    let pos2 = Pose::from_translation(Vector::new(1.2, 0.5));
++
++    let c = contact(&pos1, &box1, &pos2, &box1, 0.0).unwrap().unwrap();
++
++    assert!(
++        (c.dist + 0.3).abs() < 1.0e-4,
++        "expected dist ~ -0.3, got {}",
++        c.dist
++    );
++    assert!((c.normal1 - Vector::X).length() < EPS);
++}
+diff --git a/crates/parry2d/tests/issue_431_cuboid_distance_asymmetry.rs b/crates/parry2d/tests/issue_431_cuboid_distance_asymmetry.rs
+new file mode 100644
+index 00000000..53823daa
+--- /dev/null
++++ b/crates/parry2d/tests/issue_431_cuboid_distance_asymmetry.rs
+@@ -0,0 +1,99 @@
++// Regression test for https://github.com/dimforge/parry/issues/431
++//
++// `query::distance` between two cuboids is dispatched to a SAT-based special
++// case whose face-vertex branch projected an unclamped support corner,
++// overestimating the distance in face-face configurations and making the result
++// depend on the arguments order. That was fixed by "fix some ambiguities in
++// cuboid-cuboid SAT" (#436); these tests pin the behavior down.
++
++use parry2d::math::{Pose, Real, Vector};
++use parry2d::query::{self, ClosestPoints};
++use parry2d::shape::Cuboid;
++
++fn check_symmetric_and_exact(p1: &Pose, c1: &Cuboid, p2: &Pose, c2: &Cuboid, expected: Real) {
++    let d12 = query::distance(p1, c1, p2, c2).unwrap();
++    let d21 = query::distance(p2, c2, p1, c1).unwrap();
++
++    // Cross-check against the exact GJK closest points.
++    let gjk_dist = match query::closest_points(p1, c1, p2, c2, Real::MAX).unwrap() {
++        ClosestPoints::WithinMargin(a, b) => (a - b).length(),
++        _ => 0.0,
++    };
++
++    assert!(
++        (d12 - d21).abs() < 1.0e-5,
++        "asymmetric distance: {d12} vs {d21}"
++    );
++    assert!(
++        (d12 - gjk_dist).abs() < 1.0e-5,
++        "distance {d12} disagrees with GJK closest points {gjk_dist}"
++    );
++    assert!(
++        (d12 - expected).abs() < 1.0e-4,
++        "distance {d12} != expected {expected}"
++    );
++}
++
++// The exact repro from issue #431: face-face configuration where the support
++// corner of the taller cuboid does not project inside the other cuboid's face.
++#[test]
++fn issue_431_repro() {
++    let c1 = Cuboid::new(Vector::new(1.0, 1.0));
++    let c2 = Cuboid::new(Vector::new(1.0, 2.0));
++    let p1 = Pose::identity();
++    let p2 = Pose::new(Vector::new(-5.573167, 0.0), 0.0);
++
++    check_symmetric_and_exact(&p1, &c1, &p2, &c2, 3.5731668);
++}
++
++// Separated face-face configuration (equal heights).
++#[test]
++fn face_face_separated() {
++    let c1 = Cuboid::new(Vector::new(1.0, 1.0));
++    let c2 = Cuboid::new(Vector::new(2.0, 1.0));
++    let p1 = Pose::identity();
++    let p2 = Pose::new(Vector::new(7.0, 0.5), 0.0);
++
++    check_symmetric_and_exact(&p1, &c1, &p2, &c2, 4.0);
++}
++
++// Corner-corner configuration: closest features are two vertices.
++#[test]
++fn corner_corner_separated() {
++    let c1 = Cuboid::new(Vector::new(1.0, 1.0));
++    let c2 = Cuboid::new(Vector::new(1.0, 1.0));
++    let p1 = Pose::identity();
++    let p2 = Pose::new(Vector::new(5.0, 4.0), 0.0);
++
++    let expected = (3.0f32 * 3.0 + 2.0 * 2.0).sqrt();
++    check_symmetric_and_exact(&p1, &c1, &p2, &c2, expected);
++}
++
++// Rotated cuboid: vertex-face configuration.
++#[test]
++fn vertex_face_rotated() {
++    let c1 = Cuboid::new(Vector::new(1.0, 1.0));
++    let c2 = Cuboid::new(Vector::new(1.0, 1.0));
++    let p1 = Pose::identity();
++    // c2 rotated by 45 degrees, its bottom vertex facing c1's top face.
++    let p2 = Pose::new(Vector::new(0.0, 4.0), core::f32::consts::FRAC_PI_4);
++
++    let expected = 3.0 - core::f32::consts::SQRT_2;
++    check_symmetric_and_exact(&p1, &c1, &p2, &c2, expected);
++}
++
++// Touching and overlapping cuboids must report a zero distance in both orders.
++#[test]
++fn touching_and_overlapping() {
++    let c1 = Cuboid::new(Vector::new(1.0, 1.0));
++    let c2 = Cuboid::new(Vector::new(1.0, 2.0));
++    let p1 = Pose::identity();
++
++    for x in [2.0, 1.5] {
++        let p2 = Pose::new(Vector::new(x, 0.0), 0.0);
++        let d12 = query::distance(&p1, &c1, &p2, &c2).unwrap();
++        let d21 = query::distance(&p2, &c2, &p1, &c1).unwrap();
++        assert!(d12.abs() < 1.0e-6, "expected zero distance, got {d12}");
++        assert!(d21.abs() < 1.0e-6, "expected zero distance, got {d21}");
++    }
++}
+diff --git a/crates/parry2d/tests/issue_76_point_degenerate_triangle.rs b/crates/parry2d/tests/issue_76_point_degenerate_triangle.rs
+new file mode 100644
+index 00000000..f2810f64
+--- /dev/null
++++ b/crates/parry2d/tests/issue_76_point_degenerate_triangle.rs
+@@ -0,0 +1,78 @@
++// Regression test for https://github.com/dimforge/parry/issues/76 (2D version).
++//
++// A degenerate triangle reaching the face Voronoï region used to be handled by the
++// `solid` branch, reporting the point as inside with distance 0 (or producing NaNs);
++// it now projects on the longest edge. Collinear cases adapted from PR #358.
++
++use parry2d::math::Vector;
++use parry2d::query::{PointQuery, PointQueryWithLocation};
++use parry2d::shape::{Segment, Triangle};
++
++#[test]
++fn degenerate_triangle_distance_matches_segment() {
++    let a = Vector::new(-1.0, 2.0);
++    let b = Vector::new(3.0, -1.0);
++
++    // b == c: the degenerate triangle must behave like its longest segment.
++    let tri = Triangle::new(a, b, b);
++    let seg = Segment::new(a, b);
++
++    let queries = [
++        Vector::new(0.0, 0.0),
++        Vector::new(10.0, 10.0),
++        Vector::new(-5.0, 2.5),
++        Vector::new(1.0, 0.5), // Near the middle of the segment.
++        a,                     // Exactly on a vertex.
++    ];
++
++    for pt in queries {
++        let tri_dist = tri.distance_to_local_point(pt, true);
++        let seg_dist = seg.distance_to_local_point(pt, true);
++        assert!(
++            (tri_dist - seg_dist).abs() <= 1.0e-6,
++            "point {pt:?}: triangle dist {tri_dist} != segment dist {seg_dist}"
++        );
++        assert!(tri_dist.is_finite());
++    }
++}
++
++// Cases from #358 by its author.
++#[test]
++fn two_identical_points_triangle_projection_is_finite() {
++    let triangle = Triangle::new(
++        Vector::new(40.0, 0.0),
++        Vector::new(0.0, 80.0),
++        Vector::new(0.0, 80.0),
++    );
++
++    let res = triangle.project_local_point_and_get_location(Vector::new(10.0, 20.0), false);
++    assert!(res.0.point.is_finite());
++
++    let res = triangle.project_local_point_and_get_location(Vector::new(40.0, 0.0), false);
++    assert!(res.0.point.is_finite());
++}
++
++// Cases from #358 by its author.
++#[test]
++fn collinear_points_triangle_projection_is_finite() {
++    let triangle = Triangle::new(
++        Vector::new(0.0, 0.0),
++        Vector::new(100.0, 0.0),
++        Vector::new(160.0, 0.0),
++    );
++
++    // Point considered "inside" (on the line).
++    let res = triangle.project_local_point_and_get_location(Vector::new(10.0, 0.0), false);
++    assert!(res.0.is_inside);
++    assert!(res.0.point.is_finite());
++
++    // Point off the line: not inside, finite projection, correct distance
++    // even with `solid = true` (a degenerate triangle has no interior).
++    let res = triangle.project_local_point_and_get_location(Vector::new(10.0, 10.0), false);
++    assert!(!res.0.is_inside);
++    assert!(res.0.point.is_finite());
++    assert_eq!(
++        triangle.distance_to_local_point(Vector::new(10.0, 10.0), true),
++        10.0
++    );
++}
+diff --git a/crates/parry3d/tests/issue_106_shape_cast_status_consistency.rs b/crates/parry3d/tests/issue_106_shape_cast_status_consistency.rs
+new file mode 100644
+index 00000000..a6d568b8
+--- /dev/null
++++ b/crates/parry3d/tests/issue_106_shape_cast_status_consistency.rs
+@@ -0,0 +1,109 @@
++// Regression test for https://github.com/dimforge/parry/issues/106
++//
++// A shape-cast starting exactly touching (`toi == 0`, not penetrating) returned
++// `Converged` for ball-vs-ball but `PenetratingOrWithinTargetDist` for the generic
++// support-map path, which flagged any zero TOI as penetrating.
++
++use parry3d::math::{Pose, Vector};
++use parry3d::query::{self, ShapeCastOptions, ShapeCastStatus};
++use parry3d::shape::{Ball, Cuboid};
++
++fn cast_status(
++    pos1: Pose,
++    g1: &impl parry3d::shape::Shape,
++    pos2: Pose,
++    g2: &impl parry3d::shape::Shape,
++    options: ShapeCastOptions,
++) -> ShapeCastStatus {
++    query::cast_shapes(
++        &pos1,
++        Vector::new(0.0, -1.0, 0.0),
++        g1,
++        &pos2,
++        Vector::ZERO,
++        g2,
++        options,
++    )
++    .unwrap()
++    .expect("the cast should return a hit")
++    .status
++}
++
++#[test]
++fn touching_at_toi_zero_is_converged_for_all_backends() {
++    let ball = Ball::new(0.5);
++    let other_ball = Ball::new(0.5);
++    let cuboid = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
++
++    // Exactly touching configurations (all coordinates exact in floats):
++    // - ball at y = 1.0 touching a ball at the origin (r1 + r2 = 1.0);
++    // - ball at y = 1.5 touching the top face (y = 1.0) of the cuboid.
++    let ball_ball_status = cast_status(
++        Pose::translation(0.0, 1.0, 0.0),
++        &ball,
++        Pose::IDENTITY,
++        &other_ball,
++        ShapeCastOptions::default(),
++    );
++    let ball_cuboid_status = cast_status(
++        Pose::translation(0.0, 1.5, 0.0),
++        &ball,
++        Pose::IDENTITY,
++        &cuboid,
++        ShapeCastOptions::default(),
++    );
++
++    assert_eq!(ball_ball_status, ShapeCastStatus::Converged);
++    assert_eq!(ball_cuboid_status, ball_ball_status);
++
++    // Same, without the impact-geometry fallback.
++    let no_geometry_options = ShapeCastOptions {
++        compute_impact_geometry_on_penetration: false,
++        ..Default::default()
++    };
++    let ball_ball_status = cast_status(
++        Pose::translation(0.0, 1.0, 0.0),
++        &ball,
++        Pose::IDENTITY,
++        &other_ball,
++        no_geometry_options,
++    );
++    let ball_cuboid_status = cast_status(
++        Pose::translation(0.0, 1.5, 0.0),
++        &ball,
++        Pose::IDENTITY,
++        &cuboid,
++        no_geometry_options,
++    );
++    assert_eq!(ball_ball_status, ShapeCastStatus::Converged);
++    assert_eq!(ball_cuboid_status, ball_ball_status);
++}
++
++#[test]
++fn penetrating_at_toi_zero_is_reported_for_all_backends() {
++    let ball = Ball::new(0.5);
++    let other_ball = Ball::new(0.5);
++    let cuboid = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
++
++    // Actually overlapping by 0.125.
++    let ball_ball_status = cast_status(
++        Pose::translation(0.0, 0.875, 0.0),
++        &ball,
++        Pose::IDENTITY,
++        &other_ball,
++        ShapeCastOptions::default(),
++    );
++    let ball_cuboid_status = cast_status(
++        Pose::translation(0.0, 1.375, 0.0),
++        &ball,
++        Pose::IDENTITY,
++        &cuboid,
++        ShapeCastOptions::default(),
++    );
++
++    assert_eq!(
++        ball_ball_status,
++        ShapeCastStatus::PenetratingOrWithinTargetDist
++    );
++    assert_eq!(ball_cuboid_status, ball_ball_status);
++}
+diff --git a/crates/parry3d/tests/issue_111_triangle_area_degenerate.rs b/crates/parry3d/tests/issue_111_triangle_area_degenerate.rs
+new file mode 100644
+index 00000000..7bd350d4
+--- /dev/null
++++ b/crates/parry3d/tests/issue_111_triangle_area_degenerate.rs
+@@ -0,0 +1,91 @@
++// Regression test for https://github.com/dimforge/parry/issues/111
++//
++// `Triangle::area` used Kahan's formula on the rounded f32 side lengths, returning
++// wildly wrong values (~1e-3) for degenerate triangles; it now uses half the
++// cross-product magnitude, exact (0.0) for bitwise-collinear vertices.
++
++use parry3d::math::{Real, Vector};
++use parry3d::shape::Triangle;
++
++/// The previous implementation (Kahan's formula on side lengths), kept here to
++/// check that the new formula agrees with it on well-conditioned triangles.
++fn kahan_area(tri: &Triangle) -> Real {
++    let mut s = [
++        tri.b.distance(tri.a),
++        tri.c.distance(tri.b),
++        tri.a.distance(tri.c),
++    ];
++    s.sort_by(|x, y| x.partial_cmp(y).unwrap());
++    let (c, b, a) = (s[0], s[1], s[2]); // a >= b >= c
++
++    let sqr = (a + (b + c)) * (c - (a - b)) * (c + (a - b)) * (a + (b - c));
++    sqr.max(0.0).sqrt() * 0.25
++}
++
++#[test]
++fn degenerate_triangle_area_is_exactly_zero() {
++    // Exact values from the issue: three collinear points (the old formula
++    // returned ~0.0010679931).
++    let tri = Triangle::new(
++        Vector::new(1.811, -2.871, 17.464),
++        Vector::new(1.811, 1.629, 17.464),
++        Vector::new(1.811, -1.521, 17.464),
++    );
++
++    assert_eq!(tri.area(), 0.0);
++
++    // Two identical vertices (from issue #76).
++    let tri = Triangle::new(
++        Vector::new(2.27699995, -7.9000001, 16.3180008),
++        Vector::new(-0.569999993, -8.10000038, 16.6070004),
++        Vector::new(-0.569999993, -8.10000038, 16.6070004),
++    );
++
++    assert_eq!(tri.area(), 0.0);
++}
++
++#[test]
++fn area_matches_kahan_for_well_conditioned_triangles() {
++    let tris = [
++        Triangle::new(
++            Vector::new(0.0, 0.0, 0.0),
++            Vector::new(1.0, 0.0, 0.0),
++            Vector::new(0.0, 1.0, 0.0),
++        ),
++        Triangle::new(
++            Vector::new(1.0, 2.0, 3.0),
++            Vector::new(4.0, 0.0, -1.0),
++            Vector::new(2.0, 5.0, 1.0),
++        ),
++        Triangle::new(
++            Vector::new(-3.0, 1.0, 2.0),
++            Vector::new(0.0, 4.0, -2.0),
++            Vector::new(5.0, -1.0, 3.0),
++        ),
++        Triangle::new(
++            Vector::new(0.1, 0.2, 0.3),
++            Vector::new(-0.4, 0.5, 0.1),
++            Vector::new(0.3, -0.2, 0.6),
++        ),
++    ];
++
++    for tri in &tris {
++        let expected = kahan_area(tri);
++        let area = tri.area();
++        assert!(
++            (area - expected).abs() <= expected * 1.0e-6,
++            "area {area} != kahan area {expected}"
++        );
++    }
++
++    // Sanity check on an exactly-known area.
++    assert_eq!(
++        Triangle::new(
++            Vector::new(0.0, 0.0, 0.0),
++            Vector::new(1.0, 0.0, 0.0),
++            Vector::new(0.0, 1.0, 0.0),
++        )
++        .area(),
++        0.5
++    );
++}
+diff --git a/crates/parry3d/tests/issue_157_frustum_contact.rs b/crates/parry3d/tests/issue_157_frustum_contact.rs
+new file mode 100644
+index 00000000..a07bbe3f
+--- /dev/null
++++ b/crates/parry3d/tests/issue_157_frustum_contact.rs
+@@ -0,0 +1,115 @@
++// Verification tests for https://github.com/dimforge/parry/issues/157
++// (ported from Davidster's fork; frustum shapes pulled from a game engine)
++//
++// `contact`/`intersection_test` between two view-frustum polyhedra used to fail: GJK
++// reported the intersection but EPA hit its iteration cap and returned `None`. EPA now
++// caps at 100 iterations and returns its best-effort result.
++
++use parry3d::math::{Pose, Vector};
++use parry3d::query;
++use parry3d::query::PointQuery;
++use parry3d::shape::ConvexPolyhedron;
++
++#[test]
++fn convex_polyhedra_contact() {
++    let convex_polyhedron_a_points = [
++        [-0.7938391, 5.1101756, 0.1773476],
++        [-5.293839, 0.6101756, -4.3226523],
++        [-5.293839, 0.6101756, 5.6773477],
++        [-0.7938391, 5.1101756, 1.1773477],
++        [-0.7938391, 6.1101756, 0.1773476],
++        [-5.293839, 10.610176, -4.3226523], // this point and only this point lies inside of b
++        [-5.293839, 10.610176, 5.6773477],
++        [-0.7938391, 6.1101756, 1.1773477],
++    ]
++    .map(|arr| Vector::new(arr[0], arr[1], arr[2]));
++    let convex_polyhedron_a =
++        ConvexPolyhedron::from_convex_hull(&convex_polyhedron_a_points).unwrap();
++
++    let convex_polyhedron_b_points = [
++        [8.114634, 4.6308937, 0.76987207],
++        [-18.83664, -53.96347, -649.29565],
++        [-608.7832, -53.96347, -208.59384],
++        [6.93474, 4.6308937, 1.6512758],
++        [8.253552, 5.426136, 0.9558364],
++        [50.62288, 343.65768, -556.3136],
++        [-539.3237, 343.65768, -115.611725],
++        [7.073659, 5.426136, 1.8372401],
++    ]
++    .map(|arr| Vector::new(arr[0], arr[1], arr[2]));
++    let convex_polyhedron_b =
++        ConvexPolyhedron::from_convex_hull(&convex_polyhedron_b_points).unwrap();
++
++    let num_contained_points = convex_polyhedron_a_points
++        .iter()
++        .filter(|point| {
++            convex_polyhedron_b
++                .project_local_point(**point, false)
++                .is_inside
++        })
++        .count();
++
++    let contact = query::contact(
++        &Pose::IDENTITY,
++        &convex_polyhedron_a,
++        &Pose::IDENTITY,
++        &convex_polyhedron_b,
++        0.0,
++    )
++    .unwrap();
++
++    assert!(num_contained_points == 1);
++    assert!(contact.is_some());
++}
++
++// Shapes are pulled directly from the view frustums of a game engine.
++#[test]
++fn convex_polyhedra_intersection() {
++    let convex_polyhedron_a_points = [
++        [0.45838028, 5.7372417, 0.61019015],
++        [1000.35846, -994.1628, 1000.51013],
++        [1000.35834, -994.1628, -999.48987],
++        [0.45838028, 5.7372417, 0.41019014],
++        [0.45838028, 5.9372416, 0.61019015],
++        [1000.35846, 1005.8372, 1000.51013],
++        [1000.35834, 1005.8372, -999.48987],
++        [0.45838028, 5.9372416, 0.41019014],
++    ]
++    .map(|arr| Vector::new(arr[0], arr[1], arr[2]));
++    let convex_polyhedron_a =
++        ConvexPolyhedron::from_convex_hull(&convex_polyhedron_a_points).unwrap();
++
++    let convex_polyhedron_b_points = [
++        [-0.4522132, 8.780189, 15.508082],
++        [72537.12, -72390.1, -81439.88],
++        [-74725.21, -72390.1, -79438.195],
++        [-0.45368585, 8.780189, 15.508101],
++        [-0.45221695, 8.780969, 15.507806],
++        [72161.625, 5710.25, -109064.305],
++        [-75100.7, 5710.25, -107062.62],
++        [-0.4536896, 8.780969, 15.507825],
++    ]
++    .map(|arr| Vector::new(arr[0], arr[1], arr[2]));
++    let convex_polyhedron_b =
++        ConvexPolyhedron::from_convex_hull(&convex_polyhedron_b_points).unwrap();
++
++    let num_contained_points = convex_polyhedron_a_points
++        .iter()
++        .filter(|point| {
++            convex_polyhedron_b
++                .project_local_point(**point, false)
++                .is_inside
++        })
++        .count();
++
++    let intersects = query::intersection_test(
++        &Pose::IDENTITY,
++        &convex_polyhedron_a,
++        &Pose::IDENTITY,
++        &convex_polyhedron_b,
++    )
++    .unwrap();
++
++    assert!(num_contained_points == 4);
++    assert!(intersects);
++}
+diff --git a/crates/parry3d/tests/issue_177_trimesh_debug.rs b/crates/parry3d/tests/issue_177_trimesh_debug.rs
+new file mode 100644
+index 00000000..e615056f
+--- /dev/null
++++ b/crates/parry3d/tests/issue_177_trimesh_debug.rs
+@@ -0,0 +1,30 @@
++// Regression test for https://github.com/dimforge/parry/issues/177
++//
++// `Debug` for `TriMesh` used to print just "GenericTriMesh"; it now summarizes the
++// vertex/triangle counts, local AABB, flags, and optional topology data.
++
++use parry3d::shape::{TriMesh, TriMeshFlags};
++
++use parry3d::math::Vector;
++
++#[test]
++fn trimesh_debug_prints_summary() {
++    let vertices = vec![
++        Vector::new(0.0, 0.0, 0.0),
++        Vector::new(1.0, 0.0, 0.0),
++        Vector::new(0.0, 1.0, 0.0),
++        Vector::new(1.0, 1.0, 0.0),
++    ];
++    let indices = vec![[0, 1, 2], [1, 3, 2]];
++    let mesh = TriMesh::with_flags(vertices, indices, TriMeshFlags::HALF_EDGE_TOPOLOGY).unwrap();
++
++    let dbg = format!("{mesh:?}");
++    assert!(dbg.contains("TriMesh"), "{dbg}");
++    assert!(dbg.contains("num_vertices: 4"), "{dbg}");
++    assert!(dbg.contains("num_triangles: 2"), "{dbg}");
++    assert!(dbg.contains("local_aabb"), "{dbg}");
++    assert!(dbg.contains("flags"), "{dbg}");
++    assert!(dbg.contains("has_pseudo_normals: false"), "{dbg}");
++    assert!(dbg.contains("has_topology: true"), "{dbg}");
++    assert!(dbg.contains("has_connected_components: false"), "{dbg}");
++}
+diff --git a/crates/parry3d/tests/issue_17_tiny_trimesh_distance.rs b/crates/parry3d/tests/issue_17_tiny_trimesh_distance.rs
+new file mode 100644
+index 00000000..18300bfd
+--- /dev/null
++++ b/crates/parry3d/tests/issue_17_tiny_trimesh_distance.rs
+@@ -0,0 +1,56 @@
++// Regression test for https://github.com/dimforge/parry/issues/17
++//
++// A cube `TriMesh` scaled down to 1e-10 used to panic on an `Option::unwrap` inside the
++// old Qbvh best-first traversal, which has since been replaced (see also issue #395).
++
++use parry3d::math::Vector;
++use parry3d::query::PointQuery;
++use parry3d::shape::TriMesh;
++
++#[test]
++fn tiny_trimesh_distance_to_point_does_not_panic() {
++    let length_unit = 1.0e-10_f32;
++
++    // Exact mesh from the issue.
++    let vertices: Vec<_> = [
++        [-0.5, -0.5, 0.5],
++        [0.5, -0.5, 0.5],
++        [-0.5, 0.5, 0.5],
++        [0.5, 0.5, 0.5],
++        [-0.5, 0.5, -0.5],
++        [0.5, 0.5, -0.5],
++        [-0.5, -0.5, -0.5],
++        [0.5, -0.5, -0.5],
++    ]
++    .iter()
++    .map(|p| Vector::new(p[0] * length_unit, p[1] * length_unit, p[2] * length_unit))
++    .collect();
++    let indices = vec![
++        [3, 1, 0],
++        [2, 3, 0],
++        [5, 3, 2],
++        [4, 5, 2],
++        [7, 5, 4],
++        [6, 7, 4],
++        [1, 7, 6],
++        [0, 1, 6],
++        [5, 7, 1],
++        [3, 5, 1],
++        [2, 0, 6],
++        [4, 2, 6],
++    ];
++
++    let trimesh = TriMesh::new(vertices, indices).unwrap();
++
++    let queries = [
++        Vector::ZERO,
++        Vector::splat(0.25 * length_unit),
++        Vector::splat(2.0 * length_unit),
++        Vector::new(1.0, -2.0, 3.0), // Far away compared to the mesh scale.
++    ];
++
++    for pt in queries {
++        let dist = trimesh.distance_to_local_point(pt, true);
++        assert!(dist.is_finite());
++    }
++}
+diff --git a/crates/parry3d/tests/issue_193_shape_cast_penetrating_normals.rs b/crates/parry3d/tests/issue_193_shape_cast_penetrating_normals.rs
+new file mode 100644
+index 00000000..3742862f
+--- /dev/null
++++ b/crates/parry3d/tests/issue_193_shape_cast_penetrating_normals.rs
+@@ -0,0 +1,66 @@
++// Regression test for https://github.com/dimforge/parry/issues/193
++// (the four cases from HeartofPhos' 2024-11-29 comment)
++//
++// A shape slightly penetrating the +Y face of a large cuboid used to get wildly wrong
++// shape-cast normals (e.g. [0.707, 0.027, 0.707] instead of ±Y), the GJK-derived normal
++// being unreliable for tiny TOIs. Casts with `toi < 1e-4` now fall back on the contact
++// query for the impact geometry.
++
++use parry3d::math::{Pose, Vector};
++use parry3d::query::{self, ShapeCastOptions};
++use parry3d::shape::{Ball, Capsule, Cuboid, Shape};
++
++#[test]
++fn slightly_penetrating_casts_report_the_face_normal() {
++    let cases: [(Box<dyn Shape>, Pose); 4] = [
++        {
++            let g = Capsule::new_y(5.0, 1.0);
++            let pos = Pose::translation(0.0, g.half_height() - 0.01, 0.0);
++            (Box::new(g), pos)
++        },
++        {
++            let g = Capsule::new_y(5.0, 1.0);
++            let pos = Pose::translation(0.0, g.half_height() - 0.02, 0.0);
++            (Box::new(g), pos)
++        },
++        {
++            let g = Ball::new(1.0);
++            let pos = Pose::translation(0.0, g.radius - 0.2, 0.0);
++            (Box::new(g), pos)
++        },
++        {
++            let g = Ball::new(1.0);
++            let pos = Pose::translation(0.0, g.radius - 0.200001, 0.0);
++            (Box::new(g), pos)
++        },
++    ];
++
++    let g2 = Cuboid::new(Vector::new(20.0, 1.0, 20.0));
++    let pos2 = Pose::translation(0.0, -g2.half_extents.y, 0.0);
++    let vel2 = Vector::ZERO;
++
++    // Velocity not being straight down played a part in the original failures.
++    let vel1 = Vector::new(0.1, 1.0, 0.0);
++
++    let options = ShapeCastOptions {
++        compute_impact_geometry_on_penetration: true,
++        ..Default::default()
++    };
++
++    for (i, (g1, pos1)) in cases.iter().enumerate() {
++        let hit = query::cast_shapes(pos1, vel1, &**g1, &pos2, vel2, &g2, options)
++            .unwrap()
++            .expect("the penetrating cast should return a hit");
++
++        assert!(
++            (hit.normal2 - Vector::Y).length() < 1.0e-4,
++            "case {i}: normal2 {:?} should be +Y",
++            hit.normal2,
++        );
++        assert!(
++            (hit.normal1 + Vector::Y).length() < 1.0e-4,
++            "case {i}: normal1 {:?} should be -Y",
++            hit.normal1,
++        );
++    }
++}
+diff --git a/crates/parry3d/tests/issue_215_plane_intersection_hang.rs b/crates/parry3d/tests/issue_215_plane_intersection_hang.rs
+new file mode 100644
+index 00000000..79a20bce
+--- /dev/null
++++ b/crates/parry3d/tests/issue_215_plane_intersection_hang.rs
+@@ -0,0 +1,50 @@
++// Regression test for https://github.com/dimforge/parry/issues/215
++//
++// `TriMesh::intersection_with_local_plane` used to hang forever on a flat two-triangle
++// quad when the plane crossed the shared edge, the polyline extraction loop having no
++// termination guard. This checks the issue's repro terminates with a sane polyline.
++
++use parry3d::math::Vector;
++use parry3d::query::IntersectResult;
++use parry3d::shape::TriMesh;
++
++#[test]
++fn flat_quad_plane_intersection_terminates() {
++    // Exact repro from the issue.
++    let points = vec![
++        Vector::new(0.0, 0.0, 0.0),
++        Vector::new(0.0, 0.0, 1.0),
++        Vector::new(1.0, 0.0, 0.0),
++        Vector::new(1.0, 0.0, 1.0),
++    ];
++    let indices = vec![[0, 1, 2], [1, 3, 2]];
++    let trimesh = TriMesh::new(points, indices).unwrap();
++
++    let result = trimesh.intersection_with_local_plane(Vector::X, 0.5, 0.0005);
++
++    match result {
++        IntersectResult::Intersect(polyline) => {
++            // The plane x = 0.5 cuts the unit quad along a segment of length 1.
++            assert!(!polyline.vertices().is_empty());
++            for pt in polyline.vertices() {
++                assert!((pt.x - 0.5).abs() <= 1.0e-4, "vertex {pt:?} not on plane");
++                assert!(pt.y.abs() <= 1.0e-4);
++                assert!((-1.0e-4..=1.0 + 1.0e-4).contains(&pt.z));
++            }
++
++            let z_min = polyline
++                .vertices()
++                .iter()
++                .map(|p| p.z)
++                .fold(f32::MAX, f32::min);
++            let z_max = polyline
++                .vertices()
++                .iter()
++                .map(|p| p.z)
++                .fold(f32::MIN, f32::max);
++            assert!((z_min - 0.0).abs() <= 1.0e-4);
++            assert!((z_max - 1.0).abs() <= 1.0e-4);
++        }
++        _ => panic!("expected an Intersect result"),
++    }
++}
+diff --git a/crates/parry3d/tests/issue_252_trimesh_inertia_offdiagonal.rs b/crates/parry3d/tests/issue_252_trimesh_inertia_offdiagonal.rs
+new file mode 100644
+index 00000000..3104fc1f
+--- /dev/null
++++ b/crates/parry3d/tests/issue_252_trimesh_inertia_offdiagonal.rs
+@@ -0,0 +1,115 @@
++// Regression test for https://github.com/dimforge/parry/issues/252
++//
++// The issue reported swapped `xy`/`xz` off-diagonal terms in a trimesh's inertia tensor.
++// This checks the full tensor against the analytic cuboid one, both axis-aligned and
++// with a rotation baked into the vertices.
++
++use parry3d::mass_properties::MassProperties;
++use parry3d::math::{Mat3, Rot3, Vector};
++
++fn box_mesh(he: Vector) -> (Vec<Vector>, Vec<[u32; 3]>) {
++    // Outward-oriented box triangulation.
++    let vertices = vec![
++        Vector::new(-he.x, -he.y, -he.z),
++        Vector::new(he.x, -he.y, -he.z),
++        Vector::new(he.x, he.y, -he.z),
++        Vector::new(-he.x, he.y, -he.z),
++        Vector::new(-he.x, -he.y, he.z),
++        Vector::new(he.x, -he.y, he.z),
++        Vector::new(he.x, he.y, he.z),
++        Vector::new(-he.x, he.y, he.z),
++    ];
++    let indices = vec![
++        [0, 2, 1],
++        [0, 3, 2], // -z
++        [4, 5, 6],
++        [4, 6, 7], // +z
++        [0, 1, 5],
++        [0, 5, 4], // -y
++        [2, 3, 7],
++        [2, 7, 6], // +y
++        [1, 2, 6],
++        [1, 6, 5], // +x
++        [0, 4, 7],
++        [0, 7, 3], // -x
++    ];
++    (vertices, indices)
++}
++
++fn assert_mat_relative_eq(actual: Mat3, expected: Mat3, scale: f32) {
++    let a = actual.to_cols_array();
++    let e = expected.to_cols_array();
++    for i in 0..9 {
++        assert!(
++            (a[i] - e[i]).abs() <= scale * 1.0e-3,
++            "inertia mismatch at {i}: {} vs {} (actual {a:?}, expected {e:?})",
++            a[i],
++            e[i]
++        );
++    }
++}
++
++#[test]
++fn aligned_box_mesh_inertia_matches_cuboid() {
++    let he = Vector::new(0.4, 0.6, 0.8);
++    let density = 2.5;
++
++    let (vertices, indices) = box_mesh(he);
++    let mp_mesh = MassProperties::from_trimesh(density, &vertices, &indices);
++    let mp_cuboid = MassProperties::from_cuboid(density, he);
++
++    let mass_mesh = 1.0 / mp_mesh.inv_mass;
++    let mass_cuboid = 1.0 / mp_cuboid.inv_mass;
++    assert!((mass_mesh - mass_cuboid).abs() <= mass_cuboid * 1.0e-4);
++    assert!(mp_mesh.local_com.length() <= 1.0e-5);
++
++    let i_mesh = mp_mesh.reconstruct_inertia_matrix();
++    let i_cuboid = mp_cuboid.reconstruct_inertia_matrix();
++
++    // Scale for the relative tolerance: the largest diagonal term.
++    let scale = i_cuboid
++        .to_cols_array()
++        .iter()
++        .fold(0.0f32, |m, x| m.max(x.abs()));
++    assert_mat_relative_eq(i_mesh, i_cuboid, scale);
++
++    // The aligned case must have (near-)zero off-diagonals.
++    let m = i_mesh.to_cols_array_2d();
++    for (i, col) in m.iter().enumerate() {
++        for (j, v) in col.iter().enumerate() {
++            if i != j {
++                assert!(v.abs() <= scale * 1.0e-4, "off-diagonal [{i}][{j}] = {v}");
++            }
++        }
++    }
++}
++
++#[test]
++fn rotated_box_mesh_inertia_matches_rotated_cuboid_tensor() {
++    let he = Vector::new(0.4, 0.6, 0.8);
++    let density = 2.5;
++    let rot = Rot3::from_axis_angle(Vector::new(1.0, 2.0, 3.0).normalize(), 0.7);
++
++    let (vertices, indices) = box_mesh(he);
++    let rotated: Vec<_> = vertices.iter().map(|v| rot * *v).collect();
++    let mp_mesh = MassProperties::from_trimesh(density, &rotated, &indices);
++    let mp_cuboid = MassProperties::from_cuboid(density, he);
++
++    let i_mesh = mp_mesh.reconstruct_inertia_matrix();
++
++    // Expected: R * I * R^T. This has non-zero off-diagonal terms, so an
++    // xy/xz swap in `reconstruct_inertia_matrix` (the original report) or in
++    // the trimesh accumulation would be caught here.
++    let r = Mat3::from_quat(rot);
++    let i_expected = r * mp_cuboid.reconstruct_inertia_matrix() * r.transpose();
++
++    let scale = i_expected
++        .to_cols_array()
++        .iter()
++        .fold(0.0f32, |m, x| m.max(x.abs()));
++    assert_mat_relative_eq(i_mesh, i_expected, scale);
++
++    // Sanity: the rotated tensor really has significant off-diagonal terms.
++    let e = i_expected.to_cols_array_2d();
++    assert!(e[0][1].abs() > 1.0e-3 || e[0][2].abs() > 1.0e-3 || e[1][2].abs() > 1.0e-3);
++}
+diff --git a/crates/parry3d/tests/issue_26_shape_cast_target_distance.rs b/crates/parry3d/tests/issue_26_shape_cast_target_distance.rs
+new file mode 100644
+index 00000000..d6a4d3f0
+--- /dev/null
++++ b/crates/parry3d/tests/issue_26_shape_cast_target_distance.rs
+@@ -0,0 +1,52 @@
++// Verification test for https://github.com/dimforge/parry/issues/26
++//
++// `ShapeCastOptions::target_distance` re-added the threshold-distance parameter removed
++// in early versions: the cast reports a hit as soon as the shapes come within that
++// distance, i.e. earlier than a plain cast.
++
++use parry3d::math::{Pose, Vector};
++use parry3d::query::{self, ShapeCastOptions};
++use parry3d::shape::Ball;
++
++#[test]
++fn target_distance_makes_the_cast_hit_earlier() {
++    let b1 = Ball::new(0.5);
++    let b2 = Ball::new(0.5);
++
++    let pos1 = Pose::IDENTITY;
++    let pos2 = Pose::translation(3.0, 0.0, 0.0);
++    let vel1 = Vector::new(1.0, 0.0, 0.0);
++
++    let plain = query::cast_shapes(
++        &pos1,
++        vel1,
++        &b1,
++        &pos2,
++        Vector::ZERO,
++        &b2,
++        ShapeCastOptions::default(),
++    )
++    .unwrap()
++    .expect("the plain cast should hit");
++
++    let with_target_distance = query::cast_shapes(
++        &pos1,
++        vel1,
++        &b1,
++        &pos2,
++        Vector::ZERO,
++        &b2,
++        ShapeCastOptions {
++            target_distance: 0.5,
++            ..Default::default()
++        },
++    )
++    .unwrap()
++    .expect("the thresholded cast should hit");
++
++    // Plain cast: the balls touch after moving 3 - (0.5 + 0.5) = 2.
++    assert!((plain.time_of_impact - 2.0).abs() < 1.0e-5);
++    // With a 0.5 target distance the hit is reported 0.5 units earlier.
++    assert!((with_target_distance.time_of_impact - 1.5).abs() < 1.0e-5);
++    assert!(with_target_distance.time_of_impact < plain.time_of_impact);
++}
+diff --git a/crates/parry3d/tests/issue_274_contact_heightfield.rs b/crates/parry3d/tests/issue_274_contact_heightfield.rs
+new file mode 100644
+index 00000000..1d1e2803
+--- /dev/null
++++ b/crates/parry3d/tests/issue_274_contact_heightfield.rs
+@@ -0,0 +1,134 @@
++// Regression test for https://github.com/dimforge/parry/issues/274
++//
++// `query::contact` with a heightfield used to return `Err(Unsupported)`, `HeightField`
++// implementing neither `SupportMap` nor `CompositeShape`. It now iterates the elements
++// intersecting the other shape's Aabb and keeps the deepest contact.
++
++use parry3d::math::{Pose, Vector};
++use parry3d::query::contact;
++use parry3d::shape::{Ball, Capsule, HeightField};
++use parry3d::utils::Array2;
++
++const EPS: f32 = 1.0e-4;
++
++fn flat_heightfield() -> HeightField {
++    // A flat heightfield at y = 0 spanning x, z in [-5, 5].
++    HeightField::new(
++        Array2::new(3, 3, vec![0.0; 9]),
++        Vector::new(10.0, 1.0, 10.0),
++    )
++}
++
++#[test]
++fn capsule_above_heightfield() {
++    let hf = flat_heightfield();
++    let capsule = Capsule::new_y(0.5, 0.2);
++    let pos_hf = Pose::identity();
++    // The capsule's lowest point is at y = 2.0 - 0.7 = 1.3.
++    let pos_capsule = Pose::from_translation(Vector::new(0.0, 2.0, 0.0));
++
++    // Out of prediction range: no contact, but not Unsupported.
++    let c = contact(&pos_hf, &hf, &pos_capsule, &capsule, 1.0).unwrap();
++    assert!(c.is_none(), "expected no contact, got {c:?}");
++
++    // Within prediction range: a contact with the correct separation and normal.
++    let c = contact(&pos_hf, &hf, &pos_capsule, &capsule, 2.0)
++        .unwrap()
++        .unwrap();
++    assert!(
++        (c.dist - 1.3).abs() < EPS,
++        "expected dist ~ 1.3, got {}",
++        c.dist
++    );
++    assert!(
++        (c.normal1 - Vector::Y).length() < EPS,
++        "normal1 should be +Y, got {:?}",
++        c.normal1
++    );
++}
++
++#[test]
++fn capsule_touching_heightfield() {
++    let hf = flat_heightfield();
++    let capsule = Capsule::new_y(0.5, 0.2);
++    let pos_hf = Pose::identity();
++    // NOTE: touch the interior of a heightfield triangle: on shared triangle
++    // vertices/edges the single-contact normal is ambiguous (the query sees
++    // zero-thickness triangles, not the whole surface).
++    let pos_capsule = Pose::from_translation(Vector::new(1.0, 0.7, -2.0));
++
++    let c = contact(&pos_hf, &hf, &pos_capsule, &capsule, 0.1)
++        .unwrap()
++        .unwrap();
++    assert!(c.dist.abs() < EPS, "expected touching dist, got {}", c.dist);
++    assert!(
++        (c.normal1 - Vector::Y).length() < EPS,
++        "normal1 should be +Y, got {:?}",
++        c.normal1
++    );
++}
++
++#[test]
++fn capsule_penetrating_heightfield_both_orders() {
++    let hf = flat_heightfield();
++    let capsule = Capsule::new_y(0.5, 0.2);
++    let pos_hf = Pose::identity();
++    // NOTE: (1, -2) is strictly inside one heightfield triangle (not on the cell
++    // diagonal), and the penetration (0.1) is smaller than the capsule radius so
++    // the bottom sphere's center stays strictly above the triangles' plane. Both
++    // matter: on such degenerate configurations the (pre-existing) single-contact
++    // query against zero-thickness triangles has an ambiguous normal.
++    let pos_capsule = Pose::from_translation(Vector::new(1.0, 0.6, -2.0));
++
++    // NOTE: EPA linearizes the capsule's round surface, hence the looser tolerance.
++    const PEN_EPS: f32 = 5.0e-3;
++
++    let c = contact(&pos_hf, &hf, &pos_capsule, &capsule, 0.0)
++        .unwrap()
++        .unwrap();
++    assert!(
++        (c.dist + 0.1).abs() < PEN_EPS,
++        "expected dist ~ -0.1, got {}",
++        c.dist
++    );
++    assert!(
++        (c.normal1 - Vector::Y).length() < PEN_EPS,
++        "normal1 should be +Y, got {:?}",
++        c.normal1
++    );
++
++    // Flipped arguments order: the contact must be flipped as well.
++    let c = contact(&pos_capsule, &capsule, &pos_hf, &hf, 0.0)
++        .unwrap()
++        .unwrap();
++    assert!(
++        (c.dist + 0.1).abs() < PEN_EPS,
++        "expected dist ~ -0.1, got {}",
++        c.dist
++    );
++    assert!(
++        (c.normal1 + Vector::Y).length() < PEN_EPS,
++        "normal1 should be -Y, got {:?}",
++        c.normal1
++    );
++}
++
++#[test]
++fn ball_vs_heightfield() {
++    let hf = flat_heightfield();
++    let ball = Ball::new(0.5);
++    let pos_hf = Pose::identity();
++    let pos_ball = Pose::from_translation(Vector::new(1.0, 0.3, -2.0));
++
++    let c = contact(&pos_hf, &hf, &pos_ball, &ball, 0.0)
++        .unwrap()
++        .unwrap();
++    assert!(
++        (c.dist + 0.2).abs() < EPS,
++        "expected dist ~ -0.2, got {}",
++        c.dist
++    );
++    assert!((c.normal1 - Vector::Y).length() < EPS);
++    // The witness point on the heightfield is on its surface, under the ball.
++    assert!((c.point1 - Vector::new(1.0, 0.0, -2.0)).length() < EPS);
++}
+diff --git a/crates/parry3d/tests/issue_315_touching_cuboids_contact.rs b/crates/parry3d/tests/issue_315_touching_cuboids_contact.rs
+new file mode 100644
+index 00000000..ea4176c0
+--- /dev/null
++++ b/crates/parry3d/tests/issue_315_touching_cuboids_contact.rs
+@@ -0,0 +1,90 @@
++// Regression test for https://github.com/dimforge/parry/issues/315
++//
++// `contact()` between two exactly-touching cuboids used to return arbitrary results:
++// GJK's first CSO support point can land exactly on the origin, leaving EPA with a
++// 0-dimensional simplex answered by a hardcoded fallback. EPA now bootstraps it and
++// locates the touching face.
++
++use parry3d::math::{Pose, Vector};
++use parry3d::query::contact;
++use parry3d::shape::Cuboid;
++
++const EPS: f32 = 1.0e-5;
++
++// The exact repro from issue #315: two unit cubes touching on the plane x = 1.
++#[test]
++fn exactly_touching_cuboids() {
++    let box1 = Cuboid::new(Vector::new(0.5, 0.5, 0.5));
++    let pos1 = Pose::from_translation(Vector::new(0.5, 0.5, 0.5));
++    let pos2 = Pose::from_translation(Vector::new(1.5, 0.5, 0.5));
++
++    let c = contact(&pos1, &box1, &pos2, &box1, 0.0).unwrap().unwrap();
++
++    assert!(c.dist.abs() < EPS, "expected touching dist, got {}", c.dist);
++    assert!(
++        (c.point1.x - 1.0).abs() < EPS,
++        "point1 not on the touching plane: {:?}",
++        c.point1
++    );
++    assert!(
++        (c.point2.x - 1.0).abs() < EPS,
++        "point2 not on the touching plane: {:?}",
++        c.point2
++    );
++    for pt in [c.point1, c.point2] {
++        assert!(
++            (0.0..=1.0).contains(&pt.y) && (0.0..=1.0).contains(&pt.z),
++            "witness point outside the touching faces: {pt:?}"
++        );
++    }
++    assert!(
++        (c.normal1 - Vector::X).length() < EPS,
++        "normal1 should be +X, got {:?}",
++        c.normal1
++    );
++    assert!(
++        (c.normal2 + Vector::X).length() < EPS,
++        "normal2 should be -X, got {:?}",
++        c.normal2
++    );
++}
++
++// Same configuration with the arguments flipped: the normal must flip too.
++#[test]
++fn exactly_touching_cuboids_flipped() {
++    let box1 = Cuboid::new(Vector::new(0.5, 0.5, 0.5));
++    let pos1 = Pose::from_translation(Vector::new(0.5, 0.5, 0.5));
++    let pos2 = Pose::from_translation(Vector::new(1.5, 0.5, 0.5));
++
++    let c = contact(&pos2, &box1, &pos1, &box1, 0.0).unwrap().unwrap();
++
++    assert!(c.dist.abs() < EPS, "expected touching dist, got {}", c.dist);
++    assert!((c.point1.x - 1.0).abs() < EPS);
++    assert!((c.point2.x - 1.0).abs() < EPS);
++    assert!(
++        (c.normal1 + Vector::X).length() < EPS,
++        "normal1 should be -X, got {:?}",
++        c.normal1
++    );
++}
++
++// Overlapping cuboids must keep returning a negative dist consistent with the
++// actual penetration.
++#[test]
++fn overlapping_cuboids() {
++    let box1 = Cuboid::new(Vector::new(0.5, 0.5, 0.5));
++    let pos1 = Pose::from_translation(Vector::new(0.5, 0.5, 0.5));
++    let pos2 = Pose::from_translation(Vector::new(1.2, 0.5, 0.5));
++
++    let c = contact(&pos1, &box1, &pos2, &box1, 0.0).unwrap().unwrap();
++
++    assert!(
++        (c.dist + 0.3).abs() < 1.0e-4,
++        "expected dist ~ -0.3, got {}",
++        c.dist
++    );
++    assert!((c.normal1 - Vector::X).length() < EPS);
++    // The witness points must be on the shapes' penetrating faces.
++    assert!((c.point1.x - 1.0).abs() < 1.0e-4);
++    assert!((c.point2.x - 0.7).abs() < 1.0e-4);
++}
+diff --git a/crates/parry3d/tests/issue_332_heightfield_point_projection.rs b/crates/parry3d/tests/issue_332_heightfield_point_projection.rs
+new file mode 100644
+index 00000000..dff77160
+--- /dev/null
++++ b/crates/parry3d/tests/issue_332_heightfield_point_projection.rs
+@@ -0,0 +1,154 @@
++// Regression test for https://github.com/dimforge/rapier/issues/332
++//
++// `HeightField::project_local_point` used to iterate on every triangle, making
++// ball-vs-heightfield tests O(rows * cols) per query; it now visits only the cells
++// overlapping a growing neighborhood. These check it matches brute force and is faster.
++
++use parry3d::math::Vector;
++use parry3d::query::PointQuery;
++use parry3d::shape::HeightField;
++use parry3d::utils::Array2;
++
++/// Tiny deterministic LCG so the tests don't depend on rand seeding.
++struct Lcg(u64);
++
++impl Lcg {
++    fn next_u32(&mut self) -> u32 {
++        self.0 = self
++            .0
++            .wrapping_mul(6364136223846793005)
++            .wrapping_add(1442695040888963407);
++        (self.0 >> 32) as u32
++    }
++
++    fn real(&mut self, min: f32, max: f32) -> f32 {
++        min + (max - min) * (self.next_u32() as f32 / u32::MAX as f32)
++    }
++}
++
++fn random_heightfield(rng: &mut Lcg, n: usize, scale: Vector) -> HeightField {
++    let heights: Vec<f32> = (0..n * n).map(|_| rng.real(-1.0, 1.0)).collect();
++    HeightField::new(Array2::new(n, n, heights), scale)
++}
++
++fn brute_force_distance(heightfield: &HeightField, pt: Vector) -> f32 {
++    let mut smallest_dist = f32::MAX;
++    for tri in heightfield.triangles() {
++        let proj = tri.project_local_point(pt, false);
++        smallest_dist = smallest_dist.min((pt - proj.point).length());
++    }
++    smallest_dist
++}
++
++#[test]
++fn pruned_projection_matches_brute_force() {
++    let mut rng = Lcg(0x332);
++    let heightfield = random_heightfield(&mut rng, 16, Vector::new(16.0, 2.0, 16.0));
++
++    for i in 0..1000 {
++        // Mix of points: near the surface, inside the AABB, far outside, above, below.
++        let pt = match i % 4 {
++            0 => Vector::new(
++                rng.real(-8.0, 8.0),
++                rng.real(-2.0, 2.0),
++                rng.real(-8.0, 8.0),
++            ),
++            1 => Vector::new(
++                rng.real(-8.0, 8.0),
++                rng.real(-100.0, 100.0),
++                rng.real(-8.0, 8.0),
++            ),
++            2 => Vector::new(
++                rng.real(-100.0, 100.0),
++                rng.real(-10.0, 10.0),
++                rng.real(-100.0, 100.0),
++            ),
++            _ => Vector::new(
++                rng.real(-8.5, 8.5),
++                rng.real(-3.0, 3.0),
++                rng.real(-8.5, 8.5),
++            ),
++        };
++
++        let proj = heightfield.project_local_point(pt, false);
++        let dist = (pt - proj.point).length();
++        let brute_dist = brute_force_distance(&heightfield, pt);
++
++        assert!(
++            (dist - brute_dist).abs() <= 1.0e-4 * brute_dist.max(1.0),
++            "point {pt:?}: pruned distance {dist} != brute-force distance {brute_dist}"
++        );
++    }
++}
++
++#[test]
++fn pruned_projection_matches_brute_force_flat_field() {
++    // The exact setup from the issue: a constant-height field.
++    let n = 16;
++    let heights = vec![1.0; n * n];
++    let heightfield = HeightField::new(Array2::new(n, n, heights), Vector::new(16.0, 1.0, 16.0));
++    let mut rng = Lcg(0x332_332);
++
++    for _ in 0..1000 {
++        let pt = Vector::new(
++            rng.real(-20.0, 20.0),
++            rng.real(-5.0, 5.0),
++            rng.real(-20.0, 20.0),
++        );
++
++        let proj = heightfield.project_local_point(pt, true);
++        let dist = (pt - proj.point).length();
++        let brute_dist = brute_force_distance(&heightfield, pt);
++
++        assert!(
++            (dist - brute_dist).abs() <= 1.0e-4 * brute_dist.max(1.0),
++            "point {pt:?}: pruned distance {dist} != brute-force distance {brute_dist}"
++        );
++    }
++}
++
++#[test]
++#[ignore = "benchmark, run manually with --ignored --test-threads=1"]
++fn pruned_projection_perf() {
++    let mut rng = Lcg(0xbe7c4);
++    let n = 512;
++    let heightfield = random_heightfield(&mut rng, n, Vector::new(256.0, 2.0, 256.0));
++
++    let pts: Vec<Vector> = (0..10_000)
++        .map(|_| {
++            Vector::new(
++                rng.real(-128.0, 128.0),
++                rng.real(-4.0, 4.0),
++                rng.real(-128.0, 128.0),
++            )
++        })
++        .collect();
++
++    let t_pruned = std::time::Instant::now();
++    let mut acc = 0.0;
++    for pt in &pts {
++        let proj = heightfield.project_local_point(*pt, false);
++        acc += (proj.point - *pt).length();
++    }
++    let t_pruned = t_pruned.elapsed().as_secs_f64() / pts.len() as f64;
++
++    // Brute force is way too slow for 10k queries; sample it on a few points.
++    let t_brute = std::time::Instant::now();
++    for pt in &pts[..20] {
++        acc += brute_force_distance(&heightfield, *pt);
++    }
++    let t_brute = t_brute.elapsed().as_secs_f64() / 20.0;
++
++    println!(
++        "pruned: {:.3}us/query, brute force: {:.3}us/query, speedup: {:.1}x (acc: {acc})",
++        t_pruned * 1.0e6,
++        t_brute * 1.0e6,
++        t_brute / t_pruned
++    );
++
++    assert!(
++        t_pruned * 100.0 < t_brute,
++        "pruned projection should be at least 100x faster than brute force \
++         (pruned: {t_pruned}s, brute: {t_brute}s)"
++    );
++}
+diff --git a/crates/parry3d/tests/issue_345_voxels_workspace_key_overflow.rs b/crates/parry3d/tests/issue_345_voxels_workspace_key_overflow.rs
+new file mode 100644
+index 00000000..7ad809f9
+--- /dev/null
++++ b/crates/parry3d/tests/issue_345_voxels_workspace_key_overflow.rs
+@@ -0,0 +1,62 @@
++// Regression test for https://github.com/dimforge/parry/issues/345
++// (originally reported as https://github.com/dimforge/rapier/issues/845)
++//
++// The contact-manifold workspace key was computed over the undilated voxel domain, so a
++// voxel with a non-free face toward a domain minimum produced a relative key of -1,
++// overflowing on the cast to u32. It is now computed over a domain dilated by 1.
++
++use parry3d::math::{IVector, Pose, Vector};
++use parry3d::query::{ContactManifold, DefaultQueryDispatcher, PersistentQueryDispatcher};
++use parry3d::shape::{Cuboid, Voxels};
++
++#[test]
++fn voxels_contact_manifold_at_domain_minimum_does_not_overflow() {
++    // A 5x2x5 slab of unit voxels. Every top-layer voxel has a neighbor below
++    // it, so its canonical shape extends past the domain minimum along -y
++    // (and along -x/-z for the interior ones), which is exactly the situation
++    // that overflowed the workspace-key computation.
++    let mut coords = Vec::new();
++    for i in 0..5 {
++        for j in 0..2 {
++            for k in 0..5 {
++                coords.push(IVector::new(i, j, k));
++            }
++        }
++    }
++    let voxels = Voxels::new(Vector::new(1.0, 1.0, 1.0), &coords);
++
++    // A small cuboid resting on the center of the slab's top face (y = 2),
++    // penetrating by 0.05. The dispatcher routes cuboid-vs-voxels through
++    // `contact_manifolds_voxels_shape`, which calls
++    // `CanonicalVoxelShape::from_voxel` for each candidate voxel.
++    let cuboid = Cuboid::new(Vector::new(0.4, 0.4, 0.4));
++    let pos12 = Pose::translation(2.5, 2.35, 2.5);
++
++    let mut manifolds: Vec<ContactManifold<(), ()>> = Vec::new();
++    let mut workspace = None;
++
++    // Run two frames to also exercise the workspace-reuse (occupied entry) path.
++    for _ in 0..2 {
++        DefaultQueryDispatcher
++            .contact_manifolds(
++                &pos12,
++                &voxels,
++                &cuboid,
++                0.05,
++                &mut manifolds,
++                &mut workspace,
++            )
++            .expect("the voxels/cuboid pair must be supported");
++    }
++
++    // No overflow panic reached this point; also check the result is sane.
++    let deepest = manifolds
++        .iter()
++        .flat_map(|m| m.points.iter())
++        .map(|pt| pt.dist)
++        .fold(f32::MAX, f32::min);
++    assert!(
++        (deepest + 0.05).abs() < 1.0e-3,
++        "expected a contact at dist ~ -0.05, got {deepest}"
++    );
++}
+diff --git a/crates/parry3d/tests/issue_373_voxels_shape_cast_witness.rs b/crates/parry3d/tests/issue_373_voxels_shape_cast_witness.rs
+new file mode 100644
+index 00000000..c5aa5569
+--- /dev/null
++++ b/crates/parry3d/tests/issue_373_voxels_shape_cast_witness.rs
+@@ -0,0 +1,77 @@
++// Regression test for https://github.com/dimforge/parry/issues/373
++//
++// `cast_shapes_voxels_shape` delegates the cast to a cuboid centered on each candidate
++// voxel, but stored `witness1` without shifting it back into the voxels shape's local
++// frame, so it was off by the voxel's center (and `witness2` in the swapped wrapper).
++
++use parry3d::math::{IVector, Pose, Vector};
++use parry3d::query::{self, ShapeCastOptions};
++use parry3d::shape::{Ball, Voxels};
++
++fn floor_voxels() -> Voxels {
++    // A single row of 20 unit voxels along +x: voxel `i` spans
++    // [i, i + 1] x [0, 1] x [0, 1] in the shape's local space.
++    let coords: Vec<_> = (0..20).map(|i| IVector::new(i, 0, 0)).collect();
++    Voxels::new(Vector::new(1.0, 1.0, 1.0), &coords)
++}
++
++#[test]
++fn voxels_shape_cast_witness1_is_in_voxels_local_space() {
++    let voxels = floor_voxels();
++    let ball = Ball::new(0.5);
++
++    // Drop the ball straight down onto voxel 17, far from the shape's origin.
++    let pos_voxels = Pose::identity();
++    let pos_ball = Pose::translation(17.5, 3.5, 0.5);
++    let vel_ball = Vector::new(0.0, -1.0, 0.0);
++
++    let hit = query::cast_shapes(
++        &pos_voxels,
++        Vector::ZERO,
++        &voxels,
++        &pos_ball,
++        vel_ball,
++        &ball,
++        ShapeCastOptions::default(),
++    )
++    .unwrap()
++    .expect("the ball should hit the voxels floor");
++
++    // Ball bottom starts at y = 3.0 and the voxel top face is at y = 1.0.
++    assert!((hit.time_of_impact - 2.0).abs() < 1.0e-4);
++
++    // `witness1` must lie on the hit voxel's top face, in the voxels shape's
++    // local space (the bug reported it in the individual voxel's frame,
++    // i.e. (0.0, 0.5, 0.0) here).
++    let expected_witness1 = Vector::new(17.5, 1.0, 0.5);
++    assert!(
++        (hit.witness1 - expected_witness1).length() < 1.0e-2,
++        "unexpected witness1: {:?}",
++        hit.witness1
++    );
++
++    // The other fields were already correct: `witness2` is in the ball's frame
++    // and the normals are translation-invariant.
++    assert!((hit.witness2 - Vector::new(0.0, -0.5, 0.0)).length() < 1.0e-2);
++    assert!((hit.normal1 - Vector::new(0.0, 1.0, 0.0)).length() < 1.0e-2);
++    assert!((hit.normal2 - Vector::new(0.0, -1.0, 0.0)).length() < 1.0e-2);
++
++    // The swapped shape order must agree with the direct one.
++    let swapped_hit = query::cast_shapes(
++        &pos_ball,
++        vel_ball,
++        &ball,
++        &pos_voxels,
++        Vector::ZERO,
++        &voxels,
++        ShapeCastOptions::default(),
++    )
++    .unwrap()
++    .expect("the ball should hit the voxels floor");
++
++    assert!((swapped_hit.time_of_impact - hit.time_of_impact).abs() < 1.0e-2);
++    assert!((swapped_hit.witness1 - hit.witness2).length() < 1.0e-2);
++    assert!((swapped_hit.witness2 - hit.witness1).length() < 1.0e-2);
++    assert!((swapped_hit.normal1 - hit.normal2).length() < 1.0e-2);
++    assert!((swapped_hit.normal2 - hit.normal1).length() < 1.0e-2);
++}
+diff --git a/crates/parry3d/tests/issue_382_voxels_iter_non_empty.rs b/crates/parry3d/tests/issue_382_voxels_iter_non_empty.rs
+new file mode 100644
+index 00000000..1b510c9d
+--- /dev/null
++++ b/crates/parry3d/tests/issue_382_voxels_iter_non_empty.rs
+@@ -0,0 +1,44 @@
++// Regression test for https://github.com/dimforge/parry/issues/382
++//
++// The sparse chunk storage makes `Voxels::voxels()` and `Voxels::voxels_in_range()`
++// yield only non-empty voxels, which the doc-comments used to contradict.
++
++use parry3d::math::{IVector, Vector};
++use parry3d::shape::Voxels;
++
++#[test]
++fn voxels_iterators_only_yield_non_empty_voxels() {
++    // An L-shaped set of voxels: the domain bounding box contains empty cells
++    // (e.g. (1, 1, 0), (2, 1, 0), ...).
++    let coords = [
++        IVector::new(0, 0, 0),
++        IVector::new(1, 0, 0),
++        IVector::new(2, 0, 0),
++        IVector::new(0, 1, 0),
++        IVector::new(0, 2, 0),
++    ];
++    let voxels = Voxels::new(Vector::new(1.0, 1.0, 1.0), &coords);
++
++    // `voxels()` yields exactly the filled voxels, all non-empty.
++    let all: Vec<_> = voxels.voxels().collect();
++    assert_eq!(all.len(), coords.len());
++    assert!(all.iter().all(|v| !v.state.is_empty()));
++    for c in &coords {
++        assert!(all.iter().any(|v| v.grid_coords == *c));
++    }
++
++    // `voxels_in_range()` over a range strictly larger than the domain still
++    // only yields the non-empty voxels.
++    let in_range: Vec<_> = voxels
++        .voxels_in_range(IVector::new(-10, -10, -10), IVector::new(10, 10, 10))
++        .collect();
++    assert_eq!(in_range.len(), coords.len());
++    assert!(in_range.iter().all(|v| !v.state.is_empty()));
++
++    // A range covering only empty cells of the domain's bounding box yields
++    // nothing.
++    let empty_range: Vec<_> = voxels
++        .voxels_in_range(IVector::new(1, 1, 0), IVector::new(3, 3, 1))
++        .collect();
++    assert!(empty_range.is_empty());
++}
+diff --git a/crates/parry3d/tests/issue_387_composite_contact_flipped.rs b/crates/parry3d/tests/issue_387_composite_contact_flipped.rs
+new file mode 100644
+index 00000000..f260e088
+--- /dev/null
++++ b/crates/parry3d/tests/issue_387_composite_contact_flipped.rs
+@@ -0,0 +1,55 @@
++// Regression test for https://github.com/dimforge/parry/issues/387
++// (fixed by https://github.com/dimforge/parry/pull/388)
++//
++// `contact_composite_shape_shape` used to invert `pose12` a second time before
++// traversing the composite's BVH, mirroring the traversal AABB and missing contacts for
++// off-center parts. This checks it agrees with the flipped query.
++
++use parry3d::math::{Pose, Vector};
++use parry3d::query::contact;
++use parry3d::shape::{Ball, Compound, SharedShape};
++
++#[test]
++fn contact_with_off_center_compound_part_agrees_with_flipped_order() {
++    // A compound whose parts are far from its origin: a unit-half-extent cube
++    // at (5, 0, 0) and another at (-5, -2, 0).
++    let compound = Compound::new(vec![
++        (
++            Pose::translation(5.0, 0.0, 0.0),
++            SharedShape::cuboid(1.0, 1.0, 1.0),
++        ),
++        (
++            Pose::translation(-5.0, -2.0, 0.0),
++            SharedShape::cuboid(1.0, 1.0, 1.0),
++        ),
++    ]);
++    let ball = Ball::new(1.0);
++
++    // The ball hovers 1.0 above the top face of the part at (5, 0, 0).
++    let pos_compound = Pose::identity();
++    let pos_ball = Pose::translation(5.0, 3.0, 0.0);
++    let prediction = 1.5;
++
++    let c12 = contact(&pos_compound, &compound, &pos_ball, &ball, prediction)
++        .unwrap()
++        .expect("the ball is within the prediction distance of the off-center part");
++
++    // With the double inversion, the traversal AABB was around (-5, -3, 0):
++    // no part there, hence no contact (or a contact against the wrong part).
++    assert!((c12.dist - 1.0).abs() < 1.0e-3, "dist = {}", c12.dist);
++    assert!((c12.point1 - Vector::new(5.0, 1.0, 0.0)).length() < 1.0e-3);
++    assert!((c12.point2 - Vector::new(5.0, 2.0, 0.0)).length() < 1.0e-3);
++    assert!((c12.normal1 - Vector::new(0.0, 1.0, 0.0)).length() < 1.0e-3);
++    assert!((c12.normal2 - Vector::new(0.0, -1.0, 0.0)).length() < 1.0e-3);
++
++    // The flipped order must return the same contact with the roles swapped.
++    let c21 = contact(&pos_ball, &ball, &pos_compound, &compound, prediction)
++        .unwrap()
++        .expect("the flipped query must detect the same contact");
++
++    assert!((c21.dist - c12.dist).abs() < 1.0e-6);
++    assert!((c21.point1 - c12.point2).length() < 1.0e-6);
++    assert!((c21.point2 - c12.point1).length() < 1.0e-6);
++    assert!((c21.normal1 - c12.normal2).length() < 1.0e-6);
++    assert!((c21.normal2 - c12.normal1).length() < 1.0e-6);
++}
+diff --git a/crates/parry3d/tests/issue_395_project_point_nan.rs b/crates/parry3d/tests/issue_395_project_point_nan.rs
+new file mode 100644
+index 00000000..da1ed12d
+--- /dev/null
++++ b/crates/parry3d/tests/issue_395_project_point_nan.rs
+@@ -0,0 +1,165 @@
++// Regression test for https://github.com/dimforge/parry/issues/395
++//
++// `CompositeShapeRef::project_local_point` (and friends) used to panic with
++// `unreachable!()` when `Bvh::find_best` recorded no candidate, which is what a NaN
++// query point causes. Point queries now report the query point itself instead.
++
++use parry3d::math::{Pose, Real, Vector};
++use parry3d::query::{PointQuery, PointQueryWithLocation};
++use parry3d::shape::{Compound, Cuboid, Polyline, SharedShape, TriMesh, TriMeshFlags};
++
++fn cube_mesh() -> (Vec<Vector>, Vec<[u32; 3]>) {
++    let vertices = vec![
++        Vector::new(-0.5, -0.5, -0.5),
++        Vector::new(0.5, -0.5, -0.5),
++        Vector::new(0.5, 0.5, -0.5),
++        Vector::new(-0.5, 0.5, -0.5),
++        Vector::new(-0.5, -0.5, 0.5),
++        Vector::new(0.5, -0.5, 0.5),
++        Vector::new(0.5, 0.5, 0.5),
++        Vector::new(-0.5, 0.5, 0.5),
++    ];
++    let indices = vec![
++        [0, 2, 1],
++        [0, 3, 2],
++        [4, 5, 6],
++        [4, 6, 7],
++        [0, 1, 5],
++        [0, 5, 4],
++        [2, 3, 7],
++        [2, 7, 6],
++        [1, 2, 6],
++        [1, 6, 5],
++        [0, 4, 7],
++        [0, 7, 3],
++    ];
++    (vertices, indices)
++}
++
++#[test]
++fn trimesh_nan_point_queries_do_not_panic() {
++    let (vertices, indices) = cube_mesh();
++    let mesh = TriMesh::new(vertices, indices).unwrap();
++    let nan = Vector::splat(Real::NAN);
++
++    // The projection is the NaN query point itself, not an arbitrary point picked
++    // from the mesh.
++    for solid in [true, false] {
++        let proj = mesh.project_local_point(nan, solid);
++        assert!(proj.point.is_nan());
++        assert!(!proj.is_inside);
++
++        let (proj, _) = mesh.project_local_point_and_get_location(nan, solid);
++        assert!(proj.point.is_nan());
++    }
++
++    assert!(mesh
++        .project_local_point_and_get_feature(nan)
++        .0
++        .point
++        .is_nan());
++    assert!(mesh
++        .project_local_point_with_max_dist(nan, true, Real::MAX)
++        .is_none());
++    assert!(mesh.distance_to_local_point(nan, true).is_nan());
++    assert!(!mesh.contains_local_point(nan));
++}
++
++#[test]
++fn oriented_trimesh_nan_point_queries_do_not_panic() {
++    // The pseudo-normals code path is different; make sure it is NaN-safe too.
++    let (vertices, indices) = cube_mesh();
++    let mesh = TriMesh::with_flags(vertices, indices, TriMeshFlags::ORIENTED).unwrap();
++    let nan = Vector::splat(Real::NAN);
++
++    assert!(mesh.project_local_point(nan, true).point.is_nan());
++    assert!(mesh
++        .project_local_point_and_get_feature(nan)
++        .0
++        .point
++        .is_nan());
++    assert!(mesh
++        .project_local_point_and_get_location(nan, true)
++        .0
++        .point
++        .is_nan());
++    assert!(!mesh.contains_local_point(nan));
++}
++
++#[test]
++fn polyline_nan_point_queries_do_not_panic() {
++    let polyline = Polyline::new(
++        vec![
++            Vector::new(0.0, 0.0, 0.0),
++            Vector::new(1.0, 0.0, 0.0),
++            Vector::new(1.0, 1.0, 0.0),
++        ],
++        None,
++    );
++    let nan = Vector::splat(Real::NAN);
++
++    assert!(polyline.project_local_point(nan, true).point.is_nan());
++    assert!(polyline
++        .project_local_point_and_get_feature(nan)
++        .0
++        .point
++        .is_nan());
++    assert!(polyline
++        .project_local_point_and_get_location(nan, true)
++        .0
++        .point
++        .is_nan());
++    assert!(!polyline.contains_local_point(nan));
++}
++
++#[test]
++fn compound_nan_point_queries_do_not_panic() {
++    let compound = Compound::new(vec![
++        (
++            Pose::IDENTITY,
++            SharedShape::new(Cuboid::new(Vector::splat(0.5))),
++        ),
++        (
++            Pose::from_translation(Vector::new(2.0, 0.0, 0.0)),
++            SharedShape::new(Cuboid::new(Vector::splat(0.5))),
++        ),
++    ]);
++    let nan = Vector::splat(Real::NAN);
++
++    for solid in [true, false] {
++        assert!(compound.project_local_point(nan, solid).point.is_nan());
++    }
++    assert!(compound
++        .project_local_point_and_get_feature(nan)
++        .0
++        .point
++        .is_nan());
++    // NOTE: unlike `TriMesh`/`Polyline` above, this currently returns `true`, because
++    //       `Aabb::contains_local_point` rejects a point by testing whether it lies
++    //       outside the bounds: every such test is false for a NaN, so the point is
++    //       reported as contained. That affects `Aabb`/`Cuboid` themselves, not just
++    //       composite shapes, so it is left alone here.
++    let _ = compound.contains_local_point(nan);
++}
++
++#[test]
++fn finite_point_projection_still_works() {
++    // Sanity check: the non-finite handling must not change regular queries.
++    let (vertices, indices) = cube_mesh();
++    let mesh = TriMesh::new(vertices, indices).unwrap();
++
++    let proj = mesh.project_local_point(Vector::new(2.0, 0.0, 0.0), true);
++    assert!(!proj.is_inside);
++    assert!((proj.point - Vector::new(0.5, 0.0, 0.0)).length() < 1.0e-5);
++}
++
++#[test]
++fn empty_trimesh_is_a_construction_error() {
++    assert!(TriMesh::new(Vec::new(), Vec::new()).is_err());
++}
++
++#[test]
++#[should_panic(expected = "must contain at least one shape")]
++fn empty_compound_panics_at_construction() {
++    let _ = Compound::new(Vec::new());
++}
+diff --git a/crates/parry3d/tests/issue_396_cylinder_intersection_false_negative.rs b/crates/parry3d/tests/issue_396_cylinder_intersection_false_negative.rs
+new file mode 100644
+index 00000000..d8643fa1
+--- /dev/null
++++ b/crates/parry3d/tests/issue_396_cylinder_intersection_false_negative.rs
+@@ -0,0 +1,100 @@
++// Regression test for https://github.com/dimforge/parry/issues/396
++//
++// `intersection_test` returned `Ok(false)` for two overlapping coaxial cylinders: their
++// degenerate axial support directions stall the GJK simplex, and the stagnation exits
++// reported `Proximity` (=> disjoint) without ever certifying separation.
++
++use parry3d::math::{Pose, Vector};
++use parry3d::query::intersection_test;
++use parry3d::shape::{Capsule, Cylinder};
++
++#[test]
++fn coaxial_overlapping_cylinders_intersect() {
++    // The exact setup from the issue.
++    let iso = Pose::IDENTITY;
++    let big = Cylinder::new(50.0, 100.0);
++    let small = Cylinder::new(1.5, 1.0);
++
++    assert_eq!(intersection_test(&iso, &big, &iso, &small), Ok(true));
++}
++
++#[test]
++fn coaxial_cylinder_capsule_intersect() {
++    // The second setup from the issue (cylinder vs tall thin capsule).
++    let iso = Pose::IDENTITY;
++    let big = Cylinder::new(50.0, 100.0);
++    let small = Capsule::new(
++        Vector::new(0.0, -50.0, 0.0),
++        Vector::new(0.0, 50.0, 0.0),
++        10.0,
++    );
++
++    assert_eq!(intersection_test(&iso, &big, &iso, &small), Ok(true));
++}
++
++#[test]
++fn offset_and_rotated_cylinders_intersecting() {
++    let big = Cylinder::new(50.0, 100.0);
++    let small = Cylinder::new(1.5, 1.0);
++
++    // Slightly offset (but still deeply overlapping) pairs.
++    for offset in [
++        Vector::new(0.01, 0.0, 0.0),
++        Vector::new(0.0, 0.01, 0.0),
++        Vector::new(0.0, 0.0, -0.01),
++        Vector::new(3.0, 5.0, -2.0),
++    ] {
++        let pos2 = Pose::from_translation(offset);
++        assert_eq!(
++            intersection_test(&Pose::IDENTITY, &big, &pos2, &small),
++            Ok(true),
++            "offset {offset:?} should intersect"
++        );
++    }
++
++    // Rotated overlapping pairs.
++    for angle in [0.01, 0.5, core::f32::consts::FRAC_PI_2] {
++        let pos2 = Pose::rotation(Vector::new(0.0, 0.0, angle));
++        assert_eq!(
++            intersection_test(&Pose::IDENTITY, &big, &pos2, &small),
++            Ok(true),
++            "rotation angle {angle} should intersect"
++        );
++    }
++}
++
++#[test]
++fn coaxial_cylinders_separated() {
++    // Guard the other direction: separated (still coaxial/axisymmetric) pairs
++    // must keep returning `false`.
++    let big = Cylinder::new(50.0, 100.0);
++    let small = Cylinder::new(1.5, 1.0);
++
++    // Separated along the symmetry axis.
++    for dy in [51.6, 60.0, 200.0] {
++        let pos2 = Pose::translation(0.0, dy, 0.0);
++        assert_eq!(
++            intersection_test(&Pose::IDENTITY, &big, &pos2, &small),
++            Ok(false),
++            "axial offset {dy} should be disjoint"
++        );
++    }
++
++    // Separated radially.
++    for dx in [101.1, 110.0, 500.0] {
++        let pos2 = Pose::translation(dx, 0.0, 0.0);
++        assert_eq!(
++            intersection_test(&Pose::IDENTITY, &big, &pos2, &small),
++            Ok(false),
++            "radial offset {dx} should be disjoint"
++        );
++    }
++
++    // Separated and rotated.
++    let pos2 = Pose::new(Vector::new(0.0, 53.0, 0.0), Vector::new(0.0, 0.0, 0.7));
++    assert_eq!(
++        intersection_test(&Pose::IDENTITY, &big, &pos2, &small),
++        Ok(false),
++        "rotated separated pair should be disjoint"
++    );
++}
+diff --git a/crates/parry3d/tests/issue_399_bvh_rebuild_reuse.rs b/crates/parry3d/tests/issue_399_bvh_rebuild_reuse.rs
+new file mode 100644
+index 00000000..177cbbfe
+--- /dev/null
++++ b/crates/parry3d/tests/issue_399_bvh_rebuild_reuse.rs
+@@ -0,0 +1,61 @@
++// Regression test for https://github.com/dimforge/parry/issues/399
++//
++// The request was a reusable BVH: rebuilding from moved leaves every tick without
++// reallocating. This locks in the recipe — `insert_or_update_partially` + `rebuild` with
++// a reused `BvhWorkspace` — and checks queries stay correct and the leaf set is stable.
++
++use parry3d::bounding_volume::{Aabb, BoundingVolume};
++use parry3d::math::Vector;
++use parry3d::partitioning::{Bvh, BvhBuildStrategy, BvhWorkspace};
++
++fn leaf_aabb(i: usize, tick: usize) -> Aabb {
++    // Leaves on a moving diagonal so every tick changes every AABB.
++    let offset = tick as f32 * 3.5;
++    let x = i as f32 * 2.0 + offset;
++    let y = (i % 7) as f32 - offset;
++    let mins = Vector::new(x, y, -1.0);
++    Aabb::new(mins, mins + Vector::new(1.0, 1.0, 2.0))
++}
++
++#[test]
++fn bvh_tick_loop_rebuild_with_reused_workspace() {
++    const NUM_LEAVES: usize = 100;
++    const NUM_TICKS: usize = 4;
++
++    let mut bvh = Bvh::new();
++    let mut workspace = BvhWorkspace::default();
++
++    for tick in 0..NUM_TICKS {
++        // Update (or insert, on the first tick) every leaf in place.
++        for i in 0..NUM_LEAVES {
++            bvh.insert_or_update_partially(leaf_aabb(i, tick), i as u32, 0.0);
++        }
++
++        // Rebuild in place, reusing both the tree's own buffers and the
++        // workspace.
++        bvh.rebuild(&mut workspace, BvhBuildStrategy::Binned);
++
++        // The leaf set must not grow tick over tick (updates must not
++        // duplicate leaves).
++        assert_eq!(bvh.leaf_count() as usize, NUM_LEAVES);
++
++        // The queries must reflect the new leaf positions.
++        for i in [0, 1, NUM_LEAVES / 2, NUM_LEAVES - 1] {
++            let query = leaf_aabb(i, tick);
++            let hits: Vec<u32> = bvh.intersect_aabb(&query).collect();
++            assert!(
++                hits.contains(&(i as u32)),
++                "tick {tick}: leaf {i} not found at its updated position"
++            );
++            // And no leaf may be reported at its previous (tick - 1) position
++            // unless it actually overlaps the new one.
++            for &hit in &hits {
++                let hit_aabb = leaf_aabb(hit as usize, tick);
++                assert!(
++                    hit_aabb.intersects(&query),
++                    "tick {tick}: stale leaf {hit} reported"
++                );
++            }
++        }
++    }
++}
+diff --git a/crates/parry3d/tests/issue_404_voxels_manifold_prediction.rs b/crates/parry3d/tests/issue_404_voxels_manifold_prediction.rs
+new file mode 100644
+index 00000000..02929333
+--- /dev/null
++++ b/crates/parry3d/tests/issue_404_voxels_manifold_prediction.rs
+@@ -0,0 +1,90 @@
++// Regression test for the ground-detection bug reported in
++// https://github.com/dimforge/parry/issues/404 (comment by @bolshoytoster)
++//
++// `contact_manifolds_voxels_shape` did not loosen the shape's AABB by `prediction`
++// before intersecting it with the voxels' AABB, so a shape hovering within the
++// prediction distance above a voxels floor got no manifold at all.
++
++use parry3d::math::{IVector, Pose, Vector};
++use parry3d::query::{ContactManifold, DefaultQueryDispatcher, PersistentQueryDispatcher};
++use parry3d::shape::{Ball, Capsule, Voxels};
++
++fn voxels_floor() -> Voxels {
++    // An 8x1x8 floor of unit voxels: top face at y = 1.
++    let mut coords = Vec::new();
++    for i in 0..8 {
++        for k in 0..8 {
++            coords.push(IVector::new(i, 0, k));
++        }
++    }
++    Voxels::new(Vector::new(1.0, 1.0, 1.0), &coords)
++}
++
++fn closest_dist(manifolds: &[ContactManifold<(), ()>]) -> Option<f32> {
++    manifolds
++        .iter()
++        .flat_map(|m| m.points.iter())
++        .map(|pt| pt.dist)
++        .min_by(|a, b| a.partial_cmp(b).unwrap())
++}
++
++#[test]
++fn voxels_shape_manifold_within_prediction_distance() {
++    let voxels = voxels_floor();
++
++    // A capsule (the typical character-controller shape) hovering 0.05 above
++    // the floor. Its lowest point is at y = 1.05.
++    let capsule = Capsule::new_y(0.3, 0.2);
++    let pos12 = Pose::translation(4.0, 1.55, 4.0);
++
++    let mut manifolds: Vec<ContactManifold<(), ()>> = Vec::new();
++    let mut workspace = None;
++    DefaultQueryDispatcher
++        .contact_manifolds(
++            &pos12,
++            &voxels,
++            &capsule,
++            0.1,
++            &mut manifolds,
++            &mut workspace,
++        )
++        .expect("the voxels/capsule pair must be supported");
++
++    let dist = closest_dist(&manifolds)
++        .expect("a speculative contact must be generated within the prediction distance");
++    assert!(
++        (dist - 0.05).abs() < 1.0e-3,
++        "expected a contact at dist ~ 0.05, got {dist}"
++    );
++}
++
++#[test]
++fn voxels_shape_manifold_within_prediction_distance_direct_ball() {
++    // Same check exercising `contact_manifolds_voxels_shape_shapes` directly
++    // (the dispatcher would route a ball to the specialized voxels-ball
++    // generator, which already loosened its AABBs correctly).
++    use parry3d::query::details::contact_manifolds_voxels_shape_shapes;
++
++    let voxels = voxels_floor();
++    let ball = Ball::new(0.5);
++    let pos12 = Pose::translation(4.0, 1.55, 4.0);
++
++    let mut manifolds: Vec<ContactManifold<(), ()>> = Vec::new();
++    let mut workspace = None;
++    contact_manifolds_voxels_shape_shapes(
++        &DefaultQueryDispatcher,
++        &pos12,
++        &voxels,
++        &ball,
++        0.1,
++        &mut manifolds,
++        &mut workspace,
++    );
++
++    let dist = closest_dist(&manifolds)
++        .expect("a speculative contact must be generated within the prediction distance");
++    assert!(
++        (dist - 0.05).abs() < 1.0e-3,
++        "expected a contact at dist ~ 0.05, got {dist}"
++    );
++}
+diff --git a/crates/parry3d/tests/issue_429_shape_cast_toi_accuracy.rs b/crates/parry3d/tests/issue_429_shape_cast_toi_accuracy.rs
+new file mode 100644
+index 00000000..fb3b2946
+--- /dev/null
++++ b/crates/parry3d/tests/issue_429_shape_cast_toi_accuracy.rs
+@@ -0,0 +1,80 @@
++// Regression test for https://github.com/dimforge/parry/issues/429
++// (adapted from the test of PR #430, by its author)
++//
++// `cast_shapes` returned a time of impact short by an amount scaling with the target
++// shape's extent: with large support coordinates orthogonal to the cast, float
++// cancellation kept the GJK upper bound from decreasing and the last-chance exit
++// returned the unrefined lower bound. It now refines it with the simplex witnesses.
++
++use parry3d::math::{Pose, Real, Vector};
++use parry3d::query::{self, ShapeCastOptions};
++use parry3d::shape::{Ball, Cuboid};
++
++#[test]
++fn shape_cast_toi_accuracy_does_not_scale_with_shape_extent() {
++    const BALL_RADIUS: Real = 0.5166;
++    const MAX_TOI_ERROR: Real = 2.0e-4; // 0.2 mm.
++    const MAX_WITNESS_ERROR: Real = 1.0e-6;
++    const MAX_NORMAL_ERROR: Real = 5.0e-4;
++
++    let ball = Ball::new(BALL_RADIUS);
++    let direction = -Vector::Y;
++    let mut toi_errors = Vec::new();
++
++    for half_extent in [5.0, 50.0, 500.0] {
++        let ground = Cuboid::new(Vector::new(half_extent, 0.5, half_extent));
++        let ground_pose = Pose::translation(0.0, -0.5, 0.0);
++        let mut max_toi_error: Real = 0.0;
++        let mut max_witness_error: Real = 0.0;
++        let mut max_normal_error: Real = 0.0;
++
++        // Sweep sub-millimetre start offsets at several lateral positions. This mirrors
++        // suspension probes near their resting pose while exercising large support points.
++        for i in 0..200 {
++            let y = 1.177 + i as Real * 5.0e-5;
++            for (x, z) in [(1.4, 2.8), (-1.4, -0.4), (1.4, -2.0), (-1.4, 2.0)] {
++                let ball_pose = Pose::translation(x, y, z);
++                let hit = query::cast_shapes(
++                    &ground_pose,
++                    Vector::ZERO,
++                    &ground,
++                    &ball_pose,
++                    direction,
++                    &ball,
++                    ShapeCastOptions::with_max_time_of_impact(2.0),
++                )
++                .unwrap()
++                .expect("the downward cast should hit the cuboid");
++
++                let expected_toi = y - BALL_RADIUS;
++                max_toi_error = max_toi_error.max((hit.time_of_impact - expected_toi).abs());
++
++                let witness1 = ground_pose.transform_point(hit.witness1);
++                max_witness_error = max_witness_error.max(witness1.y.abs());
++                max_normal_error = max_normal_error.max((hit.normal1 - Vector::Y).length());
++            }
++        }
++
++        assert!(
++            max_witness_error <= MAX_WITNESS_ERROR,
++            "shape-cast witness error {max_witness_error} exceeded {MAX_WITNESS_ERROR} for half-extent {half_extent}",
++        );
++        assert!(
++            max_normal_error <= MAX_NORMAL_ERROR,
++            "shape-cast normal error {max_normal_error} exceeded {MAX_NORMAL_ERROR} for half-extent {half_extent}",
++        );
++        println!(
++            "half-extent {half_extent}: max TOI error = {} mm, max witness error = {} mm",
++            max_toi_error * 1000.0,
++            max_witness_error * 1000.0,
++        );
++        toi_errors.push((half_extent, max_toi_error));
++    }
++
++    for (half_extent, max_toi_error) in toi_errors {
++        assert!(
++            max_toi_error <= MAX_TOI_ERROR,
++            "shape-cast TOI error {max_toi_error} exceeded {MAX_TOI_ERROR} for half-extent {half_extent}",
++        );
++    }
++}
+diff --git a/crates/parry3d/tests/issue_431_cuboid_distance_asymmetry.rs b/crates/parry3d/tests/issue_431_cuboid_distance_asymmetry.rs
+new file mode 100644
+index 00000000..2bd8f2a0
+--- /dev/null
++++ b/crates/parry3d/tests/issue_431_cuboid_distance_asymmetry.rs
+@@ -0,0 +1,110 @@
++// Regression test for https://github.com/dimforge/parry/issues/431 (3D variant)
++//
++// `query::distance` between two cuboids is dispatched to a SAT-based special
++// case whose face-vertex branch projected an unclamped support corner,
++// overestimating the distance in face-face configurations and making the result
++// depend on the arguments order. That was fixed by "fix some ambiguities in
++// cuboid-cuboid SAT" (#436); these tests pin the behavior down.
++
++use parry3d::math::{Pose, Real, Vector};
++use parry3d::query::{self, ClosestPoints};
++use parry3d::shape::Cuboid;
++
++fn check_symmetric_and_exact(p1: &Pose, c1: &Cuboid, p2: &Pose, c2: &Cuboid, expected: Real) {
++    let d12 = query::distance(p1, c1, p2, c2).unwrap();
++    let d21 = query::distance(p2, c2, p1, c1).unwrap();
++
++    // Cross-check against the exact GJK closest points.
++    let gjk_dist = match query::closest_points(p1, c1, p2, c2, Real::MAX).unwrap() {
++        ClosestPoints::WithinMargin(a, b) => (a - b).length(),
++        _ => 0.0,
++    };
++
++    assert!(
++        (d12 - d21).abs() < 1.0e-5,
++        "asymmetric distance: {d12} vs {d21}"
++    );
++    assert!(
++        (d12 - gjk_dist).abs() < 1.0e-5,
++        "distance {d12} disagrees with GJK closest points {gjk_dist}"
++    );
++    assert!(
++        (d12 - expected).abs() < 1.0e-4,
++        "distance {d12} != expected {expected}"
++    );
++}
++
++// 3D analog of the issue #431 repro: face-face configuration where the support
++// corner of the larger cuboid does not project inside the other cuboid's face.
++#[test]
++fn face_face_overhang() {
++    let c1 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
++    let c2 = Cuboid::new(Vector::new(1.0, 2.0, 2.0));
++    let p1 = Pose::identity();
++    let p2 = Pose::from_translation(Vector::new(-5.573167, 0.0, 0.0));
++
++    check_symmetric_and_exact(&p1, &c1, &p2, &c2, 3.5731668);
++}
++
++// Face-vertex configuration: c2 is rotated 45 degrees about Z on the diagonal,
++// which aligns one of its faces with the diagonal direction; the closest pair is
++// c1's corner (1, 1, z) against the interior of that face.
++#[test]
++fn vertex_face_diagonal() {
++    let c1 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
++    let c2 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
++    let p1 = Pose::identity();
++    let p2 = Pose::new(
++        Vector::new(4.0, 4.0, 0.0),
++        Vector::new(0.0, 0.0, core::f32::consts::FRAC_PI_4),
++    );
++
++    // Distance from c1's corner to c2's face plane: 3 * sqrt(2) - 1.
++    let expected = 3.0 * core::f32::consts::SQRT_2 - 1.0;
++    check_symmetric_and_exact(&p1, &c1, &p2, &c2, expected);
++}
++
++// Edge-edge configuration: c2 is rotated 30 degrees about Y so that one of its
++// y-parallel edges faces one of c1's y-parallel edges.
++#[test]
++fn edge_edge_separated() {
++    let c1 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
++    let c2 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
++    let p1 = Pose::identity();
++    let angle = core::f32::consts::FRAC_PI_6;
++    let p2 = Pose::new(Vector::new(5.0, 0.0, 5.0), Vector::new(0.0, angle, 0.0));
++
++    // Closest features: c1's edge through (1, y, 1) and c2's edge through the
++    // rotated image of its local (-1, y, -1) corner.
++    let (s, c) = angle.sin_cos();
++    let expected = ((4.0 - c - s) * (4.0 - c - s) + (4.0 - c + s) * (4.0 - c + s)).sqrt();
++    check_symmetric_and_exact(&p1, &c1, &p2, &c2, expected);
++}
++
++// Corner-corner configuration.
++#[test]
++fn corner_corner_separated() {
++    let c1 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
++    let c2 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
++    let p1 = Pose::identity();
++    let p2 = Pose::from_translation(Vector::new(5.0, 4.0, 3.0));
++
++    let expected = (3.0f32 * 3.0 + 2.0 * 2.0 + 1.0).sqrt();
++    check_symmetric_and_exact(&p1, &c1, &p2, &c2, expected);
++}
++
++// Touching and overlapping cuboids must report a zero distance in both orders.
++#[test]
++fn touching_and_overlapping() {
++    let c1 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
++    let c2 = Cuboid::new(Vector::new(1.0, 2.0, 2.0));
++    let p1 = Pose::identity();
++
++    for x in [2.0, 1.5] {
++        let p2 = Pose::from_translation(Vector::new(x, 0.0, 0.0));
++        let d12 = query::distance(&p1, &c1, &p2, &c2).unwrap();
++        let d21 = query::distance(&p2, &c2, &p1, &c1).unwrap();
++        assert!(d12.abs() < 1.0e-6, "expected zero distance, got {d12}");
++        assert!(d21.abs() < 1.0e-6, "expected zero distance, got {d21}");
++    }
++}
+diff --git a/crates/parry3d/tests/issue_70_capsule_cuboid_false_negatives.rs b/crates/parry3d/tests/issue_70_capsule_cuboid_false_negatives.rs
+new file mode 100644
+index 00000000..89e1e101
+--- /dev/null
++++ b/crates/parry3d/tests/issue_70_capsule_cuboid_false_negatives.rs
+@@ -0,0 +1,55 @@
++// Regression test for https://github.com/dimforge/parry/issues/70
++// (MRP by the issue author, reformatted as a test by @ThierryBerger)
++//
++// Sweeping a capsule through a large cuboid produced many false negatives: the absolute
++// GJK tolerance is too tight for ~100-unit support coordinates, so rounding noise made
++// near-touching configurations look disjoint. The tolerance is now relative.
++
++use parry3d::math::Pose;
++use parry3d::math::Vector;
++use parry3d::query::intersection_test;
++use parry3d::shape::{Ball, Capsule, Cuboid, HalfSpace};
++
++#[test]
++fn capsule_cuboid_sweep_has_no_false_negatives() {
++    let capsule = Capsule::new(Vector::new(0.0, -0.5, 0.0), Vector::new(0.0, 0.5, 0.0), 0.5);
++    let ball = Ball::new(0.5);
++    let halfspace = HalfSpace::new(Vector::new(0.0, 1.0, 0.0));
++
++    // Upper face of the cuboid is coplanar with the outer face of the halfspace.
++    let cuboid = Cuboid::new(Vector::new(50.0, 50.0, 50.0));
++    let cuboid_pos = Pose::translation(0.0, -50.0, 0.0);
++
++    let steps = 200;
++    let y_max = 0.5;
++    let y_min = -0.5;
++    let step_size = (y_max - y_min) / steps as f32;
++
++    let mut capsule_cuboid = 0;
++    let mut capsule_halfspace = 0;
++    let mut ball_cuboid = 0;
++    let mut ball_halfspace = 0;
++
++    for step in 0..steps {
++        let y = y_min + step_size * step as f32;
++        let test_pos = Pose::translation(0.0, y, 0.0);
++
++        if intersection_test(&test_pos, &capsule, &Pose::IDENTITY, &halfspace).unwrap() {
++            capsule_halfspace += 1;
++        }
++        if intersection_test(&test_pos, &capsule, &cuboid_pos, &cuboid).unwrap() {
++            capsule_cuboid += 1;
++        }
++        if intersection_test(&test_pos, &ball, &Pose::IDENTITY, &halfspace).unwrap() {
++            ball_halfspace += 1;
++        }
++        if intersection_test(&test_pos, &ball, &cuboid_pos, &cuboid).unwrap() {
++            ball_cuboid += 1;
++        }
++    }
++
++    assert_eq!(capsule_halfspace, steps);
++    assert_eq!(capsule_cuboid, steps);
++    assert_eq!(ball_halfspace, steps);
++    assert_eq!(ball_cuboid, steps);
++}
+diff --git a/crates/parry3d/tests/issue_76_point_degenerate_triangle.rs b/crates/parry3d/tests/issue_76_point_degenerate_triangle.rs
+new file mode 100644
+index 00000000..21c7ec4b
+--- /dev/null
++++ b/crates/parry3d/tests/issue_76_point_degenerate_triangle.rs
+@@ -0,0 +1,110 @@
++// Regression test for https://github.com/dimforge/parry/issues/76
++//
++// Point projection on a degenerate triangle used to skip every edge Voronoï test (the
++// face normal being zero) and report the point as inside with distance 0; it now
++// projects on the longest edge. Collinear cases adapted from PR #358.
++
++use parry3d::math::Vector;
++use parry3d::query::{PointQuery, PointQueryWithLocation};
++use parry3d::shape::{Polyline, Shape, Triangle};
++
++#[test]
++fn degenerate_triangle_distance_matches_segment() {
++    // Exact values from the issue.
++    let p = Vector::new(1.10000002, -7.9000001, 16.5879993);
++
++    let a = Vector::new(2.27699995, -7.9000001, 16.3180008);
++    let b = Vector::new(-0.569999993, -8.10000038, 16.6070004);
++    let c = Vector::new(-0.569999993, -8.10000038, 16.6070004);
++
++    let line = Polyline::new(vec![a, b], None);
++    let tri = Triangle::new(a, b, c);
++
++    assert_eq!(tri.area(), 0.0);
++    assert!(tri.compute_local_aabb().contains_local_point(p));
++
++    let tri_dist = tri.distance_to_local_point(p, true);
++    let line_dist = line.distance_to_local_point(p, true);
++
++    assert!(line_dist > 0.0);
++    assert_eq!(tri_dist, line_dist);
++
++    // The non-solid projection must match too.
++    assert_eq!(
++        tri.distance_to_local_point(p, false),
++        line.distance_to_local_point(p, false)
++    );
++}
++
++#[test]
++fn degenerate_triangle_distance_several_points() {
++    let a = Vector::new(-1.0, 2.0, 0.5);
++    let b = Vector::new(3.0, -1.0, 2.0);
++
++    // b == c: the degenerate triangle must behave like its longest segment.
++    let tri = Triangle::new(a, b, b);
++    let seg = parry3d::shape::Segment::new(a, b);
++
++    let queries = [
++        Vector::new(0.0, 0.0, 0.0),
++        Vector::new(10.0, 10.0, -3.0),
++        Vector::new(-5.0, 2.5, 1.0),
++        Vector::new(1.0, 0.5, 1.25), // Near the middle of the segment.
++        a,                           // Exactly on a vertex.
++    ];
++
++    for pt in queries {
++        let tri_dist = tri.distance_to_local_point(pt, true);
++        let seg_dist = seg.distance_to_local_point(pt, true);
++        assert!(
++            (tri_dist - seg_dist).abs() <= 1.0e-6,
++            "point {pt:?}: triangle dist {tri_dist} != segment dist {seg_dist}"
++        );
++        assert!(tri_dist.is_finite());
++    }
++}
++
++// Cases from #358 by its author.
++#[test]
++fn two_identical_points_triangle_projection_is_finite() {
++    let triangle = Triangle::new(
++        Vector::new(40.0, 0.0, 0.0),
++        Vector::new(0.0, 80.0, 0.0),
++        Vector::new(0.0, 80.0, 0.0),
++    );
++
++    let res = triangle.project_local_point_and_get_location(Vector::new(10.0, 20.0, 0.0), false);
++    assert!(res.0.point.is_finite());
++
++    let res = triangle.project_local_point_and_get_location(Vector::new(40.0, 0.0, 0.0), false);
++    assert!(res.0.point.is_finite());
++}
++
++// Cases from #358 by its author.
++#[test]
++fn collinear_points_triangle_projection_is_finite() {
++    let triangle = Triangle::new(
++        Vector::new(0.0, 0.0, 0.0),
++        Vector::new(100.0, 0.0, 0.0),
++        Vector::new(160.0, 0.0, 0.0),
++    );
++
++    // Point considered "inside" (on the line).
++    let res = triangle.project_local_point_and_get_location(Vector::new(10.0, 0.0, 0.0), false);
++    assert!(res.0.is_inside);
++    assert!(res.0.point.is_finite());
++
++    // Point off the line: not inside, finite projection.
++    let res = triangle.project_local_point_and_get_location(Vector::new(10.0, 10.0, 0.0), false);
++    assert!(!res.0.is_inside);
++    assert!(res.0.point.is_finite());
++
++    // The solid flag must not change anything for a degenerate triangle:
++    // it has no interior.
++    let res = triangle.project_local_point_and_get_location(Vector::new(10.0, 10.0, 0.0), true);
++    assert!(!res.0.is_inside);
++    assert_eq!(
++        triangle.distance_to_local_point(Vector::new(10.0, 10.0, 0.0), true),
++        10.0
++    );
++}
+diff --git a/crates/parry3d/tests/issue_79_closest_points_max_dist.rs b/crates/parry3d/tests/issue_79_closest_points_max_dist.rs
+new file mode 100644
+index 00000000..3d79a57f
+--- /dev/null
++++ b/crates/parry3d/tests/issue_79_closest_points_max_dist.rs
+@@ -0,0 +1,51 @@
++// Regression test for https://github.com/dimforge/parry/issues/79
++//
++// `closest_points` used to panic when a `Cylinder` and a `TriMesh` were
++// farther apart than `max_dist` (the old best-first visitor asserted that a
++// result was always found). It must return `Ok(ClosestPoints::Disjoint)`.
++
++use parry3d::math::{Pose, Vector};
++use parry3d::query::{self, ClosestPoints};
++use parry3d::shape::{Cylinder, TriMesh};
++
++fn test_shapes() -> (Cylinder, TriMesh) {
++    let cylinder = Cylinder::new(0.5, 1.0);
++
++    // Exact mesh from the issue: one triangle at distance 0.5 below the cylinder.
++    let vertices = vec![
++        Vector::new(1.0, -1.0, 0.0),
++        Vector::new(-1.0, -1.0, 0.0),
++        Vector::new(0.0, -1.0, 1.0),
++    ];
++    let indices = vec![[0, 1, 2]];
++    let trimesh = TriMesh::new(vertices, indices).unwrap();
++
++    (cylinder, trimesh)
++}
++
++#[test]
++fn closest_points_beyond_max_dist_is_disjoint() {
++    let (cylinder, trimesh) = test_shapes();
++
++    // The shapes are at distance 0.5: with max_dist = 0.49 this used to panic.
++    let res = query::closest_points(&Pose::IDENTITY, &cylinder, &Pose::IDENTITY, &trimesh, 0.49);
++    assert!(matches!(res, Ok(ClosestPoints::Disjoint)));
++
++    // Same in the other argument order.
++    let res = query::closest_points(&Pose::IDENTITY, &trimesh, &Pose::IDENTITY, &cylinder, 0.49);
++    assert!(matches!(res, Ok(ClosestPoints::Disjoint)));
++}
++
++#[test]
++fn closest_points_within_max_dist_is_within_margin() {
++    let (cylinder, trimesh) = test_shapes();
++
++    let res = query::closest_points(&Pose::IDENTITY, &cylinder, &Pose::IDENTITY, &trimesh, 0.6);
++    match res {
++        Ok(ClosestPoints::WithinMargin(p1, p2)) => {
++            let dist = (p1 - p2).length();
++            assert!((dist - 0.5).abs() < 1.0e-4, "distance was {dist}");
++        }
++        other => panic!("expected WithinMargin, got {other:?}"),
++    }
++}
+diff --git a/crates/parry3d/tests/issue_961_bvh_binned_build_panic.rs b/crates/parry3d/tests/issue_961_bvh_binned_build_panic.rs
+new file mode 100644
+index 00000000..8307bd8c
+--- /dev/null
++++ b/crates/parry3d/tests/issue_961_bvh_binned_build_panic.rs
+@@ -0,0 +1,170 @@
++// Regression test for https://github.com/dimforge/rapier/issues/961
++//
++// The binned BVH builder computed bin indices without clamping them to the bin count, so
++// degenerate leaf AABBs (huge, zero-extent, or non-finite) could panic out-of-bounds.
++
++use parry3d::bounding_volume::Aabb;
++use parry3d::math::Vector;
++use parry3d::partitioning::{Bvh, BvhBuildStrategy, BvhWorkspace};
++
++/// Tiny deterministic LCG so the fuzz-style tests don't depend on rand seeding.
++struct Lcg(u64);
++
++impl Lcg {
++    fn next_u32(&mut self) -> u32 {
++        self.0 = self
++            .0
++            .wrapping_mul(6364136223846793005)
++            .wrapping_add(1442695040888963407);
++        (self.0 >> 32) as u32
++    }
++
++    fn real(&mut self, min: f32, max: f32) -> f32 {
++        min + (max - min) * (self.next_u32() as f32 / u32::MAX as f32)
++    }
++}
++
++fn aabb(mins: Vector, maxs: Vector) -> Aabb {
++    Aabb::new(mins, maxs)
++}
++
++fn exercise(leaves: &[Aabb]) {
++    // Build (binned) directly from the leaves.
++    let mut bvh = Bvh::from_leaves(BvhBuildStrategy::Binned, leaves);
++    let mut workspace = BvhWorkspace::default();
++
++    // Explicit full rebuilds.
++    bvh.rebuild(&mut workspace, BvhBuildStrategy::Binned);
++
++    // Insert/remove churn + incremental optimization, mimicking the
++    // broad-phase update loop from the original report.
++    for k in 0..8 {
++        for i in 0..leaves.len() {
++            if (i + k) % 3 == 0 {
++                bvh.remove(i as u32);
++            }
++        }
++        for (i, aabb) in leaves.iter().enumerate() {
++            if (i + k) % 3 == 0 {
++                bvh.insert(*aabb, i as u32);
++            }
++        }
++        bvh.optimize_incremental(&mut workspace);
++    }
++}
++
++#[test]
++fn coincident_aabbs() {
++    let unit = aabb(Vector::new(-1.0, -1.0, -1.0), Vector::new(1.0, 1.0, 1.0));
++    exercise(&[unit; 32]);
++}
++
++#[test]
++fn one_enormous_aabb() {
++    let mut leaves = vec![];
++    for i in 0..31 {
++        let c = Vector::new(i as f32, 0.0, 0.0);
++        leaves.push(aabb(c - Vector::splat(0.5), c + Vector::splat(0.5)));
++    }
++    leaves.push(aabb(Vector::splat(-1.0e30), Vector::splat(1.0e30)));
++    exercise(&leaves);
++}
++
++#[test]
++fn huge_translated_aabbs() {
++    // AABBs whose coordinates are large enough for `mins + maxs` to overflow
++    // to infinity when computing centers.
++    let mut leaves = vec![];
++    for i in 0..16 {
++        let c = Vector::splat(2.0e38) + Vector::new(i as f32, 0.0, 0.0);
++        leaves.push(aabb(c - Vector::splat(0.5), c + Vector::splat(0.5)));
++    }
++    for i in 0..16 {
++        let c = Vector::new(i as f32, 0.0, 0.0);
++        leaves.push(aabb(c - Vector::splat(0.5), c + Vector::splat(0.5)));
++    }
++    exercise(&leaves);
++}
++
++#[test]
++fn zero_extent_aabbs() {
++    let mut leaves = vec![];
++    for i in 0..32 {
++        let c = Vector::new(i as f32 * 0.25, -(i as f32), 3.0);
++        leaves.push(aabb(c, c));
++    }
++    exercise(&leaves);
++}
++
++#[test]
++fn non_finite_aabbs() {
++    let mut leaves = vec![];
++    for i in 0..16 {
++        let c = Vector::new(i as f32, 0.0, 0.0);
++        leaves.push(aabb(c - Vector::splat(0.5), c + Vector::splat(0.5)));
++    }
++    leaves.push(aabb(Vector::splat(f32::NAN), Vector::splat(f32::NAN)));
++    leaves.push(aabb(
++        Vector::splat(f32::INFINITY),
++        Vector::splat(f32::INFINITY),
++    ));
++    leaves.push(aabb(
++        Vector::splat(f32::NEG_INFINITY),
++        Vector::splat(f32::INFINITY),
++    ));
++    leaves.push(Aabb::new_invalid());
++    exercise(&leaves);
++}
++
++#[test]
++fn fuzz_mixed_degenerate_aabbs() {
++    let mut rng = Lcg(0x961_961_961);
++
++    for _ in 0..64 {
++        let n = 8 + (rng.next_u32() % 64) as usize;
++        let mut leaves = vec![];
++
++        for _ in 0..n {
++            let kind = rng.next_u32() % 5;
++            let leaf = match kind {
++                0 => {
++                    // Regular AABB.
++                    let c = Vector::new(
++                        rng.real(-100.0, 100.0),
++                        rng.real(-100.0, 100.0),
++                        rng.real(-100.0, 100.0),
++                    );
++                    aabb(c - Vector::splat(0.5), c + Vector::splat(0.5))
++                }
++                1 => {
++                    // Huge AABB.
++                    let e = rng.real(1.0e30, 3.0e38);
++                    aabb(Vector::splat(-e), Vector::splat(e))
++                }
++                2 => {
++                    // Zero-extent AABB, possibly at a huge coordinate.
++                    let c = Vector::splat(rng.real(-3.0e38, 3.0e38));
++                    aabb(c, c)
++                }
++                3 => {
++                    // Non-finite AABB.
++                    let v = if rng.next_u32() % 2 == 0 {
++                        f32::NAN
++                    } else {
++                        f32::INFINITY
++                    };
++                    aabb(Vector::splat(v), Vector::splat(v))
++                }
++                _ => {
++                    // Tiny cluster: nearly-coincident centroids.
++                    let c = Vector::new(1.0, 2.0, 3.0);
++                    let e = rng.real(0.0, 1.0e-30);
++                    aabb(c - Vector::splat(e), c + Vector::splat(e))
++                }
++            };
++            leaves.push(leaf);
++        }
++
++        exercise(&leaves);
++    }
++}
+diff --git a/crates/parry3d/tests/issue_969_round_shape_outline_zero_radius.rs b/crates/parry3d/tests/issue_969_round_shape_outline_zero_radius.rs
+new file mode 100644
+index 00000000..08d3effc
+--- /dev/null
++++ b/crates/parry3d/tests/issue_969_round_shape_outline_zero_radius.rs
+@@ -0,0 +1,94 @@
++// Regression test for https://github.com/dimforge/rapier/issues/969
++//
++// `to_outline` on round shapes with a zero border radius produced index buffers
++// referencing vertices that were never pushed, the arc helper skipping the intermediate
++// vertices the index buffer assumed.
++
++use parry3d::math::Vector;
++use parry3d::shape::{
++    Cone, ConvexPolyhedron, Cuboid, Cylinder, RoundCone, RoundCuboid, RoundCylinder, RoundShape,
++};
++
++fn assert_indices_in_bounds(shape_name: &str, vtx: &[Vector], idx: &[[u32; 2]]) {
++    for (i, seg) in idx.iter().enumerate() {
++        for &id in seg {
++            assert!(
++                (id as usize) < vtx.len(),
++                "{shape_name}: index {id} of segment {i} is out of bounds (only {} vertices)",
++                vtx.len()
++            );
++        }
++    }
++
++    for pt in vtx {
++        assert!(pt.is_finite(), "{shape_name}: non-finite outline vertex");
++    }
++}
++
++fn check_all_outlines(border_radius: f32) {
++    let round_cuboid = RoundCuboid {
++        inner_shape: Cuboid::new(Vector::new(1.0, 1.0, 1.0)),
++        border_radius,
++    };
++    let (vtx, idx) = round_cuboid.to_outline(5);
++    assert_indices_in_bounds("RoundCuboid", &vtx, &idx);
++
++    let round_cylinder = RoundCylinder {
++        inner_shape: Cylinder::new(1.0, 0.5),
++        border_radius,
++    };
++    let (vtx, idx) = round_cylinder.to_outline(10, 5);
++    assert_indices_in_bounds("RoundCylinder", &vtx, &idx);
++
++    let round_cone = RoundCone {
++        inner_shape: Cone::new(1.0, 0.5),
++        border_radius,
++    };
++    let (vtx, idx) = round_cone.to_outline(10, 5);
++    assert_indices_in_bounds("RoundCone", &vtx, &idx);
++
++    let convex = ConvexPolyhedron::from_convex_hull(&[
++        Vector::new(-1.0, -1.0, -1.0),
++        Vector::new(1.0, -1.0, -1.0),
++        Vector::new(-1.0, 1.0, -1.0),
++        Vector::new(1.0, 1.0, -1.0),
++        Vector::new(-1.0, -1.0, 1.0),
++        Vector::new(1.0, -1.0, 1.0),
++        Vector::new(-1.0, 1.0, 1.0),
++        Vector::new(1.0, 1.0, 1.0),
++    ])
++    .unwrap();
++    let round_convex = RoundShape {
++        inner_shape: convex,
++        border_radius,
++    };
++    let (vtx, idx) = round_convex.to_outline(5);
++    assert_indices_in_bounds("RoundConvexPolyhedron", &vtx, &idx);
++}
++
++#[test]
++fn round_shape_outline_zero_border_radius() {
++    check_all_outlines(0.0);
++}
++
++#[test]
++fn round_shape_outline_tiny_border_radius() {
++    check_all_outlines(1.0e-8);
++}
++
++#[test]
++fn round_shape_outline_regular_border_radius() {
++    check_all_outlines(0.1);
++}
++
++#[test]
++fn round_cuboid_outline_zero_radius_matches_issue_repro() {
++    // The exact shape from the issue: ColliderBuilder::round_cuboid(1.0, 1.0, 1.0, 0.0).
++    let shape = RoundCuboid {
++        inner_shape: Cuboid::new(Vector::new(1.0, 1.0, 1.0)),
++        border_radius: 0.0,
++    };
++    // Rapier’s debug-render pipeline uses nsubdivs = 20.
++    let (vtx, idx) = shape.to_outline(20);
++    assert_indices_in_bounds("RoundCuboid", &vtx, &idx);
++}
+diff --git a/crates/parry3d/tests/issue_rapier810_cylinder_cap_manifold.rs b/crates/parry3d/tests/issue_rapier810_cylinder_cap_manifold.rs
+new file mode 100644
+index 00000000..b729b08f
+--- /dev/null
++++ b/crates/parry3d/tests/issue_rapier810_cylinder_cap_manifold.rs
+@@ -0,0 +1,100 @@
++// Regression test for https://github.com/dimforge/rapier/issues/810
++//
++// A small cube resting face-down on a large thin cylinder disc could get a single-point
++// manifold: the cap's circular face is approximated by an inscribed square anchored at
++// an arbitrary azimuth, missing up to ~36% of the cap near its rim. The approximation is
++// now oriented toward the contact point, so face contacts clip to a full manifold.
++
++use parry3d::math::{Pose, Real, Vector};
++use parry3d::query::{ContactManifold, DefaultQueryDispatcher, PersistentQueryDispatcher};
++use parry3d::shape::{Cuboid, Cylinder};
++
++const CAP_RADIUS: Real = 10.0;
++
++fn cap_manifold(x: Real, z: Real, sep: Real) -> ContactManifold<(), ()> {
++    // The issue's geometry: thin disc (radius 10, half-height 0.05), small cube
++    // (half-extents 0.05) face-down on the top cap.
++    let disc = Cylinder::new(0.05, CAP_RADIUS);
++    let cube = Cuboid::new(Vector::splat(0.05));
++    let pos12 = Pose::translation(x, 0.05 + 0.05 + sep, z);
++    let mut manifold = ContactManifold::new();
++    DefaultQueryDispatcher
++        .contact_manifold_convex_convex(&pos12, &disc, &cube, None, None, 0.01, &mut manifold)
++        .unwrap();
++    manifold
++}
++
++/// A cube face resting anywhere on the cap must produce a multi-point manifold with a
++/// near-axial normal — including in the band near the rim not covered by an arbitrarily
++/// anchored inscribed square (`|x| + |z| > radius`, e.g. the issue's tunneling cubes).
++#[test]
++fn cuboid_on_cylinder_cap_has_multi_point_manifold() {
++    for &(x, z) in &[
++        (0.0, 0.0),    // cap center
++        (3.0, -2.0),   // mid cap
++        (5.54, 4.51),  // rim band: |x| + |z| > radius (used to get 1 point)
++        (-5.65, 5.65), // worst-case azimuth on the rim band
++        (7.0, 7.0),    // radius ~9.9, close to the rim
++        (9.9, 0.0),    // right at the rim
++    ] {
++        for &sep in &[-0.001, 0.0001] {
++            let manifold = cap_manifold(x, z, sep);
++            assert!(
++                manifold.points.len() >= 3,
++                "cube at ({x}, {z}), sep {sep}: got {} contact point(s), need >= 3 \
++                 for a stable face-on-cap contact",
++                manifold.points.len()
++            );
++            assert!(
++                manifold.local_n1.y.abs() > 0.99,
++                "cube at ({x}, {z}), sep {sep}: expected a near-axial normal, got {:?}",
++                manifold.local_n1
++            );
++        }
++    }
++}
++
++/// A cube touching the cylinder's curved side must keep the current behavior: a radial
++/// normal, with every contact point on the side's support segment (the line of the
++/// cylinder's curved surface closest to the cube).
++#[test]
++fn cuboid_on_cylinder_side_unchanged() {
++    let cylinder = Cylinder::new(2.0, 0.5);
++    let cube = Cuboid::new(Vector::splat(0.25));
++    let pos12 = Pose::translation(0.5 + 0.25 - 0.001, 0.0, 0.0);
++    let mut manifold = ContactManifold::<(), ()>::new();
++    DefaultQueryDispatcher
++        .contact_manifold_convex_convex(&pos12, &cylinder, &cube, None, None, 0.01, &mut manifold)
++        .unwrap();
++    assert!(!manifold.points.is_empty());
++    assert!(
++        manifold.local_n1.x > 0.99,
++        "expected a radial normal, got {:?}",
++        manifold.local_n1
++    );
++    for pt in &manifold.points {
++        assert!(
++            (pt.local_p1.x - 0.5).abs() < 1.0e-3 && pt.local_p1.z.abs() < 1.0e-3,
++            "side contact point should lie on the cylinder's support segment, got {:?}",
++            pt.local_p1
++        );
++    }
++}
++
++/// A cylinder standing on its cap on a cuboid floor must also get a multi-point manifold.
++#[test]
++fn cylinder_standing_on_cuboid_floor() {
++    let floor = Cuboid::new(Vector::new(5.0, 0.5, 5.0));
++    let cylinder = Cylinder::new(0.4, 0.3);
++    let pos12 = Pose::translation(1.0, 0.5 + 0.4 - 0.001, -2.0);
++    let mut manifold = ContactManifold::<(), ()>::new();
++    DefaultQueryDispatcher
++        .contact_manifold_convex_convex(&pos12, &floor, &cylinder, None, None, 0.01, &mut manifold)
++        .unwrap();
++    assert!(
++        manifold.points.len() >= 3,
++        "standing cylinder should rest on >= 3 cap points, got {}",
++        manifold.points.len()
++    );
++    assert!(manifold.local_n1.y > 0.99);
++}
+diff --git a/src/bounding_volume/bounding_sphere.rs b/src/bounding_volume/bounding_sphere.rs
+index b9b76a61..173b9fa3 100644
+--- a/src/bounding_volume/bounding_sphere.rs
++++ b/src/bounding_volume/bounding_sphere.rs
+@@ -97,7 +97,9 @@ use crate::math::{Pose, Real, Vector};
+ /// let sphere2 = BoundingSphere::new(Vector::new(4.0, 0.0, 0.0), 1.0);
+ ///
+ /// let merged = sphere1.merged(&sphere2);
+-/// // The merged sphere contains both original spheres
++/// // The merged sphere contains both original spheres.
++/// // Note: due to floating-point rounding, containment may fail by a tiny margin
++/// // for some inputs; apply `BoundingVolume::loosened` if strict containment matters.
+ /// assert!(merged.contains(&sphere1));
+ /// assert!(merged.contains(&sphere2));
+ /// # }
+@@ -352,6 +354,11 @@ impl BoundingVolume for BoundingSphere {
+     /// After this operation, this sphere will be the smallest sphere that contains
+     /// both the original sphere and the other sphere.
+     ///
++    /// Note that due to floating-point rounding, [`contains`](BoundingVolume::contains)
++    /// is not guaranteed to return `true` for the two input spheres afterwards: the
++    /// result can be off by a tiny margin. Use [`loosened`](BoundingVolume::loosened)
++    /// with a small margin if strict containment is required.
++    ///
+     /// # Arguments
+     ///
+     /// * `other` - The other bounding sphere to merge with
+@@ -408,6 +415,11 @@ impl BoundingVolume for BoundingSphere {
+     /// The returned sphere is the smallest sphere that contains both input spheres.
+     /// This is the non-mutating version of `merge`.
+     ///
++    /// Note that due to floating-point rounding, [`contains`](BoundingVolume::contains)
++    /// is not guaranteed to return `true` for the two input spheres: the result can be
++    /// off by a tiny margin. Use [`loosened`](BoundingVolume::loosened) with a small
++    /// margin if strict containment is required.
++    ///
+     /// # Arguments
+     ///
+     /// * `other` - The other bounding sphere to merge with
+diff --git a/src/bounding_volume/bounding_volume.rs b/src/bounding_volume/bounding_volume.rs
+index 69e36268..1d4ab227 100644
+--- a/src/bounding_volume/bounding_volume.rs
++++ b/src/bounding_volume/bounding_volume.rs
+@@ -18,9 +18,17 @@ pub trait BoundingVolume {
+     fn contains(&self, _: &Self) -> bool;
+ 
+     /// Merges this bounding volume with another one. The merge is done in-place.
++    ///
++    /// Due to floating-point rounding, the merged volume is not guaranteed to strictly
++    /// [`contain`](Self::contains) both input volumes. Use [`loosened`](Self::loosened)
++    /// with a small margin if strict containment is required.
+     fn merge(&mut self, _: &Self);
+ 
+     /// Merges this bounding volume with another one.
++    ///
++    /// Due to floating-point rounding, the merged volume is not guaranteed to strictly
++    /// [`contain`](Self::contains) both input volumes. Use [`loosened`](Self::loosened)
++    /// with a small margin if strict containment is required.
+     fn merged(&self, _: &Self) -> Self;
+ 
+     /// Enlarges this bounding volume.
+diff --git a/src/partitioning/bvh/bvh_binned_build.rs b/src/partitioning/bvh/bvh_binned_build.rs
+index eb5812d5..e2251ecc 100644
+--- a/src/partitioning/bvh/bvh_binned_build.rs
++++ b/src/partitioning/bvh/bvh_binned_build.rs
+@@ -57,8 +57,12 @@ impl Bvh {
+         // Compute bins characteristics.
+         let k1 = NUM_BINS as Real * (1.0 - BIN_EPSILON) / (bins_range[1] - bins_range[0]);
+         let k0 = bins_range[0];
++        // NOTE: the clamp guards against degenerate leaf AABBs, whose non-finite or very
++        //       large coordinates would push the bin index outside [0, NUM_BINS - 1]
++        //       (`as usize` saturates).
++        let bin_id_unclamped = |center: Real| (k1 * (center - k0)) as usize;
+         for leaf in &*leaves {
+-            let bin_id = (k1 * (leaf.center().vget(bins_axis) - k0)) as usize;
++            let bin_id = bin_id_unclamped(leaf.center().vget(bins_axis)).min(NUM_BINS - 1);
+             let bin = &mut bins[bin_id];
+             bin.aabb.merge(&leaf.aabb());
+             bin.leaf_count += 1;
+@@ -106,7 +110,7 @@ impl Bvh {
+             // TODO PERF: try with using teh leaves_tmp instead of in-place sorting.
+             let bin = |leaves: &mut [BvhNode], id: usize| {
+                 let node = &leaves[id];
+-                (k1 * (node.center().vget(bins_axis) - k0)) as usize
++                bin_id_unclamped(node.center().vget(bins_axis)).min(NUM_BINS - 1)
+             };
+ 
+             let mut left_id = 0;
+diff --git a/src/query/contact/contact_heightfield_shape.rs b/src/query/contact/contact_heightfield_shape.rs
+new file mode 100644
+index 00000000..b6a7c9fe
+--- /dev/null
++++ b/src/query/contact/contact_heightfield_shape.rs
+@@ -0,0 +1,55 @@
++use crate::bounding_volume::BoundingVolume;
++use crate::math::{Pose, Real};
++use crate::query::{Contact, QueryDispatcher};
++use crate::shape::{HeightField, Shape};
++
++/// Best contact between a heightfield and any other shape.
++///
++/// Tests the elements intersecting `shape2`'s Aabb (loosened by `prediction`) and returns
++/// the deepest contact.
++pub fn contact_heightfield_shape<D>(
++    dispatcher: &D,
++    pos12: &Pose,
++    heightfield1: &HeightField,
++    shape2: &dyn Shape,
++    prediction: Real,
++) -> Option<Contact>
++where
++    D: ?Sized + QueryDispatcher,
++{
++    let aabb2_1 = shape2.compute_aabb(pos12).loosened(prediction.max(0.0));
++    let mut result = None::<Contact>;
++
++    heightfield1.map_elements_in_local_aabb(&aabb2_1, &mut |_, elt1| {
++        // The elements are already in the heightfield's local frame, so the sub-shape
++        // contact needs no transform.
++        if let Ok(Some(c)) = dispatcher.contact(pos12, elt1, shape2, prediction) {
++            if result.is_none_or(|best| c.dist < best.dist) {
++                result = Some(c);
++            }
++        }
++    });
++
++    result
++}
++
++/// Best contact between a shape and a heightfield.
++pub fn contact_shape_heightfield<D>(
++    dispatcher: &D,
++    pos12: &Pose,
++    shape1: &dyn Shape,
++    heightfield2: &HeightField,
++    prediction: Real,
++) -> Option<Contact>
++where
++    D: ?Sized + QueryDispatcher,
++{
++    contact_heightfield_shape(
++        dispatcher,
++        &pos12.inverse(),
++        heightfield2,
++        shape1,
++        prediction,
++    )
++    .map(|c| c.flipped())
++}
+diff --git a/src/query/contact/mod.rs b/src/query/contact/mod.rs
+index 7271a27f..2daacb83 100644
+--- a/src/query/contact/mod.rs
++++ b/src/query/contact/mod.rs
+@@ -13,6 +13,8 @@ pub use self::contact_cuboid_cuboid::contact_cuboid_cuboid;
+ pub use self::contact_halfspace_support_map::{
+     contact_halfspace_support_map, contact_support_map_halfspace,
+ };
++#[cfg(feature = "alloc")]
++pub use self::contact_heightfield_shape::{contact_heightfield_shape, contact_shape_heightfield};
+ pub use self::contact_shape_shape::contact;
+ #[cfg(feature = "alloc")]
+ pub use self::contact_support_map_support_map::{
+@@ -26,6 +28,8 @@ mod contact_ball_convex_polyhedron;
+ mod contact_composite_shape_shape;
+ mod contact_cuboid_cuboid;
+ mod contact_halfspace_support_map;
++#[cfg(feature = "alloc")]
++mod contact_heightfield_shape;
+ mod contact_shape_shape;
+ #[cfg(feature = "alloc")]
+ mod contact_support_map_support_map;
+diff --git a/src/query/contact_manifolds/contact_manifolds_pfm_pfm.rs b/src/query/contact_manifolds/contact_manifolds_pfm_pfm.rs
+index 9e97cca7..0d61c74a 100644
+--- a/src/query/contact_manifolds/contact_manifolds_pfm_pfm.rs
++++ b/src/query/contact_manifolds/contact_manifolds_pfm_pfm.rs
+@@ -94,8 +94,12 @@ pub fn contact_manifold_pfm_pfm<'a, ManifoldData, ContactData, S1, S2>(
+ 
+             let mut feature1 = PolygonalFeature::default();
+             let mut feature2 = PolygonalFeature::default();
+-            pfm1.local_support_feature(local_n1, &mut feature1);
+-            pfm2.local_support_feature(local_n2, &mut feature2);
++            pfm1.local_support_feature_toward(local_n1, p1, &mut feature1);
++            pfm2.local_support_feature_toward(
++                local_n2,
++                pos12.inverse_transform_point(p2_1),
++                &mut feature2,
++            );
+ 
+             PolygonalFeature::contacts(
+                 pos12,
+diff --git a/src/query/contact_manifolds/contact_manifolds_voxels_shape.rs b/src/query/contact_manifolds/contact_manifolds_voxels_shape.rs
+index 54033d4d..f0b50e6d 100644
+--- a/src/query/contact_manifolds/contact_manifolds_voxels_shape.rs
++++ b/src/query/contact_manifolds/contact_manifolds_voxels_shape.rs
+@@ -1,4 +1,4 @@
+-use crate::bounding_volume::Aabb;
++use crate::bounding_volume::{Aabb, BoundingVolume};
+ use crate::math::{IVector, IVectorExt, Int, Pose, Real, Vector, VectorExt, DIM};
+ use crate::query::{
+     ContactManifold, ContactManifoldsWorkspace, PersistentQueryDispatcher, PointQuery,
+@@ -138,7 +138,9 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
+     let radius1 = voxels1.voxel_size() / 2.0;
+ 
+     let aabb1 = voxels1.local_aabb();
+-    let aabb2_1 = shape2.compute_aabb(pos12);
++    // Loosen by `prediction` (like the trimesh/heightfield/compound manifold generators do)
++    // so that speculative contacts within the prediction distance are generated too.
++    let aabb2_1 = shape2.compute_aabb(pos12).loosened(prediction);
+     let domain2_1 = Aabb {
+         mins: aabb2_1.mins - radius1 * 10.0,
+         maxs: aabb2_1.maxs + radius1 * 10.0,
+diff --git a/src/query/default_query_dispatcher.rs b/src/query/default_query_dispatcher.rs
+index ad815d7c..2c03f029 100644
+--- a/src/query/default_query_dispatcher.rs
++++ b/src/query/default_query_dispatcher.rs
+@@ -344,6 +344,14 @@ impl QueryDispatcher for DefaultQueryDispatcher {
+                 return Ok(query::details::contact_support_map_support_map(
+                     pos12, s1, s2, prediction,
+                 ));
++            } else if let Some(hf1) = shape1.as_heightfield() {
++                return Ok(query::details::contact_heightfield_shape(
++                    self, pos12, hf1, shape2, prediction,
++                ));
++            } else if let Some(hf2) = shape2.as_heightfield() {
++                return Ok(query::details::contact_shape_heightfield(
++                    self, pos12, shape1, hf2, prediction,
++                ));
+             } else if let Some(c1) = shape1.as_composite_shape() {
+                 return Ok(query::details::contact_composite_shape_shape(
+                     self, pos12, c1, shape2, prediction,
+diff --git a/src/query/epa/epa2.rs b/src/query/epa/epa2.rs
+index a8e51268..555280dd 100644
+--- a/src/query/epa/epa2.rs
++++ b/src/query/epa/epa2.rs
+@@ -414,7 +414,10 @@ impl EPA {
+                 }
+             }
+ 
+-            return Some((Vector::ZERO, Vector::ZERO, n));
++            // The CSO point lies at the origin, so both support points coincide at the
++            // touching location: report them instead of fabricated zeros.
++            let v = self.vertices[0];
++            return Some((v.orig1, v.orig2, n));
+         } else if simplex.dimension() == 2 {
+             let dp1 = self.vertices[1] - self.vertices[0];
+             let dp2 = self.vertices[2] - self.vertices[0];
+diff --git a/src/query/epa/epa3.rs b/src/query/epa/epa3.rs
+index 44e790a9..a32b3391 100644
+--- a/src/query/epa/epa3.rs
++++ b/src/query/epa/epa3.rs
+@@ -448,6 +448,35 @@ impl EPA {
+             self.vertices.push(*simplex.point(i));
+         }
+ 
++        if simplex.dimension() == 0 {
++            // The GJK simplex degenerated to a single point on the CSO boundary, typically
++            // an exactly-touching contact. Bootstrap a second vertex from an axis-aligned
++            // support direction so the expansion below can find the normal.
++            let candidates = [
++                Vector::X,
++                Vector::Y,
++                Vector::Z,
++                -Vector::X,
++                -Vector::Y,
++                -Vector::Z,
++            ];
++            let sep_tol = gjk::eps_tol();
++            let bootstrap = candidates.iter().find_map(|dir| {
++                let pt = CsoPoint::from_shapes(pos12, g1, g2, *dir);
++                ((pt.point - self.vertices[0].point).length_squared() > sep_tol * sep_tol)
++                    .then_some(pt)
++            });
++
++            match bootstrap {
++                Some(pt) => self.vertices.push(pt),
++                None => {
++                    // The CSO is degenerate (a single point): no meaningful normal exists.
++                    let v = self.vertices[0];
++                    return Some((v.orig1, v.orig2, Vector::Y));
++                }
++            }
++        }
++
+         // Tolerance used to reject degenerate faces. It is scaled relative to the magnitude of
+         // the simplex coordinates: dot products used to compute face distances accumulate
+         // rounding errors proportional to the coordinate magnitudes, so an absolute tolerance
+@@ -462,11 +491,7 @@ impl EPA {
+             gjk::eps_tol() * scale.max(1.0)
+         };
+ 
+-        if simplex.dimension() == 0 {
+-            let mut n: Vector = Vector::ZERO;
+-            n.y = 1.0;
+-            return Some((Vector::ZERO, Vector::ZERO, n));
+-        } else if simplex.dimension() == 3 {
++        if simplex.dimension() == 3 {
+             let dp1 = self.vertices[1] - self.vertices[0];
+             let dp2 = self.vertices[2] - self.vertices[0];
+             let dp3 = self.vertices[3] - self.vertices[0];
+@@ -523,7 +548,9 @@ impl EPA {
+                 return None;
+             }
+         } else {
+-            if simplex.dimension() == 1 {
++            // NOTE: len == 2 covers both a 1-dimensional GJK simplex and a 0-dimensional
++            // one completed by the bootstrap above.
++            if self.vertices.len() == 2 {
+                 let dpt = self.vertices[1] - self.vertices[0];
+ 
+                 crate::math::orthonormal_subspace_basis(&[dpt], |dir| {
+diff --git a/src/query/gjk/gjk.rs b/src/query/gjk/gjk.rs
+index 25009a72..56f4caea 100644
+--- a/src/query/gjk/gjk.rs
++++ b/src/query/gjk/gjk.rs
+@@ -380,6 +380,15 @@ where
+     let mut max_bound = Real::max_value();
+     let mut dir;
+     let mut niter = 0;
++    // Tightest lower bound on the distance from the origin to the CSO: `min_bound`
++    // maximized over the directions probed. Its sign classifies the origin: `> 0`
++    // means separation, `~ 0` puts it on the CSO boundary (touching),
++    // `< 0` bounds the penetration depth.
++    let mut best_min_bound = -Real::max_value();
++    // Largest CSO support magnitude seen, used to scale the tolerance below.
++    let mut support_scale: Real = 0.0;
++    let mut nb_perturbs = 0usize;
++    const MAX_PERTURBATIONS: usize = 2 * DIM;
+ 
+     loop {
+         let old_max_bound = max_bound;
+@@ -395,11 +404,26 @@ where
+         }
+ 
+         if max_bound >= old_max_bound {
+-            if exact_dist {
++            if best_min_bound > 0.0 {
++                // Separation certified: the converged witnesses are the answer.
++                if exact_dist {
++                    let (p1, p2) = result(simplex, true);
++                    return GJKResult::ClosestPoints(p1, p2, old_dir); // upper bounds inconsistencies
++                } else {
++                    return GJKResult::Proximity(old_dir);
++                }
++            } else if exact_dist && best_min_bound >= -_eps_rel * support_scale {
++                // Origin on the CSO boundary: the pair is touching, so the witnesses
++                // describe the contact.
+                 let (p1, p2) = result(simplex, true);
+-                return GJKResult::ClosestPoints(p1, p2, old_dir); // upper bounds inconsistencies
++                return GJKResult::ClosestPoints(p1, p2, old_dir);
++            } else if nb_perturbs < MAX_PERTURBATIONS {
++                // Try slight perturbations to avoid getting stuck into a numerical ambiguity.
++                nb_perturbs += 1;
++                dir = perturbed_dir(dir, nb_perturbs);
+             } else {
+-                return GJKResult::Proximity(old_dir);
++                // The CSO reaches past the origin in every direction probed.
++                return GJKResult::Intersection;
+             }
+         }
+ 
+@@ -408,6 +432,9 @@ where
+ 
+         assert!(min_bound.is_finite());
+ 
++        best_min_bound = best_min_bound.max(min_bound);
++        support_scale = support_scale.max(cso_point.point.length());
++
+         if min_bound > max_dist {
+             return GJKResult::NoIntersection(dir);
+         } else if !exact_dist && min_bound > 0.0 && max_bound <= max_dist {
+@@ -422,11 +449,23 @@ where
+         }
+ 
+         if !simplex.add_point(cso_point) {
+-            if exact_dist {
++            // See the stagnation branch above for how `best_min_bound` classifies a stall.
++            if best_min_bound > 0.0 {
++                if exact_dist {
++                    let (p1, p2) = result(simplex, false);
++                    return GJKResult::ClosestPoints(p1, p2, dir);
++                } else {
++                    return GJKResult::Proximity(dir);
++                }
++            } else if exact_dist && best_min_bound >= -_eps_rel * support_scale {
+                 let (p1, p2) = result(simplex, false);
+                 return GJKResult::ClosestPoints(p1, p2, dir);
++            } else if nb_perturbs < MAX_PERTURBATIONS {
++                // The duplicate support point cannot enrich the simplex; jump back to
++                // the top of the loop where the stagnation branch will perturb `dir`.
++                continue;
+             } else {
+-                return GJKResult::Proximity(dir);
++                return GJKResult::Intersection;
+             }
+         }
+ 
+@@ -710,7 +749,8 @@ where
+         }
+ 
+         let support_point = if max_bound >= old_max_bound {
+-            // Upper bounds inconsistencies. Consider the projection as a valid support point.
++            // Upper bounds inconsistencies. Keep the projection as a valid support point
++            // for the last-chance path below.
+             last_chance = true;
+             CsoPoint::single_point(proj + curr_ray.origin)
+         } else {
+@@ -718,7 +758,19 @@ where
+         };
+ 
+         if last_chance && ltoi > 0.0 {
+-            // last_chance && ltoi > 0.0 && (support_point.point - curr_ray.origin).dot(ldir) >= 0.0 {
++            // The witnesses stay precise when large support coordinates stop the upper
++            // bound from decreasing, so refine the lower bound with their separation
++            // along the cast direction before accepting the impact.
++            let (witness1, witness2) = result(simplex, simplex.dimension() == DIM);
++            let witness_ltoi = (witness1 - witness2 - ray.origin).dot(curr_ray.dir);
++            if witness_ltoi.is_finite() && witness_ltoi > ltoi {
++                ltoi = witness_ltoi;
++
++                if ltoi / ray_length > max_time_of_impact {
++                    return None;
++                }
++            }
++
+             return Some((ltoi / ray_length, ldir));
+         }
+ 
+@@ -784,7 +836,10 @@ where
+         proj = simplex.project_origin_and_reduce();
+ 
+         if simplex.dimension() == DIM {
+-            if min_bound >= _eps_tol {
++            // `min_bound` accumulates rounding errors proportional to the magnitude of the
++            // support coordinates, so we scale the tolerance accordingly.
++            let scale = support_point.point.length().max(curr_ray.origin.length());
++            if min_bound >= _eps_tol * scale.max(1.0) {
+                 return None;
+             } else {
+                 return Some((ltoi / ray_length, ldir)); // Vector inside of the cso.
+@@ -798,6 +853,22 @@ where
+     }
+ }
+ 
++// Deterministically perturbs the unit direction `dir` to escape degenerate support
++// directions that stall the GJK simplex without proving separation.
++// Successive seeds cycle through ±offsets along each coordinate axis.
++fn perturbed_dir(dir: Vector, seed: usize) -> Vector {
++    const OFFSET: Real = 1.0e-2;
++    let axis = (seed - 1) % DIM;
++    let sign = if ((seed - 1) / DIM).is_multiple_of(2) {
++        1.0
++    } else {
++        -1.0
++    };
++    let mut res = dir;
++    res[axis] += sign * OFFSET;
++    res.try_normalize().unwrap_or(dir)
++}
++
+ fn result(simplex: &VoronoiSimplex, prev: bool) -> (Vector, Vector) {
+     let mut res = (Vector::ZERO, Vector::ZERO);
+     if prev {
+diff --git a/src/query/point/point_composite_shape.rs b/src/query/point/point_composite_shape.rs
+index 0bd1dfca..d2d0642e 100644
+--- a/src/query/point/point_composite_shape.rs
++++ b/src/query/point/point_composite_shape.rs
+@@ -140,9 +140,14 @@ impl PointQuery for Polyline {
+     #[inline]
+     #[allow(unused_mut)] // Because we need mut in 2D but not in 3D.
+     fn project_local_point_and_get_feature(&self, point: Vector) -> (PointProjection, FeatureId) {
+-        let (seg_id, (mut proj, feature)) = CompositeShapeRef(self)
+-            .project_local_point_and_get_feature(point, Real::MAX)
+-            .unwrap_or_else(|| unreachable!());
++        // Every comparison involving a NaN is false, so the traversal finds no candidate
++        // at all when `point` (or `self`) isn’t finite. Report `point` itself rather than
++        // an arbitrary projection onto whichever part we happened to pick.
++        let Some((seg_id, (mut proj, feature))) =
++            CompositeShapeRef(self).project_local_point_and_get_feature(point, Real::MAX)
++        else {
++            return (PointProjection::new(false, point), FeatureId::Unknown);
++        };
+ 
+         // A point behind the outward pseudo-normal is inside.
+         #[cfg(feature = "dim2")]
+@@ -182,8 +187,10 @@ impl PointQuery for TriMesh {
+     fn project_local_point(&self, point: Vector, solid: bool) -> PointProjection {
+         CompositeShapeRef(self)
+             .project_local_point(point, Real::MAX, solid)
+-            .unwrap_or_else(|| unreachable!())
+-            .1
++            .map(|(_, proj)| proj)
++            // No candidate: `point` (or `self`) isn’t finite. See
++            // `Polyline::project_local_point_and_get_feature`.
++            .unwrap_or(PointProjection::new(false, point))
+     }
+ 
+     #[inline]
+@@ -197,9 +204,13 @@ impl PointQuery for TriMesh {
+         }
+ 
+         let solid = cfg!(feature = "dim2");
+-        let (tri_id, proj) = CompositeShapeRef(self)
+-            .project_local_point(point, Real::MAX, solid)
+-            .unwrap_or_else(|| unreachable!());
++        // No candidate: `point` (or `self`) isn’t finite. See
++        // `Polyline::project_local_point_and_get_feature`.
++        let Some((tri_id, proj)) =
++            CompositeShapeRef(self).project_local_point(point, Real::MAX, solid)
++        else {
++            return (PointProjection::new(false, point), FeatureId::Unknown);
++        };
+         (proj, FeatureId::Face(tri_id))
+     }
+ 
+@@ -238,8 +249,10 @@ impl PointQuery for Compound {
+     fn project_local_point(&self, point: Vector, solid: bool) -> PointProjection {
+         CompositeShapeRef(self)
+             .project_local_point(point, Real::MAX, solid)
+-            .unwrap_or_else(|| unreachable!())
+-            .1
++            .map(|(_, proj)| proj)
++            // No candidate: `point` (or `self`) isn’t finite. See
++            // `Polyline::project_local_point_and_get_feature`.
++            .unwrap_or(PointProjection::new(false, point))
+     }
+ 
+     #[inline]
+@@ -247,9 +260,10 @@ impl PointQuery for Compound {
+         (
+             CompositeShapeRef(self)
+                 .project_local_point_and_get_feature(point, Real::MAX)
+-                .unwrap_or_else(|| unreachable!())
+-                .1
+-                 .0,
++                .map(|(_, (proj, _))| proj)
++                // No candidate: `point` (or `self`) isn’t finite. See
++                // `Polyline::project_local_point_and_get_feature`.
++                .unwrap_or(PointProjection::new(false, point)),
+             FeatureId::Unknown,
+         )
+     }
+@@ -272,7 +286,12 @@ impl PointQueryWithLocation for Polyline {
+         solid: bool,
+     ) -> (PointProjection, Self::Location) {
+         self.project_local_point_and_get_location_with_max_dist(point, solid, Real::MAX)
+-            .unwrap()
++            // No candidate: `point` (or `self`) isn’t finite. See
++            // `Polyline::project_local_point_and_get_feature`.
++            .unwrap_or((
++                PointProjection::new(false, point),
++                (0, SegmentPointLocation::OnVertex(0)),
++            ))
+     }
+ 
+     /// Projects a point on `self`, with a maximum projection distance.
+@@ -318,7 +337,12 @@ impl PointQueryWithLocation for TriMesh {
+         solid: bool,
+     ) -> (PointProjection, Self::Location) {
+         self.project_local_point_and_get_location_with_max_dist(point, solid, Real::MAX)
+-            .unwrap()
++            // No candidate: `point` (or `self`) isn’t finite. See
++            // `Polyline::project_local_point_and_get_feature`.
++            .unwrap_or((
++                PointProjection::new(false, point),
++                (0, TrianglePointLocation::OnVertex(0)),
++            ))
+     }
+ 
+     /// Projects a point on `self`, with a maximum projection distance.
+diff --git a/src/query/point/point_heightfield.rs b/src/query/point/point_heightfield.rs
+index 42cbcfeb..621596c0 100644
+--- a/src/query/point/point_heightfield.rs
++++ b/src/query/point/point_heightfield.rs
+@@ -33,25 +33,40 @@ impl PointQuery for HeightField {
+     }
+ 
+     #[inline]
+-    fn project_local_point(&self, point: Vector, _: bool) -> PointProjection {
+-        let mut smallest_dist = Real::MAX;
+-        let mut best_proj = PointProjection::new(false, point);
++    fn project_local_point(&self, point: Vector, solid: bool) -> PointProjection {
++        // Grow a search neighborhood around `point` geometrically instead of iterating on
++        // every element. A projection found at `dist <= max_dist` is the global closest
++        // one: any closer element would intersect the ball of radius `dist` around
++        // `point`, which the searched AABB contains.
++        let root_aabb = self.root_aabb();
++        let extents = root_aabb.extents();
++
++        // Distance beyond which the search AABB covers every cell, making the search
++        // below exhaustive.
++        let max_search_dist = (point - root_aabb.center()).length() + extents.length();
+ 
+         #[cfg(feature = "dim2")]
+-        let iter = self.segments();
++        let cell_size = self.cell_width();
+         #[cfg(feature = "dim3")]
+-        let iter = self.triangles();
+-        for elt in iter {
+-            let proj = elt.project_local_point(point, false);
+-            let dist = (point - proj.point).length_squared();
+-
+-            if dist < smallest_dist {
+-                smallest_dist = dist;
+-                best_proj = proj;
++        let cell_size = self.cell_width().max(self.cell_height());
++
++        // Initial guess: distance to the root AABB plus one cell, so the first search
++        // usually visits only a few cells.
++        let dist_to_aabb = (point - point.clamp(root_aabb.mins, root_aabb.maxs)).length();
++        let mut search_dist = (dist_to_aabb + cell_size).max(max_search_dist * 1.0e-4);
++
++        // TODO: the search AABB only grows, so each iteration re-tests the elements the
++        //       previous ones already tested. Visit only the ring added by each step.
++        while search_dist < max_search_dist {
++            if let Some(proj) = self.project_local_point_with_max_dist(point, solid, search_dist) {
++                return proj;
+             }
++
++            search_dist *= 4.0;
+         }
+ 
+-        best_proj
++        self.project_local_point_with_max_dist(point, solid, max_search_dist)
++            .unwrap_or_else(|| PointProjection::new(false, point))
+     }
+ 
+     #[inline]
+diff --git a/src/query/point/point_triangle.rs b/src/query/point/point_triangle.rs
+index 832b85bc..810e3e33 100644
+--- a/src/query/point/point_triangle.rs
++++ b/src/query/point/point_triangle.rs
+@@ -1,6 +1,6 @@
+ use crate::math::{Real, Vector, DIM};
+ use crate::query::{PointProjection, PointQuery, PointQueryWithLocation};
+-use crate::shape::{FeatureId, Triangle, TrianglePointLocation};
++use crate::shape::{FeatureId, Segment, SegmentPointLocation, Triangle, TrianglePointLocation};
+ #[cfg(feature = "dim3")]
+ use crate::utils::relative_eq_vector;
+ 
+@@ -217,22 +217,49 @@ impl PointQueryWithLocation for Triangle {
+             }
+             ProjectionInfo::OnFace(face_side, va, vb, vc) => {
+                 // Voronoï region of the face.
+-                if DIM != 2 {
+-                    // NOTE: in some cases, numerical instability
+-                    // may result in the denominator being zero
+-                    // when the triangle is nearly degenerate.
+-                    if va + vb + vc != 0.0 {
+-                        let denom = 1.0 / (va + vb + vc);
+-                        let v = vb * denom;
+-                        let w = vc * denom;
+-                        let bcoords = [1.0 - v - w, v, w];
+-                        let res = a + ab * v + ac * w;
+-
+-                        return (
+-                            compute_result(pt, res),
+-                            TrianglePointLocation::OnFace(face_side as u32, bcoords),
+-                        );
+-                    }
++                let denom = va + vb + vc;
++
++                if denom == 0.0 {
++                    // Collinear vertices: the zero face normal skipped every edge Voronoï
++                    // test, so projecting on the "face" would report the point as inside
++                    // (or produce NaNs). A degenerate triangle has no interior, so project
++                    // on its longest edge regardless of `solid`.
++                    let sq_ab = ab.length_squared();
++                    let sq_ac = ac.length_squared();
++                    let sq_bc = bc.length_squared();
++
++                    // (segment, edge id, triangle vertex ids of the segment endpoints)
++                    let (seg, eid, vids) = if sq_ab >= sq_ac && sq_ab >= sq_bc {
++                        (Segment::new(a, b), 0, [0, 1])
++                    } else if sq_ac >= sq_bc {
++                        (Segment::new(a, c), 2, [0, 2])
++                    } else {
++                        (Segment::new(b, c), 1, [1, 2])
++                    };
++
++                    let (proj, loc) = seg.project_local_point_and_get_location(pt, solid);
++                    let loc = match loc {
++                        SegmentPointLocation::OnVertex(i) => {
++                            TrianglePointLocation::OnVertex(vids[i as usize])
++                        }
++                        SegmentPointLocation::OnEdge(bcoords) => {
++                            TrianglePointLocation::OnEdge(eid, bcoords)
++                        }
++                    };
++
++                    return (proj, loc);
++                } else if DIM != 2 {
++                    // NOTE: divide instead of multiplying by `1.0 / denom`, whose
++                    // reciprocal overflows to infinity for subnormal `denom`.
++                    let v = vb / denom;
++                    let w = vc / denom;
++                    let bcoords = [1.0 - v - w, v, w];
++                    let res = a + ab * v + ac * w;
++
++                    return (
++                        compute_result(pt, res),
++                        TrianglePointLocation::OnFace(face_side as u32, bcoords),
++                    );
+                 }
+             }
+         }
+diff --git a/src/query/shape_cast/shape_cast.rs b/src/query/shape_cast/shape_cast.rs
+index bbb6faff..857b42a6 100644
+--- a/src/query/shape_cast/shape_cast.rs
++++ b/src/query/shape_cast/shape_cast.rs
+@@ -29,29 +29,43 @@ pub enum ShapeCastStatus {
+     PenetratingOrWithinTargetDist,
+ }
+ 
+-/// The result of a shape casting..
++/// The result of a shape casting.
++///
++/// # Frame conventions
++///
++/// The `witness1`/`normal1` (resp. `witness2`/`normal2`) fields are expressed in the frame the
++/// first (resp. second) shape was described in when performing the query:
++/// - For shape-local queries like [`cast_shapes`] or [`QueryDispatcher::cast_shapes`], this is
++///   the local frame of the corresponding shape.
++/// - For queries where a shape is a composite with its parts posed in another frame (e.g.
++///   casting a shape on Rapier's `QueryPipeline`, where the colliders hit are posed in world
++///   space), the corresponding fields are expressed in that frame (e.g. world space).
+ #[derive(Copy, Clone, Debug)]
+ pub struct ShapeCastHit {
+     /// The time at which the objects touch.
+     pub time_of_impact: Real,
+-    /// The local-space closest point on the first shape at the time of impact.
++    /// The closest point on the first shape at the time of impact, expressed in the frame of
++    /// the query (see the [frame conventions](ShapeCastHit#frame-conventions)).
+     ///
+     /// This value is unreliable if `status` is [`ShapeCastStatus::PenetratingOrWithinTargetDist`]
+     /// and [`ShapeCastOptions::compute_impact_geometry_on_penetration`] was set to `false`.
+     pub witness1: Vector,
+-    /// The local-space closest point on the second shape at the time of impact.
++    /// The closest point on the second shape at the time of impact, expressed in the frame of
++    /// the query (see the [frame conventions](ShapeCastHit#frame-conventions)).
+     ///
+     /// This value is unreliable if `status` is [`ShapeCastStatus::PenetratingOrWithinTargetDist`]
+     /// and both [`ShapeCastOptions::compute_impact_geometry_on_penetration`] was set to `false`
+     /// when calling the time-of-impact function.
+     pub witness2: Vector,
+-    /// The local-space outward normal on the first shape at the time of impact.
++    /// The outward normal on the first shape at the time of impact, expressed in the frame of
++    /// the query (see the [frame conventions](ShapeCastHit#frame-conventions)).
+     ///
+     /// This value is unreliable if `status` is [`ShapeCastStatus::PenetratingOrWithinTargetDist`]
+     /// and both [`ShapeCastOptions::compute_impact_geometry_on_penetration`] was set to `false`
+     /// when calling the time-of-impact function.
+     pub normal1: Vector,
+-    /// The local-space outward normal on the second shape at the time of impact.
++    /// The outward normal on the second shape at the time of impact, expressed in the frame of
++    /// the query (see the [frame conventions](ShapeCastHit#frame-conventions)).
+     ///
+     /// This value is unreliable if `status` is [`ShapeCastStatus::PenetratingOrWithinTargetDist`]
+     /// and both [`ShapeCastOptions::compute_impact_geometry_on_penetration`] was set to `false`
+diff --git a/src/query/shape_cast/shape_cast_support_map_support_map.rs b/src/query/shape_cast/shape_cast_support_map_support_map.rs
+index 5503c70a..b965e7ed 100644
+--- a/src/query/shape_cast/shape_cast_support_map_support_map.rs
++++ b/src/query/shape_cast/shape_cast_support_map_support_map.rs
+@@ -51,7 +51,13 @@ where
+                     normal2: contact.normal2,
+                     witness1: contact.point1,
+                     witness2: contact.point2,
+-                    status: ShapeCastStatus::PenetratingOrWithinTargetDist,
++                    // A cast starting exactly touching, neither penetrating nor within
++                    // the target distance, converged like ball-ball does.
++                    status: if contact.dist < options.target_distance {
++                        ShapeCastStatus::PenetratingOrWithinTargetDist
++                    } else {
++                        ShapeCastStatus::Converged
++                    },
+                 })
+             }
+         } else {
+@@ -62,7 +68,15 @@ where
+                 witness1: witness1 - normal1 * options.target_distance,
+                 witness2: pos12.inverse_transform_point(witness2),
+                 status: if time_of_impact.is_zero() {
+-                    ShapeCastStatus::PenetratingOrWithinTargetDist
++                    // A zero TOI means either a real penetration (or a start within the
++                    // target distance) or a mere touching contact; only the former is
++                    // `PenetratingOrWithinTargetDist`, as for ball-ball.
++                    match details::contact_support_map_support_map(pos12, g1, g2, Real::MAX) {
++                        Some(contact) if contact.dist >= options.target_distance => {
++                            ShapeCastStatus::Converged
++                        }
++                        _ => ShapeCastStatus::PenetratingOrWithinTargetDist,
++                    }
+                 } else {
+                     ShapeCastStatus::Converged
+                 },
+diff --git a/src/query/shape_cast/shape_cast_voxels_shape.rs b/src/query/shape_cast/shape_cast_voxels_shape.rs
+index 140a5ab5..baa8ada1 100644
+--- a/src/query/shape_cast/shape_cast_voxels_shape.rs
++++ b/src/query/shape_cast/shape_cast_voxels_shape.rs
+@@ -27,12 +27,16 @@ where
+                 let center = g1.voxel_center(vox.grid_coords);
+                 let cuboid = Cuboid::new(g1.voxel_size() / 2.0);
+                 let vox_pos12 = Pose::from_translation(center).inverse() * pos12;
+-                if let Some(new_hit) = dispatcher
++                if let Some(mut new_hit) = dispatcher
+                     .cast_shapes(&vox_pos12, vel12, &cuboid, g2, options)
+                     .ok()
+                     .flatten()
+                 {
+                     if new_hit.time_of_impact < smallest_t {
++                        // The hit is expressed in the voxel cuboid's frame, i.e. the shape's
++                        // frame translated by `center`. Shift `witness1` back; the normals
++                        // and `witness2` are unaffected by a translation.
++                        new_hit.witness1 += center;
+                         smallest_t = new_hit.time_of_impact;
+                         hit = Some(new_hit);
+                     }
+diff --git a/src/shape/polygonal_feature_map.rs b/src/shape/polygonal_feature_map.rs
+index 3acb8734..6b50400c 100644
+--- a/src/shape/polygonal_feature_map.rs
++++ b/src/shape/polygonal_feature_map.rs
+@@ -10,6 +10,23 @@ pub trait PolygonalFeatureMap: SupportMap {
+     /// Compute the support polygonal face of `self` towards the `dir`.
+     fn local_support_feature(&self, dir: Vector, out_feature: &mut PolygonalFeature);
+ 
++    /// Compute the support polygonal face of `self` towards `dir`, oriented so that it best
++    /// covers the neighborhood of the local-space point `hint`.
++    ///
++    /// The default implementation ignores `hint`, which is exact for genuine polygons.
++    /// Shapes approximating a curved feature (like a cylinder cap by an inscribed square)
++    /// must orient it from `hint`: a fixed azimuth misses up to ~36% of the cap near its
++    /// rim, leaving contacts there with a single unclippable point.
++    fn local_support_feature_toward(
++        &self,
++        dir: Vector,
++        hint: Vector,
++        out_feature: &mut PolygonalFeature,
++    ) {
++        let _ = hint;
++        self.local_support_feature(dir, out_feature);
++    }
++
+     // TODO: this is currently just a workaround for https://github.com/dimforge/rapier/issues/417
+     //       until we get a better way to deal with the issue without breaking internal edges
+     //       handling.
+@@ -37,11 +54,43 @@ impl PolygonalFeatureMap for Cuboid {
+     }
+ }
+ 
++/// Azimuth (unit `xz` direction) orienting the polygonal approximation of a cylinder's or
++/// cone's curved features, taken from `hint` if it lies off the axis, else from `dir`.
++#[cfg(feature = "dim3")]
++fn feature_azimuth(dir: Vector, hint: Option<Vector>) -> crate::math::Vector2 {
++    use crate::math::Vector2;
++    hint.and_then(|hint| Vector2::new(hint.x, hint.z).try_normalize())
++        .or_else(|| Vector2::new(dir.x, dir.z).try_normalize())
++        .unwrap_or(Vector2::X)
++}
++
+ #[cfg(feature = "dim3")]
+ impl PolygonalFeatureMap for Cylinder {
+     fn local_support_feature(&self, dir: Vector, out_features: &mut PolygonalFeature) {
+-        use crate::math::Vector2;
++        self.support_feature_with_azimuth(dir, feature_azimuth(dir, None), out_features);
++    }
++
++    fn local_support_feature_toward(
++        &self,
++        dir: Vector,
++        hint: Vector,
++        out_features: &mut PolygonalFeature,
++    ) {
++        // Orienting the cap's square approximation so that one of its vertices (which lie on
++        // the cap's rim) sits at the contact's azimuth guarantees the approximation covers
++        // the cap's surface in the contact's neighborhood, wherever it lies on the cap.
++        self.support_feature_with_azimuth(dir, feature_azimuth(dir, Some(hint)), out_features);
++    }
++}
+ 
++#[cfg(feature = "dim3")]
++impl Cylinder {
++    fn support_feature_with_azimuth(
++        &self,
++        dir: Vector,
++        dir2: crate::math::Vector2,
++        out_features: &mut PolygonalFeature,
++    ) {
+         // About feature ids.
+         // At all times, we consider our cylinder to be approximated as follows:
+         // - The curved part is approximated by a single segment.
+@@ -56,10 +105,6 @@ impl PolygonalFeatureMap for Cylinder {
+         //   So its vertices have IDs 11,13,15,17, its edges 12,14,16,18, and its face 19.
+         // - Note that at all times, one of each cap's vertices are the same as the curved-part
+         //   segment endpoints.
+-        let dir2 = Vector2::new(dir.x, dir.z)
+-            .try_normalize()
+-            .unwrap_or(Vector2::X);
+-
+         if dir.y.abs() < 0.5 {
+             // We return a segment lying on the cylinder's curved part.
+             out_features.vertices[0] = Vector::new(
+@@ -99,8 +144,28 @@ impl PolygonalFeatureMap for Cylinder {
+ #[cfg(feature = "dim3")]
+ impl PolygonalFeatureMap for Cone {
+     fn local_support_feature(&self, dir: Vector, out_features: &mut PolygonalFeature) {
+-        use crate::math::Vector2;
++        self.support_feature_with_azimuth(dir, feature_azimuth(dir, None), out_features);
++    }
++
++    fn local_support_feature_toward(
++        &self,
++        dir: Vector,
++        hint: Vector,
++        out_features: &mut PolygonalFeature,
++    ) {
++        // See the comment in the cylinder's implementation.
++        self.support_feature_with_azimuth(dir, feature_azimuth(dir, Some(hint)), out_features);
++    }
++}
+ 
++#[cfg(feature = "dim3")]
++impl Cone {
++    fn support_feature_with_azimuth(
++        &self,
++        dir: Vector,
++        dir2: crate::math::Vector2,
++        out_features: &mut PolygonalFeature,
++    ) {
+         // About feature ids. It is very similar to the feature ids of cylinders.
+         // At all times, we consider our cone to be approximated as follows:
+         // - The curved part is approximated by a single segment.
+@@ -113,10 +178,6 @@ impl PolygonalFeatureMap for Cone {
+         // - The bottom cap has its face feature ID of 9.
+         // - Note that at all times, one of the cap's vertices are the same as the curved-part
+         //   segment endpoints.
+-        let dir2 = Vector2::new(dir.x, dir.z)
+-            .try_normalize()
+-            .unwrap_or(Vector2::X);
+-
+         if dir.y > 0.0 {
+             // We return a segment lying on the cone's curved part.
+             out_features.vertices[0] = Vector::new(
+diff --git a/src/shape/triangle.rs b/src/shape/triangle.rs
+index a90fe2f3..d7e5d16b 100644
+--- a/src/shape/triangle.rs
++++ b/src/shape/triangle.rs
+@@ -432,21 +432,16 @@ impl Triangle {
+     /// The area of this triangle.
+     #[inline]
+     pub fn area(&self) -> Real {
+-        // Kahan's formula.
+-        let a = self.b.distance(self.a);
+-        let b = self.c.distance(self.b);
+-        let c = self.a.distance(self.c);
+-
+-        let (c, b, a) = utils::sort3(&a, &b, &c);
+-        let a = *a;
+-        let b = *b;
+-        let c = *c;
++        // Half the cross-product magnitude, which unlike Kahan's formula on the rounded
++        // side lengths is exactly 0.0 for bitwise-collinear vertices.
++        let ab = self.b - self.a;
++        let ac = self.c - self.a;
+ 
+-        let sqr = (a + (b + c)) * (c - (a - b)) * (c + (a - b)) * (a + (b - c));
++        #[cfg(feature = "dim2")]
++        return ab.perp_dot(ac).abs() * 0.5;
+ 
+-        // We take the max(0.0) because it can be slightly negative
+-        // because of numerical errors due to almost-degenerate triangles.
+-        <Real as ComplexField>::sqrt(sqr.max(0.0)) * 0.25
++        #[cfg(feature = "dim3")]
++        return ab.cross(ac).length() * 0.5;
+     }
+ 
+     /// Computes the unit angular inertia of this triangle.
+diff --git a/src/shape/trimesh.rs b/src/shape/trimesh.rs
+index 8c1a9e6d..ed979623 100644
+--- a/src/shape/trimesh.rs
++++ b/src/shape/trimesh.rs
+@@ -519,9 +519,26 @@ pub struct TriMesh {
+     flags: TriMeshFlags,
+ }
+ 
++// NOTE: can't be derived because of the `Bvh` and topology fields; print a
++// summary useful for quickly validating the mesh instead.
+ impl fmt::Debug for TriMesh {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        write!(f, "GenericTriMesh")
++        let mut dbg = f.debug_struct("TriMesh");
++        let dbg = dbg
++            .field("num_vertices", &self.vertices.len())
++            .field("num_triangles", &self.indices.len())
++            .field("local_aabb", &self.local_aabb())
++            .field("flags", &self.flags);
++
++        #[cfg(feature = "dim3")]
++        let dbg = dbg.field("has_pseudo_normals", &self.pseudo_normals.is_some());
++
++        dbg.field("has_topology", &self.topology.is_some())
++            .field(
++                "has_connected_components",
++                &self.connected_components.is_some(),
++            )
++            .finish_non_exhaustive()
+     }
+ }
+ 
+diff --git a/src/shape/voxels/voxels.rs b/src/shape/voxels/voxels.rs
+index def2e109..892b9f50 100644
+--- a/src/shape/voxels/voxels.rs
++++ b/src/shape/voxels/voxels.rs
+@@ -907,10 +907,10 @@ impl Voxels {
+         self.voxels_in_range(mins, maxs)
+     }
+ 
+-    /// The center point of all the voxels in this shape (including empty ones).
++    /// The center point of all the non-empty voxels in this shape.
+     ///
+     /// The voxel data associated to each center is provided to determine what kind of voxel
+-    /// it is (and, in particular, if it is empty or full).
++    /// it is (in particular, its [`VoxelState`] indicating which of its faces are free).
+     pub fn voxels(&self) -> impl Iterator<Item = VoxelData> + '_ {
+         let aabb = self.chunk_bvh.root_aabb();
+         self.voxels_in_range(
+@@ -921,7 +921,7 @@ impl Voxels {
+ 
+     /// Iterate through the data of all the voxels within the given (semi-open) voxel grid indices.
+     ///
+-    /// Note that this yields both empty and non-empty voxels within the range. This does not
++    /// Note that this only yields non-empty voxels within the range. This does not
+     /// include any voxel that falls outside [`Self::domain`].
+     pub fn voxels_in_range(
+         &self,
+diff --git a/src/shape/voxels/voxels_chunk.rs b/src/shape/voxels/voxels_chunk.rs
+index 39c3ccbd..47603f09 100644
+--- a/src/shape/voxels/voxels_chunk.rs
++++ b/src/shape/voxels/voxels_chunk.rs
+@@ -270,7 +270,7 @@ impl<'a> VoxelsChunkRef<'a> {
+ 
+     /// Iterate through the data of all the voxels within the given (semi-open) voxel grid indices.
+     ///
+-    /// Note that this yields both empty and non-empty voxels within the range. This does not
++    /// Note that this only yields non-empty voxels within the range. This does not
+     /// include any voxel that falls outside [`Self::domain`].
+     #[cfg(feature = "dim3")]
+     pub fn voxels_in_range(
+diff --git a/src/transformation/hertel_mehlhorn.rs b/src/transformation/hertel_mehlhorn.rs
+index 70d0edf7..446f2a57 100644
+--- a/src/transformation/hertel_mehlhorn.rs
++++ b/src/transformation/hertel_mehlhorn.rs
+@@ -110,8 +110,10 @@ pub fn hertel_mehlhorn_idx(vertices: &[Vector], indices: &[[u32; 3]]) -> Vec<Vec
+             new_polygon.extend(polygon1.iter().cycle().skip(i12).take(polygon1.len() - 1));
+             new_polygon.extend(polygon2.iter().cycle().skip(i22).take(polygon2.len() - 1));
+ 
+-            // Remove the polygon from the list.
+-            let _ = indices.remove(i_poly2);
++            // `swap_remove` is O(1) and safe here: it moves the last polygon into slot
++            // `i_poly2 > i_poly1`, which the edge search above re-scans, so no merge
++            // candidate is skipped — only the output order changes.
++            let _ = indices.swap_remove(i_poly2);
+             // Overwrite the first polygon with the new one.
+             indices[i_poly1] = new_polygon;
+             // Start from the first point.
+@@ -130,6 +132,18 @@ pub fn hertel_mehlhorn_idx(vertices: &[Vector], indices: &[[u32; 3]]) -> Vec<Vec
+ mod tests {
+     use super::hertel_mehlhorn_idx;
+     use crate::math::Vector;
++    use alloc::vec::Vec;
++
++    /// Normalizes a decomposition for an order-insensitive comparison, since the
++    /// algorithm's output order is unspecified.
++    fn canonicalize(mut polygons: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
++        for poly in &mut polygons {
++            let min_pos = (0..poly.len()).min_by_key(|&i| poly[i]).unwrap();
++            poly.rotate_left(min_pos);
++        }
++        polygons.sort();
++        polygons
++    }
+ 
+     #[test]
+     fn origin_outside_shape() {
+@@ -172,6 +186,8 @@ mod tests {
+             vec![2, 3, 0, 1],
+         ];
+ 
+-        assert_eq!(indices, expected_indices);
++        // Compare the decompositions as sets of (cyclic) polygons: the output order
++        // is unspecified.
++        assert_eq!(canonicalize(indices), canonicalize(expected_indices));
+     }
+ }
+diff --git a/src/transformation/utils.rs b/src/transformation/utils.rs
+index 62dfc41f..d84fbbc6 100644
+--- a/src/transformation/utils.rs
++++ b/src/transformation/utils.rs
+@@ -653,7 +653,10 @@ pub fn push_arc_and_idx(
+         nsubdivs,
+         out_vtx,
+     );
+-    push_arc_idx(start, base..base + nsubdivs - 1, end, out_idx);
++    // Rely on the actual number of pushed vertices so the index buffer can never
++    // reference vertices that were not pushed.
++    let pushed = out_vtx.len() as u32 - base;
++    push_arc_idx(start, base..base + pushed, end, out_idx);
+ }
+ 
+ /// Pushes points forming an arc between two points around a center.
+@@ -664,6 +667,8 @@ pub fn push_arc_and_idx(
+ ///
+ /// The function interpolates both the angle and the radius, so it can handle arcs where
+ /// the start and end points are at different distances from the center (spiral-like paths).
++/// On a degenerate arc (`start` and/or `end` coinciding with `center`), the intermediate
++/// points are linearly interpolated instead, so exactly `nsubdivs - 1` points are pushed.
+ ///
+ /// # Arguments
+ /// * `center` - The center point of rotation
+@@ -728,6 +733,13 @@ pub fn push_arc(center: Vector, start: Vector, end: Vector, nsubdivs: u32, out:
+ 
+             out.push(center + curr_dir * curr_len);
+         }
++    } else {
++        // Degenerate arc (e.g. a zero border radius): fall back to a straight line so the
++        // callers' index bookkeeping still gets exactly `nsubdivs - 1` points.
++        for i in 1..nsubdivs {
++            let t = i as Real / nsubdivs as Real;
++            out.push(start + (end - start) * t);
++        }
+     }
+ }
+ 
+diff --git a/src/utils/segments_intersection.rs b/src/utils/segments_intersection.rs
+index d74558c2..e7bf526b 100644
+--- a/src/utils/segments_intersection.rs
++++ b/src/utils/segments_intersection.rs
+@@ -51,7 +51,7 @@ pub fn segments_intersection2d(
+     } else {
+         let loc1 = if s == 0.0 {
+             SegmentPointLocation::OnVertex(0)
+-        } else if s == denom {
++        } else if s == 1.0 {
+             SegmentPointLocation::OnVertex(1)
+         } else {
+             SegmentPointLocation::OnEdge([1.0 - s, s])
+@@ -59,7 +59,7 @@ pub fn segments_intersection2d(
+ 
+         let loc2 = if t == 0.0 {
+             SegmentPointLocation::OnVertex(0)
+-        } else if t == denom {
++        } else if t == 1.0 {
+             SegmentPointLocation::OnVertex(1)
+         } else {
+             SegmentPointLocation::OnEdge([1.0 - t, t])
+@@ -144,23 +144,32 @@ fn parallel_intersection(
+ // Checks that `c` is in-between `a` and `b`.
+ // Assumes the three points are collinear.
+ fn between(a: Vector2, b: Vector2, c: Vector2) -> Option<SegmentPointLocation> {
++    // Classifies the barycentric coordinate of `c` along `ab`, snapping the
++    // exact endpoints to `OnVertex` instead of `OnEdge`.
++    fn classify(bcoord_b: Real) -> SegmentPointLocation {
++        if bcoord_b == 0.0 {
++            SegmentPointLocation::OnVertex(0)
++        } else if bcoord_b == 1.0 {
++            SegmentPointLocation::OnVertex(1)
++        } else {
++            SegmentPointLocation::OnEdge([1.0 - bcoord_b, bcoord_b])
++        }
++    }
++
+     // If ab not vertical, check betweenness on x; else on y.
+-    // TODO: handle cases where we actually are on a vertex (to return OnEdge instead of OnVertex)?
+     if a.x != b.x {
+         if a.x <= c.x && c.x <= b.x {
+-            let bcoord = (c.x - a.x) / (b.x - a.x);
+-            return Some(SegmentPointLocation::OnEdge([1.0 - bcoord, bcoord]));
++            return Some(classify((c.x - a.x) / (b.x - a.x)));
+         } else if a.x >= c.x && c.x >= b.x {
+             let bcoord = (c.x - b.x) / (a.x - b.x);
+-            return Some(SegmentPointLocation::OnEdge([bcoord, 1.0 - bcoord]));
++            return Some(classify(1.0 - bcoord));
+         }
+     } else if a.y != b.y {
+         if a.y <= c.y && c.y <= b.y {
+-            let bcoord = (c.y - a.y) / (b.y - a.y);
+-            return Some(SegmentPointLocation::OnEdge([1.0 - bcoord, bcoord]));
++            return Some(classify((c.y - a.y) / (b.y - a.y)));
+         } else if a.y >= c.y && c.y >= b.y {
+             let bcoord = (c.y - b.y) / (a.y - b.y);
+-            return Some(SegmentPointLocation::OnEdge([bcoord, 1.0 - bcoord]));
++            return Some(classify(1.0 - bcoord));
+         }
+     } else if a.x == c.x && a.y == c.y {
+         return Some(SegmentPointLocation::OnVertex(0));

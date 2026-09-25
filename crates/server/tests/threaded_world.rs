@@ -6,25 +6,67 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use crossbeam::channel::{unbounded, Receiver};
+use game::movement;
 use game::{
-    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind,
-    InlineLodBuilder, InputEvent, Key, LodBuilder, RegionCoords, RegionOutput, ServerEvent,
-    ServerPacket, SubChunk, WorldManager, SPAWN_REGION, UNLOAD_GRACE_MS,
+    Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, EntityBundle, GameEvent,
+    GameEventKind, InlineLodBuilder, InputEvent, Key, LodBuilder, RegionCoords, RegionOutput,
+    ServerEvent, ServerPacket, SubChunk, WorldManager, FLIP_HYSTERESIS, REGION_SIZE, SPAWN_REGION,
+    UNLOAD_GRACE_MS,
 };
 use server::region_threads::ThreadRegionSpawner;
 
 const REGION_STARTUP_BUDGET: Duration = Duration::from_secs(10);
 
-fn lightweight_columns() -> Vec<(ColumnCoords, Column)> {
-    vec![(
-        ColumnCoords::new(4, 4),
+/// Voxel height of every fixture floor.
+const FLOOR_DEPTH: u32 = 8;
+
+fn floor_column(x: usize, z: usize) -> (ColumnCoords, Column) {
+    (
+        ColumnCoords::new(x, z),
         Column::new(
             0,
             Block::new(BlockId::AIR),
             Block::new(BlockId::AIR),
-            vec![SubChunk::Dense(Box::new(Chunk::flat_floor(8)))],
+            vec![SubChunk::Dense(Box::new(Chunk::flat_floor(FLOOR_DEPTH)))],
         ),
-    )]
+    )
+}
+
+fn lightweight_columns() -> Vec<(ColumnCoords, Column)> {
+    vec![floor_column(4, 4)]
+}
+
+/// Floor under the whole square between the spawn point (x=128,z=128 — on the
+/// seam between columns 3 and 4) and the region's -x/-z corner, continuing two
+/// columns deep into the three neighbours around that corner. Every walk in
+/// this file therefore crosses GROUNDED, with voxel colliders on both sides.
+fn seam_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
+    let (near, far) = (0..=4, 30..=31);
+    let (xs, zs) = if rc == SPAWN_REGION {
+        (near.clone(), near)
+    } else if rc == RegionCoords::new(0, -1) {
+        (near, far)
+    } else if rc == RegionCoords::new(-1, 0) {
+        (far, near)
+    } else if rc == RegionCoords::new(-1, -1) {
+        (far.clone(), far)
+    } else {
+        return lightweight_columns();
+    };
+    xs.flat_map(|x| zs.clone().map(move |z| floor_column(x, z))).collect()
+}
+
+/// A key-down `PlayerInput` from client 0. Stamped with the spawn region on
+/// purpose: the manager routes input by the player's HOME, not by the stamp.
+fn key_event(key: Key, pressed: bool) -> ServerEvent {
+    ServerEvent::ClientPacket(
+        ClientPacket::GameEvent(GameEvent::new(
+            GameEventKind::PlayerInput(0, InputEvent::Key { key, pressed }),
+            0,
+            SPAWN_REGION,
+        )),
+        0,
+    )
 }
 
 struct Rig {
@@ -43,6 +85,28 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
+        Self::with_columns(|_| lightweight_columns())
+    }
+
+    fn with_columns(
+        columns: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
+    ) -> Self {
+        Self::with_spawner(ThreadRegionSpawner::default(), columns)
+    }
+
+    /// The server's own spawn path: region threads run worldgen themselves
+    /// (`RegionSeed::Deferred`) instead of being handed ready-made columns.
+    fn with_on_thread_worldgen(
+        columns: impl Fn(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + Sync + Clone + 'static,
+    ) -> Self {
+        let spawner = ThreadRegionSpawner::with_generator(std::sync::Arc::new(columns.clone()));
+        Self::with_spawner(spawner, columns)
+    }
+
+    fn with_spawner(
+        spawner: ThreadRegionSpawner,
+        columns: impl FnMut(RegionCoords) -> Vec<(ColumnCoords, Column)> + Send + 'static,
+    ) -> Self {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let (lod_result_send, lod_result_recv) = unbounded();
@@ -51,8 +115,8 @@ impl Rig {
             out: lod_result_send,
         });
         let manager = WorldManager::new(
-            ThreadRegionSpawner::default(),
-            Box::new(|_| lightweight_columns()),
+            spawner,
+            Box::new(columns),
             out_send,
             region_out_send,
             lod_builder,
@@ -95,6 +159,29 @@ impl Rig {
             })
             .collect()
     }
+    /// Keep region-thread outputs flowing into the manager until `seen`
+    /// accepts one of the packets bound for the client, or `timeout` passes.
+    /// Returns whether it did; every packet observed lands in `log`.
+    fn pump_until(
+        &mut self,
+        timeout: Duration,
+        log: &mut Vec<String>,
+        mut seen: impl FnMut(&ServerPacket) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut done = false;
+        while !done && Instant::now() < deadline {
+            if let Ok((rc, output)) = self.region_out.recv_timeout(Duration::from_millis(50)) {
+                self.absorb(rc, output);
+            }
+            for (_to, p) in self.packets.try_iter() {
+                done |= seen(&p);
+                log.push(format!("{p:?}"));
+            }
+        }
+        done
+    }
+
     /// Block (bounded by `timeout`) until every region in `want` has
     /// produced a snapshot, draining `region_out` into the manager as
     /// outputs arrive. Panics with the still-missing set if the deadline
@@ -220,6 +307,10 @@ fn roaming_client_cycles_regions_across_threads() {
 /// player out of `SPAWN_REGION` (0,0) across the -z boundary into (0,-1) using
 /// real input, and we observe the authoritative handoff — the `PlayerRegion`
 /// home flip AND the `EntityArrived` fan-out — arrive over the packet channel.
+/// The arriving bundle is checked for STATE, not just existence: the floor
+/// spans the seam (`seam_floor_columns`), so the player must cross grounded,
+/// land just past the boundary in the arrival region's frame, and still carry
+/// its client, camera and movement state.
 ///
 /// Held-input note: `InputState::step` (run once per region tick) demotes a
 /// `Pressed` key to `Held` but never clears it, and `key_held` reports both.
@@ -231,7 +322,7 @@ fn roaming_client_cycles_regions_across_threads() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn walking_input_crosses_a_boundary_on_real_threads() {
-    let mut rig = Rig::new();
+    let mut rig = Rig::with_columns(seam_floor_columns);
     rig.event(ServerEvent::ClientConnected(0));
 
     // Subscribe the 3x3 window so both the departing (0,0) and arriving
@@ -248,29 +339,20 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
     // focused on what happened after we started walking.
     let _ = rig.packets.try_iter().count();
 
-    // Player spawns at region-local (128,26,128) facing -z. Enable fps-cam,
-    // then hold W: 8 units/tick along -z from z=128 crosses the -z boundary
-    // (past -FLIP_HYSTERESIS) after ~17 ticks (~8.5s at TICK_RATE=500ms).
-    let press = |key| {
-        ServerEvent::ClientPacket(
-            ClientPacket::GameEvent(GameEvent::new(
-                GameEventKind::PlayerInput(0, InputEvent::Key { key, pressed: true }),
-                0,
-                SPAWN_REGION,
-            )),
-            0,
-        )
-    };
-    rig.event(press(Key::KeyE));
-    rig.event(press(Key::KeyW));
+    // Player spawns at region-local x=128,z=128 on the floor, facing -z. Enable
+    // controls, then hold W: walk speed along -z from z=128 crosses the -z
+    // boundary (past -FLIP_HYSTERESIS) after ~40 ticks, walking the floor
+    // strip the whole way.
+    rig.event(key_event(Key::KeyE, true));
+    rig.event(key_event(Key::KeyW, true));
 
     let arrival_region = RegionCoords::new(0, -1);
-    // ~8.5s of walking (17 ticks at 500ms) plus handoff propagation.
+    // ~40 ticks of walking plus handoff propagation.
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut seen_flip = false;
-    let mut seen_arrival = false;
+    let mut arrival: Option<EntityBundle> = None;
     let mut observed: Vec<String> = Vec::new();
-    while (!seen_flip || !seen_arrival) && Instant::now() < deadline {
+    while (!seen_flip || arrival.is_none()) && Instant::now() < deadline {
         // Keep region-thread outputs flowing into the manager: the crossing
         // surfaces as a `Departures` output that the manager turns into the
         // `PlayerRegion` push and the `EntityArrived` relay.
@@ -283,11 +365,10 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
                 ServerPacket::PlayerRegion(Some(rc), 0) if *rc == arrival_region => {
                     seen_flip = true;
                 }
-                ServerPacket::GameEvent(ev)
-                    if ev.region_id == arrival_region
-                        && matches!(ev.kind, GameEventKind::EntityArrived(_)) =>
-                {
-                    seen_arrival = true;
+                ServerPacket::GameEvent(ev) if ev.region_id == arrival_region => {
+                    if let GameEventKind::EntityArrived(bundle) = &ev.kind {
+                        arrival = Some(bundle.clone());
+                    }
                 }
                 _ => {}
             }
@@ -299,8 +380,138 @@ fn walking_input_crosses_a_boundary_on_real_threads() {
         seen_flip,
         "no PlayerRegion flip to {arrival_region:?} within deadline; packets seen: {observed:#?}"
     );
+    let Some(bundle) = arrival else {
+        panic!(
+            "no EntityArrived GameEvent for {arrival_region:?} within deadline; packets seen: {observed:#?}"
+        );
+    };
+
+    // The handoff carried the player's identity and state, not just an event.
+    assert_eq!(bundle.source_region, SPAWN_REGION);
+    assert_eq!(bundle.client.as_ref().map(|(id, _)| *id), Some(0), "client rides the bundle");
+    assert!(bundle.has_camera, "camera rides the bundle");
+    // Pose is rebased into the arrival frame: x untouched, z just inside the
+    // far (+z) edge — past the hysteresis line by at most one tick of walking.
+    let (x, z) = (f32::from(bundle.isometry.translation.x), f32::from(bundle.isometry.translation.z));
+    let tick_walk = movement::WALK_SPEED * movement::UNITS_PER_METER * movement::TICK_DT;
+    assert!((x - 128.0).abs() < 0.5, "walked straight along -z, x={x}");
     assert!(
-        seen_arrival,
-        "no EntityArrived GameEvent for {arrival_region:?} within deadline; packets seen: {observed:#?}"
+        z <= REGION_SIZE - FLIP_HYSTERESIS && z > REGION_SIZE - FLIP_HYSTERESIS - tick_walk - 0.5,
+        "arrived within one walking tick past the flip line, z={z}"
+    );
+    // The floor spans the seam, so the crossing happened on the ground.
+    let motion = bundle.motion.expect("player carries movement state");
+    assert!(motion.grounded && !motion.flying, "crossed grounded, got {motion:?}");
+}
+
+/// A player-carrying `EntityArrived` relayed from `region`, if `p` is one.
+fn arrival_in(p: &ServerPacket, region: RegionCoords) -> Option<&EntityBundle> {
+    match p {
+        ServerPacket::GameEvent(ev) if ev.region_id == region => match &ev.kind {
+            GameEventKind::EntityArrived(bundle) if bundle.client.is_some() => Some(bundle),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Diagonal crossing through a region corner on real threads: W+A from the
+/// spawn point, which is equidistant from the -x and -z seams. Four region
+/// threads are involved — the home, both edge neighbours (which get ghost
+/// mirrors, and may briefly own the player if one seam is crossed a tick
+/// before the other) and the diagonal neighbour, where the player must end up.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn diagonal_walk_crosses_a_corner_on_real_threads() {
+    let mut rig = Rig::with_columns(seam_floor_columns);
+    rig.event(ServerEvent::ClientConnected(0));
+    let window = SPAWN_REGION.window_3x3();
+    for rc in &window {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(*rc), 0));
+    }
+    rig.wait_for_snapshots(&window, REGION_STARTUP_BUDGET);
+    let _ = rig.packets.try_iter().count();
+
+    rig.event(key_event(Key::KeyE, true));
+    rig.event(key_event(Key::KeyW, true));
+    rig.event(key_event(Key::KeyA, true));
+
+    let corner = RegionCoords::new(-1, -1);
+    let mut log = Vec::new();
+    let mut home = None;
+    let mut arrival: Option<EntityBundle> = None;
+    rig.pump_until(Duration::from_secs(30), &mut log, |p| {
+        if let ServerPacket::PlayerRegion(Some(rc), 0) = p {
+            home = Some(*rc);
+        }
+        if let Some(bundle) = arrival_in(p, corner) {
+            arrival = Some(bundle.clone());
+        }
+        home == Some(corner) && arrival.is_some()
+    });
+
+    assert_eq!(home, Some(corner), "home never settled on the diagonal region; packets: {log:#?}");
+    let bundle = arrival.expect("EntityArrived relayed from the diagonal region");
+    let (x, z) = (f32::from(bundle.isometry.translation.x), f32::from(bundle.isometry.translation.z));
+    assert!(
+        x > REGION_SIZE - 32.0 && z > REGION_SIZE - 32.0,
+        "arrived near the corner in the diagonal region's frame, got x={x} z={z}"
+    );
+    let motion = bundle.motion.expect("player carries movement state");
+    assert!(motion.grounded, "crossed the corner grounded, got {motion:?}");
+}
+
+/// Walking into a region nobody is subscribed to, on the server's production
+/// spawn path (`ThreadRegionSpawner::with_generator`): the departure has to
+/// WAKE the target, whose brand-new thread runs worldgen + collider genesis
+/// before it can look at the `EntityArrived` already queued for it. Then the
+/// player walks back, so the return `EntityArrived` — sourced from the woken
+/// region — proves the entity really lived there, and covers the round trip
+/// (flip hysteresis in both directions) on real threads.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walking_into_a_cold_region_wakes_its_thread_and_returns() {
+    let mut rig = Rig::with_on_thread_worldgen(seam_floor_columns);
+    rig.event(ServerEvent::ClientConnected(0));
+    // Home only: the region to the north is cold.
+    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0));
+    rig.wait_for_snapshots(&[SPAWN_REGION], REGION_STARTUP_BUDGET);
+    let north = RegionCoords::new(0, -1);
+    assert!(!rig.manager.running_regions().contains(&north), "north starts cold");
+
+    rig.event(key_event(Key::KeyE, true));
+    rig.event(key_event(Key::KeyW, true));
+    let mut log = Vec::new();
+    let flipped = rig.pump_until(Duration::from_secs(30), &mut log, |p| {
+        matches!(p, ServerPacket::PlayerRegion(Some(rc), 0) if *rc == north)
+    });
+    assert!(flipped, "no home flip into the cold region; packets: {log:#?}");
+    assert!(rig.manager.running_regions().contains(&north), "the arrival woke the cold region");
+
+    // Subscribe now, so the woken region relays to us; its snapshot proves
+    // the new thread finished genesis and is answering.
+    rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(north), 0));
+    rig.wait_for_snapshots(&[north], REGION_STARTUP_BUDGET);
+
+    // Turn around — still stamping the old home; routing goes by `homes`.
+    rig.event(key_event(Key::KeyW, false));
+    rig.event(key_event(Key::KeyS, true));
+    let mut back: Option<EntityBundle> = None;
+    let mut home_again = false;
+    rig.pump_until(Duration::from_secs(30), &mut log, |p| {
+        home_again |= matches!(p, ServerPacket::PlayerRegion(Some(rc), 0) if *rc == SPAWN_REGION);
+        if let Some(bundle) = arrival_in(p, SPAWN_REGION) {
+            back = Some(bundle.clone());
+        }
+        home_again && back.is_some()
+    });
+    assert!(home_again, "no home flip back to the spawn region; packets: {log:#?}");
+    let bundle = back.expect("EntityArrived relayed from the spawn region on return");
+    assert_eq!(bundle.source_region, north, "the player came back FROM the woken region");
+    assert_eq!(bundle.client.as_ref().map(|(id, _)| *id), Some(0));
+    let z = f32::from(bundle.isometry.translation.z);
+    assert!(
+        z >= FLIP_HYSTERESIS && z < 32.0,
+        "returned just past the flip line in the spawn region's frame, z={z}"
     );
 }

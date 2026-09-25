@@ -8,15 +8,20 @@
 
 use std::fmt;
 
-/// Production near-window radius: 1 = the 3x3 block of simulated regions.
-pub const DEFAULT_NEAR_RADIUS: i32 = 1;
+/// Production near-window radius: 2 = the 5x5 block of simulated regions.
+/// The LOD ring table is NOT widened with it: `desired_lod` subtracts the
+/// near window, so the factor-2 ring (bound 2) is simply absorbed into
+/// simulated terrain and the rings from factor 4 out — and the horizon —
+/// stay where they were.
+pub const DEFAULT_NEAR_RADIUS: i32 = 2;
 /// Upper bound on `VOXEL_NEAR_RADIUS`. Every near region is a full sim +
 /// collider genesis on the server and a predicted copy on the client, so a
 /// typo like `10` (441 regions) should fail loudly instead of thrashing.
 pub const MAX_NEAR_RADIUS: i32 = 3;
-/// `small` preset ring table: one factor-2 ring, so the far path still has
+/// `small` preset ring table: one ring at the production table's finest
+/// factor (2 at the default region size), so the far path still has
 /// something to draw (24 keys around a radius-0 near window).
-pub const SMALL_LOD_RING_TABLE: &[(i32, u32)] = &[(2, 2)];
+pub const SMALL_LOD_RING_TABLE: &[(i32, u32)] = &[(2, game::lod::LOD_RING_TABLE[0].1)];
 
 /// The resolved near window + LOD ring table.
 #[derive(bevy::prelude::Resource, Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +33,7 @@ pub struct WorldScale {
 }
 
 impl WorldScale {
-    /// Production: 3x3 near window + the full ring table.
+    /// Production: 5x5 near window + the full ring table.
     pub const FULL: Self = Self {
         near_radius: DEFAULT_NEAR_RADIUS,
         lod_table: game::lod::LOD_RING_TABLE,
@@ -193,9 +198,9 @@ mod tests {
     fn unset_environment_is_the_production_scale() {
         let scale = WorldScale::resolve(None, None, None).unwrap();
         assert_eq!(scale, WorldScale::FULL);
-        assert_eq!(scale.near_radius, 1);
+        assert_eq!(scale.near_radius, DEFAULT_NEAR_RADIUS);
         assert_eq!(scale.lod_table, game::lod::LOD_RING_TABLE);
-        assert_eq!(scale.near_region_count(), 9);
+        assert_eq!(scale.near_region_count(), 25);
     }
 
     #[test]

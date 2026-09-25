@@ -90,6 +90,9 @@ impl TerrainRenderConfig {
         capabilities: TerrainRenderCapabilities,
     ) -> Result<Self, TerrainRenderConfigError> {
         if is_wasm {
+            // Grouped-direct is what a WebGPU browser build can run; the
+            // `webgl2` build has no storage buffers at all, and
+            // `for_device` drops it to per-chunk once the adapter is known.
             return Ok(Self {
                 near: NearRenderBackend::GroupedDirect,
                 far: FarRenderBackend::Raster,
@@ -108,6 +111,22 @@ impl TerrainRenderConfig {
             None => FarRenderBackend::Raster,
         };
         Ok(Self { near, far })
+    }
+
+    /// Reconcile the requested pairing with what the adapter can run. Both
+    /// quad-record backends read their records from storage buffers in the
+    /// VERTEX stage; a device without that (WebGL2, GLES 3.0) can only draw
+    /// per-chunk meshes. Must be applied before any chunk is meshed, because
+    /// the backend decides whether meshing emits `ChunkQuads` or `Mesh3d`.
+    pub const fn for_device(self, vertex_storage_buffers: bool) -> Self {
+        if self.near.uses_quad_records() && !vertex_storage_buffers {
+            Self {
+                near: NearRenderBackend::PerChunk,
+                far: self.far,
+            }
+        } else {
+            self
+        }
     }
 
     /// Resolve the process environment on native. Browser builds intentionally
@@ -277,6 +296,29 @@ mod tests {
                 far: FarRenderBackend::Raster,
             }
         );
+    }
+
+    #[test]
+    fn device_without_vertex_storage_falls_back_to_per_chunk() {
+        for near in [NearRenderBackend::GroupedDirect, NearRenderBackend::GpuDriven] {
+            let config = TerrainRenderConfig {
+                near,
+                far: FarRenderBackend::Raster,
+            };
+            assert_eq!(config.for_device(true), config);
+            assert_eq!(
+                config.for_device(false),
+                TerrainRenderConfig {
+                    near: NearRenderBackend::PerChunk,
+                    far: FarRenderBackend::Raster,
+                }
+            );
+        }
+        let per_chunk = TerrainRenderConfig {
+            near: NearRenderBackend::PerChunk,
+            far: FarRenderBackend::Raster,
+        };
+        assert_eq!(per_chunk.for_device(false), per_chunk);
     }
 
     #[test]

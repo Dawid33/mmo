@@ -9,87 +9,74 @@ use crate::{BlockId, Chunk, ChunkCoords, RegionCoords, Voxel, CHUNK_VOXEL_COUNT,
 
 /// Merge up to 2×2×2 source 32³ grids (index `sx + 2*sy + 4*sz`; `None` = all-air) into one 32³ coarse grid at 2× the cell size.
 /// Each coarse cell (x,y,z) draws from source grid `(x/16, y/16, z/16)`'s 2×2×2 voxel block at `((x%16)*2, (y%16)*2, (z%16)*2)`.
-/// Solid iff any source voxel solid; material = majority BlockId among solid sources, ties → lowest BlockId.
+/// Solid iff any source voxel solid; material per [`merge_group`] (what is visible from above, not the volume majority).
 ///
 /// **Layout contract:** LOD grids are always 32³ `Vec<Voxel>` in the standard `x + 32*y + 32*32*z` order.
 pub fn downsample2(sources: &[Option<&[Voxel]>; 8]) -> Vec<Voxel> {
     let mut output = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
 
-    // Iterate all 32³ coarse cells
     for z in 0..32 {
         for y in 0..32 {
             for x in 0..32 {
-                // Determine which source octant and offset within that octant
-                let sx = x / 16; // 0 or 1
-                let sy = y / 16; // 0 or 1
-                let sz = z / 16; // 0 or 1
-                let source_idx = sx + 2 * sy + 4 * sz;
+                // Which source octant, and the 2×2×2 block's origin within it.
+                let source_idx = x / 16 + 2 * (y / 16) + 4 * (z / 16);
+                let Some(source_grid) = sources[source_idx] else {
+                    continue;
+                };
+                let (ox, oy, oz) = ((x % 16) * 2, (y % 16) * 2, (z % 16) * 2); // 0..=30
 
-                let ox = (x % 16) * 2; // 0..30
-                let oy = (y % 16) * 2; // 0..30
-                let oz = (z % 16) * 2; // 0..30
-
-                // Gather the 2×2×2 source voxels from this octant's grid
-                let mut block_counts: [(BlockId, u8); 8] = [(BlockId(0), 0); 8];
-                let mut block_count_len = 0;
-                let mut has_solid = false;
-
-                if let Some(source_grid) = sources[source_idx] {
-                    for dz in 0..2 {
-                        for dy in 0..2 {
-                            for dx in 0..2 {
-                                let sx_coord = ox + dx;
-                                let sy_coord = oy + dy;
-                                let sz_coord = oz + dz;
-                                // ox/oy/oz top out at 30 and dx/dy/dz at 1.
-                                debug_assert!(sx_coord < 32 && sy_coord < 32 && sz_coord < 32);
-
-                                let idx = sx_coord + 32 * sy_coord + 32 * 32 * sz_coord;
-                                let voxel = source_grid[idx];
-
-                                if !voxel.is_air() {
-                                    has_solid = true;
-                                    let block_id = voxel.block;
-
-                                    // Find or add this block_id to our count array
-                                    let mut found = false;
-                                    for (bid, count) in block_counts[..block_count_len].iter_mut() {
-                                        if *bid == block_id {
-                                            *count = count.saturating_add(1);
-                                            found = true;
-                                            break;
-                                        }
-                                    }
-                                    if !found && block_count_len < 8 {
-                                        block_counts[block_count_len] = (block_id, 1);
-                                        block_count_len += 1;
-                                    }
-                                }
-                            }
+                let mut group = [BlockId::AIR; 8];
+                for dz in 0..2 {
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let idx = (ox + dx) + 32 * (oy + dy) + 32 * 32 * (oz + dz);
+                            group[dx + 2 * dy + 4 * dz] = source_grid[idx].block;
                         }
                     }
                 }
-
-                // Determine the output material
-                if has_solid {
-                    // Find the majority material; ties break to lowest BlockId
-                    let mut max_count = 0;
-                    let mut winner = BlockId(u16::MAX); // sentinel
-
-                    for (bid, count) in block_counts[..block_count_len].iter() {
-                        if *count > max_count || (*count == max_count && *bid < winner) {
-                            max_count = *count;
-                            winner = *bid;
-                        }
-                    }
-
-                    output[x + 32 * y + 32 * 32 * z] = Voxel::new(winner);
-                }
+                output[x + 32 * y + 32 * 32 * z] = merge_group(&group);
             }
         }
     }
 
     output
+}
+
+/// The coarse cell for one 2×2×2 source group (index `dx + 2*dy + 4*dz`,
+/// `AIR` = empty). Occupancy is any-solid — that keeps every coarse level a
+/// superset of the finer one, so rings of different factors never crack
+/// against each other. The MATERIAL is what a viewer sees from above: each of
+/// the four x/z columns contributes its topmost solid voxel, the most frequent
+/// of those wins, ties go to the lowest `BlockId`. A volume majority instead
+/// lets the dirt under a grass surface outvote it as soon as a cell spans more
+/// than one block, so distant land changed colour with the ring factor.
+pub fn merge_group(group: &[BlockId; 8]) -> Voxel {
+    let first = group[0];
+    if group.iter().all(|&id| id == first) {
+        return Voxel::new(first); // uniform (incl. all-air): the common case
+    }
+    let mut tops = [BlockId::AIR; 4];
+    let mut n = 0;
+    for dz in 0..2 {
+        for dx in 0..2 {
+            let upper = group[dx + 2 + 4 * dz];
+            let top = if upper != BlockId::AIR { upper } else { group[dx + 4 * dz] };
+            if top != BlockId::AIR {
+                tops[n] = top;
+                n += 1;
+            }
+        }
+    }
+    let mut winner: Option<(BlockId, usize)> = None;
+    for &id in &tops[..n] {
+        let count = tops[..n].iter().filter(|&&other| other == id).count();
+        if winner.is_none_or(|(best, best_count)| {
+            count > best_count || (count == best_count && id < best)
+        }) {
+            winner = Some((id, count));
+        }
+    }
+    winner.map_or_else(Voxel::default, |(id, _)| Voxel::new(id))
 }
 
 /// Block-scale (factor-16) downsample: each source chunk contributes its
@@ -183,8 +170,8 @@ pub fn build_far_lod_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
 ///
 /// It works per block: the 2x2x2 source groups sit on even coordinates, so
 /// none straddles a 16-voxel block boundary. An un-chiseled block is uniform,
-/// hence so is its 8^3 image (one fill); only chiseled blocks need the
-/// majority rule, read straight from their occupancy bitset. The whole octant
+/// hence so is its 8^3 image (one fill); only chiseled blocks need
+/// [`merge_group`], fed from their decoded materials. The whole octant
 /// is overwritten, air included, so a later chunk at the same coordinates
 /// replaces an earlier one just as the old octant table did.
 fn write_chunk_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], chunk: &Chunk) {
@@ -199,60 +186,32 @@ fn write_chunk_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], chunk: &Chu
             octant[1] * 16 + by * half,
             octant[2] * 16 + bz * half,
         ];
-        let chisel = chunk.chisel.get(&bi);
+        // Decoded once per chiseled block: grid order, x fastest.
+        let chisel = chunk.chisel.get(&bi).map(crate::ChiselData::materials);
         for z in 0..half {
             for y in 0..half {
                 let row = (base[1] + y) * 32 + (base[2] + z) * 32 * 32 + base[0];
-                match chisel {
+                match &chisel {
                     None => grid[row..row + half].fill(Voxel::new(block.id)),
-                    Some(chisel) => {
+                    Some(materials) => {
                         for x in 0..half {
-                            let mut samples = [BlockId::AIR; 8];
-                            let mut n = 0;
+                            let mut group = [BlockId::AIR; 8];
                             for dz in 0..2 {
                                 for dy in 0..2 {
                                     for dx in 0..2 {
                                         let (vx, vy, vz) = (2 * x + dx, 2 * y + dy, 2 * z + dz);
-                                        if chisel.is_solid(vx, vy, vz) {
-                                            samples[n] = chisel.material_at(vx, vy, vz);
-                                            n += 1;
-                                        }
+                                        group[dx + 2 * dy + 4 * dz] =
+                                            materials[vx + vy * BLOCK_VOXELS + vz * BLOCK_VOXELS * BLOCK_VOXELS];
                                     }
                                 }
                             }
-                            grid[row + x] = majority_solid(&samples[..n]);
+                            grid[row + x] = merge_group(&group);
                         }
                     }
                 }
             }
         }
     }
-}
-
-/// `downsample2`'s material rule for one coarse cell: air iff no sample is
-/// solid; otherwise the most frequent non-air `BlockId`, ties to the lowest.
-fn majority_solid(samples: &[BlockId]) -> Voxel {
-    let mut counts: [(BlockId, u8); 8] = [(BlockId::AIR, 0); 8];
-    let mut len = 0;
-    for &id in samples {
-        if id == BlockId::AIR {
-            continue;
-        }
-        match counts[..len].iter_mut().find(|(seen, _)| *seen == id) {
-            Some((_, count)) => *count += 1,
-            None => {
-                counts[len] = (id, 1);
-                len += 1;
-            }
-        }
-    }
-    let mut winner: Option<(BlockId, u8)> = None;
-    for &(id, count) in &counts[..len] {
-        if winner.is_none_or(|(best, best_count)| count > best_count || (count == best_count && id < best)) {
-            winner = Some((id, count));
-        }
-    }
-    winner.map_or_else(Voxel::default, |(id, _)| Voxel::new(id))
 }
 
 /// Second `downsample2` pass: merge factor-2 cells (group key = chunk coords
@@ -287,7 +246,7 @@ pub fn downsample_cells(cells: Vec<LodCell>) -> Vec<LodCell> {
 /// band (512 units). Mapping: chunk `(cx, sub_y, cz)`, block `(bx, by, bz)` →
 /// cell `(cx.rem_euclid(16)*2 + bx, sub_y.rem_euclid(16)*2 + by,
 /// cz.rem_euclid(16)*2 + bz)`. With `REGION_CHUNKS = 32` a region spans 2×2
-/// tiles per band; a region smaller than one tile leaves the grid's excess
+/// tiles per band (4×4 at 64); a region smaller than one tile leaves the grid's excess
 /// x/z volume as air (the corner-packing trade the plan documents for
 /// `downsample_blocks`) — over-draw from the shared LOD `Aabb`, never
 /// under-draw. Chiseled blocks count as their block id — chisel detail is
@@ -318,20 +277,90 @@ pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
 }
 
 /// Every streamable LOD factor. The server validates request factors
-/// against this list; `downsample_chunks` supports exactly these.
-pub const LOD_FACTORS: [u32; 5] = [2, 4, 16, 64, 256];
+/// against this list; `downsample_chunks` supports exactly these. 256 stays
+/// streamable (custom `VOXEL_LOD_RINGS` tables, a future longer horizon) but
+/// the production table below never reaches it.
+pub const LOD_FACTORS: [u32; 7] = [2, 4, 8, 16, 32, 64, 256];
+
+/// Pristine (never-edited) terrain at this factor and coarser is sampled
+/// straight from the worldgen profile (`worldgen::coarse_tile`) instead of
+/// downsampled from a fully generated region: a cell is a whole block or
+/// more, so the voxel-resolution surface chiselling full generation pays for
+/// is invisible, and the wide outer rings hold thousands of regions.
+pub const COARSE_MIN_FACTOR: u32 = 16;
+
+/// On-screen size a LOD cell may reach where its ring begins, in pixels, at
+/// the reference view below. Far terrain only reads as the real thing while
+/// its cells are about this small — the same budget Voxy's screen-space
+/// subdivision enforces; coarser and every rounded-up surface is a visible
+/// step. `ring_table_keeps_cells_within_the_pixel_budget` holds the table to it.
+pub const LOD_MAX_CELL_PX: f32 = 2.5;
+/// Reference view for [`LOD_MAX_CELL_PX`]: focal length in pixels of a 1080p
+/// frame at the camera's 60° vertical FOV (`540 / tan 30°`).
+pub const LOD_REFERENCE_FOCAL_PX: f32 = 935.0;
+
+/// Home-region LOD factor for large cell-mode regions: a factor-`f` LOD cell
+/// is `f` chunks wide, so `f <= CELL_CHUNKS` keeps every home LOD cell inside
+/// one game cell — the renderer can then hide exactly the ones under active
+/// cells (a coarser factor spans several cells and draws over full-detail
+/// terrain: overlapping rendering, live 2026-09-25).
+pub const LARGE_HOME_FACTOR: u32 = {
+    let c = crate::CELL_CHUNKS as u32;
+    if c >= 16 { 16 } else if c >= 8 { 8 } else if c >= 4 { 4 } else { 2 }
+};
 
 /// Ring table: `(chebyshev_bound, lod_factor)` with ascending bounds. A
 /// region at Chebyshev distance `d` from the viewer region renders at the
 /// factor of the first entry with `d <= bound`; None past the last bound.
-pub const LOD_RING_TABLE: &[(i32, u32)] = &[(2, 2), (4, 4), (8, 16), (16, 64), (32, 256)];
+///
+/// The factor doubles when the distance doubles, so every ring starts at
+/// roughly [`LOD_MAX_CELL_PX`] and holds a similar number of grids. (The
+/// previous table quadrupled the factor per doubling and showed 3 / 6 / 13 px
+/// cells in its outer rings.)
+///
+/// Bounds are in REGIONS, so the table belongs to a region size: the pixel
+/// budget is about world distance. Each doubling of `REGION_CHUNKS` starts
+/// every ring twice as far out, so the same bounds carry twice the factor —
+/// the near window already covers what the finest ring used to — and the
+/// horizon halves in regions to keep the same [`LOD_HORIZON_UNITS`] (16
+/// regions of 1024, 8 of 2048, 4 of 4096). `ring_table_keeps_cells_within_the_pixel_budget`
+/// checks whichever table the build ships, `ring_table_ends_at_the_horizon`
+/// that it stops at the horizon.
+pub const LOD_RING_TABLE: &[(i32, u32)] = match crate::REGION_CHUNKS {
+    32 => &[(2, 2), (3, 4), (6, 8), (13, 16), (16, 32)],
+    64 => &[(2, 4), (3, 8), (6, 16), (8, 32)],
+    128 => &[(2, 8), (3, 16), (4, 32)],
+    // Cell-mode regions above 128 chunks (up to 65.5 km): the viewer's own
+    // region at LARGE_HOME_FACTOR, one coarse ring of neighbours. Placeholder —
+    // LOD for large regions is to be revisited (user, 2026-09-25); the pixel
+    // budget and 1 km horizon do not hold here.
+    _ => &[(0, LARGE_HOME_FACTOR), (1, 32)],
+};
+
+/// How far the LOD rings reach, in world units: the last ring's Chebyshev
+/// bound × `REGION_SIZE`, the same at every region size. It is also the
+/// NEAREST the horizon edge can be (the viewer may stand on their region's
+/// edge), which is where the client's fog goes opaque. 16 384 units = 1 km;
+/// it was 2 km (32 768).
+pub const LOD_HORIZON_UNITS: f32 = 16_384.0;
+
+// The `LodKey` tiling contract (`tile_regions`, `cells_per_region`,
+// `copy_region_cells_into_tile`): every factor's 32-cell grid (32 * factor
+// units) is either a whole number of regions (tile-keyed) or divides a region
+// exactly (region-keyed, several grids per key). With `LOD_FACTORS` all
+// powers of two that is "REGION_SIZE is a power of two"; `>= 32` keeps the
+// factor-2 grid (64 units) inside a chunk pair the way the mesher expects.
+const _: () = assert!(crate::REGION_CHUNKS.is_power_of_two() && crate::REGION_CHUNKS >= 32);
 
 /// Hysteresis band for `ring_factor_in` (see that function).
 pub const LOD_STICKY_BAND: i32 = 1;
 
 /// Tile edge length in regions for a factor's `LodKey`: factors whose 32³
-/// grid fits inside one region key per-region; 64/256 key per-tile so one
-/// key is exactly one grid footprint (32 * factor == span * REGION_SIZE).
+/// grid fits inside one region key per-region (the integer division
+/// truncates to 0 and `max(1)` says "one region, several grids"); coarser
+/// ones key per-tile so one key is exactly one grid footprint
+/// (32 * factor == span * REGION_SIZE). At the default size that is 64/256
+/// per-tile; at `REGION_CHUNKS = 128` factor 64 is per-region too.
 pub fn tile_regions(factor: u32) -> i32 {
     ((32 * factor) as i32 / REGION_SIZE as i32).max(1)
 }
@@ -463,14 +492,16 @@ pub fn cells_per_region(factor: u32) -> usize {
 
 /// Downsample one region's chunks (region-local x/z chunk coords, absolute
 /// signed y) to `factor` LOD cells with key-local group coords. Factors
-/// follow the composition: 2 = voxel 2x2x2 merge; 4 = one more merge pass;
-/// 16 = block scale; 64/256 = block scale + 2/4 more merge passes (each
-/// pass halves the group lattice, so groups stay consistent throughout).
+/// follow the composition: 2 = voxel 2x2x2 merge; 4/8 = one/two more merge
+/// passes; 16 = block scale; 32/64/256 = block scale + 1/2/4 more merge passes
+/// (each pass halves the group lattice, so groups stay consistent throughout).
 pub fn downsample_chunks(chunks: Vec<(ChunkCoords, Chunk)>, factor: u32) -> Vec<LodCell> {
     match factor {
         2 => build_far_lod_cells(chunks),
         4 => downsample_cells(build_far_lod_cells(chunks)),
+        8 => downsample_cells(downsample_cells(build_far_lod_cells(chunks))),
         16 => block_scale_cells(chunks),
+        32 => downsample_cells(block_scale_cells(chunks)),
         64 => downsample_cells(downsample_cells(block_scale_cells(chunks))),
         256 => downsample_cells(downsample_cells(downsample_cells(downsample_cells(
             block_scale_cells(chunks),
@@ -563,20 +594,78 @@ mod tests {
     }
 
     #[test]
-    fn majority_material_wins_ties_to_lowest() {
-        // One coarse cell: 8 source voxels = 3×id2, 3×id5, 2×air → tie 3-3 → id2.
-        let mut g = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
-        for (i, (x, y, z)) in [(0, 0, 0), (1, 0, 0), (0, 1, 0)].into_iter().enumerate() {
-            let _ = i;
-            g[x + 32 * y + 32 * 32 * z] = Voxel::new(BlockId(2));
-        }
-        for (x, y, z) in [(1, 1, 0), (0, 0, 1), (1, 0, 1)] {
-            g[x + 32 * y + 32 * 32 * z] = Voxel::new(BlockId(5));
-        }
+    fn column_top_ties_break_to_lowest_id() {
+        // Column tops of one coarse cell: id2, id5, id5, id2 -> 2-2 tie -> id2.
+        let g = grid_with(&[([0, 0, 0], 2), ([1, 1, 0], 5), ([0, 0, 1], 5), ([1, 0, 1], 2)]);
         let mut sources: [Option<&[Voxel]>; 8] = [None; 8];
         sources[0] = Some(&g);
         let out = downsample2(&sources);
         assert_eq!(out[0].block, BlockId(2), "tie broken to lowest id");
+    }
+
+    #[test]
+    fn surface_material_survives_the_material_under_it() {
+        // Grass (3) over dirt (1), 4 voxels each: a volume majority ties 4-4
+        // and the lowest id (dirt) used to win. Seen from above it is grass.
+        let mut group = [BlockId(1); 8];
+        for dz in 0..2 {
+            for dx in 0..2 {
+                group[dx + 2 + 4 * dz] = BlockId(3);
+            }
+        }
+        assert_eq!(merge_group(&group).block, BlockId(3));
+
+        // A lone voxel over a full lower layer colours one column top of
+        // four, so the ground it stands on still wins.
+        let mut lone = [BlockId::AIR; 8];
+        for dz in 0..2 {
+            for dx in 0..2 {
+                lone[dx + 4 * dz] = BlockId(3);
+            }
+        }
+        lone[2] = BlockId(7);
+        assert_eq!(merge_group(&lone).block, BlockId(3));
+
+        // Any-solid occupancy is unchanged: one voxel keeps the cell solid.
+        let mut single = [BlockId::AIR; 8];
+        single[5] = BlockId(4);
+        assert_eq!(merge_group(&single).block, BlockId(4));
+        assert!(merge_group(&[BlockId::AIR; 8]).is_air());
+    }
+
+    #[test]
+    fn grass_over_dirt_stays_grass_at_every_multi_block_factor() {
+        // A 2-chunk-deep slab: dirt everywhere, grass on the top block layer,
+        // placed so the surface block is the LOWER of its factor-32 pair
+        // (the alignment that used to flip to dirt).
+        let mut chunks = Vec::new();
+        for cy in 0..2 {
+            let mut c = Chunk::default();
+            for bz in 0..2 {
+                for by in 0..2 {
+                    for bx in 0..2 {
+                        let top = cy == 1 && by == 1;
+                        c.blocks[crate::BlockIndex::from_xyz(bx, by, bz).0 as usize] =
+                            Block::new(BlockId(if top { 3 } else { 1 }));
+                    }
+                }
+            }
+            chunks.push((ChunkCoords::new(0, cy, 0), c));
+        }
+        for factor in [32u32, 64, 256] {
+            let cells = downsample_chunks(chunks.clone(), factor);
+            let top = cells
+                .iter()
+                .flat_map(|c| {
+                    (0..32usize).rev().find_map(|y| {
+                        let v = c.grid[32 * y];
+                        (!v.is_air()).then_some((c.group[1] * 32 + y as i32, v.block))
+                    })
+                })
+                .max()
+                .expect("solid column");
+            assert_eq!(top.1, BlockId(3), "factor {factor}: surface cell is grass");
+        }
     }
 
     #[test]
@@ -649,14 +738,23 @@ mod tests {
                     let (bx, by, bz) = bi.xyz();
                     chunk.set_block(bx, by, bz, Block::new(BlockId(next(4) as u16)));
                     // ~1/3 of the blocks carry chisel detail, some with an AIR
-                    // palette entry (solid bit set, air material).
-                    if next(3) == 0 {
-                        let mut chisel = ChiselData::new(vec![BlockId(1), BlockId(2), BlockId::AIR, BlockId(7)]);
-                        for _ in 0..next(3000) {
-                            let (vx, vy, vz) = (next(16) as usize, next(16) as usize, next(16) as usize);
-                            chisel.set(vx, vy, vz, next(4) != 0, next(4) as u8);
+                    // palette entry (occupied, air material); ~1/6 are half
+                    // blocks (one cuboid).
+                    match next(6) {
+                        0 | 1 => {
+                            let palette = vec![BlockId(1), BlockId(2), BlockId::AIR, BlockId(7)];
+                            let mut grid = vec![None; crate::BLOCK_VOXEL_COUNT];
+                            for _ in 0..next(3000) {
+                                let i = next(crate::BLOCK_VOXEL_COUNT as u64) as usize;
+                                grid[i] = (next(4) != 0).then(|| next(4) as u8);
+                            }
+                            chunk.chisel.insert(bi, ChiselData::from_grid(palette, &grid));
                         }
-                        chunk.chisel.insert(bi, chisel);
+                        2 => {
+                            let half = ChiselData::cuboid(BlockId(3), [0, 0, 0], [16, 8, 16]);
+                            chunk.chisel.insert(bi, half);
+                        }
+                        _ => {}
                     }
                 }
                 chunks.push((coords, chunk));
@@ -792,27 +890,49 @@ mod tests {
         assert_eq!(LodKey::for_region(4, RegionCoords::new(-3, 7)).coords, [-3, 7]);
         assert_eq!(tile_regions(2), 1);
         assert_eq!(tile_regions(16), 1);
-        // Factor 64: 2x2-region tiles, div_euclid so negatives round toward -inf.
-        assert_eq!(tile_regions(64), 2);
-        assert_eq!(LodKey::for_region(64, RegionCoords::new(-1, 3)).coords, [-1, 1]);
-        // Factor 256: 8x8-region tiles.
-        assert_eq!(tile_regions(256), 8);
-        assert_eq!(LodKey::for_region(256, RegionCoords::new(-9, 15)).coords, [-2, 1]);
+        // Factor 64: one 2048-unit grid — 2x2-region tiles at the default
+        // region size; div_euclid so negatives round toward -inf.
+        let s64 = tile_regions(64);
+        assert_eq!(s64, (2048 / crate::REGION_SIZE as i32).max(1));
+        assert_eq!(
+            LodKey::for_region(64, RegionCoords::new(-1, 3)).coords,
+            [(-1i32).div_euclid(s64), 3i32.div_euclid(s64)]
+        );
+        // Factor 256: 8192-unit grids, 8x8-region tiles at the default size.
+        let s256 = tile_regions(256);
+        assert_eq!(s256, (8192 / crate::REGION_SIZE as i32).max(1));
+        assert_eq!(
+            LodKey::for_region(256, RegionCoords::new(-9, 15)).coords,
+            [(-9i32).div_euclid(s256), 15i32.div_euclid(s256)]
+        );
     }
 
     #[test]
     fn lod_key_regions_and_world_offset() {
         use crate::{RegionCoords, REGION_SIZE};
+        // `span` is 2 at the default region size (1 at REGION_CHUNKS = 64).
+        let span = tile_regions(64);
         let key = LodKey { factor: 64, coords: [-1, 1] };
-        assert_eq!(key.origin_region(), RegionCoords::new(-2, 2));
+        assert_eq!(key.origin_region(), RegionCoords::new(-span, span));
         let regions = key.regions();
-        assert_eq!(regions.len(), 4);
-        assert!(regions.contains(&RegionCoords::new(-2, 2)));
-        assert!(regions.contains(&RegionCoords::new(-1, 3)));
-        assert_eq!(key.world_offset(), [-2.0 * REGION_SIZE, 0.0, 2.0 * REGION_SIZE]);
-        // A tile grid spans exactly 32 cells * factor world units = span regions.
-        assert_eq!(32 * 64, 2 * REGION_SIZE as i32);
-        assert_eq!(32 * 256, 8 * REGION_SIZE as i32);
+        assert_eq!(regions.len(), (span * span) as usize);
+        assert!(regions.contains(&RegionCoords::new(-span, span)));
+        assert!(regions.contains(&RegionCoords::new(-1, 2 * span - 1)));
+        let edge = span as f32 * REGION_SIZE;
+        assert_eq!(key.world_offset(), [-edge, 0.0, edge]);
+        // A tile grid spans exactly 32 cells * factor world units = span
+        // regions — or, once a grid is smaller than a region (factor 64 at
+        // REGION_CHUNKS = 128), the key is one region of several grids.
+        for factor in [64, 256] {
+            let grid = 32 * factor;
+            let span = tile_regions(factor as u32);
+            if grid >= REGION_SIZE as i32 {
+                assert_eq!(grid, span * REGION_SIZE as i32, "factor {factor}: whole regions");
+            } else {
+                assert_eq!(span, 1);
+                assert_eq!(REGION_SIZE as i32 % grid, 0, "factor {factor}: whole grids");
+            }
+        }
         // Region-keyed factor: world offset == the region's own offset.
         let rk = LodKey::for_region(4, RegionCoords::new(3, -2));
         assert_eq!(rk.world_offset(), RegionCoords::new(3, -2).world_offset());
@@ -820,7 +940,9 @@ mod tests {
 
     #[test]
     fn ring_table_is_ascending_and_factors_valid() {
-        let mut prev = 0;
+        // A first bound of 0 is the home-region ring of large cell-mode
+        // regions; every later bound must strictly ascend.
+        let mut prev = -1;
         for &(bound, factor) in LOD_RING_TABLE {
             assert!(bound > prev, "bounds ascend");
             prev = bound;
@@ -828,19 +950,25 @@ mod tests {
         }
     }
 
+    /// Fixture for the `ring_factor_in` tests: they pin the assignment and
+    /// hysteresis ALGORITHM, so they must not move with `LOD_RING_TABLE`, which
+    /// is re-cut per `REGION_CHUNKS`. (This is the default-size table.)
+    const RING_FIXTURE: &[(i32, u32)] = &[(2, 2), (3, 4), (6, 8), (13, 16), (27, 32), (32, 64)];
+
     #[test]
     fn ring_factor_fresh_assignment_over_all_distances() {
         for d in 0..=35 {
             let expect = match d {
                 0..=2 => Some(2),
-                3..=4 => Some(4),
-                5..=8 => Some(16),
-                9..=16 => Some(64),
-                17..=32 => Some(256),
+                3 => Some(4),
+                4..=6 => Some(8),
+                7..=13 => Some(16),
+                14..=27 => Some(32),
+                28..=32 => Some(64),
                 _ => None,
             };
             assert_eq!(
-                ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, d, None),
+                ring_factor_in(RING_FIXTURE, LOD_STICKY_BAND, d, None),
                 expect,
                 "dist {d}, no current"
             );
@@ -849,20 +977,18 @@ mod tests {
 
     #[test]
     fn ring_factor_sticky_band_holds_factor_4_one_past_its_bound() {
-        // Factor 4's fresh band is d in 3..=4; band 1 widens the held
-        // interval to 2..=5 on both edges. Unlike the old 2-entry client
-        // table, factor 4 is no longer the innermost ring here (factor 2 is),
-        // so its lower edge is a real boundary too, not `i32::MIN`.
-        for d in 0..=10 {
+        // Factor 4's fresh band is d == 3; band 1 widens the held interval to
+        // 2..=4 on both edges.
+        for d in 0..=8 {
             let expect = match d {
                 0..=1 => Some(2),
-                2..=5 => Some(4),
-                6..=8 => Some(16),
-                9..=10 => Some(64),
+                2..=4 => Some(4),
+                5..=6 => Some(8),
+                7..=8 => Some(16),
                 _ => unreachable!(),
             };
             assert_eq!(
-                ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, d, Some(4)),
+                ring_factor_in(RING_FIXTURE, LOD_STICKY_BAND, d, Some(4)),
                 expect,
                 "dist {d}, current 4"
             );
@@ -871,19 +997,19 @@ mod tests {
 
     #[test]
     fn ring_factor_sticky_band_holds_factor_16_both_directions() {
-        // Factor 16's fresh band is 5..=8; band 1 widens the held interval to
-        // 4..=9 (unchanged from the old table: its neighboring bounds, 4 and
-        // 8, are the same in both tables).
-        for d in 0..=10 {
+        // Factor 16's fresh band is 7..=13; band 1 widens the held interval
+        // to 6..=14.
+        for d in 0..=15 {
             let expect = match d {
                 0..=2 => Some(2),
                 3 => Some(4),
-                4..=9 => Some(16),
-                10 => Some(64),
+                4..=5 => Some(8),
+                6..=14 => Some(16),
+                15 => Some(32),
                 _ => unreachable!(),
             };
             assert_eq!(
-                ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, d, Some(16)),
+                ring_factor_in(RING_FIXTURE, LOD_STICKY_BAND, d, Some(16)),
                 expect,
                 "dist {d}, current 16"
             );
@@ -891,11 +1017,52 @@ mod tests {
     }
 
     #[test]
+    fn ring_table_keeps_cells_within_the_pixel_budget() {
+        if crate::REGION_CHUNKS > 128 {
+            return; // placeholder table for large cell-mode regions
+        }
+        // Worst case for a ring: the viewer stands on the edge of their own
+        // region, so a ring whose inner neighbour ends at `prev` regions
+        // starts `prev` whole regions away.
+        // Near radius 1 (3x3) is the tightest window any preset runs a full
+        // table with; the production 5x5 only pushes the first ring further out.
+        let mut prev = 1;
+        for &(bound, factor) in LOD_RING_TABLE {
+            let start = prev as f32 * REGION_SIZE;
+            let px = factor as f32 / start * LOD_REFERENCE_FOCAL_PX;
+            assert!(
+                px <= LOD_MAX_CELL_PX,
+                "factor {factor} starts {start} voxels out: {px:.2} px per cell"
+            );
+            prev = bound;
+        }
+    }
+
+    #[test]
+    fn a_large_cell_region_s_home_lod_fits_inside_a_cell() {
+        if crate::REGION_CHUNKS <= 128 || crate::CELL_CHUNKS == 0 {
+            return;
+        }
+        let home = ring_factor_in(LOD_RING_TABLE, 0, 0, None).expect("home ring");
+        assert!(home as usize <= crate::CELL_CHUNKS.max(2), "home factor {home} > cell {}", crate::CELL_CHUNKS);
+        assert_eq!(ring_factor_in(LOD_RING_TABLE, 0, 1, None), Some(32));
+    }
+
+    #[test]
+    fn ring_table_ends_at_the_horizon() {
+        if crate::REGION_CHUNKS > 128 {
+            return; // placeholder table for large cell-mode regions
+        }
+        let &(last, _) = LOD_RING_TABLE.last().unwrap();
+        assert_eq!(last as f32 * REGION_SIZE, LOD_HORIZON_UNITS);
+    }
+
+    #[test]
     fn ring_factor_unknown_current_falls_back_to_fresh() {
         // A current factor not in the table (table shrank between sessions,
         // say) gets no stickiness — plain fresh assignment.
-        assert_eq!(ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, 3, Some(99)), Some(4));
-        assert_eq!(ring_factor_in(LOD_RING_TABLE, LOD_STICKY_BAND, 33, Some(99)), None);
+        assert_eq!(ring_factor_in(RING_FIXTURE, LOD_STICKY_BAND, 3, Some(99)), Some(4));
+        assert_eq!(ring_factor_in(RING_FIXTURE, LOD_STICKY_BAND, 33, Some(99)), None);
     }
 
     #[test]
@@ -935,7 +1102,7 @@ mod tests {
         // each axis. Expected occupancy per factor: f cells = 16/f per axis
         // (min 1), all in the grid at group [0,0,0].
         for &(factor, expect_per_axis) in
-            &[(2u32, 8usize), (4, 4), (16, 1), (64, 1), (256, 1)]
+            &[(2u32, 8usize), (4, 4), (8, 2), (16, 1), (32, 1), (64, 1), (256, 1)]
         {
             let chunks = vec![(ChunkCoords::new(0, 0, 0), chunk_with_block([0, 0, 0], 5))];
             let cells = downsample_chunks(chunks, factor);
@@ -949,21 +1116,36 @@ mod tests {
 
     #[test]
     fn downsample_chunks_places_region_content_in_the_low_corner_rect() {
-        // Chunk (31, 0, 31) is the region's far corner. At factor 64 the region
-        // spans cells 0..16, so that chunk's block lands at cell (15, 0, 15).
-        let chunks = vec![(ChunkCoords::new(31, 0, 31), chunk_with_block([1, 0, 1], 9))];
+        // The region's far-corner chunk — (31, 0, 31) at the default size. At
+        // factor 64 the region spans cells 0..per (16 by default), so that
+        // chunk's far block lands in the last of them.
+        let far = crate::REGION_CHUNKS - 1;
+        let per = cells_per_region(64);
+        assert_eq!(per, crate::REGION_CHUNKS / 2);
+        assert_eq!(cells_per_region(256), crate::REGION_CHUNKS / 8);
+        let chunks = vec![(ChunkCoords::new(far, 0, far), chunk_with_block([1, 0, 1], 9))];
         let cells = downsample_chunks(chunks, 64);
         assert_eq!(cells.len(), 1);
-        let idx = 15 + 32 * 0 + 32 * 32 * 15;
+        // `per` may exceed one grid (64 at REGION_CHUNKS = 128): then the last
+        // cell sits in the last grid of the region's own group lattice.
+        let (grp, local) = (((per - 1) / 32) as i32, (per - 1) % 32);
+        assert_eq!(cells[0].group, [grp, 0, grp]);
+        let idx = local + 32 * 0 + 32 * 32 * local;
         assert_eq!(cells[0].grid[idx].block, BlockId(9));
-        assert_eq!(cells_per_region(64), 16);
-        assert_eq!(cells_per_region(256), 4);
     }
 
     #[test]
     fn copy_region_cells_overlays_and_clears() {
         use crate::RegionCoords;
-        let key = LodKey { factor: 64, coords: [0, 0] }; // covers regions (0..2, 0..2)
+        // A key whose tile spans several regions: factor 64 (2x2) at the
+        // default size; at REGION_CHUNKS = 64 that tile is ONE region, so 256
+        // (2x2 at 128 as well).
+        let factor = if tile_regions(64) > 1 { 64 } else { 256 };
+        if tile_regions(factor) <= 1 {
+            return; // large cell-mode regions: no tile spans several regions
+        }
+        let per = cells_per_region(factor); // 16 by default
+        let key = LodKey { factor, coords: [0, 0] };
         // Coarse tile band 0: fully solid everywhere.
         let mut tile: BTreeMap<[i32; 3], Vec<Voxel>> = BTreeMap::new();
         tile.insert([0, 0, 0], vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT]);
@@ -974,11 +1156,11 @@ mod tests {
         copy_region_cells_into_tile(&mut tile, &region_cells, RegionCoords::new(1, 0), &key);
 
         let band = &tile[&[0, 0, 0]];
-        // Region (1,0) maps to x cells 16..32, z 0..16: rect cleared, one cell rewritten.
-        assert_eq!(band[16].block, BlockId(7), "authoritative cell written at x offset 16");
-        assert!(band[17].is_air(), "rest of the region rect cleared to authoritative air");
-        assert!(band[16 + 32 * 32 * 15].is_air(), "cleared across the whole z extent");
+        // Region (1,0) maps to x cells per..2*per, z 0..per: rect cleared, one cell rewritten.
+        assert_eq!(band[per].block, BlockId(7), "authoritative cell written at x offset `per`");
+        assert!(band[per + 1].is_air(), "rest of the region rect cleared to authoritative air");
+        assert!(band[per + 32 * 32 * (per - 1)].is_air(), "cleared across the whole z extent");
         assert_eq!(band[0].block, BlockId(1), "outside the region rect untouched");
-        assert_eq!(band[32 * 32 * 16].block, BlockId(1), "z >= 16 (other region row) untouched");
+        assert_eq!(band[32 * 32 * per].block, BlockId(1), "z >= per (other region row) untouched");
     }
 }

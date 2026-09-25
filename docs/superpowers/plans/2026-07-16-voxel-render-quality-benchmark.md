@@ -45,6 +45,14 @@ pub struct RenderQualityConfig {
 }
 ```
 
+Native parsing must implement these exact contracts:
+
+- `VOXEL_AA=off|fxaa|smaa-low|smaa-medium|smaa-high`
+- `VOXEL_SHADOW_FILTER=hardware-2x2|gaussian`
+- `VOXEL_SHADOW_CASCADES=1|2|3|4`
+- `VOXEL_SHADOW_MAP_SIZE=512|1024|2048|4096`
+- `VOXEL_RENDER_SCALE=0.50..1.00` inclusive
+
 - [ ] Write table-driven tests for every documented value, every default, wasm override suppression, both scale endpoints, out-of-range/NaN scale, and errors that name the variable and allowed domain.
 - [ ] Run `cargo test -p client renderer::config::tests -- --nocapture`; expect the new tests to fail because the types and parser do not exist.
 - [ ] Implement `RenderQualityConfig::resolve(aa, filter, cascades, map_size, scale, is_wasm)` and native-only `from_env()`. Parse scale with `is_finite()` and inclusive `0.50..=1.00`; accept cascade/map values only from the specified sets.
@@ -156,7 +164,7 @@ pub struct TerrainWorkloadSnapshot {
 - [ ] Increment the benchmark schema version. Extend `BenchmarkMetadata`/result structures with `quality_preset`, `quality`, `internal_resolution`, `shadow_map_texels`, workload fields, and calculated rejection ratios.
 - [ ] Populate the main-world snapshot from live `ChunkQuads`/LOD entities and quad allocations; publish render-world cull counters asynchronously through the existing benchmark/readback channel. Do not add synchronous GPU waits.
 - [ ] Use `MainPassResolutionOverride` when present and camera physical target size otherwise. Keep existing fields and their JSON names backward compatible.
-- [ ] Run `cargo test -p client render_bench::tests` and `just render-bench --help` (or `just --show render-bench` if the recipe has no help mode); expect success and no benchmark launch.
+- [ ] Run `cargo test -p client render_bench::tests` and `just --show render-bench`; expect success and no benchmark launch.
 - [ ] Commit with `git commit -m "feat(client): report render quality and terrain workload"`.
 
 ### Task 6: Add named quality presets and three-run comparison workflow
@@ -164,11 +172,13 @@ pub struct TerrainWorkloadSnapshot {
 **Files:**
 - Modify: `justfile`
 - Modify: `crates/client/src/renderer/render_bench.rs`
-- Modify: `scripts/render_bench.py` if present; otherwise create `scripts/compare_render_bench.py`
-- Modify: `docs/benchmarks/README.md` if present; otherwise create it
+- Create: `scripts/compare_render_bench.py`
+- Create: `scripts/tests/__init__.py`
+- Create: `scripts/tests/test_compare_render_bench.py`
+- Create: `docs/benchmarks/README.md`
 
 - [ ] Add script tests using temporary JSON fixtures: three runs per side, median-of-run p50/p95 summaries, a passing 5%/5% gate, a failing p95 gate, missing GPU timings, and memory-regression reporting.
-- [ ] Run the script test command exposed by the repository's existing script-test convention; if none exists, run `python3 -m unittest scripts.tests.test_compare_render_bench`; expect failure before the comparator exists.
+- [ ] Run `python3 -m unittest scripts.tests.test_compare_render_bench`; expect failure before the comparator exists.
 - [ ] Extend `render-bench` with `quality=current` default and exact mappings: `cheap-aa`, `cheap-shadows`, `balanced`, `scale-75`. Implement shell defaulting with `${VAR:-preset_value}` so explicit environment values override presets.
 - [ ] Export `VOXEL_RENDER_QUALITY_PRESET` for JSON metadata and reject unknown preset names before launching the client.
 - [ ] Implement the comparator to require three result files per side, compare medians of each run's p50/p95 summaries, enforce p50 improvement ≥5% and p95 regression ≤5%, and report reserved-memory and unavailable-metric differences without concealing them.
@@ -187,4 +197,3 @@ pub struct TerrainWorkloadSnapshot {
 - [ ] Capture the existing visual probe positions under `current` and verify no holes, LOD seams, missing shadows, or unstable transitions. Record any deliberate preset quality differences separately from defects.
 - [ ] Confirm current resolves to SMAA High/Gaussian/4/2048/1.0 in JSON and that internal resolution equals output resolution.
 - [ ] Commit with `git commit -m "docs: record render quality benchmark baseline"`.
-

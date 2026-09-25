@@ -1,0 +1,163 @@
+diff --git a/crates/parry3d/tests/issue_193_shape_cast_penetrating_normals.rs b/crates/parry3d/tests/issue_193_shape_cast_penetrating_normals.rs
+new file mode 100644
+index 00000000..3742862f
+--- /dev/null
++++ b/crates/parry3d/tests/issue_193_shape_cast_penetrating_normals.rs
+@@ -0,0 +1,66 @@
++// Regression test for https://github.com/dimforge/parry/issues/193
++// (the four cases from HeartofPhos' 2024-11-29 comment)
++//
++// A shape slightly penetrating the +Y face of a large cuboid used to get wildly wrong
++// shape-cast normals (e.g. [0.707, 0.027, 0.707] instead of ±Y), the GJK-derived normal
++// being unreliable for tiny TOIs. Casts with `toi < 1e-4` now fall back on the contact
++// query for the impact geometry.
++
++use parry3d::math::{Pose, Vector};
++use parry3d::query::{self, ShapeCastOptions};
++use parry3d::shape::{Ball, Capsule, Cuboid, Shape};
++
++#[test]
++fn slightly_penetrating_casts_report_the_face_normal() {
++    let cases: [(Box<dyn Shape>, Pose); 4] = [
++        {
++            let g = Capsule::new_y(5.0, 1.0);
++            let pos = Pose::translation(0.0, g.half_height() - 0.01, 0.0);
++            (Box::new(g), pos)
++        },
++        {
++            let g = Capsule::new_y(5.0, 1.0);
++            let pos = Pose::translation(0.0, g.half_height() - 0.02, 0.0);
++            (Box::new(g), pos)
++        },
++        {
++            let g = Ball::new(1.0);
++            let pos = Pose::translation(0.0, g.radius - 0.2, 0.0);
++            (Box::new(g), pos)
++        },
++        {
++            let g = Ball::new(1.0);
++            let pos = Pose::translation(0.0, g.radius - 0.200001, 0.0);
++            (Box::new(g), pos)
++        },
++    ];
++
++    let g2 = Cuboid::new(Vector::new(20.0, 1.0, 20.0));
++    let pos2 = Pose::translation(0.0, -g2.half_extents.y, 0.0);
++    let vel2 = Vector::ZERO;
++
++    // Velocity not being straight down played a part in the original failures.
++    let vel1 = Vector::new(0.1, 1.0, 0.0);
++
++    let options = ShapeCastOptions {
++        compute_impact_geometry_on_penetration: true,
++        ..Default::default()
++    };
++
++    for (i, (g1, pos1)) in cases.iter().enumerate() {
++        let hit = query::cast_shapes(pos1, vel1, &**g1, &pos2, vel2, &g2, options)
++            .unwrap()
++            .expect("the penetrating cast should return a hit");
++
++        assert!(
++            (hit.normal2 - Vector::Y).length() < 1.0e-4,
++            "case {i}: normal2 {:?} should be +Y",
++            hit.normal2,
++        );
++        assert!(
++            (hit.normal1 + Vector::Y).length() < 1.0e-4,
++            "case {i}: normal1 {:?} should be -Y",
++            hit.normal1,
++        );
++    }
++}
+diff --git a/src/query/gjk/gjk.rs b/src/query/gjk/gjk.rs
+index 24eb2cb0..cd0a5c59 100644
+--- a/src/query/gjk/gjk.rs
++++ b/src/query/gjk/gjk.rs
+@@ -380,13 +380,13 @@ where
+     let mut max_bound = Real::max_value();
+     let mut dir;
+     let mut niter = 0;
+-    // Separation is certified as soon as some support plane puts the origin strictly
+-    // outside the CSO (`min_bound > 0`). Without such a certificate, a stalled simplex
+-    // must not report the shapes as disjoint (issue #396): degenerate support directions
+-    // (e.g. the symmetry axis of two coaxial cylinders) can stall the simplex while the
+-    // origin is deeply inside the CSO. In that case we perturb the search direction and
+-    // continue instead.
+-    let mut separation_certified = false;
++    // Tightest lower bound on the distance from the origin to the CSO: `min_bound`
++    // maximized over the directions probed. Its sign classifies the origin: `> 0`
++    // means separation, `~ 0` puts it on the CSO boundary (touching),
++    // `< 0` bounds the penetration depth.
++    let mut best_min_bound = -Real::max_value();
++    // Largest CSO support magnitude seen, used to scale the tolerance below.
++    let mut support_scale: Real = 0.0;
+     let mut nb_perturbs = 0usize;
+     const MAX_PERTURBATIONS: usize = 2 * DIM;
+ 
+@@ -404,17 +404,25 @@ where
+         }
+ 
+         if max_bound >= old_max_bound {
+-            if exact_dist {
++            if best_min_bound > 0.0 {
++                // Separation certified: the converged witnesses are the answer.
++                if exact_dist {
++                    let (p1, p2) = result(simplex, true);
++                    return GJKResult::ClosestPoints(p1, p2, old_dir); // upper bounds inconsistencies
++                } else {
++                    return GJKResult::Proximity(old_dir);
++                }
++            } else if exact_dist && best_min_bound >= -_eps_rel * support_scale {
++                // Origin on the CSO boundary: the pair is touching, so the witnesses
++                // describe the contact.
+                 let (p1, p2) = result(simplex, true);
+-                return GJKResult::ClosestPoints(p1, p2, old_dir); // upper bounds inconsistencies
+-            } else if separation_certified {
+-                return GJKResult::Proximity(old_dir);
++                return GJKResult::ClosestPoints(p1, p2, old_dir);
+             } else if nb_perturbs < MAX_PERTURBATIONS {
++                // Try slight perturbations to avoid getting stuck into a numerical ambiguity.
+                 nb_perturbs += 1;
+                 dir = perturbed_dir(dir, nb_perturbs);
+             } else {
+-                // We could neither make progress nor certify separation:
+-                // reporting an intersection is the safe answer.
++                // The CSO reaches past the origin in every direction probed.
+                 return GJKResult::Intersection;
+             }
+         }
+@@ -424,6 +432,9 @@ where
+ 
+         assert!(min_bound.is_finite());
+ 
++        best_min_bound = best_min_bound.max(min_bound);
++        support_scale = support_scale.max(cso_point.point.length());
++
+         if min_bound > max_dist {
+             return GJKResult::NoIntersection(dir);
+         } else if !exact_dist && min_bound > 0.0 && max_bound <= max_dist {
+@@ -437,14 +448,18 @@ where
+             }
+         }
+ 
+-        separation_certified = separation_certified || min_bound > 0.0;
+-
+         if !simplex.add_point(cso_point) {
+-            if exact_dist {
++            // See the stagnation branch above for how `best_min_bound` classifies a stall.
++            if best_min_bound > 0.0 {
++                if exact_dist {
++                    let (p1, p2) = result(simplex, false);
++                    return GJKResult::ClosestPoints(p1, p2, dir);
++                } else {
++                    return GJKResult::Proximity(dir);
++                }
++            } else if exact_dist && best_min_bound >= -_eps_rel * support_scale {
+                 let (p1, p2) = result(simplex, false);
+                 return GJKResult::ClosestPoints(p1, p2, dir);
+-            } else if separation_certified {
+-                return GJKResult::Proximity(dir);
+             } else if nb_perturbs < MAX_PERTURBATIONS {
+                 // The duplicate support point cannot enrich the simplex; jump back to
+                 // the top of the loop where the stagnation branch will perturb `dir`.

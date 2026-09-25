@@ -35,51 +35,48 @@ pub fn connect(server_send: Sender<ServerPacket>, client_recv: Receiver<ClientPa
     });
 }
 
+/// Pause between connect attempts and the total budget before giving up —
+/// the same policy as the native client (`CONNECT_RETRY_INTERVAL` /
+/// `CONNECT_DEADLINE` in `netcode.rs`, which is not compiled on wasm), so the
+/// page can be opened before the server is up.
+pub const CONNECT_RETRY_INTERVAL_MS: i32 = 500;
+pub const CONNECT_DEADLINE_MS: f64 = 120_000.0;
+/// Log every Nth failed attempt (and the first): the browser console is the
+/// only log here, and two minutes of 500 ms retries would bury it.
+const CONNECT_RETRY_LOG_EVERY: u32 = 10;
+
 async fn run(
     server_send: Sender<ServerPacket>,
     client_recv: Receiver<ClientPacket>,
 ) -> Result<(), JsValue> {
     let window = web_sys::window().expect("no window");
 
-    // 1. Fetch the cert hash + port the server wrote into assets/. Malformed
-    //    contents are Err returns, not panics: a panic inside this promise
-    //    would poison the whole wasm instance instead of just flagging the
-    //    connection as lost.
-    let resp: web_sys::Response =
-        JsFuture::from(window.fetch_with_str("assets/webtransport-cert-hash.json"))
-            .await?
-            .dyn_into()?;
-    let text = JsFuture::from(resp.text()?).await?;
-    let text = text
-        .as_string()
-        .ok_or_else(|| JsValue::from_str("hash file not text"))?;
-    let (hash_hex, port) =
-        parse_hash_json(&text).ok_or_else(|| JsValue::from_str("malformed cert hash file"))?;
-    // Guard the slicing too: odd-length or non-ASCII hex would panic on
-    // `&hash_hex[i..i + 2]` before from_str_radix ever saw it.
-    if hash_hex.len() % 2 != 0 || !hash_hex.is_ascii() {
-        return Err(JsValue::from_str("bad hex in cert hash"));
-    }
-    let hash_bytes: Vec<u8> = (0..hash_hex.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hash_hex[i..i + 2], 16)
-                .map_err(|_| JsValue::from_str("bad hex in cert hash"))
-        })
-        .collect::<Result<_, _>>()?;
-
-    // 2. Open the transport, trusting exactly that certificate.
-    let hash = WebTransportHash::new();
-    hash.set_algorithm("sha-256");
-    // `set_value` wants a bare `Object`; the `_u8_array` setter is the safe,
-    // copying variant that takes a `Uint8Array` directly (web-sys 0.3.103).
-    hash.set_value_u8_array(&Uint8Array::from(hash_bytes.as_slice()));
-    let options = WebTransportOptions::new();
-    // Takes a slice of hashes directly, not a JS Array wrapper.
-    options.set_server_certificate_hashes(&[hash]);
-    let transport = WebTransport::new_with_options(&format!("https://127.0.0.1:{port}/"), &options)?;
-    JsFuture::from(transport.ready()).await?;
+    let started = js_sys::Date::now();
+    let mut attempt = 1u32;
+    let transport = loop {
+        let failure = match open_transport(&window).await {
+            Ok(transport) => break transport,
+            Err(failure) => failure,
+        };
+        if js_sys::Date::now() - started >= CONNECT_DEADLINE_MS {
+            error!("[client] giving up after {attempt} connect attempts");
+            return Err(failure);
+        }
+        if attempt == 1 || attempt % CONNECT_RETRY_LOG_EVERY == 0 {
+            warn!(
+                "[client] webtransport connect attempt {attempt} failed ({failure:?}); \
+                 is the server running? retrying"
+            );
+        }
+        attempt += 1;
+        sleep_ms(CONNECT_RETRY_INTERVAL_MS).await;
+    };
     info!("[client] webtransport connected");
+    game::perf_event!(
+        "connected",
+        "attempts={attempt} connect_ms={:.0}",
+        js_sys::Date::now() - started
+    );
 
     // Shared death flag: the read loop is the one that observes the server
     // going away; the write loop checks it so it stops polling instead of
@@ -190,6 +187,55 @@ async fn read_stream_to_end(stream: web_sys::ReadableStream) -> Result<Vec<u8>, 
         let chunk: Uint8Array = Reflect::get(&next, &"value".into())?.dyn_into()?;
         bytes.extend(chunk.to_vec());
     }
+}
+
+/// One connect attempt: fetch the cert hash the server published, then open a
+/// session trusting exactly that certificate.
+async fn open_transport(window: &web_sys::Window) -> Result<WebTransport, JsValue> {
+    // 1. Fetch the cert hash + port the server wrote into assets/. Malformed
+    //    contents are Err returns, not panics: a panic inside this promise
+    //    would poison the whole wasm instance instead of just flagging the
+    //    connection as lost. Re-fetched on every attempt, past the HTTP cache:
+    //    the server mints a new certificate (and rewrites this file) each
+    //    start, so a hash read before it came up is stale.
+    let hash_url = format!(
+        "assets/webtransport-cert-hash.json?t={}",
+        js_sys::Date::now()
+    );
+    let resp: web_sys::Response = JsFuture::from(window.fetch_with_str(&hash_url))
+        .await?
+        .dyn_into()?;
+    let text = JsFuture::from(resp.text()?).await?;
+    let text = text
+        .as_string()
+        .ok_or_else(|| JsValue::from_str("hash file not text"))?;
+    let (hash_hex, port) =
+        parse_hash_json(&text).ok_or_else(|| JsValue::from_str("malformed cert hash file"))?;
+    // Guard the slicing too: odd-length or non-ASCII hex would panic on
+    // `&hash_hex[i..i + 2]` before from_str_radix ever saw it.
+    if hash_hex.len() % 2 != 0 || !hash_hex.is_ascii() {
+        return Err(JsValue::from_str("bad hex in cert hash"));
+    }
+    let hash_bytes: Vec<u8> = (0..hash_hex.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&hash_hex[i..i + 2], 16)
+                .map_err(|_| JsValue::from_str("bad hex in cert hash"))
+        })
+        .collect::<Result<_, _>>()?;
+
+    // 2. Open the transport, trusting exactly that certificate.
+    let hash = WebTransportHash::new();
+    hash.set_algorithm("sha-256");
+    // `set_value` wants a bare `Object`; the `_u8_array` setter is the safe,
+    // copying variant that takes a `Uint8Array` directly (web-sys 0.3.103).
+    hash.set_value_u8_array(&Uint8Array::from(hash_bytes.as_slice()));
+    let options = WebTransportOptions::new();
+    // Takes a slice of hashes directly, not a JS Array wrapper.
+    options.set_server_certificate_hashes(&[hash]);
+    let transport = WebTransport::new_with_options(&format!("https://127.0.0.1:{port}/"), &options)?;
+    JsFuture::from(transport.ready()).await?;
+    Ok(transport)
 }
 
 fn parse_hash_json(text: &str) -> Option<(String, u16)> {

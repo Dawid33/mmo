@@ -145,7 +145,7 @@ pub fn translate_snapshot(
         translated.near_backend_resolved = Some(near.active_mode.as_str().to_owned());
         translated.near_visibility_source = near.visibility_source;
         translated.near.active_chunks = Some(u64::from(near.active_chunks));
-        translated.near.frustum_survivors = Some(u64::from(near.frustum_visible_chunks));
+        translated.near.frustum_survivors = near.frustum_visible_chunks.map(u64::from);
         translated.near.hzb_survivors = near.hzb_visible_chunks.map(u64::from);
         translated.near.resident_quads = Some(near.resident_quads);
         translated.near.submitted_quads = near.submitted_quads;
@@ -202,7 +202,7 @@ mod tests {
                 mode_generation: 1,
                 visibility_source: Some(ForwardCullSource::Hzb),
                 active_chunks: 17,
-                frustum_visible_chunks: 11,
+                frustum_visible_chunks: Some(11),
                 hzb_visible_chunks: Some(7),
                 indirect_draw_count: Some(3),
                 direct_draw_count: Some(0),

@@ -73,6 +73,33 @@ fn pressing_e_grabs_and_releases_cursor() {
     );
 }
 
+/// Put the local player in fps-cam mode the way a player does — press E — and
+/// wait until the window holds the pointer: mouse motion only turns the camera
+/// while it does.
+fn grab_pointer(h: &mut BevyInputHarness) {
+    h.press_e();
+    h.step();
+    h.release_e();
+    h.step();
+    assert_eq!(h.cursor_grab_mode(), CursorGrabMode::Locked, "E must grab the pointer");
+}
+
+/// Raw motion arrives from the device whether or not the window holds the
+/// pointer. Without a grab (menus, another window focused, an autopilot run
+/// that enabled fps-cam with `InputEvent::FpsCam`) it must not reach the sim,
+/// or moving the mouse over another window turns the player.
+#[test]
+fn motion_without_a_grabbed_pointer_is_not_forwarded() {
+    let mut h = BevyInputHarness::new();
+    h.connect();
+    h.set_mouse_coalesce_window(Duration::ZERO);
+    for _ in 0..4 {
+        h.move_mouse(Vec2::new(5.0, 5.0));
+        h.step();
+    }
+    assert!(h.mouse_motions().is_empty(), "ungrabbed motion forwarded: {:?}", h.mouse_motions());
+}
+
 /// The pre-change contract: with the window collapsed, every frame with motion
 /// still produces exactly one MouseMotion event. Guards against the coalescer
 /// dropping deltas outright.
@@ -80,6 +107,7 @@ fn pressing_e_grabs_and_releases_cursor() {
 fn zero_window_emits_one_motion_event_per_frame() {
     let mut h = BevyInputHarness::new();
     h.connect();
+    grab_pointer(&mut h);
     h.set_mouse_coalesce_window(Duration::ZERO);
 
     for i in 0..4 {
@@ -101,6 +129,7 @@ fn zero_window_emits_one_motion_event_per_frame() {
 fn long_window_coalesces_frames_into_one_packet() {
     let mut h = BevyInputHarness::new();
     h.connect();
+    grab_pointer(&mut h);
     h.set_mouse_coalesce_window(Duration::from_secs(3600));
 
     for _ in 0..8 {

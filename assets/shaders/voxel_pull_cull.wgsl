@@ -5,12 +5,19 @@ struct ChunkMeta {
     quad_count: u32,
     transform_slot: u32,
     cave_active: u32,
+    // records::face_ends: cumulative per-face range ends (PosX, NegX, PosY,
+    // NegY, PosZ, NegZ) relative to record_start, then the unsorted flag.
+    face_ends_lo: vec4<u32>,
+    face_ends_hi: vec4<u32>,
 };
 
-struct DrawIndirectArgs {
-    vertex_count: u32,
+// WebGPU's indexed indirect draw ABI (5 words). Every command indexes the
+// shared quad index buffer from 0; base_vertex selects the chunk's records.
+struct DrawIndexedIndirectArgs {
+    index_count: u32,
     instance_count: u32,
-    first_vertex: u32,
+    first_index: u32,
+    base_vertex: i32,
     first_instance: u32,
 };
 
@@ -18,15 +25,24 @@ struct CullView {
     clip_from_world: mat4x4<f32>,
     // viewport width, viewport height, chunk capacity, HZB mip count.
     viewport_and_capacity: vec4<u32>,
+    // Eye position; w = 1 culls back-facing face ranges (perspective views),
+    // w = 0 keeps every face (shadow cascades).
+    camera: vec4<f32>,
 };
 
+// `commands` first: indirect-count draws read the command count at offset 0.
 struct DrawCount {
-    visible_chunks: atomic<u32>,
+    commands: atomic<u32>,
     visible_quads: atomic<u32>,
+    visible_chunks: atomic<u32>,
+    pad: u32,
 };
+
+// Up to one command per face direction per chunk slot.
+const FACES_PER_SLOT: u32 = 6u;
 
 @group(0) @binding(0) var<storage, read> chunks: array<ChunkMeta>;
-@group(0) @binding(1) var<storage, read_write> commands: array<DrawIndirectArgs>;
+@group(0) @binding(1) var<storage, read_write> commands: array<DrawIndexedIndirectArgs>;
 @group(0) @binding(2) var<storage, read_write> draw_count: DrawCount;
 @group(0) @binding(3) var<uniform> view: CullView;
 
@@ -66,26 +82,80 @@ fn frustum_visible(chunk: ChunkMeta) -> bool {
     return !(all_left || all_right || all_bottom || all_top || all_near);
 }
 
-fn emit_command(slot: u32, chunk: ChunkMeta, visible: bool) {
-    var command = DrawIndirectArgs(
-        select(0u, chunk.quad_count * 6u, visible),
+fn face_end(chunk: ChunkMeta, face: u32) -> u32 {
+    var end = 0u;
+    if face < 4u {
+        end = chunk.face_ends_lo[face];
+    } else {
+        end = chunk.face_ends_hi[face - 4u];
+    }
+    return min(end, chunk.quad_count);
+}
+
+// Whether any quad of `face` in this chunk can face the camera. Every face
+// plane of direction +X lies at or above the AABB's min x, so with the eye at
+// or below it all +X faces are seen from behind or edge-on (and likewise for
+// the other five). Conservative; the rasterizer still back-face culls within
+// kept ranges.
+fn face_may_be_visible(chunk: ChunkMeta, face: u32) -> bool {
+    if view.camera.w == 0.0 {
+        return true;
+    }
+    let axis = face / 2u;
+    let lo = chunk.center[axis] - chunk.half_extents[axis];
+    let hi = chunk.center[axis] + chunk.half_extents[axis];
+    let eye = view.camera[axis];
+    if (face & 1u) == 0u {
+        return eye > lo;
+    }
+    return eye < hi;
+}
+
+fn write_command(index: u32, chunk: ChunkMeta, start: u32, count: u32) {
+    commands[index] = DrawIndexedIndirectArgs(
+        count * 6u,
         1u,
-        chunk.record_start * 6u,
+        0u,
+        i32((chunk.record_start + start) * 4u),
         chunk.transform_slot,
     );
+}
+
+fn emit_command(slot: u32, chunk: ChunkMeta, visible: bool) {
+    // Unsorted records (flag) draw as one whole range, never face-culled.
+    let unsorted = chunk.face_ends_hi.z != 0u;
+    var emitted_quads = 0u;
+    var start = 0u;
+    for (var face = 0u; face < FACES_PER_SLOT; face += 1u) {
+        var end = face_end(chunk, face);
+        if unsorted {
+            end = select(0u, chunk.quad_count, face == 0u);
+            start = 0u;
+        }
+        let count = end - min(start, end);
+        let keep = visible && count > 0u && (unsorted || face_may_be_visible(chunk, face));
 #ifdef INDIRECT_COUNT
-    if visible {
-        let output = atomicAdd(&draw_count.visible_chunks, 1u);
-        atomicAdd(&draw_count.visible_quads, chunk.quad_count);
-        commands[output] = command;
-    }
+        if keep {
+            let output = atomicAdd(&draw_count.commands, 1u);
+            write_command(output, chunk, start, count);
+        }
 #else
-    commands[slot] = command;
+        write_command(slot * FACES_PER_SLOT + face, chunk, start, select(0u, count, keep));
+        if keep {
+            atomicAdd(&draw_count.commands, 1u);
+        }
+#endif
+        if keep {
+            emitted_quads += count;
+        }
+        if !unsorted {
+            start = end;
+        }
+    }
     if visible {
         atomicAdd(&draw_count.visible_chunks, 1u);
-        atomicAdd(&draw_count.visible_quads, chunk.quad_count);
+        atomicAdd(&draw_count.visible_quads, emitted_quads);
     }
-#endif
 }
 
 fn hzb_visible(chunk: ChunkMeta) -> bool {
