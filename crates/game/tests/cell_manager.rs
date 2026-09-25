@@ -201,3 +201,57 @@ mod convergence {
         assert!(r.data().cells.active.len() > 9, "cells loaded around the walking player");
     }
 }
+
+/// Cell generator factory producing one flat floor chunk per column.
+fn flat_cell_factory(cell_chunks: usize) -> game::CellGeneratorFactory {
+    std::sync::Arc::new(move |_rc: RegionCoords| -> game::CellGenerator {
+        Box::new(move |cell: game::CellCoords| {
+            let mut cols = Vec::new();
+            for x in 0..cell_chunks {
+                for z in 0..cell_chunks {
+                    let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(8)));
+                    let air = Block::new(BlockId::AIR);
+                    let (cx, cz) = (cell.x as usize * cell_chunks + x, cell.z as usize * cell_chunks + z);
+                    cols.push((ColumnCoords::new(cx, cz), Column::new(0, air, air, vec![sub])));
+                }
+            }
+            cols
+        })
+    })
+}
+
+#[test]
+fn a_lazy_cell_region_never_generates_the_whole_region() {
+    let (out_send, _packets) = unbounded();
+    let (region_out_send, region_out) = unbounded();
+    let (lod_result_send, lod_result_recv) = unbounded();
+    let lod_builder: Box<dyn LodBuilder> = Box::new(InlineLodBuilder {
+        coarse: Box::new(|_key: &game::lod::LodKey| Vec::new()),
+        out: lod_result_send,
+    });
+    let mut manager = WorldManager::new(
+        InlineSpawner::with_cell_generator(CC, flat_cell_factory(CC)),
+        Box::new(|rc: RegionCoords| -> Vec<(ColumnCoords, Column)> {
+            panic!("whole-region generation for {rc:?} in a lazy cell world")
+        }),
+        out_send,
+        region_out_send,
+        lod_builder,
+        lod_result_recv,
+    );
+    manager.handle_server_event(ServerEvent::ClientConnected(0), 0);
+    for _ in 0..2 {
+        manager.spawner_mut().pump();
+        while let Ok((rc, o)) = region_out.try_recv() {
+            manager.handle_region_output(rc, o, 0);
+        }
+    }
+    let mut active = 0;
+    let mut chunks = 0;
+    manager.spawner_mut().with_region(SPAWN_REGION, |r| {
+        active = r.data().cells.active.len();
+        chunks = r.data().ecs.chunk.iter().filter(|(_, c)| c.is_some()).count();
+    });
+    assert_eq!(active, 9);
+    assert_eq!(chunks, 9 * CC * CC, "the 9 required cells, generated on demand");
+}

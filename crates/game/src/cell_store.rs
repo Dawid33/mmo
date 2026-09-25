@@ -18,6 +18,10 @@ struct StoredCell {
 /// demand — `worldgen::generate_cell` bound to a region, seed and materials.
 pub type CellGenerator = Box<dyn Fn(CellCoords) -> Vec<(ColumnCoords, Column)> + Send>;
 
+/// Builds a region's [`CellGenerator`] (spawners hold one; the server binds
+/// `worldgen::generate_cell` with its seed and materials).
+pub type CellGeneratorFactory = std::sync::Arc<dyn Fn(crate::RegionCoords) -> CellGenerator + Send + Sync>;
+
 pub struct CellStore {
     /// Materialized cells. Eager stores hold every grid cell; lazy stores
     /// only those generated (or written back) so far.

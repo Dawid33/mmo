@@ -23,16 +23,24 @@ pub struct ThreadRegionSpawner {
     /// Non-zero: spawn cell-mode runners with this cell size
     /// (`game::CELL_CHUNKS`).
     cell_chunks: usize,
+    /// Cell mode: generate cells lazily, never whole regions.
+    cell_generator: Option<game::CellGeneratorFactory>,
 }
 
 impl ThreadRegionSpawner {
     pub fn with_generator(generator: SharedRegionGenerator) -> Self {
-        Self { handles: BTreeMap::new(), generator: Some(generator), cell_chunks: 0 }
+        Self { handles: BTreeMap::new(), generator: Some(generator), cell_chunks: 0, cell_generator: None }
     }
 
     /// Run every spawned region in cell mode (`cell_chunks` = 0: legacy).
     pub fn with_cells(mut self, cell_chunks: usize) -> Self {
         self.cell_chunks = cell_chunks;
+        self
+    }
+
+    /// Lazy per-cell generation for cell-mode regions (see `with_cells`).
+    pub fn with_cell_generator(mut self, factory: game::CellGeneratorFactory) -> Self {
+        self.cell_generator = Some(factory);
         self
     }
 }
@@ -47,6 +55,7 @@ impl RegionSpawner for ThreadRegionSpawner {
         let (send, recv) = unbounded();
         let generator = self.generator.clone();
         let cell_chunks = self.cell_chunks;
+        let cell_generator = self.cell_generator.clone();
         let handle = std::thread::Builder::new()
             .name(format!("region {},{}", id.x, id.z))
             .spawn(move || {
@@ -69,6 +78,7 @@ impl RegionSpawner for ThreadRegionSpawner {
                         columns
                     },
                     cell_chunks,
+                    cell_generator.as_ref(),
                 );
                 let generate_time = generate_time.get();
                 let hash_time = runner.baseline_hash_time();

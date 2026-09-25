@@ -66,7 +66,24 @@ impl LocalServer {
             out: lod_result_send,
         });
         let mut manager = WorldManager::new(
-            InlineSpawner::with_cells(game::CELL_CHUNKS),
+            if game::CELL_CHUNKS == 0 {
+                InlineSpawner::default()
+            } else {
+                InlineSpawner::with_cell_generator(
+                    game::CELL_CHUNKS,
+                    std::sync::Arc::new(move |rc| -> game::CellGenerator {
+                        Box::new(move |cell| {
+                            worldgen::generate_cell(
+                                rc,
+                                cell,
+                                game::CELL_CHUNKS,
+                                worldgen::WORLD_SEED,
+                                materials,
+                            )
+                        })
+                    }),
+                )
+            },
             generator,
             out_send,
             region_out_send,

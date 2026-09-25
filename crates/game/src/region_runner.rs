@@ -129,9 +129,21 @@ impl RegionSeed {
         out: Sender<(RegionCoords, RegionOutput)>,
         generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
         cell_chunks: usize,
+        cells: Option<&crate::CellGeneratorFactory>,
     ) -> RegionRunner {
         if cell_chunks == 0 {
             return RegionRunner::new(id, self.into_region_with(id, generate), out);
+        }
+        if let (Some(factory), RegionSeed::Fresh(_) | RegionSeed::Deferred(None)) = (cells, &self) {
+            // Lazy: cells generate on first activation; the region is never
+            // built whole (large regions).
+            return RegionRunner::new_with_cells(
+                id,
+                Region::new_cells(id, cell_chunks, None, None),
+                out,
+                CellStore::lazy(cell_chunks, factory(id)),
+                CellConfig::new(cell_chunks),
+            );
         }
         let columns = match self {
             RegionSeed::Fresh(columns) => columns,

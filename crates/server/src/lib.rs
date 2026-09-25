@@ -344,7 +344,12 @@ pub fn run() {
     );
     let mut manager = game::WorldManager::new(
         region_threads::ThreadRegionSpawner::with_generator(region_generator)
-            .with_cells(game::CELL_CHUNKS),
+            .with_cells(game::CELL_CHUNKS)
+            .with_cell_generator(std::sync::Arc::new(move |rc| -> game::CellGenerator {
+                Box::new(move |cell| {
+                    worldgen::generate_cell(rc, cell, game::CELL_CHUNKS, world_seed, materials)
+                })
+            })),
         Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
         server_send,
         region_out_send,
