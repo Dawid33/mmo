@@ -69,6 +69,17 @@ not worth it now — phase 2 closed, next is phase 3. Pre-existing unrelated fai
 `collider_genesis::mixed_chunk_gets_block_and_voxel_scale_colliders`
 (expects a 1.0-scale collider, gets the 8.0 half-block grid since 6736620).
 
+## Phase 3 finding: sea cells are 8× land cells
+
+With islands, cells offshore exist: a deep-sea cell at 1024/16 is 5 989
+chunks, 88 % all-water (5 276), vs ≈700 for a land cell — ≈48 ms activation
+at the measured ≈8 µs/chunk. The all-water collapse deferred in phase 2 is
+now worth doing; it needs a decision first, since the sim treats water as
+SOLID today (players walk on the sea): collapse = no entity/collider for
+all-water chunks (players sink to the sea floor until swimming lands) plus
+a renderer water plane, or keep solid water as one shared collider per
+column run. Reproduce: `cell_profile --radius 0 --centre 52 32`.
+
 ## (Original notes) spec phase 2 — cheaper activation
 
 Known costs from live runs (server `[server]` lines / perf logs, 1024/16):
