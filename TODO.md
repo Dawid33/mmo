@@ -1,4 +1,5 @@
 Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-world):
+- Island regions + cell loading (spec 2026-09-25-island-regions-cell-loading-design): phase 1 (game-only cell mode) DONE; next: phase 1b WorldManager/server/client wiring + rendering (not yet planned), then phase 2 (measure + cheaper activation).
 
 - Client per-region clock tracking (single shared tick_rate today; 9 SyncClock streams fight over it).
 - Durable region persistence (parking lot is in-memory only).

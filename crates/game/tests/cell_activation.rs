@@ -327,3 +327,121 @@ fn a_cell_missing_from_the_store_is_skipped_not_fatal() {
     assert!(runner.region_mut().data().cells.active.contains(&CellCoords::new(0, 0)));
     assert!(!runner.region_mut().data().cells.active.contains(&CellCoords::new(1, 1)));
 }
+
+use game::InputEvent;
+
+/// Client joined from the runner's current state, predicting ahead of the
+/// server and reconciling every server event.
+struct Harness {
+    runner: RegionRunner,
+    rx: Receiver<(RegionCoords, RegionOutput)>,
+    client: Region,
+    _recv: Receiver<game::GameDataUpdate>,
+}
+
+impl Harness {
+    fn new() -> Self {
+        game::set_hash_mode(game::HashMode::Full);
+        let (mut runner, rx) = cell_runner();
+        runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+        let _ = processed(&rx);
+        let (send, recv) = unbounded();
+        let snapshot = runner.region_mut().data().clone();
+        let client = Region::new(snapshot, Some(send), r0(), Some(0));
+        Self { runner, rx, client, _recv: recv }
+    }
+
+    /// Client predicts up to `lead` events, then the server runs one tick and
+    /// the client reconciles everything it emitted.
+    fn step(&mut self, lead: usize, input: Option<InputEvent>) {
+        if let Some(i) = input {
+            self.client.handle_event(GameEventKind::PlayerInput(0, i.clone())).unwrap();
+            self.runner.handle_input(RegionInput::Event(GameEventKind::PlayerInput(0, i)));
+        }
+        while self.client.pending_event_ids().len() < lead {
+            self.client.handle_event(GameEventKind::Tick).unwrap();
+        }
+        self.runner.tick();
+        for ev in processed(&self.rx) {
+            self.client.reconcile(ev).unwrap();
+        }
+    }
+
+    /// Server catches up with every prediction, then the hashes must match.
+    fn settle_and_compare(&mut self) {
+        for _ in 0..8 {
+            if self.client.pending_event_ids().is_empty() {
+                break;
+            }
+            self.runner.tick();
+            for ev in processed(&self.rx) {
+                self.client.reconcile(ev).unwrap();
+            }
+        }
+        assert!(self.client.pending_event_ids().is_empty(), "client still ahead");
+        assert_eq!(
+            state_hash(self.runner.region_mut().data()),
+            state_hash(self.client.data()),
+            "client replica diverged"
+        );
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_predicting_client_converges_while_cells_load() {
+    let mut h = Harness::new();
+    for _ in 0..8 {
+        h.step(2, None);
+    }
+    h.settle_and_compare();
+    assert_eq!(h.client.data().cells.active.len(), 9);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_client_with_no_pending_predictions_still_applies_cell_changes() {
+    let mut h = Harness::new();
+    // No client prediction at all: server events park in the input buffer,
+    // then apply once the client predicts again.
+    h.runner.tick();
+    let evs = processed(&h.rx);
+    assert!(evs.iter().any(|e| matches!(e.kind, GameEventKind::CellChanges(_))));
+    for ev in evs {
+        h.client.reconcile(ev).unwrap();
+    }
+    for _ in 0..3 {
+        h.step(2, None);
+    }
+    h.settle_and_compare();
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walking_across_cells_converges_for_every_seed() {
+    use game::Key;
+    for seed in 0..8u64 {
+        let mut h = Harness::new();
+        let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let start = h.client.data().cells.active.clone();
+        // Enter fps mode, then hold W with random prediction leads.
+        h.step(1, Some(InputEvent::FpsCam(true)));
+        h.step(1, Some(InputEvent::Key { key: Key::KeyW, pressed: true }));
+        for _ in 0..240 {
+            let lead = 1 + (next() % 3) as usize;
+            h.step(lead, None);
+        }
+        h.settle_and_compare();
+        assert_ne!(
+            start,
+            h.client.data().cells.active,
+            "seed {seed}: the player crossed a cell edge and the active set followed"
+        );
+    }
+}
