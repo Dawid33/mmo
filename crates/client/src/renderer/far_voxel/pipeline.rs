@@ -630,7 +630,7 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> {
             "@compute @workgroup_size(64)",
             "atomicAdd(&draw_args.instance_count",
             "visible_cell_slots[visible_index] = cell_slot",
-            "cell.is_active == 0u",
+            "cell.is_active != 1u",
             "for (var plane_index = 0u; plane_index < 5u",
         ] {
             assert!(

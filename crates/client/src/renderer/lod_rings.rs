@@ -122,30 +122,26 @@ pub struct HomeCellMask {
     pub cells: BTreeSet<game::CellCoords>,
 }
 
-/// A masked LOD cell's grid, parked off `LodVoxelData` so both LOD paths
-/// drop it (brick residency reacts to the removal; raster also hides it).
+/// A home-region LOD cell under active cells: not drawn, but its data stays
+/// so neighbouring LOD cells still see solid terrain there and draw no
+/// boundary wall (removing the data made each neighbour draw a wall on the
+/// same plane as the full-detail terrain's own edge — z-fighting along the
+/// edge of the loaded area). Raster hides it via `Visibility::Hidden`; brick
+/// uploads it with `active = 0` (`far_voxel::lifecycle::refresh_far_neighbors`).
 #[derive(Component)]
-pub struct LodMaskStash(pub game::lod::PackedLodGrid);
+pub struct LodMasked;
 
 /// Hide/unhide LOD cells under the home region's active cells (cell mode).
 /// Re-evaluates everything when the mask changed, else only new LOD cells.
 pub fn mask_home_lod(
     mut commands: Commands,
     mask: Res<HomeCellMask>,
-    cells: Query<(
-        Entity,
-        &lod::LodChunk,
-        &Transform,
-        &ChildOf,
-        Option<&lod::LodVoxelData>,
-        Option<&LodMaskStash>,
-        Ref<lod::LodChunk>,
-    )>,
+    cells: Query<(Entity, &lod::LodChunk, &Transform, &ChildOf, Has<LodMasked>, Ref<lod::LodChunk>)>,
     roots: Query<&Transform, Without<lod::LodChunk>>,
 ) {
     let Some(home) = mask.region else { return };
     let all = mask.is_changed();
-    for (e, chunk, tf, parent, data, stash, added) in &cells {
+    for (e, chunk, tf, parent, is_masked, added) in &cells {
         if !all && !added.is_added() {
             continue;
         }
@@ -154,20 +150,10 @@ pub fn mask_home_lod(
         let size = (32 * chunk.factor) as f32;
         let masked =
             game::lod_cell_masked(home, &mask.cells, game::CELL_CHUNKS, [min.x, min.z], size);
-        match (masked, data, stash) {
-            (true, Some(d), None) => {
-                commands
-                    .entity(e)
-                    .insert((LodMaskStash(d.0.clone()), Visibility::Hidden))
-                    .remove::<lod::LodVoxelData>();
-            }
-            (false, None, Some(st)) => {
-                commands
-                    .entity(e)
-                    .insert((lod::LodVoxelData(st.0.clone()), Visibility::Inherited))
-                    .remove::<LodMaskStash>();
-            }
-            _ => {}
+        if masked && !is_masked {
+            commands.entity(e).insert((LodMasked, Visibility::Hidden));
+        } else if !masked && is_masked {
+            commands.entity(e).insert(Visibility::Inherited).remove::<LodMasked>();
         }
     }
 }

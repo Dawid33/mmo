@@ -435,7 +435,10 @@ pub fn refresh_far_neighbors(
     mut residency: ResMut<FarVoxelResidency>,
     queue: Res<LodBuildQueue>,
     brick_tasks: Query<Entity, With<FarBrickBuildTask>>,
-    cells: Query<(Entity, &LodChunk, &FarVoxelResident), With<LodVoxelData>>,
+    cells: Query<
+        (Entity, &LodChunk, &FarVoxelResident, Has<crate::renderer::lod_rings::LodMasked>),
+        With<LodVoxelData>,
+    >,
 ) {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct CellCoord {
@@ -469,16 +472,20 @@ pub fn refresh_far_neighbors(
     };
     let resident = cells
         .iter()
-        .filter_map(|(entity, _, cell)| {
+        .filter_map(|(entity, _, cell, _)| {
             let metadata = residency.cell_metadata(entity)?;
             Some((cell_coord(metadata), cell.cell_slot))
         })
         .collect::<BTreeMap<_, _>>();
     let mut updates = Vec::new();
-    for (entity, lod, _) in &cells {
+    for (entity, lod, _, masked) in &cells {
         let Some(mut metadata) = residency.cell_metadata(entity).copied() else {
             continue;
         };
+        // Masked (home-region LOD under active cells): resident and solid to
+        // its neighbours (no boundary walls), but never drawn — the shader's
+        // cull pass draws only `active == 1`; 2 = hidden (far_voxel.wgsl).
+        metadata.active = if masked { 2 } else { 1 };
         metadata
             .neighbor_slots
             .fill(super::residency::INVALID_FAR_SLOT);
