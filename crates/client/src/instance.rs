@@ -1269,10 +1269,31 @@ impl GameInstanceManager {
                 for event in self.buffer.drain(..).collect::<Vec<_>>() {
                     self.route_server_game_event(event)?;
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                let cells = match &game_event.kind {
+                    game::GameEventKind::CellChanges(c) => Some((
+                        c.activate.len(),
+                        c.deactivate.len(),
+                        c.activate.iter().map(|p| p.content.chunks.len()).sum::<usize>(),
+                    )),
+                    _ => None,
+                };
+                #[cfg(not(target_arch = "wasm32"))]
+                let event_start = Instant::now();
                 self.route_server_game_event(game_event)?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     self.perf.reconcile_total += recon_start.elapsed();
+                    // Per CellChanges (≤ one per server tick): the sim
+                    // thread's cost of an activation — rollback, raw
+                    // materialize + hash check, replay of the prediction lead.
+                    if let Some((act, deact, chunks)) = cells {
+                        game::perf_event!(
+                            "cell_changes",
+                            "side=client activate={act} deactivate={deact} chunks={chunks} ms={:.1}",
+                            event_start.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
                 }
                 self.is_caught_up = true;
             }

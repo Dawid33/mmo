@@ -37,13 +37,26 @@ impl Controller for PhysicsController {
         }
         // Pre-digest only when Delta verification will actually read it (it walks
         // the journal's saved payloads); Full/Off ignore it, so skip the work.
-        let pre = if scope.wants_delta_digest() {
-            journal.pre_digest()
-        } else {
-            0
-        };
+        let delta = scope.wants_delta_digest();
+        let pre = if delta { journal.pre_digest() } else { 0 };
         scope.register(pre, move |phys, _| {
             let p = phys.raw_undo_parts();
+            if !delta {
+                // Full/Off never read the returned digest. `revert_digest`
+                // re-hashes the whole broad-phase tree + pair set — O(every
+                // collider) per rolled-back tick: 91% of the client's crc32
+                // time while flying over ~300k loaded chunks (2026-09-25).
+                journal.revert(
+                    p.islands,
+                    p.broad_phase,
+                    p.narrow_phase,
+                    p.bodies,
+                    p.colliders,
+                    p.implules_joint_set,
+                    p.multi_body_joint_set,
+                );
+                return 0;
+            }
             // Reverts the tick AND recomputes the same footprint digest from the
             // restored live structures; Delta compares it against `pre`.
             journal.revert_digest(

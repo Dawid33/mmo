@@ -291,6 +291,7 @@ impl RegionRunner {
     /// then file dematerialized cells back into the store.
     fn apply_cell_changes(&mut self, deactivate: Vec<CellCoords>, activate: Vec<CellCoords>) {
         let Some(mode) = self.cells.as_mut() else { return };
+        let watch = crate::perf::Stopwatch::start();
         let mut changes = CellChanges { deactivate, activate: Vec::new() };
         for cell in activate {
             match mode.store.payload(cell) {
@@ -307,7 +308,21 @@ impl RegionRunner {
             .map(|&c| (c, self.region.data().cell_terrain_term(c)))
             .collect();
         let activated: Vec<CellCoords> = changes.activate.iter().map(|p| p.cell).collect();
+        let chunks: usize = changes.activate.iter().map(|p| p.content.chunks.len()).sum();
+        let (n_act, n_deact) = (changes.activate.len(), changes.deactivate.len());
+        let payload_ms = watch.elapsed().as_secs_f64() * 1000.0;
         self.apply(GameEventKind::CellChanges(changes));
+        // One line per CellChanges (at most one per tick): what activation
+        // costs the region thread — payload cut from the store, then the
+        // event (materialize + cell_hash, dematerialize).
+        crate::perf_event!(
+            "cell_changes",
+            "side=server region={},{} tick={} activate={n_act} deactivate={n_deact} chunks={chunks} payload_ms={payload_ms:.1} ms={:.1}",
+            self.id.x,
+            self.id.z,
+            self.region.current_tick(),
+            watch.elapsed().as_secs_f64() * 1000.0
+        );
         let dormant = self.region.take_dormant();
         let Some(mode) = self.cells.as_mut() else { return };
         for (cell, content) in dormant {
