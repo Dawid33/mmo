@@ -1,5 +1,16 @@
 # Handoff — LOD flicker / seams in large cell-mode regions (2026-09-25)
 
+> **RESOLVED 2026-09-25 (live-confirmed by the user).**
+> - Flicker: LOD skirts were applied to every border wall quad, not just the
+>   floor, so a grass wall's skirt lay coplanar on the dirt wall below it; the
+>   idle camera's ~0.002 u/tick wobble flipped the depth test (`3acd148`).
+> - Near/LOD sky gap: masking a home cell never re-meshed its LOD neighbours,
+>   whose walls toward it stayed culled (`396fe15`).
+> - Red dirt stripes along contours are steady whole-block risers — expected.
+> - Tools: F6/F7 hide LOD/near, `[client-still]` probe under `PERF_LOG=1` (`184ed23`).
+> - Still open: the idle camera wobble itself (sim pose moves ~0.002 u each
+>   tick while standing), and item 3 below (edit cost at 2 km).
+
 Repro: `just region_chunks=1024 cells=16 run` (a 2 km region, cell loading on,
 only the home region loads — `LOD_RING_TABLE` for >128 is `[(0, LARGE_HOME_FACTOR)]`,
 i.e. one factor-16 LOD key covering the whole home region). Add
