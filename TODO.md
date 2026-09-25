@@ -1,5 +1,5 @@
 Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-world):
-- Island regions + cell loading (spec 2026-09-25-island-regions-cell-loading-design): phase 1 + 1b DONE (cell mode runs live behind `just region_chunks=128 cells=16 world=tiny run`); limits: world=tiny only, region crossings unsupported in cell mode (client lacks the target snapshot at the flip), cell regions never reclaimed; next: user live run, then phase 2 (measure activation cost — client sim-thread voxel derivation, genesis per cell — then cheaper activation).
+- Island regions + cell loading (spec 2026-09-25-island-regions-cell-loading-design): phase 1 + 1b DONE (cell mode runs live behind `just region_chunks=128 cells=16 world=tiny run`); limits: world=tiny only, region crossings unsupported in cell mode (client lacks the target snapshot at the flip), cell regions never reclaimed; phase 1c (centre spawn, home-region LOD masked under active cells) and phase 2 (large regions: lazy per-cell worldgen, sizes up to 32768 chunks in cell mode) DONE; LOD for large regions is a placeholder (user to revisit); next: activation cost (client sim-thread voxel derivation → off-thread), then phase 3 island worldgen.
 
 - Client per-region clock tracking (single shared tick_rate today; 9 SyncClock streams fight over it).
 - Durable region persistence (parking lot is in-memory only).
