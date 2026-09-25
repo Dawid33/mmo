@@ -1,5 +1,5 @@
 Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-world):
-- Island regions + cell loading (spec 2026-09-25-island-regions-cell-loading-design): phase 1 (game-only cell mode) DONE; next: phase 1b WorldManager/server/client wiring + rendering (not yet planned), then phase 2 (measure + cheaper activation).
+- Island regions + cell loading (spec 2026-09-25-island-regions-cell-loading-design): phase 1 + 1b DONE (cell mode runs live behind `just region_chunks=128 cells=16 world=tiny run`); next: user live run, then phase 2 (measure activation cost — client sim-thread voxel derivation, genesis per cell — then cheaper activation).
 
 - Client per-region clock tracking (single shared tick_rate today; 9 SyncClock streams fight over it).
 - Durable region persistence (parking lot is in-memory only).
