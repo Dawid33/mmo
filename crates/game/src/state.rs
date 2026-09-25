@@ -260,20 +260,16 @@ impl Undo<Ecs> {
         key
     }
 
-    /// Raw (unlogged, no-emit) twin of `create_entity_safe`, for genesis
-    /// only: genesis is the base state and is never rolled back below
-    /// itself, so these writes must not enter the undo log (under Full
-    /// hash mode every logged entry re-hashes the whole component map —
-    /// quadratic across a region build).
-    pub(crate) fn create_entity_raw(&mut self) -> EntityKey {
+    /// A genesis terrain chunk: only the `rigidbody` and `chunk` slots. The
+    /// other components have no slot at all (`try_get` reads `None`), so the
+    /// per-tick scans over `kind`/`slime`/`motion` walk the handful of mobile
+    /// entities instead of every chunk (~300k over open sea: `scan_boundaries`
+    /// + `freeze_strays_safe` + the slime cap were ~20% of a region tick).
+    /// Chunks leave through `remove_chunk_raw`, never `remove_entity_safe`.
+    pub(crate) fn create_chunk_entity_raw(&mut self) -> EntityKey {
         let key = self.entities.insert_raw(());
-        self.camera.raw_mut().insert(key, None);
-        self.isometry.raw_mut().insert(key, None);
         self.rigidbody.raw_mut().insert(key, None);
         self.chunk.raw_mut().insert(key, None);
-        self.kind.raw_mut().insert(key, None);
-        self.motion.raw_mut().insert(key, None);
-        self.slime.raw_mut().insert(key, None);
         key
     }
 }
@@ -284,6 +280,11 @@ where
     T: 'static + Default,
 {
     list: SparseSecondaryMap<EntityKey, Option<T>>,
+    /// Always `None`: what `try_get` lends for an entity with no slot here
+    /// (terrain chunks carry only `rigidbody` + `chunk` slots — see
+    /// `create_chunk_entity_raw`). Not state: skipped by serde, constant.
+    #[serde(skip)]
+    none: Option<T>,
 }
 
 /// crc32 of one component slot — the exact footprint of the single-key
@@ -498,16 +499,20 @@ where
         self.list.insert(e, item);
     }
 
+    /// Drop the entity's slot; `None` if it had none (terrain chunks only
+    /// carry some slots) or an empty one.
     pub fn remove(&mut self, item: EntityKey) -> Option<T> {
-        self.list.remove(item).unwrap()
+        self.list.remove(item).flatten()
     }
 
     pub fn get(&self, key: EntityKey) -> &T {
         self.list.get(key).unwrap().as_ref().unwrap()
     }
 
+    /// The entity's slot; `None` also for an entity without one (terrain
+    /// chunks have no camera/isometry/kind/motion/slime slots).
     pub fn try_get(&self, key: EntityKey) -> &Option<T> {
-        self.list.get(key).unwrap()
+        self.list.get(key).unwrap_or(&self.none)
     }
 
     pub fn get_mut(&mut self, key: EntityKey) -> &mut T {
@@ -606,7 +611,7 @@ impl Rollback {
     /// emits.
     pub fn seed_terrain_genesis(&mut self, chunks: Vec<(ChunkCoords, Chunk)>) {
         for (coords, chunk) in chunks {
-            let e = self.ecs.create_entity_raw();
+            let e = self.ecs.create_chunk_entity_raw();
             let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
             self.ecs.chunk.raw_mut().insert(e, Some(chunk));
             self.chunk_index.insert_raw(chunk_index_key(coords), e);
