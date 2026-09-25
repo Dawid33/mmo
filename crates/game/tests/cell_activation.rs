@@ -878,3 +878,30 @@ fn an_edit_released_in_the_same_tick_is_still_pushed() {
     }
     assert_eq!(terrain_changes(&rx), 1, "the released edit is pushed once");
 }
+
+#[test]
+fn an_island_spawn_places_the_player_and_its_cells() {
+    let spawn = [40, 700];
+    let dir: game::IslandDirectory = std::sync::Arc::new(move |rc| {
+        (rc == r0()).then_some(game::IslandInfo { id: (0, 0, 0), origin_m: [0.0; 2], size_cells: 1, spawn })
+    });
+    let (out, _rx) = unbounded();
+    let mut runner = game::RegionSeed::Fresh(Vec::new()).into_runner(
+        r0(),
+        out,
+        &|rc| unreachable!("fresh seed never generates ({rc:?})"),
+        CC,
+        None,
+        Some(&dir),
+    );
+    runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+    let d = runner.region_mut().data();
+    assert_eq!(d.player_positions()[0], (40.0, 700.0));
+    let home = game::cell_of_pos(40.0, 700.0, CC).unwrap();
+    for cell in game::cells_within(home, 1, CC) {
+        assert!(d.cells.active.contains(&cell), "required cell {cell:?} around the spawn");
+    }
+    // Clients get the spawn with the snapshot.
+    let back: game::Rollback = bincode::deserialize(&bincode::serialize(d).unwrap()).unwrap();
+    assert_eq!(back.spawn_xz(), (40.0, 700.0));
+}

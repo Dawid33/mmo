@@ -25,16 +25,30 @@ pub struct ThreadRegionSpawner {
     cell_chunks: usize,
     /// Cell mode: generate cells lazily, never whole regions.
     cell_generator: Option<game::CellGeneratorFactory>,
+    /// Cell mode: each new region's island (its spawn column).
+    islands: Option<game::IslandDirectory>,
 }
 
 impl ThreadRegionSpawner {
     pub fn with_generator(generator: SharedRegionGenerator) -> Self {
-        Self { handles: BTreeMap::new(), generator: Some(generator), cell_chunks: 0, cell_generator: None }
+        Self {
+            handles: BTreeMap::new(),
+            generator: Some(generator),
+            cell_chunks: 0,
+            cell_generator: None,
+            islands: None,
+        }
     }
 
     /// Run every spawned region in cell mode (`cell_chunks` = 0: legacy).
     pub fn with_cells(mut self, cell_chunks: usize) -> Self {
         self.cell_chunks = cell_chunks;
+        self
+    }
+
+    /// Give new cell-mode regions their island's spawn.
+    pub fn with_islands(mut self, islands: game::IslandDirectory) -> Self {
+        self.islands = Some(islands);
         self
     }
 
@@ -56,6 +70,7 @@ impl RegionSpawner for ThreadRegionSpawner {
         let generator = self.generator.clone();
         let cell_chunks = self.cell_chunks;
         let cell_generator = self.cell_generator.clone();
+        let islands = self.islands.clone();
         let handle = std::thread::Builder::new()
             .name(format!("region {},{}", id.x, id.z))
             .spawn(move || {
@@ -79,6 +94,8 @@ impl RegionSpawner for ThreadRegionSpawner {
                     },
                     cell_chunks,
                     cell_generator.as_ref(),
+                    // Worldgen (the spawn search) on the region's thread too.
+                    islands.as_ref(),
                 );
                 let generate_time = generate_time.get();
                 let hash_time = runner.baseline_hash_time();

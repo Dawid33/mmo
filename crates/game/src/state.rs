@@ -801,7 +801,7 @@ impl Rollback {
     }
 
     pub fn create_player_safe(&mut self, client_id: ClientId) {
-        let (spawn_x, spawn_z) = player_spawn_xz(self.data.cells.enabled());
+        let (spawn_x, spawn_z) = self.spawn_xz();
         // Spawn on the terrain surface at the region-local spawn column, clear
         // of the capsule — real terrain has real elevation, so the old
         // hardcoded flat-floor height would bury the player. `surface + 1` is

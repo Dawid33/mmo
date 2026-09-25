@@ -113,13 +113,36 @@ pub fn lod_cell_masked(
 }
 
 /// Sim-side cell bookkeeping (tier-2 field `GameData.cells`). Mutated ONLY
-/// raw, inside the `CellChanges` arm, which every replica forgets at once.
+/// raw: inside the `CellChanges` arm, which every replica forgets at once,
+/// and at region creation (`spawn`).
 #[derive(Debug, Clone, Default, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CellState {
     /// 0 = legacy region (fully materialized, no cells).
     pub cell_chunks: usize,
     pub active: BTreeSet<CellCoords>,
+    /// Region-local spawn column in voxel units, from the region's
+    /// [`IslandInfo`]; `None` = the default ([`crate::player_spawn_xz`]).
+    /// Part of the state (and snapshot), so clients spawn players exactly
+    /// where the server does.
+    pub spawn: Option<[u32; 2]>,
 }
+
+/// What worldgen knows about the island a region hosts (spec §5). Produced
+/// by the server's [`IslandDirectory`]; `game` never sees worldgen itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IslandInfo {
+    /// Quadtree slot `(level, x, z)`.
+    pub id: (u8, i64, i64),
+    /// World-meter corner of the island's power-of-two square of 64 m
+    /// cells (the future island region), and its edge in those cells.
+    pub origin_m: [f64; 2],
+    pub size_cells: u32,
+    /// Region-local spawn column, voxel units: a dry, flat coastal point.
+    pub spawn: [u32; 2],
+}
+
+/// The island (if any) whose centre lies in a region.
+pub type IslandDirectory = std::sync::Arc<dyn Fn(RegionCoords) -> Option<IslandInfo> + Send + Sync>;
 
 impl CellState {
     pub fn enabled(&self) -> bool {
@@ -331,6 +354,20 @@ impl Rollback {
     }
 
     /// Region-local (x, z) of every player body, by ClientId.
+    /// Where this region spawns players (region-local units).
+    pub fn spawn_xz(&self) -> (f32, f32) {
+        match self.data.cells.spawn {
+            Some([x, z]) => (x as f32, z as f32),
+            None => crate::player_spawn_xz(self.data.cells.enabled()),
+        }
+    }
+
+    /// Set the spawn column raw — only on a freshly built region, before any
+    /// client joins (the value then travels in every snapshot).
+    pub fn set_spawn_raw(&mut self, spawn: [u32; 2]) {
+        self.data.cells.raw_mut().spawn = Some(spawn);
+    }
+
     pub fn player_positions(&self) -> Vec<(f32, f32)> {
         self.data
             .player_entites

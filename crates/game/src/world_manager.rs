@@ -164,6 +164,8 @@ pub struct InlineSpawner {
     /// Lazy cell mode: per-cell generation (the manager then never builds a
     /// whole region for this spawner).
     cell_generator: Option<crate::CellGeneratorFactory>,
+    /// Cell mode: each new region's island (its spawn column).
+    islands: Option<crate::IslandDirectory>,
 }
 
 impl InlineSpawner {
@@ -174,6 +176,12 @@ impl InlineSpawner {
     /// Cell mode with lazy per-cell generation.
     pub fn with_cell_generator(cell_chunks: usize, factory: crate::CellGeneratorFactory) -> Self {
         Self { cell_chunks, cell_generator: Some(factory), ..Self::default() }
+    }
+
+    /// Give new cell-mode regions their island's spawn.
+    pub fn with_islands(mut self, islands: crate::IslandDirectory) -> Self {
+        self.islands = Some(islands);
+        self
     }
 
     pub fn with_schedule(schedule: InlineSchedule) -> Self {
@@ -263,6 +271,7 @@ impl RegionSpawner for InlineSpawner {
             &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"),
             self.cell_chunks,
             self.cell_generator.as_ref(),
+            self.islands.as_ref(),
         );
         self.runners.insert(id, (recv, runner));
         send

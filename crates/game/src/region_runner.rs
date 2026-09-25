@@ -130,7 +130,15 @@ impl RegionSeed {
         generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
         cell_chunks: usize,
         cells: Option<&crate::CellGeneratorFactory>,
+        islands: Option<&crate::IslandDirectory>,
     ) -> RegionRunner {
+        let new_cells = || {
+            let mut region = Region::new_cells(id, cell_chunks, None, None);
+            if let Some(island) = islands.and_then(|d| d(id)) {
+                region.with_data(|rb| rb.set_spawn_raw(island.spawn));
+            }
+            region
+        };
         if cell_chunks == 0 {
             return RegionRunner::new(id, self.into_region_with(id, generate), out);
         }
@@ -139,7 +147,7 @@ impl RegionSeed {
             // built whole (large regions).
             return RegionRunner::new_with_cells(
                 id,
-                Region::new_cells(id, cell_chunks, None, None),
+                new_cells(),
                 out,
                 CellStore::lazy(cell_chunks, factory(id)),
                 CellConfig::new(cell_chunks),
@@ -155,7 +163,7 @@ impl RegionSeed {
         };
         RegionRunner::new_with_cells(
             id,
-            Region::new_cells(id, cell_chunks, None, None),
+            new_cells(),
             out,
             CellStore::from_columns(columns, cell_chunks),
             CellConfig::new(cell_chunks),
@@ -402,7 +410,7 @@ impl RegionRunner {
                     // under it before it lands.
                     match &kind {
                         GameEventKind::CreateClient(_) => {
-                            self.ensure_required(crate::player_spawn_xz(true))
+                            self.ensure_required(self.region.data().spawn_xz())
                         }
                         GameEventKind::EntityArrived(b) => {
                             let t = b.isometry.translation;

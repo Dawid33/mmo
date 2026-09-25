@@ -349,7 +349,8 @@ pub fn run() {
                 Box::new(move |cell| {
                     worldgen::generate_cell(rc, cell, game::CELL_CHUNKS, world_seed, materials)
                 })
-            })),
+            }))
+            .with_islands(std::sync::Arc::new(move |rc| worldgen::islands::island_info(world_seed, rc))),
         Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
         server_send,
         region_out_send,

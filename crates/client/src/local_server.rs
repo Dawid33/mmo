@@ -83,6 +83,9 @@ impl LocalServer {
                         })
                     }),
                 )
+                .with_islands(std::sync::Arc::new(|rc| {
+                    worldgen::islands::island_info(worldgen::WORLD_SEED, rc)
+                }))
             },
             generator,
             out_send,

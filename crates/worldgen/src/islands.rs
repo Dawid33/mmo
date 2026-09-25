@@ -181,6 +181,80 @@ impl IslandField {
     }
 }
 
+/// Spawn search: rays around the island, walked outward from this share of
+/// the radius to `SPAWN_SEARCH_TO`, in `SPAWN_SEARCH_STEP_M` steps.
+pub const SPAWN_SEARCH_RAYS: usize = 16;
+pub const SPAWN_SEARCH_FROM: f64 = 0.5;
+pub const SPAWN_SEARCH_TO: f64 = 1.3;
+pub const SPAWN_SEARCH_STEP_M: f64 = 2.0;
+/// A spawn column's surface is this many meters above sea level…
+pub const SPAWN_HEIGHT_M: (f64, f64) = (1.0, 4.0);
+/// …and its neighbours `SPAWN_FLAT_PROBE_M` away differ by less than this.
+pub const SPAWN_FLAT_M: f64 = 1.0;
+pub const SPAWN_FLAT_PROBE_M: f64 = 4.0;
+
+/// A dry, flat coastal point of `island` (world meters): the first column,
+/// radius-major from `SPAWN_SEARCH_FROM` of the radius outward, whose surface
+/// is `SPAWN_HEIGHT_M` above the sea and flat to `SPAWN_FLAT_M`. The island
+/// centre if none qualifies.
+pub fn spawn_point(p: &crate::pipeline::TerrainPipeline, island: &Island) -> [f64; 2] {
+    let surface = |x: f64, z: f64| p.column(x, z).surface_y() - crate::pipeline::SEA_LEVEL;
+    let [cx, cz] = island.centre;
+    let mut r = island.radius * SPAWN_SEARCH_FROM;
+    while r <= island.radius * SPAWN_SEARCH_TO {
+        for a in 0..SPAWN_SEARCH_RAYS {
+            let t = a as f64 * std::f64::consts::TAU / SPAWN_SEARCH_RAYS as f64;
+            let (x, z) = (cx + r * t.cos(), cz + r * t.sin());
+            let h = surface(x, z);
+            if h < SPAWN_HEIGHT_M.0 || h > SPAWN_HEIGHT_M.1 {
+                continue;
+            }
+            let d = SPAWN_FLAT_PROBE_M;
+            let flat = [(d, 0.0), (-d, 0.0), (0.0, d), (0.0, -d)]
+                .iter()
+                .all(|(dx, dz)| (surface(x + dx, z + dz) - h).abs() < SPAWN_FLAT_M);
+            if flat {
+                return [x, z];
+            }
+        }
+        r += SPAWN_SEARCH_STEP_M;
+    }
+    island.centre
+}
+
+/// The island whose centre lies in region `rc`, with its spawn converted to
+/// region-local voxel units (centred in a block; the island centre when the
+/// coast lies outside the region).
+/// The server's `game::IslandDirectory`.
+pub fn island_info(seed: u64, rc: game::RegionCoords) -> Option<game::IslandInfo> {
+    let blocks = (game::REGION_CHUNKS * game::CHUNK_BLOCKS) as f64;
+    let origin = [rc.x as f64 * blocks, rc.z as f64 * blocks];
+    let field = IslandField::new(seed);
+    let island = field.island_at(origin[0] + blocks / 2.0, origin[1] + blocks / 2.0)?;
+    let inside = |v: f64, o: f64| (o..o + blocks).contains(&v);
+    if !inside(island.centre[0], origin[0]) || !inside(island.centre[1], origin[1]) {
+        return None;
+    }
+    let pipeline = crate::pipeline::TerrainPipeline::with_islands(seed, field);
+    let mut spawn = spawn_point(&pipeline, &island);
+    if !inside(spawn[0], origin[0]) || !inside(spawn[1], origin[1]) {
+        // The island outgrows the region (e.g. `region_chunks=128` with the
+        // default 1 km island): its coast is out of reach, the centre is not.
+        log::warn!("[islands] coastal spawn {spawn:?} lies outside region {rc:?}; spawning at the island centre");
+        spawn = island.centre;
+    }
+    let bv = game::BLOCK_VOXELS as f64;
+    let local = |v: f64, o: f64| ((v - o).floor() * bv + bv / 2.0) as u32;
+    let size_cells = ((2.0 * island.reach() / ISLAND_CELL_M).ceil() as u32).next_power_of_two();
+    let half = size_cells as f64 * ISLAND_CELL_M / 2.0;
+    Some(game::IslandInfo {
+        id: (island.id.level, island.id.x, island.id.z),
+        origin_m: [island.centre[0] - half, island.centre[1] - half],
+        size_cells,
+        spawn: [local(spawn[0], origin[0]), local(spawn[1], origin[1])],
+    })
+}
+
 fn splitmix(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -288,6 +362,30 @@ mod tests {
     fn the_largest_spawn_island_still_fits_its_root() {
         let f = IslandField::with_spawn_cells(3, SPAWN_ISLAND_CELLS_MAX);
         assert!(f.spawn_island().reach() <= ROOT_M / 2.0);
+    }
+
+    #[test]
+    fn spawns_are_dry_flat_and_coastal() {
+        for cells in [1, 4, 16, 64] {
+            let seed = 0x00D5_C0DE_8D78;
+            let field = IslandField::with_spawn_cells(seed, cells);
+            let island = field.spawn_island();
+            let p = crate::pipeline::TerrainPipeline::with_islands(seed, field);
+            let s = spawn_point(&p, &island);
+            let h = p.column(s[0], s[1]).surface_y() - crate::pipeline::SEA_LEVEL;
+            assert!((SPAWN_HEIGHT_M.0..=SPAWN_HEIGHT_M.1).contains(&h), "{cells} cells: spawn {h} m above sea");
+            let d = ((s[0] - island.centre[0]).powi(2) + (s[1] - island.centre[1]).powi(2)).sqrt();
+            assert!(d >= island.radius * SPAWN_SEARCH_FROM, "{cells} cells: spawn not coastal ({d} m out)");
+        }
+    }
+
+    #[test]
+    fn the_home_region_hosts_the_spawn_island() {
+        let info = island_info(0x00D5_C0DE_8D78, game::RegionCoords::new(0, 0)).expect("home island");
+        assert_eq!(info.id, (0, 0, 0));
+        let size = game::REGION_SIZE as u32;
+        assert!(info.spawn[0] < size && info.spawn[1] < size, "spawn is inside the home region");
+        assert!(island_info(0x00D5_C0DE_8D78, game::RegionCoords::new(7, -3)).is_none_or(|i| i.id != (0, 0, 0)));
     }
 
     #[test]
