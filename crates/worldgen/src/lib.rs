@@ -8,6 +8,7 @@ mod spline;
 mod density;
 pub mod cache;
 pub mod forged;
+pub mod islands;
 pub mod pipeline;
 pub mod material;
 
