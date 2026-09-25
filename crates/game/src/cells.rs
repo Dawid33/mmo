@@ -5,7 +5,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::{Chunk, ChunkCoords, EntityBundle, REGION_CHUNKS, REGION_SIZE};
+use crate::{
+    Chunk, ChunkCoords, EntityBundle, EntityKey, RegionCoords, Rollback, REGION_CHUNKS, REGION_SIZE,
+};
 
 /// Region-local cell address, `0..cells_per_side` on each axis.
 #[derive(
@@ -146,6 +148,144 @@ pub struct CellChanges {
 impl CellChanges {
     pub fn is_empty(&self) -> bool {
         self.deactivate.is_empty() && self.activate.is_empty()
+    }
+}
+
+impl Rollback {
+    fn chunk_coords_of(&self, key: EntityKey) -> Option<ChunkCoords> {
+        let handle = (*self.data.ecs.rigidbody.try_get(key))?;
+        let t = self.data.physics.bodies.get(handle)?.translation();
+        // Chunk bodies sit at exact multiples of 32 (seed_terrain_genesis / create_mesh).
+        Some(ChunkCoords::new(
+            (t.x.0 / 32.0) as usize,
+            (t.y.0 / 32.0).floor() as i32,
+            (t.z.0 / 32.0) as usize,
+        ))
+    }
+
+    /// Chunk entities in `cell`, sorted by coordinates.
+    pub fn cell_chunk_keys(&self, cell: CellCoords) -> Vec<(ChunkCoords, EntityKey)> {
+        let cc = self.data.cells.cell_chunks;
+        let mut out: Vec<_> = self
+            .data
+            .ecs
+            .chunk
+            .iter()
+            .filter(|(_, c)| c.is_some())
+            .filter_map(|(k, _)| self.chunk_coords_of(k).map(|c| (c, k)))
+            .filter(|(c, _)| cell_of_chunk(*c, cc) == cell)
+            .collect();
+        out.sort_by_key(|(c, _)| (c.x, c.y, c.z));
+        out
+    }
+
+    /// Kind-bearing entities (players, mobs) whose body is in `cell`,
+    /// ghosts excluded, in key order.
+    pub fn cell_entity_keys(&self, cell: CellCoords) -> Vec<EntityKey> {
+        let cc = self.data.cells.cell_chunks;
+        let ghosts: BTreeSet<EntityKey> = self.data.ghosts.iter().map(|(_, g)| g.entity).collect();
+        self.data
+            .ecs
+            .kind
+            .iter()
+            .filter(|(k, kind)| kind.is_some() && !ghosts.contains(k))
+            .filter_map(|(k, _)| {
+                let h = (*self.data.ecs.rigidbody.try_get(k))?;
+                let t = self.data.physics.bodies.get(h)?.translation();
+                (cell_of_pos(t.x.0, t.z.0, cc) == Some(cell)).then_some(k)
+            })
+            .collect()
+    }
+
+    pub fn cell_has_player(&self, cell: CellCoords) -> bool {
+        let players: BTreeSet<EntityKey> = self.data.player_entites.values().copied().collect();
+        self.cell_entity_keys(cell).iter().any(|k| players.contains(k))
+    }
+
+    /// Hash of the cell AS MATERIALIZED: chunk content, entity keys, bodies
+    /// and colliders of its terrain, plus its entities' bodies. Computed by
+    /// the server after activation and re-computed by clients.
+    pub fn cell_hash(&self, cell: CellCoords) -> u32 {
+        use std::hash::Hash;
+        let mut h = crc32fast::Hasher::new();
+        cell.hash(&mut h);
+        for (coords, key) in self.cell_chunk_keys(cell) {
+            (coords.x, coords.y, coords.z).hash(&mut h);
+            key.hash(&mut h);
+            self.data.ecs.chunk.try_get(key).hash(&mut h);
+            if let Some(handle) = *self.data.ecs.rigidbody.try_get(key) {
+                handle.hash(&mut h);
+                if let Some(body) = self.data.physics.bodies.get(handle) {
+                    body.hash(&mut h);
+                    for ch in body.colliders() {
+                        ch.hash(&mut h);
+                        self.data.physics.colliders.get(*ch).hash(&mut h);
+                    }
+                }
+            }
+        }
+        for key in self.cell_entity_keys(cell) {
+            key.hash(&mut h);
+            self.data.ecs.kind.try_get(key).hash(&mut h);
+            if let Some(handle) = *self.data.ecs.rigidbody.try_get(key) {
+                self.data.physics.bodies.get(handle).hash(&mut h);
+            }
+        }
+        h.finalize()
+    }
+
+    /// Activation. Terrain goes through the raw genesis path; entities
+    /// through the (logged) arrival path. Only valid inside the
+    /// `CellChanges` arm, whose transaction is forgotten at once.
+    pub fn materialize_cell(&mut self, payload: &CellPayload) {
+        self.seed_terrain_genesis(payload.content.chunks.clone());
+        for bundle in payload.content.entities.iter().cloned() {
+            self.apply_arrival(bundle);
+        }
+        self.data.cells.raw_mut().active.insert(payload.cell);
+    }
+
+    /// Deactivation: freeze entities, capture terrain, remove it raw.
+    /// Caller guarantees no player is in the cell.
+    pub fn dematerialize_cell(&mut self, cell: CellCoords, region: RegionCoords) -> DormantCell {
+        let entities: Vec<EntityBundle> = self
+            .cell_entity_keys(cell)
+            .into_iter()
+            .map(|k| self.extract_entity_safe(k, region))
+            .collect();
+        let chunk_keys = self.cell_chunk_keys(cell);
+        let mut chunks = Vec::with_capacity(chunk_keys.len());
+        for (coords, key) in chunk_keys {
+            let chunk = self.data.ecs.chunk.try_get(key).clone().expect("chunk entity");
+            chunks.push((coords, chunk));
+            self.remove_chunk_raw(key);
+        }
+        self.data.cells.raw_mut().active.remove(&cell);
+        DormantCell { chunks, entities }
+    }
+
+    /// Raw inverse of one `seed_terrain_genesis` chunk: body + attached
+    /// colliders, component slots, entity slot.
+    fn remove_chunk_raw(&mut self, key: EntityKey) {
+        if let Some(handle) = *self.data.ecs.rigidbody.try_get(key) {
+            let p = self.data.physics.raw_mut();
+            p.bodies.raw_mut().remove(
+                handle,
+                p.islands.raw_mut(),
+                p.colliders.raw_mut(),
+                p.implules_joint_set.raw_mut(),
+                p.multi_body_joint_set.raw_mut(),
+                true,
+            );
+        }
+        self.data.ecs.camera.raw_mut().remove(key);
+        self.data.ecs.isometry.raw_mut().remove(key);
+        self.data.ecs.rigidbody.raw_mut().remove(key);
+        self.data.ecs.chunk.raw_mut().remove(key);
+        self.data.ecs.kind.raw_mut().remove(key);
+        self.data.ecs.motion.raw_mut().remove(key);
+        self.data.ecs.slime.raw_mut().remove(key);
+        self.data.ecs.entities.remove_raw(key);
     }
 }
 

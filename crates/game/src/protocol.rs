@@ -185,6 +185,8 @@ pub type LastGameEventId = usize;
 pub enum GameError {
     CrashedOnServerEvent,
     QuitRequested,
+    /// A client materialized a cell differently from the server (spec §1).
+    CellHashMismatch(crate::CellCoords),
 }
 
 pub enum WorldId {

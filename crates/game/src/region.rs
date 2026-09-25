@@ -127,6 +127,8 @@ pub struct Region {
     /// never read (see the plan's read-after-progress invariant).
     pending_departures: Vec<(EntityBundle, RegionCoords)>,
     pending_ghosts: Vec<(GhostData, RegionCoords)>,
+    /// Server only: cells dematerialized by `CellChanges`, for the store.
+    pending_dormant: Vec<(crate::CellCoords, crate::DormantCell)>,
     /// Wall-time attribution for Tick executions, drained by the client's
     /// budget reporter (native only — see `RegionTickPerf`).
     #[cfg(not(target_arch = "wasm32"))]
@@ -173,6 +175,7 @@ impl Region {
             base_event_id,
             pending_departures: Vec::new(),
             pending_ghosts: Vec::new(),
+            pending_dormant: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             tick_perf: RegionTickPerf::default(),
         }
@@ -468,7 +471,7 @@ impl Region {
 
     /// Handle a client event.
     pub fn handle_event(&mut self, event: GameEventKind) -> Result<GameEvent, GameError> {
-        let event = GameEvent::new(event, *self.data.next_game_event_id, self.id);
+        let mut event = GameEvent::new(event, *self.data.next_game_event_id, self.id);
         self.data.new_transaction();
         self.data.next_game_event_id.update(|n| *n += 1);
         let _b = &event.kind;
@@ -528,8 +531,41 @@ impl Region {
                 );
                 self.data.create_player_safe(client_id);
             }
-            // Materialization lands in the next change (cell-loading plan Task 4).
-            GameEventKind::CellChanges(_) => {}
+            GameEventKind::CellChanges(mut changes) => {
+                // Applied at the confirmed head and forgotten at once by
+                // every replica, so the raw terrain ops below never meet a
+                // rollback.
+                let server = self.local_client_id.is_none();
+                for cell in changes.deactivate.iter().copied() {
+                    if !self.data.cells.active.contains(&cell) {
+                        continue;
+                    }
+                    if self.data.cell_has_player(cell) {
+                        log::warn!(
+                            "[cells r={:?}] refusing to deactivate {cell:?}: a player is in it",
+                            self.id
+                        );
+                        continue;
+                    }
+                    let dormant = self.data.dematerialize_cell(cell, self.id);
+                    if server {
+                        self.pending_dormant.push((cell, dormant));
+                    }
+                }
+                for payload in changes.activate.iter_mut() {
+                    if self.data.cells.active.contains(&payload.cell) {
+                        continue;
+                    }
+                    self.data.materialize_cell(payload);
+                    let hash = self.data.cell_hash(payload.cell);
+                    if server {
+                        payload.materialized_hash = hash;
+                    } else if hash != payload.materialized_hash {
+                        return Err(GameError::CellHashMismatch(payload.cell));
+                    }
+                }
+                event.kind = GameEventKind::CellChanges(changes);
+            }
             GameEventKind::EntityArrived(bundle) => {
                 self.data.apply_arrival(bundle);
             }
@@ -630,6 +666,11 @@ impl Region {
         let mut data = Rollback::new(None);
         data.cells.raw_mut().cell_chunks = cell_chunks;
         Region::new(data, game_update_send, id, local_client_id)
+    }
+
+    /// Server: cells dematerialized since the last call, for the store.
+    pub fn take_dormant(&mut self) -> Vec<(crate::CellCoords, crate::DormantCell)> {
+        std::mem::take(&mut self.pending_dormant)
     }
 
     pub fn forget_last_event(&mut self) {
