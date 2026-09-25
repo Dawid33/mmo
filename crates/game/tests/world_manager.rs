@@ -446,3 +446,24 @@ fn deferred_seed_generates_only_for_fresh_regions() {
     assert_eq!(calls.get(), 1, "a valid parked region restores without worldgen");
     assert_eq!(restored.terrain_fingerprint(), fresh.terrain_fingerprint());
 }
+
+#[test]
+fn a_client_cannot_inject_cell_changes() {
+    let mut h = harness();
+    h.event(ServerEvent::ClientConnected(0), 0);
+    let rc = RegionCoords::new(1, 0);
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
+    h.drain_packets();
+    // CellChanges are server-authored: a client-sent one must never reach a
+    // region (it would inject terrain, or crash a legacy region).
+    let forged = game::CellChanges {
+        deactivate: vec![game::CellCoords::new(0, 0)],
+        activate: vec![],
+    };
+    let ev = GameEvent::new(GameEventKind::CellChanges(forged), 0, rc);
+    h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 0);
+    let relayed = h.drain_packets().into_iter().any(|(_, p)| {
+        matches!(p, ServerPacket::GameEvent(e) if matches!(e.kind, GameEventKind::CellChanges(_)))
+    });
+    assert!(!relayed, "client-sent CellChanges must be dropped by the manager");
+}

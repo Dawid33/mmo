@@ -341,8 +341,19 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_config(CellConfig::new(CC))
+    }
+
+    fn with_config(config: CellConfig) -> Self {
         game::set_hash_mode(game::HashMode::Full);
-        let (mut runner, rx) = cell_runner();
+        let (out, rx) = unbounded();
+        let mut runner = RegionRunner::new_with_cells(
+            r0(),
+            Region::new_cells(r0(), CC, None, None),
+            out,
+            flat_store(),
+            config,
+        );
         runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
         let _ = processed(&rx);
         let (send, recv) = unbounded();
@@ -429,19 +440,147 @@ fn walking_across_cells_converges_for_every_seed() {
             rng ^= rng << 17;
             rng
         };
-        let start = h.client.data().cells.active.clone();
+        let player_cell = |h: &Harness| {
+            let (x, z) = h.client.data().player_positions()[0];
+            game::cell_of_pos(x, z, CC)
+        };
+        let start = player_cell(&h);
         // Enter fps mode, then hold W with random prediction leads.
         h.step(1, Some(InputEvent::FpsCam(true)));
+        // Face +Z (yaw π: 1208 px × 0.0026 rad/px at the default sensitivity, as block_edit.rs measures pitch) so the walk crosses the
+        // region's interior cells instead of leaving the region at z = 0.
+        h.step(1, Some(InputEvent::MouseMotion { dx: 1208.0, dy: 0.0 }));
         h.step(1, Some(InputEvent::Key { key: Key::KeyW, pressed: true }));
-        for _ in 0..240 {
+        for _ in 0..200 {
             let lead = 1 + (next() % 3) as usize;
             h.step(lead, None);
         }
         h.settle_and_compare();
-        assert_ne!(
-            start,
-            h.client.data().cells.active,
-            "seed {seed}: the player crossed a cell edge and the active set followed"
-        );
+        assert_eq!(h.client.data().player_positions().len(), 1, "seed {seed}: player stayed in the region");
+        let end = player_cell(&h);
+        assert_ne!(start, end, "seed {seed}: the walk must cross a cell edge");
+        let active = &h.client.data().cells.active;
+        for c in game::required_cells(h.client.data().player_positions()[0], CC) {
+            assert!(active.contains(&c), "seed {seed}: required cell {c:?} active after the walk");
+        }
     }
+}
+
+#[test]
+fn a_legacy_region_ignores_cell_changes() {
+    let mut r = Region::from_chunks(r0(), Vec::new());
+    let ev = r.handle_event(activate(&[CellCoords::new(0, 0)]));
+    assert!(ev.is_ok(), "no panic, no error: {ev:?}");
+    assert!(r.data().cells.active.is_empty());
+    assert_eq!(r.data().ecs.chunk.iter().filter(|(_, c)| c.is_some()).count(), 0);
+}
+
+/// 1-chunk (2-block) cells. The player stands in cell (4,5) looking −Z
+/// (yaw 0) across cell (4,4) at a two-chunk-tall wall in cell (4,3); a
+/// right click places against the wall's +Z face, i.e. at block z = 8, which
+/// is inside cell (4,4). `middle_active` controls whether (4,4) is active.
+fn place_across_a_cell(middle_active: bool) -> Region {
+    use game::{InputEvent, IsometryReal, Key, MouseButton};
+    let cell = |x, z| CellCoords::new(x, z);
+    let solid = || Chunk::flat_floor(32);
+    let payload = |c: CellCoords, chunks: Vec<(ChunkCoords, Chunk)>| CellPayload {
+        cell: c,
+        version: 1,
+        materialized_hash: 0,
+        content: DormantCell { chunks, entities: vec![] },
+    };
+    let mut activate = vec![
+        payload(cell(4, 3), vec![(ChunkCoords::new(4, 0, 3), solid()), (ChunkCoords::new(4, 1, 3), solid())]),
+        payload(cell(4, 5), vec![(ChunkCoords::new(4, 0, 5), solid())]),
+    ];
+    if middle_active {
+        activate.push(payload(cell(4, 4), vec![]));
+    }
+    activate.sort_by_key(|p| p.cell);
+    let mut s = Region::new_cells(r0(), 1, None, None);
+    server_apply(&mut s, GameEventKind::CellChanges(CellChanges { deactivate: vec![], activate }));
+    server_apply(&mut s, GameEventKind::CreateClient(0));
+    let input = |ev| GameEventKind::PlayerInput(0, ev);
+    server_apply(&mut s, input(InputEvent::Key { key: Key::KeyE, pressed: true }));
+    server_apply(&mut s, input(InputEvent::Key { key: Key::KeyE, pressed: false }));
+    // Block (8.5, _, 10.5): voxel (136, _, 168), dropped onto the floor.
+    s.with_data(|rb| {
+        let e = *rb.data.player_entites.get(&0).unwrap();
+        rb.set_body_pose_safe(e, IsometryReal::translation(136.0.into(), 60.0.into(), 168.0.into()));
+    });
+    for _ in 0..12 {
+        server_apply(&mut s, GameEventKind::Tick);
+    }
+    for ev in [
+        input(InputEvent::MouseButton { button: MouseButton::Right, pressed: true }),
+        GameEventKind::Tick,
+        input(InputEvent::MouseButton { button: MouseButton::Right, pressed: false }),
+        GameEventKind::Tick,
+    ] {
+        server_apply(&mut s, ev);
+    }
+    s
+}
+
+#[test]
+fn placing_into_an_active_neighbour_cell_works() {
+    // Control: proves the look ray reaches the wall across the middle cell.
+    let s = place_across_a_cell(true);
+    assert_eq!(s.data().cell_chunk_keys(CellCoords::new(4, 4)).len(), 1);
+}
+
+#[test]
+fn a_player_cannot_place_into_a_dormant_cell() {
+    let s = place_across_a_cell(false);
+    assert!(
+        s.data().cell_chunk_keys(CellCoords::new(4, 4)).is_empty(),
+        "player_edit_safe created a chunk inside dormant cell (4,4)"
+    );
+}
+
+/// Radius 0, no hysteresis, 1-tick grace: cells release as soon as the
+/// player leaves their 3×3, so raw removal runs under client prediction.
+fn eager_release() -> CellConfig {
+    CellConfig { sim_radius: 0, hysteresis: 0, release_grace_ticks: 1, ..CellConfig::new(CC) }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn cells_deactivate_under_prediction_and_replicas_stay_bit_exact() {
+    use game::Key;
+    let mut h = Harness::with_config(eager_release());
+    let mut released = 0usize;
+    h.step(1, Some(InputEvent::FpsCam(true)));
+    // Face +Z (yaw π: 1208 px × 0.0026 rad/px at the default sensitivity, as block_edit.rs measures pitch) so the walk crosses the
+    // region's interior cells instead of leaving the region at z = 0.
+    h.step(1, Some(InputEvent::MouseMotion { dx: 1208.0, dy: 0.0 }));
+    h.step(1, Some(InputEvent::Key { key: Key::KeyW, pressed: true }));
+    for i in 0..200 {
+        let before = h.client.data().cells.active.clone();
+        h.step(1 + i % 3, None);
+        released += before.difference(&h.client.data().cells.active).count();
+    }
+    h.settle_and_compare();
+    assert_eq!(h.client.data().player_positions().len(), 1, "player stayed in the region");
+    assert!(released > 0, "the walk must release at least one cell");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn a_stray_freeze_under_prediction_converges() {
+    let mut h = Harness::new();
+    // A slime in dormant cell (3,3), placed on both replicas identically.
+    let at = 3.5 * game::cell_size_units(CC);
+    let spawn = |rb: &mut game::Rollback| {
+        rb.spawn_slime_safe(Vector::new(Real::from(at), Real::from(40.0), Real::from(at)), 1, Real::from(0.0), 0);
+    };
+    h.runner.region_mut().with_data(spawn);
+    h.client.with_data(spawn);
+    assert_eq!(state_hash(h.runner.region_mut().data()), state_hash(h.client.data()));
+    for _ in 0..6 {
+        h.step(3, None);
+    }
+    h.settle_and_compare();
+    assert_eq!(h.client.data().ecs.slime.iter().filter(|(_, x)| x.is_some()).count(), 0);
+    assert_eq!(h.runner.cell_store().unwrap().version(CellCoords::new(3, 3)), Some(1));
 }

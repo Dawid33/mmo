@@ -350,7 +350,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     }
                     // Manager-internal event kinds: a client must never inject
                     // these directly. Drop rather than forward to a region.
-                    GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) => {
+                    GameEventKind::EntityArrived(_)
+                    | GameEventKind::GhostUpdate(_)
+                    | GameEventKind::CellChanges(_) => {
                         log::debug!(
                             "dropping internal event kind sent by client {id} for {:?}",
                             event.region_id

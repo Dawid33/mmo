@@ -536,7 +536,12 @@ impl Region {
                 );
                 self.data.create_player_safe(client_id);
             }
-            GameEventKind::CellChanges(mut changes) => {
+            GameEventKind::CellChanges(mut changes) => 'cells: {
+                if !self.data.cells.enabled() {
+                    // Legacy regions have no cell grid (cell_chunks == 0).
+                    log::warn!("[cells r={:?}] CellChanges on a legacy region ignored", self.id);
+                    break 'cells;
+                }
                 // Applied at the confirmed head and forgotten at once by
                 // every replica, so the raw terrain ops below never meet a
                 // rollback.
