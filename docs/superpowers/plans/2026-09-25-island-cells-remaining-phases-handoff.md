@@ -36,7 +36,7 @@ is NOT the spec's phase 2 ("cheaper activation").
 |---|---|
 | 1 Cells inside one region | DONE (+1b wiring into server/client, +1c centre spawn & home-LOD masking) |
 | (extra) Large regions | DONE: lazy per-cell worldgen (`worldgen::generate_cell`, bit-identical to `generate_region`), `CellStore::lazy` + worker-thread prefetch, sizes to 32768 chunks, only the home region loads (`LOD_RING_TABLE` >128 = `[(0, LARGE_HOME_FACTOR)]`), pristine coarse LOD for ungenerated cells, cell LOD churn fix `aae81f9` |
-| 2 Cheaper activation | PARTLY DONE (plan `2026-09-25-cell-loading-phase2-cheaper-activation.md`): chunk index + incremental fingerprint landed; genesis timing pending the user's `cell_profile --time` run; water collapse deferred to 3/6 |
+| 2 Cheaper activation | DONE (timed: 5–12 ms/cell release) (plan `2026-09-25-cell-loading-phase2-cheaper-activation.md`): chunk index + incremental fingerprint landed; genesis timing pending the user's `cell_profile --time` run; water collapse deferred to 3/6 |
 | 3 Island worldgen | NOT STARTED |
 | 4 Wire (zstd, framed snapshot, catch-up) | NOT STARTED (packet cap overflow on wasm32 was fixed in phase-2-large) |
 | 5 Postgres cell store + wind-down | NOT STARTED |
@@ -60,7 +60,12 @@ chunks, 24 k colliders, 0 all-water chunks, ≈70 KiB raw / 15 KiB lz4 per
 cell payload. Still open: run
 `VOXEL_REGION_CHUNKS=1024 VOXEL_CELL_CHUNKS=16 cargo run --release -p worldgen --example cell_profile -- --time`
 (user's call — benchmarks) to see what genesis per cell costs now; then
-decide on compact `Voxels`. Pre-existing unrelated failure:
+decide on compact `Voxels`.
+**Timing run by the user (release, HASH_MODE off):** activation 4.7–11.7 ms
+per cell (≈8–9 µs/chunk, linear in chunk count), `cell_terrain_term`
+0.3–0.6 ms, `cell_hash` 1.3–3.2 ms, whole fingerprint over 25 cells 7.7 ms
+(now avoided). Verdict: fits one activation per tick; compact `Voxels`
+not worth it now — phase 2 closed, next is phase 3. Pre-existing unrelated failure:
 `collider_genesis::mixed_chunk_gets_block_and_voxel_scale_colliders`
 (expects a 1.0-scale collider, gets the 8.0 half-block grid since 6736620).
 
