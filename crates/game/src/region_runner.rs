@@ -168,6 +168,15 @@ pub struct CellMode {
     store: CellStore,
     tickets: CellTickets,
     config: CellConfig,
+    /// Per cell ever materialized: its terrain term as generated, and as
+    /// last released. See [`RegionRunner::terrain_fingerprint`].
+    terms: std::collections::HashMap<CellCoords, CellTerms>,
+}
+
+#[derive(Clone, Copy)]
+struct CellTerms {
+    pristine: u32,
+    dormant: u32,
 }
 
 pub struct RegionRunner {
@@ -231,7 +240,12 @@ impl RegionRunner {
             "region/config cell size mismatch"
         );
         let mut runner = Self::new(id, region, out);
-        runner.cells = Some(CellMode { store, tickets: CellTickets::default(), config });
+        runner.cells = Some(CellMode {
+            store,
+            tickets: CellTickets::default(),
+            config,
+            terms: Default::default(),
+        });
         runner
     }
 
@@ -271,13 +285,51 @@ impl RegionRunner {
         if changes.is_empty() {
             return;
         }
+        let released: Vec<(CellCoords, u32)> = changes
+            .deactivate
+            .iter()
+            .map(|&c| (c, self.region.data().cell_terrain_term(c)))
+            .collect();
+        let activated: Vec<CellCoords> = changes.activate.iter().map(|p| p.cell).collect();
         self.apply(GameEventKind::CellChanges(changes));
         let dormant = self.region.take_dormant();
-        if let Some(mode) = self.cells.as_mut() {
-            for (cell, content) in dormant {
-                mode.store.put(cell, content);
+        let Some(mode) = self.cells.as_mut() else { return };
+        for (cell, content) in dormant {
+            mode.store.put(cell, content);
+        }
+        for (cell, term) in released {
+            if let Some(t) = mode.terms.get_mut(&cell) {
+                t.dormant = term;
             }
         }
+        for cell in activated {
+            if !mode.terms.contains_key(&cell) {
+                // First materialization: straight from worldgen, pristine.
+                let term = self.region.data().cell_terrain_term(cell);
+                mode.terms.insert(cell, CellTerms { pristine: term, dormant: term });
+            }
+        }
+    }
+
+    /// What the LOD shows of this region, as a fingerprint. Legacy regions:
+    /// every chunk. Cell mode: only the difference from pristine worldgen —
+    /// materializing or releasing an unedited cell moves no terrain the LOD
+    /// shows (dormant cells are part of `terrain()`), so it must not push a
+    /// `TerrainChanged`: each push rebuilds and re-sends the region's whole
+    /// LOD key, which at large region sizes is thousands of cells.
+    fn terrain_fingerprint(&self) -> u32 {
+        let mut sum = self.region.terrain_fingerprint();
+        if let Some(mode) = self.cells.as_ref() {
+            let active = &self.region.data().cells.active;
+            for (cell, t) in &mode.terms {
+                sum = if active.contains(cell) {
+                    sum.wrapping_sub(t.pristine)
+                } else {
+                    sum.wrapping_add(t.dormant).wrapping_sub(t.pristine)
+                };
+            }
+        }
+        sum
     }
 
     /// Required cells around `pos` that are not active yet, activated now,
@@ -429,7 +481,7 @@ impl RegionRunner {
             let watch = crate::perf::Stopwatch::start();
             // In-place fingerprint: the (large) snapshot is only built below,
             // once something actually changed.
-            let hash = self.region.terrain_fingerprint();
+            let hash = self.terrain_fingerprint();
             let took = watch.elapsed();
             self.terrain_hash_cost.0 += 1;
             self.terrain_hash_cost.1 += took;

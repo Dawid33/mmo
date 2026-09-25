@@ -1299,20 +1299,26 @@ impl Rollback {
     /// two places cannot cancel out. Only ever compared with an earlier value
     /// from the same process — not a wire or cross-machine hash.
     pub fn terrain_fingerprint(&self) -> u32 {
-        use std::hash::Hash;
         let mut sum = 0u32;
-        for (key, maybe_chunk) in self.data.ecs.chunk.iter() {
-            let Some(chunk) = maybe_chunk else { continue };
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
-            let Some(body) = self.data.physics.bodies.get(handle) else { continue };
-            let t = body.translation();
-            let mut h = crc32fast::Hasher::new();
-            // Same coordinate derivation as `terrain_snapshot`.
-            ((t.x.0 / 32.0) as i64, (t.y.0 / 32.0) as i64, (t.z.0 / 32.0) as i64).hash(&mut h);
-            chunk.hash(&mut h);
-            sum = sum.wrapping_add(h.finalize());
+        for (key, _) in self.data.ecs.chunk.iter() {
+            sum = sum.wrapping_add(self.chunk_terrain_term(key).unwrap_or(0));
         }
         sum
+    }
+
+    /// One chunk's `terrain_fingerprint` contribution; `None` for a key
+    /// without a terrain chunk body.
+    pub fn chunk_terrain_term(&self, key: EntityKey) -> Option<u32> {
+        use std::hash::Hash;
+        let chunk = self.data.ecs.chunk.try_get(key).as_ref()?;
+        let handle = (*self.data.ecs.rigidbody.try_get(key))?;
+        let body = self.data.physics.bodies.get(handle)?;
+        let t = body.translation();
+        let mut h = crc32fast::Hasher::new();
+        // Same coordinate derivation as `terrain_snapshot`.
+        ((t.x.0 / 32.0) as i64, (t.y.0 / 32.0) as i64, (t.z.0 / 32.0) as i64).hash(&mut h);
+        chunk.hash(&mut h);
+        Some(h.finalize())
     }
 
     /// Terrain-only extraction for far-region views. Iterates chunk

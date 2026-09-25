@@ -233,6 +233,13 @@ impl Rollback {
     /// Hash of the cell AS MATERIALIZED: chunk content, entity keys, bodies
     /// and colliders of its terrain, plus its entities' bodies. Computed by
     /// the server after activation and re-computed by clients.
+    /// The cell's share of `terrain_fingerprint` (its chunks' summed terms).
+    pub fn cell_terrain_term(&self, cell: CellCoords) -> u32 {
+        self.cell_chunk_keys(cell)
+            .into_iter()
+            .fold(0u32, |sum, (_, key)| sum.wrapping_add(self.chunk_terrain_term(key).unwrap_or(0)))
+    }
+
     pub fn cell_hash(&self, cell: CellCoords) -> u32 {
         use std::hash::Hash;
         let mut h = crc32fast::Hasher::new();

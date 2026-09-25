@@ -707,3 +707,62 @@ fn a_cell_mode_player_spawns_in_the_region_centre_cell() {
     assert_eq!(d.cells.active.len(), 9);
     assert_eq!(game::player_spawn_xz(false), (game::PLAYER_SPAWN_X, game::PLAYER_SPAWN_Z));
 }
+
+fn terrain_changes(rx: &Receiver<(RegionCoords, RegionOutput)>) -> usize {
+    rx.try_iter().filter(|(_, o)| matches!(o, RegionOutput::TerrainChanged(_))).count()
+}
+
+/// Drop the player so every cell releases after the grace period.
+fn remove_player(runner: &mut RegionRunner) {
+    runner.region_mut().with_data(|rb| {
+        let key = *rb.data.player_entites.get(&0).unwrap();
+        rb.remove_entity_safe(key, Some(0));
+        rb.data.player_entites.remove(&0);
+    });
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn loading_and_releasing_pristine_cells_pushes_no_terrain_change() {
+    // Activation only moves pristine terrain between the store and the sim:
+    // nothing the LOD shows changed. A push here makes the manager rebuild
+    // and re-send the whole region's LOD key on every cell load — the client
+    // then swaps LOD roots, which flickers across a large region.
+    let (mut runner, rx) = cell_runner();
+    runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+    for _ in 0..game::TERRAIN_HASH_INTERVAL_TICKS * 2 {
+        runner.tick();
+    }
+    remove_player(&mut runner);
+    for _ in 0..game::CELL_RELEASE_GRACE_TICKS as usize + game::TERRAIN_HASH_INTERVAL_TICKS * 2 {
+        runner.tick();
+    }
+    assert!(runner.region_mut().data().cells.active.is_empty());
+    assert_eq!(terrain_changes(&rx), 0);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn an_edit_pushes_one_terrain_change_that_survives_release() {
+    let (mut runner, rx) = cell_runner();
+    runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+    for _ in 0..game::TERRAIN_HASH_INTERVAL_TICKS {
+        runner.tick();
+    }
+    let _ = rx.try_iter().count();
+    let block = game::Block::new(game::BlockId(1));
+    let mut placed = false;
+    // Block 40 is chunk 20: cell (2,2), the spawn cell.
+    runner.region_mut().with_data(|rb| placed = rb.set_block_safe([40, 1, 40], block));
+    assert!(placed);
+    for _ in 0..game::TERRAIN_HASH_INTERVAL_TICKS * 2 {
+        runner.tick();
+    }
+    assert_eq!(terrain_changes(&rx), 1, "the edit is pushed once");
+    remove_player(&mut runner);
+    for _ in 0..game::CELL_RELEASE_GRACE_TICKS as usize + game::TERRAIN_HASH_INTERVAL_TICKS * 2 {
+        runner.tick();
+    }
+    assert!(runner.region_mut().data().cells.active.is_empty());
+    assert_eq!(terrain_changes(&rx), 0, "releasing the edited cell changes nothing the LOD shows");
+}
