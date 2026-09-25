@@ -17,3 +17,6 @@ jobs = -4
 [env]
 VOXEL_REGION_CHUNKS = "32"
 VOXEL_CELL_CHUNKS = "0"
+# Spawn island diameter in 64 m cells (`worldgen::islands::SPAWN_ISLAND_CELLS`,
+# 0 = its default); `just island=64 …`.
+VOXEL_ISLAND_CELLS = "0"

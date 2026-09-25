@@ -37,7 +37,7 @@ is NOT the spec's phase 2 ("cheaper activation").
 | 1 Cells inside one region | DONE (+1b wiring into server/client, +1c centre spawn & home-LOD masking) |
 | (extra) Large regions | DONE: lazy per-cell worldgen (`worldgen::generate_cell`, bit-identical to `generate_region`), `CellStore::lazy` + worker-thread prefetch, sizes to 32768 chunks, only the home region loads (`LOD_RING_TABLE` >128 = `[(0, LARGE_HOME_FACTOR)]`), pristine coarse LOD for ungenerated cells, cell LOD churn fix `aae81f9` |
 | 2 Cheaper activation | DONE (timed: 5–12 ms/cell release) (plan `2026-09-25-cell-loading-phase2-cheaper-activation.md`): chunk index + incremental fingerprint landed; genesis timing pending the user's `cell_profile --time` run; water collapse deferred to 3/6 |
-| 3 Island worldgen | NOT STARTED |
+| 3 Island worldgen | DONE (plan `2026-09-25-cell-loading-phase3-island-worldgen.md`, 95fb76d..): quadtree islands, mask in `column()` + `DensityFn::Island` oracle, spawn island on the home region, `IslandDirectory` → `CellState.spawn`, `just island=<cells>`; regions still fixed `REGION_CHUNKS` squares — `IslandId` region keying deferred to phase 6 |
 | 4 Wire (zstd, framed snapshot, catch-up) | NOT STARTED (packet cap overflow on wasm32 was fixed in phase-2-large) |
 | 5 Postgres cell store + wind-down | NOT STARTED |
 | 6 Ocean region + fast travel | NOT STARTED |

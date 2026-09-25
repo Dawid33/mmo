@@ -146,17 +146,20 @@ fn region_file(rc: RegionCoords) -> String {
 /// (sorted by path). `None` if the source tree is unreadable (e.g. a binary
 /// deployed away from the repo) — the cache just disables itself then.
 fn cache_key(seed: u64, block_manifest: &str) -> Option<u32> {
-    cache_key_for(seed, block_manifest, game::REGION_CHUNKS)
+    cache_key_for(seed, block_manifest, game::REGION_CHUNKS, crate::islands::SPAWN_ISLAND_CELLS)
 }
 
 /// `cache_key` for an explicit region edge: a region file holds exactly
 /// `region_chunks²` columns, so builds with different `REGION_CHUNKS` must
 /// never share a cache directory.
-fn cache_key_for(seed: u64, block_manifest: &str, region_chunks: usize) -> Option<u32> {
+fn cache_key_for(seed: u64, block_manifest: &str, region_chunks: usize, island_cells: u32) -> Option<u32> {
     let mut h = crc32fast::Hasher::new();
     h.update(&seed.to_le_bytes());
     h.update(block_manifest.as_bytes());
     h.update(&(region_chunks as u64).to_le_bytes());
+    // The spawn island's size is a build dial (`VOXEL_ISLAND_CELLS`), not
+    // source: it must key the cache itself.
+    h.update(&island_cells.to_le_bytes());
     // A forged world replaces the seed as the source of terrain: regions of
     // different world files must never share a cache directory.
     if let Some(world) = crate::forged::active() {
@@ -220,8 +223,15 @@ mod tests {
     fn builds_with_different_region_sizes_never_share_a_cache() {
         // A 32-chunk region file loaded by a 128-chunk build is a 64 m corner
         // of terrain inside a 256 m region (cell-loading live bug, 2026-09-25).
-        let a = cache_key_for(7, "manifest", 32).unwrap();
-        let b = cache_key_for(7, "manifest", 128).unwrap();
+        let a = cache_key_for(7, "manifest", 32, 16).unwrap();
+        let b = cache_key_for(7, "manifest", 128, 16).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn builds_with_different_spawn_islands_never_share_a_cache() {
+        let a = cache_key_for(7, "manifest", 32, 16).unwrap();
+        let b = cache_key_for(7, "manifest", 32, 4).unwrap();
         assert_ne!(a, b);
     }
 

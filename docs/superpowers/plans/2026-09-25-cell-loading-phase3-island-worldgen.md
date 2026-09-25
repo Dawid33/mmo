@@ -1,6 +1,6 @@
 # Cell loading phase 3 — island worldgen Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** The procedural world becomes islands in an open ocean (hashed
 quadtree placement, island mask in `column()`), with a guaranteed spawn island
@@ -112,11 +112,11 @@ radius `lerp(frac) * size`, centre jittered within
 `size/2 - ISLAND_REACH * radius * (1 + COAST_WARP)` of the slot centre.
 Spawn radius = `cells * ISLAND_CELL_M / 2`, capped so its reach fits the root.
 
-- [ ] Tests (in the module): determinism; `island_at` is local (same island
+- [x] Tests (in the module): determinism; `island_at` is local (same island
   for every point of its slot); `islands_stay_inside_their_slot` (reach ≤
   half slot for 2 000 sampled slots); size bounds; the spawn island is at the
   home centre with the requested radius; neighbouring slots never overlap.
-- [ ] Implement; `just test-one worldgen "--lib islands"` green; commit.
+- [x] Implement; `just test-one worldgen "--lib islands"` green; commit.
 
 ### Task 2: island mask in `column()`
 

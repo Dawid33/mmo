@@ -65,6 +65,15 @@ export VOXEL_REGION_CHUNKS := region_chunks
 cells := env_var_or_default("VOXEL_CELL_CHUNKS", "0")
 export VOXEL_CELL_CHUNKS := cells
 
+# Spawn island size (phase 3 of the island spec): the island centred on the home
+# region, as a diameter in 64 m cells — a BUILD-time constant
+# (`worldgen::islands::SPAWN_ISLAND_CELLS`), 0 = the default 16 (1 km), at most
+# `SPAWN_ISLAND_CELLS_MAX`. The rest of the world is quadtree-placed islands in
+# open sea. Keep the island inside the region for cell mode, e.g.
+#   just region_chunks=1024 cells=16 island=16 run     (1 km island, 2 km region)
+island := env_var_or_default("VOXEL_ISLAND_CELLS", "0")
+export VOXEL_ISLAND_CELLS := island
+
 # GPU sampled by `just gpu-log` (domain:bus:dev.func). Default is the RX 6700 XT eGPU;
 # `amdgpu_top --list` prints the ids.
 pci := "0000:40:00.0"
