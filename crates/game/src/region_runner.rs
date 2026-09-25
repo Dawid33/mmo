@@ -6,8 +6,10 @@
 //! wasm build LocalServer pumps runners inline (crates/client).
 
 use crate::{
-    ClientId, Column, ColumnCoords, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, GhostData,
-    Region, RegionCoords, RegionId, Rollback, Tick, TERRAIN_HASH_INTERVAL_TICKS, TICK_RATE,
+    required_cells, CellChanges, CellConfig, CellCoords, CellStore, CellTickets, ClientId, Column,
+    ColumnCoords, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, GhostData, Region,
+    RegionCoords, RegionId, Rollback, Tick, PLAYER_SPAWN_X, PLAYER_SPAWN_Z,
+    TERRAIN_HASH_INTERVAL_TICKS, TICK_RATE,
 };
 use crossbeam::channel::Sender;
 
@@ -116,6 +118,13 @@ impl RegionSeed {
     }
 }
 
+/// Cell-mode state of a runner (spec §1, §3): tickets + the dormant store.
+pub struct CellMode {
+    store: CellStore,
+    tickets: CellTickets,
+    config: CellConfig,
+}
+
 pub struct RegionRunner {
     id: RegionCoords,
     region: Region,
@@ -130,6 +139,8 @@ pub struct RegionRunner {
     /// Client events waiting for the tick they were predicted after, in
     /// arrival order.
     held: std::collections::VecDeque<(GameEventKind, u64)>,
+    /// `Some` for a cell-mode region (`RegionRunner::new_with_cells`).
+    cells: Option<CellMode>,
 }
 
 /// Furthest ahead of a region's tick a client event may be stamped and still
@@ -151,7 +162,74 @@ impl RegionRunner {
             last_terrain_hash,
             terrain_hash_cost: Default::default(),
             held: Default::default(),
+            cells: None,
         }
+    }
+
+    /// A cell-mode runner: `region` must come from `Region::new_cells` with
+    /// the same cell size as `config`. Terrain loads through tickets.
+    pub fn new_with_cells(
+        id: RegionCoords,
+        region: Region,
+        out: Sender<(RegionCoords, RegionOutput)>,
+        store: CellStore,
+        config: CellConfig,
+    ) -> Self {
+        assert_eq!(
+            region.data().cells.cell_chunks,
+            config.cell_chunks,
+            "region/config cell size mismatch"
+        );
+        let mut runner = Self::new(id, region, out);
+        runner.cells = Some(CellMode { store, tickets: CellTickets::default(), config });
+        runner
+    }
+
+    pub fn cell_store(&self) -> Option<&CellStore> {
+        self.cells.as_ref().map(|c| &c.store)
+    }
+
+    /// Emit one CellChanges (if non-empty) for `deactivate` + `activate`,
+    /// then file dematerialized cells back into the store.
+    fn apply_cell_changes(&mut self, deactivate: Vec<CellCoords>, activate: Vec<CellCoords>) {
+        let Some(mode) = self.cells.as_mut() else { return };
+        let mut changes = CellChanges { deactivate, activate: Vec::new() };
+        for cell in activate {
+            match mode.store.payload(cell) {
+                Some(p) => changes.activate.push(p),
+                None => log::error!("[cells r={:?}] no store entry for {cell:?}; skipped", self.id),
+            }
+        }
+        if changes.is_empty() {
+            return;
+        }
+        self.apply(GameEventKind::CellChanges(changes));
+        let dormant = self.region.take_dormant();
+        if let Some(mode) = self.cells.as_mut() {
+            for (cell, content) in dormant {
+                mode.store.put(cell, content);
+            }
+        }
+    }
+
+    /// Required cells around `pos` that are not active yet, activated now,
+    /// outside the budget (joins and arrivals).
+    fn ensure_required(&mut self, pos: (f32, f32)) {
+        let Some(mode) = self.cells.as_ref() else { return };
+        let active = &self.region.data().cells.active;
+        let missing: Vec<CellCoords> = required_cells(pos, mode.config.cell_chunks)
+            .into_iter()
+            .filter(|c| !active.contains(c))
+            .collect();
+        self.apply_cell_changes(Vec::new(), missing);
+    }
+
+    /// The per-tick ticket pass (before the Tick event).
+    fn run_tickets(&mut self) {
+        let Some(mode) = self.cells.as_mut() else { return };
+        let players = self.region.data().player_positions();
+        let plan = mode.tickets.plan(&self.region.data().cells.active, &players, &mode.config);
+        self.apply_cell_changes(plan.deactivate, plan.activate);
     }
 
     /// `(checks, total, slowest)` of the every-`TERRAIN_HASH_INTERVAL_TICKS`
@@ -168,7 +246,21 @@ impl RegionRunner {
                 // The manager filters these; drop defensively rather than
                 // double-ticking or stopping on a stray packet.
                 GameEventKind::Tick | GameEventKind::Quit => {}
-                kind => self.apply(kind),
+                kind => {
+                    // Cell mode: a joining or arriving body needs its cells
+                    // under it before it lands.
+                    match &kind {
+                        GameEventKind::CreateClient(_) => {
+                            self.ensure_required((PLAYER_SPAWN_X, PLAYER_SPAWN_Z))
+                        }
+                        GameEventKind::EntityArrived(b) => {
+                            let t = b.isometry.translation;
+                            self.ensure_required((t.x.0, t.z.0));
+                        }
+                        _ => {}
+                    }
+                    self.apply(kind)
+                }
             },
             RegionInput::EventAfterTick(kind, after_tick) => {
                 let now = self.region.current_tick() as u64;
@@ -219,6 +311,7 @@ impl RegionRunner {
     /// One sim tick + the every-10-ticks SyncClock self-report. The caller
     /// owns pacing (thread timer on the server, frame accumulator on wasm).
     pub fn tick(&mut self) {
+        self.run_tickets();
         let event = self
             .region
             .handle_event(GameEventKind::Tick)
@@ -237,6 +330,12 @@ impl RegionRunner {
             }
         }
         let (departures, ghosts) = self.region.take_transfers();
+        let frozen = self.region.take_frozen();
+        if let Some(mode) = self.cells.as_mut() {
+            for (cell, bundle) in frozen {
+                mode.store.add_entity(cell, bundle);
+            }
+        }
         if !departures.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::Departures(departures)));
         }

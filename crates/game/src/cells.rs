@@ -264,6 +264,19 @@ impl Rollback {
         DormantCell { chunks, entities }
     }
 
+    /// Region-local (x, z) of every player body, by ClientId.
+    pub fn player_positions(&self) -> Vec<(f32, f32)> {
+        self.data
+            .player_entites
+            .values()
+            .filter_map(|e| {
+                let h = (*self.data.ecs.rigidbody.try_get(*e))?;
+                let t = self.data.physics.bodies.get(h)?.translation();
+                Some((t.x.0, t.z.0))
+            })
+            .collect()
+    }
+
     /// Cell-mode only: whether block `pos` lies in an active cell.
     /// Legacy regions: always true.
     pub fn block_in_active_cell(&self, pos: [i32; 3]) -> bool {

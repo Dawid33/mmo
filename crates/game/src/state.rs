@@ -445,8 +445,8 @@ const PLAYER_SPAWN_CLEARANCE: f32 = 3.6;
 /// Region-local voxel column the player spawns over. Not tied to the region
 /// center: the world seed was scanned (examples/seed_scan.rs) for dry land at
 /// exactly this column, so it stays fixed even though REGION_SIZE grew.
-const PLAYER_SPAWN_X: f32 = 128.0;
-const PLAYER_SPAWN_Z: f32 = 128.0;
+pub const PLAYER_SPAWN_X: f32 = 128.0;
+pub const PLAYER_SPAWN_Z: f32 = 128.0;
 /// Spawn height used only when the spawn column has no terrain (all air).
 const PLAYER_SPAWN_FALLBACK_Y: f32 = 26.0;
 

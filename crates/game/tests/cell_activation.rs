@@ -223,3 +223,107 @@ fn slime_spawns_are_gated_to_active_cells() {
     let legacy = Region::from_chunks(r0(), Vec::new());
     assert!(legacy.data().slime_spawn_allowed(700, 700), "legacy regions are ungated");
 }
+
+use crossbeam::channel::{unbounded, Receiver};
+use game::{CellConfig, CellStore, RegionInput, RegionOutput, RegionRunner};
+
+/// A flat 4×4-cell region: one floor chunk per column at y = 0.
+pub fn flat_store() -> CellStore {
+    let mut chunks = Vec::new();
+    for x in 0..game::REGION_CHUNKS {
+        for z in 0..game::REGION_CHUNKS {
+            chunks.push((ChunkCoords::new(x, 0, z), Chunk::flat_floor(8)));
+        }
+    }
+    CellStore::from_chunks(chunks, CC)
+}
+
+pub fn cell_runner() -> (RegionRunner, Receiver<(RegionCoords, RegionOutput)>) {
+    let (out, rx) = unbounded();
+    let runner = RegionRunner::new_with_cells(
+        r0(),
+        Region::new_cells(r0(), CC, None, None),
+        out,
+        flat_store(),
+        CellConfig::new(CC),
+    );
+    (runner, rx)
+}
+
+pub fn processed(rx: &Receiver<(RegionCoords, RegionOutput)>) -> Vec<game::GameEvent> {
+    rx.try_iter()
+        .filter_map(|(_, o)| match o {
+            RegionOutput::EventProcessed(e) => Some(e),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn create_client_activates_the_spawn_cells_first() {
+    let (mut runner, rx) = cell_runner();
+    runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+    let evs = processed(&rx);
+    assert!(matches!(evs[0].kind, GameEventKind::CellChanges(_)));
+    assert!(matches!(evs[1].kind, GameEventKind::CreateClient(0)));
+    // Spawn (128,128) is cell (0,0): required = (0,0),(0,1),(1,0),(1,1).
+    assert_eq!(runner.region_mut().data().cells.active.len(), 4);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn ticks_grow_the_active_set_one_wanted_cell_at_a_time() {
+    let (mut runner, rx) = cell_runner();
+    runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+    let _ = processed(&rx);
+    let mut sizes = Vec::new();
+    for _ in 0..6 {
+        runner.tick();
+        sizes.push(runner.region_mut().data().cells.active.len());
+    }
+    // Radius 2 from cell (0,0) = 3×3 = 9 cells; 4 required, then +1 per tick.
+    assert_eq!(sizes, vec![5, 6, 7, 8, 9, 9]);
+    let evs = processed(&rx);
+    let cell_events = evs.iter().filter(|e| matches!(e.kind, GameEventKind::CellChanges(_))).count();
+    assert_eq!(cell_events, 5, "no empty CellChanges once the set is complete");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn deactivated_cells_go_back_to_the_store_with_a_new_version_only_if_changed() {
+    let (mut runner, rx) = cell_runner();
+    runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+    for _ in 0..8 {
+        runner.tick();
+    }
+    // Remove the player: everything releases after the grace period.
+    runner.region_mut().with_data(|rb| {
+        let key = *rb.data.player_entites.get(&0).unwrap();
+        rb.remove_entity_safe(key, Some(0));
+        rb.data.player_entites.remove(&0);
+    });
+    for _ in 0..game::CELL_RELEASE_GRACE_TICKS + 2 {
+        runner.tick();
+    }
+    assert!(runner.region_mut().data().cells.active.is_empty());
+    // Untouched terrain: versions stay 0.
+    assert_eq!(runner.cell_store().unwrap().version(CellCoords::new(0, 0)), Some(0));
+    let _ = processed(&rx);
+}
+
+#[test]
+fn a_cell_missing_from_the_store_is_skipped_not_fatal() {
+    let (out, _rx) = unbounded();
+    let mut runner = RegionRunner::new_with_cells(
+        r0(),
+        Region::new_cells(r0(), CC, None, None),
+        out,
+        // A 1-cell grid: only (0,0) exists; the runner asks for (0,1), (1,1)…
+        CellStore::from_chunks(Vec::new(), game::REGION_CHUNKS),
+        CellConfig::new(CC),
+    );
+    runner.handle_input(RegionInput::Event(GameEventKind::CreateClient(0)));
+    runner.tick();
+    assert!(runner.region_mut().data().cells.active.contains(&CellCoords::new(0, 0)));
+    assert!(!runner.region_mut().data().cells.active.contains(&CellCoords::new(1, 1)));
+}
