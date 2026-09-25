@@ -168,6 +168,7 @@ impl Plugin for SimBridgePlugin {
                 // the LOD mesh systems pick up on later frames.
                 (
                     lod_rings::apply_lod_events,
+                    lod_rings::reveal_meshed_cells,
                     lod_rings::mask_home_lod,
                     lod_rings::retire_lod_roots,
                 )

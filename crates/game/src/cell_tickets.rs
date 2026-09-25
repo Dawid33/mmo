@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{cell_of_pos, cells_within, chebyshev, CellCoords};
 
 /// Cells within this Chebyshev radius of a player are wanted active.
-pub const SIM_RADIUS_CELLS: u32 = 2;
+pub const SIM_RADIUS_CELLS: u32 = 3;
 /// Extra radius a cell may drift out to before its release countdown starts.
 pub const CELL_HYSTERESIS: u32 = 1;
 /// Ticks a cell must stay beyond radius + hysteresis before it deactivates.

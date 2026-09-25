@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use game::lod::LodKey;
 use game::{LodPayload, RegionCoords};
 
-use super::bridge::{PendingSnapshotVoxels, RegionRoots, VoxelData};
+use super::bridge::{PendingSnapshotVoxels, RegionRoots, SimEntity, VoxelData};
 use super::far_voxel::FarVoxelReady;
 use super::meshing::lod;
 use super::meshing::lod::LodRasterReady;
@@ -114,12 +114,17 @@ impl Default for LodRings {
 pub const LOD_APPLY_CELLS_PER_FRAME: usize = 512;
 
 /// Cell mode: the home region's active cells, from
-/// `ClientUpdateEvent::ActiveCells`. Home-region LOD cells under them are
-/// hidden — those cells render at full detail from the sim.
+/// `ClientUpdateEvent::ActiveCells`. Home-region LOD cells under `cells` are
+/// hidden — those cells render at full detail from the sim. An active cell
+/// joins `cells` only once it is fully meshed ([`reveal_meshed_cells`]), so
+/// the LOD keeps covering it until then.
 #[derive(Resource, Debug)]
 pub struct HomeCellMask {
     pub region: Option<RegionCoords>,
+    /// Masked: active AND fully meshed (or past `CELL_REVEAL_MAX_FRAMES`).
     pub cells: BTreeSet<game::CellCoords>,
+    /// Every active cell with its terrain chunk count at activation.
+    pub active: BTreeMap<game::CellCoords, u32>,
     /// Cell edge in chunks: `game::CELL_CHUNKS`, a field only so tests can
     /// exercise masking in a build without cell mode.
     pub cell_chunks: usize,
@@ -127,7 +132,71 @@ pub struct HomeCellMask {
 
 impl Default for HomeCellMask {
     fn default() -> Self {
-        Self { region: None, cells: BTreeSet::new(), cell_chunks: game::CELL_CHUNKS }
+        Self {
+            region: None,
+            cells: BTreeSet::new(),
+            active: BTreeMap::new(),
+            cell_chunks: game::CELL_CHUNKS,
+        }
+    }
+}
+
+/// Frames an activated cell may take to mesh before its LOD is hidden
+/// anyway: a cell whose chunk count never adds up (a chunk removed before
+/// it meshed) must not leave LOD and near terrain overlapping for good.
+pub const CELL_REVEAL_MAX_FRAMES: u32 = 600;
+
+/// Promote active cells into the LOD mask once every terrain chunk the sim
+/// reported for them has meshed (`ChunkConnectivity`, set for every finished
+/// mesh, all-air ones included) and stayed so for
+/// [`NEAR_HANDOFF_HOLD_FRAMES`] — the render sub-app uploads a frame later.
+/// Scans the home region's meshed chunks only while some cell is pending.
+pub fn reveal_meshed_cells(
+    mut mask: ResMut<HomeCellMask>,
+    roots: Res<RegionRoots>,
+    meshed: Query<(&Transform, &ChildOf), (With<SimEntity>, With<ChunkConnectivity>)>,
+    mut state: Local<BTreeMap<game::CellCoords, (u32, u32)>>,
+) {
+    let pending: BTreeMap<game::CellCoords, u32> = mask
+        .active
+        .iter()
+        .filter(|(c, _)| !mask.cells.contains(*c))
+        .map(|(c, n)| (*c, *n))
+        .collect();
+    // (frames pending, frames complete) per pending cell.
+    state.retain(|c, _| pending.contains_key(c));
+    let (Some(home), cc) = (mask.region, mask.cell_chunks) else { return };
+    if pending.is_empty() || cc == 0 {
+        return;
+    }
+    let Some(&root) = roots.0.get(&home) else { return };
+    let mut counts: BTreeMap<game::CellCoords, u32> = BTreeMap::new();
+    for (tf, parent) in &meshed {
+        if parent.parent() != root {
+            continue;
+        }
+        // Chunk transforms are region-local chunk minimum corners.
+        if let Some(c) = game::cell_of_pos(tf.translation.x, tf.translation.z, cc) {
+            if pending.contains_key(&c) {
+                *counts.entry(c).or_default() += 1;
+            }
+        }
+    }
+    let mut ready = Vec::new();
+    for (cell, want) in pending {
+        let (age, streak) = state.entry(cell).or_default();
+        *age += 1;
+        if counts.get(&cell).copied().unwrap_or(0) >= want {
+            *streak += 1;
+        } else {
+            *streak = 0;
+        }
+        if *streak >= NEAR_HANDOFF_HOLD_FRAMES || *age >= CELL_REVEAL_MAX_FRAMES {
+            ready.push(cell);
+        }
+    }
+    if !ready.is_empty() {
+        mask.cells.extend(ready);
     }
 }
 
@@ -554,6 +623,51 @@ mod tests {
     fn mesh_vertices(app: &App, e: Entity) -> Option<usize> {
         let h = &app.world().get::<Mesh3d>(e)?.0;
         app.world().resource::<Assets<Mesh>>().get(h).map(|m| m.count_vertices())
+    }
+
+    /// An activated cell's LOD stays until every chunk the sim reported for
+    /// it has meshed, held for NEAR_HANDOFF_HOLD_FRAMES — no hole while the
+    /// near chunks are still being built.
+    #[test]
+    fn an_active_cell_is_masked_only_once_its_chunks_have_meshed() {
+        let mut app = App::new();
+        app.init_resource::<HomeCellMask>()
+            .init_resource::<RegionRoots>()
+            .add_systems(Update, reveal_meshed_cells);
+        let home = RegionCoords::new(0, 0);
+        let cell = game::CellCoords::new(1, 0);
+        let root = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<RegionRoots>().0.insert(home, root);
+        {
+            let mut mask = app.world_mut().resource_mut::<HomeCellMask>();
+            mask.region = Some(home);
+            mask.cell_chunks = 4; // 128-unit cells: x in [128, 256) is cell (1, 0)
+            mask.active.insert(cell, 2);
+        }
+        let mut chunk = |x: f32| {
+            let key = game::EntityKey::default();
+            app.world_mut()
+                .spawn((super::super::bridge::SimEntity { region: home, key }, Transform::from_xyz(x, 0.0, 0.0), ChildOf(root)))
+                .id()
+        };
+        let (a, b) = (chunk(128.0), chunk(160.0));
+        let masked = |app: &App| app.world().resource::<HomeCellMask>().cells.contains(&cell);
+        for _ in 0..NEAR_HANDOFF_HOLD_FRAMES + 2 {
+            app.update();
+        }
+        assert!(!masked(&app), "nothing meshed yet: the LOD stays");
+        app.world_mut().entity_mut(a).insert(ChunkConnectivity(0));
+        for _ in 0..NEAR_HANDOFF_HOLD_FRAMES + 2 {
+            app.update();
+        }
+        assert!(!masked(&app), "one of two chunks meshed: the LOD stays");
+        app.world_mut().entity_mut(b).insert(ChunkConnectivity(0));
+        app.update();
+        assert!(!masked(&app), "held for NEAR_HANDOFF_HOLD_FRAMES first");
+        for _ in 0..NEAR_HANDOFF_HOLD_FRAMES {
+            app.update();
+        }
+        assert!(masked(&app), "fully meshed: the near cell takes over");
     }
 
     /// Cell mode: activating a cell masks the home LOD cell under it, and the

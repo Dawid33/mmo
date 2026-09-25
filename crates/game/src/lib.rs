@@ -114,10 +114,11 @@ pub enum ClientUpdateEvent {
     RemoveLod { key: LodKey, near_takeover: bool },
     GameCrash(GameError),
     SetPlayer(ClientId),
-    /// Cell mode: the home region's active cells (edge-triggered). The
-    /// renderer hides home-region LOD cells under them — those render at
-    /// full detail from the sim.
-    ActiveCells(RegionId, std::collections::BTreeSet<crate::CellCoords>),
+    /// Cell mode: the home region's active cells with their terrain chunk
+    /// counts (edge-triggered on the set). The renderer hides home-region
+    /// LOD cells under a cell once that many of its chunks have meshed —
+    /// until then the LOD stays, so activation never opens a hole.
+    ActiveCells(RegionId, std::collections::BTreeMap<crate::CellCoords, u32>),
     /// Region + connection status for the debug HUD. Edge-triggered by the
     /// manager (only sent on change); consumed by the render bridge.
     HudStatus {

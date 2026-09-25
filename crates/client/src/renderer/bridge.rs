@@ -548,9 +548,17 @@ pub fn drain_client_updates(
                     .pending
                     .push(lod_rings::LodEventMsg::Remove { key, near_takeover });
             }
-            ClientUpdateEvent::ActiveCells(region, cells) => {
-                home_cells.region = Some(region);
-                home_cells.cells = cells;
+            ClientUpdateEvent::ActiveCells(region, counts) => {
+                if home_cells.region != Some(region) {
+                    home_cells.region = Some(region);
+                    home_cells.cells.clear();
+                }
+                // Released cells unmask at once (their LOD returns while the
+                // near chunks go); new ones wait for `reveal_meshed_cells`.
+                if home_cells.cells.iter().any(|c| !counts.contains_key(c)) {
+                    home_cells.cells.retain(|c| counts.contains_key(c));
+                }
+                home_cells.active = counts;
             }
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
             ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {

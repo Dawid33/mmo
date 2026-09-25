@@ -934,8 +934,10 @@ impl GameInstanceManager {
         if self.last_active_cells.as_ref() == Some(&(home, active.clone())) {
             return;
         }
-        self.last_active_cells = Some((home, active.clone()));
-        let _ = self.client_event_send.send(ClientUpdateEvent::ActiveCells(home, active));
+        let data = world.data(&home);
+        let counts = active.iter().map(|&c| (c, data.cell_chunk_keys(c).len() as u32)).collect();
+        self.last_active_cells = Some((home, active));
+        let _ = self.client_event_send.send(ClientUpdateEvent::ActiveCells(home, counts));
     }
 
     fn emit_hud_status(&mut self) {
