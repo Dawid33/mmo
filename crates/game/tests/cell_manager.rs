@@ -122,3 +122,83 @@ fn a_cell_mode_region_never_parks() {
 fn a_legacy_spawner_still_parks() {
     assert!(!release_after_grace(0));
 }
+
+mod convergence {
+    use super::*;
+    use game::{GameEvent, GameEventKind, GameDataUpdate, InputEvent, Key, Region};
+
+    struct Client {
+        region: Option<Region>,
+        send: crossbeam::channel::Sender<GameDataUpdate>,
+        _recv: Receiver<GameDataUpdate>,
+    }
+
+    /// Route every server packet for the home region into the client replica.
+    fn feed(h: &mut Harness, c: &mut Client) {
+        for (_, p) in h.drain() {
+            match p {
+                ServerPacket::Region(rc, rb) if rc == SPAWN_REGION => {
+                    c.region = Some(Region::new(rb, Some(c.send.clone()), rc, Some(0)));
+                }
+                ServerPacket::GameEvent(ev) if ev.region_id == SPAWN_REGION => {
+                    if let Some(r) = c.region.as_mut() {
+                        r.reconcile(ev).unwrap();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn predict(c: &mut Client, lead: usize) {
+        let r = c.region.as_mut().expect("joined");
+        while r.pending_event_ids().len() < lead {
+            r.handle_event(GameEventKind::Tick).unwrap();
+        }
+    }
+
+    fn input(h: &mut Harness, c: &mut Client, ev: InputEvent, now: u64) {
+        c.region.as_mut().unwrap().handle_event(GameEventKind::PlayerInput(0, ev.clone())).unwrap();
+        let gev = GameEvent::new(GameEventKind::PlayerInput(0, ev), 0, SPAWN_REGION);
+        h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(gev), 0), now);
+        feed(h, c);
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn a_client_joined_through_the_manager_converges_while_cells_load() {
+        game::set_hash_mode(game::HashMode::Full);
+        let mut h = harness(CC);
+        let (send, recv) = unbounded();
+        let mut c = Client { region: None, send, _recv: recv };
+        h.event(ServerEvent::ClientConnected(0), 0);
+        h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(SPAWN_REGION), 0), 0);
+        feed(&mut h, &mut c);
+        assert!(c.region.is_some(), "snapshot delivered");
+        let mut now = 0u64;
+        input(&mut h, &mut c, InputEvent::FpsCam(true), now);
+        // Face +Z (1208 px × 0.0026 rad/px ≈ π) so the walk stays inside the region.
+        input(&mut h, &mut c, InputEvent::MouseMotion { dx: 1208.0, dy: 0.0 }, now);
+        input(&mut h, &mut c, InputEvent::Key { key: Key::KeyW, pressed: true }, now);
+        for i in 0..160usize {
+            predict(&mut c, 1 + i % 3);
+            now += 50;
+            h.tick(now);
+            feed(&mut h, &mut c);
+        }
+        for _ in 0..8 {
+            if c.region.as_ref().unwrap().pending_event_ids().is_empty() {
+                break;
+            }
+            now += 50;
+            h.tick(now);
+            feed(&mut h, &mut c);
+        }
+        let r = c.region.as_ref().unwrap();
+        assert!(r.pending_event_ids().is_empty(), "client still ahead");
+        let mut server_hash = 0;
+        h.manager.spawner_mut().with_region(SPAWN_REGION, |s| server_hash = game::state_hash(s.data()));
+        assert_eq!(server_hash, game::state_hash(r.data()), "client diverged from the server");
+        assert!(r.data().cells.active.len() > 4, "cells loaded around the walking player");
+    }
+}
