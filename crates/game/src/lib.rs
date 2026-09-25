@@ -106,6 +106,10 @@ pub enum ClientUpdateEvent {
     RemoveLod(LodKey),
     GameCrash(GameError),
     SetPlayer(ClientId),
+    /// Cell mode: the home region's active cells (edge-triggered). The
+    /// renderer hides home-region LOD cells under them — those render at
+    /// full detail from the sim.
+    ActiveCells(RegionId, std::collections::BTreeSet<crate::CellCoords>),
     /// Region + connection status for the debug HUD. Edge-triggered by the
     /// manager (only sent on change); consumed by the render bridge.
     HudStatus {

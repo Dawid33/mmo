@@ -84,6 +84,34 @@ pub fn cells_within(center: CellCoords, radius: u32, cell_chunks: usize) -> Vec<
     out
 }
 
+/// Whether a LOD cell of the viewer's HOME region should be hidden because
+/// full-detail cells cover it (phase 1c: the home region gets LOD too, with
+/// holes where its active cells render from the sim). `min_xz` is the LOD
+/// cell's world-space minimum corner, `size` its edge in world units.
+/// Hidden only if it lies inside `home` and EVERY game cell under it is
+/// active: a partly covered LOD cell stays visible (overlap, never a hole).
+pub fn lod_cell_masked(
+    home: RegionCoords,
+    active: &BTreeSet<CellCoords>,
+    cell_chunks: usize,
+    min_xz: [f32; 2],
+    size: f32,
+) -> bool {
+    if active.is_empty() || cell_chunks == 0 {
+        return false;
+    }
+    let o = home.world_offset();
+    let (lx, lz) = (min_xz[0] - o[0], min_xz[1] - o[2]);
+    if lx < 0.0 || lz < 0.0 || lx + size > REGION_SIZE || lz + size > REGION_SIZE {
+        return false;
+    }
+    let cs = cell_size_units(cell_chunks);
+    // Cells overlapped by [lx, lx+size) × [lz, lz+size).
+    let (x0, z0) = ((lx / cs).floor() as u32, (lz / cs).floor() as u32);
+    let (x1, z1) = (((lx + size) / cs).ceil() as u32, ((lz + size) / cs).ceil() as u32);
+    (x0..x1).all(|x| (z0..z1).all(|z| active.contains(&CellCoords::new(x, z))))
+}
+
 /// Sim-side cell bookkeeping (tier-2 field `GameData.cells`). Mutated ONLY
 /// raw, inside the `CellChanges` arm, which every replica forgets at once.
 #[derive(Debug, Clone, Default, Hash, serde::Serialize, serde::Deserialize)]
@@ -482,5 +510,49 @@ mod protocol_tests {
         b.chunks.clear();
         assert_ne!(a.content_crc(), b.content_crc());
         assert!(CellChanges::default().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod lod_mask_tests {
+    use super::*;
+
+    fn active(cells: &[(u32, u32)]) -> BTreeSet<CellCoords> {
+        cells.iter().map(|&(x, z)| CellCoords::new(x, z)).collect()
+    }
+
+    #[test]
+    fn a_lod_cell_inside_an_active_cell_is_masked() {
+        let home = RegionCoords::new(0, 0);
+        let cell = cell_size_units(8); // 256 units
+        // A 64-unit LOD cell in the middle of cell (1,1).
+        let m = lod_cell_masked(home, &active(&[(1, 1)]), 8, [cell + 64.0, cell + 64.0], 64.0);
+        assert!(m);
+        assert!(!lod_cell_masked(home, &active(&[(0, 0)]), 8, [cell + 64.0, cell + 64.0], 64.0));
+    }
+
+    #[test]
+    fn a_lod_cell_spanning_cells_is_masked_only_when_all_are_active() {
+        let home = RegionCoords::new(0, 0);
+        let cell = cell_size_units(8);
+        // 512 units wide from the origin: covers cells (0,0),(1,0),(0,1),(1,1).
+        let rect = [0.0, 0.0];
+        assert!(!lod_cell_masked(home, &active(&[(0, 0), (1, 0), (0, 1)]), 8, rect, 2.0 * cell));
+        assert!(lod_cell_masked(home, &active(&[(0, 0), (1, 0), (0, 1), (1, 1)]), 8, rect, 2.0 * cell));
+    }
+
+    #[test]
+    fn lod_cells_of_other_regions_are_never_masked() {
+        let home = RegionCoords::new(0, 0);
+        let world = RegionCoords::new(1, 0).world_offset();
+        assert!(!lod_cell_masked(home, &active(&[(0, 0)]), 8, [world[0], world[2]], 64.0));
+    }
+
+    #[test]
+    fn home_region_offsets_are_respected() {
+        let home = RegionCoords::new(-1, 2);
+        let o = home.world_offset();
+        assert!(lod_cell_masked(home, &active(&[(0, 0)]), 8, [o[0] + 8.0, o[2] + 8.0], 64.0));
+        assert!(!lod_cell_masked(RegionCoords::new(0, 0), &active(&[(0, 0)]), 8, [o[0] + 8.0, o[2] + 8.0], 64.0));
     }
 }
