@@ -58,18 +58,44 @@ fn skirt_extend(q: &mut Quad) {
 /// different scales) never show a seam gap at y=0. Resulting quads span Y
 /// range 0..=33 — callers translate `Transform.y` down by the scale factor
 /// to compensate (Task 3). Shared by `mesh_lod_grid` and `mesh_lod_output`.
+///
+/// A skirt is skipped where the row just below the quad already shows a wall
+/// on the same plane (e.g. grass over dirt: two quads, since greedy meshing
+/// never merges different blocks) — the skirt would lie coplanar on it and
+/// z-fight. A seam can only open where that row is NOT an exposed wall.
 fn lod_quads(grid: &[Voxel], neighbors: &BTreeMap<[i32; 3], &[Voxel]>) -> Vec<Quad> {
     let padded = gather_padded(grid, neighbors);
     let mut quads = binary::mesh_quads(&padded);
     for q in &mut quads {
-        q.min[1] += 1;
-    }
-    for q in &mut quads {
-        if q.face.axis() != 1 && is_border_side_quad(q) {
+        if q.face.axis() != 1 && is_border_side_quad(q) && !wall_below(&padded, q) {
+            q.min[1] += 1;
             skirt_extend(q);
+        } else {
+            q.min[1] += 1;
         }
     }
     quads
+}
+
+/// Does any cell in the row just below side quad `q` (unbiased grid coords)
+/// show a face on `q`'s plane, facing `q`'s way? Row -1 reads the padding
+/// (the neighbour below, air when not wired).
+fn wall_below(p: &super::binary::PaddedVoxels, q: &Quad) -> bool {
+    let axis = q.face.axis();
+    let out: isize = match q.face {
+        Face::PosX | Face::PosZ => 1,
+        _ => -1,
+    };
+    // Padded coords: grid + 1. The row below the quad's bottom is min.y - 1.
+    let y = q.min[1] as usize; // (min.y - 1) + 1
+    let (lo, len) = if axis == 0 { (q.min[2], q.h) } else { (q.min[0], q.w) };
+    (lo..lo + len).any(|t| {
+        let mut c = [q.min[0] as usize + 1, y, q.min[2] as usize + 1];
+        c[if axis == 0 { 2 } else { 0 }] = t as usize + 1;
+        let mut o = c;
+        o[axis] = (c[axis] as isize + out) as usize;
+        p.is_solid(c[0], c[1], c[2]) && !p.is_solid(o[0], o[1], o[2])
+    })
 }
 
 /// Mesh a coarse LOD grid. See `lod_quads` for the bias/skirt contract.
@@ -406,6 +432,57 @@ pub fn apply_lod_meshes(
 mod tests {
     use super::*;
     use game::{BlockId, CHUNK_VOXEL_COUNT};
+
+    /// Two side quads on the same plane, facing the same way, whose rects
+    /// overlap: coplanar duplicates that z-fight (flicker) under any camera
+    /// jitter.
+    fn overlapping_side_quads(quads: &[Quad]) -> Vec<(Quad, Quad)> {
+        let rect = |q: &Quad| {
+            let (u, v) = binary::cross_axes(q.face.axis());
+            (q.min[u], q.min[u] + q.w, q.min[v], q.min[v] + q.h)
+        };
+        let mut out = Vec::new();
+        for (i, a) in quads.iter().enumerate() {
+            for b in &quads[i + 1..] {
+                let axis = a.face.axis();
+                if axis == 1 || a.face != b.face || a.min[axis] != b.min[axis] {
+                    continue;
+                }
+                let (a0, a1, a2, a3) = rect(a);
+                let (b0, b1, b2, b3) = rect(b);
+                if a0 < b1 && b0 < a1 && a2 < b3 && b2 < a3 {
+                    out.push((a.clone(), b.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// A border wall of grass over dirt meshes as two quads on one plane
+    /// (greedy meshing never merges different blocks). Skirting the upper one
+    /// down a row laid it over the lower one's top row: same plane, same
+    /// facing, different texture — the grass/dirt flicker along LOD cell
+    /// edges, flipped by a ~0.002-unit camera wobble.
+    #[test]
+    fn skirts_never_overlap_a_coplanar_wall_below() {
+        let mut grid = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        for (i, v) in grid.iter_mut().enumerate() {
+            let y = (i / 32) % 32;
+            if y <= 10 {
+                *v = Voxel::new(BlockId(if y < 10 { 1 } else { 2 }));
+            }
+        }
+        let quads = lod_quads(&grid, &BTreeMap::new());
+        let overlaps = overlapping_side_quads(&quads);
+        assert!(overlaps.is_empty(), "coplanar overlapping side quads: {overlaps:?}");
+        // The floor seam is still covered: border walls reach biased y=0.
+        for face in [Face::PosX, Face::NegX, Face::PosZ, Face::NegZ] {
+            assert!(
+                quads.iter().any(|q| q.face == face && q.min[1] == 0),
+                "{face:?}: the bottom wall keeps its skirt to y=0"
+            );
+        }
+    }
 
     fn base_quad(face: Face) -> Quad {
         Quad {
