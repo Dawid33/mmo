@@ -618,6 +618,20 @@ impl Region {
         Region::from_chunks(id, chunks)
     }
 
+    /// An empty cell-mode region: no terrain, no active cells. Terrain
+    /// arrives only through `CellChanges`.
+    pub fn new_cells(
+        id: RegionId,
+        cell_chunks: usize,
+        game_update_send: Option<Sender<GameDataUpdate>>,
+        local_client_id: Option<ClientId>,
+    ) -> Self {
+        crate::cells_per_side(cell_chunks); // validates the size
+        let mut data = Rollback::new(None);
+        data.cells.raw_mut().cell_chunks = cell_chunks;
+        Region::new(data, game_update_send, id, local_client_id)
+    }
+
     pub fn forget_last_event(&mut self) {
         self.data.forget();
     }

@@ -3,6 +3,8 @@
 //! A cell is a `cell_chunks` × `cell_chunks` square of chunk columns; the
 //! server activates cells around players through `CellChanges` events.
 
+use std::collections::BTreeSet;
+
 use crate::{Chunk, ChunkCoords, EntityBundle, REGION_CHUNKS, REGION_SIZE};
 
 /// Region-local cell address, `0..cells_per_side` on each axis.
@@ -78,6 +80,21 @@ pub fn cells_within(center: CellCoords, radius: u32, cell_chunks: usize) -> Vec<
         }
     }
     out
+}
+
+/// Sim-side cell bookkeeping (tier-2 field `GameData.cells`). Mutated ONLY
+/// raw, inside the `CellChanges` arm, which every replica forgets at once.
+#[derive(Debug, Clone, Default, Hash, serde::Serialize, serde::Deserialize)]
+pub struct CellState {
+    /// 0 = legacy region (fully materialized, no cells).
+    pub cell_chunks: usize,
+    pub active: BTreeSet<CellCoords>,
+}
+
+impl CellState {
+    pub fn enabled(&self) -> bool {
+        self.cell_chunks != 0
+    }
 }
 
 /// A cell's full content while it is not in the sim: the server's store

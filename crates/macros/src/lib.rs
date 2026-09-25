@@ -1067,6 +1067,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 pub fn insert_raw(&mut self, v: V) -> K {
                     self.data.insert(v)
                 }
+                /// Raw remove: no undo entry, no renderer emit. Only correct
+                /// inside a transaction that is forgotten immediately and never
+                /// rolled back (cell dematerialization); anywhere else this
+                /// desyncs the undo log from the data.
+                pub fn remove_raw(&mut self, k: K) -> ::std::option::Option<V> {
+                    self.data.remove(k)
+                }
                 pub fn remove(&mut self, k: K) -> ::std::option::Option<V> {
                     let (pre_hash, verify) = match hash_mode() {
                         HashMode::Off => (0u32, HashMode::Off),

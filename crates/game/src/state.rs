@@ -16,6 +16,7 @@ use slotmapd::{new_key_type, SlotMap, SparseSecondaryMap};
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use crate::camera::Camera;
+use crate::cells::CellState;
 use crate::input::InputState;
 use crate::protocol::{ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
 use crate::registry::BlockId;
@@ -155,7 +156,7 @@ mod game_data {
     };
 
     use super::{
-        Camera, Chunk, Client, ClientId, Component, EntityKey, EntityKind, GhostEntry,
+        Camera, CellState, Chunk, Client, ClientId, Component, EntityKey, EntityKind, GhostEntry,
         IsometryReal, RigidBodyHandle, RollbackInfo, SlotMap,
     };
     use std::collections::BTreeMap;
@@ -178,6 +179,8 @@ mod game_data {
         /// arrived under — makes replayed arrivals idempotent.
         #[undo(map)]
         arrivals: BTreeMap<(crate::RegionCoords, EntityKey), EntityKey>,
+        /// Cell loading (cell-mode regions); default = legacy region.
+        cells: CellState,
     }
 
     pub struct Ecs {
