@@ -689,6 +689,15 @@ impl Region {
         std::mem::take(&mut self.pending_dormant)
     }
 
+    /// Server-side commit of the event just handled: forget its undo
+    /// transaction AND drop it from `event_log`. Server regions never
+    /// reconcile, so the log would otherwise grow by every event forever
+    /// (and `CellChanges` carry whole cells).
+    pub fn commit_server_event(&mut self) {
+        self.data.forget();
+        self.event_log.pop_back();
+    }
+
     pub fn forget_last_event(&mut self) {
         self.data.forget();
     }

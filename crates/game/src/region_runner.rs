@@ -304,7 +304,7 @@ impl RegionRunner {
             .region
             .handle_event(kind)
             .expect("region event processing failed");
-        self.region.forget_last_event();
+        self.region.commit_server_event();
         let _ = self.out.send((self.id, RegionOutput::EventProcessed(event)));
     }
 
@@ -316,7 +316,7 @@ impl RegionRunner {
             .region
             .handle_event(GameEventKind::Tick)
             .expect("region tick failed");
-        self.region.forget_last_event();
+        self.region.commit_server_event();
         let _ = self.out.send((self.id, RegionOutput::EventProcessed(event)));
         // Events predicted after the tick that just ran, in arrival order.
         let now = self.region.current_tick() as u64;

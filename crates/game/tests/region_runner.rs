@@ -292,3 +292,18 @@ fn leading_client_reconciles_a_stamped_input_without_rollback() {
         "applied on arrival, the same input lands ticks early and the client rolls back"
     );
 }
+
+#[test]
+fn a_server_runner_keeps_no_event_history() {
+    let (out, _rx) = crossbeam::channel::unbounded();
+    let rc = game::RegionCoords::new(0, 0);
+    let mut runner = game::RegionRunner::new(rc, game::Region::from_chunks(rc, Vec::new()), out);
+    runner.handle_input(game::RegionInput::Event(game::GameEventKind::CreateClient(0)));
+    for _ in 0..50 {
+        runner.tick();
+    }
+    assert!(
+        runner.region_mut().pending_event_ids().is_empty(),
+        "server regions must not retain applied events"
+    );
+}
