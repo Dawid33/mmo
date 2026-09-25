@@ -40,6 +40,7 @@ pub struct CellStore {
 /// threads), or a worker thread running it (native: generation never costs
 /// the region's tick once a cell was prefetched).
 enum Generate {
+    #[cfg(target_arch = "wasm32")]
     Local(CellGenerator),
     #[cfg(not(target_arch = "wasm32"))]
     Worker {
@@ -184,6 +185,7 @@ impl CellStore {
             self.poll_prefetch();
             if !self.cells.contains_key(&cell) {
                 match self.generate.as_ref()? {
+                    #[cfg(target_arch = "wasm32")]
                     Generate::Local(generate) => {
                         let chunks = generated_chunks(generate, cell);
                         self.cells.insert(
