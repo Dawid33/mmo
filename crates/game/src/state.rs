@@ -47,6 +47,10 @@ impl RollbackInfo {
 #[derive(Clone, Debug)]
 pub enum GameDataUpdateKind {
     SetVoxelComponent(EntityKey, Option<Vec<Voxel>>),
+    /// A terrain chunk loaded with a cell (cell mode): the renderer spawns it
+    /// at its pose and derives its voxels off-thread, budgeted — the sim
+    /// thread never builds voxels for activated cells.
+    AddTerrainChunk(EntityKey, IsometryReal, Box<Chunk>),
     SetEntityPosition(EntityKey, IsometryReal),
     AddCameraComponent(EntityKey, ClientId, Perspective3<Real>, IsometryReal),
     RemoveCameraComponent(EntityKey),

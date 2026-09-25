@@ -267,16 +267,11 @@ impl Rollback {
     /// `CellChanges` arm, whose transaction is forgotten at once.
     pub fn materialize_cell(&mut self, payload: &CellPayload) {
         let chunks = payload.content.chunks.clone();
-        // Client regions tell the renderer about the new terrain the way a
-        // runtime-created chunk does (edit.rs): CreateEntity, its place, its
-        // voxels. Server regions have no render sink and derive nothing.
+        // Client regions hand the renderer each new chunk raw; it spawns the
+        // chunk and derives voxels off-thread (budgeted, nearest first), as
+        // for a join snapshot. Server regions have no render sink.
         let render = self.data.has_render_sink();
-        let voxels: Vec<_> = if render {
-            chunks.iter().map(|(_, c)| crate::derive_voxels(&c.blocks, &c.chisel)).collect()
-        } else {
-            Vec::new()
-        };
-        let coords: Vec<ChunkCoords> = chunks.iter().map(|(c, _)| *c).collect();
+        let raw: Vec<(ChunkCoords, Chunk)> = if render { chunks.clone() } else { Vec::new() };
         self.seed_terrain_genesis(chunks);
         if render {
             let index: std::collections::BTreeMap<(usize, i32, usize), EntityKey> = self
@@ -284,20 +279,17 @@ impl Rollback {
                 .into_iter()
                 .map(|(c, k)| ((c.x, c.y, c.z), k))
                 .collect();
-            for (c, v) in coords.iter().zip(voxels) {
+            for (c, chunk) in raw {
                 let e = index[&(c.x, c.y, c.z)];
                 let pose = crate::IsometryReal::translation(
                     parry3d::math::Real::from((c.x * 32) as f32),
                     parry3d::math::Real::from((c.y * 32) as f32),
                     parry3d::math::Real::from((c.z * 32) as f32),
                 );
-                for kind in [
-                    crate::GameDataUpdateKind::CreateEntity(e),
-                    crate::GameDataUpdateKind::SetEntityPosition(e, pose),
-                    crate::GameDataUpdateKind::SetVoxelComponent(e, Some(v)),
-                ] {
-                    self.data.send(crate::GameDataUpdate::new(crate::GameDataTransactionKind::Do, kind));
-                }
+                self.data.send(crate::GameDataUpdate::new(
+                    crate::GameDataTransactionKind::Do,
+                    crate::GameDataUpdateKind::AddTerrainChunk(e, pose, Box::new(chunk)),
+                ));
             }
         }
         for bundle in payload.content.entities.iter().cloned() {

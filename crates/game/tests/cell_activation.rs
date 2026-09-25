@@ -590,6 +590,7 @@ fn render_kinds(recv: &Receiver<game::GameDataUpdate>) -> Vec<&'static str> {
             game::GameDataUpdateKind::SetEntityPosition(..) => "pos",
             game::GameDataUpdateKind::SetVoxelComponent(..) => "voxels",
             game::GameDataUpdateKind::RemoveEntity(_) => "remove",
+            game::GameDataUpdateKind::AddTerrainChunk(..) => "terrain",
             _ => "other",
         })
         .collect()
@@ -604,8 +605,9 @@ fn a_client_tells_the_renderer_about_activated_and_released_terrain() {
     let ev = server_apply(&mut s, activate(&[CellCoords::new(1, 1)]));
     c.handle_event(ev.kind).unwrap();
     c.forget_last_event();
-    // cell_content has two chunks.
-    assert_eq!(render_kinds(&recv), vec!["create", "pos", "voxels", "create", "pos", "voxels"]);
+    // cell_content has two chunks: one raw-chunk update each — voxels are
+    // built off-thread by the renderer, never on the sim thread.
+    assert_eq!(render_kinds(&recv), vec!["terrain", "terrain"]);
     let ev = server_apply(&mut s, deactivate(&[CellCoords::new(1, 1)]));
     c.handle_event(ev.kind).unwrap();
     c.forget_last_event();
