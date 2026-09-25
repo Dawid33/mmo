@@ -116,10 +116,19 @@ pub const LOD_APPLY_CELLS_PER_FRAME: usize = 512;
 /// Cell mode: the home region's active cells, from
 /// `ClientUpdateEvent::ActiveCells`. Home-region LOD cells under them are
 /// hidden — those cells render at full detail from the sim.
-#[derive(Resource, Default, Debug)]
+#[derive(Resource, Debug)]
 pub struct HomeCellMask {
     pub region: Option<RegionCoords>,
     pub cells: BTreeSet<game::CellCoords>,
+    /// Cell edge in chunks: `game::CELL_CHUNKS`, a field only so tests can
+    /// exercise masking in a build without cell mode.
+    pub cell_chunks: usize,
+}
+
+impl Default for HomeCellMask {
+    fn default() -> Self {
+        Self { region: None, cells: BTreeSet::new(), cell_chunks: game::CELL_CHUNKS }
+    }
 }
 
 /// A masked LOD cell's grid, parked off `LodVoxelData` so both LOD paths
@@ -129,6 +138,14 @@ pub struct LodMaskStash(pub game::lod::PackedLodGrid);
 
 /// Hide/unhide LOD cells under the home region's active cells (cell mode).
 /// Re-evaluates everything when the mask changed, else only new LOD cells.
+///
+/// A flip also re-meshes the flipped cell's same-key neighbours: raster LOD
+/// meshing culls faces against neighbour grids and only re-runs on
+/// `Changed<LodVoxelData>`, so a neighbour meshed while this cell was present
+/// would keep its wall toward it culled — and that inward wall is exactly
+/// what closes the seam between near terrain and LOD (sky showed through).
+/// The touch goes through `commands`, so it lands in the same flush as the
+/// removal and the re-mesh sees the masked cell as air.
 pub fn mask_home_lod(
     mut commands: Commands,
     mask: Res<HomeCellMask>,
@@ -139,13 +156,16 @@ pub fn mask_home_lod(
         &ChildOf,
         Option<&lod::LodVoxelData>,
         Option<&LodMaskStash>,
+        Option<&lod::LodNeighbors>,
         Ref<lod::LodChunk>,
     )>,
     roots: Query<&Transform, Without<lod::LodChunk>>,
 ) {
     let Some(home) = mask.region else { return };
     let all = mask.is_changed();
-    for (e, chunk, tf, parent, data, stash, added) in &cells {
+    let mut flipped: BTreeSet<Entity> = BTreeSet::new();
+    let mut touch: BTreeSet<Entity> = BTreeSet::new();
+    for (e, chunk, tf, parent, data, stash, neighbors, added) in &cells {
         if !all && !added.is_added() {
             continue;
         }
@@ -153,7 +173,7 @@ pub fn mask_home_lod(
         let min = root.translation + tf.translation;
         let size = (32 * chunk.factor) as f32;
         let masked =
-            game::lod_cell_masked(home, &mask.cells, game::CELL_CHUNKS, [min.x, min.z], size);
+            game::lod_cell_masked(home, &mask.cells, mask.cell_chunks, [min.x, min.z], size);
         match (masked, data, stash) {
             (true, Some(d), None) => {
                 commands
@@ -167,7 +187,18 @@ pub fn mask_home_lod(
                     .insert((lod::LodVoxelData(st.0.clone()), Visibility::Inherited))
                     .remove::<LodMaskStash>();
             }
-            _ => {}
+            _ => continue,
+        }
+        flipped.insert(e);
+        if let Some(n) = neighbors {
+            touch.extend(n.0.values().copied());
+        }
+    }
+    // Re-insert (not mutate) so the `Changed` lands with the flip's flush.
+    // Flipped cells are skipped: they already get fresh data or none.
+    for ne in touch.difference(&flipped) {
+        if let Ok((.., Some(d), None, _, _)) = cells.get(*ne) {
+            commands.entity(*ne).insert(lod::LodVoxelData(d.0.clone()));
         }
     }
 }
@@ -518,6 +549,58 @@ mod tests {
 
     fn solid_payload(group: [i32; 3]) -> LodPayload {
         vec![(group, PackedLodGrid::encode(&one_solid_grid()))]
+    }
+
+    fn mesh_vertices(app: &App, e: Entity) -> Option<usize> {
+        let h = &app.world().get::<Mesh3d>(e)?.0;
+        app.world().resource::<Assets<Mesh>>().get(h).map(|m| m.count_vertices())
+    }
+
+    /// Cell mode: activating a cell masks the home LOD cell under it, and the
+    /// UNMASKED neighbour must re-mesh with that cell as air — its wall toward
+    /// the masked cell is what closes the near/LOD seam from inside the
+    /// active cell. Before the fix the neighbour kept its stale mesh (wall
+    /// culled against the now-hidden cell) and sky showed through.
+    #[test]
+    fn masking_a_cell_remeshes_its_neighbours_wall_toward_it() {
+        let mut app = rings_app();
+        let home = RegionCoords::new(0, 0);
+        {
+            let mut mask = app.world_mut().resource_mut::<HomeCellMask>();
+            mask.region = Some(home);
+            // One factor-4 LOD cell (32 * 4 units) == one 4-chunk game cell.
+            mask.cell_chunks = 4;
+        }
+        let key = LodKey::for_region(4, home);
+        let packed = PackedLodGrid::encode(&one_solid_grid());
+        push_event(&mut app, LodEventMsg::Data(key, vec![([0, 0, 0], packed.clone()), ([1, 0, 0], packed)]));
+        assert!(wait_until(&mut app, |app| slot_root(app, key).is_some()));
+        let root = slot_root(&app, key).unwrap();
+        let child_at = |app: &mut App, x: f32| {
+            let world = app.world_mut();
+            let mut q = world.query::<(Entity, &Transform, &ChildOf)>();
+            q.iter(world)
+                .find(|(_, tf, c)| c.parent() == root && tf.translation.x == x)
+                .map(|(e, ..)| e)
+                .unwrap()
+        };
+        let (kept, masked) = (child_at(&mut app, 0.0), child_at(&mut app, 128.0));
+        assert!(wait_until(&mut app, |app| mesh_vertices(app, kept).is_some()
+            && mesh_vertices(app, masked).is_some()));
+        let before = mesh_vertices(&app, kept).unwrap();
+
+        app.world_mut()
+            .resource_mut::<HomeCellMask>()
+            .cells
+            .insert(game::CellCoords::new(1, 0));
+        assert!(
+            wait_until(&mut app, |app| app.world().get::<LodVoxelData>(masked).is_none()),
+            "the cell under the active game cell is masked"
+        );
+        assert!(
+            wait_until(&mut app, |app| mesh_vertices(app, kept).is_some_and(|v| v > before)),
+            "the neighbour must re-mesh and gain its +X wall toward the masked cell"
+        );
     }
 
     /// A burst of payloads must not stack into one frame: the cell budget
