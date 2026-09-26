@@ -525,7 +525,9 @@ impl core::hash::Hash for Voxels {
 }
 
 /// Minimal FNV-1a, used only for the canonical content hash below.
-/// Deterministic across platforms (no_std, no external deps).
+/// Deterministic across platforms (no_std, no external deps): `usize` (the
+/// length prefix of every hashed slice) is widened to 64-bit little-endian,
+/// the bytes std already writes on 64-bit native, so wasm32 hashes the same.
 struct ContentHasher(u64);
 
 impl core::hash::Hasher for ContentHasher {
@@ -537,6 +539,12 @@ impl core::hash::Hasher for ContentHasher {
             self.0 ^= *b as u64;
             self.0 = self.0.wrapping_mul(0x100000001b3);
         }
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write(&(i as u64).to_le_bytes());
+    }
+    fn write_isize(&mut self, i: isize) {
+        self.write(&(i as i64).to_le_bytes());
     }
 }
 
