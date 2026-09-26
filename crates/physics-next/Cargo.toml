@@ -1,0 +1,19 @@
+[package]
+name = "physics-next"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Harness for the rapier 0.36 / parry 0.31 (glam) upgrade: spikes now, the fork patches' pinning tests later. Nothing in game/client/server depends on it."
+
+[dependencies]
+# Phase 2 swaps these for the vendored `*-next` forks.
+rapier3d = { version = "=0.36.0", features = ["enhanced-determinism", "serde-serialize"] }
+bincode = { workspace = true }
+crc32fast = { workspace = true, features = ["std"] }
+serde = { workspace = true }
+
+[dev-dependencies]
+# Constants only (player capsule, skin, speeds): the probes measure upstream
+# against the game's real numbers without restating them. The direction
+# matters: game never depends on this crate or on rapier 0.36.
+game = { workspace = true }
