@@ -232,3 +232,20 @@ fn issue_315_overlapping_cuboids() {
     assert!((c.point1.x.0 - 1.0).abs() < 1.0e-4);
     assert!((c.point2.x.0 - 0.7).abs() < 1.0e-4);
 }
+
+/// #415 (upstream PR #420): EPA rejected valid faces with an absolute
+/// tolerance, although face distances carry rounding error proportional to
+/// the coordinate magnitudes. A capsule sunk 1.3 mm into a 100-unit-wide
+/// cuboid got no contact at all. Found by a sweep; EPA's degenerate-face
+/// tolerance now scales with the simplex coordinates.
+#[test]
+fn issue_415_capsule_sunk_into_wide_cuboid_gets_a_contact() {
+    let ground = Cuboid::new(v(50.0, 0.5, 50.0));
+    let cap = Capsule::new_y(r(0.4), r(0.3));
+    let pen = 0.0013;
+    let c = query::contact(&at(0.0, -0.5, 0.0), &ground, &at(0.1, 0.7 - pen, -0.1), &cap, r(0.0))
+        .unwrap()
+        .expect("a sunk capsule must get a contact");
+    assert!((c.dist.0 + pen).abs() < 1.0e-4, "dist {} (expected {})", c.dist, -pen);
+    assert!((c.normal1.into_inner() - Vector::y()).norm().0 < 1.0e-3, "normal1 {:?}", c.normal1);
+}

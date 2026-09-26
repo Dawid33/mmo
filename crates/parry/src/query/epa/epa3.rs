@@ -21,8 +21,10 @@ struct FaceId {
 }
 
 impl FaceId {
-    fn new(id: usize, neg_dist: Real) -> Option<Self> {
-        if neg_dist > gjk::eps_tol() {
+    /// `tol` is the degenerate-face tolerance, scaled with the simplex coordinate
+    /// magnitudes (upstream #420/#415).
+    fn new(id: usize, neg_dist: Real, tol: Real) -> Option<Self> {
+        if neg_dist > tol {
             None
         } else {
             Some(FaceId { id, neg_dist })
@@ -477,6 +479,18 @@ impl EPA {
             }
         }
 
+        // Tolerance used to reject degenerate faces. It is scaled relative to the magnitude
+        // of the simplex coordinates: dot products used to compute face distances accumulate
+        // rounding errors proportional to the coordinate magnitudes, so an absolute tolerance
+        // wrongly rejects valid faces far from the origin (upstream #420/#415).
+        let dist_tol = {
+            let mut scale = Real::from(0.0);
+            for v in &self.vertices {
+                scale = scale.max(v.point.coords.norm());
+            }
+            gjk::eps_tol() * scale.max(Real::from(1.0))
+        };
+
         if simplex.dimension() == 3 {
             let dp1 = self.vertices[1] - self.vertices[0];
             let dp2 = self.vertices[2] - self.vertices[0];
@@ -508,22 +522,22 @@ impl EPA {
 
             if proj_inside1 {
                 let dist1 = self.faces[0].normal.dot(&self.vertices[0].point.coords);
-                self.heap.push(FaceId::new(0, -dist1)?);
+                self.heap.push(FaceId::new(0, -dist1, dist_tol)?);
             }
 
             if proj_inside2 {
                 let dist2 = self.faces[1].normal.dot(&self.vertices[1].point.coords);
-                self.heap.push(FaceId::new(1, -dist2)?);
+                self.heap.push(FaceId::new(1, -dist2, dist_tol)?);
             }
 
             if proj_inside3 {
                 let dist3 = self.faces[2].normal.dot(&self.vertices[2].point.coords);
-                self.heap.push(FaceId::new(2, -dist3)?);
+                self.heap.push(FaceId::new(2, -dist3, dist_tol)?);
             }
 
             if proj_inside4 {
                 let dist4 = self.faces[3].normal.dot(&self.vertices[3].point.coords);
-                self.heap.push(FaceId::new(3, -dist4)?);
+                self.heap.push(FaceId::new(3, -dist4, dist_tol)?);
             }
 
             if !(proj_inside1 || proj_inside2 || proj_inside3 || proj_inside4) {
@@ -559,8 +573,8 @@ impl EPA {
             self.faces.push(face1);
             self.faces.push(face2);
 
-            self.heap.push(FaceId::new(0, Real::from(0.0))?);
-            self.heap.push(FaceId::new(1, Real::from(0.0))?);
+            self.heap.push(FaceId::new(0, Real::from(0.0), dist_tol)?);
+            self.heap.push(FaceId::new(1, Real::from(0.0), dist_tol)?);
         }
 
         let mut niter = 0;
@@ -647,7 +661,7 @@ impl EPA {
                             return Some((points.0, points.1, face.normal));
                         }
 
-                        self.heap.push(FaceId::new(new_face_id, -dist)?);
+                        self.heap.push(FaceId::new(new_face_id, -dist, dist_tol)?);
                     }
                 }
             }

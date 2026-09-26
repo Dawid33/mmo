@@ -834,7 +834,14 @@ where
         proj = simplex.project_origin_and_reduce();
 
         if simplex.dimension() == DIM {
-            if min_bound >= _eps_tol {
+            // `min_bound` accumulates rounding errors proportional to the magnitude of the
+            // support coordinates, so we scale the tolerance accordingly (upstream #180).
+            let scale = support_point
+                .point
+                .coords
+                .norm()
+                .max(curr_ray.origin.coords.norm());
+            if min_bound >= _eps_tol * scale.max(Real::from(1.0)) {
                 return None;
             } else {
                 return Some((ltoi / ray_length, ldir)); // Point inside of the cso.
