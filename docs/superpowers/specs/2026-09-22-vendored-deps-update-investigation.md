@@ -97,3 +97,27 @@ Lockfile duplicates are harmless:
    - breaking the wire and snapshot format.
 
    Worth it only for the new solver/islands/CCD, `parallel` with determinism, or to stop maintaining four math forks.
+
+## Landed (2026-09-26, plan `docs/superpowers/plans/2026-09-22-physics-fork-fixes.md`)
+
+Hand-ported upstream fixes in the nalgebra-era forks. Each one is pinned by a test in `crates/game/tests/` that becomes a port-parity check for the rapier 0.35 upgrade. No hard-coded expected value moved: the movement rig (`shape_cast_grazing`, `walking_smoothness` incl. slow, `kinematic`, `step_journal`, `sunk_body`, `jump_arc`, `slime`, `random_ops`, `hash_restore`) and `just test-threads` stayed green.
+
+- `47e4ebe` **slotmapd**: `Slot::clone_from` drops the overwritten value (slotmap #137), plus the `PanicOnDrop` guard on map-level `clone_from`. Test: `hash_restore::slotmap_clone_from_drops_overwritten_values`.
+- `3b276a8` **nalgebra**: stable 2×2 deflation basis in `SymmetricEigen` (#1210). Test: `nalgebra_fixes.rs`, with upstream's per-element 1e-5 bound; the recompose error was 11.6 before.
+- `6d295d9` **parry voxels**: the #404 and #373 fixes were already local. They are now pinned by `voxels_upstream.rs`; each test was checked to fail with its fix reverted.
+- `fa08f24` **parry GJK/EPA**:
+  - GJK stalls are classified by the best lower bound (separated / touching / penetrating), with deterministic direction perturbation (#193, #396);
+  - EPA bootstraps a 0-simplex from an axis support point (#315).
+  - Tests: `gjk_upstream::issue_{193,396,70,315}_*`.
+- `80ff452` **parry**: the last-chance shape-cast TOI is refined with the simplex witnesses (#429). Test: `issue_429_*`, upstream's sweep, ≤ 0.2 mm.
+- `c25d6ae` **parry**:
+  - the GJK ray-cast containment tolerance (#180) and the EPA degenerate-face tolerance (#415 / PR #420) now scale with coordinate magnitude;
+  - test: `issue_415_capsule_sunk_into_wide_cuboid_gets_a_contact`;
+  - the #180 fix has no 3D repro, since upstream's test is 2D only.
+
+Deliberately not ported: C4/#106, the 1e-4 small-TOI fallback, BVH #419/#409/#403, and signed-zero impulses (see the plan).
+
+**Known open item: EPA seeding.** When GJK hands EPA a 1-simplex passing through the origin, EPA can only expand toward one side. Faces whose origin projection falls outside them never enter the heap. Example: a capsule sunk 1 mm into a 16-unit cuboid at (0.1, −0.1) gets normal −Y and depth 2.4 from `query::contact`.
+- **Cause:** a pre-existing weakness, now reached more often because the GJK stall classification hands stalls over to EPA. Upstream's EPA has the same code.
+- **Net effect:** in a 2000-case sunk ball/capsule sweep, wrong-direction normals dropped from 128 to 30 (46 → 1 at our 8/16-unit sizes) and bad contacts from 609 to 372.
+- **Game impact:** none today. The KCC's `query::contact` call is commented out, and capsule/cuboid manifolds go through the core-segment PFM path, which reaches EPA only when a capsule is sunk past its radius.
