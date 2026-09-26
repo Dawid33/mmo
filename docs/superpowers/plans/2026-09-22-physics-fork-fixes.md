@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Work on `develop` in the main checkout; never create worktrees (CLAUDE.md).
-- The checkout has a lot of the user's uncommitted work, including in `crates/parry/src/query/contact_manifolds/contact_manifolds_voxels_shape.rs` and `crates/rapier/src/geometry/collider_set.rs`.
+- The checkout has a lot of the user's uncommitted work, possibly including fork files; check `git status --short crates/` first.
   - Before every commit, run `git diff -- <file>` on each file you touch.
   - Stage only this task's hunks, with `git add -p <file>`.
   - Never `git add -A` or `git add .`, and never `git stash`.
@@ -209,19 +209,19 @@ let basis = if (eigvals.x.clone() - diag[start + 1].clone()).abs()
 
 ---
 
-### Task 3: Commit the voxels prediction-AABB fix and pin parry #404 and #373
+### Task 3: Pin the voxels fixes for parry #404 and #373 (fixes already committed)
 
 **Files:**
-- Modify (already edited, uncommitted): `crates/parry/src/query/contact_manifolds/contact_manifolds_voxels_shape.rs` (~:134, `shape2.compute_aabb(pos12).loosened(prediction)`)
+- Read only: `crates/parry/src/query/contact_manifolds/contact_manifolds_voxels_shape.rs` (~:134, `shape2.compute_aabb(pos12).loosened(prediction)`, committed in 6736620)
 - Create: `crates/game/tests/voxels_upstream.rs`
 
 Upstream fixed the same bugs in parry PR #437 (issues #404 and #373). Our fork already has both fixes:
-- #404 is uncommitted;
+- #404 is in `contact_manifolds_voxels_shape.rs:134`, committed in 6736620;
 - #373 is in `shape_cast_voxels_shape.rs:187/228/246`, committed in 7b7eb9e / 4173c4e.
 
 This task only pins them.
 
-- [ ] **Step 1: Check the uncommitted diff is only #404.** Run `git diff -- crates/parry/src/query/contact_manifolds/contact_manifolds_voxels_shape.rs`. If it contains more than the `.loosened(prediction)` AABB change and its comment, stop and ask the user which hunks are theirs.
+- [ ] **Step 1: Confirm the fix is already committed.** It went in with 6736620 ("commit all outstanding work in progress"): `git log --oneline -1 -- crates/parry/src/query/contact_manifolds/contact_manifolds_voxels_shape.rs` must show it, and `git diff` on the file must be empty. This task only adds the pinning tests.
 
 - [ ] **Step 2: Write the tests.** Create `crates/game/tests/voxels_upstream.rs`:
 
@@ -275,7 +275,7 @@ Adjust the constructor calls to the fork's API before running: check the `Voxels
 
 - [ ] **Step 3: Run the tests.** `just test-one game "--test voxels_upstream"`. Expected: PASS with the uncommitted fix. To prove the #404 test bites, temporarily revert the `.loosened(prediction)` line and confirm `voxels_manifold_sees_contacts_within_prediction` FAILS, then restore it. Do this by hand-editing; do not use `git checkout`/`stash`, which would drop other uncommitted work.
 
-- [ ] **Step 4: Commit.** Stage only the #404 hunk (`git add -p <voxels manifold file>`) plus the new test file. Message: `fix(parry): voxels manifolds see contacts within the prediction distance (upstream #404); pin #373`.
+- [ ] **Step 4: Commit** the new test file only. Message: `test(parry): pin voxels prediction-distance contacts (#404) and cast witness frame (#373)`.
 
 ---
 

@@ -1,8 +1,8 @@
-# Rapier 0.35 / parry 0.30 (glam) Upgrade Implementation Plan
+# Rapier 0.36 / parry 0.31 (glam) Upgrade Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the nalgebra-era rapier 0.31 / parry 0.25.3 forks with forks of upstream rapier 0.35.3 / parry 0.30.2 (glam via `glamx`, `f32` scalar). Keep bit-exact rollback, client/server determinism (native and wasm32), and today's movement behaviour, and shrink the fork diff to a handful of hooks.
+**Goal:** Replace the nalgebra-era rapier 0.31 / parry 0.25.3 forks with forks of upstream rapier 0.36.0 / parry 0.31.1 (glam via `glamx`, `f32` scalar). Keep bit-exact rollback, client/server determinism (native and wasm32), and today's movement behaviour, and shrink the fork diff to a handful of hooks.
 
 **Architecture:**
 - **Land the work without breaking `develop`.**
@@ -14,7 +14,7 @@
   - a fresh `PhysicsPipeline` + `CCDSolver` after every revert.
 - **Hashing moves from `derive(Hash)` over `OrderedFloat` to crc32 over canonical bincode bytes.** Upstream contracts byte-identical snapshot round-trips.
 
-**Tech Stack:** Rust; rapier3d 0.35.3, parry3d 0.30.2, glamx 0.3 (glam 0.33), simba 0.10, nalgebra 0.35 (rapier-internal only); bincode 1.3; crc32fast; wasm-bindgen-test-runner + node for wasm32 goldens.
+**Tech Stack:** Rust; rapier3d 0.36.0, parry3d 0.31.1, glamx 0.3.1 (glam 0.33), simba 0.10, nalgebra 0.35 (rapier-internal only); bincode 1.3; crc32fast; wasm-bindgen-test-runner + node for wasm32 goldens.
 
 **Spec:** `docs/superpowers/specs/2026-09-22-vendored-deps-update-investigation.md`, plus the design section of this plan. Roadmap: `docs/superpowers/plans/2026-09-22-physics-upstream-roadmap.md`.
 
@@ -48,11 +48,41 @@
 | D5 ⚠️ | How the multi-week port lands | Side-by-side vendoring (`crates/rapier-next`, `crates/parry-next`, `crates/physics-next`) on `develop`, then one switch commit series | CLAUDE.md forbids worktrees, and the user edits `develop` concurrently, so a long-lived branch would need constant rebasing of a huge diff. **Needs the user's OK.** |
 | D6 | `IntegrationParameters::length_unit` | Decided in the Phase 1 spike: 1.0 (today's behaviour) vs `UNITS_PER_METER` | It scales the broad-phase skin, contact recycling and sleep thresholds, so it sets how often the BVH, and hence the journal, is dirty. Pick the value that keeps `walking_smoothness` green with fewer dirty ticks. |
 | D7 | Character-controller depenetration | Keep `movement::depenetration_lift`; disable upstream's zero-motion depenetration (#485) if the two fight | Our lift is pinned by `sunk_body.rs`; having two depenetrations is a jitter source. Decided in Task 3.4. |
-| D8 | Upstream parry #106 (touching = `Converged` at TOI 0) | Accept it, and rework our two separated-start cast filters to `toi == 0 && normal·vel >= 0` | It's in 0.30.2, and reverting it would be a new fork patch. Pinned by `shape_cast_grazing.rs`. |
+| D8 | Upstream parry #106 (touching = `Converged` at TOI 0) | Accept it, and rework our two separated-start cast filters to `toi == 0 && normal·vel >= 0` | It's in 0.30.2 and carried unchanged into 0.31.1, and reverting it would be a new fork patch. Pinned by `shape_cast_grazing.rs`. |
+
+## Retargeted to rapier 0.36.0 / parry 0.31.1 (2026-09-26)
+
+Written against 0.35.3 / 0.30.2, then retargeted when 0.36.0 shipped (2026-09-25) before any Plan 2 work had started. All seven design facts still hold (checked against source); per-task deltas:
+
+- **Pins.** rapier 0.36.0 pins parry `^0.31.1` (0.31.0 is yanked), glamx `^0.3.1`, simba `^0.10.2`, nalgebra `^0.35` (internal only) and `wide ^1`. MSRV is 1.86 and editions are unchanged. This release is new, so **re-check for a 0.36.x patch at the Task 2.1 import** and take the newest.
+- **Soft bodies are always compiled in; we don't use them.**
+  - `PhysicsPipeline::step`, `RigidBodySet::remove`, `ColliderSet::remove`, `DebugRenderPipeline::render` and `CCDSolver::solve_continuous` now take `&mut SoftBodySet`.
+  - New variants break exhaustive matches: `RigidBodyType::SoftFrame`, which `is_dynamic()` counts as dynamic, and `DebugRenderObject::SoftBody`.
+  - `EventHandler` gains a required `handle_soft_body_tear_event`.
+  - The journal (D1) clones the empty `SoftBodySet` wholesale and debug-asserts it stays empty.
+  - The game keeps one empty `SoftBodySet` in `PhysicsState` (Task 5.2).
+- **parry 0.31 API changes:**
+  - `ShapeCastHit` gains `subshape1/subshape2`, and `RayIntersection`/`PointProjection` gain `subshape`.
+  - `distance`/`intersection_test` return structs.
+  - `CompositeShapeRef` queries return `(id, hit)`.
+  - The GJK/EPA fixes are byte-identical to 0.30.2, so Plan 1's parity tests apply as-is.
+- **Task 3.1:** `rigid_body_components.rs:434-446` now has an `is_soft_frame()` early return. Extend it with `|| body_type.is_fixed()`, keeping the `recompute_max_extent` call if our old patch kept it.
+- **Task 3.3:** ported casts must fill `subshape1/2`. `cast_shape_on_continuous_surfaces` uses the `(id, hit)` form and maps ids via `handle_of` (`query_pipeline.rs:174-178`). `cast_shape` is at `:489`.
+- **Task 3.4 line refs:** depenetration `character_controller.rs:240` / `:313-317`, snap gate `:457`, `predict_ground` `:491-514`.
+- **Task 3.5 line refs:** re-insertion `broad_phase_bvh/update.rs:74-93`, filter `:359-397`.
+- **Task 4.1:** `RigidBodySet::remove` takes `soft_bodies`. Re-check the arena free-list layout against 0.36.
+- **Task 4.2:**
+  - Capture accessors: `rigid_body_set.rs:352-366`, `collider_set.rs:530-545`.
+  - The staged solver's raw-pointer writes are at `staged_island_solver/mod.rs:212` (created `solve.rs:267`, `substep.rs:166`; dereferenced `worker.rs:702/964`). The debug asserts go there.
+- **Task 4.3:** memos `physics_pipeline/mod.rs:48-53` (used `solve.rs:351-358`); staged assembly cache `staged_island_solver/mod.rs:287`, `joints.rs:52,313`. `CCDSolver` needs no patch; upstream now also calls `invalidate_fixed_targets_cache` itself (`substep.rs:389-397`).
+- **Task 5.2:**
+  - Game call sites needing `SoftBodySet`: `state.rs:~933` (`bodies.remove`), `debug_render.rs`, `physics.rs` (step), and the `CCDSolver` kept in state (`state.rs:~222`).
+  - Add match arms for the new variants.
+- **Task 5.4:** upstream's portability golden changed in 0.36; ours are re-recorded anyway.
 
 ## Review Focus
 
-1. **A rollback across a tick where the staged solver wrote a body the journal didn't capture.** The capture hooks sit in the set accessors, but the staged solver writes through a raw pointer. Task 4.2 adds a debug assert, and the revert fuzzer must hit wake-up, island-merge and removal ticks.
+1. **A rollback across a tick where the staged solver wrote a body the journal didn't capture.** The capture hooks sit in the set accessors, but the staged solver writes through a raw pointer (0.36: `staged_island_solver/mod.rs:212`, dereferenced `worker.rs:702/964`). Task 4.2 adds a debug assert, and the revert fuzzer must hit wake-up, island-merge and removal ticks.
 2. **Revert, then re-step, with a live `PhysicsPipeline`.** Its epoch-keyed joint and assembly memos go stale after a rewind. Task 4.3 pins that a fresh pipeline after revert gives byte-identical re-steps, with joints present even though the game has none today.
 3. **The same scene on native and on wasm32.** The voxel mass properties go through std `acos`/`cos` in glamx `SymmetricEigen3`. The fixed-body mass-props skip must survive the re-port, and Task 0.3's cross-target golden must match.
 4. **A player walking over chunk and scale seams, standing on a 1-voxel terrace, and sunk into terrain.** These use the re-ported voxels-cast fixes, the KCC snap gate and `depenetration_lift` against the upstream KCC. `walking_smoothness` (with its slow tests), `shape_cast_grazing`, `sunk_body`, `jump_arc`, plus the Phase 0 behaviour goldens.
@@ -133,8 +163,8 @@ determinism-wasm:
 
 ### Task 0.4: Port Plan 1's upstream-fix tests into the rig
 
-- [ ] **Step 1: Check where Plan 1 stands.** It is `docs/superpowers/plans/2026-09-22-physics-fork-fixes.md`, and it lands first. `gjk_upstream.rs`, `voxels_upstream.rs` and `nalgebra_fixes.rs` exist and are green. Those tests cover fixes that are *in* parry 0.30.2, so they must stay green after the switch. That's the check that the upstream versions behave like our hand ports.
-- [ ] **Step 2: Add a module doc line to each file:** "Must stay green across the rapier 0.35 switch (upgrade plan Phase 5)."
+- [ ] **Step 1: Check where Plan 1 stands.** It is `docs/superpowers/plans/2026-09-22-physics-fork-fixes.md`, and it lands first. `gjk_upstream.rs`, `voxels_upstream.rs` and `nalgebra_fixes.rs` exist and are green. Those tests cover fixes that are *in* parry 0.30.2 (unchanged in 0.31.1), so they must stay green after the switch. That's the check that the upstream versions behave like our hand ports.
+- [ ] **Step 2: Add a module doc line to each file:** "Must stay green across the rapier 0.36 switch (upgrade plan Phase 5)."
 
 ---
 
@@ -143,14 +173,14 @@ determinism-wasm:
 ### Task 1.1: Real-scale clone and hash cost
 
 **Files:**
-- Create: `crates/physics-next/` (workspace member, `publish = false`), depending on crates.io `rapier3d = { version = "=0.35.3", features = ["enhanced-determinism", "serde-serialize"] }` and `bincode`, `crc32fast`. Phase 2 swaps this for the vendored fork.
+- Create: `crates/physics-next/` (workspace member, `publish = false`), depending on crates.io `rapier3d = { version = "=0.36.0", features = ["enhanced-determinism", "serde-serialize"] }` and `bincode`, `crc32fast`. Phase 2 swaps this for the vendored fork.
 - Create: `crates/game/examples/export_region_colliders.rs`. It writes, for one generated region, every chunk collider's `(chunk origin, voxel_size, Vec<[i32;3]>)` or cuboid half-extents to `target/physics-next/region_<x>_<z>.bin` (bincode).
 - Create: `crates/physics-next/examples/clone_cost.rs`
 
 - [ ] **Step 1: Write the exporter.** It uses `game`'s genesis path (`seed_terrain_genesis`, `state.rs:565`) to get exactly the production collider set; read that function and walk `data.physics.colliders`. Add a `just` recipe `export-region` only if it's worth a one-word command; otherwise document the `cargo run --example` line in the file header.
 - [ ] **Step 2: Write `clone_cost.rs`.**
   - Load the export.
-  - Build a 0.35 world with the same bodies and colliders (fixed body per chunk, as the game does today), plus 4 kinematic capsules on the surface, moved each tick.
+  - Build a 0.36 world (with an empty `SoftBodySet`) with the same bodies and colliders (fixed body per chunk, as the game does today), plus 4 kinematic capsules on the surface, moved each tick.
   - Measure over 600 ticks: clone time per structure, wholesale `(IslandManager, NarrowPhase, BroadPhaseBvh)` clone, full 7-structure clone, bincode size, crc32 of bincode per structure, first step after `PhysicsPipeline::new()`.
   - Print a table.
 - [ ] **Step 3: Ask the user before running it** (timing run). Then run it in release, pinned to one core (`taskset -c 2`), and paste the table into `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md`.
@@ -163,7 +193,7 @@ determinism-wasm:
 **Files:**
 - Create: `crates/physics-next/tests/upstream_movement_probe.rs`
 
-- [ ] **Step 1: Port the pure-parry cases.** Take the five tests in `crates/game/tests/shape_cast_grazing.rs` and translate them to the glam API (`Vec3`, `Pose`; `Voxels::new(Vec3, &[IVec3])`), running against crates.io parry 0.30.2.
+- [ ] **Step 1: Port the pure-parry cases.** Take the five tests in `crates/game/tests/shape_cast_grazing.rs` and translate them to the glam API (`Vec3`, `Pose`; `Voxels::new(Vec3, &[IVec3])`), running against crates.io parry 0.31.1.
 - [ ] **Step 2: Run them and record which fail.** Expected from the research: the search-domain and internal-edge cases fail upstream; the grazing-start case may pass (partial upstream fallback). This list is the re-port scope for Task 3.2.
 - [ ] **Step 3: Run a KCC probe.** Capsule on a flat voxels floor, `move_shape` with zero desired translation after placing it 0.3 units sunk. Does upstream's #485 depenetration push it out, and along which normal? Record it for D7.
 - [ ] **Step 4: Run a `length_unit` probe (D6).** Repeat a 120-tick walk across a chunk seam with `length_unit = 1.0` and `= 16.0`. Record the dirty-BVH tick count and the max |Δy|.
@@ -181,11 +211,11 @@ determinism-wasm:
 ### Task 2.1: Import pristine sources
 
 **Files:**
-- Create: `crates/rapier-next/` (pristine rapier 0.35.3 git tag, `src/` + `crates/rapier3d/Cargo.toml` layout as upstream)
-- Create: `crates/parry-next/` (pristine parry 0.30.2)
+- Create: `crates/rapier-next/` (pristine rapier 0.36.0 git tag (`v0.36.0`, b716d37), `src/` + `crates/rapier3d/Cargo.toml` layout as upstream)
+- Create: `crates/parry-next/` (pristine parry 0.31.1, tag `v0.31.1`, 3383f51)
 - Modify: root `Cargo.toml` `[workspace] members` and `[workspace.dependencies]`
 
-- [ ] **Step 1: Import from the tagged git sources**, not the crates.io tarballs, so upstream tests come along: `git clone --depth 1 --branch v0.35.3 https://github.com/dimforge/rapier` into `$CLAUDE_JOB_DIR`-style scratch, then copy. Check the tag names with `git ls-remote --tags`. Import commit message: `vendor: pristine rapier 0.35.3 + parry 0.30.2 as *-next (unused)`. Keep it a pure import, so the fork diff is always `git diff <import-commit> -- crates/rapier-next`.
+- [ ] **Step 1: Import from the tagged git sources**, not the crates.io tarballs, so upstream tests come along: `git clone --depth 1 --branch v0.36.0 https://github.com/dimforge/rapier` into `$CLAUDE_JOB_DIR`-style scratch, then copy. Check the tag names with `git ls-remote --tags`. Import commit message: `vendor: pristine rapier 0.36.0 + parry 0.31.1 as *-next (unused)`. Keep it a pure import, so the fork diff is always `git diff <import-commit> -- crates/rapier-next`.
 - [ ] **Step 2: Rename the packages** to `rapier3d-next` / `parry3d-next`, with `[lib] name = "rapier3d"` / `"parry3d"`, so source paths inside the forks need no edits. Point rapier-next's parry dependency at `parry3d-next` via `package = "parry3d-next"`.
 - [ ] **Step 3: Switch `physics-next` to `path` deps on the new forks** with `enhanced-determinism, serde-serialize`. Run `just test-one physics-next "--tests"`. Expected: the Task 1.2 probe gives the same results as against crates.io.
 - [ ] **Step 4: Confirm the game build is untouched.** `cargo tree -p game | grep -c next` must print 0. Run `just smoke`.
@@ -219,7 +249,7 @@ Keep every patch small and marked `// mmo-fork:` so the fork diff stays greppabl
 ### Task 3.3: `QueryPipeline::cast_shape_on_continuous_surfaces` and grazing-start handling
 
 - **Old patch:** `crates/rapier/src/pipeline/query_pipeline.rs:512` plus its uses in `character_controller.rs:315/439/736/756`; the parry side is `shape_cast_support_map_support_map.rs` (`GRAZING_START_MARGIN`).
-- **Apply D8:** upstream 0.30.2 already returns `Converged` for touching at TOI 0. Re-port only the parts `shape_cast_grazing.rs` still needs, and rewrite the two separated-start filters (the query pipeline, and the voxels cast ~:240) to accept a hit at `toi == 0` only if `normal · vel < 0`.
+- **Apply D8:** upstream 0.31.1 already returns `Converged` for touching at TOI 0. Re-port only the parts `shape_cast_grazing.rs` still needs, and rewrite the two separated-start filters (the query pipeline, and the voxels cast ~:240) to accept a hit at `toi == 0` only if `normal · vel < 0`.
 - **Tests:** all of `shape_cast_grazing.rs`, translated.
 
 ### Task 3.4: KCC: snap gate, prediction-loosened ground manifolds, depenetration (D7)
@@ -257,7 +287,7 @@ Keep every patch small and marked `// mmo-fork:` so the fork diff stays greppabl
 
 - [ ] **Step 1: Port the tests.** `crates/game/tests/hash_restore.rs`, the arena/`RigidBodySet`/`ColliderSet` exactness tests (10), translated into `physics-next/tests/arena_revert.rs`, asserting byte equality of bincode before and after instead of `Hash`.
 - [ ] **Step 2: Watch them fail** (methods missing).
-- [ ] **Step 3: Port the implementations.** Old code: `crates/rapier/src/data/arena.rs:370-402`, `rigid_body_set.rs:124-220`, `collider_set.rs:111-154`. Upstream 0.35 arenas: check for changes to the free-list layout before copying.
+- [ ] **Step 3: Port the implementations.** Old code: `crates/rapier/src/data/arena.rs:370-402`, `rigid_body_set.rs:124-220`, `collider_set.rs:111-154`. Upstream 0.36 arenas: check for changes to the free-list layout before copying.
 - [ ] **Step 4: Green, then commit.**
 
 ### Task 4.2: Hybrid `StepJournal`
@@ -288,6 +318,8 @@ pub struct PhysicsParts<'a> {
     pub colliders: &'a mut ColliderSet,
     pub impulse_joints: &'a mut ImpulseJointSet,
     pub multibody_joints: &'a mut MultibodyJointSet,
+    /// 0.36: soft bodies are compiled in; the game keeps this empty (asserted).
+    pub soft_bodies: &'a mut SoftBodySet,
 }
 impl PhysicsPipeline {
     pub fn step_journaled(&mut self, /* same args as step */, journal: Option<&mut StepJournal>);
@@ -314,7 +346,7 @@ On `revert`, the captured values are written back in reverse order and the clone
 ### Task 4.3: Pipeline memo invalidation after revert
 
 - [ ] **Step 1: Write the test.** A scene with an impulse joint: step to tick N; journal, step and revert; re-step with (a) the same `PhysicsPipeline` and (b) `PhysicsPipeline::new()`. Assert (b) equals a never-reverted run byte for byte. Show whether (a) diverges; either way, record it in the test's doc comment.
-- [ ] **Step 2: Implement.** Add `PhysicsPipeline::invalidate_caches(&mut self)` and `CCDSolver::invalidate_caches(&mut self)`, which clear `joint_constraint_indices`, `joint_selection_primed`, the staged-solver assembly cache and `fixed_targets_cache`. `StepJournal::revert` can't reach the pipeline, so the game calls these after revert. If (a) doesn't diverge, keep the call anyway: it's cheap insurance, and the test pins it.
+- [ ] **Step 2: Implement.** Add `PhysicsPipeline::invalidate_caches(&mut self)` and upstream's public `CCDSolver::invalidate_fixed_targets_cache()` (0.36, `ccd_solver.rs:47-49`; no fork patch), which together clear `joint_constraint_indices`, `joint_selection_primed`, the staged-solver assembly cache and `fixed_targets_cache`. `StepJournal::revert` can't reach the pipeline, so the game calls these after revert. If (a) doesn't diverge, keep the call anyway: it's cheap insurance, and the test pins it.
 - [ ] **Step 3: Commit.**
 
 ### Task 4.4: `StateDigest` and physics digests
@@ -376,7 +408,12 @@ The type map applies everywhere:
 | `KinematicCharacterController::up: UnitVector` | `Vec3` |
 | `move_shape(.., desired: &Vector)` | `move_shape(.., desired: Vector)` |
 
-- [ ] **Step 1: Migrate the files** in dependency order, with `cargo check -p game` after each: `lib.rs` (the re-exports `pub use parry3d as parry`, `na`) → `protocol.rs` → `state.rs` → `physics.rs` (journal call with `PhysicsParts`, then `invalidate_caches`) → `movement.rs` (`length_unit` constant from D6, `depenetrate = false` from D7) → `camera.rs` (keep `yaw_quat` libm-forced: `libm::sinf`/`cosf`) → `edit.rs` → `slime.rs` → `debug_render.rs` → `input.rs`.
+- [ ] **Step 1: Migrate the files** in dependency order, with `cargo check -p game` after each: `lib.rs` (the re-exports `pub use parry3d as parry`, `na`) → `protocol.rs` → `state.rs` → `physics.rs` (journal call with `PhysicsParts`, then `PhysicsPipeline::invalidate_caches` + `CCDSolver::invalidate_fixed_targets_cache`) → `movement.rs` (`length_unit` constant from D6, `depenetrate = false` from D7) → `camera.rs` (keep `yaw_quat` libm-forced: `libm::sinf`/`cosf`) → `edit.rs` → `slime.rs` → `cells.rs` → `debug_render.rs` → `input.rs`.
+
+  `cells.rs` came with cell loading after this plan was written:
+  - `cell_hash` (~:261-295) feeds `RigidBody`/`Collider` into a `Hasher`. Switch it to `StateDigest`: it's a server-authored checksum that clients hard-fail on, so client and server must compute it identically.
+  - `materialize` (via `seed_terrain_genesis`, ~:310) and `dematerialize` insert and remove terrain bodies and colliders with raw ops. Check each against the new arena primitives (Task 4.1).
+  - Also run `just test-one game "--test cell_activation --test cell_manager"` in Task 5.4.
 - [ ] **Step 2: Flip hashing to `StateDigest`, then remove `OrderedFloat`.**
   - Change the `#[rollback]` macro's generated `Undo<T>` bound from `Hash` to `StateDigest` (`crates/macros/src/lib.rs` ~:740). Make the Full-mode `hash_data()` (~:864) and `game::state_hash` (`lib.rs:72`) digest through `StateDigest`, inside `parry3d::shape::digest_scope`.
   - Stop the macro deriving `Hash` on the module's structs (~:293).
@@ -396,8 +433,9 @@ The type map applies everywhere:
 ### Task 5.4: Behavioural verification (the rig from Phase 0)
 
 - [ ] **Step 1: Port-parity tests, with no re-recording allowed.** `just test-one game "--test physics_goldens"` must pass within the recorded tolerances, and so must `gjk_upstream`, `voxels_upstream`, `nalgebra_fixes` (if nalgebra is still reachable; otherwise delete it with a note), `shape_cast_grazing`, `sunk_body`, `jump_arc`, `pair_filter` (as inverted in 3.5).
+- [ ] **Step 1b: Add the centred-capsule check** to `gjk_upstream.rs`: `capsule_centred_touching_cuboid_gets_face_normal`, a `Capsule::new_y(0.7, 0.3)` centred at (0, 1, 0) on a `Cuboid(8, 8, 8)` centred at (0, -8, 0), via `query::contact` with prediction 0. `normal1` must be +Y within 1e-4. It fails on the nalgebra-era fork (stale 45° direction, same as parry 0.25.3) and passes on parry 0.31.1; see the spec's "Landed" section.
 - [ ] **Step 2: Walking smoothness.** `just test-one game "--test walking_smoothness -- --include-ignored"`.
-- [ ] **Step 3: Rollback exactness.** `just test-one game "--test step_journal --test kinematic --test slime --test random_ops --test rollback_restore --test hash_mode --test state_hash --test block_edit --test hash_restore --test collider_genesis"`.
+- [ ] **Step 3: Rollback exactness.** `just test-one game "--test step_journal --test kinematic --test slime --test random_ops --test rollback_restore --test hash_mode --test state_hash --test block_edit --test hash_restore --test collider_genesis --test cell_activation --test cell_manager"`.
 - [ ] **Step 4: Handoff and threading.** `just test-one game "--test handoff_state --test handoff_scan --test handoff_protocol --test handoff_manager"`, then `just test-threads`.
 - [ ] **Step 5: If a golden in Step 1 diverges,** diagnose it (superpowers:systematic-debugging) before touching tolerances. The legitimate reasons are the upstream GJK/TOI fixes (already in Plan 1, so they shouldn't show up here) and D6/D7 choices. Write every tolerance change and its reason into the spike doc.
 - [ ] **Step 6: Re-record the hash goldens** `scene_hash_golden.rs` and `wasm_determinism.rs` once, with a commit message saying it's the physics-engine switch. Then run `just determinism-wasm`: native and wasm hashes must be equal.
