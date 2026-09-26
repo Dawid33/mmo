@@ -104,7 +104,7 @@ The port changes numerics, so bit-exact hashes can't carry across it. What carri
 - Produces: `fn run_scenario(name: &str) -> Vec<[f32; 4]>`, i.e. per tick `(x, y, z, grounded as f32)` of the tracked body. Scenarios are built only through public game APIs (`Rollback`/`GameData`, `movement`, `MoveKeys`), so the same test source compiles after the switch.
 - The CSV format is one row per tick, `tick,x,y,z,grounded`, which is diff-friendly.
 
-- [ ] **Step 1: Write the scenario list and harness.** Reuse the setup helpers `walking_smoothness.rs` and `jump_arc.rs` already use; read both first and call the same functions rather than copying them. Scenarios, each 120 ticks:
+- [x] **Step 1: Write the scenario list and harness.** Reuse the setup helpers `walking_smoothness.rs` and `jump_arc.rs` already use; read both first and call the same functions rather than copying them. Scenarios, each 120 ticks:
   - `walk_flat_across_chunk_seam`: +x at walk speed, starting 2 units before a chunk boundary.
   - `walk_scale_seam`: block-scale onto a half-block (chisel) surface.
   - `step_up_one_block`
@@ -114,41 +114,45 @@ The port changes numerics, so bit-exact hashes can't carry across it. What carri
   - `sunk_start_depenetrates`: starts 0.3 units inside terrain.
   - `slime_hop_sequence`: one slime, fixed seed.
 
-- [ ] **Step 2: Add the record mode.** When `PHYSICS_GOLDENS_RECORD=1`, write the CSVs. Otherwise compare, with tolerances as named constants:
+- [x] **Step 2: Add the record mode.** When `PHYSICS_GOLDENS_RECORD=1`, write the CSVs. Otherwise compare, with tolerances as named constants:
   - `POS_TOL = 0.05 * UNITS_PER_METER / 16.0`, i.e. 0.05 units per axis per tick;
   - `grounded` must match exactly except within `GROUNDED_SLACK_TICKS = 2` of a transition.
 
   On failure, print the first diverging tick and the full row pair.
 
-- [ ] **Step 3: Record, then run in compare mode.** Run `PHYSICS_GOLDENS_RECORD=1 just test-one game "--test physics_goldens"`, then `just test-one game "--test physics_goldens"`. Expected: PASS. Run it twice more to prove it's stable, i.e. deterministic.
+- [x] **Step 3: Record, then run in compare mode.** Run `PHYSICS_GOLDENS_RECORD=1 just test-one game "--test physics_goldens"`, then `just test-one game "--test physics_goldens"`. Expected: PASS. Run it twice more to prove it's stable, i.e. deterministic.
 
-- [ ] **Step 4: Sanity-check the fixtures by eye.** For `jump_in_place`, peak height ≈ the value `jump_arc.rs` pins. For `walk_flat_across_chunk_seam`, y is constant within 1e-3. If not, the harness is wrong: fix it before committing.
+- [x] **Step 4: Sanity-check the fixtures by eye.** For `jump_in_place`, peak height ≈ the value `jump_arc.rs` pins. For `walk_flat_across_chunk_seam`, y is constant within 1e-3. If not, the harness is wrong: fix it before committing.
 
-- [ ] **Step 5: Commit.** `test(game): behaviour goldens for movement, recorded on the nalgebra-era physics`.
+- [x] **Step 5: Commit.** `test(game): behaviour goldens for movement, recorded on the nalgebra-era physics`.
 
 ### Task 0.2: State-hash golden for a canonical scene (same-engine regression only)
+
+> **Landed (cc6e060) in `crates/worldgen/tests/scene_hash_golden.rs`, not `crates/game/tests/`:** `game` can't depend on worldgen. `SCENE_HASH = 0xEF4000BC`; skips on non-default world dials.
 
 **Files:**
 - Create: `crates/game/tests/scene_hash_golden.rs`
 
-- [ ] **Step 1: Write the test.**
+- [x] **Step 1: Write the test.**
   - Build a canonical scene: the fixed worldgen region `RegionCoords { x: 0, z: 0 }` at `set_near_radius(0)` scale if applicable; one player; one slime; 60 ticks of scripted input.
   - Assert `game::state_hash(&rollback)` equals a constant.
   - Include in the doc comment the regeneration command (`SCENE_HASH_PRINT=1 ... -- --nocapture`), and the rule: the constant changes only in a commit that says why.
 
-- [ ] **Step 2: Record the constant, then assert.** Tag the test slow if it takes more than 100 ms (region genesis likely does).
-- [ ] **Step 3: Commit.** `test(game): canonical scene state-hash golden`.
+- [x] **Step 2: Record the constant, then assert.** Tag the test slow if it takes more than 100 ms (region genesis likely does).
+- [x] **Step 3: Commit.** `test(game): canonical scene state-hash golden`.
 
 ### Task 0.3: Cross-target determinism check (native vs wasm32)
+
+> **Landed (5e2f219, 78fa13a).** The first run did NOT match. The Voxels `cached_hash` hashed slice length prefixes at pointer width, and it is serialized, so the bytes differed per target. Fixed in the parry fork; native values are unchanged. The cross-target assertion compares crc32 of the region's bincode bytes (`WASM_SCENE_DIGEST = 0x105EC680`). `state_hash` is pinned native-only (`0xA93B9D8C`) because std `Hash` is pointer-width dependent (length prefixes, `[usize]` slices). Consequences: Task 4.4's Voxels `content_digest` must be target-independent, and Task 5.2's `cell_hash` → `StateDigest` switch also fixes a wasm cell-mode `CellHashMismatch`.
 
 **Files:**
 - Create: `crates/game/tests/wasm_determinism.rs` (native side) and `crates/game/tests/wasm/` or a `#[wasm_bindgen_test]` module in the same file (check how/if the workspace already uses `wasm-bindgen-test`: `grep -rn wasm_bindgen_test crates`)
 - Modify: `justfile` (new recipe `determinism-wasm`)
 
-- [ ] **Step 1: Write a scene that fits wasm.** Kinematic capsule on a small hand-built voxels floor (8×8 chunks' worth of `Voxels`) plus one slime, 120 ticks. It uses no worldgen, so the wasm build stays small. Compute `state_hash`.
-- [ ] **Step 2: Native side.** `#[test] fn scene_hash_native()` asserts the constant `WASM_SCENE_HASH`.
-- [ ] **Step 3: wasm side.** `#[wasm_bindgen_test] fn scene_hash_wasm()` asserts the same constant.
-- [ ] **Step 4: Add the justfile recipe.**
+- [x] **Step 1: Write a scene that fits wasm.** Kinematic capsule on a small hand-built voxels floor (8×8 chunks' worth of `Voxels`) plus one slime, 120 ticks. It uses no worldgen, so the wasm build stays small. Compute `state_hash`.
+- [x] **Step 2: Native side.** `#[test] fn scene_hash_native()` asserts the constant `WASM_SCENE_HASH`.
+- [x] **Step 3: wasm side.** `#[wasm_bindgen_test] fn scene_hash_wasm()` asserts the same constant.
+- [x] **Step 4: Add the justfile recipe.**
 
 ```just
 # Cross-target determinism: the same physics scene must hash identically on
@@ -158,13 +162,13 @@ determinism-wasm:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner {{cap}} {{cargo}} test -p game --test wasm_determinism --target wasm32-unknown-unknown
 ```
 
-- [ ] **Step 5: Run both.** Expected: the same hash. If `game` doesn't build for wasm32 test targets, e.g. because of dev-deps, scope the dev-deps with `[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]`. If it still can't be made to run in ≤ 1 h, record that in the commit and fall back to comparing a native hash against one printed by the browser client in a debug build (`?offline`). This test is the only proof of cross-target determinism, so don't drop it silently.
-- [ ] **Step 6: Commit.** Include CLAUDE.md: add `just determinism-wasm` to the verification list.
+- [x] **Step 5: Run both.** Expected: the same hash. If `game` doesn't build for wasm32 test targets, e.g. because of dev-deps, scope the dev-deps with `[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]`. If it still can't be made to run in ≤ 1 h, record that in the commit and fall back to comparing a native hash against one printed by the browser client in a debug build (`?offline`). This test is the only proof of cross-target determinism, so don't drop it silently.
+- [x] **Step 6: Commit.** Include CLAUDE.md: add `just determinism-wasm` to the verification list.
 
 ### Task 0.4: Port Plan 1's upstream-fix tests into the rig
 
-- [ ] **Step 1: Check where Plan 1 stands.** It is `docs/superpowers/plans/2026-09-22-physics-fork-fixes.md`, and it lands first. `gjk_upstream.rs`, `voxels_upstream.rs` and `nalgebra_fixes.rs` exist and are green. Those tests cover fixes that are *in* parry 0.30.2 (unchanged in 0.31.1), so they must stay green after the switch. That's the check that the upstream versions behave like our hand ports.
-- [ ] **Step 2: Add a module doc line to each file:** "Must stay green across the rapier 0.36 switch (upgrade plan Phase 5)."
+- [x] **Step 1: Check where Plan 1 stands.** It is `docs/superpowers/plans/2026-09-22-physics-fork-fixes.md`, and it lands first. `gjk_upstream.rs`, `voxels_upstream.rs` and `nalgebra_fixes.rs` exist and are green. Those tests cover fixes that are *in* parry 0.30.2 (unchanged in 0.31.1), so they must stay green after the switch. That's the check that the upstream versions behave like our hand ports.
+- [x] **Step 2: Add a module doc line to each file:** "Must stay green across the rapier 0.36 switch (upgrade plan Phase 5)."
 
 ---
 

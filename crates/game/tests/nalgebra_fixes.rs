@@ -1,4 +1,6 @@
 //! Upstream nalgebra fixes carried in the vendored fork.
+//!
+//! Must stay green across the rapier 0.36 switch (upgrade plan Phase 5).
 use game::na::Matrix4;
 
 /// nalgebra #1109 / PR #1210: the 2×2 deflation basis lost all precision

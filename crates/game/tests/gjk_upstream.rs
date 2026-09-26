@@ -1,6 +1,8 @@
 //! Upstream parry GJK/EPA fixes hand-ported into the vendored fork (PR #437 +
 //! #420 subset). Each test is a port of the upstream regression test, in the
 //! fork's nalgebra + `OrderedFloat` idiom.
+//!
+//! Must stay green across the rapier 0.36 switch (upgrade plan Phase 5).
 use game::parry::math::{Isometry, Point, Real, Vector};
 use game::parry::query::details::cast_shapes_support_map_support_map;
 use game::parry::query::{self, ShapeCastOptions};

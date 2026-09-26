@@ -1,6 +1,8 @@
 //! parry #404 / #373 (upstream PR #437): voxels contact manifolds see
 //! speculative contacts within the prediction distance, and voxels shape
 //! casts report witness1 in shape1's frame. Both fixed locally first.
+//!
+//! Must stay green across the rapier 0.36 switch (upgrade plan Phase 5).
 use game::parry::math::{Isometry, Point, Real, Vector};
 use game::parry::query::{
     self, ContactManifold, DefaultQueryDispatcher, PersistentQueryDispatcher, ShapeCastOptions,
