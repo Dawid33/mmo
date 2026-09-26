@@ -113,3 +113,8 @@ taffy_tree = []
 
 [dev-dependencies]
 crc32fast = { workspace = true }
+
+# `tests/wasm_determinism.rs` on wasm32 (`just determinism-wasm`). Its
+# wasm-bindgen must stay the version Cargo.lock already has for the client.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

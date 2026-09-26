@@ -527,6 +527,21 @@ test-threads:
     {{cap}} {{cargo}} test -p game --test handoff_schedule -- --include-ignored
     {{cap}} {{cargo}} test -p server --test threaded_world -- --include-ignored --test-threads=1
 
+# Cross-target determinism: the same physics scene must end in the same state
+# on native and on wasm32 (node via wasm-bindgen-test-runner) —
+# crates/game/tests/wasm_determinism.rs. The runner must match Cargo.lock's
+# wasm-bindgen exactly, so the first run installs that version under
+# target/tools (needs node; ~1 min cold for the wasm build).
+determinism-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+    root="$PWD/target/tools/wasm-bindgen-$ver"
+    [ -x "$root/bin/wasm-bindgen-test-runner" ] || {{cap}} cargo install --locked wasm-bindgen-cli --version "$ver" --root "$root"
+    {{cap}} {{cargo}} test -p game --test wasm_determinism
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
+        {{cap}} {{cargo}} test -p game --test wasm_determinism --target wasm32-unknown-unknown
+
 # ---------------------------------------------------------------------------
 # Local deployment environment: a single-node k0s cluster in docker (the same
 # distribution as the planned single-node k0s host), configured by the
