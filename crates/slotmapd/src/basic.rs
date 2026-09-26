@@ -14,7 +14,7 @@ use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::{Index, IndexMut};
 
-use crate::util::{Never, UnwrapUnchecked};
+use crate::util::{Never, PanicOnDrop, UnwrapUnchecked};
 use crate::{DefaultKey, Key, KeyData};
 
 // Storage inside a slot or metadata for the freelist when vacant.
@@ -116,12 +116,16 @@ impl<T: Clone> Clone for Slot<T> {
             (VacantMut(self_next_free), Vacant(&source_next_free)) => {
                 *self_next_free = source_next_free
             }
-            (_, Occupied(value)) => {
+            (OccupiedMut(_), Vacant(&next_free)) => unsafe {
+                // SAFETY: the slot is occupied, so `value` is the live union field.
+                ManuallyDrop::drop(&mut self.u.value);
+                self.u = SlotUnion { next_free };
+            },
+            (VacantMut(_), Occupied(value)) => {
                 self.u = SlotUnion {
                     value: ManuallyDrop::new(value.clone()),
                 }
             }
-            (_, Vacant(&next_free)) => self.u = SlotUnion { next_free },
         }
         self.version = source.version;
     }
@@ -1011,9 +1015,11 @@ where
     }
 
     fn clone_from(&mut self, source: &Self) {
+        let guard = PanicOnDrop("abort - a panic during SlotMap::clone_from is unrecoverable");
         self.slots.clone_from(&source.slots);
         self.free_head = source.free_head;
         self.num_elems = source.num_elems;
+        core::mem::forget(guard);
     }
 }
 

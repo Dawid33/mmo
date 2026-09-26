@@ -204,3 +204,19 @@ fn collider_insert_with_parent_reverts_exactly() {
         "collider slot + alloc + modified list must restore"
     );
 }
+
+/// Upstream slotmap #137: cloning a vacant slot over an occupied one leaked
+/// the occupied value (the union was overwritten without a drop).
+#[test]
+fn slotmap_clone_from_drops_overwritten_values() {
+    use slotmapd::{DefaultKey, SlotMap};
+    use std::rc::Rc;
+    let rc = Rc::new(());
+    let mut dst: SlotMap<DefaultKey, Rc<()>> = SlotMap::new();
+    dst.insert(rc.clone());
+    let mut src: SlotMap<DefaultKey, Rc<()>> = SlotMap::new();
+    let k = src.insert(Rc::new(()));
+    src.remove(k); // slot 1 vacant in src, occupied in dst
+    dst.clone_from(&src);
+    assert_eq!(Rc::strong_count(&rc), 1, "overwritten value leaked");
+}

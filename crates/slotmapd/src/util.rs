@@ -44,3 +44,13 @@ impl<T, E: Debug> UnwrapUnchecked<T> for Result<T, E> {
         }
     }
 }
+
+/// Aborts (by panicking during unwind → abort) if dropped: guards sections
+/// that leave a map inconsistent when a user `Clone` impl panics mid-way.
+pub(crate) struct PanicOnDrop(pub &'static str);
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        panic!("{}", self.0);
+    }
+}

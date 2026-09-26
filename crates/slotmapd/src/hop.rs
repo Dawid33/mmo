@@ -25,7 +25,7 @@ use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 
-use crate::util::{Never, UnwrapUnchecked};
+use crate::util::{Never, PanicOnDrop, UnwrapUnchecked};
 use crate::{DefaultKey, Key, KeyData};
 
 // Metadata to maintain the freelist.
@@ -120,12 +120,16 @@ impl<T: Clone> Clone for Slot<T> {
         match (self.get_mut(), source.get()) {
             (OccupiedMut(self_val), Occupied(source_val)) => self_val.clone_from(source_val),
             (VacantMut(self_free), Vacant(&source_free)) => *self_free = source_free,
-            (_, Occupied(value)) => {
+            (OccupiedMut(_), Vacant(&free)) => unsafe {
+                // SAFETY: the slot is occupied, so `value` is the live union field.
+                ManuallyDrop::drop(&mut self.u.value);
+                self.u = SlotUnion { free };
+            },
+            (VacantMut(_), Occupied(value)) => {
                 self.u = SlotUnion {
                     value: ManuallyDrop::new(value.clone()),
                 }
             }
-            (_, Vacant(&free)) => self.u = SlotUnion { free },
         }
         self.version = source.version;
     }
@@ -1014,8 +1018,10 @@ where
     }
 
     fn clone_from(&mut self, source: &Self) {
+        let guard = PanicOnDrop("abort - a panic during HopSlotMap::clone_from is unrecoverable");
         self.slots.clone_from(&source.slots);
         self.num_elems = source.num_elems;
+        core::mem::forget(guard);
     }
 }
 
