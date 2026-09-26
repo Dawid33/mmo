@@ -5,12 +5,13 @@
 //! every seam between two boxes used to read as an edge: the character
 //! controller slid down its leaning normal into the floor, fell through the
 //! skin for a tick, then tripped on the next box and popped up ungrounded.
-use std::collections::BTreeMap;
+mod common;
 
+use common::{body, key, r0, terraces, ticks, world_of};
 use game::movement::{TICK_DT, UNITS_PER_METER, WALK_SPEED};
 use game::{
-    Block, BlockId, BlockIndex, ChiselData, Chunk, ChunkCoords, GameEventKind, InputEvent, Key,
-    Region, RegionCoords, World, BLOCK_VOXELS,
+    Block, BlockId, BlockIndex, ChiselData, Chunk, ChunkCoords, GameEventKind, Key, Region,
+    World, BLOCK_VOXELS,
 };
 
 const SOLID: BlockId = BlockId(1);
@@ -19,10 +20,6 @@ const STEP: f32 = WALK_SPEED * UNITS_PER_METER * TICK_DT;
 /// Slack on per-tick motion: the controller re-settles onto its skin by a
 /// fraction of a millimetre now and then.
 const LEVEL: f32 = 0.005;
-
-fn r0() -> RegionCoords {
-    RegionCoords::new(0, 0)
-}
 
 /// Chunk rows along z a walk of that many ticks from the spawn needs. Voxel-
 /// scale colliders are slow to build, so worlds are no bigger than the walk.
@@ -34,62 +31,6 @@ fn rows_for(walk_ticks: usize) -> std::ops::RangeInclusive<usize> {
 /// from the spawn touches.
 fn world(rows: std::ops::RangeInclusive<usize>, chunk: impl Fn(usize, usize) -> Chunk) -> World {
     world_of(3..=4, rows, chunk)
-}
-
-/// A world of chunks (y 0) with one player whose controls are on, settled on
-/// the ground at the spawn column (128, 128) — the corner where columns 3 and
-/// 4 meet rows 3 and 4.
-fn world_of(
-    columns: std::ops::RangeInclusive<usize>,
-    rows: std::ops::RangeInclusive<usize>,
-    chunk: impl Fn(usize, usize) -> Chunk,
-) -> World {
-    let mut chunks = Vec::new();
-    for x in columns {
-        for z in rows.clone() {
-            chunks.push((ChunkCoords::new(x, 0, z), chunk(x, z)));
-        }
-    }
-    let mut world = World::new();
-    world.load(&r0(), Region::from_chunks(r0(), chunks));
-    world.handle_region_event(GameEventKind::CreateClient(0), r0()).unwrap();
-    world.forget_last_event(&r0());
-    key(&mut world, Key::KeyE, true);
-    key(&mut world, Key::KeyE, false);
-    // The spawn clearance is a few ticks of fall.
-    ticks(&mut world, 12);
-    assert!(body(&world).grounded, "player must settle on the floor");
-    world
-}
-
-fn key(world: &mut World, key: Key, pressed: bool) {
-    world
-        .handle_region_event(GameEventKind::PlayerInput(0, InputEvent::Key { key, pressed }), r0())
-        .unwrap();
-    world.forget_last_event(&r0());
-}
-
-fn ticks(world: &mut World, n: usize) {
-    let mut results = BTreeMap::new();
-    for _ in 0..n {
-        world.progress_world_one_tick(&mut results);
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Body {
-    x: f32,
-    y: f32,
-    z: f32,
-    grounded: bool,
-}
-
-fn body(world: &World) -> Body {
-    let data = world.data(&r0());
-    let e = *data.player_entites.get(&0).unwrap();
-    let t = *data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation();
-    let grounded = data.ecs.motion.try_get(e).unwrap_or_default().grounded;
-    Body { x: t.x.0, y: t.y.0, z: t.z.0, grounded }
 }
 
 /// Walks +z (S at yaw 0) for `n` ticks after sidestepping `side` ticks along
@@ -304,12 +245,6 @@ fn player_does_not_fit_a_one_block_tunnel() {
     ticks(&mut world, 25);
     let after = body(&world);
     assert!(after.z < 160.0, "a one-block gap is lower than the body: {after:?}");
-}
-
-/// One-voxel terraces, a step down per chunk along +z: the gentle slopes of
-/// generated terrain.
-fn terraces(rows: std::ops::RangeInclusive<usize>) -> World {
-    world(rows, |_, z| Chunk::flat_floor(28 - z as u32))
 }
 
 #[test]
