@@ -5,7 +5,124 @@ Everything here ran against **pristine crates.io** rapier3d 0.36.0 / parry3d 0.3
 (features `enhanced-determinism, serde-serialize`) from `crates/physics-next`. No game crate
 depends on it (`cargo tree -p game|client|server|worldgen` shows no 0.36 rapier).
 
-<!-- DECISION SUMMARY (Task 1.3) goes here -->
+## Decision summary (Task 1.3) — D1, D4, D5, D6 await the user's confirmation
+
+| # | Decision | Recommendation | Needs the user? |
+|---|---|---|---|
+| D1 | Rollback mechanism | **Hybrid journal** (measured ~12 µs vs ~225 µs) | confirm |
+| D2 | State hashing | **`StateDigest` over bincode, with the cached `Voxels` content digest (Task 4.4)** | no |
+| D4 | Math forks after the switch | **Move `simba`, `nalgebra`, `approx`, `ordered-float` to crates.io or drop them** | **yes** (reverses a CLAUDE.md rule) |
+| D5 | How the port lands | **Side-by-side `*-next` crates on `develop`** | **yes** |
+| D6 | `length_unit` | **`UNITS_PER_METER` (16)** as `movement::PHYSICS_LENGTH_UNIT` | confirm |
+| D7 | KCC depenetration | **Keep `depenetration_lift`; no fork flag for #485** | no |
+
+**D1 — keep the hybrid journal.**
+- *Numbers.* At real region scale (2616 terrain bodies, 2956 colliders), the hybrid's per-tick
+  wholesale clone of islands + narrow phase + broad phase costs ~12 µs p50 (15 µs p95). Its
+  first-touch capture of four moving bodies costs 0.6 µs. A full 7-structure snapshot costs
+  ~225 µs p50 plus ~63 µs to drop, and 3.1 MB per tick. That is ~19× the hybrid and 17× the
+  physics step it would protect, so the "full snapshot within 2×" condition fails by an order
+  of magnitude.
+- *Cost of the hybrid.* Complexity. It needs capture hooks in the set accessors, the
+  raw-pointer writes in the staged solver (Review Focus 1), and a fuzzer to prove LIFO exactness.
+  Snapshots would inherit upstream's byte-exact snapshot contract for free.
+- *Memory.* Retained log memory is dominated by the 240 KB broad-phase clone per logged tick, in
+  both designs.
+- *Where the gap comes from.* One fixed body per chunk, which is how the game builds terrain. It
+  wouldn't narrow unless terrain moved to far fewer bodies.
+- *Side result.* A fresh `PhysicsPipeline` after revert costs nothing measurable (14.9 vs
+  13.4 µs), so Task 4.3's fresh-pipeline rule is free.
+
+**D2 — `StateDigest` (crc32 over bincode), with Task 4.4's cached `Voxels` digest.**
+- *Why bincode.* It is the only canonical form upstream contracts, and it is target-independent.
+  Phase 0 showed std `Hash` is not: it writes `usize` at pointer width. `state_hash` already
+  differs between native and wasm32, and the server-authored `cell_hash` would make a wasm32
+  cell-mode client fail with `CellHashMismatch`. Moving `cell_hash` to `StateDigest` (Task 5.2)
+  fixes that as a side effect.
+- *Cost.* Serialized digests are expensive at region scale:
+  - the whole `ColliderSet` is 5.7 ms (1.7 MB), so the 1 ms gate trips;
+  - bodies are 2.4 ms and the broad phase 0.5 ms;
+  - a Full-mode digest per log entry is therefore ~8.6 ms.
+- *Task 4.4.* The cached per-`Voxels` digest cuts the collider term to ~1.3 ms, so it stays in
+  scope. Full mode then remains a test/harness mode, as today: production runs `Off`, and
+  `Delta` digests only an entry's footprint.
+- *Open alternative.* A buffered digest writer (fewer, larger `crc32` updates) would help by a
+  constant factor; worth trying in Task 4.4 before anything cleverer.
+
+**D4 — move the math forks to crates.io (or drop them).**
+- *Evidence.* rapier 0.36 already resolves crates.io `nalgebra` 0.35 and `simba` 0.10.2 for its
+  internals. Our forks are 0.34.1 and 0.9.1 and cannot serve it without being re-forked at the
+  new versions. Upstream's `enhanced-determinism` now forces `simba/libm_force`, `glamx/libm` and
+  `glamx/scalar-math` by feature, which is what the forks were for, together with the
+  `OrderedFloat` scalar that D3 removes. After the switch, the game's own nalgebra use (e.g. the
+  camera's `Perspective3`) moves to glam.
+- *Costs:*
+  - it reverses CLAUDE.md's "don't switch these back to crates.io" rule;
+  - a future determinism defect in upstream nalgebra/simba would need a new fork instead of a
+    local patch;
+  - Plan 1's `nalgebra_fixes.rs` (`SymmetricEigen`) becomes unreachable if nalgebra is no longer
+    a direct dependency. Task 5.4 already allows deleting it with a note, and the determinism-
+    sensitive eigen path is kept off fixed bodies by Task 3.1's mass-props skip.
+- *Keep vendored:* `rapier3d`/`parry3d` (fork patches), `slotmapd` (rollback inverses) and
+  `block-mesh`.
+- *Recommendation:* yes.
+
+**D5 — land side by side on `develop`.**
+- *Evidence.* This phase already did it: `crates/physics-next` sits in the workspace with
+  crates.io rapier 0.36. `cargo tree` shows nothing in `game`/`client`/`server`/`worldgen` picked
+  it up, and `just smoke` stayed green. Phase 2 does the same with vendored `rapier-next`/
+  `parry-next`.
+- *Costs:*
+  - two physics stacks in one workspace, so more compile time when you build `physics-next`
+    (never on the game path);
+  - a large vendored import on `develop`;
+  - possible confusion between the two `rapier3d`s. Mitigated by the `*-next` package names and
+    by never letting a game crate depend on them.
+- *The alternative.* A long-lived branch keeps `develop` clean, but it conflicts with the
+  no-worktree rule and with your concurrent edits: a multi-week, very large diff would need
+  constant rebasing.
+- *Recommendation:* side by side.
+
+**D6 — `length_unit = UNITS_PER_METER` (16).**
+- *Measured.* No difference for today's world. Walking trajectories are bit-identical at 1 and
+  16, the walking capsule's BVH leaf changes every tick at both, and a standing body's leaf
+  changes only once in 1200 ticks at both. The character controller reads none of the scaled
+  thresholds, and every game body is fixed or kinematic.
+- *Why 16 anyway.* The plan's tie-break ("green walking_smoothness with fewer dirty ticks")
+  can't separate the two, so the choice comes down to what the value means. At 1.0 with 16
+  units per metre:
+  - contact prediction is 1.25 mm;
+  - allowed penetration and contact recycling are 16× tighter than rapier's tuning intends;
+  - sleep thresholds are 16× stricter, so dynamic bodies stay awake longer, which means more
+    journal captures.
+
+  None of this bites until the first dynamic bodies arrive (dropped items, buoyancy).
+- *Why now.* Setting 16 at the switch absorbs the change inside the one phase that is already
+  judged by tolerance goldens, instead of re-baselining later.
+- *Trade-off.* It's a second change riding on the engine switch. If a golden diverges at
+  Task 5.4, `length_unit` is one more suspect to rule out, though the probe says it cannot move
+  the KCC.
+- *Fallback.* Keeping 1.0 (zero change) is the safe alternative, if you'd rather keep the switch
+  a pure engine swap.
+
+**D7 — keep `depenetration_lift`; don't gate #485.**
+- *Measured.* Upstream's zero-motion depenetration does nothing on voxel terrain: parry 0.31.1
+  has no `contact` for `Voxels`, and it skips the `Unsupported` error. On a full-chunk cuboid it
+  lifts a sunk body straight up to the skin gap, which is exactly what our lift does.
+- *Why they don't fight.* `sweep_character` applies the lift before `move_shape`, so #485 then
+  finds a body at the skin gap and does nothing.
+- *Why skip the flag.* The plan's `KinematicCharacterController::depenetrate` flag (Task 3.4)
+  would be a fork patch that changes nothing measurable today.
+- *Cost of skipping it.* #485 does an extra AABB query and contact tests on zero-motion calls
+  near cuboids, e.g. idle standing entities. If a future parry adds `Voxels` contact, #485 would
+  start running on voxel terrain too, still after the lift and still a no-op.
+- *In Task 3.4:* add a test that pins "lift then #485" as a no-op pair, rather than the flag.
+- *The lift keeps working upstream:* `intersect_shape` is implemented for `Voxels` in 0.31.1.
+
+**Also new for the re-port (Tasks 3.2/3.3):** on a bare flat voxel floor, upstream's KCC dips
+~1.2 units before chunk seams while walking. That's the defect our voxels-cast patches fixed,
+now pinned by the ignored `walk_on_flat_voxel_floor_keeps_its_height`.
+
 
 ## Task 1.1 — clone and digest cost at real region scale
 
