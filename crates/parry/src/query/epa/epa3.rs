@@ -449,10 +449,35 @@ impl EPA {
         }
 
         if simplex.dimension() == 0 {
-            let mut n: Vector<Real> = na::zero();
-            n[1] = Real::from(1.0);
-            return Some((Point::origin(), Point::origin(), Unit::new_unchecked(n)));
-        } else if simplex.dimension() == 3 {
+            // The GJK simplex degenerated to a single point on the CSO boundary, typically
+            // an exactly-touching contact (upstream #315). Bootstrap a second vertex from an
+            // axis-aligned support direction so the expansion below can find the normal.
+            let candidates = [
+                Vector::x_axis(),
+                Vector::y_axis(),
+                Vector::z_axis(),
+                -Vector::x_axis(),
+                -Vector::y_axis(),
+                -Vector::z_axis(),
+            ];
+            let sep_tol = gjk::eps_tol();
+            let bootstrap = candidates.iter().find_map(|dir| {
+                let pt = CSOPoint::from_shapes(pos12, g1, g2, dir);
+                ((pt.point - self.vertices[0].point).norm_squared() > sep_tol * sep_tol)
+                    .then_some(pt)
+            });
+
+            match bootstrap {
+                Some(pt) => self.vertices.push(pt),
+                None => {
+                    // The CSO is degenerate (a single point): no meaningful normal exists.
+                    let v = self.vertices[0];
+                    return Some((v.orig1, v.orig2, Vector::y_axis()));
+                }
+            }
+        }
+
+        if simplex.dimension() == 3 {
             let dp1 = self.vertices[1] - self.vertices[0];
             let dp2 = self.vertices[2] - self.vertices[0];
             let dp3 = self.vertices[3] - self.vertices[0];
@@ -509,7 +534,9 @@ impl EPA {
                 return None;
             }
         } else {
-            if simplex.dimension() == 1 {
+            // NOTE: len == 2 covers both a 1-dimensional GJK simplex and a 0-dimensional
+            // one completed by the bootstrap above.
+            if self.vertices.len() == 2 {
                 let dpt = self.vertices[1] - self.vertices[0];
 
                 Vector::orthonormal_subspace_basis(&[dpt], |dir| {

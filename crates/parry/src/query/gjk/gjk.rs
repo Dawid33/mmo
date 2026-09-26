@@ -380,6 +380,15 @@ where
     let mut max_bound = Real::max_value();
     let mut dir;
     let mut niter = 0;
+    // Tightest lower bound on the distance from the origin to the CSO: `min_bound`
+    // maximized over the directions probed. Its sign classifies the origin: `> 0`
+    // means separation, `~ 0` puts it on the CSO boundary (touching),
+    // `< 0` bounds the penetration depth (upstream #193/#396).
+    let mut best_min_bound = -Real::max_value();
+    // Largest CSO support magnitude seen, used to scale the tolerance below.
+    let mut support_scale = Real::from(0.0);
+    let mut nb_perturbs = 0usize;
+    const MAX_PERTURBATIONS: usize = 2 * DIM;
 
     loop {
         let old_max_bound = max_bound;
@@ -393,11 +402,28 @@ where
         }
 
         if max_bound >= old_max_bound {
-            if exact_dist {
+            if best_min_bound > Real::from(0.0) {
+                // Separation certified: the converged witnesses are the answer.
+                if exact_dist {
+                    let (p1, p2) = result(simplex, true);
+                    return GJKResult::ClosestPoints(p1, p2, old_dir); // upper bounds inconsistencies
+                } else {
+                    return GJKResult::Proximity(old_dir);
+                }
+            } else if exact_dist && best_min_bound >= -_eps_rel * support_scale {
+                // Origin on the CSO boundary: the pair is touching, so the witnesses
+                // describe the contact.
                 let (p1, p2) = result(simplex, true);
-                return GJKResult::ClosestPoints(p1, p2, old_dir); // upper bounds inconsistencies
+                return GJKResult::ClosestPoints(p1, p2, old_dir);
+            } else if nb_perturbs < MAX_PERTURBATIONS {
+                // A degenerate support direction (e.g. a symmetry axis) stalled the
+                // simplex without certifying separation: retry from a slightly
+                // perturbed direction.
+                nb_perturbs += 1;
+                dir = perturbed_dir(dir, nb_perturbs);
             } else {
-                return GJKResult::Proximity(old_dir);
+                // The CSO reaches past the origin in every direction probed.
+                return GJKResult::Intersection;
             }
         }
 
@@ -405,6 +431,9 @@ where
         let min_bound = -dir.dot(&cso_point.point.coords);
 
         assert!(min_bound.is_finite());
+
+        best_min_bound = best_min_bound.max(min_bound);
+        support_scale = support_scale.max(cso_point.point.coords.norm());
 
         if min_bound > max_dist {
             return GJKResult::NoIntersection(dir);
@@ -420,11 +449,23 @@ where
         }
 
         if !simplex.add_point(cso_point) {
-            if exact_dist {
+            // See the stagnation branch above for how `best_min_bound` classifies a stall.
+            if best_min_bound > Real::from(0.0) {
+                if exact_dist {
+                    let (p1, p2) = result(simplex, false);
+                    return GJKResult::ClosestPoints(p1, p2, dir);
+                } else {
+                    return GJKResult::Proximity(dir);
+                }
+            } else if exact_dist && best_min_bound >= -_eps_rel * support_scale {
                 let (p1, p2) = result(simplex, false);
                 return GJKResult::ClosestPoints(p1, p2, dir);
+            } else if nb_perturbs < MAX_PERTURBATIONS {
+                // The duplicate support point cannot enrich the simplex; jump back to
+                // the top of the loop where the stagnation branch will perturb `dir`.
+                continue;
             } else {
-                return GJKResult::Proximity(dir);
+                return GJKResult::Intersection;
             }
         }
 
@@ -792,6 +833,22 @@ where
             return None;
         }
     }
+}
+
+/// Deterministically perturbs the unit direction `dir` to escape degenerate support
+/// directions that stall the GJK simplex without proving separation. Successive
+/// seeds cycle through ±offsets along each coordinate axis (never random: client
+/// and server must take the same path).
+fn perturbed_dir(dir: Unit<Vector<Real>>, seed: usize) -> Unit<Vector<Real>> {
+    let axis = (seed - 1) % DIM;
+    let sign = if ((seed - 1) / DIM) % 2 == 0 {
+        Real::from(1.0)
+    } else {
+        Real::from(-1.0)
+    };
+    let mut res = dir.into_inner();
+    res[axis] += sign * Real::from(1.0e-2);
+    Unit::try_new(res, Real::from(0.0)).unwrap_or(dir)
 }
 
 fn result(simplex: &VoronoiSimplex, prev: bool) -> (Point<Real>, Point<Real>) {
