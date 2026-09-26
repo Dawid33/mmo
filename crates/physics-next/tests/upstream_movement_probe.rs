@@ -282,6 +282,26 @@ fn kcc_zero_motion_depenetration_is_cuboid_only() {
     assert!(walking.translation.y.abs() < 0.1 * SINK, "walking lifted by {}", walking.translation.y);
 }
 
+/// D7, the case `depenetration_lift` declines: a body buried deeper than
+/// `STEP_HEIGHT` gets no lift (the game's "buried stays put" policy), so #485
+/// is what acts on it — on a full-chunk cuboid, with zero desired motion, it
+/// pushes the body out by up to a quarter of the character height per call.
+#[test]
+fn kcc_zero_motion_moves_a_body_the_lift_leaves_buried() {
+    let chunk = 2.0 * BLOCK;
+    let sink = STEP_HEIGHT * UNITS_PER_METER + 1.0;
+    let mut w = PhysicsWorld { params: IntegrationParameters { dt: game::TICK_RATE as f32 / 1000.0, ..Default::default() }, ..Default::default() };
+    let ground = w.bodies.insert(RigidBodyBuilder::fixed());
+    let half = 0.5 * chunk;
+    w.colliders.insert_with_parent(ColliderBuilder::cuboid(half, half, half).translation(v(half, BLOCK - half, half)), ground, &mut w.bodies);
+    let (body, _) = add_player(&mut w, v(0.5 * BLOCK, BLOCK + HALF_HEIGHT + RADIUS - sink, 0.5 * BLOCK));
+    w.step(&mut PhysicsPipeline::new());
+    let still = kcc_move(&w, body, Vector::ZERO);
+    let quarter_height = 0.25 * 2.0 * (HALF_HEIGHT + RADIUS);
+    println!("D7 cuboid buried {sink}: still {:?} (cap {quarter_height})", still.translation);
+    assert!(still.translation.y > 0.5 * quarter_height, "#485 moved a buried body: {:?}", still.translation);
+}
+
 /// Per tick: `(y, grounded, capsule's BVH leaf changed)`.
 fn kcc_run(w: &mut PhysicsWorld, body: RigidBodyHandle, collider: ColliderHandle, ticks: usize, walk: f32) -> Vec<(f32, bool, bool)> {
     let mut pipeline = PhysicsPipeline::new();
@@ -354,10 +374,14 @@ fn length_unit_does_not_change_character_movement() {
 
 /// Walking straight across a flat block-scale voxel floor. Upstream
 /// (Task 1.2) the body dips ~1.16 units just before some chunk seams and
-/// pops back up ungrounded (x ≈ 28 and 92 on this floor): the voxels-cast
-/// search-domain defect `walking_smoothness.rs` pins in the game.
+/// pops back up ungrounded (x ≈ 28 and 92 on this floor) — just before the
+/// seams between chunk BODIES (32, 96), never at the voxel borders inside a
+/// body. What `walking_smoothness.rs` pins in the game; the probe does not
+/// isolate which fork fix it needs: the voxels cast (3.2), the cross-collider
+/// `cast_shape_on_continuous_surfaces` (3.3, which upstream `move_shape`
+/// doesn't use) or the KCC snap gate (3.4).
 #[test]
-#[ignore = "fails on pristine parry 0.31.1 (seam dips of ~1.2 units): re-port scope, Task 3.2"]
+#[ignore = "fails on pristine parry 0.31.1 (seam dips of ~1.2 units at body seams): re-port scope, Tasks 3.2-3.4 together (cause not isolated)"]
 fn walk_on_flat_voxel_floor_keeps_its_height() {
     const TICKS: usize = 120;
     let (mut w, body, collider) = walker_on_floor(16, 1.0);

@@ -14,13 +14,14 @@
 //! phase, broad phase), its first-touch capture (the moved bodies and their
 //! colliders), a full 7-structure snapshot, and crc32-over-bincode of each
 //! structure — for the `ColliderSet` also with every `Voxels` shape swapped
-//! for a stand-in, i.e. what a digest that skips voxel data would cost.
+//! for a stand-in, i.e. what a digest that skips voxel data would cost —
+//! and the big ones again through a reusable buffer and one crc32 pass.
 //! Every [`FRESH_PIPELINE_EVERY`] ticks the step runs on a new
 //! `PhysicsPipeline` (the plan's post-revert pipeline), timed separately.
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use physics_next::{PhysicsWorld, digest, load_region};
+use physics_next::{PhysicsWorld, digest, digest_buffered, load_region};
 use rapier3d::prelude::*;
 
 /// Default tick count; `CLONE_COST_TICKS` overrides it (a short run checks the rig).
@@ -103,6 +104,9 @@ fn main() {
     let [mut step, mut fresh_step, mut small, mut full, mut full_drop, mut capture, mut stand_in_dig] =
         std::array::from_fn::<Series, 7, _>(|_| Series::default());
     let mut stand_in_size = 0;
+    // Buffered variants: bodies, colliders, broad phase, stand-in colliders.
+    let mut buffered: Vec<Series> = (0..4).map(|_| Series::default()).collect();
+    let mut buf = Vec::new();
     let mut active_bodies = 0usize;
     let dx = export.walk_speed / TICK_HZ;
 
@@ -159,6 +163,10 @@ fn main() {
             sizes[i] = *len;
         }
         stand_in_size = stand_in_dig.time(|| digest(&stand_in)).1;
+        buffered[0].time(|| digest_buffered(&w.bodies, &mut buf));
+        buffered[1].time(|| digest_buffered(&w.colliders, &mut buf));
+        buffered[2].time(|| digest_buffered(&w.broad_phase, &mut buf));
+        buffered[3].time(|| digest_buffered(&stand_in, &mut buf));
     }
 
     let voxels = export.chunks.iter().flat_map(|c| &c.colliders).filter(|c| matches!(c, physics_next::ExportedCollider::Voxels { .. })).count();
@@ -189,4 +197,8 @@ fn main() {
         dig[i].row(&format!("crc32(bincode) {n}"), &sizes[i].to_string());
     }
     stand_in_dig.row("crc32(bincode) colliders, Voxels as stand-ins", &stand_in_size.to_string());
+    buffered[0].row("buffered crc32(bincode) bodies", &sizes[0].to_string());
+    buffered[1].row("buffered crc32(bincode) colliders", &sizes[1].to_string());
+    buffered[2].row("buffered crc32(bincode) broad_phase", &sizes[4].to_string());
+    buffered[3].row("buffered crc32(bincode) colliders, Voxels stand-ins", &stand_in_size.to_string());
 }

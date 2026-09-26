@@ -141,3 +141,12 @@ pub fn digest<T: serde::Serialize>(value: &T) -> (u32, usize) {
     let len = w.len;
     (hasher.finalize(), len)
 }
+
+/// [`digest`] through a reusable buffer: bincode writes into `buf`, then one
+/// crc32 pass. Separates bincode's per-field cost from `crc32fast::update`'s
+/// per-call overhead (the unbuffered writer calls it once per primitive).
+pub fn digest_buffered<T: serde::Serialize>(value: &T, buf: &mut Vec<u8>) -> (u32, usize) {
+    buf.clear();
+    bincode::serialize_into(&mut *buf, value).expect("digest serialize");
+    (crc32fast::hash(buf), buf.len())
+}

@@ -10,11 +10,11 @@ depends on it (`cargo tree -p game|client|server|worldgen` shows no 0.36 rapier)
 | # | Decision | Recommendation | Needs the user? |
 |---|---|---|---|
 | D1 | Rollback mechanism | **Hybrid journal** (measured ~12 µs vs ~225 µs) | confirm |
-| D2 | State hashing | **`StateDigest` over bincode, with the cached `Voxels` content digest (Task 4.4)** | no |
+| D2 | State hashing | **`StateDigest` over bincode through a buffered writer; the `Voxels` digest mode (Task 4.4 Step 2) is optional — gate passed narrowly (0.83 ms)** | no (your call if you want the margin) |
 | D4 | Math forks after the switch | **Move `simba`, `nalgebra`, `approx`, `ordered-float` to crates.io or drop them** | **yes** (reverses a CLAUDE.md rule) |
 | D5 | How the port lands | **Side-by-side `*-next` crates on `develop`** | **yes** |
 | D6 | `length_unit` | **`UNITS_PER_METER` (16)** as `movement::PHYSICS_LENGTH_UNIT` | confirm |
-| D7 | KCC depenetration | **Keep `depenetration_lift`; no fork flag for #485** | no |
+| D7 | KCC depenetration | **Keep `depenetration_lift`; gate #485 off (the plan's `depenetrate = false` flag, Task 3.4)** | no |
 
 **D1 — keep the hybrid journal.**
 - *Numbers.* At real region scale (2616 terrain bodies, 2956 colliders), the hybrid's per-tick
@@ -26,28 +26,41 @@ depends on it (`cargo tree -p game|client|server|worldgen` shows no 0.36 rapier)
 - *Cost of the hybrid.* Complexity. It needs capture hooks in the set accessors, the
   raw-pointer writes in the staged solver (Review Focus 1), and a fuzzer to prove LIFO exactness.
   Snapshots would inherit upstream's byte-exact snapshot contract for free.
-- *Memory.* Retained log memory is dominated by the 240 KB broad-phase clone per logged tick, in
-  both designs.
+- *Memory.* The hybrid retains about the 240 KB broad-phase clone per logged tick. A full
+  snapshot retains ~3.1 MB of serialized state per tick, somewhat less as heap because cloned
+  `Voxels` shapes are `Arc`-shared.
 - *Where the gap comes from.* One fixed body per chunk, which is how the game builds terrain. It
   wouldn't narrow unless terrain moved to far fewer bodies.
 - *Side result.* A fresh `PhysicsPipeline` after revert costs nothing measurable (14.9 vs
   13.4 µs), so Task 4.3's fresh-pipeline rule is free.
 
-**D2 — `StateDigest` (crc32 over bincode), with Task 4.4's cached `Voxels` digest.**
+**D2 — `StateDigest` (crc32 over bincode) through a buffered writer; the voxels digest mode is optional.**
 - *Why bincode.* It is the only canonical form upstream contracts, and it is target-independent.
   Phase 0 showed std `Hash` is not: it writes `usize` at pointer width. `state_hash` already
   differs between native and wasm32, and the server-authored `cell_hash` would make a wasm32
   cell-mode client fail with `CellHashMismatch`. Moving `cell_hash` to `StateDigest` (Task 5.2)
   fixes that as a side effect.
-- *Cost.* Serialized digests are expensive at region scale:
-  - the whole `ColliderSet` is 5.7 ms (1.7 MB), so the 1 ms gate trips;
-  - bodies are 2.4 ms and the broad phase 0.5 ms;
-  - a Full-mode digest per log entry is therefore ~8.6 ms.
-- *Task 4.4.* The cached per-`Voxels` digest cuts the collider term to ~1.3 ms, so it stays in
-  scope. Full mode then remains a test/harness mode, as today: production runs `Off`, and
-  `Delta` digests only an entry's footprint.
-- *Open alternative.* A buffered digest writer (fewer, larger `crc32` updates) would help by a
-  constant factor; worth trying in Task 4.4 before anything cleverer.
+- *Cost depends on buffering.* Run 1 streamed bincode straight into crc32: one
+  `crc32fast::update` per primitive field, 5.7 ms for the whole `ColliderSet`. The reviewer
+  flagged that as a likely artefact, so run 2 (your go-ahead) added a reusable buffer and a
+  single crc32 pass:
+  - `ColliderSet` 5.1 → **0.83 ms** p50 (0.97 p95);
+  - bodies 2.3 → 0.43 ms;
+  - broad phase 0.51 → 0.06 ms;
+  - colliders with `Voxels` stand-ins 1.25 → 0.16 ms.
+
+  **The buffered writer is mandatory:** `DigestWriter` in the plan's Task 4.4 becomes "serialize
+  into a reused `Vec`, hash once".
+- *Gate.* The whole `ColliderSet` at ≤ 1 ms passes, narrowly. By the plan's rule, Task 4.4's
+  `DIGEST_MODE` fork patch can be skipped.
+- *Trade-off on that skip.* The margin is thin: p95 0.97 ms, max 1.6 ms. Generated terrain has no
+  voxel-scale grids yet, and chisel edits add them (up to 32³ cells per chunk), which grows the
+  `Voxels` payload. The stand-in rows show the patch buys 5× on colliders (0.83 → 0.16 ms), for a
+  `thread_local!` fork patch that must never leak into wire or parking serialization.
+- *Recommendation.* Skip the patch in Task 4.4, and add a Full-mode cost check on an edited
+  region instead. Take the patch if that check crosses 1 ms. Full mode stays a test/harness
+  mode (production `Off`, `Delta` digests only the footprint), so a Full-mode digest per log
+  entry of ~1.3 ms at region scale is acceptable.
 
 **D4 — move the math forks to crates.io (or drop them).**
 - *Evidence.* rapier 0.36 already resolves crates.io `nalgebra` 0.35 and `simba` 0.10.2 for its
@@ -105,23 +118,33 @@ depends on it (`cargo tree -p game|client|server|worldgen` shows no 0.36 rapier)
 - *Fallback.* Keeping 1.0 (zero change) is the safe alternative, if you'd rather keep the switch
   a pure engine swap.
 
-**D7 — keep `depenetration_lift`; don't gate #485.**
-- *Measured.* Upstream's zero-motion depenetration does nothing on voxel terrain: parry 0.31.1
-  has no `contact` for `Voxels`, and it skips the `Unsupported` error. On a full-chunk cuboid it
-  lifts a sunk body straight up to the skin gap, which is exactly what our lift does.
-- *Why they don't fight.* `sweep_character` applies the lift before `move_shape`, so #485 then
-  finds a body at the skin gap and does nothing.
-- *Why skip the flag.* The plan's `KinematicCharacterController::depenetrate` flag (Task 3.4)
-  would be a fork patch that changes nothing measurable today.
-- *Cost of skipping it.* #485 does an extra AABB query and contact tests on zero-motion calls
-  near cuboids, e.g. idle standing entities. If a future parry adds `Voxels` contact, #485 would
-  start running on voxel terrain too, still after the lift and still a no-op.
-- *In Task 3.4:* add a test that pins "lift then #485" as a no-op pair, rather than the flag.
+**D7 — keep `depenetration_lift`, and gate #485 off (the plan's `depenetrate` flag).**
+- *Where #485 does nothing.* Upstream's zero-motion depenetration does nothing on voxel terrain:
+  parry 0.31.1 has no `contact` for `Voxels`, and it skips the `Unsupported` error.
+- *Where it matches the lift.* On a full-chunk cuboid with a body sunk 0.3, it lifts straight up
+  to the skin gap, which is exactly what our lift does. `sweep_character` applies the lift before
+  `move_shape`, so there #485 then finds nothing to do.
+- *Where they disagree (found in review).* The case the lift deliberately declines: a body
+  buried deeper than `STEP_HEIGHT`, or one that a lift wouldn't clear. The lift's policy is
+  "a buried body stays put, never teleported up through what buried it". #485 then pushes the
+  body out along the contact normal, by up to a quarter of the character height per call. The
+  probe `kcc_zero_motion_moves_a_body_the_lift_leaves_buried` has it lift a body buried 10.6
+  units straight up by 7.2 (the cap). It happens only on cuboid chunks, so behaviour would
+  differ between cuboid and voxel ground.
+- *Recommendation.* Keep the lift, and take the plan's Task 3.4 patch: a
+  `KinematicCharacterController::depenetrate: bool` (default `true`, upstream behaviour), set to
+  `false` by the game.
+- *Cost.* One small `// mmo-fork:` patch. It's also the only way #485's behaviour stays
+  independent of whether a future parry adds `Voxels` contact.
 - *The lift keeps working upstream:* `intersect_shape` is implemented for `Voxels` in 0.31.1.
 
-**Also new for the re-port (Tasks 3.2/3.3):** on a bare flat voxel floor, upstream's KCC dips
-~1.2 units before chunk seams while walking. That's the defect our voxels-cast patches fixed,
-now pinned by the ignored `walk_on_flat_voxel_floor_keeps_its_height`.
+**Also new for the re-port (Tasks 3.2–3.4):** on a bare flat voxel floor, upstream's KCC dips
+~1.2 units just before the seams between chunk *bodies* while walking, never at voxel borders
+inside a body. That's the walking-smoothness defect our fork fixed, now pinned by the ignored
+`walk_on_flat_voxel_floor_keeps_its_height`. The probe doesn't isolate which fix it needs: the
+voxels cast (3.2), the cross-collider `cast_shape_on_continuous_surfaces` (3.3; upstream
+`move_shape` doesn't use it) or the snap gate (3.4). Expect its ignore to come off only after
+all three.
 
 
 ## Task 1.1 — clone and digest cost at real region scale
@@ -172,6 +195,17 @@ before/after (no power clamp). Build 9.1 ms. First step, i.e. the broad phase ov
 | crc32(bincode) multibody_joints | 0.6 | 1.2 | 3.3 | 0.7 | 101 |
 | **crc32(bincode) colliders, `Voxels` swapped for a stand-in** | **1264.2** | 1401.0 | 1934.4 | 1277.7 | 578 645 |
 
+**Run 2** (review follow-up, your go-ahead; same pinning, core 2 at 4.4 GHz after). It added
+the buffered rows: bincode into a reused `Vec`, then one crc32 pass. Its other rows matched run 1
+within ~12% (hybrid 12.4 µs, full clone 224.2 µs, unbuffered colliders 5077 µs).
+
+| µs per tick | p50 | p95 | max | mean | bincode bytes |
+|---|---|---|---|---|---|
+| buffered crc32(bincode) bodies | 430.7 | 540.9 | 832.8 | 435.9 | 1 140 013 |
+| **buffered crc32(bincode) colliders** | **825.9** | 968.7 | 1605.9 | 839.9 | 1 739 409 |
+| buffered crc32(bincode) broad_phase | 56.1 | 97.5 | 125.9 | 65.1 | 239 830 |
+| buffered crc32(bincode) colliders, `Voxels` stand-ins | 155.8 | 191.2 | 312.3 | 160.3 | 578 645 |
+
 Reading the table:
 
 - **The hybrid's wholesale clone is ~12 µs p50.** The separately timed broad-phase clone (18.8
@@ -188,20 +222,18 @@ Reading the table:
 - **The narrow phase is ~1 KB.** Upstream's default `ActiveCollisionTypes` never creates
   kinematic↔fixed pairs (the plan's Task 3.5 note), and the character controller does its own
   shape casts.
-- **Serialized digests are slow at this scale:** ~2 GB/s nominal crc32, but ~0.3 GB/s through
-  bincode's per-field writes. A Full-mode per-entry digest of bodies + colliders + broad phase
-  is **~8.6 ms**. With `Voxels` replaced by a stand-in, the collider digest drops from 5.7 ms to
-  1.3 ms: still over the 1 ms gate, because 2956 colliders × ~196 bytes of non-shape state
-  remain. Buffering the writer would help by a constant; this spike didn't time it.
+- **Unbuffered digests are slow at this scale.** Streaming bincode field by field into crc32
+  (run 1) reaches only ~0.3 GB/s: bodies + colliders + broad phase take ~8.6 ms. Buffered
+  (run 2: bincode into a reused `Vec`, one crc32 pass), the same three take **~1.3 ms**. That is
+  the per-call overhead of `crc32fast::update`, not bincode.
 
 **D1 gate:** hybrid wholesale ≤ 50 µs: **yes (~12 µs)**. Full clone within 2× of it: **no
 (~19×)**. → **Keep the hybrid journal.**
 
-**D2 gate:** crc32(bincode) of the whole `ColliderSet` > 1 ms: **yes (5.7 ms)**. → The
-Full-mode digest needs Task 4.4's cached per-`Voxels` content digest (5.7 → ~1.3 ms). Even then,
-a Full-mode whole-set digest per log entry costs milliseconds at region scale. That's acceptable
-only because Full is a test/harness mode (production runs `Off`, and `Delta` digests only the
-entry's footprint).
+**D2 gate:** buffered crc32(bincode) of the whole `ColliderSet` ≤ 1 ms: **yes, narrowly
+(0.83 ms p50, 0.97 ms p95).** Unbuffered, it was 5.7 ms. → Per the plan, Task 4.4's `Voxels`
+digest mode may be skipped; the decision summary weighs that. The buffered writer is required
+either way.
 
 ## Task 1.2 — upstream against our movement fixes
 
@@ -226,8 +258,10 @@ patch lands in the fork. Run: `just test-one physics-next "--test upstream_movem
 **Re-port scope** (`// mmo-fork:` patches; each test's ignore comes off when it lands):
 
 - **Task 3.2 (voxels cast):** `voxels_cast_sees_the_voxel_under_a_hovering_shape` (search
-  domain), `voxels_cast_reports_no_edges_inside_a_flat_floor` (internal edges),
-  `walk_on_flat_voxel_floor_keeps_its_height` (seam dips; both halves together).
+  domain), `voxels_cast_reports_no_edges_inside_a_flat_floor` (internal edges).
+- **Tasks 3.2–3.4 together:** `walk_on_flat_voxel_floor_keeps_its_height`. The dips sit at
+  chunk-body seams only, and the probe doesn't isolate the cause (voxels cast,
+  `cast_shape_on_continuous_surfaces`, snap gate).
 - **Task 3.3 (grazing start):** `cast_starting_at_the_target_distance_hits_with_the_true_normal`,
   plus the TOI half of the flat-floor case. Upstream's TOIs here are geometrically right; what
   the fork adds is the policy that a start within `GRAZING_START_MARGIN` of the skin *is* a
@@ -251,8 +285,11 @@ patch lands in the fork. Run: `just test-one physics-next "--test upstream_movem
 - On a cuboid it does exactly what `depenetration_lift` does (straight up, to the skin gap).
 - It never runs for a nonzero desired translation.
 - `game::movement::sweep_character` applies `depenetration_lift` *before* `move_shape`, so by the
-  time #485 looks, the body is already at the skin gap and it finds nothing to do. **The two
-  don't fight.**
+  time #485 looks, the body is already at the skin gap and it finds nothing to do. They
+  don't fight when the lift succeeds. **They do when the lift declines:** a body buried deeper
+  than `STEP_HEIGHT` on a cuboid gets pushed out by #485 (probe
+  `kcc_zero_motion_moves_a_body_the_lift_leaves_buried`: 10.6 units deep → lifted 7.2, the
+  quarter-height cap). That's why D7 takes the `depenetrate = false` flag.
 - `depenetration_lift` survives the switch: its `intersect_shape` goes through
   `intersection_test`, which 0.31.1 *does* implement for `Voxels`.
 
