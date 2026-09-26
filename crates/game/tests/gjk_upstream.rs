@@ -92,6 +92,50 @@ fn issue_396_separated_coaxial_pairs_stay_disjoint() {
     }
 }
 
+/// #429: the TOI came back short by an amount scaling with the target's
+/// extent (large support coordinates orthogonal to the cast kept the GJK
+/// upper bound from decreasing; the last-chance exit returned the unrefined
+/// lower bound). Up to ~3.6 mm on our 8–16-unit cuboids.
+#[test]
+fn issue_429_shape_cast_toi_accuracy_does_not_scale_with_shape_extent() {
+    const BALL_RADIUS: f32 = 0.5166;
+    const MAX_TOI_ERROR: f32 = 2.0e-4; // 0.2 mm.
+    let ball = Ball::new(r(BALL_RADIUS));
+    let down = v(0.0, -1.0, 0.0);
+    let mut errors = Vec::new();
+    for half_extent in [5.0, 50.0, 500.0] {
+        let ground = Cuboid::new(v(half_extent, 0.5, half_extent));
+        let ground_pose = at(0.0, -0.5, 0.0);
+        let mut max_toi_error = 0.0f32;
+        // Sub-millimetre start offsets at several lateral positions (upstream's sweep).
+        for i in 0..200 {
+            let y = 1.177 + i as f32 * 5.0e-5;
+            for (x, z) in [(1.4, 2.8), (-1.4, -0.4), (1.4, -2.0), (-1.4, 2.0)] {
+                let hit = query::cast_shapes(
+                    &ground_pose,
+                    &Vector::zeros(),
+                    &ground,
+                    &at(x, y, z),
+                    &down,
+                    &ball,
+                    ShapeCastOptions::with_max_time_of_impact(r(2.0)),
+                )
+                .unwrap()
+                .expect("the downward cast should hit the cuboid");
+                let expected = y - BALL_RADIUS;
+                max_toi_error = max_toi_error.max((hit.time_of_impact.0 - expected).abs());
+            }
+        }
+        errors.push((half_extent, max_toi_error));
+    }
+    for (half_extent, err) in errors {
+        assert!(
+            err <= MAX_TOI_ERROR,
+            "shape-cast TOI error {err} exceeded {MAX_TOI_ERROR} for half-extent {half_extent}"
+        );
+    }
+}
+
 /// #70 / #180: sweeping a capsule/ball through the top of a large cuboid
 /// (coplanar with a halfspace) gave false negatives from an absolute GJK
 /// tolerance on ~100-unit support coordinates.
