@@ -2,8 +2,9 @@
 //! #420 subset). Each test is a port of the upstream regression test, in the
 //! fork's nalgebra + `OrderedFloat` idiom.
 use game::parry::math::{Isometry, Point, Real, Vector};
+use game::parry::query::details::cast_shapes_support_map_support_map;
 use game::parry::query::{self, ShapeCastOptions};
-use game::parry::shape::{Ball, Capsule, Cuboid, Cylinder, HalfSpace, Shape};
+use game::parry::shape::{Ball, Capsule, Cuboid, Cylinder, HalfSpace, Segment, Shape};
 
 fn r(x: f32) -> Real {
     Real::from(x)
@@ -136,9 +137,37 @@ fn issue_429_shape_cast_toi_accuracy_does_not_scale_with_shape_extent() {
     }
 }
 
-/// #70 / #180: sweeping a capsule/ball through the top of a large cuboid
-/// (coplanar with a halfspace) gave false negatives from an absolute GJK
-/// tolerance on ~100-unit support coordinates.
+/// #180 (C2, upstream 79833ff91b): a grazing cast returned `None` because
+/// `minkowski_ray_cast` compared `min_bound` against an absolute tolerance
+/// while its rounding error grows with the support coordinates. Upstream's 2D
+/// MRE embedded in the z = 0 plane. Found by probing ulps around the MRE with
+/// the scaled tolerance reverted: x = 15.689517 and 15.689518 (bits
+/// 0x417b0843 / 0x417b0844) miss without it. Neighbours stay as guards.
+/// Calls the support-map cast directly (the path `minkowski_ray_cast` is on;
+/// `intersection_test` below never reaches it).
+#[test]
+fn issue_180_grazing_cast_is_not_ulp_sensitive() {
+    let segment = Segment::new(Point::new(r(1.0), r(1.0), r(0.0)), Point::new(r(124.0), r(1.0), r(0.0)));
+    let cuboid = Cuboid::new(v(2.0, 2.0, 2.0));
+    let vel = v(0.0081385, -0.999966, 0.0);
+    for bits in [0x417b_0842u32, 0x417b_0843, 0x417b_0844, 0x417b_0845] {
+        let x = f32::from_bits(bits);
+        let hit = cast_shapes_support_map_support_map(
+            &at(x, 54.00709, 0.0),
+            &vel,
+            &segment,
+            &cuboid,
+            ShapeCastOptions::default(),
+        );
+        assert!(hit.is_some(), "grazing cast missed at x = {x} ({bits:#x})");
+    }
+}
+
+/// #70: sweeping a capsule/ball through the top of a large cuboid
+/// (coplanar with a halfspace) gave false negatives. `intersection_test` runs
+/// `gjk::closest_points`, so what fixed this is the stall classification
+/// (#193/#396, fa08f24), not the #180 ray-cast tolerance: that one is pinned
+/// by `issue_180_grazing_cast_is_not_ulp_sensitive` above.
 #[test]
 fn issue_70_capsule_cuboid_sweep_has_no_false_negatives() {
     let capsule = Capsule::new(Point::new(r(0.0), r(-0.5), r(0.0)), Point::new(r(0.0), r(0.5), r(0.0)), r(0.5));
@@ -204,19 +233,32 @@ fn issue_315_exactly_touching_cuboids_flipped() {
     assert!((c.normal1.into_inner() + Vector::x()).norm().0 < EPS_315, "normal1 {:?}", c.normal1);
 }
 
-/// #315, the shape pair the game has most: a ball resting exactly on a
-/// cuboid's top face. Witnesses on the face, normal ±Y.
+/// Parity pin, not a #315 test: the player capsule resting on a block's top
+/// face, the contact pair the game has most. Capsule vs cuboid goes through
+/// support-map GJK (a ball would take point projection instead). At ~1e-5
+/// separation GJK's closest-points direction is ~1.6° off the face normal;
+/// pristine parry 0.25.3 and parry 0.31.1 both give exactly the values below,
+/// so after the rapier 0.36 switch this must still match within 1e-6.
+///
+/// #315's EPA bootstrap is covered by the two cuboid tests above, which do
+/// reach it. The same capsule centred exactly over the block (x = z = 0)
+/// stops at distance exactly 0 and returns a stale 45° direction in the fork
+/// and in 0.25.3; 0.31.1 gets +Y. The upgrade plan (Task 5.4) adds that case
+/// as a must-pass after the switch.
 #[test]
-fn issue_315_ball_exactly_touching_cuboid() {
-    let ground = Cuboid::new(v(8.0, 0.5, 8.0));
-    let ball = Ball::new(r(0.5));
-    let c = query::contact(&at(0.0, -0.5, 0.0), &ground, &at(1.0, 0.5, -2.0), &ball, r(0.0))
+fn capsule_touching_cuboid_matches_upstream() {
+    let block = Cuboid::new(v(8.0, 8.0, 8.0));
+    let capsule = Capsule::new_y(r(0.7), r(0.3));
+    // Block top face at y = 0; capsule bottom (centre y - 0.7 - 0.3) on it.
+    let c = query::contact(&at(0.0, -8.0, 0.0), &block, &at(1.0, 1.0, -2.0), &capsule, r(0.0))
         .unwrap()
         .unwrap();
-    assert!(c.dist.0.abs() < EPS_315, "expected touching dist, got {}", c.dist);
-    assert!(c.point1.y.0.abs() < EPS_315, "point1 not on the face: {:?}", c.point1);
-    assert!(c.point2.y.0.abs() < EPS_315, "point2 not on the face: {:?}", c.point2);
-    assert!((c.normal1.into_inner() - Vector::y()).norm().0 < EPS_315, "normal1 {:?}", c.normal1);
+    const TOL: f32 = 1.0e-6;
+    let close = |got: Vector<Real>, want: [f32; 3]| (got - v(want[0], want[1], want[2])).norm().0 < TOL;
+    assert!((c.dist.0 - 1.2409591e-5).abs() < TOL, "dist {}", c.dist);
+    assert!(close(c.normal1.into_inner(), [-0.02856119, 0.9995807, -0.0047601983]), "normal1 {:?}", c.normal1);
+    assert!(close(c.point1.coords, [1.0015448, 0.0, -2.000366]), "point1 {:?}", c.point1);
+    assert!(close(c.point2.coords, [1.0015442, 1.2397766e-5, -2.000366]), "point2 {:?}", c.point2);
 }
 
 /// #315 guard: overlapping cuboids keep a penetration depth and witnesses on

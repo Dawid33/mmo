@@ -63,13 +63,9 @@ fn genesis_is_deterministic() {
     );
 }
 
-#[test]
-fn mixed_chunk_gets_block_and_voxel_scale_colliders() {
-    // flat_floor(24): whole solid by=0 block layer + chiseled by=1 layer.
-    let region = Region::from_chunks(
-        RegionId::new(0, 0),
-        vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor(24))],
-    );
+/// Voxel sizes of the `Voxels` colliders genesis builds for one chunk.
+fn voxels_collider_sizes(chunk: Chunk) -> Vec<Real> {
+    let region = Region::from_chunks(RegionId::new(0, 0), vec![(ChunkCoords::new(0, 0, 0), chunk)]);
     let mut sizes: Vec<Real> = region
         .data()
         .physics
@@ -78,10 +74,29 @@ fn mixed_chunk_gets_block_and_voxel_scale_colliders() {
         .filter_map(|(_, c)| c.shape().as_voxels().map(|v| v.voxel_size().x))
         .collect();
     sizes.sort();
+    sizes
+}
+
+#[test]
+fn mixed_chunk_gets_block_and_voxel_scale_colliders() {
+    // flat_floor(20): whole solid by=0 block layer + a 4-voxel chiseled slab
+    // in by=1, which fills no half-block octant, so it needs voxel scale.
     assert_eq!(
-        sizes,
+        voxels_collider_sizes(Chunk::flat_floor(20)),
         vec![Real::from(1.0), Real::from(16.0)],
         "one chisel-scale and one block-scale voxels collider"
+    );
+}
+
+#[test]
+fn half_block_slab_gets_half_block_scale_collider() {
+    // flat_floor(24): the chiseled slab is exactly the lower half of by=1,
+    // i.e. whole half-block octants (worldgen's half blocks), so it needs no
+    // voxel-scale collider.
+    assert_eq!(
+        voxels_collider_sizes(Chunk::flat_floor(24)),
+        vec![Real::from(8.0), Real::from(16.0)],
+        "one half-block-scale and one block-scale voxels collider"
     );
 }
 
