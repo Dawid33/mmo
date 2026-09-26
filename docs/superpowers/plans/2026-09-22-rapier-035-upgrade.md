@@ -131,7 +131,7 @@ The port changes numerics, so bit-exact hashes can't carry across it. What carri
 > **Landed (cc6e060) in `crates/worldgen/tests/scene_hash_golden.rs`, not `crates/game/tests/`:** `game` can't depend on worldgen. `SCENE_HASH = 0xEF4000BC`; skips on non-default world dials.
 
 **Files:**
-- Create: `crates/game/tests/scene_hash_golden.rs`
+- Create: `crates/worldgen/tests/scene_hash_golden.rs`
 
 - [x] **Step 1: Write the test.**
   - Build a canonical scene: the fixed worldgen region `RegionCoords { x: 0, z: 0 }` at `set_near_radius(0)` scale if applicable; one player; one slime; 60 ticks of scripted input.
@@ -149,18 +149,10 @@ The port changes numerics, so bit-exact hashes can't carry across it. What carri
 - Create: `crates/game/tests/wasm_determinism.rs` (native side) and `crates/game/tests/wasm/` or a `#[wasm_bindgen_test]` module in the same file (check how/if the workspace already uses `wasm-bindgen-test`: `grep -rn wasm_bindgen_test crates`)
 - Modify: `justfile` (new recipe `determinism-wasm`)
 
-- [x] **Step 1: Write a scene that fits wasm.** Kinematic capsule on a small hand-built voxels floor (8×8 chunks' worth of `Voxels`) plus one slime, 120 ticks. It uses no worldgen, so the wasm build stays small. Compute `state_hash`.
-- [x] **Step 2: Native side.** `#[test] fn scene_hash_native()` asserts the constant `WASM_SCENE_HASH`.
-- [x] **Step 3: wasm side.** `#[wasm_bindgen_test] fn scene_hash_wasm()` asserts the same constant.
-- [x] **Step 4: Add the justfile recipe.**
-
-```just
-# Cross-target determinism: the same physics scene must hash identically on
-# native and wasm32 (node via wasm-bindgen-test-runner).
-determinism-wasm:
-    {{cap}} {{cargo}} test -p game --test wasm_determinism
-    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner {{cap}} {{cargo}} test -p game --test wasm_determinism --target wasm32-unknown-unknown
-```
+- [x] **Step 1: Write a scene that fits wasm.** Kinematic capsule on a small hand-built voxels floor (8×8 chunks' worth of `Voxels`) plus one slime, 120 ticks. It uses no worldgen, so the wasm build stays small. Compute crc32 of the region's bincode bytes (`state_hash` is pointer-width dependent, see the note above).
+- [x] **Step 2: Native side.** `#[test] fn scene_hash_native()` asserts that digest equals `WASM_SCENE_DIGEST`, and `state_hash` equals the native-only `NATIVE_STATE_HASH`.
+- [x] **Step 3: wasm side.** `#[wasm_bindgen_test] fn scene_hash_wasm()` asserts the same `WASM_SCENE_DIGEST`.
+- [x] **Step 4: Add the justfile recipe** `determinism-wasm` (see the `justfile`: it installs the `wasm-bindgen-test-runner` matching Cargo.lock under `target/tools` on first use, then runs `--test wasm_determinism` natively and with `--target wasm32-unknown-unknown`).
 
 - [x] **Step 5: Run both.** Expected: the same hash. If `game` doesn't build for wasm32 test targets, e.g. because of dev-deps, scope the dev-deps with `[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]`. If it still can't be made to run in ≤ 1 h, record that in the commit and fall back to comparing a native hash against one printed by the browser client in a debug build (`?offline`). This test is the only proof of cross-target determinism, so don't drop it silently.
 - [x] **Step 6: Commit.** Include CLAUDE.md: add `just determinism-wasm` to the verification list.
