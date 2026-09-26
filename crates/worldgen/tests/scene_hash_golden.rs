@@ -1,0 +1,104 @@
+//! Same-engine regression golden: a canonical scene — the generated region
+//! (0, 0), one player, one slime, 60 ticks of scripted input — must end in
+//! exactly [`SCENE_HASH`] (`game::state_hash`, whose Full-mode crc32 is the
+//! default). Any change to worldgen, the sim or the physics engine that moves
+//! a single bit of state shows up here; behaviour across an engine switch is
+//! judged by `crates/game/tests/physics_goldens.rs` instead.
+//!
+//! The constant changes only in a commit whose message says why. Regenerate:
+//!
+//! ```sh
+//! SCENE_HASH_PRINT=1 just test-one worldgen "--test scene_hash_golden -- --include-ignored --nocapture"
+//! ```
+//!
+//! It lives in `worldgen` because `game` can't depend on it (worldgen
+//! depends on game). It holds for the default build dials only: another
+//! region size, cell mode, spawn island size or a forged world file is a
+//! different world, and the test says so and skips.
+use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
+
+/// `state_hash` after the scene's last tick.
+const SCENE_HASH: u32 = 0xEF40_00BC;
+/// Ticks of scripted input.
+const SCENE_TICKS: usize = 60;
+
+fn mats() -> worldgen::material::Materials {
+    worldgen::material::Materials {
+        stone: game::BlockId(2),
+        dirt: game::BlockId(1),
+        grass: game::BlockId(3),
+        sand: game::BlockId(4),
+        water: game::BlockId(5),
+    }
+}
+
+fn default_dials() -> bool {
+    game::REGION_CHUNKS == 32
+        && game::CELL_CHUNKS == 0
+        && option_env!("VOXEL_ISLAND_CELLS").is_none_or(|v| v.is_empty() || v == "0" || v == "16")
+        && std::env::var_os(worldgen::forged::WORLD_FILE_ENV).is_none_or(|v| v.is_empty())
+}
+
+/// Events of the scene: controls on, settle, then walk W, D, S with a jump,
+/// one key at a time — [`SCENE_TICKS`] ticks in all.
+fn script() -> Vec<GameEventKind> {
+    let key = |key, pressed| GameEventKind::PlayerInput(0, InputEvent::Key { key, pressed });
+    let ticks = |n| std::iter::repeat_with(|| GameEventKind::Tick).take(n);
+    let mut events = vec![key(Key::KeyE, true), key(Key::KeyE, false)];
+    events.extend(ticks(15));
+    for dir in [Key::KeyW, Key::KeyD, Key::KeyS] {
+        events.push(key(dir, true));
+        events.extend(ticks(5));
+        events.push(key(Key::Space, true));
+        events.extend(ticks(1));
+        events.push(key(Key::Space, false));
+        events.extend(ticks(9));
+        events.push(key(dir, false));
+    }
+    events
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn canonical_scene_state_hash() {
+    if !default_dials() {
+        eprintln!("scene_hash_golden: non-default world dials, skipped");
+        return;
+    }
+    let rc = RegionCoords::new(0, 0);
+    let mut region = Region::from_columns(rc, worldgen::generate_region(rc, worldgen::WORLD_SEED, mats()));
+    let apply = |region: &mut Region, ev| {
+        region.handle_event(ev).unwrap();
+        region.forget_last_event();
+    };
+    apply(&mut region, GameEventKind::CreateClient(0));
+    let player = |region: &Region| {
+        let d = region.data();
+        let e = *d.player_entites.get(&0).unwrap();
+        let t = *d.physics.bodies.get(*d.ecs.rigidbody.get(e)).unwrap().translation();
+        [t.x.0, t.z.0]
+    };
+    let spawn = player(&region);
+    // One slime, a few blocks off the player's spawn, dropped onto the surface.
+    region.with_data(|d| {
+        let [px, pz] = spawn;
+        let (x, z) = (px + 48.0, pz + 48.0);
+        let surface = d.surface_voxel_y(x as i32, z as i32).expect("land next to the spawn");
+        let pos = game::parry::math::Vector::new(x.into(), (surface as f32 + 24.0).into(), z.into());
+        d.spawn_slime_safe(pos, 1, 0.0.into(), 0);
+    });
+    let start = player(&region);
+    let events = script();
+    assert_eq!(events.iter().filter(|e| matches!(e, GameEventKind::Tick)).count(), SCENE_TICKS);
+    for ev in events {
+        apply(&mut region, ev);
+    }
+    let end = player(&region);
+    let walked = ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt();
+    assert!(walked > 16.0, "the scripted walk must move the player: {start:?} -> {end:?}");
+    let hash = state_hash(region.data());
+    if std::env::var_os("SCENE_HASH_PRINT").is_some() {
+        eprintln!("SCENE_HASH = 0x{hash:08X}");
+    }
+    assert_eq!(hash, SCENE_HASH, "canonical scene hash 0x{hash:08X} != golden 0x{SCENE_HASH:08X}");
+}
