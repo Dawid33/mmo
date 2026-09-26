@@ -15,6 +15,11 @@
 //! depends on game). It holds for the default build dials only: another
 //! region size, cell mode, spawn island size or a forged world file is a
 //! different world, and the test says so and skips.
+// The game crate's movement rig: every read of physics-engine types.
+#[path = "../../game/tests/common/mod.rs"]
+mod common;
+
+use common::{entity_body, spawn_slime};
 use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 
 /// `state_hash` after the scene's last tick.
@@ -73,20 +78,14 @@ fn canonical_scene_state_hash() {
     };
     apply(&mut region, GameEventKind::CreateClient(0));
     let player = |region: &Region| {
-        let d = region.data();
-        let e = *d.player_entites.get(&0).unwrap();
-        let t = *d.physics.bodies.get(*d.ecs.rigidbody.get(e)).unwrap().translation();
-        [t.x.0, t.z.0]
+        let b = entity_body(region.data(), *region.data().player_entites.get(&0).unwrap());
+        [b.x, b.z]
     };
     let spawn = player(&region);
     // One slime, a few blocks off the player's spawn, dropped onto the surface.
-    region.with_data(|d| {
-        let [px, pz] = spawn;
-        let (x, z) = (px + 48.0, pz + 48.0);
-        let surface = d.surface_voxel_y(x as i32, z as i32).expect("land next to the spawn");
-        let pos = game::parry::math::Vector::new(x.into(), (surface as f32 + 24.0).into(), z.into());
-        d.spawn_slime_safe(pos, 1, 0.0.into(), 0);
-    });
+    let (x, z) = (spawn[0] + 48.0, spawn[1] + 48.0);
+    let surface = region.data().surface_voxel_y(x as i32, z as i32).expect("land next to the spawn");
+    spawn_slime(&mut region, [x, surface as f32 + 24.0, z], 1, 0.0, 0);
     let start = player(&region);
     let events = script();
     assert_eq!(events.iter().filter(|e| matches!(e, GameEventKind::Tick)).count(), SCENE_TICKS);

@@ -20,7 +20,7 @@
 //! ```
 mod common;
 
-use common::{body, key, r0, spawn_slime, ticks, world_of};
+use common::{body, fixed_body_mass_count, key, r0, spawn_slime, ticks, world_of};
 use game::{state_hash, Chunk, Key};
 
 /// crc32 of the scene region's bincode bytes after [`SCENE_TICKS`] ticks,
@@ -59,6 +59,11 @@ fn scene() -> (u32, u32) {
     assert!(end.z - start.z > 100.0 && end.x - start.x > 100.0, "the script must walk: {start:?} -> {end:?}");
     assert!(end.grounded && end.x < 320.0 && end.z < 320.0, "the walk must end on the floor: {end:?}");
     let data = world.data(&r0());
+    // The hazard this check exists for, asserted directly: were terrain mass
+    // properties computed, the digest would only differ if std acos/cos
+    // happened to round differently on this floor.
+    let (fixed, massive) = fixed_body_mass_count(data);
+    assert!(fixed >= 64 && massive == 0, "{massive} of {fixed} fixed terrain bodies computed mass properties");
     let digest = crc32fast::hash(&game::SerializedRegion::from_rollback(data).0);
     let hash = state_hash(data);
     if print_hash() {

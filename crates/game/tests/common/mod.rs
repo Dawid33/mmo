@@ -101,3 +101,13 @@ pub fn spawn_slime(region: &mut Region, pos: [f32; 3], size: u8, yaw: f32, tick:
     });
     slime.unwrap()
 }
+
+/// `(fixed bodies, fixed bodies with mass)`. Terrain bodies are fixed and
+/// must skip collider mass properties: for `Voxels` those go through
+/// `SymmetricEigen`'s std `acos`/`cos`, which is not bit-identical across
+/// targets.
+pub fn fixed_body_mass_count(data: &Rollback) -> (usize, usize) {
+    let fixed: Vec<_> = data.physics.bodies.iter().filter(|(_, b)| b.is_fixed()).collect();
+    let massive = fixed.iter().filter(|(_, b)| b.mass().0 != 0.0).count();
+    (fixed.len(), massive)
+}

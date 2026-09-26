@@ -27,7 +27,8 @@ use game::{Block, BlockId, Chunk, GameEventKind, Key, Region, World, BLOCK_VOXEL
 
 /// Ticks recorded per scenario.
 const SCENARIO_TICKS: usize = 120;
-/// Per-axis position tolerance per tick: 0.05 units (5 cm scaled to 16 units/m).
+/// Per-axis position tolerance per tick: 0.05 units, about 3 mm at 16 units/m
+/// (the upgrade plan's value; no allowance for drift or a shifted landing).
 const POS_TOL: f32 = 0.05 * UNITS_PER_METER / 16.0;
 /// `grounded` may disagree with the golden within this many ticks of a
 /// recorded grounded/airborne transition.
@@ -137,10 +138,11 @@ fn sprint_jump_over_gap() -> Vec<Row> {
     run_player(world, |w, t| tap(w, Key::Space, 8, t))
 }
 
-/// Starts 0.3 units sunk into a flat floor, stands, walks +z, stands.
+/// Starts 0.3 units sunk into a flat floor — into the solid, past the skin
+/// gap it normally rests on — stands, walks +z, stands.
 fn sunk_start_depenetrates() -> Vec<Row> {
     let mut world = world_of(3..=4, 3..=6, |_, _| Chunk::flat_floor(16));
-    teleport(&mut world, 136.0, rest_y(16.0) - 0.3, 136.0);
+    teleport(&mut world, 136.0, rest_y(16.0) - CHARACTER_SKIN - 0.3, 136.0);
     run_player(world, |w, t| {
         if t == 20 {
             key(w, Key::KeyS, true);
