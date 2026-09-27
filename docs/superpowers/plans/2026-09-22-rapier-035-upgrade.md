@@ -12,9 +12,9 @@
   - first-touch value capture of `RigidBody`/`Collider` inside the sets' internal accessors;
   - per-tick wholesale clones of `IslandManager`, `NarrowPhase`, `BroadPhaseBvh` and the joint sets;
   - a fresh `PhysicsPipeline` + `CCDSolver` after every revert.
-- **Hashing moves from `derive(Hash)` over `OrderedFloat` to crc32 over canonical bincode bytes.** Upstream contracts byte-identical snapshot round-trips.
+- **Hashing moves from std `Hash` over `OrderedFloat` to our own zero-copy `StateHash` trait** (new first-party crates `state-hash` + `state-hash-derive`): the same field-by-field walk into the hasher, but implementable for glam `f32` types (floats hash by canonicalised bits), derived in the rapier/parry forks. Hashing serialized bytes was rejected: the user measured it far slower than `Hash` impls when the engine was designed (decided 2026-09-27, D2).
 
-**Tech Stack:** Rust; rapier3d 0.36.0, parry3d 0.31.1, glamx 0.3.1 (glam 0.33), simba 0.10, nalgebra 0.35 (rapier-internal only); bincode 1.3; crc32fast; wasm-bindgen-test-runner + node for wasm32 goldens.
+**Tech Stack:** Rust; rapier3d 0.36.0, parry3d 0.31.1, glamx 0.3.1 (glam 0.33), simba 0.10, nalgebra 0.35 (rapier-internal only); bincode 1.3 (wire/parking only); crc32fast (hasher for `StateHash`); wasm-bindgen-test-runner + node for wasm32 goldens.
 
 **Spec:** `docs/superpowers/specs/2026-09-22-vendored-deps-update-investigation.md`, plus the design section of this plan. Roadmap: `docs/superpowers/plans/2026-09-22-physics-upstream-roadmap.md`.
 
@@ -41,13 +41,13 @@
 
 | # | Decision | Choice | Why |
 |---|---|---|---|
-| D1 | Rollback mechanism | Hybrid journal (capture on first touch + small wholesale clones), not full snapshots | A full clone is ~170 µs and ~1 MB per region per tick in the spike, dominated by one fixed body per chunk; hybrid is ~10–20 µs. Confirmed or overturned by the Phase 1 spike at real region scale. |
-| D2 | State hashing | crc32 over bincode bytes behind a `StateDigest` trait. The `#[rollback]` macro's `Hash` bound becomes `StateDigest`, with a blanket impl for `T: Serialize`. | glam `f32` types have no `Hash`, and re-adding ~140 derives plus custom impls on glam types is a permanent fork burden. Upstream contracts canonical bytes (`tests/snapshot_roundtrip.rs`, `snapshot_portability.rs`). Voxel shapes keep a cached content digest so hashing a collider doesn't re-serialize its voxel data. |
-| D3 | `OrderedFloat` in game state | Remove it. Game-owned floats become plain `f32`; glam types are used directly. | Its only job was `Hash`/`Ord` for digests, which D2 replaces. |
-| D4 ⚠️ | Forks that survive the switch | **Keep vendored:** `rapier3d`, `parry3d` (fork patches), `slotmapd` (rollback inverses), `block-mesh` (unchanged). **Move to crates.io:** `simba` 0.10, `nalgebra` 0.35, `approx`, `ordered-float` (or drop). | Upstream now gives determinism through features (`libm_force`, `glamx/libm`, `scalar-math`). The math forks existed only for the `OrderedFloat` scalar. **This reverses the CLAUDE.md rule "don't switch these back to crates.io", so it needs the user's OK.** |
-| D5 ⚠️ | How the multi-week port lands | Side-by-side vendoring (`crates/rapier-next`, `crates/parry-next`, `crates/physics-next`) on `develop`, then one switch commit series | CLAUDE.md forbids worktrees, and the user edits `develop` concurrently, so a long-lived branch would need constant rebasing of a huge diff. **Needs the user's OK.** |
-| D6 | `IntegrationParameters::length_unit` | Decided in the Phase 1 spike: 1.0 (today's behaviour) vs `UNITS_PER_METER` | It scales the broad-phase skin, contact recycling and sleep thresholds, so it sets how often the BVH, and hence the journal, is dirty. Pick the value that keeps `walking_smoothness` green with fewer dirty ticks. |
-| D7 | Character-controller depenetration | Keep `movement::depenetration_lift`; disable upstream's zero-motion depenetration (#485) if the two fight | Our lift is pinned by `sunk_body.rs`; having two depenetrations is a jitter source. Decided in Task 3.4. |
+| D1 ✅ | Rollback mechanism | **Hybrid journal** (option 2, confirmed 2026-09-27): first-touch value capture of `RigidBody`/`Collider`, plus per-tick wholesale clones of `IslandManager`, `NarrowPhase`, `BroadPhaseBvh` (and the joint sets if non-empty). Not a port of today's fine-grained narrow-phase log, not full snapshots. | Spike at real region scale: wholesale clone ~12 µs/tick, full 7-structure clone ~225 µs (+63 µs drop, 3.1 MB). The narrow phase is ~1 KB upstream (no kinematic↔fixed pairs), so the fine-grained log isn't worth re-porting. Known cost: the broad phase (240 KB) is copied every tick, since its serialized `frame_index` changes every step. |
+| D2 ✅ | State hashing | **Own zero-copy `StateHash` trait + derive** (confirmed 2026-09-27), replacing std `Hash` and the plan's earlier bincode `StateDigest`. `f32` hashes canonicalised bits (−0.0 → 0.0, one NaN, matching `OrderedFloat`'s `Hash`); `usize` hashes as `u64` so native and wasm32 agree; impls for glam/glamx and the few nalgebra types in rapier state live in the trait crate (orphan rule allows it); rapier/parry structs `#[derive(StateHash)]` in the forks; cached digests (voxels content hash, pairs, BVH) become hand impls. | The user measured hashing serialized state as far slower than `Hash` impls when the engine was designed; that's why the math forks exist. glam types can't get std `Hash`, so the trait is ours. Cost: the derive on ~140 rapier/parry types is a permanent, mechanical fork burden. |
+| D3 | `OrderedFloat` in game state | Remove it. Game-owned floats become plain `f32`; glam types are used directly. | Its only job was std `Hash`/`Ord`; `StateHash` hashes `f32` directly. Any game code that truly needs `Ord` on floats uses `total_cmp` or keeps crates.io `ordered-float` locally. |
+| D4 ✅ | Forks that survive the switch | **Keep vendored:** `rapier3d`, `parry3d` (fork patches + `StateHash` derives), `slotmapd` (rollback inverses), `block-mesh` (unchanged). **Move to crates.io or drop:** `simba`, `nalgebra`, `approx`, `ordered-float`. No new forks (glam is not forked). Confirmed 2026-09-27. | Upstream gives determinism through features (`simba/libm_force`, `glamx/libm`, `glamx/scalar-math`); rapier 0.36 uses crates.io nalgebra 0.35 / simba 0.10.2 internally, which our 0.34/0.9 forks can't serve. Reverses the CLAUDE.md "don't switch back to crates.io" rule (rewritten in Task 6.1). |
+| D5 ✅ | How the multi-week port lands | Side-by-side vendoring (`crates/rapier-next`, `crates/parry-next`, `crates/physics-next`) on `develop`, then one switch commit series. Confirmed 2026-09-27. | No worktrees or long-lived branches; the game compiles against the old forks until Phase 5, so `develop` builds and `just smoke` passes at every commit. Phase 1 already landed this way. |
+| D6 ✅ | `IntegrationParameters::length_unit` | **`UNITS_PER_METER` (16)**, as `movement::PHYSICS_LENGTH_UNIT`. Confirmed 2026-09-27. | Measured neutral today (identical walks and BVH-leaf update counts at 1 and 16; the KCC reads none of the scaled thresholds, and every game body is fixed or kinematic). 16 makes rapier's tolerances (prediction 2 cm instead of 1.25 mm, sleep thresholds, contact recycling) correct for the dynamic bodies to come. |
+| D7 ✅ | Character-controller depenetration | Keep `movement::depenetration_lift`; **gate off** upstream's zero-motion depenetration (#485) with a `KinematicCharacterController::depenetrate: bool` fork field (default `true`, the game sets `false`). | Spike: #485 is inert on `Voxels` (no `contact` for them upstream) and matches the lift on cuboids, but where the lift declines (buried deeper than `STEP_HEIGHT`) #485 pushes the body out by up to a quarter of its height, on cuboid chunks only — against the lift's "buried stays put" policy. |
 | D8 | Upstream parry #106 (touching = `Converged` at TOI 0) | Accept it, and rework our two separated-start cast filters to `toi == 0 && normal·vel >= 0` | It's in 0.30.2 and carried unchanged into 0.31.1, and reverting it would be a new fork patch. Pinned by `shape_cast_grazing.rs`. |
 
 ## Retargeted to rapier 0.36.0 / parry 0.31.1 (2026-09-26)
@@ -166,6 +166,8 @@ The port changes numerics, so bit-exact hashes can't carry across it. What carri
 
 ## Phase 1 — Spikes and decision gate (scratch crate, nothing merged into the game)
 
+> **Landed (04dd668..bf8da0a, 2026-09-26); gate passed 2026-09-27.** Results and numbers: `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md`. The exporter lives in `crates/worldgen/examples/` (game can't depend on worldgen). D1–D7 confirmed as in the table above. Re-port scope from Task 1.2: the four `#[ignore]`d tests in `crates/physics-next/tests/upstream_movement_probe.rs` (search domain, internal edges, grazing start, the seam-dip walk — the last only comes off after 3.2–3.4 together).
+
 ### Task 1.1: Real-scale clone and hash cost
 
 **Files:**
@@ -173,32 +175,32 @@ The port changes numerics, so bit-exact hashes can't carry across it. What carri
 - Create: `crates/game/examples/export_region_colliders.rs`. It writes, for one generated region, every chunk collider's `(chunk origin, voxel_size, Vec<[i32;3]>)` or cuboid half-extents to `target/physics-next/region_<x>_<z>.bin` (bincode).
 - Create: `crates/physics-next/examples/clone_cost.rs`
 
-- [ ] **Step 1: Write the exporter.** It uses `game`'s genesis path (`seed_terrain_genesis`, `state.rs:565`) to get exactly the production collider set; read that function and walk `data.physics.colliders`. Add a `just` recipe `export-region` only if it's worth a one-word command; otherwise document the `cargo run --example` line in the file header.
-- [ ] **Step 2: Write `clone_cost.rs`.**
+- [x] **Step 1: Write the exporter.** It uses `game`'s genesis path (`seed_terrain_genesis`, `state.rs:565`) to get exactly the production collider set; read that function and walk `data.physics.colliders`. Add a `just` recipe `export-region` only if it's worth a one-word command; otherwise document the `cargo run --example` line in the file header.
+- [x] **Step 2: Write `clone_cost.rs`.**
   - Load the export.
   - Build a 0.36 world (with an empty `SoftBodySet`) with the same bodies and colliders (fixed body per chunk, as the game does today), plus 4 kinematic capsules on the surface, moved each tick.
   - Measure over 600 ticks: clone time per structure, wholesale `(IslandManager, NarrowPhase, BroadPhaseBvh)` clone, full 7-structure clone, bincode size, crc32 of bincode per structure, first step after `PhysicsPipeline::new()`.
   - Print a table.
-- [ ] **Step 3: Ask the user before running it** (timing run). Then run it in release, pinned to one core (`taskset -c 2`), and paste the table into `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md`.
-- [ ] **Step 4: Gate D1.** Keep the hybrid if the wholesale-small-structures clone costs ≤ 50 µs/tick at real scale. If a full clone is within 2× of that, prefer full snapshots: they're simpler and upstream-guaranteed. Record the decision in the spike doc.
-- [ ] **Step 5: Gate D2 cost.** If the crc32 of bincode of the whole `ColliderSet` is more than 1 ms, the Full-mode digest needs the cached per-shape digest (Task 4.4). Record which.
-- [ ] **Step 6: Commit** the crate, exporter and spike doc.
+- [x] **Step 3: Ask the user before running it** (timing run). Then run it in release, pinned to one core (`taskset -c 2`), and paste the table into `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md`.
+- [x] **Step 4: Gate D1.** Keep the hybrid if the wholesale-small-structures clone costs ≤ 50 µs/tick at real scale. If a full clone is within 2× of that, prefer full snapshots: they're simpler and upstream-guaranteed. Record the decision in the spike doc.
+- [x] **Step 5: Gate D2 cost.** If the crc32 of bincode of the whole `ColliderSet` is more than 1 ms, the Full-mode digest needs the cached per-shape digest (Task 4.4). Record which.
+- [x] **Step 6: Commit** the crate, exporter and spike doc.
 
 ### Task 1.2: Upstream voxels cast and KCC against our movement tests
 
 **Files:**
 - Create: `crates/physics-next/tests/upstream_movement_probe.rs`
 
-- [ ] **Step 1: Port the pure-parry cases.** Take the five tests in `crates/game/tests/shape_cast_grazing.rs` and translate them to the glam API (`Vec3`, `Pose`; `Voxels::new(Vec3, &[IVec3])`), running against crates.io parry 0.31.1.
-- [ ] **Step 2: Run them and record which fail.** Expected from the research: the search-domain and internal-edge cases fail upstream; the grazing-start case may pass (partial upstream fallback). This list is the re-port scope for Task 3.2.
-- [ ] **Step 3: Run a KCC probe.** Capsule on a flat voxels floor, `move_shape` with zero desired translation after placing it 0.3 units sunk. Does upstream's #485 depenetration push it out, and along which normal? Record it for D7.
-- [ ] **Step 4: Run a `length_unit` probe (D6).** Repeat a 120-tick walk across a chunk seam with `length_unit = 1.0` and `= 16.0`. Record the dirty-BVH tick count and the max |Δy|.
-- [ ] **Step 5: Write up and commit.** Append the results to the spike doc, then commit.
+- [x] **Step 1: Port the pure-parry cases.** Take the five tests in `crates/game/tests/shape_cast_grazing.rs` and translate them to the glam API (`Vec3`, `Pose`; `Voxels::new(Vec3, &[IVec3])`), running against crates.io parry 0.31.1.
+- [x] **Step 2: Run them and record which fail.** Expected from the research: the search-domain and internal-edge cases fail upstream; the grazing-start case may pass (partial upstream fallback). This list is the re-port scope for Task 3.2.
+- [x] **Step 3: Run a KCC probe.** Capsule on a flat voxels floor, `move_shape` with zero desired translation after placing it 0.3 units sunk. Does upstream's #485 depenetration push it out, and along which normal? Record it for D7.
+- [x] **Step 4: Run a `length_unit` probe (D6).** Repeat a 120-tick walk across a chunk seam with `length_unit = 1.0` and `= 16.0`. Record the dirty-BVH tick count and the max |Δy|.
+- [x] **Step 5: Write up and commit.** Append the results to the spike doc, then commit.
 
 ### Task 1.3: Decision checkpoint with the user
 
-- [ ] **Step 1: Summarise.** Write D1, D2, D4, D5 and D6 with the spike numbers at the top of the spike doc.
-- [ ] **Step 2: Stop and ask the user to confirm D4 and D5** (and D1 if the spike flipped it). Don't start Phase 2 without that.
+- [x] **Step 1: Summarise.** Write D1, D2, D4, D5 and D6 with the spike numbers at the top of the spike doc.
+- [x] **Step 2: Stop and ask the user to confirm D4 and D5** (and D1 if the spike flipped it). Don't start Phase 2 without that.
 
 ---
 
@@ -211,7 +213,7 @@ The port changes numerics, so bit-exact hashes can't carry across it. What carri
 - Create: `crates/parry-next/` (pristine parry 0.31.1, tag `v0.31.1`, 3383f51)
 - Modify: root `Cargo.toml` `[workspace] members` and `[workspace.dependencies]`
 
-- [ ] **Step 1: Import from the tagged git sources**, not the crates.io tarballs, so upstream tests come along: `git clone --depth 1 --branch v0.36.0 https://github.com/dimforge/rapier` into `$CLAUDE_JOB_DIR`-style scratch, then copy. Check the tag names with `git ls-remote --tags`. Import commit message: `vendor: pristine rapier 0.36.0 + parry 0.31.1 as *-next (unused)`. Keep it a pure import, so the fork diff is always `git diff <import-commit> -- crates/rapier-next`.
+- [ ] **Step 1: Import from the tagged git sources**, not the crates.io tarballs, so upstream tests come along: `git clone --depth 1 --branch v0.36.0 https://github.com/dimforge/rapier` into `$CLAUDE_JOB_DIR`-style scratch, then copy. Check the tag names with `git ls-remote --tags`. Import commit message: `vendor: pristine rapier 0.36.0 + parry 0.31.1 as *-next (unused)`. Keep it a pure import, so the fork diff is always `git diff <import-commit> -- crates/rapier-next`. Record the import commit's hash in the spike doc ("Import commit"); Task 6.3 diffs against it.
 - [ ] **Step 2: Rename the packages** to `rapier3d-next` / `parry3d-next`, with `[lib] name = "rapier3d"` / `"parry3d"`, so source paths inside the forks need no edits. Point rapier-next's parry dependency at `parry3d-next` via `package = "parry3d-next"`.
 - [ ] **Step 3: Switch `physics-next` to `path` deps on the new forks** with `enhanced-determinism, serde-serialize`. Run `just test-one physics-next "--tests"`. Expected: the Task 1.2 probe gives the same results as against crates.io.
 - [ ] **Step 4: Confirm the game build is untouched.** `cargo tree -p game | grep -c next` must print 0. Run `just smoke`.
@@ -252,7 +254,7 @@ Keep every patch small and marked `// mmo-fork:` so the fork diff stays greppabl
 
 - **Old patch:** `crates/rapier/src/control/character_controller.rs:463-486` (`predict_ground`, `.loosened(prediction)`), and the snap gate (grep `snap` in the old fork's `git log -p`).
 - **Target:** `crates/rapier-next/src/control/character_controller.rs` ~:236-300 (#485 depenetration) and ~:443-470 (snap).
-- **D7:** if Task 1.2 showed upstream's zero-motion depenetration moving the body differently from `depenetration_lift`, gate it behind a new field `KinematicCharacterController::depenetrate: bool`, defaulting to upstream's `true`. The game sets `false`. The test is `sunk_body.rs`, translated.
+- **D7 (decided: gate it):** add `KinematicCharacterController::depenetrate: bool`, defaulting to upstream's `true`; the game sets `false`. Tests: `sunk_body.rs`, translated, and flip `kcc_zero_motion_moves_a_body_the_lift_leaves_buried` (physics-next) to assert that with `depenetrate: false` a buried body is not moved.
 
 ### Task 3.5: Pair filter parity and guards
 
@@ -262,7 +264,7 @@ Keep every patch small and marked `// mmo-fork:` so the fork diff stays greppabl
 
 ### Task 3.6: `length_unit` (D6)
 
-- Apply the Task 1.2 choice as a named constant in the game at switch time (`movement::PHYSICS_LENGTH_UNIT`). There's no fork change; record it in the spike doc now.
+- Decided: `UNITS_PER_METER` (16). Apply it as a named constant in the game at switch time (`movement::PHYSICS_LENGTH_UNIT`), feeding `IntegrationParameters::length_unit`. There's no fork change.
 
 ---
 
@@ -345,40 +347,36 @@ On `revert`, the captured values are written back in reverse order and the clone
 - [ ] **Step 2: Implement.** Add `PhysicsPipeline::invalidate_caches(&mut self)` and upstream's public `CCDSolver::invalidate_fixed_targets_cache()` (0.36, `ccd_solver.rs:47-49`; no fork patch), which together clear `joint_constraint_indices`, `joint_selection_primed`, the staged-solver assembly cache and `fixed_targets_cache`. `StepJournal::revert` can't reach the pipeline, so the game calls these after revert. If (a) doesn't diverge, keep the call anyway: it's cheap insurance, and the test pins it.
 - [ ] **Step 3: Commit.**
 
-### Task 4.4: `StateDigest` and physics digests
+### Task 4.4: `StateHash` trait, derive, and the forks' hash impls (D2)
 
-**Files:** Create `crates/game/src/digest.rs`, `crates/game/tests/state_digest.rs`; Modify `crates/parry-next/src/shape/voxels/voxels.rs` (cached content digest, digest mode). At the switch (Task 5.2): `crates/macros/src/lib.rs` (the `Undo<T>` bound ~:740, `hash_data()` ~:864) and `crates/game/src/lib.rs` (`state_hash` :72).
+**Files:**
+- Create: `crates/state-hash/` (trait + impls for primitives, std containers, glam/glamx, and the nalgebra types rapier stores), `crates/state-hash-derive/` (proc-macro `#[derive(StateHash)]`), `crates/state-hash/tests/state_hash.rs`.
+- Modify: `crates/rapier-next`, `crates/parry-next` (derive `StateHash` on every type the old forks derived `Hash` on; hand impls for the cached digests), `crates/slotmapd` (impl `StateHash` for its maps/keys, next to the existing `Hash` impls).
+- At the switch (Task 5.2): `crates/macros/src/lib.rs` (the `Undo<T>` bound ~:740, `hash_data()` ~:864, derives ~:293), `crates/game/src/lib.rs` (`state_hash` :72), `crates/game/src/cells.rs` (`cell_hash`).
 
 **Interfaces:**
 
 ```rust
-/// Canonical content digest used by rollback verification and state_hash.
-pub trait StateDigest {
-    fn digest(&self, h: &mut crc32fast::Hasher);
+/// Zero-copy canonical state hash: std `Hash`'s shape, but ours, so it can be
+/// implemented for foreign `f32` types (glam) and pins widths across targets.
+pub trait StateHash {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H);
 }
-impl<T: serde::Serialize> StateDigest for T {
-    fn digest(&self, h: &mut crc32fast::Hasher) {
-        bincode::serialize_into(DigestWriter(h), self).expect("digest serialize");
-    }
-}
+// f32: canonicalised bits, matching OrderedFloat's Hash (-0.0 == 0.0, one NaN).
+// usize/isize: written as u64/i64, so native and wasm32 hash identically.
+// Vec/slices/Option/BTreeMap/arrays/tuples: length as u64, then elements in order.
+// glam Vec3/Quat/Mat3/…, glamx Pose3/Rot3: component-wise.
 ```
 
-`DigestWriter` is an `io::Write` that feeds bytes to the hasher without allocating.
+`#[derive(StateHash)]` hashes fields in declaration order, like `#[derive(Hash)]`; `#[state_hash(skip)]` for caches/workspaces the old forks excluded from `Hash`.
 
-- [ ] **Step 1: Write a standalone test first.**
-  - Add `StateDigest`, `DigestWriter` and the blanket impl to `crates/game/src/digest.rs`, and export them from `lib.rs`.
-  - Test it in `crates/game/tests/state_digest.rs`:
-    - a struct holding a plain `f32` and a `Vec<u32>` digests equal after a bincode round trip;
-    - it digests differently after any field changes;
-    - `-0.0` and `0.0` digest differently, which documents that digests are bit-level.
-- [ ] **Step 2: Voxels digest mode in `parry-next`.**
-  - Problem: upstream `Voxels` serializes its whole voxel data, so a Full-mode digest of a region's colliders would re-encode megabytes per log entry.
-  - Carry the old fork's cached content hash over (old code `crates/parry/src/shape/voxels/voxels.rs:516`), maintained on every edit, as `Voxels::content_digest() -> u32`.
-  - Add one fork patch: a `thread_local!` flag `parry3d::shape::DIGEST_MODE` that, while set, makes `Voxels`' `Serialize` emit `(voxel_size, content_digest)` instead of the data.
-  - `DigestWriter` users set it with a scope guard (`parry3d::shape::digest_scope(|| ...)`). It must never be set during wire or parking serialization. Assert that in `region_runner`'s park path at the switch.
-  - Test: port `voxels_hash_cache.rs` into `physics-next`. Also assert the normal serialization round trip still carries the full data when the flag is off.
-  - If Task 1.1 measured the whole-`ColliderSet` bincode digest at ≤ 1 ms, skip this step and note that in the spike doc.
-- [ ] **Step 3: Commit.** The macro's `Hash` bound is flipped to `StateDigest` in the switch (Task 5.2, Step 2), not here. The old forks' voxels serialize their full data, so flipping earlier would make every Full-mode test re-encode terrain.
+- [ ] **Step 1: Trait crate, tests first.** In `crates/state-hash/tests/state_hash.rs`: `0.0` and `-0.0` hash equal, all NaNs hash equal, any field change changes the hash, a `usize` hashes like the same `u64`, and a derived struct hashes like its fields in order. Watch them fail (crate empty), then implement the trait, impls and derive. Hasher in practice: `crc32fast::Hasher` (implements `core::hash::Hasher`), as today.
+- [ ] **Step 2: Derive in the forks.** List the types the old forks hash: `grep -rn "derive(.*Hash\|impl.*Hash for" crates/rapier/src crates/parry/src`. Add `#[derive(StateHash)]` (or a hand impl) on the matching types in `rapier-next`/`parry-next`, each line marked `// mmo-fork: StateHash`. Port the old forks' cached digests as hand impls that feed the cached value:
+  - `Voxels`: the cached content hash (old code `crates/parry/src/shape/voxels/voxels.rs:516`, target-independent since 5e2f219), maintained on every edit; `StateHash` feeds `(voxel_size, content_hash)`, never the voxel data.
+  - Broad phase: the old BVH/pairs digests (`git log -p -S pairs_hash -- crates/rapier crates/parry`).
+- [ ] **Step 3: Parity tests.** Port `voxels_hash_cache.rs` into `physics-next` (the cached hash tracks edits; equal content ⇒ equal hash). Add a cross-target check: a small scene's `StateHash` over all 7 physics structures equals a constant natively and under `wasm32` (same harness as `just determinism-wasm`).
+- [ ] **Step 4: Cost check.** Ask the user, then time `StateHash` of the region-scale world from `clone_cost` (bodies, colliders, broad phase), next to the old fork's `Hash` on the same region (the exporter's source). It should be in the same range as today; if it's far slower, stop and report before the switch.
+- [ ] **Step 5: Commit.** The macro's `Hash` bound is flipped to `StateHash` in the switch (Task 5.2, Step 2), not here.
 
 ---
 
@@ -386,6 +384,7 @@ impl<T: serde::Serialize> StateDigest for T {
 
 ### Task 5.1: Point the workspace at the new forks
 
+- [ ] **Step 0: Record the old forks' divergence** for Task 6.3's before/after comparison: clone upstream parry `v0.25.3` and rapier `v0.31.0` into scratch, and save `git diff --no-index --stat` of each against `crates/parry` / `crates/rapier` (plus total `+/-` lines and the count of `mmo-fork` markers) into `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md` under "Old fork divergence".
 - [ ] **Step 1: Delete the old forks.** `git rm -r crates/rapier crates/parry`, then `git mv crates/rapier-next crates/rapier` and `git mv crates/parry-next crates/parry`, and rename the packages back to `rapier3d`/`parry3d`.
 - [ ] **Step 2: Update the root `Cargo.toml`.** Rapier gets the features `enhanced-determinism, serde-serialize, debug-render`. Per D4, replace the path deps for `simba`, `nalgebra`, `approx` and `ordered-float` with crates.io versions, or remove them, then `git rm -r` those fork dirs. Leave `slotmapd` and `block-mesh` as they are.
 - [ ] **Step 3: Check the build fails as expected.** `cargo check -p game` now fails; that's the migration worklist.
@@ -407,14 +406,14 @@ The type map applies everywhere:
 - [ ] **Step 1: Migrate the files** in dependency order, with `cargo check -p game` after each: `lib.rs` (the re-exports `pub use parry3d as parry`, `na`) → `protocol.rs` → `state.rs` → `physics.rs` (journal call with `PhysicsParts`, then `PhysicsPipeline::invalidate_caches` + `CCDSolver::invalidate_fixed_targets_cache`) → `movement.rs` (`length_unit` constant from D6, `depenetrate = false` from D7) → `camera.rs` (keep `yaw_quat` libm-forced: `libm::sinf`/`cosf`) → `edit.rs` → `slime.rs` → `cells.rs` → `debug_render.rs` → `input.rs`.
 
   `cells.rs` came with cell loading after this plan was written:
-  - `cell_hash` (~:261-295) feeds `RigidBody`/`Collider` into a `Hasher`. Switch it to `StateDigest`: it's a server-authored checksum that clients hard-fail on, so client and server must compute it identically.
+  - `cell_hash` (~:261-295) feeds `RigidBody`/`Collider` into a `Hasher`. Switch it to `StateHash`: it's a server-authored checksum that clients hard-fail on, so client and server must compute it identically — this also fixes the wasm32 `CellHashMismatch` (std `Hash` wrote `usize` at pointer width).
   - `materialize` (via `seed_terrain_genesis`, ~:310) and `dematerialize` insert and remove terrain bodies and colliders with raw ops. Check each against the new arena primitives (Task 4.1).
   - Also run `just test-one game "--test cell_activation --test cell_manager"` in Task 5.4.
-- [ ] **Step 2: Flip hashing to `StateDigest`, then remove `OrderedFloat`.**
-  - Change the `#[rollback]` macro's generated `Undo<T>` bound from `Hash` to `StateDigest` (`crates/macros/src/lib.rs` ~:740). Make the Full-mode `hash_data()` (~:864) and `game::state_hash` (`lib.rs:72`) digest through `StateDigest`, inside `parry3d::shape::digest_scope`.
-  - Stop the macro deriving `Hash` on the module's structs (~:293).
+- [ ] **Step 2: Flip hashing to `StateHash`, then remove `OrderedFloat`.**
+  - Change the `#[rollback]` macro's generated `Undo<T>` bound from `Hash` to `StateHash` (`crates/macros/src/lib.rs` ~:740). Make the Full-mode `hash_data()` (~:864), the Delta footprint digests, the journal's `pre_digest`/`revert_digest`, and `game::state_hash` (`lib.rs:72`) hash through `StateHash`.
+  - Make the macro derive `StateHash` instead of `Hash` on the module's structs (~:293); game types outside the module switch their derives too.
   - Then remove `OrderedFloat` from game state (D3).
-  - Run `just test-one game "--test state_digest --test hash_mode --test simple --test log_model"`.
+  - Run `just test-one game "--test hash_mode --test simple --test log_model --test hash_restore"`.
 - [ ] **Step 3: Migrate `crates/game/tests/`,** mechanically with the same type map. Don't change any assertion's meaning. Hash constants in `scene_hash_golden.rs` and `wasm_determinism.rs` are re-recorded in Task 5.4, not here.
 - [ ] **Step 4: Run `cargo check -p game --tests`.**
 
@@ -450,10 +449,34 @@ The type map applies everywhere:
 ### Task 6.1: Documentation and memory
 
 - [ ] **CLAUDE.md "Vendored Forks":** rewrite it. Remaining forks: rapier/parry (the `// mmo-fork:` patches, `grep -rn "mmo-fork" crates/rapier crates/parry` lists them), slotmapd, block-mesh. Determinism now comes from upstream features. Remove the `simba` libm_force / `ordered-float` wording and the "don't switch back to crates.io" rule (per D4). Replace "Bevy 0.18" with the actual pin while you're there.
-- [ ] **CLAUDE.md `crates/macros` paragraph:** `Hash` → `StateDigest`.
+- [ ] **CLAUDE.md `crates/macros` paragraph:** `Hash` → `StateHash` (and mention the `state-hash` crates).
 - [ ] **Memory:** update `vendored-deps-update-investigation.md` to IMPLEMENTED, with the commit range; mark `undo-hashing-hotspots`, `narrow-phase-fixed-fixed-flood` and `wasm32-usize-sentinel-hazard` as superseded where upstream now covers them.
 
 ### Task 6.2: Broad sweep (ask first)
 
 - [ ] **Step 1: Ask the user.** Then run `just test-full` and fix anything real.
-- [ ] **Step 2: Final commit.**
+- [ ] **Step 2: Commit.**
+
+### Task 6.3: Final review — fork divergence from upstream
+
+The last task. Measures how far our rapier/parry forks have drifted from pristine upstream, and reviews every hunk: what is necessary, what isn't, and what can be cleaned up. It proposes; it doesn't delete anything without the user's OK.
+
+**Files:** Create `docs/superpowers/specs/<date>-physics-fork-divergence-review.md`.
+
+- [ ] **Step 1: Produce the diff.** Two independent baselines, which must agree:
+  - the pristine import commit from Task 2.1 (`IMPORT` = its hash): `git diff --stat IMPORT:crates/rapier-next HEAD:crates/rapier` and the same for parry (tree-ish paths, since Task 5.1 renamed the dirs), then the full diff into the job scratch dir;
+  - a fresh clone of upstream at the imported tags (`v0.36.0`, `v0.31.1`) into scratch: `git diff --no-index` against `crates/rapier` / `crates/parry`. Also note whether a newer 0.36.x / 0.31.x release exists and what it changed in files we patch.
+  - Record: files touched, `+/-` lines per crate, `mmo-fork:` marker count, and the old forks' numbers from Task 5.1 Step 0 for comparison.
+- [ ] **Step 2: Classify every hunk** in a table (file, lines, category, pinning test, verdict):
+  - **Required patch** (Phase 3/4: mass-props skip, voxels cast, continuous surfaces, KCC snap/`depenetrate`, arena primitives, `StepJournal` hooks, memo invalidation) — must name the test that fails without it;
+  - **`StateHash` derives / hand impls** (mechanical; count them);
+  - **Rename / packaging** (Cargo.toml, `[lib] name`);
+  - **Unmarked** — any hunk without a `// mmo-fork:` marker is a finding: mark it, justify it, or remove it;
+  - **Superseded** — upstream now does the same thing (check the newer release too);
+  - **Dead / leftover** — debug code, commented-out blocks, unused helpers, patches whose game-side caller is gone;
+  - **Upstreamable** — generic fixes (e.g. the voxels cast defects) worth offering as upstream PRs, which would shrink the fork later.
+- [ ] **Step 3: Check necessity where it's in doubt.** For a patch whose need is unclear, find its pinning test (`physics-next` or `crates/game/tests/`) and reason from what it asserts. Only if that's inconclusive, revert that one hunk in the working tree (fork files only, after checking `git status` shows no other change to that file), run the named test with `just test-one`, and restore the file. Never `git stash`; never touch the user's uncommitted files.
+- [ ] **Step 4: Also look outside the forks:** `crates/physics-next` (does it still earn its keep, or should its tests move next to the forks?), `crates/state-hash*`, `slotmapd` (diff against upstream slotmap for the rollback inverses only), and any game-side workaround made unnecessary by upstream (e.g. `depenetration_lift` vs #485, the fixed-fixed pair filter vs upstream's).
+- [ ] **Step 5: Write the review doc.** Totals and before/after comparison first; then the hunk table; then a ranked cleanup list (what to remove, what to upstream, what must stay and why), each with its risk and the test that proves it.
+- [ ] **Step 6: Stop and report to the user** with the cleanup list. Apply cleanups only after they approve, one commit per item, each verified with its pinning test and `just smoke`.
+- [ ] **Step 7: Final commit** (the review doc, and any approved cleanups).

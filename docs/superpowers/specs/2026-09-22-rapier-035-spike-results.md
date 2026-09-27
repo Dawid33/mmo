@@ -5,16 +5,34 @@ Everything here ran against **pristine crates.io** rapier3d 0.36.0 / parry3d 0.3
 (features `enhanced-determinism, serde-serialize`) from `crates/physics-next`. No game crate
 depends on it (`cargo tree -p game|client|server|worldgen` shows no 0.36 rapier).
 
-## Decision summary (Task 1.3) — D1, D4, D5, D6 await the user's confirmation
+## Decision summary (Task 1.3) — all confirmed by the user, 2026-09-27
 
-| # | Decision | Recommendation | Needs the user? |
-|---|---|---|---|
-| D1 | Rollback mechanism | **Hybrid journal** (measured ~12 µs vs ~225 µs) | confirm |
-| D2 | State hashing | **`StateDigest` over bincode through a buffered writer; the `Voxels` digest mode (Task 4.4 Step 2) is optional — gate passed narrowly (0.83 ms)** | no (your call if you want the margin) |
-| D4 | Math forks after the switch | **Move `simba`, `nalgebra`, `approx`, `ordered-float` to crates.io or drop them** | **yes** (reverses a CLAUDE.md rule) |
-| D5 | How the port lands | **Side-by-side `*-next` crates on `develop`** | **yes** |
-| D6 | `length_unit` | **`UNITS_PER_METER` (16)** as `movement::PHYSICS_LENGTH_UNIT` | confirm |
-| D7 | KCC depenetration | **Keep `depenetration_lift`; gate #485 off (the plan's `depenetrate = false` flag, Task 3.4)** | no |
+| # | Decision | Outcome |
+|---|---|---|
+| D1 | Rollback mechanism | **Hybrid journal** (option 2: first-touch body/collider capture + per-tick wholesale islands/narrow/broad clones; not the full re-port of today's fine-grained narrow-phase log, not snapshots) |
+| D2 | State hashing | **Own zero-copy `StateHash` trait + derive** — *changed at the gate*, see below |
+| D4 | Math forks after the switch | **`simba`, `nalgebra`, `approx`, `ordered-float` → crates.io or dropped; no new forks** |
+| D5 | How the port lands | **Side-by-side `*-next` crates on `develop`** |
+| D6 | `length_unit` | **`UNITS_PER_METER` (16)** as `movement::PHYSICS_LENGTH_UNIT` |
+| D7 | KCC depenetration | **Keep `depenetration_lift`; gate #485 off (`depenetrate = false`)** |
+
+**D2 at the gate.** The spike recommended crc32 over buffered bincode (`StateDigest`). The user
+rejected it: when the engine was designed, hashing serialized state was measured far slower
+than implementing `Hash`, and that is why the `OrderedFloat` math forks exist. The spike's
+digest rows compare two serialization variants with each other, never with `Hash`, so they
+don't contradict that.
+
+Chosen instead: our own `StateHash` trait with a derive.
+- It is the same zero-copy field walk as std `Hash`, but implementable for glam `f32` types (the
+  orphan rule allows our trait on foreign types).
+- Floats hash by canonicalised bits, matching `OrderedFloat`.
+- `usize` is written as `u64`, so native and wasm32 agree.
+- It is derived in the rapier/parry forks, with the cached voxels/BVH digests kept as hand impls.
+- Cost: ~140 derive lines in the forks.
+
+Task 4.4 was rewritten accordingly, and its cost check compares `StateHash` against today's
+`Hash` on the same region. The D2 paragraph below is the spike's original recommendation, kept
+for the record.
 
 **D1 — keep the hybrid journal.**
 - *Numbers.* At real region scale (2616 terrain bodies, 2956 colliders), the hybrid's per-tick
@@ -34,7 +52,7 @@ depends on it (`cargo tree -p game|client|server|worldgen` shows no 0.36 rapier)
 - *Side result.* A fresh `PhysicsPipeline` after revert costs nothing measurable (14.9 vs
   13.4 µs), so Task 4.3's fresh-pipeline rule is free.
 
-**D2 — `StateDigest` (crc32 over bincode) through a buffered writer; the voxels digest mode is optional.**
+**D2 (spike recommendation, rejected at the gate) — `StateDigest` (crc32 over bincode) through a buffered writer.**
 - *Why bincode.* It is the only canonical form upstream contracts, and it is target-independent.
   Phase 0 showed std `Hash` is not: it writes `usize` at pointer width. `state_hash` already
   differs between native and wasm32, and the server-authored `cell_hash` would make a wasm32
@@ -118,7 +136,7 @@ depends on it (`cargo tree -p game|client|server|worldgen` shows no 0.36 rapier)
 - *Fallback.* Keeping 1.0 (zero change) is the safe alternative, if you'd rather keep the switch
   a pure engine swap.
 
-**D7 — keep `depenetration_lift`, and gate #485 off (the plan's `depenetrate` flag).**
+**D7 — keep `depenetration_lift`, and gate #485 off (the plan's `depenetrate` flag).** Confirmed.
 - *Where #485 does nothing.* Upstream's zero-motion depenetration does nothing on voxel terrain:
   parry 0.31.1 has no `contact` for `Voxels`, and it skips the `Unsupported` error.
 - *Where it matches the lift.* On a full-chunk cuboid with a body sunk 0.3, it lifts straight up
