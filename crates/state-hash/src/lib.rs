@@ -57,6 +57,21 @@ impl<T: StateHash + ?Sized> DynStateHash for T {
     }
 }
 
+/// `impl StateHash` for a `bitflags!` type (or anything with a `bits()`
+/// accessor): the flags hash as their bits. A derive can't see through
+/// bitflags 2's private inner type.
+#[macro_export]
+macro_rules! impl_via_bits {
+    ($($t:ty),+ $(,)?) => {$(
+        impl $crate::StateHash for $t {
+            #[inline]
+            fn state_hash<H: ::core::hash::Hasher>(&self, h: &mut H) {
+                $crate::StateHash::state_hash(&self.bits(), h);
+            }
+        }
+    )+};
+}
+
 /// The length prefix every sequence and map writes.
 #[inline]
 pub fn hash_len<H: Hasher>(len: usize, h: &mut H) {
@@ -287,6 +302,8 @@ impl_tuple!(0 A, 1 B, 2 C);
 impl_tuple!(0 A, 1 B, 2 C, 3 D);
 impl_tuple!(0 A, 1 B, 2 C, 3 D, 4 E);
 impl_tuple!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F);
+impl_tuple!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G);
+impl_tuple!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 I);
 
 /// `IndexMap`/`IndexSet` (parry's `HashMap` under `enhanced-determinism`):
 /// insertion order is iteration order, which the engine's behaviour follows
@@ -309,6 +326,64 @@ mod indexmap_impls {
         fn state_hash<H: Hasher>(&self, h: &mut H) {
             hash_len(self.len(), h);
             for x in self {
+                x.state_hash(h);
+            }
+        }
+    }
+}
+
+/// `hashbrown` maps and sets (parry's `HashMap`/`HashSet` WITHOUT
+/// `enhanced-determinism`): iteration order is an accident of the hasher and
+/// the insertion history, not state, so entries are hashed sorted by key.
+/// Costs an allocation and a sort; the game never builds this configuration.
+#[cfg(feature = "hashbrown")]
+mod hashbrown_impls {
+    use super::*;
+
+    impl<K: StateHash + Ord, V: StateHash, S> StateHash for hashbrown::HashMap<K, V, S> {
+        fn state_hash<H: Hasher>(&self, h: &mut H) {
+            let mut entries: Vec<(&K, &V)> = self.iter().collect();
+            entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            hash_len(entries.len(), h);
+            for (k, v) in entries {
+                k.state_hash(h);
+                v.state_hash(h);
+            }
+        }
+    }
+
+    impl<T: StateHash + Ord, S> StateHash for hashbrown::HashSet<T, S> {
+        fn state_hash<H: Hasher>(&self, h: &mut H) {
+            let mut entries: Vec<&T> = self.iter().collect();
+            entries.sort_unstable();
+            hash_len(entries.len(), h);
+            for x in entries {
+                x.state_hash(h);
+            }
+        }
+    }
+}
+
+/// nalgebra matrices (rapier 0.36 keeps a few internally: multibody state, a
+/// contact's tangent impulse): rows and columns as `u64` (a dynamic matrix's
+/// shape is state), then the elements column-major.
+#[cfg(feature = "nalgebra")]
+mod nalgebra_impls {
+    use super::*;
+    use nalgebra::{Dim, Matrix, Scalar, storage::RawStorage};
+
+    impl<T, R, C, S> StateHash for Matrix<T, R, C, S>
+    where
+        T: StateHash + Scalar,
+        R: Dim,
+        C: Dim,
+        S: RawStorage<T, R, C>,
+    {
+        fn state_hash<H: Hasher>(&self, h: &mut H) {
+            let (rows, cols) = self.shape();
+            hash_len(rows, h);
+            hash_len(cols, h);
+            for x in self.iter() {
                 x.state_hash(h);
             }
         }

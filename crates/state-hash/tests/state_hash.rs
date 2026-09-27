@@ -214,3 +214,67 @@ fn dyn_state_hash_hashes_like_the_concrete_value() {
     boxed.dyn_state_hash(&mut r);
     assert_eq!(r.0, bytes_of(&Plain { a: 1, b: 2.0, c: vec![3] }));
 }
+
+#[test]
+fn hashbrown_map_hashes_sorted_by_key_whatever_the_insertion_order() {
+    let mut a = hashbrown::HashMap::new();
+    let mut b = hashbrown::HashMap::new();
+    for k in 0u32..64 {
+        a.insert(k, k as u8);
+        b.insert(63 - k, (63 - k) as u8);
+    }
+    assert_eq!(bytes_of(&a), bytes_of(&b));
+    let mut sorted = IndexMap::new();
+    for k in 0u32..64 {
+        sorted.insert(k, k as u8);
+    }
+    assert_eq!(bytes_of(&a), bytes_of(&sorted));
+    b.insert(7, 0);
+    assert_ne!(bytes_of(&a), bytes_of(&b));
+}
+
+#[test]
+fn nalgebra_matrices_hash_shape_then_column_major_elements() {
+    use nalgebra::{DMatrix, DVector, Vector2};
+    let v = Vector2::new(1.0f32, 2.0);
+    assert_eq!(bytes_of(&v), bytes_of(&(2u64, 1u64, 1.0f32, 2.0f32)));
+    assert_eq!(bytes_of(&DVector::from_vec(vec![1.0f32, 2.0])), bytes_of(&v));
+    let m = DMatrix::from_column_slice(2, 3, &[1.0f32, 2., 3., 4., 5., 6.]);
+    assert_eq!(bytes_of(&m), bytes_of(&(2u64, 3u64, 1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32)));
+    // Same elements, other shape.
+    assert_ne!(bytes_of(&m), bytes_of(&DMatrix::from_column_slice(3, 2, &[1.0f32, 2., 3., 4., 5., 6.])));
+    assert_eq!(bytes_of(&DVector::from_vec(vec![-0.0f32])), bytes_of(&DVector::from_vec(vec![0.0f32])));
+}
+
+#[test]
+fn impl_via_bits_hashes_the_bits() {
+    struct Flags(u16);
+    impl Flags {
+        fn bits(&self) -> u16 {
+            self.0
+        }
+    }
+    state_hash::impl_via_bits!(Flags);
+    assert_eq!(bytes_of(&Flags(0x1234)), bytes_of(&0x1234u16));
+}
+
+fn hash_sorted<H: core::hash::Hasher>(v: &Vec<u32>, h: &mut H) {
+    let mut sorted = v.clone();
+    sorted.sort();
+    sorted.state_hash(h);
+}
+
+#[derive(StateHash)]
+struct WithCustomField {
+    a: u8,
+    #[state_hash(with = "hash_sorted")]
+    set: Vec<u32>,
+}
+
+#[test]
+fn with_attribute_routes_a_field_through_a_function() {
+    let x = WithCustomField { a: 1, set: vec![3, 1, 2] };
+    let y = WithCustomField { a: 1, set: vec![1, 2, 3] };
+    assert_eq!(bytes_of(&x), bytes_of(&y));
+    assert_eq!(bytes_of(&x), bytes_of(&(1u8, vec![1u32, 2, 3])));
+}

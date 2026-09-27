@@ -1,7 +1,8 @@
 //! `#[derive(StateHash)]`: fields in declaration order (like `#[derive(Hash)]`);
 //! enums write the variant's index as `u32` first; `#[state_hash(skip)]` on a
-//! field leaves it out (caches, workspaces). Every type parameter gets a
-//! `StateHash` bound; `#[state_hash(bound = "…")]` on the type replaces them.
+//! field leaves it out (caches, workspaces); `#[state_hash(with = "path")]`
+//! hashes it as `path(&field, hasher)` (e.g. an unordered map, sorted). Every
+//! type parameter gets a `StateHash` bound; `#[state_hash(bound = "…")]` on the type replaces them.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -20,6 +21,7 @@ pub fn derive_state_hash(input: TokenStream) -> TokenStream {
 enum Attr {
     Skip,
     Bound(syn::WherePredicate),
+    With(syn::Path),
 }
 
 fn attrs(attrs: &[syn::Attribute]) -> syn::Result<Vec<Attr>> {
@@ -36,24 +38,33 @@ fn attrs(attrs: &[syn::Attribute]) -> syn::Result<Vec<Attr>> {
                 )?;
                 out.extend(preds.into_iter().map(Attr::Bound));
                 Ok(())
+            } else if m.path.is_ident("with") {
+                let s: syn::LitStr = m.value()?.parse()?;
+                out.push(Attr::With(s.parse()?));
+                Ok(())
             } else {
-                Err(m.error("expected `skip` or `bound = \"...\"`"))
+                Err(m.error("expected `skip`, `with = \"path\"` or `bound = \"...\"`"))
             }
         })?;
     }
     Ok(out)
 }
 
-fn skipped(field: &syn::Field) -> syn::Result<bool> {
-    Ok(attrs(&field.attrs)?.iter().any(|a| matches!(a, Attr::Skip)))
-}
-
-/// Statements hashing `fields`, each bound to the matching name in `names`.
+/// Statements hashing `fields`, each bound to the matching name in `names`:
+/// skipped, through a `with` function, or through `StateHash`.
 fn hash_fields(fields: &Fields, names: &[TokenStream2]) -> syn::Result<TokenStream2> {
     let mut out = TokenStream2::new();
     for (f, n) in fields.iter().zip(names) {
-        if !skipped(f)? {
-            out.extend(quote! { ::state_hash::StateHash::state_hash(#n, __h); });
+        let field_attrs = attrs(&f.attrs)?;
+        if field_attrs.iter().any(|a| matches!(a, Attr::Skip)) {
+            continue;
+        }
+        match field_attrs.iter().find_map(|a| match a {
+            Attr::With(p) => Some(p),
+            _ => None,
+        }) {
+            Some(path) => out.extend(quote! { #path(#n, __h); }),
+            None => out.extend(quote! { ::state_hash::StateHash::state_hash(#n, __h); }),
         }
     }
     Ok(out)
@@ -65,7 +76,7 @@ fn expand(input: &mut DeriveInput) -> syn::Result<TokenStream2> {
         .into_iter()
         .filter_map(|a| match a {
             Attr::Bound(p) => Some(p),
-            Attr::Skip => None,
+            _ => None,
         })
         .collect();
     let where_clause = input.generics.make_where_clause();

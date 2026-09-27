@@ -5791,6 +5791,7 @@ dependencies = [
  "slab",
  "smallvec",
  "spade",
+ "state-hash",
  "static_assertions",
  "thiserror 2.0.20",
  "web-time",
@@ -5904,6 +5905,7 @@ dependencies = [
  "game",
  "rapier3d-next",
  "serde 1.0.229",
+ "state-hash",
 ]
 
 [[package]]
@@ -6606,6 +6608,7 @@ dependencies = [
  "serde 1.0.229",
  "serde_json",
  "simba 0.10.2",
+ "state-hash",
  "static_assertions",
  "thiserror 2.0.20",
  "web-time",
@@ -7612,7 +7615,9 @@ name = "state-hash"
 version = "0.1.0"
 dependencies = [
  "glamx",
+ "hashbrown 0.17.1",
  "indexmap",
+ "nalgebra 0.35.0",
  "state-hash",
  "state-hash-derive",
 ]

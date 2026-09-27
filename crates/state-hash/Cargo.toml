@@ -9,6 +9,8 @@ description = "Zero-copy canonical state hashing (plan D2): std `Hash`'s shape, 
 state-hash-derive = { path = "../state-hash-derive", optional = true }
 glamx = { version = "0.3.1", default-features = false, optional = true }
 indexmap = { version = "2", default-features = false, optional = true }
+hashbrown = { version = "0.17", default-features = false, optional = true }
+nalgebra = { version = "0.35", default-features = false, optional = true }
 
 [features]
 default = ["derive"]
@@ -16,9 +18,15 @@ derive = ["dep:state-hash-derive"]
 # `i32` for `IVec*` (the forks enable it too; Voxels keys are `IVec3`).
 glamx = ["dep:glamx", "glamx/i32"]
 indexmap = ["dep:indexmap"]
+# Unordered maps (parry without `enhanced-determinism`): hashed sorted by key.
+hashbrown = ["dep:hashbrown"]
+# nalgebra matrices (rapier stores a few: multibodies, contact tangent impulses).
+nalgebra = ["dep:nalgebra"]
 
 [dev-dependencies]
 glamx = { version = "0.3.1", default-features = false, features = ["std", "i32"] }
 indexmap = { version = "2", default-features = false, features = ["std"] }
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher"] }
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 # The tests exercise the optional glam/indexmap impls.
-state-hash = { path = ".", features = ["glamx", "indexmap"] }
+state-hash = { path = ".", features = ["glamx", "indexmap", "hashbrown", "nalgebra"] }
