@@ -497,6 +497,30 @@ changed. D6 stays at `UNITS_PER_METER`.
 | `wasm_determinism` `CELL_STATE_HASH` (new) | — | 0x87B69ED7 | the cell-mode region's `state_hash` |
 | worldgen `scene_hash_golden` `SCENE_HASH` | 0xEF4000BC | 0xAB8DD394 | engine switch + the tie-break (H9 saw 0x461AAA04 before it) |
 
+Then re-recorded again for `dt` = `TICK_DT` and the kinematic `can_sleep(false)` fix (6494c0c):
+
+| Constant | Old | New |
+|---|---|---|
+| `WASM_SCENE_DIGEST` | 0xC053C01B | 0x93634457 |
+| `SCENE_STATE_HASH` | 0xB1E42EAC | 0x2B94A58B |
+| `CELL_STATE_HASH` | 0x87B69ED7 | 0x1AF8C5B2 |
+| `CELL_HASH` | 0xC52858CB | unchanged (terrain only) |
+| worldgen `SCENE_HASH` | 0xAB8DD394 | 0x33DBFC3F |
+
+### `dt` = `TICK_DT` and kinematic sleep (user decision, H10)
+
+- **Before:** the game stepped rapier at its default `dt` of 1/60 s while a tick is 50 ms.
+- **What `dt` reaches today:** only the derived kinematic `linvel`, which was 3× too large. It is
+  carried in `EntityBundle`/`GhostData` and never read back. The KCC gets `TICK_DT` explicitly.
+- **Why switch:** dynamic bodies to come would fall at a third of real time.
+- **Bug exposed:** upstream 0.36's `update_energy` sleeps a kinematic body at exactly zero
+  velocity even when it is `can_sleep(false)`. Sleep takes 0.5 s at rest: 30 steps at 1/60, so a
+  player standing still for 1.5 s already fell asleep; 10 steps at `TICK_DT`, which is where a
+  resting slime lost its per-tick pose updates.
+- **Fork patch:** the kinematic branch now also requires the thresholds to be non-negative.
+  Pinned by `physics-next/tests/kinematic_sleep.rs`.
+- **Behaviour goldens:** all unchanged.
+
 ### Step 5b — moving bodies' mass properties across targets
 
 - **The scene:** a kinematic body carrying two offset, rotated cuboids. One collider alone

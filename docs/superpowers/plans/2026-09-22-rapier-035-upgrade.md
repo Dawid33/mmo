@@ -429,7 +429,7 @@ pub trait StateHash {
 > - **Step 6:** re-recorded `WASM_SCENE_DIGEST` 0x105EC680 → 0xC053C01B, `NATIVE_STATE_HASH` → `SCENE_STATE_HASH` 0xB1E42EAC (asserted on wasm32 too), and worldgen `SCENE_HASH` 0xEF4000BC → 0xAB8DD394. Added a cell-mode `CELL_HASH` 0xC52858CB / `CELL_STATE_HASH` 0x87B69ED7 on both targets. `determinism-wasm-next` is folded into `determinism-wasm`.
 > - **Review fix (39402ec):** the tie pass reuses `find_best`'s leaf casts and only casts the leaves it pruned (pinned by a counting dispatcher). Deferred minors are in the ledger; the main one is that least-opposing-first nudges an idle body ~4 cm off a 2–6-voxel ledge edge.
 > - **5.5 Step 1:** the wasm client (bevy `webgl2` only, so this is the per-chunk path) builds. Steps 2–3, the live and browser runs, wait on the user.
-> - **Game `dt`** is still rapier's 1/60 at 50 ms ticks. It only reaches the derived kinematic `linvel` (3× too large, written into `EntityBundle`/`GhostData` but never read back); whether to set it to `TICK_DT` is waiting on the user.
+> - **Game `dt` = `TICK_DT` (6494c0c, the user's decision).** Before this it was rapier's 1/60 at 50 ms ticks, which made the derived kinematic `linvel` 3× too large. The change exposed an upstream 0.36 bug: a kinematic body at exactly zero velocity sleeps despite `can_sleep(false)`, after 30 steps at 1/60 or 10 at `TICK_DT`. Fixed with a `// mmo-fork:` in `RigidBodyActivation::update_energy`, pinned by physics-next `kinematic_sleep.rs`. Hash goldens were re-recorded once more (spike doc table).
 
 ### Task 5.1: Point the workspace at the new forks
 
