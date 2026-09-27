@@ -1,7 +1,8 @@
 // mmo-fork: this file is the fork's voxels cast (search domain, internal
 // edges, resting contact without ray casts), ported from the nalgebra-era
 // fork (crates/parry, commits 4173c4e and 7b7eb9e). Pinned by
-// crates/physics-next/tests/{upstream_movement_probe,voxels_upstream}.rs.
+// crates/physics-next/tests/{upstream_movement_probe,voxels_upstream,voxels_cast,
+// continuous_surfaces,walking_smoothness}.rs.
 use crate::bounding_volume::BoundingVolume;
 use crate::math::{IVector, IVectorExt, Pose, Real, Vector, VectorExt, DIM};
 use crate::query::shape_cast::shape_cast_support_map_support_map::GRAZING_START_MARGIN;

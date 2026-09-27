@@ -61,7 +61,7 @@ Still needing the user: every timing run (Task 4.4 Step 4 included), the Phase 5
 - **Dropping the `block-mesh` fork for a direct `ndshape` dependency.** Independent of all this; do it whenever.
 - **rapier's `parallel` or `simd8` features.** Regions are the threading unit.
 
-**Status 2026-09-27:** Plan 1 (H1+H2) landed as 47e4ebe..bee7a9b. Plan 2 Phase 0 (H3) landed bdcce66..dcb3aab; Phase 1 (H4) landed 04dd668..bf8da0a and the gate passed (D1–D7 confirmed). H5 landed bb7d5b5..98a21dc (import commit bb7d5b5). Next: H6.
+**Status 2026-09-27:** Plan 1 (H1+H2) landed as 47e4ebe..bee7a9b. Plan 2 Phase 0 (H3) landed bdcce66..dcb3aab; Phase 1 (H4) landed 04dd668..bf8da0a and the gate passed (D1–D7 confirmed). H5 landed bb7d5b5..98a21dc (import commit bb7d5b5). H6 landed 933eadf..5612429 plus a docs commit (Tasks 3.2–3.4, H5 review minors, H6 review fix). Next: H7.
 
 ## Handoff sequence (one agent per row, strictly in order)
 
@@ -81,7 +81,7 @@ Every handoff starts with the common preamble below. It then names a plan, a tas
 | H3 | rapier-035-upgrade | Phase 0: 0.1–0.4 (behaviour goldens, scene hash, wasm determinism, parity notes) | After 0.4 | 2–3 days |
 | H4 ✅ | rapier-035-upgrade | Phase 1: 1.1, 1.2 (spikes), then 1.3 (write the decision summary) | **USER GATE:** passed 2026-09-27 | 2–3 days |
 | H5 ✅ | rapier-035-upgrade | 2.1 (vendor `*-next`), 3.1 (fixed mprops skip), 3.5 (pair filter), 3.6 (length_unit note) | After 3.6 | 1–2 days |
-| H6 | rapier-035-upgrade | 3.2, 3.3, 3.4 (voxels cast, continuous-surfaces + #106 filters, KCC snap/depenetration) | After 3.4 | 1 week |
+| H6 ✅ | rapier-035-upgrade | 3.2, 3.3, 3.4 (voxels cast, continuous-surfaces + #106 filters, KCC snap/depenetration) | After 3.4 | 1 week |
 | H7 | rapier-035-upgrade | 4.1, 4.2, 4.3 (arena primitives, hybrid StepJournal + fuzzer, memo invalidation) | After 4.3 | 1–1.5 weeks |
 | H8 | rapier-035-upgrade | 4.4 (`StateHash` crates + derives in the forks, cached voxels/BVH digests) | After 4.4 (its cost check needs the user's go-ahead) | 3–4 days |
 | H9 | rapier-035-upgrade | 5.1, 5.2, 5.3 (switch, migrate game incl. `cells.rs`, client/server/worldgen) | `just smoke` green | 3–5 days |

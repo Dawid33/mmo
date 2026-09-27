@@ -1,18 +1,18 @@
 //! Upgrade plan Task 1.2: the game's movement-critical parry/rapier fixes,
-//! translated to glam and run against PRISTINE crates.io parry 0.31.1 /
-//! rapier 0.36.0.
+//! translated to glam. Written against PRISTINE parry 0.31.1 / rapier 0.36.0,
+//! where the cases upstream failed were `#[ignore]`d; they now run against
+//! the vendored `*-next` forks, and every ignore came off as its
+//! `// mmo-fork:` patch landed (Tasks 3.2-3.4, H6).
 //!
 //! - The five `crates/game/tests/shape_cast_grazing.rs` cases and
 //!   `gjk_upstream.rs::capsule_touching_cuboid_matches_upstream`, with their
-//!   assertions unchanged. The ones upstream fails are `#[ignore]`d with the
-//!   reason: that list is Task 3.2/3.3's re-port scope, and each ignore comes
-//!   off when its patch lands in the fork.
+//!   assertions unchanged.
 //! - The centred-capsule contact the nalgebra-era fork gets wrong (Task 5.4
 //!   Step 1b adds it to `gjk_upstream.rs` after the switch).
 //! - Probes for design decisions D7 (upstream's zero-motion KCC
-//!   depenetration, #485) and D6 (`IntegrationParameters::length_unit`).
-//!   They pin what upstream does today; run with `-- --nocapture` for the
-//!   numbers written up in `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md`.
+//!   depenetration, #485, and the fork's `depenetrate` flag) and D6
+//!   (`IntegrationParameters::length_unit`); run with `-- --nocapture` for
+//!   the numbers in `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md`.
 use game::movement::{
     CHARACTER_SKIN, GRAVITY, GROUND_SNAP, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT,
     UNITS_PER_METER, WALK_SPEED,

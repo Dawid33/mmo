@@ -285,6 +285,10 @@ patch lands in the fork. Run: `just test-one physics-next "--test upstream_movem
   the fork adds is the policy that a start within `GRAZING_START_MARGIN` of the skin *is* a
   resting contact, and our KCC tuning depends on that. Port the policy, not a fix.
 
+**Landed (H6, 2026-09-27).** All four tests lost their `#[ignore]`: 3.2 fixes the two voxels cases, 3.3 fixes the grazing start, and the walk passes after 3.3 (grounded 120/120, max |Δy| 2.1e-3). The seam dip was the cross-collider edge normal, which `cast_shape_on_continuous_surfaces` removes; the snap gate (3.4) is pinned separately by the terrace cases of the `walking_smoothness.rs` port.
+
+**D8 record (which `shape_cast_grazing.rs` cases changed).** None of the five assertions changed. What changed under D8 is the *status* a grazing start beyond the target distance carries: `Converged` (#106), where the old fork said `PenetratingOrWithinTargetDist`. The only status-reading assertion, the flat-floor slide's `is_none_or(status == Converged …)`, gets `None` either way. The two separated-start filters (the voxels cast, and the query pipeline's cuboid path) now key on `toi == 0 && normal·vel >= 0`; the status-keyed form let a slide from exactly the skin stop at TOI 0 (`voxels_cast.rs` / `continuous_surfaces.rs` `d8_touching_start_sliding_or_lifting_is_no_hit`).
+
 ### D7 — upstream's zero-motion depenetration (#485)
 
 `kcc_zero_motion_depenetration_is_cuboid_only`, with a capsule sunk 0.3 units (the

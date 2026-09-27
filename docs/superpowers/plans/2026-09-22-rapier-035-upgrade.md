@@ -213,7 +213,7 @@ The port changes numerics, so bit-exact hashes can't carry across it. What carri
 **Files:**
 - Create: `crates/rapier-next/` (pristine rapier 0.36.0 git tag (`v0.36.0`, b716d37), `src/` + `crates/rapier3d/Cargo.toml` layout as upstream)
 - Create: `crates/parry-next/` (pristine parry 0.31.1, tag `v0.31.1`, 3383f51)
-- Modify: root `Cargo.toml` `[workspace] members` and `[workspace.dependencies]`
+- Root `Cargo.toml`: unchanged. The `*-next` crates are implicit path members (via `physics-next`), and their manifests are self-contained (no workspace inheritance: our `[workspace.dependencies]` keys point at the old forks).
 
 - [x] **Step 1: Import from the tagged git sources**, not the crates.io tarballs, so upstream tests come along: `git clone --depth 1 --branch v0.36.0 https://github.com/dimforge/rapier` into `$CLAUDE_JOB_DIR`-style scratch, then copy. Check the tag names with `git ls-remote --tags`. Import commit message: `vendor: pristine rapier 0.36.0 + parry 0.31.1 as *-next (unused)`. Keep it a pure import, so the fork diff is always `git diff <import-commit> -- crates/rapier-next`. Record the import commit's hash in the spike doc ("Import commit"); Task 6.3 diffs against it.
 - [x] **Step 2: Rename the packages** to `rapier3d-next` / `parry3d-next`, with `[lib] name = "rapier3d"` / `"parry3d"`, so source paths inside the forks need no edits. Point rapier-next's parry dependency at `parry3d-next` via `package = "parry3d-next"`.
@@ -234,6 +234,15 @@ Every task follows the same cycle:
 Keep every patch small and marked `// mmo-fork:` so the fork diff stays greppable.
 
 > **3.1, 3.5, 3.6 landed (dd64deb, 98a21dc, 2026-09-27).** 3.1 also adds `TYPE` to `user_changes`' mass-props recompute trigger (the old fork had it; without the set_body_type guard a fixed→dynamic body would keep mass 0) and re-mints upstream's `snapshot_portability` GOLDEN (only the fixed ground's stored `local_mprops` changed; dynamics bit-identical). Pins: `crates/physics-next/tests/fixed_mass_props.rs`, `pair_filter.rs`.
+
+> **3.2, 3.3, 3.4 landed (b6abc1e, d54e90b, 38cd3da, 2026-09-27; H6).** Every Task 1.2 probe test lost its `#[ignore]`; `walk_on_flat_voxel_floor_keeps_its_height` passes after 3.3 (grounded 120/120, max |Δy| 2.1e-3; pristine 114/120, 1.61). Beyond a straight port:
+> - **3.2:** a normal left along one axis is made *exactly* that axis. A floor contact came back as (0, 0.99999994, 0), and upstream's KCC `decompose_hit` (`normal × up` = 0) then read the slide as slipping and dropped the tick's motion. `subshape1` is the hit voxel's flat id.
+> - **3.3 / D8:** the separated-start filters key on `toi == 0 && normal·vel >= 0`, and the fork's own resting contacts report #106's status (`Converged` unless within the target distance). None of the five `shape_cast_grazing.rs` assertions changed. `just physics-next-upstream` now also runs upstream's shape-cast / voxels / KCC regression tests.
+> - **3.4:** the prediction-loosened voxels manifolds are upstream already (#404), so they are pinned, not patched. `KinematicCharacterController::depenetrate` defaults to `true`; Task 5.2 sets it `false` in `movement::character_controller`. `walking_smoothness.rs` and `sunk_body.rs` run in `physics-next` on a rig (`tests/common/mod.rs`) that drives the fork with `game::movement`'s own `plan`/`settle`; the game's four `slow` cases run untagged there (~0.1 s).
+> - H5 review minors: a body turned fixed drops its collider mass (2cafdbe); pair-filter re-pair pins for a groups change and a collider enable toggle (d6d9cae).
+> - H6 review: D7's flag is pinned through the rig on cuboid chunks, the only terrain #485 acts on (5612429). Deferred to Task 5.2: set the rig's `length_unit` to `PHYSICS_LENGTH_UNIT` alongside the game.
+>
+> Pins: `crates/physics-next/tests/{voxels_cast,voxels_upstream,continuous_surfaces,walking_smoothness,sunk_body}.rs`, plus the probe.
 
 ### Task 3.1: Fixed-body mass-properties skip (determinism-critical)
 
