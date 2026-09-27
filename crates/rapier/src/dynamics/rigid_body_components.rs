@@ -1518,8 +1518,12 @@ impl RigidBodyActivation {
                 // Platforms only sleep if both velocities are exactly zero. If it’s not exactly
                 // zero, then the user really wants them to move.
                 // mmo-fork: and only if they may sleep at all: `can_sleep(false)`
-                // (`cannot_sleep`, negative thresholds) keeps them awake.
-                self.normalized_linear_threshold >= 0.0 && sq_linvel == 0.0 && sq_angvel == 0.0
+                // (`cannot_sleep`, negative thresholds) keeps them awake. Either
+                // negative threshold counts, as in the dynamic branch.
+                self.normalized_linear_threshold >= 0.0
+                    && self.angular_threshold >= 0.0
+                    && sq_linvel == 0.0
+                    && sq_angvel == 0.0
             }
             RigidBodyType::Fixed => true,
         };

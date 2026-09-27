@@ -41,3 +41,22 @@ fn a_kinematic_body_that_can_sleep_sleeps_at_rest() {
     stand(&mut w);
     assert!(w.bodies[h].is_sleeping());
 }
+
+/// Both kinematic kinds share the gate.
+#[test]
+fn a_velocity_based_kinematic_body_that_cannot_sleep_stays_awake_at_rest() {
+    let (mut w, h) = world_with(RigidBodyBuilder::kinematic_velocity_based().can_sleep(false));
+    stand(&mut w);
+    assert!(!w.bodies[h].is_sleeping(), "can_sleep(false) is ignored");
+    assert!(w.islands.active_bodies().any(|b| b == h), "not in the awake island");
+}
+
+/// Like the dynamic branch, either negative threshold means "never sleeps":
+/// `can_sleep(false)` sets both, but a hand-set activation may set one.
+#[test]
+fn a_negative_angular_threshold_alone_keeps_a_kinematic_body_awake() {
+    let (mut w, h) = world_with(RigidBodyBuilder::kinematic_position_based());
+    w.bodies[h].activation_mut().angular_threshold = -1.0;
+    stand(&mut w);
+    assert!(!w.bodies[h].is_sleeping(), "a negative angular threshold is ignored");
+}
