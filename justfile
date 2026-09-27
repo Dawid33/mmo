@@ -461,8 +461,9 @@ web-release:
 
 # ---- Test -----------------------------------------------------------------
 
-# Scoped per-crate on purpose: `cargo test --workspace` fails building the
-# vendored nalgebra fork's own tests.
+# Scoped per-crate on purpose: first-party crates only (the vendored physics
+# forks are path dependencies, tested through physics-next and
+# `physics-next-upstream`), and each crate's suite is big enough on its own.
 #
 # Tests measured >100ms (2026-07-08, debug build) carry
 # `#[ignore = "slow: >100ms — run via just test-full"]`, so the default run is
