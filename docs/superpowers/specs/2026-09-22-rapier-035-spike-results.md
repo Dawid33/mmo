@@ -388,3 +388,44 @@ diff (Task 6.3) is always `git diff bb7d5b5 -- crates/rapier-next crates/parry-n
   `snapshot_roundtrip` (8 pass, 1 upstream-ignored), `snapshot_portability`,
   `simd_backend_parity`, `simd_backend_determinism`. `thread_count_determinism` is
   `parallel`-gated and not run (we never enable `parallel`).
+
+## Old fork divergence (Task 5.1 Step 0, recorded 2026-09-27 before the old forks were deleted)
+
+Baseline for Task 6.3's before/after comparison. `git diff --no-index --numstat` of pristine
+upstream against the old forks as they stood at `3c1a1c8` (the last commit with
+`crates/rapier` / `crates/parry` = the nalgebra-era forks; `git show 3c1a1c8:crates/rapier/…`
+recovers any file).
+
+- Upstream baselines: parry tag `v0.25.3`; rapier has **no `v0.31.0` tag** upstream — the
+  release commit `13413290` ("Release v0.31.0 (#904)") was used (the fork's `CHANGELOG.md`
+  tops out at v0.31.0, 21 Nov. 2025).
+- The old forks carry **no `mmo-fork` markers** (0 in rapier, 0 in parry): patches were never
+  marked, which is why the new forks mark every hunk.
+- `Hash` derives/impls in the old forks' `src/`: 153 lines (`derive(.*Hash` / `impl.*Hash for`);
+  files naming `OrderedFloat`: rapier 4, parry 9.
+
+| Crate | Area | Files | + lines | − lines |
+|---|---|---:|---:|---:|
+| rapier (vs `13413290`) | `src/` | 70 | 3612 | 1631 |
+| rapier | manifests | 1 | 9 | 8 |
+| **rapier total** | | **71** | **3621** | **1639** |
+| parry (vs `v0.25.3`) | `src/` | 166 | 1876 | 1118 |
+| parry | manifests | 2 | 166 | 167 |
+| parry | other (mode-only changes) | 50 | 0 | 0 |
+| **parry total** | | **218** | **2042** | **1285** |
+
+Largest hunks (+/−):
+
+- rapier: `geometry/broad_phase_bvh.rs` 508/72, `pipeline/step_journal.rs` 456/0 (new),
+  `geometry/narrow_phase.rs` 369/100, `pipeline/physics_pipeline.rs` 245/56, `data/graph.rs`
+  200/33, `geometry/collider_set.rs` 182/4, `dynamics/joint/multibody_joint/multibody.rs`
+  176/61, `dynamics/integration_parameters.rs` 161/129, `pipeline/query_pipeline.rs` 153/6,
+  `dynamics/rigid_body_components.rs` 141/69, `dynamics/island_manager.rs` 109/6,
+  `control/character_controller.rs` 93/75, `data/coarena.rs` 75/14, `dynamics/rigid_body_set.rs`
+  64/4, `pipeline/user_changes.rs` 59/17, `data/arena.rs` 49/2.
+- parry: `query/shape_cast/shape_cast_voxels_shape.rs` 253/25, `crates/parry3d/Cargo.toml`
+  141/142, `shape/voxels/voxels_neighborhood.rs` 131/2, `query/gjk/gjk.rs` 92/15,
+  `utils/point_in_poly2d.rs` 79/79, `shape/voxels/voxels.rs` 64/6, `partitioning/bvh/bvh_tests.rs`
+  61/4, `query/shape_cast/shape_cast_support_map_support_map.rs` 61/5, `query/epa/epa3.rs` 60/19,
+  `mass_properties/mass_properties.rs` 47/44, `partitioning/bvh/bvh_tree.rs` 46/7; most of the
+  rest is the `Real = OrderedFloat<f32>` churn (symmetric +/− in math-heavy files).
