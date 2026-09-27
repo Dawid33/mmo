@@ -542,6 +542,20 @@ determinism-wasm:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
         {{cap}} {{cargo}} test -p game --test wasm_determinism --target wasm32-unknown-unknown
 
+# The rapier 0.36 forks' StateHash (upgrade plan Task 4.4): a small physics
+# scene's hash over every journaled structure must be the same constant on
+# native and on wasm32 (node). Same runner install as determinism-wasm; merges
+# into it at the switch (Phase 5).
+determinism-wasm-next:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ver=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+    root="$PWD/target/tools/wasm-bindgen-$ver"
+    [ -x "$root/bin/wasm-bindgen-test-runner" ] || {{cap}} cargo install --locked wasm-bindgen-cli --version "$ver" --root "$root"
+    {{cap}} {{cargo}} test -p physics-next --test state_hash_wasm
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
+        {{cap}} {{cargo}} test -p physics-next --test state_hash_wasm --target wasm32-unknown-unknown
+
 # Upstream rapier's own determinism tests, run from the vendored rapier-next
 # fork (rapier 0.36 upgrade, docs/superpowers/plans/2026-09-22-rapier-035-upgrade.md),
 # plus upstream's regression tests for the code the fork patches (shape casts,

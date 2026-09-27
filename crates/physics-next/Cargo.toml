@@ -24,3 +24,8 @@ parallel = ["rapier3d/parallel"]
 # against the game's real numbers without restating them. The direction
 # matters: game never depends on this crate or on rapier 0.36.
 game = { workspace = true }
+
+# `tests/state_hash_wasm.rs` on wasm32 (`just determinism-wasm-next`); the
+# same wasm-bindgen-test as the game's `just determinism-wasm`.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
