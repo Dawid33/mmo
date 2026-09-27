@@ -8,6 +8,8 @@
 //! components that point through a face some collider covers. The five
 //! single-shape cases of `crates/game/tests/shape_cast_grazing.rs` live in
 //! `upstream_movement_probe.rs`; these are the cross-collider ones.
+mod common;
+
 use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER};
 use physics_next::PhysicsWorld;
 use rapier3d::parry::query::{ShapeCastHit, ShapeCastOptions, cast_shapes};
@@ -150,6 +152,54 @@ fn d8_touching_start_sliding_or_lifting_is_no_hit() {
                 let hit = continuous(&w, touching, Vector::new(1.0, -0.5, 0.0).normalize(), skin_cast(4.0));
                 assert_flat(hit, &format!("{what}, eps {eps} x {x}: pressing in from touching"));
             }
+        }
+    }
+}
+
+/// Terraces rising one voxel per chunk along +z (`Chunk::flat_floor(12 + z)`,
+/// columns 3–4, rows 7–10), added in `order`, with the broad phase built at
+/// `length_unit`: its leaves' fat-AABB margin scales with it, so the two
+/// units give two BVH layouts over the same colliders.
+fn terrace_world(length_unit: f32, reversed: bool) -> PhysicsWorld {
+    let mut chunks: Vec<_> = (3..=4)
+        .flat_map(|x| (7..=10).map(move |z| (x, z)))
+        .map(|(x, z)| ((x, 0, z), game::Chunk::flat_floor(12 + z as u32)))
+        .collect();
+    if reversed {
+        chunks.reverse();
+    }
+    let mut w = PhysicsWorld::default();
+    w.params.length_unit = length_unit;
+    for (coords, chunk) in &chunks {
+        common::add_chunk(&mut w, *coords, chunk);
+    }
+    w.step(&mut PhysicsPipeline::new());
+    w
+}
+
+/// A walking body resting on one terrace while its capsule already touches
+/// the next one's riser edge touches both at TOI 0. Which of the tied hits the
+/// cast returns decides the controller's move (the floor first strips the
+/// gravity part of the step; the riser first projects it onto the edge and
+/// loses ~0.6 units of the tick's walk), so it must not depend on the
+/// broad phase's layout: blocking hits win, then the least-opposing one
+/// (here the floor), then the lowest collider index. Before the tie pass the
+/// first touching leaf in traversal order won — `length_unit` (D6) flipped
+/// it on `physics_goldens::terrace_uphill_1_voxel`, at this exact pose.
+#[test]
+fn a_touching_tie_resolves_the_same_in_every_bvh_layout() {
+    let pos = Vector::new(128.0, 34.616791, 284.503448);
+    let desired = Vector::new(0.0, -1.35, 3.4536);
+    let capsule = Capsule::new_y(HALF_HEIGHT, RADIUS);
+    for lu in [1.0, UNITS_PER_METER] {
+        for reversed in [false, true] {
+            let w = terrace_world(lu, reversed);
+            let qp = w.broad_phase.as_query_pipeline(w.narrow_phase.query_dispatcher(), &w.bodies, &w.colliders, QueryFilter::default());
+            let (_, hit) = qp
+                .cast_shape_on_continuous_surfaces(&Pose::from_translation(pos), desired.normalize(), &capsule, skin_cast(desired.length()), SKIN)
+                .unwrap_or_else(|| panic!("length unit {lu}, reversed {reversed}: resting on the floor is a hit"));
+            assert_eq!(hit.time_of_impact, 0.0, "length unit {lu}, reversed {reversed}: {hit:?}");
+            assert_eq!(hit.normal1, Vector::Y, "length unit {lu}, reversed {reversed}: the floor, not the riser edge: {hit:?}");
         }
     }
 }

@@ -519,6 +519,12 @@ impl<'a> QueryPipeline<'a> {
     /// covered: by a neighbour of the same voxels shape, or by any collider
     /// (passing the filter) found solid within `reach` across the face at the
     /// contact point.
+    ///
+    /// Among hits tied at the smallest time of impact (a body resting on a
+    /// floor while touching a step's edge meets both at 0), blocking hits win,
+    /// then the least-opposing one, then the lowest collider index — never the
+    /// broad phase's traversal order, which `length_unit` and the insertion
+    /// history reshape.
     #[profiling::function]
     pub fn cast_shape_on_continuous_surfaces(
         &self,
@@ -535,35 +541,66 @@ impl<'a> QueryPipeline<'a> {
         let msum_shift = -ls_aabb2.center();
         let msum_margin = ls_aabb2.half_extents() + Vector::splat(options.target_distance);
 
+        let node_toi = |node: &BvhNode, max_toi: Real| {
+            let msum = Aabb {
+                mins: node.mins() + msum_shift - msum_margin,
+                maxs: node.maxs() + msum_shift + msum_margin,
+            };
+            msum.cast_local_ray(&ray, max_toi, true)
+        };
+        let part_hit = |part_id: u32| {
+            let (co, co_handle) = self.colliders.get_unknown_gen(part_id)?;
+            if !self.filter.test(self.bodies, co_handle, co) {
+                return None;
+            }
+            let pos1 = co.position();
+            self.cast_shape_on_part(
+                pos1,
+                co.shape(),
+                &pos1.inv_mul(shape_pos),
+                pos1.rotation.inverse() * shape_vel,
+                shape,
+                options,
+                reach,
+            )
+            .map(|hit| hit.transform1_by(pos1))
+        };
         let (id, hit) = self.bvh.find_best(
             options.max_time_of_impact,
-            |node: &BvhNode, best_so_far| {
-                let msum = Aabb {
-                    mins: node.mins() + msum_shift - msum_margin,
-                    maxs: node.maxs() + msum_shift + msum_margin,
-                };
-                msum.cast_local_ray(&ray, best_so_far, true)
-                    .unwrap_or(Real::MAX)
-            },
-            |part_id, _| {
-                let (co, co_handle) = self.colliders.get_unknown_gen(part_id)?;
-                if !self.filter.test(self.bodies, co_handle, co) {
-                    return None;
-                }
-                let pos1 = co.position();
-                self.cast_shape_on_part(
-                    pos1,
-                    co.shape(),
-                    &pos1.inv_mul(shape_pos),
-                    pos1.rotation.inverse() * shape_vel,
-                    shape,
-                    options,
-                    reach,
-                )
-                .map(|hit| hit.transform1_by(pos1))
-            },
+            |node: &BvhNode, best_so_far| node_toi(node, best_so_far).unwrap_or(Real::MAX),
+            |part_id, _| part_hit(part_id),
         )?;
-        Some((self.handle_of(id)?, hit))
+
+        // mmo-fork: `find_best` keeps the first leaf it meets at the best
+        // cost (and prunes everything else once that cost is 0), so a tie
+        // would go to the BVH layout. Every leaf that can reach the same TOI
+        // is cast again and the tie broken on the hits themselves.
+        let toi = hit.time_of_impact;
+        let rank = |part_id: u32, hit: &ShapeCastHit| {
+            let opposing = hit.normal1.dot(shape_vel);
+            (opposing >= 0.0, -opposing, part_id)
+        };
+        let better = |a: &(bool, Real, u32), b: &(bool, Real, u32)| {
+            a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)).is_lt()
+        };
+        let (mut best_id, mut best_hit) = (id, hit);
+        let mut best_rank = rank(id, &hit);
+        for part_id in self.bvh.leaves(|node: &BvhNode| node_toi(node, toi).is_some()) {
+            if part_id == id {
+                continue;
+            }
+            let Some(hit) = part_hit(part_id) else {
+                continue;
+            };
+            if hit.time_of_impact != toi {
+                continue;
+            }
+            let r = rank(part_id, &hit);
+            if better(&r, &best_rank) {
+                (best_id, best_hit, best_rank) = (part_id, hit, r);
+            }
+        }
+        Some((self.handle_of(best_id)?, best_hit))
     }
 
     /// One collider's share of [`Self::cast_shape_on_continuous_surfaces`],
