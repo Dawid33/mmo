@@ -37,6 +37,7 @@ pub struct SimDriverRes(pub SyncCell<SimDriver>);
 
 pub fn start_wasm_sim(
     debug_flags: game::DebugFlags,
+    world_scale: crate::world_scale::WorldScale,
 ) -> (
     SimDriverRes,
     Sender<GameEventKind>,
@@ -55,6 +56,8 @@ pub fn start_wasm_sim(
         dummy_addr,
         debug_flags,
     );
+    // Same subscription scale as the native game thread (`?world=` here).
+    manager.set_world_scale(world_scale);
 
     // Online (real WebTransport server) is the default; `?offline` anywhere
     // in the query string opts into the embedded single-player world instead.

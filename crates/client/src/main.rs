@@ -218,7 +218,7 @@ fn main() {
     };
 
     #[cfg(target_arch = "wasm32")]
-    let (sim, game_send, client_recv) = sim_driver::start_wasm_sim(debug_flags.clone());
+    let (sim, game_send, client_recv) = sim_driver::start_wasm_sim(debug_flags.clone(), world_scale);
 
     // Bevy's default asset root is CARGO_MANIFEST_DIR/assets (crates/client/assets,
     // a local, gitignored scratch dir left over from earlier prototyping). The

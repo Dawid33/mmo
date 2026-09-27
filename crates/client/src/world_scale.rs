@@ -82,8 +82,8 @@ impl WorldScale {
         Ok(scale)
     }
 
-    /// Resolve the process environment on native. Browser builds have no
-    /// environment and always run the production scale.
+    /// Resolve the process environment on native; browser builds read the
+    /// page URL's `?world=` preset instead (default full).
     pub fn from_env() -> Result<Self, WorldScaleError> {
         let mut scale = Self::from_env_unforced()?;
         if game::CELL_CHUNKS != 0 && scale.near_radius != 0 {
@@ -98,7 +98,11 @@ impl WorldScale {
     fn from_env_unforced() -> Result<Self, WorldScaleError> {
         #[cfg(target_arch = "wasm32")]
         {
-            Ok(Self::FULL)
+            // No environment in the browser: `?world=tiny|small|full` in the
+            // page URL picks the preset (default full), like `?offline`.
+            let search = web_sys::window().and_then(|w| w.location().search().ok());
+            let preset = search.as_deref().and_then(query_world);
+            Self::resolve(preset, None, None)
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -133,6 +137,17 @@ impl fmt::Display for WorldScale {
             self.lod_table
         )
     }
+}
+
+/// The `world` parameter of a page URL's query string (`?world=small`,
+/// `?offline&world=tiny`), for the browser build's [`WorldScale`] preset.
+#[cfg(any(target_arch = "wasm32", test))]
+fn query_world(search: &str) -> Option<&str> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("world="))
+        .filter(|value| !value.is_empty())
 }
 
 /// `off`, `small`, `full`, or an explicit `bound:factor,...` table. An explicit
@@ -193,6 +208,15 @@ impl std::error::Error for WorldScaleError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_query_picks_the_world_preset() {
+        assert_eq!(query_world("?world=small"), Some("small"));
+        assert_eq!(query_world("?offline&world=tiny"), Some("tiny"));
+        assert_eq!(query_world("?offline"), None);
+        assert_eq!(query_world("?world="), None);
+        assert_eq!(query_world(""), None);
+    }
 
     #[test]
     fn unset_environment_is_the_production_scale() {

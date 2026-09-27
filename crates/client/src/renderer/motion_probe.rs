@@ -11,7 +11,10 @@
 //! Frames at a camera chunk-cell change are reported apart from the rest,
 //! since that is where culling and extraction have the most to redo.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// Not `std::time::Instant`: its `now()` panics on wasm32-unknown-unknown.
+use bevy::platform::time::Instant;
 
 use bevy::prelude::*;
 
