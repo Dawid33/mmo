@@ -163,6 +163,12 @@ fn app_exit_code(exit: &bevy::app::AppExit) -> i32 {
 }
 
 fn main() {
+    // First, so every panic reaches the browser console with its message:
+    // without the hook it is only "RuntimeError: unreachable" (e.g. a bad
+    // `?world=` value in `WorldScale::from_env` below).
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
+
     game::perf::pin_origin();
     // Per-entry verification is off by default (desync is caught by the
     // periodic tick-interval state hash); HASH_MODE=delta re-enables
@@ -188,16 +194,14 @@ fn main() {
         None
     };
 
-    // World-size knobs (VOXEL_WORLD / VOXEL_NEAR_RADIUS / VOXEL_LOD_RINGS):
-    // resolved once here so a typo fails before any window or socket opens.
-    // The game thread subscribes by it; the render benchmark gates on it.
+    // World-size knobs (VOXEL_WORLD / VOXEL_NEAR_RADIUS / VOXEL_LOD_RINGS,
+    // `?world=` in the browser): resolved once here so a typo fails before
+    // any window or socket opens. The game thread subscribes by it; the
+    // render benchmark gates on it.
     let world_scale = WorldScale::from_env().unwrap_or_else(|error| panic!("{error}"));
 
     // Shared debug toggles: render thread (F3 dev panel) writes, game thread reads.
     let debug_flags = game::DebugFlags::default();
-
-    #[cfg(target_arch = "wasm32")]
-    console_error_panic_hook::set_once();
 
     #[cfg(not(target_arch = "wasm32"))]
     let (command_send, game_send, client_recv) = {

@@ -734,7 +734,8 @@ pub fn cull_chunks(
     // different entry faces, and the sets of exits the mask allows for those
     // entries differ — deduping them against each other would under-visit
     // (= holes in the world).
-    let flood_start = std::time::Instant::now();
+    // wasm-safe clock: F4 / the F3 panel turn culling on in the browser too.
+    let flood_start = bevy::platform::time::Instant::now();
     scratch.flood_cached(
         lo,
         hi,
