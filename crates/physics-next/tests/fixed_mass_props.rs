@@ -97,3 +97,28 @@ fn dynamic_and_kinematic_bodies_still_get_collider_mass_at_attach() {
         assert!((mass - expected).abs() <= expected * 1e-6, "mass {mass}, colliders {expected}");
     }
 }
+
+/// The other direction (H5 review M2): a dynamic body turned fixed must
+/// drop the mass it had, or its serialized state depends on its history — a
+/// born-fixed body and a turned-fixed one with the same colliders would
+/// differ in `local_mprops` (and so in snapshots and state hashes).
+#[test]
+fn dynamic_body_turned_fixed_drops_its_collider_mass() {
+    let (mut w, body) = world_with(RigidBodyBuilder::dynamic());
+    let mut pipeline = PhysicsPipeline::new();
+    w.step(&mut pipeline);
+    assert!(w.bodies[body].mass() > 0.0, "dynamic first");
+    w.bodies[body].set_body_type(RigidBodyType::Fixed, true);
+    w.step(&mut pipeline);
+    let (born_fixed, born) = world_with(RigidBodyBuilder::fixed());
+    assert_eq!(
+        w.bodies[body].mass_properties().local_mprops,
+        MassProperties::default(),
+        "a turned-fixed body keeps the collider mass it had while dynamic"
+    );
+    assert_eq!(
+        w.bodies[body].mass_properties().local_mprops,
+        born_fixed.bodies[born].mass_properties().local_mprops,
+        "turned-fixed and born-fixed bodies must agree"
+    );
+}

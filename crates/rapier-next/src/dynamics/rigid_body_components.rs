@@ -450,8 +450,10 @@ impl RigidBodyMassProps {
         // every voxel cell per collider, and the inertia goes through glamx
         // `SymmetricEigen3`, whose std `acos`/`cos` differ between native and
         // wasm32. `user_changes` also recomputes on TYPE, so a body that stops
-        // being fixed gets its real mass on the next step.
+        // being fixed gets its real mass on the next step, and one that becomes
+        // fixed drops the mass it had (no history-dependent state).
         if body_type.is_fixed() {
+            self.local_mprops = MassProperties::default();
             self.recompute_max_extent(colliders, attached_colliders);
             self.update_world_mass_properties(body_type, position);
             return;
