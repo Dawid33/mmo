@@ -223,3 +223,58 @@ fn broad_and_narrow_phase_survive_serde_round_trip() {
     let restored: NarrowPhase = bincode::deserialize(&narrow).expect("deserialize narrow phase");
     assert_eq!(bincode::serialize(&restored).unwrap(), narrow, "narrow phase must round-trip in full");
 }
+
+/// A dynamic ball overlapping a fixed cuboid: the pair terrain edits
+/// (edit.rs) and group changes touch. No gravity and every axis locked, so
+/// the ball never moves: its broad-phase leaf never changes by itself, and
+/// only the re-pair path can report the pair.
+fn ball_on_ground(w: &mut PhysicsWorld, ground: ColliderBuilder, ball: ColliderBuilder) -> (ColliderHandle, ColliderHandle) {
+    w.gravity = Vector::ZERO;
+    let (_, ground) = attach(w, RigidBodyBuilder::fixed(), ground);
+    let still = RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.4, 0.0)).locked_axes(LockedAxes::all());
+    let (_, ball) = attach(w, still, ball);
+    (ground, ball)
+}
+
+/// H5 review M4: a collision-groups change is a filter input too. Groups that
+/// exclude each other suppress the pair at creation; making them match again
+/// must re-pair (upstream's GROUPS re-insertion), and excluding again must
+/// drop it.
+#[test]
+fn collision_groups_change_re_pairs() {
+    let (mut w, mut pipeline) = world();
+    let apart = InteractionGroups::new(Group::GROUP_1, Group::NONE, InteractionTestMode::And);
+    let (ground, ball) = ball_on_ground(&mut w, cuboid(), ColliderBuilder::ball(0.5).collision_groups(apart));
+    w.step(&mut pipeline);
+    assert!(w.narrow_phase.contact_pair(ground, ball).is_none(), "excluded by groups at creation");
+
+    w.colliders[ball].set_collision_groups(InteractionGroups::all());
+    w.step(&mut pipeline);
+    assert!(w.narrow_phase.contact_pair(ground, ball).is_some(), "matching groups must re-pair");
+
+    w.colliders[ball].set_collision_groups(apart);
+    w.step(&mut pipeline);
+    assert!(
+        w.narrow_phase.contact_pair(ground, ball).is_none_or(|p| !p.has_any_active_contact()),
+        "excluded again: no contact"
+    );
+}
+
+/// H5 review M4: edit.rs toggles terrain colliders with `set_enabled`. A
+/// ground collider enabled after the ball has come to rest on its spot must
+/// pair with it, and disabling it must drop the pair.
+#[test]
+fn collider_enable_toggle_re_pairs() {
+    let (mut w, mut pipeline) = world();
+    let (ground, ball) = ball_on_ground(&mut w, cuboid().enabled(false), ColliderBuilder::ball(0.5));
+    w.step(&mut pipeline);
+    assert!(w.narrow_phase.contact_pair(ground, ball).is_none(), "a disabled collider has no pair");
+
+    w.colliders[ground].set_enabled(true);
+    w.step(&mut pipeline);
+    assert!(w.narrow_phase.contact_pair(ground, ball).is_some(), "enabling must pair");
+
+    w.colliders[ground].set_enabled(false);
+    w.step(&mut pipeline);
+    assert!(w.narrow_phase.contact_pair(ground, ball).is_none(), "disabling must drop the pair");
+}
