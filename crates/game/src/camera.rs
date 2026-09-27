@@ -41,8 +41,9 @@ pub fn apply_look(yaw: f32, pitch: f32, dx: f32, dy: f32) -> (f32, f32) {
     let dx = if dx.is_finite() { dx } else { 0.0 };
     let dy = if dy.is_finite() { dy } else { 0.0 };
     let new_yaw = yaw - look_delta_rad(dx, LOOK_BASE_X);
-    // nalgebra's `clamp` (not f32::clamp): no NaN special case.
-    let p = pitch - look_delta_rad(dy, LOOK_BASE_Y);
+    // Compare-and-select: a NaN pitch passes through unchanged (unreachable:
+    // the deltas are sanitised above and the stored pitch was clamped).
+    let p =pitch - look_delta_rad(dy, LOOK_BASE_Y);
     let new_pitch = if p < -PITCH_LIMIT {
         -PITCH_LIMIT
     } else if p > PITCH_LIMIT {
