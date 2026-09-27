@@ -232,7 +232,8 @@ mod game_data {
 pub use game_data::*;
 
 /// Rapier's integration parameters as the game runs them: its defaults, but
-/// with `length_unit` = [`crate::movement::PHYSICS_LENGTH_UNIT`] (plan D6), so
+/// with `dt` = [`crate::movement::TICK_DT`] (one step per region tick) and
+/// `length_unit` = [`crate::movement::PHYSICS_LENGTH_UNIT`] (plan D6), so
 /// a default-built `PhysicsState` (the rollback derives `Default`) already has
 /// it. Serializes and hashes exactly as the inner parameters (a newtype);
 /// derefs to them wherever rapier takes `&IntegrationParameters`.
@@ -242,6 +243,7 @@ pub struct PhysicsParams(pub rapier3d::prelude::IntegrationParameters);
 impl Default for PhysicsParams {
     fn default() -> Self {
         Self(rapier3d::prelude::IntegrationParameters {
+            dt: crate::movement::TICK_DT,
             length_unit: crate::movement::PHYSICS_LENGTH_UNIT,
             ..Default::default()
         })
@@ -1541,5 +1543,14 @@ mod physics_params_tests {
         let r = Rollback::new(None);
         assert_eq!(r.physics.integration_parameters.length_unit, crate::movement::PHYSICS_LENGTH_UNIT);
         assert_ne!(crate::movement::PHYSICS_LENGTH_UNIT, 1.0, "D6 moves it off rapier's default");
+    }
+
+    /// One physics step per region tick: a kinematic body's derived `linvel`
+    /// (Δpose / dt, carried in `EntityBundle`/`GhostData`) is in units/s, and
+    /// a dynamic body falls in real time (H10, the user's decision).
+    #[test]
+    fn default_physics_state_steps_one_tick() {
+        let r = Rollback::new(None);
+        assert_eq!(r.physics.integration_parameters.dt, crate::movement::TICK_DT);
     }
 }

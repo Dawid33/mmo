@@ -32,15 +32,16 @@ use game::{
 use slotmapd::Key as _;
 
 /// crc32 of the scene region's bincode bytes after [`SCENE_TICKS`] ticks,
-/// on every target. Re-recorded for the rapier 0.36 / parry 0.31 switch.
-const WASM_SCENE_DIGEST: u32 = 0xC053_C01B;
+/// on every target. Re-recorded for the rapier 0.36 / parry 0.31 switch,
+/// then for `dt` = `TICK_DT` and the kinematic `can_sleep(false)` fix.
+const WASM_SCENE_DIGEST: u32 = 0x9363_4457;
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = 0xB1E4_2EAC;
+const SCENE_STATE_HASH: u32 = 0x2B94_A58B;
 const SCENE_TICKS: usize = 120;
 /// `cell_hash` of [`cell_scene`]'s activated cell, on every target.
 const CELL_HASH: u32 = 0xC528_58CB;
 /// `game::state_hash` of [`cell_scene`]'s region, on every target.
-const CELL_STATE_HASH: u32 = 0x87B6_9ED7;
+const CELL_STATE_HASH: u32 = 0x1AF8_C5B2;
 
 /// Runs the scene; returns `(portable digest, state_hash)`.
 fn scene() -> (u32, u32) {

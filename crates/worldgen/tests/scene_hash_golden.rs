@@ -23,8 +23,9 @@ use common::{entity_body, spawn_slime};
 use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 
 /// `state_hash` after the scene's last tick. Re-recorded for the rapier 0.36
-/// / parry 0.31 switch (with the continuous-surfaces tie-break).
-const SCENE_HASH: u32 = 0xAB8D_D394;
+/// / parry 0.31 switch (with the continuous-surfaces tie-break, `dt` =
+/// `TICK_DT` and the kinematic `can_sleep(false)` fix).
+const SCENE_HASH: u32 = 0x33DB_FC3F;
 /// Ticks of scripted input.
 const SCENE_TICKS: usize = 60;
 
