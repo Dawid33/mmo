@@ -222,7 +222,7 @@ impl Default for KinematicCharacterController {
             min_slope_slide_angle: Real::frac_pi_4(),
             snap_to_ground: Some(CharacterLength::Relative(0.2)),
             normal_nudge_factor: 1.0e-4,
-            depenetrate: true,
+            depenetrate: true, // mmo-fork (D7): upstream behaviour by default
         }
     }
 }
@@ -361,7 +361,7 @@ impl KinematicCharacterController {
             is_moving = true;
 
             // 2. Cast towards the movement direction.
-            if let Some((handle, hit)) = queries.cast_shape_on_continuous_surfaces(
+            if let Some((handle, hit)) = queries.cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
                 &(Pose::from_translation(result.translation) * *character_pos),
                 translation_dir,
                 character_shape,
@@ -485,7 +485,7 @@ impl KinematicCharacterController {
             {
                 let snap_distance = snap_distance.eval(dims.y);
                 let offset = self.offset.eval(dims.y);
-                if let Some((hit_handle, hit)) = queries.cast_shape_on_continuous_surfaces(
+                if let Some((hit_handle, hit)) = queries.cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
                     character_pos,
                     -self.up,
                     character_shape,
@@ -791,7 +791,7 @@ impl KinematicCharacterController {
         };
 
         if queries
-            .cast_shape_on_continuous_surfaces(
+            .cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
                 character_pos,
                 self.up,
                 character_shape,
@@ -811,7 +811,7 @@ impl KinematicCharacterController {
         }
 
         if queries
-            .cast_shape_on_continuous_surfaces(
+            .cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
                 &shifted_character_pos,
                 horizontal_dir,
                 character_shape,
@@ -832,7 +832,7 @@ impl KinematicCharacterController {
 
         // Check that we are not getting into a ramp that is too steep
         // after stepping.
-        if let Some((_, hit)) = queries.cast_shape_on_continuous_surfaces(
+        if let Some((_, hit)) = queries.cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
             &Pose::from_parts(
                 shifted_character_pos.translation + horizontal_dir * min_width,
                 shifted_character_pos.rotation,
@@ -868,7 +868,7 @@ impl KinematicCharacterController {
         // We can step, we need to find the actual step height.
         let step_height = max_height
             - queries
-                .cast_shape_on_continuous_surfaces(
+                .cast_shape_on_continuous_surfaces( // mmo-fork: was `cast_shape`
                     &Pose::from_parts(
                         shifted_character_pos.translation + horizontal_dir * min_width,
                         shifted_character_pos.rotation,

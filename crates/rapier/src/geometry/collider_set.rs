@@ -68,7 +68,7 @@ impl ColliderSet {
             colliders: Arena::new(),
             modified_colliders: Default::default(),
             removed_colliders: Vec::new(),
-            capture: None,
+            capture: None, // mmo-fork: journal capture
         }
     }
 
@@ -80,7 +80,7 @@ impl ColliderSet {
             colliders: Arena::with_capacity(capacity),
             modified_colliders: ModifiedColliders::with_capacity(capacity),
             removed_colliders: Vec::new(),
-            capture: None,
+            capture: None, // mmo-fork: journal capture
         }
     }
 

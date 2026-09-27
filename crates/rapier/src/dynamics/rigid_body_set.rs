@@ -96,7 +96,7 @@ impl RigidBodySet {
             bodies: Arena::new(),
             modified_bodies: ModifiedObjects::default(),
             default_fixed: RigidBodyBuilder::fixed().build(),
-            capture: None,
+            capture: None, // mmo-fork: journal capture
         }
     }
 
@@ -116,7 +116,7 @@ impl RigidBodySet {
             bodies: Arena::with_capacity(capacity),
             modified_bodies: ModifiedRigidBodies::with_capacity(capacity),
             default_fixed: RigidBodyBuilder::fixed().build(),
-            capture: None,
+            capture: None, // mmo-fork: journal capture
         }
     }
 

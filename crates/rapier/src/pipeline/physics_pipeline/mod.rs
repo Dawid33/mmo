@@ -126,7 +126,7 @@ impl PhysicsPipeline {
             end_step_collider_aabbs: vec![],
             soft_synced_colliders: vec![],
             quarantine: Quarantine::default(),
-            seen_journal_reverts: 0,
+            seen_journal_reverts: 0, // mmo-fork: memo invalidation after a revert
         }
     }
 

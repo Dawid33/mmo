@@ -323,6 +323,8 @@ where
 
         let imin = Vector::from(toi.map(|t| t.0)).min_position();
 
+        // mmo-fork: stop past the best hit, and keep trailing rows in the
+        // search domain (below) — upstream shifts both ends with the motion.
         if toi[imin].0 > smallest_t.get() {
             // Whatever lies further is reached after the hit already found.
             break;
@@ -352,6 +354,8 @@ where
         }
 
         if toi[imin].1 {
+            // mmo-fork: upstream also advanced `search_domain[0]` here; the
+            // trailing-row clamp above owns the lower bound.
             search_domain[1].ivset(imin, search_domain[1].ivget(imin) + 1);
 
             if search_domain[1].ivget(imin) <= domain_maxs.ivget(imin) {
@@ -366,6 +370,8 @@ where
                 break;
             }
         } else {
+            // mmo-fork: upstream also pulled in `search_domain[1]` here; the
+            // trailing-row clamp above owns the upper bound.
             search_domain[0].ivset(imin, search_domain[0].ivget(imin) - 1);
 
             if search_domain[0].ivget(imin) >= domain_mins.ivget(imin) {
