@@ -27,7 +27,9 @@ impl IslandManager {
     /// body.add_force(Vector::new(100.0, 0.0, 0.0), false);
     /// ```
     ///
-    /// Only affects dynamic bodies (kinematic and fixed bodies don't sleep).
+    /// Affects dynamic and kinematic bodies (a kinematic body at rest sleeps
+    /// unless it was built with `can_sleep(false)`); fixed bodies are ignored.
+    // mmo-fork: upstream's docstring said only dynamic bodies are affected.
     pub fn wake_up(&mut self, bodies: &mut RigidBodySet, handle: RigidBodyHandle, strong: bool) {
         // NOTE: the use an Option here because there are many legitimate cases (like when
         //       deleting a joint attached to an already-removed body) where we could be
