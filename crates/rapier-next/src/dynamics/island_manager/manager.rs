@@ -48,6 +48,12 @@ pub struct IslandManager {
     /// The persistent islands: connected components of the touching-contact/joint
     /// graph, maintained incrementally.
     pub(crate) persistent: super::PersistentIslands,
+    /// mmo-fork (upgrade plan Task 4.3, H7 review I2): bumped by every
+    /// `StepJournal::revert`. A `PhysicsPipeline` that sees it move since its
+    /// last step drops its memos (they describe the undone step), so the
+    /// caller needs no post-revert call. Not state: never serialized.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) journal_reverts: u32,
 }
 
 impl IslandManager {

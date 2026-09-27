@@ -19,10 +19,12 @@
 //!   serialized `frame_index` changes every step, so there is no clean tick.
 //!
 //! Revert writes the captured values back and swaps the clones in. It restores
-//! the seven structures of [`PhysicsParts`] byte for byte; it does not restore
-//! the `PhysicsPipeline` or the `CCDSolver` — their memos are workspace keyed on
-//! the reverted state, so the caller steps on with a fresh pipeline or calls
-//! `invalidate_caches` (Task 4.3).
+//! the seven physics structures of [`PhysicsParts`] byte for byte. The
+//! `PhysicsPipeline` and the `CCDSolver` hold memos of the undone step instead
+//! of state (Task 4.3): the revert discards the CCD solver's fixed-targets
+//! cache and bumps a counter in the `IslandManager` that makes the pipeline
+//! drop its memos at its next step, so the caller steps on with the same
+//! pipeline and solver and needs no post-revert call.
 //!
 //! Contract: nothing but the step itself may run between `step_journaled` and
 //! `revert` on the journaled structures, and journals are reverted in LIFO order.
@@ -32,7 +34,7 @@
 use crate::alloc_prelude::*;
 
 use crate::dynamics::{
-    ImpulseJointSet, IslandManager, MultibodyJointSet, RigidBody, RigidBodyHandle, RigidBodySet,
+    CCDSolver, ImpulseJointSet, IslandManager, MultibodyJointSet, RigidBody, RigidBodyHandle, RigidBodySet,
     SoftBodySet,
 };
 use crate::geometry::{BroadPhaseBvh, Collider, ColliderHandle, ColliderSet, NarrowPhase};
@@ -95,6 +97,9 @@ pub struct PhysicsParts<'a> {
     pub multibody_joints: &'a mut MultibodyJointSet,
     /// 0.36: soft bodies are compiled in; the game keeps this empty (asserted).
     pub soft_bodies: &'a mut SoftBodySet,
+    /// Not restored: its fixed-targets cache (which a revert can make name a
+    /// vacant collider) is discarded.
+    pub ccd_solver: &'a mut CCDSolver,
 }
 
 struct Wholesale {
@@ -203,6 +208,7 @@ impl StepJournal {
             impulse_joints,
             multibody_joints,
             soft_bodies,
+            ccd_solver,
         } = parts;
         debug_assert!(soft_bodies.is_empty(), "the journal does not capture soft bodies");
         let w = self
@@ -226,7 +232,10 @@ impl StepJournal {
             removed_colliders,
             joints,
         } = *w;
+        // The counter survives the swap and moves (see its doc).
+        let reverts = islands.journal_reverts.wrapping_add(1);
         *islands = saved_islands;
+        islands.journal_reverts = reverts;
         *narrow_phase = saved_narrow;
         *broad_phase = saved_broad;
         bodies.set_modified(modified_bodies);
@@ -236,6 +245,10 @@ impl StepJournal {
             *impulse_joints = ij;
             *multibody_joints = mj;
         }
+        // The undone step may have rebuilt the cache with colliders the caller's
+        // own undo then removes (a terrain edit), and the re-step sees no user
+        // change that would invalidate it.
+        ccd_solver.invalidate_fixed_targets_cache();
     }
 }
 

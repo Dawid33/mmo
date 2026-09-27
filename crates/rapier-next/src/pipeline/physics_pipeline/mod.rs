@@ -82,6 +82,9 @@ pub struct PhysicsPipeline {
     /// pool, or `parallel` off): run inline by `join_deferred_bvh_optimize`, i.e. at
     /// the same point of the step where the concurrent one is joined.
     deferred_bvh_inline: Option<crate::geometry::DeferredBvhOptimize>,
+    /// mmo-fork (Task 4.3): the `IslandManager::journal_reverts` this pipeline
+    /// last stepped with; a mismatch means a `StepJournal` revert happened since.
+    seen_journal_reverts: u32,
     /// Pool running the parallel parts of the step (see [`Self::configure_thread_pool`]).
     /// `None` uses whichever pool the calling thread is in.
     #[cfg(all(feature = "parallel", not(feature = "unsync-callbacks")))]
@@ -123,6 +126,7 @@ impl PhysicsPipeline {
             end_step_collider_aabbs: vec![],
             soft_synced_colliders: vec![],
             quarantine: Quarantine::default(),
+            seen_journal_reverts: 0,
         }
     }
 
@@ -220,6 +224,13 @@ impl PhysicsPipeline {
         hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
     ) {
+        // mmo-fork (Task 4.3, H7 review I2): after a `StepJournal` revert this
+        // pipeline's memos describe the undone step.
+        if islands.journal_reverts != self.seen_journal_reverts {
+            self.seen_journal_reverts = islands.journal_reverts;
+            self.invalidate_caches();
+        }
+
         // With a dedicated pool configured, run the whole step inside it.
         #[cfg(all(feature = "parallel", not(feature = "unsync-callbacks")))]
         if let Some(pool) = self.thread_pool.clone() {
@@ -260,11 +271,11 @@ impl PhysicsPipeline {
     }
 
     /// mmo-fork (upgrade plan Task 4.3): forgets every memo this pipeline keeps
-    /// about the last step it ran. Call it after a
-    /// [`StepJournal::revert`](crate::pipeline::StepJournal::revert) before
-    /// stepping on with the same pipeline (together with
-    /// [`CCDSolver::invalidate_fixed_targets_cache`]); a fresh pipeline is
-    /// equivalent.
+    /// about the last step it ran; a fresh pipeline is equivalent. The step
+    /// calls it by itself after a
+    /// [`StepJournal::revert`](crate::pipeline::StepJournal::revert) (which
+    /// also discards the `CCDSolver`'s fixed-targets cache), so callers only
+    /// need it for a rewind done some other way.
     ///
     /// The memos are keyed on epochs the revert rolls back
     /// (`IslandManager::active_set_epoch`, `ImpulseJointSet::assembly_epoch`)
@@ -273,19 +284,14 @@ impl PhysicsPipeline {
     /// (`joint_constraint_indices`) and the staged solver's joint-assembly
     /// cache. Pinned by `physics-next/tests/pipeline_memo.rs`.
     ///
-    /// Only valid right after a revert: it also drops a deferred BVH
-    /// optimization left pending by a reverted zero-`dt` step, which belongs to
-    /// the broad phase the revert replaced.
+    /// A deferred BVH optimization is not a memo: after a zero-`dt` step the
+    /// pending task owns the whole broad-phase tree, so it is kept (and
+    /// `step_journaled` never leaves one behind).
     pub fn invalidate_caches(&mut self) {
         self.joint_constraint_indices.clear();
         // Makes the next selection invalidate the joint set's memo too.
         self.joint_selection_primed = false;
         self.staged_solver.invalidate_joint_assembly_cache();
-        self.deferred_bvh_inline = None;
-        #[cfg(feature = "parallel")]
-        {
-            *self.deferred_bvh.get_mut().unwrap() = None;
-        }
     }
 
     /// mmo-fork (upgrade plan Task 4.2): [`Self::step`], recording into
@@ -293,9 +299,9 @@ impl PhysicsPipeline {
     /// [`StepJournal::revert`](crate::pipeline::StepJournal::revert) can undo it
     /// exactly. `None` is a plain `step`.
     ///
-    /// After a revert, step on with a fresh `PhysicsPipeline` (or call
-    /// `invalidate_caches`, Task 4.3): this pipeline's memos describe the
-    /// reverted step.
+    /// After a revert, step on with this same pipeline and `CCDSolver`: the
+    /// revert discards the solver's fixed-targets cache and this pipeline drops
+    /// its memos of the undone step at its next step (Task 4.3).
     #[allow(clippy::too_many_arguments)]
     pub fn step_journaled(
         &mut self,
@@ -332,6 +338,17 @@ impl PhysicsPipeline {
             );
         };
 
+        // The first-touch capture is a plain buffer in the sets: under `parallel`
+        // the rayon chunks of the body/collider passes (and the staged solver's
+        // workers) would push into it concurrently. The game never enables
+        // `parallel` (regions are its threading unit), so refuse loudly rather
+        // than race (H7 review I1).
+        if cfg!(feature = "parallel") {
+            panic!(
+                "step_journaled does not support the `parallel` feature: the journal's capture is single-threaded"
+            );
+        }
+
         // A deferred tree optimization left over from a zero-`dt` step lives in
         // this pipeline, not in the broad phase. The step joins it first thing
         // anyway (`detect_collisions`); joining before the clone makes the
@@ -346,6 +363,7 @@ impl PhysicsPipeline {
             impulse_joints,
             multibody_joints,
             soft_bodies,
+            ccd_solver,
         });
         self.step(
             gravity,
@@ -363,6 +381,12 @@ impl PhysicsPipeline {
             events,
         );
         journal.end(bodies, colliders);
+        // A zero-`dt` step returns with its deferred tree optimization still
+        // pending in this pipeline (it owns the tree). Join it now, as the next
+        // step would first thing: a revert must find the broad phase whole.
+        if integration_parameters.dt <= 0.0 {
+            self.join_deferred_bvh_optimize(broad_phase);
+        }
     }
 }
 

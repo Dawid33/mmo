@@ -102,7 +102,8 @@ impl PhysicsWorld {
         journal
     }
 
-    /// The seven structures a journal restores.
+    /// The seven structures a journal restores, plus the CCD solver whose
+    /// cache it discards.
     pub fn parts(&mut self) -> PhysicsParts<'_> {
         PhysicsParts {
             islands: &mut self.islands,
@@ -113,6 +114,7 @@ impl PhysicsWorld {
             impulse_joints: &mut self.impulse_joints,
             multibody_joints: &mut self.multibody_joints,
             soft_bodies: &mut self.soft_bodies,
+            ccd_solver: &mut self.ccd,
         }
     }
 

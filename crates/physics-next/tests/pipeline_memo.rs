@@ -20,28 +20,30 @@
 //!   ball instead.
 //!
 //! Findings (0.36 fork):
-//! - **Re-stepping the same input on the same pipeline does not diverge**
+//! - **Re-stepping the same input on the same pipeline never diverged**
 //!   (both scenes): the re-step bumps the epochs to the values the undone
 //!   step did, and finds the memos that step computed for identical state.
-//! - **A corrected input on the same pipeline DIVERGES** at the first
-//!   re-stepped tick in `PairSleeps` (bodies, colliders, broad phase, impulse
-//!   joints differ): the undone step woke the pair and bumped the active-set
-//!   epoch; the revert restored the old epoch and the joint set's old
-//!   `selection_epochs`, so the corrected step — which wakes nothing — gets a
-//!   memo hit and solves the undone future's joint selection. (`PairAwake`
-//!   gets no memo hit on the re-step — its active-set epoch moves anyway — and
-//!   is printed, not asserted, by that test.)
-//! - A fresh `PhysicsPipeline` + `CCDSolver`, or the same ones after
-//!   `PhysicsPipeline::invalidate_caches` +
-//!   `CCDSolver::invalidate_fixed_targets_cache`, match the reference byte for
-//!   byte in every case. Which part of `invalidate_caches` is load-bearing
-//!   (mutation runs, H7): dropping both the selection-buffer clear and the
-//!   un-priming makes `PairSleeps` diverge; either one alone suffices (the
-//!   un-priming forces a re-selection that overwrites the buffer). The
-//!   staged-cache reset is not observable here (its reuse gate also compares
-//!   the selected joint indices and group ranges) and is kept as insurance;
-//!   `CCDSolver`'s fixed-targets cache has no fixed collider change to go
-//!   stale on in these scenes.
+//! - **A corrected input on the same pipeline DIVERGED** (before the H7
+//!   review fix) at the first re-stepped tick in `PairSleeps` (bodies,
+//!   colliders, broad phase, impulse joints differed): the undone step woke
+//!   the pair and bumped the active-set epoch; the revert restored the old
+//!   epoch and the joint set's old `selection_epochs`, so the corrected step —
+//!   which wakes nothing — got a memo hit and solved the undone future's joint
+//!   selection. `PairAwake` got no memo hit (its epoch moves anyway).
+//! - The fix (H7 review I2): the game's undo closure reaches the physics state
+//!   but not the pipeline, so the revert bumps `IslandManager::journal_reverts`
+//!   (serde-skipped) and the pipeline calls `invalidate_caches` itself when it
+//!   sees the counter move; the revert also discards the `CCDSolver`'s
+//!   fixed-targets cache, which could name a collider the game's undo removed
+//!   (`ccd_after_an_undone_fixed_collider_insert_…`: it panicked indexing the
+//!   vacant slot). Same pipeline, fresh pipeline and explicit
+//!   `invalidate_caches` now all match the reference byte for byte.
+//! - Which part of `invalidate_caches` is load-bearing (mutation runs, H7):
+//!   dropping both the selection-buffer clear and the un-priming makes
+//!   `PairSleeps` diverge; either one alone suffices (the un-priming forces a
+//!   re-selection that overwrites the buffer). The staged-cache reset is not
+//!   observable here (its reuse gate also compares the selected joint indices
+//!   and group ranges) and is kept as insurance.
 use physics_next::{PhysicsWorld, differing_parts};
 use rapier3d::prelude::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -203,29 +205,146 @@ fn same_pipeline_replaying_the_same_input_does_not_diverge() {
     }
 }
 
-/// Pins why the game must not re-step on the same pipeline without
-/// `invalidate_caches`: in `PairSleeps` the undone step's joint selection is
-/// reused. `PairAwake`'s outcome is printed for the record.
+/// H7 review I2: the game's undo closure reaches the physics state but not
+/// the pipeline, so after a revert the SAME pipeline must be safe: the revert
+/// bumps a counter in the `IslandManager` and the pipeline invalidates its
+/// memos when it sees it move. (Before that fix this re-step diverged at the
+/// first tick in `PairSleeps`: the undone step's joint selection was reused.)
 #[test]
-fn same_pipeline_after_a_corrected_input_diverges() {
+fn same_pipeline_after_a_corrected_input_matches_a_never_reverted_run() {
     for case in CASES {
         let expect = reference(case);
         let s = rollback(case, true);
-        let outcome = catch_unwind(AssertUnwindSafe(|| advance(s, AfterRevert::SamePipeline)));
-        let diverged = match outcome {
-            Ok(got) => {
-                let d = first_divergence(&got, &expect);
-                eprintln!("{case:?}: same pipeline after a corrected input: first divergence {d:?}");
-                d.is_some()
-            }
-            Err(e) => {
-                let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()));
-                eprintln!("{case:?}: same pipeline after a corrected input: re-step panicked: {msg:?}");
-                true
-            }
-        };
-        if matches!(case, Case::PairSleeps) {
-            assert!(diverged, "expected the stale joint selection to change the re-step");
-        }
+        let got = catch_unwind(AssertUnwindSafe(|| advance(s, AfterRevert::SamePipeline)));
+        let got = got.unwrap_or_else(|_| panic!("{case:?}: same-pipeline re-step panicked"));
+        assert_eq!(first_divergence(&got, &expect), None, "{case:?}, same pipeline after a corrected input");
     }
+}
+
+/// H7 review I2 (CCD): the game's terrain edit is a fixed collider insert.
+/// A journaled step with it rebuilds `CCDSolver`'s fixed-targets cache; the
+/// rollback reverts the step and undoes the insert (`revert_insert` pops the
+/// modified list), so the re-step sees no user change and would keep the
+/// cache — with the vacant wall in it. The revert must invalidate it.
+#[test]
+fn ccd_after_an_undone_fixed_collider_insert_matches_a_never_inserted_run() {
+    fn world() -> (PhysicsWorld, PhysicsPipeline, RigidBodyHandle) {
+        let mut w = PhysicsWorld::default();
+        w.params.dt = 0.05;
+        let ball = w.bodies.insert(
+            // A fast dynamic body WITHOUT `ccd_enabled` is a non-bullet CCD
+            // origin in 0.36: it sweeps the cached fixed-target list.
+            RigidBodyBuilder::dynamic().translation(Vector::new(-6.0, 0.0, 0.0)).linvel(Vector::new(60.0, 0.0, 0.0)),
+        );
+        w.colliders.insert_with_parent(ColliderBuilder::ball(0.2), ball, &mut w.bodies);
+        let mut p = PhysicsPipeline::new();
+        for _ in 0..2 {
+            w.step(&mut p);
+        }
+        (w, p, ball)
+    }
+    let (mut r, mut rp, ball) = world();
+    let expect: Vec<_> = (0..5)
+        .map(|_| {
+            r.step(&mut rp);
+            r.state_bytes()
+        })
+        .collect();
+
+    let (mut w, mut p, _) = world();
+    let (head, len) = w.colliders.alloc_state();
+    let wall = w.colliders.insert(ColliderBuilder::cuboid(0.1, 5.0, 5.0).translation(Vector::new(2.0, 0.0, 0.0)));
+    let j = w.step_journaled(&mut p);
+    assert!(w.bodies[ball].translation().x < 2.0, "setup: CCD must stop the ball at the wall");
+    w.revert(j);
+    w.colliders.revert_insert(wall, head, len);
+    let got = catch_unwind(AssertUnwindSafe(|| {
+        (0..5)
+            .map(|_| {
+                w.step(&mut p);
+                w.state_bytes()
+            })
+            .collect::<Vec<_>>()
+    }))
+    .unwrap_or_else(|_| panic!("re-step after the undone insert panicked"));
+    assert_eq!(first_divergence(&got, &expect), None);
+}
+
+/// H7 review M1 (re-graded): `invalidate_caches` right after a zero-`dt`
+/// step must not lose the broad phase. Such a step leaves its deferred tree
+/// optimization pending in the pipeline, holding the whole tree.
+#[test]
+fn invalidate_caches_after_a_zero_dt_step_keeps_the_broad_phase() {
+    fn run(invalidate: bool) -> Vec<u8> {
+        let mut w = PhysicsWorld { gravity: Vector::new(0.0, -9.81, 0.0), ..Default::default() };
+        let floor = w.colliders.insert(ColliderBuilder::cuboid(16.0, 1.0, 16.0).translation(Vector::new(0.0, -1.0, 0.0)));
+        let _ = floor;
+        let b = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.0, 0.0)));
+        w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
+        let mut p = PhysicsPipeline::new();
+        // Past the first broad-phase pass (which never defers), then a zero-dt
+        // step whose update has enough changed leaves to defer an optimization.
+        w.params.dt = 0.05;
+        for _ in 0..3 {
+            w.step(&mut p);
+        }
+        w.bodies.get_mut(b).unwrap().set_translation(Vector::new(0.0, 1.5, 0.0), true);
+        w.params.dt = 0.0;
+        w.step(&mut p);
+        if invalidate {
+            p.invalidate_caches();
+        }
+        w.params.dt = 0.05;
+        for _ in 0..40 {
+            w.step(&mut p);
+        }
+        assert!(w.bodies[b].translation().y > 0.0, "invalidate={invalidate}: the ball fell through the floor");
+        bincode::serialize(&w.bodies).unwrap()
+    }
+    assert!(run(true) == run(false), "invalidate_caches changed the simulation");
+}
+
+/// H7 review M1: a journaled zero-`dt` step must not leave its deferred tree
+/// optimization pending in the pipeline (it owns the tree of the state the
+/// revert discards): reverting it and stepping on matches a run that never
+/// took it.
+#[test]
+fn reverted_zero_dt_step_steps_on_like_a_run_that_never_took_it() {
+    fn scene() -> (PhysicsWorld, PhysicsPipeline, RigidBodyHandle) {
+        let mut w = PhysicsWorld { gravity: Vector::new(0.0, -9.81, 0.0), ..Default::default() };
+        w.colliders.insert(ColliderBuilder::cuboid(16.0, 1.0, 16.0).translation(Vector::new(0.0, -1.0, 0.0)));
+        let b = w.bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.0, 0.0)));
+        w.colliders.insert_with_parent(ColliderBuilder::ball(0.4), b, &mut w.bodies);
+        let mut p = PhysicsPipeline::new();
+        w.params.dt = 0.05;
+        for _ in 0..3 {
+            w.step(&mut p);
+        }
+        (w, p, b)
+    }
+    let run = |zero_dt_rollback: bool| {
+        let (mut w, mut p, b) = scene();
+        let pre = w.bodies[b].clone();
+        let was_modified = w.bodies.is_marked_modified(b);
+        if zero_dt_rollback {
+            // A user move makes the zero-dt update defer an optimization.
+            w.bodies.get_mut(b).unwrap().set_translation(Vector::new(0.0, 1.5, 0.0), true);
+            w.params.dt = 0.0;
+            let j = w.step_journaled(&mut p);
+            w.revert(j);
+            w.bodies.restore_raw(b, pre);
+            if !was_modified {
+                w.bodies.pop_modified(b);
+            }
+            w.params.dt = 0.05;
+        }
+        (0..40)
+            .map(|_| {
+                w.step(&mut p);
+                w.state_bytes()
+            })
+            .collect::<Vec<_>>()
+    };
+    let expect = run(false);
+    assert_eq!(first_divergence(&run(true), &expect), None);
 }

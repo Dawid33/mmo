@@ -12,6 +12,11 @@ bincode = { workspace = true }
 crc32fast = { workspace = true, features = ["std"] }
 serde = { workspace = true }
 
+[features]
+# Only for tests/journal_parallel.rs (H7 review I1): the game never enables
+# rapier's `parallel`, and the step journal refuses to run under it.
+parallel = ["rapier3d/parallel"]
+
 [dev-dependencies]
 # Constants only (player capsule, skin, speeds): the probes measure upstream
 # against the game's real numbers without restating them. The direction
