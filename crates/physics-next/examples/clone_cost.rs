@@ -18,10 +18,19 @@
 //! and the big ones again through a reusable buffer and one crc32 pass.
 //! Every [`FRESH_PIPELINE_EVERY`] ticks the step runs on a new
 //! `PhysicsPipeline` (the plan's post-revert pipeline), timed separately.
+//!
+//! Task 4.4 Step 4 adds `StateHash` into crc32 per structure (the Full-mode
+//! state hash after the switch), the same through a buffering hasher (one
+//! crc32 pass per hash instead of one per field), and a second, journaled
+//! pass of [`TICKS`] steps timing the Delta digests: `pre_digest`, the live
+//! side alone, and `revert_digest` (revert + live side). The old forks' std
+//! `Hash` baseline for the same region comes from
+//! `cargo run --release -p worldgen --example export_region_colliders -- --hash-cost`.
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use physics_next::{PhysicsWorld, digest, digest_buffered, load_region};
+use state_hash::StateHash;
 use rapier3d::prelude::*;
 
 /// Default tick count; `CLONE_COST_TICKS` overrides it (a short run checks the rig).
@@ -57,6 +66,33 @@ impl Series {
             mean
         );
     }
+}
+
+/// `StateHash` into crc32, field by field (what the game will do).
+fn state_hash<T: StateHash>(value: &T) -> u32 {
+    let mut h = crc32fast::Hasher::new();
+    value.state_hash(&mut h);
+    h.finalize()
+}
+
+/// Buffers the hashed bytes and runs crc32 once over them at the end.
+struct BufHasher<'a>(&'a mut Vec<u8>);
+
+impl std::hash::Hasher for BufHasher<'_> {
+    fn finish(&self) -> u64 {
+        crc32fast::hash(self.0) as u64
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+}
+
+fn state_hash_buffered<T: StateHash>(value: &T, buf: &mut Vec<u8>) -> u64 {
+    use std::hash::Hasher;
+    buf.clear();
+    let mut h = BufHasher(buf);
+    value.state_hash(&mut h);
+    h.finish()
 }
 
 fn main() {
@@ -107,6 +143,8 @@ fn main() {
     // Buffered variants: bodies, colliders, broad phase, stand-in colliders.
     let mut buffered: Vec<Series> = (0..4).map(|_| Series::default()).collect();
     let mut buf = Vec::new();
+    let mut sh: Vec<Series> = names.iter().map(|_| Series::default()).collect();
+    let mut sh_buffered: Vec<Series> = (0..3).map(|_| Series::default()).collect();
     let mut active_bodies = 0usize;
     let dx = export.walk_speed / TICK_HZ;
 
@@ -167,6 +205,38 @@ fn main() {
         buffered[1].time(|| digest_buffered(&w.colliders, &mut buf));
         buffered[2].time(|| digest_buffered(&w.broad_phase, &mut buf));
         buffered[3].time(|| digest_buffered(&stand_in, &mut buf));
+
+        sh[0].time(|| state_hash(&w.bodies));
+        sh[1].time(|| state_hash(&w.colliders));
+        sh[2].time(|| state_hash(&w.islands));
+        sh[3].time(|| state_hash(&w.narrow_phase));
+        sh[4].time(|| state_hash(&w.broad_phase));
+        sh[5].time(|| state_hash(&w.impulse_joints));
+        sh[6].time(|| state_hash(&w.multibody_joints));
+        sh_buffered[0].time(|| state_hash_buffered(&w.bodies, &mut buf));
+        sh_buffered[1].time(|| state_hash_buffered(&w.colliders, &mut buf));
+        sh_buffered[2].time(|| state_hash_buffered(&w.broad_phase, &mut buf));
+    }
+
+    // Journaled pass: each tick steps journaled, digests, reverts (with the
+    // digest), then steps for real so the walk goes on.
+    let [mut pre, mut live, mut revert_dig, mut journaled] = std::array::from_fn::<Series, 4, _>(|_| Series::default());
+    let mut captured = 0usize;
+    for _ in 0..ticks {
+        for &(body, _) in &walkers {
+            let p = w.bodies[body].translation();
+            let x = p.x + dx;
+            let y = w.surface_y(x, p.z).map_or(p.y, |y| y + lift);
+            w.bodies[body].set_next_kinematic_translation(Vector::new(x, y, p.z));
+        }
+        let j = journaled.time(|| w.step_journaled(&mut pipeline));
+        captured = captured.max(j.saved_body_count() + j.saved_collider_count());
+        let p = pre.time(|| j.pre_digest());
+        let l = live.time(|| j.live_digest(&w.parts()));
+        assert_ne!(p, l, "a walking step changes its footprint");
+        let r = revert_dig.time(|| j.revert_digest(w.parts()));
+        assert_eq!(p, r, "exact revert");
+        w.step(&mut pipeline);
     }
 
     let voxels = export.chunks.iter().flat_map(|c| &c.colliders).filter(|c| matches!(c, physics_next::ExportedCollider::Voxels { .. })).count();
@@ -201,4 +271,14 @@ fn main() {
     buffered[1].row("buffered crc32(bincode) colliders", &sizes[1].to_string());
     buffered[2].row("buffered crc32(bincode) broad_phase", &sizes[4].to_string());
     buffered[3].row("buffered crc32(bincode) colliders, Voxels stand-ins", &stand_in_size.to_string());
+    for (i, n) in names.iter().enumerate() {
+        sh[i].row(&format!("StateHash {n}"), &sizes[i].to_string());
+    }
+    sh_buffered[0].row("buffered StateHash bodies", &sizes[0].to_string());
+    sh_buffered[1].row("buffered StateHash colliders", &sizes[1].to_string());
+    sh_buffered[2].row("buffered StateHash broad_phase", &sizes[4].to_string());
+    journaled.row("step_journaled (journal pass)", "");
+    pre.row(&format!("pre_digest (max {captured} bodies+colliders)"), "");
+    live.row("live_digest (no revert)", "");
+    revert_dig.row("revert_digest (revert + live side)", "");
 }
