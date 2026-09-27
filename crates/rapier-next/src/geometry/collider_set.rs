@@ -104,6 +104,71 @@ impl ColliderSet {
         core::mem::take(&mut self.removed_colliders)
     }
 
+    // mmo-fork: rollback primitives (upgrade plan Task 4.1; same names and
+    // semantics as the old fork's, mirroring `RigidBodySet`'s).
+
+    /// Undo-only: overwrite the slot value; the handle must be occupied.
+    /// Does NOT touch modified/removed lists (the journal restores those
+    /// wholesale).
+    pub fn restore_raw(&mut self, handle: ColliderHandle, collider: Collider) {
+        *self
+            .colliders
+            .get_mut(handle.0)
+            .expect("restore_raw: slot vacant") = collider;
+    }
+
+    /// Whether `handle`'s collider currently carries the `IN_MODIFIED_SET` change-flag,
+    /// i.e. whether a tracked mutation (`get_mut`) would skip its
+    /// modified-list push. Capture this BEFORE such a mutation so its undo
+    /// knows whether to [`Self::pop_modified`]. Mirrors
+    /// [`RigidBodySet::is_marked_modified`].
+    pub fn is_marked_modified(&self, handle: ColliderHandle) -> bool {
+        self.colliders
+            .get(handle.0)
+            .is_some_and(|co| co.has_modified_flag())
+    }
+
+    /// Exact inverse of the modified-list push performed on `handle` by the
+    /// MOST RECENT tracked mutation. LIFO contract: `handle` must be the
+    /// list's tail (asserted). Callers restore the collider VALUE separately
+    /// via [`Self::restore_raw`], which covers the `IN_MODIFIED_SET` flag itself.
+    /// Mirrors [`RigidBodySet::pop_modified`].
+    pub fn pop_modified(&mut self, handle: ColliderHandle) {
+        let popped = self.modified_colliders.pop();
+        assert_eq!(popped, Some(handle), "pop_modified: not the list tail");
+    }
+
+    /// Allocator state to capture before `insert`/`insert_with_parent` for
+    /// [`Self::revert_insert`]. Mirrors [`RigidBodySet::alloc_state`].
+    pub fn alloc_state(&self) -> (Option<u32>, u32) {
+        self.colliders.alloc_state()
+    }
+
+    /// Exact inverse of the MOST RECENT collider insert that returned
+    /// `handle`, given the state captured by [`Self::alloc_state`] just
+    /// before it. LIFO contract: invalid if any other collider was
+    /// inserted/removed/marked modified since. Does NOT touch the parent
+    /// body — callers that used `insert_with_parent` must also restore the
+    /// parent (its collider list, mass properties and change flags changed)
+    /// and its modified-list membership
+    /// ([`RigidBodySet::is_marked_modified`] / [`RigidBodySet::pop_modified`]).
+    /// Mirrors [`RigidBodySet::revert_insert`].
+    pub fn revert_insert(
+        &mut self,
+        handle: ColliderHandle,
+        prev_free_head: Option<u32>,
+        prev_items_len: u32,
+    ) {
+        let popped = self.modified_colliders.pop();
+        assert_eq!(
+            popped,
+            Some(handle),
+            "revert_insert: not the most recent insert"
+        );
+        self.colliders
+            .revert_insert(handle.0, prev_free_head, prev_items_len);
+    }
+
     /// Returns a handle that's guaranteed to be invalid.
     ///
     /// Useful as a sentinel/placeholder value.

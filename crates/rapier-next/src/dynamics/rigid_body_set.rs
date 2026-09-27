@@ -114,6 +114,66 @@ impl RigidBodySet {
         core::mem::take(&mut self.modified_bodies)
     }
 
+    // mmo-fork: rollback primitives (upgrade plan Task 4.1; same names and
+    // semantics as the old fork's, so the game's undo closures port 1:1).
+
+    /// Undo-only: overwrite the slot value; the handle must be occupied.
+    /// Does NOT touch modified/removed lists (the journal restores those
+    /// wholesale).
+    pub fn restore_raw(&mut self, handle: RigidBodyHandle, body: RigidBody) {
+        *self
+            .bodies
+            .get_mut(handle.0)
+            .expect("restore_raw: slot vacant") = body;
+    }
+
+    /// Allocator state to capture before `insert` for [`Self::revert_insert`].
+    pub fn alloc_state(&self) -> (Option<u32>, u32) {
+        self.bodies.alloc_state()
+    }
+
+    /// Exact inverse of the MOST RECENT `insert` that returned `handle`,
+    /// given the state captured by [`Self::alloc_state`] just before it.
+    /// LIFO contract: invalid if any other body was inserted/removed/marked
+    /// modified since.
+    pub fn revert_insert(
+        &mut self,
+        handle: RigidBodyHandle,
+        prev_free_head: Option<u32>,
+        prev_items_len: u32,
+    ) {
+        let popped = self.modified_bodies.pop();
+        assert_eq!(
+            popped,
+            Some(handle),
+            "revert_insert: not the most recent insert"
+        );
+        self.bodies
+            .revert_insert(handle.0, prev_free_head, prev_items_len);
+    }
+
+    /// Whether `handle`'s body currently carries the `IN_MODIFIED_SET` change-flag —
+    /// i.e. whether a tracked mutation (`get_mut`,
+    /// `get_mut_internal_with_modification_tracking`, an insert) would skip
+    /// its modified-list push. Capture this BEFORE an operation that goes
+    /// through modification tracking so its undo knows whether to
+    /// [`Self::pop_modified`].
+    pub fn is_marked_modified(&self, handle: RigidBodyHandle) -> bool {
+        self.bodies
+            .get(handle.0)
+            .is_some_and(|rb| rb.has_modified_flag())
+    }
+
+    /// Exact inverse of the modified-list push performed on `handle` by the
+    /// MOST RECENT tracked mutation. LIFO contract: `handle` must be the
+    /// list's tail (asserted). Callers restore the body VALUE separately via
+    /// [`Self::restore_raw`] — that rewrite covers the `IN_MODIFIED_SET` flag itself,
+    /// so this only fixes the list.
+    pub fn pop_modified(&mut self, handle: RigidBodyHandle) {
+        let popped = self.modified_bodies.pop();
+        assert_eq!(popped, Some(handle), "pop_modified: not the list tail");
+    }
+
     /// Returns how many rigid bodies are currently in this collection.
     pub fn len(&self) -> usize {
         self.bodies.len()
