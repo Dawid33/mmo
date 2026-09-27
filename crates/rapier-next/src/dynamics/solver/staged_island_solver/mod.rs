@@ -309,6 +309,13 @@ pub(crate) struct StagedIslandSolver {
 }
 
 impl StagedIslandSolver {
+    /// mmo-fork (upgrade plan Task 4.3): the next step rebuilds the joint
+    /// layout instead of trusting its epoch-keyed reuse gate (see
+    /// `PhysicsPipeline::invalidate_caches`).
+    pub(crate) fn invalidate_joint_assembly_cache(&mut self) {
+        self.staged_joints_valid = false;
+    }
+
     pub fn new() -> Self {
         Self {
             contact_constraints: ContactConstraintsSet::new(),

@@ -259,6 +259,35 @@ impl PhysicsPipeline {
         )
     }
 
+    /// mmo-fork (upgrade plan Task 4.3): forgets every memo this pipeline keeps
+    /// about the last step it ran. Call it after a
+    /// [`StepJournal::revert`](crate::pipeline::StepJournal::revert) before
+    /// stepping on with the same pipeline (together with
+    /// [`CCDSolver::invalidate_fixed_targets_cache`]); a fresh pipeline is
+    /// equivalent.
+    ///
+    /// The memos are keyed on epochs the revert rolls back
+    /// (`IslandManager::active_set_epoch`, `ImpulseJointSet::assembly_epoch`)
+    /// while their data stays here, so a re-step under a different input can
+    /// hit a memo of the undone step: the joint selection
+    /// (`joint_constraint_indices`) and the staged solver's joint-assembly
+    /// cache. Pinned by `physics-next/tests/pipeline_memo.rs`.
+    ///
+    /// Only valid right after a revert: it also drops a deferred BVH
+    /// optimization left pending by a reverted zero-`dt` step, which belongs to
+    /// the broad phase the revert replaced.
+    pub fn invalidate_caches(&mut self) {
+        self.joint_constraint_indices.clear();
+        // Makes the next selection invalidate the joint set's memo too.
+        self.joint_selection_primed = false;
+        self.staged_solver.invalidate_joint_assembly_cache();
+        self.deferred_bvh_inline = None;
+        #[cfg(feature = "parallel")]
+        {
+            *self.deferred_bvh.get_mut().unwrap() = None;
+        }
+    }
+
     /// mmo-fork (upgrade plan Task 4.2): [`Self::step`], recording into
     /// `journal` everything the step mutates so
     /// [`StepJournal::revert`](crate::pipeline::StepJournal::revert) can undo it
