@@ -75,6 +75,17 @@ pub struct ImpulseJointSet {
 }
 
 impl ImpulseJointSet {
+    /// mmo-fork (upgrade plan Task 4.2): no joint and no pending joint work, so
+    /// a step can't write anything the step journal would have to restore.
+    pub(crate) fn journal_quiescent(&self) -> bool {
+        self.is_empty()
+            && self.to_wake_up.is_empty()
+            && self.to_join.is_empty()
+            && self.island_events.is_empty()
+            && self.modified_joints.is_empty()
+            && !self.all_joints_modified
+    }
+
     /// Creates a new empty set of impulse_joints.
     pub fn new() -> Self {
         Self {

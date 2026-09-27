@@ -18,6 +18,9 @@ pub use physics_hooks::{
 pub use physics_pipeline::{PhysicsPipeline, Quarantine};
 #[cfg(feature = "alloc")]
 pub use physics_world::PhysicsWorld;
+// mmo-fork: per-tick rollback journal (upgrade plan Task 4.2).
+#[cfg(feature = "alloc")]
+pub use step_journal::{PhysicsParts, StepJournal};
 #[cfg(feature = "alloc")]
 pub use query_pipeline::{QueryFilter, QueryFilterFlags, QueryPipeline, QueryPipelineMut};
 
@@ -40,6 +43,8 @@ mod physics_world;
 mod query_pipeline;
 #[cfg(feature = "alloc")]
 mod user_changes;
+#[cfg(feature = "alloc")]
+pub(crate) mod step_journal; // mmo-fork
 
 #[cfg(all(feature = "debug-render", feature = "alloc"))]
 mod debug_render_pipeline;

@@ -258,6 +258,83 @@ impl PhysicsPipeline {
             events,
         )
     }
+
+    /// mmo-fork (upgrade plan Task 4.2): [`Self::step`], recording into
+    /// `journal` everything the step mutates so
+    /// [`StepJournal::revert`](crate::pipeline::StepJournal::revert) can undo it
+    /// exactly. `None` is a plain `step`.
+    ///
+    /// After a revert, step on with a fresh `PhysicsPipeline` (or call
+    /// `invalidate_caches`, Task 4.3): this pipeline's memos describe the
+    /// reverted step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_journaled(
+        &mut self,
+        gravity: Vector,
+        integration_parameters: &IntegrationParameters,
+        islands: &mut IslandManager,
+        broad_phase: &mut BroadPhaseBvh,
+        narrow_phase: &mut NarrowPhase,
+        bodies: &mut RigidBodySet,
+        colliders: &mut ColliderSet,
+        impulse_joints: &mut ImpulseJointSet,
+        multibody_joints: &mut MultibodyJointSet,
+        soft_bodies: &mut SoftBodySet,
+        ccd_solver: &mut CCDSolver,
+        hooks: &dyn PhysicsHooks,
+        events: &dyn EventHandler,
+        journal: Option<&mut crate::pipeline::StepJournal>,
+    ) {
+        let Some(journal) = journal else {
+            return self.step(
+                gravity,
+                integration_parameters,
+                islands,
+                broad_phase,
+                narrow_phase,
+                bodies,
+                colliders,
+                impulse_joints,
+                multibody_joints,
+                soft_bodies,
+                ccd_solver,
+                hooks,
+                events,
+            );
+        };
+
+        // A deferred tree optimization left over from a zero-`dt` step lives in
+        // this pipeline, not in the broad phase. The step joins it first thing
+        // anyway (`detect_collisions`); joining before the clone makes the
+        // restored broad phase whole, as a fresh pipeline after revert needs.
+        self.join_deferred_bvh_optimize(broad_phase);
+        journal.begin(crate::pipeline::PhysicsParts {
+            islands,
+            broad_phase,
+            narrow_phase,
+            bodies,
+            colliders,
+            impulse_joints,
+            multibody_joints,
+            soft_bodies,
+        });
+        self.step(
+            gravity,
+            integration_parameters,
+            islands,
+            broad_phase,
+            narrow_phase,
+            bodies,
+            colliders,
+            impulse_joints,
+            multibody_joints,
+            soft_bodies,
+            ccd_solver,
+            hooks,
+            events,
+        );
+        journal.end(bodies, colliders);
+    }
 }
 
 #[cfg(all(feature = "parallel", not(feature = "unsync-callbacks")))]

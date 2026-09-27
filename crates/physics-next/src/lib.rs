@@ -45,7 +45,7 @@ pub fn load_region(path: &std::path::Path) -> RegionExport {
 }
 
 /// Every structure `PhysicsPipeline::step` takes by `&mut`.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PhysicsWorld {
     pub gravity: Vector,
     pub params: IntegrationParameters,
@@ -79,6 +79,94 @@ impl PhysicsWorld {
         );
         debug_assert!(self.soft_bodies.is_empty(), "the game never uses soft bodies");
     }
+
+    /// One step recorded into a fresh `StepJournal` (upgrade plan Task 4.2).
+    pub fn step_journaled(&mut self, pipeline: &mut PhysicsPipeline) -> StepJournal {
+        let mut journal = StepJournal::new();
+        pipeline.step_journaled(
+            self.gravity,
+            &self.params,
+            &mut self.islands,
+            &mut self.broad_phase,
+            &mut self.narrow_phase,
+            &mut self.bodies,
+            &mut self.colliders,
+            &mut self.impulse_joints,
+            &mut self.multibody_joints,
+            &mut self.soft_bodies,
+            &mut self.ccd,
+            &(),
+            &(),
+            Some(&mut journal),
+        );
+        journal
+    }
+
+    /// The seven structures a journal restores.
+    pub fn parts(&mut self) -> PhysicsParts<'_> {
+        PhysicsParts {
+            islands: &mut self.islands,
+            broad_phase: &mut self.broad_phase,
+            narrow_phase: &mut self.narrow_phase,
+            bodies: &mut self.bodies,
+            colliders: &mut self.colliders,
+            impulse_joints: &mut self.impulse_joints,
+            multibody_joints: &mut self.multibody_joints,
+            soft_bodies: &mut self.soft_bodies,
+        }
+    }
+
+    pub fn revert(&mut self, journal: StepJournal) {
+        journal.revert(self.parts());
+    }
+
+    /// bincode of each structure a journal restores, in `PhysicsParts` order.
+    /// Byte equality is the revert bar in the tests (std `Hash` is gone from
+    /// the glam-era forks; `StateHash` is Task 4.4).
+    pub fn state_bytes(&self) -> [Vec<u8>; 8] {
+        let b = |t: &dyn erased::Ser| t.bytes();
+        [
+            b(&self.islands),
+            b(&self.broad_phase),
+            b(&self.narrow_phase),
+            b(&self.bodies),
+            b(&self.colliders),
+            b(&self.impulse_joints),
+            b(&self.multibody_joints),
+            b(&self.soft_bodies),
+        ]
+    }
+}
+
+/// Names of [`PhysicsWorld::state_bytes`]'s entries, for failure messages.
+pub const STATE_PARTS: [&str; 8] = [
+    "islands",
+    "broad_phase",
+    "narrow_phase",
+    "bodies",
+    "colliders",
+    "impulse_joints",
+    "multibody_joints",
+    "soft_bodies",
+];
+
+/// The parts whose bytes differ, e.g. `["bodies", "broad_phase"]`.
+pub fn differing_parts(a: &[Vec<u8>; 8], b: &[Vec<u8>; 8]) -> Vec<&'static str> {
+    (0..8).filter(|&i| a[i] != b[i]).map(|i| STATE_PARTS[i]).collect()
+}
+
+mod erased {
+    pub trait Ser {
+        fn bytes(&self) -> Vec<u8>;
+    }
+    impl<T: serde::Serialize> Ser for T {
+        fn bytes(&self) -> Vec<u8> {
+            bincode::serialize(self).expect("serialize")
+        }
+    }
+}
+
+impl PhysicsWorld {
 
     /// The game's terrain: one fixed body per chunk (with or without
     /// colliders), colliders attached in export order.

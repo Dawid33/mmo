@@ -962,6 +962,15 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                 }
 
                 let bodies = unsafe { &mut *ctx.bodies };
+                // mmo-fork (upgrade plan Task 4.2, Review Focus 1): this writeback
+                // runs on the solver workers through a raw `*mut RigidBodySet`; a
+                // first capture here would push into the journal from a worker.
+                // Every island body must already be saved (the pipeline's serial
+                // passes over the active bodies touch each one first).
+                debug_assert!(
+                    bodies.journal_covers(handle),
+                    "staged-solver writeback of a body the step journal never captured: {handle:?}"
+                );
                 let rb = bodies.index_mut_internal(handle);
                 let vs = unsafe { &*ctx.velocity_solver };
                 let solver_vels = &vs.solver_bodies.vels[rb.ids.active_set_id as usize];

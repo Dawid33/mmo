@@ -76,6 +76,16 @@ pub struct MultibodyJointSet {
 }
 
 impl MultibodyJointSet {
+    /// mmo-fork (upgrade plan Task 4.2): no multibody and no pending joint
+    /// work, so a step can't write anything the step journal would have to
+    /// restore.
+    pub(crate) fn journal_quiescent(&self) -> bool {
+        self.multibodies.is_empty()
+            && self.to_wake_up.is_empty()
+            && self.to_join.is_empty()
+            && self.island_chain_events.is_empty()
+    }
+
     /// Create a new empty set of multibodies.
     pub fn new() -> Self {
         Self {

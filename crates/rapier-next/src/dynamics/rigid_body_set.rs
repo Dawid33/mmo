@@ -76,6 +76,11 @@ pub struct RigidBodySet {
     pub(crate) modified_bodies: ModifiedRigidBodies,
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) default_fixed: RigidBody,
+    // mmo-fork: first-touch capture buffer, installed only for the duration of
+    // a journaled step (`pipeline::step_journal`, upgrade plan Task 4.2).
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) capture:
+        Option<alloc::boxed::Box<crate::pipeline::step_journal::Capture<RigidBodyHandle, RigidBody>>>,
 }
 
 impl RigidBodySet {
@@ -88,6 +93,7 @@ impl RigidBodySet {
             bodies: Arena::new(),
             modified_bodies: ModifiedObjects::default(),
             default_fixed: RigidBodyBuilder::fixed().build(),
+            capture: None,
         }
     }
 
@@ -107,11 +113,38 @@ impl RigidBodySet {
             bodies: Arena::with_capacity(capacity),
             modified_bodies: ModifiedRigidBodies::with_capacity(capacity),
             default_fixed: RigidBodyBuilder::fixed().build(),
+            capture: None,
         }
     }
 
     pub(crate) fn take_modified(&mut self) -> ModifiedRigidBodies {
         core::mem::take(&mut self.modified_bodies)
+    }
+
+    // mmo-fork: journal plumbing (upgrade plan Task 4.2).
+    pub(crate) fn set_modified(&mut self, modified: ModifiedRigidBodies) {
+        self.modified_bodies = modified;
+    }
+
+    /// mmo-fork: saves `handle`'s pre-step value on its first `&mut` access
+    /// during a journaled step. Every accessor handing out `&mut RigidBody`
+    /// calls this first.
+    #[inline]
+    fn journal_capture(&mut self, handle: RigidBodyHandle) {
+        if let Some(capture) = self.capture.as_deref_mut() {
+            if let Some(rb) = self.bodies.get(handle.0) {
+                capture.save(handle, handle.0.into_raw_parts().0, rb);
+            }
+        }
+    }
+
+    /// mmo-fork: whether a write to `handle` right now would be covered by the
+    /// journal: no journaled step is running, or its value is already saved.
+    /// The staged solver's raw-pointer writeback asserts this.
+    pub(crate) fn journal_covers(&self, handle: RigidBodyHandle) -> bool {
+        self.capture
+            .as_deref()
+            .is_none_or(|c| c.contains(handle.0.into_raw_parts().0))
     }
 
     // mmo-fork: rollback primitives (upgrade plan Task 4.1; same names and
@@ -208,6 +241,8 @@ impl RigidBodySet {
     /// // Store `handle` to access this body later
     /// ```
     pub fn insert(&mut self, rb: impl Into<RigidBody>) -> RigidBodyHandle {
+        // mmo-fork: the journal restores values, not slots.
+        debug_assert!(self.capture.is_none(), "body insert during a journaled step");
         let mut rb = rb.into();
         // Make sure the internal links are reset, they may not be
         // if this rigid-body was obtained by cloning another one.
@@ -270,6 +305,8 @@ impl RigidBodySet {
         soft_bodies: &mut SoftBodySet,
         remove_attached_colliders: bool,
     ) -> Option<RigidBody> {
+        // mmo-fork: the journal restores values, not slots.
+        debug_assert!(self.capture.is_none(), "body removal during a journaled step");
         // Removing a soft-frame proxy removes its cluster: the particles only it covers, the
         // elements attached to them, and their colliders. Dissolved before the body removal so the
         // proxy (and its parenting of the cluster's colliders) is still intact meanwhile.
@@ -332,6 +369,8 @@ impl RigidBodySet {
     /// for more details on when this is appropriate (rarely).
     #[cfg(not(feature = "dev-remove-slow-accessors"))]
     pub fn get_unknown_gen_mut(&mut self, i: u32) -> Option<(&mut RigidBody, RigidBodyHandle)> {
+        let (_, handle) = self.bodies.get_unknown_gen(i)?;
+        self.journal_capture(RigidBodyHandle(handle)); // mmo-fork
         let (rb, handle) = self.bodies.get_unknown_gen_mut(i)?;
         let handle = RigidBodyHandle(handle);
         self.modified_bodies.push_once(handle, rb);
@@ -365,6 +404,7 @@ impl RigidBodySet {
     /// ```
     #[cfg(not(feature = "dev-remove-slow-accessors"))]
     pub fn get_mut(&mut self, handle: RigidBodyHandle) -> Option<&mut RigidBody> {
+        self.journal_capture(handle); // mmo-fork
         let result = self.bodies.get_mut(handle.0)?;
         self.modified_bodies.push_once(handle, result);
         Some(result)
@@ -398,6 +438,9 @@ impl RigidBodySet {
         if handle1 == handle2 {
             (self.get_mut(handle1), None)
         } else {
+            // mmo-fork
+            self.journal_capture(handle1);
+            self.journal_capture(handle2);
             let (mut rb1, mut rb2) = self.bodies.get2_mut(handle1.0, handle2.0);
             if let Some(rb1) = rb1.as_deref_mut() {
                 self.modified_bodies.push_once(handle1, rb1);
@@ -410,10 +453,12 @@ impl RigidBodySet {
     }
 
     pub(crate) fn get_mut_internal(&mut self, handle: RigidBodyHandle) -> Option<&mut RigidBody> {
+        self.journal_capture(handle); // mmo-fork
         self.bodies.get_mut(handle.0)
     }
 
     pub(crate) fn index_mut_internal(&mut self, handle: RigidBodyHandle) -> &mut RigidBody {
+        self.journal_capture(handle); // mmo-fork
         &mut self.bodies[handle.0]
     }
 
@@ -423,6 +468,7 @@ impl RigidBodySet {
         &mut self,
         handle: RigidBodyHandle,
     ) -> Option<&mut RigidBody> {
+        self.journal_capture(handle); // mmo-fork
         let result = self.bodies.get_mut(handle.0)?;
         self.modified_bodies.push_once(handle, result);
         Some(result)
@@ -465,6 +511,12 @@ impl RigidBodySet {
     /// ```
     #[cfg(not(feature = "dev-remove-slow-accessors"))]
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (RigidBodyHandle, &mut RigidBody)> {
+        // mmo-fork: every body is handed out.
+        if let Some(capture) = self.capture.as_deref_mut() {
+            for (h, rb) in self.bodies.iter() {
+                capture.save(RigidBodyHandle(h), h.into_raw_parts().0, rb);
+            }
+        }
         self.modified_bodies.clear();
         let modified_bodies = &mut self.modified_bodies;
         self.bodies.iter_mut().map(move |(h, b)| {
@@ -517,6 +569,7 @@ impl Index<crate::data::Index> for RigidBodySet {
 #[cfg(not(feature = "dev-remove-slow-accessors"))]
 impl IndexMut<RigidBodyHandle> for RigidBodySet {
     fn index_mut(&mut self, handle: RigidBodyHandle) -> &mut RigidBody {
+        self.journal_capture(handle); // mmo-fork
         let rb = &mut self.bodies[handle.0];
         self.modified_bodies.push_once(handle, rb);
         rb

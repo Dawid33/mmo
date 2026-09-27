@@ -52,6 +52,11 @@ pub struct ColliderSet {
     pub(crate) colliders: Arena<Collider>,
     pub(crate) modified_colliders: ModifiedColliders,
     pub(crate) removed_colliders: Vec<ColliderHandle>,
+    // mmo-fork: first-touch capture buffer, installed only for the duration of
+    // a journaled step (`pipeline::step_journal`, upgrade plan Task 4.2).
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) capture:
+        Option<Box<crate::pipeline::step_journal::Capture<ColliderHandle, Collider>>>,
 }
 
 impl ColliderSet {
@@ -61,6 +66,7 @@ impl ColliderSet {
             colliders: Arena::new(),
             modified_colliders: Default::default(),
             removed_colliders: Vec::new(),
+            capture: None,
         }
     }
 
@@ -72,6 +78,7 @@ impl ColliderSet {
             colliders: Arena::with_capacity(capacity),
             modified_colliders: ModifiedColliders::with_capacity(capacity),
             removed_colliders: Vec::new(),
+            capture: None,
         }
     }
 
@@ -102,6 +109,23 @@ impl ColliderSet {
     /// broadphase updates automatically.
     pub fn take_removed(&mut self) -> Vec<ColliderHandle> {
         core::mem::take(&mut self.removed_colliders)
+    }
+
+    // mmo-fork: journal plumbing (upgrade plan Task 4.2).
+    pub(crate) fn set_removed(&mut self, removed: Vec<ColliderHandle>) {
+        self.removed_colliders = removed;
+    }
+
+    /// mmo-fork: saves `handle`'s pre-step value on its first `&mut` access
+    /// during a journaled step. Every accessor handing out `&mut Collider`
+    /// calls this first.
+    #[inline]
+    fn journal_capture(&mut self, handle: ColliderHandle) {
+        if let Some(capture) = self.capture.as_deref_mut() {
+            if let Some(co) = self.colliders.get(handle.0) {
+                capture.save(handle, handle.0.into_raw_parts().0, co);
+            }
+        }
     }
 
     // mmo-fork: rollback primitives (upgrade plan Task 4.1; same names and
@@ -196,6 +220,12 @@ impl ColliderSet {
     /// Iterates over all colliders with mutable access.
     #[cfg(not(feature = "dev-remove-slow-accessors"))]
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (ColliderHandle, &mut Collider)> {
+        // mmo-fork: every collider is handed out.
+        if let Some(capture) = self.capture.as_deref_mut() {
+            for (h, co) in self.colliders.iter() {
+                capture.save(ColliderHandle(h), h.into_raw_parts().0, co);
+            }
+        }
         self.modified_colliders.clear();
         let modified_colliders = &mut self.modified_colliders;
         self.colliders.iter_mut().map(move |(h, co)| {
@@ -232,6 +262,8 @@ impl ColliderSet {
     /// Most colliders should be attached to rigid bodies using [`insert_with_parent()`](Self::insert_with_parent) instead.
     /// Standalone colliders are useful for sensors or static collision geometry that doesn't need a body.
     pub fn insert(&mut self, coll: impl Into<Collider>) -> ColliderHandle {
+        // mmo-fork: the journal restores values, not slots.
+        debug_assert!(self.capture.is_none(), "collider insert/removal during a journaled step");
         let mut coll = coll.into();
         // Make sure the internal links are reset, they may not be
         // if this rigid-body was obtained by cloning another one.
@@ -270,6 +302,8 @@ impl ColliderSet {
         parent_handle: RigidBodyHandle,
         bodies: &mut RigidBodySet,
     ) -> ColliderHandle {
+        // mmo-fork: the journal restores values, not slots.
+        debug_assert!(self.capture.is_none(), "collider insert/removal during a journaled step");
         let mut coll = coll.into();
         // Make sure the internal links are reset, they may not be
         // if this collider was obtained by cloning another one.
@@ -502,6 +536,8 @@ impl ColliderSet {
         bodies: &mut RigidBodySet,
         wake_up: bool,
     ) -> Option<Collider> {
+        // mmo-fork: the journal restores values, not slots.
+        debug_assert!(self.capture.is_none(), "collider insert/removal during a journaled step");
         let collider = self.colliders.remove(handle.0)?;
 
         /*
@@ -544,6 +580,8 @@ impl ColliderSet {
     /// suffer form the ABA problem.
     #[cfg(not(feature = "dev-remove-slow-accessors"))]
     pub fn get_unknown_gen_mut(&mut self, i: u32) -> Option<(&mut Collider, ColliderHandle)> {
+        let (_, handle) = self.colliders.get_unknown_gen(i)?;
+        self.journal_capture(ColliderHandle(handle)); // mmo-fork
         let (collider, handle) = self.colliders.get_unknown_gen_mut(i)?;
         let handle = ColliderHandle(handle);
         self.modified_colliders.push_once(handle, collider);
@@ -563,6 +601,7 @@ impl ColliderSet {
     /// Use this to modify collider properties like friction, restitution, sensor status, etc.
     #[cfg(not(feature = "dev-remove-slow-accessors"))]
     pub fn get_mut(&mut self, handle: ColliderHandle) -> Option<&mut Collider> {
+        self.journal_capture(handle); // mmo-fork
         let result = self.colliders.get_mut(handle.0)?;
         self.modified_colliders.push_once(handle, result);
         Some(result)
@@ -581,6 +620,9 @@ impl ColliderSet {
         if handle1 == handle2 {
             (self.get_mut(handle1), None)
         } else {
+            // mmo-fork
+            self.journal_capture(handle1);
+            self.journal_capture(handle2);
             let (mut co1, mut co2) = self.colliders.get2_mut(handle1.0, handle2.0);
             if let Some(co1) = co1.as_deref_mut() {
                 self.modified_colliders.push_once(handle1, co1);
@@ -593,10 +635,12 @@ impl ColliderSet {
     }
 
     pub(crate) fn index_mut_internal(&mut self, handle: ColliderHandle) -> &mut Collider {
+        self.journal_capture(handle); // mmo-fork
         &mut self.colliders[handle.0]
     }
 
     pub(crate) fn get_mut_internal(&mut self, handle: ColliderHandle) -> Option<&mut Collider> {
+        self.journal_capture(handle); // mmo-fork
         self.colliders.get_mut(handle.0)
     }
 
@@ -607,6 +651,7 @@ impl ColliderSet {
         &mut self,
         handle: ColliderHandle,
     ) -> Option<&mut Collider> {
+        self.journal_capture(handle); // mmo-fork
         let result = self.colliders.get_mut(handle.0)?;
         self.modified_colliders.push_once(handle, result);
         Some(result)
@@ -632,6 +677,7 @@ impl Index<ColliderHandle> for ColliderSet {
 #[cfg(not(feature = "dev-remove-slow-accessors"))]
 impl IndexMut<ColliderHandle> for ColliderSet {
     fn index_mut(&mut self, handle: ColliderHandle) -> &mut Collider {
+        self.journal_capture(handle); // mmo-fork
         let collider = &mut self.colliders[handle.0];
         self.modified_colliders.push_once(handle, collider);
         collider
