@@ -1,4 +1,4 @@
-use crate::math::{Isometry, Real};
+use crate::math::{Pose, Real, Vector};
 use crate::query::contact_manifolds::{NormalConstraints, NormalConstraintsPair};
 use crate::query::{
     self,
@@ -6,12 +6,11 @@ use crate::query::{
     ContactManifold, TrackedContact,
 };
 use crate::shape::{PackedFeatureId, PolygonalFeature, PolygonalFeatureMap, Shape};
-use na::Unit;
 
 /// Computes the contact manifold between two convex shapes implementing the `PolygonalSupportMap`
 /// trait, both represented as `Shape` trait-objects.
 pub fn contact_manifold_pfm_pfm_shapes<ManifoldData, ContactData>(
-    pos12: &Isometry<Real>,
+    pos12: &Pose,
     shape1: &dyn Shape,
     shape2: &dyn Shape,
     normal_constraints1: Option<&dyn NormalConstraints>,
@@ -42,7 +41,7 @@ pub fn contact_manifold_pfm_pfm_shapes<ManifoldData, ContactData>(
 
 /// Computes the contact manifold between two convex shapes implementing the `PolygonalSupportMap` trait.
 pub fn contact_manifold_pfm_pfm<'a, ManifoldData, ContactData, S1, S2>(
-    pos12: &Isometry<Real>,
+    pos12: &Pose,
     pfm1: &'a S1,
     border_radius1: Real,
     normal_constraints1: Option<&dyn NormalConstraints>,
@@ -60,11 +59,11 @@ pub fn contact_manifold_pfm_pfm<'a, ManifoldData, ContactData, S1, S2>(
     // We use very small thresholds for the manifold update because something to high would
     // cause numerical drifts with the effect of introducing bumps in
     // what should have been smooth rolling motions.
-    if manifold.try_update_contacts_eps(pos12, crate::utils::COS_1_DEGREES, Real::from(1.0e-6)) {
+    if manifold.try_update_contacts_eps(pos12, crate::utils::COS_1_DEGREES, 1.0e-6) {
         return;
     }
 
-    let init_dir = Unit::try_new(manifold.local_n1, Real::from(crate::math::DEFAULT_EPSILON));
+    let init_dir = (manifold.local_n1).try_normalize();
     let total_prediction = prediction + border_radius1 + border_radius2;
     let contact = query::details::contact_support_map_support_map_with_params(
         pos12,
@@ -81,13 +80,13 @@ pub fn contact_manifold_pfm_pfm<'a, ManifoldData, ContactData, S1, S2>(
     match contact {
         GJKResult::ClosestPoints(p1, p2_1, dir) => {
             let mut local_n1 = dir;
-            let mut local_n2 = pos12.inverse_transform_unit_vector(&-dir);
-            let dist = (p2_1 - p1).dot(&local_n1);
+            let mut local_n2 = pos12.rotation.inverse() * -dir;
+            let dist = (p2_1 - p1).dot(local_n1);
 
             if !(normal_constraints1, normal_constraints2).project_local_normals(
                 pos12,
-                local_n1.as_mut_unchecked(),
-                local_n2.as_mut_unchecked(),
+                &mut local_n1,
+                &mut local_n2,
             ) {
                 // The contact got completely discarded by the normal correction.
                 return;
@@ -95,14 +94,18 @@ pub fn contact_manifold_pfm_pfm<'a, ManifoldData, ContactData, S1, S2>(
 
             let mut feature1 = PolygonalFeature::default();
             let mut feature2 = PolygonalFeature::default();
-            pfm1.local_support_feature(&local_n1, &mut feature1);
-            pfm2.local_support_feature(&local_n2, &mut feature2);
+            pfm1.local_support_feature_toward(local_n1, p1, &mut feature1);
+            pfm2.local_support_feature_toward(
+                local_n2,
+                pos12.inverse_transform_point(p2_1),
+                &mut feature2,
+            );
 
             PolygonalFeature::contacts(
                 pos12,
                 &pos12.inverse(),
-                &local_n1,
-                &local_n2,
+                local_n1,
+                local_n2,
                 &feature1,
                 &feature2,
                 manifold,
@@ -115,10 +118,10 @@ pub fn contact_manifold_pfm_pfm<'a, ManifoldData, ContactData, S1, S2>(
             {
                 let contact = TrackedContact::new(
                     p1,
-                    pos12.inverse_transform_point(&p2_1),
+                    pos12.inverse_transform_point(p2_1),
                     PackedFeatureId::UNKNOWN, // TODO: We don't know what features are involved.
                     PackedFeatureId::UNKNOWN,
-                    (p2_1 - p1).dot(&local_n1),
+                    (p2_1 - p1).dot(local_n1),
                 );
                 manifold.points.push(contact);
             }
@@ -132,28 +135,28 @@ pub fn contact_manifold_pfm_pfm<'a, ManifoldData, ContactData, S1, S2>(
                 //       relative to the unconstrained penetration distance.
                 manifold
                     .points
-                    .retain(|pt| dist >= Real::from(0.0) || pt.dist >= Real::from(0.0) || pt.dist >= dist * Real::from(5.0));
+                    .retain(|pt| dist >= 0.0 || pt.dist >= 0.0 || pt.dist >= dist * 5.0);
             }
 
             // Adjust points to take the radius into account.
             if border_radius1 != 0.0 || border_radius2 != 0.0 {
                 for contact in &mut manifold.points {
-                    contact.local_p1 += *local_n1 * border_radius1;
-                    contact.local_p2 += *local_n2 * border_radius2;
+                    contact.local_p1 += local_n1 * border_radius1;
+                    contact.local_p2 += local_n2 * border_radius2;
                     contact.dist -= border_radius1 + border_radius2;
                 }
             }
 
-            manifold.local_n1 = *local_n1;
-            manifold.local_n2 = *local_n2;
+            manifold.local_n1 = local_n1;
+            manifold.local_n2 = local_n2;
         }
         GJKResult::NoIntersection(dir) => {
             // Use the manifold normal as a cache.
-            manifold.local_n1 = *dir;
+            manifold.local_n1 = dir;
         }
         _ => {
             // Reset the cached direction.
-            manifold.local_n1.fill(Real::from(0.0));
+            manifold.local_n1 = Vector::ZERO;
         }
     }
 

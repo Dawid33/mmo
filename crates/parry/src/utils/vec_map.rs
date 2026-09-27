@@ -79,12 +79,24 @@ use core::slice;
 )]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 pub struct VecMap<V> {
     n: usize,
     v: Vec<Option<V>>,
+}
+
+// mmo-fork: StateHash — the entries (count, then key as u64 and value, in key
+// order), like the old fork's `Hash`: a vacant slot is not state, so the
+// backing vector's trailing vacancies don't count.
+impl<V: state_hash::StateHash> state_hash::StateHash for VecMap<V> {
+    fn state_hash<H: Hasher>(&self, h: &mut H) {
+        state_hash::hash_len(self.n, h);
+        for (key, value) in self {
+            state_hash::StateHash::state_hash(&key, h);
+            value.state_hash(h);
+        }
+    }
 }
 
 /// A view into a single entry in a map, which may either be vacant or occupied.

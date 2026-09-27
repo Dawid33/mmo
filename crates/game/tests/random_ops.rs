@@ -1,13 +1,13 @@
 //! Seeded random op sequences across transactions; rolling everything back
 //! must restore the exact state hash. This is the core invariant of the
 //! rollback system.
-use std::hash::Hash;
+use game::StateHash;
 
 use game::{ChunkCoords, EntityKey, Rollback};
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
-    r.hash(&mut hasher);
+    r.state_hash(&mut hasher);
     hasher.finalize()
 }
 

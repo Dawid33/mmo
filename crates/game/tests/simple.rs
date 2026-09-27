@@ -4,14 +4,14 @@
 //! which the macro no longer supports (generated code is tied to the crate's
 //! GameDataUpdate types). These are the same behaviors exercised against the
 //! real GameData Rollback, using the current API.
-use std::hash::Hash;
+use game::StateHash;
 
 use rapier3d::prelude::RigidBodyBuilder;
 use game::Rollback;
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
-    r.hash(&mut hasher);
+    r.state_hash(&mut hasher);
     hasher.finalize()
 }
 

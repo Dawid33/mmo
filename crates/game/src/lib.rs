@@ -8,7 +8,6 @@ extern crate serde;
 
 #[cfg_attr(test, macro_use)]
 extern crate alloc;
-pub extern crate nalgebra as na;
 extern crate num_traits as num;
 extern crate std;
 
@@ -38,6 +37,15 @@ pub mod volume;
 pub mod voxel;
 pub mod world_manager;
 pub use parry3d as parry;
+pub use rapier3d;
+/// The physics fork's math: glam 0.33 through glamx (`Vec3`, `Quat`, `Mat4`,
+/// `Pose3`, `IVec3`, …). NOT Bevy's glam (0.32) — the render boundary
+/// converts through arrays (`client/src/renderer/convert.rs`).
+pub use glamx as math;
+/// A body pose (translation + unit-quaternion rotation), rapier's `Pose`.
+pub use rapier3d::math::Pose;
+/// The rollback hash trait (plan D2); `#[derive(StateHash)]` on game types.
+pub use state_hash::StateHash;
 
 // The #[rollback] macro expansion in `state` and the borrow::Partial derives
 // rely on these items being reachable at the crate root (`crate::...`).
@@ -73,13 +81,75 @@ pub const TEST_INDUCED_LATENCY_MS: isize = 0;
 pub const METRICS_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Deterministic, cross-machine-stable hash of a rollback's simulation state.
-/// crc32fast (not a default-seeded DefaultHasher) so it is identical across
-/// runs/machines — the basis for client/server convergence assertions in tests.
+/// crc32 over the `StateHash` walk (not a default-seeded DefaultHasher, not
+/// std `Hash`, which writes `usize` at pointer width), so it is identical
+/// across runs, machines and native/wasm32 — the basis for client/server
+/// convergence assertions in tests.
 pub fn state_hash(r: &Rollback) -> u32 {
-    use std::hash::Hash;
-    let mut h = crc32fast::Hasher::new();
-    r.data.hash(&mut h);
+    let mut h = StateHasher::new();
+    r.data.state_hash(&mut h);
     h.finalize()
+}
+
+/// Bytes staged per crc32 call by [`StateHasher`].
+pub const STATE_HASHER_CHUNK: usize = 4096;
+
+/// crc32 of everything written to it, through a fixed staging buffer.
+///
+/// A `StateHash` walk writes a few bytes per field, and crc32fast's per-call
+/// overhead is ~90% of hashing field by field (measured in plan Task 4.4:
+/// bodies 2307 µs unbuffered vs 251 µs buffered). Staging the bytes and
+/// feeding crc32 `STATE_HASHER_CHUNK` at a time gives the SAME value as
+/// `crc32fast::Hasher` fed the same writes (crc32 is a stream: chunking does
+/// not change it), so every target agrees; no heap, so a per-entry digest
+/// costs nothing extra to create.
+#[derive(Clone)]
+pub struct StateHasher {
+    crc: crc32fast::Hasher,
+    len: usize,
+    buf: [u8; STATE_HASHER_CHUNK],
+}
+
+impl Default for StateHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StateHasher {
+    pub fn new() -> Self {
+        Self { crc: crc32fast::Hasher::new(), len: 0, buf: [0; STATE_HASHER_CHUNK] }
+    }
+
+    fn flush(&mut self) {
+        self.crc.update(&self.buf[..self.len]);
+        self.len = 0;
+    }
+
+    /// The crc32 of every byte written.
+    pub fn finalize(mut self) -> u32 {
+        self.flush();
+        self.crc.finalize()
+    }
+}
+
+impl std::hash::Hasher for StateHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        if self.len + bytes.len() > STATE_HASHER_CHUNK {
+            self.flush();
+        }
+        if bytes.len() >= STATE_HASHER_CHUNK {
+            self.crc.update(bytes);
+            return;
+        }
+        self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+    }
+
+    /// As `crc32fast::Hasher::finish`: the crc so far, widened.
+    fn finish(&self) -> u64 {
+        self.clone().finalize() as u64
+    }
 }
 
 /// Connection/sync state surfaced to the client HUD. Derived from the
@@ -333,6 +403,44 @@ mod hud_status_tests {
                 assert_eq!(connection, ConnectionState::Ready);
             }
             _ => panic!("wrong variant"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod state_hasher_tests {
+    use super::{StateHasher, STATE_HASHER_CHUNK};
+    use std::hash::Hasher;
+
+    /// The same writes through `StateHasher` and plain `crc32fast::Hasher`,
+    /// including writes that straddle, fill and exceed the staging buffer.
+    fn both(writes: &[Vec<u8>]) -> (u32, u32, u64, u64) {
+        let (mut a, mut b) = (StateHasher::new(), crc32fast::Hasher::new());
+        for w in writes {
+            a.write(w);
+            b.write(w);
+        }
+        let (fa, fb) = (a.finish(), b.finish());
+        (a.finalize(), b.finalize(), fa, fb)
+    }
+
+    #[test]
+    fn buffered_crc_equals_unbuffered_crc() {
+        let bytes = |n: usize, seed: u8| {
+            (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect::<Vec<u8>>()
+        };
+        let cases: Vec<Vec<Vec<u8>>> = vec![
+            vec![],
+            vec![bytes(1, 1)],
+            (0..5000).map(|i| bytes(i % 13, i as u8)).collect(),
+            vec![bytes(STATE_HASHER_CHUNK - 1, 2), bytes(2, 3)],
+            vec![bytes(STATE_HASHER_CHUNK, 4)],
+            vec![bytes(7, 5), bytes(3 * STATE_HASHER_CHUNK + 5, 6), bytes(9, 7)],
+        ];
+        for (i, writes) in cases.iter().enumerate() {
+            let (a, b, fa, fb) = both(writes);
+            assert_eq!(a, b, "case {i}: finalize");
+            assert_eq!(fa, fb, "case {i}: finish");
         }
     }
 }

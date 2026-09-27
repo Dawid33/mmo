@@ -19,6 +19,8 @@ serde = []
 
 [dependencies]
 serde = { workspace = true }
+# mmo: the game's rollback hash (plan D2). Impls mirror the `Hash` impls.
+state-hash = { workspace = true }
 
 [dev-dependencies]
 fxhash = "0.2.1"

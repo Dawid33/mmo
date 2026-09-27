@@ -73,6 +73,20 @@ pub struct SparseSecondaryMap<K: Key, V> {
     _k: PhantomData<fn(K) -> K>,
 }
 
+// mmo: mirror the derived `Hash` impls on `Slot` and `SparseSecondaryMap`.
+impl<T: state_hash::StateHash> state_hash::StateHash for Slot<T> {
+    fn state_hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.version.state_hash(state);
+        self.value.state_hash(state);
+    }
+}
+
+impl<K: Key, V: state_hash::StateHash> state_hash::StateHash for SparseSecondaryMap<K, V> {
+    fn state_hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.slots.state_hash(state);
+    }
+}
+
 impl<K: Key, V> SparseSecondaryMap<K, V> {
     /// Constructs a new, empty [`SparseSecondaryMap`].
     ///

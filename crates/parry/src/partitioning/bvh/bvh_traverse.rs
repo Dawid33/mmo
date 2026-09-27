@@ -1,6 +1,6 @@
 use super::BvhNode;
-use crate::math::{Real, RawReal};
-use crate::partitioning::Bvh;
+use crate::math::Real;
+use crate::partitioning::{Bvh, BvhNodeIndex};
 use smallvec::SmallVec;
 
 const TRAVERSAL_STACK_SIZE: usize = 32;
@@ -173,19 +173,19 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy, TraversalAction};
     /// use parry3d::bounding_volume::{Aabb, BoundingVolume};
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs = vec![
-    ///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(5.0, 0.0, 0.0), Point3::new(6.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(10.0, 0.0, 0.0), Point3::new(11.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(5.0, 0.0, 0.0), Vector::new(6.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(10.0, 0.0, 0.0), Vector::new(11.0, 1.0, 1.0)),
     /// ];
     ///
     /// let bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
     ///
     /// let query_region = Aabb::new(
-    ///     Point3::new(-1.0, -1.0, -1.0),
-    ///     Point3::new(7.0, 2.0, 2.0)
+    ///     Vector::new(-1.0, -1.0, -1.0),
+    ///     Vector::new(7.0, 2.0, 2.0)
     /// );
     ///
     /// let mut count = 0;
@@ -212,21 +212,21 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy, TraversalAction};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs = vec![
-    ///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(5.0, 0.0, 0.0), Point3::new(6.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(10.0, 0.0, 0.0), Point3::new(11.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(5.0, 0.0, 0.0), Vector::new(6.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(10.0, 0.0, 0.0), Vector::new(11.0, 1.0, 1.0)),
     /// ];
     ///
     /// let bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
     ///
-    /// let target_point = Point3::new(5.5, 0.5, 0.5);
+    /// let target_point = Vector::new(5.5, 0.5, 0.5);
     /// let mut found_leaf = None;
     ///
     /// bvh.traverse(|node| {
-    ///     if !node.aabb().contains_local_point(&target_point) {
+    ///     if !node.aabb().contains_local_point(target_point) {
     ///         return TraversalAction::Prune;
     ///     }
     ///
@@ -248,12 +248,12 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy, TraversalAction};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs = vec![
-    ///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(4.0, 0.0, 0.0), Point3::new(5.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(4.0, 0.0, 0.0), Vector::new(5.0, 1.0, 1.0)),
     /// ];
     ///
     /// let bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
@@ -288,27 +288,54 @@ impl Bvh {
     /// - [`cast_ray`](Self::cast_ray) - Ray casting with best-first traversal
     /// - [`TraversalAction`] - Controls traversal flow
     pub fn traverse(&self, mut check_node: impl FnMut(&BvhNode) -> TraversalAction) {
+        self.traverse_indexed(None, move |node, _| check_node(node));
+    }
+
+    /// Similar to [`Self::traverse`] but starts the traversal with the node at index `subtree`,
+    /// and the `check_node` closure is given the node index.
+    ///
+    /// If `subtree` is `None` the traversal starts at the root of the tree.
+    pub fn traverse_indexed(
+        &self,
+        subtree: Option<BvhNodeIndex>,
+        mut check_node: impl FnMut(&BvhNode, BvhNodeIndex) -> TraversalAction,
+    ) {
         let mut stack = Self::traversal_stack();
         let mut curr_id = 0;
 
-        if self.nodes.is_empty() {
-            return;
-        } else if self.nodes[0].right.leaf_count() == 0 {
-            // Special case for partial root.
-            let _ = check_node(&self.nodes[0].left);
-            return;
+        if let Some(subtree) = subtree {
+            let to_check = &self.nodes[subtree];
+            match check_node(to_check, subtree) {
+                TraversalAction::Continue => {
+                    if to_check.is_leaf() {
+                        return;
+                    }
+
+                    curr_id = to_check.children;
+                }
+                TraversalAction::Prune | TraversalAction::EarlyExit => return,
+            }
+        } else {
+            // Start at the root.
+            if self.nodes.is_empty() {
+                return;
+            } else if self.nodes[0].right.leaf_count() == 0 {
+                // Special case for partial root.
+                let _ = check_node(&self.nodes[0].left, BvhNodeIndex::left(0));
+                return;
+            }
         }
 
         loop {
             let node = &self.nodes[curr_id as usize];
             let left = &node.left;
             let right = &node.right;
-            let go_left = match check_node(left) {
+            let go_left = match check_node(left, BvhNodeIndex::left(curr_id)) {
                 TraversalAction::Continue => !left.is_leaf(),
                 TraversalAction::Prune => false,
                 TraversalAction::EarlyExit => return,
             };
-            let go_right = match check_node(right) {
+            let go_right = match check_node(right, BvhNodeIndex::right(curr_id)) {
                 TraversalAction::Continue => !right.is_leaf(),
                 TraversalAction::Prune => false,
                 TraversalAction::EarlyExit => return,
@@ -372,7 +399,7 @@ impl Bvh {
             }
 
             let mut found_next = false;
-            if left_score < best_cost && left_score != Real::from(RawReal::MAX) {
+            if left_score < best_cost && left_score != Real::MAX {
                 if left.is_leaf() {
                     if let Some(primitive_val) = leaf_cost(left.children, best_cost) {
                         let primitive_score = primitive_val.cost();
@@ -388,7 +415,7 @@ impl Bvh {
                 }
             }
 
-            if right_score < best_cost && right_score != Real::from(RawReal::MAX) {
+            if right_score < best_cost && right_score != Real::MAX {
                 if right.is_leaf() {
                     if let Some(primitive_val) = leaf_cost(right.children, best_cost) {
                         let primitive_score = primitive_val.cost();

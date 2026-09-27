@@ -182,10 +182,7 @@ impl LocalServer {
     /// region currently runs. Undo-safe (`Region::with_data` runs the pose
     /// mutation in its own forgotten transaction). Test/harness hook.
     pub fn teleport_local_player(&mut self, pos: [f32; 3]) {
-        let pose = game::IsometryReal::from_parts(
-            game::na::Translation3::new(pos[0].into(), pos[1].into(), pos[2].into()),
-            game::na::Unit::<game::na::Quaternion<game::parry::math::Real>>::identity(),
-        );
+        let pose = game::Pose::translation(pos[0], pos[1], pos[2]);
         for rc in self.manager.spawner_mut().running() {
             let mut found = false;
             self.manager.spawner_mut().with_region(rc, |r| {

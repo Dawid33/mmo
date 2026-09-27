@@ -1,5 +1,5 @@
 use super::{Voxels, VoxelsChunk, VoxelsChunkHeader};
-use crate::math::Point;
+use crate::math::IVector;
 
 impl Voxels {
     // TODO: support a crate like get_size2 (will require support on nalgebra too)?
@@ -19,12 +19,12 @@ impl Voxels {
             free_chunks,
             chunk_keys,
             voxel_size: _,
-            cached_hash: _,
+            content_hash: _, // mmo-fork: StateHash
         } = self;
         chunks.capacity() * size_of::<VoxelsChunk>()
             + free_chunks.capacity() * size_of::<usize>()
-            + chunk_keys.capacity() * size_of::<Point<i32>>()
-            + chunk_headers.capacity() * (size_of::<VoxelsChunkHeader>() + size_of::<Point<i32>>())
+            + chunk_keys.capacity() * size_of::<IVector>()
+            + chunk_headers.capacity() * (size_of::<VoxelsChunkHeader>() + size_of::<IVector>())
             + chunk_bvh.heap_memory_size()
     }
 }

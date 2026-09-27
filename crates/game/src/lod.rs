@@ -370,7 +370,7 @@ pub fn tile_regions(factor: u32) -> i32 {
 /// divided (euclid) by the tile span, so they're plain region coords for
 /// the small factors.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, state_hash::StateHash,
     serde::Serialize, serde::Deserialize,
 )]
 pub struct LodKey {

@@ -2,13 +2,13 @@
 //! timeline, not mispredictions. See
 //! docs/superpowers/specs/2026-07-04-multi-client-players-design.md
 use std::collections::BTreeMap;
-use std::hash::Hash;
+use game::StateHash;
 
 use game::{Chunk, ChunkCoords, GameEventKind, InputEvent, Key, Region, RegionCoords, World};
 
 fn state_hash(r: &game::Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
-    r.hash(&mut hasher);
+    r.state_hash(&mut hasher);
     hasher.finalize()
 }
 
@@ -274,7 +274,7 @@ fn player_y(server: &World) -> f32 {
     let data = server.data(&r0());
     let e = *data.player_entites.get(&0).unwrap();
     let handle = *data.ecs.rigidbody.get(e);
-    data.physics.bodies.get(handle).unwrap().translation().y.0
+    data.physics.bodies.get(handle).unwrap().translation().y
 }
 
 fn player_motion(server: &World) -> game::Motion {
@@ -311,7 +311,7 @@ fn idle_player_falls_under_gravity_and_rests_on_terrain() {
     assert!(y < REST_Y + 1.0, "player never reached the floor: y = {y}");
     let motion = player_motion(&server);
     assert!(motion.grounded);
-    assert_eq!(motion.vel_y.0, 0.0, "a resting body carries no fall speed");
+    assert_eq!(motion.vel_y, 0.0, "a resting body carries no fall speed");
 }
 
 #[test]
@@ -375,7 +375,7 @@ fn walking_holds_the_floor_at_walk_speed() {
         let data = s.data(&r0());
         let e = *data.player_entites.get(&0).unwrap();
         let h = *data.ecs.rigidbody.get(e);
-        *data.physics.bodies.get(h).unwrap().translation()
+        data.physics.bodies.get(h).unwrap().translation()
     };
     let start = pos(&server);
     // Yaw 0 faces -z; S backs away from the slab's edge onto its interior.
@@ -383,9 +383,9 @@ fn walking_holds_the_floor_at_walk_speed() {
     ticks(&mut server, 4);
     let end = pos(&server);
     let expected = 4.0 * game::movement::WALK_SPEED * game::movement::UNITS_PER_METER * game::movement::TICK_DT;
-    let walked = end.z.0 - start.z.0;
+    let walked = end.z - start.z;
     assert!((walked - expected).abs() < 0.2, "walked {walked}, expected {expected}");
-    assert!((end.y.0 - start.y.0).abs() < 0.1, "flat ground stays level");
+    assert!((end.y - start.y).abs() < 0.1, "flat ground stays level");
     assert!(player_motion(&server).grounded);
 }
 

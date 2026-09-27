@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::bounding_volume::BoundingVolume;
-use crate::math::{Isometry, Real};
+use crate::math::{Pose, Real};
 use crate::query::contact_manifolds::contact_manifolds_workspace::{
     TypedWorkspaceData, WorkspaceData,
 };
@@ -11,22 +11,23 @@ use crate::query::query_dispatcher::PersistentQueryDispatcher;
 use crate::query::ContactManifold;
 use crate::shape::CompositeShape;
 use crate::utils::hashmap::{Entry, HashMap};
-use crate::utils::IsometryOpt;
+use crate::utils::PoseOpt;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(Clone, Hash)]
+#[derive(Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 struct SubDetector {
     manifold_id: usize,
     timestamp: bool,
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Hash)]
+#[derive(Clone, Default)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompositeShapeCompositeShapeContactManifoldsWorkspace {
     timestamp: bool,
     sub_detectors: HashMap<(u32, u32), SubDetector>,
@@ -57,7 +58,7 @@ fn ensure_workspace_exists(workspace: &mut Option<ContactManifoldsWorkspace>) {
 /// Computes the contact manifolds between two composite shapes.
 pub fn contact_manifolds_composite_shape_composite_shape<'a, ManifoldData, ContactData>(
     dispatcher: &dyn PersistentQueryDispatcher<ManifoldData, ContactData>,
-    pos12: &Isometry<Real>,
+    pos12: &Pose,
     mut composite1: &'a dyn CompositeShape,
     mut composite2: &'a dyn CompositeShape,
     prediction: Real,
@@ -85,7 +86,8 @@ pub fn contact_manifolds_composite_shape_composite_shape<'a, ManifoldData, Conta
 
     let mut ls_aabb1 = bvh1.root_aabb();
     let mut ls_aabb2 = bvh2.root_aabb();
-    let flipped = ls_aabb1.half_extents().norm_squared() < ls_aabb2.half_extents().norm_squared();
+    let flipped =
+        ls_aabb1.half_extents().length_squared() < ls_aabb2.half_extents().length_squared();
 
     if flipped {
         core::mem::swap(&mut composite1, &mut composite2);
@@ -97,6 +99,7 @@ pub fn contact_manifolds_composite_shape_composite_shape<'a, ManifoldData, Conta
     // Traverse bvh1 first.
     let ls_aabb2_1 = ls_aabb2.transform_by(&pos12).loosened(prediction);
     let mut old_manifolds = core::mem::take(manifolds);
+    let deformable = composite1.is_deformable() || composite2.is_deformable();
 
     let mut leaf_fn1 = |leaf1: u32| {
         composite1.map_part_at(leaf1, &mut |part_pos1, part_shape1, normal_constraints1| {
@@ -133,13 +136,13 @@ pub fn contact_manifolds_composite_shape_composite_shape<'a, ManifoldData, Conta
                                 if flipped {
                                     manifold.subshape1 = leaf2;
                                     manifold.subshape2 = leaf1;
-                                    manifold.subshape_pos1 = part_pos2.copied();
-                                    manifold.subshape_pos2 = part_pos1.copied();
+                                    manifold.set_subshape_pos1(part_pos2.copied());
+                                    manifold.set_subshape_pos2(part_pos1.copied());
                                 } else {
                                     manifold.subshape1 = leaf1;
                                     manifold.subshape2 = leaf2;
-                                    manifold.subshape_pos1 = part_pos1.copied();
-                                    manifold.subshape_pos2 = part_pos2.copied();
+                                    manifold.set_subshape_pos1(part_pos1.copied());
+                                    manifold.set_subshape_pos2(part_pos2.copied());
                                 };
 
                                 manifolds.push(manifold);
@@ -148,6 +151,9 @@ pub fn contact_manifolds_composite_shape_composite_shape<'a, ManifoldData, Conta
                         };
 
                         let manifold = &mut manifolds[sub_detector.manifold_id];
+                        if deformable {
+                            manifold.mark_shapes_deformed();
+                        }
 
                         if flipped {
                             let _ = dispatcher.contact_manifold_convex_convex(

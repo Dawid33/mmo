@@ -1,12 +1,9 @@
-use game::na::Vector3;
-use game::parry::math::Real;
 use game::{GameEventKind, InputEvent, Key, Region, RegionCoords, Rollback};
-use ordered_float::OrderedFloat;
-use std::hash::Hash;
+use game::StateHash;
 
 fn crc(region: &Region) -> u32 {
     let mut h = crc32fast::Hasher::new();
-    region.data().data.hash(&mut h);
+    region.data().data.state_hash(&mut h);
     h.finalize()
 }
 
@@ -50,20 +47,22 @@ fn mouse_tick_accumulates_look_and_rebuilds_body_rotation() {
     region.handle_event(GameEventKind::Tick).unwrap();
 
     let cam = region.data().ecs.camera.get(e).clone();
-    assert_ne!(cam.yaw, OrderedFloat(0.0), "yaw should accumulate");
-    assert_ne!(cam.pitch, OrderedFloat(0.0), "pitch should accumulate");
+    assert_ne!(cam.yaw, 0.0, "yaw should accumulate");
+    assert_ne!(cam.pitch, 0.0, "pitch should accumulate");
 
     // Body's post-step rotation equals the derived full-look quaternion.
     let handle = *region.data().ecs.rigidbody.get(e);
     let body_rot = region.data().physics.bodies.get(handle).unwrap().rotation().clone();
     let expected = game::look_quat(cam.yaw, cam.pitch);
-    assert!(
-        body_rot.angle_to(&expected).into_inner() < 1e-5,
-        "body rotation must match look_quat(yaw,pitch)"
-    );
+    // nalgebra's `angle_to` (2·atan2(|v|, |w|) of the relative rotation):
+    // glam's `angle_between` is 2·acos(|dot|), which cannot resolve angles
+    // under ~5e-4 rad in f32 (identical quaternions read dot 0.99999994).
+    let rel = body_rot.inverse() * expected;
+    let angle = 2.0 * rel.xyz().length().atan2(rel.w.abs());
+    assert!(angle < 1e-5, "body rotation must match look_quat(yaw,pitch): {angle} rad");
     // No roll: camera-right stays horizontal.
-    let right = body_rot.transform_vector(&Vector3::<Real>::x());
-    assert!(right.y.into_inner().abs() < 1e-5, "body look must not roll");
+    let right = body_rot * game::math::Vec3::X;
+    assert!(right.y.abs() < 1e-5, "body look must not roll");
 }
 
 /// Movement path: KeyW-held ticks write `set_next_kinematic_translation`

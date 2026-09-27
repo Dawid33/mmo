@@ -1,13 +1,13 @@
 //! Region-build profiling + determinism check for the genesis collider path.
 //! Run: cargo run --release -p worldgen --example collider_profile
 use game::Region;
-use std::hash::Hash;
+use game::StateHash;
 use std::time::Instant;
 use worldgen::material::Materials;
 
 fn region_hash(r: &Region) -> u32 {
     let mut h = crc32fast::Hasher::new();
-    r.data().data.hash(&mut h);
+    r.data().data.state_hash(&mut h);
     h.finalize()
 }
 

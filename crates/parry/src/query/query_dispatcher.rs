@@ -61,12 +61,12 @@
 //! # #[cfg(all(feature = "dim3", feature = "f32"))] {
 //! use parry3d::query;
 //! use parry3d::shape::Ball;
-//! use parry3d::na::Isometry3;
+//! use parry3d::math::Pose;
 //!
 //! let ball1 = Ball::new(0.5);
 //! let ball2 = Ball::new(1.0);
-//! let pos1 = Isometry3::identity();
-//! let pos2 = Isometry3::translation(5.0, 0.0, 0.0);
+//! let pos1 = Pose::identity();
+//! let pos2 = Pose::translation(5.0, 0.0, 0.0);
 //!
 //! // Uses DefaultQueryDispatcher automatically
 //! let distance = query::distance(&pos1, &ball1, &pos2, &ball2);
@@ -81,14 +81,14 @@
 //! # #[cfg(all(feature = "dim3", feature = "f32"))] {
 //! use parry3d::query::{QueryDispatcher, DefaultQueryDispatcher};
 //! use parry3d::shape::Ball;
-//! use parry3d::na::Isometry3;
+//! use parry3d::math::Pose;
 //!
 //! let dispatcher = DefaultQueryDispatcher;
 //! let ball1 = Ball::new(0.5);
 //! let ball2 = Ball::new(1.0);
 //!
-//! let pos1 = Isometry3::identity();
-//! let pos2 = Isometry3::translation(5.0, 0.0, 0.0);
+//! let pos1 = Pose::identity();
+//! let pos2 = Pose::translation(5.0, 0.0, 0.0);
 //!
 //! // Compute relative position of shape2 in shape1's local space
 //! let pos12 = pos1.inv_mul(&pos2);
@@ -121,7 +121,7 @@
 //! ```ignore
 //! use parry3d::query::{QueryDispatcher, Unsupported};
 //! use parry3d::shape::Shape;
-//! use parry3d::math::{Isometry, Real};
+//! use parry3d::math::{Pose, Real};
 //!
 //! struct MyDispatcher {
 //!     // Your dispatcher state
@@ -130,10 +130,10 @@
 //! impl QueryDispatcher for MyDispatcher {
 //!     fn intersection_test(
 //!         &self,
-//!         pos12: &Isometry<Real>,
+//!         pos12: &Pose,
 //!         g1: &dyn Shape,
 //!         g2: &dyn Shape,
-//!     ) -> Result<bool, Unsupported> {
+//!     ) -> Result<ShapeIntersection, Unsupported> {
 //!         // Try to downcast to your custom shape types
 //!         if let (Some(my_shape1), Some(my_shape2)) = (
 //!             g1.as_any().downcast_ref::<MyCustomShape>(),
@@ -149,10 +149,10 @@
 //!
 //!     fn distance(
 //!         &self,
-//!         pos12: &Isometry<Real>,
+//!         pos12: &Pose,
 //!         g1: &dyn Shape,
 //!         g2: &dyn Shape,
-//!     ) -> Result<Real, Unsupported> {
+//!     ) -> Result<ShapeDistance, Unsupported> {
 //!         // Implement other query methods similarly
 //!         Err(Unsupported)
 //!     }
@@ -188,14 +188,17 @@
 //! When chaining dispatchers, returning `Unsupported` allows the next dispatcher in the
 //! chain to try handling the query.
 
-use crate::math::{Isometry, Real, Vector};
+use crate::math::{Pose, Real, Vector};
 use crate::query::details::ShapeCastOptions;
 #[cfg(feature = "alloc")]
 use crate::query::{
     contact_manifolds::{ContactManifoldsWorkspace, NormalConstraints},
     ContactManifold,
 };
-use crate::query::{ClosestPoints, Contact, NonlinearRigidMotion, ShapeCastHit, Unsupported};
+use crate::query::{
+    ClosestPoints, Contact, NonlinearRigidMotion, ShapeCastHit, ShapeDistance, ShapeIntersection,
+    Unsupported,
+};
 use crate::shape::Shape;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -247,7 +250,7 @@ pub trait PersistentQueryDispatcher<ManifoldData = (), ContactData = ()>: QueryD
     /// spatial and temporal coherence.
     fn contact_manifolds(
         &self,
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
         prediction: Real,
@@ -258,7 +261,7 @@ pub trait PersistentQueryDispatcher<ManifoldData = (), ContactData = ()>: QueryD
     /// Computes the contact-manifold between two convex shapes.
     fn contact_manifold_convex_convex(
         &self,
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
         normal_constraints1: Option<&dyn NormalConstraints>,
@@ -343,22 +346,22 @@ pub trait PersistentQueryDispatcher<ManifoldData = (), ContactData = ()>: QueryD
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::query::{QueryDispatcher, DefaultQueryDispatcher};
 /// use parry3d::shape::{Ball, Cuboid};
-/// use parry3d::na::{Isometry3, Vector3};
+/// use parry3d::math::{Pose, Vector};
 ///
 /// let dispatcher = DefaultQueryDispatcher;
 ///
 /// let ball = Ball::new(1.0);
-/// let cuboid = Cuboid::new(Vector3::new(2.0, 2.0, 2.0));
+/// let cuboid = Cuboid::new(Vector::splat(2.0));
 ///
-/// let pos1 = Isometry3::identity();
-/// let pos2 = Isometry3::translation(5.0, 0.0, 0.0);
+/// let pos1 = Pose::identity();
+/// let pos2 = Pose::translation(5.0, 0.0, 0.0);
 /// let pos12 = pos1.inv_mul(&pos2);
 ///
 /// // Test intersection
-/// let intersects = dispatcher.intersection_test(&pos12, &ball, &cuboid).unwrap();
+/// let intersects = dispatcher.intersection_test(&pos12, &ball, &cuboid).unwrap().intersecting;
 ///
 /// // Compute distance
-/// let dist = dispatcher.distance(&pos12, &ball, &cuboid).unwrap();
+/// let dist = dispatcher.distance(&pos12, &ball, &cuboid).unwrap().distance;
 ///
 /// println!("Intersects: {}, Distance: {}", intersects, dist);
 /// # }
@@ -375,10 +378,10 @@ pub trait PersistentQueryDispatcher<ManifoldData = (), ContactData = ()>: QueryD
 /// impl QueryDispatcher for MyCustomDispatcher {
 ///     fn distance(
 ///         &self,
-///         pos12: &Isometry<Real>,
+///         pos12: &Pose,
 ///         g1: &dyn Shape,
 ///         g2: &dyn Shape,
-///     ) -> Result<Real, Unsupported> {
+///     ) -> Result<ShapeDistance, Unsupported> {
 ///         // Handle custom shape types
 ///         if let Some(my_shape) = g1.as_any().downcast_ref::<MyShape>() {
 ///             // ... custom distance computation
@@ -396,7 +399,7 @@ pub trait PersistentQueryDispatcher<ManifoldData = (), ContactData = ()>: QueryD
 /// let dispatcher = MyCustomDispatcher.chain(DefaultQueryDispatcher);
 ///
 /// // Now all queries try custom dispatcher first, then default
-/// let dist = dispatcher.distance(&pos12, shape1, shape2)?;
+/// let dist = dispatcher.distance(pos12, shape1, shape2)?;
 /// # }
 /// ```
 ///
@@ -409,27 +412,27 @@ pub trait QueryDispatcher: Send + Sync {
     /// Tests whether two shapes are intersecting.
     fn intersection_test(
         &self,
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
-    ) -> Result<bool, Unsupported>;
+    ) -> Result<ShapeIntersection, Unsupported>;
 
     /// Computes the minimum distance separating two shapes.
     ///
     /// Returns `0.0` if the objects are touching or penetrating.
     fn distance(
         &self,
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
-    ) -> Result<Real, Unsupported>;
+    ) -> Result<ShapeDistance, Unsupported>;
 
     /// Computes one pair of contact points point between two shapes.
     ///
     /// Returns `None` if the objects are separated by a distance greater than `prediction`.
     fn contact(
         &self,
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
         prediction: Real,
@@ -440,7 +443,7 @@ pub trait QueryDispatcher: Send + Sync {
     /// Returns `ClosestPoints::Disjoint` if the objects are separated by a distance greater than `max_dist`.
     fn closest_points(
         &self,
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
         max_dist: Real,
@@ -462,8 +465,8 @@ pub trait QueryDispatcher: Send + Sync {
     ///   detected is theater than this value.
     fn cast_shapes(
         &self,
-        pos12: &Isometry<Real>,
-        local_vel12: &Vector<Real>,
+        pos12: &Pose,
+        local_vel12: Vector,
         g1: &dyn Shape,
         g2: &dyn Shape,
         options: ShapeCastOptions,
@@ -539,10 +542,10 @@ pub trait QueryDispatcher: Send + Sync {
 /// impl QueryDispatcher for CustomShapeDispatcher {
 ///     fn distance(
 ///         &self,
-///         pos12: &Isometry<Real>,
+///         pos12: &Pose,
 ///         g1: &dyn Shape,
 ///         g2: &dyn Shape,
-///     ) -> Result<Real, Unsupported> {
+///     ) -> Result<ShapeDistance, Unsupported> {
 ///         // Try to handle custom shapes
 ///         match (g1.as_any().downcast_ref::<MyShape>(),
 ///                g2.as_any().downcast_ref::<MyShape>()) {
@@ -558,7 +561,7 @@ pub trait QueryDispatcher: Send + Sync {
 ///
 /// // This will use CustomShapeDispatcher if both are MyShape,
 /// // otherwise DefaultQueryDispatcher handles it
-/// let dist = dispatcher.distance(&pos12, shape1, shape2)?;
+/// let dist = dispatcher.distance(pos12, shape1, shape2)?;
 /// # }
 /// ```
 ///
@@ -597,30 +600,30 @@ where
     U: QueryDispatcher,
 {
     chain_method!(intersection_test(
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
-    ) -> bool);
+    ) -> ShapeIntersection);
 
-    chain_method!(distance(pos12: &Isometry<Real>, g1: &dyn Shape, g2: &dyn Shape,) -> Real);
+    chain_method!(distance(pos12: &Pose, g1: &dyn Shape, g2: &dyn Shape,) -> ShapeDistance);
 
     chain_method!(contact(
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
         prediction: Real,
     ) -> Option<Contact>);
 
     chain_method!(closest_points(
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
         max_dist: Real,
     ) -> ClosestPoints);
 
     chain_method!(cast_shapes(
-        pos12: &Isometry<Real>,
-        vel12: &Vector<Real>,
+        pos12: &Pose,
+        vel12: Vector,
         g1: &dyn Shape,
         g2: &dyn Shape,
         options: ShapeCastOptions,
@@ -645,7 +648,7 @@ where
     U: PersistentQueryDispatcher<ManifoldData, ContactData>,
 {
     chain_method!(contact_manifolds(
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
         prediction: Real,
@@ -654,7 +657,7 @@ where
     ) -> ());
 
     chain_method!(contact_manifold_convex_convex(
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         g1: &dyn Shape,
         g2: &dyn Shape,
         normal_constraints1: Option<&dyn NormalConstraints>,

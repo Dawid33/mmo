@@ -2,7 +2,7 @@
 //! a real worldgen region, under the production hash mode (Delta).
 //! Run: cargo run --release -p worldgen --example narrow_phase_probe
 use game::{Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Key, Region, RegionCoords, Rollback};
-use rapier3d::prelude::{PhysicsPipeline, StepJournal};
+use rapier3d::prelude::{PhysicsParts, PhysicsPipeline, StepJournal};
 use slotmapd::KeyData;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -75,7 +75,7 @@ fn direct_step(r: &mut Rollback, pipeline: &mut PhysicsPipeline, label: Option<&
     {
         let p = scope.raw_fields();
         pipeline.step_journaled(
-            &*p.gravity,
+            *p.gravity,
             &*p.integration_parameters,
             p.islands,
             p.broad_phase,
@@ -84,10 +84,11 @@ fn direct_step(r: &mut Rollback, pipeline: &mut PhysicsPipeline, label: Option<&
             p.colliders,
             p.implules_joint_set,
             p.multi_body_joint_set,
+            p.soft_bodies,
             p.ccd_solver,
             &(),
             &(),
-            &mut journal,
+            Some(&mut journal),
         );
     }
     let t = Instant::now();
@@ -95,15 +96,17 @@ fn direct_step(r: &mut Rollback, pipeline: &mut PhysicsPipeline, label: Option<&
     let digest_dt = t.elapsed();
     scope.register(pre, move |phys, _| {
         let p = phys.raw_undo_parts();
-        journal.revert_digest(
-            p.islands,
-            p.broad_phase,
-            p.narrow_phase,
-            p.bodies,
-            p.colliders,
-            p.implules_joint_set,
-            p.multi_body_joint_set,
-        )
+        journal.revert_digest(PhysicsParts {
+            islands: p.islands,
+            broad_phase: p.broad_phase,
+            narrow_phase: p.narrow_phase,
+            bodies: p.bodies,
+            colliders: p.colliders,
+            impulse_joints: p.implules_joint_set,
+            multibody_joints: p.multi_body_joint_set,
+            soft_bodies: p.soft_bodies,
+            ccd_solver: p.ccd_solver,
+        })
     });
     if let Some(label) = label {
         let c = &pipeline.counters;

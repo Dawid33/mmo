@@ -1,12 +1,16 @@
 use crate::bounding_volume::Aabb;
-use crate::math::{Isometry, Point, Real, Vector};
+#[cfg(feature = "dim3")]
+use crate::math::VectorExt;
+use crate::math::{Pose, Vector};
 use crate::partitioning::{Bvh, BvhBuildStrategy};
+#[cfg(feature = "dim3")]
+use crate::shape::SubShapeId;
 use crate::shape::{FeatureId, Shape, Triangle, TrianglePseudoNormals, TypedCompositeShape};
 use crate::utils::HashablePartialEq;
 use alloc::{vec, vec::Vec};
 use core::fmt;
 #[cfg(feature = "dim3")]
-use {crate::shape::Cuboid, crate::utils::SortedPair, na::Unit};
+use {crate::shape::Cuboid, crate::utils::SortedPair};
 
 use {
     crate::shape::composite_shape::CompositeShape,
@@ -18,8 +22,6 @@ use {
 use crate::transformation::ear_clipping::triangulate_ear_clipping;
 
 use crate::query::details::NormalConstraints;
-#[cfg(feature = "rkyv")]
-use rkyv::{bytecheck, CheckBytes};
 
 /// Errors that occur when computing or validating triangle mesh topology.
 ///
@@ -52,11 +54,11 @@ pub enum TopologyError {
     //    /// ```
     //    /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     //    /// # use parry3d::shape::{TriMesh, TriMeshFlags};
-    //    /// # use nalgebra::Point3;
+    //    /// # use parry3d::math::Vector;
     //    /// let vertices = vec![
-    //    ///     Point3::origin(),
-    //    ///     Point3::new(1.0, 0.0, 0.0),
-    //    ///     Point3::new(0.0, 1.0, 0.0),
+    //    ///     Vector::ZERO,
+    //    ///     Vector::new(1.0, 0.0, 0.0),
+    //    ///     Vector::new(0.0, 1.0, 0.0),
     //    /// ];
     //    ///
     //    /// // BAD: Triangle with duplicate vertices
@@ -85,8 +87,8 @@ pub enum TopologyError {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// # use parry3d::shape::{TriMesh, TriMeshFlags};
-    /// # use nalgebra::Point3;
-    /// # let vertices = vec![Point3::origin(), Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)];
+    /// # use parry3d::math::Vector;
+    /// # let vertices = vec![Vector::ZERO, Vector::new(1.0, 0.0, 0.0), Vector::new(0.0, 1.0, 0.0)];
     /// # let indices = vec![[0, 0, 1], [0, 1, 2]];
     /// let flags = TriMeshFlags::HALF_EDGE_TOPOLOGY
     ///     | TriMeshFlags::DELETE_BAD_TOPOLOGY_TRIANGLES;
@@ -128,12 +130,12 @@ pub enum TopologyError {
     //    /// ```
     //    /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     //    /// # use parry3d::shape::{TriMesh, TriMeshFlags};
-    //    /// # use nalgebra::Point3;
+    //    /// # use parry3d::math::Vector;
     //    /// let vertices = vec![
-    //    ///     Point3::origin(),  // vertex 0
-    //    ///     Point3::new(1.0, 0.0, 0.0),  // vertex 1
-    //    ///     Point3::new(0.5, 1.0, 0.0),  // vertex 2
-    //    ///     Point3::new(0.5, -1.0, 0.0), // vertex 3
+    //    ///     Vector::ZERO,  // vertex 0
+    //    ///     Vector::new(1.0, 0.0, 0.0),  // vertex 1
+    //    ///     Vector::new(0.5, 1.0, 0.0),  // vertex 2
+    //    ///     Vector::new(0.5, -1.0, 0.0), // vertex 3
     //    /// ];
     //    ///
     //    /// // BAD: Both triangles traverse edge (0,1) in the same direction
@@ -190,8 +192,8 @@ pub enum TopologyError {
 /// ```
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// # use parry3d::shape::{TriMesh, TriMeshBuilderError, TopologyError};
-/// # use nalgebra::Point3;
-/// let vertices = vec![Point3::origin()];
+/// # use parry3d::math::Vector;
+/// let vertices = vec![Vector::ZERO];
 /// let indices = vec![];  // Empty!
 ///
 /// match TriMesh::new(vertices, indices) {
@@ -225,11 +227,11 @@ pub enum TriMeshBuilderError {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// # use parry3d::shape::TriMesh;
-    /// # use nalgebra::Point3;
+    /// # use parry3d::math::Vector;
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     ///
     /// // BAD: No triangles
@@ -258,11 +260,11 @@ pub enum TriMeshBuilderError {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// # use parry3d::shape::{TriMesh, TriMeshFlags, TriMeshBuilderError};
-    /// # use nalgebra::Point3;
+    /// # use parry3d::math::Vector;
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     ///
     /// // Triangle with duplicate vertices
@@ -289,31 +291,31 @@ pub enum TriMeshBuilderError {
 /// point on the triangle, as described in the paper:
 /// "Signed distance computation using the angle weighted pseudonormal", Baerentzen, et al.
 /// DOI: 10.1109/TVCG.2005.49
-#[derive(Default, Clone, Hash)]
+#[derive(Default, Clone)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
 #[cfg(feature = "dim3")]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMeshPseudoNormals {
     /// The pseudo-normals of the vertices.
-    pub vertices_pseudo_normal: Vec<Vector<Real>>,
+    pub vertices_pseudo_normal: Vec<Vector>,
     /// The pseudo-normals of the edges.
-    pub edges_pseudo_normal: Vec<[Vector<Real>; 3]>,
+    pub edges_pseudo_normal: Vec<[Vector; 3]>,
 }
 
 /// The connected-components of a triangle mesh.
-#[derive(Debug, Clone, Hash)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMeshConnectedComponents {
     /// The `face_colors[i]` gives the connected-component index
     /// of the i-th face.
@@ -336,7 +338,7 @@ impl TriMeshConnectedComponents {
     ///
     /// The `mesh` must be the one used to generate `self`, otherwise it might panic or produce an
     /// unexpected result.
-    pub fn to_mesh_buffers(&self, mesh: &TriMesh) -> Vec<(Vec<Point<Real>>, Vec<[u32; 3]>)> {
+    pub fn to_mesh_buffers(&self, mesh: &TriMesh) -> Vec<(Vec<Vector>, Vec<[u32; 3]>)> {
         let mut result = vec![];
         let mut new_vtx_index: Vec<_> = vec![u32::MAX; mesh.vertices.len()];
 
@@ -388,28 +390,28 @@ impl TriMeshConnectedComponents {
 }
 
 /// A vertex of a triangle-mesh’s half-edge topology.
-#[derive(Clone, Copy, Debug, Hash)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
-    archive(as = "Self")
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TopoVertex {
     /// One of the half-edge with this vertex as endpoint.
     pub half_edge: u32,
 }
 
 /// A face of a triangle-mesh’s half-edge topology.
-#[derive(Clone, Copy, Debug, Hash)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
-    archive(as = "Self")
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TopoFace {
     /// The half-edge adjacent to this face, with a starting point equal
     /// to the first point of this face.
@@ -417,14 +419,14 @@ pub struct TopoFace {
 }
 
 /// A half-edge of a triangle-mesh’s half-edge topology.
-#[derive(Clone, Copy, Debug, Hash)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
-    archive(as = "Self")
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TopoHalfEdge {
     /// The next half-edge.
     pub next: u32,
@@ -439,14 +441,14 @@ pub struct TopoHalfEdge {
 }
 
 /// The half-edge topology information of a triangle mesh.
-#[derive(Default, Clone, Hash)]
+#[derive(Default, Clone)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMeshTopology {
     /// The vertices of this half-edge representation.
     pub vertices: Vec<TopoVertex>,
@@ -459,12 +461,12 @@ pub struct TriMeshTopology {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(as = "Self")
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 /// Controls how a [`TriMesh`] should be loaded.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMeshFlags(u16);
 
 bitflags::bitflags! {
@@ -504,21 +506,32 @@ bitflags::bitflags! {
         /// This is achieved by taking into account adjacent triangle normals when computing contact
         /// points for a given triangle.
         const FIX_INTERNAL_EDGES = (1 << 7) | Self::MERGE_DUPLICATE_VERTICES.bits();
+        /// If set, the vertices of this mesh are expected to move between queries while its pose
+        /// stays fixed (see [`TriMesh::set_vertices`]).
+        ///
+        /// The contact-manifold queries then recompute the triangles interfering with the other
+        /// shape at every call and never reuse cached contact points (see
+        /// [`CompositeShape::is_deformable`]).
+        const DEFORMABLE = 1 << 8;
+        /// Same as [`Self::FIX_INTERNAL_EDGES`] but treating the mesh as two-sided: a contact
+        /// coming from the back of a triangle is kept and its normal is constrained by the
+        /// mirrored pseudo-normal cone instead of being discarded.
+        const FIX_INTERNAL_EDGES_TWO_SIDED = (1 << 9) | Self::FIX_INTERNAL_EDGES.bits();
     }
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
-#[derive(Clone, Hash)]
+#[derive(Clone)]
 /// A triangle mesh.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMesh {
     bvh: Bvh,
-    vertices: Vec<Point<Real>>,
+    vertices: Vec<Vector>,
     indices: Vec<[u32; 3]>,
     #[cfg(feature = "dim3")]
     pub(crate) pseudo_normals: Option<TriMeshPseudoNormals>,
@@ -527,9 +540,26 @@ pub struct TriMesh {
     flags: TriMeshFlags,
 }
 
+// NOTE: can't be derived because of the `Bvh` and topology fields; print a
+// summary useful for quickly validating the mesh instead.
 impl fmt::Debug for TriMesh {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "GenericTriMesh")
+        let mut dbg = f.debug_struct("TriMesh");
+        let dbg = dbg
+            .field("num_vertices", &self.vertices.len())
+            .field("num_triangles", &self.indices.len())
+            .field("local_aabb", &self.local_aabb())
+            .field("flags", &self.flags);
+
+        #[cfg(feature = "dim3")]
+        let dbg = dbg.field("has_pseudo_normals", &self.pseudo_normals.is_some());
+
+        dbg.field("has_topology", &self.topology.is_some())
+            .field(
+                "has_connected_components",
+                &self.connected_components.is_some(),
+            )
+            .finish_non_exhaustive()
     }
 }
 
@@ -567,13 +597,13 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// // Create a simple triangle mesh (a single triangle)
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     ///
@@ -585,14 +615,14 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim2", feature = "f32"))] {
     /// use parry2d::shape::TriMesh;
-    /// use nalgebra::Point2;
+    /// use parry2d::math::Vector;
     ///
     /// // Create a quad (two triangles) in 2D
     /// let vertices = vec![
-    ///     Point2::origin(),  // bottom-left
-    ///     Point2::new(1.0, 0.0),  // bottom-right
-    ///     Point2::new(1.0, 1.0),  // top-right
-    ///     Point2::new(0.0, 1.0),  // top-left
+    ///     Vector::ZERO,  // bottom-left
+    ///     Vector::new(1.0, 0.0),  // bottom-right
+    ///     Vector::new(1.0, 1.0),  // top-right
+    ///     Vector::new(0.0, 1.0),  // top-left
     /// ];
     /// let indices = vec![
     ///     [0, 1, 2],  // first triangle
@@ -604,10 +634,7 @@ impl TriMesh {
     /// assert_eq!(quad.vertices().len(), 4);
     /// # }
     /// ```
-    pub fn new(
-        vertices: Vec<Point<Real>>,
-        indices: Vec<[u32; 3]>,
-    ) -> Result<Self, TriMeshBuilderError> {
+    pub fn new(vertices: Vec<Vector>, indices: Vec<[u32; 3]>) -> Result<Self, TriMeshBuilderError> {
         Self::with_flags(vertices, indices, TriMeshFlags::empty())
     }
 
@@ -653,14 +680,14 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::{TriMesh, TriMeshFlags};
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// // Create vertices for a simple mesh
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
-    ///     Point3::new(1.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
+    ///     Vector::new(1.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2], [1, 3, 2]];
     ///
@@ -677,12 +704,12 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::{TriMesh, TriMeshFlags};
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// # let vertices = vec![
-    /// #     Point3::origin(),
-    /// #     Point3::new(1.0, 0.0, 0.0),
-    /// #     Point3::new(0.0, 1.0, 0.0),
+    /// #     Vector::ZERO,
+    /// #     Vector::new(1.0, 0.0, 0.0),
+    /// #     Vector::new(0.0, 1.0, 0.0),
     /// # ];
     /// # let indices = vec![[0, 1, 2]];
     /// // Combine multiple flags for advanced features
@@ -698,12 +725,12 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::{TriMesh, TriMeshFlags};
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// # let vertices = vec![
-    /// #     Point3::origin(),
-    /// #     Point3::new(1.0, 0.0, 0.0),
-    /// #     Point3::new(0.0, 1.0, 0.0),
+    /// #     Vector::ZERO,
+    /// #     Vector::new(1.0, 0.0, 0.0),
+    /// #     Vector::new(0.0, 1.0, 0.0),
     /// # ];
     /// # let indices = vec![[0, 1, 2]];
     /// // For robust point containment tests in 3D
@@ -716,7 +743,7 @@ impl TriMesh {
     /// # }
     /// ```
     pub fn with_flags(
-        vertices: Vec<Point<Real>>,
+        vertices: Vec<Vector>,
         indices: Vec<[u32; 3]>,
         flags: TriMeshFlags,
     ) -> Result<Self, TriMeshBuilderError> {
@@ -822,14 +849,14 @@ impl TriMesh {
             pseudo_normals,
         } = self;
         let sz_bvh = bvh.heap_memory_size();
-        let sz_vertices = vertices.capacity() * size_of::<Point<Real>>();
+        let sz_vertices = vertices.capacity() * size_of::<Vector>();
         let sz_indices = indices.capacity() * size_of::<[u32; 3]>();
         #[cfg(feature = "dim3")]
         let sz_pseudo_normals = pseudo_normals
             .as_ref()
             .map(|pn| {
-                pn.vertices_pseudo_normal.capacity() * size_of::<Vector<Real>>()
-                    + pn.edges_pseudo_normal.capacity() * size_of::<[Vector<Real>; 3]>()
+                pn.vertices_pseudo_normal.capacity() * size_of::<Vector>()
+                    + pn.edges_pseudo_normal.capacity() * size_of::<[Vector; 3]>()
             })
             .unwrap_or(0);
         #[cfg(feature = "dim2")]
@@ -879,27 +906,27 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::{Point3, Vector3, Isometry3};
+    /// use parry3d::math::{Vector, Pose};
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     /// let mut mesh = TriMesh::new(vertices, indices).unwrap();
     ///
     /// // Translate the mesh by (10, 0, 0)
-    /// let transform = Isometry3::translation(10.0, 0.0, 0.0);
+    /// let transform = Pose::translation(10.0, 0.0, 0.0);
     /// mesh.transform_vertices(&transform);
     ///
     /// // All vertices are now shifted
-    /// assert_eq!(mesh.vertices()[0], Point3::new(10.0, 0.0, 0.0));
-    /// assert_eq!(mesh.vertices()[1], Point3::new(11.0, 0.0, 0.0));
-    /// assert_eq!(mesh.vertices()[2], Point3::new(10.0, 1.0, 0.0));
+    /// assert_eq!(mesh.vertices()[0], Vector::new(10.0, 0.0, 0.0));
+    /// assert_eq!(mesh.vertices()[1], Vector::new(11.0, 0.0, 0.0));
+    /// assert_eq!(mesh.vertices()[2], Vector::new(10.0, 1.0, 0.0));
     /// # }
     /// ```
-    pub fn transform_vertices(&mut self, transform: &Isometry<Real>) {
+    pub fn transform_vertices(&mut self, transform: &Pose) {
         self.vertices
             .iter_mut()
             .for_each(|pt| *pt = transform * *pt);
@@ -911,13 +938,85 @@ impl TriMesh {
             pseudo_normals
                 .vertices_pseudo_normal
                 .iter_mut()
-                .for_each(|n| *n = transform * *n);
+                .for_each(|n| *n = transform.rotation * *n);
             pseudo_normals.edges_pseudo_normal.iter_mut().for_each(|n| {
-                n[0] = transform * n[0];
-                n[1] = transform * n[1];
-                n[2] = transform * n[2];
+                n[0] = transform.rotation * n[0];
+                n[1] = transform.rotation * n[1];
+                n[2] = transform.rotation * n[2];
             });
         }
+    }
+
+    /// Replaces the vertex positions in place, keeping the index buffer and topology.
+    ///
+    /// The BVH is refitted (not rebuilt) and the pseudo-normals, if any, are recomputed. This
+    /// is the update path of a deformable mesh: `vertices.len()` must equal
+    /// [`Self::vertices`]`.len()`.
+    ///
+    /// The refit keeps the tree structure built for the original vertices; after very large
+    /// deformations, rebuilding the mesh gives a tighter tree.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `vertices.len()` differs from the current number of vertices.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
+    /// use parry3d::shape::{TriMesh, TriMeshFlags};
+    /// use parry3d::math::Vector;
+    ///
+    /// let vertices = vec![
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
+    /// ];
+    /// let indices = vec![[0, 1, 2]];
+    /// let mut mesh = TriMesh::with_flags(vertices, indices, TriMeshFlags::DEFORMABLE).unwrap();
+    ///
+    /// // Lift the third vertex.
+    /// mesh.set_vertices(&[
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 2.0),
+    /// ]);
+    /// assert_eq!(mesh.local_aabb().maxs, Vector::new(1.0, 1.0, 2.0));
+    /// # }
+    /// ```
+    pub fn set_vertices(&mut self, vertices: &[Vector]) {
+        assert_eq!(
+            vertices.len(),
+            self.vertices.len(),
+            "TriMesh::set_vertices: the number of vertices must not change."
+        );
+        self.update_vertices(|vtx| vtx.copy_from_slice(vertices));
+    }
+
+    /// Modifies the vertex positions in place through `f`, then refits the BVH and recomputes
+    /// the pseudo-normals, if any (see [`Self::set_vertices`]).
+    pub fn update_vertices(&mut self, f: impl FnOnce(&mut [Vector])) {
+        f(&mut self.vertices);
+        self.refit_bvh();
+
+        #[cfg(feature = "dim3")]
+        if self.pseudo_normals.is_some() {
+            self.compute_pseudo_normals();
+        }
+    }
+
+    /// Updates every triangle's leaf AABB and refits the BVH in place, keeping its structure.
+    fn refit_bvh(&mut self) {
+        for (i, idx) in self.indices.iter().enumerate() {
+            let aabb = Triangle::new(
+                self.vertices[idx[0] as usize],
+                self.vertices[idx[1] as usize],
+                self.vertices[idx[2] as usize],
+            )
+            .local_aabb();
+            let _ = self.bvh.insert_or_update_partially(aabb, i as u32, 0.0);
+        }
+        self.bvh.refit_without_opt();
     }
 
     /// Returns a scaled version of this triangle mesh.
@@ -942,45 +1041,43 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     /// let mesh = TriMesh::new(vertices, indices).unwrap();
     ///
     /// // Uniform scaling: double all dimensions
-    /// let scaled = mesh.clone().scaled(&Vector3::new(2.0, 2.0, 2.0));
-    /// assert_eq!(scaled.vertices()[1], Point3::new(2.0, 0.0, 0.0));
+    /// let scaled = mesh.clone().scaled(Vector::new(2.0, 2.0, 2.0));
+    /// assert_eq!(scaled.vertices()[1], Vector::new(2.0, 0.0, 0.0));
     ///
     /// // Non-uniform scaling: stretch along X axis
-    /// let stretched = mesh.scaled(&Vector3::new(3.0, 1.0, 1.0));
-    /// assert_eq!(stretched.vertices()[1], Point3::new(3.0, 0.0, 0.0));
-    /// assert_eq!(stretched.vertices()[2], Point3::new(0.0, 1.0, 0.0));
+    /// let stretched = mesh.scaled(Vector::new(3.0, 1.0, 1.0));
+    /// assert_eq!(stretched.vertices()[1], Vector::new(3.0, 0.0, 0.0));
+    /// assert_eq!(stretched.vertices()[2], Vector::new(0.0, 1.0, 0.0));
     /// # }
     /// ```
-    pub fn scaled(mut self, scale: &Vector<Real>) -> Self {
-        self.vertices
-            .iter_mut()
-            .for_each(|pt| pt.coords.component_mul_assign(scale));
+    pub fn scaled(mut self, scale: Vector) -> Self {
+        self.vertices.iter_mut().for_each(|pt| *pt *= scale);
 
         #[cfg(feature = "dim3")]
         if let Some(pn) = &mut self.pseudo_normals {
             pn.vertices_pseudo_normal.iter_mut().for_each(|n| {
-                n.component_mul_assign(scale);
-                let _ = n.try_normalize_mut(0.0.into());
+                *n *= scale;
+                *n = n.normalize_or(*n);
             });
             pn.edges_pseudo_normal.iter_mut().for_each(|n| {
-                n[0].component_mul_assign(scale);
-                n[1].component_mul_assign(scale);
-                n[2].component_mul_assign(scale);
+                n[0] *= scale;
+                n[1] *= scale;
+                n[2] *= scale;
 
-                let _ = n[0].try_normalize_mut(0.0.into());
-                let _ = n[1].try_normalize_mut(0.0.into());
-                let _ = n[2].try_normalize_mut(0.0.into());
+                n[0] = n[0].normalize_or(n[0]);
+                n[1] = n[1].normalize_or(n[1]);
+                n[2] = n[2].normalize_or(n[2]);
             });
         }
 
@@ -1024,22 +1121,22 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// // Create first mesh (a triangle)
     /// let vertices1 = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices1 = vec![[0, 1, 2]];
     /// let mut mesh1 = TriMesh::new(vertices1, indices1).unwrap();
     ///
     /// // Create second mesh (another triangle, offset in space)
     /// let vertices2 = vec![
-    ///     Point3::new(2.0, 0.0, 0.0),
-    ///     Point3::new(3.0, 0.0, 0.0),
-    ///     Point3::new(2.0, 1.0, 0.0),
+    ///     Vector::new(2.0, 0.0, 0.0),
+    ///     Vector::new(3.0, 0.0, 0.0),
+    ///     Vector::new(2.0, 1.0, 0.0),
     /// ];
     /// let indices2 = vec![[0, 1, 2]];
     /// let mesh2 = TriMesh::new(vertices2, indices2).unwrap();
@@ -1097,16 +1194,16 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim2", feature = "f32"))] {
     /// use parry2d::shape::TriMesh;
-    /// use nalgebra::Point2;
+    /// use parry2d::math::Vector;
     ///
     /// // Create a simple concave polygon (L-shape)
     /// let vertices = vec![
-    ///     Point2::origin(),
-    ///     Point2::new(2.0, 0.0),
-    ///     Point2::new(2.0, 1.0),
-    ///     Point2::new(1.0, 1.0),
-    ///     Point2::new(1.0, 2.0),
-    ///     Point2::new(0.0, 2.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(2.0, 0.0),
+    ///     Vector::new(2.0, 1.0),
+    ///     Vector::new(1.0, 1.0),
+    ///     Vector::new(1.0, 2.0),
+    ///     Vector::new(0.0, 2.0),
     /// ];
     ///
     /// let mesh = TriMesh::from_polygon(vertices)
@@ -1117,7 +1214,7 @@ impl TriMesh {
     /// # }
     /// ```
     #[cfg(feature = "dim2")]
-    pub fn from_polygon(vertices: Vec<Point<Real>>) -> Option<Self> {
+    pub fn from_polygon(vertices: Vec<Vector>) -> Option<Self> {
         triangulate_ear_clipping(&vertices).map(|indices| Self::new(vertices, indices).unwrap())
     }
 
@@ -1132,13 +1229,13 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
-    ///     Point3::new(1.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
+    ///     Vector::new(1.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2], [1, 3, 2]];
     /// let mesh = TriMesh::new(vertices, indices).unwrap();
@@ -1191,12 +1288,12 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     ///
@@ -1259,18 +1356,18 @@ impl TriMesh {
         let mut triangle_set = HashSet::default();
 
         fn resolve_coord_id(
-            coord: &Point<Real>,
-            vtx_to_id: &mut HashMap<HashablePartialEq<Point<Real>>, u32>,
-            new_vertices: &mut Vec<Point<Real>>,
+            coord: Vector,
+            vtx_to_id: &mut HashMap<HashablePartialEq<Vector>, u32>,
+            new_vertices: &mut Vec<Vector>,
         ) -> u32 {
-            let key = HashablePartialEq::new(*coord);
+            let key = HashablePartialEq::new(coord);
             let id = match vtx_to_id.entry(key) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => entry.insert(new_vertices.len() as u32),
             };
 
             if *id == new_vertices.len() as u32 {
-                new_vertices.push(*coord);
+                new_vertices.push(coord);
             }
 
             *id
@@ -1278,19 +1375,19 @@ impl TriMesh {
 
         for t in self.indices.iter() {
             let va = resolve_coord_id(
-                &self.vertices[t[0] as usize],
+                self.vertices[t[0] as usize],
                 &mut vtx_to_id,
                 &mut new_vertices,
             );
 
             let vb = resolve_coord_id(
-                &self.vertices[t[1] as usize],
+                self.vertices[t[1] as usize],
                 &mut vtx_to_id,
                 &mut new_vertices,
             );
 
             let vc = resolve_coord_id(
-                &self.vertices[t[2] as usize],
+                self.vertices[t[2] as usize],
                 &mut vtx_to_id,
                 &mut new_vertices,
             );
@@ -1346,7 +1443,7 @@ impl TriMesh {
     /// It may be useful to call `self.remove_duplicate_vertices()` before this method, in order to fix the
     /// index buffer if some of the vertices of this trimesh are duplicated.
     fn compute_pseudo_normals(&mut self) {
-        let mut vertices_pseudo_normal = vec![Vector::zeros(); self.vertices().len()];
+        let mut vertices_pseudo_normal = vec![Vector::ZERO; self.vertices().len()];
         let mut edges_pseudo_normal = HashMap::default();
         let mut edges_multiplicity = HashMap::default();
 
@@ -1359,13 +1456,13 @@ impl TriMesh {
             );
 
             if let Some(n) = tri.normal() {
-                let ang1 = (tri.b - tri.a).angle(&(tri.c - tri.a));
-                let ang2 = (tri.a - tri.b).angle(&(tri.c - tri.b));
-                let ang3 = (tri.b - tri.c).angle(&(tri.a - tri.c));
+                let ang1 = (tri.b - tri.a).angle(tri.c - tri.a);
+                let ang2 = (tri.a - tri.b).angle(tri.c - tri.b);
+                let ang3 = (tri.b - tri.c).angle(tri.a - tri.c);
 
-                vertices_pseudo_normal[idx[0] as usize] += *n * ang1;
-                vertices_pseudo_normal[idx[1] as usize] += *n * ang2;
-                vertices_pseudo_normal[idx[2] as usize] += *n * ang3;
+                vertices_pseudo_normal[idx[0] as usize] += n * ang1;
+                vertices_pseudo_normal[idx[1] as usize] += n * ang2;
+                vertices_pseudo_normal[idx[2] as usize] += n * ang3;
 
                 let edges = [
                     SortedPair::new(idx[0], idx[1]),
@@ -1374,10 +1471,8 @@ impl TriMesh {
                 ];
 
                 for edge in &edges {
-                    let edge_n = edges_pseudo_normal
-                        .entry(*edge)
-                        .or_insert_with(Vector::zeros);
-                    *edge_n += *n; // NOTE: there is no need to multiply by the incident angle since it is always equal to PI for all the edges.
+                    let edge_n = edges_pseudo_normal.entry(*edge).or_insert(Vector::ZERO);
+                    *edge_n += n; // NOTE: there is no need to multiply by the incident angle since it is always equal to PI for all the edges.
                     let edge_mult = edges_multiplicity.entry(*edge).or_insert(0);
                     *edge_mult += 1;
                 }
@@ -1391,7 +1486,7 @@ impl TriMesh {
                 let e0 = SortedPair::new(idx[0], idx[1]);
                 let e1 = SortedPair::new(idx[1], idx[2]);
                 let e2 = SortedPair::new(idx[2], idx[0]);
-                let default = Vector::zeros();
+                let default = Vector::ZERO;
                 [
                     edges_pseudo_normal.get(&e0).copied().unwrap_or(default),
                     edges_pseudo_normal.get(&e1).copied().unwrap_or(default),
@@ -1655,13 +1750,13 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
-    ///     Point3::new(1.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
+    ///     Vector::new(1.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2], [1, 3, 2]];
     /// let mesh = TriMesh::new(vertices, indices).unwrap();
@@ -1688,14 +1783,10 @@ impl TriMesh {
     }
 
     #[cfg(feature = "dim3")]
-    /// Gets the normal of the triangle represented by `feature`.
-    pub fn feature_normal(&self, feature: FeatureId) -> Option<Unit<Vector<Real>>> {
-        match feature {
-            FeatureId::Face(i) => self
-                .triangle(i % self.num_triangles() as u32)
-                .feature_normal(FeatureId::Face(0)),
-            _ => None,
-        }
+    /// Gets the normal of the triangle `triangle_id`.
+    pub fn triangle_normal(&self, triangle_id: SubShapeId) -> Option<Vector> {
+        self.triangle(triangle_id % self.num_triangles() as u32)
+            .feature_normal(FeatureId::Face(0))
     }
 }
 
@@ -1710,12 +1801,12 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::{TriMesh, TriMeshFlags};
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     ///
@@ -1743,24 +1834,24 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::{Point3, Isometry3};
+    /// use parry3d::math::{Vector, Pose};
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     /// let mesh = TriMesh::new(vertices, indices).unwrap();
     ///
-    /// let identity = Isometry3::identity();
+    /// let identity = Pose::identity();
     /// let aabb = mesh.aabb(&identity);
     ///
     /// // The AABB contains all vertices
-    /// assert!(aabb.contains_local_point(&Point3::new(0.5, 0.5, 0.0)));
+    /// assert!(aabb.contains_local_point(Vector::new(0.5, 0.5, 0.0)));
     /// # }
     /// ```
-    pub fn aabb(&self, pos: &Isometry<Real>) -> Aabb {
+    pub fn aabb(&self, pos: &Pose) -> Aabb {
         self.bvh.root_aabb().transform_by(pos)
     }
 
@@ -1775,12 +1866,12 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::new(-1.0, -1.0, 0.0),
-    ///     Point3::new(1.0, -1.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::new(-1.0, -1.0, 0.0),
+    ///     Vector::new(1.0, -1.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     /// let mesh = TriMesh::new(vertices, indices).unwrap();
@@ -1805,12 +1896,12 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     /// let mesh = TriMesh::new(vertices, indices).unwrap();
@@ -1831,13 +1922,13 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
-    ///     Point3::new(1.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
+    ///     Vector::new(1.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2], [1, 3, 2]];
     /// let mesh = TriMesh::new(vertices, indices).unwrap();
@@ -1851,11 +1942,9 @@ impl TriMesh {
 
     /// Does the given feature ID identify a backface of this trimesh?
     pub fn is_backface(&self, feature: FeatureId) -> bool {
-        if let FeatureId::Face(i) = feature {
-            i >= self.indices.len() as u32
-        } else {
-            false
-        }
+        // The feature is the hit triangle's own, which reports its back face as `Face(1)`; the
+        // triangle itself is identified by the result's `subshape`.
+        feature == FeatureId::Face(1)
     }
 
     /// Get the `i`-th triangle of this mesh.
@@ -1877,20 +1966,20 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     /// let mesh = TriMesh::new(vertices, indices).unwrap();
     ///
     /// let triangle = mesh.triangle(0);
-    /// assert_eq!(triangle.a, Point3::origin());
-    /// assert_eq!(triangle.b, Point3::new(1.0, 0.0, 0.0));
-    /// assert_eq!(triangle.c, Point3::new(0.0, 1.0, 0.0));
+    /// assert_eq!(triangle.a, Vector::ZERO);
+    /// assert_eq!(triangle.b, Vector::new(1.0, 0.0, 0.0));
+    /// assert_eq!(triangle.c, Vector::new(0.0, 1.0, 0.0));
     /// # }
     /// ```
     pub fn triangle(&self, i: u32) -> Triangle {
@@ -1919,10 +2008,13 @@ impl TriMesh {
             Some(TrianglePseudoNormals {
                 face: triangle.normal()?,
                 edges: [
-                    Unit::try_new(edges_pseudo_normals[0], 1.0e-6.into())?,
-                    Unit::try_new(edges_pseudo_normals[1], 1.0e-6.into())?,
-                    Unit::try_new(edges_pseudo_normals[2], 1.0e-6.into())?,
+                    (edges_pseudo_normals[0]).try_normalize()?,
+                    (edges_pseudo_normals[1]).try_normalize()?,
+                    (edges_pseudo_normals[2]).try_normalize()?,
                 ],
+                two_sided: self
+                    .flags
+                    .contains(TriMeshFlags::FIX_INTERNAL_EDGES_TWO_SIDED),
             })
         } else {
             None
@@ -1945,21 +2037,21 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     /// let mesh = TriMesh::new(vertices, indices).unwrap();
     ///
     /// assert_eq!(mesh.vertices().len(), 3);
-    /// assert_eq!(mesh.vertices()[0], Point3::origin());
+    /// assert_eq!(mesh.vertices()[0], Vector::ZERO);
     /// # }
     /// ```
-    pub fn vertices(&self) -> &[Point<Real>] {
+    pub fn vertices(&self) -> &[Vector] {
         &self.vertices
     }
 
@@ -1974,13 +2066,13 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::TriMesh;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
-    ///     Point3::new(1.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
+    ///     Vector::new(1.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2], [1, 3, 2]];
     /// let mesh = TriMesh::new(vertices, indices).unwrap();
@@ -2005,12 +2097,12 @@ impl TriMesh {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::{TriMesh, TriMeshFlags};
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let vertices = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2]];
     ///
@@ -2043,18 +2135,18 @@ impl TriMesh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// # #[cfg(feature = "std")] {
     /// use parry3d::shape::{TriMesh, TriMeshFlags};
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// // Create two separate triangles (not connected)
     /// let vertices = vec![
     ///     // First triangle
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0),
     ///     // Second triangle (separate)
-    ///     Point3::new(5.0, 0.0, 0.0),
-    ///     Point3::new(6.0, 0.0, 0.0),
-    ///     Point3::new(5.0, 1.0, 0.0),
+    ///     Vector::new(5.0, 0.0, 0.0),
+    ///     Vector::new(6.0, 0.0, 0.0),
+    ///     Vector::new(5.0, 1.0, 0.0),
     /// ];
     /// let indices = vec![[0, 1, 2], [3, 4, 5]];
     ///
@@ -2123,7 +2215,7 @@ impl CompositeShape for TriMesh {
     fn map_part_at(
         &self,
         i: u32,
-        f: &mut dyn FnMut(Option<&Isometry<Real>>, &dyn Shape, Option<&dyn NormalConstraints>),
+        f: &mut dyn FnMut(Option<&Pose>, &dyn Shape, Option<&dyn NormalConstraints>),
     ) {
         let tri = self.triangle(i);
         let normals = self.triangle_normal_constraints(i);
@@ -2137,6 +2229,10 @@ impl CompositeShape for TriMesh {
     fn bvh(&self) -> &Bvh {
         &self.bvh
     }
+
+    fn is_deformable(&self) -> bool {
+        self.flags.contains(TriMeshFlags::DEFORMABLE)
+    }
 }
 
 impl TypedCompositeShape for TriMesh {
@@ -2147,11 +2243,7 @@ impl TypedCompositeShape for TriMesh {
     fn map_typed_part_at<T>(
         &self,
         i: u32,
-        mut f: impl FnMut(
-            Option<&Isometry<Real>>,
-            &Self::PartShape,
-            Option<&Self::PartNormalConstraints>,
-        ) -> T,
+        mut f: impl FnMut(Option<&Pose>, &Self::PartShape, Option<&Self::PartNormalConstraints>) -> T,
     ) -> Option<T> {
         let tri = self.triangle(i);
         let pseudo_normals = self.triangle_normal_constraints(i);
@@ -2162,7 +2254,7 @@ impl TypedCompositeShape for TriMesh {
     fn map_untyped_part_at<T>(
         &self,
         i: u32,
-        mut f: impl FnMut(Option<&Isometry<Real>>, &dyn Shape, Option<&dyn NormalConstraints>) -> T,
+        mut f: impl FnMut(Option<&Pose>, &dyn Shape, Option<&dyn NormalConstraints>) -> T,
     ) -> Option<T> {
         let tri = self.triangle(i);
         let pseudo_normals = self.triangle_normal_constraints(i);
@@ -2176,7 +2268,7 @@ impl TypedCompositeShape for TriMesh {
 
 #[cfg(test)]
 mod test {
-    use crate::math::{Real, RawReal, Vector};
+    use crate::math::{Real, Vector};
     use crate::shape::{Cuboid, TriMesh, TriMeshFlags};
 
     #[test]
@@ -2189,7 +2281,7 @@ mod test {
 
     #[test]
     fn connected_components() {
-        let (vtx, idx) = Cuboid::new(Vector::repeat(0.5.into())).to_trimesh();
+        let (vtx, idx) = Cuboid::new(Vector::splat(0.5)).to_trimesh();
 
         // Push 10 copy of the mesh, each time pushed with an offset.
         let mut mesh = TriMesh::new(vtx.clone(), idx.clone()).unwrap();
@@ -2197,7 +2289,7 @@ mod test {
         for i in 1..10 {
             let cc_vtx = vtx
                 .iter()
-                .map(|pt| pt + Vector::repeat(Real::from(2.0 * i as RawReal)))
+                .map(|pt| *pt + Vector::splat(2.0 * i as Real))
                 .collect();
 
             let to_append = TriMesh::new(cc_vtx, idx.clone()).unwrap();

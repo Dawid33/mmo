@@ -1,22 +1,17 @@
 use game::{
-    GameEvent, GameEventKind, IsometryReal, Region, RegionCoords, Rollback, FLIP_HYSTERESIS,
+    GameEvent, GameEventKind, Pose, Region, RegionCoords, Rollback, FLIP_HYSTERESIS,
     REGION_SIZE,
 };
-use game::na::{Quaternion, Translation3, Unit};
-use game::parry::math::Real;
-use std::hash::Hash;
+use game::StateHash;
 
 fn crc(region: &Region) -> u32 {
     let mut h = crc32fast::Hasher::new();
-    region.data().data.hash(&mut h);
+    region.data().data.state_hash(&mut h);
     h.finalize()
 }
 
-fn pose(x: f32, z: f32) -> IsometryReal {
-    IsometryReal::from_parts(
-        Translation3::new(Real::from(x), Real::from(26.0), Real::from(z)),
-        Unit::<Quaternion<Real>>::identity(),
-    )
+fn pose(x: f32, z: f32) -> Pose {
+    Pose::from_translation(game::rapier3d::math::Vector::new(x, 26.0, z))
 }
 
 /// A region with one player, teleported to (x, z), ticked once.
@@ -181,7 +176,7 @@ fn bodyless_ghost_is_not_scanned() {
             source_key: Default::default(),
             kind: game::EntityKind::Player,
             isometry: pose(300.0, 128.0), // absurdly out of bounds
-            linvel: game::parry::math::Vector::zeros(),
+            linvel: game::parry::math::Vector::ZERO,
             collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
         }))
         .unwrap();
@@ -215,7 +210,7 @@ fn bodied_ghost_past_boundary_is_not_extracted() {
             source_key: src_key,
             kind: game::EntityKind::Player,
             isometry: pose(300.0, 128.0), // strictly past the 258 flip line
-            linvel: game::parry::math::Vector::zeros(),
+            linvel: game::parry::math::Vector::ZERO,
             collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
         }))
         .unwrap();
@@ -258,7 +253,7 @@ fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
     let mk = |x: f32| game::EntityBundle {
         kind: game::EntityKind::Player,
         isometry: pose(x, 128.0),
-        linvel: game::parry::math::Vector::zeros(),
+        linvel: game::parry::math::Vector::ZERO,
         collider: game::ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
         has_camera: true,
         yaw: 0.0.into(),
@@ -273,7 +268,7 @@ fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
     // Client-side region (local_client_id = Some → predictions reconcile).
     // reconcile() rolls back on divergence, which replays tier-2 undo closures
     // through the rollback log's `client` sender (`client.as_ref().unwrap()`);
-    // a None sender panics. Real client regions always have a live sender
+    // a None sender panics. f32 client regions always have a live sender
     // (built via new_region with Some(send)), so give this one a throwaway
     // sender too — _recv stays bound to keep the channel connected.
     let (send, _recv) = crossbeam::channel::unbounded();
@@ -293,5 +288,5 @@ fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
     let e = *region.data().player_entites.get(&9).unwrap();
     let handle = region.data().ecs.rigidbody.try_get(e).unwrap();
     let t = region.data().physics.bodies.get(handle).unwrap().translation();
-    assert_eq!(t.x, Real::from(4.0), "authoritative pose won");
+    assert_eq!(t.x, 4.0, "authoritative pose won");
 }

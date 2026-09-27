@@ -1,9 +1,7 @@
-use ordered_float::OrderedFloat;
-use parry3d::math::Real;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Key {
     KeyW,
     KeyA,
@@ -16,7 +14,7 @@ pub enum Key {
     Escape,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum MouseButton {
     Left,
     Right,
@@ -44,7 +42,7 @@ pub enum InputEvent {
     FpsCam(bool),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, state_hash::StateHash)]
 enum KeyState {
     Released,
     Pressed,
@@ -55,11 +53,11 @@ enum KeyState {
     Tapped,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, Hash, PartialEq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, state_hash::StateHash, PartialEq)]
 pub struct InputState {
     window_resized: Option<(u32, u32)>,
     keyboard_state: BTreeMap<Key, KeyState>,
-    mouse_diff: Option<(Real, Real)>,
+    mouse_diff: Option<(f32, f32)>,
     /// Mouse buttons, with the same press / hold / tap semantics as keys.
     mouse_buttons: BTreeMap<MouseButton, KeyState>,
 }
@@ -155,7 +153,7 @@ impl InputState {
                     m.0 += dx;
                     m.1 += dy;
                 } else {
-                    self.mouse_diff = Some((OrderedFloat(dx), OrderedFloat(dy)));
+                    self.mouse_diff = Some((dx, dy));
                 }
                 Some(Box::new(move |s: &mut Self| s.mouse_diff = old))
             }
@@ -181,7 +179,7 @@ impl InputState {
 
     pub fn mouse_diff(&mut self) -> (f32, f32) {
         if let Some(m) = self.mouse_diff {
-            (*m.0, *m.1)
+            (m.0, m.1)
         } else {
             (0.0, 0.0)
         }

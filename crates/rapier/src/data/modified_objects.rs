@@ -1,5 +1,6 @@
-use std::marker::PhantomData;
-use std::ops::Deref;
+use crate::alloc_prelude::*;
+use core::marker::PhantomData;
+use core::ops::Deref;
 
 /// Contains handles of modified objects.
 ///
@@ -8,7 +9,8 @@ use std::ops::Deref;
 /// It is possible to bypass the wrapper with `.as_mut_internal`. But this should only
 /// be done for internal engine usage (like the physics pipeline).
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Debug, Hash)]
+#[derive(Clone, Debug)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ModifiedObjects<Handle, Object>(Vec<Handle>, PhantomData<Object>);
 
 impl<Handle, Object> Default for ModifiedObjects<Handle, Object> {
@@ -67,6 +69,7 @@ impl<Handle, Object: HasModifiedFlag> ModifiedObjects<Handle, Object> {
         self.0.push(handle);
     }
 
+    // mmo-fork: LIFO undo support (upgrade plan Task 4.1).
     /// Pops the most recently pushed handle (LIFO undo support).
     pub fn pop(&mut self) -> Option<Handle> {
         self.0.pop()

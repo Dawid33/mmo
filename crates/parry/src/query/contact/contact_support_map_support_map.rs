@@ -1,14 +1,12 @@
-use crate::math::{Isometry, Real, Vector};
+use crate::math::{Pose, Real, Vector};
 use crate::query::epa::EPA;
-use crate::query::gjk::{self, CSOPoint, GJKResult, VoronoiSimplex};
+use crate::query::gjk::{self, CsoPoint, GJKResult, VoronoiSimplex};
 use crate::query::Contact;
 use crate::shape::SupportMap;
 
-use na::Unit;
-
 /// Contact between support-mapped shapes (`Cuboid`, `ConvexHull`, etc.)
 pub fn contact_support_map_support_map<G1, G2>(
-    pos12: &Isometry<Real>,
+    pos12: &Pose,
     g1: &G1,
     g2: &G2,
     prediction: Real,
@@ -20,9 +18,9 @@ where
     let simplex = &mut VoronoiSimplex::new();
     match contact_support_map_support_map_with_params(pos12, g1, g2, prediction, simplex, None) {
         GJKResult::ClosestPoints(point1, point2_1, normal1) => {
-            let dist = (point2_1 - point1).dot(&normal1);
-            let point2 = pos12.inverse_transform_point(&point2_1);
-            let normal2 = pos12.inverse_transform_unit_vector(&-normal1);
+            let dist = (point2_1 - point1).dot(normal1);
+            let point2 = pos12.inverse_transform_point(point2_1);
+            let normal2 = pos12.rotation.inverse() * -normal1;
             Some(Contact::new(point1, point2, normal1, normal2, dist))
         }
         GJKResult::NoIntersection(_) => None,
@@ -38,12 +36,12 @@ where
 /// subsequent executions of the algorithm. It is also the contact
 /// normal (that points toward the outside of the first solid).
 pub fn contact_support_map_support_map_with_params<G1, G2>(
-    pos12: &Isometry<Real>,
+    pos12: &Pose,
     g1: &G1,
     g2: &G2,
     prediction: Real,
     simplex: &mut VoronoiSimplex,
-    init_dir: Option<Unit<Vector<Real>>>,
+    init_dir: Option<Vector>,
 ) -> GJKResult
 where
     G1: ?Sized + SupportMap,
@@ -51,15 +49,13 @@ where
 {
     let dir = if let Some(init_dir) = init_dir {
         init_dir
-    } else if let Some(init_dir) =
-        Unit::try_new(pos12.translation.vector, Real::from(crate::math::DEFAULT_EPSILON))
-    {
+    } else if let Some(init_dir) = (pos12.translation).try_normalize() {
         init_dir
     } else {
-        Vector::x_axis()
+        Vector::X
     };
 
-    simplex.reset(CSOPoint::from_shapes(pos12, g1, g2, &dir));
+    simplex.reset(CsoPoint::from_shapes(pos12, g1, g2, dir));
 
     let cpts = gjk::closest_points(pos12, g1, g2, prediction, true, simplex);
     if cpts != GJKResult::Intersection {
@@ -73,5 +69,42 @@ where
     }
 
     // Everything failed
-    GJKResult::NoIntersection(Vector::x_axis())
+    GJKResult::NoIntersection(Vector::X)
+}
+
+#[cfg(all(test, feature = "dim2"))]
+mod test {
+    use crate::bounding_volume::Aabb;
+    use crate::math::{Pose, Vector};
+    use crate::query::contact;
+    use crate::shape::{Cuboid, Segment};
+
+    /// Regression test for <https://github.com/dimforge/parry/issues/415>: a segment overlapping
+    /// a cuboid must report a penetrating contact. An absolute tolerance used in EPA's `FaceId`
+    /// construction used to spuriously reject valid faces (and make `contact` return `None`) when
+    /// using `f64` precision with large coordinates.
+    ///
+    /// NOTE: this is not in the `tests` directory since we want it for both f32 and f64 versions.
+    #[test]
+    fn contact_segment_cuboid_issue_415() {
+        let segment = Segment {
+            a: Vector::new(60.0, 10.0),
+            b: Vector::new(10.0, 0.0),
+        };
+        let aabb = Aabb {
+            mins: Vector::new(40.0, -50.0),
+            maxs: Vector::new(60.0, 150.0),
+        };
+        let cuboid = Cuboid::new(aabb.half_extents());
+        let pos_cuboid = Pose::from_translation(aabb.center());
+
+        let contact = contact(&Pose::IDENTITY, &segment, &pos_cuboid, &cuboid, 1.0)
+            .unwrap()
+            .expect("the overlapping segment and cuboid must report a contact");
+        assert!(
+            contact.dist < 0.0,
+            "expected a penetrating contact, got dist = {}",
+            contact.dist
+        );
+    }
 }

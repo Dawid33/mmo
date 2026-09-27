@@ -4,16 +4,22 @@ use crate::dynamics::{
     RigidBodyVelocity, joint,
 };
 use crate::math::{
-    ANG_DIM, DIM, Isometry, JacobianViewMut, Real, Rotation, SPATIAL_DIM, SpacialVector,
-    Translation, Vector,
+    ANG_DIM, DIM, DVector, JacobianViewMut, Pose, Real, Rotation, SPATIAL_DIM, SpatialVector,
+    Vector,
 };
-use na::{DVector, DVectorViewMut};
+use parry::math::VectorExt;
+
+#[cfg(feature = "dim2")]
+use crate::math::rotation_from_angle;
 #[cfg(feature = "dim3")]
-use na::{UnitQuaternion, Vector3};
+use crate::utils::RotationOps;
+use crate::utils::vect_to_na;
+use na::DVectorViewMut;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, Hash)]
+#[derive(Copy, Clone, Debug)]
 /// An joint attached to two bodies based on the reduced coordinates formalism.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct MultibodyJoint {
     /// The joint’s description.
     pub data: GenericJoint,
@@ -22,8 +28,15 @@ pub struct MultibodyJoint {
     /// Kinematic joint velocities are never changed by the physics engine. This gives the user
     /// total control over the values of their degrees of freedoms.
     pub kinematic: bool,
-    pub(crate) coords: SpacialVector<Real>,
-    pub(crate) joint_rot: Rotation<Real>,
+    pub(crate) coords: SpatialVector,
+    pub(crate) joint_rot: Rotation,
+    /// Per-DoF spring stiffness (a passive joint spring integrated implicitly
+    /// in the generalized dynamics). Zero on axes with no spring.
+    pub(crate) spring_stiffness: SpatialVector,
+    /// Per-DoF spring rest position, in the joint's generalized coordinate
+    /// (same convention as [`Self::coords`]). Only meaningful where
+    /// `spring_stiffness` is non-zero.
+    pub(crate) spring_ref: SpatialVector,
 }
 
 impl MultibodyJoint {
@@ -32,38 +45,68 @@ impl MultibodyJoint {
         Self {
             data,
             kinematic,
-            coords: na::zero(),
-            joint_rot: Rotation::identity(),
+            coords: Default::default(),
+            joint_rot: Rotation::IDENTITY,
+            spring_stiffness: Default::default(),
+            spring_ref: Default::default(),
         }
     }
 
-    pub(crate) fn free(pos: Isometry<Real>) -> Self {
+    /// Sets a passive joint spring on `axis` (an index into the 6-DoF spatial
+    /// layout: `0..DIM` linear, `DIM..SPATIAL_DIM` angular). The spring applies
+    /// a generalized force `-stiffness · (q − rest)` integrated implicitly.
+    pub fn set_spring(&mut self, axis: usize, stiffness: Real, rest: Real) {
+        self.spring_stiffness[axis] = stiffness;
+        self.spring_ref[axis] = rest;
+    }
+
+    /// The passive joint spring on `axis` as `(stiffness, rest)`, as set by
+    /// [`Self::set_spring`]. `(0, 0)` if no spring is set on that axis.
+    pub fn spring(&self, axis: usize) -> (Real, Real) {
+        (self.spring_stiffness[axis], self.spring_ref[axis])
+    }
+
+    pub(crate) fn free(pos: Pose) -> Self {
         let mut result = Self::new(GenericJoint::default(), false);
         result.set_free_pos(pos);
         result
     }
 
-    pub(crate) fn fixed(pos: Isometry<Real>) -> Self {
+    pub(crate) fn fixed(pos: Pose) -> Self {
         Self::new(
             FixedJointBuilder::new().local_frame1(pos).build().into(),
             false,
         )
     }
 
-    pub(crate) fn set_free_pos(&mut self, pos: Isometry<Real>) {
-        self.coords
-            .fixed_rows_mut::<DIM>(0)
-            .copy_from(&pos.translation.vector);
+    pub(crate) fn set_free_pos(&mut self, pos: Pose) {
+        #[cfg(feature = "dim2")]
+        {
+            self.coords.x = pos.translation.x;
+            self.coords.y = pos.translation.y;
+        }
+        #[cfg(feature = "dim3")]
+        {
+            self.coords[0] = pos.translation.x;
+            self.coords[1] = pos.translation.y;
+            self.coords[2] = pos.translation.z;
+        }
         self.joint_rot = pos.rotation;
     }
 
-    // pub(crate) fn local_joint_rot(&self) -> &Rotation<Real> {
-    //     &self.joint_rot
-    // }
+    /// The joint’s angular coordinates converted to a rotation.
+    pub fn joint_rot(&self) -> Rotation {
+        self.joint_rot
+    }
 
     fn num_free_lin_dofs(&self) -> usize {
         let locked_bits = self.data.locked_axes.bits();
         DIM - (locked_bits & ((1 << DIM) - 1)).count_ones() as usize
+    }
+
+    /// Generalized coordinates for this joint.
+    pub fn coords(&self) -> SpatialVector {
+        self.coords
     }
 
     /// The number of degrees of freedom allowed by the multibody_joint.
@@ -72,13 +115,15 @@ impl MultibodyJoint {
     }
 
     /// The position of the multibody link containing this multibody_joint relative to its parent.
-    pub fn body_to_parent(&self) -> Isometry<Real> {
+    pub fn body_to_parent(&self) -> Pose {
         let locked_bits = self.data.locked_axes.bits();
-        let mut transform = self.joint_rot * self.data.local_frame2.inverse();
+        let mut transform = Pose::from_rotation(self.joint_rot) * self.data.local_frame2.inverse();
 
         for i in 0..DIM {
             if (locked_bits & (1 << i)) == 0 {
-                transform = Translation::from(Vector::ith(i, self.coords[i])) * transform;
+                // Create a translation along axis i with the coordinate value
+                let translation = Vector::ith(i, self.coords[i]);
+                transform = Pose::from_translation(translation) * transform;
             }
         }
 
@@ -107,12 +152,12 @@ impl MultibodyJoint {
                 self.coords[DIM + dof_id] += vels[curr_free_dof] * dt;
                 #[cfg(feature = "dim2")]
                 {
-                    self.joint_rot = Rotation::new(self.coords[DIM + dof_id]);
+                    self.joint_rot = rotation_from_angle(self.coords[DIM + dof_id]);
                 }
                 #[cfg(feature = "dim3")]
                 {
                     self.joint_rot = Rotation::from_axis_angle(
-                        &Vector::ith_axis(dof_id),
+                        Vector::ith(dof_id, 1.0),
                         self.coords[DIM + dof_id],
                     );
                 }
@@ -122,8 +167,8 @@ impl MultibodyJoint {
             }
             #[cfg(feature = "dim3")]
             3 => {
-                let angvel = Vector3::from_row_slice(&vels[curr_free_dof..curr_free_dof + 3]);
-                let disp = UnitQuaternion::new_eps(angvel * dt, Real::from(0.0));
+                let angvel = Vector::from_slice(&vels[curr_free_dof..curr_free_dof + 3]);
+                let disp = Rotation::from_scaled_axis(angvel * dt);
                 self.joint_rot = disp * self.joint_rot;
                 self.coords[3] += angvel[0] * dt;
                 self.coords[4] += angvel[1] * dt;
@@ -135,19 +180,19 @@ impl MultibodyJoint {
 
     /// Apply a displacement to the multibody_joint.
     pub fn apply_displacement(&mut self, disp: &[Real]) {
-        self.integrate(Real::from(1.0), disp);
+        self.integrate(1.0, disp);
     }
 
     /// Sets in `out` the non-zero entries of the multibody_joint jacobian transformed by `transform`.
-    pub fn jacobian(&self, transform: &Rotation<Real>, out: &mut JacobianViewMut<Real>) {
+    pub fn jacobian(&self, transform: &Rotation, out: &mut JacobianViewMut<Real>) {
         let locked_bits = self.data.locked_axes.bits();
         let mut curr_free_dof = 0;
 
         for i in 0..DIM {
             if (locked_bits & (1 << i)) == 0 {
-                let transformed_axis = transform * Vector::ith(i, Real::from(1.0));
+                let transformed_axis = (*transform) * Vector::ith(i, 1.0);
                 out.fixed_view_mut::<DIM, 1>(0, curr_free_dof)
-                    .copy_from(&transformed_axis);
+                    .copy_from(&vect_to_na(transformed_axis));
                 curr_free_dof += 1;
             }
         }
@@ -165,9 +210,9 @@ impl MultibodyJoint {
                 #[cfg(feature = "dim3")]
                 {
                     let dof_id = (!locked_ang_bits).trailing_zeros() as usize;
-                    let rotmat = transform.to_rotation_matrix().into_inner();
+                    let rotmat = transform.to_mat();
                     out.fixed_view_mut::<ANG_DIM, 1>(DIM, curr_free_dof)
-                        .copy_from(&rotmat.column(dof_id));
+                        .copy_from_slice(rotmat.col(dof_id).as_ref());
                 }
             }
             2 => {
@@ -175,9 +220,9 @@ impl MultibodyJoint {
             }
             #[cfg(feature = "dim3")]
             3 => {
-                let rotmat = transform.to_rotation_matrix();
+                let rotmat = transform.to_mat();
                 out.fixed_view_mut::<3, 3>(3, curr_free_dof)
-                    .copy_from(rotmat.matrix());
+                    .copy_from_slice(rotmat.as_ref());
             }
             _ => unreachable!(),
         }
@@ -217,7 +262,7 @@ impl MultibodyJoint {
             }
             #[cfg(feature = "dim3")]
             3 => {
-                let angvel = Vector3::from_row_slice(&acc[curr_free_dof..curr_free_dof + 3]);
+                let angvel = Vector::from_slice(&acc[curr_free_dof..curr_free_dof + 3]);
                 result.angvel += angvel;
             }
             _ => unreachable!(),
@@ -234,7 +279,7 @@ impl MultibodyJoint {
         for i in DIM..SPATIAL_DIM {
             if locked_bits & (1 << i) == 0 {
                 // This is a free angular DOF.
-                out[curr_free_dof] = Real::from(0.1);
+                out[curr_free_dof] = 0.1;
                 curr_free_dof += 1;
             }
         }
@@ -268,7 +313,7 @@ impl MultibodyJoint {
         multibody: &Multibody,
         link: &MultibodyLink,
         mut j_id: usize,
-        jacobians: &mut DVector<Real>,
+        jacobians: &mut DVector,
         constraints: &mut [GenericJointConstraint],
     ) -> usize {
         let j_id = &mut j_id;
@@ -314,6 +359,25 @@ impl MultibodyJoint {
                         jacobians,
                         constraints,
                         &mut num_constraints,
+                        self.data.softness,
+                    );
+                }
+                // Dry joint friction (MuJoCo `frictionloss`), keyed per-DoF on
+                // the multibody rather than per-axis on the joint. Zero (the
+                // default) emits nothing.
+                let friction = multibody.frictions()[link.assembly_id + curr_free_dof];
+                if friction > 0.0 {
+                    joint::unit_joint_friction_constraint(
+                        params,
+                        multibody,
+                        link,
+                        friction,
+                        curr_free_dof,
+                        j_id,
+                        jacobians,
+                        constraints,
+                        &mut num_constraints,
+                        self.data.softness,
                     );
                 }
                 curr_free_dof += 1;
@@ -349,6 +413,7 @@ impl MultibodyJoint {
                         jacobians,
                         constraints,
                         &mut num_constraints,
+                        self.data.softness,
                     );
                     Some(limits)
                 } else {
@@ -368,6 +433,25 @@ impl MultibodyJoint {
                         jacobians,
                         constraints,
                         &mut num_constraints,
+                    );
+                }
+
+                // Dry joint friction (MuJoCo `frictionloss`), keyed per-DoF on
+                // the multibody rather than per-axis on the joint. Zero (the
+                // default) emits nothing.
+                let friction = multibody.frictions()[link.assembly_id + curr_free_dof];
+                if friction > 0.0 {
+                    joint::unit_joint_friction_constraint(
+                        params,
+                        multibody,
+                        link,
+                        friction,
+                        curr_free_dof,
+                        j_id,
+                        jacobians,
+                        constraints,
+                        &mut num_constraints,
+                        self.data.softness,
                     );
                 }
                 curr_free_dof += 1;

@@ -3,7 +3,7 @@
 //! casts begins. Three defects of the vendored parry used to meet here; each
 //! made a body on flat voxel ground sink, fall through its skin, or trip.
 //! See `walking_smoothness.rs` for what they did to a walking player.
-use game::parry::math::{Isometry, Point, Real, Vector};
+use game::parry::math::{IVector, Pose, Vector};
 use game::parry::query::{cast_shapes, ShapeCastOptions, ShapeCastStatus};
 use game::parry::shape::{Capsule, Cuboid, Voxels};
 
@@ -12,11 +12,11 @@ const HALF_HEIGHT: f32 = game::movement::PLAYER_CAPSULE_HALF_HEIGHT;
 const RADIUS: f32 = game::movement::PLAYER_CAPSULE_RADIUS;
 const SKIN: f32 = game::movement::CHARACTER_SKIN;
 
-fn r(x: f32) -> Real {
-    Real::from(x)
+fn r(x: f32) -> f32 {
+    x
 }
 
-fn v(x: f32, y: f32, z: f32) -> Vector<Real> {
+fn v(x: f32, y: f32, z: f32) -> Vector {
     Vector::new(r(x), r(y), r(z))
 }
 
@@ -31,20 +31,20 @@ fn skin_cast(max_time_of_impact: f32) -> ShapeCastOptions {
 }
 
 /// One tick of walking with gravity: mostly along +z, slightly down.
-fn walking_step() -> Vector<Real> {
+fn walking_step() -> Vector {
     v(0.0, -0.64, 3.4536)
 }
 
 fn assert_floor_hit(hit: Option<game::parry::query::ShapeCastHit>, context: &str) {
     let hit = hit.unwrap_or_else(|| panic!("{context}: the floor was missed"));
-    assert!(hit.time_of_impact.0 < 1.0e-3, "{context}: toi {}", hit.time_of_impact.0);
+    assert!(hit.time_of_impact < 1.0e-3, "{context}: toi {}", hit.time_of_impact);
     let n = hit.normal1;
     assert!(
-        n.x.0.abs() < 1.0e-4 && n.z.0.abs() < 1.0e-4 && n.y.0 > 0.9999,
+        n.x.abs() < 1.0e-4 && n.z.abs() < 1.0e-4 && n.y > 0.9999,
         "{context}: a flat floor's normal is straight up, got ({}, {}, {})",
-        n.x.0,
-        n.y.0,
-        n.z.0
+        n.x,
+        n.y,
+        n.z
     );
 }
 
@@ -58,13 +58,13 @@ fn cast_starting_at_the_target_distance_hits_with_the_true_normal() {
     // Around the skin: where time-of-impact error leaves a parked shape.
     for gap in [SKIN + 0.0015, SKIN + 0.0005, SKIN, SKIN - 0.0005, SKIN - 0.006] {
         for z in [-6.0, -2.5, 0.0, 2.01, 5.0] {
-            let pos2 = Isometry::translation(r(0.3), r(8.0 + HALF_HEIGHT + RADIUS + gap), r(z));
+            let pos2 = Pose::translation(r(0.3), r(8.0 + HALF_HEIGHT + RADIUS + gap), r(z));
             let hit = cast_shapes(
-                &Isometry::identity(),
-                &Vector::zeros(),
+                &Pose::IDENTITY,
+                Vector::ZERO,
                 &cuboid,
                 &pos2,
-                &walking_step(),
+                walking_step(),
                 &capsule,
                 skin_cast(1.0),
             )
@@ -78,10 +78,10 @@ fn cast_starting_at_the_target_distance_hits_with_the_true_normal() {
 fn cast_moving_away_from_within_the_target_distance_is_free() {
     let cuboid = Cuboid::new(v(8.0, 8.0, 8.0));
     let capsule = Capsule::new_y(r(HALF_HEIGHT), r(RADIUS));
-    let pos2 = Isometry::translation(r(0.0), r(8.0 + HALF_HEIGHT + RADIUS + SKIN), r(0.0));
+    let pos2 = Pose::translation(r(0.0), r(8.0 + HALF_HEIGHT + RADIUS + SKIN), r(0.0));
     for vel in [v(0.0, 0.0, 3.0), v(0.0, 1.0, 3.0)] {
         let hit =
-            cast_shapes(&Isometry::identity(), &Vector::zeros(), &cuboid, &pos2, &vel, &capsule, skin_cast(1.0))
+            cast_shapes(&Pose::IDENTITY, Vector::ZERO, &cuboid, &pos2, vel, &capsule, skin_cast(1.0))
                 .unwrap();
         assert!(hit.is_none(), "sliding along or lifting off the floor is no hit: {hit:?}");
     }
@@ -92,24 +92,24 @@ fn voxel_floor(size: f32) -> Voxels {
     let mut cells = Vec::new();
     for x in 0..3 {
         for z in 0..3 {
-            cells.push(Point::new(x, 0, z));
+            cells.push(IVector::new(x, 0, z));
         }
     }
-    Voxels::new(Vector::repeat(r(size)), &cells)
+    Voxels::new(Vector::splat(r(size)), &cells)
 }
 
-fn cast_on_floor(floor: &Voxels, size: f32, x: f32, z: f32, vel: Vector<Real>) -> Option<game::parry::query::ShapeCastHit> {
+fn cast_on_floor(floor: &Voxels, size: f32, x: f32, z: f32, vel: Vector) -> Option<game::parry::query::ShapeCastHit> {
     let capsule = Capsule::new_y(r(HALF_HEIGHT), r(RADIUS));
-    let pos2 = Isometry::translation(r(x), r(size + HALF_HEIGHT + RADIUS + SKIN + 0.001), r(z));
-    let distance = vel.norm();
+    let pos2 = Pose::translation(r(x), r(size + HALF_HEIGHT + RADIUS + SKIN + 0.001), r(z));
+    let distance = vel.length();
     cast_shapes(
-        &Isometry::identity(),
-        &Vector::zeros(),
+        &Pose::IDENTITY,
+        Vector::ZERO,
         floor,
         &pos2,
-        &(vel / distance),
+        vel / distance,
         &capsule,
-        skin_cast(distance.0),
+        skin_cast(distance),
     )
     .unwrap()
 }
@@ -145,7 +145,7 @@ fn voxels_cast_reports_no_edges_inside_a_flat_floor() {
     // rim of the next voxel either.
     let slide = cast_on_floor(&floor, 1.0, 1.5, 1.24, v(0.0, 0.0, 0.7));
     assert!(
-        slide.is_none_or(|hit| hit.status == ShapeCastStatus::Converged && hit.normal1.y.0 > 0.9999),
+        slide.is_none_or(|hit| hit.status == ShapeCastStatus::Converged && hit.normal1.y > 0.9999),
         "a flat floor must not stop a slide along it: {slide:?}"
     );
 }
@@ -157,18 +157,18 @@ fn voxels_cast_keeps_real_edges() {
     let capsule = Capsule::new_y(r(HALF_HEIGHT), r(RADIUS));
     // Beyond the z = 48 rim and below the top, moving back in: the capsule's
     // rounded foot meets the rim's edge.
-    let pos2 = Isometry::translation(r(24.0), r(16.0 + HALF_HEIGHT + RADIUS - 2.0), r(48.0 + 8.0));
+    let pos2 = Pose::translation(r(24.0), r(16.0 + HALF_HEIGHT + RADIUS - 2.0), r(48.0 + 8.0));
     let hit = cast_shapes(
-        &Isometry::identity(),
-        &Vector::zeros(),
+        &Pose::IDENTITY,
+        Vector::ZERO,
         &floor,
         &pos2,
-        &v(0.0, 0.0, -1.0),
+        v(0.0, 0.0, -1.0),
         &capsule,
         skin_cast(8.0),
     )
     .unwrap()
     .expect("the rim must stop the capsule");
     let n = hit.normal1;
-    assert!(n.z.0 > 0.3 && n.y.0 > 0.3, "an edge contact leans: ({}, {}, {})", n.x.0, n.y.0, n.z.0);
+    assert!(n.z > 0.3 && n.y > 0.3, "an edge contact leans: ({}, {}, {})", n.x, n.y, n.z);
 }

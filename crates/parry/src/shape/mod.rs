@@ -3,7 +3,7 @@
 pub use self::ball::Ball;
 pub use self::capsule::Capsule;
 pub use self::cuboid::Cuboid;
-pub use self::feature_id::{FeatureId, PackedFeatureId};
+pub use self::feature_id::{FeatureId, PackedFeatureId, SubShapeId};
 pub use self::half_space::HalfSpace;
 pub use self::polygonal_feature_map::PolygonalFeatureMap;
 pub use self::round_shape::RoundShape;
@@ -25,6 +25,9 @@ pub use self::{
     voxels::{AxisMask, OctantPattern, VoxelData, VoxelState, VoxelType, Voxels, VoxelsChunkRef},
 };
 
+#[cfg(feature = "alloc")]
+pub use self::polyline::PolylineFlags;
+
 #[cfg(feature = "dim2")]
 #[cfg(feature = "alloc")]
 pub use self::convex_polygon::ConvexPolygon;
@@ -34,6 +37,14 @@ pub use self::heightfield2::*;
 #[cfg(feature = "dim2")]
 pub use self::polygonal_feature2d::PolygonalFeature;
 
+#[cfg(feature = "alloc")]
+pub use self::compound::CompoundFlags;
+#[cfg(all(feature = "alloc", feature = "dim2"))]
+pub use self::compound_pseudo_normals::CompoundEdgeCone;
+#[cfg(all(feature = "alloc", feature = "dim3"))]
+pub use self::compound_pseudo_normals::CompoundFaceCone;
+#[cfg(feature = "alloc")]
+pub use self::compound_pseudo_normals::CompoundPseudoNormals;
 #[cfg(feature = "dim3")]
 pub use self::cone::Cone;
 #[cfg(feature = "dim3")]
@@ -46,6 +57,7 @@ pub use self::cylinder::Cylinder;
 pub use self::heightfield3::*;
 #[cfg(feature = "dim3")]
 pub use self::polygonal_feature3d::PolygonalFeature;
+pub use self::segment_pseudo_normals::SegmentPseudoNormals;
 #[cfg(feature = "dim3")]
 pub use self::tetrahedron::{Tetrahedron, TetrahedronPointLocation};
 pub use self::triangle_pseudo_normals::TrianglePseudoNormals;
@@ -117,9 +129,14 @@ mod tetrahedron;
 #[cfg(feature = "alloc")]
 pub(crate) mod trimesh;
 // TODO: move this elsewhere?
+#[cfg(feature = "alloc")]
+mod compound_pseudo_normals;
 mod feature_id;
 #[cfg(feature = "dim2")]
 mod polygonal_feature2d;
+#[cfg(feature = "alloc")]
+mod pseudo_normals;
+mod segment_pseudo_normals;
 #[cfg(feature = "alloc")]
 mod shared_shape;
 mod triangle_pseudo_normals;

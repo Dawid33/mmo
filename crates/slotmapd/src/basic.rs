@@ -44,6 +44,30 @@ where
     }
 }
 
+// mmo: mirrors `Hash` above.
+impl<T> state_hash::StateHash for Slot<T>
+where
+    T: state_hash::StateHash,
+{
+    fn state_hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        if self.occupied() {
+            unsafe { self.u.value.state_hash(state) };
+        } else {
+            unsafe { self.u.next_free.state_hash(state) };
+        }
+        self.version.state_hash(state);
+    }
+}
+
+// mmo: mirrors the derived `Hash` on `SlotMap` (`_k` is a PhantomData).
+impl<K: Key, V: state_hash::StateHash> state_hash::StateHash for SlotMap<K, V> {
+    fn state_hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.slots.state_hash(state);
+        self.free_head.state_hash(state);
+        self.num_elems.state_hash(state);
+    }
+}
+
 // Safe API to read a slot.
 enum SlotContent<'a, T: 'a> {
     Occupied(&'a T),

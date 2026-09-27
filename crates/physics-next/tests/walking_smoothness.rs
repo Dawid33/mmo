@@ -240,7 +240,7 @@ fn player_does_not_fit_a_one_block_tunnel() {
 }
 
 /// Not in the game's file — pins the snap gate's other half (`// mmo-fork:`
-/// `heading_down` in rapier-next's controller): snap-to-ground only follows
+/// `heading_down` in the rapier fork's controller): snap-to-ground only follows
 /// a body that means to go down. A jump under a low ceiling rises less than
 /// `GROUND_SNAP` before bumping its head; snapping it would pull it straight
 /// back onto the floor, cancelling the jump.

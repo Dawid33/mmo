@@ -1,4 +1,4 @@
-//! Fork policy of the voxels cast (`// mmo-fork:` in parry-next's
+//! Fork policy of the voxels cast (`// mmo-fork:` in the parry fork's
 //! `shape_cast_voxels_shape.rs`) beyond the cases ported from the game in
 //! `upstream_movement_probe.rs`.
 use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER};

@@ -15,8 +15,7 @@
 //! Minecraft's tick is 50 ms, the same as `TICK_RATE` today, so its tick
 //! counts are used as they are.
 
-use parry3d::math::{Real, Vector};
-use na::{Quaternion, Translation3, Unit};
+use rapier3d::math::Vector;
 use slotmapd::Key as _;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
@@ -25,7 +24,7 @@ use crate::protocol::{ColliderSpec, RegionCoords, REGION_SIZE};
 use crate::registry::BlockId;
 use crate::{
     EntityKey, EntityKind, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind,
-    IsometryReal, Rollback, BLOCK_VOXELS,
+    Pose, Rollback, BLOCK_VOXELS,
 };
 
 // --- Spawning -----------------------------------------------------------
@@ -75,11 +74,11 @@ pub const SLIME_EDGE_MARGIN: f32 = 4.0 * BLOCK_VOXELS as f32;
 /// Per-slime behaviour state. Lives in the rollback ECS (`Ecs::slime`) and
 /// rides `EntityBundle`. u64 ticks, not usize: serialized across the
 /// 64-bit↔wasm32 seam.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, state_hash::StateHash, serde::Serialize, serde::Deserialize)]
 pub struct Slime {
     /// Facing (radians about +Y), eased toward `target_yaw`.
-    pub yaw: Real,
-    pub target_yaw: Real,
+    pub yaw: f32,
+    pub target_yaw: f32,
     /// Tick at which a wandering slime picks a new heading.
     pub next_turn_tick: u64,
     /// Tick at which a grounded slime hops.
@@ -131,8 +130,8 @@ fn region_subject(r: RegionCoords) -> u64 {
     ((r.x as u32 as u64) << 32) | r.z as u32 as u64
 }
 
-fn random_yaw(r: u64) -> Real {
-    Real::from((r % 3600) as f32 * (TAU / 3600.0))
+fn random_yaw(r: u64) -> f32 {
+    (r % 3600) as f32 * (TAU / 3600.0)
 }
 
 /// Wrap an angle into [-π, π). `rem_euclid` is an exact IEEE op.
@@ -175,7 +174,7 @@ pub struct SlimeSpawnPlan {
     pub vx: i32,
     pub vz: i32,
     pub size: u8,
-    pub yaw: Real,
+    pub yaw: f32,
 }
 
 /// The spawn attempt of `region` at `tick`, or `None` if there is none (not
@@ -273,18 +272,15 @@ impl Rollback {
             return;
         }
         let y = (surface + 1) as f32 + slime_edge_units(plan.size) / 2.0 + SLIME_SPAWN_CLEARANCE;
-        let pos = Vector::new(Real::from(plan.vx as f32), Real::from(y), Real::from(plan.vz as f32));
+        let pos = Vector::new(plan.vx as f32, y, plan.vz as f32);
         self.spawn_slime_safe(pos, plan.size, plan.yaw, tick);
     }
 
     /// Spawn a slime of `size` at region-local `pos` (the body centre),
     /// undo-safely. Falls to the ground before its first hop.
-    pub fn spawn_slime_safe(&mut self, pos: Vector<Real>, size: u8, yaw: Real, tick: u64) -> EntityKey {
+    pub fn spawn_slime_safe(&mut self, pos: Vector, size: u8, yaw: f32, tick: u64) -> EntityKey {
         let e = self.data.ecs.create_entity_safe();
-        let pose = IsometryReal::from_parts(
-            Translation3::new(pos.x, pos.y, pos.z),
-            Unit::<Quaternion<Real>>::from(crate::yaw_quat(yaw)),
-        );
+        let pose = Pose::from_parts(pos, crate::yaw_quat(yaw));
         self.build_kinematic_body_safe(e, pose, &slime_collider(size));
         let kind = EntityKind::Slime { size };
         self.data.send(GameDataUpdate::new(
@@ -320,22 +316,22 @@ impl Rollback {
         let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return };
         let Some(EntityKind::Slime { size }) = *self.data.ecs.kind.try_get(e) else { return };
         let Some(body) = self.data.physics.bodies.get(handle) else { return };
-        let t = *body.translation();
+        let t = body.translation();
         let motion0 = (*self.data.ecs.motion.try_get(e)).unwrap_or_default();
         let subject = e.data().as_ffi();
         let mut slime = slime0;
 
         // Heading: back inwards near an edge, else re-rolled now and then.
-        if let Some(inward) = inward_yaw(t.x.0, t.z.0) {
-            slime.target_yaw = Real::from(inward);
+        if let Some(inward) = inward_yaw(t.x, t.z) {
+            slime.target_yaw = inward;
         } else if tick >= slime.next_turn_tick {
             let r = roll(tick, subject, SALT_TURN);
             slime.target_yaw = random_yaw(r);
             slime.next_turn_tick = tick + SLIME_TURN_MIN_TICKS + mix(r) % SLIME_TURN_RANGE_TICKS;
         }
-        let d = wrap_angle(slime.target_yaw.0 - slime.yaw.0)
+        let d = wrap_angle(slime.target_yaw - slime.yaw)
             .clamp(-SLIME_MAX_TURN_PER_TICK, SLIME_MAX_TURN_PER_TICK);
-        slime.yaw = Real::from(wrap_angle(slime.yaw.0 + d));
+        slime.yaw = wrap_angle(slime.yaw + d);
 
         // Hop cadence: still on the ground, a hop when due, forward in the air.
         let grounded = motion0.grounded;
@@ -352,7 +348,7 @@ impl Rollback {
 
         // A slime sitting out its delay makes no move at all, so it skips the
         // character controller — the dominant sim cost — on most ticks.
-        let mut moved = Vector::zeros();
+        let mut moved = Vector::ZERO;
         if !(grounded && keys == MoveKeys::default()) {
             let mut motion = motion0;
             let desired = movement::plan_with(&mut motion, &keys, slime.yaw, tick, &slime_move_params(size));
@@ -384,10 +380,10 @@ impl Rollback {
             self.data.ecs.slime.set_safe(e, Some(slime));
         }
         let turned = slime.yaw != slime0.yaw;
-        if moved != Vector::zeros() || turned {
+        if moved != Vector::ZERO || turned {
             let rot = crate::yaw_quat(slime.yaw);
             self.data.physics.bodies.mutate_body_safe(handle, move |b| {
-                if moved != Vector::zeros() {
+                if moved != Vector::ZERO {
                     b.set_next_kinematic_translation(t + moved);
                 }
                 if turned {

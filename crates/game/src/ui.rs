@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 /// Deterministic, stable widget identity. Assigned by `build_player_ui` from a
 /// widget's logical role (NOT a slotmap key), so `diff_ui` can match nodes
 /// across rebuilds. Root is always `WidgetId(0)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, state_hash::StateHash)]
 pub struct WidgetId(pub u64);
 
 /// Icon handle the client resolves to a texture. For inventory, derived from

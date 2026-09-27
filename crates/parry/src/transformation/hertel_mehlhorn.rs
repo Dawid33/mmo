@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use crate::math::{Point, Real};
+use crate::math::Vector;
 use crate::utils::point_in_triangle::{corner_direction, Orientation};
 
 /// Checks if the counter-clockwise polygon `poly` has an edge going counter-clockwise from `p1` to `p2`.
@@ -29,7 +29,7 @@ fn find_edge_index_in_polygon(p1: u32, p2: u32, indices: &[u32]) -> Option<(usiz
 /// partitioning.
 ///
 /// This algorithm is described in <https://people.mpi-inf.mpg.de/~mehlhorn/ftp/FastTriangulation.pdf>.
-pub fn hertel_mehlhorn(vertices: &[Point<Real>], indices: &[[u32; 3]]) -> Vec<Vec<Point<Real>>> {
+pub fn hertel_mehlhorn(vertices: &[Vector], indices: &[[u32; 3]]) -> Vec<Vec<Vector>> {
     hertel_mehlhorn_idx(vertices, indices)
         .into_iter()
         .map(|poly_indices| {
@@ -42,7 +42,7 @@ pub fn hertel_mehlhorn(vertices: &[Point<Real>], indices: &[[u32; 3]]) -> Vec<Ve
 }
 
 /// Internal implementation of the Hertel-Mehlhorn algorithm that returns the polygon indices.
-pub fn hertel_mehlhorn_idx(vertices: &[Point<Real>], indices: &[[u32; 3]]) -> Vec<Vec<u32>> {
+pub fn hertel_mehlhorn_idx(vertices: &[Vector], indices: &[[u32; 3]]) -> Vec<Vec<u32>> {
     let mut indices: Vec<Vec<u32>> = indices.iter().map(|indices| indices.to_vec()).collect();
     // Iterate over all polygons.
     let mut i_poly1 = 0;
@@ -85,9 +85,9 @@ pub fn hertel_mehlhorn_idx(vertices: &[Point<Real>], indices: &[[u32; 3]]) -> Ve
             // First connection:
             let i13 = (polygon1.len() + i11 - 1) % polygon1.len();
             let i23 = (i22 + 1) % polygon2.len();
-            let p1 = &vertices[polygon2[i23] as usize];
-            let p2 = &vertices[polygon1[i13] as usize];
-            let p3 = &vertices[polygon1[i11] as usize];
+            let p1 = vertices[polygon2[i23] as usize];
+            let p2 = vertices[polygon1[i13] as usize];
+            let p3 = vertices[polygon1[i11] as usize];
             // Go to the next point if this section isn't convex.
             if corner_direction(p1, p2, p3) == Orientation::Cw {
                 i11 += 1;
@@ -96,9 +96,9 @@ pub fn hertel_mehlhorn_idx(vertices: &[Point<Real>], indices: &[[u32; 3]]) -> Ve
             // Second connection:
             let i13 = (i12 + 1) % polygon1.len();
             let i23 = (polygon2.len() + i21 - 1) % polygon2.len();
-            let p1 = &vertices[polygon1[i13] as usize];
-            let p2 = &vertices[polygon2[i23] as usize];
-            let p3 = &vertices[polygon1[i12] as usize];
+            let p1 = vertices[polygon1[i13] as usize];
+            let p2 = vertices[polygon2[i23] as usize];
+            let p3 = vertices[polygon1[i12] as usize];
             // Go to the next point if this section isn't convex.
             if corner_direction(p1, p2, p3) == Orientation::Cw {
                 i11 += 1;
@@ -110,8 +110,10 @@ pub fn hertel_mehlhorn_idx(vertices: &[Point<Real>], indices: &[[u32; 3]]) -> Ve
             new_polygon.extend(polygon1.iter().cycle().skip(i12).take(polygon1.len() - 1));
             new_polygon.extend(polygon2.iter().cycle().skip(i22).take(polygon2.len() - 1));
 
-            // Remove the polygon from the list.
-            let _ = indices.remove(i_poly2);
+            // `swap_remove` is O(1) and safe here: it moves the last polygon into slot
+            // `i_poly2 > i_poly1`, which the edge search above re-scans, so no merge
+            // candidate is skipped — only the output order changes.
+            let _ = indices.swap_remove(i_poly2);
             // Overwrite the first polygon with the new one.
             indices[i_poly1] = new_polygon;
             // Start from the first point.
@@ -129,7 +131,19 @@ pub fn hertel_mehlhorn_idx(vertices: &[Point<Real>], indices: &[[u32; 3]]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::hertel_mehlhorn_idx;
-    use crate::math::Point;
+    use crate::math::Vector;
+    use alloc::vec::Vec;
+
+    /// Normalizes a decomposition for an order-insensitive comparison, since the
+    /// algorithm's output order is unspecified.
+    fn canonicalize(mut polygons: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
+        for poly in &mut polygons {
+            let min_pos = (0..poly.len()).min_by_key(|&i| poly[i]).unwrap();
+            poly.rotate_left(min_pos);
+        }
+        polygons.sort();
+        polygons
+    }
 
     #[test]
     fn origin_outside_shape() {
@@ -142,14 +156,14 @@ mod tests {
         // |       |   °   |       |
         // 5-------6       1-------2
         let vertices = vec![
-            Point::new(2.0, 2.0),   // 0
-            Point::new(2.0, -2.0),  // 1
-            Point::new(4.0, -2.0),  // 2
-            Point::new(4.0, 4.0),   // 3
-            Point::new(-4.0, 4.0),  // 4
-            Point::new(-4.0, -2.0), // 5
-            Point::new(-2.0, -2.0), // 6
-            Point::new(-2.0, 2.0),  // 7
+            Vector::new(2.0, 2.0),   // 0
+            Vector::new(2.0, -2.0),  // 1
+            Vector::new(4.0, -2.0),  // 2
+            Vector::new(4.0, 4.0),   // 3
+            Vector::new(-4.0, 4.0),  // 4
+            Vector::new(-4.0, -2.0), // 5
+            Vector::new(-2.0, -2.0), // 6
+            Vector::new(-2.0, 2.0),  // 7
         ];
 
         let triangles = [
@@ -172,6 +186,8 @@ mod tests {
             vec![2, 3, 0, 1],
         ];
 
-        assert_eq!(indices, expected_indices);
+        // Compare the decompositions as sets of (cyclic) polygons: the output order
+        // is unspecified.
+        assert_eq!(canonicalize(indices), canonicalize(expected_indices));
     }
 }

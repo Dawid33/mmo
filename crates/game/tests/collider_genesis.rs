@@ -2,14 +2,13 @@
 //! fully-solid chunks collapse to a single cuboid; partial chunks get up to
 //! two parry Voxels shapes (block-scale for whole solid blocks, voxel-scale
 //! for chisel detail); the build is deterministic (bit-exact hash).
-use game::parry::math::Real;
 use game::parry::shape::ShapeType;
 use game::{Chunk, ChunkCoords, Region, RegionId};
-use std::hash::Hash;
+use game::StateHash;
 
 fn hash_region(r: &Region) -> u32 {
     let mut h = crc32fast::Hasher::new();
-    r.data().data.hash(&mut h);
+    r.data().data.state_hash(&mut h);
     h.finalize()
 }
 
@@ -64,16 +63,16 @@ fn genesis_is_deterministic() {
 }
 
 /// Voxel sizes of the `Voxels` colliders genesis builds for one chunk.
-fn voxels_collider_sizes(chunk: Chunk) -> Vec<Real> {
+fn voxels_collider_sizes(chunk: Chunk) -> Vec<f32> {
     let region = Region::from_chunks(RegionId::new(0, 0), vec![(ChunkCoords::new(0, 0, 0), chunk)]);
-    let mut sizes: Vec<Real> = region
+    let mut sizes: Vec<f32> = region
         .data()
         .physics
         .colliders
         .iter()
         .filter_map(|(_, c)| c.shape().as_voxels().map(|v| v.voxel_size().x))
         .collect();
-    sizes.sort();
+    sizes.sort_by(f32::total_cmp);
     sizes
 }
 
@@ -83,7 +82,7 @@ fn mixed_chunk_gets_block_and_voxel_scale_colliders() {
     // in by=1, which fills no half-block octant, so it needs voxel scale.
     assert_eq!(
         voxels_collider_sizes(Chunk::flat_floor(20)),
-        vec![Real::from(1.0), Real::from(16.0)],
+        vec![1.0, 16.0],
         "one chisel-scale and one block-scale voxels collider"
     );
 }
@@ -95,7 +94,7 @@ fn half_block_slab_gets_half_block_scale_collider() {
     // voxel-scale collider.
     assert_eq!(
         voxels_collider_sizes(Chunk::flat_floor(24)),
-        vec![Real::from(8.0), Real::from(16.0)],
+        vec![8.0, 16.0],
         "one half-block-scale and one block-scale voxels collider"
     );
 }
@@ -112,7 +111,7 @@ fn fixed_terrain_bodies_skip_collider_mass_properties() {
         // must be skipped entirely: local mass stays at its default (0).
         assert_eq!(
             body.mass(),
-            Real::from(0.0),
+            0.0,
             "fixed terrain body computed collider mass properties"
         );
         checked += 1;

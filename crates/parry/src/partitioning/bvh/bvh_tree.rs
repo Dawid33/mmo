@@ -1,6 +1,7 @@
+use super::bvh_optimize::BvhIncrementalOptimizationState;
 use super::BvhOptimizationHeapEntry;
 use crate::bounding_volume::{Aabb, BoundingVolume};
-use crate::math::{Point, RawReal, Real, Vector};
+use crate::math::{Real, Vector};
 use crate::query::{Ray, RayCast};
 use crate::utils::VecMap;
 use alloc::collections::{BinaryHeap, VecDeque};
@@ -31,13 +32,13 @@ use core::ops::{Deref, DerefMut, Index, IndexMut};
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
 /// use parry3d::bounding_volume::Aabb;
-/// use nalgebra::Point3;
+/// use parry3d::math::Vector;
 ///
 /// // Create some AABBs for objects in the scene
 /// let aabbs = vec![
-///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-///     Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0)),
-///     Aabb::new(Point3::new(0.0, 2.0, 0.0), Point3::new(1.0, 3.0, 1.0)),
+///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+///     Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0)),
+///     Aabb::new(Vector::new(0.0, 2.0, 0.0), Vector::new(1.0, 3.0, 1.0)),
 /// ];
 ///
 /// // Use binned strategy for general purpose (default)
@@ -108,11 +109,11 @@ pub enum BvhBuildStrategy {
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::partitioning::{Bvh, BvhBuildStrategy, BvhWorkspace};
 /// use parry3d::bounding_volume::Aabb;
-/// use nalgebra::Point3;
+/// use parry3d::math::Vector;
 ///
 /// let aabbs = vec![
-///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-///     Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0)),
+///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+///     Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0)),
 /// ];
 ///
 /// let mut bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
@@ -136,8 +137,6 @@ pub enum BvhBuildStrategy {
 pub struct BvhWorkspace {
     pub(super) refit_tmp: BvhNodeVec,
     pub(super) rebuild_leaves: Vec<BvhNode>,
-    pub(super) rebuild_frame_index: u32,
-    pub(super) rebuild_start_index: u32,
     pub(super) optimization_roots: Vec<u32>,
     pub(super) queue: BinaryHeap<BvhOptimizationHeapEntry>,
     pub(super) dequeue: VecDeque<u32>,
@@ -145,14 +144,14 @@ pub struct BvhWorkspace {
 }
 
 /// A piece of data packing state flags as well as leaf counts for a BVH tree node.
-#[derive(Default, Copy, Clone, Debug, Hash)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(transparent)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct BvhNodeData(u32);
 const CHANGED: u32 = 0b01;
 const CHANGE_PENDING: u32 = 0b11;
@@ -186,6 +185,17 @@ impl BvhNodeData {
     #[inline(always)]
     pub(super) fn set_change_pending(&mut self) {
         self.0 |= CHANGE_PENDING << 30;
+    }
+
+    /// Collapses any change flag (pending or resolved) into the resolved `CHANGED` state.
+    ///
+    /// Used by partial refitting on internal nodes: a pending flag on an internal node
+    /// would otherwise read as "unchanged" (`is_changed() == false`) during traversals.
+    #[inline(always)]
+    pub(super) fn normalize_change_flag(&mut self) {
+        if self.0 >> 30 != 0 {
+            *self = Self((self.0 & 0x3fff_ffff) | (CHANGED << 30));
+        }
     }
 
     #[inline(always)]
@@ -229,12 +239,12 @@ impl BvhNodeData {
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
 /// use parry3d::bounding_volume::Aabb;
-/// use nalgebra::Point3;
+/// use parry3d::math::Vector;
 ///
 /// let aabbs = vec![
-///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-///     Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0)),
-///     Aabb::new(Point3::new(4.0, 0.0, 0.0), Point3::new(5.0, 1.0, 1.0)),
+///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+///     Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0)),
+///     Aabb::new(Vector::new(4.0, 0.0, 0.0), Vector::new(5.0, 1.0, 1.0)),
 /// ];
 ///
 /// let bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
@@ -249,17 +259,17 @@ impl BvhNodeData {
 ///
 /// - [`BvhNode`] - Individual node in the pair
 /// - [`Bvh`] - The main BVH structure
-#[derive(Copy, Clone, Debug, Hash)]
+#[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
 // PERF: the size of this struct is 64 bytes but has a default alignment of 16 (in f32 + 3d + simd mode).
 //       Forcing an alignment of 64 won’t add padding, and makes aligns it with most cache lines.
 #[cfg_attr(all(feature = "dim3", feature = "f32"), repr(align(64)))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct BvhNodeWide {
     pub(super) left: BvhNode,
     pub(super) right: BvhNode,
@@ -306,11 +316,11 @@ impl BvhNodeWide {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::{Aabb, BoundingVolume};
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs = vec![
-    ///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0)),
     /// ];
     ///
     /// let bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
@@ -338,15 +348,15 @@ impl BvhNodeWide {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNodeWide;
-    /// use nalgebra::Vector3;
+    /// use parry3d::math::Vector;
     ///
     /// let mut node_wide = BvhNodeWide::zeros();
     /// let nodes = node_wide.as_array_mut();
     ///
     /// // Scale both nodes by 2.0
-    /// let scale = Vector3::new(2.0, 2.0, 2.0);
-    /// nodes[0].scale(&scale);
-    /// nodes[1].scale(&scale);
+    /// let scale = Vector::splat(2.0);
+    /// nodes[0].scale(scale);
+    /// nodes[1].scale(scale);
     /// # }
     /// ```
     ///
@@ -389,16 +399,16 @@ impl BvhNodeWide {
 }
 
 #[repr(C)] // SAFETY: needed to ensure SIMD aabb checks rely on the layout.
-#[cfg(all(feature = "simd-is-enabled", feature = "dim3", feature = "f32"))]
+#[cfg(all(feature = "dim3", feature = "f32"))]
 pub(super) struct BvhNodeSimd {
-    mins: glam::Vec3A,
-    maxs: glam::Vec3A,
+    mins: glamx::Vec3A,
+    maxs: glamx::Vec3A,
 }
 
 // SAFETY: compile-time assertions to ensure we can transmute between `BvhNode` and `BvhNodeSimd`.
-#[cfg(all(feature = "simd-is-enabled", feature = "dim3", feature = "f32"))]
+#[cfg(all(feature = "dim3", feature = "f32"))]
 static_assertions::assert_eq_align!(BvhNode, BvhNodeSimd);
-#[cfg(all(feature = "simd-is-enabled", feature = "dim3", feature = "f32"))]
+#[cfg(all(feature = "dim3", feature = "f32"))]
 static_assertions::assert_eq_size!(BvhNode, BvhNodeSimd);
 
 /// A single node (internal or leaf) of a BVH.
@@ -428,10 +438,10 @@ static_assertions::assert_eq_size!(BvhNode, BvhNodeSimd);
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::partitioning::BvhNode;
 /// use parry3d::bounding_volume::Aabb;
-/// use nalgebra::Point3;
+/// use parry3d::math::Vector;
 ///
 /// // Create a leaf node
-/// let aabb = Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0));
+/// let aabb = Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0));
 /// let leaf = BvhNode::leaf(aabb, 42);
 ///
 /// assert!(leaf.is_leaf());
@@ -444,24 +454,24 @@ static_assertions::assert_eq_size!(BvhNode, BvhNodeSimd);
 ///
 /// - `BvhNodeWide` - Pair of nodes stored together
 /// - [`Bvh`] - The main BVH structure
-#[derive(Copy, Clone, Debug, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(C)] // SAFETY: needed to ensure SIMD aabb checks rely on the layout.
 #[cfg_attr(all(feature = "f32", feature = "dim3"), repr(align(16)))]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct BvhNode {
     /// Mins coordinates of the node’s bounding volume.
-    pub(super) mins: Point<Real>,
+    pub(super) mins: Vector,
     /// Children of this node. A node has either 0 (i.e. it’s a leaf) or 2 children.
     ///
     /// If [`Self::leaf_count`] is 1, then the node has 0 children and is a leaf.
     pub(super) children: u32,
     /// Maxs coordinates of this node’s bounding volume.
-    pub(super) maxs: Point<Real>,
+    pub(super) maxs: Vector,
     /// Packed data associated to this node (leaf count and flags).
     pub(super) data: BvhNodeData,
 }
@@ -470,9 +480,9 @@ impl BvhNode {
     #[inline(always)]
     pub(super) fn zeros() -> Self {
         Self {
-            mins: Point::origin(),
+            mins: Vector::ZERO,
             children: 0,
-            maxs: Point::origin(),
+            maxs: Vector::ZERO,
             data: BvhNodeData(0),
         }
     }
@@ -498,10 +508,10 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// // Create an AABB for a unit cube
-    /// let aabb = Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0));
+    /// let aabb = Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0));
     ///
     /// // Create a leaf node with index 0
     /// let leaf = BvhNode::leaf(aabb, 0);
@@ -543,9 +553,9 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb = Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0));
+    /// let aabb = Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0));
     /// let leaf = BvhNode::leaf(aabb, 42);
     ///
     /// assert_eq!(leaf.leaf_data(), Some(42));
@@ -576,9 +586,9 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb = Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0));
+    /// let aabb = Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0));
     /// let leaf = BvhNode::leaf(aabb, 0);
     ///
     /// assert!(leaf.is_leaf());
@@ -599,7 +609,7 @@ impl BvhNode {
     }
 
     #[inline(always)]
-    #[cfg(all(feature = "simd-is-enabled", feature = "dim3", feature = "f32"))]
+    #[cfg(all(feature = "dim3", feature = "f32"))]
     pub(super) fn as_simd(&self) -> &BvhNodeSimd {
         // SAFETY: BvhNode is declared with the alignment
         //         and size of two SimdReal.
@@ -608,11 +618,10 @@ impl BvhNode {
 
     #[inline(always)]
     pub(super) fn merged(&self, other: &Self, children: u32) -> Self {
-        // TODO PERF: simd optimizations?
         Self {
-            mins: self.mins.inf(&other.mins),
+            mins: self.mins.min(other.mins),
             children,
-            maxs: self.maxs.sup(&other.maxs),
+            maxs: self.maxs.max(other.maxs),
             data: self.data.merged(other.data),
         }
     }
@@ -632,12 +641,12 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb = Aabb::new(Point3::new(1.0, 2.0, 3.0), Point3::new(4.0, 5.0, 6.0));
+    /// let aabb = Aabb::new(Vector::new(1.0, 2.0, 3.0), Vector::new(4.0, 5.0, 6.0));
     /// let node = BvhNode::leaf(aabb, 0);
     ///
-    /// assert_eq!(node.mins(), Point3::new(1.0, 2.0, 3.0));
+    /// assert_eq!(node.mins(), Vector::new(1.0, 2.0, 3.0));
     /// # }
     /// ```
     ///
@@ -646,7 +655,7 @@ impl BvhNode {
     /// - [`maxs`](Self::maxs) - Get the maximum corner
     /// - [`aabb`](Self::aabb) - Get the full AABB
     #[inline]
-    pub fn mins(&self) -> Point<Real> {
+    pub fn mins(&self) -> Vector {
         self.mins
     }
 
@@ -665,12 +674,12 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb = Aabb::new(Point3::new(1.0, 2.0, 3.0), Point3::new(4.0, 5.0, 6.0));
+    /// let aabb = Aabb::new(Vector::new(1.0, 2.0, 3.0), Vector::new(4.0, 5.0, 6.0));
     /// let node = BvhNode::leaf(aabb, 0);
     ///
-    /// assert_eq!(node.maxs(), Point3::new(4.0, 5.0, 6.0));
+    /// assert_eq!(node.maxs(), Vector::new(4.0, 5.0, 6.0));
     /// # }
     /// ```
     ///
@@ -679,7 +688,7 @@ impl BvhNode {
     /// - [`mins`](Self::mins) - Get the minimum corner
     /// - [`aabb`](Self::aabb) - Get the full AABB
     #[inline]
-    pub fn maxs(&self) -> Point<Real> {
+    pub fn maxs(&self) -> Vector {
         self.maxs
     }
 
@@ -698,9 +707,9 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let original_aabb = Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0));
+    /// let original_aabb = Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0));
     /// let node = BvhNode::leaf(original_aabb, 0);
     ///
     /// assert_eq!(node.aabb(), original_aabb);
@@ -734,17 +743,17 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb = Aabb::new(Point3::origin(), Point3::new(2.0, 4.0, 6.0));
+    /// let aabb = Aabb::new(Vector::ZERO, Vector::new(2.0, 4.0, 6.0));
     /// let node = BvhNode::leaf(aabb, 0);
     ///
-    /// assert_eq!(node.center(), Point3::new(1.0, 2.0, 3.0));
+    /// assert_eq!(node.center(), Vector::new(1.0, 2.0, 3.0));
     /// # }
     /// ```
     #[inline]
-    pub fn center(&self) -> Point<Real> {
-        na::center(&self.mins, &self.maxs)
+    pub fn center(&self) -> Vector {
+        self.mins.midpoint(self.maxs)
     }
 
     /// Returns `true` if this node has been marked as changed.
@@ -763,9 +772,9 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb = Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0));
+    /// let aabb = Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0));
     /// let node = BvhNode::leaf(aabb, 0);
     ///
     /// // New leaf nodes are marked as changed (pending change)
@@ -797,15 +806,15 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb = Aabb::new(Point3::new(1.0, 1.0, 1.0), Point3::new(2.0, 2.0, 2.0));
+    /// let aabb = Aabb::new(Vector::new(1.0, 1.0, 1.0), Vector::new(2.0, 2.0, 2.0));
     /// let mut node = BvhNode::leaf(aabb, 0);
     ///
-    /// node.scale(&Vector3::new(2.0, 2.0, 2.0));
+    /// node.scale(Vector::new(2.0, 2.0, 2.0));
     ///
-    /// assert_eq!(node.mins(), Point3::new(2.0, 2.0, 2.0));
-    /// assert_eq!(node.maxs(), Point3::new(4.0, 4.0, 4.0));
+    /// assert_eq!(node.mins(), Vector::new(2.0, 2.0, 2.0));
+    /// assert_eq!(node.maxs(), Vector::new(4.0, 4.0, 4.0));
     /// # }
     /// ```
     ///
@@ -813,9 +822,13 @@ impl BvhNode {
     ///
     /// - [`Bvh::scale`] - Scale an entire BVH tree
     #[inline]
-    pub fn scale(&mut self, scale: &Vector<Real>) {
-        self.mins.coords.component_mul_assign(scale);
-        self.maxs.coords.component_mul_assign(scale);
+    pub fn scale(&mut self, scale: Vector) {
+        let new_mins = self.mins * scale;
+        let new_maxs = self.maxs * scale;
+        // When scale has negative components, mins/maxs swap on those axes.
+        // Use component-wise min/max to maintain the AABB invariant (mins <= maxs).
+        self.mins = new_mins.min(new_maxs);
+        self.maxs = new_mins.max(new_maxs);
     }
 
     /// Calculates the volume of this node's AABB.
@@ -834,10 +847,10 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// // Create a 2×3×4 box
-    /// let aabb = Aabb::new(Point3::origin(), Point3::new(2.0, 3.0, 4.0));
+    /// let aabb = Aabb::new(Vector::ZERO, Vector::new(2.0, 3.0, 4.0));
     /// let node = BvhNode::leaf(aabb, 0);
     ///
     /// assert_eq!(node.volume(), 24.0); // 2 * 3 * 4 = 24
@@ -881,10 +894,10 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb1 = Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0));
-    /// let aabb2 = Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0));
+    /// let aabb1 = Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0));
+    /// let aabb2 = Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0));
     ///
     /// let node1 = BvhNode::leaf(aabb1, 0);
     /// let node2 = BvhNode::leaf(aabb2, 1);
@@ -899,8 +912,8 @@ impl BvhNode {
     /// - [`volume`](Self::volume) - Volume of a single node
     pub fn merged_volume(&self, other: &Self) -> Real {
         // TODO PERF: simd optimizations?
-        let mins = self.mins.inf(&other.mins);
-        let maxs = self.maxs.sup(&other.maxs);
+        let mins = self.mins.min(other.mins);
+        let maxs = self.maxs.max(other.maxs);
         let extents = maxs - mins;
 
         #[cfg(feature = "dim2")]
@@ -924,8 +937,8 @@ impl BvhNode {
     ///
     /// # Performance
     ///
-    /// When SIMD is enabled (3D, f32, simd-is-enabled feature), this uses vectorized
-    /// comparisons for improved performance.
+    /// In 3D with f32, this uses vectorized comparisons for improved
+    /// performance.
     ///
     /// # Example
     ///
@@ -933,11 +946,11 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb1 = Aabb::new(Point3::origin(), Point3::new(2.0, 2.0, 2.0));
-    /// let aabb2 = Aabb::new(Point3::new(1.0, 1.0, 1.0), Point3::new(3.0, 3.0, 3.0));
-    /// let aabb3 = Aabb::new(Point3::new(5.0, 5.0, 5.0), Point3::new(6.0, 6.0, 6.0));
+    /// let aabb1 = Aabb::new(Vector::ZERO, Vector::new(2.0, 2.0, 2.0));
+    /// let aabb2 = Aabb::new(Vector::new(1.0, 1.0, 1.0), Vector::new(3.0, 3.0, 3.0));
+    /// let aabb3 = Aabb::new(Vector::new(5.0, 5.0, 5.0), Vector::new(6.0, 6.0, 6.0));
     ///
     /// let node1 = BvhNode::leaf(aabb1, 0);
     /// let node2 = BvhNode::leaf(aabb2, 1);
@@ -951,9 +964,9 @@ impl BvhNode {
     /// # See Also
     ///
     /// - [`contains`](Self::contains) - Check full containment
-    #[cfg(not(all(feature = "simd-is-enabled", feature = "dim3", feature = "f32")))]
+    #[cfg(not(all(feature = "dim3", feature = "f32")))]
     pub fn intersects(&self, other: &Self) -> bool {
-        na::partial_le(&self.mins, &other.maxs) && na::partial_ge(&self.maxs, &other.mins)
+        self.mins.cmple(other.maxs).all() && self.maxs.cmpge(other.mins).all()
     }
 
     /// Tests if this node's AABB intersects another node's AABB.
@@ -977,13 +990,13 @@ impl BvhNode {
     ///
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
-    /// use parry3d::partitioning::bvh::BvhNode;
+    /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb1 = Aabb::new(Point3::origin(), Point3::new(2.0, 2.0, 2.0));
-    /// let aabb2 = Aabb::new(Point3::new(1.0, 1.0, 1.0), Point3::new(3.0, 3.0, 3.0));
-    /// let aabb3 = Aabb::new(Point3::new(5.0, 5.0, 5.0), Point3::new(6.0, 6.0, 6.0));
+    /// let aabb1 = Aabb::new(Vector::ZERO, Vector::new(2.0, 2.0, 2.0));
+    /// let aabb2 = Aabb::new(Vector::new(1.0, 1.0, 1.0), Vector::new(3.0, 3.0, 3.0));
+    /// let aabb3 = Aabb::new(Vector::new(5.0, 5.0, 5.0), Vector::new(6.0, 6.0, 6.0));
     ///
     /// let node1 = BvhNode::leaf(aabb1, 0);
     /// let node2 = BvhNode::leaf(aabb2, 1);
@@ -997,7 +1010,7 @@ impl BvhNode {
     /// # See Also
     ///
     /// - [`contains`](Self::contains) - Check full containment
-    #[cfg(all(feature = "simd-is-enabled", feature = "dim3", feature = "f32"))]
+    #[cfg(all(feature = "dim3", feature = "f32"))]
     pub fn intersects(&self, other: &Self) -> bool {
         let simd_self = self.as_simd();
         let simd_other = other.as_simd();
@@ -1019,8 +1032,8 @@ impl BvhNode {
     ///
     /// # Performance
     ///
-    /// When SIMD is enabled (3D, f32, simd-is-enabled feature), this uses vectorized
-    /// comparisons for improved performance.
+    /// In 3D with f32, this uses vectorized comparisons for improved
+    /// performance.
     ///
     /// # Example
     ///
@@ -1028,10 +1041,10 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let large = Aabb::new(Point3::origin(), Point3::new(10.0, 10.0, 10.0));
-    /// let small = Aabb::new(Point3::new(2.0, 2.0, 2.0), Point3::new(5.0, 5.0, 5.0));
+    /// let large = Aabb::new(Vector::ZERO, Vector::new(10.0, 10.0, 10.0));
+    /// let small = Aabb::new(Vector::new(2.0, 2.0, 2.0), Vector::new(5.0, 5.0, 5.0));
     ///
     /// let node_large = BvhNode::leaf(large, 0);
     /// let node_small = BvhNode::leaf(small, 1);
@@ -1045,9 +1058,9 @@ impl BvhNode {
     ///
     /// - [`intersects`](Self::intersects) - Check any overlap
     /// - [`contains_aabb`](Self::contains_aabb) - Contains an `Aabb` directly
-    #[cfg(not(all(feature = "simd-is-enabled", feature = "dim3", feature = "f32")))]
+    #[cfg(not(all(feature = "dim3", feature = "f32")))]
     pub fn contains(&self, other: &Self) -> bool {
-        na::partial_le(&self.mins, &other.mins) && na::partial_ge(&self.maxs, &other.maxs)
+        self.mins.cmple(other.mins).all() && self.maxs.cmpge(other.maxs).all()
     }
 
     /// Tests if this node's AABB fully contains another node's AABB.
@@ -1071,12 +1084,12 @@ impl BvhNode {
     ///
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
-    /// use parry3d::partitioning::bvh::BvhNode;
+    /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let large = Aabb::new(Point3::origin(), Point3::new(10.0, 10.0, 10.0));
-    /// let small = Aabb::new(Point3::new(2.0, 2.0, 2.0), Point3::new(5.0, 5.0, 5.0));
+    /// let large = Aabb::new(Vector::ZERO, Vector::new(10.0, 10.0, 10.0));
+    /// let small = Aabb::new(Vector::new(2.0, 2.0, 2.0), Vector::new(5.0, 5.0, 5.0));
     ///
     /// let node_large = BvhNode::leaf(large, 0);
     /// let node_small = BvhNode::leaf(small, 1);
@@ -1090,7 +1103,7 @@ impl BvhNode {
     ///
     /// - [`intersects`](Self::intersects) - Check any overlap
     /// - [`contains_aabb`](Self::contains_aabb) - Contains an `Aabb` directly
-    #[cfg(all(feature = "simd-is-enabled", feature = "dim3", feature = "f32"))]
+    #[cfg(all(feature = "dim3", feature = "f32"))]
     pub fn contains(&self, other: &Self) -> bool {
         let simd_self = self.as_simd();
         let simd_other = other.as_simd();
@@ -1116,10 +1129,10 @@ impl BvhNode {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
-    /// let large = Aabb::new(Point3::origin(), Point3::new(10.0, 10.0, 10.0));
-    /// let small = Aabb::new(Point3::new(2.0, 2.0, 2.0), Point3::new(5.0, 5.0, 5.0));
+    /// let large = Aabb::new(Vector::ZERO, Vector::new(10.0, 10.0, 10.0));
+    /// let small = Aabb::new(Vector::new(2.0, 2.0, 2.0), Vector::new(5.0, 5.0, 5.0));
     ///
     /// let node = BvhNode::leaf(large, 0);
     ///
@@ -1132,7 +1145,7 @@ impl BvhNode {
     /// - [`contains`](Self::contains) - Contains another `BvhNode`
     pub fn contains_aabb(&self, other: &Aabb) -> bool {
         // TODO PERF: simd optimizations?
-        na::partial_le(&self.mins, &other.mins) && na::partial_ge(&self.maxs, &other.maxs)
+        self.mins.cmple(other.mins).all() && self.maxs.cmpge(other.maxs).all()
     }
 
     /// Casts a ray against this node's AABB.
@@ -1157,13 +1170,13 @@ impl BvhNode {
     /// use parry3d::partitioning::BvhNode;
     /// use parry3d::bounding_volume::Aabb;
     /// use parry3d::query::Ray;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::Vector;
     ///
-    /// let aabb = Aabb::new(Point3::new(5.0, -1.0, -1.0), Point3::new(6.0, 1.0, 1.0));
+    /// let aabb = Aabb::new(Vector::new(5.0, -1.0, -1.0), Vector::new(6.0, 1.0, 1.0));
     /// let node = BvhNode::leaf(aabb, 0);
     ///
     /// // Ray from origin along X axis
-    /// let ray = Ray::new(Point3::origin(), Vector3::new(1.0, 0.0, 0.0));
+    /// let ray = Ray::new(Vector::ZERO, Vector::new(1.0, 0.0, 0.0));
     ///
     /// let toi = node.cast_ray(&ray, f32::MAX);
     /// assert_eq!(toi, 5.0); // Ray hits at x=5.0
@@ -1177,13 +1190,13 @@ impl BvhNode {
     pub fn cast_ray(&self, ray: &Ray, max_toi: Real) -> Real {
         self.aabb()
             .cast_local_ray(ray, max_toi, true)
-            .unwrap_or(RawReal::MAX.into())
+            .unwrap_or(Real::MAX)
     }
 
     /// Casts a ray on this AABB, with SIMD optimizations.
     ///
     /// Returns `Real::MAX` if there is no hit.
-    #[cfg(all(feature = "simd-is-enabled", feature = "dim3", feature = "f32"))]
+    #[cfg(all(feature = "dim3", feature = "f32"))]
     pub(super) fn cast_inv_ray_simd(&self, ray: &super::bvh_queries::SimdInvRay) -> f32 {
         let simd_self = self.as_simd();
         let t1 = (simd_self.mins - ray.origin) * ray.inv_dir;
@@ -1240,13 +1253,13 @@ impl BvhNode {
 ///
 /// - `BvhNodeWide` - The pair of nodes this index points into
 /// - [`Bvh`] - The main BVH structure
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct BvhNodeIndex(pub usize);
 
 impl BvhNodeIndex {
@@ -1415,31 +1428,21 @@ impl BvhNodeIndex {
 }
 
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(not(all(feature = "dim3", feature = "f32")), derive(Hash))]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 pub(crate) struct BvhNodeVec(pub(crate) Vec<BvhNodeWide>);
 
-// SAFETY / DETERMINISM invariants for the bulk hash below, const-asserted:
-// - BvhNode is repr(C), align(16): mins (Point<Real> = 3×f32 via
-//   repr(transparent) OrderedFloat) + children u32 + maxs (3×f32) + data u32
-//   = 32 bytes, no padding. BvhNodeWide is repr(C), align(64) = exactly two
-//   BvhNodes = 64 bytes, no padding.
-// - Every field is always initialized (no MaybeUninit), so every byte is
-//   defined.
-// - Both shipping targets (x86-64, wasm32) are little-endian; the byte image
-//   of a node is therefore identical across machines for identical content.
-//   A big-endian port would need a per-field fallback here.
-// Hashing the raw bytes covers EXACTLY what the derived Hash covered (mins,
-// children, maxs, data — including the packed changed/pending flags) in one
-// Hasher::write instead of ~16 per-field calls per node. This is the hot
-// input of the rollback step-journal digests (`BroadSaved::digest` /
-// `BroadPhaseBvh::journal_digest` in the rapier fork) and of Full-mode state
-// hashing, both of which hash the whole tree.
+// mmo-fork: StateHash — the whole tree is hashed by the step-journal digests
+// and state hashing, so the node array goes in as one byte image (the old
+// fork's `Hash for BvhNodeVec`, 3ead754) instead of a ~16-field walk per wide
+// node. Sound because both node types are `repr(C)` with no padding (asserted
+// below); the bytes are little-endian on every target we ship (x86_64,
+// aarch64, wasm32), and nodes hold no `usize`. Floats go in raw, not
+// canonicalised: stricter than `StateHash`'s float rule (a -0.0 AABB bound
+// differs from 0.0), which never matters for a bit-exact restore.
 #[cfg(all(feature = "dim3", feature = "f32"))]
 const _: () = {
     assert!(size_of::<BvhNode>() == 32);
@@ -1447,18 +1450,25 @@ const _: () = {
 };
 
 #[cfg(all(feature = "dim3", feature = "f32"))]
-impl core::hash::Hash for BvhNodeVec {
-    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        // Length first so [A, B] and [A ++ B] byte streams cannot collide;
-        // mirrors the derived Vec hash prefix.
-        state.write_usize(self.0.len());
+impl state_hash::StateHash for BvhNodeVec {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        state_hash::hash_len(self.0.len(), h);
+        // SAFETY: `BvhNodeWide` is plain-old-data without padding (size
+        // asserted above), so every byte of the slice is initialised.
         let bytes = unsafe {
             core::slice::from_raw_parts(
                 self.0.as_ptr() as *const u8,
                 self.0.len() * size_of::<BvhNodeWide>(),
             )
         };
-        state.write(bytes);
+        h.write(bytes);
+    }
+}
+
+#[cfg(not(all(feature = "dim3", feature = "f32")))]
+impl state_hash::StateHash for BvhNodeVec {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        self.0.state_hash(h);
     }
 }
 
@@ -1549,13 +1559,13 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
 /// use parry3d::bounding_volume::Aabb;
-/// use nalgebra::Point3;
+/// use parry3d::math::Vector;
 ///
 /// // Create AABBs for your objects
 /// let objects = vec![
-///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-///     Aabb::new(Point3::new(5.0, 0.0, 0.0), Point3::new(6.0, 1.0, 1.0)),
-///     Aabb::new(Point3::new(10.0, 0.0, 0.0), Point3::new(11.0, 1.0, 1.0)),
+///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+///     Aabb::new(Vector::new(5.0, 0.0, 0.0), Vector::new(6.0, 1.0, 1.0)),
+///     Aabb::new(Vector::new(10.0, 0.0, 0.0), Vector::new(11.0, 1.0, 1.0)),
 /// ];
 ///
 /// // Build the BVH - the index of each AABB becomes its leaf ID
@@ -1563,8 +1573,8 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
 ///
 /// // Query which objects intersect a region
 /// let query_region = Aabb::new(
-///     Point3::new(-1.0, -1.0, -1.0),
-///     Point3::new(2.0, 2.0, 2.0)
+///     Vector::new(-1.0, -1.0, -1.0),
+///     Vector::new(2.0, 2.0, 2.0)
 /// );
 ///
 /// for leaf_id in bvh.intersect_aabb(&query_region) {
@@ -1582,17 +1592,17 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::partitioning::{Bvh, BvhWorkspace};
 /// use parry3d::bounding_volume::Aabb;
-/// use nalgebra::Point3;
+/// use parry3d::math::Vector;
 ///
 /// let mut bvh = Bvh::new();
 /// let mut workspace = BvhWorkspace::default();
 ///
 /// // Add objects dynamically with custom IDs
-/// bvh.insert(Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)), 100);
-/// bvh.insert(Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0)), 200);
+/// bvh.insert(Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)), 100);
+/// bvh.insert(Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0)), 200);
 ///
 /// // Update an object's position (by re-inserting with same ID)
-/// bvh.insert(Aabb::new(Point3::new(0.5, 0.5, 0.0), Point3::new(1.5, 1.5, 1.0)), 100);
+/// bvh.insert(Aabb::new(Vector::new(0.5, 0.5, 0.0), Vector::new(1.5, 1.5, 1.0)), 100);
 ///
 /// // Refit the tree after updates for optimal query performance
 /// bvh.refit(&mut workspace);
@@ -1611,17 +1621,17 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
 /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
 /// use parry3d::bounding_volume::Aabb;
 /// use parry3d::query::{Ray, RayCast};
-/// use nalgebra::{Point3, Vector3};
+/// use parry3d::math::Vector;
 ///
 /// let objects = vec![
-///     Aabb::new(Point3::new(0.0, 0.0, 5.0), Point3::new(1.0, 1.0, 6.0)),
-///     Aabb::new(Point3::new(0.0, 0.0, 10.0), Point3::new(1.0, 1.0, 11.0)),
+///     Aabb::new(Vector::new(0.0, 0.0, 5.0), Vector::new(1.0, 1.0, 6.0)),
+///     Aabb::new(Vector::new(0.0, 0.0, 10.0), Vector::new(1.0, 1.0, 11.0)),
 /// ];
 ///
 /// let bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &objects);
 ///
 /// // Cast a ray forward along the Z axis
-/// let ray = Ray::new(Point3::new(0.5, 0.5, 0.0), Vector3::new(0.0, 0.0, 1.0));
+/// let ray = Ray::new(Vector::new(0.5, 0.5, 0.0), Vector::new(0.0, 0.0, 1.0));
 /// let max_distance = 100.0;
 ///
 /// // The BVH finds potentially intersecting leaves, then you test actual geometry
@@ -1646,11 +1656,11 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
 /// use parry3d::bounding_volume::Aabb;
-/// use nalgebra::Point3;
+/// use parry3d::math::Vector;
 ///
 /// let aabbs = vec![
-///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-///     Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0)),
+///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+///     Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0)),
 /// ];
 ///
 /// // Binned strategy: Fast construction, good quality (recommended default)
@@ -1674,21 +1684,21 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::partitioning::{Bvh, BvhWorkspace};
 /// use parry3d::bounding_volume::Aabb;
-/// use nalgebra::Point3;
+/// use parry3d::math::Vector;
 ///
 /// let mut bvh = Bvh::new();
 /// let mut workspace = BvhWorkspace::default();
 ///
 /// // Insert initial objects
-/// bvh.insert(Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)), 0);
-/// bvh.insert(Aabb::new(Point3::new(5.0, 0.0, 0.0), Point3::new(6.0, 1.0, 1.0)), 1);
+/// bvh.insert(Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)), 0);
+/// bvh.insert(Aabb::new(Vector::new(5.0, 0.0, 0.0), Vector::new(6.0, 1.0, 1.0)), 1);
 ///
 /// // Simulate object movement every frame
 /// for frame in 0..100 {
 ///     let offset = frame as f32 * 0.1;
 ///     bvh.insert(Aabb::new(
-///         Point3::new(offset, 0.0, 0.0),
-///         Point3::new(1.0 + offset, 1.0, 1.0)
+///         Vector::new(offset, 0.0, 0.0),
+///         Vector::new(1.0 + offset, 1.0, 1.0)
 ///     ), 0);
 ///
 ///     // Refit updates internal AABBs - very fast operation
@@ -1707,7 +1717,7 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::partitioning::{Bvh, BvhWorkspace};
 /// use parry3d::bounding_volume::Aabb;
-/// use nalgebra::Point3;
+/// use parry3d::math::Vector;
 ///
 /// let mut bvh = Bvh::new();
 /// let mut workspace = BvhWorkspace::default();
@@ -1715,8 +1725,8 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
 /// // Build initial tree
 /// for i in 0..1000 {
 ///     let aabb = Aabb::new(
-///         Point3::new(i as f32, 0.0, 0.0),
-///         Point3::new(i as f32 + 1.0, 1.0, 1.0)
+///         Vector::new(i as f32, 0.0, 0.0),
+///         Vector::new(i as f32 + 1.0, 1.0, 1.0)
 ///     );
 ///     bvh.insert(aabb, i);
 /// }
@@ -1784,19 +1794,32 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
 /// - [`BvhBuildStrategy`] - Choose construction algorithm (Binned vs PLOC)
 /// - [`BvhWorkspace`] - Reusable workspace to avoid allocations
 /// - [`BvhNode`] - Individual tree nodes with AABBs
-#[derive(Clone, Debug, Default, Hash)]
+#[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Bvh {
     pub(super) nodes: BvhNodeVec,
     // Parent indices for elements in `nodes`.
     // We don’t store this in `Self::nodes` since it’s only useful for node removal.
     pub(super) parents: Vec<BvhNodeIndex>,
     pub(super) leaf_node_indices: VecMap<BvhNodeIndex>,
+    // NOTE: this cannot be in the workspace as we need this to survive serialization/deserialization
+    //       to maintain determinism.
+    pub(super) optimization: BvhIncrementalOptimizationState,
+    // Wide-node slots orphaned by leaf removals, reused by subsequent insertions
+    // so remove/insert cycles don't grow the node array unboundedly between
+    // compacting refits. The slots are zeroed when freed (a stale leaf copy left
+    // in an orphaned slot would be picked up by [`Bvh::rebuild`]'s raw node scan).
+    // Compacting refits and rebuilds (which recreate the node array and drop the
+    // orphaned slots) clear this list.
+    // NOTE: must survive serialization to maintain determinism (the slot reuse
+    //       order affects the tree topology produced by later insertions).
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub(super) free_wide_nodes: Vec<u32>,
 }
 
 impl Bvh {
@@ -1852,12 +1875,12 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs = vec![
-    ///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(4.0, 0.0, 0.0), Point3::new(5.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(4.0, 0.0, 0.0), Vector::new(5.0, 1.0, 1.0)),
     /// ];
     ///
     /// let bvh = Bvh::from_leaves(BvhBuildStrategy::Binned, &aabbs);
@@ -1907,13 +1930,13 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// // Create a BVH with custom indices
     /// let leaves = vec![
-    ///     (10, Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0))),
-    ///     (20, Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0))),
-    ///     (30, Aabb::new(Point3::new(4.0, 0.0, 0.0), Point3::new(5.0, 1.0, 1.0))),
+    ///     (10, Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0))),
+    ///     (20, Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0))),
+    ///     (30, Aabb::new(Vector::new(4.0, 0.0, 0.0), Vector::new(5.0, 1.0, 1.0))),
     /// ];
     ///
     /// let bvh = Bvh::from_iter(BvhBuildStrategy::Binned, leaves.into_iter());
@@ -2008,11 +2031,11 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::{Aabb, BoundingVolume};
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs = vec![
-    ///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(5.0, 0.0, 0.0), Point3::new(6.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(5.0, 0.0, 0.0), Vector::new(6.0, 1.0, 1.0)),
     /// ];
     ///
     /// let bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
@@ -2040,18 +2063,18 @@ impl Bvh {
 
     /// Scales all AABBs in the tree by the given factors.
     ///
-    /// This multiplies all AABB coordinates (mins and maxs) by the corresponding components
-    /// of the scale vector. This is useful when scaling an entire scene or changing coordinate
-    /// systems.
+    /// Each AABB's coordinates are multiplied by the corresponding scale components, with
+    /// mins and maxs swapped on any axis where the scale is negative to preserve the
+    /// AABB invariant. This is useful when scaling an entire scene or changing coordinate
+    /// systems, including reflections.
     ///
     /// # Arguments
     ///
-    /// * `scale` - Per-axis scale factors (must all be positive)
+    /// * `scale` - Per-axis scale factors. Each component must be non-zero.
     ///
     /// # Panics
     ///
-    /// This function has undefined behavior if any scale component is negative or zero.
-    /// Always use positive scale values.
+    /// Undefined behavior if any scale component is zero (degenerate AABB).
     ///
     /// # Example
     ///
@@ -2059,26 +2082,26 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs = vec![
-    ///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
     /// ];
     ///
     /// let mut bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
     ///
     /// // Scale by 2x on all axes
-    /// bvh.scale(&Vector3::new(2.0, 2.0, 2.0));
+    /// bvh.scale(Vector::new(2.0, 2.0, 2.0));
     ///
     /// let root = bvh.root_aabb();
-    /// assert_eq!(root.maxs, Point3::new(2.0, 2.0, 2.0));
+    /// assert_eq!(root.maxs, Vector::new(2.0, 2.0, 2.0));
     /// # }
     /// ```
     ///
     /// # See Also
     ///
     /// - [`BvhNode::scale`] - Scale a single node
-    pub fn scale(&mut self, scale: &Vector<Real>) {
+    pub fn scale(&mut self, scale: Vector) {
         for node in self.nodes.0.iter_mut() {
             node.left.scale(scale);
             node.right.scale(scale);
@@ -2132,10 +2155,10 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs = vec![
-    ///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
     /// ];
     ///
     /// let bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
@@ -2171,12 +2194,12 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs: Vec<_> = (0..100)
     ///     .map(|i| {
     ///         let f = i as f32;
-    ///         Aabb::new(Point3::new(f, 0.0, 0.0), Point3::new(f + 1.0, 1.0, 1.0))
+    ///         Aabb::new(Vector::new(f, 0.0, 0.0), Vector::new(f + 1.0, 1.0, 1.0))
     ///     })
     ///     .collect();
     ///
@@ -2208,12 +2231,12 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs: Vec<_> = (0..100)
     ///     .map(|i| {
     ///         let f = i as f32;
-    ///         Aabb::new(Point3::new(f, 0.0, 0.0), Point3::new(f + 1.0, 1.0, 1.0))
+    ///         Aabb::new(Vector::new(f, 0.0, 0.0), Vector::new(f + 1.0, 1.0, 1.0))
     ///     })
     ///     .collect();
     ///
@@ -2231,10 +2254,13 @@ impl Bvh {
             nodes,
             parents,
             leaf_node_indices,
+            optimization: _,
+            free_wide_nodes,
         } = self;
         nodes.capacity() * size_of::<BvhNodeWide>()
             + parents.capacity() * size_of::<BvhNodeIndex>()
             + leaf_node_indices.capacity() * size_of::<BvhNodeIndex>()
+            + free_wide_nodes.capacity() * size_of::<u32>()
     }
 
     /// Computes the depth of the subtree rooted at the specified node.
@@ -2256,12 +2282,12 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs: Vec<_> = (0..4)
     ///     .map(|i| {
     ///         let f = i as f32;
-    ///         Aabb::new(Point3::new(f, 0.0, 0.0), Point3::new(f + 1.0, 1.0, 1.0))
+    ///         Aabb::new(Vector::new(f, 0.0, 0.0), Vector::new(f + 1.0, 1.0, 1.0))
     ///     })
     ///     .collect();
     ///
@@ -2315,12 +2341,12 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs = vec![
-    ///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(4.0, 0.0, 0.0), Point3::new(5.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(4.0, 0.0, 0.0), Vector::new(5.0, 1.0, 1.0)),
     /// ];
     ///
     /// let bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
@@ -2367,12 +2393,12 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhBuildStrategy};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let aabbs = vec![
-    ///     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(2.0, 0.0, 0.0), Point3::new(3.0, 1.0, 1.0)),
-    ///     Aabb::new(Point3::new(4.0, 0.0, 0.0), Point3::new(5.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(2.0, 0.0, 0.0), Vector::new(3.0, 1.0, 1.0)),
+    ///     Aabb::new(Vector::new(4.0, 0.0, 0.0), Vector::new(5.0, 1.0, 1.0)),
     /// ];
     ///
     /// let mut bvh = Bvh::from_leaves(BvhBuildStrategy::default(), &aabbs);
@@ -2402,6 +2428,7 @@ impl Bvh {
                 // We deleted the last leaf! Remove the root.
                 self.nodes.clear();
                 self.parents.clear();
+                self.free_wide_nodes.clear();
                 return;
             }
 
@@ -2421,9 +2448,21 @@ impl Bvh {
 
                     // Now we can just clear the right leaf.
                     self.nodes[0].right = BvhNode::zeros();
+
+                    // Clean up orphaned nodes. With a partial root, only node[0] is
+                    // reachable. Previous removes may have left orphaned wide nodes
+                    // that were waiting for refit to compact them. If we don't truncate
+                    // here, the tree appears as a single-leaf tree with unreachable
+                    // nodes, which corrupts optimize_incremental.
+                    self.nodes.truncate(1);
+                    self.parents.truncate(1);
+                    self.free_wide_nodes.clear();
                 } else {
                     // The sibling isn’t a leaf. It becomes the new root at index 0.
-                    self.nodes[0] = self.nodes[self.nodes[sibling].children as usize];
+                    let old_sibling_slot = self.nodes[sibling].children;
+                    self.nodes[0] = self.nodes[old_sibling_slot as usize];
+                    self.nodes[old_sibling_slot as usize] = BvhNodeWide::zeros();
+                    self.free_wide_nodes.push(old_sibling_slot);
                     // Both parent pointers need to be updated since both nodes moved to the root.
                     let new_root = &mut self.nodes[0];
                     if new_root.left.is_leaf() {
@@ -2452,6 +2491,12 @@ impl Bvh {
                 }
 
                 self.nodes[parent] = *sibling;
+
+                // The removed leaf's wide node is now unreachable: zero it (so raw
+                // node scans like `Bvh::rebuild` can't pick up its stale leaf
+                // copies) and recycle its slot for later insertions.
+                self.nodes[wide_node_index] = BvhNodeWide::zeros();
+                self.free_wide_nodes.push(wide_node_index as u32);
 
                 // TODO: we could use that propagation as an opportunity to
                 //       apply some rotations?

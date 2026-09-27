@@ -544,8 +544,8 @@ determinism-wasm:
 
 # The rapier 0.36 forks' StateHash (upgrade plan Task 4.4): a small physics
 # scene's hash over every journaled structure must be the same constant on
-# native and on wasm32 (node). Same runner install as determinism-wasm; merges
-# into it at the switch (Phase 5).
+# native and on wasm32 (node). Same runner install as determinism-wasm; folds
+# into it once Task 5.4 re-records determinism-wasm's constant for the switch.
 determinism-wasm-next:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -556,18 +556,18 @@ determinism-wasm-next:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
         {{cap}} {{cargo}} test -p physics-next --test state_hash_wasm --target wasm32-unknown-unknown
 
-# Upstream rapier's own determinism tests, run from the vendored rapier-next
-# fork (rapier 0.36 upgrade, docs/superpowers/plans/2026-09-22-rapier-035-upgrade.md),
+# Upstream rapier's own determinism tests, run from the vendored rapier 0.36
+# fork (docs/superpowers/plans/2026-09-22-rapier-035-upgrade.md),
 # plus upstream's regression tests for the code the fork patches (shape casts,
 # voxels, the character controller). Every `// mmo-fork:` patch must keep these
 # green. thread_count_determinism is `parallel`-gated and we never enable that
 # feature, so it is not listed.
 physics-next-upstream:
-    {{cap}} {{cargo}} test -p rapier3d-next --features enhanced-determinism,serde-serialize \
+    {{cap}} {{cargo}} test -p rapier3d --features enhanced-determinism,serde-serialize \
         --test snapshot_roundtrip --test snapshot_portability \
         --test simd_backend_parity --test simd_backend_determinism \
         --test issue_485_kcc_depenetration --test issue_862_kcc_impulse_point
-    {{cap}} {{cargo}} test -p parry3d-next \
+    {{cap}} {{cargo}} test -p parry3d \
         --test issue_106_shape_cast_status_consistency --test issue_193_shape_cast_penetrating_normals \
         --test issue_26_shape_cast_target_distance --test issue_373_voxels_shape_cast_witness \
         --test issue_404_voxels_manifold_prediction --test issue_429_shape_cast_toi_accuracy \

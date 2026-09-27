@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rapier3d::geometry::Aabb;
-use rapier3d::math::{Point, Real};
+use rapier3d::math::Vector;
 use rapier3d::pipeline::{
     DebugColor, DebugRenderBackend, DebugRenderMode, DebugRenderObject, DebugRenderPipeline,
     DebugRenderStyle,
@@ -49,10 +49,10 @@ impl DebugFlags {
 }
 
 /// Squared distance from a point to an AABB (0 inside).
-fn aabb_dist_sq(aabb: &Aabb, p: &Point<Real>) -> Real {
-    let mut d2 = Real::from(0.0);
+fn aabb_dist_sq(aabb: &Aabb, p: &Vector) -> f32 {
+    let mut d2 = 0.0;
     for i in 0..3 {
-        let c = Ord::clamp(p[i], aabb.mins[i], aabb.maxs[i]);
+        let c = p[i].clamp(aabb.mins[i], aabb.maxs[i]);
         let d = c - p[i];
         d2 += d * d;
     }
@@ -63,8 +63,8 @@ fn aabb_dist_sq(aabb: &Aabb, p: &Point<Real>) -> Real {
 /// beyond `DEBUG_COLLIDER_RADIUS` of the viewer.
 struct LineCollector {
     lines: Vec<DebugLine>,
-    viewer: Point<Real>,
-    max_dist_sq: Real,
+    viewer: Vector,
+    max_dist_sq: f32,
 }
 
 impl DebugRenderBackend for LineCollector {
@@ -81,14 +81,13 @@ impl DebugRenderBackend for LineCollector {
     fn draw_line(
         &mut self,
         _object: DebugRenderObject,
-        a: Point<Real>,
-        b: Point<Real>,
+        a: Vector,
+        b: Vector,
         color: DebugColor,
     ) {
-        // Real = OrderedFloat<f32>; .0 unwraps (same as convert.rs).
         self.lines.push(DebugLine {
-            a: [a.x.0, a.y.0, a.z.0],
-            b: [b.x.0, b.y.0, b.z.0],
+            a: [a.x, a.y, a.z],
+            b: [b.x, b.y, b.z],
             color,
         });
     }
@@ -123,12 +122,8 @@ impl ColliderDebug {
     ) -> Vec<DebugLine> {
         let mut backend = LineCollector {
             lines: Vec::new(),
-            viewer: Point::new(
-                Real::from(viewer[0]),
-                Real::from(viewer[1]),
-                Real::from(viewer[2]),
-            ),
-            max_dist_sq: Real::from(DEBUG_COLLIDER_RADIUS * DEBUG_COLLIDER_RADIUS),
+            viewer: Vector::from_array(viewer),
+            max_dist_sq: DEBUG_COLLIDER_RADIUS * DEBUG_COLLIDER_RADIUS,
         };
         self.pipeline
             .render_colliders(&mut backend, bodies, colliders);
@@ -139,7 +134,7 @@ impl ColliderDebug {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapier3d::math::{Real, Vector};
+    use rapier3d::math::Vector;
     use rapier3d::prelude::{ColliderBuilder, ColliderSet, RigidBodyBuilder, RigidBodySet};
 
     /// A fixed body with a 2×2×2 cuboid at the origin, viewer at the origin.
@@ -148,7 +143,7 @@ mod tests {
         let mut colliders = ColliderSet::new();
         let body = bodies.insert(RigidBodyBuilder::fixed().build());
         colliders.insert_with_parent(
-            ColliderBuilder::cuboid(Real::from(1.0), Real::from(1.0), Real::from(1.0)).build(),
+            ColliderBuilder::cuboid(1.0, 1.0, 1.0).build(),
             body,
             &mut bodies,
         );
@@ -185,15 +180,11 @@ mod tests {
         // Add a second cuboid far beyond DEBUG_COLLIDER_RADIUS.
         let far = bodies.insert(
             RigidBodyBuilder::fixed()
-                .translation(Vector::new(
-                    Real::from(1000.0),
-                    Real::from(0.0),
-                    Real::from(0.0),
-                ))
+                .translation(Vector::new(1000.0, 0.0, 0.0))
                 .build(),
         );
         colliders.insert_with_parent(
-            ColliderBuilder::cuboid(Real::from(1.0), Real::from(1.0), Real::from(1.0)).build(),
+            ColliderBuilder::cuboid(1.0, 1.0, 1.0).build(),
             far,
             &mut bodies,
         );
@@ -216,7 +207,7 @@ mod tests {
         // A dynamic ball next to the fixed cuboid (player capsule stand-in).
         let ball = bodies.insert(RigidBodyBuilder::dynamic().build());
         colliders.insert_with_parent(
-            ColliderBuilder::ball(Real::from(0.5)).build(),
+            ColliderBuilder::ball(0.5).build(),
             ball,
             &mut bodies,
         );

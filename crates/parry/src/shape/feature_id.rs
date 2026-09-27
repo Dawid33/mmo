@@ -1,5 +1,14 @@
-#[cfg(feature = "rkyv")]
-use rkyv::{bytecheck, CheckBytes};
+/// The index of a sub-shape within a shape that has several.
+///
+/// Identifies a part of a [`Compound`](crate::shape::Compound), a triangle of a
+/// [`TriMesh`](crate::shape::TriMesh), a segment of a [`Polyline`](crate::shape::Polyline), a cell
+/// of a [`HeightField`](crate::shape::HeightField), or a voxel of a
+/// [`Voxels`](crate::shape::Voxels) shape.
+///
+/// Query results carry the sub-shape they came from, so a hit against a composite shape says which
+/// part answered. A shape with no sub-shapes, like a [`Ball`](crate::shape::Ball) or a
+/// [`Cuboid`](crate::shape::Cuboid), always reports `0`.
+pub type SubShapeId = u32;
 
 /// An identifier of a geometric feature (vertex, edge, or face) of a shape.
 ///
@@ -110,10 +119,10 @@ use rkyv::{bytecheck, CheckBytes};
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(as = "Self")
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, Default)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum FeatureId {
     /// Shape-dependent identifier of a vertex (0-dimensional corner point).
     ///
@@ -439,10 +448,10 @@ impl FeatureId {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
-    archive(as = "Self")
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct PackedFeatureId(pub u32);
 
 impl PackedFeatureId {
@@ -489,6 +498,7 @@ impl PackedFeatureId {
     /// # }
     /// ```
     pub fn vertex(code: u32) -> Self {
+        #[cfg(not(target_arch = "spirv"))]
         assert_eq!(code & Self::HEADER_MASK, 0);
         Self(Self::HEADER_VERTEX | code)
     }
@@ -515,6 +525,7 @@ impl PackedFeatureId {
     /// ```
     #[cfg(feature = "dim3")]
     pub fn edge(code: u32) -> Self {
+        #[cfg(not(target_arch = "spirv"))]
         assert_eq!(code & Self::HEADER_MASK, 0);
         Self(Self::HEADER_EDGE | code)
     }
@@ -538,6 +549,7 @@ impl PackedFeatureId {
     /// # }
     /// ```
     pub fn face(code: u32) -> Self {
+        #[cfg(not(target_arch = "spirv"))]
         assert_eq!(code & Self::HEADER_MASK, 0);
         Self(Self::HEADER_FACE | code)
     }

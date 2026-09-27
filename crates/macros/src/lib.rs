@@ -23,7 +23,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "Undo AsRef",
         quote! {
             impl<T> AsRef<T> for Undo<T>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 fn as_ref(&self) -> &T {
                     &self.data
                 }
@@ -35,7 +35,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "Undo Deref",
         quote! {
             impl<T> ::std::ops::Deref for Undo<T>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 type Target = T;
 
                 fn deref(&self) -> &Self::Target {
@@ -49,7 +49,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "mut access",
         quote! {
             impl<T> Undo<T>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 pub fn change(&mut self) -> &mut T {
                     let old = self.data.clone();
                     self.undo(move |mut d, s| *d = old);
@@ -63,7 +63,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "UndoScope Deref",
         quote! {
             impl<T, 'a> ::std::ops::Deref for UndoScope<T, 'a>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 type Target = T;
 
                 fn deref(&self) -> &Self::Target {
@@ -77,7 +77,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "UndoScope DerefMut",
         quote! {
             impl<T, 'a> ::std::ops::DerefMut for UndoScope<T, 'a>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 fn deref_mut(&mut self) -> &mut Self::Target {
                     self.touched = true;
                     &mut self.value.data
@@ -90,7 +90,7 @@ fn boilerplate(items: &mut Vec<Item>, root_struct_ident: &Ident) {
         "UndoScope Drop",
         quote! {
             impl<T, 'a> ::std::ops::Drop for UndoScope<T, 'a>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 fn drop(&mut self) {
                     debug_assert!(
                         !self.touched || self.registered,
@@ -290,7 +290,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         match &mut i {
             Item::Struct(item_struct) => {
                 item_struct.attrs.push(
-                    parse_quote! {#[derive(::core::default::Default, ::derive_more::Debug, crate::serde::Serialize, crate::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial, ::std::hash::Hash)] },
+                    parse_quote! {#[derive(::core::default::Default, ::derive_more::Debug, crate::serde::Serialize, crate::serde::Deserialize, ::std::clone::Clone, ::borrow::Partial, ::state_hash::StateHash)] },
                 );
                 item_struct.attrs.push(parse_quote! {#[module(crate)]});
                 let mut struct_info: Vec<(Ident, syn::Type)> = Vec::new();
@@ -624,7 +624,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             // Tier-2 escape hatch: captures the pre-mutation hash at creation,
             // hands out &mut T, and requires register() with a TRUE inverse of
             // the full serialized state before it is dropped.
-            pub struct UndoScope<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            pub struct UndoScope<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 pre_hash: u32,
                 verify: HashMode,
                 touched: bool,
@@ -637,7 +637,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "impl UndoScope<T>",
         quote! {
-            impl<T, 'a> UndoScope<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash  {
+            impl<T, 'a> UndoScope<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash  {
                 pub fn register(mut self, undo: impl FnOnce(&mut T, &::crossbeam::channel::Sender<crate::GameDataUpdate>) + 'static + Send) {
                     self.registered = true;
                     let mut global = self.value.global_log.lock().unwrap();
@@ -656,7 +656,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             // the pre-mutation footprint digest at register() time (no
             // whole-field hash); under Full it behaves like UndoScope (captures
             // the whole-field hash at creation); under Off nothing is checked.
-            pub struct UndoScopeDigest<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            pub struct UndoScopeDigest<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 verify: HashMode,
                 pre_hash: u32, // whole-field hash iff verify == Full
                 touched: bool,
@@ -669,7 +669,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "impl UndoScopeDigest<T>",
         quote! {
-            impl<T, 'a> UndoScopeDigest<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash  {
+            impl<T, 'a> UndoScopeDigest<T, 'a> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash  {
                 /// True iff this scope was created under Delta mode. Lets callers
                 /// skip computing an expensive pre-digest that wouldn't be checked.
                 pub fn wants_delta_digest(&self) -> bool {
@@ -695,7 +695,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         "UndoScopeDigest Deref",
         quote! {
             impl<T, 'a> ::std::ops::Deref for UndoScopeDigest<T, 'a>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 type Target = T;
 
                 fn deref(&self) -> &Self::Target {
@@ -709,7 +709,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         "UndoScopeDigest DerefMut",
         quote! {
             impl<T, 'a> ::std::ops::DerefMut for UndoScopeDigest<T, 'a>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 fn deref_mut(&mut self) -> &mut Self::Target {
                     self.touched = true;
                     &mut self.value.data
@@ -722,7 +722,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         "UndoScopeDigest Drop",
         quote! {
             impl<T, 'a> ::std::ops::Drop for UndoScopeDigest<T, 'a>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::std::hash::Hash {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + ::state_hash::StateHash {
                 fn drop(&mut self) {
                     debug_assert!(
                         !self.touched || self.registered,
@@ -737,7 +737,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         "struct Undo<T>",
         quote! {
             #[derive(::core::default::Default, ::derive_more::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
-            pub struct Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
+            pub struct Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static {
                 #[serde(skip)]
                 #[debug(skip)]
                 global_log: ::std::sync::Arc<::std::sync::Mutex<RollbackLog>>,
@@ -756,11 +756,11 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "impl hash Undo<T>",
         quote! {
-            impl<T> ::std::hash::Hash for Undo<T>
-                where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static + ::std::hash::Hash
+            impl<T> ::state_hash::StateHash for Undo<T>
+                where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static
             {
-                fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
-                    self.data.hash(state);
+                fn state_hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+                    ::state_hash::StateHash::state_hash(&self.data, state);
                 }
             }
         },
@@ -769,7 +769,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "impl Undo<T>",
         quote! {
-            impl<T> Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + Sized + ::std::hash::Hash {
+            impl<T> Undo<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + 'static + Sized + ::state_hash::StateHash {
                 /// Crate-internal raw access for trusted tier-2 helpers that
                 /// pair it with a pre-registered undo(). Not visible outside
                 /// the rollback crate.
@@ -862,8 +862,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                 }
 
                 pub unsafe fn hash_data(&self) -> u32 {
-                    let mut hasher = ::crc32fast::Hasher::new();
-                    self.data.hash(&mut hasher);
+                    let mut hasher = crate::StateHasher::new();
+                    ::state_hash::StateHash::state_hash(&self.data, &mut hasher);
                     hasher.finalize()
                 }
 
@@ -1006,8 +1006,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             #[derive(::core::default::Default, ::derive_more::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
             pub struct UndoSlotMap<K, V>
             where
-                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
-                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
             {
                 #[serde(skip)]
                 #[debug(skip)]
@@ -1034,8 +1034,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             impl<K, V> UndoSlotMap<K, V>
             where
-                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
-                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
             {
                 fn log_op(&mut self, op: SlotOp<K, V>, pre_hash: u32, verify: HashMode, emit: ::std::option::Option<crate::GameDataUpdateKind>) {
                     let mut global = self.global_log.lock().unwrap();
@@ -1054,9 +1054,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         HashMode::Delta => {
                             // Pre-state footprint of an insert: the allocator state and the
                             // (absent) value at the slot the insert will occupy.
-                            let mut hasher = ::crc32fast::Hasher::new();
-                            ::std::hash::Hash::hash(&self.data.alloc_fingerprint_head(), &mut hasher);
-                            ::std::hash::Hash::hash(&::std::option::Option::<&V>::None, &mut hasher);
+                            let mut hasher = crate::StateHasher::new();
+                            ::state_hash::StateHash::state_hash(&self.data.alloc_fingerprint_head(), &mut hasher);
+                            ::state_hash::StateHash::state_hash(&::std::option::Option::<&V>::None, &mut hasher);
                             (hasher.finalize(), HashMode::Delta)
                         }
                     };
@@ -1085,9 +1085,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         HashMode::Off => (0u32, HashMode::Off),
                         HashMode::Full => (unsafe { self.hash_data() }, HashMode::Full),
                         HashMode::Delta => {
-                            let mut hasher = ::crc32fast::Hasher::new();
-                            ::std::hash::Hash::hash(&self.data.alloc_fingerprint(k), &mut hasher);
-                            ::std::hash::Hash::hash(&self.data.get(k), &mut hasher);
+                            let mut hasher = crate::StateHasher::new();
+                            ::state_hash::StateHash::state_hash(&self.data.alloc_fingerprint(k), &mut hasher);
+                            ::state_hash::StateHash::state_hash(&self.data.get(k), &mut hasher);
                             (hasher.finalize(), HashMode::Delta)
                         }
                     };
@@ -1097,8 +1097,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     Some(v)
                 }
                 pub unsafe fn hash_data(&self) -> u32 {
-                    let mut hasher = ::crc32fast::Hasher::new();
-                    ::std::hash::Hash::hash(&self.data, &mut hasher);
+                    let mut hasher = crate::StateHasher::new();
+                    ::state_hash::StateHash::state_hash(&self.data, &mut hasher);
                     hasher.finalize()
                 }
             }
@@ -1109,8 +1109,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             impl<K, V> ::std::ops::Deref for UndoSlotMap<K, V>
             where
-                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
-                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
             {
                 type Target = ::slotmapd::SlotMap<K, V>;
 
@@ -1123,13 +1123,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "UndoSlotMap Hash",
         quote! {
-            impl<K, V> ::std::hash::Hash for UndoSlotMap<K, V>
+            impl<K, V> ::state_hash::StateHash for UndoSlotMap<K, V>
             where
-                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
-                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                K: ::slotmapd::Key + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
             {
-                fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
-                    self.data.hash(state);
+                fn state_hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+                    ::state_hash::StateHash::state_hash(&self.data, state);
                 }
             }
         },
@@ -1140,8 +1140,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
             #[derive(::core::default::Default, ::derive_more::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
             pub struct UndoMap<K, V>
             where
-                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
-                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
             {
                 #[serde(skip)]
                 #[debug(skip)]
@@ -1162,8 +1162,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             impl<K, V> UndoMap<K, V>
             where
-                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
-                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
             {
                 fn log_entry(&mut self, key: K, prev: ::std::option::Option<V>) {
                     let mut global = self.global_log.lock().unwrap();
@@ -1171,17 +1171,17 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     let (pre_hash, verify) = match hash_mode() {
                         HashMode::Off => (0u32, HashMode::Off),
                         HashMode::Full => {
-                            let mut hasher = ::crc32fast::Hasher::new();
-                            ::std::hash::Hash::hash(&self.data, &mut hasher);
+                            let mut hasher = crate::StateHasher::new();
+                            ::state_hash::StateHash::state_hash(&self.data, &mut hasher);
                             (hasher.finalize(), HashMode::Full)
                         }
                         HashMode::Delta => {
                             // Footprint of a single-key op: the key and its pre-mutation
                             // value. `prev` was read from the map before mutating, so it IS
                             // the pre-state at that key.
-                            let mut hasher = ::crc32fast::Hasher::new();
-                            ::std::hash::Hash::hash(&key, &mut hasher);
-                            ::std::hash::Hash::hash(&prev, &mut hasher);
+                            let mut hasher = crate::StateHasher::new();
+                            ::state_hash::StateHash::state_hash(&key, &mut hasher);
+                            ::state_hash::StateHash::state_hash(&prev, &mut hasher);
                             (hasher.finalize(), HashMode::Delta)
                         }
                     };
@@ -1215,8 +1215,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     self.data.get_mut(k)
                 }
                 pub unsafe fn hash_data(&self) -> u32 {
-                    let mut hasher = ::crc32fast::Hasher::new();
-                    ::std::hash::Hash::hash(&self.data, &mut hasher);
+                    let mut hasher = crate::StateHasher::new();
+                    ::state_hash::StateHash::state_hash(&self.data, &mut hasher);
                     hasher.finalize()
                 }
             }
@@ -1227,8 +1227,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         quote! {
             impl<K, V> ::std::ops::Deref for UndoMap<K, V>
             where
-                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
-                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
             {
                 type Target = ::std::collections::BTreeMap<K, V>;
 
@@ -1241,13 +1241,13 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "UndoMap Hash",
         quote! {
-            impl<K, V> ::std::hash::Hash for UndoMap<K, V>
+            impl<K, V> ::state_hash::StateHash for UndoMap<K, V>
             where
-                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
-                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static,
+                K: ::std::cmp::Ord + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
+                V: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static,
             {
-                fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
-                    self.data.hash(state);
+                fn state_hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+                    ::state_hash::StateHash::state_hash(&self.data, state);
                 }
             }
         },
@@ -1256,7 +1256,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         "UndoCell",
         quote! {
             #[derive(::core::default::Default, ::derive_more::Debug, ::serde::Serialize, ::serde::Deserialize, ::std::clone::Clone)]
-            pub struct UndoCell<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
+            pub struct UndoCell<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static {
                 #[serde(skip)]
                 #[debug(skip)]
                 global_log: ::std::sync::Arc<::std::sync::Mutex<RollbackLog>>,
@@ -1274,7 +1274,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "impl UndoCell",
         quote! {
-            impl<T> UndoCell<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
+            impl<T> UndoCell<T> where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static {
                 fn log_old(&mut self) {
                     let mut global = self.global_log.lock().unwrap();
                     let trans = self.info.current.load(::std::sync::atomic::Ordering::SeqCst);
@@ -1283,8 +1283,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                         // A cell's footprint IS its whole value, so Full and Delta
                         // coincide here: stamp Full and reuse the whole-cell hash.
                         HashMode::Full | HashMode::Delta => {
-                            let mut hasher = ::crc32fast::Hasher::new();
-                            ::std::hash::Hash::hash(&self.data, &mut hasher);
+                            let mut hasher = crate::StateHasher::new();
+                            ::state_hash::StateHash::state_hash(&self.data, &mut hasher);
                             (hasher.finalize(), HashMode::Full)
                         }
                     };
@@ -1300,8 +1300,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     f(&mut self.data);
                 }
                 pub unsafe fn hash_data(&self) -> u32 {
-                    let mut hasher = ::crc32fast::Hasher::new();
-                    ::std::hash::Hash::hash(&self.data, &mut hasher);
+                    let mut hasher = crate::StateHasher::new();
+                    ::state_hash::StateHash::state_hash(&self.data, &mut hasher);
                     hasher.finalize()
                 }
             }
@@ -1311,7 +1311,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
         "UndoCell Deref",
         quote! {
             impl<T> ::std::ops::Deref for UndoCell<T>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static {
                 type Target = T;
 
                 fn deref(&self) -> &Self::Target {
@@ -1323,10 +1323,10 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "UndoCell Hash",
         quote! {
-            impl<T> ::std::hash::Hash for UndoCell<T>
-            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::std::hash::Hash + 'static {
-                fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
-                    self.data.hash(state);
+            impl<T> ::state_hash::StateHash for UndoCell<T>
+            where T: ::core::default::Default + ::std::clone::Clone + ::serde::Serialize + ::std::marker::Send + ::state_hash::StateHash + 'static {
+                fn state_hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+                    ::state_hash::StateHash::state_hash(&self.data, state);
                 }
             }
         },
@@ -1361,9 +1361,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
     items.push(item(
         "impl hash Rollback",
         quote! {
-            impl ::std::hash::Hash for Rollback {
-                fn hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
-                    self.data.hash(state);
+            impl ::state_hash::StateHash for Rollback {
+                fn state_hash<H: ::std::hash::Hasher>(&self, state: &mut H) {
+                    ::state_hash::StateHash::state_hash(&self.data, state);
                 }
             }
         },
@@ -1404,7 +1404,7 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     self.log.lock().unwrap().info.current.fetch_add(1, ::std::sync::atomic::Ordering::SeqCst);
                 }
                 pub fn rollback(&mut self) {
-                    use ::std::hash::{Hash, Hasher};
+                    use ::std::hash::Hasher;
                     let rollback_log = self.log.clone();
                     let mut rollback_log = rollback_log.lock().unwrap();
                     let current = rollback_log.info.current.load(::std::sync::atomic::Ordering::SeqCst);
@@ -1466,8 +1466,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                     match entry.verify {
                                         HashMode::Off => {}
                                         HashMode::Full => {
-                                            let mut hasher = ::crc32fast::Hasher::new();
-                                            ::std::hash::Hash::hash(&self.#cell_path1.data, &mut hasher);
+                                            let mut hasher = crate::StateHasher::new();
+                                            ::state_hash::StateHash::state_hash(&self.#cell_path1.data, &mut hasher);
                                             let new_hash = hasher.finalize();
                                             if new_hash != entry.pre_hash {
                                                 panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #cell_path_string1, entry.transaction, new_hash, entry.pre_hash);
@@ -1487,8 +1487,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                     match entry.verify {
                                         HashMode::Off => {}
                                         HashMode::Full => {
-                                            let mut hasher = ::crc32fast::Hasher::new();
-                                            ::std::hash::Hash::hash(&self.#map_path1.data, &mut hasher);
+                                            let mut hasher = crate::StateHasher::new();
+                                            ::state_hash::StateHash::state_hash(&self.#map_path1.data, &mut hasher);
                                             let new_hash = hasher.finalize();
                                             if new_hash != entry.pre_hash {
                                                 panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #map_path_string1, entry.transaction, new_hash, entry.pre_hash);
@@ -1497,9 +1497,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                         HashMode::Delta => {
                                             // Re-derive the entry digest from LIVE post-undo data; matches
                                             // the log side because Option<&V> and Option<V> hash identically.
-                                            let mut hasher = ::crc32fast::Hasher::new();
-                                            ::std::hash::Hash::hash(&vkey, &mut hasher);
-                                            ::std::hash::Hash::hash(&self.#map_path1.data.get(&vkey), &mut hasher);
+                                            let mut hasher = crate::StateHasher::new();
+                                            ::state_hash::StateHash::state_hash(&vkey, &mut hasher);
+                                            ::state_hash::StateHash::state_hash(&self.#map_path1.data.get(&vkey), &mut hasher);
                                             let new_hash = hasher.finalize();
                                             if new_hash != entry.pre_hash {
                                                 panic!("Hash verification failed (delta) for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #map_path_string1, entry.transaction, new_hash, entry.pre_hash);
@@ -1518,8 +1518,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                             match entry.verify {
                                                 HashMode::Off => {}
                                                 HashMode::Full => {
-                                                    let mut hasher = ::crc32fast::Hasher::new();
-                                                    ::std::hash::Hash::hash(&self.#slot_path1.data, &mut hasher);
+                                                    let mut hasher = crate::StateHasher::new();
+                                                    ::state_hash::StateHash::state_hash(&self.#slot_path1.data, &mut hasher);
                                                     let new_hash = hasher.finalize();
                                                     if new_hash != entry.pre_hash {
                                                         panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
@@ -1528,9 +1528,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 HashMode::Delta => {
                                                     // Post-revert_insert: free_head points back at k's slot, and
                                                     // the slot is vacant, so get(k) is None — matches the log side.
-                                                    let mut hasher = ::crc32fast::Hasher::new();
-                                                    ::std::hash::Hash::hash(&self.#slot_path1.data.alloc_fingerprint_head(), &mut hasher);
-                                                    ::std::hash::Hash::hash(&self.#slot_path1.data.get(k), &mut hasher);
+                                                    let mut hasher = crate::StateHasher::new();
+                                                    ::state_hash::StateHash::state_hash(&self.#slot_path1.data.alloc_fingerprint_head(), &mut hasher);
+                                                    ::state_hash::StateHash::state_hash(&self.#slot_path1.data.get(k), &mut hasher);
                                                     let new_hash = hasher.finalize();
                                                     if new_hash != entry.pre_hash {
                                                         panic!("Hash verification failed (delta) for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
@@ -1547,8 +1547,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                             match entry.verify {
                                                 HashMode::Off => {}
                                                 HashMode::Full => {
-                                                    let mut hasher = ::crc32fast::Hasher::new();
-                                                    ::std::hash::Hash::hash(&self.#slot_path1.data, &mut hasher);
+                                                    let mut hasher = crate::StateHasher::new();
+                                                    ::state_hash::StateHash::state_hash(&self.#slot_path1.data, &mut hasher);
                                                     let new_hash = hasher.finalize();
                                                     if new_hash != entry.pre_hash {
                                                         panic!("Hash verification failed for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);
@@ -1557,9 +1557,9 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 HashMode::Delta => {
                                                     // Post-revert_remove: slot is occupied again with the
                                                     // restored value — matches the log side's Some(&v).
-                                                    let mut hasher = ::crc32fast::Hasher::new();
-                                                    ::std::hash::Hash::hash(&self.#slot_path1.data.alloc_fingerprint(k), &mut hasher);
-                                                    ::std::hash::Hash::hash(&self.#slot_path1.data.get(k), &mut hasher);
+                                                    let mut hasher = crate::StateHasher::new();
+                                                    ::state_hash::StateHash::state_hash(&self.#slot_path1.data.alloc_fingerprint(k), &mut hasher);
+                                                    ::state_hash::StateHash::state_hash(&self.#slot_path1.data.get(k), &mut hasher);
                                                     let new_hash = hasher.finalize();
                                                     if new_hash != entry.pre_hash {
                                                         panic!("Hash verification failed (delta) for typed undo of self.{} in transaction {:?}: {:?} != {:?}", #slot_path_string1, entry.transaction, new_hash, entry.pre_hash);

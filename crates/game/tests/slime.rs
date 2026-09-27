@@ -8,7 +8,7 @@ use game::{
     state_hash, Chunk, ChunkCoords, EntityKey, EntityKind, GameDataUpdate, GameDataUpdateKind,
     GameEventKind, Region, RegionCoords, GHOST_MARGIN,
 };
-use parry3d::math::{Real, Vector};
+use game::rapier3d::math::Vector;
 
 fn r0() -> RegionCoords {
     RegionCoords::new(0, 0)
@@ -35,8 +35,8 @@ fn floor_region(
 fn spawn(region: &mut Region, x: f32, z: f32, size: u8, yaw: f32) -> EntityKey {
     let mut key = None;
     region.with_data(|d| {
-        let pos = Vector::new(Real::from(x), Real::from(40.0), Real::from(z));
-        key = Some(d.spawn_slime_safe(pos, size, Real::from(yaw), 0));
+        let pos = Vector::new(x, 40.0, z);
+        key = Some(d.spawn_slime_safe(pos, size, yaw, 0));
     });
     key.unwrap()
 }
@@ -49,9 +49,9 @@ fn tick(region: &mut Region) {
 /// (position, grounded)
 fn pose(region: &Region, e: EntityKey) -> ([f32; 3], bool) {
     let data = region.data();
-    let t = *data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation();
+    let t = data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation();
     let m = data.ecs.motion.try_get(e).unwrap_or_default();
-    ([t.x.0, t.y.0, t.z.0], m.grounded)
+    ([t.x, t.y, t.z], m.grounded)
 }
 
 #[test]

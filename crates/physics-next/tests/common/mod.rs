@@ -1,14 +1,14 @@
 //! A player walking through the fork the way the game drives one: the game's
 //! own pure movement code (`game::movement::{plan, settle}`, its constants,
 //! `game::collider_cells` for terrain), with the engine-facing half —
-//! `depenetration_lift`, `character_controller`, `sweep_character` — ported to
-//! the glam API as it will read after the switch (Task 5.2). The ports of
+//! `depenetration_lift`, `character_controller`, `sweep_character` — the glam
+//! port written before the switch (Task 5.2), kept as the fork's pin. The ports of
 //! `crates/game/tests/{walking_smoothness,sunk_body}.rs` drive it.
 #![allow(dead_code)]
 
 use game::movement::{
-    self, CHARACTER_SKIN, GROUND_SNAP, Motion, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS,
-    STEP_HEIGHT, TICK_DT, UNITS_PER_METER,
+    self, CHARACTER_SKIN, GROUND_SNAP, Motion, MoveKeys, PHYSICS_LENGTH_UNIT, PLAYER_CAPSULE_HALF_HEIGHT,
+    PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, TICK_DT, UNITS_PER_METER,
 };
 use game::{BLOCK_VOXELS, CHUNK_BLOCKS, Chunk};
 use physics_next::PhysicsWorld;
@@ -80,10 +80,6 @@ pub fn sweep_character(w: &PhysicsWorld, handle: RigidBodyHandle, motion: &Motio
     (out.translation + lift, out.grounded)
 }
 
-fn na(v: Vector) -> game::parry::math::Vector<game::parry::math::Real> {
-    game::parry::math::Vector::new(v.x.into(), v.y.into(), v.z.into())
-}
-
 /// Adds `chunk`'s terrain at chunk coordinates `(x, y, z)`, the way
 /// `seed_terrain_genesis` does: one fixed body at the chunk origin; a full
 /// chunk is one cuboid, anything else a `Voxels` per `collider_cells` grid.
@@ -126,7 +122,8 @@ impl Walker {
     /// column from above them, settled on the ground.
     pub fn new(chunks: impl IntoIterator<Item = ((i32, i32, i32), Chunk)>) -> Self {
         let mut w = PhysicsWorld {
-            params: IntegrationParameters { dt: TICK_DT, ..Default::default() },
+            // D6: the game's length unit (world units per metre).
+            params: IntegrationParameters { dt: TICK_DT, length_unit: PHYSICS_LENGTH_UNIT, ..Default::default() },
             ..Default::default()
         };
         let mut top = 0;
@@ -159,11 +156,10 @@ impl Walker {
 
     /// One region tick of the player: plan, sweep, settle, step.
     pub fn tick(&mut self) {
-        let desired = movement::plan(&mut self.motion, &self.keys, 0.0.into(), self.tick);
+        let desired = movement::plan(&mut self.motion, &self.keys, 0.0, self.tick);
         self.keys.jump_pressed = false;
-        let desired = Vector::new(desired.x.0, desired.y.0, desired.z.0);
         let (corrected, grounded) = sweep_character(&self.w, self.body, &self.motion, desired);
-        movement::settle(&mut self.motion, &na(desired), &na(corrected), grounded);
+        movement::settle(&mut self.motion, &desired, &corrected, grounded);
         if corrected != Vector::ZERO {
             let t = self.w.bodies[self.body].translation();
             self.w.bodies[self.body].set_next_kinematic_translation(t + corrected);

@@ -1,4 +1,51 @@
-use crate::math::{Isometry, Real};
+use crate::shape::SubShapeId;
+
+/// Whether two shapes intersect, and the sub-shapes that do.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ShapeIntersection {
+    /// Whether the two shapes intersect.
+    pub intersecting: bool,
+    /// The sub-shape of the first shape that intersects.
+    ///
+    /// Always `0` for a shape with no sub-shapes, and meaningless unless `intersecting` is `true`.
+    pub subshape1: SubShapeId,
+    /// The sub-shape of the second shape that intersects.
+    ///
+    /// Always `0` for a shape with no sub-shapes, and meaningless unless `intersecting` is `true`.
+    pub subshape2: SubShapeId,
+}
+
+impl ShapeIntersection {
+    /// A result between shapes with no sub-shapes to distinguish.
+    pub fn new(intersecting: bool) -> Self {
+        Self {
+            intersecting,
+            subshape1: 0,
+            subshape2: 0,
+        }
+    }
+
+    /// Sets the sub-shapes that intersect.
+    pub fn with_subshapes(mut self, subshape1: SubShapeId, subshape2: SubShapeId) -> Self {
+        self.subshape1 = subshape1;
+        self.subshape2 = subshape2;
+        self
+    }
+
+    /// Swaps the roles of the two shapes.
+    pub fn swapped(mut self) -> Self {
+        core::mem::swap(&mut self.subshape1, &mut self.subshape2);
+        self
+    }
+}
+
+impl From<bool> for ShapeIntersection {
+    fn from(intersecting: bool) -> Self {
+        Self::new(intersecting)
+    }
+}
+
+use crate::math::Pose;
 use crate::query::{DefaultQueryDispatcher, QueryDispatcher, Unsupported};
 use crate::shape::Shape;
 
@@ -47,21 +94,21 @@ use crate::shape::Shape;
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::query::intersection_test;
 /// use parry3d::shape::Ball;
-/// use nalgebra::Isometry3;
+/// use parry3d::math::Pose;
 ///
 /// let ball1 = Ball::new(1.0);
 /// let ball2 = Ball::new(1.0);
 ///
 /// // Overlapping balls
-/// let pos1 = Isometry3::translation(0.0, 0.0, 0.0);
-/// let pos2 = Isometry3::translation(1.5, 0.0, 0.0);
+/// let pos1 = Pose::translation(0.0, 0.0, 0.0);
+/// let pos2 = Pose::translation(1.5, 0.0, 0.0);
 ///
-/// let intersecting = intersection_test(&pos1, &ball1, &pos2, &ball2).unwrap();
+/// let intersecting = intersection_test(&pos1, &ball1, &pos2, &ball2).unwrap().intersecting;
 /// assert!(intersecting); // Distance 1.5 < combined radii 2.0
 ///
 /// // Separated balls
-/// let pos3 = Isometry3::translation(5.0, 0.0, 0.0);
-/// let not_intersecting = intersection_test(&pos1, &ball1, &pos3, &ball2).unwrap();
+/// let pos3 = Pose::translation(5.0, 0.0, 0.0);
+/// let not_intersecting = intersection_test(&pos1, &ball1, &pos3, &ball2).unwrap().intersecting;
 /// assert!(!not_intersecting); // Distance 5.0 > combined radii 2.0
 /// # }
 /// ```
@@ -86,11 +133,11 @@ use crate::shape::Shape;
 /// - [`distance`](crate::query::distance()) - Get separation distance
 /// - [`closest_points`](crate::query::closest_points()) - Get closest point locations
 pub fn intersection_test(
-    pos1: &Isometry<Real>,
+    pos1: &Pose,
     g1: &dyn Shape,
-    pos2: &Isometry<Real>,
+    pos2: &Pose,
     g2: &dyn Shape,
-) -> Result<bool, Unsupported> {
+) -> Result<ShapeIntersection, Unsupported> {
     let pos12 = pos1.inv_mul(pos2);
     DefaultQueryDispatcher.intersection_test(&pos12, g1, g2)
 }

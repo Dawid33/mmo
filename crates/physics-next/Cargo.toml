@@ -3,11 +3,11 @@ name = "physics-next"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Harness for the rapier 0.36 / parry 0.31 (glam) upgrade: spikes now, the fork patches' pinning tests later. Nothing in game/client/server depends on it."
+description = "Pinning tests for the vendored rapier 0.36 / parry 0.31 forks' patches (journal, StateHash, voxels cast, KCC). Nothing in game/client/server depends on it."
 
 [dependencies]
 # The vendored fork (upstream rapier 0.36.0 / parry 0.31.1 + `// mmo-fork:` patches).
-rapier3d = { package = "rapier3d-next", path = "../rapier-next/crates/rapier3d", features = ["enhanced-determinism", "serde-serialize"] }
+rapier3d = { path = "../rapier/crates/rapier3d", features = ["enhanced-determinism", "serde-serialize"] }
 bincode = { workspace = true }
 crc32fast = { workspace = true, features = ["std"] }
 serde = { workspace = true }
@@ -20,9 +20,9 @@ state-hash = { path = "../state-hash" }
 parallel = ["rapier3d/parallel"]
 
 [dev-dependencies]
-# Constants only (player capsule, skin, speeds): the probes measure upstream
-# against the game's real numbers without restating them. The direction
-# matters: game never depends on this crate or on rapier 0.36.
+# Constants and the pure movement code (player capsule, skin, speeds, plan /
+# settle): the probes measure the fork against the game's real numbers without
+# restating them. The direction matters: game never depends on this crate.
 game = { workspace = true }
 
 # `tests/state_hash_wasm.rs` on wasm32 (`just determinism-wasm-next`); the

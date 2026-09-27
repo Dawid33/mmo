@@ -3,14 +3,14 @@ use super::{
     FACES_TO_VOXEL_TYPES, INTERIOR_FACE_MASK,
 };
 use crate::bounding_volume::{Aabb, BoundingVolume};
-use crate::math::{Point, Real, Vector};
+#[cfg(not(feature = "std"))]
+use crate::math::ComplexField;
+use crate::math::{ivect_to_vect, vect_to_ivect, IVector, Int, Vector};
 use crate::partitioning::{Bvh, BvhBuildStrategy, BvhNode};
 use crate::shape::voxels::voxels_chunk::{VoxelsChunk, VoxelsChunkHeader};
 use crate::shape::VoxelsChunkRef;
 use crate::utils::hashmap::HashMap;
 use alloc::{vec, vec::Vec};
-#[cfg(not(feature = "std"))]
-use na::ComplexField;
 
 /// Categorization of a voxel based on its neighbors.
 ///
@@ -32,25 +32,25 @@ use na::ComplexField;
 /// ```
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::shape::{Voxels, VoxelType};
-/// use nalgebra::{Point3, Vector3};
+/// use parry3d::math::{Vector, IVector};
 ///
 /// // Create a small 2x2x2 cube of voxels
 /// let voxels = Voxels::new(
-///     Vector3::new(1.0, 1.0, 1.0),
+///     Vector::new(1.0, 1.0, 1.0),
 ///     &[
-///         Point3::new(0, 0, 0),
-///         Point3::new(1, 0, 0),
-///         Point3::new(0, 1, 0),
-///         Point3::new(1, 1, 0),
-///         Point3::new(0, 0, 1),
-///         Point3::new(1, 0, 1),
-///         Point3::new(0, 1, 1),
-///         Point3::new(1, 1, 1),
+///         IVector::new(0, 0, 0),
+///         IVector::new(1, 0, 0),
+///         IVector::new(0, 1, 0),
+///         IVector::new(1, 1, 0),
+///         IVector::new(0, 0, 1),
+///         IVector::new(1, 0, 1),
+///         IVector::new(0, 1, 1),
+///         IVector::new(1, 1, 1),
 ///     ],
 /// );
 ///
 /// // Check voxel type - interior voxels are fully surrounded
-/// let state = voxels.voxel_state(Point3::new(0, 0, 0)).unwrap();
+/// let state = voxels.voxel_state(IVector::new(0, 0, 0)).unwrap();
 /// let voxel_type = state.voxel_type();
 /// println!("Voxel type: {:?}", voxel_type);
 /// # }
@@ -76,6 +76,7 @@ pub enum VoxelType {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 /// The status of the cell of an heightfield.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct AxisMask(u8);
 
 bitflags::bitflags! {
@@ -190,16 +191,16 @@ impl OctantPattern {
 /// ```
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::shape::{Voxels, VoxelState, AxisMask};
-/// use nalgebra::{Point3, Vector3};
+/// use parry3d::math::{Vector, IVector};
 ///
 /// // Create a simple voxel shape
 /// let voxels = Voxels::new(
-///     Vector3::new(1.0, 1.0, 1.0),
-///     &[Point3::new(0, 0, 0), Point3::new(1, 0, 0)],
+///     Vector::new(1.0, 1.0, 1.0),
+///     &[IVector::new(0, 0, 0), IVector::new(1, 0, 0)],
 /// );
 ///
 /// // Query the state of a voxel
-/// let state = voxels.voxel_state(Point3::new(0, 0, 0)).unwrap();
+/// let state = voxels.voxel_state(IVector::new(0, 0, 0)).unwrap();
 ///
 /// // Check if empty
 /// assert!(!state.is_empty());
@@ -214,8 +215,9 @@ impl OctantPattern {
 /// println!("Voxel type: {:?}", state.voxel_type());
 /// # }
 /// ```
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct VoxelState(pub(super) u8);
 
 impl VoxelState {
@@ -274,11 +276,11 @@ impl VoxelState {
 /// ```
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::shape::Voxels;
-/// use nalgebra::{Point3, Vector3};
+/// use parry3d::math::{Vector, IVector};
 ///
 /// let voxels = Voxels::new(
-///     Vector3::new(0.5, 0.5, 0.5),
-///     &[Point3::new(0, 0, 0), Point3::new(1, 0, 0)],
+///     Vector::new(0.5, 0.5, 0.5),
+///     &[IVector::new(0, 0, 0), IVector::new(1, 0, 0)],
 /// );
 ///
 /// // Iterate through all voxels
@@ -299,9 +301,9 @@ pub struct VoxelData {
     /// [`Voxels::crop`].
     pub linear_id: VoxelIndex,
     /// The voxel's integer grid coordinates.
-    pub grid_coords: Point<i32>,
+    pub grid_coords: IVector,
     /// The voxel's center position in the local-space of the [`Voxels`] shape it is part of.
-    pub center: Point<Real>,
+    pub center: Vector,
     /// The voxel's state, indicating if it's empty or full.
     pub state: VoxelState,
 }
@@ -350,15 +352,15 @@ pub struct VoxelData {
 /// ```
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::shape::Voxels;
-/// use nalgebra::{Point3, Vector3};
+/// use parry3d::math::{Vector, IVector};
 ///
 /// // Create a simple 3×3×3 cube of voxels
-/// let voxel_size = Vector3::new(1.0, 1.0, 1.0);
+/// let voxel_size = Vector::new(1.0, 1.0, 1.0);
 /// let mut coords = Vec::new();
 /// for x in 0..3 {
 ///     for y in 0..3 {
 ///         for z in 0..3 {
-///             coords.push(Point3::new(x, y, z));
+///             coords.push(IVector::new(x, y, z));
 ///         }
 ///     }
 /// }
@@ -368,22 +370,22 @@ pub struct VoxelData {
 /// # }
 /// ```
 ///
-/// ## Creating Voxels from World-Space Points
+/// ## Creating Voxels from World-Space Vectors
 ///
 /// ```
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::shape::Voxels;
-/// use nalgebra::{Point3, Vector3};
+/// use parry3d::math::Vector;
 ///
 /// // Sample points in world space (e.g., from a point cloud)
 /// let points = vec![
-///     Point3::new(0.1, 0.2, 0.3),
-///     Point3::new(1.5, 2.1, 3.7),
-///     Point3::new(0.8, 0.9, 1.2),
+///     Vector::new(0.1, 0.2, 0.3),
+///     Vector::new(1.5, 2.1, 3.7),
+///     Vector::new(0.8, 0.9, 1.2),
 /// ];
 ///
 /// // Create voxels with 0.5 unit size - nearby points merge into same voxel
-/// let voxels = Voxels::from_points(Vector3::new(0.5, 0.5, 0.5), &points);
+/// let voxels = Voxels::from_points(Vector::new(0.5, 0.5, 0.5), &points);
 /// println!("Created voxel shape from {} points", points.len());
 /// # }
 /// ```
@@ -393,15 +395,15 @@ pub struct VoxelData {
 /// ```
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::shape::Voxels;
-/// use nalgebra::{Point3, Vector3};
+/// use parry3d::math::{Vector, IVector};
 ///
 /// let voxels = Voxels::new(
-///     Vector3::new(1.0, 1.0, 1.0),
-///     &[Point3::new(0, 0, 0), Point3::new(1, 0, 0)],
+///     Vector::new(1.0, 1.0, 1.0),
+///     &[IVector::new(0, 0, 0), IVector::new(1, 0, 0)],
 /// );
 ///
 /// // Check if a specific grid position is filled
-/// if let Some(state) = voxels.voxel_state(Point3::new(0, 0, 0)) {
+/// if let Some(state) = voxels.voxel_state(IVector::new(0, 0, 0)) {
 ///     println!("Voxel is filled!");
 ///     println!("Type: {:?}", state.voxel_type());
 ///     println!("Free faces: {:?}", state.free_faces());
@@ -410,9 +412,9 @@ pub struct VoxelData {
 /// }
 ///
 /// // Convert world-space point to grid coordinates
-/// let world_point = Point3::new(1.3, 0.7, 0.2);
+/// let world_point = Vector::new(1.3, 0.7, 0.2);
 /// let grid_coord = voxels.voxel_at_point(world_point);
-/// println!("Point at {:?} is in voxel {:?}", world_point, grid_coord);
+/// println!("Vector at {:?} is in voxel {:?}", world_point, grid_coord);
 /// # }
 /// ```
 ///
@@ -421,11 +423,11 @@ pub struct VoxelData {
 /// ```
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::shape::Voxels;
-/// use nalgebra::{Point3, Vector3};
+/// use parry3d::math::{Vector, IVector};
 ///
 /// let voxels = Voxels::new(
-///     Vector3::new(0.5, 0.5, 0.5),
-///     &[Point3::new(0, 0, 0), Point3::new(1, 0, 0), Point3::new(0, 1, 0)],
+///     Vector::new(0.5, 0.5, 0.5),
+///     &[IVector::new(0, 0, 0), IVector::new(1, 0, 0), IVector::new(0, 1, 0)],
 /// );
 ///
 /// // Iterate through all non-empty voxels
@@ -443,22 +445,22 @@ pub struct VoxelData {
 /// ```
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::shape::Voxels;
-/// use nalgebra::{Point3, Vector3};
+/// use parry3d::math::{Vector, IVector};
 ///
 /// let mut voxels = Voxels::new(
-///     Vector3::new(1.0, 1.0, 1.0),
-///     &[Point3::new(0, 0, 0)],
+///     Vector::new(1.0, 1.0, 1.0),
+///     &[IVector::new(0, 0, 0)],
 /// );
 ///
 /// // Add a new voxel
-/// voxels.set_voxel(Point3::new(1, 0, 0), true);
+/// voxels.set_voxel(IVector::new(1, 0, 0), true);
 ///
 /// // Remove a voxel
-/// voxels.set_voxel(Point3::new(0, 0, 0), false);
+/// voxels.set_voxel(IVector::new(0, 0, 0), false);
 ///
 /// // Check the result
-/// assert!(voxels.voxel_state(Point3::new(0, 0, 0)).unwrap().is_empty());
-/// assert!(!voxels.voxel_state(Point3::new(1, 0, 0)).unwrap().is_empty());
+/// assert!(voxels.voxel_state(IVector::new(0, 0, 0)).unwrap().is_empty());
+/// assert!(!voxels.voxel_state(IVector::new(1, 0, 0)).unwrap().is_empty());
 /// # }
 /// ```
 ///
@@ -468,15 +470,15 @@ pub struct VoxelData {
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::shape::Voxels;
 /// use parry3d::bounding_volume::Aabb;
-/// use nalgebra::{Point3, Vector3};
+/// use parry3d::math::{Vector, IVector};
 ///
 /// let voxels = Voxels::new(
-///     Vector3::new(1.0, 1.0, 1.0),
-///     &[Point3::new(0, 0, 0), Point3::new(1, 0, 0), Point3::new(2, 0, 0)],
+///     Vector::new(1.0, 1.0, 1.0),
+///     &[IVector::new(0, 0, 0), IVector::new(1, 0, 0), IVector::new(2, 0, 0)],
 /// );
 ///
 /// // Find voxels intersecting an AABB
-/// let query_aabb = Aabb::new(Point3::new(-0.5, -0.5, -0.5), Point3::new(1.5, 1.5, 1.5));
+/// let query_aabb = Aabb::new(Vector::new(-0.5, -0.5, -0.5), Vector::new(1.5, 1.5, 1.5));
 /// let count = voxels.voxels_intersecting_local_aabb(&query_aabb)
 ///     .filter(|v| !v.state.is_empty())
 ///     .count();
@@ -496,38 +498,73 @@ pub struct VoxelData {
 /// - [`crate::transformation::voxelization`]: Convert meshes to voxels
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+// mmo-fork: StateHash — deserialization recomputes the (serde-skipped) content hash.
+#[cfg_attr(feature = "serde-serialize", serde(from = "VoxelsDe"))]
 pub struct Voxels {
     /// A BVH of chunk keys.
     ///
     /// The bounding boxes are the ones of the chunk’s voxels **keys**. This is equivalent to a bvh
     /// of the chunks with a uniform voxel size of 1.
     pub(super) chunk_bvh: Bvh,
-    pub(super) chunk_headers: HashMap<Point<i32>, VoxelsChunkHeader>,
-    pub(super) chunk_keys: Vec<Point<i32>>,
+    pub(super) chunk_headers: HashMap<IVector, VoxelsChunkHeader>,
+    pub(super) chunk_keys: Vec<IVector>,
     pub(super) chunks: Vec<VoxelsChunk>,
     pub(super) free_chunks: Vec<usize>,
-    pub(super) voxel_size: Vector<Real>,
-    /// Content hash over (sorted chunk key → voxel states), maintained by
-    /// every constructor/mutator. Lets `Hash` be O(1) in voxel count so the
-    /// rollback machinery's per-tick hashing doesn't walk voxel contents.
-    pub(super) cached_hash: u32,
+    pub(super) voxel_size: Vector,
+    /// mmo-fork: StateHash — digest of the content, (sorted chunk key → voxel
+    /// states), maintained by every mutator (`recompute_content_hash`), so
+    /// hashing a voxel shape never walks its voxels (the old fork's
+    /// `cached_hash`). A cache: serde-skipped and recomputed on
+    /// deserialization, so it can neither go stale nor change the wire format.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(super) content_hash: u64,
 }
 
-impl core::hash::Hash for Voxels {
-    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        // Content is summarized by cached_hash; free lists, chunk allocation
-        // order, and BVH layout are deliberately excluded (they are not
-        // semantic content — but note they ARE part of `Clone`/serde state,
-        // so exact-restore invariants are unaffected).
-        self.voxel_size.hash(state);
-        self.cached_hash.hash(state);
+/// mmo-fork: StateHash — [`Voxels`]' serialized fields, in order, without the
+/// content hash; `From` recomputes it. A field added to `Voxels` fails the
+/// `From` impl at compile time: extend both together (bincode is positional).
+#[cfg(feature = "serde-serialize")]
+#[derive(Deserialize)]
+struct VoxelsDe {
+    chunk_bvh: Bvh,
+    chunk_headers: HashMap<IVector, VoxelsChunkHeader>,
+    chunk_keys: Vec<IVector>,
+    chunks: Vec<VoxelsChunk>,
+    free_chunks: Vec<usize>,
+    voxel_size: Vector,
+}
+
+#[cfg(feature = "serde-serialize")]
+impl From<VoxelsDe> for Voxels {
+    fn from(de: VoxelsDe) -> Self {
+        let VoxelsDe { chunk_bvh, chunk_headers, chunk_keys, chunks, free_chunks, voxel_size } = de;
+        let mut voxels = Voxels {
+            chunk_bvh,
+            chunk_headers,
+            chunk_keys,
+            chunks,
+            free_chunks,
+            voxel_size,
+            content_hash: 0,
+        };
+        voxels.recompute_content_hash();
+        voxels
     }
 }
 
-/// Minimal FNV-1a, used only for the canonical content hash below.
-/// Deterministic across platforms (no_std, no external deps): `usize` (the
-/// length prefix of every hashed slice) is widened to 64-bit little-endian,
-/// the bytes std already writes on 64-bit native, so wasm32 hashes the same.
+// mmo-fork: StateHash — `(voxel_size, content_hash)`, never the voxel data.
+// The free list, chunk allocation order and chunk BVH are deliberately left
+// out: they are not content (though they are part of `Clone`/serde, so an
+// exact restore still restores them).
+impl state_hash::StateHash for Voxels {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        self.voxel_size.state_hash(h);
+        h.write_u64(self.content_hash);
+    }
+}
+
+/// mmo-fork: StateHash — FNV-1a over the canonical content stream. Every
+/// width is pinned by `StateHash` (`u64` lengths), so native and wasm32 agree.
 struct ContentHasher(u64);
 
 impl core::hash::Hasher for ContentHasher {
@@ -537,31 +574,29 @@ impl core::hash::Hasher for ContentHasher {
     fn write(&mut self, bytes: &[u8]) {
         for b in bytes {
             self.0 ^= *b as u64;
-            self.0 = self.0.wrapping_mul(0x100000001b3);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
         }
-    }
-    fn write_usize(&mut self, i: usize) {
-        self.write(&(i as u64).to_le_bytes());
-    }
-    fn write_isize(&mut self, i: isize) {
-        self.write(&(i as i64).to_le_bytes());
     }
 }
 
 impl Voxels {
-    /// Recompute the cached content hash. Iterates chunk keys in sorted
-    /// order so the result is independent of map iteration order and of
-    /// the chunk allocation history.
-    pub(super) fn recompute_cached_hash(&mut self) {
-        let mut keys: Vec<Point<i32>> = self.chunk_headers.keys().copied().collect();
-        keys.sort_unstable_by_key(|p| (p.x, p.y, p.z));
-        let mut h = ContentHasher(0xcbf29ce484222325);
+    /// mmo-fork: StateHash — recomputes the cached content hash: chunk keys in
+    /// sorted order, so the result is independent of the map's insertion order
+    /// and of the chunk allocation history.
+    pub(super) fn recompute_content_hash(&mut self) {
+        use core::hash::Hasher as _;
+        use state_hash::StateHash;
+        let mut keys: Vec<IVector> = self.chunk_headers.keys().copied().collect();
+        keys.sort_unstable_by_key(|k| (k.x, k.y, k.z));
+        let mut h = ContentHasher(0xcbf2_9ce4_8422_2325);
+        state_hash::hash_len(keys.len(), &mut h);
         for key in keys {
-            core::hash::Hash::hash(&key, &mut h);
+            key.state_hash(&mut h);
             let id = self.chunk_headers[&key].id;
-            core::hash::Hash::hash(&self.chunks[id].states[..], &mut h);
+            let states = &self.chunks[id].states;
+            h.write(&states.map(|state| state.0));
         }
-        self.cached_hash = core::hash::Hasher::finish(&h) as u32;
+        self.content_hash = h.0;
     }
 }
 
@@ -589,45 +624,45 @@ impl Voxels {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::Voxels;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::{Vector, IVector};
     ///
     /// // Create a 2×2×2 cube of voxels with 1.0 unit size
     /// let voxels = Voxels::new(
-    ///     Vector3::new(1.0, 1.0, 1.0),
+    ///     Vector::new(1.0, 1.0, 1.0),
     ///     &[
-    ///         Point3::new(0, 0, 0), Point3::new(1, 0, 0),
-    ///         Point3::new(0, 1, 0), Point3::new(1, 1, 0),
-    ///         Point3::new(0, 0, 1), Point3::new(1, 0, 1),
-    ///         Point3::new(0, 1, 1), Point3::new(1, 1, 1),
+    ///         IVector::new(0, 0, 0), IVector::new(1, 0, 0),
+    ///         IVector::new(0, 1, 0), IVector::new(1, 1, 0),
+    ///         IVector::new(0, 0, 1), IVector::new(1, 0, 1),
+    ///         IVector::new(0, 1, 1), IVector::new(1, 1, 1),
     ///     ],
     /// );
     ///
     /// // Verify the first voxel's center position
-    /// let center = voxels.voxel_center(Point3::new(0, 0, 0));
-    /// assert_eq!(center, Point3::new(0.5, 0.5, 0.5));
+    /// let center = voxels.voxel_center(IVector::new(0, 0, 0));
+    /// assert_eq!(center, Vector::new(0.5, 0.5, 0.5));
     /// # }
     /// ```
     ///
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::Voxels;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::{Vector, IVector};
     ///
     /// // Create a line of voxels along the X axis
     /// let voxels = Voxels::new(
-    ///     Vector3::new(0.5, 0.5, 0.5),
-    ///     &[Point3::new(0, 0, 0), Point3::new(1, 0, 0), Point3::new(2, 0, 0)],
+    ///     Vector::new(0.5, 0.5, 0.5),
+    ///     &[IVector::new(0, 0, 0), IVector::new(1, 0, 0), IVector::new(2, 0, 0)],
     /// );
     ///
     /// // Query the domain (bounding grid coordinates)
     /// // Note: domain is aligned to internal chunk boundaries for efficiency
     /// let [mins, maxs] = voxels.domain();
-    /// assert_eq!(mins, Point3::new(0, 0, 0));
+    /// assert_eq!(mins, IVector::new(0, 0, 0));
     /// // maxs will be chunk-aligned (chunks are 8x8x8), so it includes more space
     /// assert!(maxs.x >= 3 && maxs.y >= 1 && maxs.z >= 1);
     /// # }
     /// ```
-    pub fn new(voxel_size: Vector<Real>, grid_coordinates: &[Point<i32>]) -> Self {
+    pub fn new(voxel_size: Vector, grid_coordinates: &[IVector]) -> Self {
         let mut result = Self {
             chunk_bvh: Bvh::new(),
             chunk_headers: HashMap::default(),
@@ -635,7 +670,7 @@ impl Voxels {
             chunks: vec![],
             free_chunks: vec![],
             voxel_size,
-            cached_hash: 0,
+            content_hash: 0, // mmo-fork: StateHash — computed below.
         };
 
         for vox in grid_coordinates {
@@ -653,15 +688,12 @@ impl Voxels {
         result.chunk_bvh = Bvh::from_iter(
             BvhBuildStrategy::Ploc,
             result.chunk_headers.iter().map(|(chunk_key, chunk_id)| {
-                (
-                    chunk_id.id,
-                    VoxelsChunk::aabb(chunk_key, &result.voxel_size),
-                )
+                (chunk_id.id, VoxelsChunk::aabb(chunk_key, result.voxel_size))
             }),
         );
 
         result.recompute_all_voxels_states();
-        result.recompute_cached_hash();
+        result.recompute_content_hash(); // mmo-fork: StateHash
         result
     }
 
@@ -678,9 +710,9 @@ impl Voxels {
     /// 3. Removing duplicates (multiple points in the same voxel become one voxel)
     ///
     /// For example, with `voxel_size = 1.0`:
-    /// - Point `(0.3, 0.7, 0.9)` → Grid `(0, 0, 0)`
-    /// - Point `(1.1, 0.2, 0.5)` → Grid `(1, 0, 0)`
-    /// - Point `(0.9, 0.1, 0.8)` → Grid `(0, 0, 0)` (merges with first)
+    /// - Vector `(0.3, 0.7, 0.9)` → Grid `(0, 0, 0)`
+    /// - Vector `(1.1, 0.2, 0.5)` → Grid `(1, 0, 0)`
+    /// - Vector `(0.9, 0.1, 0.8)` → Grid `(0, 0, 0)` (merges with first)
     ///
     /// # Use Cases
     ///
@@ -693,18 +725,18 @@ impl Voxels {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::Voxels;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::Vector;
     ///
     /// // Sample points in world space
     /// let points = vec![
-    ///     Point3::new(0.1, 0.2, 0.3),   // → Grid (0, 0, 0)
-    ///     Point3::new(0.7, 0.8, 0.9),   // → Grid (0, 0, 0) - same voxel!
-    ///     Point3::new(1.2, 0.3, 0.1),   // → Grid (1, 0, 0)
-    ///     Point3::new(0.5, 1.5, 0.2),   // → Grid (0, 1, 0)
+    ///     Vector::new(0.1, 0.2, 0.3),   // → Grid (0, 0, 0)
+    ///     Vector::new(0.7, 0.8, 0.9),   // → Grid (0, 0, 0) - same voxel!
+    ///     Vector::new(1.2, 0.3, 0.1),   // → Grid (1, 0, 0)
+    ///     Vector::new(0.5, 1.5, 0.2),   // → Grid (0, 1, 0)
     /// ];
     ///
     /// // Create voxels with 1.0 unit size
-    /// let voxels = Voxels::from_points(Vector3::new(1.0, 1.0, 1.0), &points);
+    /// let voxels = Voxels::from_points(Vector::new(1.0, 1.0, 1.0), &points);
     ///
     /// // Only 3 unique voxels created (first two points merged)
     /// let filled_count = voxels.voxels()
@@ -717,32 +749,26 @@ impl Voxels {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::Voxels;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::{Vector, IVector};
     ///
     /// // Higher resolution voxelization
     /// let points = vec![
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 1.0, 1.0),
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 1.0, 1.0),
     /// ];
     ///
     /// // Smaller voxels = finer detail
-    /// let voxels = Voxels::from_points(Vector3::new(0.5, 0.5, 0.5), &points);
+    /// let voxels = Voxels::from_points(Vector::new(0.5, 0.5, 0.5), &points);
     ///
     /// // First point at grid (0,0,0), second at grid (2,2,2) due to smaller voxel size
-    /// assert!(voxels.voxel_state(Point3::new(0, 0, 0)).is_some());
-    /// assert!(voxels.voxel_state(Point3::new(2, 2, 2)).is_some());
+    /// assert!(voxels.voxel_state(IVector::new(0, 0, 0)).is_some());
+    /// assert!(voxels.voxel_state(IVector::new(2, 2, 2)).is_some());
     /// # }
     /// ```
-    pub fn from_points(voxel_size: Vector<Real>, points: &[Point<Real>]) -> Self {
+    pub fn from_points(voxel_size: Vector, points: &[Vector]) -> Self {
         let voxels: Vec<_> = points
             .iter()
-            .map(|pt| {
-                Point::from(
-                    pt.coords
-                        .component_div(&voxel_size)
-                        .map(|x| x.floor() as i32),
-                )
-            })
+            .map(|pt| vect_to_ivect((*pt / voxel_size).floor()))
             .collect();
         Self::new(voxel_size, &voxels)
     }
@@ -767,15 +793,15 @@ impl Voxels {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::Voxels;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::{Vector, IVector};
     ///
     /// let voxels = Voxels::new(
-    ///     Vector3::new(1.0, 1.0, 1.0),
-    ///     &[Point3::new(0, 0, 0), Point3::new(2, 3, 1)],
+    ///     Vector::new(1.0, 1.0, 1.0),
+    ///     &[IVector::new(0, 0, 0), IVector::new(2, 3, 1)],
     /// );
     ///
     /// let [mins, maxs] = voxels.domain();
-    /// assert_eq!(mins, Point3::new(0, 0, 0));
+    /// assert_eq!(mins, IVector::new(0, 0, 0));
     /// // Domain is conservative and chunk-aligned
     /// assert!(maxs.x > 2 && maxs.y > 3 && maxs.z > 1);
     ///
@@ -787,16 +813,17 @@ impl Voxels {
     /// }
     /// # }
     /// ```
-    pub fn domain(&self) -> [Point<i32>; 2] {
+    pub fn domain(&self) -> [IVector; 2] {
         let aabb = self.chunk_bvh.root_aabb();
 
-        // NOTE that we shift the AABB’s bounds so the endpoint matches a voxel center
+        // NOTE that we shift the AABB's bounds so the endpoint matches a voxel center
         //      to avoid rounding errors.
-        let half_sz = self.voxel_size() / Real::from(2.0);
+        let half_sz = self.voxel_size() / 2.0;
         let mins = self.voxel_at_point(aabb.mins + half_sz);
         // + 1 because the range is semi-open.
-        let maxs = self.voxel_at_point(aabb.maxs - half_sz) + Vector::repeat(1);
-        [mins, maxs]
+        let maxs = self.voxel_at_point(aabb.maxs - half_sz);
+        let one = IVector::splat(1);
+        [mins, maxs + one]
     }
 
     // /// The number of voxels along each coordinate axis.
@@ -805,13 +832,14 @@ impl Voxels {
     // }
 
     /// The size of each voxel part this [`Voxels`] shape.
-    pub fn voxel_size(&self) -> Vector<Real> {
+    pub fn voxel_size(&self) -> Vector {
         self.voxel_size
     }
 
     /// Scale this shape.
-    pub fn scaled(mut self, scale: &Vector<Real>) -> Self {
-        self.voxel_size.component_mul_assign(scale);
+    pub fn scaled(mut self, scale: Vector) -> Self {
+        self.voxel_size *= scale;
+        self.chunk_bvh.scale(scale);
         self
     }
 
@@ -828,9 +856,9 @@ impl Voxels {
     }
 
     /// The AABB of the voxel with the given quantized `key`.
-    pub fn voxel_aabb(&self, key: Point<i32>) -> Aabb {
+    pub fn voxel_aabb(&self, key: IVector) -> Aabb {
         let center = self.voxel_center(key);
-        let hext = self.voxel_size / Real::from(2.0);
+        let hext = self.voxel_size / 2.0;
         Aabb::from_half_extents(center, hext)
     }
 
@@ -845,24 +873,24 @@ impl Voxels {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::Voxels;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::{Vector, IVector};
     ///
     /// let voxels = Voxels::new(
-    ///     Vector3::new(1.0, 1.0, 1.0),
-    ///     &[Point3::new(0, 0, 0), Point3::new(1, 0, 0)],
+    ///     Vector::new(1.0, 1.0, 1.0),
+    ///     &[IVector::new(0, 0, 0), IVector::new(1, 0, 0)],
     /// );
     ///
     /// // Query an existing voxel
-    /// if let Some(state) = voxels.voxel_state(Point3::new(0, 0, 0)) {
+    /// if let Some(state) = voxels.voxel_state(IVector::new(0, 0, 0)) {
     ///     assert!(!state.is_empty());
     ///     println!("Voxel type: {:?}", state.voxel_type());
     /// }
     ///
     /// // Query a non-existent voxel
-    /// assert!(voxels.voxel_state(Point3::new(10, 10, 10)).is_none());
+    /// assert!(voxels.voxel_state(IVector::new(10, 10, 10)).is_none());
     /// # }
     /// ```
-    pub fn voxel_state(&self, key: Point<i32>) -> Option<VoxelState> {
+    pub fn voxel_state(&self, key: IVector) -> Option<VoxelState> {
         let vid = self.linear_index(key)?;
         Some(self.chunks[vid.chunk_id].states[vid.id_in_chunk])
     }
@@ -877,49 +905,45 @@ impl Voxels {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::Voxels;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::{Vector, IVector};
     ///
     /// let voxels = Voxels::new(
-    ///     Vector3::new(1.0, 1.0, 1.0),
-    ///     &[Point3::new(0, 0, 0)],
+    ///     Vector::new(1.0, 1.0, 1.0),
+    ///     &[IVector::new(0, 0, 0)],
     /// );
     ///
-    /// // Point in first voxel (center at 0.5, 0.5, 0.5)
-    /// assert_eq!(voxels.voxel_at_point(Point3::new(0.3, 0.7, 0.2)), Point3::new(0, 0, 0));
+    /// // Vector in first voxel (center at 0.5, 0.5, 0.5)
+    /// assert_eq!(voxels.voxel_at_point(Vector::new(0.3, 0.7, 0.2)), IVector::new(0, 0, 0));
     ///
-    /// // Point just inside second voxel boundary
-    /// assert_eq!(voxels.voxel_at_point(Point3::new(1.0, 0.0, 0.0)), Point3::new(1, 0, 0));
+    /// // Vector just inside second voxel boundary
+    /// assert_eq!(voxels.voxel_at_point(Vector::new(1.0, 0.0, 0.0)), IVector::new(1, 0, 0));
     ///
     /// // Negative coordinates work too
-    /// assert_eq!(voxels.voxel_at_point(Point3::new(-0.5, -0.5, -0.5)), Point3::new(-1, -1, -1));
+    /// assert_eq!(voxels.voxel_at_point(Vector::new(-0.5, -0.5, -0.5)), IVector::new(-1, -1, -1));
     /// # }
     /// ```
     ///
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::Voxels;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::{Vector, IVector};
     ///
     /// // With non-uniform voxel size
     /// let voxels = Voxels::new(
-    ///     Vector3::new(2.0, 0.5, 1.0),
+    ///     Vector::new(2.0, 0.5, 1.0),
     ///     &[],
     /// );
     ///
     /// // X coordinate divided by 2.0, Y by 0.5, Z by 1.0
-    /// assert_eq!(voxels.voxel_at_point(Point3::new(3.0, 1.2, 0.8)), Point3::new(1, 2, 0));
+    /// assert_eq!(voxels.voxel_at_point(Vector::new(3.0, 1.2, 0.8)), IVector::new(1, 2, 0));
     /// # }
     /// ```
-    pub fn voxel_at_point(&self, point: Point<Real>) -> Point<i32> {
-        point
-            .coords
-            .component_div(&self.voxel_size)
-            .map(|x| x.floor() as i32)
-            .into()
+    pub fn voxel_at_point(&self, point: Vector) -> IVector {
+        vect_to_ivect((point / self.voxel_size).floor())
     }
 
     /// Gets the voxel at the given flat voxel index.
-    pub fn voxel_at_flat_id(&self, id: u32) -> Option<Point<i32>> {
+    pub fn voxel_at_flat_id(&self, id: u32) -> Option<IVector> {
         let vid = VoxelIndex::from_flat_id(id as usize);
         let chunk_key = self.chunk_keys.get(vid.chunk_id)?;
         if *chunk_key == VoxelsChunk::INVALID_CHUNK_KEY {
@@ -938,36 +962,20 @@ impl Voxels {
     /// bounds defined by [`Self::domain`].
     /// The range is semi, open, i.e., the range along each dimension `i` is understood as
     /// the semi-open interval: `range[0][i]..range[1][i]`.
-    pub fn voxel_range_intersecting_local_aabb(&self, aabb: &Aabb) -> [Point<i32>; 2] {
-        let mins = aabb
-            .mins
-            .coords
-            .component_div(&self.voxel_size)
-            .map(|x| x.floor() as i32);
-        let maxs = aabb
-            .maxs
-            .coords
-            .component_div(&self.voxel_size)
-            .map(|x| x.ceil() as i32);
-        [mins.into(), maxs.into()]
+    pub fn voxel_range_intersecting_local_aabb(&self, aabb: &Aabb) -> [IVector; 2] {
+        let mins = vect_to_ivect((aabb.mins / self.voxel_size).floor());
+        let maxs = vect_to_ivect((aabb.maxs / self.voxel_size).ceil());
+        [mins, maxs]
     }
 
     /// The AABB of a given range of voxels.
     ///
     /// The AABB is computed independently of [`Self::domain`] and independently of whether
     /// the voxels contained within are empty or not.
-    pub fn voxel_range_aabb(&self, mins: Point<i32>, maxs: Point<i32>) -> Aabb {
+    pub fn voxel_range_aabb(&self, mins: IVector, maxs: IVector) -> Aabb {
         Aabb {
-            mins: mins
-                .cast::<Real>()
-                .coords
-                .component_mul(&self.voxel_size)
-                .into(),
-            maxs: maxs
-                .cast::<Real>()
-                .coords
-                .component_mul(&self.voxel_size)
-                .into(),
+            mins: ivect_to_vect(mins) * self.voxel_size,
+            maxs: ivect_to_vect(maxs) * self.voxel_size,
         }
     }
 
@@ -976,16 +984,8 @@ impl Voxels {
     /// The aligned is calculated such that the returned AABB has corners lying at the grid
     /// intersections (i.e. matches voxel corners) and fully contains the input `aabb`.
     pub fn align_aabb_to_grid(&self, aabb: &Aabb) -> Aabb {
-        let mins = aabb
-            .mins
-            .coords
-            .zip_map(&self.voxel_size, |m, sz| Real::from((m / sz).floor()) * m)
-            .into();
-        let maxs = aabb
-            .maxs
-            .coords
-            .zip_map(&self.voxel_size, |m, sz| Real::from((m / sz).ceil()) * m)
-            .into();
+        let mins = (aabb.mins / self.voxel_size).floor() * self.voxel_size;
+        let maxs = (aabb.maxs / self.voxel_size).ceil() * self.voxel_size;
         Aabb { mins, maxs }
     }
 
@@ -1000,10 +1000,10 @@ impl Voxels {
         self.voxels_in_range(mins, maxs)
     }
 
-    /// The center point of all the voxels in this shape (including empty ones).
+    /// The center point of all the non-empty voxels in this shape.
     ///
     /// The voxel data associated to each center is provided to determine what kind of voxel
-    /// it is (and, in particular, if it is empty or full).
+    /// it is (in particular, its [`VoxelState`] indicating which of its faces are free).
     pub fn voxels(&self) -> impl Iterator<Item = VoxelData> + '_ {
         let aabb = self.chunk_bvh.root_aabb();
         self.voxels_in_range(
@@ -1014,12 +1014,12 @@ impl Voxels {
 
     /// Iterate through the data of all the voxels within the given (semi-open) voxel grid indices.
     ///
-    /// Note that this yields both empty and non-empty voxels within the range. This does not
+    /// Note that this only yields non-empty voxels within the range. This does not
     /// include any voxel that falls outside [`Self::domain`].
     pub fn voxels_in_range(
         &self,
-        mins: Point<i32>,
-        maxs: Point<i32>,
+        mins: IVector,
+        maxs: IVector,
     ) -> impl Iterator<Item = VoxelData> + '_ {
         let range_aabb = Aabb::new(self.voxel_center(mins), self.voxel_center(maxs));
 
@@ -1031,24 +1031,38 @@ impl Voxels {
             })
     }
 
-    fn voxel_to_chunk_key(voxel_key: Point<i32>) -> Point<i32> {
-        fn div_floor(a: i32, b: usize) -> i32 {
-            let sign = (a < 0) as i32;
-            (a + sign) / b as i32 - sign
+    fn voxel_to_chunk_key(voxel_key: IVector) -> IVector {
+        fn div_floor(a: Int, b: usize) -> Int {
+            let sign = (a < 0) as Int;
+            (a + sign) / b as Int - sign
         }
 
-        voxel_key.map(|e| div_floor(e, VoxelsChunk::VOXELS_PER_CHUNK_DIM))
+        #[cfg(feature = "dim2")]
+        {
+            IVector::new(
+                div_floor(voxel_key.x, VoxelsChunk::VOXELS_PER_CHUNK_DIM),
+                div_floor(voxel_key.y, VoxelsChunk::VOXELS_PER_CHUNK_DIM),
+            )
+        }
+        #[cfg(feature = "dim3")]
+        {
+            IVector::new(
+                div_floor(voxel_key.x, VoxelsChunk::VOXELS_PER_CHUNK_DIM),
+                div_floor(voxel_key.y, VoxelsChunk::VOXELS_PER_CHUNK_DIM),
+                div_floor(voxel_key.z, VoxelsChunk::VOXELS_PER_CHUNK_DIM),
+            )
+        }
     }
 
     /// Given a voxel key, returns the key of the voxel chunk that contains it, as well as the
     /// linear index of the voxel within that chunk.
     #[cfg(feature = "dim2")]
-    pub(super) fn chunk_key_and_id_in_chunk(voxel_key: Point<i32>) -> (Point<i32>, usize) {
+    pub(super) fn chunk_key_and_id_in_chunk(voxel_key: IVector) -> (IVector, usize) {
         let chunk_key = Self::voxel_to_chunk_key(voxel_key);
         // NOTE: always positive since we subtracted the smallest possible key on that chunk.
-        let voxel_key_in_chunk = voxel_key - chunk_key * VoxelsChunk::VOXELS_PER_CHUNK_DIM as i32;
+        let voxel_key_in_chunk = voxel_key - chunk_key * VoxelsChunk::VOXELS_PER_CHUNK_DIM as Int;
         let id_in_chunk = (voxel_key_in_chunk.x
-            + voxel_key_in_chunk.y * VoxelsChunk::VOXELS_PER_CHUNK_DIM as i32)
+            + voxel_key_in_chunk.y * VoxelsChunk::VOXELS_PER_CHUNK_DIM as Int)
             as usize;
         (chunk_key, id_in_chunk)
     }
@@ -1056,20 +1070,20 @@ impl Voxels {
     /// Given a voxel key, returns the key of the voxel chunk that contains it, as well as the
     /// linear index of the voxel within that chunk.
     #[cfg(feature = "dim3")]
-    pub(super) fn chunk_key_and_id_in_chunk(voxel_key: Point<i32>) -> (Point<i32>, usize) {
+    pub(super) fn chunk_key_and_id_in_chunk(voxel_key: IVector) -> (IVector, usize) {
         let chunk_key = Self::voxel_to_chunk_key(voxel_key);
         // NOTE: always positive since we subtracted the smallest possible key on that chunk.
-        let voxel_key_in_chunk = voxel_key - chunk_key * VoxelsChunk::VOXELS_PER_CHUNK_DIM as i32;
+        let voxel_key_in_chunk = voxel_key - chunk_key * VoxelsChunk::VOXELS_PER_CHUNK_DIM as Int;
         let id_in_chunk = (voxel_key_in_chunk.x
-            + voxel_key_in_chunk.y * VoxelsChunk::VOXELS_PER_CHUNK_DIM as i32
+            + voxel_key_in_chunk.y * VoxelsChunk::VOXELS_PER_CHUNK_DIM as Int
             + voxel_key_in_chunk.z
-                * VoxelsChunk::VOXELS_PER_CHUNK_DIM as i32
-                * VoxelsChunk::VOXELS_PER_CHUNK_DIM as i32) as usize;
+                * VoxelsChunk::VOXELS_PER_CHUNK_DIM as Int
+                * VoxelsChunk::VOXELS_PER_CHUNK_DIM as Int) as usize;
         (chunk_key, id_in_chunk)
     }
 
     /// The linearized index associated to the given voxel key.
-    pub fn linear_index(&self, voxel_key: Point<i32>) -> Option<VoxelIndex> {
+    pub fn linear_index(&self, voxel_key: IVector) -> Option<VoxelIndex> {
         let (chunk_key, id_in_chunk) = Self::chunk_key_and_id_in_chunk(voxel_key);
         let chunk_id = self.chunk_headers.get(&chunk_key)?.id;
         Some(VoxelIndex {
@@ -1087,24 +1101,21 @@ impl Voxels {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::Voxels;
-    /// use nalgebra::{Point3, Vector3};
+    /// use parry3d::math::{Vector, IVector};
     ///
     /// let voxels = Voxels::new(
-    ///     Vector3::new(1.0, 1.0, 1.0),
-    ///     &[Point3::new(0, 0, 0)],
+    ///     Vector::new(1.0, 1.0, 1.0),
+    ///     &[IVector::new(0, 0, 0)],
     /// );
     ///
     /// // Center of voxel at origin
-    /// assert_eq!(voxels.voxel_center(Point3::new(0, 0, 0)), Point3::new(0.5, 0.5, 0.5));
+    /// assert_eq!(voxels.voxel_center(IVector::new(0, 0, 0)), Vector::new(0.5, 0.5, 0.5));
     ///
     /// // Center of voxel at (1, 2, 3)
-    /// assert_eq!(voxels.voxel_center(Point3::new(1, 2, 3)), Point3::new(1.5, 2.5, 3.5));
+    /// assert_eq!(voxels.voxel_center(IVector::new(1, 2, 3)), Vector::new(1.5, 2.5, 3.5));
     /// # }
     /// ```
-    pub fn voxel_center(&self, key: Point<i32>) -> Point<Real> {
-        (key.cast::<Real>() + Vector::repeat(Real::from(0.5)))
-            .coords
-            .component_mul(&self.voxel_size)
-            .into()
+    pub fn voxel_center(&self, key: IVector) -> Vector {
+        (ivect_to_vect(key) + Vector::splat(0.5)) * self.voxel_size
     }
 }

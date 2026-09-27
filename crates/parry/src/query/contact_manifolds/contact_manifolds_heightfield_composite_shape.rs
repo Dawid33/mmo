@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::bounding_volume::BoundingVolume;
-use crate::math::{Isometry, Real};
+use crate::math::{Pose, Real};
 use crate::query::contact_manifolds::contact_manifolds_workspace::{
     TypedWorkspaceData, WorkspaceData,
 };
@@ -12,22 +12,23 @@ use crate::query::ContactManifold;
 use crate::shape::Capsule;
 use crate::shape::{CompositeShape, HeightField, Shape};
 use crate::utils::hashmap::{Entry, HashMap};
-use crate::utils::IsometryOpt;
+use crate::utils::PoseOpt;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(Clone, Hash)]
+#[derive(Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 struct SubDetector {
     manifold_id: usize,
     timestamp: bool,
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Hash)]
+#[derive(Clone, Default)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct HeightFieldCompositeShapeContactManifoldsWorkspace {
     timestamp: bool,
     sub_detectors: HashMap<(u32, u32), SubDetector>,
@@ -58,8 +59,8 @@ fn ensure_workspace_exists(workspace: &mut Option<ContactManifoldsWorkspace>) {
 /// Computes the contact manifold between an heightfield and a composite shape.
 pub fn contact_manifolds_heightfield_composite_shape<ManifoldData, ContactData>(
     dispatcher: &dyn PersistentQueryDispatcher<ManifoldData, ContactData>,
-    pos12: &Isometry<Real>,
-    pos21: &Isometry<Real>,
+    pos12: &Pose,
+    pos21: &Pose,
     heightfield1: &HeightField,
     composite2: &dyn CompositeShape,
     prediction: Real,
@@ -82,6 +83,7 @@ pub fn contact_manifolds_heightfield_composite_shape<ManifoldData, ContactData>(
     let bvh2 = composite2.bvh();
     let ls_aabb2_1 = bvh2.root_aabb().transform_by(pos12).loosened(prediction);
     let mut old_manifolds = core::mem::take(manifolds);
+    let deformable = composite2.is_deformable();
 
     heightfield1.map_elements_in_local_aabb(&ls_aabb2_1, &mut |leaf1, part1| {
         #[cfg(feature = "dim2")]
@@ -112,11 +114,11 @@ pub fn contact_manifolds_heightfield_composite_shape<ManifoldData, ContactData>(
                         if flipped {
                             manifold.subshape1 = leaf2;
                             manifold.subshape2 = leaf1;
-                            manifold.subshape_pos1 = part_pos2.copied();
+                            manifold.set_subshape_pos1(part_pos2.copied());
                         } else {
                             manifold.subshape1 = leaf1;
                             manifold.subshape2 = leaf2;
-                            manifold.subshape_pos2 = part_pos2.copied();
+                            manifold.set_subshape_pos2(part_pos2.copied());
                         };
 
                         manifolds.push(manifold);
@@ -125,6 +127,9 @@ pub fn contact_manifolds_heightfield_composite_shape<ManifoldData, ContactData>(
                 };
 
                 let manifold = &mut manifolds[sub_detector.manifold_id];
+                if deformable {
+                    manifold.mark_shapes_deformed();
+                }
 
                 #[cfg(feature = "dim2")]
                 let triangle_normals = None::<()>;

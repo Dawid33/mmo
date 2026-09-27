@@ -11,7 +11,7 @@ use crate::{
 
 /// Region-local cell address, `0..cells_per_side` on each axis.
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, state_hash::StateHash,
     serde::Serialize, serde::Deserialize,
 )]
 pub struct CellCoords {
@@ -115,7 +115,7 @@ pub fn lod_cell_masked(
 /// Sim-side cell bookkeeping (tier-2 field `GameData.cells`). Mutated ONLY
 /// raw: inside the `CellChanges` arm, which every replica forgets at once,
 /// and at region creation (`spawn`).
-#[derive(Debug, Clone, Default, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, state_hash::StateHash, serde::Serialize, serde::Deserialize)]
 pub struct CellState {
     /// 0 = legacy region (fully materialized, no cells).
     pub cell_chunks: usize,
@@ -208,9 +208,9 @@ impl Rollback {
         let t = self.data.physics.bodies.get(handle)?.translation();
         // Chunk bodies sit at exact multiples of 32 (seed_terrain_genesis / create_mesh).
         Some(ChunkCoords::new(
-            (t.x.0 / 32.0) as usize,
-            (t.y.0 / 32.0).floor() as i32,
-            (t.z.0 / 32.0) as usize,
+            (t.x / 32.0) as usize,
+            (t.y / 32.0).floor() as i32,
+            (t.z / 32.0) as usize,
         ))
     }
 
@@ -248,7 +248,7 @@ impl Rollback {
             .filter_map(|(k, _)| {
                 let h = (*self.data.ecs.rigidbody.try_get(k))?;
                 let t = self.data.physics.bodies.get(h)?.translation();
-                (cell_of_pos(t.x.0, t.z.0, cc) == Some(cell)).then_some(k)
+                (cell_of_pos(t.x, t.z, cc) == Some(cell)).then_some(k)
             })
             .collect()
     }
@@ -268,30 +268,35 @@ impl Rollback {
             .fold(0u32, |sum, (_, key)| sum.wrapping_add(self.chunk_terrain_term(key).unwrap_or(0)))
     }
 
+    ///
+    /// Server-authored and hard-checked by clients, so both sides must compute
+    /// it identically on every target: it walks `StateHash` (usize as u64),
+    /// not std `Hash`, which wrote `usize` at pointer width and made every
+    /// wasm32 client fail with `CellHashMismatch`.
     pub fn cell_hash(&self, cell: CellCoords) -> u32 {
-        use std::hash::Hash;
-        let mut h = crc32fast::Hasher::new();
-        cell.hash(&mut h);
+        use state_hash::StateHash;
+        let mut h = crate::StateHasher::new();
+        cell.state_hash(&mut h);
         for (coords, key) in self.cell_chunk_keys(cell) {
-            (coords.x, coords.y, coords.z).hash(&mut h);
-            key.hash(&mut h);
-            self.data.ecs.chunk.try_get(key).hash(&mut h);
+            (coords.x, coords.y, coords.z).state_hash(&mut h);
+            key.state_hash(&mut h);
+            self.data.ecs.chunk.try_get(key).state_hash(&mut h);
             if let Some(handle) = *self.data.ecs.rigidbody.try_get(key) {
-                handle.hash(&mut h);
+                handle.state_hash(&mut h);
                 if let Some(body) = self.data.physics.bodies.get(handle) {
-                    body.hash(&mut h);
+                    body.state_hash(&mut h);
                     for ch in body.colliders() {
-                        ch.hash(&mut h);
-                        self.data.physics.colliders.get(*ch).hash(&mut h);
+                        ch.state_hash(&mut h);
+                        self.data.physics.colliders.get(*ch).state_hash(&mut h);
                     }
                 }
             }
         }
         for key in self.cell_entity_keys(cell) {
-            key.hash(&mut h);
-            self.data.ecs.kind.try_get(key).hash(&mut h);
+            key.state_hash(&mut h);
+            self.data.ecs.kind.try_get(key).state_hash(&mut h);
             if let Some(handle) = *self.data.ecs.rigidbody.try_get(key) {
-                self.data.physics.bodies.get(handle).hash(&mut h);
+                self.data.physics.bodies.get(handle).state_hash(&mut h);
             }
         }
         h.finalize()
@@ -311,10 +316,10 @@ impl Rollback {
         if render {
             for (c, chunk) in raw {
                 let e = self.chunk_key_at(c).expect("genesis indexed the chunk");
-                let pose = crate::IsometryReal::translation(
-                    parry3d::math::Real::from((c.x * 32) as f32),
-                    parry3d::math::Real::from((c.y * 32) as f32),
-                    parry3d::math::Real::from((c.z * 32) as f32),
+                let pose = crate::Pose::translation(
+                    (c.x * 32) as f32,
+                    (c.y * 32) as f32,
+                    (c.z * 32) as f32,
                 );
                 self.data.send(crate::GameDataUpdate::new(
                     crate::GameDataTransactionKind::Do,
@@ -375,7 +380,7 @@ impl Rollback {
             .filter_map(|e| {
                 let h = (*self.data.ecs.rigidbody.try_get(*e))?;
                 let t = self.data.physics.bodies.get(h)?.translation();
-                Some((t.x.0, t.z.0))
+                Some((t.x, t.z))
             })
             .collect()
     }
@@ -409,7 +414,7 @@ impl Rollback {
             let Some(body) = self.data.physics.bodies.get(h) else { continue };
             let t = body.translation();
             // Outside the region is the departure scan's job.
-            if let Some(cell) = cell_of_pos(t.x.0, t.z.0, cc) {
+            if let Some(cell) = cell_of_pos(t.x, t.z, cc) {
                 if !self.data.cells.active.contains(&cell) {
                     strays.push((cell, k));
                 }
@@ -433,6 +438,7 @@ impl Rollback {
                 p.colliders.raw_mut(),
                 p.implules_joint_set.raw_mut(),
                 p.multi_body_joint_set.raw_mut(),
+                p.soft_bodies.raw_mut(),
                 true,
             );
         }

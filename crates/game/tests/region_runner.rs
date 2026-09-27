@@ -3,7 +3,7 @@ use game::{
     Block, BlockId, Chunk, ChunkCoords, Column, ColumnCoords, GameEventKind, Region, RegionCoords,
     RegionInput, RegionOutput, RegionRunner, RegionSeed, SerializedRegion, SubChunk,
 };
-use std::hash::{Hash, Hasher};
+use game::StateHash;
 
 fn flat_chunks() -> Vec<(ChunkCoords, Chunk)> {
     (0..2)
@@ -26,7 +26,7 @@ fn flat_columns() -> Vec<(ColumnCoords, Column)> {
 
 fn crc(region: &Region) -> u32 {
     let mut h = crc32fast::Hasher::new();
-    region.data().data.hash(&mut h);
+    region.data().data.state_hash(&mut h);
     h.finalize()
 }
 
@@ -90,7 +90,7 @@ fn shutdown_stops_and_park_restore_is_hash_exact() {
             panic!()
         };
         let mut h = crc32fast::Hasher::new();
-        rb.data.hash(&mut h);
+        rb.data.state_hash(&mut h);
         h.finalize()
     };
 

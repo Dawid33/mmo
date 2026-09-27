@@ -1,16 +1,17 @@
-use crate::math::{Real, RawReal};
+use crate::math::Real;
 use crate::partitioning::BvhNode;
 use crate::query::{
     self, details::NonlinearShapeCastMode, NonlinearRigidMotion, QueryDispatcher, ShapeCastHit,
 };
-use crate::shape::{Ball, CompositeShapeRef, Shape, TypedCompositeShape};
+use crate::shape::{Ball, CompositeShapeRef, Shape, SubShapeId, TypedCompositeShape};
 
 impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
     /// Performs a non-linear shape-cast between `self` animated subject to the `motion1` and
     /// the `shape2` subject to the `motion2`.
     ///
-    /// Returns the shape-cast hit (if any) as well as the index of the sub-shape of `self` involved
-    /// in the hit.
+    /// Returns the index of the sub-shape of `self` that was involved alongside the hit, which is
+    /// left as that sub-shape reported it (its `subshape1` is the sub-shape's own when it is a
+    /// composite too, and `subshape2` is `shape2`'s).
     pub fn cast_shape_nonlinear<D: ?Sized + QueryDispatcher>(
         &self,
         dispatcher: &D,
@@ -20,7 +21,7 @@ impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
         start_time: Real,
         end_time: Real,
         stop_at_penetration: bool,
-    ) -> Option<(u32, ShapeCastHit)> {
+    ) -> Option<(SubShapeId, ShapeCastHit)> {
         let sphere2 = shape2.compute_local_bounding_sphere();
 
         self.0.bvh().find_best(
@@ -28,11 +29,11 @@ impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
             |node: &BvhNode, _| {
                 let aabb1 = node.aabb();
                 let center1 = aabb1.center();
-                let radius1 = aabb1.half_extents().norm();
+                let radius1 = aabb1.half_extents().length();
                 let ball1 = Ball::new(radius1);
                 let ball2 = Ball::new(sphere2.radius());
-                let ball_motion1 = motion1.prepend_translation(center1.coords);
-                let ball_motion2 = motion2.prepend_translation(sphere2.center.coords);
+                let ball_motion1 = motion1.prepend_translation(center1);
+                let ball_motion2 = motion2.prepend_translation(sphere2.center);
 
                 query::details::cast_shapes_nonlinear_support_map_support_map(
                     dispatcher,
@@ -47,7 +48,7 @@ impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
                     NonlinearShapeCastMode::StopAtPenetration,
                 )
                 .map(|hit| hit.time_of_impact)
-                .unwrap_or(Real::from(RawReal::MAX))
+                .unwrap_or(Real::MAX)
             },
             |part_id, _| {
                 self.0
@@ -109,7 +110,10 @@ where
             end_time,
             stop_at_penetration,
         )
-        .map(|hit| hit.1)
+        .map(|(part_id, mut hit)| {
+            hit.subshape1 = part_id;
+            hit
+        })
 }
 
 /// Time Of Impact of any shape with a composite shape, under a rigid motion (translation + rotation).

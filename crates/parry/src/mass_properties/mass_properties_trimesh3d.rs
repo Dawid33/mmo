@@ -1,5 +1,5 @@
 use crate::mass_properties::MassProperties;
-use crate::math::{Matrix, Point, Real, DIM};
+use crate::math::{Matrix, Real, Vector, DIM};
 use crate::shape::Tetrahedron;
 use num::Zero;
 
@@ -7,7 +7,7 @@ impl MassProperties {
     /// Computes the mass properties of a triangle mesh.
     pub fn from_trimesh(
         density: Real,
-        vertices: &[Point<Real>],
+        vertices: &[Vector],
         indices: &[[u32; DIM]],
     ) -> MassProperties {
         let (volume, com) = trimesh_signed_volume_and_center_of_mass(vertices, indices);
@@ -16,50 +16,50 @@ impl MassProperties {
             return MassProperties::zero();
         }
 
-        let mut itot = Matrix::zeros();
+        let mut itot = Matrix::ZERO;
 
         for t in indices {
-            let p2 = &vertices[t[0] as usize];
-            let p3 = &vertices[t[1] as usize];
-            let p4 = &vertices[t[2] as usize];
+            let p2 = vertices[t[0] as usize];
+            let p3 = vertices[t[1] as usize];
+            let p4 = vertices[t[2] as usize];
 
-            let vol = Tetrahedron::new(com, *p2, *p3, *p4).signed_volume();
-            let ipart = tetrahedron_unit_inertia_tensor_wrt_point(&com, &com, p2, p3, p4);
+            let vol = Tetrahedron::new(com, p2, p3, p4).signed_volume();
+            let ipart = tetrahedron_unit_inertia_tensor_wrt_point(com, com, p2, p3, p4);
 
             itot += ipart * vol;
         }
 
-        let sign: Real = volume.signum().into();
+        let sign = volume.signum();
         Self::with_inertia_matrix(com, volume * density * sign, itot * density * sign)
     }
 }
 
 /// Computes the unit inertia tensor of a tetrahedron, with regard to the given `point`.
 pub fn tetrahedron_unit_inertia_tensor_wrt_point(
-    point: &Point<Real>,
-    p1: &Point<Real>,
-    p2: &Point<Real>,
-    p3: &Point<Real>,
-    p4: &Point<Real>,
-) -> Matrix<Real> {
+    point: Vector,
+    p1: Vector,
+    p2: Vector,
+    p3: Vector,
+    p4: Vector,
+) -> Matrix {
     let p1 = p1 - point;
     let p2 = p2 - point;
     let p3 = p3 - point;
     let p4 = p4 - point;
 
     // Just for readability.
-    let x1 = p1[0];
-    let y1 = p1[1];
-    let z1 = p1[2];
-    let x2 = p2[0];
-    let y2 = p2[1];
-    let z2 = p2[2];
-    let x3 = p3[0];
-    let y3 = p3[1];
-    let z3 = p3[2];
-    let x4 = p4[0];
-    let y4 = p4[1];
-    let z4 = p4[2];
+    let x1 = p1.x;
+    let y1 = p1.y;
+    let z1 = p1.z;
+    let x2 = p2.x;
+    let y2 = p2.y;
+    let z2 = p2.z;
+    let x3 = p3.x;
+    let y3 = p3.y;
+    let z3 = p3.z;
+    let x4 = p4.x;
+    let y4 = p4.y;
+    let z4 = p4.z;
 
     let diag_x = x1 * x1
         + x1 * x2
@@ -148,18 +148,18 @@ pub fn tetrahedron_unit_inertia_tensor_wrt_point(
         + x4 * y4 * 2.0)
         * 0.05;
 
-    Matrix::new(a0, -c1, -b1, -c1, b0, -a1, -b1, -a1, c0)
+    Matrix::from_cols_array(&[a0, -c1, -b1, -c1, b0, -a1, -b1, -a1, c0])
 }
 
 /// Computes the volume and center-of-mass of a mesh.
 pub fn trimesh_signed_volume_and_center_of_mass(
-    vertices: &[Point<Real>],
+    vertices: &[Vector],
     indices: &[[u32; DIM]],
-) -> (Real, Point<Real>) {
+) -> (Real, Vector) {
     let geometric_center = crate::utils::center(vertices);
 
-    let mut res = Point::origin();
-    let mut vol: Real = 0.0.into();
+    let mut res = Vector::ZERO;
+    let mut vol = 0.0;
 
     for t in indices {
         let p2 = vertices[t[0] as usize];
@@ -169,7 +169,7 @@ pub fn trimesh_signed_volume_and_center_of_mass(
         let volume = Tetrahedron::new(geometric_center, p2, p3, p4).signed_volume();
         let center = Tetrahedron::new(geometric_center, p2, p3, p4).center();
 
-        res += center.coords * volume;
+        res += center * volume;
         vol += volume;
     }
 
@@ -182,67 +182,64 @@ pub fn trimesh_signed_volume_and_center_of_mass(
 
 #[cfg(test)]
 mod test {
-    use crate::math::{Isometry, Vector, Real};
+    use crate::math::{Pose, Rotation, Vector, VectorExt};
     use crate::{
         mass_properties::MassProperties,
         shape::{Ball, Capsule, Cone, Cuboid, Cylinder, Shape},
     };
-    use na::UnitQuaternion;
     use std::dbg;
 
     fn assert_same_principal_inertias(mprops1: &MassProperties, mprops2: &MassProperties) {
         for k in 0..3 {
             let i1 = mprops1.principal_inertia_local_frame
-                * mprops1.principal_inertia().component_mul(
-                    &(mprops1.principal_inertia_local_frame.inverse() * Vector::ith(k, 1.0.into())),
-                );
+                * (mprops1.principal_inertia()
+                    * (mprops1.principal_inertia_local_frame.inverse() * Vector::ith(k, 1.0)));
             let i2 = mprops2.principal_inertia_local_frame
-                * mprops2.principal_inertia().component_mul(
-                    &(mprops2.principal_inertia_local_frame.inverse() * Vector::ith(k, 1.0.into())),
-                );
-            assert_relative_eq!(i1, i2, epsilon = 0.5.into())
+                * (mprops2.principal_inertia()
+                    * (mprops2.principal_inertia_local_frame.inverse() * Vector::ith(k, 1.0)));
+            assert!(i1.abs_diff_eq(i2, 0.5))
         }
     }
 
     #[test]
     fn cuboid_as_trimesh_mprops() {
-        let cuboid = Cuboid::new(Vector::new(1.0.into(), 2.0.into(), 3.0.into()));
+        let cuboid = Cuboid::new(Vector::new(1.0, 2.0, 3.0));
 
         use crate::shape::Shape;
-        let orig_mprops = cuboid.mass_properties(1.0.into());
+        let orig_mprops = cuboid.mass_properties(1.0);
         dbg!(orig_mprops.principal_inertia());
 
         let mut trimesh = cuboid.to_trimesh();
-        let mprops = MassProperties::from_trimesh(1.0.into(), &trimesh.0, &trimesh.1);
-        assert_relative_eq!(mprops.mass(), Real::from(48.0), epsilon = 1.0e-4.into());
-        assert_relative_eq!(
-            (mprops.principal_inertia_local_frame * mprops.principal_inertia()).abs(),
-            Vector::new(Real::from(208.0), Real::from(160.0), Real::from(80.0)),
-            epsilon = 1.0e-4.into()
+        let mprops = MassProperties::from_trimesh(1.0, &trimesh.0, &trimesh.1);
+        assert_relative_eq!(mprops.mass(), 48.0, epsilon = 1.0e-4);
+        assert!(
+            (mprops.principal_inertia_local_frame * mprops.principal_inertia())
+                .abs()
+                .abs_diff_eq(Vector::new(208.0, 160.0, 80.0), 1.0e-4)
         );
 
         // Check after shifting the trimesh off the origin.
         trimesh
             .0
             .iter_mut()
-            .for_each(|pt| *pt += Vector::new(30.0.into(), 20.0.into(), 10.0.into()));
-        let mprops = MassProperties::from_trimesh(1.0.into(), &trimesh.0, &trimesh.1);
-        assert_relative_eq!(mprops.mass(), Real::from(48.0), epsilon = 1.0e-4.into());
-        assert_relative_eq!(
-            (mprops.principal_inertia_local_frame * mprops.principal_inertia()).abs(),
-            Vector::new(Real::from(208.0), Real::from(160.0), Real::from(80.0)),
-            epsilon = 1.0e-4.into()
+            .for_each(|pt| *pt += Vector::new(30.0, 20.0, 10.0));
+        let mprops = MassProperties::from_trimesh(1.0, &trimesh.0, &trimesh.1);
+        assert_relative_eq!(mprops.mass(), 48.0, epsilon = 1.0e-4);
+        assert!(
+            (mprops.principal_inertia_local_frame * mprops.principal_inertia())
+                .abs()
+                .abs_diff_eq(Vector::new(208.0, 160.0, 80.0), 1.0e-4)
         );
     }
 
     #[test]
     fn primitives_as_trimesh_mprops() {
         let primitives = (
-            Cuboid::new(Vector::new(1.0.into(), 2.0.into(), 3.0.into())),
-            Capsule::new_y(2.0.into(), 1.0.into()),
-            Cone::new(2.0.into(), 1.0.into()),
-            Cylinder::new(2.0.into(), 1.0.into()),
-            Ball::new(2.0.into()),
+            Cuboid::new(Vector::new(1.0, 2.0, 3.0)),
+            Capsule::new_y(2.0, 1.0),
+            Cone::new(2.0, 1.0),
+            Cylinder::new(2.0, 1.0),
+            Ball::new(2.0),
         );
         let mut meshes = [
             primitives.0.to_trimesh(),
@@ -260,28 +257,28 @@ mod test {
         ];
 
         for (shape, mesh) in shapes.iter().zip(meshes.iter_mut()) {
-            let shape_mprops = shape.mass_properties(2.0.into());
-            let mesh_mprops = MassProperties::from_trimesh(2.0.into(), &mesh.0, &mesh.1);
-            assert_relative_eq!(shape_mprops.mass(), mesh_mprops.mass(), epsilon = 1.0e-1.into());
+            let shape_mprops = shape.mass_properties(2.0);
+            let mesh_mprops = MassProperties::from_trimesh(2.0, &mesh.0, &mesh.1);
+            assert_relative_eq!(shape_mprops.mass(), mesh_mprops.mass(), epsilon = 1.0e-1);
             assert_same_principal_inertias(&shape_mprops, &mesh_mprops);
             assert_relative_eq!(
                 shape_mprops.local_com,
                 mesh_mprops.local_com,
-                epsilon = 1.0e-3.into()
+                epsilon = 1.0e-3
             );
 
             // Now try with a shifted mesh.
-            let shift = Vector::new(33.0.into(), 22.0.into(), 11.0.into());
+            let shift = Vector::new(33.0, 22.0, 11.0);
             mesh.0.iter_mut().for_each(|pt| *pt += shift);
 
-            let mesh_mprops = MassProperties::from_trimesh(2.0.into(), &mesh.0, &mesh.1);
+            let mesh_mprops = MassProperties::from_trimesh(2.0, &mesh.0, &mesh.1);
 
-            assert_relative_eq!(shape_mprops.mass(), mesh_mprops.mass(), epsilon = 1.0e-1.into());
+            assert_relative_eq!(shape_mprops.mass(), mesh_mprops.mass(), epsilon = 1.0e-1);
             assert_same_principal_inertias(&shape_mprops, &mesh_mprops);
             assert_relative_eq!(
                 shape_mprops.local_com + shift, // The mesh is shifted, so its center-of-mass is shifted too.
                 mesh_mprops.local_com,
-                epsilon = 1.0e-3.into()
+                epsilon = 1.0e-3
             );
         }
     }
@@ -293,11 +290,11 @@ mod test {
     // vertices.
     #[test]
     fn rotated_inertia_tensor() {
-        let cuboid = Cuboid::new(Vector::new(1.0.into(), 2.0.into(), 3.0.into()));
-        let density = 1.0.into();
+        let cuboid = Cuboid::new(Vector::new(3.0, 2.0, 1.0));
+        let density = 1.0;
 
         // Compute mass properties with a translated and rotated cuboid.
-        let pose = Isometry::new(Vector::new(5.0.into(), 2.0.into(), 3.0.into()), Vector::new(0.6.into(), 0.7.into(), 0.8.into()));
+        let pose = Pose::new(Vector::new(5.0, 2.0, 3.0), Vector::new(0.6, 0.7, 0.8));
         let mprops = cuboid.mass_properties(density);
 
         // Compute mass properties with a manually transformed cuboid.
@@ -312,36 +309,34 @@ mod test {
         assert_relative_eq!(
             mprops.mass(),
             trimesh_origin_mprops.mass(),
-            epsilon = 1.0e-4.into()
+            epsilon = 1.0e-4
         );
         assert_relative_eq!(
             mprops.mass(),
             trimesh_transformed_mprops.mass(),
-            epsilon = 1.0e-4.into()
+            epsilon = 1.0e-4
         );
         // compare local_com
         assert_relative_eq!(
             pose * mprops.local_com,
             trimesh_transformed_mprops.local_com,
-            epsilon = 1.0e-4.into()
+            epsilon = 1.0e-4
         );
         assert_relative_eq!(
             pose * trimesh_origin_mprops.local_com,
             trimesh_transformed_mprops.local_com,
-            epsilon = 1.0e-4.into()
+            epsilon = 1.0e-4
         );
-        assert_relative_eq!(
-            trimesh_origin_mprops.principal_inertia(),
-            mprops.principal_inertia(),
-            epsilon = 1.0e-4.into()
-        );
+        assert!(trimesh_origin_mprops
+            .principal_inertia()
+            .abs_diff_eq(mprops.principal_inertia(), 1.0e-4));
         let w1 = trimesh_origin_mprops.world_inv_inertia(&pose.rotation);
-        let w2 = trimesh_transformed_mprops.world_inv_inertia(&UnitQuaternion::identity());
-        assert_relative_eq!(w1.m11, w2.m11, epsilon = 1.0e-7.into());
-        assert_relative_eq!(w1.m12, w2.m12, epsilon = 1.0e-7.into());
-        assert_relative_eq!(w1.m13, w2.m13, epsilon = 1.0e-7.into());
-        assert_relative_eq!(w1.m22, w2.m22, epsilon = 1.0e-7.into());
-        assert_relative_eq!(w1.m23, w2.m23, epsilon = 1.0e-7.into());
-        assert_relative_eq!(w1.m33, w2.m33, epsilon = 1.0e-7.into());
+        let w2 = trimesh_transformed_mprops.world_inv_inertia(&Rotation::IDENTITY);
+        assert_relative_eq!(w1.m11, w2.m11, epsilon = 1.0e-7);
+        assert_relative_eq!(w1.m12, w2.m12, epsilon = 1.0e-7);
+        assert_relative_eq!(w1.m13, w2.m13, epsilon = 1.0e-7);
+        assert_relative_eq!(w1.m22, w2.m22, epsilon = 1.0e-7);
+        assert_relative_eq!(w1.m23, w2.m23, epsilon = 1.0e-7);
+        assert_relative_eq!(w1.m33, w2.m33, epsilon = 1.0e-7);
     }
 }

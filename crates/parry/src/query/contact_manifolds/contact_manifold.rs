@@ -1,15 +1,13 @@
-use crate::math::{Isometry, Point, Real, Vector};
+use crate::math::{Pose, Real, Vector};
 use crate::shape::PackedFeatureId;
 #[cfg(feature = "dim3")]
 use alloc::vec::Vec;
-use ordered_float::OrderedFloat;
 
-#[derive(Copy, Clone, Debug, Hash)]
+#[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 /// A single contact point between two shapes.
 ///
@@ -47,12 +45,12 @@ use ordered_float::OrderedFloat;
 /// use parry3d::query::{ContactManifold, TrackedContact};
 /// use parry3d::query::details::contact_manifold_ball_ball;
 /// use parry3d::shape::Ball;
-/// use parry3d::math::Isometry;
+/// use parry3d::math::Pose;
 ///
 /// // Two balls, one slightly overlapping the other
 /// let ball1 = Ball::new(1.0);
 /// let ball2 = Ball::new(1.0);
-/// let pos12 = Isometry::translation(1.5, 0.0, 0.0); // Overlapping by 0.5
+/// let pos12 = Pose::translation(1.5, 0.0, 0.0); // Overlapping by 0.5
 ///
 /// let mut manifold = ContactManifold::<(), ()>::new();
 /// contact_manifold_ball_ball(&pos12, &ball1, &ball2, 0.0, &mut manifold);
@@ -72,14 +70,14 @@ use ordered_float::OrderedFloat;
 /// use parry3d::query::{ContactManifold, TrackedContact};
 /// use parry3d::query::details::contact_manifold_ball_ball;
 /// use parry3d::shape::Ball;
-/// use parry3d::math::Isometry;
+/// use parry3d::math::Pose;
 ///
 /// let ball1 = Ball::new(1.0);
 /// let ball2 = Ball::new(1.0);
 ///
 /// // Position shapes in world space
-/// let pos1 = Isometry::translation(0.0, 0.0, 0.0);
-/// let pos2 = Isometry::translation(1.5, 0.0, 0.0);
+/// let pos1 = Pose::translation(0.0, 0.0, 0.0);
+/// let pos2 = Pose::translation(1.5, 0.0, 0.0);
 /// let pos12 = pos1.inverse() * pos2; // Relative position
 ///
 /// let mut manifold = ContactManifold::<(), ()>::new();
@@ -106,18 +104,19 @@ use ordered_float::OrderedFloat;
 ///
 /// These IDs are used to track contacts across frames. If the same feature IDs appear
 /// in consecutive frames, it's likely the same physical contact point.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TrackedContact<Data> {
     /// The contact point in the local-space of the first shape.
     ///
     /// This is the point on the first shape's surface (or interior if penetrating)
     /// that is closest to or in contact with the second shape.
-    pub local_p1: Point<Real>,
+    pub local_p1: Vector,
 
     /// The contact point in the local-space of the second shape.
     ///
     /// This is the point on the second shape's surface (or interior if penetrating)
     /// that is closest to or in contact with the first shape.
-    pub local_p2: Point<Real>,
+    pub local_p2: Vector,
 
     /// The signed distance between the two contact points.
     ///
@@ -170,11 +169,11 @@ impl<Data: Default + Copy> TrackedContact<Data> {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::query::TrackedContact;
     /// use parry3d::shape::PackedFeatureId;
-    /// use parry3d::math::Point;
+    /// use parry3d::math::Vector;
     ///
     /// let contact = TrackedContact::<()>::new(
-    ///     Point::new(1.0, 0.0, 0.0),  // Point on shape 1
-    ///     Point::new(-1.0, 0.0, 0.0), // Point on shape 2
+    ///     Vector::new(1.0, 0.0, 0.0),  // Point on shape 1
+    ///     Vector::new(-1.0, 0.0, 0.0), // Point on shape 2
     ///     PackedFeatureId::face(0),    // Face 0 of shape 1
     ///     PackedFeatureId::face(0),    // Face 0 of shape 2
     ///     -0.1,                         // Penetration depth of 0.1
@@ -184,8 +183,8 @@ impl<Data: Default + Copy> TrackedContact<Data> {
     /// # }
     /// ```
     pub fn new(
-        local_p1: Point<Real>,
-        local_p2: Point<Real>,
+        local_p1: Vector,
+        local_p2: Vector,
         fid1: PackedFeatureId,
         fid2: PackedFeatureId,
         dist: Real,
@@ -202,8 +201,8 @@ impl<Data: Default + Copy> TrackedContact<Data> {
 
     /// Creates a new tracked contact where its input may need to be flipped.
     pub fn flipped(
-        local_p1: Point<Real>,
-        local_p2: Point<Real>,
+        local_p1: Vector,
+        local_p2: Vector,
         fid1: PackedFeatureId,
         fid2: PackedFeatureId,
         dist: Real,
@@ -226,7 +225,7 @@ impl<Data: Default + Copy> TrackedContact<Data> {
     }
 }
 
-#[derive(Clone, Debug, Default, Hash)]
+#[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// A contact manifold between two shapes.
 ///
@@ -271,14 +270,14 @@ impl<Data: Default + Copy> TrackedContact<Data> {
 /// use parry3d::query::{ContactManifold, TrackedContact};
 /// use parry3d::query::details::contact_manifold_ball_ball;
 /// use parry3d::shape::Ball;
-/// use parry3d::math::Isometry;
+/// use parry3d::math::Pose;
 ///
 /// // Create two balls
 /// let ball1 = Ball::new(1.0);
 /// let ball2 = Ball::new(1.0);
 ///
 /// // Position them so they overlap
-/// let pos12 = Isometry::translation(1.5, 0.0, 0.0); // Overlapping by 0.5
+/// let pos12 = Pose::translation(1.5, 0.0, 0.0); // Overlapping by 0.5
 ///
 /// // Create an empty manifold
 /// let mut manifold = ContactManifold::<(), ()>::new();
@@ -307,13 +306,13 @@ impl<Data: Default + Copy> TrackedContact<Data> {
 /// use parry3d::query::ContactManifold;
 /// use parry3d::query::details::contact_manifold_ball_ball;
 /// use parry3d::shape::Ball;
-/// use parry3d::math::Isometry;
+/// use parry3d::math::Pose;
 ///
 /// let ball1 = Ball::new(1.0);
 /// let ball2 = Ball::new(1.0);
 ///
 /// // Balls are separated by 0.1
-/// let pos12 = Isometry::translation(2.1, 0.0, 0.0);
+/// let pos12 = Pose::translation(2.1, 0.0, 0.0);
 ///
 /// let mut manifold = ContactManifold::<(), ()>::new();
 ///
@@ -338,19 +337,19 @@ impl<Data: Default + Copy> TrackedContact<Data> {
 /// use parry3d::query::ContactManifold;
 /// use parry3d::query::details::contact_manifold_ball_ball;
 /// use parry3d::shape::Ball;
-/// use parry3d::math::Isometry;
+/// use parry3d::math::Pose;
 ///
 /// let ball1 = Ball::new(1.0);
 /// let ball2 = Ball::new(1.0);
 /// let mut manifold = ContactManifold::<(), ()>::new();
 ///
 /// // Frame 1: Initial contact
-/// let pos12_frame1 = Isometry::translation(1.9, 0.0, 0.0);
+/// let pos12_frame1 = Pose::translation(1.9, 0.0, 0.0);
 /// contact_manifold_ball_ball(&pos12_frame1, &ball1, &ball2, 0.1, &mut manifold);
 /// println!("Frame 1: {} contacts", manifold.points.len());
 ///
 /// // Frame 2: Small movement - try to update efficiently
-/// let pos12_frame2 = Isometry::translation(1.85, 0.0, 0.0);
+/// let pos12_frame2 = Pose::translation(1.85, 0.0, 0.0);
 ///
 /// if manifold.try_update_contacts(&pos12_frame2) {
 ///     println!("Successfully updated contacts using spatial coherence");
@@ -370,14 +369,14 @@ impl<Data: Default + Copy> TrackedContact<Data> {
 /// use parry3d::query::ContactManifold;
 /// use parry3d::query::details::contact_manifold_cuboid_cuboid;
 /// use parry3d::shape::Cuboid;
-/// use parry3d::math::{Isometry, Vector};
+/// use parry3d::math::{Pose, Vector};
 ///
 /// // Two boxes
 /// let cuboid1 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
 /// let cuboid2 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
 ///
 /// // One box sitting on top of another
-/// let pos12 = Isometry::translation(0.0, 1.9, 0.0); // Slight overlap
+/// let pos12 = Pose::translation(0.0, 1.9, 0.0); // Slight overlap
 ///
 /// let mut manifold = ContactManifold::<(), ()>::new();
 /// contact_manifold_cuboid_cuboid(&pos12, &cuboid1, &cuboid2, 0.0, &mut manifold);
@@ -406,7 +405,7 @@ impl<Data: Default + Copy> TrackedContact<Data> {
 /// use parry3d::query::ContactManifold;
 /// use parry3d::query::details::contact_manifold_ball_ball;
 /// use parry3d::shape::Ball;
-/// use parry3d::math::Isometry;
+/// use parry3d::math::Pose;
 ///
 /// // Custom data structures
 /// #[derive(Clone, Default, Copy)]
@@ -423,7 +422,7 @@ impl<Data: Default + Copy> TrackedContact<Data> {
 ///
 /// let ball1 = Ball::new(1.0);
 /// let ball2 = Ball::new(1.0);
-/// let pos12 = Isometry::translation(1.8, 0.0, 0.0);
+/// let pos12 = Pose::translation(1.8, 0.0, 0.0);
 ///
 /// // Create manifold with custom data
 /// let manifold_data = MyManifoldData {
@@ -473,6 +472,7 @@ impl<Data: Default + Copy> TrackedContact<Data> {
 ///          manifold.subshape1, manifold.subshape2);
 /// # }
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ContactManifold<ManifoldData, ContactData> {
     // NOTE: use a SmallVec instead?
     // And for 2D use an ArrayVec since there will never be more than 2 contacts anyways.
@@ -483,9 +483,9 @@ pub struct ContactManifold<ManifoldData, ContactData> {
     #[cfg(feature = "dim3")]
     pub points: Vec<TrackedContact<ContactData>>,
     /// The contact normal of all the contacts of this manifold, expressed in the local space of the first shape.
-    pub local_n1: Vector<Real>,
+    pub local_n1: Vector,
     /// The contact normal of all the contacts of this manifold, expressed in the local space of the second shape.
-    pub local_n2: Vector<Real>,
+    pub local_n2: Vector,
     /// The first subshape involved in this contact manifold.
     ///
     /// This is zero if the first shape is not a composite shape.
@@ -494,14 +494,68 @@ pub struct ContactManifold<ManifoldData, ContactData> {
     ///
     /// This is zero if the second shape is not a composite shape.
     pub subshape2: u32,
-    /// If the first shape involved is a composite shape, this contains the position of its subshape
-    /// involved in this contact.
-    pub subshape_pos1: Option<Isometry<Real>>,
-    /// If the second shape involved is a composite shape, this contains the position of its subshape
-    /// involved in this contact.
-    pub subshape_pos2: Option<Isometry<Real>>,
+    /// If either shape involved is a composite shape, this contains the positions of the
+    /// subshapes involved in this contact.
+    pub subshape_poses: Option<alloc::boxed::Box<SubshapePoses>>,
     /// Additional tracked data associated to this contact manifold.
     pub data: ManifoldData,
+}
+
+/// The positions of the composite-shape subshapes involved in a contact manifold.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+pub struct SubshapePoses {
+    /// The position of the first shape's subshape, if it is a composite shape.
+    pub pos1: Option<Pose>,
+    /// The position of the second shape's subshape, if it is a composite shape.
+    pub pos2: Option<Pose>,
+}
+
+impl<ManifoldData, ContactData> ContactManifold<ManifoldData, ContactData> {
+    /// The position of the first shape's subshape involved in this contact, if the first
+    /// shape is a composite shape.
+    #[inline]
+    pub fn subshape_pos1(&self) -> Option<&Pose> {
+        self.subshape_poses.as_ref().and_then(|p| p.pos1.as_ref())
+    }
+
+    /// The position of the second shape's subshape involved in this contact, if the second
+    /// shape is a composite shape.
+    #[inline]
+    pub fn subshape_pos2(&self) -> Option<&Pose> {
+        self.subshape_poses.as_ref().and_then(|p| p.pos2.as_ref())
+    }
+
+    /// Sets the position of the first shape's subshape, reusing the existing allocation.
+    #[inline]
+    pub fn set_subshape_pos1(&mut self, pos: Option<Pose>) {
+        match (&mut self.subshape_poses, pos) {
+            (Some(poses), pos) => poses.pos1 = pos,
+            (slot @ None, Some(pos)) => {
+                *slot = Some(alloc::boxed::Box::new(SubshapePoses {
+                    pos1: Some(pos),
+                    pos2: None,
+                }))
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// Sets the position of the second shape's subshape, reusing the existing allocation.
+    #[inline]
+    pub fn set_subshape_pos2(&mut self, pos: Option<Pose>) {
+        match (&mut self.subshape_poses, pos) {
+            (Some(poses), pos) => poses.pos2 = pos,
+            (slot @ None, Some(pos)) => {
+                *slot = Some(alloc::boxed::Box::new(SubshapePoses {
+                    pos1: None,
+                    pos2: Some(pos),
+                }))
+            }
+            (None, None) => {}
+        }
+    }
 }
 
 impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, ContactData> {
@@ -520,12 +574,11 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
             points: arrayvec::ArrayVec::new(),
             #[cfg(feature = "dim3")]
             points: Vec::new(),
-            local_n1: Vector::zeros(),
-            local_n2: Vector::zeros(),
+            local_n1: Vector::ZERO,
+            local_n2: Vector::ZERO,
             subshape1,
             subshape2,
-            subshape_pos1: None,
-            subshape_pos2: None,
+            subshape_poses: None,
             data,
         }
     }
@@ -547,8 +600,7 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
             local_n2: self.local_n2,
             subshape1: self.subshape1,
             subshape2: self.subshape2,
-            subshape_pos1: self.subshape_pos1,
-            subshape_pos2: self.subshape_pos2,
+            subshape_poses: self.subshape_poses.clone(),
             data: self.data.clone(),
         }
     }
@@ -579,11 +631,11 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
     /// use parry3d::query::ContactManifold;
     /// use parry3d::query::details::contact_manifold_ball_ball;
     /// use parry3d::shape::Ball;
-    /// use parry3d::math::Isometry;
+    /// use parry3d::math::Pose;
     ///
     /// let ball1 = Ball::new(1.0);
     /// let ball2 = Ball::new(1.0);
-    /// let pos12 = Isometry::translation(1.8, 0.0, 0.0);
+    /// let pos12 = Pose::translation(1.8, 0.0, 0.0);
     ///
     /// let mut manifold = ContactManifold::<(), ()>::new();
     /// contact_manifold_ball_ball(&pos12, &ball1, &ball2, 0.0, &mut manifold);
@@ -628,18 +680,18 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
     /// use parry3d::query::ContactManifold;
     /// use parry3d::query::details::contact_manifold_ball_ball;
     /// use parry3d::shape::Ball;
-    /// use parry3d::math::Isometry;
+    /// use parry3d::math::Pose;
     ///
     /// let ball1 = Ball::new(1.0);
     /// let ball2 = Ball::new(1.0);
     /// let mut manifold = ContactManifold::<(), ()>::new();
     ///
     /// // Initial computation
-    /// let pos12_old = Isometry::translation(1.9, 0.0, 0.0);
+    /// let pos12_old = Pose::translation(1.9, 0.0, 0.0);
     /// contact_manifold_ball_ball(&pos12_old, &ball1, &ball2, 0.1, &mut manifold);
     ///
     /// // Next frame: shapes moved slightly
-    /// let pos12_new = Isometry::translation(1.85, 0.05, 0.0);
+    /// let pos12_new = Pose::translation(1.85, 0.05, 0.0);
     ///
     /// if manifold.try_update_contacts(&pos12_new) {
     ///     println!("Updated contacts efficiently!");
@@ -650,11 +702,11 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
     /// # }
     /// ```
     #[inline]
-    pub fn try_update_contacts(&mut self, pos12: &Isometry<Real>) -> bool {
+    pub fn try_update_contacts(&mut self, pos12: &Pose) -> bool {
         // const DOT_THRESHOLD: Real = 0.crate::COS_10_DEGREES;
         // const DOT_THRESHOLD: Real = crate::utils::COS_5_DEGREES;
         const DOT_THRESHOLD: Real = crate::utils::COS_1_DEGREES;
-        const DIST_SQ_THRESHOLD: Real = OrderedFloat(1.0e-6); // TODO: this should not be hard-coded.
+        const DIST_SQ_THRESHOLD: Real = 1.0e-6; // TODO: this should not be hard-coded.
         self.try_update_contacts_eps(pos12, DOT_THRESHOLD, DIST_SQ_THRESHOLD)
     }
 
@@ -662,7 +714,7 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
     #[inline]
     pub fn try_update_contacts_eps(
         &mut self,
-        pos12: &Isometry<Real>,
+        pos12: &Pose,
         angle_dot_threshold: Real,
         dist_sq_threshold: Real,
     ) -> bool {
@@ -670,33 +722,52 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
             return false;
         }
 
-        let local_n2 = pos12 * self.local_n2;
+        let local_n2 = pos12.rotation * self.local_n2;
 
-        if -self.local_n1.dot(&local_n2) < angle_dot_threshold {
+        if -self.local_n1.dot(local_n2) < angle_dot_threshold {
             return false;
         }
 
-        for pt in &mut self.points {
+        for pt in &self.points {
             let local_p2 = pos12 * pt.local_p2;
             let dpt = local_p2 - pt.local_p1;
-            let dist = dpt.dot(&self.local_n1);
+            let dist = dpt.dot(self.local_n1);
 
-            if dist * pt.dist < Real::from(0.0) {
+            if dist * pt.dist < 0.0 {
                 // We switched between penetrating/non-penetrating.
                 // The may result in other contacts to appear.
                 return false;
             }
             let new_local_p1 = local_p2 - self.local_n1 * dist;
 
-            if na::distance_squared(&pt.local_p1, &new_local_p1) > dist_sq_threshold {
+            if pt.local_p1.distance_squared(new_local_p1) > dist_sq_threshold {
                 return false;
             }
-
-            pt.dist = dist;
-            pt.local_p1 = new_local_p1;
         }
 
+        self.update_separations(pos12);
+
         true
+    }
+
+    /// Forces the next contact-manifold computation to recompute this manifold's contact points
+    /// instead of reusing them through [`Self::try_update_contacts`]; call it when a shape's
+    /// geometry changed with its pose fixed. The points are kept for [`Self::match_contacts`].
+    #[inline]
+    pub fn mark_shapes_deformed(&mut self) {
+        // The coherence check compares the two cached normals; a zero second normal never passes it.
+        self.local_n2 = Vector::ZERO;
+    }
+
+    /// Refreshes every contact point's separation (`dist`) from the current
+    /// relative pose of the two shapes, keeping the contact points (anchors)
+    /// frozen at their captured material positions.
+    #[inline]
+    pub fn update_separations(&mut self, pos12: &Pose) {
+        for pt in &mut self.points {
+            let local_p2 = pos12 * pt.local_p2;
+            pt.dist = (local_p2 - pt.local_p1).dot(self.local_n1);
+        }
     }
 
     /// Transfers contact data from previous frame's contacts to current contacts based on feature IDs.
@@ -723,7 +794,7 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
     /// use parry3d::query::ContactManifold;
     /// use parry3d::query::details::contact_manifold_ball_ball;
     /// use parry3d::shape::Ball;
-    /// use parry3d::math::Isometry;
+    /// use parry3d::math::Pose;
     ///
     /// #[derive(Clone, Default, Copy)]
     /// struct MyContactData {
@@ -736,7 +807,7 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
     /// let mut manifold = ContactManifold::<(), MyContactData>::new();
     ///
     /// // Frame 1: Compute contacts
-    /// let pos12_frame1 = Isometry::translation(1.9, 0.0, 0.0);
+    /// let pos12_frame1 = Pose::translation(1.9, 0.0, 0.0);
     /// contact_manifold_ball_ball(&pos12_frame1, &ball1, &ball2, 0.0, &mut manifold);
     ///
     /// // Simulate physics, accumulate impulse
@@ -747,7 +818,7 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
     ///
     /// // Frame 2: Save old contacts, recompute
     /// let old_contacts = manifold.points.clone();
-    /// let pos12_frame2 = Isometry::translation(1.85, 0.0, 0.0);
+    /// let pos12_frame2 = Pose::translation(1.85, 0.0, 0.0);
     /// contact_manifold_ball_ball(&pos12_frame2, &ball1, &ball2, 0.0, &mut manifold);
     ///
     /// // Transfer data from old to new based on feature ID matching
@@ -780,8 +851,8 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
         let sq_threshold = dist_threshold * dist_threshold;
         for contact in &mut self.points {
             for old_contact in old_contacts {
-                if na::distance_squared(&contact.local_p1, &old_contact.local_p1) < sq_threshold
-                    && na::distance_squared(&contact.local_p2, &old_contact.local_p2) < sq_threshold
+                if contact.local_p1.distance_squared(old_contact.local_p1) < sq_threshold
+                    && contact.local_p2.distance_squared(old_contact.local_p2) < sq_threshold
                 {
                     // Transfer the tracked data.
                     contact.data = old_contact.data;
@@ -815,13 +886,13 @@ impl<ManifoldData, ContactData: Default + Copy> ContactManifold<ManifoldData, Co
     /// use parry3d::query::ContactManifold;
     /// use parry3d::query::details::contact_manifold_cuboid_cuboid;
     /// use parry3d::shape::Cuboid;
-    /// use parry3d::math::{Isometry, Vector};
+    /// use parry3d::math::{Pose, Vector};
     ///
     /// let cuboid1 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
     /// let cuboid2 = Cuboid::new(Vector::new(1.0, 1.0, 1.0));
     ///
     /// // Position with some penetration
-    /// let pos12 = Isometry::translation(0.0, 1.8, 0.0);
+    /// let pos12 = Pose::translation(0.0, 1.8, 0.0);
     ///
     /// let mut manifold = ContactManifold::<(), ()>::new();
     /// contact_manifold_cuboid_cuboid(&pos12, &cuboid1, &cuboid2, 0.0, &mut manifold);

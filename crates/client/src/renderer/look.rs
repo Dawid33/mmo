@@ -56,8 +56,7 @@ pub fn integrate_local_look(
     }
     look.idle = Duration::ZERO;
     if let Some((yaw, pitch)) = look.look {
-        let (y, p) = game::apply_look(yaw.into(), pitch.into(), delta.x, delta.y);
-        look.look = Some((y.0, p.0));
+        look.look = Some(game::apply_look(yaw, pitch, delta.x, delta.y));
     }
 }
 
@@ -93,8 +92,7 @@ mod tests {
     #[test]
     fn look_rotation_matches_sim_quat() {
         for &(yaw, pitch) in &[(0.0f32, 0.0f32), (1.3, -0.4), (-2.9, 1.2), (5.0, 0.7)] {
-            let q = game::look_quat(yaw.into(), pitch.into());
-            let sim = Quat::from_xyzw(q.i.0, q.j.0, q.k.0, q.w.0);
+            let sim = Quat::from_array(game::look_quat(yaw, pitch).to_array());
             assert!(look_rotation(yaw, pitch).angle_between(sim) < 1e-5, "{yaw} {pitch}");
         }
     }

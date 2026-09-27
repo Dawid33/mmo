@@ -1,4 +1,4 @@
-use crate::math::{Point, Real};
+use crate::math::{Real, Vector};
 
 /// Trait of bounding volumes.
 ///
@@ -9,7 +9,7 @@ pub trait BoundingVolume {
     // TODO: keep that ? What about non-spacial bounding volumes (e.g. bounding cones, curvature
     // bounds, etc.) ?
     /// Returns a point inside of this bounding volume. This is ideally its center.
-    fn center(&self) -> Point<Real>;
+    fn center(&self) -> Vector;
 
     /// Checks if this bounding volume intersect with another one.
     fn intersects(&self, _: &Self) -> bool;
@@ -18,9 +18,17 @@ pub trait BoundingVolume {
     fn contains(&self, _: &Self) -> bool;
 
     /// Merges this bounding volume with another one. The merge is done in-place.
+    ///
+    /// Due to floating-point rounding, the merged volume is not guaranteed to strictly
+    /// [`contain`](Self::contains) both input volumes. Use [`loosened`](Self::loosened)
+    /// with a small margin if strict containment is required.
     fn merge(&mut self, _: &Self);
 
     /// Merges this bounding volume with another one.
+    ///
+    /// Due to floating-point rounding, the merged volume is not guaranteed to strictly
+    /// [`contain`](Self::contains) both input volumes. Use [`loosened`](Self::loosened)
+    /// with a small margin if strict containment is required.
     fn merged(&self, _: &Self) -> Self;
 
     /// Enlarges this bounding volume.

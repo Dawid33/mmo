@@ -1,28 +1,32 @@
+// mmo-fork: this file is the fork's voxels cast (search domain, internal
+// edges, resting contact without ray casts), ported from the nalgebra-era
+// fork (crates/parry, commits 4173c4e and 7b7eb9e). Pinned by
+// crates/physics-next/tests/{upstream_movement_probe,voxels_upstream,voxels_cast,
+// continuous_surfaces,walking_smoothness}.rs.
 use crate::bounding_volume::BoundingVolume;
-use crate::math::{Isometry, Point, RawReal, Real, Translation, Vector, DIM};
+use crate::math::{IVector, IVectorExt, Pose, Real, Vector, VectorExt, DIM};
 use crate::query::shape_cast::shape_cast_support_map_support_map::GRAZING_START_MARGIN;
 use crate::query::{QueryDispatcher, ShapeCastHit, ShapeCastOptions, ShapeCastStatus};
 use crate::shape::{AxisMask, Cuboid, Shape, SupportMap, Voxels};
-use na::Unit;
 
 /// Looks for solid geometry a shape does not know about itself (a neighbouring
 /// collider) just across one of its faces. See [`without_internal_edges`].
 #[derive(Copy, Clone)]
 pub struct InternalEdgeProbe<'a> {
     /// Whether a point, in the local space of the shape, is inside something solid.
-    pub is_solid: &'a dyn Fn(&Point<Real>) -> bool,
+    pub is_solid: &'a dyn Fn(Vector) -> bool,
     /// How far across a face, and how far below the surface it meets, to look.
     pub reach: Real,
 }
 
 /// Normal components smaller than this are noise and snapped to the axis.
-const NORMAL_SNAP: RawReal = 1.0e-4;
+const NORMAL_SNAP: Real = 1.0e-4;
 
 /// Time Of Impact of a voxels shape with any other shape, under a translational movement.
 pub fn cast_shapes_voxels_shape<D>(
     dispatcher: &D,
-    pos12: &Isometry<Real>,
-    vel12: &Vector<Real>,
+    pos12: &Pose,
+    vel12: Vector,
     g1: &Voxels,
     g2: &dyn Shape,
     options: ShapeCastOptions,
@@ -44,77 +48,86 @@ where
 /// point (a neighbouring collider). A normal with no component left is kept
 /// as it was: the hit is on the face itself, not on an edge.
 pub fn without_internal_edges(
-    normal1: Unit<Vector<Real>>,
-    witness1: &Point<Real>,
+    normal1: Vector,
+    witness1: Vector,
     free_faces: AxisMask,
     probe: Option<InternalEdgeProbe>,
-) -> Unit<Vector<Real>> {
-    let snap = Real::from(NORMAL_SNAP);
-    let leaning = |i: usize| normal1[i].0.abs() > NORMAL_SNAP;
-    let mut fixed = normal1.into_inner();
+) -> Vector {
+    let leaning = |i: usize| normal1.vget(i).abs() > NORMAL_SNAP;
+    let mut fixed = normal1;
     let mut changed = false;
 
     for i in 0..DIM {
-        if fixed[i] == Real::from(0.0) {
+        if fixed.vget(i) == 0.0 {
             continue;
         }
         if !leaning(i) {
-            fixed[i] = Real::from(0.0);
+            fixed.vset(i, 0.0);
             changed = true;
             continue;
         }
-        let positive = normal1[i] > Real::from(0.0);
+        let positive = normal1.vget(i) > 0.0;
         let face = AxisMask::from_bits_truncate(1 << (i * 2 + usize::from(!positive)));
         let covered = !free_faces.contains(face)
             || probe.is_some_and(|probe| {
                 // Just across the face, and just behind every other face the
                 // normal leans on: flush material there continues the surface
                 // the contact is on.
-                let mut p = *witness1;
+                let mut p = witness1;
                 for j in 0..DIM {
                     if !leaning(j) {
                         continue;
                     }
-                    let outward = if normal1[j] > Real::from(0.0) { probe.reach } else { -probe.reach };
-                    p[j] += if j == i { outward } else { -outward };
+                    let outward = if normal1.vget(j) > 0.0 { probe.reach } else { -probe.reach };
+                    p.vset(j, p.vget(j) + if j == i { outward } else { -outward });
                 }
-                (probe.is_solid)(&p)
+                (probe.is_solid)(p)
             });
         if covered {
-            fixed[i] = Real::from(0.0);
+            fixed.vset(i, 0.0);
             changed = true;
         }
     }
 
+    // A normal along one axis is a box face's: make it exactly that axis. A
+    // contact reports (0, 0.99999994, 0) for a flat floor now and then, and
+    // the character controller's `normal × up` split turns that last ulp
+    // into a dropped tick of motion (it reads the slide as slipping).
+    let mut axes = (0..DIM).filter(|&i| fixed.vget(i) != 0.0);
+    if let (Some(i), None) = (axes.next(), axes.next()) {
+        let mut axis = Vector::ZERO;
+        axis.vset(i, fixed.vget(i).signum());
+        return axis;
+    }
     if !changed {
         return normal1;
     }
-    Unit::try_new(fixed, snap).unwrap_or(normal1)
+    let length = fixed.length();
+    if length > NORMAL_SNAP {
+        fixed / length
+    } else {
+        normal1
+    }
 }
 
 /// A lower bound of the distance between a voxel and a support-mapped shape:
 /// their gap along the line between their centres. Two support evaluations,
 /// against the GJK run it spares the many voxels under a shape's AABB that
 /// are nowhere near the shape itself.
-fn separation_bound(
-    center: &Point<Real>,
-    half_extents: &Vector<Real>,
-    pos12: &Isometry<Real>,
-    g2: &dyn SupportMap,
-) -> Real {
-    let Some(dir) = Unit::try_new(pos12.translation.vector - center.coords, Real::from(1.0e-6)) else {
-        return Real::from(0.0);
+fn separation_bound(center: Vector, half_extents: Vector, pos12: &Pose, g2: &dyn SupportMap) -> Real {
+    let Some(dir) = (pos12.translation - center).try_normalize() else {
+        return 0.0;
     };
-    let nearest2 = g2.support_point(pos12, &-*dir);
-    (nearest2 - center).dot(&dir) - half_extents.dot(&dir.abs())
+    let nearest2 = g2.support_point(pos12, -dir);
+    (nearest2 - center).dot(dir) - half_extents.dot(dir.abs())
 }
 
 /// Does any face in `free_faces` look into a motion along `vel`?
-fn faces_motion(free_faces: AxisMask, vel: &Vector<Real>) -> bool {
+fn faces_motion(free_faces: AxisMask, vel: Vector) -> bool {
     (0..DIM).any(|i| {
-        let facing = if vel[i] > Real::from(0.0) {
+        let facing = if vel.vget(i) > 0.0 {
             1 << (i * 2 + 1)
-        } else if vel[i] < Real::from(0.0) {
+        } else if vel.vget(i) < 0.0 {
             1 << (i * 2)
         } else {
             return false;
@@ -127,8 +140,8 @@ fn faces_motion(free_faces: AxisMask, vel: &Vector<Real>) -> bool {
 /// the shape believes exposed is covered by other geometry.
 pub fn cast_shapes_voxels_shape_with_probe<D>(
     dispatcher: &D,
-    pos12: &Isometry<Real>,
-    vel12: &Vector<Real>,
+    pos12: &Pose,
+    vel12: Vector,
     g1: &Voxels,
     g2: &dyn Shape,
     options: ShapeCastOptions,
@@ -147,7 +160,7 @@ where
     // voxels at all otherwise.
     let start_aabb2_1 = g2
         .compute_aabb(pos12)
-        .loosened(options.target_distance * Real::from(1.0 + GRAZING_START_MARGIN));
+        .loosened(options.target_distance * (1.0 + GRAZING_START_MARGIN));
     // The separating-start filter of `stop_at_penetration: false` has to see
     // the corrected normal, so it is applied here rather than per voxel.
     let voxel_options = ShapeCastOptions {
@@ -157,7 +170,7 @@ where
         ..options
     };
 
-    let half_extents = g1.voxel_size() / Real::from(2.0);
+    let half_extents = g1.voxel_size() / 2.0;
     let cuboid = Cuboid::new(half_extents);
     let mut search_domain = g1.voxel_range_intersecting_local_aabb(&start_aabb2_1);
 
@@ -165,44 +178,51 @@ where
     // start of a character's cast, and nothing can beat its time of impact of
     // zero: look for it first, which takes no ray cast at all. Same voxel
     // order as the casts below, so the same voxel wins as would there.
-    if options.target_distance > Real::from(0.0)
+    if options.target_distance > 0.0
         && (options.compute_impact_geometry_on_penetration || !options.stop_at_penetration)
     {
-        let within = options.target_distance * Real::from(1.0 + GRAZING_START_MARGIN);
+        let within = options.target_distance * (1.0 + GRAZING_START_MARGIN);
         let support_map2 = g2.as_support_map();
         for vox in g1.voxels_in_range(search_domain[0], search_domain[1]) {
             if vox.state.is_empty() {
                 continue;
             }
             let center = g1.voxel_center(vox.grid_coords);
-            if support_map2.is_some_and(|g2| {
-                separation_bound(&center, &half_extents, pos12, g2) > within
-            }) {
+            if support_map2
+                .is_some_and(|g2| separation_bound(center, half_extents, pos12, g2) > within)
+            {
                 continue;
             }
-            let vox_pos12 = Translation::from(center).inverse() * pos12;
+            let vox_pos12 = Pose::from_translation(center).inverse() * *pos12;
             let Ok(Some(contact)) = dispatcher.contact(&vox_pos12, &cuboid, g2, within) else {
                 continue;
             };
-            let witness1 = contact.point1 + center.coords;
+            let witness1 = contact.point1 + center;
             let normal1 =
-                without_internal_edges(contact.normal1, &witness1, vox.state.free_faces(), probe);
-            if !options.stop_at_penetration && normal1.dot(vel12) >= Real::from(0.0) {
+                without_internal_edges(contact.normal1, witness1, vox.state.free_faces(), probe);
+            if !options.stop_at_penetration && normal1.dot(vel12) >= 0.0 {
                 continue;
             }
             return Some(ShapeCastHit {
-                time_of_impact: Real::from(0.0),
+                time_of_impact: 0.0,
                 normal1,
-                normal2: pos12.inverse_transform_unit_vector(&-normal1),
+                normal2: pos12.rotation.inverse() * -normal1,
                 witness1,
                 witness2: contact.point2,
-                status: ShapeCastStatus::PenetratingOrWithinTargetDist,
+                // #106 (D8), as in the support-map cast's grazing start.
+                status: if contact.dist < options.target_distance {
+                    ShapeCastStatus::PenetratingOrWithinTargetDist
+                } else {
+                    ShapeCastStatus::Converged
+                },
+                subshape1: vox.linear_id.flat_id() as u32,
+                subshape2: 0,
             });
         }
     }
 
     let smallest_t = core::cell::Cell::new(options.max_time_of_impact);
-    let mut check_voxels_in_range = |search_domain: [Point<i32>; 2]| {
+    let mut check_voxels_in_range = |search_domain: [IVector; 2]| {
         for vox in g1.voxels_in_range(search_domain[0], search_domain[1]) {
             // A voxel is reached through a face that looks into the motion.
             // With all of those covered, the neighbours covering them are
@@ -212,7 +232,7 @@ where
             }
             // PERF: could we check the canonical shape instead, and deduplicate accordingly?
             let center = g1.voxel_center(vox.grid_coords);
-            let vox_pos12 = Translation::from(center).inverse() * pos12;
+            let vox_pos12 = Pose::from_translation(center).inverse() * *pos12;
             let capped = ShapeCastOptions {
                 max_time_of_impact: smallest_t.get(),
                 ..voxel_options
@@ -225,25 +245,28 @@ where
                 if new_hit.time_of_impact >= smallest_t.get() {
                     continue;
                 }
-                let witness1 = new_hit.witness1 + center.coords;
-                let normal1 = without_internal_edges(
-                    new_hit.normal1,
-                    &witness1,
-                    vox.state.free_faces(),
-                    probe,
-                );
+                // The hit is expressed in the voxel cuboid's frame, i.e. the
+                // shape's frame translated by `center`: shift `witness1` back
+                // (#373). The normals and `witness2` are unaffected.
+                let witness1 = new_hit.witness1 + center;
+                let normal1 =
+                    without_internal_edges(new_hit.normal1, witness1, vox.state.free_faces(), probe);
                 if normal1 != new_hit.normal1 {
                     new_hit.normal1 = normal1;
-                    new_hit.normal2 = pos12.inverse_transform_unit_vector(&-normal1);
+                    new_hit.normal2 = pos12.rotation.inverse() * -normal1;
                 }
+                // mmo-fork (D8): a start at the target distance is `Converged`
+                // at TOI 0 (#106), so the separated-start filter keys on the
+                // TOI, not the status.
                 if !options.stop_at_penetration
-                    && new_hit.status == ShapeCastStatus::PenetratingOrWithinTargetDist
-                    && new_hit.normal1.dot(vel12) >= Real::from(0.0)
+                    && new_hit.time_of_impact == 0.0
+                    && new_hit.normal1.dot(vel12) >= 0.0
                 {
                     continue;
                 }
                 smallest_t.set(new_hit.time_of_impact);
                 new_hit.witness1 = witness1;
+                new_hit.subshape1 = vox.linear_id.flat_id() as u32;
                 hit = Some(new_hit);
             }
         }
@@ -264,16 +287,18 @@ where
         let ii = [0, 1, 2];
 
         let toi = ii.map(|i| {
-            if vel12[i] > Real::from(0.0) {
-                let t = (search_domain_aabb.maxs[i] - start_aabb2_1.maxs[i]) / vel12[i];
-                if t < Real::from(0.0) {
+            if vel12.vget(i) > 0.0 {
+                let t =
+                    (search_domain_aabb.maxs.vget(i) - start_aabb2_1.maxs.vget(i)) / vel12.vget(i);
+                if t < 0.0 {
                     (Real::max_value(), true)
                 } else {
                     (t, true)
                 }
-            } else if vel12[i] < Real::from(0.0) {
-                let t = (search_domain_aabb.mins[i] - start_aabb2_1.mins[i]) / vel12[i];
-                if t < Real::from(0.0) {
+            } else if vel12.vget(i) < 0.0 {
+                let t =
+                    (search_domain_aabb.mins.vget(i) - start_aabb2_1.mins.vget(i)) / vel12.vget(i);
+                if t < 0.0 {
                     (Real::max_value(), false)
                 } else {
                     (t, false)
@@ -296,7 +321,7 @@ where
             break;
         }
 
-        let imin = Vector::from(toi.map(|t| t.0)).imin();
+        let imin = Vector::from(toi.map(|t| t.0)).min_position();
 
         if toi[imin].0 > smallest_t.get() {
             // Whatever lies further is reached after the hit already found.
@@ -306,47 +331,52 @@ where
         // Rows the swept AABB has fully left were all checked when it entered
         // them. Rows it still overlaps stay in the search: the next row added
         // across them would otherwise skip the voxels under its trailing part.
-        let travelled = *vel12 * toi[imin].0;
+        // (Upstream shifts both ends of the search box with the motion.)
+        let travelled = vel12 * toi[imin].0;
         let trailing_lo = g1.voxel_at_point(start_aabb2_1.mins + travelled);
         let trailing_hi = g1.voxel_at_point(start_aabb2_1.maxs + travelled);
         for i in ii {
-            if vel12[i] > Real::from(0.0) {
-                search_domain[0][i] = search_domain[0][i]
-                    .max(trailing_lo[i])
-                    .min(search_domain[1][i] - 1);
-            } else if vel12[i] < Real::from(0.0) {
-                search_domain[1][i] = search_domain[1][i]
-                    .min(trailing_hi[i] + 1)
-                    .max(search_domain[0][i] + 1);
+            if vel12.vget(i) > 0.0 {
+                let lo = search_domain[0]
+                    .ivget(i)
+                    .max(trailing_lo.ivget(i))
+                    .min(search_domain[1].ivget(i) - 1);
+                search_domain[0].ivset(i, lo);
+            } else if vel12.vget(i) < 0.0 {
+                let hi = search_domain[1]
+                    .ivget(i)
+                    .min(trailing_hi.ivget(i) + 1)
+                    .max(search_domain[0].ivget(i) + 1);
+                search_domain[1].ivset(i, hi);
             }
         }
 
         if toi[imin].1 {
-            search_domain[1][imin] += 1;
+            search_domain[1].ivset(imin, search_domain[1].ivget(imin) + 1);
 
-            if search_domain[1][imin] <= domain_maxs[imin] {
+            if search_domain[1].ivget(imin) <= domain_maxs.ivget(imin) {
                 // Check the voxels on the added row.
                 let mut prev_row = search_domain[0];
-                prev_row[imin] = search_domain[1][imin] - 1;
+                prev_row.ivset(imin, search_domain[1].ivget(imin) - 1);
 
                 let range_to_check = [prev_row, search_domain[1]];
                 check_voxels_in_range(range_to_check);
-            } else if search_domain[0][imin] >= domain_maxs[imin] {
-                // Leaving the shape’s bounds.
+            } else if search_domain[0].ivget(imin) >= domain_maxs.ivget(imin) {
+                // Leaving the shape's bounds.
                 break;
             }
         } else {
-            search_domain[0][imin] -= 1;
+            search_domain[0].ivset(imin, search_domain[0].ivget(imin) - 1);
 
-            if search_domain[0][imin] >= domain_mins[imin] {
+            if search_domain[0].ivget(imin) >= domain_mins.ivget(imin) {
                 // Check the voxels on the added row.
                 let mut next_row = search_domain[1];
-                next_row[imin] = search_domain[0][imin] + 1;
+                next_row.ivset(imin, search_domain[0].ivget(imin) + 1);
 
                 let range_to_check = [search_domain[0], next_row];
                 check_voxels_in_range(range_to_check);
-            } else if search_domain[1][imin] <= domain_mins[imin] {
-                // Leaving the shape’s bounds.
+            } else if search_domain[1].ivget(imin) <= domain_mins.ivget(imin) {
+                // Leaving the shape's bounds.
                 break;
             }
         }
@@ -358,8 +388,8 @@ where
 /// Time Of Impact of any shape with a composite shape, under a rigid motion (translation + rotation).
 pub fn cast_shapes_shape_voxels<D>(
     dispatcher: &D,
-    pos12: &Isometry<Real>,
-    vel12: &Vector<Real>,
+    pos12: &Pose,
+    vel12: Vector,
     g1: &dyn Shape,
     g2: &Voxels,
     options: ShapeCastOptions,
@@ -370,7 +400,7 @@ where
     cast_shapes_voxels_shape(
         dispatcher,
         &pos12.inverse(),
-        &-pos12.inverse_transform_vector(vel12),
+        -(pos12.rotation.inverse() * vel12),
         g2,
         g1,
         options,

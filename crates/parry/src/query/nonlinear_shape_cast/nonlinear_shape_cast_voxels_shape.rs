@@ -1,5 +1,5 @@
 use crate::bounding_volume::BoundingVolume;
-use crate::math::{Point, Real, Vector};
+use crate::math::{IVector, IVectorExt, Real, Vector, VectorExt};
 use crate::query::{NonlinearRigidMotion, QueryDispatcher, ShapeCastHit};
 use crate::shape::{Cuboid, Shape, Voxels};
 
@@ -56,13 +56,13 @@ where
         .compute_aabb(&start_pos2_1)
         .merged(&g2.compute_aabb(&end_pos2_1));
 
-    let mut check_voxels_in_range = |search_domain: [Point<i32>; 2]| {
+    let mut check_voxels_in_range = |search_domain: [IVector; 2]| {
         for vox in g1.voxels_in_range(search_domain[0], search_domain[1]) {
             if !vox.state.is_empty() {
                 // PERF: could we check the canonical shape instead, and deduplicate accordingly?
                 let center = g1.voxel_center(vox.grid_coords);
-                let cuboid = Cuboid::new(g1.voxel_size() / Real::from(2.0));
-                let vox_motion1 = motion1.prepend_translation(center.coords);
+                let cuboid = Cuboid::new(g1.voxel_size() / 2.0);
+                let vox_motion1 = motion1.prepend_translation(center);
                 if let Some(new_hit) = dispatcher
                     .cast_shapes_nonlinear(
                         &vox_motion1,
@@ -101,16 +101,18 @@ where
         let ii = [0, 1, 2];
 
         let toi = ii.map(|i| {
-            if motion2.linvel[i] > Real::from(0.0) {
-                let t = (search_domain_aabb.maxs[i] - start_aabb2_1.maxs[i]) / motion2.linvel[i];
-                if t < Real::from(0.0) {
+            if motion2.linvel.vget(i) > 0.0 {
+                let t = (search_domain_aabb.maxs.vget(i) - start_aabb2_1.maxs.vget(i))
+                    / motion2.linvel.vget(i);
+                if t < 0.0 {
                     (Real::max_value(), true)
                 } else {
                     (t, true)
                 }
-            } else if motion2.linvel[i] < Real::from(0.0) {
-                let t = (search_domain_aabb.mins[i] - start_aabb2_1.mins[i]) / motion2.linvel[i];
-                if t < Real::from(0.0) {
+            } else if motion2.linvel.vget(i) < 0.0 {
+                let t = (search_domain_aabb.mins.vget(i) - start_aabb2_1.mins.vget(i))
+                    / motion2.linvel.vget(i);
+                if t < 0.0 {
                     (Real::max_value(), false)
                 } else {
                     (t, false)
@@ -130,36 +132,36 @@ where
             break;
         }
 
-        let imin = Vector::from(toi.map(|t| t.0)).imin();
+        let imin = Vector::from(toi.map(|t| t.0)).min_position();
 
         if toi[imin].1 {
-            search_domain[0][imin] += 1;
-            search_domain[1][imin] += 1;
+            search_domain[0].ivset(imin, search_domain[0].ivget(imin) + 1);
+            search_domain[1].ivset(imin, search_domain[1].ivget(imin) + 1);
 
-            if search_domain[1][imin] <= domain_maxs[imin] {
+            if search_domain[1].ivget(imin) <= domain_maxs.ivget(imin) {
                 // Check the voxels on the added row.
                 let mut prev_row = search_domain[0];
-                prev_row[imin] = search_domain[1][imin] - 1;
+                prev_row.ivset(imin, search_domain[1].ivget(imin) - 1);
 
                 let range_to_check = [prev_row, search_domain[1]];
                 check_voxels_in_range(range_to_check);
-            } else if search_domain[0][imin] >= domain_maxs[imin] {
-                // Leaving the shape’s bounds.
+            } else if search_domain[0].ivget(imin) >= domain_maxs.ivget(imin) {
+                // Leaving the shape's bounds.
                 break;
             }
         } else {
-            search_domain[0][imin] -= 1;
-            search_domain[1][imin] -= 1;
+            search_domain[0].ivset(imin, search_domain[0].ivget(imin) - 1);
+            search_domain[1].ivset(imin, search_domain[1].ivget(imin) - 1);
 
-            if search_domain[0][imin] >= domain_mins[imin] {
+            if search_domain[0].ivget(imin) >= domain_mins.ivget(imin) {
                 // Check the voxels on the added row.
                 let mut next_row = search_domain[1];
-                next_row[imin] = search_domain[0][imin] + 1;
+                next_row.ivset(imin, search_domain[0].ivget(imin) + 1);
 
                 let range_to_check = [search_domain[0], next_row];
                 check_voxels_in_range(range_to_check);
-            } else if search_domain[1][imin] <= domain_mins[imin] {
-                // Leaving the shape’s bounds.
+            } else if search_domain[1].ivget(imin) <= domain_mins.ivget(imin) {
+                // Leaving the shape's bounds.
                 break;
             }
         }

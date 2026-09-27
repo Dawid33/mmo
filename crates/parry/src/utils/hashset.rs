@@ -2,7 +2,7 @@
 //! `enhanced-determinism` feature is enabled.
 
 #[cfg(all(feature = "enhanced-determinism", feature = "serde-serialize"))]
-use ordermap::OrderSet as StdHashSet;
+use indexmap::IndexSet as StdHashSet;
 #[cfg(all(not(feature = "enhanced-determinism"), feature = "serde-serialize"))]
 use std::collections::HashSet as StdHashSet;
 
@@ -49,7 +49,7 @@ pub fn deserialize_hashset_capacity<
 /// Deterministic hashset using [`indexmap::IndexSet`]
 #[cfg(feature = "enhanced-determinism")]
 pub type FxHashSet32<K> =
-    ordermap::OrderSet<K, core::hash::BuildHasherDefault<super::fx_hasher::FxHasher32>>;
+    indexmap::IndexSet<K, core::hash::BuildHasherDefault<super::fx_hasher::FxHasher32>>;
 #[cfg(feature = "enhanced-determinism")]
 pub use self::FxHashSet32 as HashSet;
 

@@ -218,6 +218,8 @@ pub mod __impl {
     pub use core::result::Result;
     #[cfg(feature = "serde")]
     pub use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub use state_hash::StateHash;
+    pub use core::hash::Hasher;
 }
 
 pub mod basic;
@@ -330,6 +332,13 @@ impl Hash for KeyData {
         // A derived Hash impl would call write_u32 twice. We call write_u64
         // once, which is beneficial if the hasher implements write_u64
         // explicitly.
+        state.write_u64(self.as_ffi())
+    }
+}
+
+// mmo: mirrors `Hash` (one u64).
+impl state_hash::StateHash for KeyData {
+    fn state_hash<H: Hasher>(&self, state: &mut H) {
         state.write_u64(self.as_ffi())
     }
 }
@@ -466,6 +475,13 @@ macro_rules! new_key_type {
         impl $crate::__impl::From<$crate::KeyData> for $name {
             fn from(k: $crate::KeyData) -> Self {
                 $name(k)
+            }
+        }
+
+        // mmo: mirrors the derived `Hash` (the inner KeyData).
+        impl $crate::__impl::StateHash for $name {
+            fn state_hash<H: $crate::__impl::Hasher>(&self, state: &mut H) {
+                $crate::__impl::StateHash::state_hash(&self.0, state)
             }
         }
 

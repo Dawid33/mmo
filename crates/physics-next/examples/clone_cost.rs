@@ -24,8 +24,10 @@
 //! crc32 pass per hash instead of one per field), and a second, journaled
 //! pass of [`TICKS`] steps timing the Delta digests: `pre_digest`, the live
 //! side alone, and `revert_digest` (revert + live side). The old forks' std
-//! `Hash` baseline for the same region comes from
-//! `cargo run --release -p worldgen --example export_region_colliders -- --hash-cost`.
+//! `Hash` baseline for the same region was measured before the switch deleted
+//! those forks; its numbers are recorded in the upgrade plan
+//! (`docs/superpowers/plans/2026-09-22-rapier-035-upgrade.md`, Task 4.4 "Step 4
+//! cost check").
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 

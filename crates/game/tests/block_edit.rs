@@ -5,7 +5,7 @@
 //! on replay.
 use game::edit::PLACE_BLOCK;
 use game::{
-    BlockId, Chunk, ChunkCoords, GameEventKind, InputEvent, IsometryReal, Key, MouseButton, Region,
+    BlockId, Chunk, ChunkCoords, GameEventKind, InputEvent, Pose, Key, MouseButton, Region,
     RegionCoords, BLOCK_VOXELS,
 };
 
@@ -52,9 +52,9 @@ fn forget(region: &mut Region, ev: GameEventKind) {
 fn player(region: &Region) -> (f32, f32, f32, bool) {
     let data = region.data();
     let e = *data.player_entites.get(&0).unwrap();
-    let t = *data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation();
+    let t = data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation();
     let grounded = data.ecs.motion.try_get(e).unwrap_or_default().grounded;
-    (t.x.0, t.y.0, t.z.0, grounded)
+    (t.x, t.y, t.z, grounded)
 }
 
 /// Moves the player to (x, current y, z), in a forgotten transaction.
@@ -62,7 +62,7 @@ fn teleport(region: &mut Region, x: f32, z: f32) {
     let (_, y, _, _) = player(region);
     region.with_data(|r| {
         let e = *r.data.player_entites.get(&0).unwrap();
-        r.set_body_pose_safe(e, IsometryReal::translation(x.into(), y.into(), z.into()));
+        r.set_body_pose_safe(e, Pose::translation(x, y, z));
     });
     for _ in 0..3 {
         forget(region, GameEventKind::Tick);

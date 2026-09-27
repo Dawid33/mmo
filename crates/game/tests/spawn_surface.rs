@@ -18,7 +18,7 @@ fn player_body_y(region: &Region) -> f32 {
     let e = *data.player_entites.get(&0).unwrap();
     let handle = *data.ecs.rigidbody.get(e);
     let body = data.physics.bodies.get(handle).unwrap();
-    body.translation().y.0
+    body.translation().y
 }
 
 #[test]

@@ -1,10 +1,10 @@
-use std::hash::Hash;
+use game::StateHash;
 
 use game::Rollback;
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
-    r.hash(&mut hasher);
+    r.state_hash(&mut hasher);
     hasher.finalize()
 }
 

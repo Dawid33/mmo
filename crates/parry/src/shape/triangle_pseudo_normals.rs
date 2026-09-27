@@ -1,11 +1,7 @@
-#[cfg(feature = "alloc")]
 use crate::math::Vector;
-use crate::math::{Real, UnitVector};
-#[cfg(feature = "alloc")]
-use na::Vector3;
 
 #[cfg(feature = "alloc")]
-use crate::query::details::NormalConstraints;
+use crate::{math::Vector3, query::details::NormalConstraints};
 
 // NOTE: ideally, the normal cone should take into account the point where the normal cone is
 //       considered. But as long as we assume that the triangles are one-way we can get away with
@@ -22,143 +18,112 @@ use crate::query::details::NormalConstraints;
 #[derive(Clone, Debug)]
 pub struct TrianglePseudoNormals {
     /// The triangle’s face normal.
-    pub face: UnitVector<Real>,
+    pub face: Vector,
     // TODO: if we switch this to providing pseudo-normals in a specific order
     //       (e.g. in the same order as the triangle’s edges), then we should
     //       think of fixing that order in the heightfield
     //       triangle_pseudo_normals code.
     /// The edges pseudo-normals, in no particular order.
-    pub edges: [UnitVector<Real>; 3],
+    pub edges: [Vector; 3],
+    /// If `true`, a direction pointing to the back of the triangle is projected into the
+    /// mirrored cone (`-face`, `-edges`) and kept, instead of being discarded.
+    pub two_sided: bool,
 }
 
 #[cfg(feature = "alloc")]
 impl NormalConstraints for TrianglePseudoNormals {
     /// Projects the given direction to it is contained in the polygonal
     /// cone defined `self`.
-    fn project_local_normal_mut(&self, dir: &mut Vector<Real>) -> bool {
-        let dot_face = dir.dot(&self.face);
-
-        // Find the closest pseudo-normal.
-        let dots = Vector3::new(
-            dir.dot(&self.edges[0]),
-            dir.dot(&self.edges[1]),
-            dir.dot(&self.edges[2]),
-        );
-        let closest_dot = dots.imax();
-        let closest_edge = &self.edges[closest_dot];
-
-        // Apply the projection. Note that this isn’t 100% accurate since this approximates the
-        // vertex normal cone using the closest edge’s normal cone instead of the
-        // true polygonal cone on S² (but taking into account this polygonal cone exactly
-        // would be quite computationally expensive).
-
-        if *closest_edge == self.face {
-            // The normal cone is degenerate, there is only one possible direction.
-            *dir = *self.face;
-            return dot_face >= Real::from(0.0);
-        }
-
-        // TODO: take into account the two closest edges instead for better continuity
-        //       of vertex normals?
-        let dot_edge_face = self.face.dot(closest_edge);
-        let dot_dir_face = self.face.dot(dir);
-        let dot_corrected_dir_face = Real::from(2.0) * dot_edge_face * dot_edge_face - Real::from(1.0); // cos(2 * angle(closest_edge, face))
-
-        if dot_dir_face >= dot_corrected_dir_face {
-            // The direction is in the pseudo-normal cone. No correction to apply.
+    fn project_local_normal_mut(&self, dir: &mut Vector) -> bool {
+        if self.two_sided && dir.dot(self.face) < 0.0 {
+            // The back cone is the front cone mirrored through the triangle's plane.
+            let mut mirrored = -*dir;
+            let _ = self.project_front(&mut mirrored);
+            *dir = -mirrored;
             return true;
         }
 
-        // We need to correct.
-        let edge_on_normal = *self.face * dot_edge_face;
-        let edge_orthogonal_to_normal = **closest_edge - edge_on_normal;
+        self.project_front(dir)
+    }
+}
 
-        let dir_on_normal = *self.face * dot_dir_face;
-        let dir_orthogonal_to_normal = *dir - dir_on_normal;
-        let Some(unit_dir_orthogonal_to_normal) = dir_orthogonal_to_normal.try_normalize(Real::from(1.0e-6))
-        else {
-            return dot_face >= Real::from(0.0);
-        };
-
-        // NOTE: the normalization might be redundant as the result vector is guaranteed to be
-        //       unit sized. Though some rounding errors could throw it off.
-        let Some(adjusted_pseudo_normal) = (edge_on_normal
-            + unit_dir_orthogonal_to_normal * edge_orthogonal_to_normal.norm())
-        .try_normalize(Real::from(1.0e-6)) else {
-            return dot_face >= Real::from(0.0);
-        };
-
-        // The reflection of the face normal wrt. the adjusted pseudo-normal gives us the
-        // second end of the pseudo-normal cone the direction is projected on.
-        *dir = adjusted_pseudo_normal * (Real::from(2.) * self.face.dot(&adjusted_pseudo_normal)) - *self.face;
-        dot_face >= Real::from(0.0)
+#[cfg(feature = "alloc")]
+impl TrianglePseudoNormals {
+    fn project_front(&self, dir: &mut Vector) -> bool {
+        // Find the closest pseudo-normal.
+        let dots = Vector3::new(
+            dir.dot(self.edges[0]),
+            dir.dot(self.edges[1]),
+            dir.dot(self.edges[2]),
+        );
+        let closest_edge = self.edges[dots.max_position()];
+        crate::shape::pseudo_normals::project_into_cone(self.face, closest_edge, dir)
     }
 }
 
 #[cfg(test)]
 #[cfg(all(feature = "dim3", feature = "alloc"))]
 mod test {
-    use crate::math::{Real, RawReal, Vector};
-    use crate::shape::TrianglePseudoNormals;
-    use na::Unit;
-
     use super::NormalConstraints;
+    use crate::math::{Real, Vector};
+    use crate::shape::TrianglePseudoNormals;
 
-    fn bisector(v1: Vector<Real>, v2: Vector<Real>) -> Vector<Real> {
+    fn bisector(v1: Vector, v2: Vector) -> Vector {
         (v1 + v2).normalize()
     }
 
-    fn bisector_y(v: Vector<Real>) -> Vector<Real> {
-        bisector(v, Vector::y())
+    fn bisector_y(v: Vector) -> Vector {
+        bisector(v, Vector::Y)
     }
 
     #[test]
     fn trivial_pseudo_normals_projection() {
         let pn = TrianglePseudoNormals {
-            face: Vector::y_axis(),
-            edges: [Vector::y_axis(); 3],
+            face: Vector::Y,
+            edges: [Vector::Y; 3],
+            two_sided: false,
         };
 
         assert_eq!(
-            pn.project_local_normal(Vector::new(Real::from(1.0), Real::from(1.0), Real::from(1.0))),
-            Some(Vector::y())
+            pn.project_local_normal(Vector::new(1.0, 1.0, 1.0)),
+            Some(Vector::Y)
         );
-        assert!(pn.project_local_normal(-Vector::y()).is_none());
+        assert!(pn.project_local_normal(-Vector::Y).is_none());
     }
 
     #[test]
     fn edge_pseudo_normals_projection_strictly_positive() {
-        let bisector = |v1: Vector<Real>, v2: Vector<Real>| (v1 + v2).normalize();
-        let bisector_y = |v: Vector<Real>| bisector(v, Vector::y());
+        let bisector = |v1: Vector, v2: Vector| (v1 + v2).normalize();
+        let bisector_y = |v: Vector| bisector(v, Vector::Y);
 
         // The normal cones for this test will be fully contained in the +Y half-space.
         let cones_ref_dir = [
-            -Vector::z(),
-            -Vector::x(),
-            Vector::new(Real::from(1.0), Real::from(0.0), Real::from(1.0)).normalize(),
+            -Vector::Z,
+            -Vector::X,
+            Vector::new(1.0, 0.0, 1.0).normalize(),
         ];
         let cones_ends = cones_ref_dir.map(bisector_y);
         let cones_axes = cones_ends.map(bisector_y);
 
         let pn = TrianglePseudoNormals {
-            face: Vector::y_axis(),
-            edges: cones_axes.map(Unit::new_normalize),
+            face: Vector::Y,
+            edges: cones_axes.map(|v| v.normalize()),
+            two_sided: false,
         };
 
         for i in 0..3 {
-            assert_relative_eq!(
-                pn.project_local_normal(cones_ends[i]).unwrap(),
-                cones_ends[i],
-                epsilon = Real::from(1.0e-5)
-            );
+            assert!(pn
+                .project_local_normal(cones_ends[i])
+                .unwrap()
+                .abs_diff_eq(cones_ends[i], 1.0e-5));
             assert_eq!(pn.project_local_normal(cones_axes[i]), Some(cones_axes[i]));
 
             // Guaranteed to be inside the normal cone of edge i.
             let subdivs = 100;
 
             for k in 1..100 {
-                let v = Vector::y()
-                    .lerp(&cones_ends[i], Real::from(k as RawReal / (subdivs as RawReal)))
+                let v = Vector::Y
+                    .lerp(cones_ends[i], k as Real / (subdivs as Real))
                     .normalize();
                 assert_eq!(pn.project_local_normal(v).unwrap(), v);
             }
@@ -166,19 +131,18 @@ mod test {
             // Guaranteed to be outside the normal cone of edge i.
             for k in 1..subdivs {
                 let v = cones_ref_dir[i]
-                    .lerp(&cones_ends[i], Real::from(k as RawReal / (subdivs as RawReal)))
+                    .lerp(cones_ends[i], k as Real / (subdivs as Real))
                     .normalize();
-                assert_relative_eq!(
-                    pn.project_local_normal(v).unwrap(),
-                    cones_ends[i],
-                    epsilon = Real::from(1.0e-5)
-                );
+                assert!(pn
+                    .project_local_normal(v)
+                    .unwrap()
+                    .abs_diff_eq(cones_ends[i], 1.0e-5));
             }
 
             // Guaranteed to be outside the normal cone, and in the -Y half-space.
             for k in 1..subdivs {
                 let v = cones_ref_dir[i]
-                    .lerp(&(-Vector::y()), Real::from(k as RawReal / (subdivs as RawReal)))
+                    .lerp(-Vector::Y, k as Real / (subdivs as Real))
                     .normalize();
                 assert!(pn.project_local_normal(v).is_none(),);
             }
@@ -189,11 +153,11 @@ mod test {
     fn edge_pseudo_normals_projection_negative() {
         // The normal cones for this test will be fully contained in the +Y half-space.
         let cones_ref_dir = [
-            -Vector::z(),
-            -Vector::x(),
-            Vector::new(Real::from(1.0), Real::from(0.0),Real::from(1.0)).normalize(),
+            -Vector::Z,
+            -Vector::X,
+            Vector::new(1.0, 0.0, 1.0).normalize(),
         ];
-        let cones_ends = cones_ref_dir.map(|v| bisector(v, -Vector::y()));
+        let cones_ends = cones_ref_dir.map(|v| bisector(v, -Vector::Y));
         let cones_axes = [
             bisector(bisector_y(cones_ref_dir[0]), cones_ref_dir[0]),
             bisector(bisector_y(cones_ref_dir[1]), cones_ref_dir[1]),
@@ -201,8 +165,9 @@ mod test {
         ];
 
         let pn = TrianglePseudoNormals {
-            face: Vector::y_axis(),
-            edges: cones_axes.map(Unit::new_normalize),
+            face: Vector::Y,
+            edges: cones_axes.map(|v| v.normalize()),
+            two_sided: false,
         };
 
         for i in 0..3 {
@@ -212,8 +177,8 @@ mod test {
             let subdivs = 100;
 
             for k in 1..subdivs {
-                let v = Vector::y()
-                    .lerp(&cones_ends[i], Real::from(k as RawReal / (subdivs as RawReal)))
+                let v = Vector::Y
+                    .lerp(cones_ends[i], k as Real / (subdivs as Real))
                     .normalize();
                 assert_eq!(pn.project_local_normal(v).unwrap(), v);
             }
@@ -221,10 +186,54 @@ mod test {
             // Guaranteed to be outside the normal cone of edge i.
             // Since it is additionally guaranteed to be in the -Y half-space, we should get None.
             for k in 1..subdivs {
-                let v = (-Vector::y())
-                    .lerp(&cones_ends[i], Real::from(k as RawReal / (subdivs as RawReal)));
+                let v = (-Vector::Y)
+                    .lerp(cones_ends[i], k as Real / (subdivs as Real))
+                    .normalize();
                 assert!(pn.project_local_normal(v).is_none());
             }
+        }
+    }
+
+    #[test]
+    fn two_sided_pseudo_normals_mirror_the_cone() {
+        let one_sided = TrianglePseudoNormals {
+            face: Vector::Y,
+            edges: [Vector::Y; 3],
+            two_sided: false,
+        };
+        let two_sided = TrianglePseudoNormals {
+            two_sided: true,
+            ..one_sided.clone()
+        };
+
+        // Front directions behave the same.
+        let front = Vector::new(1.0, 1.0, 1.0);
+        assert_eq!(two_sided.project_local_normal(front), Some(Vector::Y));
+
+        // Back directions are kept and constrained to the mirrored cone.
+        let back = Vector::new(1.0, -1.0, 1.0);
+        assert!(one_sided.project_local_normal(back).is_none());
+        assert_eq!(two_sided.project_local_normal(back), Some(-Vector::Y));
+
+        // The mirrored projection is the negation of the front projection.
+        let cone_axes = [
+            bisector_y(-Vector::Z),
+            bisector_y(-Vector::X),
+            bisector_y(Vector::new(1.0, 0.0, 1.0).normalize()),
+        ];
+        let pn = TrianglePseudoNormals {
+            face: Vector::Y,
+            edges: cone_axes,
+            two_sided: true,
+        };
+        for dir in [
+            Vector::new(0.3, 1.0, -0.8).normalize(),
+            Vector::new(-1.0, 0.2, 0.1).normalize(),
+            Vector::new(0.9, 0.5, 0.9).normalize(),
+        ] {
+            let front = pn.project_local_normal(dir).unwrap();
+            let back = pn.project_local_normal(-dir).unwrap();
+            assert!(back.abs_diff_eq(-front, 1.0e-6));
         }
     }
 }

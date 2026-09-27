@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use game::{
-    Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, IsometryReal, Key, Region,
+    Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Pose, Key, Region,
     RegionCoords, Rollback, World,
 };
 
@@ -72,9 +72,9 @@ pub struct Body {
 
 /// Position and motion of any entity with a body.
 pub fn entity_body(data: &Rollback, e: EntityKey) -> Body {
-    let t = *data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation();
+    let t = data.physics.bodies.get(*data.ecs.rigidbody.get(e)).unwrap().translation();
     let m = data.ecs.motion.try_get(e).unwrap_or_default();
-    Body { x: t.x.0, y: t.y.0, z: t.z.0, grounded: m.grounded, vel_y: m.vel_y.0 }
+    Body { x: t.x, y: t.y, z: t.z, grounded: m.grounded, vel_y: m.vel_y }
 }
 
 /// The player's body.
@@ -87,7 +87,7 @@ pub fn body(world: &World) -> Body {
 pub fn teleport(world: &mut World, x: f32, y: f32, z: f32) {
     world.regions.get_mut(&r0()).unwrap().with_data(|d| {
         let e = *d.data.player_entites.get(&0).unwrap();
-        d.set_body_pose_safe(e, IsometryReal::translation(x.into(), y.into(), z.into()));
+        d.set_body_pose_safe(e, Pose::translation(x, y, z));
     });
 }
 
@@ -96,7 +96,7 @@ pub fn teleport(world: &mut World, x: f32, y: f32, z: f32) {
 pub fn spawn_slime(region: &mut Region, pos: [f32; 3], size: u8, yaw: f32, tick: u64) -> EntityKey {
     let mut slime = None;
     region.with_data(|d| {
-        let pos = game::parry::math::Vector::new(pos[0].into(), pos[1].into(), pos[2].into());
+        let pos = game::parry::math::Vector::new(pos[0], pos[1], pos[2]);
         slime = Some(d.spawn_slime_safe(pos, size, yaw.into(), tick));
     });
     slime.unwrap()
@@ -108,6 +108,6 @@ pub fn spawn_slime(region: &mut Region, pos: [f32; 3], size: u8, yaw: f32, tick:
 /// targets.
 pub fn fixed_body_mass_count(data: &Rollback) -> (usize, usize) {
     let fixed: Vec<_> = data.physics.bodies.iter().filter(|(_, b)| b.is_fixed()).collect();
-    let massive = fixed.iter().filter(|(_, b)| b.mass().0 != 0.0).count();
+    let massive = fixed.iter().filter(|(_, b)| b.mass() != 0.0).count();
     (fixed.len(), massive)
 }

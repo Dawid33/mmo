@@ -4,10 +4,10 @@ use crate::input::InputEvent;
 use crate::lod::LodKey;
 use crate::{
     Chunk, ChunkCoords, Client, ClientId, Column, ColumnCoords, EntityKey, EntityKind,
-    IsometryReal, Rollback,
+    Pose, Rollback,
 };
 use derive_more::Debug;
-use parry3d::math::{Real, Vector};
+use rapier3d::math::Vector;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Usize {
@@ -124,7 +124,7 @@ pub const TERRAIN_HASH_INTERVAL_TICKS: usize = 25;
 
 #[derive(
     Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, PartialOrd,
-    Ord, Hash,
+    Ord, Hash, state_hash::StateHash,
 )]
 pub struct RegionCoords {
     pub x: i32,
@@ -230,12 +230,12 @@ pub fn ghost_offsets(x: f32, z: f32) -> Vec<(i32, i32)> {
 /// Move an isometry from one region's local frame to another's. Offsets are
 /// exact multiples of 256 so the delta is exact in f32; both the server
 /// relay and the client's predicted synthesis MUST use this one function.
-pub fn rebase_isometry(iso: &IsometryReal, from: RegionCoords, to: RegionCoords) -> IsometryReal {
+pub fn rebase_isometry(iso: &Pose, from: RegionCoords, to: RegionCoords) -> Pose {
     let f = from.world_offset();
     let t = to.world_offset();
     let mut out = *iso;
-    out.translation.x += Real::from(f[0] - t[0]);
-    out.translation.z += Real::from(f[2] - t[2]);
+    out.translation.x += f[0] - t[0];
+    out.translation.z += f[2] - t[2];
     out
 }
 
@@ -253,14 +253,14 @@ pub enum ColliderSpec {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct EntityBundle {
     pub kind: EntityKind,
-    pub isometry: IsometryReal,
-    pub linvel: Vector<Real>,
+    pub isometry: Pose,
+    pub linvel: Vector,
     pub collider: ColliderSpec,
     pub has_camera: bool,
     /// Authoritative look scalars (the body quaternion is derived from them
     /// on every look change) — zeroes when `has_camera` is false.
-    pub yaw: Real,
-    pub pitch: Real,
+    pub yaw: f32,
+    pub pitch: f32,
     /// Movement state (fall speed, flight) — `None` for entities that don't move
     /// under the character controller.
     pub motion: Option<crate::Motion>,
@@ -277,8 +277,8 @@ pub struct GhostData {
     pub source_region: RegionCoords,
     pub source_key: EntityKey,
     pub kind: EntityKind,
-    pub isometry: IsometryReal,
-    pub linvel: Vector<Real>,
+    pub isometry: Pose,
+    pub linvel: Vector,
     pub collider: ColliderSpec,
 }
 

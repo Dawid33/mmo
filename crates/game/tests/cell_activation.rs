@@ -157,16 +157,16 @@ fn a_cell_holding_a_player_is_not_deactivated() {
     assert!(s.take_dormant().is_empty());
 }
 
-use game::parry::math::{Real, Vector};
+use game::rapier3d::math::Vector;
 
 fn slime_in_cell_2_2(s: &mut Region) {
     // Centre of dormant cell (2,2), well above ground.
     let at = 2.5 * game::cell_size_units(CC);
     s.with_data(|rb| {
         rb.spawn_slime_safe(
-            Vector::new(Real::from(at), Real::from(40.0), Real::from(at)),
+            Vector::new(at, 40.0, at),
             1,
-            Real::from(0.0),
+            0.0,
             0,
         );
     });
@@ -550,7 +550,7 @@ fn a_legacy_region_ignores_cell_changes() {
 /// right click places against the wall's +Z face, i.e. at block z = 8, which
 /// is inside cell (4,4). `middle_active` controls whether (4,4) is active.
 fn place_across_a_cell(middle_active: bool) -> Region {
-    use game::{InputEvent, IsometryReal, Key, MouseButton};
+    use game::{InputEvent, Pose, Key, MouseButton};
     let cell = |x, z| CellCoords::new(x, z);
     let solid = || Chunk::flat_floor(32);
     let payload = |c: CellCoords, chunks: Vec<(ChunkCoords, Chunk)>| CellPayload {
@@ -576,7 +576,7 @@ fn place_across_a_cell(middle_active: bool) -> Region {
     // Block (8.5, _, 10.5): voxel (136, _, 168), dropped onto the floor.
     s.with_data(|rb| {
         let e = *rb.data.player_entites.get(&0).unwrap();
-        rb.set_body_pose_safe(e, IsometryReal::translation(136.0.into(), 60.0.into(), 168.0.into()));
+        rb.set_body_pose_safe(e, Pose::translation(136.0, 60.0, 168.0));
     });
     for _ in 0..12 {
         server_apply(&mut s, GameEventKind::Tick);
@@ -640,7 +640,7 @@ fn a_stray_freeze_under_prediction_converges() {
     let mut h = Harness::with_config(eager_release());
     let at = 0.5 * game::cell_size_units(CC);
     let spawn = |rb: &mut game::Rollback| {
-        rb.spawn_slime_safe(Vector::new(Real::from(at), Real::from(40.0), Real::from(at)), 1, Real::from(0.0), 0);
+        rb.spawn_slime_safe(Vector::new(at, 40.0, at), 1, 0.0, 0);
     };
     h.runner.region_mut().with_data(spawn);
     h.client.with_data(spawn);

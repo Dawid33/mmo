@@ -105,29 +105,17 @@ assert-json-diff = "=2.0.2"
 pyroscope = { version = "0.5.8" }
 pyroscope_pprofrs = { version = "0.2.10" }
 image = { version = "0.25.9", default-features = false, features = ["png"] }
-ordered-float = { path = "crates/ordered-float", default-features = false, features = [
-  "serde", "bytemuck", "spade"
-] }
 spade = { version = "2.9", default-features = false, features = ["serde"] }
-nalgebra = { path = "crates/nalgebra", default-features = false, features = [
-  "alloc",
-  "convert-bytemuck",
-  "serde-serialize",
-  "std",
-  "macros",
-  "libm"
-] }
-simba = { path = "crates/simba", default-features = false, features = [
-  "libm_force",
-] }
-approx = { path = "crates/approx", default-features = false }
 oorandom = "11.1.5"
 ordermap = { version = "1.0.0", features = ["serde"] }
 hashbrown = { version = "0.16", default-features = false, features = [
   "default-hasher",
 ] }
 parry3d = { path = "crates/parry/crates/parry3d" }
-rapier3d = { path = "crates/rapier/crates/rapier3d", features = ["enhanced-determinism", "debug-render"] }
+rapier3d = { path = "crates/rapier/crates/rapier3d", features = ["enhanced-determinism", "serde-serialize", "debug-render"] }
+state-hash = { path = "crates/state-hash" }
+# The fork's math types (glam 0.33 via glamx), re-exported by game as `game::math`.
+glamx = { version = "0.3.1", default-features = false }
 slotmapd = {path = "crates/slotmapd"}
 num-traits = { version = "0.2.11" }
 wtransport = { version = "0.7", default-features = false, features = ["self-signed", "ring"] }

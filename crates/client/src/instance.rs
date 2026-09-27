@@ -806,8 +806,7 @@ impl GameInstanceManager {
         let handle = (*data.ecs.rigidbody.try_get(key))?;
         let t = data.physics.bodies.get(handle)?.translation();
         let off = home.world_offset();
-        // Real = OrderedFloat<f32>; .0 unwraps to f32 (same as convert.rs).
-        Some((t.x.0 + off[0], t.z.0 + off[2]))
+        Some((t.x + off[0], t.z + off[2]))
     }
 
     /// Centre of the near window and the LOD rings: the viewer's region, but
@@ -848,8 +847,7 @@ impl GameInstanceManager {
         let handle = (*data.ecs.rigidbody.try_get(key))?;
         let body = data.physics.bodies.get(handle)?;
         let t = body.translation();
-        // Real = OrderedFloat<f32>; .0 unwraps to f32 (as convert.rs / viewer_region).
-        Some([t.x.0, t.y.0, t.z.0])
+        Some(t.to_array())
     }
 
     /// While the debug flag is on: wireframe every collider near the viewer,
@@ -2041,14 +2039,7 @@ mod manager_tests {
             w.regions.get_mut(&home).unwrap().with_data(|d| {
                 d.set_body_pose_safe(
                     key,
-                    game::IsometryReal::from_parts(
-                        game::na::Translation3::new(
-                            (game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0).into(),
-                            26.0f32.into(),
-                            128.0f32.into(),
-                        ),
-                        game::na::Unit::<game::na::Quaternion<game::parry::math::Real>>::identity(),
-                    ),
+                    game::Pose::translation(game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0, 26.0, 128.0),
                 )
             });
         }
@@ -2168,10 +2159,7 @@ mod manager_tests {
         // Deep-into-B teleport: local x rebases to 128 (interior — no ghost
         // back to A, no re-departure from B), just past A's +x boundary.
         let cross_x = game::REGION_SIZE + 128.0;
-        let cross_iso = game::IsometryReal::from_parts(
-            game::na::Translation3::new(cross_x.into(), 26.0f32.into(), 128.0f32.into()),
-            game::na::Unit::<game::na::Quaternion<game::parry::math::Real>>::identity(),
-        );
+        let cross_iso = game::Pose::translation(cross_x, 26.0, 128.0);
         {
             let w = manager.world.as_mut().unwrap();
             w.regions
@@ -2406,10 +2394,7 @@ mod manager_tests {
             .unwrap();
 
         let cross_x = game::REGION_SIZE + 128.0;
-        let cross_iso = game::IsometryReal::from_parts(
-            game::na::Translation3::new(cross_x.into(), 26.0f32.into(), 128.0f32.into()),
-            game::na::Unit::<game::na::Quaternion<game::parry::math::Real>>::identity(),
-        );
+        let cross_iso = game::Pose::translation(cross_x, 26.0, 128.0);
         {
             let w = manager.world.as_mut().unwrap();
             w.regions
@@ -2577,9 +2562,9 @@ mod manager_tests {
         // identically iff the legit inputs were faithfully integrated and no
         // desync residue remains.
         let state_hash = |r: &Rollback| {
-            use std::hash::{Hash, Hasher};
+            use std::hash::Hasher;
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            r.hash(&mut h);
+            game::StateHash::state_hash(r, &mut h);
             h.finish()
         };
         let client_hash = state_hash(manager.world.as_ref().unwrap().data(&target));

@@ -3,7 +3,7 @@
 //! `game` never see: a
 //! spawned player must land, walk and jump across it without tunneling, and
 //! every one of those ticks must roll back bit-exact.
-use std::hash::Hash;
+use game::StateHash;
 
 use game::{GameEventKind, InputEvent, Key, Region, RegionCoords};
 
@@ -22,7 +22,7 @@ const FEET: f32 = 10.8;
 
 fn crc(region: &Region) -> u32 {
     let mut h = crc32fast::Hasher::new();
-    region.data().hash(&mut h);
+    region.data().state_hash(&mut h);
     h.finalize()
 }
 
@@ -31,7 +31,7 @@ fn pose(region: &Region) -> ([f32; 3], game::Motion) {
     let e = *data.player_entites.get(&0).unwrap();
     let handle = *data.ecs.rigidbody.get(e);
     let t = data.physics.bodies.get(handle).unwrap().translation();
-    ([t.x.0, t.y.0, t.z.0], data.ecs.motion.try_get(e).unwrap())
+    ([t.x, t.y, t.z], data.ecs.motion.try_get(e).unwrap())
 }
 
 #[test]

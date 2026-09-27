@@ -1,8 +1,8 @@
 use crate::counters::Timer;
-use std::fmt::{Display, Formatter, Result};
+use core::fmt::{Display, Formatter, Result};
 
 /// Performance counters related to each stage of the time step.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct StagesCounters {
     /// Time spent for updating the kinematic and dynamics of every body.
     pub update_time: Timer,
@@ -10,6 +10,12 @@ pub struct StagesCounters {
     pub collision_detection_time: Timer,
     /// Time spent for the computation of collision island and body activation/deactivation (sleeping).
     pub island_construction_time: Timer,
+    /// Time spent maintaining the persistent solver-facing structures (solver
+    /// contact graph reconciliation for the pairs that changed this step,
+    /// frontier solver-body slots, force-event pair list). O(changed pairs) —
+    /// the solvers consume the persistent buckets directly, so there is no
+    /// per-step constraints-collection pass anymore.
+    pub island_constraints_collection_time: Timer,
     /// Total time spent for the constraints resolution and position update.t
     pub solver_time: Timer,
     /// Total time spent for CCD and CCD resolution.
@@ -25,6 +31,7 @@ impl StagesCounters {
             update_time: Timer::new(),
             collision_detection_time: Timer::new(),
             island_construction_time: Timer::new(),
+            island_constraints_collection_time: Timer::new(),
             solver_time: Timer::new(),
             ccd_time: Timer::new(),
             user_changes: Timer::new(),
@@ -36,6 +43,7 @@ impl StagesCounters {
         self.update_time.reset();
         self.collision_detection_time.reset();
         self.island_construction_time.reset();
+        self.island_constraints_collection_time.reset();
         self.solver_time.reset();
         self.ccd_time.reset();
         self.user_changes.reset();
@@ -54,6 +62,11 @@ impl Display for StagesCounters {
             f,
             "Island construction time: {}",
             self.island_construction_time
+        )?;
+        writeln!(
+            f,
+            "Constraints maintenance time: {}",
+            self.island_constraints_collection_time
         )?;
         writeln!(f, "Solver time: {}", self.solver_time)?;
         writeln!(f, "CCD time: {}", self.ccd_time)?;

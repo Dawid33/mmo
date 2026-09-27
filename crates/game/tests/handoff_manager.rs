@@ -68,10 +68,7 @@ impl Harness {
             region.with_data(|d| {
                 d.set_body_pose_safe(
                     key,
-                    game::IsometryReal::from_parts(
-                        game::na::Translation3::new(x.into(), 26.0f32.into(), z.into()),
-                        game::na::Unit::<game::na::Quaternion<game::parry::math::Real>>::identity(),
-                    ),
+                    game::Pose::from_translation(game::rapier3d::math::Vector::new(x, 26.0, z)),
                 )
             });
         });

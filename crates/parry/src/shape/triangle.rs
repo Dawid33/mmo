@@ -1,22 +1,18 @@
 //! Definition of the triangle shape.
 
-use crate::math::{Isometry, Point, Real, RawReal, Vector};
+use crate::math::{ComplexField, Pose, Real, Vector};
 use crate::shape::SupportMap;
 use crate::shape::{PolygonalFeature, Segment};
 use crate::utils;
 
 use core::mem;
-use na::{self, ComplexField, Unit};
 use num::Zero;
 
 #[cfg(feature = "dim3")]
-use {crate::shape::FeatureId, core::f64};
+use crate::shape::FeatureId;
 
 #[cfg(feature = "dim2")]
 use crate::shape::PackedFeatureId;
-
-#[cfg(feature = "rkyv")]
-use rkyv::{bytecheck, CheckBytes};
 
 /// A triangle shape defined by three vertices.
 ///
@@ -55,21 +51,21 @@ use rkyv::{bytecheck, CheckBytes};
 /// ```rust
 /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
 /// use parry3d::shape::Triangle;
-/// use nalgebra::Point3;
+/// use parry3d::math::Vector;
 ///
 /// // Create a right triangle in the XY plane
 /// let triangle = Triangle::new(
-///     Point3::origin(),  // a: origin
-///     Point3::new(3.0, 0.0, 0.0),  // b: along +X
-///     Point3::new(0.0, 4.0, 0.0)   // c: along +Y
+///     Vector::ZERO,  // a: origin
+///     Vector::new(3.0, 0.0, 0.0),  // b: along +X
+///     Vector::new(0.0, 4.0, 0.0)   // c: along +Y
 /// );
 ///
 /// // Area of 3-4-5 right triangle is 6.0
 /// assert_eq!(triangle.area(), 6.0);
 ///
 /// // Check if a point is inside
-/// let inside = Point3::new(1.0, 1.0, 0.0);
-/// assert!(triangle.contains_point(&inside));
+/// let inside = Vector::new(1.0, 1.0, 0.0);
+/// assert!(triangle.contains_point(inside));
 /// # }
 /// ```
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -77,18 +73,18 @@ use rkyv::{bytecheck, CheckBytes};
 #[cfg_attr(feature = "encase", derive(encase::ShaderType))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
-    archive(as = "Self")
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(PartialEq, Debug, Copy, Clone, Default, Hash)]
+#[derive(PartialEq, Debug, Copy, Clone, Default)]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Triangle {
     /// The first vertex of the triangle.
-    pub a: Point<Real>,
+    pub a: Vector,
     /// The second vertex of the triangle.
-    pub b: Point<Real>,
+    pub b: Vector,
     /// The third vertex of the triangle.
-    pub c: Point<Real>,
+    pub c: Vector,
 }
 
 /// Description of the location of a point on a triangle.
@@ -119,10 +115,10 @@ impl TrianglePointLocation {
     ///
     /// Returns `None` if the location is `TrianglePointLocation::OnSolid`.
     pub fn barycentric_coordinates(&self) -> Option<[Real; 3]> {
-        let mut bcoords = [Real::from(0.0); 3];
+        let mut bcoords = [0.0; 3];
 
         match self {
-            TrianglePointLocation::OnVertex(i) => bcoords[*i as usize] = Real::from(1.0),
+            TrianglePointLocation::OnVertex(i) => bcoords[*i as usize] = 1.0,
             TrianglePointLocation::OnEdge(i, uv) => {
                 let idx = match i {
                     0 => (0, 1),
@@ -164,8 +160,8 @@ pub enum TriangleOrientation {
     Degenerate,
 }
 
-impl From<[Point<Real>; 3]> for Triangle {
-    fn from(arr: [Point<Real>; 3]) -> Self {
+impl From<[Vector; 3]> for Triangle {
+    fn from(arr: [Vector; 3]) -> Self {
         *Self::from_array(&arr)
     }
 }
@@ -189,31 +185,31 @@ impl Triangle {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::shape::Triangle;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// // Create a triangle in the XY plane
     /// let tri = Triangle::new(
-    ///     Point3::origin(),
-    ///     Point3::new(1.0, 0.0, 0.0),
-    ///     Point3::new(0.0, 1.0, 0.0)
+    ///     Vector::ZERO,
+    ///     Vector::new(1.0, 0.0, 0.0),
+    ///     Vector::new(0.0, 1.0, 0.0)
     /// );
     ///
     /// assert_eq!(tri.area(), 0.5);
     /// # }
     /// ```
     #[inline]
-    pub fn new(a: Point<Real>, b: Point<Real>, c: Point<Real>) -> Triangle {
+    pub fn new(a: Vector, b: Vector, c: Vector) -> Triangle {
         Triangle { a, b, c }
     }
 
     /// Creates the reference to a triangle from the reference to an array of three points.
-    pub fn from_array(arr: &[Point<Real>; 3]) -> &Triangle {
+    pub fn from_array(arr: &[Vector; 3]) -> &Triangle {
         unsafe { mem::transmute(arr) }
     }
 
     /// Reference to an array containing the three vertices of this triangle.
     #[inline]
-    pub fn vertices(&self) -> &[Point<Real>; 3] {
+    pub fn vertices(&self) -> &[Vector; 3] {
         unsafe { mem::transmute(self) }
     }
 
@@ -223,8 +219,8 @@ impl Triangle {
     /// product).
     #[inline]
     #[cfg(feature = "dim3")]
-    pub fn normal(&self) -> Option<Unit<Vector<Real>>> {
-        Unit::try_new(self.scaled_normal(), Real::from(crate::math::DEFAULT_EPSILON))
+    pub fn normal(&self) -> Option<Vector> {
+        self.scaled_normal().try_normalize()
     }
 
     /// The three edges of this triangle: [AB, BC, CA].
@@ -238,36 +234,36 @@ impl Triangle {
     }
 
     /// Computes a scaled version of this triangle.
-    pub fn scaled(self, scale: &Vector<Real>) -> Self {
-        Self::new(
-            na::Scale::from(*scale) * self.a,
-            na::Scale::from(*scale) * self.b,
-            na::Scale::from(*scale) * self.c,
-        )
+    pub fn scaled(self, scale: Vector) -> Self {
+        Self::new(self.a * scale, self.b * scale, self.c * scale)
     }
 
     /// Returns a new triangle with vertices transformed by `m`.
     #[inline]
-    pub fn transformed(&self, m: &Isometry<Real>) -> Self {
+    pub fn transformed(&self, m: &Pose) -> Self {
         Triangle::new(m * self.a, m * self.b, m * self.c)
     }
 
     /// The three edges scaled directions of this triangle: [B - A, C - B, A - C].
     #[inline]
-    pub fn edges_scaled_directions(&self) -> [Vector<Real>; 3] {
+    pub fn edges_scaled_directions(&self) -> [Vector; 3] {
         [self.b - self.a, self.c - self.b, self.a - self.c]
     }
 
     /// Return the edge segment of this cuboid with a normal cone containing
     /// a direction that that maximizes the dot product with `local_dir`.
-    pub fn local_support_edge_segment(&self, dir: Vector<Real>) -> Segment {
-        let dots = na::Vector3::new(
-            dir.dot(&self.a.coords),
-            dir.dot(&self.b.coords),
-            dir.dot(&self.c.coords),
-        );
+    pub fn local_support_edge_segment(&self, dir: Vector) -> Segment {
+        let dots = [dir.dot(self.a), dir.dot(self.b), dir.dot(self.c)];
 
-        match dots.imin() {
+        let imin = if dots[0] <= dots[1] && dots[0] <= dots[2] {
+            0
+        } else if dots[1] <= dots[2] {
+            1
+        } else {
+            2
+        };
+
+        match imin {
             0 => Segment::new(self.b, self.c),
             1 => Segment::new(self.c, self.a),
             _ => Segment::new(self.a, self.b),
@@ -277,22 +273,22 @@ impl Triangle {
     /// Return the face of this triangle with a normal that maximizes
     /// the dot product with `dir`.
     #[cfg(feature = "dim3")]
-    pub fn support_face(&self, _dir: Vector<Real>) -> PolygonalFeature {
+    pub fn support_face(&self, _dir: Vector) -> PolygonalFeature {
         PolygonalFeature::from(*self)
     }
 
     /// Return the face of this triangle with a normal that maximizes
     /// the dot product with `dir`.
     #[cfg(feature = "dim2")]
-    pub fn support_face(&self, dir: Vector<Real>) -> PolygonalFeature {
+    pub fn support_face(&self, dir: Vector) -> PolygonalFeature {
         let mut best = 0;
-        let mut best_dot = -RawReal::MAX;
+        let mut best_dot = -Real::MAX;
 
         for (i, tangent) in self.edges_scaled_directions().iter().enumerate() {
             let normal = Vector::new(tangent.y, -tangent.x);
-            if let Some(normal) = Unit::try_new(normal, 0.0) {
-                let dot = normal.dot(&dir);
-                if normal.dot(&dir) > best_dot {
+            if let Some(normal) = normal.try_normalize() {
+                let dot = normal.dot(dir);
+                if normal.dot(dir) > best_dot {
                     best = i;
                     best_dot = dot;
                 }
@@ -321,10 +317,10 @@ impl Triangle {
     /// [`Triangle::robust_scaled_normal`].
     #[inline]
     #[cfg(feature = "dim3")]
-    pub fn scaled_normal(&self) -> Vector<Real> {
+    pub fn scaled_normal(&self) -> Vector {
         let ab = self.b - self.a;
         let ac = self.c - self.a;
-        ab.cross(&ac)
+        ab.cross(ac)
     }
 
     /// Find a triangle normal more robustly than with [`Triangle::scaled_normal`].
@@ -334,19 +330,19 @@ impl Triangle {
     /// computationally expensive.
     #[inline]
     #[cfg(feature = "dim3")]
-    pub fn robust_scaled_normal(&self) -> na::Vector3<Real> {
+    pub fn robust_scaled_normal(&self) -> Vector {
         let pts = self.vertices();
         let best_vertex = self.angle_closest_to_90();
         let d1 = pts[(best_vertex + 2) % 3] - pts[(best_vertex + 1) % 3];
         let d2 = pts[best_vertex] - pts[(best_vertex + 1) % 3];
 
-        d1.cross(&d2)
+        d1.cross(d2)
     }
 
     /// Similar to [`Triangle::robust_scaled_normal`], but returns the unit length normal.
     #[inline]
     #[cfg(feature = "dim3")]
-    pub fn robust_normal(&self) -> na::Vector3<Real> {
+    pub fn robust_normal(&self) -> Vector {
         self.robust_scaled_normal().normalize()
     }
 
@@ -355,10 +351,10 @@ impl Triangle {
     /// This computes the min and max values of the dot products between each
     /// vertex of this triangle and `dir`.
     #[inline]
-    pub fn extents_on_dir(&self, dir: &Unit<Vector<Real>>) -> (Real, Real) {
-        let a = self.a.coords.dot(dir);
-        let b = self.b.coords.dot(dir);
-        let c = self.c.coords.dot(dir);
+    pub fn extents_on_dir(&self, dir: Vector) -> (Real, Real) {
+        let a = self.a.dot(dir);
+        let b = self.b.dot(dir);
+        let c = self.c.dot(dir);
 
         if a > b {
             if b > c {
@@ -381,11 +377,11 @@ impl Triangle {
     }
     //
     // #[cfg(feature = "dim3")]
-    // fn support_feature_id_toward(&self, local_dir: &Unit<Vector<Real>>, eps: Real) -> FeatureId {
+    // fn support_feature_id_toward(&self, local_dir: Vector, eps: Real) -> FeatureId {
     //     if let Some(normal) = self.normal() {
     //         let (seps, ceps) = ComplexField::sin_cos(eps);
     //
-    //         let normal_dot = local_dir.dot(&*normal);
+    //         let normal_dot = local_dir.dot(*normal);
     //         if normal_dot >= ceps {
     //             FeatureId::Face(0)
     //         } else if normal_dot <= -ceps {
@@ -437,21 +433,16 @@ impl Triangle {
     /// The area of this triangle.
     #[inline]
     pub fn area(&self) -> Real {
-        // Kahan's formula.
-        let a = na::distance(&self.a, &self.b);
-        let b = na::distance(&self.b, &self.c);
-        let c = na::distance(&self.c, &self.a);
+        // Half the cross-product magnitude, which unlike Kahan's formula on the rounded
+        // side lengths is exactly 0.0 for bitwise-collinear vertices.
+        let ab = self.b - self.a;
+        let ac = self.c - self.a;
 
-        let (c, b, a) = utils::sort3(&a, &b, &c);
-        let a = *a;
-        let b = *b;
-        let c = *c;
+        #[cfg(feature = "dim2")]
+        return ab.perp_dot(ac).abs() * 0.5;
 
-        let sqr = (a + (b + c)) * (c - (a - b)) * (c + (a - b)) * (a + (b - c));
-
-        // We take the max(0.0) because it can be slightly negative
-        // because of numerical errors due to almost-degenerate triangles.
-        ComplexField::sqrt(sqr.max(Real::from(0.0))) * 0.25
+        #[cfg(feature = "dim3")]
+        return ab.cross(ac).length() * 0.5;
     }
 
     /// Computes the unit angular inertia of this triangle.
@@ -470,60 +461,58 @@ impl Triangle {
 
     /// The geometric center of this triangle.
     #[inline]
-    pub fn center(&self) -> Point<Real> {
+    pub fn center(&self) -> Vector {
         utils::center(&[self.a, self.b, self.c])
     }
 
     /// The perimeter of this triangle.
     #[inline]
     pub fn perimeter(&self) -> Real {
-        na::distance(&self.a, &self.b)
-            + na::distance(&self.b, &self.c)
-            + na::distance(&self.c, &self.a)
+        self.b.distance(self.a) + self.c.distance(self.b) + self.a.distance(self.c)
     }
 
     /// The circumcircle of this triangle.
-    pub fn circumcircle(&self) -> (Point<Real>, Real) {
+    pub fn circumcircle(&self) -> (Vector, Real) {
         let a = self.a - self.c;
         let b = self.b - self.c;
 
-        let na = a.norm_squared();
-        let nb = b.norm_squared();
+        let na = a.length_squared();
+        let nb = b.length_squared();
 
-        let dab = a.dot(&b);
+        let dab = a.dot(b);
 
-        let denom = Real::from(2.0) * (na * nb - dab * dab);
+        let denom = 2.0 * (na * nb - dab * dab);
 
         if denom.is_zero() {
             // The triangle is degenerate (the three points are collinear).
             // So we find the longest segment and take its center.
             let c = self.a - self.b;
-            let nc = c.norm_squared();
+            let nc = c.length_squared();
 
             if nc >= na && nc >= nb {
                 // Longest segment: [&self.a, &self.b]
                 (
-                    na::center(&self.a, &self.b),
-                    ComplexField::sqrt(nc) / na::convert::<f64, Real>(2.0f64),
+                    self.a.midpoint(self.b),
+                    <Real as ComplexField>::sqrt(nc) / 2.0,
                 )
             } else if na >= nb && na >= nc {
                 // Longest segment: [&self.a, pc]
                 (
-                    na::center(&self.a, &self.c),
-                    ComplexField::sqrt(na) / na::convert::<f64, Real>(2.0f64),
+                    self.a.midpoint(self.c),
+                    <Real as ComplexField>::sqrt(na) / 2.0,
                 )
             } else {
                 // Longest segment: [&self.b, &self.c]
                 (
-                    na::center(&self.b, &self.c),
-                    ComplexField::sqrt(nb) / na::convert::<f64, Real>(2.0f64),
+                    self.b.midpoint(self.c),
+                    <Real as ComplexField>::sqrt(nb) / 2.0,
                 )
             }
         } else {
             let k = b * na - a * nb;
 
-            let center = self.c + (a * k.dot(&b) - b * k.dot(&a)) / denom;
-            let radius = na::distance(&self.a, &center);
+            let center = self.c + (a * k.dot(b) - b * k.dot(a)) / denom;
+            let radius = center.distance(self.a);
 
             (center, radius)
         }
@@ -532,11 +521,11 @@ impl Triangle {
     /// Tests if this triangle is affinely dependent, i.e., its points are almost aligned.
     #[cfg(feature = "dim3")]
     pub fn is_affinely_dependent(&self) -> bool {
-        const EPS: RawReal = crate::math::DEFAULT_EPSILON * 100.0;
+        const EPS: Real = crate::math::DEFAULT_EPSILON * 100.0;
 
         let p1p2 = self.b - self.a;
         let p1p3 = self.c - self.a;
-        relative_eq!(p1p2.cross(&p1p3).norm_squared(), Real::from(0.0), epsilon = Real::from(EPS * EPS))
+        relative_eq!(p1p2.cross(p1p3).length_squared(), 0.0, epsilon = EPS * EPS)
 
         // relative_eq!(
         //     self.area(),
@@ -551,9 +540,9 @@ impl Triangle {
         let p1p2 = self.b - self.a;
         let p1p3 = self.c - self.a;
         relative_eq!(
-            p1p2.cross(&p1p3).norm(),
-            Real::from(0.0),
-            epsilon = eps * p1p2.norm().max(p1p3.norm())
+            p1p2.cross(p1p3).length(),
+            0.0,
+            epsilon = eps * p1p2.length().max(p1p3.length())
         )
 
         // relative_eq!(
@@ -565,13 +554,13 @@ impl Triangle {
 
     /// Tests if a point is inside of this triangle.
     #[cfg(feature = "dim2")]
-    pub fn contains_point(&self, p: &Point<Real>) -> bool {
+    pub fn contains_point(&self, p: Vector) -> bool {
         let ab = self.b - self.a;
         let bc = self.c - self.b;
         let ca = self.a - self.c;
-        let sgn1 = ab.perp(&(p - self.a));
-        let sgn2 = bc.perp(&(p - self.b));
-        let sgn3 = ca.perp(&(p - self.c));
+        let sgn1 = ab.perp_dot(p - self.a);
+        let sgn2 = bc.perp_dot(p - self.b);
+        let sgn3 = ca.perp_dot(p - self.c);
         sgn1.signum() * sgn2.signum() >= 0.0
             && sgn1.signum() * sgn3.signum() >= 0.0
             && sgn2.signum() * sgn3.signum() >= 0.0
@@ -579,16 +568,16 @@ impl Triangle {
 
     /// Tests if a point is inside of this triangle.
     #[cfg(feature = "dim3")]
-    pub fn contains_point(&self, p: &Point<Real>) -> bool {
-        const EPS: Real = ordered_float::OrderedFloat(crate::math::DEFAULT_EPSILON);
+    pub fn contains_point(&self, p: Vector) -> bool {
+        const EPS: Real = crate::math::DEFAULT_EPSILON;
 
         let vb = self.b - self.a;
         let vc = self.c - self.a;
         let vp = p - self.a;
 
-        let n = vc.cross(&vb);
-        let n_norm = n.norm_squared();
-        if n_norm < EPS || vp.dot(&n).abs() > EPS * n_norm {
+        let n = vc.cross(vb);
+        let n_norm = n.length_squared();
+        if n_norm < EPS || vp.dot(n).abs() > EPS * n_norm {
             // the triangle is degenerate or the
             // point does not lie on the same plane as the triangle.
             return false;
@@ -607,23 +596,23 @@ impl Triangle {
         // b = vb.dot(nc) * B and c = vc.dot(nb) * C - this results in harder-to-follow math but
         // hopefully fast code.
 
-        let nb = vb.cross(&n);
-        let nc = vc.cross(&n);
+        let nb = vb.cross(n);
+        let nc = vc.cross(n);
 
-        let signed_blim = vb.dot(&nc);
-        let b = vp.dot(&nc) * signed_blim.signum();
+        let signed_blim = vb.dot(nc);
+        let b = vp.dot(nc) * signed_blim.signum();
         let blim = signed_blim.abs();
 
-        let signed_clim = vc.dot(&nb);
-        let c = vp.dot(&nb) * signed_clim.signum();
+        let signed_clim = vc.dot(nb);
+        let c = vp.dot(nb) * signed_clim.signum();
         let clim = signed_clim.abs();
 
-        c >= 0.0.into() && c <= clim && b >= 0.0.into() && b <= blim && c * blim + b * clim <= blim * clim
+        c >= 0.0 && c <= clim && b >= 0.0 && b <= blim && c * blim + b * clim <= blim * clim
     }
 
     /// The normal of the given feature of this shape.
     #[cfg(feature = "dim3")]
-    pub fn feature_normal(&self, _: FeatureId) -> Option<Unit<Vector<Real>>> {
+    pub fn feature_normal(&self, _: FeatureId) -> Option<Vector> {
         self.normal()
     }
 
@@ -633,7 +622,7 @@ impl Triangle {
     /// smaller than `epsilon`.
     #[cfg(feature = "dim2")]
     pub fn orientation(&self, epsilon: Real) -> TriangleOrientation {
-        let area2 = (self.b - self.a).perp(&(self.c - self.a));
+        let area2 = (self.b - self.a).perp_dot(self.c - self.a);
         // println!("area2: {}", area2);
         if area2 > epsilon {
             TriangleOrientation::CounterClockwise
@@ -646,15 +635,15 @@ impl Triangle {
 
     /// The orientation of the 2D triangle, based on its signed area.
     ///
-    /// Returns `TriangleOrientation::Degenerate` if the triangle’s area is
+    /// Returns `TriangleOrientation::Degenerate` if the triangle's area is
     /// smaller than `epsilon`.
     pub fn orientation2d(
-        a: &na::Point2<Real>,
-        b: &na::Point2<Real>,
-        c: &na::Point2<Real>,
+        a: crate::math::Vector2,
+        b: crate::math::Vector2,
+        c: crate::math::Vector2,
         epsilon: Real,
     ) -> TriangleOrientation {
-        let area2 = (b - a).perp(&(c - a));
+        let area2 = (b - a).perp_dot(c - a);
         // println!("area2: {}", area2);
         if area2 > epsilon {
             TriangleOrientation::CounterClockwise
@@ -670,14 +659,14 @@ impl Triangle {
     /// degrees in the triangle.
     pub fn angle_closest_to_90(&self) -> usize {
         let points = self.vertices();
-        let mut best_cos = Real::from(2.0);
+        let mut best_cos = 2.0;
         let mut selected_i = 0;
 
         for i in 0..3 {
             let d1 = (points[i] - points[(i + 1) % 3]).normalize();
             let d2 = (points[(i + 2) % 3] - points[(i + 1) % 3]).normalize();
 
-            let cos_abs = d1.dot(&d2).abs();
+            let cos_abs = d1.dot(d2).abs();
 
             if cos_abs < best_cos {
                 best_cos = cos_abs;
@@ -696,10 +685,10 @@ impl Triangle {
 
 impl SupportMap for Triangle {
     #[inline]
-    fn local_support_point(&self, dir: &Vector<Real>) -> Point<Real> {
-        let d1 = self.a.coords.dot(dir);
-        let d2 = self.b.coords.dot(dir);
-        let d3 = self.c.coords.dot(dir);
+    fn local_support_point(&self, dir: Vector) -> Vector {
+        let d1 = self.a.dot(dir);
+        let d2 = self.b.dot(dir);
+        let d3 = self.c.dot(dir);
 
         if d1 > d2 {
             if d1 > d3 {
@@ -718,7 +707,7 @@ impl SupportMap for Triangle {
 /*
 #[cfg(feature = "dim3")]
 impl ConvexPolyhedron for Triangle {
-    fn vertex(&self, id: FeatureId) -> Point<Real> {
+    fn vertex(&self, id: FeatureId) -> Vector {
         match id.unwrap_vertex() {
             0 => self.a,
             1 => self.b,
@@ -726,7 +715,7 @@ impl ConvexPolyhedron for Triangle {
             _ => panic!("Triangle vertex index out of bounds."),
         }
     }
-    fn edge(&self, id: FeatureId) -> (Point<Real>, Point<Real>, FeatureId, FeatureId) {
+    fn edge(&self, id: FeatureId) -> (Vector, Vector, FeatureId, FeatureId) {
         match id.unwrap_edge() {
             0 => (self.a, self.b, FeatureId::Vertex(0), FeatureId::Vertex(1)),
             1 => (self.b, self.c, FeatureId::Vertex(1), FeatureId::Vertex(2)),
@@ -772,13 +761,13 @@ impl ConvexPolyhedron for Triangle {
 
     fn support_face_toward(
         &self,
-        m: &Isometry<Real>,
-        dir: &Unit<Vector<Real>>,
+        m: &Pose,
+        dir: Vector,
         face: &mut ConvexPolygonalFeature,
     ) {
         let normal = self.scaled_normal();
 
-        if normal.dot(&*dir) >= 0.0 {
+        if normal.dot(*dir) >= 0.0 {
             ConvexPolyhedron::face(self, FeatureId::Face(0), face);
         } else {
             ConvexPolyhedron::face(self, FeatureId::Face(1), face);
@@ -788,8 +777,8 @@ impl ConvexPolyhedron for Triangle {
 
     fn support_feature_toward(
         &self,
-        transform: &Isometry<Real>,
-        dir: &Unit<Vector<Real>>,
+        transform: &Pose,
+        dir: Vector,
         eps: Real,
         out: &mut ConvexPolygonalFeature,
     ) {
@@ -815,8 +804,8 @@ impl ConvexPolyhedron for Triangle {
         }
     }
 
-    fn support_feature_id_toward(&self, local_dir: &Unit<Vector<Real>>) -> FeatureId {
-        self.support_feature_id_toward(local_dir, na::convert::<f64, Real>(f64::consts::PI / 180.0))
+    fn support_feature_id_toward(&self, local_dir: Vector) -> FeatureId {
+        self.support_feature_id_toward(local_dir, (f64::consts::PI / 180.0) as Real)
     }
 }
 */
@@ -824,14 +813,51 @@ impl ConvexPolyhedron for Triangle {
 #[cfg(feature = "dim2")]
 #[cfg(test)]
 mod test {
+    use crate::math::Vector;
     use crate::shape::Triangle;
-    use na::Point2;
 
     #[test]
     fn test_triangle_area() {
-        let pa = Point2::new(5.0, 0.0);
-        let pb = Point2::origin();
-        let pc = Point2::new(0.0, 4.0);
+        let pa = Vector::new(5.0, 0.0);
+        let pb = Vector::ZERO;
+        let pc = Vector::new(0.0, 4.0);
+
+        assert!(relative_eq!(Triangle::new(pa, pb, pc).area(), 10.0));
+    }
+
+    #[test]
+    fn test_triangle_contains_point() {
+        let tri = Triangle::new(Vector::new(5.0, 0.0), Vector::ZERO, Vector::new(0.0, 4.0));
+
+        assert!(tri.contains_point(Vector::new(1.0, 1.0)));
+        assert!(!tri.contains_point(Vector::new(-1.0, 1.0)));
+    }
+
+    #[test]
+    fn test_obtuse_triangle_contains_point() {
+        let tri = Triangle::new(
+            Vector::new(-10.0, 10.0),
+            Vector::ZERO,
+            Vector::new(20.0, 0.0),
+        );
+
+        assert!(tri.contains_point(Vector::new(-3.0, 5.0)));
+        assert!(tri.contains_point(Vector::new(5.0, 1.0)));
+        assert!(!tri.contains_point(Vector::new(0.0, -1.0)));
+    }
+}
+
+#[cfg(feature = "dim3")]
+#[cfg(test)]
+mod test {
+    use crate::math::{Real, Vector};
+    use crate::shape::Triangle;
+
+    #[test]
+    fn test_triangle_area() {
+        let pa = Vector::new(0.0, 5.0, 0.0);
+        let pb = Vector::ZERO;
+        let pc = Vector::new(0.0, 0.0, 4.0);
 
         assert!(relative_eq!(Triangle::new(pa, pb, pc).area(), 10.0));
     }
@@ -839,76 +865,34 @@ mod test {
     #[test]
     fn test_triangle_contains_point() {
         let tri = Triangle::new(
-            Point2::new(5.0, 0.0),
-            Point2::origin(),
-            Point2::new(0.0, 4.0),
+            Vector::new(0.0, 5.0, 0.0),
+            Vector::ZERO,
+            Vector::new(0.0, 0.0, 4.0),
         );
 
-        assert!(tri.contains_point(&Point2::new(1.0, 1.0)));
-        assert!(!tri.contains_point(&Point2::new(-1.0, 1.0)));
+        assert!(tri.contains_point(Vector::new(0.0, 1.0, 1.0)));
+        assert!(!tri.contains_point(Vector::new(0.0, -1.0, 1.0)));
     }
 
     #[test]
     fn test_obtuse_triangle_contains_point() {
         let tri = Triangle::new(
-            Point2::new(-10.0, 10.0),
-            Point2::origin(),
-            Point2::new(20.0, 0.0),
+            Vector::new(-10.0, 10.0, 0.0),
+            Vector::ZERO,
+            Vector::new(20.0, 0.0, 0.0),
         );
 
-        assert!(tri.contains_point(&Point2::new(-3.0, 5.0)));
-        assert!(tri.contains_point(&Point2::new(5.0, 1.0)));
-        assert!(!tri.contains_point(&Point2::new(0.0, -1.0)));
-    }
-}
-
-#[cfg(feature = "dim3")]
-#[cfg(test)]
-mod test {
-    use crate::math::Real;
-    use crate::shape::Triangle;
-    use na::Point3;
-
-    #[test]
-    fn test_triangle_area() {
-        let pa = Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0));
-        let pb = Point3::origin();
-        let pc = Point3::new(Real::from(0.0), Real::from(0.0), Real::from(4.0));
-
-        assert!(relative_eq!(Triangle::new(pa, pb, pc).area(), Real::from(10.0)));
-    }
-
-    #[test]
-    fn test_triangle_contains_point() {
-        let tri = Triangle::new(
-            Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0)),
-            Point3::origin(),
-            Point3::new(Real::from(0.0), Real::from(0.0), Real::from(4.0)),
-        );
-
-        assert!(tri.contains_point(&Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0))));
-        assert!(!tri.contains_point(&Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0))));
-    }
-
-    #[test]
-    fn test_obtuse_triangle_contains_point() {
-        let tri = Triangle::new(
-            Point3::new(Real::from(-10.0), Real::from(10.0), Real::from(0.0)),
-            Point3::origin(),
-            Point3::new(Real::from(20.0), Real::from(0.0), Real::from(0.0)),
-        );
-
-        assert!(tri.contains_point(&Point3::new(Real::from(-3.0), Real::from(0.0), Real::from(0.0))));
-        assert!(tri.contains_point(&Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0))));
-        assert!(!tri.contains_point(&Point3::new(Real::from(0.0), Real::from(0.0), Real::from(0.0))));
+        assert!(tri.contains_point(Vector::new(-3.0, 5.0, 0.0)));
+        assert!(tri.contains_point(Vector::new(5.0, 1.0, 0.0)));
+        assert!(!tri.contains_point(Vector::new(0.0, -1.0, 0.0)));
     }
 
     #[test]
     fn test_3dtriangle_contains_point() {
-        let o = Point3::origin();
-        let pa = Point3::new(Real::from(1.2), Real::from(1.4), Real::from(5.6));
-        let pb = Point3::new(Real::from(1.5), Real::from(6.7), Real::from(1.9));
-        let pc = Point3::new(Real::from(0.0), Real::from(2.1), Real::from(1.3));
+        let o = Vector::ZERO;
+        let pa = Vector::new(1.2, 1.4, 5.6);
+        let pb = Vector::new(1.5, 6.7, 1.9);
+        let pc = Vector::new(5.0, 2.1, 1.3);
 
         let tri = Triangle::new(pa, pb, pc);
 
@@ -916,44 +900,44 @@ mod test {
         let vb = pb - o;
         let vc = pc - o;
 
-        let n = (pa - pb).cross(&(pb - pc));
+        let n = (pa - pb).cross(pb - pc);
 
         // This is a simple algorithm for generating points that are inside the
         // triangle: o + (va * alpha + vb * beta + vc * gamma) is always inside the
         // triangle if:
         // * each of alpha, beta, gamma is in (0, 1)
         // * alpha + beta + gamma = 1
-        let contained_p = o + (va * Real::from(0.2) + vb * Real::from(0.3) + vc * Real::from(0.5));
-        let not_contained_coplanar_p = o + (va * Real::from(-0.5) + vb * Real::from(0.8) + vc * Real::from(0.7));
-        let not_coplanar_p = o + (va * Real::from(0.2) + vb * Real::from(0.3) + vc * Real::from(0.5)) + n * Real::from(0.1);
-        let not_coplanar_p2 = o + (va * Real::from(-0.5) + vb * Real::from(0.8) + vc * Real::from(0.7)) + n * Real::from(0.1);
-        assert!(tri.contains_point(&contained_p));
-        assert!(!tri.contains_point(&not_contained_coplanar_p));
-        assert!(!tri.contains_point(&not_coplanar_p));
-        assert!(!tri.contains_point(&not_coplanar_p2));
+        let contained_p = o + (va * 0.2 + vb * 0.3 + vc * 0.5);
+        let not_contained_coplanar_p = o + (va * -0.5 + vb * 0.8 + vc * 0.7);
+        let not_coplanar_p = o + (va * 0.2 + vb * 0.3 + vc * 0.5) + n * 0.1;
+        let not_coplanar_p2 = o + (va * -0.5 + vb * 0.8 + vc * 0.7) + n * 0.1;
+        assert!(tri.contains_point(contained_p));
+        assert!(!tri.contains_point(not_contained_coplanar_p));
+        assert!(!tri.contains_point(not_coplanar_p));
+        assert!(!tri.contains_point(not_coplanar_p2));
 
         // Test that points that are clearly within the triangle as seen as such, by testing
         // a number of points along a line intersecting the triangle.
         for i in -50i16..150 {
-            let a = Real::from(0.15);
-            let b = Real::from(0.01) * Real::from(i); // b ranges from -0.5 to 1.5
-            let c = Real::from(1.0) - a - b;
+            let a = 0.15;
+            let b = 0.01 * Real::from(i); // b ranges from -0.5 to 1.5
+            let c = 1.0 - a - b;
             let p = o + (va * a + vb * b + vc * c);
 
             match i {
                 ii if ii < 0 || ii > 85 => assert!(
-                    !tri.contains_point(&p),
+                    !tri.contains_point(p),
                     "Should not contain: i = {}, b = {}",
                     i,
                     b
                 ),
                 ii if ii > 0 && ii < 85 => assert!(
-                    tri.contains_point(&p),
+                    tri.contains_point(p),
                     "Should contain: i = {}, b = {}",
                     i,
                     b
                 ),
-                _ => (), // Points at the edge may be seen as inside or outside
+                _ => (), // Vectors at the edge may be seen as inside or outside
             }
         }
     }

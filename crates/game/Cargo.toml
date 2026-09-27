@@ -43,10 +43,12 @@ obj = { version = "0.10.2", optional = true }
 ena = { version = "0.14.3", optional = true, default-features = false }
 # smallvec = "1"
 foldhash = { version = "0.2", default-features = false }
-ordered-float = { workspace = true }
-nalgebra = { workspace = true }
-approx = { workspace = true }
-simba = { workspace = true }
+# StateHash (plan D2): the rollback hash; replaces std Hash over OrderedFloat.
+state-hash = { workspace = true, features = ["derive", "glamx"] }
+glamx = { workspace = true }
+# D3: the few game floats that need a total order use f32::total_cmp; libm
+# keeps the camera's trig identical on native and wasm32.
+libm = "0.2"
 oorandom = { workspace = true }
 parry3d = { workspace = true }
 rapier3d = { workspace = true }

@@ -3,6 +3,7 @@ use crate::geometry::ColliderHandle;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// A pair of collider handles.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ColliderPair {
     /// The handle of the first collider involved in this pair.
     pub collider1: ColliderHandle,

@@ -5,16 +5,17 @@
 //! those must restore a full snapshot instead (see Undo::change /
 //! create_entity_safe). If a vendored fork changes this behavior, these tests
 //! flag it.
-use std::hash::Hash;
+use game::StateHash;
 
 use rapier3d::prelude::{
     ColliderSet, ImpulseJointSet, IslandManager, MultibodyJointSet, RigidBodyBuilder, RigidBodySet,
+    SoftBodySet,
 };
 use slotmapd::{new_key_type, SlotMap, SparseSecondaryMap};
 
-fn h<T: Hash>(t: &T) -> u32 {
+fn h<T: StateHash>(t: &T) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
-    t.hash(&mut hasher);
+    t.state_hash(&mut hasher);
     hasher.finalize()
 }
 
@@ -109,7 +110,7 @@ fn rigidbodyset_revert_insert_restores_hash_exactly() {
     let mut ij = ImpulseJointSet::new();
     let mut mj = MultibodyJointSet::new();
     let _b = bodies.insert(RigidBodyBuilder::fixed().build());
-    bodies.remove(a, &mut islands, &mut colliders, &mut ij, &mut mj, true);
+    bodies.remove(a, &mut islands, &mut colliders, &mut ij, &mut mj, &mut SoftBodySet::new(), true);
     let s1 = h(&bodies);
     let st = bodies.alloc_state();
     let c = bodies.insert(RigidBodyBuilder::fixed().build());
@@ -126,7 +127,7 @@ fn rigidbodyset_remove_does_not_restore_hash() {
     let mut mj = MultibodyJointSet::new();
     let before = h(&bodies);
     let handle = bodies.insert(RigidBodyBuilder::fixed().build());
-    bodies.remove(handle, &mut islands, &mut colliders, &mut ij, &mut mj, true);
+    bodies.remove(handle, &mut islands, &mut colliders, &mut ij, &mut mj, &mut SoftBodySet::new(), true);
     assert_ne!(before, h(&bodies), "arena generation/free list are hashed");
 }
 
@@ -176,8 +177,8 @@ fn collider_insert_with_parent_reverts_exactly() {
 
     // A parent body plus collider history so the arena free list is non-trivial.
     let parent = bodies.insert(RigidBodyBuilder::fixed().build());
-    let doomed = colliders.insert(ColliderBuilder::ball(1.0.into()).build());
-    colliders.remove(doomed, &mut islands, &mut bodies, false);
+    let doomed = colliders.insert(ColliderBuilder::ball(1.0).build());
+    colliders.remove(doomed, &mut islands, &mut bodies, &mut SoftBodySet::new(), false);
 
     let was_modified = bodies.is_marked_modified(parent);
     assert!(was_modified, "a freshly-inserted body is on the modified list");

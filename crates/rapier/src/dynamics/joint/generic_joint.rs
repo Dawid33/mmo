@@ -1,13 +1,18 @@
 #![allow(clippy::bad_bit_mask)] // Clippy will complain about the bitmasks due to JointAxesMask::FREE_FIXED_AXES being 0.
+#![allow(clippy::unnecessary_cast)] // Casts are needed for switching between f32/f64.
 
+#[cfg(feature = "alloc")]
+use crate::dynamics::RigidBody;
+use crate::dynamics::integration_parameters::SpringCoefficients;
+#[cfg(feature = "alloc")]
 use crate::dynamics::solver::MotorParameters;
-use crate::dynamics::{
-    FixedJoint, MotorModel, PrismaticJoint, RevoluteJoint, RigidBody, RopeJoint,
-};
-use crate::math::{
-    Isometry, Point, RawReal, Real, Rotation, UnitVector, Vector, SPATIAL_DIM,
-};
-use crate::utils::{SimdBasis, SimdRealCopy};
+use crate::dynamics::{FixedJoint, MotorModel, PrismaticJoint, RevoluteJoint, RopeJoint};
+use crate::math::{Pose, Real, Rotation, SPATIAL_DIM, Vector};
+#[cfg(feature = "dim2")]
+use crate::utils::OrthonormalBasis;
+use crate::utils::SimdRealCopy;
+#[cfg(feature = "dim2")]
+use parry::math::Matrix;
 
 #[cfg(feature = "dim3")]
 use crate::dynamics::SphericalJoint;
@@ -16,7 +21,7 @@ use crate::dynamics::SphericalJoint;
 bitflags::bitflags! {
     /// A bit mask identifying multiple degrees of freedom of a joint.
     #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-    #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     pub struct JointAxesMask: u8 {
         /// The linear (translational) degree of freedom along the local X axis of a joint.
         const LIN_X = 1 << 0;
@@ -69,6 +74,8 @@ bitflags::bitflags! {
         const LOCKED_REVOLUTE_AXES = Self::LIN_X.bits() | Self::LIN_Y.bits();
         /// The set of degrees of freedom locked by a prismatic joint.
         const LOCKED_PRISMATIC_AXES = Self::LIN_Y.bits() | Self::ANG_X.bits();
+        /// The set of degrees of freedom locked by a pin slot joint.
+        const LOCKED_PIN_SLOT_AXES = Self::LIN_Y.bits();
         /// The set of degrees of freedom locked by a fixed joint.
         const LOCKED_FIXED_AXES = Self::LIN_X.bits() | Self::LIN_Y.bits() | Self::ANG_X.bits();
         /// The set of degrees of freedom left free by a revolute joint.
@@ -125,8 +132,14 @@ impl From<JointAxis> for JointAxesMask {
 /// - Elbow that bends 0-150°: revolute joint with limits `[0.0, 5*PI/6]`
 ///
 /// When a joint hits its limit, forces are applied to prevent further movement in that direction.
+///
+/// An angular range may sit anywhere on the circle (`[0, 3π/2]` and `[π, 3π/2]` both work), but
+/// it can't be wider than a full turn: the joint's angle is derived from the bodies' relative
+/// rotation, which doesn't count revolutions, so a wider range is indistinguishable from no
+/// limit at all and leaves the axis free.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct JointLimits<N> {
     /// Minimum allowed value (angle for revolute, distance for prismatic).
     pub min: N,
@@ -139,9 +152,9 @@ pub struct JointLimits<N> {
 impl<N: SimdRealCopy> Default for JointLimits<N> {
     fn default() -> Self {
         Self {
-            min: -N::splat(Real::from(RawReal::MAX)),
-            max: N::splat(Real::from(RawReal::MAX)),
-            impulse: N::splat(Real::from(0.0)),
+            min: -N::splat(Real::MAX),
+            max: N::splat(Real::MAX),
+            impulse: N::splat(0.0),
         }
     }
 }
@@ -151,7 +164,7 @@ impl<N: SimdRealCopy> From<[N; 2]> for JointLimits<N> {
         Self {
             min: value[0],
             max: value[1],
-            impulse: N::splat(Real::from(0.0)),
+            impulse: N::splat(0.0),
         }
     }
 }
@@ -178,8 +191,8 @@ impl<N: SimdRealCopy> From<[N; 2]> for JointLimits<N> {
 /// ```
 /// # use rapier3d::prelude::*;
 /// # use rapier3d::dynamics::{RevoluteJoint, PrismaticJoint};
-/// # let mut revolute_joint = RevoluteJoint::new(Vector::x_axis());
-/// # let mut prismatic_joint = PrismaticJoint::new(Vector::x_axis());
+/// # let mut revolute_joint = RevoluteJoint::new(Vector::X);
+/// # let mut prismatic_joint = PrismaticJoint::new(Vector::X);
 /// // Motor that spins a wheel at 10 rad/s
 /// revolute_joint.set_motor_velocity(10.0, 0.8);
 ///
@@ -187,7 +200,8 @@ impl<N: SimdRealCopy> From<[N; 2]> for JointLimits<N> {
 /// prismatic_joint.set_motor_position(5.0, 100.0, 10.0);  // stiffness=100, damping=10
 /// ```
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct JointMotor {
     /// Target velocity (units/sec for prismatic, rad/sec for revolute).
     pub target_vel: Real,
@@ -208,17 +222,18 @@ pub struct JointMotor {
 impl Default for JointMotor {
     fn default() -> Self {
         Self {
-            target_pos: Real::from(0.0),
-            target_vel: Real::from(0.0),
-            stiffness: Real::from(0.0),
-            damping: Real::from(0.0),
-            max_force: Real::from(RawReal::MAX),
-            impulse: Real::from(0.0),
+            target_pos: 0.0,
+            target_vel: 0.0,
+            stiffness: 0.0,
+            damping: 0.0,
+            max_force: Real::MAX,
+            impulse: 0.0,
             model: MotorModel::AccelerationBased,
         }
     }
 }
 
+#[cfg(feature = "alloc")]
 impl JointMotor {
     pub(crate) fn motor_params(&self, dt: Real) -> MotorParameters<Real> {
         let (erp_inv_dt, cfm_coeff, cfm_gain) =
@@ -231,14 +246,23 @@ impl JointMotor {
             // keep_lhs,
             target_pos: self.target_pos,
             target_vel: self.target_vel,
-            max_impulse: self.max_force * dt,
+            max_impulse: Self::max_impulse(self.max_force, dt),
         }
+    }
+
+    /// The largest impulse a motor with the given max force can apply during `dt`.
+    ///
+    /// This is zero if `dt` is zero, even for an infinite `max_force` (whose product with `dt`
+    /// would be NaN).
+    pub(crate) fn max_impulse(max_force: Real, dt: Real) -> Real {
+        if dt == 0.0 { 0.0 } else { max_force * dt }
     }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// Enum indicating whether or not a joint is enabled.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum JointEnabled {
     /// The joint is enabled.
     Enabled,
@@ -250,13 +274,14 @@ pub enum JointEnabled {
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 /// A generic joint.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct GenericJoint {
     /// The joint’s frame, expressed in the first rigid-body’s local-space.
-    pub local_frame1: Isometry<Real>,
+    pub local_frame1: Pose,
     /// The joint’s frame, expressed in the second rigid-body’s local-space.
-    pub local_frame2: Isometry<Real>,
+    pub local_frame2: Pose,
     /// The degrees-of-freedoms locked by this joint.
     pub locked_axes: JointAxesMask,
     /// The degrees-of-freedoms limited by this joint.
@@ -282,6 +307,8 @@ pub struct GenericJoint {
     /// For coupled degrees of freedoms (DoF), only the first linear (resp. angular) coupled DoF motor and `motor_axes`
     /// bitmask is applied to the coupled linear (resp. angular) axes.
     pub motors: [JointMotor; SPATIAL_DIM],
+    /// The coefficients controlling the joint constraints’ softness.
+    pub softness: SpringCoefficients<Real>,
     /// Are contacts between the attached rigid-bodies enabled?
     pub contacts_enabled: bool,
     /// Whether the joint is enabled.
@@ -293,14 +320,15 @@ pub struct GenericJoint {
 impl Default for GenericJoint {
     fn default() -> Self {
         Self {
-            local_frame1: Isometry::identity(),
-            local_frame2: Isometry::identity(),
+            local_frame1: Pose::IDENTITY,
+            local_frame2: Pose::IDENTITY,
             locked_axes: JointAxesMask::empty(),
             limit_axes: JointAxesMask::empty(),
             motor_axes: JointAxesMask::empty(),
             coupled_axes: JointAxesMask::empty(),
             limits: [JointLimits::default(); SPATIAL_DIM],
             motors: [JointMotor::default(); SPATIAL_DIM],
+            softness: SpringCoefficients::joint_defaults(),
             contacts_enabled: true,
             enabled: JointEnabled::Enabled,
             user_data: 0,
@@ -315,30 +343,60 @@ impl GenericJoint {
         *Self::default().lock_axes(locked_axes)
     }
 
-    #[cfg(feature = "simd-is-enabled")]
     /// Can this joint use SIMD-accelerated constraint formulations?
+    ///
+    /// Locked axes and uncoupled limits have wide row formulations, as does the
+    /// 2D angular motor (the workhorse of ragdoll joints); linear motors, 3D
+    /// motors and coupled limit rows don't (yet) and fall back to the scalar
+    /// path.
+    #[cfg(feature = "alloc")]
     pub(crate) fn supports_simd_constraints(&self) -> bool {
-        self.limit_axes.is_empty() && self.motor_axes.is_empty()
+        #[cfg(feature = "dim2")]
+        let motors_ok =
+            (self.motor_axes.bits() & !self.locked_axes.bits() & JointAxesMask::LIN_AXES.bits())
+                == 0;
+        #[cfg(feature = "dim3")]
+        let motors_ok = (self.motor_axes.bits() & !self.locked_axes.bits()) == 0;
+        motors_ok && (self.limit_axes & self.coupled_axes).is_empty()
+    }
+
+    /// The constraint-row layout signature of this joint: joints sharing it emit
+    /// the same row sequence (kinds, axes and count), so they can share the
+    /// lanes of one SIMD constraint group.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn simd_row_signature(&self) -> u32 {
+        let locked = self.locked_axes.bits() as u32;
+        let limits = (self.limit_axes.bits() & !self.locked_axes.bits()) as u32;
+        #[cfg(feature = "dim2")]
+        {
+            // The angular motor row's coefficient formula depends on the motor
+            // model, so lanes must also share it.
+            let motors = (self.motor_axes.bits() & !self.locked_axes.bits()) as u32;
+            let model = (self.motors[crate::math::DIM].model
+                == crate::dynamics::MotorModel::ForceBased) as u32;
+            locked | (limits << 8) | (motors << 16) | (model << 24)
+        }
+        #[cfg(feature = "dim3")]
+        {
+            locked | (limits << 8)
+        }
     }
 
     #[doc(hidden)]
-    pub fn complete_ang_frame(axis: UnitVector<Real>) -> Rotation<Real> {
-        let basis = axis.orthonormal_basis();
-
+    pub fn complete_ang_frame(axis: Vector) -> Rotation {
         #[cfg(feature = "dim2")]
         {
-            use na::{Matrix2, Rotation2, UnitComplex};
-            let mat = Matrix2::from_columns(&[axis.into_inner(), basis[0]]);
-            let rotmat = Rotation2::from_matrix_unchecked(mat);
-            UnitComplex::from_rotation_matrix(&rotmat)
+            let basis = axis.orthonormal_basis();
+            let mat = Matrix::from_cols(axis, basis[0]);
+            Rotation::from_matrix_unchecked(mat)
         }
 
         #[cfg(feature = "dim3")]
         {
-            use na::{Matrix3, Rotation3, UnitQuaternion};
-            let mat = Matrix3::from_columns(&[axis.into_inner(), basis[0], basis[1]]);
-            let rotmat = Rotation3::from_matrix_unchecked(mat);
-            UnitQuaternion::from_rotation_matrix(&rotmat)
+            // Minimal rotation taking +X to `axis`, NOT an arbitrary orthonormal basis:
+            // frames completed from two independently-set axes must not disagree by a twist,
+            // which fights a prismatic-like joint's angular locks and can diverge.
+            Rotation::from_rotation_arc(Vector::X, axis)
         }
     }
 
@@ -370,62 +428,72 @@ impl GenericJoint {
     }
 
     /// Sets the joint’s frame, expressed in the first rigid-body’s local-space.
-    pub fn set_local_frame1(&mut self, local_frame: Isometry<Real>) -> &mut Self {
+    pub fn set_local_frame1(&mut self, local_frame: Pose) -> &mut Self {
         self.local_frame1 = local_frame;
         self
     }
 
     /// Sets the joint’s frame, expressed in the second rigid-body’s local-space.
-    pub fn set_local_frame2(&mut self, local_frame: Isometry<Real>) -> &mut Self {
+    pub fn set_local_frame2(&mut self, local_frame: Pose) -> &mut Self {
         self.local_frame2 = local_frame;
         self
     }
 
     /// The principal (local X) axis of this joint, expressed in the first rigid-body’s local-space.
     #[must_use]
-    pub fn local_axis1(&self) -> UnitVector<Real> {
-        self.local_frame1 * Vector::x_axis()
+    pub fn local_axis1(&self) -> Vector {
+        self.local_frame1 * Vector::X
     }
 
     /// Sets the principal (local X) axis of this joint, expressed in the first rigid-body’s local-space.
-    pub fn set_local_axis1(&mut self, local_axis: UnitVector<Real>) -> &mut Self {
+    ///
+    /// The tangent axes of the joint frame are completed deterministically with the minimal
+    /// rotation taking +X to `local_axis`, so frames set from two rotated-but-matching axes
+    /// remain twist-consistent. For exact control over the tangent axes, set the full frame
+    /// with [`Self::set_local_frame1`] instead.
+    pub fn set_local_axis1(&mut self, local_axis: Vector) -> &mut Self {
         self.local_frame1.rotation = Self::complete_ang_frame(local_axis);
         self
     }
 
     /// The principal (local X) axis of this joint, expressed in the second rigid-body’s local-space.
     #[must_use]
-    pub fn local_axis2(&self) -> UnitVector<Real> {
-        self.local_frame2 * Vector::x_axis()
+    pub fn local_axis2(&self) -> Vector {
+        self.local_frame2 * Vector::X
     }
 
     /// Sets the principal (local X) axis of this joint, expressed in the second rigid-body’s local-space.
-    pub fn set_local_axis2(&mut self, local_axis: UnitVector<Real>) -> &mut Self {
+    ///
+    /// The tangent axes of the joint frame are completed deterministically with the minimal
+    /// rotation taking +X to `local_axis`, so frames set from two rotated-but-matching axes
+    /// remain twist-consistent. For exact control over the tangent axes, set the full frame
+    /// with [`Self::set_local_frame2`] instead.
+    pub fn set_local_axis2(&mut self, local_axis: Vector) -> &mut Self {
         self.local_frame2.rotation = Self::complete_ang_frame(local_axis);
         self
     }
 
     /// The anchor of this joint, expressed in the first rigid-body’s local-space.
     #[must_use]
-    pub fn local_anchor1(&self) -> Point<Real> {
-        self.local_frame1.translation.vector.into()
+    pub fn local_anchor1(&self) -> Vector {
+        self.local_frame1.translation
     }
 
-    /// Sets anchor of this joint, expressed in the first rigid-body’s local-space.
-    pub fn set_local_anchor1(&mut self, anchor1: Point<Real>) -> &mut Self {
-        self.local_frame1.translation.vector = anchor1.coords;
+    /// Sets anchor of this joint, expressed in the first rigid-body's local-space.
+    pub fn set_local_anchor1(&mut self, anchor1: Vector) -> &mut Self {
+        self.local_frame1.translation = anchor1;
         self
     }
 
-    /// The anchor of this joint, expressed in the second rigid-body’s local-space.
+    /// The anchor of this joint, expressed in the second rigid-body's local-space.
     #[must_use]
-    pub fn local_anchor2(&self) -> Point<Real> {
-        self.local_frame2.translation.vector.into()
+    pub fn local_anchor2(&self) -> Vector {
+        self.local_frame2.translation
     }
 
-    /// Sets anchor of this joint, expressed in the second rigid-body’s local-space.
-    pub fn set_local_anchor2(&mut self, anchor2: Point<Real>) -> &mut Self {
-        self.local_frame2.translation.vector = anchor2.coords;
+    /// Sets anchor of this joint, expressed in the second rigid-body's local-space.
+    pub fn set_local_anchor2(&mut self, anchor2: Vector) -> &mut Self {
+        self.local_frame2.translation = anchor2;
         self
     }
 
@@ -437,6 +505,13 @@ impl GenericJoint {
     /// Sets whether contacts between the attached rigid-bodies are enabled.
     pub fn set_contacts_enabled(&mut self, enabled: bool) -> &mut Self {
         self.contacts_enabled = enabled;
+        self
+    }
+
+    /// Sets the spring coefficients controlling this joint constraint’s softness.
+    #[must_use]
+    pub fn set_softness(&mut self, softness: SpringCoefficients<Real>) -> &mut Self {
+        self.softness = softness;
         self
     }
 
@@ -488,7 +563,7 @@ impl GenericJoint {
             axis,
             self.motors[axis as usize].target_pos,
             target_vel,
-            Real::from(0.0),
+            0.0,
             factor,
         )
     }
@@ -501,7 +576,7 @@ impl GenericJoint {
         stiffness: Real,
         damping: Real,
     ) -> &mut Self {
-        self.set_motor(axis, target_pos, Real::from(0.0), stiffness, damping)
+        self.set_motor(axis, target_pos, 0.0, stiffness, damping)
     }
 
     /// Sets the maximum force the motor can deliver along the specified axis.
@@ -541,7 +616,7 @@ impl GenericJoint {
 
     /// Flips the orientation of the joint, including limits and motors.
     pub fn flip(&mut self) {
-        std::mem::swap(&mut self.local_frame1, &mut self.local_frame2);
+        core::mem::swap(&mut self.local_frame1, &mut self.local_frame2);
 
         let coupled_bits = self.coupled_axes.bits();
 
@@ -557,17 +632,18 @@ impl GenericJoint {
         }
     }
 
+    #[cfg(feature = "alloc")]
     pub(crate) fn transform_to_solver_body_space(&mut self, rb1: &RigidBody, rb2: &RigidBody) {
         if rb1.is_fixed() {
             self.local_frame1 = rb1.pos.position * self.local_frame1;
         } else {
-            self.local_frame1.translation.vector -= rb1.mprops.local_mprops.local_com.coords;
+            self.local_frame1.translation -= rb1.mprops.local_mprops.local_com;
         }
 
         if rb2.is_fixed() {
             self.local_frame2 = rb2.pos.position * self.local_frame2;
         } else {
-            self.local_frame2.translation.vector -= rb2.mprops.local_mprops.local_com.coords;
+            self.local_frame2.translation -= rb2.mprops.local_mprops.local_com;
         }
     }
 }
@@ -580,7 +656,7 @@ macro_rules! joint_conversion_methods(
             if self.locked_axes == $axes {
                 // SAFETY: this is OK because the target joint type is
                 //         a `repr(transparent)` newtype of `Joint`.
-                Some(unsafe { std::mem::transmute::<&Self, &$Joint>(self) })
+                Some(unsafe { core::mem::transmute::<&Self, &$Joint>(self) })
             } else {
                 None
             }
@@ -592,7 +668,7 @@ macro_rules! joint_conversion_methods(
             if self.locked_axes == $axes {
                 // SAFETY: this is OK because the target joint type is
                 //         a `repr(transparent)` newtype of `Joint`.
-                Some(unsafe { std::mem::transmute::<&mut Self, &mut $Joint>(self) })
+                Some(unsafe { core::mem::transmute::<&mut Self, &mut $Joint>(self) })
             } else {
                 None
             }
@@ -663,42 +739,42 @@ impl GenericJointBuilder {
 
     /// Sets the joint’s frame, expressed in the first rigid-body’s local-space.
     #[must_use]
-    pub fn local_frame1(mut self, local_frame: Isometry<Real>) -> Self {
+    pub fn local_frame1(mut self, local_frame: Pose) -> Self {
         self.0.set_local_frame1(local_frame);
         self
     }
 
     /// Sets the joint’s frame, expressed in the second rigid-body’s local-space.
     #[must_use]
-    pub fn local_frame2(mut self, local_frame: Isometry<Real>) -> Self {
+    pub fn local_frame2(mut self, local_frame: Pose) -> Self {
         self.0.set_local_frame2(local_frame);
         self
     }
 
     /// Sets the principal (local X) axis of this joint, expressed in the first rigid-body’s local-space.
     #[must_use]
-    pub fn local_axis1(mut self, local_axis: UnitVector<Real>) -> Self {
+    pub fn local_axis1(mut self, local_axis: Vector) -> Self {
         self.0.set_local_axis1(local_axis);
         self
     }
 
     /// Sets the principal (local X) axis of this joint, expressed in the second rigid-body’s local-space.
     #[must_use]
-    pub fn local_axis2(mut self, local_axis: UnitVector<Real>) -> Self {
+    pub fn local_axis2(mut self, local_axis: Vector) -> Self {
         self.0.set_local_axis2(local_axis);
         self
     }
 
     /// Sets the anchor of this joint, expressed in the first rigid-body’s local-space.
     #[must_use]
-    pub fn local_anchor1(mut self, anchor1: Point<Real>) -> Self {
+    pub fn local_anchor1(mut self, anchor1: Vector) -> Self {
         self.0.set_local_anchor1(anchor1);
         self
     }
 
     /// Sets the anchor of this joint, expressed in the second rigid-body’s local-space.
     #[must_use]
-    pub fn local_anchor2(mut self, anchor2: Point<Real>) -> Self {
+    pub fn local_anchor2(mut self, anchor2: Vector) -> Self {
         self.0.set_local_anchor2(anchor2);
         self
     }
@@ -767,6 +843,13 @@ impl GenericJointBuilder {
         self
     }
 
+    /// Sets the softness of this joint’s locked degrees of freedom.
+    #[must_use]
+    pub fn softness(mut self, softness: SpringCoefficients<Real>) -> Self {
+        self.0.softness = softness;
+        self
+    }
+
     /// An arbitrary user-defined 128-bit integer associated to the joints built by this builder.
     pub fn user_data(mut self, data: u128) -> Self {
         self.0.user_data = data;
@@ -785,3 +868,28 @@ impl From<GenericJointBuilder> for GenericJoint {
         val.0
     }
 }
+
+#[cfg(all(test, feature = "alloc"))]
+mod test {
+    use super::JointMotor;
+    use crate::math::Real;
+
+    #[test]
+    fn infinite_motor_force_with_zero_dt_has_finite_impulse_bounds() {
+        let motor = JointMotor {
+            max_force: Real::INFINITY,
+            target_vel: 1.0,
+            damping: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(motor.motor_params(0.0).max_impulse, 0.0);
+        assert_eq!(motor.motor_params(1.0 / 60.0).max_impulse, Real::INFINITY);
+
+        let motor = JointMotor::default();
+        assert_eq!(motor.motor_params(0.0).max_impulse, 0.0);
+        assert_eq!(motor.motor_params(0.5).max_impulse, Real::MAX * 0.5);
+    }
+}
+
+// mmo-fork: StateHash — bitflags hash as their bits.
+state_hash::impl_via_bits!(JointAxesMask);

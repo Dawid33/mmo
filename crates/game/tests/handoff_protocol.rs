@@ -1,5 +1,5 @@
 use game::{
-    departure_offset, ghost_offsets, rebase_isometry, IsometryReal, RegionCoords,
+    departure_offset, ghost_offsets, rebase_isometry, Pose, RegionCoords,
     FLIP_HYSTERESIS, GHOST_MARGIN, REGION_SIZE,
 };
 
@@ -38,15 +38,10 @@ fn ghost_offsets_cover_edges_and_corners() {
 #[test]
 fn rebase_is_exact_for_boundary_walk() {
     // Walking off A(0,0) at x=REGION_SIZE+2 lands at x=2 in B(1,0), bit-exact.
-    use game::na::{Quaternion, Translation3, Unit};
-    use game::parry::math::Real;
-    let iso = IsometryReal::from_parts(
-        Translation3::new(Real::from(REGION_SIZE + 2.0), Real::from(26.0), Real::from(100.0)),
-        Unit::<Quaternion<Real>>::identity(),
-    );
+    let iso = Pose::from_translation(game::rapier3d::math::Vector::new(REGION_SIZE + 2.0, 26.0, 100.0));
     let out = rebase_isometry(&iso, RegionCoords::new(0, 0), RegionCoords::new(1, 0));
-    assert_eq!(out.translation.x, Real::from(2.0));
-    assert_eq!(out.translation.z, Real::from(100.0));
+    assert_eq!(out.translation.x, 2.0);
+    assert_eq!(out.translation.z, 100.0);
     // Round-trip is identity.
     let back = rebase_isometry(&out, RegionCoords::new(1, 0), RegionCoords::new(0, 0));
     assert_eq!(back, iso);
@@ -58,8 +53,8 @@ fn matches_prediction_is_identity_based_for_transfers() {
     use game::parry::math::Vector;
     let mk = |x: f32| EntityBundle {
         kind: EntityKind::Player,
-        isometry: IsometryReal::translation(x.into(), 0.0.into(), 0.0.into()),
-        linvel: Vector::zeros(),
+        isometry: Pose::translation(x, 0.0, 0.0),
+        linvel: Vector::ZERO,
         collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
         has_camera: true,
         yaw: 0.0.into(),
@@ -85,8 +80,8 @@ fn matches_prediction_is_identity_based_for_transfers() {
         source_region: RegionCoords::new(0, 0),
         source_key: Default::default(),
         kind: EntityKind::Player,
-        isometry: IsometryReal::translation(x.into(), 0.0.into(), 0.0.into()),
-        linvel: Vector::zeros(),
+        isometry: Pose::translation(x, 0.0, 0.0),
+        linvel: Vector::ZERO,
         collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
     });
     assert!(g(1.0).matches_prediction(&g(9.0)));

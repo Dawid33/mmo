@@ -1,144 +1,266 @@
-//! Per-tick mutation journal: save-before-first-write capture of everything
-//! `PhysicsPipeline::step` mutates, with an exact LIFO revert. Pure capture —
-//! never influences simulation. See the game repo spec
-//! `docs/superpowers/specs/2026-07-04-physics-step-journal-design.md`.
+//! mmo-fork: per-tick rollback journal (upgrade plan Task 4.2, design D1 — the
+//! "hybrid" journal).
+//!
+//! [`PhysicsPipeline::step_journaled`](crate::pipeline::PhysicsPipeline::step_journaled)
+//! records everything a step mutates so the tick can be undone exactly,
+//! without a whole-state snapshot:
+//!
+//! - **First-touch value capture** of every `RigidBody` / `Collider` the step
+//!   writes. The sets carry a capture buffer for the duration of the step, and
+//!   every accessor that hands out `&mut` saves the value on its first use
+//!   (`Vec<(handle, value)>` + a dedup bitset). No call site inside the engine
+//!   knows about the journal. The staged solver writes bodies through a raw
+//!   `*mut RigidBodySet` from its workers; its writeback debug-asserts every
+//!   body it writes was already captured.
+//! - **Wholesale clones at step start** of the small structures: `IslandManager`,
+//!   `NarrowPhase`, `BroadPhaseBvh`, the sets' modified/removed lists, and the
+//!   joint sets when they hold anything the step can touch. The broad phase is
+//!   the whole cost (~240 KB at region scale, see the spike doc): its
+//!   serialized `frame_index` changes every step, so there is no clean tick.
+//!
+//! Revert writes the captured values back and swaps the clones in. It restores
+//! the seven physics structures of [`PhysicsParts`] byte for byte. The
+//! `PhysicsPipeline` and the `CCDSolver` hold memos of the undone step instead
+//! of state (Task 4.3): the revert discards the CCD solver's fixed-targets
+//! cache and bumps a counter in the `IslandManager` that makes the pipeline
+//! drop its memos at its next step, so the caller steps on with the same
+//! pipeline and solver and needs no post-revert call.
+//!
+//! **Digests** (`HashMode::Delta` in the game): [`StepJournal::pre_digest`]
+//! hashes the captured pre-step footprint and [`StepJournal::revert_digest`]
+//! reverts, then hashes the same footprint from the live structures; they are
+//! equal iff the revert restored it exactly. The footprint is what the revert
+//! restores piecemeal — the saved bodies and colliders, by sorted handle — plus
+//! the joint sets when the step was judged unable to touch them (not cloned):
+//! their pre-step hash, so that judgement is checked instead of trusted. The
+//! wholesale clones are left out: the revert moves the saved clone itself back,
+//! so hashing it on both sides could never differ, and the broad phase alone
+//! is ~240 KB per side. Both sides go through one walker,
+//! [`digest_footprint`], so they can't drift.
+//!
+//! Contract: nothing but the step itself may run between `step_journaled` and
+//! `revert` on the journaled structures, and journals are reverted in LIFO order.
+//! User mutations (inserts, removals, `get_mut` writes) between steps are owned
+//! by the game's undo log, not by this journal.
+
+use crate::alloc_prelude::*;
+
 use crate::dynamics::{
-    ImpulseJointSet, IslandManager, MultibodyJointSet, RigidBody, RigidBodyHandle, RigidBodySet,
+    CCDSolver, ImpulseJointSet, IslandManager, MultibodyJointSet, RigidBody, RigidBodyHandle, RigidBodySet,
+    SoftBodySet,
 };
 use crate::geometry::{BroadPhaseBvh, Collider, ColliderHandle, ColliderSet, NarrowPhase};
-use parry3d::utils::hashset::HashSet;
-use std::hash::Hash;
 
-/// Per-tick mutation journal for [`crate::pipeline::PhysicsPipeline::step_journaled`].
-///
-/// Captures the pre-mutation state of everything a step touches so the tick
-/// can be reverted without a whole-state snapshot. Building this out (actual
-/// capture calls, islands/lists/joints/narrow/broad handling) is the job of
-/// later tasks; this skeleton only defines the container and the plumbing to
-/// thread it through the pipeline. With no capture calls wired up yet, a
-/// journal always reverts to a no-op.
+/// First-touch capture buffer: the pre-step value of every object handed out
+/// by `&mut` during a journaled step, at most once per arena slot.
+#[derive(Clone, Debug)]
+pub(crate) struct Capture<H, T> {
+    saved: Vec<(H, T)>,
+    /// One bit per arena slot index. Keyed by slot, not generation: a step
+    /// never inserts or removes bodies or colliders.
+    seen: Vec<u64>,
+}
+
+impl<H: Copy, T: Clone> Capture<H, T> {
+    pub(crate) fn new() -> Self {
+        Self {
+            saved: Vec::new(),
+            seen: Vec::new(),
+        }
+    }
+
+    /// Saves `value` unless slot `slot` was saved already this step (the
+    /// oldest, i.e. pre-step, value wins).
+    #[inline]
+    pub(crate) fn save(&mut self, handle: H, slot: u32, value: &T) {
+        let (word, bit) = ((slot / 64) as usize, slot % 64);
+        if word >= self.seen.len() {
+            self.seen.resize(word + 1, 0);
+        }
+        if self.seen[word] & (1 << bit) == 0 {
+            self.seen[word] |= 1 << bit;
+            self.saved.push((handle, value.clone()));
+        }
+    }
+
+    #[inline]
+    pub(crate) fn contains(&self, slot: u32) -> bool {
+        let (word, bit) = ((slot / 64) as usize, slot % 64);
+        self.seen.get(word).is_some_and(|w| w & (1 << bit) != 0)
+    }
+}
+
+/// The seven structures a journaled step mutates and [`StepJournal::revert`]
+/// restores.
+pub struct PhysicsParts<'a> {
+    /// The island manager.
+    pub islands: &'a mut IslandManager,
+    /// The broad phase.
+    pub broad_phase: &'a mut BroadPhaseBvh,
+    /// The narrow phase.
+    pub narrow_phase: &'a mut NarrowPhase,
+    /// The rigid bodies.
+    pub bodies: &'a mut RigidBodySet,
+    /// The colliders.
+    pub colliders: &'a mut ColliderSet,
+    /// The impulse joints.
+    pub impulse_joints: &'a mut ImpulseJointSet,
+    /// The multibody joints.
+    pub multibody_joints: &'a mut MultibodyJointSet,
+    /// 0.36: soft bodies are compiled in; the game keeps this empty (asserted).
+    pub soft_bodies: &'a mut SoftBodySet,
+    /// Not restored: its fixed-targets cache (which a revert can make name a
+    /// vacant collider) is discarded.
+    pub ccd_solver: &'a mut CCDSolver,
+}
+
+struct Wholesale {
+    islands: IslandManager,
+    narrow_phase: NarrowPhase,
+    broad_phase: BroadPhaseBvh,
+    modified_bodies: crate::dynamics::ModifiedRigidBodies,
+    modified_colliders: crate::geometry::ModifiedColliders,
+    removed_colliders: Vec<ColliderHandle>,
+    joints: Option<(ImpulseJointSet, MultibodyJointSet)>,
+    /// The joint sets' `StateHash` when they were judged quiescent and not
+    /// cloned: the digests check that the step indeed left them alone.
+    quiescent_joints: Option<u32>,
+}
+
+/// Per-tick mutation journal for
+/// [`PhysicsPipeline::step_journaled`](crate::pipeline::PhysicsPipeline::step_journaled);
+/// see the module docs.
 #[derive(Default)]
 pub struct StepJournal {
-    pub(crate) saved_bodies: Vec<(RigidBodyHandle, RigidBody)>,
-    pub(crate) saved_body_set: HashSet<RigidBodyHandle>,
-    pub(crate) saved_colliders: Vec<(ColliderHandle, Collider)>,
-    pub(crate) saved_collider_set: HashSet<ColliderHandle>,
-    pub(crate) islands: Option<crate::dynamics::IslandsSaved>,
-    pub(crate) lists: Option<ListsSaved>,
-    pub(crate) joints: Option<Box<(ImpulseJointSet, MultibodyJointSet)>>,
-    /// Fine-grained narrow-phase mutation log (payload saves + exact graph/coarena
-    /// cell inverses), recorded in execution order and reverted LIFO. Empty when
-    /// [`Self::narrow_wholesale`] is set — collider-removal ticks fall back to a
-    /// wholesale snapshot instead (see [`NarrowPhase::handle_user_changes`]).
-    pub(crate) narrow: Vec<crate::geometry::NarrowUndo>,
-    /// Per-edge dedup guard for the solver-boundary payload saves in
-    /// [`NarrowPhase::select_active_contacts`]. A re-woken body's dormant contact
-    /// pairs carry no collider flags, so `compute_contacts` never saves them, yet
-    /// the solver writes warm-start impulses into their manifolds; select's save
-    /// closes that gap. This set records which contact-graph edges select has
-    /// already snapshotted so the same edge is captured at most once across the
-    /// tick's substeps. Double-saves against `compute_contacts` (a pair that is
-    /// both flag-dirty and selected) are harmless: LIFO revert applies the
-    /// latest-pushed op first, so the earliest (true pre-tick) payload always wins.
-    pub(crate) saved_narrow_edges: HashSet<u32>,
-    pub(crate) narrow_wholesale: Option<Box<NarrowPhase>>,
-    /// Pre-mutation broad-phase snapshot, captured once on the first dirty tick
-    /// (see [`BroadPhaseBvh::journal_save`]). `None` on a clean tick where the
-    /// broad phase was never touched (query via [`Self::broad_captured`]).
-    pub(crate) broad: Option<Box<crate::geometry::BroadSaved>>,
-}
-
-pub(crate) struct ListsSaved {
-    pub modified_bodies: crate::dynamics::ModifiedRigidBodies,
-    pub modified_colliders: crate::geometry::ModifiedColliders,
-    pub removed_colliders: Vec<ColliderHandle>,
-    pub impulse_to_wake_up: HashSet<RigidBodyHandle>,
-    pub multibody_to_wake_up: HashSet<RigidBodyHandle>,
-}
-
-/// The handle lists + per-section presence flags a [`StepJournal::revert_inner`]
-/// restored on one tick. Lets [`StepJournal::revert_digest`] re-read the exact
-/// same footprint from the live structures without duplicating the revert logic.
-/// Handle lists are stored sorted ascending (canonical digest order).
-struct Footprint {
-    body_handles: Vec<RigidBodyHandle>,
-    collider_handles: Vec<ColliderHandle>,
-    had_islands: bool,
-    had_lists: bool,
-    had_joints: bool,
-    had_narrow_wholesale: bool,
-    had_broad: bool,
+    bodies: Vec<(RigidBodyHandle, RigidBody)>,
+    colliders: Vec<(ColliderHandle, Collider)>,
+    wholesale: Option<Box<Wholesale>>,
 }
 
 impl StepJournal {
-    /// True if this tick mutated the broad phase (a pre-mutation BVH snapshot was
-    /// captured). False on a clean tick where the broad phase was never touched.
-    pub fn broad_captured(&self) -> bool {
-        self.broad.is_some()
+    /// An empty journal, to pass to one `step_journaled` call.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Number of rigid bodies whose pre-tick state this journal saved. A proxy for
-    /// per-tick undo-log cost that scales with activity, not world size.
-    pub fn saved_body_count(&self) -> usize {
-        self.saved_bodies.len()
-    }
-
-    /// Number of colliders whose pre-tick state this journal saved. A proxy for
-    /// per-tick undo-log cost that scales with activity, not world size.
-    pub fn saved_collider_count(&self) -> usize {
-        self.saved_colliders.len()
-    }
-
-    /// True if nothing has been captured this tick, i.e. `revert` would be a no-op.
+    /// True if the step touched no rigid body and no collider. The wholesale
+    /// clones are taken on every journaled step and don't count.
     pub fn is_empty(&self) -> bool {
-        self.saved_bodies.is_empty()
-            && self.saved_colliders.is_empty()
-            && self.narrow.is_empty()
-            && self.narrow_wholesale.is_none()
-            && self.broad.is_none()
-            // islands are captured unconditionally but are O(active)/O(modified);
-            // is_empty() reports "nothing moved" for the size assertions, so an
-            // empty capture is one with no active bodies at step start.
-            && self
-                .islands
-                .as_ref()
-                .map_or(true, |i| i.active_set.is_empty())
+        self.bodies.is_empty() && self.colliders.is_empty()
     }
 
-    /// Saves the pre-mutation state of `body` the first time it's touched this tick.
-    /// Subsequent saves for the same handle within the same tick are no-ops, so the
-    /// oldest (pre-tick) value always wins.
-    pub fn save_body(&mut self, handle: RigidBodyHandle, body: &RigidBody) {
-        if self.saved_body_set.insert(handle) {
-            self.saved_bodies.push((handle, body.clone()));
-        }
+    /// Number of rigid bodies whose pre-step value this journal saved: the
+    /// per-tick cost that scales with activity rather than world size.
+    pub fn saved_body_count(&self) -> usize {
+        self.bodies.len()
     }
 
-    /// Saves the pre-mutation state of `collider` the first time it's touched this tick.
-    /// Subsequent saves for the same handle within the same tick are no-ops, so the
-    /// oldest (pre-tick) value always wins.
-    pub fn save_collider(&mut self, handle: ColliderHandle, collider: &Collider) {
-        if self.saved_collider_set.insert(handle) {
-            self.saved_colliders.push((handle, collider.clone()));
-        }
+    /// Number of colliders whose pre-step value this journal saved.
+    pub fn saved_collider_count(&self) -> usize {
+        self.colliders.len()
     }
 
-    /// Undoes everything this journal captured, restoring the given structures to
-    /// their pre-tick state. Consumes the journal: a reverted tick's journal cannot
-    /// be reverted twice. Thin wrapper over [`Self::revert_inner`] (whose returned
-    /// footprint it discards); [`Self::revert_digest`] uses the same inner fn so
-    /// the revert logic lives in exactly one place.
-    pub fn revert(
-        self,
-        islands: &mut IslandManager,
-        broad_phase: &mut BroadPhaseBvh,
-        narrow_phase: &mut NarrowPhase,
-        bodies: &mut RigidBodySet,
-        colliders: &mut ColliderSet,
-        impulse_joints: &mut ImpulseJointSet,
-        multibody_joints: &mut MultibodyJointSet,
-    ) {
-        let _ = self.revert_inner(
+    /// True once a journaled step has run: the hybrid journal clones the
+    /// broad phase on every step (kept for the old fork's API).
+    pub fn broad_captured(&self) -> bool {
+        self.wholesale.is_some()
+    }
+
+    /// Whether the joint sets were cloned (they held joints or pending joint
+    /// work at step start).
+    pub fn joints_captured(&self) -> bool {
+        self.wholesale.as_ref().is_some_and(|w| w.joints.is_some())
+    }
+
+    /// Takes the wholesale clones and installs the capture buffers. Called by
+    /// `step_journaled` right before the step.
+    pub(crate) fn begin(&mut self, p: PhysicsParts<'_>) {
+        assert!(
+            self.wholesale.is_none() && self.is_empty(),
+            "a StepJournal records exactly one step"
+        );
+        debug_assert!(p.soft_bodies.is_empty(), "the journal does not capture soft bodies");
+        debug_assert!(
+            p.bodies.capture.is_none() && p.colliders.capture.is_none(),
+            "nested journaled steps"
+        );
+
+        let (joints, quiescent_joints) = if joint_sets_touchable(p.impulse_joints, p.multibody_joints) {
+            (Some((p.impulse_joints.clone(), p.multibody_joints.clone())), None)
+        } else {
+            (None, Some(joint_sets_hash(p.impulse_joints, p.multibody_joints)))
+        };
+        self.wholesale = Some(Box::new(Wholesale {
+            islands: p.islands.clone(),
+            narrow_phase: p.narrow_phase.clone(),
+            broad_phase: p.broad_phase.clone(),
+            modified_bodies: p.bodies.modified_bodies.clone(),
+            modified_colliders: p.colliders.modified_colliders.clone(),
+            removed_colliders: p.colliders.removed_colliders.clone(),
+            joints,
+            quiescent_joints,
+        }));
+        p.bodies.capture = Some(Box::new(Capture::new()));
+        p.colliders.capture = Some(Box::new(Capture::new()));
+    }
+
+    /// Removes the capture buffers from the sets and keeps what they saved.
+    pub(crate) fn end(&mut self, bodies: &mut RigidBodySet, colliders: &mut ColliderSet) {
+        let b = bodies.capture.take().expect("journal capture missing");
+        let c = colliders.capture.take().expect("journal capture missing");
+        self.bodies = b.saved;
+        self.colliders = c.saved;
+    }
+
+    /// crc32 of the captured pre-step footprint (the game's Delta hash mode):
+    /// the saved bodies and colliders by sorted handle, plus the joint sets'
+    /// pre-step hash when they weren't cloned (see the module docs). Equal to
+    /// [`Self::revert_digest`] iff the revert restored that footprint exactly.
+    pub fn pre_digest(&self) -> u32 {
+        let w = self.wholesale.as_ref().expect("digest of a journal that recorded no step");
+        digest_footprint(Footprint {
+            bodies: self.bodies.iter().map(|(h, b)| (*h, Some(b))).collect(),
+            colliders: self.colliders.iter().map(|(h, c)| (*h, Some(c))).collect(),
+            quiescent_joints: w.quiescent_joints,
+        })
+    }
+
+    /// The footprint this journal captured, read from `parts` as they stand
+    /// (no revert): equals [`Self::pre_digest`] iff `parts` hold the pre-step
+    /// values of everything the step touched. [`Self::revert_digest`] is this,
+    /// right after the revert.
+    pub fn live_digest(&self, parts: &PhysicsParts<'_>) -> u32 {
+        let w = self.wholesale.as_ref().expect("digest of a journal that recorded no step");
+        let bodies: Vec<_> = self.bodies.iter().map(|(h, _)| *h).collect();
+        let colliders: Vec<_> = self.colliders.iter().map(|(h, _)| *h).collect();
+        live_footprint_digest(bodies, colliders, w.quiescent_joints.is_some(), parts)
+    }
+
+    /// Reverts (see [`Self::revert`]) and returns the post-revert footprint
+    /// digest, to compare with the [`Self::pre_digest`] taken at step time.
+    pub fn revert_digest(self, parts: PhysicsParts<'_>) -> u32 {
+        let w = self.wholesale.as_ref().expect("digest of a journal that recorded no step");
+        let quiescent_joints = w.quiescent_joints.is_some();
+        let bodies: Vec<_> = self.bodies.iter().map(|(h, _)| *h).collect();
+        let colliders: Vec<_> = self.colliders.iter().map(|(h, _)| *h).collect();
+        self.revert(PhysicsParts {
+            islands: &mut *parts.islands,
+            broad_phase: &mut *parts.broad_phase,
+            narrow_phase: &mut *parts.narrow_phase,
+            bodies: &mut *parts.bodies,
+            colliders: &mut *parts.colliders,
+            impulse_joints: &mut *parts.impulse_joints,
+            multibody_joints: &mut *parts.multibody_joints,
+            soft_bodies: &mut *parts.soft_bodies,
+            ccd_solver: &mut *parts.ccd_solver,
+        });
+        live_footprint_digest(bodies, colliders, quiescent_joints, &parts)
+    }
+
+    /// Undoes the journaled step, restoring `parts` to their pre-step state
+    /// byte for byte. Journals of consecutive steps must be reverted LIFO.
+    pub fn revert(self, parts: PhysicsParts<'_>) {
+        let PhysicsParts {
             islands,
             broad_phase,
             narrow_phase,
@@ -146,311 +268,102 @@ impl StepJournal {
             colliders,
             impulse_joints,
             multibody_joints,
-        );
-    }
+            soft_bodies,
+            ccd_solver,
+        } = parts;
+        debug_assert!(soft_bodies.is_empty(), "the journal does not capture soft bodies");
+        let w = self
+            .wholesale
+            .expect("revert of a journal that recorded no step");
 
-    /// The shared body of [`Self::revert`], returning the reverted tick's
-    /// [`Footprint`] (the sorted body/collider handles it restored plus the
-    /// per-section presence flags). Restoration is unchanged from the original
-    /// `revert`; the only addition is snapshotting the footprint up front so
-    /// [`Self::revert_digest`] can re-read it from the live structures afterwards
-    /// without re-implementing any revert logic.
-    fn revert_inner(
-        self,
-        islands: &mut IslandManager,
-        broad_phase: &mut BroadPhaseBvh,
-        narrow_phase: &mut NarrowPhase,
-        bodies: &mut RigidBodySet,
-        colliders: &mut ColliderSet,
-        impulse_joints: &mut ImpulseJointSet,
-        multibody_joints: &mut MultibodyJointSet,
-    ) -> Footprint {
-        // Snapshot the footprint (handle lists + section presence) BEFORE the
-        // moves below consume `self`. Handles are sorted ascending so both digest
-        // sides iterate in the same canonical order (saved order is first-touch,
-        // not canonical).
-        let mut body_handles: Vec<RigidBodyHandle> =
-            self.saved_bodies.iter().map(|(h, _)| *h).collect();
-        body_handles.sort_unstable();
-        let mut collider_handles: Vec<ColliderHandle> =
-            self.saved_colliders.iter().map(|(h, _)| *h).collect();
-        collider_handles.sort_unstable();
-        let footprint = Footprint {
-            body_handles,
-            collider_handles,
-            had_islands: self.islands.is_some(),
-            had_lists: self.lists.is_some(),
-            had_joints: self.joints.is_some(),
-            had_narrow_wholesale: self.narrow_wholesale.is_some(),
-            had_broad: self.broad.is_some(),
-        };
-
-        // Sections are disjoint state; within each, restoration is LIFO.
-        // Bodies/colliders: value restore (old clone wins over any number of
-        // intra-tick writes).
-        for (h, old) in self.saved_bodies.into_iter().rev() {
-            bodies.restore_raw(h, old);
+        // Each handle is saved once, so the order doesn't matter; LIFO anyway.
+        for (handle, body) in self.bodies.into_iter().rev() {
+            bodies.restore_raw(handle, body);
         }
-        for (h, old) in self.saved_colliders.into_iter().rev() {
-            colliders.restore_raw(h, old);
+        for (handle, collider) in self.colliders.into_iter().rev() {
+            colliders.restore_raw(handle, collider);
         }
 
-        // Islands: whole hashed-field snapshot restore.
-        if let Some(s) = self.islands {
-            islands.journal_restore(s);
-        }
-
-        // Modified/removed lists + the joint-set to-wake-up queues: wholesale
-        // restore of the pre-tick values.
-        if let Some(l) = self.lists {
-            bodies.set_modified(l.modified_bodies);
-            colliders.set_modified(l.modified_colliders);
-            colliders.set_removed(l.removed_colliders);
-            impulse_joints.to_wake_up = l.impulse_to_wake_up;
-            multibody_joints.to_wake_up = l.multibody_to_wake_up;
-        }
-
-        // Joints: coarse wholesale fallback (only captured when non-empty at
-        // step start). Applied after `lists` so the full pre-tick joint sets win.
-        if let Some(j) = self.joints {
-            let (ij, mj) = *j;
+        let Wholesale {
+            islands: saved_islands,
+            narrow_phase: saved_narrow,
+            broad_phase: saved_broad,
+            modified_bodies,
+            modified_colliders,
+            removed_colliders,
+            joints,
+            quiescent_joints: _,
+        } = *w;
+        // The counter survives the swap and moves (see its doc).
+        let reverts = islands.journal_reverts.wrapping_add(1);
+        *islands = saved_islands;
+        islands.journal_reverts = reverts;
+        *narrow_phase = saved_narrow;
+        *broad_phase = saved_broad;
+        bodies.set_modified(modified_bodies);
+        colliders.set_modified(modified_colliders);
+        colliders.set_removed(removed_colliders);
+        if let Some((ij, mj)) = joints {
             *impulse_joints = ij;
             *multibody_joints = mj;
         }
-
-        // Narrow phase: the wholesale snapshot (collider-removal ticks) takes
-        // precedence over op replay; otherwise LIFO-revert the fine-grained log.
-        // Ordered before the broad restore per the design spec.
-        if let Some(w) = self.narrow_wholesale {
-            *narrow_phase = *w;
-        } else {
-            narrow_phase.journal_revert(self.narrow);
-        }
-
-        // Broad phase: wholesale restore of the pre-tick snapshot (only present
-        // on a tick that actually mutated the BVH).
-        if let Some(b) = self.broad {
-            broad_phase.journal_restore(*b);
-        }
-
-        footprint
+        // The undone step may have rebuilt the cache with colliders the caller's
+        // own undo then removes (a terrain edit), and the re-step sees no user
+        // change that would invalidate it.
+        ccd_solver.invalidate_fixed_targets_cache();
     }
+}
 
-    /// Digest of the **pre-tick** values of everything this journal captured,
-    /// section by section in a fixed order: (1) bodies, (2) colliders,
-    /// (3) islands, (4) lists, (5) joints, (6) narrow, (7) broad. Its counterpart
-    /// [`Self::revert_digest`] recomputes the identical digest from the LIVE
-    /// structures after an exact revert, so the two are equal iff the revert
-    /// restored the captured footprint bit-for-bit.
-    ///
-    /// Parity rules (both sides MUST hash identical logical content in identical
-    /// order — the per-section `digest_*` helpers are called from both sides to
-    /// keep them from drifting):
-    /// - Bodies/colliders: handles sorted ascending; hash `(handle, Some(&saved))`
-    ///   here vs `(handle, set.get(handle))` on the live side.
-    /// - Wholesale-restored sections (islands, lists, joints, narrow-wholesale,
-    ///   broad): the saved snapshot IS the post-revert live state, so `hash(saved)`
-    ///   here must equal `hash(live-after-restore)` there — paired digest fns hash
-    ///   the same fields in the same order.
-    /// - HashSets (`*_to_wake_up`) are hashed as sorted `Vec`s on both sides.
-    /// - The fine-grained `narrow` op log is EXCLUDED from both sides; only a
-    ///   presence `bool` for the WHOLESALE snapshot is hashed. Its payloads are
-    ///   covered by Full mode and the fork's own step_journal revert-exactness
-    ///   tests, not by Delta digests. A presence `bool` is hashed for every
-    ///   optional section so presence/absence itself is checked.
-    pub fn pre_digest(&self) -> u32 {
-        let mut h = crc32fast::Hasher::new();
+/// Whether a step can write anything in the joint sets. False only for sets
+/// with no joint and no pending joint work: the step then only drains empty
+/// queues, so skipping their clone loses nothing.
+fn joint_sets_touchable(ij: &ImpulseJointSet, mj: &MultibodyJointSet) -> bool {
+    !ij.journal_quiescent() || !mj.journal_quiescent()
+}
 
-        // 1. Bodies: saved payloads keyed by handle, sorted ascending.
-        let mut bodies_sorted: Vec<(RigidBodyHandle, &RigidBody)> =
-            self.saved_bodies.iter().map(|(hnd, b)| (*hnd, b)).collect();
-        bodies_sorted.sort_unstable_by_key(|(hnd, _)| *hnd);
-        Self::digest_bodies(&mut h, bodies_sorted.iter().map(|&(hnd, b)| (hnd, Some(b))));
+/// The live side of the footprint digest: the journal's handles (in any
+/// order) and whether its joint sets were judged quiescent, read from `parts`.
+fn live_footprint_digest(
+    bodies: Vec<RigidBodyHandle>,
+    colliders: Vec<ColliderHandle>,
+    quiescent_joints: bool,
+    parts: &PhysicsParts<'_>,
+) -> u32 {
+    digest_footprint(Footprint {
+        bodies: bodies.into_iter().map(|h| (h, parts.bodies.get(h))).collect(),
+        colliders: colliders.into_iter().map(|h| (h, parts.colliders.get(h))).collect(),
+        quiescent_joints: quiescent_joints.then(|| joint_sets_hash(parts.impulse_joints, parts.multibody_joints)),
+    })
+}
 
-        // 2. Colliders: same shape.
-        let mut colliders_sorted: Vec<(ColliderHandle, &Collider)> =
-            self.saved_colliders.iter().map(|(hnd, c)| (*hnd, c)).collect();
-        colliders_sorted.sort_unstable_by_key(|(hnd, _)| *hnd);
-        Self::digest_colliders(&mut h, colliders_sorted.iter().map(|&(hnd, c)| (hnd, Some(c))));
+/// `StateHash` of both joint sets (cheap: only taken when they are quiescent).
+fn joint_sets_hash(ij: &ImpulseJointSet, mj: &MultibodyJointSet) -> u32 {
+    use state_hash::StateHash;
+    let mut h = crc32fast::Hasher::new();
+    ij.state_hash(&mut h);
+    mj.state_hash(&mut h);
+    h.finalize()
+}
 
-        // 3. Islands: presence + saved payload (cf. revert_digest step 3).
-        self.islands.is_some().hash(&mut h);
-        if let Some(s) = &self.islands {
-            s.digest(&mut h);
-        }
+/// One side of a footprint digest: saved values (`pre_digest`) or live ones
+/// (`live_digest`, `revert_digest`), bodies and colliders in capture order; a
+/// live slot a revert failed to refill hashes as `None`.
+struct Footprint<'a> {
+    bodies: Vec<(RigidBodyHandle, Option<&'a RigidBody>)>,
+    colliders: Vec<(ColliderHandle, Option<&'a Collider>)>,
+    quiescent_joints: Option<u32>,
+}
 
-        // 4. Lists: presence + saved five values (cf. revert_digest step 4).
-        self.lists.is_some().hash(&mut h);
-        if let Some(l) = &self.lists {
-            Self::digest_lists(
-                &mut h,
-                &l.modified_bodies,
-                &l.modified_colliders,
-                &l.removed_colliders,
-                &l.impulse_to_wake_up,
-                &l.multibody_to_wake_up,
-            );
-        }
-
-        // 5. Joints: presence + saved sets (cf. revert_digest step 5).
-        self.joints.is_some().hash(&mut h);
-        if let Some(j) = &self.joints {
-            Self::digest_joints(&mut h, &j.0, &j.1);
-        }
-
-        // 6. Narrow phase: presence of the WHOLESALE snapshot + its payload. The
-        //    fine-grained op log is intentionally not hashed on either side.
-        self.narrow_wholesale.is_some().hash(&mut h);
-        if let Some(w) = &self.narrow_wholesale {
-            Self::digest_narrow(&mut h, w);
-        }
-
-        // 7. Broad phase: presence + saved payload (cf. revert_digest step 7).
-        self.broad.is_some().hash(&mut h);
-        if let Some(b) = &self.broad {
-            b.digest(&mut h);
-        }
-
-        h.finalize()
-    }
-
-    /// Runs exactly [`Self::revert`] (via [`Self::revert_inner`]), then recomputes
-    /// [`Self::pre_digest`]'s digest from the now-restored LIVE structures over the
-    /// same footprint and section order. Equal to `pre_digest()` iff the revert
-    /// restored the footprint exactly. Same parameters as [`Self::revert`].
-    pub fn revert_digest(
-        self,
-        islands: &mut IslandManager,
-        broad_phase: &mut BroadPhaseBvh,
-        narrow_phase: &mut NarrowPhase,
-        bodies: &mut RigidBodySet,
-        colliders: &mut ColliderSet,
-        impulse_joints: &mut ImpulseJointSet,
-        multibody_joints: &mut MultibodyJointSet,
-    ) -> u32 {
-        // Consumes the journal and restores the live structures; `fp` carries the
-        // exact footprint so the digest below re-reads the same logical content.
-        let fp = self.revert_inner(
-            islands,
-            broad_phase,
-            narrow_phase,
-            bodies,
-            colliders,
-            impulse_joints,
-            multibody_joints,
-        );
-
-        let mut h = crc32fast::Hasher::new();
-
-        // 1. Bodies: live values for the same sorted handles (cf. pre_digest 1).
-        Self::digest_bodies(
-            &mut h,
-            fp.body_handles.iter().map(|&hnd| (hnd, bodies.get(hnd))),
-        );
-
-        // 2. Colliders (cf. pre_digest 2).
-        Self::digest_colliders(
-            &mut h,
-            fp.collider_handles.iter().map(|&hnd| (hnd, colliders.get(hnd))),
-        );
-
-        // 3. Islands: live fields after journal_restore (cf. pre_digest 3).
-        fp.had_islands.hash(&mut h);
-        if fp.had_islands {
-            islands.journal_digest(&mut h);
-        }
-
-        // 4. Lists: live modified/removed lists + wake sets, read via the same
-        //    fields `revert_inner` restores (cf. pre_digest 4).
-        fp.had_lists.hash(&mut h);
-        if fp.had_lists {
-            Self::digest_lists(
-                &mut h,
-                &bodies.modified_bodies,
-                &colliders.modified_colliders,
-                &colliders.removed_colliders,
-                &impulse_joints.to_wake_up,
-                &multibody_joints.to_wake_up,
-            );
-        }
-
-        // 5. Joints: live sets (cf. pre_digest 5).
-        fp.had_joints.hash(&mut h);
-        if fp.had_joints {
-            Self::digest_joints(&mut h, impulse_joints, multibody_joints);
-        }
-
-        // 6. Narrow phase: live narrow phase, only when a wholesale snapshot was
-        //    captured (cf. pre_digest 6).
-        fp.had_narrow_wholesale.hash(&mut h);
-        if fp.had_narrow_wholesale {
-            Self::digest_narrow(&mut h, narrow_phase);
-        }
-
-        // 7. Broad phase: live fields after journal_restore (cf. pre_digest 7).
-        fp.had_broad.hash(&mut h);
-        if fp.had_broad {
-            broad_phase.journal_digest(&mut h);
-        }
-
-        h.finalize()
-    }
-
-    // --- Per-section digest helpers, shared by pre_digest and revert_digest so
-    //     the two sides cannot drift. `Option<&T>` hashes identically whether the
-    //     value came from a saved payload (`Some(&saved)`) or a live lookup
-    //     (`set.get(handle)`), which is what makes the pre/live parity hold.
-
-    fn digest_bodies<'a>(
-        h: &mut crc32fast::Hasher,
-        items: impl Iterator<Item = (RigidBodyHandle, Option<&'a RigidBody>)>,
-    ) {
-        for (handle, body) in items {
-            handle.hash(h);
-            body.hash(h);
-        }
-    }
-
-    fn digest_colliders<'a>(
-        h: &mut crc32fast::Hasher,
-        items: impl Iterator<Item = (ColliderHandle, Option<&'a Collider>)>,
-    ) {
-        for (handle, collider) in items {
-            handle.hash(h);
-            collider.hash(h);
-        }
-    }
-
-    fn digest_lists(
-        h: &mut crc32fast::Hasher,
-        modified_bodies: &crate::dynamics::ModifiedRigidBodies,
-        modified_colliders: &crate::geometry::ModifiedColliders,
-        removed_colliders: &[ColliderHandle],
-        impulse_to_wake_up: &HashSet<RigidBodyHandle>,
-        multibody_to_wake_up: &HashSet<RigidBodyHandle>,
-    ) {
-        // Modified/removed are order-deterministic Vecs (restored wholesale), so
-        // hash them directly. The to-wake-up HashSets have no canonical iteration
-        // order, so hash a sorted Vec of their contents on both sides.
-        modified_bodies.hash(h);
-        modified_colliders.hash(h);
-        removed_colliders.hash(h);
-        Self::hash_sorted_bodies(h, impulse_to_wake_up);
-        Self::hash_sorted_bodies(h, multibody_to_wake_up);
-    }
-
-    fn digest_joints(h: &mut crc32fast::Hasher, ij: &ImpulseJointSet, mj: &MultibodyJointSet) {
-        ij.hash(h);
-        mj.hash(h);
-    }
-
-    fn digest_narrow(h: &mut crc32fast::Hasher, narrow: &NarrowPhase) {
-        narrow.hash(h);
-    }
-
-    fn hash_sorted_bodies(h: &mut crc32fast::Hasher, set: &HashSet<RigidBodyHandle>) {
-        let mut v: Vec<RigidBodyHandle> = set.iter().copied().collect();
-        v.sort_unstable();
-        v.hash(h);
-    }
+/// The one walker both digest sides use, so they hash identical logical
+/// content in identical order and cannot drift. Bodies and colliders go in
+/// sorted by handle (capture order is first-touch order, not canonical).
+fn digest_footprint(mut f: Footprint<'_>) -> u32 {
+    use state_hash::StateHash;
+    f.bodies.sort_unstable_by_key(|(h, _)| *h);
+    f.colliders.sort_unstable_by_key(|(h, _)| h.into_raw_parts());
+    let mut h = crc32fast::Hasher::new();
+    f.bodies.state_hash(&mut h);
+    f.colliders.state_hash(&mut h);
+    f.quiescent_joints.state_hash(&mut h);
+    h.finalize()
 }

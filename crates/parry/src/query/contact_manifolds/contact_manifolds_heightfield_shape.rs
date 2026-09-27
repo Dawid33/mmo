@@ -1,7 +1,7 @@
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::bounding_volume::BoundingVolume;
-use crate::math::{Isometry, Real};
+use crate::math::{Pose, Real};
 use crate::query::contact_manifolds::contact_manifolds_workspace::{
     TypedWorkspaceData, WorkspaceData,
 };
@@ -16,17 +16,18 @@ use crate::utils::hashmap::{Entry, HashMap};
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(Clone, Hash)]
+#[derive(Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 struct SubDetector {
     manifold_id: usize,
     timestamp: bool,
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Hash)]
+#[derive(Clone, Default)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct HeightFieldShapeContactManifoldsWorkspace {
     timestamp: bool,
     sub_detectors: HashMap<u32, SubDetector>,
@@ -41,7 +42,7 @@ impl HeightFieldShapeContactManifoldsWorkspace {
 /// Computes the contact manifold between an heightfield and a shape, both represented as `Shape` trait-objects.
 pub fn contact_manifolds_heightfield_shape_shapes<ManifoldData, ContactData>(
     dispatcher: &dyn PersistentQueryDispatcher<ManifoldData, ContactData>,
-    pos12: &Isometry<Real>,
+    pos12: &Pose,
     shape1: &dyn Shape,
     shape2: &dyn Shape,
     prediction: Real,
@@ -95,7 +96,7 @@ fn ensure_workspace_exists(workspace: &mut Option<ContactManifoldsWorkspace>) {
 /// Computes the contact manifold between an heightfield and an abstract shape.
 pub fn contact_manifolds_heightfield_shape<ManifoldData, ContactData>(
     dispatcher: &dyn PersistentQueryDispatcher<ManifoldData, ContactData>,
-    pos12: &Isometry<Real>,
+    pos12: &Pose,
     heightfield1: &HeightField,
     shape2: &dyn Shape,
     prediction: Real,

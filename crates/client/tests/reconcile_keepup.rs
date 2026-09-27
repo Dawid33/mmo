@@ -374,14 +374,7 @@ fn diag_g_mispredicted_crossing() {
     {
         let w = d.manager.world_mut();
         let key = *w.data(&home).player_entites.get(&LOCAL_CLIENT_ID).unwrap();
-        let iso = game::IsometryReal::from_parts(
-            game::na::Translation3::new(
-                (game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0).into(),
-                60.0f32.into(),
-                128.0f32.into(),
-            ),
-            game::na::Unit::<game::na::Quaternion<game::parry::math::Real>>::identity(),
-        );
+        let iso = game::Pose::translation(game::REGION_SIZE + game::FLIP_HYSTERESIS + 2.0, 60.0, 128.0);
         w.regions
             .get_mut(&home)
             .unwrap()

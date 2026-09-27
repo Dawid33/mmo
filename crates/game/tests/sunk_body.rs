@@ -4,7 +4,7 @@
 //! no floor past its edge and the body's rounded bottom dips over that edge
 //! on the crossing tick (about 3 units over a corner).
 use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
-use game::{Chunk, ChunkCoords, GameEventKind, InputEvent, IsometryReal, Key, Region, RegionCoords};
+use game::{Chunk, ChunkCoords, GameEventKind, InputEvent, Pose, Key, Region, RegionCoords};
 
 fn ev(r: &mut Region, e: GameEventKind) {
     r.handle_event(e).unwrap();
@@ -14,8 +14,8 @@ fn ev(r: &mut Region, e: GameEventKind) {
 fn body(r: &Region) -> (f32, f32, f32) {
     let d = r.data();
     let e = *d.player_entites.get(&0).unwrap();
-    let t = *d.physics.bodies.get(*d.ecs.rigidbody.get(e)).unwrap().translation();
-    (t.x.0, t.y.0, t.z.0)
+    let t = d.physics.bodies.get(*d.ecs.rigidbody.get(e)).unwrap().translation();
+    (t.x, t.y, t.z)
 }
 
 /// Floor top at y = 8 over x, z in 96..192; the player placed at (x, y, z)
@@ -37,7 +37,7 @@ fn walk_from(x: f32, y: f32, z: f32) -> Vec<(f32, f32, f32)> {
     }
     r.with_data(|d| {
         let e = *d.data.player_entites.get(&0).unwrap();
-        d.set_body_pose_safe(e, IsometryReal::translation(x.into(), y.into(), z.into()));
+        d.set_body_pose_safe(e, Pose::translation(x, y, z));
     });
     for key in [Key::KeyW, Key::KeyA] {
         ev(&mut r, GameEventKind::PlayerInput(0, InputEvent::Key { key, pressed: true }));

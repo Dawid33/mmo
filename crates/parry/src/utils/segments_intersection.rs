@@ -1,10 +1,7 @@
-use na::Point2;
+use crate::math::Vector2;
 
 use crate::math::Real;
 use crate::shape::{SegmentPointLocation, Triangle, TriangleOrientation};
-
-#[cfg(not(feature = "alloc"))]
-use na::ComplexField;
 
 /// Intersection between two segments.
 pub enum SegmentsIntersection {
@@ -30,16 +27,16 @@ pub enum SegmentsIntersection {
 
 /// Computes the intersection between two segments.
 pub fn segments_intersection2d(
-    a: &Point2<Real>,
-    b: &Point2<Real>,
-    c: &Point2<Real>,
-    d: &Point2<Real>,
+    a: Vector2,
+    b: Vector2,
+    c: Vector2,
+    d: Vector2,
     epsilon: Real,
 ) -> Option<SegmentsIntersection> {
     let denom = a.x * (d.y - c.y) + b.x * (c.y - d.y) + d.x * (b.y - a.y) + c.x * (a.y - b.y);
 
     // If denom is zero, then segments are parallel: handle separately.
-    if denom.abs() < *epsilon || ulps_eq!(denom, Real::from(0.0)) {
+    if denom.abs() < epsilon || ulps_eq!(denom, 0.0) {
         return parallel_intersection(a, b, c, d, epsilon);
     }
 
@@ -49,23 +46,23 @@ pub fn segments_intersection2d(
     let num = -(a.x * (c.y - b.y) + b.x * (a.y - c.y) + c.x * (b.y - a.y));
     let t = num / denom;
 
-    if 0.0 > *s || *s > 1.0 || 0.0 > *t || *t > 1.0 {
+    if 0.0 > s || s > 1.0 || 0.0 > t || t > 1.0 {
         None
     } else {
         let loc1 = if s == 0.0 {
             SegmentPointLocation::OnVertex(0)
-        } else if s == denom {
+        } else if s == 1.0 {
             SegmentPointLocation::OnVertex(1)
         } else {
-            SegmentPointLocation::OnEdge([Real::from(1.0) - s, s])
+            SegmentPointLocation::OnEdge([1.0 - s, s])
         };
 
         let loc2 = if t == 0.0 {
             SegmentPointLocation::OnVertex(0)
-        } else if t == denom {
+        } else if t == 1.0 {
             SegmentPointLocation::OnVertex(1)
         } else {
-            SegmentPointLocation::OnEdge([Real::from(1.0) - t, t])
+            SegmentPointLocation::OnEdge([1.0 - t, t])
         };
 
         Some(SegmentsIntersection::Point { loc1, loc2 })
@@ -73,10 +70,10 @@ pub fn segments_intersection2d(
 }
 
 fn parallel_intersection(
-    a: &Point2<Real>,
-    b: &Point2<Real>,
-    c: &Point2<Real>,
-    d: &Point2<Real>,
+    a: Vector2,
+    b: Vector2,
+    c: Vector2,
+    d: Vector2,
     epsilon: Real,
 ) -> Option<SegmentsIntersection> {
     if Triangle::orientation2d(a, b, c, epsilon) != TriangleOrientation::Degenerate {
@@ -146,24 +143,33 @@ fn parallel_intersection(
 
 // Checks that `c` is in-between `a` and `b`.
 // Assumes the three points are collinear.
-fn between(a: &Point2<Real>, b: &Point2<Real>, c: &Point2<Real>) -> Option<SegmentPointLocation> {
+fn between(a: Vector2, b: Vector2, c: Vector2) -> Option<SegmentPointLocation> {
+    // Classifies the barycentric coordinate of `c` along `ab`, snapping the
+    // exact endpoints to `OnVertex` instead of `OnEdge`.
+    fn classify(bcoord_b: Real) -> SegmentPointLocation {
+        if bcoord_b == 0.0 {
+            SegmentPointLocation::OnVertex(0)
+        } else if bcoord_b == 1.0 {
+            SegmentPointLocation::OnVertex(1)
+        } else {
+            SegmentPointLocation::OnEdge([1.0 - bcoord_b, bcoord_b])
+        }
+    }
+
     // If ab not vertical, check betweenness on x; else on y.
-    // TODO: handle cases where we actually are on a vertex (to return OnEdge instead of OnVertex)?
     if a.x != b.x {
         if a.x <= c.x && c.x <= b.x {
-            let bcoord = (c.x - a.x) / (b.x - a.x);
-            return Some(SegmentPointLocation::OnEdge([Real::from(1.0) - bcoord, bcoord]));
+            return Some(classify((c.x - a.x) / (b.x - a.x)));
         } else if a.x >= c.x && c.x >= b.x {
             let bcoord = (c.x - b.x) / (a.x - b.x);
-            return Some(SegmentPointLocation::OnEdge([bcoord, Real::from(1.0) - bcoord]));
+            return Some(classify(1.0 - bcoord));
         }
     } else if a.y != b.y {
         if a.y <= c.y && c.y <= b.y {
-            let bcoord = (c.y - a.y) / (b.y - a.y);
-            return Some(SegmentPointLocation::OnEdge([Real::from(1.0) - bcoord, bcoord]));
+            return Some(classify((c.y - a.y) / (b.y - a.y)));
         } else if a.y >= c.y && c.y >= b.y {
             let bcoord = (c.y - b.y) / (a.y - b.y);
-            return Some(SegmentPointLocation::OnEdge([bcoord, Real::from(1.0) - bcoord]));
+            return Some(classify(1.0 - bcoord));
         }
     } else if a.x == c.x && a.y == c.y {
         return Some(SegmentPointLocation::OnVertex(0));

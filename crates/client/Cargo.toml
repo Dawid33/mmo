@@ -21,7 +21,6 @@ bincode = { workspace = true }
 crc32fast = { workspace = true }
 bevy = { workspace = true }
 image = { workspace = true }
-ordered-float = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 # F3 developer panel (`renderer/dev_ui.rs`). Dev tooling only — player-facing
 # UI is bevy_ui. The clipboard/open_url defaults are left out (extra deps).

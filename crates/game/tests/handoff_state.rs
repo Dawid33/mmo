@@ -1,24 +1,19 @@
-use game::{IsometryReal, Rollback};
-use game::na::{Quaternion, Translation3, Unit};
-use game::parry::math::Real;
+use game::{Pose, Rollback};
 use game::{
     Client, ColliderSpec, EntityBundle, EntityKind, GhostData, RegionCoords, GHOST_TTL_TICKS,
 };
 use game::parry::math::Vector;
 use game::GameDataUpdateKind;
-use std::hash::Hash;
+use game::StateHash;
 
 fn crc(rb: &Rollback) -> u32 {
     let mut h = crc32fast::Hasher::new();
-    rb.data.hash(&mut h);
+    rb.data.state_hash(&mut h);
     h.finalize()
 }
 
-fn pose(x: f32, y: f32, z: f32) -> IsometryReal {
-    IsometryReal::from_parts(
-        Translation3::new(Real::from(x), Real::from(y), Real::from(z)),
-        Unit::<Quaternion<Real>>::identity(),
-    )
+fn pose(x: f32, y: f32, z: f32) -> Pose {
+    Pose::from_translation(game::rapier3d::math::Vector::new(x, y, z))
 }
 
 #[test]
@@ -86,7 +81,7 @@ fn set_body_pose_safe_moves_and_undoes_exactly() {
     rb.set_body_pose_safe(key, pose(250.0, 26.0, 10.0));
     let handle = rb.data.ecs.rigidbody.try_get(key).unwrap();
     let t = rb.data.physics.bodies.get(handle).unwrap().translation();
-    assert_eq!(t.x, Real::from(250.0));
+    assert_eq!(t.x, 250.0);
     rb.rollback();
     assert_eq!(before, crc(&rb));
 }
@@ -95,11 +90,11 @@ fn bundle(src: RegionCoords, key: game::EntityKey, client: game::ClientId, x: f3
     EntityBundle {
         kind: EntityKind::Player,
         isometry: pose(x, 26.0, 128.0),
-        linvel: Vector::zeros(),
+        linvel: Vector::ZERO,
         collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
         has_camera: true,
-        yaw: Real::from(0.0),
-        pitch: Real::from(0.0),
+        yaw: 0.0,
+        pitch: 0.0,
         motion: Some(game::Motion::default()),
         slime: None,
         client: Some((client, Client::default())),
@@ -114,7 +109,7 @@ fn ghost(src: RegionCoords, key: game::EntityKey, x: f32) -> GhostData {
         source_key: key,
         kind: EntityKind::Player,
         isometry: pose(x, 26.0, 128.0),
-        linvel: Vector::zeros(),
+        linvel: Vector::ZERO,
         collider: ColliderSpec::CapsuleY { half_height: 8.0, radius: 6.4 },
     }
 }
@@ -145,7 +140,7 @@ fn arrival_creates_player_with_client_state_and_holds_hash_bar() {
     let e = *rb.data.player_entites.get(&9).unwrap();
     let handle = rb.data.ecs.rigidbody.try_get(e).unwrap();
     let t = rb.data.physics.bodies.get(handle).unwrap().translation();
-    assert_eq!(t.x, Real::from(2.0), "arrives at the (rebased) bundle pose");
+    assert_eq!(t.x, 2.0, "arrives at the (rebased) bundle pose");
     rb.rollback();
     assert_eq!(before, crc(&rb));
 }
@@ -157,7 +152,7 @@ fn arrival_preserves_movement_state() {
     let (mut donor_rb, src_key) = donor();
     let src = RegionCoords::new(0, 0);
     let motion = game::Motion {
-        vel_y: Real::from(-12.5),
+        vel_y: -12.5,
         grounded: false,
         flying: true,
         last_jump_tap: Some(41),
@@ -192,8 +187,8 @@ fn arrival_preserves_camera_look_direction() {
     donor_rb.new_transaction();
     donor_rb.data.clients.insert(9, Client::default());
     let mut cam = donor_rb.data.ecs.camera.try_get(src_key).clone().unwrap();
-    cam.yaw = Real::from(1.25);
-    cam.pitch = Real::from(-0.5);
+    cam.yaw = 1.25;
+    cam.pitch = -0.5;
     donor_rb.data.ecs.camera.set_safe(src_key, Some(cam));
     donor_rb.forget();
 
@@ -206,8 +201,8 @@ fn arrival_preserves_camera_look_direction() {
     rb.apply_arrival(bundle);
     let e = *rb.data.player_entites.get(&9).unwrap();
     let cam = rb.data.ecs.camera.try_get(e).clone().unwrap();
-    assert_eq!(cam.yaw, Real::from(1.25), "yaw must survive the region crossing");
-    assert_eq!(cam.pitch, Real::from(-0.5), "pitch must survive the region crossing");
+    assert_eq!(cam.yaw, 1.25, "yaw must survive the region crossing");
+    assert_eq!(cam.pitch, -0.5, "pitch must survive the region crossing");
 }
 
 #[test]
@@ -323,7 +318,7 @@ fn stage2_ghost_has_a_collidable_body_that_tracks_updates() {
     rb.new_transaction();
     rb.apply_ghost(ghost(src, src_key, 240.0));
     let t = rb.data.physics.bodies.get(handle).unwrap().translation();
-    assert_eq!(t.x, Real::from(240.0));
+    assert_eq!(t.x, 240.0);
     rb.rollback();
     assert_eq!(before, crc(&rb));
 }
@@ -373,7 +368,7 @@ fn stage2_upgrade_reuses_the_ghost_body() {
     let owned_handle = rb.data.ecs.rigidbody.try_get(e).unwrap();
     assert_eq!(ghost_handle, owned_handle, "upgrade corrects pose, keeps the body");
     let t = rb.data.physics.bodies.get(owned_handle).unwrap().translation();
-    assert_eq!(t.x, Real::from(245.0));
+    assert_eq!(t.x, 245.0);
 }
 
 #[test]
@@ -432,9 +427,9 @@ fn stage2_ghost_collider_blocks_a_walking_player() {
     // Unblocked: 128 - 3*8 = 104. The ghost capsule (radius 6.4) at z=104
     // must stop the player short of ~117.
     assert!(
-        z.0 > 110.0,
+        z > 110.0,
         "ghost collider must block the walk: z={} (unblocked would be 104)",
-        z.0
+        z
     );
 }
 
@@ -458,7 +453,7 @@ fn replayed_arrival_is_a_pose_correction_not_a_duplicate() {
     let e = *rb.data.player_entites.get(&9).unwrap();
     let handle = rb.data.ecs.rigidbody.try_get(e).unwrap();
     let t = rb.data.physics.bodies.get(handle).unwrap().translation();
-    assert_eq!(t.x, Real::from(5.0), "replay corrected the pose");
+    assert_eq!(t.x, 5.0, "replay corrected the pose");
     rb.rollback();
     assert_eq!(before, crc(&rb), "idempotent replay path holds the hash bar");
 }

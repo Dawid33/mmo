@@ -1,15 +1,11 @@
 //! Support mapping based Cylinder shape.
 
-use crate::math::{Point, Real, Vector};
+use crate::math::{Real, Vector};
 use crate::shape::SupportMap;
-use na;
-use num::Zero;
+use crate::utils::WSign;
 
 #[cfg(feature = "alloc")]
 use either::Either;
-
-#[cfg(feature = "rkyv")]
-use rkyv::{bytecheck, CheckBytes};
 
 /// A 3D cylinder shape with axis aligned along the Y axis.
 ///
@@ -69,11 +65,11 @@ use rkyv::{bytecheck, CheckBytes};
 #[cfg_attr(feature = "encase", derive(encase::ShaderType))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize, CheckBytes),
-    archive(as = "Self")
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(PartialEq, Debug, Copy, Clone, Hash)]
+#[derive(PartialEq, Debug, Copy, Clone)]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Cylinder {
     /// Half the length of the cylinder along the Y axis.
     ///
@@ -150,28 +146,28 @@ impl Cylinder {
     /// ```
     /// # #[cfg(all(feature = "dim3", feature = "f32", feature = "alloc"))] {
     /// use parry3d::shape::Cylinder;
-    /// use nalgebra::Vector3;
+    /// use parry3d::math::Vector;
     /// use either::Either;
     ///
     /// let cylinder = Cylinder::new(2.0, 1.0);
     ///
     /// // Uniform scaling: produces a larger cylinder
-    /// let scale1 = Vector3::new(2.0, 2.0, 2.0);
-    /// if let Some(Either::Left(scaled)) = cylinder.scaled(&scale1, 20) {
+    /// let scale1 = Vector::splat(2.0);
+    /// if let Some(Either::Left(scaled)) = cylinder.scaled(scale1, 20) {
     ///     assert_eq!(scaled.radius, 2.0);      // 1.0 * 2.0
     ///     assert_eq!(scaled.half_height, 4.0); // 2.0 * 2.0
     /// }
     ///
     /// // Different Y scale: still a cylinder
-    /// let scale2 = Vector3::new(1.5, 3.0, 1.5);
-    /// if let Some(Either::Left(scaled)) = cylinder.scaled(&scale2, 20) {
+    /// let scale2 = Vector::new(1.5, 3.0, 1.5);
+    /// if let Some(Either::Left(scaled)) = cylinder.scaled(scale2, 20) {
     ///     assert_eq!(scaled.radius, 1.5);      // 1.0 * 1.5
     ///     assert_eq!(scaled.half_height, 6.0); // 2.0 * 3.0
     /// }
     ///
     /// // Non-uniform X/Z: produces elliptical cylinder (mesh approximation)
-    /// let scale3 = Vector3::new(2.0, 1.0, 1.0);
-    /// if let Some(Either::Right(polyhedron)) = cylinder.scaled(&scale3, 20) {
+    /// let scale3 = Vector::new(2.0, 1.0, 1.0);
+    /// if let Some(Either::Right(polyhedron)) = cylinder.scaled(scale3, 20) {
     ///     // Result is a convex mesh approximating an elliptical cylinder
     ///     assert!(polyhedron.points().len() > 0);
     /// }
@@ -181,14 +177,13 @@ impl Cylinder {
     #[inline]
     pub fn scaled(
         self,
-        scale: &Vector<Real>,
+        scale: Vector,
         nsubdivs: u32,
     ) -> Option<Either<Self, super::ConvexPolyhedron>> {
         if scale.x != scale.z {
-            // The scaled shape isn’t a cylinder.
+            // The scaled shape isn't a cylinder.
             let (mut vtx, idx) = self.to_trimesh(nsubdivs);
-            vtx.iter_mut()
-                .for_each(|pt| pt.coords = pt.coords.component_mul(scale));
+            vtx.iter_mut().for_each(|pt| *pt *= scale);
             Some(Either::Right(super::ConvexPolyhedron::from_convex_mesh(
                 vtx, &idx,
             )?))
@@ -202,19 +197,11 @@ impl Cylinder {
 }
 
 impl SupportMap for Cylinder {
-    fn local_support_point(&self, dir: &Vector<Real>) -> Point<Real> {
-        let mut vres = *dir;
-
-        vres[1] = Real::from(0.0);
-
-        if vres.normalize_mut().is_zero() {
-            vres = na::zero()
-        } else {
-            vres *= self.radius;
-        }
-
-        vres[1] = Real::from(self.half_height.copysign(*dir[1]));
-
-        Point::from(vres)
+    fn local_support_point(&self, dir: Vector) -> Vector {
+        let mut vres = dir;
+        vres.y = 0.0;
+        vres = vres.normalize_or_zero() * self.radius;
+        vres.y = dir.y.copy_sign_to(self.half_height);
+        vres
     }
 }

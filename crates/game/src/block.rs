@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use block_mesh::ndshape::ConstShape;
-use parry3d::math::Point;
+use parry3d::math::IVector;
 
 use crate::registry::BlockId;
 use crate::voxel::{ChunkShape, Voxel, CHUNK_VOXEL_COUNT};
@@ -28,7 +28,7 @@ pub fn voxel_index(x: usize, y: usize, z: usize) -> usize {
 /// Index of a block within a chunk, linear over `CHUNK_BLOCKS³` (0..8).
 /// `Ord` so it can key a `BTreeMap` deterministically.
 #[derive(
-    Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize, Debug,
+    Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, state_hash::StateHash, serde::Serialize, serde::Deserialize, Debug,
 )]
 pub struct BlockIndex(pub u8);
 
@@ -49,7 +49,7 @@ impl BlockIndex {
 /// The authoritative per-cell gameplay value. Compact; `data` reserved for
 /// future block-state (zeroed for now). Hashes trivially.
 #[derive(
-    Copy, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Debug,
+    Copy, Clone, Default, PartialEq, Eq, Hash, state_hash::StateHash, serde::Serialize, serde::Deserialize, Debug,
 )]
 pub struct Block {
     pub id: BlockId,
@@ -77,7 +77,7 @@ pub type ChiselGrid = Vec<Option<u8>>;
 /// hashes. Undo replaces the whole chunk value, so no per-voxel inverse is
 /// needed. Edit in bulk through the grid; [`ChiselData::set`] re-merges on
 /// every call.
-#[derive(Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Debug)]
+#[derive(Clone, Default, PartialEq, Eq, Hash, state_hash::StateHash, serde::Serialize, serde::Deserialize, Debug)]
 pub struct ChiselData {
     cuboids: Vec<u32>,
     palette: Vec<BlockId>, // ≤ 256 materials, indexed by a cuboid's top byte
@@ -268,13 +268,13 @@ impl ChiselData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColliderCells {
     /// Block-grid keys (0..CHUNK_BLOCKS per axis) of wholly solid blocks.
-    pub blocks: Vec<Point<i32>>,
+    pub blocks: Vec<IVector>,
     /// Half-block-grid keys (0..CHUNK_BLOCKS*2 per axis) of wholly solid 8³
     /// octants of chiseled blocks.
-    pub halves: Vec<Point<i32>>,
+    pub halves: Vec<IVector>,
     /// Voxel-grid keys (0..CHUNK_BLOCKS*BLOCK_VOXELS per axis) of the other
     /// solid chisel voxels (occupied with a non-air material).
-    pub voxels: Vec<Point<i32>>,
+    pub voxels: Vec<IVector>,
 }
 
 impl ColliderCells {
@@ -285,7 +285,7 @@ impl ColliderCells {
     /// The non-empty grids as (cell edge in voxels, keys), coarsest first:
     /// one parry `Voxels` collider each. Every collider builder walks this,
     /// so all of them attach the same shapes in the same order.
-    pub fn grids(&self) -> impl Iterator<Item = (f32, &[Point<i32>])> {
+    pub fn grids(&self) -> impl Iterator<Item = (f32, &[IVector])> {
         [
             (BLOCK_VOXELS as f32, self.blocks.as_slice()),
             (HALF_BLOCK_VOXELS as f32, self.halves.as_slice()),
@@ -319,13 +319,13 @@ pub fn collider_cells(
         let (bx, by, bz) = bi.xyz();
         let Some(c) = chisel.get(&bi) else {
             if block.id != BlockId::AIR {
-                out.blocks.push(Point::new(bx as i32, by as i32, bz as i32));
+                out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
             }
             continue;
         };
         let solid: Vec<bool> = c.materials().into_iter().map(|m| m != BlockId::AIR).collect();
         if solid.iter().all(|&s| s) {
-            out.blocks.push(Point::new(bx as i32, by as i32, bz as i32));
+            out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
             continue;
         }
         for (ox, oy, oz) in (0..8).map(|o| (o % 2, (o / 2) % 2, o / 4)) {
@@ -342,7 +342,7 @@ pub fn collider_cells(
             let mut full = true;
             octant(&mut |x, y, z| full &= solid[local_index(x, y, z)]);
             if full {
-                out.halves.push(Point::new(
+                out.halves.push(IVector::new(
                     (bx * 2 + ox) as i32,
                     (by * 2 + oy) as i32,
                     (bz * 2 + oz) as i32,
@@ -351,7 +351,7 @@ pub fn collider_cells(
             }
             octant(&mut |x, y, z| {
                 if solid[local_index(x, y, z)] {
-                    out.voxels.push(Point::new(
+                    out.voxels.push(IVector::new(
                         (bx * BLOCK_VOXELS + x) as i32,
                         (by * BLOCK_VOXELS + y) as i32,
                         (bz * BLOCK_VOXELS + z) as i32,
@@ -614,7 +614,7 @@ mod tests {
         let c = mixed_scales_chunk();
         let cells = collider_cells(&c.blocks, &c.chisel);
         // Plain block 1 and the full chisel of block 2.
-        assert_eq!(cells.blocks, vec![Point::new(1, 0, 0), Point::new(0, 1, 0)]);
+        assert_eq!(cells.blocks, vec![IVector::new(1, 0, 0), IVector::new(0, 1, 0)]);
         // Block 0's half block (4 octants), block 6's carved half (3 of its
         // 4 lower octants intact), block 7's one solid octant.
         assert_eq!(cells.halves.len(), 4 + 3 + 1);

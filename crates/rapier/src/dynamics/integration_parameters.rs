@@ -1,19 +1,19 @@
-use crate::math::{RawReal, Real};
-use na::RealField;
-
-#[cfg(doc)]
+#[cfg(all(doc, feature = "alloc"))]
 use super::RigidBodyActivation;
+use crate::math::Real;
+use simba::simd::SimdRealField;
 
-// TODO: enabling the block solver in 3d introduces a lot of jitters in
-//       the 3D domino demo. So for now we dont enable it in 3D.
-pub(crate) static BLOCK_SOLVER_ENABLED: bool = cfg!(feature = "dim2");
+// NOTE: the 2x2 block solver (`block-solver` feature) runs in BOTH passes and solves the COMPLIANT
+//       LCP `(K + C, b)`, `C = diag((1/ms_i - 1) k_ii)` — the coupled soft step — so it shares
+//       the sequential sweep's fixed points; a rigid-LCP-then-cfm-scale variant left piles micro-jiggling.
 
 /// Friction models used for all contact constraints between two rigid-bodies.
 ///
 /// This selection does not apply to multibodies that always rely on the [`FrictionModel::Coulomb`].
 #[cfg(feature = "dim3")]
-#[derive(Default, Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum FrictionModel {
     /// A simplified friction model significantly faster to solve than [`Self::Coulomb`]
     /// but less accurate.
@@ -28,6 +28,141 @@ pub enum FrictionModel {
     ///
     /// This results in one Coulomb friction constraint per contact point.
     Coulomb,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+// TODO: we should be able to combine this with MotorModel.
+/// Coefficients for a spring, typically used for configuring constraint softness for contacts and
+/// joints.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+pub struct SpringCoefficients<N> {
+    /// Sets the natural frequency (Hz) of the spring-like constraint.
+    ///
+    /// Higher values make the constraint stiffer and resolve constraint violations more quickly.
+    pub natural_frequency: N,
+    /// Sets the damping ratio for the spring-like constraint.
+    ///
+    /// Larger values make the joint more compliant (allowing more drift before stabilization).
+    pub damping_ratio: N,
+}
+
+impl<N: SimdRealField<Element = Real> + Copy> SpringCoefficients<N> {
+    /// Initializes spring coefficients from the spring natural frequency and damping ratio.
+    pub fn new(natural_frequency: N, damping_ratio: N) -> Self {
+        Self {
+            natural_frequency,
+            damping_ratio,
+        }
+    }
+
+    /// Default softness coefficients for contacts (30 Hz, ζ = 10).
+    /// The high ζ is load-bearing for large piles/stacks: softer contacts settle
+    /// deeper under load, and the extra penetration keeps them wedging and creeping instead of resting.
+    pub fn contact_defaults() -> Self {
+        Self {
+            natural_frequency: N::splat(30.0),
+            damping_ratio: N::splat(10.0),
+        }
+    }
+
+    /// Default softness coefficients for contacts touching a fixed body: twice the natural
+    /// frequency of [`Self::contact_defaults`], holding piled/pushed
+    /// bodies more firmly against walls and floors so they are less likely to squeeze through.
+    pub fn contact_static_defaults() -> Self {
+        Self {
+            natural_frequency: N::splat(60.0),
+            damping_ratio: N::splat(10.0),
+        }
+    }
+
+    /// Default softness coefficients for joints.
+    pub fn joint_defaults() -> Self {
+        Self {
+            natural_frequency: N::splat(1.0e6),
+            damping_ratio: N::splat(1.0),
+        }
+    }
+
+    /// The contact’s spring angular frequency for constraints regularization.
+    pub fn angular_frequency(&self) -> N {
+        self.natural_frequency * N::simd_two_pi()
+    }
+
+    /// The [`Self::erp`] coefficient, multiplied by the inverse timestep length.
+    pub fn erp_inv_dt(&self, dt: N) -> N {
+        let ang_freq = self.angular_frequency();
+        ang_freq / (dt * ang_freq + N::splat(2.0) * self.damping_ratio)
+    }
+
+    /// The effective Error Reduction Parameter applied for calculating regularization forces.
+    ///
+    /// This parameter is computed automatically from [`Self::natural_frequency`],
+    /// [`Self::damping_ratio`] and the substep length.
+    pub fn erp(&self, dt: N) -> N {
+        dt * self.erp_inv_dt(dt)
+    }
+
+    /// Compute CFM assuming a critically damped spring multiplied by the damping ratio.
+    ///
+    /// This coefficient softens the impulse applied at each solver iteration.
+    pub fn cfm_coeff(&self, dt: N) -> N {
+        let one = N::one();
+        let erp = self.erp(dt);
+        let erp_is_not_zero = erp.simd_ne(N::zero());
+
+        let damped = {
+            let inv_erp_minus_one = one / erp - one;
+
+            // let stiffness = 4.0 * damping_ratio * damping_ratio * projected_mass
+            //     / (dt * dt * inv_erp_minus_one * inv_erp_minus_one);
+            // let damping = 4.0 * damping_ratio * damping_ratio * projected_mass
+            //     / (dt * inv_erp_minus_one);
+            // let cfm = 1.0 / (dt * dt * stiffness + dt * damping);
+            // NOTE: This simplifies to cfm = cfm_coeff / projected_mass:
+            inv_erp_minus_one * inv_erp_minus_one
+                / ((one + inv_erp_minus_one)
+                    * N::splat(4.0)
+                    * self.damping_ratio
+                    * self.damping_ratio)
+        };
+        let undamped = {
+            // Undamped version if the damping ratio is zero.
+            let dt_omega = dt * self.angular_frequency();
+            one / (dt_omega * (dt_omega + N::splat(2.0) * self.damping_ratio))
+        };
+
+        let damping_is_zero = self.damping_ratio.simd_eq(N::zero());
+        let result = undamped.select(damping_is_zero, damped);
+        result.select(erp_is_not_zero, N::zero())
+    }
+
+    /// The CFM factor to be used in the constraint resolution.
+    ///
+    /// This parameter is computed automatically from [`Self::natural_frequency`],
+    /// [`Self::damping_ratio`] and the substep length.
+    pub fn cfm_factor(&self, dt: N) -> N {
+        let one = N::one();
+        let cfm_coeff = self.cfm_coeff(dt);
+
+        // We use this coefficient inside the impulse resolution.
+        // Surprisingly, several simplifications happen there.
+        // Let `m` the projected mass of the constraint.
+        // Let `m’` the projected mass that includes CFM: `m’ = 1 / (1 / m + cfm_coeff / m) = m / (1 + cfm_coeff)`
+        // We have:
+        // new_impulse = old_impulse - m’ (delta_vel - cfm * old_impulse)
+        //             = old_impulse - m / (1 + cfm_coeff) * (delta_vel - cfm_coeff / m * old_impulse)
+        //             = old_impulse * (1 - cfm_coeff / (1 + cfm_coeff)) - m / (1 + cfm_coeff) * delta_vel
+        //             = old_impulse / (1 + cfm_coeff) - m * delta_vel / (1 + cfm_coeff)
+        //             = 1 / (1 + cfm_coeff) * (old_impulse - m * delta_vel)
+        // So, setting cfm_factor = 1 / (1 + cfm_coeff).
+        // We obtain:
+        // new_impulse = cfm_factor * (old_impulse - m * delta_vel)
+        //
+        // The value returned by this function is this cfm_factor that can be used directly
+        // in the constraint solver.
+        one / (one + cfm_coeff)
+    }
 }
 
 /// Configuration parameters that control the physics simulation quality and behavior.
@@ -57,8 +192,9 @@ pub enum FrictionModel {
 /// ```
 ///
 /// Most other parameters are advanced settings for fine-tuning stability and performance.
-#[derive(Copy, Clone, Debug, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash (the game hashes it in PhysicsState)
 pub struct IntegrationParameters {
     /// The timestep length - how much simulated time passes per physics step (default: `1.0 / 60.0`).
     ///
@@ -67,6 +203,11 @@ pub struct IntegrationParameters {
     /// - 120 FPS: `1.0 / 120.0` ≈ 0.0083 seconds
     ///
     /// Smaller timesteps are more accurate but require more CPU time per second of simulated time.
+    ///
+    /// With a zero (or negative) `dt`, [`PhysicsPipeline::step`](crate::pipeline::PhysicsPipeline::step)
+    /// only applies the user changes and updates the collision detection (contacts, collision
+    /// events, scene queries): no time passes, so no body moves (kinematic bodies included) and
+    /// velocities are left untouched.
     pub dt: Real,
     /// Minimum timestep size when using CCD with multiple substeps (default: `1.0 / 60.0 / 100.0`).
     ///
@@ -80,34 +221,14 @@ pub struct IntegrationParameters {
     /// to numerical instabilities.
     pub min_ccd_dt: Real,
 
-    /// > 0: the damping ratio used by the springs for contact constraint stabilization.
-    ///
-    /// Larger values make the constraints more compliant (allowing more visible
-    /// penetrations before stabilization).
-    /// (default `5.0`).
-    pub contact_damping_ratio: Real,
+    /// Softness coefficients for contact constraints.
+    pub contact_softness: SpringCoefficients<Real>,
 
-    /// > 0: the natural frequency used by the springs for contact constraint regularization.
+    /// Softness coefficients for contact constraints where one side is a fixed body.
     ///
-    /// Increasing this value will make it so that penetrations get fixed more quickly at the
-    /// expense of potential jitter effects due to overshooting. In order to make the simulation
-    /// look stiffer, it is recommended to increase the [`Self::contact_damping_ratio`] instead of this
-    /// value.
-    /// (default: `30.0`).
-    pub contact_natural_frequency: Real,
-
-    /// > 0: the natural frequency used by the springs for joint constraint regularization.
-    ///
-    /// Increasing this value will make it so that penetrations get fixed more quickly.
-    /// (default: `1.0e6`).
-    pub joint_natural_frequency: Real,
-
-    /// The fraction of critical damping applied to the joint for constraints regularization.
-    ///
-    /// Larger values make the constraints more compliant (allowing more joint
-    /// drift before stabilization).
-    /// (default `1.0`).
-    pub joint_damping_ratio: Real,
+    /// Stiffer than [`Self::contact_softness`] by default so bodies are
+    /// held firmly against static walls/floors; set equal to [`Self::contact_softness`] to disable.
+    pub static_contact_softness: SpringCoefficients<Real>,
 
     /// The coefficient in `[0, 1]` applied to warmstart impulses, i.e., impulses that are used as the
     /// initial solution (instead of 0) at the next simulation step.
@@ -132,18 +253,39 @@ pub struct IntegrationParameters {
     /// with your chosen units.
     pub length_unit: Real,
 
-    /// Amount of penetration the engine won’t attempt to correct (default: `0.001m`).
+    /// Settings shared by every soft body: tangle recovery, strained-constraint re-sweep, impact
+    /// substeps, contact stiffening and FEM solver tuning (see [`SoftBodiesSettings`]).
+    ///
+    /// [`SoftBodiesSettings`]: crate::dynamics::SoftBodiesSettings
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    // mmo-fork: StateHash — soft-body tuning; the game has no soft bodies (its
+    // SoftBodySet's StateHash asserts empty), so not hashed.
+    #[state_hash(skip)]
+    pub soft_bodies: crate::dynamics::SoftBodiesSettings,
+
+    /// Geometric slop distance (default: `0.005`), e.g. the standoff kept
+    /// by the CCD clamp. NOT a deadzone on the position-correction bias: penetrations are corrected
+    /// all the way to zero; a deadzone would keep loaded piles wedging and creeping.
     ///
     /// This value is implicitly scaled by [`IntegrationParameters::length_unit`].
     pub normalized_allowed_linear_error: Real,
-    /// Maximum amount of penetration the solver will attempt to resolve in one timestep (default: `10.0`).
+    /// Maximum speed at which contact penetration is pushed out by the biased solve
+    /// (default: `3.0`).
     ///
+    /// Capping this recovery velocity keeps deep penetrations from being resolved explosively.
     /// This value is implicitly scaled by [`IntegrationParameters::length_unit`].
     pub normalized_max_corrective_velocity: Real,
-    /// The maximal distance separating two objects that will generate predictive contacts (default: `0.002m`).
+    /// The maximal distance separating two objects that will generate predictive contacts (default: `0.02`).
     ///
     /// This value is implicitly scaled by [`IntegrationParameters::length_unit`].
     pub normalized_prediction_distance: Real,
+    /// Maximum linear velocity a body may have after each solver substep (default: `400.0` m/s).
+    /// Bounding per-step travel keeps CCD and speculative contacts
+    /// reliable (a body cannot be flung or crushed to an arbitrary speed); set to `Real::MAX` to disable.
+    ///
+    /// This value is implicitly scaled by [`IntegrationParameters::length_unit`].
+    pub normalized_max_linear_velocity: Real,
     /// The number of solver iterations run by the constraints solver for calculating forces (default: `4`).
     ///
     /// Higher values produce more accurate and stable simulations at the cost of performance.
@@ -155,10 +297,40 @@ pub struct IntegrationParameters {
     pub num_internal_pgs_iterations: usize,
     /// The number of stabilization iterations run at each solver iterations (default: `1`).
     pub num_internal_stabilization_iterations: usize,
-    /// Minimum number of dynamic bodies on each active island (default: `128`).
-    pub min_island_size: usize,
-    /// Maximum number of substeps performed by the  solver (default: `1`).
+    /// Maximum number of CCD substeps performed by the solver (default: `1`).
+    ///
+    /// Also the global CCD on/off switch: `0` disables **all** CCD for the world (including the
+    /// automatic CCD of fast dynamic bodies vs fixed colliders).
     pub max_ccd_substeps: usize,
+    /// If enabled, contact manifolds of a collider pair sharing (nearly) the same normal are merged
+    /// into one "cluster" manifold before constraint generation (default: `true`, 3D only), so at
+    /// most 4 contact points are solved per contact plane — a large solver win on composite shapes
+    /// (meshes, heightfields, compounds, voxels) that emit one manifold per subshape. When clustering
+    /// applies, read solver contacts/impulses from [`crate::geometry::RigidPairContacts::solver_clusters`],
+    /// not [`crate::geometry::ContactPair::manifolds`].
+    pub contact_clustering: bool,
+    /// If enabled, a contact pair whose relative pose moved less than [`Self::contact_recycle_distance`]
+    /// since its last full narrow-phase update skips contact determination and keeps its existing points
+    /// (default: `true`) — a large speed-up for quasi-static scenes. Trade-offs:
+    /// contact features and user-facing contact data (`dist`, is-new bits) may be stale by up to that
+    /// distance, and per-step joint-based contact filtering is skipped until the pair moves.
+    /// [`crate::pipeline::ActiveHooks`] pairs are never recycled.
+    pub contact_recycling: bool,
+    /// Maximum relative-pose drift (translation plus rotation-arc) below which a contact pair may
+    /// be recycled instead of fully updated (default: `0.05`, i.e. ten times the linear slop,
+    /// multiplied by [`Self::length_unit`]). Only used when [`Self::contact_recycling`] is enabled.
+    pub normalized_contact_recycle_distance: Real,
+    /// If `false`, friction is only solved during the unbiased (relax) pass of each substep instead
+    /// of both passes (default: `false`, the "no friction when applying bias" rule).
+    /// This makes contact kernels much cheaper and is load-bearing for tall stacks: friction
+    /// reacting to bias velocities pumps their coherent lean mode until they topple. If
+    /// [`Self::num_internal_stabilization_iterations`] is zero there is no unbiased pass and this flag is ignored.
+    pub friction_in_bias_pass: bool,
+    /// If enabled, impulse-joint constraints are warm-started like contacts: impulses accumulated
+    /// by the previous step are re-applied (scaled by [`Self::warmstart_coefficient`]) at the start
+    /// of each substep instead of restarting from zero (default: `false`). This
+    /// noticeably improves convergence of stiff joint assemblies. Multibody joints are unaffected.
+    pub warmstart_joints: bool,
     /// The type of friction constraints used in the simulation.
     #[cfg(feature = "dim3")]
     pub friction_model: FrictionModel,
@@ -170,21 +342,14 @@ impl IntegrationParameters {
     /// This is zero if `self.dt` is zero.
     #[inline]
     pub fn inv_dt(&self) -> Real {
-        if self.dt == 0.0 {
-            Real::from(0.0)
-        } else {
-            Real::from(1.0) / self.dt
-        }
+        if self.dt == 0.0 { 0.0 } else { 1.0 / self.dt }
     }
 
     /// Sets the time-stepping length.
     #[inline]
     #[deprecated = "You can just set the `IntegrationParams::dt` value directly"]
     pub fn set_dt(&mut self, dt: Real) {
-        assert!(
-            dt >= Real::from(0.0),
-            "The time-stepping length cannot be negative."
-        );
+        assert!(dt >= 0.0, "The time-stepping length cannot be negative.");
         self.dt = dt;
     }
 
@@ -194,116 +359,13 @@ impl IntegrationParameters {
     #[inline]
     pub fn set_inv_dt(&mut self, inv_dt: Real) {
         if inv_dt == 0.0 {
-            self.dt = Real::from(0.0)
+            self.dt = 0.0
         } else {
-            self.dt = Real::from(1.0) / inv_dt
+            self.dt = 1.0 / inv_dt
         }
     }
 
-    /// The contact’s spring angular frequency for constraints regularization.
-    pub fn contact_angular_frequency(&self) -> Real {
-        self.contact_natural_frequency * Real::two_pi()
-    }
-
-    /// The [`Self::contact_erp`] coefficient, multiplied by the inverse timestep length.
-    pub fn contact_erp_inv_dt(&self) -> Real {
-        let ang_freq = self.contact_angular_frequency();
-        ang_freq / (self.dt * ang_freq + Real::from(2.0) * self.contact_damping_ratio)
-    }
-
-    /// The effective Error Reduction Parameter applied for calculating regularization forces
-    /// on contacts.
-    ///
-    /// This parameter is computed automatically from [`Self::contact_natural_frequency`],
-    /// [`Self::contact_damping_ratio`] and the substep length.
-    pub fn contact_erp(&self) -> Real {
-        self.dt * self.contact_erp_inv_dt()
-    }
-
-    /// The joint’s spring angular frequency for constraint regularization.
-    pub fn joint_angular_frequency(&self) -> Real {
-        self.joint_natural_frequency * Real::two_pi()
-    }
-
-    /// The [`Self::joint_erp`] coefficient, multiplied by the inverse timestep length.
-    pub fn joint_erp_inv_dt(&self) -> Real {
-        let ang_freq = self.joint_angular_frequency();
-        ang_freq / (self.dt * ang_freq + Real::from(2.0) * self.joint_damping_ratio)
-    }
-
-    /// The effective Error Reduction Parameter applied for calculating regularization forces
-    /// on joints.
-    ///
-    /// This parameter is computed automatically from [`Self::joint_natural_frequency`],
-    /// [`Self::joint_damping_ratio`] and the substep length.
-    pub fn joint_erp(&self) -> Real {
-        self.dt * self.joint_erp_inv_dt()
-    }
-
-    /// The CFM factor to be used in the constraint resolution.
-    ///
-    /// This parameter is computed automatically from [`Self::contact_natural_frequency`],
-    /// [`Self::contact_damping_ratio`] and the substep length.
-    pub fn contact_cfm_factor(&self) -> Real {
-        // Compute CFM assuming a critically damped spring multiplied by the damping ratio.
-        // The logic is similar to [`Self::joint_cfm_coeff`].
-        let contact_erp = self.contact_erp();
-        if contact_erp == 0.0 {
-            return Real::from(0.0);
-        }
-        let inv_erp_minus_one = Real::from(1.0) / contact_erp - Real::from(1.0);
-
-        // let stiffness = 4.0 * damping_ratio * damping_ratio * projected_mass
-        //     / (dt * dt * inv_erp_minus_one * inv_erp_minus_one);
-        // let damping = 4.0 * damping_ratio * damping_ratio * projected_mass
-        //     / (dt * inv_erp_minus_one);
-        // let cfm = 1.0 / (dt * dt * stiffness + dt * damping);
-        // NOTE: This simplifies to cfm = cfm_coeff / projected_mass:
-        let cfm_coeff = inv_erp_minus_one * inv_erp_minus_one
-            / ((Real::from(1.0) + inv_erp_minus_one)
-                * Real::from(4.0)
-                * self.contact_damping_ratio
-                * self.contact_damping_ratio);
-
-        // Furthermore, we use this coefficient inside of the impulse resolution.
-        // Surprisingly, several simplifications happen there.
-        // Let `m` the projected mass of the constraint.
-        // Let `m’` the projected mass that includes CFM: `m’ = 1 / (1 / m + cfm_coeff / m) = m / (1 + cfm_coeff)`
-        // We have:
-        // new_impulse = old_impulse - m’ (delta_vel - cfm * old_impulse)
-        //             = old_impulse - m / (1 + cfm_coeff) * (delta_vel - cfm_coeff / m * old_impulse)
-        //             = old_impulse * (1 - cfm_coeff / (1 + cfm_coeff)) - m / (1 + cfm_coeff) * delta_vel
-        //             = old_impulse / (1 + cfm_coeff) - m * delta_vel / (1 + cfm_coeff)
-        //             = 1 / (1 + cfm_coeff) * (old_impulse - m * delta_vel)
-        // So, setting cfm_factor = 1 / (1 + cfm_coeff).
-        // We obtain:
-        // new_impulse = cfm_factor * (old_impulse - m * delta_vel)
-        //
-        // The value returned by this function is this cfm_factor that can be used directly
-        // in the constraint solver.
-        Real::from(1.0) / (Real::from(1.0) + cfm_coeff)
-    }
-
-    /// The CFM (constraints force mixing) coefficient applied to all joints for constraints regularization.
-    ///
-    /// This parameter is computed automatically from [`Self::joint_natural_frequency`],
-    /// [`Self::joint_damping_ratio`] and the substep length.
-    pub fn joint_cfm_coeff(&self) -> Real {
-        // Compute CFM assuming a critically damped spring multiplied by the damping ratio.
-        // The logic is similar to `Self::contact_cfm_factor`.
-        let joint_erp = self.joint_erp();
-        if joint_erp == 0.0 {
-            return Real::from(0.0);
-        }
-        let inv_erp_minus_one = Real::from(1.0) / joint_erp - Real::from(1.0);
-        inv_erp_minus_one * inv_erp_minus_one
-            / ((Real::from(1.0) + inv_erp_minus_one)
-                * Real::from(4.0)
-                * self.joint_damping_ratio
-                * self.joint_damping_ratio)
-    }
-
-    /// Amount of penetration the engine won’t attempt to correct (default: `0.001` multiplied by
+    /// Amount of penetration the engine won't attempt to correct (default: `0.001` multiplied by
     /// [`Self::length_unit`]).
     pub fn allowed_linear_error(&self) -> Real {
         self.normalized_allowed_linear_error * self.length_unit
@@ -314,44 +376,66 @@ impl IntegrationParameters {
     /// This is equal to [`Self::normalized_max_corrective_velocity`] multiplied by
     /// [`Self::length_unit`].
     pub fn max_corrective_velocity(&self) -> Real {
-        if self.normalized_max_corrective_velocity != Real::from(RawReal::MAX) {
+        if self.normalized_max_corrective_velocity != Real::MAX {
             self.normalized_max_corrective_velocity * self.length_unit
         } else {
-            Real::from(RawReal::MAX)
+            Real::MAX
         }
     }
 
     /// The maximal distance separating two objects that will generate predictive contacts
-    /// (default: `0.002m` multiped by [`Self::length_unit`]).
+    /// (default: `0.02` multiplied by [`Self::length_unit`]).
     pub fn prediction_distance(&self) -> Real {
         self.normalized_prediction_distance * self.length_unit
+    }
+
+    /// Maximum linear velocity a body may have after each solver substep.
+    ///
+    /// This is equal to [`Self::normalized_max_linear_velocity`] multiplied by
+    /// [`Self::length_unit`], or `Real::MAX` when the linear speed cap is disabled.
+    pub fn max_linear_velocity(&self) -> Real {
+        if self.normalized_max_linear_velocity != Real::MAX {
+            self.normalized_max_linear_velocity * self.length_unit
+        } else {
+            Real::MAX
+        }
+    }
+
+    /// Maximum relative-pose drift below which a contact pair can be recycled instead of fully
+    /// updated: [`Self::normalized_contact_recycle_distance`] multiplied by [`Self::length_unit`].
+    /// Only used when [`Self::contact_recycling`] is enabled.
+    pub fn contact_recycle_distance(&self) -> Real {
+        self.normalized_contact_recycle_distance * self.length_unit
     }
 }
 
 impl Default for IntegrationParameters {
     fn default() -> Self {
         Self {
-            dt: Real::from(1.0 / 60.0),
-            min_ccd_dt: Real::from(1.0 / 60.0 / 100.0),
-            contact_natural_frequency: Real::from(30.0),
-            contact_damping_ratio: Real::from(5.0),
-            joint_natural_frequency: Real::from(1.0e6),
-            joint_damping_ratio: Real::from(1.0),
-            warmstart_coefficient: Real::from(1.0),
+            dt: 1.0 / 60.0,
+            min_ccd_dt: 1.0 / 60.0 / 100.0,
+            contact_softness: SpringCoefficients::contact_defaults(),
+            static_contact_softness: SpringCoefficients::contact_static_defaults(),
+            warmstart_coefficient: 1.0,
             num_internal_pgs_iterations: 1,
             num_internal_stabilization_iterations: 1,
             num_solver_iterations: 4,
-            // TODO: what is the optimal value for min_island_size?
-            // It should not be too big so that we don't end up with
-            // huge islands that don't fit in cache.
-            // However we don't want it to be too small and end up with
-            // tons of islands, reducing SIMD parallelism opportunities.
-            min_island_size: 128,
-            normalized_allowed_linear_error: Real::from(0.001),
-            normalized_max_corrective_velocity: Real::from(10.0),
-            normalized_prediction_distance: Real::from(0.002),
+            normalized_allowed_linear_error: 0.005,
+            normalized_max_corrective_velocity: 3.0,
+            // Four times the linear slop. A larger speculative
+            // margin generates contacts earlier, which (together with oriented/one-sided static
+            // geometry) keeps fast/piled bodies from tunneling through thin walls.
+            normalized_prediction_distance: 0.02,
+            normalized_max_linear_velocity: 400.0,
             max_ccd_substeps: 1,
-            length_unit: Real::from(1.0),
+            contact_clustering: true,
+            contact_recycling: true,
+            normalized_contact_recycle_distance: 0.05,
+            friction_in_bias_pass: false,
+            warmstart_joints: false,
+            length_unit: 1.0,
+            #[cfg(feature = "alloc")]
+            soft_bodies: Default::default(),
             #[cfg(feature = "dim3")]
             friction_model: FrictionModel::default(),
         }

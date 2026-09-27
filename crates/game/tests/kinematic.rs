@@ -3,16 +3,14 @@
 //! was not restored by the old surgical undo closures), and the physics
 //! step drains those flags again. Mutation + step per transaction, rolled
 //! back across every boundary, must be bit-exact.
-use std::hash::Hash;
+use game::StateHash;
 
-use nalgebra::{UnitQuaternion, Vector3};
-use parry3d::math::Real;
 use rapier3d::prelude::PhysicsPipeline;
 use game::Rollback;
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
-    r.hash(&mut hasher);
+    r.state_hash(&mut hasher);
     hasher.finalize()
 }
 
@@ -34,19 +32,17 @@ fn kinematic_mutation_and_step_roll_back_exactly() {
         // snapshot (wakes the body + marks it modified).
         {
             let bodies = r.physics.bodies.change();
-            bodies.get_mut(handle).unwrap().set_next_kinematic_rotation(
-                UnitQuaternion::from_axis_angle(
-                    &Vector3::y_axis(),
-                    Real::from(0.01 * (i + 1) as f32),
-                ),
-            );
+            bodies
+                .get_mut(handle)
+                .unwrap()
+                .set_next_kinematic_rotation(game::yaw_quat(0.01 * (i + 1) as f32));
         }
         // Physics-controller pattern: snapshot_raw + a real pipeline step
         // (drains modified flags, advances poses).
         {
             let p = r.physics.snapshot_raw();
             pipeline.step(
-                p.gravity,
+                *p.gravity,
                 p.integration_parameters,
                 p.islands,
                 p.broad_phase,
@@ -55,6 +51,7 @@ fn kinematic_mutation_and_step_roll_back_exactly() {
                 p.colliders,
                 p.implules_joint_set,
                 p.multi_body_joint_set,
+                p.soft_bodies,
                 p.ccd_solver,
                 &(),
                 &(),

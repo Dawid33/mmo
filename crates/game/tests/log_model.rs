@@ -1,12 +1,12 @@
 //! Invariants of the transaction log that must hold before and after the
 //! log-model refactor. Uses only public API that exists in both worlds.
-use std::hash::Hash;
+use game::StateHash;
 
 use game::{ChunkCoords, Rollback};
 
 fn state_hash(r: &Rollback) -> u32 {
     let mut hasher = crc32fast::Hasher::new();
-    r.hash(&mut hasher);
+    r.state_hash(&mut hasher);
     hasher.finalize()
 }
 

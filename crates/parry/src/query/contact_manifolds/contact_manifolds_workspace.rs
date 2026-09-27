@@ -40,7 +40,7 @@ pub enum TypedWorkspaceData<'a> {
 
 // NOTE: must match the TypedWorkspaceData enum.
 #[cfg(feature = "serde-serialize")]
-#[derive(Deserialize, Hash)]
+#[derive(Deserialize)]
 enum DeserializableWorkspaceData {
     TriMeshShapeContactManifoldsWorkspace(TriMeshShapeContactManifoldsWorkspace),
     HeightfieldShapeContactManifoldsWorkspace(HeightFieldShapeContactManifoldsWorkspace),
@@ -92,7 +92,8 @@ impl DeserializableWorkspaceData {
 }
 
 /// Data from a [`ContactManifoldsWorkspace`].
-pub trait WorkspaceData: DowncastSync + crate::DynHash {
+// mmo-fork: StateHash — workspaces are journaled narrow-phase state.
+pub trait WorkspaceData: DowncastSync + state_hash::DynStateHash {
     /// Gets the underlying workspace as an enum.
     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_>;
 
@@ -102,17 +103,17 @@ pub trait WorkspaceData: DowncastSync + crate::DynHash {
 
 impl_downcast!(sync WorkspaceData);
 
-impl std::hash::Hash for dyn WorkspaceData {
-    fn hash<H>(&self, state: &mut H)
-    where
-        H: std::hash::Hasher {
-        self.dyn_hash(state);
+// mmo-fork: StateHash — dispatch to the concrete workspace (the old fork's
+// `Hash for dyn WorkspaceData`). Its type follows from the pair's shape types.
+impl state_hash::StateHash for dyn WorkspaceData {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        self.dyn_state_hash(h);
     }
 }
 
 // Note we have this newtype because it simplifies the serialization/deserialization code.
 /// A serializable workspace used by some contact-manifolds computation algorithms.
-#[derive(Hash)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ContactManifoldsWorkspace(pub Box<dyn WorkspaceData>);
 
 impl Clone for ContactManifoldsWorkspace {
@@ -143,7 +144,7 @@ impl<'de> serde::Deserialize<'de> for ContactManifoldsWorkspace {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
+        use crate::serde::de::Error;
         DeserializableWorkspaceData::deserialize(deserializer)?
             .into_contact_manifold_workspace()
             .ok_or(D::Error::custom("Cannot deserialize custom shape."))

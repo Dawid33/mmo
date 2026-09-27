@@ -5,24 +5,21 @@
 //! `GameDataTransactionKind` and `serde` are reachable at the crate root —
 //! `lib.rs` re-exports this module to satisfy that.
 
-use nalgebra as na;
-use na::{Perspective3, Quaternion, Translation3, Unit};
 use macros::rollback;
 use block_mesh::ndshape::ConstShape;
-use parry3d::math::{Point, RawReal, Real, Vector};
+use rapier3d::math::{IVector, Pose, Vector};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
+use state_hash::StateHash;
 use slotmapd::Key as _;
 use slotmapd::{new_key_type, SlotMap, SparseSecondaryMap};
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use crate::camera::Camera;
+use crate::camera::{Camera, Perspective3};
 use crate::cells::CellState;
 use crate::input::InputState;
 use crate::protocol::{ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
 use crate::registry::BlockId;
 use crate::voxel::{Chunk, ChunkCoords, ChunkShape, Voxel};
-
-pub type IsometryReal = na::Isometry<Real, na::Unit<na::Quaternion<Real>>, 3>;
 
 pub type ClientId = usize;
 
@@ -50,12 +47,12 @@ pub enum GameDataUpdateKind {
     /// A terrain chunk loaded with a cell (cell mode): the renderer spawns it
     /// at its pose and derives its voxels off-thread, budgeted — the sim
     /// thread never builds voxels for activated cells.
-    AddTerrainChunk(EntityKey, IsometryReal, Box<Chunk>),
-    SetEntityPosition(EntityKey, IsometryReal),
-    AddCameraComponent(EntityKey, ClientId, Perspective3<Real>, IsometryReal),
+    AddTerrainChunk(EntityKey, Pose, Box<Chunk>),
+    SetEntityPosition(EntityKey, Pose),
+    AddCameraComponent(EntityKey, ClientId, Perspective3, Pose),
     RemoveCameraComponent(EntityKey),
-    UpdateCameraViewProj(EntityKey, Perspective3<Real>),
-    UpdateCameraViewMatrix(EntityKey, IsometryReal),
+    UpdateCameraViewProj(EntityKey, Perspective3),
+    UpdateCameraViewMatrix(EntityKey, Pose),
     CreateEntity(EntityKey),
     RemoveEntity(EntityKey),
     SetFreeCam(ClientId, bool),
@@ -89,7 +86,7 @@ pub enum GameDataTransactionKind {
 
 /// What an inventory slot holds. `Empty` is the default so `ItemStack` and
 /// `Inventory` derive `Default` cleanly.
-#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, Hash, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, StateHash, Hash, PartialEq, Eq)]
 pub enum ItemKind {
     #[default]
     Empty,
@@ -97,7 +94,7 @@ pub enum ItemKind {
     Stone,
 }
 
-#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, Hash, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, StateHash, PartialEq)]
 pub struct ItemStack {
     pub kind: ItemKind,
     pub count: u32,
@@ -105,7 +102,7 @@ pub struct ItemStack {
 
 /// A fixed-size slot list. Authoritative sim state, carried on `Client` so it
 /// follows the player across region handoffs (Client rides `EntityBundle`).
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize, Hash, PartialEq)]
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize, StateHash, PartialEq)]
 pub struct Inventory {
     pub slots: Vec<Option<ItemStack>>,
 }
@@ -125,7 +122,7 @@ impl Inventory {
     }
 }
 
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash, PartialEq)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, StateHash, PartialEq)]
 #[module(crate)]
 pub struct Client {
     pub input: InputState,
@@ -136,7 +133,7 @@ pub struct Client {
 
 /// What an entity *is*, for rendering and future gameplay. The player is the
 /// first kind; NPC kinds extend this enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, StateHash)]
 pub enum EntityKind {
     #[default]
     Player,
@@ -148,7 +145,7 @@ pub enum EntityKind {
 
 /// A live ghost mirror in this region, keyed in `GameData::ghosts` by its
 /// source identity. `last_update_tick` drives the TTL reaper.
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash, PartialEq)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, StateHash, PartialEq)]
 #[module(crate)]
 pub struct GhostEntry {
     pub entity: EntityKey,
@@ -157,15 +154,16 @@ pub struct GhostEntry {
 
 #[rollback(GameData)]
 mod game_data {
-    use parry3d::math::{Real, Vector};
+    use rapier3d::math::Vector;
     use rapier3d::prelude::{
-        CCDSolver, ColliderSet, DefaultBroadPhase, ImpulseJointSet, IntegrationParameters,
-        IslandManager, MultibodyJointSet, NarrowPhase, RigidBodySet,
+        CCDSolver, ColliderSet, DefaultBroadPhase, ImpulseJointSet, IslandManager,
+        MultibodyJointSet, NarrowPhase, RigidBodySet, SoftBodySet,
     };
 
     use super::{
         Camera, CellState, Chunk, ChunkIndexKey, Client, ClientId, Component, EntityKey,
-        EntityKind, GhostEntry, IsometryReal, RigidBodyHandle, RollbackInfo, SlotMap,
+        PhysicsParams,
+        EntityKind, GhostEntry, Pose, RigidBodyHandle, RollbackInfo, SlotMap,
     };
     use std::collections::BTreeMap;
 
@@ -206,7 +204,7 @@ mod game_data {
         #[emit(insert = CreateEntity, remove = RemoveEntity)]
         entities: SlotMap<EntityKey, ()>,
         camera: Component<Camera>,
-        isometry: Component<IsometryReal>,
+        isometry: Component<Pose>,
         rigidbody: Component<RigidBodyHandle>,
         chunk: Component<Chunk>,
         kind: Component<EntityKind>,
@@ -221,14 +219,47 @@ mod game_data {
         multi_body_joint_set: MultibodyJointSet,
         ccd_solver: CCDSolver,
         colliders: ColliderSet,
-        gravity: Vector<Real>,
-        integration_parameters: IntegrationParameters,
+        gravity: Vector,
+        integration_parameters: PhysicsParams,
         islands: IslandManager,
         narrow_phase: NarrowPhase,
+        /// Rapier 0.36 compiles soft bodies in; the game has none. Kept
+        /// empty (the step journal and its `StateHash` assert it).
+        soft_bodies: SoftBodySet,
     }
 }
 
 pub use game_data::*;
+
+/// Rapier's integration parameters as the game runs them: its defaults, but
+/// with `length_unit` = [`crate::movement::PHYSICS_LENGTH_UNIT`] (plan D6), so
+/// a default-built `PhysicsState` (the rollback derives `Default`) already has
+/// it. Serializes and hashes exactly as the inner parameters (a newtype);
+/// derefs to them wherever rapier takes `&IntegrationParameters`.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize, StateHash)]
+pub struct PhysicsParams(pub rapier3d::prelude::IntegrationParameters);
+
+impl Default for PhysicsParams {
+    fn default() -> Self {
+        Self(rapier3d::prelude::IntegrationParameters {
+            length_unit: crate::movement::PHYSICS_LENGTH_UNIT,
+            ..Default::default()
+        })
+    }
+}
+
+impl std::ops::Deref for PhysicsParams {
+    type Target = rapier3d::prelude::IntegrationParameters;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for PhysicsParams {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 /// `(x, z, y)` of a chunk — the key of `GameData::chunk_index`.
 pub type ChunkIndexKey = (usize, usize, i32);
@@ -274,7 +305,7 @@ impl Undo<Ecs> {
     }
 }
 
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, Hash)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, StateHash)]
 pub struct Component<T>
 where
     T: 'static + Default,
@@ -289,11 +320,10 @@ where
 
 /// crc32 of one component slot — the exact footprint of the single-key
 /// insert_safe / set_safe / remove_safe mutations.
-fn component_slot_digest<T: std::hash::Hash>(key: EntityKey, slot: Option<&Option<T>>) -> u32 {
-    use std::hash::Hash;
-    let mut h = crc32fast::Hasher::new();
-    key.hash(&mut h);
-    slot.hash(&mut h);
+fn component_slot_digest<T: StateHash>(key: EntityKey, slot: Option<&Option<T>>) -> u32 {
+    let mut h = crate::StateHasher::new();
+    key.state_hash(&mut h);
+    slot.state_hash(&mut h);
     h.finalize()
 }
 
@@ -303,10 +333,9 @@ fn body_slot_digest(
     alloc: (Option<u32>, u32),
     body: Option<&rapier3d::prelude::RigidBody>,
 ) -> u32 {
-    use std::hash::Hash;
-    let mut h = crc32fast::Hasher::new();
-    alloc.hash(&mut h);
-    body.hash(&mut h);
+    let mut h = crate::StateHasher::new();
+    alloc.state_hash(&mut h);
+    body.state_hash(&mut h);
     h.finalize()
 }
 
@@ -321,12 +350,11 @@ fn collider_attach_digest(
     parent: Option<&rapier3d::prelude::RigidBody>,
     parent_was_modified: bool,
 ) -> u32 {
-    use std::hash::Hash;
-    let mut h = crc32fast::Hasher::new();
-    alloc.hash(&mut h);
-    slot.hash(&mut h);
-    parent.hash(&mut h);
-    parent_was_modified.hash(&mut h);
+    let mut h = crate::StateHasher::new();
+    alloc.state_hash(&mut h);
+    slot.state_hash(&mut h);
+    parent.state_hash(&mut h);
+    parent_was_modified.state_hash(&mut h);
     h.finalize()
 }
 
@@ -336,10 +364,9 @@ fn collider_attach_digest(
 /// already on the modified list (`get_mut`'s tracking push is conditional
 /// on that).
 fn body_write_digest(body: Option<&rapier3d::prelude::RigidBody>, was_modified: bool) -> u32 {
-    use std::hash::Hash;
-    let mut h = crc32fast::Hasher::new();
-    body.hash(&mut h);
-    was_modified.hash(&mut h);
+    let mut h = crate::StateHasher::new();
+    body.state_hash(&mut h);
+    was_modified.state_hash(&mut h);
     h.finalize()
 }
 
@@ -386,10 +413,9 @@ impl Undo<rapier3d::prelude::RigidBodySet> {
 /// `ColliderSet::get_mut`: the collider's value and whether it was already on
 /// the modified list. The collider twin of [`body_write_digest`].
 fn collider_write_digest(collider: Option<&rapier3d::prelude::Collider>, was_modified: bool) -> u32 {
-    use std::hash::Hash;
-    let mut h = crc32fast::Hasher::new();
-    collider.hash(&mut h);
-    was_modified.hash(&mut h);
+    let mut h = crate::StateHasher::new();
+    collider.state_hash(&mut h);
+    was_modified.state_hash(&mut h);
     h.finalize()
 }
 
@@ -434,7 +460,7 @@ where
         + Default
         + Clone
         + Send
-        + std::hash::Hash
+        + StateHash
         + ::serde::Serialize
         + for<'a> ::serde::Deserialize<'a>,
 {
@@ -564,14 +590,7 @@ impl Rollback {
         let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
         self.ecs.chunk.set_safe(e, Some(chunk));
         self.chunk_index.insert(chunk_index_key(coords), e);
-        let position = IsometryReal::from_parts(
-            Translation3::new(
-                Real::from((coords.x * 32) as RawReal),
-                Real::from((coords.y * 32) as RawReal),
-                Real::from((coords.z * 32) as RawReal),
-            ),
-            Unit::<Quaternion<Real>>::identity(),
-        );
+        let position = Pose::from_translation(Vector::new((coords.x * 32) as f32, (coords.y * 32) as f32, (coords.z * 32) as f32));
         let body = RigidBodyBuilder::fixed()
             .pose(position)
             .user_data(e.data().as_ffi() as u128)
@@ -590,7 +609,7 @@ impl Rollback {
         );
         self.ecs.rigidbody.set_safe(e, Some(handle));
         for (size, keys) in cells.grids() {
-            self.attach_voxels_collider_safe(e, handle, keys, Real::from(size as RawReal));
+            self.attach_voxels_collider_safe(e, handle, keys, size as f32);
         }
         e
     }
@@ -615,14 +634,7 @@ impl Rollback {
             let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
             self.ecs.chunk.raw_mut().insert(e, Some(chunk));
             self.chunk_index.insert_raw(chunk_index_key(coords), e);
-            let position = IsometryReal::from_parts(
-                Translation3::new(
-                    Real::from((coords.x * 32) as RawReal),
-                    Real::from((coords.y * 32) as RawReal),
-                    Real::from((coords.z * 32) as RawReal),
-                ),
-                Unit::<Quaternion<Real>>::identity(),
-            );
+            let position = Pose::from_translation(Vector::new((coords.x * 32) as f32, (coords.y * 32) as f32, (coords.z * 32) as f32));
             let body = RigidBodyBuilder::fixed()
                 .pose(position)
                 .user_data(e.data().as_ffi() as u128)
@@ -639,11 +651,11 @@ impl Rollback {
                 // A fully-solid 32^3 chunk's collision surface is exactly a
                 // 32x32x32 cuboid (half-extents 16, centered body-local 16,16,16).
                 colliders.push(
-                    ColliderBuilder::cuboid(Real::from(16.0), Real::from(16.0), Real::from(16.0))
+                    ColliderBuilder::cuboid(16.0, 16.0, 16.0)
                         .translation(Vector::new(
-                            Real::from(16.0),
-                            Real::from(16.0),
-                            Real::from(16.0),
+                            16.0,
+                            16.0,
+                            16.0,
                         ))
                         .user_data(user_data)
                         .build(),
@@ -654,7 +666,7 @@ impl Rollback {
                 // chisel detail at voxel scale.
                 for (size, keys) in cells.grids() {
                     colliders.push(
-                        ColliderBuilder::voxels(Vector::repeat(Real::from(size as RawReal)), keys)
+                        ColliderBuilder::voxels(Vector::splat(size as f32), keys)
                             .user_data(user_data)
                             .build(),
                     );
@@ -678,10 +690,10 @@ impl Rollback {
         &mut self,
         e: EntityKey,
         body: RigidBodyHandle,
-        coords: &[Point<i32>],
-        voxel_size: Real,
+        coords: &[IVector],
+        voxel_size: f32,
     ) {
-        let collider = ColliderBuilder::voxels(Vector::repeat(voxel_size), coords)
+        let collider = ColliderBuilder::voxels(Vector::splat(voxel_size), coords)
             .user_data(e.data().as_ffi() as u128)
             .build();
         self.attach_collider_safe(body, collider);
@@ -697,7 +709,7 @@ impl Rollback {
         half_height: f32,
         radius: f32,
     ) {
-        let collider = ColliderBuilder::capsule_y(Real::from(half_height), Real::from(radius))
+        let collider = ColliderBuilder::capsule_y(half_height, radius)
             .user_data(e.data().as_ffi() as u128)
             .build();
         self.attach_collider_safe(body, collider);
@@ -786,7 +798,7 @@ impl Rollback {
                 continue;
             };
             let t = body.translation();
-            let (bx, by, bz) = (t.x.0 as i32, t.y.0 as i32, t.z.0 as i32);
+            let (bx, by, bz) = (t.x as i32, t.y as i32, t.z as i32);
             if bx.div_euclid(32) != cx || bz.div_euclid(32) != cz {
                 continue;
             }
@@ -822,20 +834,13 @@ impl Rollback {
             None => PLAYER_SPAWN_FALLBACK_Y,
         };
         let e = self.ecs.create_entity_safe();
-        let position = IsometryReal::from_parts(
-            Translation3::new(
-                Real::from(spawn_x as RawReal),
-                Real::from(spawn_y as RawReal),
-                Real::from(spawn_z as RawReal),
-            ),
-            Unit::<Quaternion<Real>>::identity(),
-        );
+        let position = Pose::from_translation(Vector::new(spawn_x as f32, spawn_y as f32, spawn_z as f32));
         let body = RigidBodyBuilder::kinematic_position_based()
             .pose(position)
-            .gravity_scale(Real::from(0.0))
+            .gravity_scale(0.0)
             .enabled_rotations(true, true, true)
             .ccd_enabled(false)
-            .angular_damping(Real::from(1.0))
+            .angular_damping(1.0)
             .can_sleep(false)
             .user_data(e.data().as_ffi() as u128)
             .build();
@@ -894,7 +899,7 @@ impl Rollback {
                 .rigidbody
                 .try_get(key)
                 .and_then(|h| self.data.physics.bodies.get(h).map(|b| *b.position()))
-                .unwrap_or_else(IsometryReal::identity);
+                .unwrap_or_else(Pose::identity);
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
                 GameDataUpdateKind::RemoveCameraComponent(key),
@@ -936,6 +941,7 @@ impl Rollback {
                 p.colliders,
                 p.implules_joint_set,
                 p.multi_body_joint_set,
+                p.soft_bodies,
                 true,
             );
         }
@@ -964,7 +970,7 @@ impl Rollback {
     /// Teleport a body, undo-safely. Footprint-sized entry: set_position also
     /// wakes the body / marks it modified, but all of that lives inside the
     /// body slot + modified-mark that `mutate_body_safe` restores.
-    pub fn set_body_pose_safe(&mut self, key: EntityKey, pose: IsometryReal) {
+    pub fn set_body_pose_safe(&mut self, key: EntityKey, pose: Pose) {
         let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { return };
         self.data
             .physics
@@ -984,15 +990,15 @@ impl Rollback {
     pub(crate) fn build_kinematic_body_safe(
         &mut self,
         e: EntityKey,
-        pose: IsometryReal,
+        pose: Pose,
         collider: &ColliderSpec,
     ) {
         let body = RigidBodyBuilder::kinematic_position_based()
             .pose(pose)
-            .gravity_scale(Real::from(0.0))
+            .gravity_scale(0.0)
             .enabled_rotations(true, true, true)
             .ccd_enabled(false)
-            .angular_damping(Real::from(1.0))
+            .angular_damping(1.0)
             .can_sleep(false)
             .user_data(e.data().as_ffi() as u128)
             .build();
@@ -1199,8 +1205,8 @@ impl Rollback {
             .and_then(|ch| self.data.physics.colliders.get(ch))
             .and_then(|c| {
                 c.shape().as_capsule().map(|cap| crate::ColliderSpec::CapsuleY {
-                    half_height: cap.half_height().0,
-                    radius: cap.radius.0,
+                    half_height: cap.half_height(),
+                    radius: cap.radius,
                 })
             })
             // Non-capsule shapes don't transfer yet; the player default.
@@ -1221,7 +1227,7 @@ impl Rollback {
             .expect("transferable entities have bodies");
         let body = self.data.physics.bodies.get(handle).unwrap();
         let isometry = *body.position();
-        let linvel = *body.linvel();
+        let linvel = body.linvel();
         let collider = self.collider_spec_of(handle);
         let client_id = self
             .data
@@ -1295,17 +1301,17 @@ impl Rollback {
             let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
             let Some(body) = self.data.physics.bodies.get(handle) else { continue };
             let t = body.translation();
-            if let Some((dx, dz)) = crate::departure_offset(t.x.0, t.z.0) {
+            if let Some((dx, dz)) = crate::departure_offset(t.x, t.z) {
                 leavers.push((key, crate::RegionCoords::new(region.x + dx, region.z + dz)));
             } else {
-                for (dx, dz) in crate::ghost_offsets(t.x.0, t.z.0) {
+                for (dx, dz) in crate::ghost_offsets(t.x, t.z) {
                     ghosts.push((
                         crate::GhostData {
                             source_region: region,
                             source_key: key,
                             kind: *kind,
                             isometry: *body.position(),
-                            linvel: *body.linvel(),
+                            linvel: body.linvel(),
                             collider: self.collider_spec_of(handle),
                         },
                         crate::RegionCoords::new(region.x + dx, region.z + dz),
@@ -1344,15 +1350,14 @@ impl Rollback {
     /// One chunk's `terrain_fingerprint` contribution; `None` for a key
     /// without a terrain chunk body.
     pub fn chunk_terrain_term(&self, key: EntityKey) -> Option<u32> {
-        use std::hash::Hash;
         let chunk = self.data.ecs.chunk.try_get(key).as_ref()?;
         let handle = (*self.data.ecs.rigidbody.try_get(key))?;
         let body = self.data.physics.bodies.get(handle)?;
         let t = body.translation();
-        let mut h = crc32fast::Hasher::new();
+        let mut h = crate::StateHasher::new();
         // Same coordinate derivation as `terrain_snapshot`.
-        ((t.x.0 / 32.0) as i64, (t.y.0 / 32.0) as i64, (t.z.0 / 32.0) as i64).hash(&mut h);
-        chunk.hash(&mut h);
+        ((t.x / 32.0) as i64, (t.y / 32.0) as i64, (t.z / 32.0) as i64).state_hash(&mut h);
+        chunk.state_hash(&mut h);
         Some(h.finalize())
     }
 
@@ -1367,11 +1372,10 @@ impl Rollback {
             let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
             let Some(body) = self.data.physics.bodies.get(handle) else { continue };
             let t = body.translation();
-            // Real = OrderedFloat<f32>; `.0` unwraps to f32 (as scan_boundaries).
             let coords = ChunkCoords::new(
-                (t.x.0 / 32.0) as usize,
-                (t.y.0 / 32.0) as i32,
-                (t.z.0 / 32.0) as usize,
+                (t.x / 32.0) as usize,
+                (t.y / 32.0) as i32,
+                (t.z / 32.0) as usize,
             );
             chunks.push((coords, chunk.clone()));
         }
@@ -1505,8 +1509,8 @@ mod delta_digest_tests {
         r.attach_voxels_collider_safe(
             e,
             body,
-            &[parry3d::math::Point::new(0, 0, 0)],
-            Real::from(1.0),
+            &[IVector::new(0, 0, 0)],
+            1.0,
         );
         r.rollback();
         assert_eq!(before, crate::state_hash(&r), "Delta-mode attach must invert bit-exact");
@@ -1524,5 +1528,18 @@ mod delta_digest_tests {
         r.ecs.camera.change();      // tier-2 snapshot
         r.rollback();
         assert_eq!(before, crate::state_hash(&r));
+    }
+}
+
+#[cfg(test)]
+mod physics_params_tests {
+    use super::*;
+
+    /// Plan D6: every region's physics runs with the game's length unit.
+    #[test]
+    fn default_physics_state_uses_the_game_length_unit() {
+        let r = Rollback::new(None);
+        assert_eq!(r.physics.integration_parameters.length_unit, crate::movement::PHYSICS_LENGTH_UNIT);
+        assert_ne!(crate::movement::PHYSICS_LENGTH_UNIT, 1.0, "D6 moves it off rapier's default");
     }
 }

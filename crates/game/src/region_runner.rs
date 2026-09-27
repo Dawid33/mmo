@@ -429,7 +429,7 @@ impl RegionRunner {
                         }
                         GameEventKind::EntityArrived(b) => {
                             let t = b.isometry.translation;
-                            self.ensure_required((t.x.0, t.z.0));
+                            self.ensure_required((t.x, t.z));
                         }
                         _ => {}
                     }

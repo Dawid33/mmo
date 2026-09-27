@@ -1,5 +1,5 @@
 //! Task 3.3: `QueryPipeline::cast_shape_on_continuous_surfaces` (`// mmo-fork:`
-//! in rapier-next) and the D8 separated-start filters.
+//! in the rapier fork) and the D8 separated-start filters.
 //!
 //! Terrain is many boxes laid flush: voxels inside a chunk collider, chunk
 //! colliders side by side, collapsed full-chunk cuboids next to voxels. A

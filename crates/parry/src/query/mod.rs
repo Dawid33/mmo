@@ -32,17 +32,22 @@ pub use self::contact_manifolds::{
     ContactManifold, ContactManifoldsWorkspace, TrackedContact, TypedWorkspaceData, WorkspaceData,
 };
 pub use self::default_query_dispatcher::DefaultQueryDispatcher;
-pub use self::distance::distance;
+pub use self::distance::{distance, ShapeDistance};
 pub use self::error::Unsupported;
-pub use self::intersection_test::intersection_test;
+pub use self::intersection_test::{intersection_test, ShapeIntersection};
 pub use self::nonlinear_shape_cast::{cast_shapes_nonlinear, NonlinearRigidMotion};
 pub use self::point::{PointProjection, PointQuery, PointQueryWithLocation};
 #[cfg(feature = "alloc")]
 pub use self::query_dispatcher::PersistentQueryDispatcher;
 pub use self::query_dispatcher::{QueryDispatcher, QueryDispatcherChain};
-pub use self::ray::{Ray, RayCast, RayIntersection};
+pub use self::ray::{Ray, RayCast, RayIntersection, SimdRay};
 pub use self::shape_cast::{cast_shapes, ShapeCastHit, ShapeCastOptions, ShapeCastStatus};
 pub use self::split::{IntersectResult, SplitResult};
+pub use self::sweep_toi::{
+    sweep_time_of_impact, SimplexCache, Sweep, SweepToiOutput, SweepToiStatus, ToiProxy,
+};
+#[cfg(feature = "alloc")]
+pub use self::sweep_toi::{sweep_time_of_impact_composite, SweepCompositeFastShape};
 
 #[cfg(all(feature = "dim3", feature = "alloc"))]
 pub use self::ray::RayCullingMode;
@@ -66,6 +71,7 @@ mod ray;
 pub mod sat;
 mod shape_cast;
 mod split;
+pub mod sweep_toi;
 
 /// Queries dedicated to specific pairs of shapes.
 pub mod details {

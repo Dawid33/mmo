@@ -1,9 +1,10 @@
 use super::{Bvh, BvhWorkspace};
-use crate::math::{Real, RawReal};
+use crate::math::Real;
 use core::cmp::Ordering;
+use ordered_float::OrderedFloat;
 
 #[cfg(not(feature = "std"))]
-use na::ComplexField; // For `round` and `sqrt` in no-std+alloc builds.
+use crate::math::ComplexField; // For `round` and `sqrt` in no-std+alloc builds.
 
 impl Bvh {
     fn optimization_config(&self, frame_index: u32) -> OptimizationConfig {
@@ -11,7 +12,7 @@ impl Bvh {
         let num_leaves = self.nodes[0].leaf_count();
         let num_optimized_leaves = (num_leaves * TARGET_REBUILD_NODE_PERCENTAGE).div_ceil(100);
 
-        let num_leaves_sqrt: Real = (num_leaves as RawReal).sqrt().into();
+        let num_leaves_sqrt = (num_leaves as Real).sqrt();
         let root_mode = if frame_index.is_multiple_of(2) {
             RootOptimizationMode::Skip
         } else if (frame_index / 2).is_multiple_of(16) {
@@ -25,7 +26,7 @@ impl Bvh {
         let root_refinement_cost = target_root_node_count * target_root_node_count.log2()
             / (target_subtree_leaf_count * target_subtree_leaf_count.log2());
         let mut target_optimized_subtree_count =
-            (num_optimized_leaves as RawReal / target_subtree_leaf_count - root_refinement_cost)
+            (num_optimized_leaves as Real / target_subtree_leaf_count - root_refinement_cost)
                 .round()
                 .max(0.0) as usize;
 
@@ -91,7 +92,7 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhWorkspace};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let mut bvh = Bvh::new();
     /// let mut workspace = BvhWorkspace::default();
@@ -99,8 +100,8 @@ impl Bvh {
     /// // Add initial objects
     /// for i in 0..1000 {
     ///     let aabb = Aabb::new(
-    ///         Point3::new(i as f32, 0.0, 0.0),
-    ///         Point3::new(i as f32 + 1.0, 1.0, 1.0)
+    ///         Vector::new(i as f32, 0.0, 0.0),
+    ///         Vector::new(i as f32 + 1.0, 1.0, 1.0)
     ///     );
     ///     bvh.insert(aabb, i);
     /// }
@@ -112,8 +113,8 @@ impl Bvh {
     ///         let time = frame as f32 * 0.016;
     ///         let offset = (time * (i as f32 + 1.0)).sin() * 5.0;
     ///         let aabb = Aabb::new(
-    ///             Point3::new(i as f32 + offset, 0.0, 0.0),
-    ///             Point3::new(i as f32 + offset + 1.0, 1.0, 1.0)
+    ///             Vector::new(i as f32 + offset, 0.0, 0.0),
+    ///             Vector::new(i as f32 + offset + 1.0, 1.0, 1.0)
     ///         );
     ///         bvh.insert_or_update_partially(aabb, i, 0.0);
     ///     }
@@ -137,7 +138,7 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhWorkspace};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let mut bvh = Bvh::new();
     /// let mut workspace = BvhWorkspace::default();
@@ -163,7 +164,7 @@ impl Bvh {
     /// }
     ///
     /// # fn get_body_aabb(id: u32) -> Aabb {
-    /// #     Aabb::new(Point3::origin(), Point3::new(1.0, 1.0, 1.0))
+    /// #     Aabb::new(Vector::ZERO, Vector::new(1.0, 1.0, 1.0))
     /// # }
     /// # }
     /// ```
@@ -174,7 +175,7 @@ impl Bvh {
     /// # #[cfg(all(feature = "dim3", feature = "f32"))] {
     /// use parry3d::partitioning::{Bvh, BvhWorkspace};
     /// use parry3d::bounding_volume::Aabb;
-    /// use nalgebra::Point3;
+    /// use parry3d::math::Vector;
     ///
     /// let mut bvh = Bvh::new();
     /// let mut workspace = BvhWorkspace::default();
@@ -182,8 +183,8 @@ impl Bvh {
     /// // Dynamically add many objects over time
     /// for i in 0..1000 {
     ///     let aabb = Aabb::new(
-    ///         Point3::new(i as f32, 0.0, 0.0),
-    ///         Point3::new(i as f32 + 1.0, 1.0, 1.0)
+    ///         Vector::new(i as f32, 0.0, 0.0),
+    ///         Vector::new(i as f32 + 1.0, 1.0, 1.0)
     ///     );
     ///     bvh.insert(aabb, i);
     ///
@@ -239,15 +240,16 @@ impl Bvh {
         }
 
         workspace.rebuild_leaves.clear();
-        workspace.rebuild_frame_index = workspace.rebuild_frame_index.overflowing_add(1).0;
-        let config = self.optimization_config(workspace.rebuild_frame_index);
+        self.optimization.rebuild_frame_index =
+            self.optimization.rebuild_frame_index.overflowing_add(1).0;
+        let config = self.optimization_config(self.optimization.rebuild_frame_index);
 
         /*
          * Subtree optimizations.
          */
         // let t0 = core::time::Instant::now();
         let num_leaves = self.nodes[0].leaf_count();
-        let mut start_index = workspace.rebuild_start_index;
+        let mut start_index = self.optimization.rebuild_start_index;
 
         // println!("Max candidate leaf count = {}", max_candidate_leaf_count);
         self.find_optimization_roots(
@@ -265,7 +267,7 @@ impl Bvh {
             //       to reach the target subtree count.
         }
 
-        workspace.rebuild_start_index = start_index;
+        self.optimization.rebuild_start_index = start_index;
 
         // println!(
         //     "Num refinement candidates: {}, list: {:?}",
@@ -392,7 +394,7 @@ impl Bvh {
         }
 
         workspace.queue.push(BvhOptimizationHeapEntry {
-            score: Real::from(RawReal::MAX),
+            score: OrderedFloat(Real::MAX),
             id: 0,
         });
 
@@ -409,10 +411,10 @@ impl Bvh {
                 workspace.rebuild_leaves.push(*left);
             } else {
                 let children = self.nodes[left.children as usize];
-                let left_score = children.left.volume() * children.left.leaf_count() as RawReal
-                    + children.right.volume() * children.right.leaf_count() as RawReal;
+                let left_score = children.left.volume() * children.left.leaf_count() as Real
+                    + children.right.volume() * children.right.leaf_count() as Real;
                 workspace.queue.push(BvhOptimizationHeapEntry {
-                    score: left_score,
+                    score: OrderedFloat(left_score),
                     id: left.children,
                 });
             }
@@ -421,10 +423,10 @@ impl Bvh {
                 workspace.rebuild_leaves.push(*right);
             } else {
                 let children = self.nodes[right.children as usize];
-                let right_score = children.left.volume() * children.left.leaf_count() as RawReal
-                    + children.right.volume() * children.right.leaf_count() as RawReal;
+                let right_score = children.left.volume() * children.left.leaf_count() as Real
+                    + children.right.volume() * children.right.leaf_count() as Real;
                 workspace.queue.push(BvhOptimizationHeapEntry {
-                    score: right_score,
+                    score: OrderedFloat(right_score),
                     id: right.children,
                 });
             }
@@ -521,6 +523,20 @@ impl Bvh {
     }
 }
 
+/// The optimization state used by `Bvh::optimize_incremental`.
+/// This allows each call to `optimize_incremental` to continue from where the last one left off.
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
+)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+pub(super) struct BvhIncrementalOptimizationState {
+    pub(super) rebuild_frame_index: u32,
+    pub(super) rebuild_start_index: u32,
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum RootOptimizationMode {
     PriorityQueue,
@@ -538,7 +554,7 @@ struct OptimizationConfig {
 
 #[derive(Copy, Clone, Debug)]
 pub struct BvhOptimizationHeapEntry {
-    score: Real,
+    score: OrderedFloat<Real>,
     id: u32,
 }
 

@@ -1,12 +1,11 @@
+use super::LinkOrBodyRef;
 use crate::dynamics::solver::joint_constraint::joint_velocity_constraint::WritebackId;
 use crate::dynamics::solver::joint_constraint::{JointConstraintHelper, JointSolverBody};
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::{GenericJoint, IntegrationParameters, JointGraphEdge, JointIndex};
-use crate::math::{DIM, Isometry, Real, RawReal};
-use crate::prelude::SPATIAL_DIM;
-use na::{DVector, DVectorView, DVectorViewMut};
-
-use super::LinkOrBodyRef;
+use crate::math::{DIM, DVector, Real, SPATIAL_DIM};
+use na::{DVectorView, DVectorViewMut};
+use parry::math::Pose;
 
 #[derive(Debug, Copy, Clone)]
 pub struct GenericJointConstraint {
@@ -51,13 +50,13 @@ impl GenericJointConstraint {
             ndofs2: usize::MAX,
             j_id2: usize::MAX,
             joint_id: usize::MAX,
-            impulse: Real::from(0.0),
-            impulse_bounds: [Real::from(-RawReal::MAX), Real::from(RawReal::MAX)],
-            inv_lhs: Real::from(RawReal::MAX),
-            rhs: Real::from(RawReal::MAX),
-            rhs_wo_bias: Real::from(RawReal::MAX),
-            cfm_coeff: Real::from(RawReal::MAX),
-            cfm_gain: Real::from(RawReal::MAX),
+            impulse: 0.0,
+            impulse_bounds: [-Real::MAX, Real::MAX],
+            inv_lhs: Real::MAX,
+            rhs: Real::MAX,
+            rhs_wo_bias: Real::MAX,
+            cfm_coeff: Real::MAX,
+            cfm_gain: Real::MAX,
             writeback_id: WritebackId::Dof(0),
         }
     }
@@ -69,10 +68,10 @@ impl GenericJointConstraint {
         body2: &JointSolverBody<Real, 1>,
         mb1: LinkOrBodyRef,
         mb2: LinkOrBodyRef,
-        frame1: &Isometry<Real>,
-        frame2: &Isometry<Real>,
+        frame1: &Pose,
+        frame2: &Pose,
         joint: &GenericJoint,
-        jacobians: &mut DVector<Real>,
+        jacobians: &mut DVector,
         j_id: &mut usize,
         out: &mut [Self],
     ) -> usize {
@@ -81,7 +80,7 @@ impl GenericJointConstraint {
         let motor_axes = joint.motor_axes.bits();
         let limit_axes = joint.limit_axes.bits();
 
-        let builder = JointConstraintHelper::new(
+        let builder = JointConstraintHelper::<Real>::new(
             frame1,
             frame2,
             &body1.world_com,
@@ -140,6 +139,7 @@ impl GenericJointConstraint {
                     mb1,
                     mb2,
                     i - DIM,
+                    joint.softness,
                     WritebackId::Dof(i),
                 );
                 len += 1;
@@ -157,6 +157,7 @@ impl GenericJointConstraint {
                     mb1,
                     mb2,
                     i,
+                    joint.softness,
                     WritebackId::Dof(i),
                 );
                 len += 1;
@@ -176,6 +177,7 @@ impl GenericJointConstraint {
                     mb2,
                     i - DIM,
                     [joint.limits[i].min, joint.limits[i].max],
+                    joint.softness,
                     WritebackId::Limit(i),
                 );
                 len += 1;
@@ -194,6 +196,7 @@ impl GenericJointConstraint {
                     mb2,
                     i,
                     [joint.limits[i].min, joint.limits[i].max],
+                    joint.softness,
                     WritebackId::Limit(i),
                 );
                 len += 1;
@@ -215,7 +218,7 @@ impl GenericJointConstraint {
     fn solver_vel1<'a>(
         &self,
         solver_vels: &'a SolverBodies,
-        generic_solver_vels: &'a DVector<Real>,
+        generic_solver_vels: &'a DVector,
     ) -> DVectorView<'a, Real> {
         if self.solver_vel1 == u32::MAX {
             generic_solver_vels.rows(0, 0) // empty
@@ -229,7 +232,7 @@ impl GenericJointConstraint {
     fn solver_vel1_mut<'a>(
         &self,
         solver_vels: &'a mut SolverBodies,
-        generic_solver_vels: &'a mut DVector<Real>,
+        generic_solver_vels: &'a mut DVector,
     ) -> DVectorViewMut<'a, Real> {
         if self.solver_vel1 == u32::MAX {
             generic_solver_vels.rows_mut(0, 0) // empty
@@ -243,7 +246,7 @@ impl GenericJointConstraint {
     fn solver_vel2<'a>(
         &self,
         solver_vels: &'a SolverBodies,
-        generic_solver_vels: &'a DVector<Real>,
+        generic_solver_vels: &'a DVector,
     ) -> DVectorView<'a, Real> {
         if self.solver_vel2 == u32::MAX {
             generic_solver_vels.rows(0, 0) // empty
@@ -257,7 +260,7 @@ impl GenericJointConstraint {
     fn solver_vel2_mut<'a>(
         &self,
         solver_vels: &'a mut SolverBodies,
-        generic_solver_vels: &'a mut DVector<Real>,
+        generic_solver_vels: &'a mut DVector,
     ) -> DVectorViewMut<'a, Real> {
         if self.solver_vel2 == u32::MAX {
             generic_solver_vels.rows_mut(0, 0) // empty
@@ -270,9 +273,9 @@ impl GenericJointConstraint {
 
     pub fn solve(
         &mut self,
-        jacobians: &DVector<Real>,
+        jacobians: &DVector,
         solver_vels: &mut SolverBodies,
-        generic_solver_vels: &mut DVector<Real>,
+        generic_solver_vels: &mut DVector,
     ) {
         let jacobians = jacobians.as_slice();
 
@@ -295,11 +298,11 @@ impl GenericJointConstraint {
 
         let mut solver_vel1 = self.solver_vel1_mut(solver_vels, generic_solver_vels);
         let wj1 = DVectorView::from_slice(&jacobians[self.wj_id1()..], self.ndofs1);
-        solver_vel1.axpy(delta_impulse, &wj1, Real::from(1.0));
+        solver_vel1.axpy(delta_impulse, &wj1, 1.0);
 
         let mut solver_vel2 = self.solver_vel2_mut(solver_vels, generic_solver_vels);
         let wj2 = DVectorView::from_slice(&jacobians[self.wj_id2()..], self.ndofs2);
-        solver_vel2.axpy(-delta_impulse, &wj2, Real::from(1.0));
+        solver_vel2.axpy(-delta_impulse, &wj2, 1.0);
     }
 
     pub fn writeback_impulses(&self, joints_all: &mut [JointGraphEdge]) {
@@ -310,6 +313,8 @@ impl GenericJointConstraint {
                 WritebackId::Dof(i) => joint.impulses[i] = self.impulse,
                 WritebackId::Limit(i) => joint.data.limits[i].impulse = self.impulse,
                 WritebackId::Motor(i) => joint.data.motors[i].impulse = self.impulse,
+                // Writeback not supported yet for internal friction.
+                WritebackId::Friction(_) => {}
             }
         }
     }

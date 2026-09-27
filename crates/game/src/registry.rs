@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 /// Numeric material identity, assigned by the manifest. `AIR` is reserved.
 /// Serialized (over the wire) and hashed, so client and server must agree.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default,
+    Debug, Clone, Copy, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord, Default,
     serde::Serialize, serde::Deserialize,
 )]
 pub struct BlockId(pub u16);

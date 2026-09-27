@@ -177,7 +177,7 @@ impl Rig {
             let e = *data.player_entites.get(&CLIENT).expect("player owned here");
             let handle = *data.ecs.rigidbody.get(e);
             let t = data.physics.bodies.get(handle).unwrap().translation();
-            xz = Some((t.x.0, t.z.0));
+            xz = Some((t.x, t.z));
         });
         xz.expect("region is running")
     }

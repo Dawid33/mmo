@@ -1,7 +1,7 @@
+use crate::alloc_prelude::*;
 use crate::dynamics::{JointAxesMask, Multibody, MultibodyLink, RigidBodySet};
-use crate::math::{ANG_DIM, DIM, Isometry, Jacobian, Real, SPATIAL_DIM};
-use na::{self, DVector, SMatrix};
-use parry3d::math::SpacialVector;
+use crate::math::{ANG_DIM, DIM, DVector, Jacobian, Pose, Real, SPATIAL_DIM};
+use na::{self, SMatrix, SVector};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 /// Options for the jacobian-based Inverse Kinematics solver for multibodies.
@@ -30,11 +30,11 @@ pub struct InverseKinematicsOption {
 impl Default for InverseKinematicsOption {
     fn default() -> Self {
         Self {
-            damping: Real::from(1.0),
+            damping: 1.0,
             max_iters: 10,
             constrained_axes: JointAxesMask::all(),
-            epsilon_linear: Real::from(1.0e-3),
-            epsilon_angular: Real::from(1.0e-3),
+            epsilon_linear: 1.0e-3,
+            epsilon_angular: 1.0e-3,
         }
     }
 }
@@ -47,9 +47,9 @@ impl Multibody {
     pub fn inverse_kinematics_delta(
         &self,
         link_id: usize,
-        desired_movement: &SpacialVector<Real>,
+        desired_movement: &SVector<Real, SPATIAL_DIM>,
         damping: Real,
-        displacements: &mut DVector<Real>,
+        displacements: &mut DVector,
     ) {
         let body_jacobian = self.body_jacobian(link_id);
         Self::inverse_kinematics_delta_with_jacobian(
@@ -67,14 +67,14 @@ impl Multibody {
     #[profiling::function]
     pub fn inverse_kinematics_delta_with_jacobian(
         jacobian: &Jacobian<Real>,
-        desired_movement: &SpacialVector<Real>,
+        desired_movement: &SVector<Real, SPATIAL_DIM>,
         damping: Real,
-        displacements: &mut DVector<Real>,
+        displacements: &mut DVector,
     ) {
         let identity = SMatrix::<Real, SPATIAL_DIM, SPATIAL_DIM>::identity();
         let jj = jacobian * &jacobian.transpose() + identity * (damping * damping);
-        let inv_jj = jj.pseudo_inverse(Real::from(1.0e-5)).unwrap_or(identity);
-        displacements.gemv_tr(Real::from(1.0), jacobian, &(inv_jj * desired_movement), Real::from(1.0));
+        let inv_jj = jj.pseudo_inverse(1.0e-5).unwrap_or(identity);
+        displacements.gemv_tr(1.0, jacobian, &(inv_jj * desired_movement), 1.0);
     }
 
     /// Computes the displacement needed to have the link identified by `link_id` have a pose
@@ -95,9 +95,9 @@ impl Multibody {
         bodies: &RigidBodySet,
         link_id: usize,
         options: &InverseKinematicsOption,
-        target_pose: &Isometry<Real>,
+        target_pose: &Pose,
         joint_can_move: impl Fn(&MultibodyLink) -> bool,
-        displacements: &mut DVector<Real>,
+        displacements: &mut DVector,
     ) {
         let mut jacobian = Jacobian::zeros(0);
         let branch = self.kinematic_branch(link_id);
@@ -120,15 +120,18 @@ impl Multibody {
                     let link = &self.links[*id];
                     jacobian
                         .columns_mut(link.assembly_id, link.joint.ndofs())
-                        .fill(Real::from(0.0));
+                        .fill(0.0);
                 }
             }
 
-            let delta_lin = target_pose.translation.vector - pose.translation.vector;
-            let delta_ang = (target_pose.rotation * pose.rotation.inverse()).scaled_axis();
+            let delta_lin = target_pose.translation - pose.translation;
+            #[cfg(feature = "dim2")]
+            let delta_ang = (target_pose.rotation * pose.rotation.inverse()).angle();
+            #[cfg(feature = "dim3")]
+            let delta_ang = (target_pose.rotation * pose.rotation.inverse()).to_scaled_axis();
 
             #[cfg(feature = "dim2")]
-            let mut delta = na::vector![delta_lin.x, delta_lin.y, delta_ang.x];
+            let mut delta = na::vector![delta_lin.x, delta_lin.y, delta_ang];
             #[cfg(feature = "dim3")]
             let mut delta = na::vector![
                 delta_lin.x,
@@ -140,25 +143,25 @@ impl Multibody {
             ];
 
             if !options.constrained_axes.contains(JointAxesMask::LIN_X) {
-                delta[0] = Real::from(0.0);
+                delta[0] = 0.0;
             }
             if !options.constrained_axes.contains(JointAxesMask::LIN_Y) {
-                delta[1] = Real::from(0.0);
+                delta[1] = 0.0;
             }
             #[cfg(feature = "dim3")]
             if !options.constrained_axes.contains(JointAxesMask::LIN_Z) {
-                delta[2] = Real::from(0.0);
+                delta[2] = 0.0;
             }
             if !options.constrained_axes.contains(JointAxesMask::ANG_X) {
-                delta[DIM] = Real::from(0.0);
+                delta[DIM] = 0.0;
             }
             #[cfg(feature = "dim3")]
             if !options.constrained_axes.contains(JointAxesMask::ANG_Y) {
-                delta[DIM + 1] = Real::from(0.0);
+                delta[DIM + 1] = 0.0;
             }
             #[cfg(feature = "dim3")]
             if !options.constrained_axes.contains(JointAxesMask::ANG_Z) {
-                delta[DIM + 2] = Real::from(0.0);
+                delta[DIM + 2] = 0.0;
             }
 
             // TODO: measure convergence on the error variation instead?
@@ -180,11 +183,12 @@ impl Multibody {
 
 #[cfg(test)]
 mod test {
+    use crate::alloc_prelude::*;
     use crate::dynamics::{
         MultibodyJointHandle, MultibodyJointSet, RevoluteJointBuilder, RigidBodyBuilder,
         RigidBodySet,
     };
-    use crate::math::{Jacobian, Real, RawReal, Vector};
+    use crate::math::{Jacobian, Real, Vector};
     use approx::assert_relative_eq;
 
     #[test]
@@ -204,10 +208,10 @@ mod test {
             #[cfg(feature = "dim2")]
             let builder = RevoluteJointBuilder::new();
             #[cfg(feature = "dim3")]
-            let builder = RevoluteJointBuilder::new(Vector::z_axis());
+            let builder = RevoluteJointBuilder::new(Vector::Z);
             let link_ab = builder
-                .local_anchor1((Vector::y() * (Real::from(0.5) / Real::from(num_segments as RawReal))).into())
-                .local_anchor2((Vector::y() * (Real::from(-0.5) / Real::from(num_segments as RawReal))).into());
+                .local_anchor1(Vector::Y * (0.5 / num_segments as Real))
+                .local_anchor2(Vector::Y * (-0.5 / num_segments as Real));
             last_link = multibodies
                 .insert(last_body, new_body, link_ab, true)
                 .unwrap();
@@ -235,11 +239,11 @@ mod test {
          */
         let niter = 100;
         let displacement_part: Vec<_> = (0..multibody.ndofs())
-            .map(|i| Real::from(i as RawReal) * Real::from(-0.1) / Real::from(niter as RawReal))
+            .map(|i| i as Real * -0.1 / niter as Real)
             .collect();
         let displacement_total: Vec<_> = displacement_part
             .iter()
-            .map(|d| *d * Real::from(niter as RawReal))
+            .map(|d| *d * niter as Real)
             .collect();
         let link_pose2 = multibody.forward_kinematics_single_link(
             &bodies,
@@ -255,7 +259,7 @@ mod test {
 
         let link_pose1 = *multibody.link(last_id).unwrap().local_to_world();
         let jacobian1 = multibody.body_jacobian(last_id);
-        assert_relative_eq!(link_pose1, link_pose2, epsilon = Real::from(1.0e-5));
-        assert_relative_eq!(jacobian1, &jacobian2, epsilon = Real::from(1.0e-5));
+        assert_relative_eq!(link_pose1, link_pose2, epsilon = 1.0e-5);
+        assert_relative_eq!(jacobian1, &jacobian2, epsilon = 1.0e-5);
     }
 }

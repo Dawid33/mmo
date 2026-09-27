@@ -17,14 +17,14 @@
 //! the player's home region. A ray that leaves the region finds nothing.
 
 
-use parry3d::math::{Isometry, Real, Vector};
+use rapier3d::math::Vector;
 use rapier3d::prelude::ColliderBuilder;
 use slotmapd::Key as _;
 
 use crate::movement::PLAYER_EYE_OFFSET;
 use crate::{
     Block, BlockId, BlockIndex, Chunk, ChunkCoords, ClientId, EntityKey, GameDataTransactionKind,
-    GameDataUpdate, GameDataUpdateKind, IsometryReal, MouseButton, Rollback, BLOCK_VOXELS, CHUNK_BLOCKS,
+    GameDataUpdate, GameDataUpdateKind, Pose, MouseButton, Rollback, BLOCK_VOXELS, CHUNK_BLOCKS,
     REGION_CHUNKS,
 };
 
@@ -89,19 +89,19 @@ impl Rollback {
     /// Walks the block grid from `origin` along `dir` (world units, `dir`
     /// normalised) and returns the first solid block within `reach` metres.
     /// Amanatides–Woo voxel traversal at block scale.
-    pub fn raycast_block(&self, origin: Vector<Real>, dir: Vector<Real>, reach: f32) -> Option<BlockHit> {
+    pub fn raycast_block(&self, origin: Vector, dir: Vector, reach: f32) -> Option<BlockHit> {
         self.raycast_block_in(origin, dir, reach)
     }
 
     fn raycast_block_in(
         &self,
-        origin: Vector<Real>,
-        dir: Vector<Real>,
+        origin: Vector,
+        dir: Vector,
         reach: f32,
     ) -> Option<BlockHit> {
         let size = BLOCK_VOXELS as f32;
-        let p = [origin.x.0 / size, origin.y.0 / size, origin.z.0 / size];
-        let d = [dir.x.0, dir.y.0, dir.z.0];
+        let p = [origin.x / size, origin.y / size, origin.z / size];
+        let d = [dir.x, dir.y, dir.z];
         let mut cell = [p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32];
         let mut step = [0i32; 3];
         let mut t_max = [f32::INFINITY; 3];
@@ -156,7 +156,7 @@ impl Rollback {
                 let Some(collider) = self.data.physics.colliders.get(ch) else { continue };
                 let aabb = collider.compute_aabb();
                 let (mins, maxs) = (aabb.mins, aabb.maxs);
-                let overlaps = (0..3).all(|a| mins[a].0 < hi[a] && maxs[a].0 > lo[a]);
+                let overlaps = (0..3).all(|a| mins[a] < hi[a] && maxs[a] > lo[a]);
                 if overlaps {
                     return true;
                 }
@@ -203,10 +203,10 @@ impl Rollback {
             let e = self.create_mesh(coords, chunk);
             // create_mesh tells the renderer nothing but CreateEntity: give
             // the new chunk its place and its voxels.
-            let pose = IsometryReal::translation(
-                Real::from((coords.x * 32) as f32),
-                Real::from((coords.y * 32) as f32),
-                Real::from((coords.z * 32) as f32),
+            let pose = Pose::translation(
+                (coords.x * 32) as f32,
+                (coords.y * 32) as f32,
+                (coords.z * 32) as f32,
             );
             self.data.send(GameDataUpdate::new(
                 GameDataTransactionKind::Do,
@@ -256,7 +256,7 @@ impl Rollback {
         let wanted: Vec<_> = cells
             .grids()
             .map(|(size, keys)| {
-                ColliderBuilder::voxels(Vector::repeat(Real::from(size)), keys)
+                ColliderBuilder::voxels(Vector::splat(size), keys)
                     .user_data(user_data)
                     .build()
             })
@@ -272,8 +272,8 @@ impl Rollback {
                     let shape = w.shared_shape().clone();
                     self.data.physics.colliders.mutate_collider_safe(ch, move |c| {
                         c.set_shape(shape);
-                        if c.position_wrt_parent().is_some_and(|p| *p != Isometry::identity()) {
-                            c.set_position_wrt_parent(Isometry::identity());
+                        if c.position_wrt_parent().is_some_and(|p| *p != Pose::IDENTITY) {
+                            c.set_position_wrt_parent(Pose::IDENTITY);
                         }
                         if !c.is_enabled() {
                             c.set_enabled(true);
@@ -301,10 +301,9 @@ impl Rollback {
         let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { return false };
         let Some(body) = self.data.physics.bodies.get(handle) else { return false };
         let Some(camera) = self.data.ecs.camera.try_get(e).as_ref() else { return false };
-        let eye = body.translation() + Vector::new(Real::from(0.0), Real::from(PLAYER_EYE_OFFSET), Real::from(0.0));
+        let eye = body.translation() + Vector::new(0.0, PLAYER_EYE_OFFSET, 0.0);
         // Cameras look down -Z, as the renderer's Camera3d does.
-        let dir = crate::look_quat(camera.yaw, camera.pitch)
-            .transform_vector(&Vector::new(Real::from(0.0), Real::from(0.0), Real::from(-1.0)));
+        let dir = crate::look_quat(camera.yaw, camera.pitch) * Vector::new(0.0, 0.0, -1.0);
         let Some(hit) = self.raycast_block_in(eye, dir, REACH) else { return false };
         match action {
             EditAction::Break => self.set_block_in(hit.block, Block::new(BlockId::AIR)),

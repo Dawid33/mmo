@@ -1,36 +1,52 @@
 use crate::bounding_volume::{Aabb, BoundingVolume};
-use crate::math::{Isometry, Point, Real, Translation, Vector, DIM};
+use crate::math::{IVector, IVectorExt, Int, Pose, Real, Vector, VectorExt, DIM};
 use crate::query::{
     ContactManifold, ContactManifoldsWorkspace, PersistentQueryDispatcher, PointQuery,
     TypedWorkspaceData, WorkspaceData,
 };
 use crate::shape::{AxisMask, Cuboid, Shape, SupportMap, VoxelData, VoxelType, Voxels};
 use crate::utils::hashmap::{Entry, HashMap};
-use crate::utils::IsometryOpt;
+use crate::utils::PoseOpt;
 use alloc::{boxed::Box, vec::Vec};
-use na::{SVector, Vector2};
+use num::AsPrimitive;
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[cfg_attr(
     feature = "rkyv",
-    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize),
-    archive(check_bytes)
+    derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
-#[derive(Clone, Hash)]
+#[derive(Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct VoxelsShapeSubDetector {
     pub manifold_id: usize,
     pub selected_contacts: u32,
     pub timestamp: bool,
 }
 
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(Clone, Eq, Hash, PartialEq)]
+// mmo-fork: StateHash (+ Ord: a hashbrown-keyed workspace map hashes sorted by key).
+#[derive(state_hash::StateHash, PartialOrd, Ord)]
+pub(crate) struct VoxelsWorkspaceKey<const N: usize> {
+    #[cfg_attr(feature = "serde-serialize", serde(with = "serde_arrays"))]
+    idx: [u32; N],
+}
+
+impl<const N: usize> From<[u32; N]> for VoxelsWorkspaceKey<N> {
+    fn from(idx: [u32; N]) -> Self {
+        Self { idx }
+    }
+}
+
 // NOTE: this is using a similar kind of cache as compound shape and height-field.
 //       It is different from the trimesh cash though. Which one is better?
 /// A workspace for collision-detection against voxels shape.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Hash)]
+#[derive(Clone, Default)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct VoxelsShapeContactManifoldsWorkspace<const N: usize> {
     pub(crate) timestamp: bool,
-    pub(crate) sub_detectors: HashMap<SVector<u32, N>, VoxelsShapeSubDetector>,
+    pub(crate) sub_detectors: HashMap<VoxelsWorkspaceKey<N>, VoxelsShapeSubDetector>,
 }
 
 impl<const N: usize> VoxelsShapeContactManifoldsWorkspace<N> {
@@ -72,7 +88,7 @@ impl WorkspaceData for VoxelsShapeContactManifoldsWorkspace<2> {
 /// Computes the contact manifold between a convex shape and a voxels shape, both represented as a `Shape` trait-object.
 pub fn contact_manifolds_voxels_shape_shapes<ManifoldData, ContactData>(
     dispatcher: &dyn PersistentQueryDispatcher<ManifoldData, ContactData>,
-    pos12: &Isometry<Real>,
+    pos12: &Pose,
     shape1: &dyn Shape,
     shape2: &dyn Shape,
     prediction: Real,
@@ -103,7 +119,7 @@ pub fn contact_manifolds_voxels_shape_shapes<ManifoldData, ContactData>(
 /// Computes the contact manifold between a convex shape and a voxels shape.
 pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
     dispatcher: &dyn PersistentQueryDispatcher<ManifoldData, ContactData>,
-    pos12: &Isometry<Real>,
+    pos12: &Pose,
     voxels1: &Voxels,
     shape2: &dyn Shape,
     prediction: Real,
@@ -123,18 +139,15 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
     // TODO: avoid reallocating the new `manifolds` vec at each step.
     let mut old_manifolds = core::mem::take(manifolds);
 
-    let radius1 = voxels1.voxel_size() / Real::from(2.0);
+    let radius1 = voxels1.voxel_size() / 2.0;
 
-    // The shape's AABB is loosened by the prediction: a shape hovering within
-    // `prediction` of the surface (the character controller rests one skin
-    // offset above it) must still visit the surface voxels below it and get
-    // its predictive contacts, or it is never seen as grounded. Only this
-    // side is loosened, so the intersection still lies inside the voxels.
     let aabb1 = voxels1.local_aabb();
+    // Loosen by `prediction` (like the trimesh/heightfield/compound manifold generators do)
+    // so that speculative contacts within the prediction distance are generated too.
     let aabb2_1 = shape2.compute_aabb(pos12).loosened(prediction);
     let domain2_1 = Aabb {
-        mins: aabb2_1.mins - radius1 * Real::from(10.0),
-        maxs: aabb2_1.maxs + radius1 * Real::from(10.0),
+        mins: aabb2_1.mins - radius1 * 10.0,
+        maxs: aabb2_1.maxs + radius1 * 10.0,
     };
 
     if let Some(intersection_aabb1) = aabb1.intersection(&aabb2_1) {
@@ -151,7 +164,7 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
             // TODO: could we refactor the workspace system between Voxels, HeightField, and CompoundShape?
             //       (and maybe TriMesh too but it’s using a different approach).
             let (sub_detector, manifold_updated) =
-                match workspace.sub_detectors.entry(canon1.workspace_key) {
+                match workspace.sub_detectors.entry(canon1.workspace_key.into()) {
                     Entry::Occupied(entry) => {
                         let sub_detector = entry.into_mut();
 
@@ -198,7 +211,7 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
                     canon1.cuboid(voxels1, &vox1, domain2_1);
 
                 let canonical_shape1 = &canonical_pseudo_cube1 as &dyn Shape;
-                let canonical_pos12 = Translation::from(-canonical_center1) * pos12;
+                let canonical_pos12 = Pose::from_translation(-canonical_center1) * pos12;
 
                 // If we already computed contacts in the previous simulation step, their
                 // local points are relative to the previously calculated canonical shape
@@ -208,18 +221,18 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
                 // and keep the point at the same "canonica-shape-space" location as in the previous frame.
                 let prev_center = if flipped {
                     manifold
-                        .subshape_pos2
+                        .subshape_pos2()
                         .as_ref()
-                        .map(|p| p.translation.vector)
+                        .map(|p| p.translation)
                         .unwrap_or_default()
                 } else {
                     manifold
-                        .subshape_pos1
+                        .subshape_pos1()
                         .as_ref()
-                        .map(|p| p.translation.vector)
+                        .map(|p| p.translation)
                         .unwrap_or_default()
                 };
-                let delta_center = canonical_center1.coords - prev_center;
+                let delta_center = canonical_center1 - prev_center;
 
                 if flipped {
                     for pt in &mut manifold.points {
@@ -233,7 +246,7 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
 
                 // Update contacts.
                 if flipped {
-                    manifold.subshape_pos2 = Some(Isometry::from(canonical_center1));
+                    manifold.set_subshape_pos2(Some(Pose::from_translation(canonical_center1)));
                     let _ = dispatcher.contact_manifold_convex_convex(
                         &canonical_pos12.inverse(),
                         shape2,
@@ -244,7 +257,7 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
                         manifold,
                     );
                 } else {
-                    manifold.subshape_pos1 = Some(Isometry::from(canonical_center1));
+                    manifold.set_subshape_pos1(Some(Pose::from_translation(canonical_center1)));
                     let _ = dispatcher.contact_manifold_convex_convex(
                         &canonical_pos12,
                         canonical_shape1,
@@ -260,7 +273,7 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
             /*
              * Filter-out points that don’t belong to this block.
              */
-            let test_voxel = Cuboid::new(radius1 + Vector::repeat(Real::from(1.0e-2)));
+            let test_voxel = Cuboid::new(radius1 + Vector::splat(1.0e-2));
             let penetration_dir1 = if flipped {
                 manifold.local_n2
             } else {
@@ -268,17 +281,17 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
             };
 
             for (i, pt) in manifold.points.iter().enumerate() {
-                if pt.dist < Real::from(0.0) {
+                if pt.dist < 0.0 {
                     // If this is a penetration, double-check that we are not hitting the
                     // interior of the infinitely expanded canonical shape by checking if
                     // the opposite normal had led to a better vector.
                     let cuboid1 = Cuboid::new(radius1);
-                    let sp1 = cuboid1.local_support_point(&-penetration_dir1) + vox1.center.coords;
+                    let sp1 = cuboid1.local_support_point(-penetration_dir1) + vox1.center;
                     let sm2 = shape2
                         .as_support_map()
                         .expect("Unsupported collision pair.");
-                    let sp2 = sm2.support_point(pos12, &penetration_dir1);
-                    let test_dist = (sp2 - sp1).dot(&-penetration_dir1);
+                    let sp2 = sm2.support_point(pos12, penetration_dir1);
+                    let test_dist = (sp2 - sp1).dot(-penetration_dir1);
                     let keep = test_dist < pt.dist;
 
                     if !keep {
@@ -289,12 +302,12 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
                 }
 
                 let pt_in_voxel_space = if flipped {
-                    manifold.subshape_pos2.transform_point(&pt.local_p2) - vox1.center.coords
+                    manifold.subshape_pos2().transform_point(pt.local_p2) - vox1.center
                 } else {
-                    manifold.subshape_pos1.transform_point(&pt.local_p1) - vox1.center.coords
+                    manifold.subshape_pos1().transform_point(pt.local_p1) - vox1.center
                 };
                 sub_detector.selected_contacts |=
-                    (test_voxel.contains_local_point(&pt_in_voxel_space) as u32) << i;
+                    (test_voxel.contains_local_point(pt_in_voxel_space) as u32) << i;
             }
         }
     }
@@ -320,8 +333,8 @@ pub fn contact_manifolds_voxels_shape<ManifoldData, ContactData>(
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct CanonicalVoxelShape {
-    pub range: [Point<i32>; 2],
-    pub workspace_key: Vector2<u32>,
+    pub range: [IVector; 2],
+    pub workspace_key: [u32; 2],
 }
 
 impl CanonicalVoxelShape {
@@ -332,68 +345,63 @@ impl CanonicalVoxelShape {
         // NOTE: the mins/maxs here are offset by 1 so we can expand past the last voxel if it
         //       happens to also be infinite along the same axis (due to cross-voxels internal edges
         //       detection).
-        let mins = voxels.domain()[0] - Vector::repeat(1);
+        let mins = voxels.domain()[0] - IVector::splat(1);
         let maxs = voxels.domain()[1];
         let counts = maxs - mins;
         let mask1 = vox.state.free_faces();
 
-        let adjust_canon = |axis: AxisMask, i: usize, key: &mut Point<i32>, val: i32| {
+        let adjust_canon = |axis: AxisMask, i: usize, key: &mut IVector, val: Int| {
             if !mask1.contains(axis) {
-                key[i] = val;
+                key.ivset(i, val.as_());
             }
         };
 
-        adjust_canon(AxisMask::X_POS, 0, &mut key_high, maxs[0]);
-        adjust_canon(AxisMask::X_NEG, 0, &mut key_low, mins[0]);
-        adjust_canon(AxisMask::Y_POS, 1, &mut key_high, maxs[1]);
-        adjust_canon(AxisMask::Y_NEG, 1, &mut key_low, mins[1]);
+        adjust_canon(AxisMask::X_POS, 0, &mut key_high, maxs.x);
+        adjust_canon(AxisMask::X_NEG, 0, &mut key_low, mins.x);
+        adjust_canon(AxisMask::Y_POS, 1, &mut key_high, maxs.y);
+        adjust_canon(AxisMask::Y_NEG, 1, &mut key_low, mins.y);
 
         #[cfg(feature = "dim3")]
         {
-            adjust_canon(AxisMask::Z_POS, 2, &mut key_high, maxs[2]);
-            adjust_canon(AxisMask::Z_NEG, 2, &mut key_low, mins[2]);
+            adjust_canon(AxisMask::Z_POS, 2, &mut key_high, maxs.z);
+            adjust_canon(AxisMask::Z_NEG, 2, &mut key_low, mins.z);
         }
 
         #[cfg(feature = "dim2")]
-        let workspace_id = |vox: Point<i32>| {
+        let workspace_id = |vox: IVector| {
             let local = vox - mins;
             (local.x + local.y * counts.x) as u32
         };
 
         #[cfg(feature = "dim3")]
-        let workspace_id = |vox: Point<i32>| {
+        let workspace_id = |vox: IVector| {
             let local = vox - mins;
             (local.x + local.y * counts.x + local.z * counts.x * counts.y) as u32
         };
 
         Self {
             range: [key_low, key_high],
-            workspace_key: Vector2::new(workspace_id(key_low), workspace_id(key_high)),
+            workspace_key: [workspace_id(key_low), workspace_id(key_high)],
         }
     }
 
-    pub fn cuboid(
-        &self,
-        voxels: &Voxels,
-        vox: &VoxelData,
-        domain2_1: Aabb,
-    ) -> (Point<Real>, Cuboid) {
-        let radius = voxels.voxel_size() / Real::from(2.0);
+    pub fn cuboid(&self, voxels: &Voxels, vox: &VoxelData, domain2_1: Aabb) -> (Vector, Cuboid) {
+        let radius = voxels.voxel_size() / 2.0;
         let mut canonical_mins = voxels.voxel_center(self.range[0]);
         let mut canonical_maxs = voxels.voxel_center(self.range[1]);
 
         for k in 0..DIM {
-            if self.range[0][k] != vox.grid_coords[k] {
-                canonical_mins[k] = canonical_mins[k].max(domain2_1.mins[k]);
+            if self.range[0].ivget(k) != vox.grid_coords.ivget(k) {
+                canonical_mins.vset(k, canonical_mins.vget(k).max(domain2_1.mins.vget(k)));
             }
 
-            if self.range[1][k] != vox.grid_coords[k] {
-                canonical_maxs[k] = canonical_maxs[k].min(domain2_1.maxs[k]);
+            if self.range[1].ivget(k) != vox.grid_coords.ivget(k) {
+                canonical_maxs.vset(k, canonical_maxs.vget(k).min(domain2_1.maxs.vget(k)));
             }
         }
 
-        let canonical_half_extents = (canonical_maxs - canonical_mins) / Real::from(2.0) + radius;
-        let canonical_center = na::center(&canonical_mins, &canonical_maxs);
+        let canonical_half_extents = (canonical_maxs - canonical_mins) / 2.0 + radius;
+        let canonical_center = canonical_mins.midpoint(canonical_maxs);
         let canonical_cube = Cuboid::new(canonical_half_extents);
 
         (canonical_center, canonical_cube)

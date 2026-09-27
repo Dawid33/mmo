@@ -1,12 +1,6 @@
-#[cfg(feature = "alloc")]
-use alloc::{boxed::Box, vec::Vec};
-use core::fmt::Debug;
-
 use crate::bounding_volume::{Aabb, BoundingSphere, BoundingVolume};
 use crate::mass_properties::MassProperties;
-use crate::math::{Isometry, Point, Real, RawReal, Vector};
-#[cfg(not(feature = "alloc"))]
-use crate::num::Float;
+use crate::math::{Pose, Real, RealField, Vector};
 use crate::query::{PointQuery, RayCast};
 #[cfg(feature = "serde-serialize")]
 use crate::shape::SharedShape;
@@ -14,10 +8,14 @@ use crate::shape::SharedShape;
 use crate::shape::{composite_shape::CompositeShape, Compound, HeightField, Polyline, TriMesh};
 use crate::shape::{
     Ball, Capsule, Cuboid, FeatureId, HalfSpace, PolygonalFeatureMap, RoundCuboid, RoundShape,
-    RoundTriangle, Segment, SupportMap, Triangle,
+    RoundTriangle, Segment, SubShapeId, SupportMap, Triangle,
 };
 #[cfg(feature = "dim3")]
 use crate::shape::{Cone, Cylinder, RoundCone, RoundCylinder};
+#[cfg(feature = "alloc")]
+use alloc::{boxed::Box, vec::Vec};
+use core::any::Any;
+use core::fmt::Debug;
 
 #[cfg(feature = "dim3")]
 #[cfg(feature = "alloc")]
@@ -26,13 +24,12 @@ use crate::shape::{ConvexPolyhedron, RoundConvexPolyhedron, Voxels};
 #[cfg(feature = "dim2")]
 #[cfg(feature = "alloc")]
 use crate::shape::{ConvexPolygon, RoundConvexPolygon, Voxels};
-use downcast_rs::{impl_downcast, DowncastSync};
-use na::{RealField, Unit};
 use num::Zero;
 use num_derive::FromPrimitive;
 
 #[derive(Copy, Clone, Debug, FromPrimitive, PartialEq, Eq, Hash)]
 /// Enum representing the type of a shape.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum ShapeType {
     /// A ball shape.
     Ball = 0,
@@ -336,7 +333,8 @@ impl DeserializableTypedShape {
 }
 
 /// Trait implemented by shapes usable by Rapier.
-pub trait Shape: RayCast + PointQuery + DowncastSync + crate::DynHash {
+// mmo-fork: StateHash — every shape is state-hashable, so `dyn Shape` can dispatch.
+pub trait Shape: RayCast + PointQuery + Any + Send + Sync + state_hash::DynStateHash {
     /// Computes the [`Aabb`] of this shape.
     fn compute_local_aabb(&self) -> Aabb;
     /// Computes the bounding-sphere of this shape.
@@ -363,14 +361,14 @@ pub trait Shape: RayCast + PointQuery + DowncastSync + crate::DynHash {
     /// if a non-uniform scale is provided and Self as a [`Ball`], then the result will be discretized
     /// (based on the `num_subdivisions` parameter) as a `ConvexPolyhedron` (in 3D) or `ConvexPolygon` (in 2D).
     #[cfg(feature = "alloc")]
-    fn scale_dyn(&self, scale: &Vector<Real>, num_subdivisions: u32) -> Option<Box<dyn Shape>>;
+    fn scale_dyn(&self, scale: Vector, num_subdivisions: u32) -> Option<Box<dyn Shape>>;
 
     /// Computes the [`Aabb`] of this shape with the given position.
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.compute_local_aabb().transform_by(position)
     }
     /// Computes the bounding-sphere of this shape with the given position.
-    fn compute_bounding_sphere(&self, position: &Isometry<Real>) -> BoundingSphere {
+    fn compute_bounding_sphere(&self, position: &Pose) -> BoundingSphere {
         self.compute_local_bounding_sphere().transform_by(position)
     }
 
@@ -408,7 +406,7 @@ pub trait Shape: RayCast + PointQuery + DowncastSync + crate::DynHash {
     }
 
     #[cfg(feature = "alloc")]
-    fn as_composite_shape(&self) -> Option<&dyn CompositeShape> {
+    fn as_composite_shape(&self) -> Option<&(dyn CompositeShape + Sync)> {
         None
     }
 
@@ -422,262 +420,265 @@ pub trait Shape: RayCast + PointQuery + DowncastSync + crate::DynHash {
     // }
 
     /// The shape's normal at the given point located on a specific feature.
+    ///
+    /// `subshape` identifies the sub-shape the feature belongs to, as a query result reports it;
+    /// it is `0` for a shape with no sub-shapes. `feature` is that sub-shape's own feature.
     fn feature_normal_at_point(
         &self,
+        _subshape: SubShapeId,
         _feature: FeatureId,
-        _point: &Point<Real>,
-    ) -> Option<Unit<Vector<Real>>> {
+        _point: Vector,
+    ) -> Option<Vector> {
         None
     }
 
     /// Computes the swept [`Aabb`] of this shape, i.e., the space it would occupy by moving from
     /// the given start position to the given end position.
-    fn compute_swept_aabb(&self, start_pos: &Isometry<Real>, end_pos: &Isometry<Real>) -> Aabb {
+    fn compute_swept_aabb(&self, start_pos: &Pose, end_pos: &Pose) -> Aabb {
         let aabb1 = self.compute_aabb(start_pos);
         let aabb2 = self.compute_aabb(end_pos);
         aabb1.merged(&aabb2)
     }
 }
 
-impl_downcast!(sync Shape);
-
-impl std::hash::Hash for dyn Shape {
-    fn hash<H>(&self, state: &mut H)
-    where
-        H: std::hash::Hasher {
-        self.dyn_hash(state);
+// mmo-fork: StateHash — the concrete shape's type first (a `Cone` and a
+// `Cylinder` with equal fields must differ), then its own `StateHash`.
+impl state_hash::StateHash for dyn Shape {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        state_hash::StateHash::state_hash(&self.shape_type(), h);
+        self.dyn_state_hash(h);
     }
 }
 
 impl dyn Shape {
     /// Converts this abstract shape to the given shape, if it is one.
     pub fn as_shape<T: Shape>(&self) -> Option<&T> {
-        self.downcast_ref()
+        (self as &dyn Any).downcast_ref()
     }
     /// Converts this abstract shape to the given mutable shape, if it is one.
     pub fn as_shape_mut<T: Shape>(&mut self) -> Option<&mut T> {
-        self.downcast_mut()
+        (self as &mut dyn Any).downcast_mut()
     }
 
     /// Converts this abstract shape to a ball, if it is one.
     pub fn as_ball(&self) -> Option<&Ball> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable ball, if it is one.
     pub fn as_ball_mut(&mut self) -> Option<&mut Ball> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a cuboid, if it is one.
     pub fn as_cuboid(&self) -> Option<&Cuboid> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable cuboid, if it is one.
     pub fn as_cuboid_mut(&mut self) -> Option<&mut Cuboid> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a halfspace, if it is one.
     pub fn as_halfspace(&self) -> Option<&HalfSpace> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a halfspace, if it is one.
     pub fn as_halfspace_mut(&mut self) -> Option<&mut HalfSpace> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a segment, if it is one.
     pub fn as_segment(&self) -> Option<&Segment> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable segment, if it is one.
     pub fn as_segment_mut(&mut self) -> Option<&mut Segment> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a capsule, if it is one.
     pub fn as_capsule(&self) -> Option<&Capsule> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable capsule, if it is one.
     pub fn as_capsule_mut(&mut self) -> Option<&mut Capsule> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a triangle, if it is one.
     pub fn as_triangle(&self) -> Option<&Triangle> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable triangle, if it is one.
     pub fn as_triangle_mut(&mut self) -> Option<&mut Triangle> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to voxels, if it is one.
     #[cfg(feature = "alloc")]
     pub fn as_voxels(&self) -> Option<&Voxels> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to mutable voxels, if it is one.
     #[cfg(feature = "alloc")]
     pub fn as_voxels_mut(&mut self) -> Option<&mut Voxels> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a compound shape, if it is one.
     #[cfg(feature = "alloc")]
     pub fn as_compound(&self) -> Option<&Compound> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable compound shape, if it is one.
     #[cfg(feature = "alloc")]
     pub fn as_compound_mut(&mut self) -> Option<&mut Compound> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a triangle mesh, if it is one.
     #[cfg(feature = "alloc")]
     pub fn as_trimesh(&self) -> Option<&TriMesh> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable triangle mesh, if it is one.
     #[cfg(feature = "alloc")]
     pub fn as_trimesh_mut(&mut self) -> Option<&mut TriMesh> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a polyline, if it is one.
     #[cfg(feature = "alloc")]
     pub fn as_polyline(&self) -> Option<&Polyline> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable polyline, if it is one.
     #[cfg(feature = "alloc")]
     pub fn as_polyline_mut(&mut self) -> Option<&mut Polyline> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a heightfield, if it is one.
     #[cfg(feature = "alloc")]
     pub fn as_heightfield(&self) -> Option<&HeightField> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable heightfield, if it is one.
     #[cfg(feature = "alloc")]
     pub fn as_heightfield_mut(&mut self) -> Option<&mut HeightField> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a round cuboid, if it is one.
     pub fn as_round_cuboid(&self) -> Option<&RoundCuboid> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable round cuboid, if it is one.
     pub fn as_round_cuboid_mut(&mut self) -> Option<&mut RoundCuboid> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a round triangle, if it is one.
     pub fn as_round_triangle(&self) -> Option<&RoundTriangle> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a round triangle, if it is one.
     pub fn as_round_triangle_mut(&mut self) -> Option<&mut RoundTriangle> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a convex polygon, if it is one.
     #[cfg(feature = "dim2")]
     #[cfg(feature = "alloc")]
     pub fn as_convex_polygon(&self) -> Option<&ConvexPolygon> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable convex polygon, if it is one.
     #[cfg(feature = "dim2")]
     #[cfg(feature = "alloc")]
     pub fn as_convex_polygon_mut(&mut self) -> Option<&mut ConvexPolygon> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a round convex polygon, if it is one.
     #[cfg(feature = "dim2")]
     #[cfg(feature = "alloc")]
     pub fn as_round_convex_polygon(&self) -> Option<&RoundConvexPolygon> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable round convex polygon, if it is one.
     #[cfg(feature = "dim2")]
     #[cfg(feature = "alloc")]
     pub fn as_round_convex_polygon_mut(&mut self) -> Option<&mut RoundConvexPolygon> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     #[cfg(feature = "dim3")]
     #[cfg(feature = "alloc")]
     pub fn as_convex_polyhedron(&self) -> Option<&ConvexPolyhedron> {
-        self.downcast_ref()
+        self.as_shape()
     }
     #[cfg(feature = "dim3")]
     #[cfg(feature = "alloc")]
     pub fn as_convex_polyhedron_mut(&mut self) -> Option<&mut ConvexPolyhedron> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a cylinder, if it is one.
     #[cfg(feature = "dim3")]
     pub fn as_cylinder(&self) -> Option<&Cylinder> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable cylinder, if it is one.
     #[cfg(feature = "dim3")]
     pub fn as_cylinder_mut(&mut self) -> Option<&mut Cylinder> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a cone, if it is one.
     #[cfg(feature = "dim3")]
     pub fn as_cone(&self) -> Option<&Cone> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable cone, if it is one.
     #[cfg(feature = "dim3")]
     pub fn as_cone_mut(&mut self) -> Option<&mut Cone> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a round cylinder, if it is one.
     #[cfg(feature = "dim3")]
     pub fn as_round_cylinder(&self) -> Option<&RoundCylinder> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable round cylinder, if it is one.
     #[cfg(feature = "dim3")]
     pub fn as_round_cylinder_mut(&mut self) -> Option<&mut RoundCylinder> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a round cone, if it is one.
     #[cfg(feature = "dim3")]
     pub fn as_round_cone(&self) -> Option<&RoundCone> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable round cone, if it is one.
     #[cfg(feature = "dim3")]
     pub fn as_round_cone_mut(&mut self) -> Option<&mut RoundCone> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 
     /// Converts this abstract shape to a round convex polyhedron, if it is one.
     #[cfg(feature = "dim3")]
     #[cfg(feature = "alloc")]
     pub fn as_round_convex_polyhedron(&self) -> Option<&RoundConvexPolyhedron> {
-        self.downcast_ref()
+        self.as_shape()
     }
     /// Converts this abstract shape to a mutable round convex polyhedron, if it is one.
     #[cfg(feature = "dim3")]
     #[cfg(feature = "alloc")]
     pub fn as_round_convex_polyhedron_mut(&mut self) -> Option<&mut RoundConvexPolyhedron> {
-        self.downcast_mut()
+        self.as_shape_mut()
     }
 }
 
@@ -688,7 +689,7 @@ impl Shape for Ball {
     }
 
     #[cfg(feature = "alloc")]
-    fn scale_dyn(&self, scale: &Vector<Real>, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         let scaled = self.scaled(scale, num_subdivisions)?;
         Some(scaled.either::<_, _, Box<dyn Shape>>(|x| Box::new(x), |x| Box::new(x)))
     }
@@ -701,7 +702,7 @@ impl Shape for Ball {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -737,10 +738,11 @@ impl Shape for Ball {
     #[inline]
     fn feature_normal_at_point(
         &self,
+        _: SubShapeId,
         _: FeatureId,
-        point: &Point<Real>,
-    ) -> Option<Unit<Vector<Real>>> {
-        Unit::try_new(point.coords, Real::from(crate::math::DEFAULT_EPSILON))
+        point: Vector,
+    ) -> Option<Vector> {
+        (point).try_normalize()
     }
 }
 
@@ -751,7 +753,7 @@ impl Shape for Cuboid {
     }
 
     #[cfg(feature = "alloc")]
-    fn scale_dyn(&self, scale: &Vector<Real>, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         Some(Box::new(self.scaled(scale)))
     }
 
@@ -763,7 +765,7 @@ impl Shape for Cuboid {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -784,7 +786,7 @@ impl Shape for Cuboid {
     }
 
     fn ccd_thickness(&self) -> Real {
-        self.half_extents.min()
+        self.half_extents.min_element()
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -796,14 +798,15 @@ impl Shape for Cuboid {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
+        Some((self as &dyn PolygonalFeatureMap, 0.0))
     }
 
     fn feature_normal_at_point(
         &self,
+        _subshape: SubShapeId,
         feature: FeatureId,
-        _point: &Point<Real>,
-    ) -> Option<Unit<Vector<Real>>> {
+        _point: Vector,
+    ) -> Option<Vector> {
         self.feature_normal(feature)
     }
 }
@@ -815,7 +818,7 @@ impl Shape for Capsule {
     }
 
     #[cfg(feature = "alloc")]
-    fn scale_dyn(&self, scale: &Vector<Real>, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         let scaled = self.scaled(scale, num_subdivisions)?;
         Some(scaled.either::<_, _, Box<dyn Shape>>(|x| Box::new(x), |x| Box::new(x)))
     }
@@ -828,7 +831,7 @@ impl Shape for Capsule {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -872,7 +875,7 @@ impl Shape for Triangle {
     }
 
     #[cfg(feature = "alloc")]
-    fn scale_dyn(&self, scale: &Vector<Real>, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         Some(Box::new(self.scaled(scale)))
     }
 
@@ -884,13 +887,13 @@ impl Shape for Triangle {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
     fn mass_properties(&self, _density: Real) -> MassProperties {
         #[cfg(feature = "dim2")]
-        return MassProperties::from_triangle(_density, &self.a, &self.b, &self.c);
+        return MassProperties::from_triangle(_density, self.a, self.b, self.c);
         #[cfg(feature = "dim3")]
         return MassProperties::zero();
     }
@@ -909,7 +912,7 @@ impl Shape for Triangle {
 
     fn ccd_thickness(&self) -> Real {
         // TODO: in 2D use the smallest height of the triangle.
-        0.0.into()
+        0.0
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -921,14 +924,15 @@ impl Shape for Triangle {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
+        Some((self as &dyn PolygonalFeatureMap, 0.0))
     }
 
     fn feature_normal_at_point(
         &self,
+        _subshape: SubShapeId,
         _feature: FeatureId,
-        _point: &Point<Real>,
-    ) -> Option<Unit<Vector<Real>>> {
+        _point: Vector,
+    ) -> Option<Vector> {
         #[cfg(feature = "dim2")]
         return None;
         #[cfg(feature = "dim3")]
@@ -943,7 +947,7 @@ impl Shape for Segment {
     }
 
     #[cfg(feature = "alloc")]
-    fn scale_dyn(&self, scale: &Vector<Real>, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         Some(Box::new(self.scaled(scale)))
     }
 
@@ -955,7 +959,7 @@ impl Shape for Segment {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -968,7 +972,7 @@ impl Shape for Segment {
     }
 
     fn ccd_thickness(&self) -> Real {
-        0.0.into()
+        0.0
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -988,14 +992,15 @@ impl Shape for Segment {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
+        Some((self as &dyn PolygonalFeatureMap, 0.0))
     }
 
     fn feature_normal_at_point(
         &self,
+        _subshape: SubShapeId,
         feature: FeatureId,
-        _point: &Point<Real>,
-    ) -> Option<Unit<Vector<Real>>> {
+        _point: Vector,
+    ) -> Option<Vector> {
         self.feature_normal(feature)
     }
 }
@@ -1006,7 +1011,7 @@ impl Shape for Compound {
         Box::new(self.clone())
     }
 
-    fn scale_dyn(&self, scale: &Vector<Real>, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         use super::SharedShape;
 
         let scaled: Vec<_> = self
@@ -1015,10 +1020,7 @@ impl Shape for Compound {
             .map(|(pos, shape)| {
                 let scaled_shape = shape.scale_dyn(scale, num_subdivisions)?;
                 Some((
-                    Isometry::from_parts(
-                        (pos.translation.vector.component_mul(scale)).into(),
-                        pos.rotation,
-                    ),
+                    Pose::from_parts(pos.translation * scale, pos.rotation),
                     SharedShape(scaled_shape.into()),
                 ))
             })
@@ -1034,7 +1036,7 @@ impl Shape for Compound {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.local_aabb().transform_by(position)
     }
 
@@ -1053,18 +1055,18 @@ impl Shape for Compound {
     fn ccd_thickness(&self) -> Real {
         self.shapes()
             .iter()
-            .fold(Real::from(RawReal::MAX), |curr, (_, s)| curr.min(s.ccd_thickness()))
+            .fold(Real::MAX, |curr, (_, s)| curr.min(s.ccd_thickness()))
     }
 
     fn ccd_angular_thickness(&self) -> Real {
-        self.shapes().iter().fold(Real::from(RawReal::MAX), |curr, (_, s)| {
+        self.shapes().iter().fold(Real::MAX, |curr, (_, s)| {
             curr.max(s.ccd_angular_thickness())
         })
     }
 
     #[cfg(feature = "alloc")]
-    fn as_composite_shape(&self) -> Option<&dyn CompositeShape> {
-        Some(self as &dyn CompositeShape)
+    fn as_composite_shape(&self) -> Option<&(dyn CompositeShape + Sync)> {
+        Some(self as &(dyn CompositeShape + Sync))
     }
 }
 
@@ -1074,7 +1076,7 @@ impl Shape for Polyline {
         Box::new(self.clone())
     }
 
-    fn scale_dyn(&self, scale: &Vector<Real>, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         Some(Box::new(self.clone().scaled(scale)))
     }
 
@@ -1086,7 +1088,7 @@ impl Shape for Polyline {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -1103,7 +1105,7 @@ impl Shape for Polyline {
     }
 
     fn ccd_thickness(&self) -> Real {
-        0.0.into()
+        0.0
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -1113,8 +1115,8 @@ impl Shape for Polyline {
     }
 
     #[cfg(feature = "alloc")]
-    fn as_composite_shape(&self) -> Option<&dyn CompositeShape> {
-        Some(self as &dyn CompositeShape)
+    fn as_composite_shape(&self) -> Option<&(dyn CompositeShape + Sync)> {
+        Some(self as &(dyn CompositeShape + Sync))
     }
 }
 
@@ -1124,7 +1126,7 @@ impl Shape for TriMesh {
         Box::new(self.clone())
     }
 
-    fn scale_dyn(&self, scale: &Vector<Real>, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         Some(Box::new(self.clone().scaled(scale)))
     }
 
@@ -1136,7 +1138,7 @@ impl Shape for TriMesh {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -1154,7 +1156,7 @@ impl Shape for TriMesh {
 
     fn ccd_thickness(&self) -> Real {
         // TODO: in 2D, return the smallest CCD thickness among triangles?
-        0.0.into()
+        0.0
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -1163,21 +1165,22 @@ impl Shape for TriMesh {
         Real::frac_pi_4()
     }
 
-    /// Gets the normal of the triangle represented by `feature`.
+    /// Gets the normal of the triangle `subshape`.
     fn feature_normal_at_point(
         &self,
+        _subshape: SubShapeId,
         _feature: FeatureId,
-        _point: &Point<Real>,
-    ) -> Option<Unit<Vector<Real>>> {
+        _point: Vector,
+    ) -> Option<Vector> {
         #[cfg(feature = "dim2")]
         return None;
         #[cfg(feature = "dim3")]
-        return self.feature_normal(_feature);
+        return self.triangle_normal(_subshape);
     }
 
     #[cfg(feature = "alloc")]
-    fn as_composite_shape(&self) -> Option<&dyn CompositeShape> {
-        Some(self as &dyn CompositeShape)
+    fn as_composite_shape(&self) -> Option<&(dyn CompositeShape + Sync)> {
+        Some(self as &(dyn CompositeShape + Sync))
     }
 }
 
@@ -1187,7 +1190,7 @@ impl Shape for HeightField {
         Box::new(self.clone())
     }
 
-    fn scale_dyn(&self, scale: &Vector<Real>, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         Some(Box::new(self.clone().scaled(scale)))
     }
 
@@ -1199,7 +1202,7 @@ impl Shape for HeightField {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -1216,7 +1219,7 @@ impl Shape for HeightField {
     }
 
     fn ccd_thickness(&self) -> Real {
-        0.0.into()
+        0.0
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -1233,7 +1236,7 @@ impl Shape for ConvexPolygon {
         Box::new(self.clone())
     }
 
-    fn scale_dyn(&self, scale: &Vector<Real>, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         Some(Box::new(self.clone().scaled(scale)?))
     }
 
@@ -1245,7 +1248,7 @@ impl Shape for ConvexPolygon {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -1267,7 +1270,7 @@ impl Shape for ConvexPolygon {
 
     fn ccd_thickness(&self) -> Real {
         // TODO: we should use the OBB instead.
-        self.compute_local_aabb().half_extents().min()
+        self.compute_local_aabb().half_extents().min_element()
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -1286,9 +1289,10 @@ impl Shape for ConvexPolygon {
 
     fn feature_normal_at_point(
         &self,
+        _subshape: SubShapeId,
         feature: FeatureId,
-        _point: &Point<Real>,
-    ) -> Option<Unit<Vector<Real>>> {
+        _point: Vector,
+    ) -> Option<Vector> {
         self.feature_normal(feature)
     }
 }
@@ -1300,7 +1304,7 @@ impl Shape for ConvexPolyhedron {
         Box::new(self.clone())
     }
 
-    fn scale_dyn(&self, scale: &Vector<Real>, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         Some(Box::new(self.clone().scaled(scale)?))
     }
 
@@ -1312,7 +1316,7 @@ impl Shape for ConvexPolyhedron {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -1335,7 +1339,7 @@ impl Shape for ConvexPolyhedron {
 
     fn ccd_thickness(&self) -> Real {
         // TODO: we should use the OBB instead.
-        self.compute_local_aabb().half_extents().min()
+        self.compute_local_aabb().half_extents().min_element()
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -1349,14 +1353,15 @@ impl Shape for ConvexPolyhedron {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
+        Some((self as &dyn PolygonalFeatureMap, 0.0))
     }
 
     fn feature_normal_at_point(
         &self,
+        _subshape: SubShapeId,
         feature: FeatureId,
-        _point: &Point<Real>,
-    ) -> Option<Unit<Vector<Real>>> {
+        _point: Vector,
+    ) -> Option<Vector> {
         self.feature_normal(feature)
     }
 }
@@ -1369,7 +1374,7 @@ impl Shape for Cylinder {
     }
 
     #[cfg(feature = "alloc")]
-    fn scale_dyn(&self, scale: &Vector<Real>, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         let scaled = self.scaled(scale, num_subdivisions)?;
         Some(scaled.either::<_, _, Box<dyn Shape>>(|x| Box::new(x), |x| Box::new(x)))
     }
@@ -1382,7 +1387,7 @@ impl Shape for Cylinder {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -1415,7 +1420,7 @@ impl Shape for Cylinder {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
+        Some((self as &dyn PolygonalFeatureMap, 0.0))
     }
 }
 
@@ -1427,7 +1432,7 @@ impl Shape for Cone {
     }
 
     #[cfg(feature = "alloc")]
-    fn scale_dyn(&self, scale: &Vector<Real>, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         let scaled = self.scaled(scale, num_subdivisions)?;
         Some(scaled.either::<_, _, Box<dyn Shape>>(|x| Box::new(x), |x| Box::new(x)))
     }
@@ -1440,7 +1445,7 @@ impl Shape for Cone {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -1466,7 +1471,7 @@ impl Shape for Cone {
 
     fn ccd_angular_thickness(&self) -> Real {
         let apex_half_angle = RealField::atan2(self.radius, self.half_height);
-        assert!(apex_half_angle >= Real::from(0.0));
+        assert!(apex_half_angle >= 0.0);
         let basis_angle = Real::frac_pi_2() - apex_half_angle;
         basis_angle.min(apex_half_angle * 2.0)
     }
@@ -1476,7 +1481,7 @@ impl Shape for Cone {
     }
 
     fn as_polygonal_feature_map(&self) -> Option<(&dyn PolygonalFeatureMap, Real)> {
-        Some((self as &dyn PolygonalFeatureMap, Real::from(0.0)))
+        Some((self as &dyn PolygonalFeatureMap, 0.0))
     }
 }
 
@@ -1487,7 +1492,7 @@ impl Shape for HalfSpace {
     }
 
     #[cfg(feature = "alloc")]
-    fn scale_dyn(&self, scale: &Vector<Real>, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         Some(Box::new(self.scaled(scale)?))
     }
 
@@ -1499,7 +1504,7 @@ impl Shape for HalfSpace {
         self.local_bounding_sphere()
     }
 
-    fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+    fn compute_aabb(&self, position: &Pose) -> Aabb {
         self.aabb(position)
     }
 
@@ -1509,7 +1514,7 @@ impl Shape for HalfSpace {
 
     fn ccd_thickness(&self) -> Real {
         #[cfg_attr(feature = "f32", expect(clippy::unnecessary_cast))]
-        let result = Real::from(f32::MAX);
+        let result = f32::MAX as Real;
         result
     }
 
@@ -1544,7 +1549,7 @@ impl Shape for Voxels {
         Box::new(self.clone())
     }
 
-    fn scale_dyn(&self, scale: &Vector<Real>, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+    fn scale_dyn(&self, scale: Vector, _num_subdivisions: u32) -> Option<Box<dyn Shape>> {
         Some(Box::new(self.clone().scaled(scale)))
     }
 
@@ -1561,7 +1566,7 @@ impl Shape for Voxels {
     }
 
     fn ccd_thickness(&self) -> Real {
-        self.voxel_size().min()
+        self.voxel_size().min_element()
     }
 
     fn ccd_angular_thickness(&self) -> Real {
@@ -1578,7 +1583,7 @@ macro_rules! impl_shape_for_round_shape(
             }
 
             #[cfg(feature = "alloc")]
-            fn scale_dyn(&self, scale: &Vector<Real>, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
+            fn scale_dyn(&self, scale: Vector, num_subdivisions: u32) -> Option<Box<dyn Shape>> {
                 $t(self, scale, num_subdivisions)
             }
 
@@ -1590,7 +1595,7 @@ macro_rules! impl_shape_for_round_shape(
                 self.inner_shape.local_bounding_sphere().loosened(self.border_radius)
             }
 
-            fn compute_aabb(&self, position: &Isometry<Real>) -> Aabb {
+            fn compute_aabb(&self, position: &Pose) -> Aabb {
                 self.inner_shape.aabb(position).loosened(self.border_radius)
             }
 
@@ -1634,7 +1639,7 @@ macro_rules! impl_shape_for_round_shape(
 impl_shape_for_round_shape!(
     Cuboid,
     RoundCuboid,
-    (|this: &Self, scale: &Vector<Real>, _num_subdivisions: u32| {
+    (|this: &Self, scale: Vector, _num_subdivisions: u32| {
         let shape = RoundShape {
             border_radius: this.border_radius,
             inner_shape: this.inner_shape.scaled(scale),
@@ -1646,7 +1651,7 @@ impl_shape_for_round_shape!(
 impl_shape_for_round_shape!(
     Triangle,
     RoundTriangle,
-    (|this: &Self, scale: &Vector<Real>, _num_subdivisions: u32| {
+    (|this: &Self, scale: Vector, _num_subdivisions: u32| {
         let shape = RoundShape {
             border_radius: this.border_radius,
             inner_shape: this.inner_shape.scaled(scale),
@@ -1660,7 +1665,7 @@ impl_shape_for_round_shape!(
 impl_shape_for_round_shape!(
     ConvexPolygon,
     RoundConvexPolygon,
-    (|this: &Self, scale: &Vector<Real>, _num_subdivisions: u32| {
+    (|this: &Self, scale: Vector, _num_subdivisions: u32| {
         let shape = RoundShape {
             border_radius: this.border_radius,
             inner_shape: this.inner_shape.clone().scaled(scale)?,
@@ -1673,7 +1678,7 @@ impl_shape_for_round_shape!(
 impl_shape_for_round_shape!(
     Cylinder,
     RoundCylinder,
-    (|this: &Self, scale: &Vector<Real>, num_subdivisions: u32| {
+    (|this: &Self, scale: Vector, num_subdivisions: u32| {
         Some(
             this.inner_shape
                 .scaled(scale, num_subdivisions)?
@@ -1698,7 +1703,7 @@ impl_shape_for_round_shape!(
 impl_shape_for_round_shape!(
     Cone,
     RoundCone,
-    (|this: &Self, scale: &Vector<Real>, num_subdivisions: u32| {
+    (|this: &Self, scale: Vector, num_subdivisions: u32| {
         Some(
             this.inner_shape
                 .scaled(scale, num_subdivisions)?
@@ -1725,7 +1730,7 @@ impl_shape_for_round_shape!(
 impl_shape_for_round_shape!(
     ConvexPolyhedron,
     RoundConvexPolyhedron,
-    (|this: &Self, scale: &Vector<Real>, _num_subdivisions: u32| {
+    (|this: &Self, scale: Vector, _num_subdivisions: u32| {
         let shape = RoundShape {
             border_radius: this.border_radius,
             inner_shape: this.inner_shape.clone().scaled(scale)?,

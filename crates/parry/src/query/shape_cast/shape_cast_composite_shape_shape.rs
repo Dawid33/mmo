@@ -1,28 +1,29 @@
 use crate::bounding_volume::Aabb;
-use crate::math::{Isometry, Point, Real, RawReal, Vector};
+use crate::math::{Pose, Real, Vector};
 use crate::partitioning::BvhNode;
 use crate::query::shape_cast::ShapeCastOptions;
 use crate::query::{QueryDispatcher, Ray, RayCast, ShapeCastHit};
-use crate::shape::{CompositeShapeRef, Shape, TypedCompositeShape};
+use crate::shape::{CompositeShapeRef, Shape, SubShapeId, TypedCompositeShape};
 
 impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
     /// Performs a shape-cast between `self` and a `shape2` positioned at `pose12` and subject to
     /// a linear velocity `vel12`, relative to `self`.
     ///
-    /// Returns the shape-cast hit (if any) as well as the index of the sub-shape of `self` involved
-    /// in the hit.
+    /// Returns the index of the sub-shape of `self` that was involved alongside the hit, which is
+    /// left as that sub-shape reported it (its `subshape1` is the sub-shape's own when it is a
+    /// composite too, and `subshape2` is `g2`'s).
     pub fn cast_shape<D: ?Sized + QueryDispatcher>(
         &self,
         dispatcher: &D,
-        pose12: &Isometry<Real>,
-        vel12: &Vector<Real>,
+        pose12: &Pose,
+        vel12: Vector,
         g2: &dyn Shape,
         options: ShapeCastOptions,
-    ) -> Option<(u32, ShapeCastHit)> {
+    ) -> Option<(SubShapeId, ShapeCastHit)> {
         let ls_aabb2 = g2.compute_aabb(pose12);
-        let ray = Ray::new(Point::origin(), *vel12);
-        let msum_shift = -ls_aabb2.center().coords;
-        let msum_margin = ls_aabb2.half_extents() + Vector::repeat(options.target_distance);
+        let ray = Ray::new(Vector::ZERO, vel12);
+        let msum_shift = -ls_aabb2.center();
+        let msum_margin = ls_aabb2.half_extents() + Vector::splat(options.target_distance);
 
         self.0.bvh().find_best(
             options.max_time_of_impact,
@@ -35,7 +36,7 @@ impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
 
                 // Compute the time of impact.
                 msum.cast_local_ray(&ray, best_so_far, true)
-                    .unwrap_or(Real::from(RawReal::MAX))
+                    .unwrap_or(Real::MAX)
             },
             |part_id, _| {
                 self.0
@@ -44,7 +45,7 @@ impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
                             dispatcher
                                 .cast_shapes(
                                     &part_pose1.inv_mul(pose12),
-                                    &part_pose1.inverse_transform_vector(vel12),
+                                    part_pose1.rotation.inverse() * vel12,
                                     part_g1,
                                     g2,
                                     options,
@@ -65,8 +66,8 @@ impl<S: ?Sized + TypedCompositeShape> CompositeShapeRef<'_, S> {
 /// Time Of Impact of a composite shape with any other shape, under translational movement.
 pub fn cast_shapes_composite_shape_shape<D, G1>(
     dispatcher: &D,
-    pos12: &Isometry<Real>,
-    vel12: &Vector<Real>,
+    pos12: &Pose,
+    vel12: Vector,
     g1: &G1,
     g2: &dyn Shape,
     options: ShapeCastOptions,
@@ -77,14 +78,17 @@ where
 {
     CompositeShapeRef(g1)
         .cast_shape(dispatcher, pos12, vel12, g2, options)
-        .map(|hit| hit.1)
+        .map(|(part_id, mut hit)| {
+            hit.subshape1 = part_id;
+            hit
+        })
 }
 
 /// Time Of Impact of any shape with a composite shape, under translational movement.
 pub fn cast_shapes_shape_composite_shape<D, G2>(
     dispatcher: &D,
-    pos12: &Isometry<Real>,
-    vel12: &Vector<Real>,
+    pos12: &Pose,
+    vel12: Vector,
     g1: &dyn Shape,
     g2: &G2,
     options: ShapeCastOptions,
@@ -96,7 +100,7 @@ where
     cast_shapes_composite_shape_shape(
         dispatcher,
         &pos12.inverse(),
-        &-pos12.inverse_transform_vector(vel12),
+        -(pos12.rotation.inverse() * vel12),
         g2,
         g1,
         options,

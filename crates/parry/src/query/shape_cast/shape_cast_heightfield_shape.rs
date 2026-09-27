@@ -1,5 +1,5 @@
 use crate::bounding_volume::BoundingVolume;
-use crate::math::{Isometry, Real, RawReal, Vector};
+use crate::math::{Pose, Real, Vector};
 use crate::query::details::ShapeCastOptions;
 use crate::query::{QueryDispatcher, Ray, ShapeCastHit, Unsupported};
 use crate::shape::{HeightField, Shape};
@@ -10,14 +10,14 @@ use crate::{bounding_volume::Aabb, query::RayCast};
 #[cfg(feature = "dim2")]
 pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
     dispatcher: &D,
-    pos12: &Isometry<Real>,
-    vel12: &Vector<Real>,
+    pos12: &Pose,
+    vel12: Vector,
     heightfield1: &HeightField,
     g2: &dyn Shape,
     options: ShapeCastOptions,
 ) -> Result<Option<ShapeCastHit>, Unsupported> {
     let aabb2_1 = g2.compute_aabb(pos12).loosened(options.target_distance);
-    let ray = Ray::new(aabb2_1.center(), *vel12);
+    let ray = Ray::new(aabb2_1.center(), vel12);
 
     let mut curr_range = heightfield1.unclamped_elements_range_in_local_aabb(&aabb2_1);
     // Enlarge the range by 1 to account for movement within a cell.
@@ -40,7 +40,7 @@ pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
         if let Some(seg) = heightfield1.segment_at(curr) {
             // TODO: pre-check using a ray-cast on the Aabbs first?
             if let Some(hit) = dispatcher.cast_shapes(pos12, vel12, &seg, g2, options)? {
-                if hit.time_of_impact < best_hit.map(|h| h.time_of_impact).unwrap_or(RawReal::MAX) {
+                if hit.time_of_impact < best_hit.map(|h| h.time_of_impact).unwrap_or(Real::MAX) {
                     best_hit = Some(hit);
                 }
             }
@@ -68,13 +68,9 @@ pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
 
         if right {
             curr_elt += 1;
-            curr_param = (cell_width * na::convert::<f64, Real>(curr_elt as f64) + start_x
-                - ray.origin.x)
-                / ray.dir.x;
+            curr_param = (cell_width * (curr_elt as Real) + start_x - ray.origin.x) / ray.dir.x;
         } else {
-            curr_param =
-                (ray.origin.x - cell_width * na::convert::<f64, Real>(curr_elt as f64) - start_x)
-                    / ray.dir.x;
+            curr_param = (ray.origin.x - cell_width * (curr_elt as Real) - start_x) / ray.dir.x;
             curr_elt -= 1;
         }
 
@@ -85,7 +81,7 @@ pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
         if let Some(seg) = heightfield1.segment_at(curr_elt as usize) {
             // TODO: pre-check using a ray-cast on the Aabbs first?
             if let Some(hit) = dispatcher.cast_shapes(pos12, vel12, &seg, g2, options)? {
-                if hit.time_of_impact < best_hit.map(|h| h.time_of_impact).unwrap_or(RawReal::MAX) {
+                if hit.time_of_impact < best_hit.map(|h| h.time_of_impact).unwrap_or(Real::MAX) {
                     best_hit = Some(hit);
                 }
             }
@@ -99,15 +95,15 @@ pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
 #[cfg(feature = "dim3")]
 pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
     dispatcher: &D,
-    pos12: &Isometry<Real>,
-    vel12: &Vector<Real>,
+    pos12: &Pose,
+    vel12: Vector,
     heightfield1: &HeightField,
     g2: &dyn Shape,
     options: ShapeCastOptions,
 ) -> Result<Option<ShapeCastHit>, Unsupported> {
     let aabb1 = heightfield1.local_aabb();
     let mut aabb2_1 = g2.compute_aabb(pos12).loosened(options.target_distance);
-    let ray = Ray::new(aabb2_1.center(), *vel12);
+    let ray = Ray::new(aabb2_1.center(), vel12);
 
     // Find the first hit between the aabbs.
     let hext2_1 = aabb2_1.half_extents();
@@ -128,15 +124,15 @@ pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
     /*
      * Enlarge the ranges by 1 to account for any movement within one cell.
      */
-    if ray.dir.z > Real::from(0.0) {
+    if ray.dir.z > 0.0 {
         curr_range_i.end += 1;
-    } else if ray.dir.z < Real::from(0.0) {
+    } else if ray.dir.z < 0.0 {
         curr_range_i.start -= 1;
     }
 
-    if ray.dir.x > Real::from(0.0) {
+    if ray.dir.x > 0.0 {
         curr_range_j.end += 1;
-    } else if ray.dir.x < Real::from(0.0) {
+    } else if ray.dir.x < 0.0 {
         curr_range_j.start -= 1;
     }
 
@@ -154,7 +150,7 @@ pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
             for tri in [tri_a, tri_b].into_iter().flatten() {
                 // TODO: pre-check using a ray-cast on the Aabbs first?
                 if let Some(hit) = dispatcher.cast_shapes(pos12, vel12, &tri, g2, options)? {
-                    if hit.time_of_impact < best_hit.map(|h| h.time_of_impact).unwrap_or(Real::from(RawReal::MAX))
+                    if hit.time_of_impact < best_hit.map(|h| h.time_of_impact).unwrap_or(Real::MAX)
                     {
                         best_hit = Some(hit);
                     }
@@ -175,7 +171,7 @@ pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
         return Ok(best_hit);
     }
 
-    let mut cell = heightfield1.unclamped_cell_at_point(&aabb2_1.center());
+    let mut cell = heightfield1.unclamped_cell_at_point(aabb2_1.center());
 
     loop {
         let prev_cell = cell;
@@ -183,35 +179,35 @@ pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
         /*
          * Find the next cell to cast the ray on.
          */
-        let toi_x = if ray.dir.x > Real::from(0.0) {
+        let toi_x = if ray.dir.x > 0.0 {
             let x = heightfield1.signed_x_at(cell.1 + 1);
             (x - ray.origin.x) / ray.dir.x
-        } else if ray.dir.x < Real::from(0.0) {
+        } else if ray.dir.x < 0.0 {
             let x = heightfield1.signed_x_at(cell.1);
             (x - ray.origin.x) / ray.dir.x
         } else {
-            Real::from(RawReal::MAX)
+            Real::MAX
         };
 
-        let toi_z = if ray.dir.z > Real::from(0.0) {
+        let toi_z = if ray.dir.z > 0.0 {
             let z = heightfield1.signed_z_at(cell.0 + 1);
             (z - ray.origin.z) / ray.dir.z
-        } else if ray.dir.z < Real::from(0.0) {
+        } else if ray.dir.z < 0.0 {
             let z = heightfield1.signed_z_at(cell.0);
             (z - ray.origin.z) / ray.dir.z
         } else {
-            Real::from(RawReal::MAX)
+            Real::MAX
         };
 
         if toi_x > options.max_time_of_impact && toi_z > options.max_time_of_impact {
             break;
         }
 
-        if toi_x >= Real::from(0.0) && toi_x <= toi_z {
+        if toi_x >= 0.0 && toi_x <= toi_z {
             cell.1 += ray.dir.x.signum() as isize;
         }
 
-        if toi_z >= Real::from(0.0) && toi_z <= toi_x {
+        if toi_z >= 0.0 && toi_z <= toi_x {
             cell.0 += ray.dir.z.signum() as isize;
         }
 
@@ -263,8 +259,8 @@ pub fn cast_shapes_heightfield_shape<D: ?Sized + QueryDispatcher>(
 /// Time Of Impact between a moving shape and a heightfield.
 pub fn cast_shapes_shape_heightfield<D: ?Sized + QueryDispatcher>(
     dispatcher: &D,
-    pos12: &Isometry<Real>,
-    vel12: &Vector<Real>,
+    pos12: &Pose,
+    vel12: Vector,
     g1: &dyn Shape,
     heightfield2: &HeightField,
     options: ShapeCastOptions,
@@ -272,7 +268,7 @@ pub fn cast_shapes_shape_heightfield<D: ?Sized + QueryDispatcher>(
     Ok(cast_shapes_heightfield_shape(
         dispatcher,
         &pos12.inverse(),
-        &-pos12.inverse_transform_vector(vel12),
+        -(pos12.rotation.inverse() * vel12),
         heightfield2,
         g1,
         options,

@@ -4,13 +4,11 @@
 //! which players fill from their input and NPCs can fill from anything.
 //!
 //! Everything here is `+ - *` on f32 (no transcendental calls), so it is
-//! bit-identical across machines; the yaw rotation goes through the vendored
+//! bit-identical across machines; the yaw rotation goes through the
 //! libm-forced `yaw_quat`, as the look code already does.
 
-use ordered_float::OrderedFloat;
-use parry3d::math::Real;
 use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
-use rapier3d::math::{Isometry, Translation, Vector};
+use rapier3d::math::{Pose, Vector};
 use rapier3d::parry::query::ShapeCastOptions;
 use rapier3d::parry::shape::Shape;
 use rapier3d::pipeline::QueryPipeline;
@@ -78,12 +76,18 @@ pub const PLAYER_EYE_OFFSET: f32 = (PLAYER_EYE_HEIGHT - PLAYER_HEIGHT / 2.0) * U
 /// skin, so it must not change when the body is resized.
 pub const CHARACTER_SKIN: f32 = 0.216;
 
+/// Rapier's `IntegrationParameters::length_unit` (plan D6): world units per
+/// metre, so rapier's metre-scaled tolerances (contact prediction, sleep
+/// thresholds, contact recycling) mean what they say for the dynamic bodies
+/// to come. Measured neutral for today's fixed/kinematic-only world.
+pub const PHYSICS_LENGTH_UNIT: f32 = UNITS_PER_METER;
+
 /// Per-entity movement state. Lives in the rollback ECS (`Ecs::motion`) and
 /// rides `EntityBundle` across region handoffs.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, state_hash::StateHash, serde::Serialize, serde::Deserialize)]
 pub struct Motion {
     /// Vertical velocity in units/s; only meaningful while walking.
-    pub vel_y: Real,
+    pub vel_y: f32,
     /// Standing on something as of the last tick.
     pub grounded: bool,
     /// Creative flight: no gravity, jump/descend move vertically.
@@ -125,7 +129,7 @@ impl MoveParams {
 /// Advances `motion` by one tick of intent and returns the translation the
 /// body *wants* this tick (world units, before collision). Feed the
 /// collision-corrected result back through [`settle`].
-pub fn plan(motion: &mut Motion, keys: &MoveKeys, yaw: Real, tick: u64) -> Vector<Real> {
+pub fn plan(motion: &mut Motion, keys: &MoveKeys, yaw: f32, tick: u64) -> Vector {
     plan_with(motion, keys, yaw, tick, &MoveParams::PLAYER)
 }
 
@@ -133,16 +137,16 @@ pub fn plan(motion: &mut Motion, keys: &MoveKeys, yaw: Real, tick: u64) -> Vecto
 pub fn plan_with(
     motion: &mut Motion,
     keys: &MoveKeys,
-    yaw: Real,
+    yaw: f32,
     tick: u64,
     params: &MoveParams,
-) -> Vector<Real> {
+) -> Vector {
     if keys.jump_pressed {
         let window = DOUBLE_TAP_WINDOW_MS / TICK_RATE;
         match motion.last_jump_tap {
             Some(t) if tick.saturating_sub(t) <= window => {
                 motion.flying = !motion.flying;
-                motion.vel_y = OrderedFloat(0.0);
+                motion.vel_y = 0.0;
                 motion.last_jump_tap = None;
             }
             _ => motion.last_jump_tap = Some(tick),
@@ -167,11 +171,7 @@ pub fn plan_with(
     let step = speed * UNITS_PER_METER * TICK_DT;
     // Horizontal movement follows yaw only — speed stays full regardless of
     // pitch (Minecraft behavior).
-    let mut desired = crate::yaw_quat(yaw).transform_vector(&Vector::new(
-        Real::from(x * step),
-        Real::from(0.0),
-        Real::from(z * step),
-    ));
+    let mut desired = crate::yaw_quat(yaw) * Vector::new(x * step, 0.0, z * step);
 
     let dy = if motion.flying {
         axis(keys.jump_held, keys.descend) * FLY_VERTICAL_SPEED * UNITS_PER_METER * TICK_DT
@@ -180,32 +180,32 @@ pub fn plan_with(
         let v0 = if motion.grounded && keys.jump_held {
             params.jump_speed * UNITS_PER_METER
         } else {
-            motion.vel_y.0
+            motion.vel_y
         };
         let g = if v0 > 0.0 { GRAVITY } else { FALL_GRAVITY };
         let v1 = (v0 - g * UNITS_PER_METER * TICK_DT).max(-TERMINAL_SPEED * UNITS_PER_METER);
-        motion.vel_y = OrderedFloat(v1);
+        motion.vel_y = v1;
         // Trapezoid rule: exact under constant acceleration, so jump height
         // does not depend on the tick period.
         (v0 + v1) * 0.5 * TICK_DT
     };
-    desired.y = Real::from(dy);
+    desired.y = dy;
     desired
 }
 
 /// Folds the collision result of this tick's move back into `motion`.
-pub fn settle(motion: &mut Motion, desired: &Vector<Real>, moved: &Vector<Real>, grounded: bool) {
+pub fn settle(motion: &mut Motion, desired: &Vector, moved: &Vector, grounded: bool) {
     motion.grounded = grounded;
     if motion.flying {
         // Touching down ends flight, as in Minecraft.
-        if grounded && desired.y.0 < 0.0 {
+        if grounded && desired.y < 0.0 {
             motion.flying = false;
         }
         return;
     }
-    let bumped_head = motion.vel_y.0 > 0.0 && moved.y.0 < desired.y.0 * 0.5;
-    if (grounded && motion.vel_y.0 < 0.0) || bumped_head {
-        motion.vel_y = OrderedFloat(0.0);
+    let bumped_head = motion.vel_y > 0.0 && moved.y < desired.y * 0.5;
+    if (grounded && motion.vel_y < 0.0) || bumped_head {
+        motion.vel_y = 0.0;
     }
 }
 
@@ -221,25 +221,26 @@ pub fn settle(motion: &mut Motion, desired: &Vector<Real>, moved: &Vector<Real>,
 /// Zero when the body is clear, and also when even a `STEP_HEIGHT` lift
 /// would not clear it: a buried body stays put rather than being teleported
 /// up through whatever buried it.
-pub fn depenetration_lift(queries: &QueryPipeline, shape: &dyn Shape, pos: &Isometry<Real>) -> Real {
-    let zero = Real::from(0.0);
+pub fn depenetration_lift(queries: &QueryPipeline, shape: &dyn Shape, pos: &Pose) -> f32 {
+    let zero = 0.0;
     if queries.intersect_shape(*pos, shape).next().is_none() {
         return zero;
     }
-    let max = Real::from(STEP_HEIGHT * UNITS_PER_METER);
-    let up = Vector::y();
-    let raised = Translation::from(up * max) * pos;
+    let max = STEP_HEIGHT * UNITS_PER_METER;
+    let up = Vector::Y;
+    let mut raised = *pos;
+    raised.translation += up * max;
     if queries.intersect_shape(raised, shape).next().is_some() {
         return zero;
     }
-    let skin = Real::from(CHARACTER_SKIN);
+    let skin = CHARACTER_SKIN;
     let options = ShapeCastOptions {
         target_distance: skin,
         stop_at_penetration: false,
         max_time_of_impact: max,
         compute_impact_geometry_on_penetration: true,
     };
-    match queries.cast_shape_on_continuous_surfaces(&raised, &-up, shape, options, skin) {
+    match queries.cast_shape_on_continuous_surfaces(&raised, -up, shape, options, skin) {
         Some((_, hit)) => max - hit.time_of_impact,
         None => zero,
     }
@@ -258,10 +259,10 @@ pub fn sweep_character(
     colliders: &rapier3d::prelude::ColliderSet,
     handle: rapier3d::prelude::RigidBodyHandle,
     motion: &Motion,
-    desired: Vector<Real>,
-) -> (Vector<Real>, bool) {
+    desired: Vector,
+) -> (Vector, bool) {
     let b = bodies.get(handle).unwrap();
-    let t = *b.translation();
+    let t = b.translation();
     let Some(collider_handle) = b.colliders().first().copied() else {
         return (desired, false);
     };
@@ -274,16 +275,12 @@ pub fn sweep_character(
     );
     // Sweep the shape upright: a player's body rotation carries the look
     // pitch, which must not tilt the collision shape.
-    let upright = Isometry::from(Translation::from(t));
+    let upright = Pose::from_translation(t);
     // A body sunk into terrain is first put back on it.
-    let lift = Vector::new(
-        Real::from(0.0),
-        depenetration_lift(&queries, collider.shape(), &upright),
-        Real::from(0.0),
-    );
-    let start = Isometry::from(Translation::from(t + lift));
+    let lift = Vector::Y * depenetration_lift(&queries, collider.shape(), &upright);
+    let start = Pose::from_translation(t + lift);
     let out = character_controller(motion).move_shape(
-        Real::from(TICK_DT),
+        TICK_DT,
         &queries,
         collider.shape(),
         &start,
@@ -299,13 +296,17 @@ pub fn character_controller(motion: &Motion) -> KinematicCharacterController {
     let walking = !motion.flying;
     KinematicCharacterController {
         autostep: walking.then(|| CharacterAutostep {
-            max_height: CharacterLength::Absolute(Real::from(STEP_HEIGHT * UNITS_PER_METER)),
-            min_width: CharacterLength::Relative(Real::from(0.5)),
+            max_height: CharacterLength::Absolute(STEP_HEIGHT * UNITS_PER_METER),
+            min_width: CharacterLength::Relative(0.5),
             include_dynamic_bodies: false,
         }),
         snap_to_ground: walking
-            .then(|| CharacterLength::Absolute(Real::from(GROUND_SNAP * UNITS_PER_METER))),
-        offset: CharacterLength::Absolute(Real::from(CHARACTER_SKIN)),
+            .then(|| CharacterLength::Absolute(GROUND_SNAP * UNITS_PER_METER)),
+        offset: CharacterLength::Absolute(CHARACTER_SKIN),
+        // Plan D7: `depenetration_lift` owns sunk bodies (a buried one stays
+        // put); upstream's zero-motion depenetration (#485) would push a body
+        // buried deeper than STEP_HEIGHT out through cuboid terrain.
+        depenetrate: false,
         ..Default::default()
     }
 }
@@ -314,21 +315,21 @@ pub fn character_controller(motion: &Motion) -> KinematicCharacterController {
 mod tests {
     use super::*;
 
-    const YAW0: Real = OrderedFloat(0.0);
+    const YAW0: f32 = 0.0;
 
     fn keys() -> MoveKeys {
         MoveKeys::default()
     }
 
     /// Runs `plan` + a collision-free `settle` on open air / flat ground.
-    fn tick(m: &mut Motion, k: &MoveKeys, t: u64, floor_y: Option<&mut f32>) -> Vector<Real> {
+    fn tick(m: &mut Motion, k: &MoveKeys, t: u64, floor_y: Option<&mut f32>) -> Vector {
         let desired = plan(m, k, YAW0, t);
         let mut moved = desired;
         let mut grounded = false;
         if let Some(y) = floor_y {
-            *y += desired.y.0;
+            *y += desired.y;
             if *y <= 0.0 {
-                moved.y = Real::from(desired.y.0 - *y);
+                moved.y = desired.y - *y;
                 *y = 0.0;
                 grounded = true;
             }
@@ -341,17 +342,17 @@ mod tests {
     fn walking_forward_moves_at_walk_speed_along_minus_z() {
         let mut m = Motion { grounded: true, ..Default::default() };
         let d = plan(&mut m, &MoveKeys { forward: true, ..keys() }, YAW0, 0);
-        assert_eq!(d.x.0, 0.0);
-        assert!((d.z.0 + WALK_SPEED * UNITS_PER_METER * TICK_DT).abs() < 1e-5);
+        assert_eq!(d.x, 0.0);
+        assert!((d.z + WALK_SPEED * UNITS_PER_METER * TICK_DT).abs() < 1e-5);
     }
 
     #[test]
     fn sprint_needs_forward_and_diagonals_are_not_faster() {
         let mut m = Motion { grounded: true, ..Default::default() };
         let back = plan(&mut m, &MoveKeys { back: true, sprint: true, ..keys() }, YAW0, 0);
-        assert!((back.z.0 - WALK_SPEED * UNITS_PER_METER * TICK_DT).abs() < 1e-5);
+        assert!((back.z - WALK_SPEED * UNITS_PER_METER * TICK_DT).abs() < 1e-5);
         let diag = plan(&mut m, &MoveKeys { forward: true, right: true, ..keys() }, YAW0, 0);
-        let len2 = diag.x.0 * diag.x.0 + diag.z.0 * diag.z.0;
+        let len2 = diag.x * diag.x + diag.z * diag.z;
         let walk = WALK_SPEED * UNITS_PER_METER * TICK_DT;
         assert!((len2 - walk * walk).abs() < 1e-3);
     }
@@ -362,12 +363,12 @@ mod tests {
         let mut y = 40.0;
         let first = tick(&mut m, &keys(), 0, Some(&mut y));
         let second = tick(&mut m, &keys(), 1, Some(&mut y));
-        assert!(first.y.0 < 0.0 && second.y.0 < first.y.0, "falls faster each tick");
+        assert!(first.y < 0.0 && second.y < first.y, "falls faster each tick");
         for t in 2..100 {
             tick(&mut m, &keys(), t, Some(&mut y));
         }
         assert!(m.grounded);
-        assert_eq!(m.vel_y.0, 0.0, "landing clears the fall speed");
+        assert_eq!(m.vel_y, 0.0, "landing clears the fall speed");
     }
 
     #[test]
@@ -394,7 +395,7 @@ mod tests {
     fn jump_is_ignored_in_mid_air() {
         let mut m = Motion::default();
         let d = plan(&mut m, &MoveKeys { jump_held: true, ..keys() }, YAW0, 0);
-        assert!(d.y.0 < 0.0);
+        assert!(d.y < 0.0);
     }
 
     #[test]
@@ -419,12 +420,12 @@ mod tests {
     #[test]
     fn flying_hovers_ascends_descends_and_lands() {
         let mut m = Motion { flying: true, ..Default::default() };
-        assert_eq!(plan(&mut m, &keys(), YAW0, 0).y.0, 0.0, "no gravity in flight");
+        assert_eq!(plan(&mut m, &keys(), YAW0, 0).y, 0.0, "no gravity in flight");
         let up = plan(&mut m, &MoveKeys { jump_held: true, ..keys() }, YAW0, 1);
         let down = plan(&mut m, &MoveKeys { descend: true, ..keys() }, YAW0, 2);
-        assert!(up.y.0 > 0.0 && down.y.0 == -up.y.0);
+        assert!(up.y > 0.0 && down.y == -up.y);
 
-        settle(&mut m, &down, &Vector::zeros(), true);
+        settle(&mut m, &down, &Vector::ZERO, true);
         assert!(!m.flying, "descending onto the ground ends flight");
     }
 
@@ -432,9 +433,9 @@ mod tests {
     fn hitting_a_ceiling_kills_upward_speed() {
         let mut m = Motion { grounded: true, ..Default::default() };
         let d = plan(&mut m, &MoveKeys { jump_held: true, ..keys() }, YAW0, 0);
-        assert!(m.vel_y.0 > 0.0);
-        settle(&mut m, &d, &Vector::zeros(), false);
-        assert_eq!(m.vel_y.0, 0.0);
+        assert!(m.vel_y > 0.0);
+        settle(&mut m, &d, &Vector::ZERO, false);
+        assert_eq!(m.vel_y, 0.0);
     }
 
     #[test]
@@ -443,6 +444,6 @@ mod tests {
         for t in 0..400 {
             tick(&mut m, &keys(), t, None);
         }
-        assert_eq!(m.vel_y.0, -TERMINAL_SPEED * UNITS_PER_METER);
+        assert_eq!(m.vel_y, -TERMINAL_SPEED * UNITS_PER_METER);
     }
 }

@@ -1017,12 +1017,12 @@ mod tests {
         (app, client_send, update_send, region_id)
     }
 
-    fn test_proj() -> game::na::Perspective3<game::parry::math::Real> {
-        game::na::Perspective3::new(
-            game::parry::math::Real::from(1.5),
-            game::parry::math::Real::from(1.2),
-            game::parry::math::Real::from(0.1),
-            game::parry::math::Real::from(100.0),
+    fn test_proj() -> game::Perspective3 {
+        game::Perspective3::new(
+            1.5,
+            1.2,
+            0.1,
+            100.0,
         )
     }
 
@@ -1045,7 +1045,7 @@ mod tests {
 
         let k = key(7);
         updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
-        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(k, game::IsometryReal::identity()))).unwrap();
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(k, game::Pose::identity()))).unwrap();
         app.update();
 
         let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).expect("entity mapped");
@@ -1064,7 +1064,7 @@ mod tests {
     fn unknown_key_is_tolerated() {
         let (mut app, _c, updates, _region_id) = test_app();
         app.update();
-        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(key(99), game::IsometryReal::identity()))).unwrap();
+        updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetEntityPosition(key(99), game::Pose::identity()))).unwrap();
         app.update(); // must not panic
     }
 
@@ -1077,7 +1077,7 @@ mod tests {
         updates.send(GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::CreateEntity(k))).unwrap();
         updates.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
-            GameDataUpdateKind::AddCameraComponent(k, 0, test_proj(), game::IsometryReal::identity()),
+            GameDataUpdateKind::AddCameraComponent(k, 0, test_proj(), game::Pose::identity()),
         )).unwrap();
         app.update();
         // second frame: AddCameraComponent on a same-drain-spawned entity goes through Commands
@@ -1109,7 +1109,7 @@ mod tests {
         updates.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
             // client 1's camera arriving at client 0's window
-            GameDataUpdateKind::AddCameraComponent(k, 1, test_proj(), game::IsometryReal::identity()),
+            GameDataUpdateKind::AddCameraComponent(k, 1, test_proj(), game::Pose::identity()),
         )).unwrap();
         app.update();
         app.update();

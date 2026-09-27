@@ -3,13 +3,15 @@
 // - It preserves associated edge iteration order after Serialization/Deserialization.
 // - It is always undirected.
 //! A stripped-down version of petgraph's UnGraph.
+use crate::alloc_prelude::*;
 
-use std::cmp::max;
-use std::ops::{Index, IndexMut};
+use core::cmp::max;
+use core::ops::{Index, IndexMut};
 
 /// Node identifier.
 #[derive(Copy, Clone, Default, PartialEq, PartialOrd, Eq, Ord, Hash, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct NodeIndex(u32);
 
 impl NodeIndex {
@@ -42,6 +44,7 @@ impl From<u32> for NodeIndex {
 /// Edge identifier.
 #[derive(Copy, Clone, Default, PartialEq, PartialOrd, Eq, Ord, Hash, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct EdgeIndex(u32);
 
 impl EdgeIndex {
@@ -75,6 +78,7 @@ impl From<u32> for EdgeIndex {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum Direction {
     Outgoing = 0,
     Incoming = 1,
@@ -92,8 +96,9 @@ impl Direction {
 const DIRECTIONS: [Direction; 2] = [Direction::Outgoing, Direction::Incoming];
 
 /// The graph's node type.
-#[derive(Debug, Copy, Clone, Hash)]
+#[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Node<N> {
     /// Associated node data.
     pub weight: N,
@@ -102,13 +107,19 @@ pub struct Node<N> {
 }
 
 /// The graph's edge type.
-#[derive(Debug, Copy, Clone, Hash)]
+#[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Edge<E> {
     /// Associated edge data.
     pub weight: E,
     /// Next edge in outgoing and incoming edge lists.
     next: [EdgeIndex; 2],
+    /// Previous edge in outgoing and incoming edge lists (`EdgeIndex::end()`
+    /// when this edge is the list head stored on the node). Kept so unlinking
+    /// an edge — the broad-phase's bread and butter on churn-heavy scenes — is
+    /// O(1) instead of an O(degree) list walk per endpoint.
+    prev: [EdgeIndex; 2],
     /// Start and End node index
     node: [NodeIndex; 2],
 }
@@ -125,50 +136,12 @@ impl<E> Edge<E> {
     }
 }
 
-#[derive(Clone, Debug, Default, Hash)]
+#[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Graph<N, E> {
     pub(crate) nodes: Vec<Node<N>>,
     pub(crate) edges: Vec<Edge<E>>,
-}
-
-/// One reverted cell/structural write inside [`Graph`]. Recorded in execution
-/// order; revert applies LIFO. Exact inverses — same discipline as
-/// `Arena::revert_insert` (a plain re-do does NOT restore link/allocator state,
-/// and the intrusive next/node link pointers are hashed, so restoration must be
-/// bit-exact).
-pub enum GraphCellUndo<N, E> {
-    /// undo: `nodes.pop()`
-    NodePush,
-    /// undo: `edges.pop()`
-    EdgePush,
-    NodeNext {
-        node: u32,
-        dir: usize,
-        old: EdgeIndex,
-    },
-    EdgeNext {
-        edge: u32,
-        dir: usize,
-        old: EdgeIndex,
-    },
-    EdgeNode {
-        edge: u32,
-        dir: usize,
-        old: NodeIndex,
-    },
-    /// `edges.swap_remove(at)`: `removed` was taken out of slot `at`; the then-
-    /// last edge (if any) moved into `at`. Undo: move it back to the tail, put
-    /// `removed` back into `at`.
-    EdgeSwapRemove {
-        at: u32,
-        removed: Edge<E>,
-        had_swap: bool,
-    },
-    NodeWeight {
-        node: u32,
-        old: N,
-    },
 }
 
 enum Pair<T> {
@@ -184,12 +157,11 @@ fn index_twice<T>(arr: &mut [T], a: usize, b: usize) -> Pair<&mut T> {
     } else if a == b {
         Pair::One(&mut arr[max(a, b)])
     } else {
-        // safe because a, b are in bounds and distinct
-        unsafe {
-            let ar = &mut *(arr.get_unchecked_mut(a) as *mut _);
-            let br = &mut *(arr.get_unchecked_mut(b) as *mut _);
-            Pair::Both(ar, br)
-        }
+        // Never fails: a, b are in bounds and distinct.
+        let [ar, br] = arr
+            .get_disjoint_mut([a, b])
+            .expect("indices are in bounds and distinct");
+        Pair::Both(ar, br)
     }
 }
 
@@ -219,59 +191,6 @@ impl<N, E> Graph<N, E> {
         let node_idx = NodeIndex::new(self.nodes.len() as u32);
         self.nodes.push(node);
         node_idx
-    }
-
-    /// Journaling variant of [`Self::add_node`]: records a `NodePush` so the
-    /// append can be reverted with `nodes.pop()`.
-    pub fn add_node_journaled(
-        &mut self,
-        weight: N,
-        ops: Option<&mut Vec<GraphCellUndo<N, E>>>,
-    ) -> NodeIndex {
-        let idx = self.add_node(weight);
-        if let Some(ops) = ops {
-            ops.push(GraphCellUndo::NodePush);
-        }
-        idx
-    }
-
-    /// Applies a single recorded cell undo. Ops are recorded in execution order
-    /// and MUST be applied in reverse (LIFO): every index an op mentions is only
-    /// valid at the moment that op replays, so a post-swap rewire must be undone
-    /// before the swap it followed, and the swap before the splice that preceded
-    /// it.
-    pub fn apply_cell_undo(&mut self, op: GraphCellUndo<N, E>) {
-        match op {
-            GraphCellUndo::NodePush => {
-                self.nodes.pop();
-            }
-            GraphCellUndo::EdgePush => {
-                self.edges.pop();
-            }
-            GraphCellUndo::NodeNext { node, dir, old } => {
-                self.nodes[node as usize].next[dir] = old
-            }
-            GraphCellUndo::EdgeNext { edge, dir, old } => {
-                self.edges[edge as usize].next[dir] = old
-            }
-            GraphCellUndo::EdgeNode { edge, dir, old } => {
-                self.edges[edge as usize].node[dir] = old
-            }
-            GraphCellUndo::EdgeSwapRemove {
-                at,
-                removed,
-                had_swap,
-            } => {
-                if had_swap {
-                    let moved = std::mem::replace(&mut self.edges[at as usize], removed);
-                    self.edges.push(moved);
-                } else {
-                    debug_assert_eq!(at as usize, self.edges.len());
-                    self.edges.push(removed);
-                }
-            }
-            GraphCellUndo::NodeWeight { node, old } => self.nodes[node as usize].weight = old,
-        }
     }
 
     /// Access the weight for node `a`.
@@ -309,29 +228,13 @@ impl<N, E> Graph<N, E> {
     /// **Note:** `Graph` allows adding parallel (“duplicate”) edges. If you want
     /// to avoid this, use [`.update_edge(a, b, weight)`](#method.update_edge) instead.
     pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, weight: E) -> EdgeIndex {
-        // Non-journaled path: delegate to the journaled twin with `None` so the
-        // list-splice logic exists in exactly one place (the full step-journal
-        // battery proves the behavior is bit-identical).
-        self.add_edge_journaled(a, b, weight, None)
-    }
-
-    /// Journaling variant of [`Self::add_edge`]. Records the two overwritten
-    /// list heads (`an.next[0]` and `bn.next[1]`, or both directions of the same
-    /// node for a self-loop) as `NodeNext` ops, then an `EdgePush` for the tail
-    /// append. After the `match`, `edge.next` holds exactly those old head values.
-    pub fn add_edge_journaled(
-        &mut self,
-        a: NodeIndex,
-        b: NodeIndex,
-        weight: E,
-        ops: Option<&mut Vec<GraphCellUndo<N, E>>>,
-    ) -> EdgeIndex {
         assert!(self.edges.len() != crate::INVALID_USIZE);
         let edge_idx = EdgeIndex::new(self.edges.len() as u32);
         let mut edge = Edge {
             weight,
             node: [a, b],
             next: [EdgeIndex::end(); 2],
+            prev: [EdgeIndex::end(); 2],
         };
         match index_twice(&mut self.nodes, a.index(), b.index()) {
             Pair::None => panic!("Graph::add_edge: node indices out of bounds"),
@@ -347,20 +250,12 @@ impl<N, E> Graph<N, E> {
                 bn.next[1] = edge_idx;
             }
         }
-        if let Some(ops) = ops {
-            // `edge.next[0]` = old `an.next[0]`; `edge.next[1]` = old `bn.next[1]`
-            // (for a self-loop, dir 0 and 1 of the same node `a == b`).
-            ops.push(GraphCellUndo::NodeNext {
-                node: a.index() as u32,
-                dir: 0,
-                old: edge.next[0],
-            });
-            ops.push(GraphCellUndo::NodeNext {
-                node: b.index() as u32,
-                dir: 1,
-                old: edge.next[1],
-            });
-            ops.push(GraphCellUndo::EdgePush);
+        // Back-links of the displaced list heads (doubly-linked adjacency).
+        for k in 0..2 {
+            let nxt = edge.next[k];
+            if nxt != EdgeIndex::end() {
+                self.edges[nxt.index()].prev[k] = edge_idx;
+            }
         }
         self.edges.push(edge);
         edge_idx
@@ -385,10 +280,18 @@ impl<N, E> Graph<N, E> {
     /// edges, including *n* calls to `.remove_edge()` where *n* is the number
     /// of edges with an endpoint in `a`, and including the edges with an
     /// endpoint in the displaced node.
-    pub fn remove_node(&mut self, a: NodeIndex) -> Option<N>
-    where
-        E: Clone,
-    {
+    pub fn remove_node(&mut self, a: NodeIndex) -> Option<N> {
+        self.remove_node_with(a, &mut |_| {})
+    }
+
+    /// Same as [`Self::remove_node`], invoking `on_remove` with each removed edge
+    /// index right before its removal is applied, so side arrays indexed like
+    /// `self.edges` can mirror the `swap_remove`s.
+    pub fn remove_node_with(
+        &mut self,
+        a: NodeIndex,
+        on_remove: &mut dyn FnMut(EdgeIndex),
+    ) -> Option<N> {
         self.nodes.get(a.index())?;
         for d in &DIRECTIONS {
             let k = *d as usize;
@@ -399,7 +302,7 @@ impl<N, E> Graph<N, E> {
                 if next == EdgeIndex::end() {
                     break;
                 }
-                let ret = self.remove_edge(next);
+                let ret = self.remove_edge_with(next, on_remove);
                 debug_assert!(ret.is_some());
                 let _ = ret;
             }
@@ -433,6 +336,67 @@ impl<N, E> Graph<N, E> {
         Some(node.weight)
     }
 
+    /// Unlinks edge `e` from the adjacency lists of both its endpoints, in O(1)
+    /// through the doubly-linked `prev`/`next` edge links. `e`'s own links are
+    /// left untouched (it is about to be removed or rewritten by the caller).
+    fn unlink_edge(&mut self, e: EdgeIndex) {
+        let (edge_node, edge_next, edge_prev) = {
+            let ed = &self.edges[e.index()];
+            (ed.node, ed.next, ed.prev)
+        };
+        for &d in &DIRECTIONS {
+            let k = d as usize;
+            let prev = edge_prev[k];
+            let next = edge_next[k];
+            if prev == EdgeIndex::end() {
+                // `e` is the list head stored on the node.
+                if let Some(node) = self.nodes.get_mut(edge_node[k].index()) {
+                    debug_assert!(node.next[k] == e);
+                    node.next[k] = next;
+                } else {
+                    debug_assert!(
+                        false,
+                        "Edge's endpoint dir={:?} index={:?} not found",
+                        d, edge_node[k]
+                    );
+                }
+            } else {
+                debug_assert!(self.edges[prev.index()].next[k] == e);
+                self.edges[prev.index()].next[k] = next;
+            }
+            if next != EdgeIndex::end() {
+                debug_assert!(self.edges[next.index()].prev[k] == e);
+                self.edges[next.index()].prev[k] = prev;
+            }
+        }
+    }
+
+    /// Rewrites the neighbors' (and head's) links pointing at edge `e` — whose
+    /// links are valid but whose index just changed — to `new_e`, in O(1)
+    /// through the doubly-linked edge links. The caller must already have moved
+    /// the edge's data to `new_e`'s slot.
+    fn relink_edge(&mut self, new_e: EdgeIndex) {
+        let (edge_node, edge_next, edge_prev) = {
+            let ed = &self.edges[new_e.index()];
+            (ed.node, ed.next, ed.prev)
+        };
+        for &d in &DIRECTIONS {
+            let k = d as usize;
+            let prev = edge_prev[k];
+            let next = edge_next[k];
+            if prev == EdgeIndex::end() {
+                if let Some(node) = self.nodes.get_mut(edge_node[k].index()) {
+                    node.next[k] = new_e;
+                }
+            } else {
+                self.edges[prev.index()].next[k] = new_e;
+            }
+            if next != EdgeIndex::end() {
+                self.edges[next.index()].prev[k] = new_e;
+            }
+        }
+    }
+
     /// Remove an edge and return its edge weight, or `None` if it didn't exist.
     ///
     /// Apart from `e`, this invalidates the last edge index in the graph
@@ -440,112 +404,37 @@ impl<N, E> Graph<N, E> {
     ///
     /// Computes in **O(e')** time, where **e'** is the size of four particular edge lists, for
     /// the vertices of `e` and the vertices of another affected edge.
-    pub fn remove_edge(&mut self, e: EdgeIndex) -> Option<E>
-    where
-        E: Clone,
-    {
-        // Non-journaled path: delegate to the journaled twin with `None`. The
-        // `E: Clone` bound is inherited from the twin but never exercised at
-        // runtime here (the clone is guarded on `ops.is_some()`); every `E` in
-        // this crate (`ContactPair`, `IntersectionPair`, `ImpulseJoint`, `()`)
-        // is `Clone`, so the bound is free.
-        self.remove_edge_journaled(e, None)
+    pub fn remove_edge(&mut self, e: EdgeIndex) -> Option<E> {
+        self.remove_edge_with(e, &mut |_| {})
     }
 
-    /// Journaling variant of [`Self::change_edge_links`]: every `node.next[k]` /
-    /// `curedge.next[k]` write records its old value (as `NodeNext` / `EdgeNext`)
-    /// into `ops` before overwriting.
-    fn change_edge_links_journaled(
+    /// Same as [`Self::remove_edge`], invoking `on_remove` with the edge index right
+    /// before the removal is applied, so side arrays indexed like `self.edges` can
+    /// mirror the `swap_remove`.
+    pub fn remove_edge_with(
         &mut self,
-        edge_node: [NodeIndex; 2],
         e: EdgeIndex,
-        edge_next: [EdgeIndex; 2],
-        mut ops: Option<&mut Vec<GraphCellUndo<N, E>>>,
-    ) {
-        for &d in &DIRECTIONS {
-            let k = d as usize;
-            let node = match self.nodes.get_mut(edge_node[k].index()) {
-                Some(r) => r,
-                None => {
-                    debug_assert!(
-                        false,
-                        "Edge's endpoint dir={:?} index={:?} not found",
-                        d, edge_node[k]
-                    );
-                    return;
-                }
-            };
-            let fst = node.next[k];
-            if fst == e {
-                if let Some(ops) = ops.as_deref_mut() {
-                    ops.push(GraphCellUndo::NodeNext {
-                        node: edge_node[k].index() as u32,
-                        dir: k,
-                        old: node.next[k],
-                    });
-                }
-                node.next[k] = edge_next[k];
-            } else {
-                let mut edges = edges_walker_mut(&mut self.edges, fst, d);
-                while let Some((cur_index, curedge)) = edges.next() {
-                    if curedge.next[k] == e {
-                        if let Some(ops) = ops.as_deref_mut() {
-                            ops.push(GraphCellUndo::EdgeNext {
-                                edge: cur_index.index() as u32,
-                                dir: k,
-                                old: curedge.next[k],
-                            });
-                        }
-                        curedge.next[k] = edge_next[k];
-                        break; // the edge can only be present once in the list.
-                    }
-                }
-            }
-        }
+        on_remove: &mut dyn FnMut(EdgeIndex),
+    ) -> Option<E> {
+        // every edge is part of two lists,
+        // outgoing and incoming edges.
+        // Remove it from both
+        self.edges.get(e.index())?;
+        self.unlink_edge(e);
+        on_remove(e);
+        self.remove_edge_adjust_indices(e)
     }
 
-    /// Journaling variant of [`Self::remove_edge`]. Records — in execution order,
-    /// for LIFO replay — every splice write (via `change_edge_links_journaled`),
-    /// the `swap_remove` relocation (as `EdgeSwapRemove`, capturing `removed` by
-    /// clone before the swap), and the post-swap rewires. Replaying in reverse
-    /// undoes the post-swap rewires first (restoring references to the old tail
-    /// index), then the swap itself (moving the relocated edge back to the tail
-    /// and reinserting `removed`), then the splice — so every index each op names
-    /// is valid at the instant that op runs.
-    pub fn remove_edge_journaled(
-        &mut self,
-        e: EdgeIndex,
-        mut ops: Option<&mut Vec<GraphCellUndo<N, E>>>,
-    ) -> Option<E>
-    where
-        E: Clone,
-    {
-        let (edge_node, edge_next) = match self.edges.get(e.index()) {
-            None => return None,
-            Some(x) => (x.node, x.next),
-        };
-        self.change_edge_links_journaled(edge_node, e, edge_next, ops.as_deref_mut());
-
-        // swap_remove the edge -- only the removed edge and the edge swapped into
-        // place are affected and need their indices updated.
-        let old_len = self.edges.len();
-        let had_swap = e.index() != old_len - 1;
-        let removed = ops.as_deref().map(|_| self.edges[e.index()].clone());
+    fn remove_edge_adjust_indices(&mut self, e: EdgeIndex) -> Option<E> {
+        // swap_remove the edge -- only the removed edge
+        // and the edge swapped into place are affected and need updating
+        // indices.
         let edge = self.edges.swap_remove(e.index());
-        if let Some(ops) = ops.as_deref_mut() {
-            ops.push(GraphCellUndo::EdgeSwapRemove {
-                at: e.index() as u32,
-                removed: removed.expect("recorded when journaling"),
-                had_swap,
-            });
+        if e.index() < self.edges.len() {
+            // An edge was swapped into the removed slot: rewrite the links
+            // pointing at its old index (the last slot) to `e`.
+            self.relink_edge(e);
         }
-        let swap = match self.edges.get(e.index()) {
-            // no element needed to be swapped.
-            None => return Some(edge.weight),
-            Some(ed) => ed.node,
-        };
-        let swapped_e = EdgeIndex::new(self.edges.len() as u32);
-        self.change_edge_links_journaled(swap, swapped_e, [e, e], ops);
         Some(edge.weight)
     }
 
@@ -605,6 +494,21 @@ impl<N, E> Graph<N, E> {
     /// connected to `a` (and `b`, if the graph edges are undirected).
     pub fn find_edge(&self, a: NodeIndex, b: NodeIndex) -> Option<EdgeIndex> {
         self.find_edge_undirected(a, b).map(|(ix, _)| ix)
+    }
+
+    /// Return an iterator over all the edges connecting `a` and `b`, in either direction.
+    ///
+    /// Unlike [`Self::find_edge`], this yields every parallel edge between the two
+    /// nodes instead of only the first one found.
+    pub fn edges_between(
+        &self,
+        a: NodeIndex,
+        b: NodeIndex,
+    ) -> impl Iterator<Item = EdgeIndex> + '_ {
+        self.edges(a).filter_map(move |e| {
+            let node = self.edges[e.id().index()].node;
+            (node == [a, b] || node == [b, a]).then_some(e.id())
+        })
     }
 
     /// Lookup an edge between `a` and `b`, in either direction.
@@ -751,6 +655,7 @@ impl<'a, E> Iterator for Edges<'a, E> {
                 node: _node,
                 weight,
                 next,
+                ..
             }) = self.edges.get(i)
             {
                 self.next[0] = next[0];
@@ -767,7 +672,10 @@ impl<'a, E> Iterator for Edges<'a, E> {
         }
 
         if iterate_over.unwrap_or(Direction::Incoming) == Direction::Incoming {
-            while let Some(Edge { node, weight, next }) = self.edges.get(self.next[1].index()) {
+            while let Some(Edge {
+                node, weight, next, ..
+            }) = self.edges.get(self.next[1].index())
+            {
                 let edge_index = self.next[1];
                 self.next[1] = next[1];
                 // In any of the "both" situations, self-loops would be iterated over twice.

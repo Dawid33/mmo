@@ -1,9 +1,9 @@
 use game::{derive_voxels, voxel_index, BlockId, Chunk};
-use std::hash::Hash;
+use game::StateHash;
 
 fn crc(c: &Chunk) -> u32 {
     let mut h = crc32fast::Hasher::new();
-    c.hash(&mut h);
+    c.state_hash(&mut h);
     h.finalize()
 }
 

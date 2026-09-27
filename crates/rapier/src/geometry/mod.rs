@@ -1,62 +1,98 @@
 //! Structures related to geometry: colliders, shapes, etc.
 
-pub use self::broad_phase_bvh::{BroadPhaseBvh, BroadSaved, BvhOptimizationStrategy};
+#[cfg(feature = "alloc")]
+pub(crate) use self::broad_phase_bvh::DeferredBvhOptimize;
+#[cfg(feature = "alloc")]
+pub use self::broad_phase_bvh::{BroadPhaseBvh, BvhOptimizationStrategy};
 pub use self::broad_phase_pair_event::{BroadPhasePairEvent, ColliderPair};
+#[cfg(feature = "alloc")]
 pub use self::collider::{Collider, ColliderBuilder};
+#[cfg(feature = "alloc")]
 pub use self::collider_components::*;
+pub use self::collider_handle::ColliderHandle;
+#[cfg(feature = "alloc")]
 pub use self::collider_set::{ColliderSet, ModifiedColliders};
+#[cfg(feature = "alloc")]
+pub(crate) use self::contact_pair::ContactRecycleState;
+#[cfg(feature = "alloc")]
+pub(crate) use self::contact_pair::PairEventStatus;
+#[cfg(feature = "alloc")]
+pub(crate) use self::contact_pair::SOLVER_DYNAMIC_COLOR_COUNT;
+#[cfg(feature = "alloc")]
+pub(crate) use self::contact_pair::relative_pose_drift;
+#[cfg(feature = "alloc")]
 pub use self::contact_pair::{
-    ContactData, ContactManifoldData, ContactPair, IntersectionPair, SimdSolverContact,
-    SolverContact, SolverFlags,
+    ContactData, ContactId, ContactManifoldData, ContactPair, IntersectionPair, NEW_CONTACT_BIT,
+    PairContacts, RigidPairContacts, SimdSolverContact, SolverContact, SolverContactGeneric,
+    SolverContacts, SolverFlags, is_bouncy, is_bouncy_simd,
 };
+#[cfg(feature = "alloc")]
 pub use self::interaction_graph::{
     ColliderGraphIndex, InteractionGraph, RigidBodyGraphIndex, TemporaryInteractionIndex,
 };
 pub use self::interaction_groups::{Group, InteractionGroups, InteractionTestMode};
+#[cfg(feature = "alloc")]
 pub use self::mesh_converter::{MeshConverter, MeshConverterError};
+#[cfg(feature = "alloc")]
 pub use self::narrow_phase::NarrowPhase;
-pub(crate) use self::narrow_phase::NarrowUndo;
+#[cfg(feature = "alloc")]
+pub(crate) use self::narrow_phase::soft_contacts;
+#[cfg(feature = "alloc")]
+pub use self::narrow_phase::soft_contacts::{
+    SoftContactImpulse, SoftEdgeCandidate, SoftEdgePass, SoftPairContacts, SoftVertexCandidate,
+    SoftVertexHits, SoftVertexPass, SoftVolumePatch, VolumeBin,
+};
+#[cfg(feature = "alloc")]
+pub use parry::utils::Array2;
 
-pub use parry3d::bounding_volume::BoundingVolume;
-pub use parry3d::partitioning::{Bvh, BvhBuildStrategy};
-pub use parry3d::query::{PointQuery, PointQueryWithLocation, RayCast, TrackedContact};
-pub use parry3d::shape::{SharedShape, VoxelState, VoxelType, Voxels};
+pub use parry::bounding_volume::BoundingVolume;
+#[cfg(feature = "alloc")]
+pub use parry::partitioning::{Bvh, BvhBuildStrategy};
+#[cfg(feature = "alloc")]
+pub use parry::query::{PointQuery, PointQueryWithLocation, RayCast, TrackedContact};
+#[cfg(feature = "alloc")]
+pub use parry::shape::{SharedShape, VoxelState, VoxelType, Voxels};
 
+#[cfg(feature = "alloc")]
 use crate::math::{Real, Vector};
 
 /// A contact between two colliders.
-pub type Contact = parry3d::query::TrackedContact<ContactData>;
+#[cfg(feature = "alloc")]
+pub type Contact = parry::query::TrackedContact<ContactData>;
 /// A contact manifold between two colliders.
-pub type ContactManifold = parry3d::query::ContactManifold<ContactManifoldData, ContactData>;
+#[cfg(feature = "alloc")]
+pub type ContactManifold = parry::query::ContactManifold<ContactManifoldData, ContactData>;
 /// A segment shape.
-pub type Segment = parry3d::shape::Segment;
+pub type Segment = parry::shape::Segment;
 /// A cuboid shape.
-pub type Cuboid = parry3d::shape::Cuboid;
+pub type Cuboid = parry::shape::Cuboid;
 /// A triangle shape.
-pub type Triangle = parry3d::shape::Triangle;
+pub type Triangle = parry::shape::Triangle;
 /// A ball shape.
-pub type Ball = parry3d::shape::Ball;
+pub type Ball = parry::shape::Ball;
 /// A capsule shape.
-pub type Capsule = parry3d::shape::Capsule;
+pub type Capsule = parry::shape::Capsule;
 /// A heightfield shape.
-pub type HeightField = parry3d::shape::HeightField;
+#[cfg(feature = "alloc")]
+pub type HeightField = parry::shape::HeightField;
 /// A cylindrical shape.
 #[cfg(feature = "dim3")]
-pub type Cylinder = parry3d::shape::Cylinder;
+pub type Cylinder = parry::shape::Cylinder;
 /// A cone shape.
 #[cfg(feature = "dim3")]
-pub type Cone = parry3d::shape::Cone;
+pub type Cone = parry::shape::Cone;
 /// An axis-aligned bounding box.
-pub type Aabb = parry3d::bounding_volume::Aabb;
+pub type Aabb = parry::bounding_volume::Aabb;
 /// A ray that can be cast against colliders.
-pub type Ray = parry3d::query::Ray;
+pub type Ray = parry::query::Ray;
 /// The intersection between a ray and a  collider.
-pub type RayIntersection = parry3d::query::RayIntersection;
+pub type RayIntersection = parry::query::RayIntersection;
 /// The projection of a point on a collider.
-pub type PointProjection = parry3d::query::PointProjection;
+pub type PointProjection = parry::query::PointProjection;
 /// The result of a shape-cast between two shapes.
-pub type ShapeCastHit = parry3d::query::ShapeCastHit;
+pub type ShapeCastHit = parry::query::ShapeCastHit;
 /// The default broad-phase implementation recommended for general-purpose usage.
+#[cfg(feature = "alloc")]
 pub type DefaultBroadPhase = BroadPhaseBvh;
 
 bitflags::bitflags! {
@@ -155,6 +191,7 @@ impl CollisionEvent {
     }
 }
 
+#[cfg(feature = "alloc")]
 #[derive(Copy, Clone, PartialEq, Debug, Default)]
 /// Event occurring when the sum of the magnitudes of the contact forces
 /// between two colliders exceed a threshold.
@@ -164,7 +201,7 @@ pub struct ContactForceEvent {
     /// The second collider involved in the contact.
     pub collider2: ColliderHandle,
     /// The sum of all the forces between the two colliders.
-    pub total_force: Vector<Real>,
+    pub total_force: Vector,
     /// The sum of the magnitudes of each force between the two colliders.
     ///
     /// Note that this is **not** the same as the magnitude of `self.total_force`.
@@ -172,11 +209,22 @@ pub struct ContactForceEvent {
     /// the magnitude of their sum.
     pub total_force_magnitude: Real,
     /// The world-space (unit) direction of the force with strongest magnitude.
-    pub max_force_direction: Vector<Real>,
+    pub max_force_direction: Vector,
     /// The magnitude of the largest force at a contact point of this contact pair.
     pub max_force_magnitude: Real,
+    /// Is this the first step the pair's total force exceeded its threshold?
+    ///
+    /// `true` on the step the force crosses the pair's
+    /// [`Collider::contact_force_event_threshold`] coming from below (or from not
+    /// touching), `false` while it stays above on consecutive steps. The status resets
+    /// when the force drops back below the threshold or the colliders separate, so the
+    /// next crossing reports `true` again. Note that this is about the *force*
+    /// threshold, not contact newness: a pair can touch gently for many steps (emitting
+    /// no force event) before its first `started` event.
+    pub started: bool,
 }
 
+#[cfg(feature = "alloc")]
 impl ContactForceEvent {
     /// Init a contact force event from a contact pair.
     pub fn from_contact_pair(dt: Real, pair: &ContactPair, total_force_magnitude: Real) -> Self {
@@ -184,11 +232,16 @@ impl ContactForceEvent {
             collider1: pair.collider1,
             collider2: pair.collider2,
             total_force_magnitude,
+            // The pair's status is updated only after the event handlers ran, so at
+            // this point it still holds the previous step's value.
+            started: !pair
+                .event_status
+                .contains(PairEventStatus::INITIAL_FORCE_THRESHOLD_EVENT_EMITTED),
             ..ContactForceEvent::default()
         };
 
-        for m in &pair.manifolds {
-            let mut total_manifold_impulse = Real::from(0.0);
+        for m in pair.solver_manifolds() {
+            let mut total_manifold_impulse = 0.0;
             for pt in m.contacts() {
                 total_manifold_impulse += pt.data.impulse;
 
@@ -199,6 +252,16 @@ impl ContactForceEvent {
             }
 
             result.total_force += m.data.normal * total_manifold_impulse;
+        }
+        // Two soft surfaces: their contacts are candidates, each reporting its impulse.
+        if let Some(soft) = pair.soft() {
+            for i in soft.impulses(pair.collider1) {
+                if i.impulse > result.max_force_magnitude {
+                    result.max_force_magnitude = i.impulse;
+                    result.max_force_direction = i.normal;
+                }
+                result.total_force += i.normal * i.impulse;
+            }
         }
 
         let inv_dt = crate::utils::inv(dt);
@@ -212,23 +275,40 @@ impl ContactForceEvent {
     }
 }
 
+#[cfg(feature = "alloc")]
 pub(crate) use self::narrow_phase::ContactManifoldIndex;
-pub use parry3d::shape::*;
+#[cfg(feature = "alloc")]
+pub use parry::shape::*;
 
-#[cfg(feature = "serde-serialize")]
+#[cfg(all(feature = "serde-serialize", feature = "alloc"))]
 pub(crate) fn default_persistent_query_dispatcher()
--> std::sync::Arc<dyn parry3d::query::PersistentQueryDispatcher<ContactManifoldData, ContactData>> {
-    std::sync::Arc::new(parry3d::query::DefaultQueryDispatcher)
+-> alloc::sync::Arc<dyn parry::query::PersistentQueryDispatcher<ContactManifoldData, ContactData>> {
+    alloc::sync::Arc::new(parry::query::DefaultQueryDispatcher)
 }
 
+#[cfg(feature = "alloc")]
 mod collider_components;
-mod contact_pair;
+mod collider_handle;
+#[cfg(feature = "alloc")]
+pub(crate) mod contact_pair;
+#[cfg(feature = "alloc")]
 mod interaction_graph;
 mod interaction_groups;
+#[cfg(feature = "alloc")]
 mod narrow_phase;
 
+#[cfg(feature = "alloc")]
 mod broad_phase_bvh;
 mod broad_phase_pair_event;
+#[cfg(feature = "alloc")]
 mod collider;
+#[cfg(feature = "alloc")]
 mod collider_set;
+#[cfg(feature = "alloc")]
 mod mesh_converter;
+
+#[cfg(all(feature = "dim3", feature = "alloc"))]
+mod manifold_reduction;
+
+#[cfg(all(feature = "dim3", feature = "alloc"))]
+mod contact_clustering;

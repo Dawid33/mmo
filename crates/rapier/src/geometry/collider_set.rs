@@ -1,9 +1,12 @@
+use crate::alloc_prelude::*;
 use crate::data::arena::Arena;
 use crate::data::{HasModifiedFlag, ModifiedObjects};
-use crate::dynamics::{IslandManager, RigidBodyHandle, RigidBodySet, RigidBodyType};
+use crate::dynamics::{
+    IslandManager, RigidBodyHandle, RigidBodySet, SoftBindingError, SoftBodySet, SoftMeshBinding,
+};
 use crate::geometry::{Collider, ColliderChanges, ColliderHandle, ColliderParent};
-use crate::math::Isometry;
-use std::ops::{Index, IndexMut};
+use crate::math::{DIM, Pose, Vector};
+use core::ops::{Index, IndexMut};
 
 /// A set of modified colliders
 pub type ModifiedColliders = ModifiedObjects<ColliderHandle, Collider>;
@@ -11,17 +14,17 @@ pub type ModifiedColliders = ModifiedObjects<ColliderHandle, Collider>;
 impl HasModifiedFlag for Collider {
     #[inline]
     fn has_modified_flag(&self) -> bool {
-        self.changes.contains(ColliderChanges::MODIFIED)
+        self.changes.contains(ColliderChanges::IN_MODIFIED_SET)
     }
 
     #[inline]
     fn set_modified_flag(&mut self) {
-        self.changes |= ColliderChanges::MODIFIED;
+        self.changes |= ColliderChanges::IN_MODIFIED_SET;
     }
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
-#[derive(Clone, Default, Debug, Hash)]
+#[derive(Clone, Default, Debug)]
 /// The collection that stores all colliders (collision shapes) in your physics world.
 ///
 /// Similar to [`RigidBodySet`](crate::dynamics::RigidBodySet), this is the "database" where
@@ -45,10 +48,17 @@ impl HasModifiedFlag for Collider {
 ///     &mut bodies
 /// );
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ColliderSet {
     pub(crate) colliders: Arena<Collider>,
     pub(crate) modified_colliders: ModifiedColliders,
     pub(crate) removed_colliders: Vec<ColliderHandle>,
+    // mmo-fork: first-touch capture buffer, installed only for the duration of
+    // a journaled step (`pipeline::step_journal`, upgrade plan Task 4.2).
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — the journal's transient capture buffer, not state.
+    pub(crate) capture:
+        Option<Box<crate::pipeline::step_journal::Capture<ColliderHandle, Collider>>>,
 }
 
 impl ColliderSet {
@@ -58,6 +68,7 @@ impl ColliderSet {
             colliders: Arena::new(),
             modified_colliders: Default::default(),
             removed_colliders: Vec::new(),
+            capture: None,
         }
     }
 
@@ -69,6 +80,7 @@ impl ColliderSet {
             colliders: Arena::with_capacity(capacity),
             modified_colliders: ModifiedColliders::with_capacity(capacity),
             removed_colliders: Vec::new(),
+            capture: None,
         }
     }
 
@@ -82,7 +94,7 @@ impl ColliderSet {
     /// [`PhysicsPipeline`](crate::pipeline::PhysicsPipeline), which handles
     /// broadphase updates automatically.
     pub fn take_modified(&mut self) -> ModifiedColliders {
-        std::mem::take(&mut self.modified_colliders)
+        core::mem::take(&mut self.modified_colliders)
     }
 
     pub(crate) fn set_modified(&mut self, modified: ModifiedColliders) {
@@ -98,12 +110,28 @@ impl ColliderSet {
     /// [`PhysicsPipeline`](crate::pipeline::PhysicsPipeline), which handles
     /// broadphase updates automatically.
     pub fn take_removed(&mut self) -> Vec<ColliderHandle> {
-        std::mem::take(&mut self.removed_colliders)
+        core::mem::take(&mut self.removed_colliders)
     }
 
+    // mmo-fork: journal plumbing (upgrade plan Task 4.2).
     pub(crate) fn set_removed(&mut self, removed: Vec<ColliderHandle>) {
         self.removed_colliders = removed;
     }
+
+    /// mmo-fork: saves `handle`'s pre-step value on its first `&mut` access
+    /// during a journaled step. Every accessor handing out `&mut Collider`
+    /// calls this first.
+    #[inline]
+    fn journal_capture(&mut self, handle: ColliderHandle) {
+        if let Some(capture) = self.capture.as_deref_mut() {
+            if let Some(co) = self.colliders.get(handle.0) {
+                capture.save(handle, handle.0.into_raw_parts().0, co);
+            }
+        }
+    }
+
+    // mmo-fork: rollback primitives (upgrade plan Task 4.1; same names and
+    // semantics as the old fork's, mirroring `RigidBodySet`'s).
 
     /// Undo-only: overwrite the slot value; the handle must be occupied.
     /// Does NOT touch modified/removed lists (the journal restores those
@@ -115,7 +143,7 @@ impl ColliderSet {
             .expect("restore_raw: slot vacant") = collider;
     }
 
-    /// Whether `handle`'s collider currently carries the MODIFIED change-flag,
+    /// Whether `handle`'s collider currently carries the `IN_MODIFIED_SET` change-flag,
     /// i.e. whether a tracked mutation (`get_mut`) would skip its
     /// modified-list push. Capture this BEFORE such a mutation so its undo
     /// knows whether to [`Self::pop_modified`]. Mirrors
@@ -123,13 +151,13 @@ impl ColliderSet {
     pub fn is_marked_modified(&self, handle: ColliderHandle) -> bool {
         self.colliders
             .get(handle.0)
-            .is_some_and(|co| co.changes.contains(ColliderChanges::MODIFIED))
+            .is_some_and(|co| co.has_modified_flag())
     }
 
     /// Exact inverse of the modified-list push performed on `handle` by the
     /// MOST RECENT tracked mutation. LIFO contract: `handle` must be the
     /// list's tail (asserted). Callers restore the collider VALUE separately
-    /// via [`Self::restore_raw`], which covers the MODIFIED flag itself.
+    /// via [`Self::restore_raw`], which covers the `IN_MODIFIED_SET` flag itself.
     /// Mirrors [`RigidBodySet::pop_modified`].
     pub fn pop_modified(&mut self, handle: ColliderHandle) {
         let popped = self.modified_colliders.pop();
@@ -163,7 +191,8 @@ impl ColliderSet {
             Some(handle),
             "revert_insert: not the most recent insert"
         );
-        self.colliders.revert_insert(handle.0, prev_free_head, prev_items_len);
+        self.colliders
+            .revert_insert(handle.0, prev_free_head, prev_items_len);
     }
 
     /// Returns a handle that's guaranteed to be invalid.
@@ -193,6 +222,12 @@ impl ColliderSet {
     /// Iterates over all colliders with mutable access.
     #[cfg(not(feature = "dev-remove-slow-accessors"))]
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (ColliderHandle, &mut Collider)> {
+        // mmo-fork: every collider is handed out.
+        if let Some(capture) = self.capture.as_deref_mut() {
+            for (h, co) in self.colliders.iter() {
+                capture.save(ColliderHandle(h), h.into_raw_parts().0, co);
+            }
+        }
         self.modified_colliders.clear();
         let modified_colliders = &mut self.modified_colliders;
         self.colliders.iter_mut().map(move |(h, co)| {
@@ -229,6 +264,8 @@ impl ColliderSet {
     /// Most colliders should be attached to rigid bodies using [`insert_with_parent()`](Self::insert_with_parent) instead.
     /// Standalone colliders are useful for sensors or static collision geometry that doesn't need a body.
     pub fn insert(&mut self, coll: impl Into<Collider>) -> ColliderHandle {
+        // mmo-fork: the journal restores values, not slots.
+        debug_assert!(self.capture.is_none(), "collider insert/removal during a journaled step");
         let mut coll = coll.into();
         // Make sure the internal links are reset, they may not be
         // if this rigid-body was obtained by cloning another one.
@@ -267,6 +304,8 @@ impl ColliderSet {
         parent_handle: RigidBodyHandle,
         bodies: &mut RigidBodySet,
     ) -> ColliderHandle {
+        // mmo-fork: the journal restores values, not slots.
+        debug_assert!(self.capture.is_none(), "collider insert/removal during a journaled step");
         let mut coll = coll.into();
         // Make sure the internal links are reset, they may not be
         // if this collider was obtained by cloning another one.
@@ -303,6 +342,79 @@ impl ColliderSet {
         handle
     }
 
+    /// Inserts a collider holding a soft body's deformable collision mesh: a polyline (2D) or
+    /// triangle mesh (3D) whose vertices follow the cluster proxy `parent_handle` via `binding`
+    /// ([`crate::dynamics::SoftBodyCluster::proxy`]); a failed call leaves both sets untouched.
+    pub fn insert_deformable(
+        &mut self,
+        coll: impl Into<Collider>,
+        binding: SoftMeshBinding,
+        parent_handle: RigidBodyHandle,
+        bodies: &mut RigidBodySet,
+        soft_bodies: &mut SoftBodySet,
+    ) -> Result<ColliderHandle, SoftBindingError> {
+        let mut coll = coll.into();
+        // The parent must be a live cluster proxy: it says which body and cluster the mesh
+        // joins, and its pose places the collider like any attached one.
+        let (body_handle, cluster_id, frame) = {
+            let rb = bodies
+                .get(parent_handle)
+                .ok_or(SoftBindingError::NotAClusterProxy)?;
+            let body = rb.soft_body().ok_or(SoftBindingError::NotAClusterProxy)?;
+            (body, rb.soft_cluster, rb.pos.position)
+        };
+        let sb = soft_bodies
+            .get_mut(body_handle)
+            .ok_or(SoftBindingError::NotAClusterProxy)?;
+        if sb
+            .cluster(cluster_id)
+            .is_none_or(|cluster| cluster.proxy() != parent_handle)
+        {
+            return Err(SoftBindingError::NotAClusterProxy);
+        }
+
+        let (vertices, indices) = mesh_geometry(coll.shape())?;
+        // The shape is kept as given, in the collider's own frame: the binding reads its
+        // vertices where the collider's pose relative to the proxy puts them.
+        let pos_wrt_parent = coll
+            .parent
+            .as_ref()
+            .map_or(coll.pos.0, |parent| parent.pos_wrt_parent);
+        let pose = frame * pos_wrt_parent;
+        let vertices: Vec<Vector> = vertices.iter().map(|v| pose * *v).collect();
+        let mut mesh = sb.bind_mesh(cluster_id, &binding, vertices, indices)?;
+        // The shape's `ORIENTED` flag says whether the closed mesh encloses solid matter.
+        #[cfg(feature = "dim2")]
+        let oriented = coll.shape().as_polyline().is_some_and(|polyline| {
+            polyline
+                .flags()
+                .contains(parry::shape::PolylineFlags::ORIENTED)
+        });
+        #[cfg(feature = "dim3")]
+        let oriented = coll.shape().as_trimesh().is_some_and(|trimesh| {
+            trimesh
+                .flags()
+                .contains(parry::shape::TriMeshFlags::ORIENTED)
+        });
+        mesh.oriented = oriented;
+        coll.set_density(0.0);
+        // The contact skin is the thickness of the mesh's vertices in the soft contact
+        // passes: a collider left without one gets the body's particle radius.
+        if coll.contact_skin() <= 0.0 {
+            coll.set_contact_skin(sb.particle_radius());
+        }
+
+        let id = sb.push_mesh(cluster_id, mesh);
+        let handle = self.insert_with_parent(coll, parent_handle, bodies);
+        let co = self.index_mut_internal(handle);
+        co.deformable_mesh_ref = Some(crate::dynamics::SoftMeshRef {
+            body: body_handle,
+            id,
+        });
+        soft_bodies[body_handle].set_mesh_collider(id, handle);
+        Ok(handle)
+    }
+
     /// Changes which rigid body a collider is attached to, or detaches it completely.
     ///
     /// Use this to move a collider from one body to another, or to make it standalone.
@@ -336,29 +448,6 @@ impl ColliderSet {
                 return; // Nothing to do, this is the same parent.
             }
 
-            // The broad phase suppresses fixed-fixed pairs at creation time
-            // (see BroadPhaseBvh::pair_permanently_dead) based on the leaf's
-            // AABB, which a re-parent does not move. Re-parenting a collider
-            // off of a fixed body (or with no parent, which is Fixed by
-            // convention) onto a non-fixed body would need those suppressed
-            // pairs re-emitted, and this fork has no re-pairing path. Detaching
-            // (`new_parent_handle == None`, effectively Fixed) stays legal —
-            // internal removal paths null parents through this method.
-            let curr_type = curr_parent
-                .and_then(|h| bodies.get(h))
-                .map(|rb| rb.body_type)
-                .unwrap_or(RigidBodyType::Fixed);
-            let new_type = new_parent_handle
-                .and_then(|h| bodies.get(h))
-                .map(|rb| rb.body_type)
-                .unwrap_or(RigidBodyType::Fixed);
-            assert!(
-                curr_type != RigidBodyType::Fixed || new_type == RigidBodyType::Fixed,
-                "set_parent: fixed -> {new_type:?} re-parent with attached collider is \
-                 unsupported: fixed-fixed pairs are suppressed at the broad phase and cannot \
-                 be re-created; remove and re-insert the collider instead",
-            );
-
             collider.changes |= ColliderChanges::PARENT;
 
             if let Some(parent_handle) = curr_parent {
@@ -374,7 +463,7 @@ impl ColliderSet {
                     } else {
                         collider.parent = Some(ColliderParent {
                             handle: new_parent_handle,
-                            pos_wrt_parent: Isometry::identity(),
+                            pos_wrt_parent: Pose::IDENTITY,
                         })
                     };
 
@@ -409,11 +498,13 @@ impl ColliderSet {
     /// # let mut bodies = RigidBodySet::new();
     /// # let mut islands = IslandManager::new();
     /// # let body_handle = bodies.insert(RigidBodyBuilder::dynamic().build());
+    /// # let mut soft_bodies = SoftBodySet::new();
     /// # let handle = colliders.insert_with_parent(ColliderBuilder::ball(0.5).build(), body_handle, &mut bodies);
     /// if let Some(collider) = colliders.remove(
     ///     handle,
     ///     &mut islands,
     ///     &mut bodies,
+    ///     &mut soft_bodies,
     ///     true  // Wake up the parent body
     /// ) {
     ///     println!("Removed collider with shape: {:?}", collider.shared_shape());
@@ -424,8 +515,31 @@ impl ColliderSet {
         handle: ColliderHandle,
         islands: &mut IslandManager,
         bodies: &mut RigidBodySet,
+        soft_bodies: &mut SoftBodySet,
         wake_up: bool,
     ) -> Option<Collider> {
+        let collider = self.remove_internal(handle, islands, bodies, wake_up)?;
+        // A removed deformable collider takes its mesh with it: the soft body keeps simulating,
+        // without that mesh's collisions.
+        if let Some(mesh) = collider.deformable_mesh_ref() {
+            if let Some(sb) = soft_bodies.get_mut(mesh.body) {
+                sb.remove_mesh(mesh.id);
+            }
+        }
+        Some(collider)
+    }
+
+    /// Like [`Self::remove`], for internal callers that maintain the soft-body back-references
+    /// themselves.
+    pub(crate) fn remove_internal(
+        &mut self,
+        handle: ColliderHandle,
+        islands: &mut IslandManager,
+        bodies: &mut RigidBodySet,
+        wake_up: bool,
+    ) -> Option<Collider> {
+        // mmo-fork: the journal restores values, not slots.
+        debug_assert!(self.capture.is_none(), "collider insert/removal during a journaled step");
         let collider = self.colliders.remove(handle.0)?;
 
         /*
@@ -468,6 +582,8 @@ impl ColliderSet {
     /// suffer form the ABA problem.
     #[cfg(not(feature = "dev-remove-slow-accessors"))]
     pub fn get_unknown_gen_mut(&mut self, i: u32) -> Option<(&mut Collider, ColliderHandle)> {
+        let (_, handle) = self.colliders.get_unknown_gen(i)?;
+        self.journal_capture(ColliderHandle(handle)); // mmo-fork
         let (collider, handle) = self.colliders.get_unknown_gen_mut(i)?;
         let handle = ColliderHandle(handle);
         self.modified_colliders.push_once(handle, collider);
@@ -487,6 +603,7 @@ impl ColliderSet {
     /// Use this to modify collider properties like friction, restitution, sensor status, etc.
     #[cfg(not(feature = "dev-remove-slow-accessors"))]
     pub fn get_mut(&mut self, handle: ColliderHandle) -> Option<&mut Collider> {
+        self.journal_capture(handle); // mmo-fork
         let result = self.colliders.get_mut(handle.0)?;
         self.modified_colliders.push_once(handle, result);
         Some(result)
@@ -505,6 +622,9 @@ impl ColliderSet {
         if handle1 == handle2 {
             (self.get_mut(handle1), None)
         } else {
+            // mmo-fork
+            self.journal_capture(handle1);
+            self.journal_capture(handle2);
             let (mut co1, mut co2) = self.colliders.get2_mut(handle1.0, handle2.0);
             if let Some(co1) = co1.as_deref_mut() {
                 self.modified_colliders.push_once(handle1, co1);
@@ -517,10 +637,12 @@ impl ColliderSet {
     }
 
     pub(crate) fn index_mut_internal(&mut self, handle: ColliderHandle) -> &mut Collider {
+        self.journal_capture(handle); // mmo-fork
         &mut self.colliders[handle.0]
     }
 
     pub(crate) fn get_mut_internal(&mut self, handle: ColliderHandle) -> Option<&mut Collider> {
+        self.journal_capture(handle); // mmo-fork
         self.colliders.get_mut(handle.0)
     }
 
@@ -531,6 +653,7 @@ impl ColliderSet {
         &mut self,
         handle: ColliderHandle,
     ) -> Option<&mut Collider> {
+        self.journal_capture(handle); // mmo-fork
         let result = self.colliders.get_mut(handle.0)?;
         self.modified_colliders.push_once(handle, result);
         Some(result)
@@ -556,98 +679,45 @@ impl Index<ColliderHandle> for ColliderSet {
 #[cfg(not(feature = "dev-remove-slow-accessors"))]
 impl IndexMut<ColliderHandle> for ColliderSet {
     fn index_mut(&mut self, handle: ColliderHandle) -> &mut Collider {
+        self.journal_capture(handle); // mmo-fork
         let collider = &mut self.colliders[handle.0];
         self.modified_colliders.push_once(handle, collider);
         collider
     }
 }
 
-#[cfg(test)]
-mod revert_insert_tests {
-    use super::*;
-    use crate::dynamics::{IslandManager, RigidBodyBuilder, RigidBodyChanges, RigidBodySet};
-    use crate::geometry::ColliderBuilder;
-    use std::hash::{Hash, Hasher};
-
-    fn h<T: Hash>(t: &T) -> u64 {
-        let mut hasher = std::hash::DefaultHasher::new();
-        t.hash(&mut hasher);
-        hasher.finish()
+/// The vertices (world space) and elements of a deformable collider's shape.
+fn mesh_geometry(
+    shape: &dyn crate::geometry::Shape,
+) -> Result<(Vec<Vector>, Vec<[u32; DIM]>), SoftBindingError> {
+    #[cfg(feature = "dim2")]
+    let (deformable, geometry) = {
+        use parry::shape::PolylineFlags;
+        let polyline = shape
+            .as_polyline()
+            .ok_or(SoftBindingError::UnsupportedShape)?;
+        (
+            polyline.flags().contains(PolylineFlags::DEFORMABLE),
+            (polyline.vertices().to_vec(), polyline.indices().to_vec()),
+        )
+    };
+    #[cfg(feature = "dim3")]
+    let (deformable, geometry) = {
+        use parry::shape::TriMeshFlags;
+        let trimesh = shape
+            .as_trimesh()
+            .ok_or(SoftBindingError::UnsupportedShape)?;
+        (
+            trimesh.flags().contains(TriMeshFlags::DEFORMABLE),
+            (trimesh.vertices().to_vec(), trimesh.indices().to_vec()),
+        )
+    };
+    if !deformable {
+        return Err(SoftBindingError::NotDeformable);
     }
-
-    /// Exact inverse of `insert_with_parent`, both parent-tracking cases:
-    /// the parent NOT yet on the modified list (the tracking push must be
-    /// popped) and already on it (it must not be). Mirrors the game-side
-    /// `attach_collider_safe` undo closure; see also the public-API twin in
-    /// the game crate's tests/hash_restore.rs.
-    #[test]
-    fn insert_with_parent_reverts_exactly_both_tracking_cases() {
-        let mut bodies = RigidBodySet::new();
-        let mut colliders = ColliderSet::new();
-        let mut islands = IslandManager::new();
-
-        // A parent body plus some collider history so the arena free list is
-        // non-trivial (reuse-case allocation gets exercised too).
-        let parent = bodies.insert(RigidBodyBuilder::fixed().build());
-        let doomed = colliders.insert(ColliderBuilder::ball(1.0.into()).build());
-        colliders.remove(doomed, &mut islands, &mut bodies, false);
-
-        // Case A: parent NOT marked modified at attach time. Reach the clean
-        // state the way the pipeline's end-of-step sweep does: clear the
-        // flags of everything on the modified lists, then the lists.
-        for handle in bodies.take_modified().iter() {
-            if let Some(rb) = bodies.bodies.get_mut(handle.0) {
-                rb.changes = RigidBodyChanges::empty();
-            }
-        }
-        for handle in colliders.take_modified().iter() {
-            // Removed colliders stay on the modified list with a vacant slot.
-            if let Some(co) = colliders.colliders.get_mut(handle.0) {
-                co.changes = ColliderChanges::empty();
-            }
-        }
-        colliders.take_removed();
-        assert!(!bodies.is_marked_modified(parent), "setup: parent must start clean");
-
-        for was_modified_case in [false, true] {
-            let was_modified = bodies.is_marked_modified(parent);
-            assert_eq!(was_modified, was_modified_case, "case setup");
-
-            let before_bodies = h(&bodies);
-            let before_colliders = h(&colliders);
-            let pre_parent = bodies.get(parent).unwrap().clone();
-            let (free_head, len) = colliders.alloc_state();
-
-            let ch = colliders.insert_with_parent(
-                ColliderBuilder::capsule_y(0.5.into(), 0.25.into()).build(),
-                parent,
-                &mut bodies,
-            );
-            assert!(bodies.is_marked_modified(parent), "attach must mark the parent");
-
-            // Exact LIFO inverse of insert_with_parent:
-            colliders.revert_insert(ch, free_head, len);
-            bodies.restore_raw(parent, pre_parent);
-            if !was_modified {
-                bodies.pop_modified(parent);
-            }
-
-            assert_eq!(
-                before_bodies,
-                h(&bodies),
-                "parent body + modified list must restore (was_modified={was_modified})"
-            );
-            assert_eq!(
-                before_colliders,
-                h(&colliders),
-                "collider slot + alloc + modified list must restore (was_modified={was_modified})"
-            );
-
-            // Case B setup: leave the parent marked modified for the second
-            // iteration by touching it through the tracked accessor.
-            if !was_modified_case {
-                let _ = bodies.get_mut_internal_with_modification_tracking(parent);
-            }
-        }
+    let (vertices, indices) = geometry;
+    if vertices.is_empty() || indices.is_empty() {
+        return Err(SoftBindingError::DegenerateMesh);
     }
+    Ok((vertices, indices))
 }

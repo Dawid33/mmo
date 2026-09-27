@@ -10,7 +10,7 @@ pub type ChunkShape = ConstShape3u32<32, 32, 32>;
 
 pub const CHUNK_VOXEL_COUNT: usize = 32 * 32 * 32;
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash, state_hash::StateHash)]
 #[module(crate)]
 pub struct Chunk {
     /// Authoritative block grid, length `CHUNK_BLOCK_COUNT` (8).
@@ -114,7 +114,7 @@ impl ChunkCoords {
 
 /// Region-local (x, z) address of a vertical column, 0..REGION_CHUNKS.
 #[derive(
-    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord,
+    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord,
 )]
 pub struct ColumnCoords {
     pub x: usize,
@@ -127,7 +127,7 @@ impl ColumnCoords {
     }
 }
 
-#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Default, Debug, serde::Serialize, serde::Deserialize, Copy, Clone, Hash, state_hash::StateHash, PartialEq, Eq)]
 pub struct Voxel {
     pub block: BlockId,
 }
