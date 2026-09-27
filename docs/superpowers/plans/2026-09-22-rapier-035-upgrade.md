@@ -311,10 +311,10 @@ Keep every patch small and marked `// mmo-fork:` so the fork diff stays greppabl
 | `RigidBodySet` | `restore_raw(handle, RigidBody)`, `alloc_state()`, `revert_insert(handle, state)`, `is_marked_modified(handle) -> bool`, `pop_modified(handle)` |
 | `ColliderSet` | `restore_raw(handle, Collider)`, `alloc_state()`, `revert_insert(handle, state)`, `is_marked_modified(handle) -> bool`, `pop_modified(handle)` |
 
-- [ ] **Step 1: Port the tests.** `crates/game/tests/hash_restore.rs`, the arena/`RigidBodySet`/`ColliderSet` exactness tests (10), translated into `physics-next/tests/arena_revert.rs`, asserting byte equality of bincode before and after instead of `Hash`.
-- [ ] **Step 2: Watch them fail** (methods missing).
-- [ ] **Step 3: Port the implementations.** Old code: `crates/rapier/src/data/arena.rs:370-402`, `rigid_body_set.rs:124-220`, `collider_set.rs:111-154`. Upstream 0.36 arenas: check for changes to the free-list layout before copying.
-- [ ] **Step 4: Green, then commit.**
+- [x] **Step 1: Port the tests.** `crates/game/tests/hash_restore.rs`, the arena/`RigidBodySet`/`ColliderSet` exactness tests (10), translated into `physics-next/tests/arena_revert.rs`, asserting byte equality of bincode before and after instead of `Hash`.
+- [x] **Step 2: Watch them fail** (methods missing).
+- [x] **Step 3: Port the implementations.** Old code: `crates/rapier/src/data/arena.rs:370-402`, `rigid_body_set.rs:124-220`, `collider_set.rs:111-154`. Upstream 0.36 arenas: check for changes to the free-list layout before copying.
+- [x] **Step 4: Green, then commit.**
 
 ### Task 4.2: Hybrid `StepJournal`
 
@@ -362,20 +362,20 @@ The old signature (`revert(self, islands, broad, narrow, bodies, colliders, ij, 
 
 On `revert`, the captured values are written back in reverse order and the clones are swapped in.
 
-- [ ] **Step 1: Write the revert fuzzer first,** in `physics-next/tests/journal_fuzz.rs`.
+- [x] **Step 1: Write the revert fuzzer first,** in `physics-next/tests/journal_fuzz.rs`.
   - Seeded scenes: kinematic capsules, a few dynamic balls, one joint pair, collider add/remove, sleep/wake.
   - For each seed and tick: snapshot the bincode of all 7 structures, `step_journaled`, `revert`, and assert the bytes are equal.
   - Then re-step with a fresh pipeline and assert the result is byte-equal to a step taken without the journal.
   - The seed count is a named constant; tag the test slow if it's over 100 ms.
-- [ ] **Step 2: Port the scenario tests.** Port `crates/game/tests/step_journal.rs` (18 scenarios) into `physics-next/tests/step_journal.rs`, translated to glam and byte equality.
-- [ ] **Step 3: Implement the capture hooks and the journal.** Add `debug_assert!`s in the staged solver's writeback (`staged_island_solver/mod.rs:199`) that every written body handle is already captured. It writes through a raw `*mut RigidBodySet`, so it bypasses the accessor hooks.
-- [ ] **Step 4: Green on both files,** plus upstream `snapshot_roundtrip`. Commit.
+- [x] **Step 2: Port the scenario tests.** Port `crates/game/tests/step_journal.rs` (18 scenarios) into `physics-next/tests/step_journal.rs`, translated to glam and byte equality.
+- [x] **Step 3: Implement the capture hooks and the journal.** Add `debug_assert!`s in the staged solver's writeback (`staged_island_solver/mod.rs:199`) that every written body handle is already captured. It writes through a raw `*mut RigidBodySet`, so it bypasses the accessor hooks.
+- [x] **Step 4: Green on both files,** plus upstream `snapshot_roundtrip`. Commit.
 
 ### Task 4.3: Pipeline memo invalidation after revert
 
-- [ ] **Step 1: Write the test.** A scene with an impulse joint: step to tick N; journal, step and revert; re-step with (a) the same `PhysicsPipeline` and (b) `PhysicsPipeline::new()`. Assert (b) equals a never-reverted run byte for byte. Show whether (a) diverges; either way, record it in the test's doc comment.
-- [ ] **Step 2: Implement.** Add `PhysicsPipeline::invalidate_caches(&mut self)` and upstream's public `CCDSolver::invalidate_fixed_targets_cache()` (0.36, `ccd_solver.rs:47-49`; no fork patch), which together clear `joint_constraint_indices`, `joint_selection_primed`, the staged-solver assembly cache and `fixed_targets_cache`. `StepJournal::revert` can't reach the pipeline, so the game calls these after revert. If (a) doesn't diverge, keep the call anyway: it's cheap insurance, and the test pins it.
-- [ ] **Step 3: Commit.**
+- [x] **Step 1: Write the test.** A scene with an impulse joint: step to tick N; journal, step and revert; re-step with (a) the same `PhysicsPipeline` and (b) `PhysicsPipeline::new()`. Assert (b) equals a never-reverted run byte for byte. Show whether (a) diverges; either way, record it in the test's doc comment.
+- [x] **Step 2: Implement.** Add `PhysicsPipeline::invalidate_caches(&mut self)` and upstream's public `CCDSolver::invalidate_fixed_targets_cache()` (0.36, `ccd_solver.rs:47-49`; no fork patch), which together clear `joint_constraint_indices`, `joint_selection_primed`, the staged-solver assembly cache and `fixed_targets_cache`. `StepJournal::revert` can't reach the pipeline, so the game calls these after revert. If (a) doesn't diverge, keep the call anyway: it's cheap insurance, and the test pins it.
+- [x] **Step 3: Commit.**
 
 ### Task 4.4: `StateHash` trait, derive, and the forks' hash impls (D2)
 
@@ -406,7 +406,7 @@ pub trait StateHash {
   - Broad phase: the old BVH/pairs digests (`git log -p -S pairs_hash -- crates/rapier crates/parry`).
 - [x] **Step 3: Parity tests.** Port `voxels_hash_cache.rs` into `physics-next` (the cached hash tracks edits; equal content ⇒ equal hash). Add a cross-target check: a small scene's `StateHash` over all 7 physics structures equals a constant natively and under `wasm32` (same harness as `just determinism-wasm`).
 - [x] **Step 4: Cost check.** Ask the user, then time `StateHash` of the region-scale world from `clone_cost` (bodies, colliders, broad phase), next to the old fork's `Hash` on the same region (the exporter's source). It should be in the same range as today; if it's far slower, stop and report before the switch.
-- [ ] **Step 5: Commit.** The macro's `Hash` bound is flipped to `StateHash` in the switch (Task 5.2, Step 2), not here.
+- [x] **Step 5: Commit.** The macro's `Hash` bound is flipped to `StateHash` in the switch (Task 5.2, Step 2), not here.
 
 ---
 
@@ -494,7 +494,9 @@ The type map applies everywhere:
 
 - [x] **Step 1: Build for wasm.** Run `just web` (compile check) and the WebGL2 / per-chunk path build.
 - [x] **Step 2: Ask the user before running the game.** Then do a live run of server + one client (`just adapter=6700 run`, `world=small`): walk over chunk seams, jump, break/place blocks, cross a region seam, watch slimes. Check the log for mispredicts (`PERF_LOG=1`: `[client] mispredicts/s`) against a pre-switch run.
-- [ ] **Step 3: Browser check.** The wasm client connects to the native server and walks without desync.
+- [x] **Step 3: Browser check.** The wasm client connects to the native server and walks without desync.
+
+> **Landed (d74f103, 60bb216; H11).** Passed on `?world=small` (Intel, ANGLE/WebGL2, debug wasm): 0 panics, 0 hash mismatches; user: "its running, just lagging" — browser perf deferred. Found and fixed on the way: `motion_probe` used `std::time::Instant` (panics on wasm); the wasm sim never applied `WorldScale`; new `?world=tiny|small|full` URL knob; the final review added the panic hook before the `?world=` parse and a wasm-safe clock in `cull_chunks` (60bb216). Not fixed (pre-existing netcode, user to schedule): the server's `send_bounded` drops a packet after `SEND_DEADLINE`, leaving a gap that panics a stalled client with "Server event input buffer too big"; once, a winit web `RefCell already borrowed` panic under an overloaded load.
 
 ---
 
@@ -502,14 +504,18 @@ The type map applies everywhere:
 
 ### Task 6.1: Documentation and memory
 
-- [ ] **CLAUDE.md "Vendored Forks":** rewrite it. Remaining forks: rapier/parry (the `// mmo-fork:` patches, `grep -rn "mmo-fork" crates/rapier crates/parry` lists them), slotmapd, block-mesh. Determinism now comes from upstream features. Remove the `simba` libm_force / `ordered-float` wording and the "don't switch back to crates.io" rule (per D4). Replace "Bevy 0.18" with the actual pin while you're there.
-- [ ] **CLAUDE.md `crates/macros` paragraph:** `Hash` → `StateHash` (and mention the `state-hash` crates).
-- [ ] **Memory:** update `vendored-deps-update-investigation.md` to IMPLEMENTED, with the commit range; mark `undo-hashing-hotspots`, `narrow-phase-fixed-fixed-flood` and `wasm32-usize-sentinel-hazard` as superseded where upstream now covers them.
+- [x] **CLAUDE.md "Vendored Forks":** rewrite it. Remaining forks: rapier/parry (the `// mmo-fork:` patches, `grep -rn "mmo-fork" crates/rapier crates/parry` lists them), slotmapd, block-mesh. Determinism now comes from upstream features. Remove the `simba` libm_force / `ordered-float` wording and the "don't switch back to crates.io" rule (per D4). Replace "Bevy 0.18" with the actual pin while you're there.
+- [x] **CLAUDE.md `crates/macros` paragraph:** `Hash` → `StateHash` (and mention the `state-hash` crates).
+- [x] **Memory:** update `vendored-deps-update-investigation.md` to IMPLEMENTED, with the commit range; mark `undo-hashing-hotspots`, `narrow-phase-fixed-fixed-flood` and `wasm32-usize-sentinel-hazard` as superseded where upstream now covers them.
+
+> **Landed (60393db; H11).** Memory entries updated after checking each claim in code; the H12 final review confirmed the CLAUDE.md claims against the code.
 
 ### Task 6.2: Broad sweep (ask first)
 
-- [ ] **Step 1: Ask the user.** Then run `just test-full` and fix anything real.
-- [ ] **Step 2: Commit.**
+- [x] **Step 1: Ask the user.** Then run `just test-full` and fix anything real.
+- [x] **Step 2: Commit.**
+
+> **Landed (b9a447e; H11–H12).** Run per crate (`--include-ignored`, the recipe's skips; client with `--no-fail-fast`): game 413/0, server 10/0, worldgen 63/0, physics-next 110/0, client 449 run. Fixed: `look_rotation_matches_sim_quat` (the quats were bit-identical; `angle_between` read 6.9e-4 rad from a dot of 1 − 2⁻²⁴ — now a component compare, stricter), and two stale harnesses (`RetiredRegionRoots` / `HomeCellMask` never inited: the HUD test and all six `bevy_input` tests). Left red, pre-existing and not physics: `lod_rings::plain_removal_waits_for_a_fully_meshed_near_region`, and `crossing.rs`'s two convergence tests (TODO.md "REGRESSED" since 2026-09-20).
 
 ### Task 6.3: Final review — fork divergence from upstream
 
@@ -517,11 +523,11 @@ The last task. Measures how far our rapier/parry forks have drifted from pristin
 
 **Files:** Create `docs/superpowers/specs/<date>-physics-fork-divergence-review.md`.
 
-- [ ] **Step 1: Produce the diff.** Two independent baselines, which must agree:
+- [x] **Step 1: Produce the diff.** Two independent baselines, which must agree:
   - the pristine import commit from Task 2.1 (`IMPORT` = its hash): `git diff --stat IMPORT:crates/rapier-next HEAD:crates/rapier` and the same for parry (tree-ish paths, since Task 5.1 renamed the dirs), then the full diff into the job scratch dir;
   - a fresh clone of upstream at the imported tags (`v0.36.0`, `v0.31.1`) into scratch: `git diff --no-index` against `crates/rapier` / `crates/parry`. Also note whether a newer 0.36.x / 0.31.x release exists and what it changed in files we patch.
   - Record: files touched, `+/-` lines per crate, `mmo-fork:` marker count, and the old forks' numbers from Task 5.1 Step 0 for comparison.
-- [ ] **Step 2: Classify every hunk** in a table (file, lines, category, pinning test, verdict):
+- [x] **Step 2: Classify every hunk** in a table (file, lines, category, pinning test, verdict):
   - **Required patch** (Phase 3/4: mass-props skip, voxels cast, continuous surfaces, KCC snap/`depenetrate`, arena primitives, `StepJournal` hooks, memo invalidation) — must name the test that fails without it;
   - **`StateHash` derives / hand impls** (mechanical; count them);
   - **Rename / packaging** (Cargo.toml, `[lib] name`);
@@ -529,8 +535,16 @@ The last task. Measures how far our rapier/parry forks have drifted from pristin
   - **Superseded** — upstream now does the same thing (check the newer release too);
   - **Dead / leftover** — debug code, commented-out blocks, unused helpers, patches whose game-side caller is gone;
   - **Upstreamable** — generic fixes (e.g. the voxels cast defects) worth offering as upstream PRs, which would shrink the fork later.
-- [ ] **Step 3: Check necessity where it's in doubt.** For a patch whose need is unclear, find its pinning test (`physics-next` or `crates/game/tests/`) and reason from what it asserts. Only if that's inconclusive, revert that one hunk in the working tree (fork files only, after checking `git status` shows no other change to that file), run the named test with `just test-one`, and restore the file. Never `git stash`; never touch the user's uncommitted files.
-- [ ] **Step 4: Also look outside the forks:** `crates/physics-next` (does it still earn its keep, or should its tests move next to the forks?), `crates/state-hash*`, `slotmapd` (diff against upstream slotmap for the rollback inverses only), and any game-side workaround made unnecessary by upstream (e.g. `depenetration_lift` vs #485, the fixed-fixed pair filter vs upstream's).
-- [ ] **Step 5: Write the review doc.** Totals and before/after comparison first; then the hunk table; then a ranked cleanup list (what to remove, what to upstream, what must stay and why), each with its risk and the test that proves it.
-- [ ] **Step 6: Stop and report to the user** with the cleanup list. Apply cleanups only after they approve, one commit per item, each verified with its pinning test and `just smoke`.
-- [ ] **Step 7: Final commit** (the review doc, and any approved cleanups).
+- [x] **Step 3: Check necessity where it's in doubt.** For a patch whose need is unclear, find its pinning test (`physics-next` or `crates/game/tests/`) and reason from what it asserts. Only if that's inconclusive, revert that one hunk in the working tree (fork files only, after checking `git status` shows no other change to that file), run the named test with `just test-one`, and restore the file. Never `git stash`; never touch the user's uncommitted files.
+- [x] **Step 4: Also look outside the forks:** `crates/physics-next` (does it still earn its keep, or should its tests move next to the forks?), `crates/state-hash*`, `slotmapd` (diff against upstream slotmap for the rollback inverses only), and any game-side workaround made unnecessary by upstream (e.g. `depenetration_lift` vs #485, the fixed-fixed pair filter vs upstream's).
+- [x] **Step 5: Write the review doc.** Totals and before/after comparison first; then the hunk table; then a ranked cleanup list (what to remove, what to upstream, what must stay and why), each with its risk and the test that proves it.
+- [x] **Step 6: Stop and report to the user** with the cleanup list. Apply cleanups only after they approve, one commit per item, each verified with its pinning test and `just smoke`.
+- [x] **Step 7: Final commit** (the review doc, and any approved cleanups).
+
+> **Landed (e80a8dc review doc; cleanups a2c2d36, eb053ad, a89a507, 0b499fa, ec89417; c6e7551 "Cleanups applied").** `docs/superpowers/specs/2026-09-27-physics-fork-divergence-review.md`. User decisions: C1–C5 applied, C6 left listed (measure first), C7 (rename physics-next) skipped, D1 keep the tie ranking. Step 3's revert-a-hunk checks were not needed: every required patch names a pinning test that asserts its behaviour. After the cleanups: `physics-next-upstream` 63/0, `determinism-wasm` 6/0, `test-threads` 8/0, smoke ok.
+
+---
+
+## Plan complete (2026-09-27)
+
+Whole range `bdcce66..60bb216` on `develop` (Phase 0 through the H12 final review). The final whole-range review (H11+H12, `01abc95..c6e7551`) came back "with fixes": two Important wasm findings, fixed in 60bb216; six minors deferred. Every ruling made on the user's behalf, every deferred review minor across all hand-offs and every out-of-plan finding is in `docs/superpowers/specs/2026-09-27-rapier-035-upgrade-execution-record.md`.

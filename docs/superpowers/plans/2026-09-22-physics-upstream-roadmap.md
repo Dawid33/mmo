@@ -74,7 +74,7 @@ The H10 live gate passed on 2026-09-27: native server + client on the Intel iGPU
 
 H11 (2026-09-27): the browser check passed ("its running, just lagging"; three wasm bugs found, two fixed in d74f103; a server packet-drop gap left for the user), Task 6.1 landed, the fork-divergence review is in `docs/superpowers/specs/2026-09-27-physics-fork-divergence-review.md` and its cleanup list was approved.
 
-Next: H12 (prompt: `.superpowers/sdd/2026-09-22-rapier-035-upgrade/h12-prompt.md`): finish test-full, apply the cleanups, final review, close the plan.
+H12 (2026-09-27): test-full finished per crate (game 413/0, server 10/0, worldgen 63/0, physics-next 110/0, client 449 run; three client test fixes in b9a447e; three pre-existing client failures left, not physics); cleanups C1–C5 applied (a2c2d36, eb053ad, a89a507, 0b499fa, ec89417), C6 left listed, C7 skipped by the user, D1 kept; final review of H11+H12 "with fixes" — two wasm fixes in 60bb216. **Plan 2 is complete** (`bdcce66..60bb216`); every ruling and deferred minor is in `docs/superpowers/specs/2026-09-27-rapier-035-upgrade-execution-record.md`. The roadmap is done.
 
 ## Handoff sequence (one agent per row, strictly in order)
 
@@ -100,4 +100,4 @@ Every handoff starts with the common preamble below. It then names a plan, a tas
 | H9 ✅ | rapier-035-upgrade | 5.1, 5.2, 5.3 (switch, migrate game incl. `cells.rs`, client/server/worldgen) | `just smoke` green | 3–5 days |
 | H10 ✅ | rapier-035-upgrade | 5.4, 5.5 (behavioural verification, wasm, live check) — landed 18ff746..6494c0c | **USER GATE:** live run passed 2026-09-27 (browser check still open) | 2–3 days |
 | H11 ✅ | rapier-035-upgrade | 5.5 Step 3 browser check (passed; wasm fixes d74f103), 6.1 docs/memory (60393db), 6.2 `test-full` started, 6.3 review doc (e80a8dc) | **USER GATE:** 6.3 cleanup list approved 2026-09-27 | 2 days |
-| H12 | rapier-035-upgrade | Finish 6.2, apply the approved 6.3 cleanups (C1–C5, C7 to reconfirm), final review, plan/roadmap/memory, delete workspace | Plan complete | 1 day |
+| H12 ✅ | rapier-035-upgrade | Finish 6.2 (b9a447e), 6.3 cleanups C1–C5 (a2c2d36..ec89417, C7 skipped by the user), Step 7 (c6e7551), final review + fixes (60bb216), plan/roadmap/memory, workspace deleted | Plan complete 2026-09-27 | 1 day |
