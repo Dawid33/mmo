@@ -1,20 +1,13 @@
 //! A player walking through the fork the way the game drives one: the game's
-//! own pure movement code (`game::movement::{plan, settle}`, its constants,
-//! `game::collider_cells` for terrain), with the engine-facing half —
-//! `depenetration_lift`, `character_controller`, `sweep_character` — the glam
-//! port written before the switch (Task 5.2), kept as the fork's pin. The ports of
+//! own movement code (`game::movement::{plan, sweep_character, settle}`, its
+//! constants, `game::collider_cells` for terrain) against a bare physics
+//! world, so the fork is pinned by exactly what the game runs. The ports of
 //! `crates/game/tests/{walking_smoothness,sunk_body}.rs` drive it.
 #![allow(dead_code)]
 
-use game::movement::{
-    self, CHARACTER_SKIN, GROUND_SNAP, Motion, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT,
-    PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, TICK_DT, UNITS_PER_METER,
-};
+use game::movement::{self, Motion, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
 use game::{BLOCK_VOXELS, CHUNK_BLOCKS, Chunk};
 use physics_next::PhysicsWorld;
-use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
-use rapier3d::parry::query::ShapeCastOptions;
-use rapier3d::parry::shape::Shape;
 use rapier3d::prelude::*;
 
 /// A chunk's edge in world units.
@@ -22,63 +15,6 @@ pub const CHUNK: f32 = (CHUNK_BLOCKS * BLOCK_VOXELS) as f32;
 /// The game's spawn column (`PLAYER_SPAWN_X`/`_Z`): the corner where chunk
 /// columns 3 and 4 meet rows 3 and 4.
 pub const SPAWN: [f32; 2] = [game::PLAYER_SPAWN_X, game::PLAYER_SPAWN_Z];
-
-/// `game::movement::depenetration_lift`, glam.
-pub fn depenetration_lift(queries: &QueryPipeline, shape: &dyn Shape, pos: &Pose) -> f32 {
-    if queries.intersect_shape(*pos, shape).next().is_none() {
-        return 0.0;
-    }
-    let max = STEP_HEIGHT * UNITS_PER_METER;
-    let raised = Pose::from_translation(pos.translation + Vector::Y * max);
-    if queries.intersect_shape(raised, shape).next().is_some() {
-        return 0.0;
-    }
-    let options = ShapeCastOptions {
-        target_distance: CHARACTER_SKIN,
-        stop_at_penetration: false,
-        max_time_of_impact: max,
-        compute_impact_geometry_on_penetration: true,
-    };
-    match queries.cast_shape_on_continuous_surfaces(&raised, -Vector::Y, shape, options, CHARACTER_SKIN) {
-        Some((_, hit)) => max - hit.time_of_impact,
-        None => 0.0,
-    }
-}
-
-/// `game::movement::character_controller`, glam.
-pub fn character_controller(motion: &Motion) -> KinematicCharacterController {
-    let walking = !motion.flying;
-    KinematicCharacterController {
-        autostep: walking.then(|| CharacterAutostep {
-            max_height: CharacterLength::Absolute(STEP_HEIGHT * UNITS_PER_METER),
-            min_width: CharacterLength::Relative(0.5),
-            include_dynamic_bodies: false,
-        }),
-        snap_to_ground: walking.then(|| CharacterLength::Absolute(GROUND_SNAP * UNITS_PER_METER)),
-        offset: CharacterLength::Absolute(CHARACTER_SKIN),
-        // D7: `depenetration_lift` owns sunk bodies; a buried one stays put.
-        depenetrate: false,
-        ..Default::default()
-    }
-}
-
-/// `game::movement::sweep_character`, glam: the lift, then the controller.
-pub fn sweep_character(w: &PhysicsWorld, handle: RigidBodyHandle, motion: &Motion, desired: Vector) -> (Vector, bool) {
-    let b = &w.bodies[handle];
-    let t = b.translation();
-    let collider = &w.colliders[b.colliders()[0]];
-    let queries = w.broad_phase.as_query_pipeline(
-        w.narrow_phase.query_dispatcher(),
-        &w.bodies,
-        &w.colliders,
-        QueryFilter::default().exclude_rigid_body(handle),
-    );
-    let upright = Pose::from_translation(t);
-    let lift = Vector::Y * depenetration_lift(&queries, collider.shape(), &upright);
-    let start = Pose::from_translation(t + lift);
-    let out = character_controller(motion).move_shape(TICK_DT, &queries, collider.shape(), &start, desired, |_| {});
-    (out.translation + lift, out.grounded)
-}
 
 /// Adds `chunk`'s terrain at chunk coordinates `(x, y, z)`, the way
 /// `seed_terrain_genesis` does: one fixed body at the chunk origin; a full
@@ -159,7 +95,16 @@ impl Walker {
     pub fn tick(&mut self) {
         let desired = movement::plan(&mut self.motion, &self.keys, 0.0, self.tick);
         self.keys.jump_pressed = false;
-        let (corrected, grounded) = sweep_character(&self.w, self.body, &self.motion, desired);
+        let w = &self.w;
+        let (corrected, grounded) = movement::sweep_character(
+            &w.broad_phase,
+            &w.narrow_phase,
+            &w.bodies,
+            &w.colliders,
+            self.body,
+            &self.motion,
+            desired,
+        );
         movement::settle(&mut self.motion, &desired, &corrected, grounded);
         if corrected != Vector::ZERO {
             let t = self.w.bodies[self.body].translation();

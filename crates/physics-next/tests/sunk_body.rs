@@ -5,13 +5,14 @@
 //! itself; it happens at region seams, where the region a body leaves has
 //! no floor past its edge and the body's rounded bottom dips over that edge
 //! on the crossing tick (about 3 units over a corner). The putting-back is
-//! the GAME's `movement::depenetration_lift` (here `common::depenetration_lift`),
+//! the GAME's `movement::depenetration_lift` (called directly here),
 //! not the fork: the rig's controller runs with `depenetrate: false` (D7),
 //! and `depenetration_lift_is_what_puts_it_back` shows the fork alone
 //! leaves the body sunk.
 mod common;
 
-use common::{CHUNK, Walker, character_controller};
+use common::{CHUNK, Walker};
+use game::movement::{character_controller, depenetration_lift};
 use game::movement::{
     CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, TICK_DT, UNITS_PER_METER,
 };
@@ -94,7 +95,7 @@ fn depenetration_lift_is_what_puts_it_back() {
         QueryFilter::default().exclude_rigid_body(w.body),
     );
     let shape = w.w.colliders[w.w.bodies[w.body].colliders()[0]].shape();
-    let lift = common::depenetration_lift(&queries, shape, &sunk);
+    let lift = depenetration_lift(&queries, shape, &sunk);
     assert!((lift - 3.03).abs() < 0.01, "the game's lift clears the sink: {lift}");
     let controller = character_controller(&w.motion);
     let still = controller.move_shape(TICK_DT, &queries, shape, &sunk, Vector::ZERO, |_| {});
