@@ -565,16 +565,25 @@ impl<'a> QueryPipeline<'a> {
             )
             .map(|hit| hit.transform1_by(pos1))
         };
+        // Every leaf `find_best` casts, so the tie pass below casts only the
+        // ones it pruned.
+        let cast: core::cell::RefCell<crate::alloc_prelude::Vec<(u32, Option<ShapeCastHit>)>> =
+            Default::default();
         let (id, hit) = self.bvh.find_best(
             options.max_time_of_impact,
             |node: &BvhNode, best_so_far| node_toi(node, best_so_far).unwrap_or(Real::MAX),
-            |part_id, _| part_hit(part_id),
+            |part_id, _| {
+                let hit = part_hit(part_id);
+                cast.borrow_mut().push((part_id, hit));
+                hit
+            },
         )?;
+        let cast = cast.into_inner();
 
         // mmo-fork: `find_best` keeps the first leaf it meets at the best
         // cost (and prunes everything else once that cost is 0), so a tie
         // would go to the BVH layout. Every leaf that can reach the same TOI
-        // is cast again and the tie broken on the hits themselves.
+        // is considered and the tie broken on the hits themselves.
         let toi = hit.time_of_impact;
         let rank = |part_id: u32, hit: &ShapeCastHit| {
             let opposing = hit.normal1.dot(shape_vel);
@@ -589,7 +598,11 @@ impl<'a> QueryPipeline<'a> {
             if part_id == id {
                 continue;
             }
-            let Some(hit) = part_hit(part_id) else {
+            let hit = match cast.iter().find(|(cast_id, _)| *cast_id == part_id) {
+                Some((_, hit)) => *hit,
+                None => part_hit(part_id),
+            };
+            let Some(hit) = hit else {
                 continue;
             };
             if hit.time_of_impact != toi {

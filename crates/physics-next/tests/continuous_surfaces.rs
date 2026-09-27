@@ -203,3 +203,65 @@ fn a_touching_tie_resolves_the_same_in_every_bvh_layout() {
         }
     }
 }
+
+/// Wraps the default dispatcher and records which shape each `cast_shapes`
+/// call was made against (a cuboid collider costs one call).
+#[derive(Default)]
+struct CountingDispatcher {
+    cast_against: std::sync::Mutex<Vec<usize>>,
+}
+
+impl CountingDispatcher {
+    fn shapes_cast_twice(&self) -> usize {
+        let mut seen = self.cast_against.lock().unwrap().clone();
+        let all = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        all - seen.len()
+    }
+}
+
+impl rapier3d::parry::query::QueryDispatcher for CountingDispatcher {
+    fn intersection_test(&self, pos12: &Pose, g1: &dyn rapier3d::parry::shape::Shape, g2: &dyn rapier3d::parry::shape::Shape) -> Result<rapier3d::parry::query::ShapeIntersection, rapier3d::parry::query::Unsupported> {
+        rapier3d::parry::query::DefaultQueryDispatcher.intersection_test(pos12, g1, g2)
+    }
+    fn distance(&self, pos12: &Pose, g1: &dyn rapier3d::parry::shape::Shape, g2: &dyn rapier3d::parry::shape::Shape) -> Result<rapier3d::parry::query::ShapeDistance, rapier3d::parry::query::Unsupported> {
+        rapier3d::parry::query::DefaultQueryDispatcher.distance(pos12, g1, g2)
+    }
+    fn contact(&self, pos12: &Pose, g1: &dyn rapier3d::parry::shape::Shape, g2: &dyn rapier3d::parry::shape::Shape, prediction: f32) -> Result<Option<rapier3d::parry::query::Contact>, rapier3d::parry::query::Unsupported> {
+        rapier3d::parry::query::DefaultQueryDispatcher.contact(pos12, g1, g2, prediction)
+    }
+    fn closest_points(&self, pos12: &Pose, g1: &dyn rapier3d::parry::shape::Shape, g2: &dyn rapier3d::parry::shape::Shape, max_dist: f32) -> Result<rapier3d::parry::query::ClosestPoints, rapier3d::parry::query::Unsupported> {
+        rapier3d::parry::query::DefaultQueryDispatcher.closest_points(pos12, g1, g2, max_dist)
+    }
+    fn cast_shapes(&self, pos12: &Pose, local_vel12: Vector, g1: &dyn rapier3d::parry::shape::Shape, g2: &dyn rapier3d::parry::shape::Shape, options: ShapeCastOptions) -> Result<Option<ShapeCastHit>, rapier3d::parry::query::Unsupported> {
+        self.cast_against.lock().unwrap().push(g1 as *const dyn rapier3d::parry::shape::Shape as *const () as usize);
+        rapier3d::parry::query::DefaultQueryDispatcher.cast_shapes(pos12, local_vel12, g1, g2, options)
+    }
+    fn cast_shapes_nonlinear(&self, motion1: &rapier3d::parry::query::NonlinearRigidMotion, g1: &dyn rapier3d::parry::shape::Shape, motion2: &rapier3d::parry::query::NonlinearRigidMotion, g2: &dyn rapier3d::parry::shape::Shape, start_time: f32, end_time: f32, stop_at_penetration: bool) -> Result<Option<ShapeCastHit>, rapier3d::parry::query::Unsupported> {
+        rapier3d::parry::query::DefaultQueryDispatcher.cast_shapes_nonlinear(motion1, g1, motion2, g2, start_time, end_time, stop_at_penetration)
+    }
+}
+
+/// The tie pass must not cost a second cast per collider: `find_best`'s
+/// results are reused, and only leaves it pruned are cast again. A walk
+/// into a two-cuboid wall over a cuboid floor (a hit at TOI > 0, and one
+/// resting on the floor at TOI 0) casts each collider at most once.
+#[test]
+fn the_tie_pass_casts_no_collider_twice() {
+    let w = world_of(
+        &[Vector::ZERO, Vector::new(CHUNK, BLOCK, 0.0), Vector::new(CHUNK, BLOCK, CHUNK)],
+        |_| chunk_cuboid(),
+    );
+    let capsule = Capsule::new_y(HALF_HEIGHT, RADIUS);
+    for (pos, vel, what) in [
+        (Vector::new(CHUNK - RADIUS - SKIN - 1.0, REST + SKIN + 0.5, CHUNK - 0.5), Vector::X, "walking into the wall"),
+        (Vector::new(0.5 * CHUNK, REST + SKIN, 0.5 * CHUNK), walking_step().normalize(), "resting on the floor"),
+    ] {
+        let counting = CountingDispatcher::default();
+        let qp = w.broad_phase.as_query_pipeline(&counting, &w.bodies, &w.colliders, QueryFilter::default());
+        let hit = qp.cast_shape_on_continuous_surfaces(&Pose::from_translation(pos), vel, &capsule, skin_cast(4.0), SKIN);
+        assert!(hit.is_some(), "{what}: a hit");
+        assert_eq!(counting.shapes_cast_twice(), 0, "{what}: {:?}", counting.cast_against.lock().unwrap());
+    }
+}
