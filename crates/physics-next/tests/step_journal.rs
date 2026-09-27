@@ -10,9 +10,11 @@
 //!   `idle_tick_touches_no_body_or_collider`: no first-touch capture on an idle
 //!   tick, and the revert is exact; the "broad untouched" half is gone.
 //! - `journal_digest_matches_after_exact_revert` and
-//!   `journal_digest_matches_on_collider_removal_tick` are not ported here:
-//!   `pre_digest` / `revert_digest` need the `StateHash` trait (D2, Task 4.4 =
-//!   handoff H8) and land with it.
+//!   `journal_digest_matches_on_collider_removal_tick` landed with `StateHash`
+//!   (D2, Task 4.4 = handoff H8), plus
+//!   `journal_digest_sees_an_incomplete_revert`: a pre-step clone stands in for
+//!   an exact revert, and perturbing one captured body in it for an incomplete
+//!   one (`live_digest` reads the footprint without reverting).
 //! - The perf-evidence tally prints the hybrid's numbers (the broad-phase
 //!   clone is taken every tick; bodies/colliders scale with activity).
 //!
@@ -417,4 +419,75 @@ fn user_wake_of_resting_sleeper_reverts_exactly() {
     let j = w.step_journaled(&mut p);
     w.revert(j);
     assert_same(&before, &w, "user-wake tick");
+}
+
+#[test]
+fn journal_digest_matches_after_exact_revert() {
+    let (mut w, mut p) = world();
+    for x in 0..4 {
+        for z in 0..4 {
+            add_floor(&mut w, x, z);
+        }
+    }
+    add_ball(&mut w, Vector::new(2.0, 8.0, 2.0), 0.5);
+    for _ in 0..3 {
+        w.step(&mut p);
+    }
+    // Fall, impact, settle: dirty ticks of several shapes.
+    for tick in 0..60 {
+        let j = w.step_journaled(&mut p);
+        let pre = j.pre_digest();
+        let live = j.revert_digest(w.parts());
+        assert_eq!(pre, live, "tick {tick}: footprint digest after exact revert must match");
+        w.step(&mut p); // advance again (state was restored)
+    }
+}
+
+#[test]
+fn journal_digest_matches_on_collider_removal_tick() {
+    let (mut w, mut p) = world();
+    add_floor(&mut w, 0, 0);
+    let tile_body = w.bodies.insert(RigidBodyBuilder::fixed().translation(Vector::new(40.0, -1.0, 2.0)));
+    let tile = w.colliders.insert_with_parent(ColliderBuilder::cuboid(16.0, 1.0, 16.0), tile_body, &mut w.bodies);
+    add_ball(&mut w, Vector::new(40.0, 1.0, 2.0), 0.5);
+    for _ in 0..90 {
+        w.step(&mut p);
+    }
+    w.colliders.remove(tile, &mut w.islands, &mut w.bodies, &mut w.soft_bodies, true);
+    let j = w.step_journaled(&mut p);
+    assert!(j.broad_captured());
+    let pre = j.pre_digest();
+    let live = j.revert_digest(w.parts());
+    assert_eq!(pre, live, "removal-tick digest must match after exact revert");
+}
+
+#[test]
+fn journal_digest_sees_an_incomplete_revert() {
+    let (mut w, mut p) = world();
+    add_floor(&mut w, 0, 0);
+    let ball = add_ball(&mut w, Vector::new(2.0, 4.0, 2.0), 0.5);
+    for _ in 0..3 {
+        w.step(&mut p);
+    }
+    let exact = w.clone(); // what an exact revert of the next step produces
+    let j = w.step_journaled(&mut p);
+    assert!(j.saved_body_count() > 0);
+    let pre = j.pre_digest();
+    // No revert at all: the stepped footprint differs.
+    assert_ne!(pre, j.live_digest(&w.parts()), "an unreverted step must not digest like the pre-step footprint");
+    // An exact revert (the pre-step world) digests like the saved footprint...
+    let mut reverted = exact.clone();
+    assert_eq!(pre, j.live_digest(&reverted.parts()));
+    // ...and one that left the captured bodies stepped does not (the stepped
+    // set's modified list is the pre-step one, so only the bodies differ).
+    reverted.bodies = w.bodies.clone();
+    assert_eq!(reverted.bodies.iter().count(), exact.bodies.iter().count());
+    assert_ne!(reverted.bodies[ball].translation(), exact.bodies[ball].translation());
+    assert_ne!(pre, j.live_digest(&reverted.parts()), "bodies the revert missed");
+    // Nor one that left the broad phase stepped.
+    let mut reverted = exact.clone();
+    reverted.broad_phase = w.broad_phase.clone();
+    assert_ne!(pre, j.live_digest(&reverted.parts()), "a broad phase the revert missed");
+    // The real revert is exact.
+    assert_eq!(pre, j.revert_digest(w.parts()));
 }

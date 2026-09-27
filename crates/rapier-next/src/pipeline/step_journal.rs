@@ -26,6 +26,16 @@
 //! drop its memos at its next step, so the caller steps on with the same
 //! pipeline and solver and needs no post-revert call.
 //!
+//! **Digests** (`HashMode::Delta` in the game): [`StepJournal::pre_digest`]
+//! hashes the captured pre-step footprint — the saved bodies and colliders by
+//! sorted handle, then each wholesale section as saved — and
+//! [`StepJournal::revert_digest`] reverts, then hashes the same footprint from
+//! the live structures. They are equal iff the revert restored the footprint
+//! exactly. Both sides go through one walker, [`digest_footprint`], so they
+//! can't drift. The broad phase dominates the cost: its whole BVH (the ~240 KB
+//! node array at region scale, one byte-slice write) is hashed on each side,
+//! as the old fork did.
+//!
 //! Contract: nothing but the step itself may run between `step_journaled` and
 //! `revert` on the journaled structures, and journals are reverted in LIFO order.
 //! User mutations (inserts, removals, `get_mut` writes) between steps are owned
@@ -196,6 +206,56 @@ impl StepJournal {
         self.colliders = c.saved;
     }
 
+    /// crc32 of the captured pre-step footprint (the game's Delta hash mode):
+    /// the saved bodies and colliders by sorted handle, then the wholesale
+    /// sections as saved. Equal to [`Self::revert_digest`] iff the revert is exact.
+    pub fn pre_digest(&self) -> u32 {
+        let w = self.wholesale.as_ref().expect("digest of a journal that recorded no step");
+        digest_footprint(Footprint {
+            bodies: self.bodies.iter().map(|(h, b)| (*h, Some(b))).collect(),
+            colliders: self.colliders.iter().map(|(h, c)| (*h, Some(c))).collect(),
+            islands: &w.islands,
+            narrow_phase: &w.narrow_phase,
+            broad_phase: &w.broad_phase,
+            modified_bodies: &w.modified_bodies,
+            modified_colliders: &w.modified_colliders,
+            removed_colliders: &w.removed_colliders,
+            joints: w.joints.as_ref().map(|(ij, mj)| (ij, mj)),
+        })
+    }
+
+    /// The footprint this journal captured, read from `parts` as they stand
+    /// (no revert): equals [`Self::pre_digest`] iff `parts` hold the pre-step
+    /// values of everything the step touched. [`Self::revert_digest`] is this,
+    /// right after the revert.
+    pub fn live_digest(&self, parts: &PhysicsParts<'_>) -> u32 {
+        let w = self.wholesale.as_ref().expect("digest of a journal that recorded no step");
+        let bodies: Vec<_> = self.bodies.iter().map(|(h, _)| *h).collect();
+        let colliders: Vec<_> = self.colliders.iter().map(|(h, _)| *h).collect();
+        live_footprint_digest(bodies, colliders, w.joints.is_some(), parts)
+    }
+
+    /// Reverts (see [`Self::revert`]) and returns the post-revert footprint
+    /// digest, to compare with the [`Self::pre_digest`] taken at step time.
+    pub fn revert_digest(self, parts: PhysicsParts<'_>) -> u32 {
+        let w = self.wholesale.as_ref().expect("digest of a journal that recorded no step");
+        let had_joints = w.joints.is_some();
+        let bodies: Vec<_> = self.bodies.iter().map(|(h, _)| *h).collect();
+        let colliders: Vec<_> = self.colliders.iter().map(|(h, _)| *h).collect();
+        self.revert(PhysicsParts {
+            islands: &mut *parts.islands,
+            broad_phase: &mut *parts.broad_phase,
+            narrow_phase: &mut *parts.narrow_phase,
+            bodies: &mut *parts.bodies,
+            colliders: &mut *parts.colliders,
+            impulse_joints: &mut *parts.impulse_joints,
+            multibody_joints: &mut *parts.multibody_joints,
+            soft_bodies: &mut *parts.soft_bodies,
+            ccd_solver: &mut *parts.ccd_solver,
+        });
+        live_footprint_digest(bodies, colliders, had_joints, &parts)
+    }
+
     /// Undoes the journaled step, restoring `parts` to their pre-step state
     /// byte for byte. Journals of consecutive steps must be reverted LIFO.
     pub fn revert(self, parts: PhysicsParts<'_>) {
@@ -257,4 +317,60 @@ impl StepJournal {
 /// queues, so skipping their clone loses nothing.
 fn joint_sets_touchable(ij: &ImpulseJointSet, mj: &MultibodyJointSet) -> bool {
     !ij.journal_quiescent() || !mj.journal_quiescent()
+}
+
+/// The live side of the footprint digest: the journal's handles (in any
+/// order) and whether its joint sets were captured, read from `parts`.
+fn live_footprint_digest(
+    bodies: Vec<RigidBodyHandle>,
+    colliders: Vec<ColliderHandle>,
+    had_joints: bool,
+    parts: &PhysicsParts<'_>,
+) -> u32 {
+    digest_footprint(Footprint {
+        bodies: bodies.into_iter().map(|h| (h, parts.bodies.get(h))).collect(),
+        colliders: colliders.into_iter().map(|h| (h, parts.colliders.get(h))).collect(),
+        islands: parts.islands,
+        narrow_phase: parts.narrow_phase,
+        broad_phase: parts.broad_phase,
+        modified_bodies: &parts.bodies.modified_bodies,
+        modified_colliders: &parts.colliders.modified_colliders,
+        removed_colliders: &parts.colliders.removed_colliders,
+        joints: had_joints.then(|| (&*parts.impulse_joints, &*parts.multibody_joints)),
+    })
+}
+
+/// One side of a footprint digest: saved values (`pre_digest`) or live ones
+/// (`live_digest`, `revert_digest`), bodies and colliders in capture order; a
+/// live slot a revert failed to refill hashes as `None`.
+struct Footprint<'a> {
+    bodies: Vec<(RigidBodyHandle, Option<&'a RigidBody>)>,
+    colliders: Vec<(ColliderHandle, Option<&'a Collider>)>,
+    islands: &'a IslandManager,
+    narrow_phase: &'a NarrowPhase,
+    broad_phase: &'a BroadPhaseBvh,
+    modified_bodies: &'a crate::dynamics::ModifiedRigidBodies,
+    modified_colliders: &'a crate::geometry::ModifiedColliders,
+    removed_colliders: &'a [ColliderHandle],
+    joints: Option<(&'a ImpulseJointSet, &'a MultibodyJointSet)>,
+}
+
+/// The one walker both digest sides use, so they hash identical logical
+/// content in identical order and cannot drift. Bodies and colliders go in
+/// sorted by handle (capture order is first-touch order, not canonical).
+fn digest_footprint(mut f: Footprint<'_>) -> u32 {
+    use state_hash::StateHash;
+    f.bodies.sort_unstable_by_key(|(h, _)| *h);
+    f.colliders.sort_unstable_by_key(|(h, _)| h.into_raw_parts());
+    let mut h = crc32fast::Hasher::new();
+    f.bodies.state_hash(&mut h);
+    f.colliders.state_hash(&mut h);
+    f.islands.state_hash(&mut h);
+    f.narrow_phase.state_hash(&mut h);
+    f.broad_phase.state_hash(&mut h);
+    f.modified_bodies.state_hash(&mut h);
+    f.modified_colliders.state_hash(&mut h);
+    f.removed_colliders.state_hash(&mut h);
+    f.joints.state_hash(&mut h);
+    h.finalize()
 }
