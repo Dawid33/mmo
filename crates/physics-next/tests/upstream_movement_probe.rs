@@ -121,8 +121,8 @@ fn cast_on_floor(floor: &Voxels, size: f32, x: f32, z: f32, vel: Vector) -> Opti
 /// AABB, moved with the motion instead of grown — a hovering shape crossing a
 /// voxel border missed the voxel under it.
 #[test]
-/// Upstream (Task 1.2): all three casts miss the floor.
-#[ignore = "fails on pristine parry 0.31.1 (floor missed: search domain): re-port scope, Task 3.2"]
+/// Upstream (Task 1.2): all three casts miss the floor. Fixed in the fork by
+/// Task 3.2 (loosened, grown search domain).
 fn voxels_cast_sees_the_voxel_under_a_hovering_shape() {
     let floor = voxel_floor(BLOCK);
     for z in [BLOCK + 9.443, 2.0 * BLOCK - RADIUS - 0.16, 2.0 * BLOCK - RADIUS - 0.01] {
@@ -136,9 +136,10 @@ fn voxels_cast_sees_the_voxel_under_a_hovering_shape() {
 /// Upstream (Task 1.2): every start 1e-3 outside the skin gets the geometric
 /// TOI (~5.3e-3) instead of a resting contact, and next to a seam (x = 1.01)
 /// the normal leans ~4e-3 (0.24°) — far smaller than the fork's old
-/// degrees-off bug, still above the 1e-4 bar. The slide is free.
+/// degrees-off bug, still above the 1e-4 bar. The slide is free. Fixed in
+/// the fork by Task 3.2 (resting contact within the grazing margin, covered
+/// faces dropped from the normal).
 #[test]
-#[ignore = "fails on pristine parry 0.31.1 (TOI ~5e-3 from a skin+1e-3 start; normal lean 4e-3 at a seam): re-port scope, Tasks 3.2/3.3"]
 fn voxels_cast_reports_no_edges_inside_a_flat_floor() {
     let floor = voxel_floor(1.0);
     let capsule_floor = |x: f32, z: f32| cast_on_floor(&floor, 1.0, x, z, walking_step());
@@ -381,7 +382,7 @@ fn length_unit_does_not_change_character_movement() {
 /// `cast_shape_on_continuous_surfaces` (3.3, which upstream `move_shape`
 /// doesn't use) or the KCC snap gate (3.4).
 #[test]
-#[ignore = "fails on pristine parry 0.31.1 (seam dips of ~1.2 units at body seams): re-port scope, Tasks 3.2-3.4 together (cause not isolated)"]
+#[ignore = "after Task 3.2: grounded 120/120 but max |dy| 0.041 (0.025 bump at chunk-body seams): re-port scope, Tasks 3.3-3.4"]
 fn walk_on_flat_voxel_floor_keeps_its_height() {
     const TICKS: usize = 120;
     let (mut w, body, collider) = walker_on_floor(16, 1.0);

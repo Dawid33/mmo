@@ -12,7 +12,11 @@ pub use self::{
     },
     shape_cast_heightfield_shape::{cast_shapes_heightfield_shape, cast_shapes_shape_heightfield},
     shape_cast_support_map_support_map::cast_shapes_support_map_support_map,
-    shape_cast_voxels_shape::{cast_shapes_shape_voxels, cast_shapes_voxels_shape},
+    // mmo-fork: the probe-taking cast for rapier's `cast_shape_on_continuous_surfaces`.
+    shape_cast_voxels_shape::{
+        cast_shapes_shape_voxels, cast_shapes_voxels_shape, cast_shapes_voxels_shape_with_probe,
+        without_internal_edges, InternalEdgeProbe,
+    },
 };
 
 mod shape_cast;

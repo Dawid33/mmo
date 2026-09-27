@@ -6,6 +6,11 @@ use crate::query::{ShapeCastHit, ShapeCastStatus};
 use crate::shape::{RoundShapeRef, SupportMap};
 use num::Zero;
 
+// mmo-fork: the grazing-start policy (Task 3.2 uses it in the voxels cast).
+/// Starts within this fraction of `target_distance` beyond it count as already
+/// within it. Covers the time-of-impact error of the cast that parked the shape.
+pub(crate) const GRAZING_START_MARGIN: Real = 0.01;
+
 /// Time of impacts between two support-mapped shapes under translational movement.
 pub fn cast_shapes_support_map_support_map<G1, G2>(
     pos12: &Pose,
