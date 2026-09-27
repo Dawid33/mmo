@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use game::movement::{
-    self, CHARACTER_SKIN, GROUND_SNAP, Motion, MoveKeys, PHYSICS_LENGTH_UNIT, PLAYER_CAPSULE_HALF_HEIGHT,
+    self, CHARACTER_SKIN, GROUND_SNAP, Motion, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT,
     PLAYER_CAPSULE_RADIUS, STEP_HEIGHT, TICK_DT, UNITS_PER_METER,
 };
 use game::{BLOCK_VOXELS, CHUNK_BLOCKS, Chunk};
@@ -122,8 +122,9 @@ impl Walker {
     /// column from above them, settled on the ground.
     pub fn new(chunks: impl IntoIterator<Item = ((i32, i32, i32), Chunk)>) -> Self {
         let mut w = PhysicsWorld {
-            // D6: the game's length unit (world units per metre).
-            params: IntegrationParameters { dt: TICK_DT, length_unit: PHYSICS_LENGTH_UNIT, ..Default::default() },
+            // Exactly the game's parameters (D6's length unit included), so the
+            // rig steps as a region does.
+            params: game::PhysicsParams::default().0,
             ..Default::default()
         };
         let mut top = 0;

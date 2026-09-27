@@ -309,3 +309,12 @@ fn walking_up_terraces_stays_on_the_ground() {
     let half_extent = PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS;
     assert!((prev.y - (floor + half_extent + CHARACTER_SKIN)).abs() < 0.05, "must stand on the terrace: {prev:?}");
 }
+
+/// The rig must step exactly as a region does (H9 review I1): its integration
+/// parameters are the game's, not a hand-built set (it used `dt = TICK_DT`
+/// while the game runs rapier's default `dt`).
+#[test]
+fn walker_steps_with_the_games_integration_parameters() {
+    let w = Walker::on(3..=4, 3..=4, |_, _| Chunk::flat_floor(16));
+    assert_eq!(w.w.params, game::PhysicsParams::default().0);
+}

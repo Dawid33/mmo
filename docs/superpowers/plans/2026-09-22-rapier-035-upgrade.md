@@ -412,12 +412,22 @@ pub trait StateHash {
 
 ## Phase 5 — The switch (short; the game moves in one commit series)
 
+> **5.1–5.3 landed (17c2887 old-fork divergence doc, beed84c the switch; 2026-09-27; H9).** One commit, since nothing builds between the rename and the last migrated crate. Beyond the task text:
+> - **5.1:** upstream rapier has no `v0.31.0` tag; the divergence baseline is its release commit `13413290` (numbers in the spike doc, "Old fork divergence"). `ordered-float 5.5` still appears in `cargo tree -p game`, as parry 0.31's own dependency, not a fork.
+> - **Hashing:** the macro, `state_hash`, Delta digests, `cell_hash` and `chunk_terrain_term` walk `StateHash` through `game::StateHasher` (crc32 through a 4 KiB stack buffer, same value as crc32fast; `state_hasher_tests`). slotmapd's impls mirror its `Hash`; the fork also derives `StateHash` for `CCDSolver` (cache skipped) and `IntegrationParameters` (soft-body settings skipped). Integer-only game types keep std `Hash` beside the new derive.
+> - **Delta semantics shrink:** a physics tick's Delta entry covers the captured bodies/colliders and the quiescent joint sets only (H8 review I1); the islands/narrow/broad phase clones are moved back unverified by Delta. Full still whole-hashes `PhysicsState`.
+> - **D6 is wired through a newtype:** `PhysicsState` was `Default`-built, so rapier's `length_unit` 1 was in effect; `state::PhysicsParams` (serde/`StateHash`-transparent, `Deref` to `IntegrationParameters`) defaults to `PHYSICS_LENGTH_UNIT`. With it, `physics_goldens::terrace_uphill_1_voxel_golden` diverges at tick 47 (0.61 units behind); every golden passes at length unit 1. **Task 5.4 Step 5 must diagnose this first.**
+> - **Camera:** nalgebra's `Perspective3` is ported onto a glam `Mat4` with the same formulas (`game::camera::Perspective3`), so the renderer's near/far, read back from `Camera::new`'s remapped matrix, are unchanged; `yaw_quat`/`look_quat` use `libm::sinf`/`cosf`.
+> - **Tests:** `crates/game/tests/{step_journal,voxels_hash_cache,voxels_upstream,pair_filter}.rs` were deleted in favour of their `crates/physics-next` ports, and `nalgebra_fixes.rs` because the game no longer reaches nalgebra. So Task 5.4 Step 1 runs `voxels_upstream`/`pair_filter` from physics-next, and Step 3 runs physics-next's `step_journal`. `worldgen/examples/narrow_phase_probe.rs` was migrated, not deleted. `export_region_colliders` lost `--hash-cost` (its numbers are in the 4.4 note above).
+> - **Review fix:** the physics-next Walker now steps with `game::PhysicsParams::default()` (it had `dt = TICK_DT`; the game runs rapier's default `dt` 1/60, unchanged by the switch). All physics-next walk pins stay green at the game's exact parameters, so the terrace divergence is not a rig/game parameter mismatch. Whether the game's `dt` should be `TICK_DT` is a behaviour decision for H10.
+> - **Fails until Task 5.4 re-records (by design):** `wasm_determinism` (`WASM_SCENE_DIGEST` 0x105EC680 → 0x25855533 natively; `NATIVE_STATE_HASH` moves too), `worldgen` `scene_hash_golden` (0xEF4000BC → 0x461AAA04), and the terrace golden above.
+
 ### Task 5.1: Point the workspace at the new forks
 
-- [ ] **Step 0: Record the old forks' divergence** for Task 6.3's before/after comparison: clone upstream parry `v0.25.3` and rapier `v0.31.0` into scratch, and save `git diff --no-index --stat` of each against `crates/parry` / `crates/rapier` (plus total `+/-` lines and the count of `mmo-fork` markers) into `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md` under "Old fork divergence".
-- [ ] **Step 1: Delete the old forks.** `git rm -r crates/rapier crates/parry`, then `git mv crates/rapier-next crates/rapier` and `git mv crates/parry-next crates/parry`, and rename the packages back to `rapier3d`/`parry3d`.
-- [ ] **Step 2: Update the root `Cargo.toml`.** Rapier gets the features `enhanced-determinism, serde-serialize, debug-render`. Per D4, replace the path deps for `simba`, `nalgebra`, `approx` and `ordered-float` with crates.io versions, or remove them, then `git rm -r` those fork dirs. Leave `slotmapd` and `block-mesh` as they are.
-- [ ] **Step 3: Check the build fails as expected.** `cargo check -p game` now fails; that's the migration worklist.
+- [x] **Step 0: Record the old forks' divergence** for Task 6.3's before/after comparison: clone upstream parry `v0.25.3` and rapier `v0.31.0` into scratch, and save `git diff --no-index --stat` of each against `crates/parry` / `crates/rapier` (plus total `+/-` lines and the count of `mmo-fork` markers) into `docs/superpowers/specs/2026-09-22-rapier-035-spike-results.md` under "Old fork divergence".
+- [x] **Step 1: Delete the old forks.** `git rm -r crates/rapier crates/parry`, then `git mv crates/rapier-next crates/rapier` and `git mv crates/parry-next crates/parry`, and rename the packages back to `rapier3d`/`parry3d`.
+- [x] **Step 2: Update the root `Cargo.toml`.** Rapier gets the features `enhanced-determinism, serde-serialize, debug-render`. Per D4, replace the path deps for `simba`, `nalgebra`, `approx` and `ordered-float` with crates.io versions, or remove them, then `git rm -r` those fork dirs. Leave `slotmapd` and `block-mesh` as they are.
+- [x] **Step 3: Check the build fails as expected.** `cargo check -p game` now fails; that's the migration worklist.
 
 ### Task 5.2: Migrate `game`
 
@@ -433,27 +443,27 @@ The type map applies everywhere:
 | `KinematicCharacterController::up: UnitVector` | `Vec3` |
 | `move_shape(.., desired: &Vector)` | `move_shape(.., desired: Vector)` |
 
-- [ ] **Step 1: Migrate the files** in dependency order, with `cargo check -p game` after each: `lib.rs` (the re-exports `pub use parry3d as parry`, `na`) → `protocol.rs` → `state.rs` → `physics.rs` (journal call with `PhysicsParts`, `ccd_solver` included; no post-revert call — H7 made the revert self-invalidate the pipeline and CCD memos) → `movement.rs` (`length_unit` constant from D6, `depenetrate = false` from D7) → `camera.rs` (keep `yaw_quat` libm-forced: `libm::sinf`/`cosf`) → `edit.rs` → `slime.rs` → `cells.rs` → `debug_render.rs` → `input.rs`.
+- [x] **Step 1: Migrate the files** in dependency order, with `cargo check -p game` after each: `lib.rs` (the re-exports `pub use parry3d as parry`, `na`) → `protocol.rs` → `state.rs` → `physics.rs` (journal call with `PhysicsParts`, `ccd_solver` included; no post-revert call — H7 made the revert self-invalidate the pipeline and CCD memos) → `movement.rs` (`length_unit` constant from D6, `depenetrate = false` from D7) → `camera.rs` (keep `yaw_quat` libm-forced: `libm::sinf`/`cosf`) → `edit.rs` → `slime.rs` → `cells.rs` → `debug_render.rs` → `input.rs`.
 
   `cells.rs` came with cell loading after this plan was written:
   - `cell_hash` (~:261-295) feeds `RigidBody`/`Collider` into a `Hasher`. Switch it to `StateHash`: it's a server-authored checksum that clients hard-fail on, so client and server must compute it identically — this also fixes the wasm32 `CellHashMismatch` (std `Hash` wrote `usize` at pointer width).
   - `materialize` (via `seed_terrain_genesis`, ~:310) and `dematerialize` insert and remove terrain bodies and colliders with raw ops. Check each against the new arena primitives (Task 4.1).
   - Also run `just test-one game "--test cell_activation --test cell_manager"` in Task 5.4.
-- [ ] **Step 2: Flip hashing to `StateHash`, then remove `OrderedFloat`.**
+- [x] **Step 2: Flip hashing to `StateHash`, then remove `OrderedFloat`.**
   - Change the `#[rollback]` macro's generated `Undo<T>` bound from `Hash` to `StateHash` (`crates/macros/src/lib.rs` ~:740). Make the Full-mode `hash_data()` (~:864), the Delta footprint digests, the journal's `pre_digest`/`revert_digest`, and `game::state_hash` (`lib.rs:72`) hash through `StateHash`.
   - Make the macro derive `StateHash` instead of `Hash` on the module's structs (~:293); game types outside the module switch their derives too.
   - Then remove `OrderedFloat` from game state (D3).
   - Run `just test-one game "--test hash_mode --test simple --test log_model --test hash_restore"`.
-- [ ] **Step 3: Migrate `crates/game/tests/`,** mechanically with the same type map. Don't change any assertion's meaning. Hash constants in `scene_hash_golden.rs` and `wasm_determinism.rs` are re-recorded in Task 5.4, not here.
-- [ ] **Step 4: Run `cargo check -p game --tests`.**
+- [x] **Step 3: Migrate `crates/game/tests/`,** mechanically with the same type map. Don't change any assertion's meaning. Hash constants in `scene_hash_golden.rs` and `wasm_determinism.rs` are re-recorded in Task 5.4, not here.
+- [x] **Step 4: Run `cargo check -p game --tests`.**
 
 ### Task 5.3: Migrate `client`, `server`, `worldgen`
 
-- [ ] **Step 1: client.**
+- [x] **Step 1: client.**
   - `renderer/convert.rs`: `Pose` → Bevy `Transform`. Bevy uses glam 0.32 and rapier glam 0.33, so convert through `to_array()`/`from_array` and never assume the types are the same.
   - `instance.rs`, `local_server.rs`, `renderer/bridge.rs`, `renderer/collider_debug.rs`, and the tests `reconcile_keepup.rs`.
-- [ ] **Step 2: worldgen.** `examples/narrow_phase_probe.rs`: migrate it or delete it with a note if it's obsolete.
-- [ ] **Step 3: Check everything compiles.** `just smoke` must pass: it type-checks client, server and tests.
+- [x] **Step 2: worldgen.** `examples/narrow_phase_probe.rs`: migrate it or delete it with a note if it's obsolete.
+- [x] **Step 3: Check everything compiles.** `just smoke` must pass: it type-checks client, server and tests.
 
 ### Task 5.4: Behavioural verification (the rig from Phase 0)
 
