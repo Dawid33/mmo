@@ -110,6 +110,8 @@ required-features = ["dim3", "f32"]
 [dependencies]
 glamx = { version = "0.3.1", default-features = false }
 # mmo-fork: the vendored parry-next, under its upstream lib name.
+# mmo-fork: StateHash — zero-copy canonical state hashing (plan D2).
+state-hash = { path = "../../../state-hash", features = ["glamx", "nalgebra"] }
 parry3d = { package = "parry3d-next", path = "../../../parry-next/crates/parry3d", default-features = false, features = ["required-features"] }
 simba = { version = "0.10.2", default-features = false, features = ["wide"] }
 num-traits = { version = "0.2", default-features = false }

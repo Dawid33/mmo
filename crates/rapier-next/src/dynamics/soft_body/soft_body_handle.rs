@@ -2,6 +2,7 @@
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[repr(transparent)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct SoftBodyHandle(pub crate::data::arena::Index);
 
 impl SoftBodyHandle {

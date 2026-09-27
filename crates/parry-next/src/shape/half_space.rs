@@ -140,6 +140,7 @@ use crate::math::Vector;
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct HalfSpace {
     /// The halfspace planar boundary's outward normal.
     ///

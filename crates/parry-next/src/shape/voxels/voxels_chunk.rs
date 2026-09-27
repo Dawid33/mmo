@@ -4,6 +4,7 @@ use crate::shape::{VoxelData, VoxelState, Voxels};
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(super) struct VoxelsChunkHeader {
     pub(super) id: usize,
     // The number of non-empty voxels in the chunk.
@@ -16,6 +17,7 @@ pub(super) struct VoxelsChunkHeader {
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[repr(C)]
 #[repr(align(64))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(super) struct VoxelsChunk {
     #[cfg_attr(feature = "serde-serialize", serde(with = "serde_arrays"))]
     pub(super) states: [VoxelState; VoxelsChunk::VOXELS_PER_CHUNK],

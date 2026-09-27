@@ -4,12 +4,14 @@ use crate::data::Index;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[repr(transparent)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct MultibodyJointHandle(pub Index);
 
 /// The temporary index of a multibody added to a `MultibodyJointSet`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[repr(transparent)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct MultibodyIndex(pub Index);
 
 impl MultibodyJointHandle {

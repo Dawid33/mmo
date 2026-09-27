@@ -2,6 +2,9 @@
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[repr(transparent)]
+// mmo-fork: StateHash (+ Ord: without `enhanced-determinism` the joint sets'
+// hashbrown sets of handles hash sorted).
+#[derive(state_hash::StateHash, PartialOrd, Ord)]
 pub struct RigidBodyHandle(pub crate::data::arena::Index);
 
 impl RigidBodyHandle {

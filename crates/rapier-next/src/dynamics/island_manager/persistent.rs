@@ -16,6 +16,7 @@ use crate::dynamics::joint::ImpulseJointHandle;
 /// edits, drained at the start of the next step.
 #[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) enum ImpulseJointIslandEvent {
     Link {
         handle: ImpulseJointHandle,
@@ -36,6 +37,7 @@ pub(crate) const INVALID_LOC: (u32, u32) = (u32::MAX, u32::MAX);
 /// Identity of a joint-induced island link.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) enum JointLinkKey {
     /// An impulse joint (arena handle, generation included).
     Impulse(ImpulseJointHandle),
@@ -69,6 +71,7 @@ pub(super) fn soft_body_key(handle: SoftBodyHandle) -> u64 {
 /// so the split's union-find pass iterates island-owned memory only.
 #[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct ContactLink {
     pub edge_id: u32,
     pub body1: RigidBodyHandle,
@@ -78,6 +81,7 @@ pub(crate) struct ContactLink {
 /// A joint edge cached inside an island.
 #[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct JointLink {
     pub key: JointLinkKey,
     pub body1: RigidBodyHandle,
@@ -88,6 +92,7 @@ pub(crate) struct JointLink {
 /// graph over enabled non-fixed bodies.
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct PersistentIsland {
     pub bodies: Vec<RigidBodyHandle>,
     pub contact_links: Vec<ContactLink>,
@@ -110,6 +115,7 @@ pub(crate) struct PersistentIsland {
 /// the same batch may have moved one of them out already.
 #[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(super) struct Removal {
     pub body1: RigidBodyHandle,
     pub body2: RigidBodyHandle,
@@ -123,32 +129,42 @@ fn serialize_joint_link_locs<S: serde::Serializer>(
     locs: &HashMap<JointLinkKey, (u32, u32)>,
     s: S,
 ) -> Result<S::Ok, S::Error> {
-    crate::utils::serde::serialize_sorted_to_vec_tuple(
-        locs,
-        |k| match k {
-            // Impulse joints and multibody chains never collide: they are tagged apart.
-            JointLinkKey::Impulse(h) => (
-                0u8,
-                h.into_raw_parts().0 as u64,
-                h.into_raw_parts().1 as u64,
-            ),
-            JointLinkKey::MultibodyChain { multibody, ordinal } => {
-                (1u8, *multibody, *ordinal as u64)
-            }
-            JointLinkKey::SoftAttachment { soft_body, ordinal } => {
-                (2u8, *soft_body, *ordinal as u64)
-            }
-            JointLinkKey::SoftProxyChain { soft_body, ordinal } => {
-                (3u8, *soft_body, *ordinal as u64)
-            }
-        },
-        s,
-    )
+    crate::utils::serde::serialize_sorted_to_vec_tuple(locs, joint_link_sort_key, s)
+}
+
+// mmo-fork: StateHash — the one sort key of `joint_link_locs`, shared by its
+// serializer and its hash so the two can't drift.
+fn joint_link_sort_key(k: &JointLinkKey) -> (u8, u64, u64) {
+    match k {
+        // Impulse joints and multibody chains never collide: they are tagged apart.
+        JointLinkKey::Impulse(h) => (
+            0u8,
+            h.into_raw_parts().0 as u64,
+            h.into_raw_parts().1 as u64,
+        ),
+        JointLinkKey::MultibodyChain { multibody, ordinal } => (1u8, *multibody, *ordinal as u64),
+        JointLinkKey::SoftAttachment { soft_body, ordinal } => (2u8, *soft_body, *ordinal as u64),
+        JointLinkKey::SoftProxyChain { soft_body, ordinal } => (3u8, *soft_body, *ordinal as u64),
+    }
+}
+
+// mmo-fork: StateHash — `joint_link_locs` in its serialized (sorted) order: the
+// map's iteration order doesn't survive a round trip, so it isn't state.
+fn hash_joint_link_locs<H: core::hash::Hasher>(locs: &HashMap<JointLinkKey, (u32, u32)>, h: &mut H) {
+    use state_hash::StateHash;
+    let mut entries: Vec<_> = locs.iter().collect();
+    entries.sort_unstable_by_key(|(k, _)| joint_link_sort_key(k));
+    state_hash::hash_len(entries.len(), h);
+    for (k, v) in entries {
+        k.state_hash(h);
+        v.state_hash(h);
+    }
 }
 
 /// The persistent-island bookkeeping.
 #[derive(Clone, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct PersistentIslands {
     pub(crate) islands: VecMap<PersistentIsland>,
     free_islands: Vec<u32>,
@@ -163,24 +179,30 @@ pub(crate) struct PersistentIslands {
             deserialize_with = "crate::utils::serde::deserialize_from_vec_tuple"
         )
     )]
+    // mmo-fork: StateHash — serialized sorted (its order is not state), so hashed sorted.
+    #[state_hash(with = "hash_joint_link_locs")]
     pub(super) joint_link_locs: HashMap<JointLinkKey, (u32, u32)>,
     /// The edges unlinked since the last [`Self::resolve_removals`].
     pub(super) removal_journal: Vec<Removal>,
     /// Workspace for the local split search.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     pub(super) local_split: super::local_split::LocalSplitWorkspace,
     /// Split candidate chosen last step (the sleepiest island that lost
     /// constraints), consumed by [`Self::run_pending_split`] this step.
     pub(super) split_island: Option<u32>,
     /// Union-find & counting workspace for the split.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     pub(super) split_workspace: SplitWorkspace,
     /// Per-step sleep-scan workspace, indexed by island id: `(stamp, all_bodies_eligible_so_far)`.
     /// Stamped so the scan is O(active bodies), never O(total islands) — sleeping islands are
     /// never touched.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     sleep_scan: Vec<(u32, bool)>,
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     sleep_scan_touched: Vec<u32>,
     pub(super) sleep_scan_stamp: u32,
     /// Whether the structures were initialized from the current world state

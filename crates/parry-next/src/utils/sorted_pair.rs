@@ -102,6 +102,7 @@ use core::ops::Deref;
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct SortedPair<T: PartialOrd>([T; 2]);
 
 impl<T: PartialOrd> SortedPair<T> {

@@ -15,6 +15,7 @@ use core::f64; // for .abs(), .sqrt(), and .sin_cos()
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Vertex {
     pub first_adj_face_or_edge: u32,
     pub num_adj_faces_or_edge: u32,
@@ -26,6 +27,7 @@ pub struct Vertex {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Edge {
     pub vertices: [u32; 2],
     pub faces: [u32; 2],
@@ -49,6 +51,7 @@ impl Edge {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[derive(PartialEq, Debug, Copy, Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Face {
     pub first_vertex_or_edge: u32,
     pub num_vertices_or_edges: u32,
@@ -160,6 +163,7 @@ impl Triangle {
 /// assert_eq!(tetrahedron.faces().len(), 4);
 /// # }
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ConvexPolyhedron {
     points: Vec<Vector>,
     vertices: Vec<Vertex>,

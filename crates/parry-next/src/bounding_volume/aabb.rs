@@ -100,6 +100,7 @@ use crate::query::{Ray, RayCast};
 )]
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Aabb {
     /// The point with minimum coordinates (bottom-left-back corner).
     ///

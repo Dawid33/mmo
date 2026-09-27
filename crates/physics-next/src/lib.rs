@@ -138,6 +138,33 @@ impl PhysicsWorld {
             b(&self.soft_bodies),
         ]
     }
+
+    /// crc32 `StateHash` of each structure, in `state_bytes` order (Task 4.4).
+    pub fn state_hashes(&self) -> [u64; 8] {
+        fn h<T: state_hash::StateHash>(t: &T) -> u64 {
+            use std::hash::Hasher;
+            let mut hasher = crc32fast::Hasher::new();
+            t.state_hash(&mut hasher);
+            hasher.finish()
+        }
+        [
+            h(&self.islands),
+            h(&self.broad_phase),
+            h(&self.narrow_phase),
+            h(&self.bodies),
+            h(&self.colliders),
+            h(&self.impulse_joints),
+            h(&self.multibody_joints),
+            h(&self.soft_bodies),
+        ]
+    }
+}
+
+/// The parts on which bytes and `StateHash` disagree about whether two states
+/// (`(state_bytes, state_hashes)`) are equal: a missed field (bytes differ,
+/// hash equal) or a hashed non-state (bytes equal, hash differs).
+pub fn hash_disagreements(a: &([Vec<u8>; 8], [u64; 8]), b: &([Vec<u8>; 8], [u64; 8])) -> Vec<&'static str> {
+    (0..8).filter(|&i| (a.0[i] == b.0[i]) != (a.1[i] == b.1[i])).map(|i| STATE_PARTS[i]).collect()
 }
 
 /// Names of [`PhysicsWorld::state_bytes`]'s entries, for failure messages.

@@ -17,6 +17,7 @@ use crate::math::ComplexField;
 )]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 /// The status of the cell of a heightfield.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct HeightFieldCellStatus(u8);
 
 bitflags::bitflags! {
@@ -40,6 +41,7 @@ bitflags::bitflags! {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 /// Flags controlling the behavior of some operations involving heightfields.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct HeightFieldFlags(u8);
 
 bitflags::bitflags! {
@@ -64,6 +66,7 @@ bitflags::bitflags! {
 #[derive(Debug, Clone)]
 #[repr(C)]
 /// A 3D heightfield.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct HeightField {
     heights: Array2<Real>,
     status: Array2<HeightFieldCellStatus>,

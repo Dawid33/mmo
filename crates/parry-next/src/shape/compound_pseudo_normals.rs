@@ -20,6 +20,7 @@ pub(crate) fn turns_clockwise(from: Vector, to: Vector) -> bool {
 #[cfg(all(feature = "alloc", feature = "dim2"))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Copy, Debug)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompoundEdgeCone {
     /// The edge's outward normal.
     pub face: Vector,
@@ -63,6 +64,7 @@ impl CompoundEdgeCone {
 #[cfg(all(feature = "alloc", feature = "dim2"))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, Default)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompoundPseudoNormals {
     /// One cone per boundary edge, in the part's local frame. Cut edges are absent.
     pub boundary_edges: Vec<CompoundEdgeCone>,
@@ -107,6 +109,7 @@ impl NormalConstraints for CompoundPseudoNormals {
 #[cfg(all(feature = "alloc", feature = "dim3"))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompoundFaceCone {
     /// The face's outward normal.
     pub face: Vector,
@@ -122,6 +125,7 @@ pub struct CompoundFaceCone {
 #[cfg(all(feature = "alloc", feature = "dim3"))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, Default)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompoundPseudoNormals {
     /// One cone per boundary face of the part, in the part's local frame.
     pub boundary_faces: Vec<CompoundFaceCone>,

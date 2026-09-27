@@ -18,6 +18,7 @@ use crate::utils::PoseOpt;
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[derive(Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 struct SubDetector {
     manifold_id: usize,
     timestamp: bool,
@@ -25,6 +26,7 @@ struct SubDetector {
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Default)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompositeShapeShapeContactManifoldsWorkspace {
     timestamp: bool,
     sub_detectors: HashMap<u32, SubDetector>,

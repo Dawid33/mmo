@@ -151,6 +151,7 @@ pub struct BvhWorkspace {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(transparent)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct BvhNodeData(u32);
 const CHANGED: u32 = 0b01;
 const CHANGE_PENDING: u32 = 0b11;
@@ -268,6 +269,7 @@ impl BvhNodeData {
 // PERF: the size of this struct is 64 bytes but has a default alignment of 16 (in f32 + 3d + simd mode).
 //       Forcing an alignment of 64 won’t add padding, and makes aligns it with most cache lines.
 #[cfg_attr(all(feature = "dim3", feature = "f32"), repr(align(64)))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct BvhNodeWide {
     pub(super) left: BvhNode,
     pub(super) right: BvhNode,
@@ -460,6 +462,7 @@ static_assertions::assert_eq_size!(BvhNode, BvhNodeSimd);
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct BvhNode {
     /// Mins coordinates of the node’s bounding volume.
     pub(super) mins: Vector,
@@ -1256,6 +1259,7 @@ impl BvhNode {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct BvhNodeIndex(pub usize);
 
 impl BvhNodeIndex {
@@ -1430,6 +1434,43 @@ impl BvhNodeIndex {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 pub(crate) struct BvhNodeVec(pub(crate) Vec<BvhNodeWide>);
+
+// mmo-fork: StateHash — the whole tree is hashed by the step-journal digests
+// and state hashing, so the node array goes in as one byte image (the old
+// fork's `Hash for BvhNodeVec`, 3ead754) instead of a ~16-field walk per wide
+// node. Sound because both node types are `repr(C)` with no padding (asserted
+// below); the bytes are little-endian on every target we ship (x86_64,
+// aarch64, wasm32), and nodes hold no `usize`. Floats go in raw, not
+// canonicalised: stricter than `StateHash`'s float rule (a -0.0 AABB bound
+// differs from 0.0), which never matters for a bit-exact restore.
+#[cfg(all(feature = "dim3", feature = "f32"))]
+const _: () = {
+    assert!(size_of::<BvhNode>() == 32);
+    assert!(size_of::<BvhNodeWide>() == 64);
+};
+
+#[cfg(all(feature = "dim3", feature = "f32"))]
+impl state_hash::StateHash for BvhNodeVec {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        state_hash::hash_len(self.0.len(), h);
+        // SAFETY: `BvhNodeWide` is plain-old-data without padding (size
+        // asserted above), so every byte of the slice is initialised.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                self.0.as_ptr() as *const u8,
+                self.0.len() * size_of::<BvhNodeWide>(),
+            )
+        };
+        h.write(bytes);
+    }
+}
+
+#[cfg(not(all(feature = "dim3", feature = "f32")))]
+impl state_hash::StateHash for BvhNodeVec {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        self.0.state_hash(h);
+    }
+}
 
 impl Deref for BvhNodeVec {
     type Target = Vec<BvhNodeWide>;
@@ -1759,6 +1800,7 @@ impl IndexMut<BvhNodeIndex> for BvhNodeVec {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Bvh {
     pub(super) nodes: BvhNodeVec,
     // Parent indices for elements in `nodes`.

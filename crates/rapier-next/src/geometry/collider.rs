@@ -48,6 +48,7 @@ use parry::utils::Array2;
 ///
 /// Colliders are usually attached to rigid bodies. One body can have multiple colliders
 /// to create compound shapes (like a character with separate colliders for head, torso, limbs).
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Collider {
     pub(crate) coll_type: ColliderType,
     pub(crate) shape: ColliderShape,

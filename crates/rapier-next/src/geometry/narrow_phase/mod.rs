@@ -29,6 +29,7 @@ use parry::query::{DefaultQueryDispatcher, PersistentQueryDispatcher};
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 struct ColliderGraphIndices {
     contact_graph_index: ColliderGraphIndex,
     intersection_graph_index: ColliderGraphIndex,
@@ -325,11 +326,13 @@ fn collect_pairs_to_update<E>(
 /// **For spatial queries** (raycasts, shape casts), use [`QueryPipeline`](crate::pipeline::QueryPipeline) instead.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct NarrowPhase {
     #[cfg_attr(
         feature = "serde-serialize",
         serde(skip, default = "crate::geometry::default_persistent_query_dispatcher")
     )]
+    #[state_hash(skip)] // mmo-fork: StateHash — configuration (a trait object), not state; serde-skipped.
     query_dispatcher: Arc<dyn PersistentQueryDispatcher<ContactManifoldData, ContactData>>,
     contact_graph: InteractionGraph<ColliderHandle, ContactPair>,
     intersection_graph: InteractionGraph<ColliderHandle, IntersectionPair>,
@@ -337,6 +340,7 @@ pub struct NarrowPhase {
     /// Workspace buffer holding the edge indices of pairs to process during a step, so
     /// the per-step loops don’t have to iterate on the whole interaction graphs.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     update_candidates: Vec<u32>,
     /// Solver graph coloring masks: per rigid-body (arena index), the set of solver colors
     /// used by its active contact pairs. Maintained incrementally on contact start/stop,
@@ -347,11 +351,13 @@ pub struct NarrowPhase {
     /// solver-graph maintenance. `u64::MAX` = missing/fixed/kinematic-or-sleeping;
     /// else `(active_set_id << 32) | is_dynamic`.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     body_qualify_info: Vec<u64>,
     /// Workspace: per-body awake bit (arena index), rebuilt each narrow-phase update.
     /// Internal motion sets no change flags, so "the parent body is awake" is the
     /// narrow-phase's it-may-have-moved signal for pair updates.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     awake_body_mask: Vec<bool>,
     /// Per-pair solver-qualification hints (contact-graph edge index): bit 15 = has a
     /// dynamic body, low bits = qualified solver-manifold count. Maintained incrementally
@@ -377,6 +383,7 @@ pub struct NarrowPhase {
     /// membership change. Consumed by the incremental maintenance in
     /// [`Self::maintain_solver_contact_graph`] and the force-event list reconciliation.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     solver_graph_dirty: Vec<u32>,
     /// Persistent list of solver-active pairs (edge indices) with contact-force events
     /// enabled — exactly what the post-solve force-event pass must inspect. Maintained
@@ -398,15 +405,18 @@ pub struct NarrowPhase {
     /// `(min, max body id)` order (discovery-order independent: ≈ Δ colors instead of ≈ 2Δ).
     /// Entries are `(edge id, packed body infos)`, see [`pack_color_body_info`].
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     solver_color_todo: Vec<(u32, u32, u32)>,
     /// The self contact detection of the soft collision meshes (by collider), rebuilt by
     /// every update for the awake bodies (see `soft_contacts`).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — soft-body self contacts; the game has none (serde-skipped).
     soft_self: parry::utils::hashmap::HashMap<ColliderHandle, soft_contacts::SoftSelfContacts>,
     /// Pool of retired [`ContactPair`]s, reused by [`Self::add_pair`] so
     /// pair-churn-heavy scenes (hundreds of broad-phase add/delete events per
     /// step) skip the buffer reallocation of freshly constructed pairs.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     retired_pairs: Vec<ContactPair>,
 }
 

@@ -5,6 +5,7 @@ use crate::math::{DVector, Real};
 /// A temporary workspace for various updates of the multibody.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct MultibodyWorkspace {
     pub accs: Vec<RigidBodyVelocity<Real>>,
     pub ndofs_vec: DVector,

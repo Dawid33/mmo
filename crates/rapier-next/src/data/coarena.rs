@@ -4,6 +4,7 @@ use crate::data::arena::Index;
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, Default)]
 /// A container for data associated to item existing into another Arena.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Coarena<T> {
     data: Vec<(u32, T)>,
 }

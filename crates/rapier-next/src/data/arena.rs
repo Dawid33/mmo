@@ -25,6 +25,7 @@ use core::slice;
 #[cfg(feature = "alloc")]
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Arena<T> {
     items: Vec<Entry<T>>,
     generation: u32,
@@ -35,6 +36,7 @@ pub struct Arena<T> {
 #[cfg(feature = "alloc")]
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 enum Entry<T> {
     Free { next_free: Option<u32> },
     Occupied { generation: u32, value: T },
@@ -55,6 +57,7 @@ enum Entry<T> {
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Index {
     index: u32,
     generation: u32,

@@ -34,6 +34,7 @@ pub enum FrictionModel {
 // TODO: we should be able to combine this with MotorModel.
 /// Coefficients for a spring, typically used for configuring constraint softness for contacts and
 /// joints.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct SpringCoefficients<N> {
     /// Sets the natural frequency (Hz) of the spring-like constraint.
     ///

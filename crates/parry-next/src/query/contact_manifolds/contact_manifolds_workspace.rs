@@ -92,7 +92,8 @@ impl DeserializableWorkspaceData {
 }
 
 /// Data from a [`ContactManifoldsWorkspace`].
-pub trait WorkspaceData: DowncastSync {
+// mmo-fork: StateHash — workspaces are journaled narrow-phase state.
+pub trait WorkspaceData: DowncastSync + state_hash::DynStateHash {
     /// Gets the underlying workspace as an enum.
     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_>;
 
@@ -102,8 +103,17 @@ pub trait WorkspaceData: DowncastSync {
 
 impl_downcast!(sync WorkspaceData);
 
+// mmo-fork: StateHash — dispatch to the concrete workspace (the old fork's
+// `Hash for dyn WorkspaceData`). Its type follows from the pair's shape types.
+impl state_hash::StateHash for dyn WorkspaceData {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        self.dyn_state_hash(h);
+    }
+}
+
 // Note we have this newtype because it simplifies the serialization/deserialization code.
 /// A serializable workspace used by some contact-manifolds computation algorithms.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ContactManifoldsWorkspace(pub Box<dyn WorkspaceData>);
 
 impl Clone for ContactManifoldsWorkspace {

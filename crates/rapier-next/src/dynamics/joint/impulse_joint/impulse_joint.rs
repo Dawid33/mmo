@@ -4,6 +4,7 @@ use crate::math::SpatialVector;
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, PartialEq)]
 /// An impulse-based joint attached to two bodies.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ImpulseJoint {
     /// Handle to the first body attached to this joint.
     ///
@@ -32,6 +33,7 @@ pub struct ImpulseJoint {
         feature = "serde-serialize",
         serde(skip, default = "default_solver_body_ids")
     )]
+    #[state_hash(skip)] // mmo-fork: StateHash — stamped by the solver's selection each step (serde-skipped).
     pub(crate) solver_body_ids: [u32; 2],
     /// The solver graph color assigned to this joint.
     #[cfg_attr(feature = "serde-serialize", serde(default = "default_solver_color"))]

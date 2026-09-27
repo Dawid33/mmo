@@ -53,6 +53,7 @@ bitflags::bitflags! {
 #[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// A single contact between two collider.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ContactData {
     /// The impulse, along the contact normal, applied by this contact to the first collider's rigid-body.
     ///
@@ -108,6 +109,7 @@ impl Default for ContactData {
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug)]
 /// The description of all the contacts between a pair of colliders.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct IntersectionPair {
     /// Are the colliders intersecting?
     pub intersecting: bool,
@@ -207,6 +209,7 @@ fn default_solver_color_bodies() -> [u32; 2] {
 ///     println!("Contact normal: {:?}", manifold.data.normal);
 /// }
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ContactPair {
     /// The first collider involved in the contact pair.
     pub collider1: ColliderHandle,
@@ -227,6 +230,7 @@ pub struct ContactPair {
 #[derive(Clone)]
 #[repr(C, u8)]
 #[allow(clippy::large_enum_variant)] // Boxing would move the manifolds off the fixed layout.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum PairContacts {
     /// Contact manifolds: every pair but the pairs of two soft surfaces.
     Rigid(RigidPairContacts),
@@ -238,6 +242,7 @@ pub enum PairContacts {
         touching: bool,
         /// The candidates (not serialized: the next update rebuilds them).
         #[cfg_attr(feature = "serde-serialize", serde(skip))]
+        #[state_hash(skip)] // mmo-fork: StateHash — rebuilt by the next update (serde-skipped).
         candidates: Box<SoftPairContacts>,
     },
 }
@@ -245,6 +250,7 @@ pub enum PairContacts {
 /// The contact manifolds of a [`ContactPair`], with the solver's bookkeeping about them.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidPairContacts {
     /// The set of contact manifolds between the two colliders.
     ///
@@ -265,6 +271,7 @@ pub struct RigidPairContacts {
     /// The clusters solved at the previous step, kept as the warm-start source (and
     /// reused as workspace buffers) when rebuilding `solver_clusters` each frame.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped scratch (a narrow-phase round trip re-steps identically, H7).
     pub(crate) solver_clusters_prev: Vec<ContactManifold>,
     /// The persistent solver graph color of this pair: same-color active pairs never share
     /// a rigid-body, so one color solves concurrently. Maintained incrementally on contact
@@ -290,6 +297,7 @@ pub struct RigidPairContacts {
     /// contacts and the volume patch, see `SoftRigidContacts`), rebuilt by every update; `None`
     /// for every other pair.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — soft-body contacts; the game has no soft bodies (serde-skipped).
     pub(crate) soft: Option<Box<SoftRigidContacts>>,
 }
 
@@ -348,6 +356,7 @@ impl RigidPairContacts {
 /// update, used by contact recycling to bound how much the pair moved since.
 #[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct ContactRecycleState {
     /// Pose of the second collider relative to the first at the last full update.
     pub pos12: Pose,
@@ -687,6 +696,7 @@ impl ContactPair {
 ///
 /// A contact manifold describes a set of contacts between two colliders. All the contact
 /// part of the same contact manifold share the same contact normal and contact kinematics.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ContactManifoldData {
     // The following are set by the narrow-phase.
     /// The first rigid-body involved in this contact manifold.
@@ -815,6 +825,18 @@ pub struct SolverContactGeneric<N: ScalarType, const LANES: usize> {
     pub contact_id: [ContactId; LANES], // 1/1
     #[cfg(feature = "dim3")]
     pub(crate) padding: [N; 1],
+}
+
+// mmo-fork: StateHash — the stored (scalar) solver contact; `padding` is not
+// state. Its fields are generic over the SIMD width, so a derive can't bound them.
+impl state_hash::StateHash for SolverContactGeneric<Real, 1> {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        self.anchor1.state_hash(h);
+        self.anchor2.state_hash(h);
+        self.dist.state_hash(h);
+        self.tangent_velocity.state_hash(h);
+        self.contact_id.state_hash(h);
+    }
 }
 
 /// The storage type of [`SolverContactGeneric::contact_id`]: one `Real`-sized slot
@@ -1061,3 +1083,6 @@ mod tests {
         );
     }
 }
+
+// mmo-fork: StateHash — bitflags hash as their bits.
+state_hash::impl_via_bits!(SolverFlags, PairEventStatus);

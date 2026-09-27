@@ -11,6 +11,7 @@ use core::ops::{Index, IndexMut};
 /// Node identifier.
 #[derive(Copy, Clone, Default, PartialEq, PartialOrd, Eq, Ord, Hash, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct NodeIndex(u32);
 
 impl NodeIndex {
@@ -43,6 +44,7 @@ impl From<u32> for NodeIndex {
 /// Edge identifier.
 #[derive(Copy, Clone, Default, PartialEq, PartialOrd, Eq, Ord, Hash, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct EdgeIndex(u32);
 
 impl EdgeIndex {
@@ -76,6 +78,7 @@ impl From<u32> for EdgeIndex {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum Direction {
     Outgoing = 0,
     Incoming = 1,
@@ -95,6 +98,7 @@ const DIRECTIONS: [Direction; 2] = [Direction::Outgoing, Direction::Incoming];
 /// The graph's node type.
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Node<N> {
     /// Associated node data.
     pub weight: N,
@@ -105,6 +109,7 @@ pub struct Node<N> {
 /// The graph's edge type.
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Edge<E> {
     /// Associated edge data.
     pub weight: E,
@@ -133,6 +138,7 @@ impl<E> Edge<E> {
 
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Graph<N, E> {
     pub(crate) nodes: Vec<Node<N>>,
     pub(crate) edges: Vec<Edge<E>>,

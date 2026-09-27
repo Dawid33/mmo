@@ -104,6 +104,7 @@ use alloc::vec::Vec;
 ///
 /// These IDs are used to track contacts across frames. If the same feature IDs appear
 /// in consecutive frames, it's likely the same physical contact point.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TrackedContact<Data> {
     /// The contact point in the local-space of the first shape.
     ///
@@ -471,6 +472,7 @@ impl<Data: Default + Copy> TrackedContact<Data> {
 ///          manifold.subshape1, manifold.subshape2);
 /// # }
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ContactManifold<ManifoldData, ContactData> {
     // NOTE: use a SmallVec instead?
     // And for 2D use an ArrayVec since there will never be more than 2 contacts anyways.
@@ -502,6 +504,7 @@ pub struct ContactManifold<ManifoldData, ContactData> {
 /// The positions of the composite-shape subshapes involved in a contact manifold.
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct SubshapePoses {
     /// The position of the first shape's subshape, if it is a composite shape.
     pub pos1: Option<Pose>,

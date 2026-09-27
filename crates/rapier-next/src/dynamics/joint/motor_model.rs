@@ -22,6 +22,7 @@ use crate::math::Real;
 /// **Most users should use AccelerationBased (the default).**
 #[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum MotorModel {
     /// Spring constants auto-scale with mass (easier to tune, recommended).
     #[default]

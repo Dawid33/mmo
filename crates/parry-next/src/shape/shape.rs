@@ -29,6 +29,7 @@ use num_derive::FromPrimitive;
 
 #[derive(Copy, Clone, Debug, FromPrimitive, PartialEq, Eq, Hash)]
 /// Enum representing the type of a shape.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum ShapeType {
     /// A ball shape.
     Ball = 0,
@@ -332,7 +333,8 @@ impl DeserializableTypedShape {
 }
 
 /// Trait implemented by shapes usable by Rapier.
-pub trait Shape: RayCast + PointQuery + Any + Send + Sync {
+// mmo-fork: StateHash — every shape is state-hashable, so `dyn Shape` can dispatch.
+pub trait Shape: RayCast + PointQuery + Any + Send + Sync + state_hash::DynStateHash {
     /// Computes the [`Aabb`] of this shape.
     fn compute_local_aabb(&self) -> Aabb;
     /// Computes the bounding-sphere of this shape.
@@ -436,6 +438,15 @@ pub trait Shape: RayCast + PointQuery + Any + Send + Sync {
         let aabb1 = self.compute_aabb(start_pos);
         let aabb2 = self.compute_aabb(end_pos);
         aabb1.merged(&aabb2)
+    }
+}
+
+// mmo-fork: StateHash — the concrete shape's type first (a `Cone` and a
+// `Cylinder` with equal fields must differ), then its own `StateHash`.
+impl state_hash::StateHash for dyn Shape {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        state_hash::StateHash::state_hash(&self.shape_type(), h);
+        self.dyn_state_hash(h);
     }
 }
 

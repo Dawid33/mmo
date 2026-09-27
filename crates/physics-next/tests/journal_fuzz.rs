@@ -10,6 +10,8 @@
 //! 2. snapshot the bincode of every journaled structure, step the window
 //!    journaled, revert it LIFO and require every intermediate snapshot back
 //!    byte for byte;
+//!    Each journaled step also checks that every part's `StateHash` moved iff
+//!    its bytes did (Task 4.4; `hash_disagreements`).
 //! 3. advance by re-stepping the window on a FRESH pipeline (the game's
 //!    post-revert rule) and require the result byte-equal to an unjournaled
 //!    clone stepped the same way — which catches state the revert missed that
@@ -20,7 +22,7 @@
 //! body and collider removal ticks, and ticks with live joints. The staged
 //! solver's writeback debug-asserts (debug builds) that every body it writes
 //! was captured first.
-use physics_next::{PhysicsWorld, differing_parts};
+use physics_next::{hash_disagreements, PhysicsWorld, differing_parts};
 use rapier3d::prelude::*;
 
 /// Seeds of the full run (`journal_fuzz_all_seeds`).
@@ -236,9 +238,13 @@ fn run_seed(seed: u64, cov: &mut Coverage) {
         let mut snaps = Vec::with_capacity(len);
         let mut journals = Vec::with_capacity(len);
         for k in 0..len {
-            snaps.push(scene.w.state_bytes());
+            let pre_state = (scene.w.state_bytes(), scene.w.state_hashes());
+            snaps.push(pre_state.0.clone());
             let pre = scene.w.clone();
             let j = scene.w.step_journaled(&mut pipeline);
+            // Task 4.4: the StateHash of each part moves iff its bytes do.
+            let bad = hash_disagreements(&pre_state, &(scene.w.state_bytes(), scene.w.state_hashes()));
+            assert!(bad.is_empty(), "seed {seed} tick {}: bytes and StateHash disagree on whether {bad:?} changed", scene.tick + k);
             if j.joints_captured() {
                 cov.joint_steps += 1;
             }

@@ -23,6 +23,7 @@ pub struct SoftMeshCellBinding {
 /// cluster. Stable for the mesh's whole life (removed meshes leave a dead slot).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct SoftMeshId {
     /// The cluster owning the mesh.
     pub cluster: u32,
@@ -33,6 +34,7 @@ pub struct SoftMeshId {
 /// A collision mesh of a given soft body: what a deformable collider points back to.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct SoftMeshRef {
     /// The soft body owning the mesh.
     pub body: crate::dynamics::SoftBodyHandle,

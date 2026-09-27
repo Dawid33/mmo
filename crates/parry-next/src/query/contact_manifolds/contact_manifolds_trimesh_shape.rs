@@ -19,6 +19,7 @@ use crate::shape::{CompositeShape, Shape, TriMesh, TriMeshFlags};
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[derive(Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMeshShapeContactManifoldsWorkspace {
     interferences: Vec<u32>,
     local_aabb2: Aabb,

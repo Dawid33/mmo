@@ -20,6 +20,7 @@ use crate::query::details::NormalConstraints;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 /// Controls how a [`Polyline`] is loaded.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct PolylineFlags(u8);
 
 bitflags::bitflags! {
@@ -127,6 +128,7 @@ bitflags::bitflags! {
 /// assert_eq!(polyline.num_segments(), 3);
 /// # }
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Polyline {
     bvh: Bvh,
     vertices: Vec<Vector>,

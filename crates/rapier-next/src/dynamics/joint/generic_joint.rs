@@ -139,6 +139,7 @@ impl From<JointAxis> for JointAxesMask {
 /// limit at all and leaves the axis free.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct JointLimits<N> {
     /// Minimum allowed value (angle for revolute, distance for prismatic).
     pub min: N,
@@ -200,6 +201,7 @@ impl<N: SimdRealCopy> From<[N; 2]> for JointLimits<N> {
 /// ```
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct JointMotor {
     /// Target velocity (units/sec for prismatic, rad/sec for revolute).
     pub target_vel: Real,
@@ -260,6 +262,7 @@ impl JointMotor {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// Enum indicating whether or not a joint is enabled.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum JointEnabled {
     /// The joint is enabled.
     Enabled,
@@ -273,6 +276,7 @@ pub enum JointEnabled {
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq)]
 /// A generic joint.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct GenericJoint {
     /// The joint’s frame, expressed in the first rigid-body’s local-space.
     pub local_frame1: Pose,
@@ -886,3 +890,6 @@ mod test {
         assert_eq!(motor.motor_params(0.5).max_impulse, Real::MAX * 0.5);
     }
 }
+
+// mmo-fork: StateHash — bitflags hash as their bits.
+state_hash::impl_via_bits!(JointAxesMask);

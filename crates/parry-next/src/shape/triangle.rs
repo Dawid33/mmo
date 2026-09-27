@@ -77,6 +77,7 @@ use crate::shape::PackedFeatureId;
 )]
 #[derive(PartialEq, Debug, Copy, Clone, Default)]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Triangle {
     /// The first vertex of the triangle.
     pub a: Vector,

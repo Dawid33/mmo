@@ -76,6 +76,7 @@ pub enum VoxelType {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 /// The status of the cell of an heightfield.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct AxisMask(u8);
 
 bitflags::bitflags! {
@@ -216,6 +217,7 @@ impl OctantPattern {
 /// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct VoxelState(pub(super) u8);
 
 impl VoxelState {
@@ -496,6 +498,8 @@ pub struct VoxelData {
 /// - [`crate::transformation::voxelization`]: Convert meshes to voxels
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+// mmo-fork: StateHash — deserialization recomputes the (serde-skipped) content hash.
+#[cfg_attr(feature = "serde-serialize", serde(from = "VoxelsDe"))]
 pub struct Voxels {
     /// A BVH of chunk keys.
     ///
@@ -507,6 +511,93 @@ pub struct Voxels {
     pub(super) chunks: Vec<VoxelsChunk>,
     pub(super) free_chunks: Vec<usize>,
     pub(super) voxel_size: Vector,
+    /// mmo-fork: StateHash — digest of the content, (sorted chunk key → voxel
+    /// states), maintained by every mutator (`recompute_content_hash`), so
+    /// hashing a voxel shape never walks its voxels (the old fork's
+    /// `cached_hash`). A cache: serde-skipped and recomputed on
+    /// deserialization, so it can neither go stale nor change the wire format.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(super) content_hash: u64,
+}
+
+/// mmo-fork: StateHash — [`Voxels`]' serialized fields, in order, without the
+/// content hash; `From` recomputes it. A field added to `Voxels` fails the
+/// `From` impl at compile time: extend both together (bincode is positional).
+#[cfg(feature = "serde-serialize")]
+#[derive(Deserialize)]
+struct VoxelsDe {
+    chunk_bvh: Bvh,
+    chunk_headers: HashMap<IVector, VoxelsChunkHeader>,
+    chunk_keys: Vec<IVector>,
+    chunks: Vec<VoxelsChunk>,
+    free_chunks: Vec<usize>,
+    voxel_size: Vector,
+}
+
+#[cfg(feature = "serde-serialize")]
+impl From<VoxelsDe> for Voxels {
+    fn from(de: VoxelsDe) -> Self {
+        let VoxelsDe { chunk_bvh, chunk_headers, chunk_keys, chunks, free_chunks, voxel_size } = de;
+        let mut voxels = Voxels {
+            chunk_bvh,
+            chunk_headers,
+            chunk_keys,
+            chunks,
+            free_chunks,
+            voxel_size,
+            content_hash: 0,
+        };
+        voxels.recompute_content_hash();
+        voxels
+    }
+}
+
+// mmo-fork: StateHash — `(voxel_size, content_hash)`, never the voxel data.
+// The free list, chunk allocation order and chunk BVH are deliberately left
+// out: they are not content (though they are part of `Clone`/serde, so an
+// exact restore still restores them).
+impl state_hash::StateHash for Voxels {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        self.voxel_size.state_hash(h);
+        h.write_u64(self.content_hash);
+    }
+}
+
+/// mmo-fork: StateHash — FNV-1a over the canonical content stream. Every
+/// width is pinned by `StateHash` (`u64` lengths), so native and wasm32 agree.
+struct ContentHasher(u64);
+
+impl core::hash::Hasher for ContentHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 ^= *b as u64;
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+impl Voxels {
+    /// mmo-fork: StateHash — recomputes the cached content hash: chunk keys in
+    /// sorted order, so the result is independent of the map's insertion order
+    /// and of the chunk allocation history.
+    pub(super) fn recompute_content_hash(&mut self) {
+        use core::hash::Hasher as _;
+        use state_hash::StateHash;
+        let mut keys: Vec<IVector> = self.chunk_headers.keys().copied().collect();
+        keys.sort_unstable_by_key(|k| (k.x, k.y, k.z));
+        let mut h = ContentHasher(0xcbf2_9ce4_8422_2325);
+        state_hash::hash_len(keys.len(), &mut h);
+        for key in keys {
+            key.state_hash(&mut h);
+            let id = self.chunk_headers[&key].id;
+            let states = &self.chunks[id].states;
+            h.write(&states.map(|state| state.0));
+        }
+        self.content_hash = h.0;
+    }
 }
 
 impl Voxels {
@@ -579,6 +670,7 @@ impl Voxels {
             chunks: vec![],
             free_chunks: vec![],
             voxel_size,
+            content_hash: 0, // mmo-fork: StateHash — computed below.
         };
 
         for vox in grid_coordinates {
@@ -601,6 +693,7 @@ impl Voxels {
         );
 
         result.recompute_all_voxels_states();
+        result.recompute_content_hash(); // mmo-fork: StateHash
         result
     }
 

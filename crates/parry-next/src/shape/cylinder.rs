@@ -69,6 +69,7 @@ use either::Either;
 )]
 #[derive(PartialEq, Debug, Copy, Clone)]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Cylinder {
     /// Half the length of the cylinder along the Y axis.
     ///

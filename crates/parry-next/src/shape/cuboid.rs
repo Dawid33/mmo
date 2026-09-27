@@ -63,6 +63,7 @@ use crate::utils::WSign;
 )]
 #[derive(PartialEq, Debug, Copy, Clone)]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Cuboid {
     /// The half-extents of the cuboid along each axis.
     ///

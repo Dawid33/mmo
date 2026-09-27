@@ -5,6 +5,7 @@ use num::{Bounded, Zero};
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone)]
 /// A column-major 2D array.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Array2<T> {
     nrows: usize,
     ncols: usize,

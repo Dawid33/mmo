@@ -20,9 +20,11 @@ mod update;
 /// However, you can use it to create a [`QueryPipeline`](crate::pipeline::QueryPipeline) for spatial queries.
 #[derive(Default, Clone)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct BroadPhaseBvh {
     pub(crate) tree: Bvh,
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     workspace: BvhWorkspace,
     #[cfg_attr(
         feature = "serde-serialize",
@@ -31,6 +33,8 @@ pub struct BroadPhaseBvh {
             deserialize_with = "crate::utils::serde::deserialize_from_vec_tuple"
         )
     )]
+    // mmo-fork: StateHash — serialized sorted (its order is not state), so hashed sorted.
+    #[state_hash(with = "hash_pairs")]
     pairs: HashMap<(ColliderHandle, ColliderHandle), u32>,
     /// For each collider, the other colliders it currently forms a pair with. Lets
     /// stale-pair detection examine only pairs adjacent to changed colliders instead of
@@ -39,21 +43,25 @@ pub struct BroadPhaseBvh {
     /// Workspace buffer holding the colliders whose AABB was updated in the tree
     /// during the last `update` call.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     updated_colliders: Vec<ColliderHandle>,
     /// Workspace buffer holding the leaf pairs reported by the tree traversal. Only the
     /// sequential traversal needs it (it reports through a closure); the parallel one
     /// returns its own vector.
     #[cfg(not(feature = "parallel"))]
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     candidates_workspace: Vec<(u32, u32)>,
     /// Workspace: per-collider "was updated this step" bit (collider arena index), so the
     /// stale-pair scan can visit a pair from one side only when both sides moved.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     updated_mask: Vec<bool>,
     /// Workspace buffer holding the stale pairs detected during `update`.
     ///
     /// The boolean indicates if a `DeletePair` event must be emitted for the pair.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     stale_pairs: Vec<(ColliderHandle, ColliderHandle, bool)>,
     /// Leaves updated at the previous `update` call — (a superset of) the leaves whose
     /// change flag the previous refit set; partial refitting needs it to clear those flags.
@@ -62,6 +70,7 @@ pub struct BroadPhaseBvh {
     prev_updated_leaves: Vec<u32>,
     /// Leaves updated in the tree during the current `update` call.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     curr_updated_leaves: Vec<u32>,
     /// Colliders whose tree leaf was updated through [`Self::set_aabb`] since the last
     /// `update` call (e.g. by the physics pipeline at the end of the previous step).
@@ -77,14 +86,17 @@ pub struct BroadPhaseBvh {
     reinsert_leaf_updates: bool,
     /// Workspace buffer for the precomputed leaf updates of [`Self::update`].
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     update_workspace: Vec<(ColliderHandle, Aabb, Real)>,
     /// Workspace of the parallel leaf-update batches (the tree API takes raw
     /// leaf indices).
     #[cfg(feature = "parallel")]
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     update_batch_workspace: Vec<(Aabb, u32, Real)>,
     #[cfg(feature = "parallel")]
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — serde-skipped workspace, rebuilt before use.
     update_batch_statuses: Vec<BvhLeafUpdateStatus>,
     frame_index: u32,
     optimization_strategy: BvhOptimizationStrategy,
@@ -99,6 +111,7 @@ pub struct BroadPhaseBvh {
     /// so the physics pipeline can run it concurrently with the narrow phase and
     /// solver; consumed by [`Self::take_deferred_optimize`].
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — a pipeline-held task flag, serde-skipped; step_journaled joins the task first (H7).
     deferred_optimize_pending: bool,
 }
 
@@ -109,6 +122,7 @@ pub struct BroadPhaseBvh {
 /// efficient for collision-detection and scene queries.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Default, PartialEq, Eq, Copy, Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum BvhOptimizationStrategy {
     /// Different sub-trees of the BVH will be optimized at each frame.
     #[default]
@@ -160,11 +174,26 @@ fn serialize_pairs<S: serde::Serializer>(
     pairs: &HashMap<(ColliderHandle, ColliderHandle), u32>,
     s: S,
 ) -> Result<S::Ok, S::Error> {
-    crate::utils::serde::serialize_sorted_to_vec_tuple(
-        pairs,
-        |(a, b)| (a.into_raw_parts(), b.into_raw_parts()),
-        s,
-    )
+    crate::utils::serde::serialize_sorted_to_vec_tuple(pairs, pair_sort_key, s)
+}
+
+// mmo-fork: StateHash — the one sort key of `pairs`, shared by its serializer
+// and its hash so the two can't drift.
+fn pair_sort_key((a, b): &(ColliderHandle, ColliderHandle)) -> ((u32, u32), (u32, u32)) {
+    (a.into_raw_parts(), b.into_raw_parts())
+}
+
+// mmo-fork: StateHash — `pairs` in its serialized (sorted) order: the map's
+// iteration order doesn't survive a round trip, so it isn't state.
+fn hash_pairs<H: core::hash::Hasher>(pairs: &HashMap<(ColliderHandle, ColliderHandle), u32>, h: &mut H) {
+    use state_hash::StateHash;
+    let mut entries: alloc::vec::Vec<_> = pairs.iter().collect();
+    entries.sort_unstable_by_key(|(k, _)| pair_sort_key(k));
+    state_hash::hash_len(entries.len(), h);
+    for (k, v) in entries {
+        k.state_hash(h);
+        v.state_hash(h);
+    }
 }
 
 impl BroadPhaseBvh {

@@ -67,6 +67,7 @@ impl HasModifiedFlag for RigidBody {
 ///     body.apply_impulse(Vector::new(0.0, 10.0, 0.0), true);
 /// }
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBodySet {
     // NOTE: the pub(crate) are needed by the broad phase
     // to avoid borrowing issues. It is also needed for
@@ -75,10 +76,12 @@ pub struct RigidBodySet {
     pub(crate) bodies: Arena<RigidBody>,
     pub(crate) modified_bodies: ModifiedRigidBodies,
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — a constant placeholder body, not state (serde-skipped).
     pub(crate) default_fixed: RigidBody,
     // mmo-fork: first-touch capture buffer, installed only for the duration of
     // a journaled step (`pipeline::step_journal`, upgrade plan Task 4.2).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — the journal's transient capture buffer, not state.
     pub(crate) capture:
         Option<alloc::boxed::Box<crate::pipeline::step_journal::Capture<RigidBodyHandle, RigidBody>>>,
 }

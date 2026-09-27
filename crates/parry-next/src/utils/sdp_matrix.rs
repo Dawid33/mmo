@@ -146,6 +146,7 @@ impl Mul<Real> for SdpMatrix2<Real> {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct SdpMatrix3<N> {
     /// The component at the first row and first column of this matrix.
     pub m11: N,

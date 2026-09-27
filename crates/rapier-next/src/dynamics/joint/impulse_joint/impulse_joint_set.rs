@@ -42,6 +42,7 @@ pub(crate) type JointGraphEdge = crate::data::graph::Edge<ImpulseJoint>;
 ///     .build();
 /// let handle = joints.insert(body1, body2, joint, true);
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ImpulseJointSet {
     rb_graph_ids: Coarena<RigidBodyGraphIndex>,
     /// Map joint handles to edge ids on the graph.
@@ -54,23 +55,31 @@ pub struct ImpulseJointSet {
     /// Persistent-island connectivity events (joint created/removed/rewired),
     /// drained at the start of the next timestep, in order.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    // mmo-fork: StateHash — hashed although serde-skipped: pending work for the
+    // next step (lost by a serde round trip, H7), so it is rollback state.
     pub(crate) island_events: Vec<crate::dynamics::ImpulseJointIslandEvent>,
     /// Joints accessed mutably since the last timestep: their enabled status may have changed,
     /// so their island links are refreshed by [`Self::flush_modified_joints`].
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    // mmo-fork: StateHash — hashed although serde-skipped: pending work for the
+    // next step (lost by a serde round trip, H7), so it is rollback state.
     modified_joints: Vec<ImpulseJointHandle>,
     /// Set by [`Self::iter_mut`]: every joint counts as modified.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    // mmo-fork: StateHash — hashed although serde-skipped: pending work for the
+    // next step (lost by a serde round trip, H7), so it is rollback state.
     all_joints_modified: bool,
     /// Bumped by every mutation that can affect the solver's joint constraint assembly (joint
     /// insertion/removal, mutable joint access, user-changes to a rigid-body with attached joints).
     /// The solver reuses its joint assembly while this, the joint list, and the island epoch are unchanged.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — a memo key for the pipeline's joint assembly cache (serde-skipped).
     pub(crate) assembly_epoch: u32,
     /// The `(active_set_epoch, assembly_epoch)` the last [`Self::select_active_interactions`] ran
     /// with: while both are unchanged the selection (and the solver-body ids it stamps) is
     /// identical, so the caller's previous output is reused untouched.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — a memo key for the selection cache (serde-skipped).
     selection_epochs: Option<(u32, u32)>,
 }
 

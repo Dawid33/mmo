@@ -24,6 +24,7 @@ pub type BodyStatus = RigidBodyType;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The type of a rigid body, determining how it responds to forces and movement.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum RigidBodyType {
     /// Fully simulated - responds to forces, gravity, and collisions.
     ///
@@ -129,6 +130,7 @@ impl Default for RigidBodyChanges {
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, Copy, PartialEq)]
 /// The position of this rigid-body.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBodyPosition {
     /// The world-space position of the rigid-body.
     pub position: Pose,
@@ -304,6 +306,7 @@ bitflags::bitflags! {
 /// Mass and angular inertia added to a rigid-body on top of its attached colliders’ contributions.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum RigidBodyAdditionalMassProps {
     /// Mass properties to be added as-is.
     MassProps(MassProperties),
@@ -322,6 +325,7 @@ impl Default for RigidBodyAdditionalMassProps {
 #[derive(Clone, Debug, PartialEq)]
 // #[repr(C)]
 /// The mass properties of a rigid-body.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBodyMassProps {
     /// The world-space center of mass of the rigid-body.
     pub world_com: Vector,
@@ -616,6 +620,8 @@ impl RigidBodyMassProps {
 // repr(C): `as_vector` reinterprets this struct as a flat vector with the
 // linear part first, so the field order must be guaranteed.
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
+#[state_hash(bound = "T::Vector: state_hash::StateHash, T::AngVector: state_hash::StateHash")]
 pub struct RigidBodyVelocity<T: ScalarType> {
     /// The linear velocity of the rigid-body.
     pub linvel: T::Vector,
@@ -986,6 +992,7 @@ impl core::ops::SubAssign<RigidBodyVelocity<Real>> for RigidBodyVelocity<Real> {
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, Copy, PartialEq)]
 /// Damping factors to progressively slow down a rigid-body.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBodyDamping<T> {
     /// Damping factor for gradually slowing down the translational motion of the rigid-body.
     pub linear_damping: T,
@@ -1005,6 +1012,7 @@ impl<T: SimdRealCopy> Default for RigidBodyDamping<T> {
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, Copy, PartialEq)]
 /// The user-defined external forces applied to this rigid-body.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBodyForces {
     /// Accumulation of external forces (only for dynamic bodies).
     pub force: Vector,
@@ -1085,6 +1093,7 @@ impl RigidBodyForces {
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, Copy, PartialEq)]
 /// Information used for Continuous-Collision-Detection.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBodyCcd {
     /// The distance used by the CCD solver to decide if a movement would
     /// result in a tunnelling problem.
@@ -1193,6 +1202,7 @@ impl RigidBodyCcd {
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Hash)]
 /// Internal identifiers used by the physics engine.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBodyIds {
     pub(crate) active_island_id: u32,
     pub(crate) active_set_id: u32,
@@ -1222,6 +1232,7 @@ impl Default for RigidBodyIds {
 /// This should not be modified manually unless you really know what
 /// you are doing (for example if you are trying to integrate Rapier
 /// to a game engine using its component-based interface).
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBodyColliders(pub Vec<ColliderHandle>);
 
 impl RigidBodyColliders {
@@ -1301,6 +1312,7 @@ impl RigidBodyColliders {
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Default, Clone, Debug, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// The dominance groups of a rigid-body.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBodyDominance(pub i8);
 
 impl RigidBodyDominance {
@@ -1333,6 +1345,7 @@ impl RigidBodyDominance {
 /// Use `RigidBodyBuilder::can_sleep(false)` or `RigidBodyActivation::cannot_sleep()`.
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBodyActivation {
     /// Velocity threshold for sleeping (scaled by `length_unit`).
     ///
@@ -1659,3 +1672,6 @@ mod tests {
         assert!(creep(0.0, steps, dt).is_eligible_for_sleep());
     }
 }
+
+// mmo-fork: StateHash — bitflags hash as their bits.
+state_hash::impl_via_bits!(LockedAxes, RigidBodyChanges);

@@ -11,6 +11,8 @@ rapier3d = { package = "rapier3d-next", path = "../rapier-next/crates/rapier3d",
 bincode = { workspace = true }
 crc32fast = { workspace = true, features = ["std"] }
 serde = { workspace = true }
+# Task 4.4: the forks' `StateHash` (PhysicsWorld::state_hashes).
+state-hash = { path = "../state-hash" }
 
 [features]
 # Only for tests/journal_parallel.rs (H7 review I1): the game never enables

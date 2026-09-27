@@ -103,6 +103,7 @@ const EPSILON: Real = f32::EPSILON as Real;
 /// println!("Combined mass: {}", total_mass);
 /// # }
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct MassProperties {
     /// The center of mass in local (shape-relative) coordinates.
     ///

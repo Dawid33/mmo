@@ -165,6 +165,10 @@ impl Voxels {
                 self.free_chunks.push(chunk_id);
                 self.chunk_keys[chunk_id] = VoxelsChunk::INVALID_CHUNK_KEY;
             }
+
+            // mmo-fork: StateHash — content changed (including the neighbour
+            // bits `update_neighbors_state` wrote in adjacent chunks).
+            self.recompute_content_hash();
         }
 
         prev

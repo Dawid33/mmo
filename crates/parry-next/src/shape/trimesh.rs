@@ -299,6 +299,7 @@ pub enum TriMeshBuilderError {
 )]
 #[repr(C)]
 #[cfg(feature = "dim3")]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMeshPseudoNormals {
     /// The pseudo-normals of the vertices.
     pub vertices_pseudo_normal: Vec<Vector>,
@@ -314,6 +315,7 @@ pub struct TriMeshPseudoNormals {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMeshConnectedComponents {
     /// The `face_colors[i]` gives the connected-component index
     /// of the i-th face.
@@ -395,6 +397,7 @@ impl TriMeshConnectedComponents {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TopoVertex {
     /// One of the half-edge with this vertex as endpoint.
     pub half_edge: u32,
@@ -408,6 +411,7 @@ pub struct TopoVertex {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TopoFace {
     /// The half-edge adjacent to this face, with a starting point equal
     /// to the first point of this face.
@@ -422,6 +426,7 @@ pub struct TopoFace {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TopoHalfEdge {
     /// The next half-edge.
     pub next: u32,
@@ -443,6 +448,7 @@ pub struct TopoHalfEdge {
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMeshTopology {
     /// The vertices of this half-edge representation.
     pub vertices: Vec<TopoVertex>,
@@ -460,6 +466,7 @@ pub struct TriMeshTopology {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 /// Controls how a [`TriMesh`] should be loaded.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMeshFlags(u16);
 
 bitflags::bitflags! {
@@ -521,6 +528,7 @@ bitflags::bitflags! {
 #[repr(C)]
 #[derive(Clone)]
 /// A triangle mesh.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct TriMesh {
     bvh: Bvh,
     vertices: Vec<Vector>,

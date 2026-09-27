@@ -16,6 +16,7 @@ use num::AsPrimitive;
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
 #[derive(Clone)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct VoxelsShapeSubDetector {
     pub manifold_id: usize,
     pub selected_contacts: u32,
@@ -24,6 +25,8 @@ pub(crate) struct VoxelsShapeSubDetector {
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Eq, Hash, PartialEq)]
+// mmo-fork: StateHash (+ Ord: a hashbrown-keyed workspace map hashes sorted by key).
+#[derive(state_hash::StateHash, PartialOrd, Ord)]
 pub(crate) struct VoxelsWorkspaceKey<const N: usize> {
     #[cfg_attr(feature = "serde-serialize", serde(with = "serde_arrays"))]
     idx: [u32; N],
@@ -40,6 +43,7 @@ impl<const N: usize> From<[u32; N]> for VoxelsWorkspaceKey<N> {
 /// A workspace for collision-detection against voxels shape.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Default)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct VoxelsShapeContactManifoldsWorkspace<const N: usize> {
     pub(crate) timestamp: bool,
     pub(crate) sub_detectors: HashMap<VoxelsWorkspaceKey<N>, VoxelsShapeSubDetector>,

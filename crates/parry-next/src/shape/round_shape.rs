@@ -172,6 +172,7 @@ use crate::shape::SupportMap;
 /// inner shape and then offsetting it by the border radius in the query direction. This is
 /// mathematically equivalent to computing the Minkowski sum of the inner shape with a ball
 /// of radius equal to the border radius.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RoundShape<S> {
     /// The shape being rounded.
     ///

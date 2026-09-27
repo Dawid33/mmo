@@ -66,11 +66,13 @@ bytemuck-serialize = ["bytemuck", "glamx/bytemuck"]
 # Widens SIMD from 4 to 8 lanes (f32 only). Needs an AVX-enabled target to
 # emit 256-bit code.
 simd8 = []
-enhanced-determinism = ["simba/libm_force", "indexmap", "glamx/libm", "glamx/scalar-math"]
+# mmo-fork: StateHash — IndexMap (the deterministic HashMap) gets its impl.
+enhanced-determinism = ["simba/libm_force", "indexmap", "glamx/libm", "glamx/scalar-math", "state-hash/indexmap"]
 parallel = ["rayon"]
 # Adds `TriMesh:to_obj_file` function.
 wavefront = ["obj"]
-alloc = ["hashbrown", "smallvec", "downcast-rs", "rstar", "glamx/approx"]
+# mmo-fork: StateHash — hashbrown maps (no `enhanced-determinism`) hash sorted by key.
+alloc = ["hashbrown", "smallvec", "downcast-rs", "rstar", "glamx/approx", "state-hash/hashbrown"]
 spade = ["dep:spade", "alloc"]
 improved_fixed_point_support = []
 encase = [ "dep:encase", "glamx/encase" ]
@@ -101,6 +103,8 @@ rayon = { version = "1", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 log = "0.4"
 ordered-float = { version = "5", default-features = false }
+# mmo-fork: StateHash — zero-copy canonical state hashing (plan D2).
+state-hash = { path = "../../../state-hash", features = ["glamx"] }
 thiserror = { version = "2", default-features = false }
 rstar = { version = "0.13.0", optional = true }
 obj = { version = "0.10.2", optional = true }

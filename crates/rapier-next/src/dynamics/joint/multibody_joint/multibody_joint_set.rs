@@ -27,6 +27,7 @@ use crate::geometry::{InteractionGraph, RigidBodyGraphIndex};
 /// let multibody = &multibody_joint_set[multibody_link_id.multibody];
 /// let link = multibody.link(multibody_link_id.id).expect("Link not found.");
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct MultibodyLinkId {
     pub(crate) graph_id: RigidBodyGraphIndex,
     /// The multibody index to be used as `&multibody_joint_set[multibody]` to
@@ -53,6 +54,7 @@ impl Default for MultibodyLinkId {
 /// A set of rigid bodies that can be handled by a physics pipeline.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct MultibodyJointSet {
     pub(crate) multibodies: Arena<Multibody>, // NOTE: a Slab would be sufficient.
     pub(crate) rb2mb: Coarena<MultibodyLinkId>,
@@ -67,6 +69,8 @@ pub struct MultibodyJointSet {
     /// at the start of the next timestep, in order. Ids of *removed*
     /// multibodies are pushed too (the update then only unlinks).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    // mmo-fork: StateHash — hashed although serde-skipped: pending work for the
+    // next step, so it is rollback state.
     pub(crate) island_chain_events: Vec<MultibodyIndex>,
     /// Epoch bumped whenever a rigid-body's multibody membership can change
     /// (multibody joint insertion/removal). Lets the narrow-phase's persistent

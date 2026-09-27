@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 /// Controls how a [`Compound`] is loaded.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct CompoundFlags(u8);
 
 bitflags::bitflags! {
@@ -48,6 +49,7 @@ bitflags::bitflags! {
 /// delta transformation to shift or rotate it with regard to the other shapes.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Compound {
     shapes: Vec<(Pose, SharedShape)>,
     bvh: Bvh,

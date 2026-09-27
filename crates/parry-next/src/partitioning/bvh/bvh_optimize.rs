@@ -531,6 +531,7 @@ impl Bvh {
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)
 )]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(super) struct BvhIncrementalOptimizationState {
     pub(super) rebuild_frame_index: u32,
     pub(super) rebuild_start_index: u32,

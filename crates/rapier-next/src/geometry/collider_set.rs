@@ -48,6 +48,7 @@ impl HasModifiedFlag for Collider {
 ///     &mut bodies
 /// );
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ColliderSet {
     pub(crate) colliders: Arena<Collider>,
     pub(crate) modified_colliders: ModifiedColliders,
@@ -55,6 +56,7 @@ pub struct ColliderSet {
     // mmo-fork: first-touch capture buffer, installed only for the duration of
     // a journaled step (`pipeline::step_journal`, upgrade plan Task 4.2).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    #[state_hash(skip)] // mmo-fork: StateHash — the journal's transient capture buffer, not state.
     pub(crate) capture:
         Option<Box<crate::pipeline::step_journal::Capture<ColliderHandle, Collider>>>,
 }

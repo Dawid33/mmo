@@ -53,6 +53,7 @@
 #[cfg_attr(feature = "bytemuck", derive(bytemuck::NoUninit))]
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct InteractionGroups {
     /// Groups memberships.
     pub memberships: Group,
@@ -71,6 +72,7 @@ pub struct InteractionGroups {
 /// Specifies which method should be used to test interactions.
 ///
 /// In case of different test modes between two [`InteractionGroups`], [`InteractionTestMode::And`] is given priority.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum InteractionTestMode {
     /// Use [`InteractionGroups::test_and`].
     #[default]
@@ -260,3 +262,6 @@ impl From<Group> for u32 {
 // to bytemuck, so we add a manual unsafe impl.
 #[cfg(feature = "bytemuck")]
 unsafe impl bytemuck::NoUninit for Group {}
+
+// mmo-fork: StateHash — bitflags hash as their bits.
+state_hash::impl_via_bits!(Group);

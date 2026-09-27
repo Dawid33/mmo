@@ -252,3 +252,6 @@ impl EventHandler for ChannelEventCollector {
         let _ = self.soft_body_tear_event_sender.send(event.clone());
     }
 }
+
+// mmo-fork: StateHash — bitflags hash as their bits.
+state_hash::impl_via_bits!(ActiveEvents);

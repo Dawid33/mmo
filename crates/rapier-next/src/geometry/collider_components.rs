@@ -70,6 +70,7 @@ impl ColliderChanges {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The type of collider.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum ColliderType {
     /// A collider that can generate contacts and contact events.
     Solid,
@@ -90,6 +91,7 @@ pub type ColliderShape = SharedShape;
 #[derive(Clone, PartialEq, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The mass-properties of a collider.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum ColliderMassProps {
     /// The collider is given a density.
     ///
@@ -149,6 +151,7 @@ impl ColliderMassProps {
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// Information about the rigid-body this collider is attached to.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ColliderParent {
     /// Handle of the rigid-body this collider is attached to.
     pub handle: RigidBodyHandle,
@@ -159,6 +162,7 @@ pub struct ColliderParent {
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The position of a collider.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ColliderPosition(pub Pose);
 
 impl AsRef<Pose> for ColliderPosition {
@@ -214,6 +218,7 @@ where
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// The constraints solver-related properties of this collider (friction, restitution, etc.)
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ColliderMaterial {
     /// The friction coefficient of this collider.
     ///
@@ -364,6 +369,7 @@ impl Default for ActiveCollisionTypes {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// Enum indicating whether or not a collider is enabled.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub enum ColliderEnabled {
     /// The collider is enabled.
     Enabled,
@@ -377,6 +383,7 @@ pub enum ColliderEnabled {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// A set of flags for controlling collision/intersection filtering, modification, and events.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct ColliderFlags {
     /// Controls whether collision-detection happens between two colliders depending on
     /// the type of the rigid-bodies they are attached to.
@@ -425,3 +432,6 @@ impl From<ActiveEvents> for ColliderFlags {
         }
     }
 }
+
+// mmo-fork: StateHash — bitflags hash as their bits.
+state_hash::impl_via_bits!(ActiveCollisionTypes, ColliderChanges);

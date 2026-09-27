@@ -39,6 +39,19 @@ pub struct SoftBodySet {
     pub(super) attached_to_stale: bool,
 }
 
+// mmo-fork: StateHash — the game never creates a soft body (the step journal
+// asserts the set stays empty), so only emptiness is hashed; a non-empty set
+// panics rather than hash to a value that would agree for different states.
+impl state_hash::StateHash for SoftBodySet {
+    fn state_hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        assert!(
+            self.bodies.is_empty() && self.island_events.is_empty(),
+            "StateHash is not implemented for soft bodies (the game has none)"
+        );
+        state_hash::hash_len(0, h);
+    }
+}
+
 #[cfg(feature = "serde-serialize")]
 fn default_true() -> bool {
     true

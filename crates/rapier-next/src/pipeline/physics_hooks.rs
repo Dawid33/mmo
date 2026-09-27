@@ -333,3 +333,6 @@ impl PhysicsHooks for () {
 
     fn modify_solver_contacts(&self, _: &mut ContactModificationContext) {}
 }
+
+// mmo-fork: StateHash — bitflags hash as their bits.
+state_hash::impl_via_bits!(ActiveHooks);

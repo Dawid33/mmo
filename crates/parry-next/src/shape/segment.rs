@@ -64,6 +64,7 @@ use core::mem;
 )]
 #[derive(PartialEq, Debug, Copy, Clone)]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Segment {
     /// The first endpoint of the segment.
     pub a: Vector,

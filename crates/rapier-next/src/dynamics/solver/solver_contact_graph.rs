@@ -39,6 +39,7 @@ pub(crate) fn bucket_id(color: u8) -> u16 {
 /// store at generate/writeback time), with [`ContactRef::PADDING`] marking unused SIMD lanes.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct ContactRef {
     pub edge: u32,
     pub manifold: u32,
@@ -68,6 +69,7 @@ impl Default for ContactRef {
 /// index in the low `BUCKET_SHIFT` bits (must hold up to [`GENERIC_BUCKET`], asserted above).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct GraphPos(u32);
 
 impl GraphPos {
@@ -110,6 +112,7 @@ impl Default for GraphPos {
 /// the generic (multibody-involved) manifold list at [`GENERIC_BUCKET`].
 #[derive(Clone, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub(crate) struct SolverContactGraph {
     buckets: Vec<Vec<ContactRef>>,
 }

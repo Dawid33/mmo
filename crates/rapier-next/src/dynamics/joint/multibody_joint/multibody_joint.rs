@@ -19,6 +19,7 @@ use na::DVectorViewMut;
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug)]
 /// An joint attached to two bodies based on the reduced coordinates formalism.
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct MultibodyJoint {
     /// The joint’s description.
     pub data: GenericJoint,

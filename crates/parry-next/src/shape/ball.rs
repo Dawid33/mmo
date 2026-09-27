@@ -43,6 +43,7 @@ use crate::shape::SupportMap;
 )]
 #[derive(PartialEq, Debug, Copy, Clone)]
 #[repr(C)]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Ball {
     /// The radius of the ball.
     ///

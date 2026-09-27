@@ -68,6 +68,7 @@ use either::Either;
 /// assert_eq!(custom.height(), 5.0); // Distance from a to b
 /// # }
 /// ```
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct Capsule {
     /// The line segment forming the capsule's central axis.
     ///

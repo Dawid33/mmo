@@ -19,6 +19,7 @@ impl Voxels {
             free_chunks,
             chunk_keys,
             voxel_size: _,
+            content_hash: _, // mmo-fork: StateHash
         } = self;
         chunks.capacity() * size_of::<VoxelsChunk>()
             + free_chunks.capacity() * size_of::<usize>()

@@ -124,6 +124,9 @@ impl Voxels {
         if let Some(vid) = self.linear_index(voxel) {
             self.chunks[vid.chunk_id].states[vid.id_in_chunk].0 |= center_state_delta.0;
         }
+        // mmo-fork: StateHash — neighbour bits are content, in both shapes.
+        self.recompute_content_hash();
+        other.recompute_content_hash();
     }
 
     /// Merges voxel state (neighborhood) information of each voxel from `self` and `other`.
@@ -201,5 +204,8 @@ impl Voxels {
                 }
             }
         }
+        // mmo-fork: StateHash — neighbour bits are content, in both shapes.
+        self.recompute_content_hash();
+        other.recompute_content_hash();
     }
 }

@@ -45,6 +45,7 @@ use crate::num::Zero;
 #[derive(Debug, Clone)]
 // #[repr(C)]
 // #[repr(align(64))]
+#[derive(state_hash::StateHash)] // mmo-fork: StateHash
 pub struct RigidBody {
     pub(crate) ids: RigidBodyIds,
     pub(crate) pos: RigidBodyPosition,
