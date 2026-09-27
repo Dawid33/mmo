@@ -70,7 +70,7 @@ Still needing the user: every timing run (Task 4.4 Step 4 included), the Phase 5
 
 Then (6494c0c), by the user's decision, the game `dt` became `TICK_DT`. That exposed an upstream kinematic-sleep bug (`can_sleep(false)` was ignored at zero velocity), now fixed in the fork.
 
-Open at the H10 gate: the live run and browser check (Task 5.5 Steps 2–3).
+The H10 live gate passed on 2026-09-27: native server + client on the Intel iGPU; the user said "works as expected". Still open: the browser check (Task 5.5 Step 3).
 
 ## Handoff sequence (one agent per row, strictly in order)
 
@@ -94,5 +94,5 @@ Every handoff starts with the common preamble below. It then names a plan, a tas
 | H7 ✅ | rapier-035-upgrade | 4.1, 4.2, 4.3 (arena primitives, hybrid StepJournal + fuzzer, memo invalidation) | After 4.3 | 1–1.5 weeks |
 | H8 ✅ | rapier-035-upgrade | 4.4 (`StateHash` crates + derives in the forks, cached voxels/BVH digests; also `StepJournal::pre_digest`/`revert_digest` and the two digest scenario tests H7 left out) | After 4.4 (its cost check needs the user's go-ahead) | 3–4 days |
 | H9 ✅ | rapier-035-upgrade | 5.1, 5.2, 5.3 (switch, migrate game incl. `cells.rs`, client/server/worldgen) | `just smoke` green | 3–5 days |
-| H10 ◐ | rapier-035-upgrade | 5.4, 5.5 (behavioural verification, wasm, live check) — 5.4 + 5.5 Step 1 landed 18ff746..6494c0c | **USER GATE:** live run with the user (pending) | 2–3 days |
+| H10 ✅ | rapier-035-upgrade | 5.4, 5.5 (behavioural verification, wasm, live check) — landed 18ff746..6494c0c | **USER GATE:** live run passed 2026-09-27 (browser check still open) | 2–3 days |
 | H11 | rapier-035-upgrade | Phase 6: 6.1 docs/memory, 6.2 `test-full` (ask first), 6.3 fork-divergence review | **USER GATE:** approve the 6.3 cleanup list | 2 days |
