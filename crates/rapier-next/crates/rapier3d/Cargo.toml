@@ -1,17 +1,23 @@
+# mmo-fork: renamed package + self-contained manifest (upstream inherits from its
+# own workspace root, which our workspace replaces). `[lib] name` stays
+# `rapier3d`, so source paths need no edits. Nothing in game/client/server
+# depends on this crate until the Phase 5 switch.
 [package]
-name = "rapier3d"
-version.workspace = true
-authors.workspace = true
+name = "rapier3d-next"
+version = "0.36.0"
+authors = ["Sébastien Crozet <sebcrozet@dimforge.com>"]
 description = "3-dimensional physics engine in Rust."
 documentation = "https://docs.rs/rapier3d"
-homepage.workspace = true
-repository.workspace = true
+homepage = "https://rapier.rs"
+repository = "https://github.com/dimforge/rapier"
 readme = "../../README.md"
-categories.workspace = true
+categories = ["science", "game-development", "mathematics", "simulation", "wasm"]
 keywords = ["physics", "dynamics", "rigid", "real-time", "impulse_joints"]
-license.workspace = true
-rust-version.workspace = true
-edition.workspace = true
+license = "Apache-2.0"
+rust-version = "1.86"
+edition = "2024"
+publish = false
+autoexamples = false
 
 [badges]
 maintenance = { status = "actively-developed" }
@@ -102,31 +108,32 @@ path = "../../src/lib.rs"
 required-features = ["dim3", "f32"]
 
 [dependencies]
-glamx.workspace = true
-parry3d.workspace = true
-simba = { workspace = true, features = ["wide"] }
-num-traits.workspace = true
-approx.workspace = true
-arrayvec.workspace = true
-bitflags.workspace = true
-log.workspace = true
-thiserror.workspace = true
-profiling.workspace = true
-static_assertions.workspace = true
-wide.workspace = true
-web-time = { workspace = true, optional = true }
-rayon = { workspace = true, optional = true }
-serde = { workspace = true, optional = true }
-bytemuck = { workspace = true, optional = true }
+glamx = { version = "0.3.1", default-features = false }
+# mmo-fork: the vendored parry-next, under its upstream lib name.
+parry3d = { package = "parry3d-next", path = "../../../parry-next/crates/parry3d", default-features = false, features = ["required-features"] }
+simba = { version = "0.10.2", default-features = false, features = ["wide"] }
+num-traits = { version = "0.2", default-features = false }
+approx = { version = "0.5", default-features = false }
+arrayvec = { version = "0.7", default-features = false }
+bitflags = "2"
+log = "0.4"
+thiserror = { version = "2", default-features = false }
+profiling = "1.0"
+static_assertions = "1"
+wide = { version = "1", default-features = false }
+web-time = { version = "1.1", optional = true }
+rayon = { version = "1", optional = true }
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
 
 # Nalgebra is only included on non-spirv targets. On spirv, rapier exposes only the
 # subset of its API that doesn't require nalgebra.
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
-nalgebra = { workspace = true }
-glamx = { workspace = true, features = ["nalgebra"] }
+nalgebra = { version = "0.35", default-features = false, features = ["macros"] }
+glamx = { version = "0.3.1", default-features = false, features = ["nalgebra"] }
 
 [dev-dependencies]
-bincode.workspace = true
-serde_json.workspace = true
-serde = { workspace = true, features = ["std"] }
-oorandom.workspace = true
+bincode = "1"
+serde_json = "1"
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+oorandom = { version = "11", default-features = false }

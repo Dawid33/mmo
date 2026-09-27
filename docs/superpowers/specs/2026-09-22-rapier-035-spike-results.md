@@ -361,3 +361,26 @@ block-scale voxels, and a 1200-tick stand, at `length_unit` 1.0 and `UNITS_PER_M
   (`WASM_SCENE_DIGEST`), not `state_hash`/`WASM_SCENE_HASH`. `state_hash` is pinned native-only.
 - Task 0.3 Step 4: the recipe snippet is replaced by a description of the real `determinism-wasm`
   recipe (it installs a Cargo.lock-matched `wasm-bindgen-test-runner` under `target/tools`).
+
+## Import commit (Task 2.1)
+
+**`bb7d5b5`** — `vendor: pristine rapier 0.36.0 + parry 0.31.1 as *-next (unused)`. The fork
+diff (Task 6.3) is always `git diff bb7d5b5 -- crates/rapier-next crates/parry-next`.
+
+- Sources: rapier tag `v0.36.0` (b716d375), parry tag `v0.31.1` (3383f51c). Checked
+  2026-09-27 against `git ls-remote --tags` and crates.io: no newer 0.36.x / 0.31.x exists
+  (parry 0.31.0 is yanked).
+- Imported: each upstream root `Cargo.toml`, `src/`, the 3D f32 crate dir
+  (`crates/rapier3d/`, `crates/parry3d/`, with upstream's tests), `parry/assets/tests/`, licence
+  and docs. Left out: bindings, testbeds, 2D/f64 crates, example dirs, `rapier/assets`, website.
+- First fork edit (the commit after it): the two crate manifests become self-contained
+  (`rapier3d-next` / `parry3d-next`, `[lib] name` unchanged, rapier's parry dep →
+  `parry3d-next`), because our workspace replaces upstream's root for inheritance; upstream's
+  kiss3d/ptree/rand_isaac dev-deps and example targets are dropped.
+- Against the vendored forks, `upstream_movement_probe` gives exactly the crates.io result:
+  7 pass / 4 ignored, and with `--include-ignored` the same 4 fail with byte-identical output
+  (same TOIs, same missed floor, 114/120 grounded).
+- Upstream's determinism tests pass from the vendored copy (`just physics-next-upstream`):
+  `snapshot_roundtrip` (8 pass, 1 upstream-ignored), `snapshot_portability`,
+  `simd_backend_parity`, `simd_backend_determinism`. `thread_count_determinism` is
+  `parallel`-gated and not run (we never enable `parallel`).

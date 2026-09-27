@@ -542,6 +542,15 @@ determinism-wasm:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
         {{cap}} {{cargo}} test -p game --test wasm_determinism --target wasm32-unknown-unknown
 
+# Upstream rapier's own determinism tests, run from the vendored rapier-next
+# fork (rapier 0.36 upgrade, docs/superpowers/plans/2026-09-22-rapier-035-upgrade.md).
+# Every `// mmo-fork:` patch must keep these green. thread_count_determinism is
+# `parallel`-gated and we never enable that feature, so it is not listed.
+physics-next-upstream:
+    {{cap}} {{cargo}} test -p rapier3d-next --features enhanced-determinism,serde-serialize \
+        --test snapshot_roundtrip --test snapshot_portability \
+        --test simd_backend_parity --test simd_backend_determinism
+
 # ---------------------------------------------------------------------------
 # Local deployment environment: a single-node k0s cluster in docker (the same
 # distribution as the planned single-node k0s host), configured by the

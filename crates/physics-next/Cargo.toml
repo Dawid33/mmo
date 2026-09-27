@@ -6,8 +6,8 @@ publish = false
 description = "Harness for the rapier 0.36 / parry 0.31 (glam) upgrade: spikes now, the fork patches' pinning tests later. Nothing in game/client/server depends on it."
 
 [dependencies]
-# Phase 2 swaps these for the vendored `*-next` forks.
-rapier3d = { version = "=0.36.0", features = ["enhanced-determinism", "serde-serialize"] }
+# The vendored fork (upstream rapier 0.36.0 / parry 0.31.1 + `// mmo-fork:` patches).
+rapier3d = { package = "rapier3d-next", path = "../rapier-next/crates/rapier3d", features = ["enhanced-determinism", "serde-serialize"] }
 bincode = { workspace = true }
 crc32fast = { workspace = true, features = ["std"] }
 serde = { workspace = true }
