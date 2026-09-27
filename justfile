@@ -529,7 +529,9 @@ test-threads:
 
 # Cross-target determinism: the same physics scene must end in the same state
 # on native and on wasm32 (node via wasm-bindgen-test-runner) —
-# crates/game/tests/wasm_determinism.rs. The runner must match Cargo.lock's
+# crates/game/tests/wasm_determinism.rs (plus a cell-mode cell_hash) and the
+# rapier/parry forks' StateHash over every journaled structure,
+# crates/physics-next/tests/state_hash_wasm.rs. The runner must match Cargo.lock's
 # wasm-bindgen exactly, so the first run installs that version under
 # target/tools (needs node; ~1 min cold for the wasm build).
 determinism-wasm:
@@ -539,20 +541,9 @@ determinism-wasm:
     root="$PWD/target/tools/wasm-bindgen-$ver"
     [ -x "$root/bin/wasm-bindgen-test-runner" ] || {{cap}} cargo install --locked wasm-bindgen-cli --version "$ver" --root "$root"
     {{cap}} {{cargo}} test -p game --test wasm_determinism
+    {{cap}} {{cargo}} test -p physics-next --test state_hash_wasm
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
         {{cap}} {{cargo}} test -p game --test wasm_determinism --target wasm32-unknown-unknown
-
-# The rapier 0.36 forks' StateHash (upgrade plan Task 4.4): a small physics
-# scene's hash over every journaled structure must be the same constant on
-# native and on wasm32 (node). Same runner install as determinism-wasm; folds
-# into it once Task 5.4 re-records determinism-wasm's constant for the switch.
-determinism-wasm-next:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ver=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
-    root="$PWD/target/tools/wasm-bindgen-$ver"
-    [ -x "$root/bin/wasm-bindgen-test-runner" ] || {{cap}} cargo install --locked wasm-bindgen-cli --version "$ver" --root "$root"
-    {{cap}} {{cargo}} test -p physics-next --test state_hash_wasm
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$root/bin/wasm-bindgen-test-runner" \
         {{cap}} {{cargo}} test -p physics-next --test state_hash_wasm --target wasm32-unknown-unknown
 

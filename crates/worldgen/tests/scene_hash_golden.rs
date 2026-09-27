@@ -22,8 +22,9 @@ mod common;
 use common::{entity_body, spawn_slime};
 use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 
-/// `state_hash` after the scene's last tick.
-const SCENE_HASH: u32 = 0xEF40_00BC;
+/// `state_hash` after the scene's last tick. Re-recorded for the rapier 0.36
+/// / parry 0.31 switch (with the continuous-surfaces tie-break).
+const SCENE_HASH: u32 = 0xAB8D_D394;
 /// Ticks of scripted input.
 const SCENE_TICKS: usize = 60;
 

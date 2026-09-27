@@ -9,7 +9,7 @@
 //! — its mass properties go through glamx's `SymmetricEigen3` (Review Focus 3:
 //! std `acos`/`cos` there would be the first thing to differ across targets).
 //!
-//! Run both sides with `just determinism-wasm-next`. The constant changes only
+//! Run both sides with `just determinism-wasm`. The constant changes only
 //! in a commit whose message says why; print it with
 //!
 //! ```sh
