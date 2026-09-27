@@ -96,6 +96,7 @@ impl BevyInputHarness {
             .init_resource::<UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<crate::renderer::lod_rings::LodRings>()
+            .init_resource::<crate::renderer::lod_rings::HomeCellMask>()
             .init_resource::<SnapshotVoxelQueue>()
             .init_resource::<RetiredRegionRoots>()
             .init_resource::<crate::renderer::cursor::CursorPolicy>()

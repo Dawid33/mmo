@@ -93,7 +93,14 @@ mod tests {
     fn look_rotation_matches_sim_quat() {
         for &(yaw, pitch) in &[(0.0f32, 0.0f32), (1.3, -0.4), (-2.9, 1.2), (5.0, 0.7)] {
             let sim = Quat::from_array(game::look_quat(yaw, pitch).to_array());
-            assert!(look_rotation(yaw, pitch).angle_between(sim) < 1e-5, "{yaw} {pitch}");
+            let bevy = look_rotation(yaw, pitch);
+            // Components, not `angle_between`: that is 2·acos(|dot|), and
+            // `dot` of two bit-identical quats can round to 1 − 2⁻²⁴, which
+            // reads as ~7e-4 rad ((5.0, 0.7) does). q and −q are the same
+            // rotation.
+            let (a, b) = (Vec4::from(bevy), Vec4::from(sim));
+            let diff = (a - b).abs().max_element().min((a + b).abs().max_element());
+            assert!(diff < 1e-6, "{yaw} {pitch}: {bevy:?} vs {sim:?}");
         }
     }
 

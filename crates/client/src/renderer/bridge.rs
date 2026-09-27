@@ -1650,6 +1650,7 @@ mod tests {
             .init_resource::<LocalPlayer>()
             .init_resource::<Regions>()
             .init_resource::<RegionRoots>()
+            .init_resource::<RetiredRegionRoots>()
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
             .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
