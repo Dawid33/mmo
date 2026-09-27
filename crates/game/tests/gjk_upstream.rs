@@ -1,8 +1,9 @@
-//! Upstream parry GJK/EPA fixes hand-ported into the vendored fork (PR #437 +
-//! #420 subset). Each test is a port of the upstream regression test, in the
-//! fork's nalgebra + `OrderedFloat` idiom.
-//!
-//! Must stay green across the rapier 0.36 switch (upgrade plan Phase 5).
+//! Upstream parry GJK/EPA fixes (PR #437 + #420 subset), first hand-ported
+//! into the nalgebra-era fork and now carried by parry 0.31.1 itself. Each
+//! test is a port of the upstream regression test; they were written before
+//! the rapier 0.36 switch and must stay green across it (upgrade plan
+//! Phase 5), which is how we know upstream's versions behave like the ones we
+//! validated.
 use game::parry::math::{Pose, Vector};
 use game::parry::query::details::cast_shapes_support_map_support_map;
 use game::parry::query::{self, ShapeCastOptions};
@@ -261,6 +262,20 @@ fn capsule_touching_cuboid_matches_upstream() {
     assert!(close(c.normal1, [-0.02856119, 0.9995807, -0.0047601983]), "normal1 {:?}", c.normal1);
     assert!(close(c.point1, [1.0015448, 0.0, -2.000366]), "point1 {:?}", c.point1);
     assert!(close(c.point2, [1.0015442, 1.2397766e-5, -2.000366]), "point2 {:?}", c.point2);
+}
+
+/// The case above with the capsule centred exactly over the block: it stops
+/// at distance exactly 0, where the nalgebra-era fork (like pristine parry
+/// 0.25.3) returned a stale 45° direction. parry 0.31.1 gets the face normal
+/// (upgrade plan Task 5.4 Step 1b).
+#[test]
+fn capsule_centred_touching_cuboid_gets_face_normal() {
+    let block = Cuboid::new(v(8.0, 8.0, 8.0));
+    let capsule = Capsule::new_y(r(0.7), r(0.3));
+    let c = query::contact(&at(0.0, -8.0, 0.0), &block, &at(0.0, 1.0, 0.0), &capsule, r(0.0))
+        .unwrap()
+        .expect("touching is a contact at prediction 0");
+    assert!((c.normal1 - Vector::Y).length() < 1.0e-4, "normal1 {:?}", c.normal1);
 }
 
 /// #315 guard: overlapping cuboids keep a penetration depth and witnesses on
