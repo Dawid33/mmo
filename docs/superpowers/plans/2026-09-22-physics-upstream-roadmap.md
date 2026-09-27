@@ -70,7 +70,9 @@ Still needing the user: every timing run (Task 4.4 Step 4 included), the Phase 5
 
 Then (6494c0c), by the user's decision, the game `dt` became `TICK_DT`. That exposed an upstream kinematic-sleep bug (`can_sleep(false)` was ignored at zero velocity), now fixed in the fork.
 
-The H10 live gate passed on 2026-09-27: native server + client on the Intel iGPU; the user said "works as expected". Still open: the browser check (Task 5.5 Step 3).
+The H10 live gate passed on 2026-09-27: native server + client on the Intel iGPU; the user said "works as expected". Still open: the browser check (Task 5.5 Step 3), carried into H11.
+
+Next: H11 (prompt: `.superpowers/sdd/2026-09-22-rapier-035-upgrade/h11-prompt.md`), which starts with the browser check and then does Phase 6.
 
 ## Handoff sequence (one agent per row, strictly in order)
 
