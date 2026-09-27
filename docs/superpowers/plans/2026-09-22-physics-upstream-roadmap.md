@@ -72,7 +72,9 @@ Then (6494c0c), by the user's decision, the game `dt` became `TICK_DT`. That exp
 
 The H10 live gate passed on 2026-09-27: native server + client on the Intel iGPU; the user said "works as expected". Still open: the browser check (Task 5.5 Step 3), carried into H11.
 
-Next: H11 (prompt: `.superpowers/sdd/2026-09-22-rapier-035-upgrade/h11-prompt.md`), which starts with the browser check and then does Phase 6.
+H11 (2026-09-27): the browser check passed ("its running, just lagging"; three wasm bugs found, two fixed in d74f103; a server packet-drop gap left for the user), Task 6.1 landed, the fork-divergence review is in `docs/superpowers/specs/2026-09-27-physics-fork-divergence-review.md` and its cleanup list was approved.
+
+Next: H12 (prompt: `.superpowers/sdd/2026-09-22-rapier-035-upgrade/h12-prompt.md`): finish test-full, apply the cleanups, final review, close the plan.
 
 ## Handoff sequence (one agent per row, strictly in order)
 
@@ -97,4 +99,5 @@ Every handoff starts with the common preamble below. It then names a plan, a tas
 | H8 ✅ | rapier-035-upgrade | 4.4 (`StateHash` crates + derives in the forks, cached voxels/BVH digests; also `StepJournal::pre_digest`/`revert_digest` and the two digest scenario tests H7 left out) | After 4.4 (its cost check needs the user's go-ahead) | 3–4 days |
 | H9 ✅ | rapier-035-upgrade | 5.1, 5.2, 5.3 (switch, migrate game incl. `cells.rs`, client/server/worldgen) | `just smoke` green | 3–5 days |
 | H10 ✅ | rapier-035-upgrade | 5.4, 5.5 (behavioural verification, wasm, live check) — landed 18ff746..6494c0c | **USER GATE:** live run passed 2026-09-27 (browser check still open) | 2–3 days |
-| H11 | rapier-035-upgrade | Phase 6: 6.1 docs/memory, 6.2 `test-full` (ask first), 6.3 fork-divergence review | **USER GATE:** approve the 6.3 cleanup list | 2 days |
+| H11 ✅ | rapier-035-upgrade | 5.5 Step 3 browser check (passed; wasm fixes d74f103), 6.1 docs/memory (60393db), 6.2 `test-full` started, 6.3 review doc (e80a8dc) | **USER GATE:** 6.3 cleanup list approved 2026-09-27 | 2 days |
+| H12 | rapier-035-upgrade | Finish 6.2, apply the approved 6.3 cleanups (C1–C5, C7 to reconfirm), final review, plan/roadmap/memory, delete workspace | Plan complete | 1 day |
