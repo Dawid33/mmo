@@ -429,3 +429,81 @@ Largest hunks (+/−):
   61/4, `query/shape_cast/shape_cast_support_map_support_map.rs` 61/5, `query/epa/epa3.rs` 60/19,
   `mass_properties/mass_properties.rs` 47/44, `partitioning/bvh/bvh_tree.rs` 46/7; most of the
   rest is the `Real = OrderedFloat<f32>` churn (symmetric +/− in math-heavy files).
+
+## Task 5.4 — behavioural verification after the switch (H10, 2026-09-27)
+
+### The terrace golden and D6: a traversal-order tie, not a length-unit effect
+
+With D6 wired (H9), `physics_goldens::terrace_uphill_1_voxel_golden` diverged at tick 47
+(golden z 286.98666, actual 286.37958; `POS_TOL` 0.05). The trajectories agreed to ~2e-4 until
+then.
+
+- **The same query gave two answers.** At tick 47's pose (128, 34.616791, 284.503448) with
+  desired (0, −1.35, 3.4536), `sweep_character` returned (0.921 up, 2.483 forward) at
+  length unit 1 and (0.798, 1.876) at 16. The capsule rests on terrace z = 8 (normal +Y) and
+  touches terrace z = 9's riser edge (normal (0, 0.848, −0.530)). Both are hits at TOI **0**.
+- **`Bvh::find_best` keeps the first leaf it meets at the best cost,** and prunes everything
+  else once that cost is 0. The continuous-surfaces cast therefore returned whichever tied leaf
+  the traversal reached first.
+- **`length_unit` reaches the controller only through that traversal order.** It sets the
+  terrain leaves' fat-AABB margin (0.04 × unit) when they are inserted, and fixed leaves are
+  never refitted. Setting the unit after the world was built changed nothing, bit for bit.
+  So the D6 note above, "the character controller reads none of these", holds for the values
+  but misses the BVH shape they create.
+- **Floor first vs riser first.** Floor first (the golden and the old engine) strips the step's
+  gravity part on the support. Riser first projects it onto the edge and loses 0.61 units of
+  that tick's walk.
+- **The dip itself is phase-driven, not caused by D6.** Over 24 start phases × 10 terraces the
+  per-terrace loss was min 1.239 / p50 1.352 / p90 1.810 / max 2.111 units, identical at
+  length unit 1 and 16. Tick 47 simply landed on the worst phase.
+
+**Fix (fork patch, `// mmo-fork:` in `QueryPipeline::cast_shape_on_continuous_surfaces`):**
+
+- After `find_best`, every leaf whose swept AABB reaches the best TOI is cast again, and the
+  tied hits are ranked:
+  1. blocking (n·v < 0) before separating;
+  2. then the least-opposing hit;
+  3. then the lowest collider index.
+- Results:
+  - The game's terrace trajectory is bit-identical at length unit 1 and 16: 960 rows over
+    8 start phases, where 73 rows differed before.
+  - All 8 behaviour goldens pass at D6's 16.
+- Pinned by `physics-next/tests/continuous_surfaces.rs`
+  `a_touching_tie_resolves_the_same_in_every_bvh_layout`, which checks 4 layouts (length unit
+  × insertion order).
+- Alternatives measured over the phase sweep:
+  - "most-opposing first" fails the golden and raises the mean terrace loss from 1.443 to
+    1.466;
+  - "lowest index" behaves like the chosen rule here, but only by insertion order.
+- Upstream's plain `cast_shape`/`cast_ray` keep traversal-order ties. The game's movement
+  doesn't use them.
+- **Cost:** the tie pass reuses `find_best`'s leaf casts and casts only the leaves it pruned,
+  which in practice means the TOI-0 early prune. This is pinned by
+  `the_tie_pass_casts_no_collider_twice`. It has not been timed.
+- **Known consequence (deferred):** a grounded idle body (gravity-only motion) touching a
+  2–6-voxel ledge's edge (≥ 45°, so a "wall") takes the edge before the floor. The player is
+  nudged ~0.67 units (~4 cm) away on the tick they stop.
+
+**Goldens and tolerances:** nothing in `physics_goldens` was re-recorded and no tolerance
+changed. D6 stays at `UNITS_PER_METER`.
+
+### Hash goldens re-recorded for the switch (commit 3901aaa)
+
+| Constant | Old | New | Why |
+|---|---|---|---|
+| `wasm_determinism` `WASM_SCENE_DIGEST` | 0x105EC680 | 0xC053C01B | engine switch; scene gains the Step 5b compound |
+| `wasm_determinism` `NATIVE_STATE_HASH` → `SCENE_STATE_HASH` | 0xA93B9D8C | 0xB1E42EAC | `StateHash`; now asserted on wasm32 too (usize hashes as u64) |
+| `wasm_determinism` `CELL_HASH` (new) | — | 0xC52858CB | pins `cell_hash` cross-target (clients hard-check it) |
+| `wasm_determinism` `CELL_STATE_HASH` (new) | — | 0x87B69ED7 | the cell-mode region's `state_hash` |
+| worldgen `scene_hash_golden` `SCENE_HASH` | 0xEF4000BC | 0xAB8DD394 | engine switch + the tie-break (H9 saw 0x461AAA04 before it) |
+
+### Step 5b — moving bodies' mass properties across targets
+
+- **The scene:** a kinematic body carrying two offset, rotated cuboids. One collider alone
+  never reaches `symmetric_eigen` (parry's `MassProperties + zero` returns the other side), so
+  two are needed. The test asserts the principal frame is more than 0.1 rad off-axis.
+- **Result:** native x86_64 and wasm32 (node) give the same digest and `state_hash`. No libm
+  patch was needed.
+- **Caveat:** this is one sampled input, not a proof. std `acosf`/`cosf` could still round
+  differently elsewhere. The scene now pins it, and a divergence would show up in
+  `just determinism-wasm`.
