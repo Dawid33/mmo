@@ -31,7 +31,10 @@ use rapier3d::prelude::*;
 /// Snapshot size in bytes, and its FNV-1a digest. Both, because the size alone localizes a
 /// failure: a differing size means a container's *encoding* changed, an equal size with a
 /// differing digest means the values did.
-const GOLDEN: (usize, u64) = (488_334, 0x3f5e_ac53_ad07_5243);
+// mmo-fork: re-minted for the fixed-body mass-properties skip (upgrade plan Task 3.1).
+// Upstream's was (488_334, 0x3f5e_ac53_ad07_5243); only the fixed ground body's stored
+// `local_mprops` changed (now default), every dynamic pose and velocity is bit-identical.
+const GOLDEN: (usize, u64) = (488_334, 0xbb73_bb29_f385_e7cf);
 
 const STEPS: usize = 60;
 

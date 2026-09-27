@@ -173,9 +173,14 @@ pub(crate) fn handle_user_changes_to_rigid_bodies(
             // NOTE: recompute the mass-properties AFTER dealing with the rigid-body changes
             //       that imply a collider change (in particular, after propagation of the
             //       enabled/disabled status).
-            if changes
-                .intersects(RigidBodyChanges::LOCAL_MASS_PROPERTIES | RigidBodyChanges::COLLIDERS)
-            {
+            // mmo-fork: TYPE too. Fixed bodies skip the collider mass properties
+            // (`recompute_mass_properties_from_colliders`), so a body that stops being
+            // fixed must recompute them here.
+            if changes.intersects(
+                RigidBodyChanges::LOCAL_MASS_PROPERTIES
+                    | RigidBodyChanges::COLLIDERS
+                    | RigidBodyChanges::TYPE,
+            ) {
                 rb.mprops.recompute_mass_properties_from_colliders(
                     colliders,
                     &rb.colliders,

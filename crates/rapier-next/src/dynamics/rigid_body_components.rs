@@ -444,6 +444,18 @@ impl RigidBodyMassProps {
             self.recompute_max_extent(colliders, attached_colliders);
             return;
         }
+        // mmo-fork: fixed bodies skip the collider mass properties. They are
+        // discarded (`update_world_mass_properties` zeroes a fixed body's effective
+        // inverse mass/inertia); for terrain `Voxels` they are two full passes over
+        // every voxel cell per collider, and the inertia goes through glamx
+        // `SymmetricEigen3`, whose std `acos`/`cos` differ between native and
+        // wasm32. `user_changes` also recomputes on TYPE, so a body that stops
+        // being fixed gets its real mass on the next step.
+        if body_type.is_fixed() {
+            self.recompute_max_extent(colliders, attached_colliders);
+            self.update_world_mass_properties(body_type, position);
+            return;
+        }
         let added_mprops = self
             .additional_local_mprops
             .as_ref()
@@ -1250,7 +1262,8 @@ impl RigidBodyColliders {
         self.0.push(co_handle);
         // A soft-frame proxy's mass is derived from its cluster's particles: its colliders
         // contribute none.
-        if !rb_type.is_soft_frame() {
+        // mmo-fork: nor do a fixed body's (see `recompute_mass_properties_from_colliders`).
+        if !rb_type.is_soft_frame() && !rb_type.is_fixed() {
             let mass_properties = co_mprops
                 .mass_properties(&**co_shape)
                 .transform_by(&co_parent.pos_wrt_parent);
