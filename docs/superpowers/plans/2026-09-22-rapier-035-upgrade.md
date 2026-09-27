@@ -206,6 +206,8 @@ The port changes numerics, so bit-exact hashes can't carry across it. What carri
 
 ## Phase 2 — Vendor the new forks side by side
 
+> **Landed (bb7d5b5 import, 790a3b4, 2026-09-27).** No newer 0.36.x / 0.31.x existed. The import is a subset (root `Cargo.toml`, `src/`, the 3D crate dir with upstream's tests, parry `assets/tests/`, licence/docs); the crate manifests were then made self-contained, because our root workspace (whose `nalgebra`/`simba`/`parry3d` keys point at the old forks) replaces upstream's for inheritance. The probe gives the crates.io result byte for byte. Upstream's determinism tests run from the vendored copy with `just physics-next-upstream` (`thread_count_determinism` is `parallel`-gated, not run).
+
 ### Task 2.1: Import pristine sources
 
 **Files:**
@@ -213,11 +215,11 @@ The port changes numerics, so bit-exact hashes can't carry across it. What carri
 - Create: `crates/parry-next/` (pristine parry 0.31.1, tag `v0.31.1`, 3383f51)
 - Modify: root `Cargo.toml` `[workspace] members` and `[workspace.dependencies]`
 
-- [ ] **Step 1: Import from the tagged git sources**, not the crates.io tarballs, so upstream tests come along: `git clone --depth 1 --branch v0.36.0 https://github.com/dimforge/rapier` into `$CLAUDE_JOB_DIR`-style scratch, then copy. Check the tag names with `git ls-remote --tags`. Import commit message: `vendor: pristine rapier 0.36.0 + parry 0.31.1 as *-next (unused)`. Keep it a pure import, so the fork diff is always `git diff <import-commit> -- crates/rapier-next`. Record the import commit's hash in the spike doc ("Import commit"); Task 6.3 diffs against it.
-- [ ] **Step 2: Rename the packages** to `rapier3d-next` / `parry3d-next`, with `[lib] name = "rapier3d"` / `"parry3d"`, so source paths inside the forks need no edits. Point rapier-next's parry dependency at `parry3d-next` via `package = "parry3d-next"`.
-- [ ] **Step 3: Switch `physics-next` to `path` deps on the new forks** with `enhanced-determinism, serde-serialize`. Run `just test-one physics-next "--tests"`. Expected: the Task 1.2 probe gives the same results as against crates.io.
-- [ ] **Step 4: Confirm the game build is untouched.** `cargo tree -p game | grep -c next` must print 0. Run `just smoke`.
-- [ ] **Step 5: Run upstream's determinism tests from the vendored copy.** `snapshot_roundtrip`, `snapshot_portability`, `simd_backend_parity`, `thread_count_determinism` (without `parallel`: skip that one if it's feature-gated). If upstream's test dirs don't build inside our workspace, copy those four files into `crates/physics-next/tests/upstream/`. Commit.
+- [x] **Step 1: Import from the tagged git sources**, not the crates.io tarballs, so upstream tests come along: `git clone --depth 1 --branch v0.36.0 https://github.com/dimforge/rapier` into `$CLAUDE_JOB_DIR`-style scratch, then copy. Check the tag names with `git ls-remote --tags`. Import commit message: `vendor: pristine rapier 0.36.0 + parry 0.31.1 as *-next (unused)`. Keep it a pure import, so the fork diff is always `git diff <import-commit> -- crates/rapier-next`. Record the import commit's hash in the spike doc ("Import commit"); Task 6.3 diffs against it.
+- [x] **Step 2: Rename the packages** to `rapier3d-next` / `parry3d-next`, with `[lib] name = "rapier3d"` / `"parry3d"`, so source paths inside the forks need no edits. Point rapier-next's parry dependency at `parry3d-next` via `package = "parry3d-next"`.
+- [x] **Step 3: Switch `physics-next` to `path` deps on the new forks** with `enhanced-determinism, serde-serialize`. Run `just test-one physics-next "--tests"`. Expected: the Task 1.2 probe gives the same results as against crates.io.
+- [x] **Step 4: Confirm the game build is untouched.** `cargo tree -p game | grep -c next` must print 0. Run `just smoke`.
+- [x] **Step 5: Run upstream's determinism tests from the vendored copy.** `snapshot_roundtrip`, `snapshot_portability`, `simd_backend_parity`, `thread_count_determinism` (without `parallel`: skip that one if it's feature-gated). If upstream's test dirs don't build inside our workspace, copy those four files into `crates/physics-next/tests/upstream/`. Commit.
 
 ---
 
@@ -230,6 +232,8 @@ Every task follows the same cycle:
 4. Green, then commit.
 
 Keep every patch small and marked `// mmo-fork:` so the fork diff stays greppable.
+
+> **3.1, 3.5, 3.6 landed (dd64deb, 98a21dc, 2026-09-27).** 3.1 also adds `TYPE` to `user_changes`' mass-props recompute trigger (the old fork had it; without the set_body_type guard a fixed→dynamic body would keep mass 0) and re-mints upstream's `snapshot_portability` GOLDEN (only the fixed ground's stored `local_mprops` changed; dynamics bit-identical). Pins: `crates/physics-next/tests/fixed_mass_props.rs`, `pair_filter.rs`.
 
 ### Task 3.1: Fixed-body mass-properties skip (determinism-critical)
 
@@ -265,6 +269,7 @@ Keep every patch small and marked `// mmo-fork:` so the fork diff stays greppabl
 ### Task 3.6: `length_unit` (D6)
 
 - Decided: `UNITS_PER_METER` (16). Apply it as a named constant in the game at switch time (`movement::PHYSICS_LENGTH_UNIT`), feeding `IntegrationParameters::length_unit`. There's no fork change.
+- Nothing to apply before the switch: `physics-next`'s probes set `length_unit` per test (`length_unit_does_not_change_character_movement` runs both values). At Task 5.2 the value goes where `PhysicsState.integration_parameters` (`crates/game/src/state.rs`, default-constructed today) is built, so every region, parked or restored, carries it in its serialized state.
 
 ---
 
