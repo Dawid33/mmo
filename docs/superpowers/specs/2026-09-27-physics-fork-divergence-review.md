@@ -248,3 +248,23 @@ Hunks were classified by their added lines (derive/skip → `StateHash`;
 `pop_modified`/`journal_reverts` → journal; the cast/KCC files → shape-cast),
 then checked by hand for the ambiguous ones (four journal hunks also carry
 `#[state_hash(skip)]` attributes).
+
+## Cleanups applied (2026-09-27, H12)
+
+The user approved C1–C5 and C7 at the Step 6 gate, then chose to skip C7
+when asked again. Each item is one commit, verified with its pinning test
+and `just smoke`.
+
+| # | commit | result | proof |
+|---|---|---|---|
+| C1 | `a2c2d36` | markers on the six `cast_shape_on_continuous_surfaces(` call lines, `depenetrate: true` in the KCC `Default`, the four `capture: None` initialisers, `seen_journal_reverts: 0`, and the voxels trailing-row block — including **two** removed upstream lines (the count above said one) | build + smoke; markers rapier 213 → 225, parry 97 → 100 |
+| C2 | `eb053ad` | kinematic sleep gate also requires `angular_threshold >= 0` | `kinematic_sleep.rs`: `a_velocity_based_kinematic_body_that_cannot_sleep_stays_awake_at_rest` (green before and after: `can_sleep(false)` sets both thresholds) and `a_negative_angular_threshold_alone_keeps_a_kinematic_body_awake` (red → green) |
+| C3 | `a89a507` | `IslandManager::wake_up` docstring matches the code (doc-only, marked) | build |
+| C4 | `0b499fa` | the physics-next Walker calls `game::movement::sweep_character`; `sunk_body` imports `character_controller` / `depenetration_lift` from the game; the glam copies are gone | `walking_smoothness` 14, `sunk_body` 3, `upstream_movement_probe` 11 (`--include-ignored --nocapture`): byte-identical output before and after — the copies had not drifted |
+| C5 | `ec89417` | physics-next `Cargo.toml` names `just determinism-wasm` | the recipe runs `state_hash_wasm` |
+| C6 | — | not applied (user: leave listed; needs a timing run first) | — |
+| C7 | — | skipped (user, H12): `crates/physics-next` keeps its name | — |
+
+**D1** (user): keep the TOI tie ranking as is (blocking → least-opposing →
+lowest collider index). Revisit only if the ~4 cm stop nudge at a ledge
+edge is seen in play, together with a gravity-only ledge pin.
