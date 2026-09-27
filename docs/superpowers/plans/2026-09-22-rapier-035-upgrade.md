@@ -284,6 +284,11 @@ Keep every patch small and marked `// mmo-fork:` so the fork diff stays greppabl
 
 ## Phase 4 — Rollback journal and digests on the new engine
 
+> **4.1, 4.2, 4.3 landed (394aac5, 83c072f, 372bce3, review fixes 271c9ee, 2026-09-27; H7).** Pins: `crates/physics-next/tests/{arena_revert,step_journal,journal_fuzz,pipeline_memo,journal_parallel}.rs`. Beyond a straight port:
+> - **4.1:** the old fork's tuple API is kept (`alloc_state() -> (Option<u32>, u32)`, `revert_insert(handle, head, len)`), not the `ArenaAllocState` in the table below, so `state.rs` ports 1:1. 0.36's arena layout is the old one; the modified flag is `IN_MODIFIED_SET`.
+> - **4.2:** the capture buffer lives in the sets for the duration of `step_journaled` and every `&mut` accessor saves first; the joint sets are cloned when they hold a joint *or pending joint work*. `pre_digest` / `revert_digest` are **not** implemented (they need `StateHash`): they and the game's two `journal_digest_matches_*` scenarios move to Task 4.4 (H8). The fuzzer (8 seeds × 300 ticks, LIFO windows of 1–4, byte-exact revert plus a fresh-pipeline re-step against an unjournaled clone) covers user/contact wakes, sleeps, island merges, body/collider removals and joints; the staged solver's writeback debug-assert never fired. `step_journaled` panics under rapier's `parallel` feature (the capture is single-threaded).
+> - **4.3:** re-stepping the same input on the same pipeline never diverged, but re-stepping a **corrected input** did (a stale joint selection). **Interface change:** `StepJournal::revert` bumps a serde-skipped `IslandManager::journal_reverts`, and the pipeline calls `invalidate_caches` itself when that counter moves. `PhysicsParts` gains `ccd_solver`, and `revert` discards its fixed-targets cache: an undone fixed-collider insert left a vacant handle in it, and the re-step panicked. **So the game needs no post-revert call:** the same `PhysicsPipeline` and `CCDSolver` step on. `invalidate_caches` keeps a pending deferred BVH task, since after a zero-`dt` step that task owns the tree. `step_journaled` joins that task after a zero-`dt` step.
+
 ### Task 4.1: Arena/set rollback primitives the game calls
 
 **Files:** `crates/rapier-next/src/data/arena.rs`, `dynamics/rigid_body_set.rs`, `geometry/collider_set.rs`
@@ -332,6 +337,8 @@ pub struct PhysicsParts<'a> {
     pub multibody_joints: &'a mut MultibodyJointSet,
     /// 0.36: soft bodies are compiled in; the game keeps this empty (asserted).
     pub soft_bodies: &'a mut SoftBodySet,
+    /// H7: not restored; its fixed-targets cache is discarded by `revert`.
+    pub ccd_solver: &'a mut CCDSolver,
 }
 impl PhysicsPipeline {
     pub fn step_journaled(&mut self, /* same args as step */, journal: Option<&mut StepJournal>);
@@ -417,7 +424,7 @@ The type map applies everywhere:
 | `KinematicCharacterController::up: UnitVector` | `Vec3` |
 | `move_shape(.., desired: &Vector)` | `move_shape(.., desired: Vector)` |
 
-- [ ] **Step 1: Migrate the files** in dependency order, with `cargo check -p game` after each: `lib.rs` (the re-exports `pub use parry3d as parry`, `na`) → `protocol.rs` → `state.rs` → `physics.rs` (journal call with `PhysicsParts`, then `PhysicsPipeline::invalidate_caches` + `CCDSolver::invalidate_fixed_targets_cache`) → `movement.rs` (`length_unit` constant from D6, `depenetrate = false` from D7) → `camera.rs` (keep `yaw_quat` libm-forced: `libm::sinf`/`cosf`) → `edit.rs` → `slime.rs` → `cells.rs` → `debug_render.rs` → `input.rs`.
+- [ ] **Step 1: Migrate the files** in dependency order, with `cargo check -p game` after each: `lib.rs` (the re-exports `pub use parry3d as parry`, `na`) → `protocol.rs` → `state.rs` → `physics.rs` (journal call with `PhysicsParts`, `ccd_solver` included; no post-revert call — H7 made the revert self-invalidate the pipeline and CCD memos) → `movement.rs` (`length_unit` constant from D6, `depenetrate = false` from D7) → `camera.rs` (keep `yaw_quat` libm-forced: `libm::sinf`/`cosf`) → `edit.rs` → `slime.rs` → `cells.rs` → `debug_render.rs` → `input.rs`.
 
   `cells.rs` came with cell loading after this plan was written:
   - `cell_hash` (~:261-295) feeds `RigidBody`/`Collider` into a `Hasher`. Switch it to `StateHash`: it's a server-authored checksum that clients hard-fail on, so client and server must compute it identically — this also fixes the wasm32 `CellHashMismatch` (std `Hash` wrote `usize` at pointer width).
