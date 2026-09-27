@@ -1,0 +1,24 @@
+[package]
+name = "state-hash"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Zero-copy canonical state hashing (plan D2): std `Hash`'s shape, but ours, so it can be implemented for glam types and pins widths across native and wasm32."
+
+[dependencies]
+state-hash-derive = { path = "../state-hash-derive", optional = true }
+glamx = { version = "0.3.1", default-features = false, optional = true }
+indexmap = { version = "2", default-features = false, optional = true }
+
+[features]
+default = ["derive"]
+derive = ["dep:state-hash-derive"]
+# `i32` for `IVec*` (the forks enable it too; Voxels keys are `IVec3`).
+glamx = ["dep:glamx", "glamx/i32"]
+indexmap = ["dep:indexmap"]
+
+[dev-dependencies]
+glamx = { version = "0.3.1", default-features = false, features = ["std", "i32"] }
+indexmap = { version = "2", default-features = false, features = ["std"] }
+# The tests exercise the optional glam/indexmap impls.
+state-hash = { path = ".", features = ["glamx", "indexmap"] }

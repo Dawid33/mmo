@@ -7608,6 +7608,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "state-hash"
+version = "0.1.0"
+dependencies = [
+ "glamx",
+ "indexmap",
+ "state-hash",
+ "state-hash-derive",
+]
+
+[[package]]
+name = "state-hash-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

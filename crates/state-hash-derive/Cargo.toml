@@ -1,0 +1,14 @@
+[package]
+name = "state-hash-derive"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "`#[derive(StateHash)]` for the state-hash crate."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0.106", features = ["full"] }
+quote = "1.0.40"
+proc-macro2 = "1.0.101"
