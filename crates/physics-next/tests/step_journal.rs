@@ -13,8 +13,9 @@
 //!   `journal_digest_matches_on_collider_removal_tick` landed with `StateHash`
 //!   (D2, Task 4.4 = handoff H8), plus
 //!   `journal_digest_sees_an_incomplete_revert`: a pre-step clone stands in for
-//!   an exact revert, and perturbing one captured body in it for an incomplete
-//!   one (`live_digest` reads the footprint without reverting).
+//!   an exact revert; stepped bodies, or joint sets changed although they were
+//!   not captured, for an incomplete one (`live_digest` reads the footprint
+//!   without reverting).
 //! - The perf-evidence tally prints the hybrid's numbers (the broad-phase
 //!   clone is taken every tick; bodies/colliders scale with activity).
 //!
@@ -484,10 +485,14 @@ fn journal_digest_sees_an_incomplete_revert() {
     assert_eq!(reverted.bodies.iter().count(), exact.bodies.iter().count());
     assert_ne!(reverted.bodies[ball].translation(), exact.bodies[ball].translation());
     assert_ne!(pre, j.live_digest(&reverted.parts()), "bodies the revert missed");
-    // Nor one that left the broad phase stepped.
+    // Nor one whose joint sets, judged quiescent and so not cloned, changed:
+    // the digest checks that assumption instead of trusting it.
+    assert!(!j.joints_captured());
     let mut reverted = exact.clone();
-    reverted.broad_phase = w.broad_phase.clone();
-    assert_ne!(pre, j.live_digest(&reverted.parts()), "a broad phase the revert missed");
+    let floor = reverted.bodies.iter().find(|(_, b)| b.is_fixed()).unwrap().0;
+    reverted.impulse_joints.insert(ball, floor, SphericalJointBuilder::new(), false);
+    assert_eq!(reverted.state_bytes()[..5], exact.state_bytes()[..5], "only the joint sets differ");
+    assert_ne!(pre, j.live_digest(&reverted.parts()), "joint sets the step wasn't expected to touch");
     // The real revert is exact.
     assert_eq!(pre, j.revert_digest(w.parts()));
 }

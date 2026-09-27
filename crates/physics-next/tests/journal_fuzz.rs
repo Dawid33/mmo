@@ -11,7 +11,8 @@
 //!    journaled, revert it LIFO and require every intermediate snapshot back
 //!    byte for byte;
 //!    Each journaled step also checks that every part's `StateHash` moved iff
-//!    its bytes did (Task 4.4; `hash_disagreements`).
+//!    its bytes did, and each revert that `pre_digest == revert_digest`
+//!    (Task 4.4).
 //! 3. advance by re-stepping the window on a FRESH pipeline (the game's
 //!    post-revert rule) and require the result byte-equal to an unjournaled
 //!    clone stepped the same way — which catches state the revert missed that
@@ -253,13 +254,15 @@ fn run_seed(seed: u64, cov: &mut Coverage) {
                 cov.collider_removal_steps += collider_removed as usize;
             }
             observe(&pre, &scene.w, if k == 0 { &woke } else { &[] }, cov);
-            journals.push(j);
+            journals.push((j.pre_digest(), j));
             cov.steps += 1;
         }
 
         // Back, LIFO, every intermediate state exact.
-        for (k, j) in journals.into_iter().enumerate().rev() {
-            scene.w.revert(j);
+        for (k, (pre_digest, j)) in journals.into_iter().enumerate().rev() {
+            // Task 4.4: the Delta digest agrees with the byte-exact revert.
+            let live = j.revert_digest(scene.w.parts());
+            assert_eq!(pre_digest, live, "seed {seed} tick {}: journal digest differs after revert", scene.tick + k);
             let got = scene.w.state_bytes();
             assert!(
                 got == snaps[k],
