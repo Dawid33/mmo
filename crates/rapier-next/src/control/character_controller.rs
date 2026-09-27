@@ -203,6 +203,12 @@ pub struct KinematicCharacterController {
     /// This value should remain fairly small since it can introduce artificial "bumps" when sliding
     /// along a flat surface.
     pub normal_nudge_factor: Real,
+    /// mmo-fork (D7): whether [`Self::move_shape`] pushes a character out of
+    /// the colliders it overlaps when it has no desired translation (#485).
+    /// Default `true`, upstream's behaviour. The game sets `false`: its own
+    /// `movement::depenetration_lift` puts a sunk body back on the surface and
+    /// deliberately leaves a buried one where it is.
+    pub depenetrate: bool,
 }
 
 impl Default for KinematicCharacterController {
@@ -216,6 +222,7 @@ impl Default for KinematicCharacterController {
             min_slope_slide_angle: Real::frac_pi_4(),
             snap_to_ground: Some(CharacterLength::Relative(0.2)),
             normal_nudge_factor: 1.0e-4,
+            depenetrate: true,
         }
     }
 }
@@ -313,7 +320,10 @@ impl KinematicCharacterController {
         // 1. Depenetrate, but only when there is no desired movement: the shape-casting
         //    loop below never runs then, so obstacles pushed into the character would
         //    tunnel through it (#485). When it moves, the shape-casts handle them instead.
-        if utils::try_normalize_and_get_length(desired_translation, 1.0e-5).is_none() {
+        //    mmo-fork (D7): unless `depenetrate` is off.
+        if self.depenetrate
+            && utils::try_normalize_and_get_length(desired_translation, 1.0e-5).is_none()
+        {
             self.check_and_fix_penetrations(
                 queries,
                 character_shape,
@@ -442,7 +452,11 @@ impl KinematicCharacterController {
             );
         }
         // If needed, and if we are not already grounded, snap to the ground.
-        if grounded_at_starting_pos {
+        // mmo-fork: only a body that means to stay down: `result` can't tell,
+        // a clean slide along level ground has no downward part left in it.
+        // A body that already ended grounded needs no snap cast.
+        let heading_down = desired_translation.dot(self.up) < 0.0;
+        if grounded_at_starting_pos && heading_down && !result.grounded {
             self.snap_to_ground(
                 queries,
                 character_shape,
@@ -465,7 +479,10 @@ impl KinematicCharacterController {
         result: &mut EffectiveCharacterMovement,
     ) -> Option<(ColliderHandle, ShapeCastHit)> {
         if let Some(snap_distance) = self.snap_to_ground {
-            if result.translation.dot(self.up) <= 0.0 {
+            // mmo-fork: whatever `result` did vertically: a slide over a
+            // step's edge overshoots the step and ends the move in the air
+            // above it (the caller gates on the desired motion instead).
+            {
                 let snap_distance = snap_distance.eval(dims.y);
                 let offset = self.offset.eval(dims.y);
                 if let Some((hit_handle, hit)) = queries.cast_shape_on_continuous_surfaces(

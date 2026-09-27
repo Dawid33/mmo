@@ -227,6 +227,15 @@ fn add_player(w: &mut PhysicsWorld, pos: Vector) -> (RigidBodyHandle, ColliderHa
 }
 
 fn kcc_move(w: &PhysicsWorld, body: RigidBodyHandle, desired: Vector) -> rapier3d::control::EffectiveCharacterMovement {
+    kcc_move_with(&game_controller(), w, body, desired)
+}
+
+fn kcc_move_with(
+    controller: &KinematicCharacterController,
+    w: &PhysicsWorld,
+    body: RigidBodyHandle,
+    desired: Vector,
+) -> rapier3d::control::EffectiveCharacterMovement {
     let qp = w.broad_phase.as_query_pipeline(
         w.narrow_phase.query_dispatcher(),
         &w.bodies,
@@ -234,7 +243,7 @@ fn kcc_move(w: &PhysicsWorld, body: RigidBodyHandle, desired: Vector) -> rapier3
         QueryFilter::default().exclude_rigid_body(body),
     );
     let shape = Capsule::new_y(HALF_HEIGHT, RADIUS);
-    game_controller().move_shape(w.params.dt, &qp, &shape, w.bodies[body].position(), desired, |_| {})
+    controller.move_shape(w.params.dt, &qp, &shape, w.bodies[body].position(), desired, |_| {})
 }
 
 /// D7: upstream's #485 zero-motion depenetration on a body sunk 0.3 units
@@ -283,9 +292,12 @@ fn kcc_zero_motion_depenetration_is_cuboid_only() {
 }
 
 /// D7, the case `depenetration_lift` declines: a body buried deeper than
-/// `STEP_HEIGHT` gets no lift (the game's "buried stays put" policy), so #485
-/// is what acts on it — on a full-chunk cuboid, with zero desired motion, it
-/// pushes the body out by up to a quarter of the character height per call.
+/// `STEP_HEIGHT` gets no lift (the game's "buried stays put" policy). With
+/// upstream's default (`depenetrate: true`), #485 acts on it instead — on a
+/// full-chunk cuboid, with zero desired motion, it pushes the body out by up
+/// to a quarter of the character height per call. The fork's
+/// `KinematicCharacterController::depenetrate` flag (D7; the game sets
+/// `false`) turns that off: the buried body is not moved.
 #[test]
 fn kcc_zero_motion_moves_a_body_the_lift_leaves_buried() {
     let chunk = 2.0 * BLOCK;
@@ -296,10 +308,16 @@ fn kcc_zero_motion_moves_a_body_the_lift_leaves_buried() {
     w.colliders.insert_with_parent(ColliderBuilder::cuboid(half, half, half).translation(v(half, BLOCK - half, half)), ground, &mut w.bodies);
     let (body, _) = add_player(&mut w, v(0.5 * BLOCK, BLOCK + HALF_HEIGHT + RADIUS - sink, 0.5 * BLOCK));
     w.step(&mut PhysicsPipeline::new());
-    let still = kcc_move(&w, body, Vector::ZERO);
     let quarter_height = 0.25 * 2.0 * (HALF_HEIGHT + RADIUS);
+
+    assert!(KinematicCharacterController::default().depenetrate, "upstream's behaviour stays the default");
+    let still = kcc_move(&w, body, Vector::ZERO);
     println!("D7 cuboid buried {sink}: still {:?} (cap {quarter_height})", still.translation);
     assert!(still.translation.y > 0.5 * quarter_height, "#485 moved a buried body: {:?}", still.translation);
+
+    let off = KinematicCharacterController { depenetrate: false, ..game_controller() };
+    let still = kcc_move_with(&off, &w, body, Vector::ZERO);
+    assert_eq!(still.translation, Vector::ZERO, "depenetrate: false leaves a buried body where it is");
 }
 
 /// Per tick: `(y, grounded, capsule's BVH leaf changed)`.
