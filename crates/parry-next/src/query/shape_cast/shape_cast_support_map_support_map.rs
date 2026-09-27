@@ -11,6 +11,10 @@ use num::Zero;
 /// within it. Covers the time-of-impact error of the cast that parked the shape.
 pub(crate) const GRAZING_START_MARGIN: Real = 0.01;
 
+// mmo-fork:
+/// Rounding noise of a closest-points normal, per unit of length.
+const NORMAL_NOISE: Real = 1.0e-4;
+
 /// Time of impacts between two support-mapped shapes under translational movement.
 pub fn cast_shapes_support_map_support_map<G1, G2>(
     pos12: &Pose,
@@ -23,6 +27,43 @@ where
     G1: ?Sized + SupportMap,
     G2: ?Sized + SupportMap,
 {
+    // mmo-fork: grazing starts. A cast that starts on (or a hair either side
+    // of) the target-distance surface is the *normal* case for a character
+    // controller: it parks the shape exactly there every step. That start is
+    // degenerate for the ray cast below (the ray origin lies on the rounded
+    // shape's boundary): it misses, reports a TOI of a few 1e-3 or a normal
+    // that is only the last search direction. Classify such starts from the
+    // real distance instead: within `GRAZING_START_MARGIN` beyond the target
+    // distance is a resting contact at TOI 0. Its status follows #106 (D8):
+    // `Converged` unless the start is really within the target distance.
+    if options.target_distance > 0.0
+        && (options.compute_impact_geometry_on_penetration || !options.stop_at_penetration)
+    {
+        let within = options.target_distance * (1.0 + GRAZING_START_MARGIN);
+        if let Some(contact) = details::contact_support_map_support_map(pos12, g1, g2, within) {
+            // Closing in by less than the normal's own rounding noise is a
+            // slide along the surface, not an approach.
+            let closing = -contact.normal1.dot(vel12);
+            if !options.stop_at_penetration && closing <= vel12.length() * NORMAL_NOISE {
+                return None;
+            }
+            return Some(ShapeCastHit {
+                time_of_impact: 0.0,
+                normal1: contact.normal1,
+                normal2: contact.normal2,
+                witness1: contact.point1,
+                witness2: contact.point2,
+                status: if contact.dist < options.target_distance {
+                    ShapeCastStatus::PenetratingOrWithinTargetDist
+                } else {
+                    ShapeCastStatus::Converged
+                },
+                subshape1: 0,
+                subshape2: 0,
+            });
+        }
+    }
+
     let gjk_result = if options.target_distance > 0.0 {
         let round_g1 = RoundShapeRef {
             inner_shape: g1,
@@ -67,6 +108,26 @@ where
                     subshape2: 0,
                 })
             }
+        } else if let Some(contact) = (options.target_distance > 0.0)
+            .then(|| {
+                // mmo-fork: the ray cast's normal is only its last search
+                // direction. The shapes sit `target_distance` apart at the
+                // impact pose, where closest points give the true one.
+                let pos12_hit = Pose::from_translation(vel12 * time_of_impact) * *pos12;
+                details::contact_support_map_support_map(&pos12_hit, g1, g2, Real::MAX)
+            })
+            .flatten()
+        {
+            Some(ShapeCastHit {
+                time_of_impact,
+                normal1: contact.normal1,
+                normal2: contact.normal2,
+                witness1: contact.point1,
+                witness2: contact.point2,
+                status: ShapeCastStatus::Converged,
+                subshape1: 0,
+                subshape2: 0,
+            })
         } else {
             Some(ShapeCastHit {
                 time_of_impact,

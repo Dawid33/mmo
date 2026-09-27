@@ -74,7 +74,6 @@ fn assert_floor_hit(hit: Option<ShapeCastHit>, context: &str) {
 /// geometric TOI (~2.3e-3) where the fork's `GRAZING_START_MARGIN` reports
 /// a resting contact (< 1e-3).
 #[test]
-#[ignore = "fails on pristine parry 0.31.1 (TOI 2.2e-3 at gap skin+1.5e-3; normal tilt up to 2.6e-3): re-port scope, Task 3.3"]
 fn cast_starting_at_the_target_distance_hits_with_the_true_normal() {
     let cuboid = Cuboid::new(v(8.0, 8.0, 8.0));
     let capsule = Capsule::new_y(HALF_HEIGHT, RADIUS);
@@ -380,14 +379,16 @@ fn length_unit_does_not_change_character_movement() {
 /// body. What `walking_smoothness.rs` pins in the game; the probe does not
 /// isolate which fork fix it needs: the voxels cast (3.2), the cross-collider
 /// `cast_shape_on_continuous_surfaces` (3.3, which upstream `move_shape`
-/// doesn't use) or the KCC snap gate (3.4).
+/// doesn't use) or the KCC snap gate (3.4). Fork: after 3.2, grounded
+/// 120/120 and max |dy| 0.041 (a 0.025 bump at the body seams); green after
+/// 3.3 (the controller casts through `cast_shape_on_continuous_surfaces`).
 #[test]
-#[ignore = "after Task 3.2: grounded 120/120 but max |dy| 0.041 (0.025 bump at chunk-body seams): re-port scope, Tasks 3.3-3.4"]
 fn walk_on_flat_voxel_floor_keeps_its_height() {
     const TICKS: usize = 120;
     let (mut w, body, collider) = walker_on_floor(16, 1.0);
     let run = kcc_run(&mut w, body, collider, TICKS, WALK_SPEED * UNITS_PER_METER);
     let grounded = run.iter().filter(|t| t.1).count();
+    println!("walk: grounded {grounded}/{TICKS}, max |dy| {:e}", max_dy(&run));
     assert!(w.bodies[body].translation().x > 8.0 * 2.0 * BLOCK, "the walk crossed at least eight chunk seams");
     assert_eq!(grounded, TICKS, "a walk on flat ground stays grounded");
     assert!(max_dy(&run) < 5.0e-3, "flat walking keeps its height (max |dy| {})", max_dy(&run));

@@ -543,13 +543,21 @@ determinism-wasm:
         {{cap}} {{cargo}} test -p game --test wasm_determinism --target wasm32-unknown-unknown
 
 # Upstream rapier's own determinism tests, run from the vendored rapier-next
-# fork (rapier 0.36 upgrade, docs/superpowers/plans/2026-09-22-rapier-035-upgrade.md).
-# Every `// mmo-fork:` patch must keep these green. thread_count_determinism is
-# `parallel`-gated and we never enable that feature, so it is not listed.
+# fork (rapier 0.36 upgrade, docs/superpowers/plans/2026-09-22-rapier-035-upgrade.md),
+# plus upstream's regression tests for the code the fork patches (shape casts,
+# voxels, the character controller). Every `// mmo-fork:` patch must keep these
+# green. thread_count_determinism is `parallel`-gated and we never enable that
+# feature, so it is not listed.
 physics-next-upstream:
     {{cap}} {{cargo}} test -p rapier3d-next --features enhanced-determinism,serde-serialize \
         --test snapshot_roundtrip --test snapshot_portability \
-        --test simd_backend_parity --test simd_backend_determinism
+        --test simd_backend_parity --test simd_backend_determinism \
+        --test issue_485_kcc_depenetration --test issue_862_kcc_impulse_point
+    {{cap}} {{cargo}} test -p parry3d-next \
+        --test issue_106_shape_cast_status_consistency --test issue_193_shape_cast_penetrating_normals \
+        --test issue_26_shape_cast_target_distance --test issue_373_voxels_shape_cast_witness \
+        --test issue_404_voxels_manifold_prediction --test issue_429_shape_cast_toi_accuracy \
+        --test sub_shape_id --test two_sided_internal_edges --test lib
 
 # ---------------------------------------------------------------------------
 # Local deployment environment: a single-node k0s cluster in docker (the same

@@ -3,7 +3,7 @@
 //! `upstream_movement_probe.rs`.
 use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER};
 use rapier3d::parry::query::{ShapeCastOptions, cast_shapes};
-use rapier3d::parry::shape::{Capsule, Voxels};
+use rapier3d::parry::shape::{Capsule, Cuboid, Voxels};
 use rapier3d::prelude::*;
 
 const BLOCK: f32 = UNITS_PER_METER;
@@ -52,4 +52,53 @@ fn voxels_cast_floor_normal_is_exactly_up() {
         .unwrap()
         .expect("floor");
     assert_eq!(hit.normal1, Vector::Y, "{hit:?}");
+}
+
+fn options4() -> ShapeCastOptions {
+    ShapeCastOptions {
+        target_distance: CHARACTER_SKIN,
+        stop_at_penetration: false,
+        max_time_of_impact: 4.0,
+        compute_impact_geometry_on_penetration: true,
+    }
+}
+
+/// D8: parry 0.31 reports a start exactly at the target distance as
+/// `Converged` at TOI 0 (#106), not `PenetratingOrWithinTargetDist`. Sliding
+/// along a floor from there, the per-voxel cast returns such a hit (its
+/// normal a few 1e-6 off +Y, so upstream counts it as closing in); once the
+/// edge correction makes the normal exactly +Y, only a filter keyed on the
+/// TOI rather than the status drops it: a TOI-0 hit whose normal does not
+/// oppose the motion is no hit. The lone cuboid is the support-map cast's
+/// own grazing policy (`NORMAL_NOISE`).
+#[test]
+fn d8_touching_start_sliding_or_lifting_is_no_hit() {
+    let rest = BLOCK + PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS + CHARACTER_SKIN;
+    let floor = Voxels::new(Vector::splat(BLOCK), &[IVector::new(0, 0, 0), IVector::new(1, 0, 0)]);
+    let cuboid = Cuboid::new(Vector::new(BLOCK, 0.5 * BLOCK, 0.5 * BLOCK));
+    let capsule = Capsule::new_y(PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS);
+    let away = [Vector::X, Vector::Z, Vector::new(1.0, 0.5, 0.0).normalize(), Vector::Y];
+    // Around the exact skin, where rounding decides which side a start is on.
+    let starts = || [-2.0e-6, -1.0e-6, 0.0, 1.0e-6, 2.0e-6].into_iter().flat_map(|eps| [0.3, 1.7, 5.0].map(|x| (eps, x)));
+    for (eps, x) in starts() {
+        for vel in away {
+            let pos = Pose::translation(BLOCK + x, rest + eps, 0.5 * BLOCK);
+            let hit = cast_shapes(&Pose::IDENTITY, Vector::ZERO, &floor, &pos, vel, &capsule, options4()).unwrap();
+            assert!(hit.is_none(), "voxels, eps {eps} x {x} vel {vel:?}: {hit:?}");
+        }
+    }
+    for (eps, x) in starts() {
+        for vel in away {
+            let y = 0.5 * BLOCK + PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS + CHARACTER_SKIN + eps;
+            let hit = cast_shapes(&Pose::IDENTITY, Vector::ZERO, &cuboid, &Pose::translation(x, y, 0.0), vel, &capsule, options4())
+                .unwrap();
+            assert!(hit.is_none(), "cuboid, eps {eps} x {x} vel {vel:?}: {hit:?}");
+        }
+    }
+    // Pressing in from touching is a hit at TOI 0 with the face normal.
+    let pos = Pose::translation(BLOCK + 0.3, rest, 0.5 * BLOCK);
+    let hit = cast_shapes(&Pose::IDENTITY, Vector::ZERO, &floor, &pos, Vector::new(1.0, -0.5, 0.0).normalize(), &capsule, options4())
+        .unwrap()
+        .expect("pressing in");
+    assert_eq!((hit.time_of_impact, hit.normal1), (0.0, Vector::Y), "{hit:?}");
 }

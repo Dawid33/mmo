@@ -8,6 +8,11 @@ use parry::partitioning::{Bvh, BvhNode};
 use parry::query::details::{NormalConstraints, ShapeCastOptions};
 use parry::query::{NonlinearRigidMotion, QueryDispatcher, RayCast, ShapeCastHit};
 use parry::shape::{CompositeShape, CompositeShapeRef, FeatureId, Shape, TypedCompositeShape};
+// mmo-fork: `cast_shape_on_continuous_surfaces`.
+use parry::query::details::{
+    InternalEdgeProbe, cast_shapes_voxels_shape_with_probe, without_internal_edges,
+};
+use parry::shape::AxisMask;
 
 /// A query system for performing spatial queries on your physics world (raycasts, shape casts, intersections).
 ///
@@ -501,6 +506,146 @@ impl<'a> QueryPipeline<'a> {
             options,
         )?;
         Some((self.handle_of(id)?, hit))
+    }
+
+    // mmo-fork: the character controller's cast (crates/rapier 4173c4e).
+    /// [`Self::cast_shape`] for a shape that slides over surfaces assembled from
+    /// several box-like colliders (voxel chunks, cuboids laid flush).
+    ///
+    /// Each voxel and cuboid is otherwise hit as a free-standing box, so the
+    /// seams of a flat surface report edge normals leaning along it, which a
+    /// sliding character follows into the floor or trips over. Here a hit's
+    /// normal loses every component pointing through a box face that is
+    /// covered: by a neighbour of the same voxels shape, or by any collider
+    /// (passing the filter) found solid within `reach` across the face at the
+    /// contact point.
+    #[profiling::function]
+    pub fn cast_shape_on_continuous_surfaces(
+        &self,
+        shape_pos: &Pose,
+        shape_vel: Vector,
+        shape: &dyn Shape,
+        options: ShapeCastOptions,
+        reach: Real,
+    ) -> Option<(ColliderHandle, ShapeCastHit)> {
+        // The traversal of `CompositeShapeRef::cast_shape`, with the per-part
+        // cast swapped out.
+        let ls_aabb2 = shape.compute_aabb(shape_pos);
+        let ray = Ray::new(Vector::ZERO, shape_vel);
+        let msum_shift = -ls_aabb2.center();
+        let msum_margin = ls_aabb2.half_extents() + Vector::splat(options.target_distance);
+
+        let (id, hit) = self.bvh.find_best(
+            options.max_time_of_impact,
+            |node: &BvhNode, best_so_far| {
+                let msum = Aabb {
+                    mins: node.mins() + msum_shift - msum_margin,
+                    maxs: node.maxs() + msum_shift + msum_margin,
+                };
+                msum.cast_local_ray(&ray, best_so_far, true)
+                    .unwrap_or(Real::MAX)
+            },
+            |part_id, _| {
+                let (co, co_handle) = self.colliders.get_unknown_gen(part_id)?;
+                if !self.filter.test(self.bodies, co_handle, co) {
+                    return None;
+                }
+                let pos1 = co.position();
+                self.cast_shape_on_part(
+                    pos1,
+                    co.shape(),
+                    &pos1.inv_mul(shape_pos),
+                    pos1.rotation.inverse() * shape_vel,
+                    shape,
+                    options,
+                    reach,
+                )
+                .map(|hit| hit.transform1_by(pos1))
+            },
+        )?;
+        Some((self.handle_of(id)?, hit))
+    }
+
+    /// One collider's share of [`Self::cast_shape_on_continuous_surfaces`],
+    /// in that collider's local space.
+    fn cast_shape_on_part(
+        &self,
+        pos1: &Pose,
+        g1: &dyn Shape,
+        pos12: &Pose,
+        local_vel12: Vector,
+        g2: &dyn Shape,
+        options: ShapeCastOptions,
+        reach: Real,
+    ) -> Option<ShapeCastHit> {
+        let is_solid = |local: Vector| self.is_solid_at(*pos1 * local);
+        let probe = InternalEdgeProbe {
+            is_solid: &is_solid,
+            reach,
+        };
+
+        if let Some(voxels) = g1.as_voxels() {
+            return cast_shapes_voxels_shape_with_probe(
+                self.dispatcher,
+                pos12,
+                local_vel12,
+                voxels,
+                g2,
+                options,
+                Some(probe),
+            );
+        }
+        if g1.as_cuboid().is_none() {
+            return self
+                .dispatcher
+                .cast_shapes(pos12, local_vel12, g1, g2, options)
+                .ok()?;
+        }
+
+        // Same treatment as one voxel: the separating-start filter has to see
+        // the corrected normal, so it is applied here.
+        let raw = ShapeCastOptions {
+            stop_at_penetration: true,
+            compute_impact_geometry_on_penetration: true,
+            ..options
+        };
+        let mut hit = self
+            .dispatcher
+            .cast_shapes(pos12, local_vel12, g1, g2, raw)
+            .ok()??;
+        let normal1 = without_internal_edges(hit.normal1, hit.witness1, AxisMask::all(), Some(probe));
+        if normal1 != hit.normal1 {
+            hit.normal1 = normal1;
+            hit.normal2 = pos12.rotation.inverse() * -normal1;
+        }
+        // D8: a start at the target distance is `Converged` at TOI 0 (#106),
+        // so this keys on the TOI, not the status.
+        let separating = hit.time_of_impact == 0.0 && hit.normal1.dot(local_vel12) >= 0.0;
+        (options.stop_at_penetration || !separating).then_some(hit)
+    }
+
+    /// Is `point` inside any collider passing the filter?
+    fn is_solid_at(&self, point: Vector) -> bool {
+        self.bvh
+            .leaves(move |node: &BvhNode| node.aabb().contains_local_point(point))
+            .any(|leaf| {
+                let Some((co, co_handle)) = self.colliders.get_unknown_gen(leaf) else {
+                    return false;
+                };
+                if !self.filter.test(self.bodies, co_handle, co) {
+                    return false;
+                }
+                match co.shape.as_voxels() {
+                    // The generic point projection walks every voxel.
+                    Some(voxels) => {
+                        let local = co.position().inverse_transform_point(point);
+                        voxels
+                            .voxel_state(voxels.voxel_at_point(local))
+                            .is_some_and(|state| !state.is_empty())
+                    }
+                    None => co.shape.contains_point(co.position(), point),
+                }
+            })
     }
 
     /// Casts a shape with an arbitrary continuous motion and retrieve the first collider it hits.

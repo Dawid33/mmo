@@ -351,7 +351,7 @@ impl KinematicCharacterController {
             is_moving = true;
 
             // 2. Cast towards the movement direction.
-            if let Some((handle, hit)) = queries.cast_shape(
+            if let Some((handle, hit)) = queries.cast_shape_on_continuous_surfaces(
                 &(Pose::from_translation(result.translation) * *character_pos),
                 translation_dir,
                 character_shape,
@@ -361,6 +361,8 @@ impl KinematicCharacterController {
                     max_time_of_impact: translation_dist,
                     compute_impact_geometry_on_penetration: true,
                 },
+                // mmo-fork: terrain is many boxes laid flush: seams are not edges.
+                offset,
             ) {
                 // We hit something, compute and apply the allowed interference-free translation.
                 let allowed_dist = hit.time_of_impact;
@@ -466,7 +468,7 @@ impl KinematicCharacterController {
             if result.translation.dot(self.up) <= 0.0 {
                 let snap_distance = snap_distance.eval(dims.y);
                 let offset = self.offset.eval(dims.y);
-                if let Some((hit_handle, hit)) = queries.cast_shape(
+                if let Some((hit_handle, hit)) = queries.cast_shape_on_continuous_surfaces(
                     character_pos,
                     -self.up,
                     character_shape,
@@ -476,6 +478,8 @@ impl KinematicCharacterController {
                         max_time_of_impact: snap_distance,
                         compute_impact_geometry_on_penetration: true,
                     },
+                    // mmo-fork: terrain is many boxes laid flush: seams are not edges.
+                    offset,
                 ) {
                     // Apply the snap.
                     result.translation -= self.up * hit.time_of_impact;
@@ -770,7 +774,7 @@ impl KinematicCharacterController {
         };
 
         if queries
-            .cast_shape(
+            .cast_shape_on_continuous_surfaces(
                 character_pos,
                 self.up,
                 character_shape,
@@ -780,6 +784,8 @@ impl KinematicCharacterController {
                     max_time_of_impact: max_height,
                     compute_impact_geometry_on_penetration: true,
                 },
+                // mmo-fork: terrain is many boxes laid flush: seams are not edges.
+                offset,
             )
             .is_some()
         {
@@ -788,7 +794,7 @@ impl KinematicCharacterController {
         }
 
         if queries
-            .cast_shape(
+            .cast_shape_on_continuous_surfaces(
                 &shifted_character_pos,
                 horizontal_dir,
                 character_shape,
@@ -798,6 +804,8 @@ impl KinematicCharacterController {
                     max_time_of_impact: min_width,
                     compute_impact_geometry_on_penetration: true,
                 },
+                // mmo-fork: terrain is many boxes laid flush: seams are not edges.
+                offset,
             )
             .is_some()
         {
@@ -807,7 +815,7 @@ impl KinematicCharacterController {
 
         // Check that we are not getting into a ramp that is too steep
         // after stepping.
-        if let Some((_, hit)) = queries.cast_shape(
+        if let Some((_, hit)) = queries.cast_shape_on_continuous_surfaces(
             &Pose::from_parts(
                 shifted_character_pos.translation + horizontal_dir * min_width,
                 shifted_character_pos.rotation,
@@ -820,6 +828,8 @@ impl KinematicCharacterController {
                 max_time_of_impact: max_height,
                 compute_impact_geometry_on_penetration: true,
             },
+            // mmo-fork: terrain is many boxes laid flush: seams are not edges.
+            offset,
         ) {
             let [vertical_slope_translation, horizontal_slope_translation] = self
                 .split_into_components(*translation_remaining)
@@ -841,7 +851,7 @@ impl KinematicCharacterController {
         // We can step, we need to find the actual step height.
         let step_height = max_height
             - queries
-                .cast_shape(
+                .cast_shape_on_continuous_surfaces(
                     &Pose::from_parts(
                         shifted_character_pos.translation + horizontal_dir * min_width,
                         shifted_character_pos.rotation,
@@ -854,6 +864,8 @@ impl KinematicCharacterController {
                         max_time_of_impact: max_height,
                         compute_impact_geometry_on_penetration: true,
                     },
+                    // mmo-fork: terrain is many boxes laid flush: seams are not edges.
+                    offset,
                 )
                 .map(|hit| hit.1.time_of_impact)
                 .unwrap_or(max_height);

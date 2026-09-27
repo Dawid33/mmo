@@ -208,7 +208,12 @@ where
                 normal2: pos12.rotation.inverse() * -normal1,
                 witness1,
                 witness2: contact.point2,
-                status: ShapeCastStatus::PenetratingOrWithinTargetDist,
+                // #106 (D8), as in the support-map cast's grazing start.
+                status: if contact.dist < options.target_distance {
+                    ShapeCastStatus::PenetratingOrWithinTargetDist
+                } else {
+                    ShapeCastStatus::Converged
+                },
                 subshape1: vox.linear_id.flat_id() as u32,
                 subshape2: 0,
             });
@@ -249,8 +254,11 @@ where
                     new_hit.normal1 = normal1;
                     new_hit.normal2 = pos12.rotation.inverse() * -normal1;
                 }
+                // mmo-fork (D8): a start at the target distance is `Converged`
+                // at TOI 0 (#106), so the separated-start filter keys on the
+                // TOI, not the status.
                 if !options.stop_at_penetration
-                    && new_hit.status == ShapeCastStatus::PenetratingOrWithinTargetDist
+                    && new_hit.time_of_impact == 0.0
                     && new_hit.normal1.dot(vel12) >= 0.0
                 {
                     continue;
