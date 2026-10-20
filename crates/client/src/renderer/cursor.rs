@@ -1,7 +1,8 @@
 //! The one writer of the primary window's cursor grab. The sim asks for a
-//! grab (fps-cam toggle via `SetFreeCam`, inventory via `SetCursorGrab`); the
-//! commander camera asks for a confined, visible pointer (edge panning);
-//! client-local overlays (the dev panel, later chat) hold the pointer on top
+//! grab (fps-cam toggle via `SetFreeCam`, inventory via `SetCursorGrab`) —
+//! only first person does; the commander camera never holds the pointer, so it
+//! can leave the window freely, except while a right-drag turns it (`orbit`).
+//! Client-local overlays (the dev panel, later chat) hold the pointer on top
 //! of that. Both used to write `CursorOptions` directly, so an overlay would
 //! either fight the sim or lose its request on close.
 use bevy::prelude::*;
@@ -13,9 +14,14 @@ pub struct CursorPolicy {
     pub sim_grab: bool,
     /// A client-local overlay needs a free pointer.
     pub overlay_open: bool,
-    /// Keep the (visible) pointer inside the window: the commander camera's
-    /// edge panning needs it. Only while the window is focused.
-    pub confine: bool,
+    /// The pointer is over the Slint game UI, or a press that started there
+    /// is still held (`slint_overlay`): world clicks, drags, edge panning and
+    /// zoom leave it alone. Unlike `overlay_open` it frees nothing.
+    pub ui_pointer: bool,
+    /// A commander right-drag is turning the camera: the pointer is held
+    /// hidden and still (`commander::hold_pointer_while_orbiting` puts it back
+    /// where the press was) until the button is released.
+    pub orbit: bool,
 }
 
 impl CursorPolicy {
@@ -25,10 +31,8 @@ impl CursorPolicy {
 
     /// The grab mode and cursor visibility the window should have.
     pub fn mode(&self) -> (CursorGrabMode, bool) {
-        if self.grabbed() {
+        if self.grabbed() || (self.orbit && !self.overlay_open) {
             (CursorGrabMode::Locked, false)
-        } else if self.confine && !self.overlay_open {
-            (CursorGrabMode::Confined, true)
         } else {
             (CursorGrabMode::None, true)
         }
@@ -93,12 +97,20 @@ mod tests {
     }
 
     #[test]
-    fn confine_keeps_the_cursor_visible_and_yields_to_lock_and_overlays() {
-        let confined = CursorPolicy { confine: true, ..Default::default() };
-        assert_eq!(confined.mode(), (CursorGrabMode::Confined, true));
-        let locked = CursorPolicy { sim_grab: true, ..confined };
+    fn only_a_sim_grab_holds_the_pointer() {
+        assert_eq!(CursorPolicy::default().mode(), (CursorGrabMode::None, true));
+        let locked = CursorPolicy { sim_grab: true, ..Default::default() };
         assert_eq!(locked.mode(), (CursorGrabMode::Locked, false));
-        let overlay = CursorPolicy { overlay_open: true, ..confined };
+        let overlay = CursorPolicy { overlay_open: true, ..locked };
+        assert_eq!(overlay.mode(), (CursorGrabMode::None, true));
+    }
+
+    #[test]
+    fn an_orbit_drag_holds_the_pointer_hidden_unless_an_overlay_is_open() {
+        let orbit = CursorPolicy { orbit: true, ..Default::default() };
+        assert_eq!(orbit.mode(), (CursorGrabMode::Locked, false));
+        assert!(!orbit.grabbed(), "an orbit drag is not the sim's mouse look");
+        let overlay = CursorPolicy { overlay_open: true, ..orbit };
         assert_eq!(overlay.mode(), (CursorGrabMode::None, true));
     }
 }

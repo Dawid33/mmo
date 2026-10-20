@@ -7,6 +7,7 @@ members = [
   "crates/macros",
   "crates/physics-next",
   "crates/server",
+  "crates/slint-ui",
   "crates/state-hash",
   "crates/state-hash-derive",
   "crates/worldgen",
@@ -63,6 +64,15 @@ bevy = { version = "0.19.1", default-features = false, features = [
 ] }
 block-mesh = { path = "crates/block-mesh", default-features = false }
 bbmodel = { path = "crates/bbmodel" }
+slint-ui = { path = "crates/slint-ui" }
+# The game UI: Slint + the Factorio-style `widgets` library from the sibling
+# ~/Projects/ui checkout (must sit next to this repo). Software renderer only —
+# no winit/femtovg backend, so no second event loop or wgpu (see
+# crates/slint-ui). `std` turns on the renderer's systemfonts text path, the
+# one `~/Projects/ui`'s reftest measures.
+slint = { version = "1.18.1", default-features = false, features = ["std", "compat-1-2", "renderer-software"] }
+slint-build = "1.18.1"
+widgets = { path = "../ui/crates/widgets" }
 game = { path = "crates/game" }
 macros = { path = "crates/macros" }
 worldgen = { path = "crates/worldgen" }

@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dependencies]
 bbmodel = { workspace = true }
 game = { workspace = true }
+# Player-facing game UI (Factorio-style Slint widgets, software-rendered):
+# composited by `renderer/slint_overlay.rs`.
+slint-ui = { workspace = true }
 worldgen = { workspace = true }
 slotmapd = { workspace = true }
 log = { workspace = true }

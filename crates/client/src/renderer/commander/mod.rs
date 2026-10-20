@@ -1,7 +1,8 @@
 //! The commander view (RTS Phase 2): the player has no body to look through.
-//! A client-local camera looks down at the island from a fixed pitch, pans
-//! with the screen edges, the arrow keys and a middle-drag, zooms with the
-//! wheel, and rides a smoothed terrain height. None of it is sim state —
+//! A client-local camera looks down at the island, pans with the screen
+//! edges, WASD / the arrow keys and a middle-drag, turns (yaw and pitch) with
+//! a right-drag, rises and sinks with Space / Shift, zooms with the wheel, and
+//! rides a smoothed terrain height. None of it is sim state —
 //! nothing in the sim depends on where a commander looks — so it lives here,
 //! with the minimap (`minimap`), the client-local selection and the ground
 //! pick (`selection`), all of which read the client height grid (`height`).
@@ -68,8 +69,21 @@ impl CameraMode {
 // Tunables: starting points to tune by feel, in metres / degrees / seconds /
 // logical pixels; converted to sim units (`UNITS_PER_METER`) at the boundary.
 
-/// Camera pitch below the horizon. Fixed: zooming only changes the distance.
+/// Camera pitch below the horizon the game opens at. Zooming only changes the
+/// distance; a right-drag changes the pitch within the limits below.
 pub const PITCH_DEG: f32 = 55.0;
+/// Shallowest pitch a right-drag reaches.
+pub const PITCH_MIN_DEG: f32 = 15.0;
+/// Steepest pitch (just short of straight down, where yaw degenerates).
+pub const PITCH_MAX_DEG: f32 = 89.0;
+/// Right-drag turn rate, per logical pixel of mouse motion.
+pub const ORBIT_DEG_PER_PX: f32 = 0.25;
+/// Space / Shift vertical speed, in zoom distances per second (like panning).
+pub const RISE_ZOOMS_PER_S: f32 = 1.0;
+/// Highest the camera rises above the terrain-following height.
+pub const RISE_MAX_M: f32 = 200.0;
+/// Lowest the eye sinks to, above the terrain-following height.
+pub const MIN_CLEARANCE_M: f32 = 2.0;
 /// Vertical field of view.
 pub const FOV_Y_DEG: f32 = 40.0;
 /// Closest zoom: camera-to-focus distance.
@@ -105,6 +119,13 @@ pub struct CommanderCamera {
     /// Camera-to-focus distance in sim units, easing toward `target_distance`.
     pub distance: f32,
     pub target_distance: f32,
+    /// Heading around the vertical axis, radians; 0 = north-up, positive
+    /// turns counter-clockwise seen from above (Bevy's yaw).
+    pub yaw: f32,
+    /// Angle below the horizon, radians, within the pitch limits.
+    pub pitch: f32,
+    /// Space / Shift offset of the focus above `ground_y`, in sim units.
+    pub rise: f32,
     /// Set once the camera has been put over the local body.
     pub placed: bool,
     /// The home region's rectangle on the ground (world x, z); `None` until
@@ -120,6 +141,9 @@ impl Default for CommanderCamera {
             ground_y: sea_level_units(),
             distance: d,
             target_distance: d,
+            yaw: 0.0,
+            pitch: PITCH_DEG.to_radians(),
+            rise: 0.0,
             placed: false,
             bounds: None,
         }
@@ -141,15 +165,40 @@ pub fn sea_level_units() -> f32 {
     worldgen::pipeline::SEA_LEVEL as f32 * UNITS_PER_METER
 }
 
-/// The camera's pose for a focus point, distance and pitch: north-up, south
-/// of the focus, looking down at it.
-pub fn camera_transform(focus: Vec3, distance: f32, pitch: f32) -> Transform {
-    let back = Vec3::new(0.0, pitch.sin(), pitch.cos());
+/// The camera's pose for a focus point, distance, heading and pitch: behind
+/// the focus along the heading (south of it at yaw 0), looking down at it.
+pub fn camera_transform(focus: Vec3, distance: f32, yaw: f32, pitch: f32) -> Transform {
+    let rotation = Quat::from_euler(EulerRot::YXZ, yaw, -pitch, 0.0);
     Transform {
-        translation: focus + back * distance,
-        rotation: Quat::from_rotation_x(-pitch),
+        translation: focus + rotation * Vec3::Z * distance,
+        rotation,
         scale: Vec3::ONE,
     }
+}
+
+/// A screen-space ground direction (x to the right, y down the screen) as a
+/// world (x, z) direction for a camera with heading `yaw`.
+pub fn ground_dir(dir: Vec2, yaw: f32) -> Vec2 {
+    let (sin, cos) = yaw.sin_cos();
+    let right = Vec2::new(cos, -sin);
+    let back = Vec2::new(sin, cos);
+    right * dir.x + back * dir.y
+}
+
+/// A right-drag of `delta` pixels turns the view like first-person mouse
+/// look: right turns right, down looks further down. Returns (yaw, pitch).
+pub fn orbit(yaw: f32, pitch: f32, delta: Vec2) -> (f32, f32) {
+    let rate = ORBIT_DEG_PER_PX.to_radians();
+    let yaw = (yaw - delta.x * rate).rem_euclid(std::f32::consts::TAU);
+    let pitch = (pitch + delta.y * rate).clamp(PITCH_MIN_DEG.to_radians(), PITCH_MAX_DEG.to_radians());
+    (yaw, pitch)
+}
+
+/// Keep the rise within its limits: at most [`RISE_MAX_M`], and low enough
+/// only that the eye stays [`MIN_CLEARANCE_M`] above the followed terrain.
+pub fn clamp_rise(rise: f32, distance: f32, pitch: f32) -> f32 {
+    let lowest = MIN_CLEARANCE_M * UNITS_PER_METER - distance * pitch.sin();
+    rise.clamp(lowest.min(0.0), RISE_MAX_M * UNITS_PER_METER)
 }
 
 /// Frame-rate-independent exponential approach of `current` to `target`
@@ -197,8 +246,9 @@ pub fn zoom_target(target: f32, notches: f32) -> f32 {
         .clamp(ZOOM_NEAR_M * UNITS_PER_METER, ZOOM_FAR_M * UNITS_PER_METER)
 }
 
-/// Focus displacement for a middle-drag of `delta` pixels, so the ground
-/// under the cursor (near the focus) follows it.
+/// Screen-space focus displacement (x right, y down the screen; turn it into
+/// the world with [`ground_dir`]) for a middle-drag of `delta` pixels, so the
+/// ground under the cursor (near the focus) follows it.
 pub fn drag_pan(delta: Vec2, distance: f32, fov_y: f32, viewport_h: f32, pitch: f32) -> Vec2 {
     if viewport_h <= 0.0 {
         return Vec2::ZERO;
@@ -254,8 +304,8 @@ impl Plugin for CommanderPlugin {
                     height::update_height_grid,
                     track_home_region,
                     place_on_body,
-                    confine_cursor,
                     minimap::minimap_pointer,
+                    hold_pointer_while_orbiting,
                     pan_and_zoom,
                     follow_terrain,
                     apply_camera_transform,
@@ -283,7 +333,7 @@ fn spawn_commander_camera(mut commands: Commands, cam: Res<CommanderCamera>) {
             far: game::lod::LOD_HORIZON_UNITS,
             ..default()
         }),
-        camera_transform(focus, cam.distance, PITCH_DEG.to_radians()),
+        camera_transform(focus, cam.distance, cam.yaw, cam.pitch),
         bevy::ui::IsDefaultUiCamera,
         Name::new("commander camera"),
     ));
@@ -316,17 +366,43 @@ fn place_on_body(
     cam.placed = true;
 }
 
-/// Edge panning needs the pointer kept inside the window: ask for a confined
-/// (still visible) cursor while the window has focus. Released on focus loss
-/// so alt-tab works. Native only — browsers have no confine mode.
-fn confine_cursor(window: Query<&Window, With<PrimaryWindow>>, mut policy: ResMut<CursorPolicy>) {
-    let want = cfg!(not(target_arch = "wasm32")) && window.single().is_ok_and(|w| w.focused);
-    if policy.confine != want {
-        policy.confine = want;
+/// A right press inside the window (not on the game UI or an overlay) starts
+/// an orbit drag: the pointer is locked hidden ([`CursorPolicy::orbit`]) and
+/// kept where the press was, and stays there when the button is released.
+/// The turn itself reads raw mouse motion, which a warp does not produce.
+/// The warp is what holds it on X11 and Windows, where `Locked` falls back to
+/// `Confined` and the hidden pointer would otherwise wander.
+fn hold_pointer_while_orbiting(
+    buttons: Res<ButtonInput<MouseButton>>,
+    mut window: Query<&mut Window, With<PrimaryWindow>>,
+    mut policy: ResMut<CursorPolicy>,
+    mut anchor: Local<Option<Vec2>>,
+) {
+    let Ok(mut window) = window.single_mut() else { return };
+    if buttons.just_pressed(MouseButton::Right)
+        && window.focused
+        && !policy.overlay_open
+        && !policy.ui_pointer
+    {
+        *anchor = window.cursor_position();
+    }
+    let held = buttons.pressed(MouseButton::Right) && window.focused && !policy.overlay_open;
+    let Some(at) = *anchor else { return };
+    // Only a real displacement is written: a `Window` change re-syncs the
+    // whole window to winit.
+    if window.cursor_position().is_none_or(|c| c.distance(at) > 0.5) {
+        window.set_cursor_position(Some(at));
+    }
+    if !held {
+        *anchor = None;
+    }
+    if policy.orbit != held {
+        policy.orbit = held;
     }
 }
 
-/// Keyboard, screen-edge, middle-drag and wheel input → focus and zoom.
+/// Keyboard, screen-edge, middle/right-drag and wheel input → focus, heading,
+/// pitch, rise and zoom.
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 fn pan_and_zoom(
     keys: Res<ButtonInput<KeyCode>>,
@@ -349,6 +425,10 @@ fn pan_and_zoom(
 
     let mut dir = Vec2::ZERO;
     for (key, d) in [
+        (KeyCode::KeyA, Vec2::NEG_X),
+        (KeyCode::KeyD, Vec2::X),
+        (KeyCode::KeyW, Vec2::NEG_Y),
+        (KeyCode::KeyS, Vec2::Y),
         (KeyCode::ArrowLeft, Vec2::NEG_X),
         (KeyCode::ArrowRight, Vec2::X),
         (KeyCode::ArrowUp, Vec2::NEG_Y),
@@ -358,25 +438,35 @@ fn pan_and_zoom(
             dir += d;
         }
     }
+    // A drag owns the mouse: the pointer crossing an edge band mid-turn
+    // must not pan as well.
+    let dragging = buttons.any_pressed([MouseButton::Middle, MouseButton::Right]);
     let cursor = window.cursor_position();
     if let Some(c) = cursor {
         let over_minimap = minimap::screen_rect(size).contains(c);
-        if window.focused && !over_minimap && !minimap.dragging {
+        if window.focused && !over_minimap && !minimap.dragging && !policy.ui_pointer && !dragging {
             dir += edge_pan_dir(c, size, EDGE_BAND_PX);
         }
     }
-    let mut focus = cam.focus + pan_step(dir, cam.distance, dt);
+    let mut step = pan_step(dir, cam.distance, dt);
 
     if buttons.pressed(MouseButton::Middle) && window.focused {
-        focus += drag_pan(
-            motion.delta,
-            cam.distance,
-            FOV_Y_DEG.to_radians(),
-            size.y,
-            PITCH_DEG.to_radians(),
-        );
+        step += drag_pan(motion.delta, cam.distance, FOV_Y_DEG.to_radians(), size.y, cam.pitch);
     }
-    cam.focus = clamp_focus(focus, cam.bounds);
+    cam.focus = clamp_focus(cam.focus + ground_dir(step, cam.yaw), cam.bounds);
+
+    if policy.orbit {
+        (cam.yaw, cam.pitch) = orbit(cam.yaw, cam.pitch, motion.delta);
+    }
+
+    let mut vertical = 0.0;
+    if keys.pressed(KeyCode::Space) {
+        vertical += 1.0;
+    }
+    if keys.pressed(KeyCode::ShiftLeft) {
+        vertical -= 1.0;
+    }
+    cam.rise += vertical * cam.distance * RISE_ZOOMS_PER_S * dt;
 
     let notches = match scroll.unit {
         MouseScrollUnit::Line => scroll.delta.y,
@@ -384,10 +474,11 @@ fn pan_and_zoom(
         MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
     };
     let over_minimap = cursor.is_some_and(|c| minimap::screen_rect(size).contains(c));
-    if notches != 0.0 && !over_minimap {
+    if notches != 0.0 && !over_minimap && !policy.ui_pointer {
         cam.target_distance = zoom_target(cam.target_distance, notches);
     }
     cam.distance = smooth(cam.distance, cam.target_distance, dt, ZOOM_SMOOTHING_S);
+    cam.rise = clamp_rise(cam.rise, cam.distance, cam.pitch);
 }
 
 /// Ease the focus height toward the terrain around it.
@@ -401,9 +492,9 @@ fn apply_camera_transform(
     cam: Res<CommanderCamera>,
     mut view: Query<&mut Transform, With<CommanderView>>,
 ) {
-    let focus = Vec3::new(cam.focus.x, cam.ground_y, cam.focus.y);
+    let focus = Vec3::new(cam.focus.x, cam.ground_y + cam.rise, cam.focus.y);
     for mut tf in &mut view {
-        tf.set_if_neq(camera_transform(focus, cam.distance, PITCH_DEG.to_radians()));
+        tf.set_if_neq(camera_transform(focus, cam.distance, cam.yaw, cam.pitch));
     }
 }
 
@@ -415,7 +506,7 @@ mod tests {
     fn camera_looks_at_the_focus_from_the_south_at_the_pitch() {
         let focus = Vec3::new(100.0, 50.0, 200.0);
         let pitch = PITCH_DEG.to_radians();
-        let tf = camera_transform(focus, 640.0, pitch);
+        let tf = camera_transform(focus, 640.0, 0.0, pitch);
         assert!((tf.translation.distance(focus) - 640.0).abs() < 1e-3);
         assert!(tf.translation.z > focus.z, "camera sits south (+z) of the focus");
         let forward = tf.forward();
@@ -429,9 +520,45 @@ mod tests {
     #[test]
     fn pitch_stays_fixed_across_zoom() {
         let focus = Vec3::ZERO;
-        let a = camera_transform(focus, ZOOM_NEAR_M * UNITS_PER_METER, PITCH_DEG.to_radians());
-        let b = camera_transform(focus, ZOOM_FAR_M * UNITS_PER_METER, PITCH_DEG.to_radians());
+        let a = camera_transform(focus, ZOOM_NEAR_M * UNITS_PER_METER, 0.3, PITCH_DEG.to_radians());
+        let b = camera_transform(focus, ZOOM_FAR_M * UNITS_PER_METER, 0.3, PITCH_DEG.to_radians());
         assert_eq!(a.rotation, b.rotation);
+    }
+
+    #[test]
+    fn a_turned_camera_still_looks_at_the_focus_and_pans_along_its_view() {
+        let focus = Vec3::new(10.0, 5.0, -20.0);
+        let yaw = 1.1;
+        let tf = camera_transform(focus, 640.0, yaw, 0.7);
+        let to_focus = (focus - tf.translation).normalize();
+        assert!(tf.forward().dot(to_focus) > 0.99999);
+        // Screen right / up map onto the camera's own right / ground-forward.
+        let right = ground_dir(Vec2::X, yaw);
+        assert!((right - Vec2::new(tf.right().x, tf.right().z)).length() < 1e-5);
+        let up = ground_dir(Vec2::NEG_Y, yaw);
+        let ahead = Vec2::new(tf.forward().x, tf.forward().z).normalize();
+        assert!((up - ahead).length() < 1e-5, "{up:?} vs {ahead:?}");
+        assert_eq!(ground_dir(Vec2::new(1.0, 1.0), 0.0), Vec2::new(1.0, 1.0), "yaw 0 is north-up");
+    }
+
+    #[test]
+    fn right_drag_turns_like_mouse_look_within_the_pitch_limits() {
+        let (yaw, pitch) = orbit(0.0, 0.8, Vec2::new(10.0, 10.0));
+        assert!(yaw > std::f32::consts::PI, "dragging right turns clockwise (negative yaw, wrapped)");
+        assert!(pitch > 0.8, "dragging down looks further down");
+        assert_eq!(orbit(0.0, 0.8, Vec2::new(0.0, 1e5)).1, PITCH_MAX_DEG.to_radians());
+        assert_eq!(orbit(0.0, 0.8, Vec2::new(0.0, -1e5)).1, PITCH_MIN_DEG.to_radians());
+    }
+
+    #[test]
+    fn rise_keeps_the_eye_above_the_terrain_and_under_the_ceiling() {
+        let d = ZOOM_NEAR_M * UNITS_PER_METER;
+        let pitch = PITCH_MIN_DEG.to_radians();
+        let low = clamp_rise(-1e6, d, pitch);
+        let eye_above = low + d * pitch.sin();
+        assert!((eye_above - MIN_CLEARANCE_M * UNITS_PER_METER).abs() < 1e-3);
+        assert_eq!(clamp_rise(1e6, d, pitch), RISE_MAX_M * UNITS_PER_METER);
+        assert_eq!(clamp_rise(0.0, d, pitch), 0.0, "the default height is always legal");
     }
 
     #[test]

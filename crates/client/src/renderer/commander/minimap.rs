@@ -135,7 +135,11 @@ pub fn minimap_pointer(
     let Ok(window) = window.single() else { return };
     let Some(cursor) = window.cursor_position() else { return };
     let rect = screen_rect(window.size());
-    if buttons.just_pressed(MouseButton::Left) && !policy.overlay_open && rect.contains(cursor) {
+    if buttons.just_pressed(MouseButton::Left)
+        && !policy.overlay_open
+        && !policy.ui_pointer
+        && rect.contains(cursor)
+    {
         pointer.dragging = true;
     }
     if let (true, Some(bounds)) = (pointer.dragging, cam.bounds) {
@@ -338,7 +342,7 @@ mod tests {
     #[test]
     fn footprint_is_a_trapezoid_wider_at_the_far_edge() {
         let pitch = super::super::PITCH_DEG.to_radians();
-        let tf = super::super::camera_transform(Vec3::ZERO, 640.0, pitch);
+        let tf = super::super::camera_transform(Vec3::ZERO, 640.0, 0.0, pitch);
         let half_v = super::super::FOV_Y_DEG.to_radians() / 2.0;
         let half_h = (half_v.tan() * 16.0 / 9.0).atan();
         let ray = |sx: f32, sy: f32| {

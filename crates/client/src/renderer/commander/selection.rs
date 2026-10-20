@@ -192,9 +192,11 @@ pub fn select_input(
     let Ok(window) = window.single() else { return };
     let cursor = window.cursor_position();
     if buttons.just_pressed(MouseButton::Left) {
-        // A press on the minimap (or under an overlay) is not a selection.
+        // A press on the minimap or the game UI (or under an overlay) is not
+        // a selection.
         *press = cursor.filter(|c| {
             !policy.overlay_open
+                && !policy.ui_pointer
                 && !minimap_pointer.dragging
                 && !minimap::screen_rect(window.size()).contains(*c)
         });

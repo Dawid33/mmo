@@ -1,0 +1,48 @@
+import { Button, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, Styles, VerticalFlow } from "@widgets";
+
+// The whole in-game UI: one transparent window-sized layer that the client
+// draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
+// Transparent pixels let the pointer through to the game.
+export component GameUi inherits Window {
+    background: transparent;
+
+    in-out property <bool> panel-open: true;
+    in property <string> home-region: "--";
+    in property <string> connection: "--";
+    in property <int> selected-count;
+    // One line per selected entity kind, e.g. "Slime (size 2) ×3".
+    in property <[string]> selection-lines;
+
+    callback clear-selection();
+
+    // Top-right, clear of the minimap (bottom-left).
+    if root.panel-open: panel := FrameFace {
+        title: "Fortress";
+        width: 240px;
+        height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: root.width - self.width - 12px;
+        y: 12px;
+
+        body := VerticalFlow {
+            x: panel.content-x;
+            y: panel.content-y;
+            width: panel.content-right - panel.content-x;
+
+            LabelFace { text: "Region " + root.home-region; }
+            LabelFace { text: root.connection; }
+            LabelFace {
+                style: Styles.caption-label;
+                text: root.selected-count == 0 ? "Nothing selected" : "Selected: " + root.selected-count;
+            }
+            for line in root.selection-lines: LabelFace { text: line; }
+            HorizontalFlow {
+                Button {
+                    text: "Clear selection";
+                    enabled: root.selected-count > 0;
+                    clicked => { root.clear-selection(); }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "slint-ui"
+version = "0.1.0"
+edition = "2024"
+
+# Engine-free like `game`: no Bevy. The client composites the pixels.
+[dependencies]
+slint = { workspace = true }
+# Only for its build-script metadata (`DEP_WIDGETS_UI_DIR`): the .slint
+# sources are compiled into this crate by build.rs.
+widgets = { workspace = true }
+# The widgets' sprites are embedded PNGs. `slint` only turns the decoders on
+# through its winit/femtovg backends, which we leave out, so ask for them on
+# the core crate directly (pinned to slint's version; png + jpeg, no more).
+i-slint-core = { version = "=1.18.1", features = ["image-decoders"] }
+
+[build-dependencies]
+slint-build = { workspace = true }

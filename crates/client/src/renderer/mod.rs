@@ -36,6 +36,7 @@ pub mod model;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod render_bench;
 mod skybox;
+pub(crate) mod slint_overlay;
 pub(crate) mod ui_bridge;
 pub(crate) mod ui_input;
 mod voxel_material;
@@ -203,7 +204,7 @@ impl Plugin for SimBridgePlugin {
             motion_probe::probe_region_crossing.after(interpolate::interpolate_transforms),
         );
         if self.camera_mode == commander::CameraMode::Commander {
-            app.add_plugins(commander::CommanderPlugin);
+            app.add_plugins((commander::CommanderPlugin, slint_overlay::SlintOverlayPlugin));
         }
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Update, config::configure_native_antialiasing);

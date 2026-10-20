@@ -63,16 +63,19 @@ pub fn setup_hud(mut commands: Commands) {
 }
 
 /// Show the crosshair only while the cursor is locked for mouse look (not
-/// when free for menus, nor merely confined for the commander's edge pan).
+/// when free for menus or the commander camera, nor held for its right-drag).
 pub fn update_crosshair_visibility(
     windows: Query<&CursorOptions, With<PrimaryWindow>>,
+    policy: Option<Res<super::cursor::CursorPolicy>>,
     mut crosshair: Query<&mut Visibility, With<Crosshair>>,
 ) {
-    let grabbed = windows
-        .iter()
-        .next()
-        .map(|c| c.grab_mode == CursorGrabMode::Locked)
-        .unwrap_or(false);
+    let orbit = policy.is_some_and(|p| p.orbit);
+    let grabbed = !orbit
+        && windows
+            .iter()
+            .next()
+            .map(|c| c.grab_mode == CursorGrabMode::Locked)
+            .unwrap_or(false);
     for mut vis in &mut crosshair {
         *vis = if grabbed { Visibility::Visible } else { Visibility::Hidden };
     }

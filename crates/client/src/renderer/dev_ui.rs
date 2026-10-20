@@ -1,7 +1,7 @@
 //! F3 developer panel, drawn with egui (`dev_ui` feature). Dev tooling only:
-//! player-facing UI stays on `bevy_ui` (the engine-projected widget tree in
-//! `ui_bridge`, the HUD in `hud`) so it keeps Bevy's text, picking and
-//! navigation. See docs/superpowers/specs/2026-09-22-ui-state-and-options.md.
+//! player-facing UI is the Slint game UI (`slint_overlay`), plus `bevy_ui`
+//! for the engine-projected widget tree (`ui_bridge`) and the HUD (`hud`).
+//! See docs/superpowers/specs/2026-09-22-ui-state-and-options.md.
 //!
 //! The panel frees the cursor through `CursorPolicy::overlay_open`, which also
 //! stops `forward_input` sending clicks and mouse motion to the sim while it
