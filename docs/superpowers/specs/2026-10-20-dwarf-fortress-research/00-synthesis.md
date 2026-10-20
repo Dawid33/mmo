@@ -2,7 +2,9 @@
 
 2026-10-20. Research and plan only; no engine code changed. Produced from the handoff
 `docs/superpowers/plans/2026-10-20-dwarf-fortress-direction-research-handoff.md`. The phased plan
-is `../2026-10-20-dwarf-fortress-transition-plan.md`.
+`../2026-10-20-dwarf-fortress-transition-plan.md` was **rejected**: features are implemented
+piece by piece, roughly modelling DF. The research and the recommendations below are reference
+material for those pieces, not decisions.
 
 ## Files
 
@@ -140,5 +142,5 @@ Detail and trade-offs in `engine-mapping.md`; the short form:
 - No throwaway spike (e.g. an A\* cost estimate on a real forged embark); estimates in
   `engine-mapping.md` are marked as such. Worth doing at the start of phase 3 if you agree.
 - No subagents were used; research ran inline.
-- CLAUDE.md "Direction", `TODO.md` and the memory note `game-direction-pivot` are **not** updated
-  yet — the handoff says to do that once the plan is approved.
+- The phased plan was rejected; CLAUDE.md "Direction" and `TODO.md` now say features are built
+  piece by piece and point here.

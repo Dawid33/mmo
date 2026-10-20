@@ -1,6 +1,7 @@
 Direction (2026-10-20): Dwarf Fortress–style game on the multi-region engine, MVP = fortress
-mode. Next: run the research + plan handoff
-docs/superpowers/plans/2026-10-20-dwarf-fortress-direction-research-handoff.md. The commander
+mode. No phased plan (rejected 2026-10-20): implement features piece by piece, roughly
+modelling DF; reference research in docs/superpowers/specs/2026-10-20-dwarf-fortress-research/
+(00-synthesis.md). The commander
 camera (renderer/commander/) is the default view; live feel pass on this branch pending.
 
 Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-world):

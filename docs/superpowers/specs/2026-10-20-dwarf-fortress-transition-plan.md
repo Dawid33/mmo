@@ -1,8 +1,8 @@
 # Dwarf Fortress direction — fortress-mode MVP transition plan
 
-> **Status: PROPOSED (2026-10-20), awaiting Dawid's approval.** Once approved it becomes the
-> project direction: update the CLAUDE.md "Direction" paragraph, `TODO.md` and the memory note
-> `game-direction-pivot` then.
+> **Status: REJECTED (2026-10-20).** Dawid rejected this phased plan. The project instead
+> implements features **piece by piece, roughly modelling Dwarf Fortress** — no fixed phase
+> sequence. Kept for reference only; the research folder it cites still stands.
 
 Research behind every decision here: `2026-10-20-dwarf-fortress-research/` (start at
 `00-synthesis.md`; engine decisions in `engine-mapping.md`). The deprecated RTS plan lives on
