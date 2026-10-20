@@ -55,7 +55,9 @@ export VOXEL_WORLD_FILE := world_file
 # AREA (x4 at 64, ~x15 at 128): compare perf numbers only within one region size.
 #
 # Two defaults: recipes that PLAY the game (server, client, run, *-release,
-# web*, diag, perf-capture, fly-probe, shuttle-probe, play-test) build with
+# web*, diag, perf-capture, fly-probe, shuttle-probe, play-test, the profilers
+# trace-chrome / trace-join / perf / perf-client / perf-server / profile-* /
+# tracy-client, and cross-section) build with
 # `play_chunks` = 128 (256 m regions, one-region near window — see
 # `DEFAULT_NEAR_RADIUS` in crates/client/src/world_scale.rs); everything else —
 # tests, check, clippy, render-bench, raw cargo — stays at `test_chunks` = 32.
@@ -360,9 +362,10 @@ world-map *args:
 # Vertical slice of the generated ground (soil, forge rock layers, bedrock) as a
 # PNG in target/cross-section/, read through the engine's own Column/ColumnGround.
 # Flags: --world <file> --region X,Z --axis x|z --at <block> --out <png>; without
-# --world it uses worlds/default.world if present, else procedural.
+# --world it uses worlds/default.world if present, else procedural. Built with
+# `play_chunks`, so --region / --at address the same grid as `just run`.
 cross-section *args:
-    {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
+    VOXEL_REGION_CHUNKS={{play_chunks}} {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
 
 # Feature census of Blockbench/Bedrock model files (.bbmodel, .geo.json,
 # .animation.json): which format features each file uses, so a model loader
@@ -842,6 +845,7 @@ gpu-log:
 trace-chrome:
     #!/usr/bin/env bash
     set -uo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/trace
     json=target/trace/client.json
@@ -873,6 +877,7 @@ join_ms := "30000"
 trace-join:
     #!/usr/bin/env bash
     set -uo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/trace
     json=target/trace/client.json
@@ -900,6 +905,7 @@ profile-down:
 profile-client:
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin server &
     server_pid=$!
@@ -910,6 +916,7 @@ profile-client:
 profile-server:
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client &
     client_pid=$!
@@ -929,6 +936,7 @@ profile-server:
 tracy-client detailed="":
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     feat="tracy"
     if [ -n "{{detailed}}" ]; then feat="tracy-detailed"; fi
@@ -942,7 +950,7 @@ tracy-client detailed="":
 # Uses the `profiling` cargo profile (release + debug info): dev's opt-level 1
 # distorts hot loops ~2.5x, so debug captures don't represent production.
 perf:
-    {{cap}} {{cargo}} build --bin client --profile profiling
+    VOXEL_REGION_CHUNKS={{play_chunks}} {{cap}} {{cargo}} build --bin client --profile profiling
     sudo perf script record -F9997 --call-graph dwarf,16384 -e cpu-clock ./target/profiling/client
     sudo chmod +r perf.data
     hotspot
@@ -963,6 +971,7 @@ perf:
 perf-client:
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server --profile profiling
     RUST_BACKTRACE=1 ./target/profiling/server &
@@ -979,6 +988,7 @@ perf-client:
 perf-server:
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server --profile profiling
     RUST_BACKTRACE=1 ./target/profiling/client &

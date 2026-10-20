@@ -5,6 +5,9 @@
 
 
 # export PYROSCOPE=true
+# Play builds use 256 m regions, as the justfile's play recipes (`play_chunks`);
+# an exported VOXEL_REGION_CHUNKS wins.
+export VOXEL_REGION_CHUNKS="${VOXEL_REGION_CHUNKS:-128}"
 {
 # Server first: it takes the build lock first and is listening by the time the
 # client connects (the client retries its connect either way).

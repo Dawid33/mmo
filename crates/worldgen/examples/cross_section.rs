@@ -7,6 +7,9 @@
 //!      just cross-section --world target/world-forge/xsec.world --region 1,0 --axis z --at 20
 //!
 //! Flags: --world <file> --region X,Z --axis x|z --at <block in region> --out <png> --seed <hex>.
+//! `just cross-section` builds at the play region size (`play_chunks`), so
+//! `--region` / `--at` address the same grid as the game; an `--at` outside
+//! the region is an error.
 //! Axis x runs the image along +x at a fixed z (`--at`, default the region
 //! centre); axis z runs along +z at a fixed x. One pixel per block, from the
 //! highest surface + 8 down to the deepest bedrock + 2. Also prints the stratum
@@ -76,7 +79,11 @@ fn main() {
     let by_coords: BTreeMap<(usize, usize), &Column> = columns.iter().map(|(c, col)| ((c.x, c.z), col)).collect();
 
     let n = REGION_CHUNKS * CHUNK_BLOCKS; // blocks along an edge
-    let at = at.unwrap_or(n / 2).min(n - 1);
+    let at = at.unwrap_or(n / 2);
+    if at >= n {
+        eprintln!("--at {at} is outside the region: blocks run 0..{n} (REGION_CHUNKS = {REGION_CHUNKS})");
+        std::process::exit(2);
+    }
     // Block (u, v) of the region -> (x, z) by axis.
     let block_xz = |u: usize| if axis_x { (u, at) } else { (at, u) };
     let read = |u: usize, y: i32| -> Block {
@@ -85,7 +92,7 @@ fn main() {
         let (lx, lz) = (bx % CHUNK_BLOCKS, bz % CHUNK_BLOCKS);
         let ground = col.ground();
         match ground {
-            Some(g) if y.div_euclid(CHUNK_BLOCKS as i32) < g.band_base_sub_y => g.block_at(lx, lz, y),
+            Some(g) if g.is_implied(y.div_euclid(CHUNK_BLOCKS as i32)) => g.block_at(lx, lz, y),
             _ => col.get(BlockPos::new(lx as i32, y, lz as i32)),
         }
     };
