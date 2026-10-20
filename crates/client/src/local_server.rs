@@ -206,13 +206,7 @@ fn terrain_materials() -> (worldgen::material::Materials, String) {
             .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
     };
     (
-        worldgen::material::Materials {
-            stone: resolve("stone"),
-            dirt: resolve("dirt"),
-            grass: resolve("grass"),
-            sand: resolve("sand"),
-            water: resolve("water"),
-        },
+        worldgen::material::Materials::from_names(resolve),
         crate::blocks::manifest_src(),
     )
 }

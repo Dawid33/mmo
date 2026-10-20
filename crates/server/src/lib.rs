@@ -304,13 +304,7 @@ pub fn run() {
             .id_of(name)
             .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
     };
-    let materials = worldgen::material::Materials {
-        stone: resolve("stone"),
-        dirt: resolve("dirt"),
-        grass: resolve("grass"),
-        sand: resolve("sand"),
-        water: resolve("water"),
-    };
+    let materials = worldgen::material::Materials::from_names(resolve);
     let world_seed = worldgen::WORLD_SEED;
     let gen_cache = worldgen::cache::WorldgenCache::from_env(world_seed, &manifest);
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();

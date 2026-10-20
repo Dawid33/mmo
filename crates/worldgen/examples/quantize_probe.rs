@@ -61,6 +61,8 @@ fn main() {
         grass: BlockId(3),
         sand: BlockId(4),
         water: WATER,
+        bedrock: game::BlockId(6),
+        rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
     };
     let t = Instant::now();
     let base: Vec<(ChunkCoords, Chunk)> = worldgen::generate_region(rc, worldgen::WORLD_SEED, mats)

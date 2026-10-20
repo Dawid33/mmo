@@ -11,9 +11,26 @@ pub struct Materials {
     pub grass: BlockId,
     pub sand: BlockId,
     pub water: BlockId,
+    pub bedrock: BlockId,
+    /// Indexed like `forge::geology::ROCKS`.
+    pub rocks: [BlockId; 6],
 }
 
 impl Materials {
+    /// Resolve every material by block name (the registry lookup of the
+    /// server / local server / harnesses).
+    pub fn from_names(resolve: impl Fn(&str) -> BlockId) -> Materials {
+        Materials {
+            stone: resolve("stone"),
+            dirt: resolve("dirt"),
+            grass: resolve("grass"),
+            sand: resolve("sand"),
+            water: resolve("water"),
+            bedrock: resolve("bedrock"),
+            rocks: crate::forge::geology::ROCKS.map(|r| resolve(r.name)),
+        }
+    }
+
     /// Block placed at a solid voxel/block. `depth_below_surface == 0` is the
     /// topmost solid block of a column.
     pub fn material_at(&self, depth_below_surface: i32, block_y: i32) -> BlockId {
@@ -50,6 +67,8 @@ mod tests {
             grass: BlockId(3),
             sand: BlockId(4),
             water: BlockId(5),
+            bedrock: game::BlockId(6),
+            rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
         }
     }
 
@@ -78,5 +97,14 @@ mod tests {
         for name in ["stone", "dirt", "grass", "sand", "water"] {
             assert!(reg.id_of(name).is_some(), "manifest must define {name}");
         }
+    }
+
+    #[test]
+    fn manifest_defines_every_material() {
+        let manifest = include_str!("../../../assets/blocks/blocks.ron");
+        let reg = game::BlockRegistry::from_ron(manifest).expect("valid manifest");
+        let m = Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing {n}")));
+        assert_eq!(m.bedrock, BlockId(6));
+        assert_eq!(m.rocks, [7, 8, 9, 10, 11, 12].map(BlockId));
     }
 }

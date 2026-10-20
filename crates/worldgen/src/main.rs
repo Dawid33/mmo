@@ -8,6 +8,8 @@ fn main() {
         grass: game::BlockId(3),
         sand: game::BlockId(4),
         water: game::BlockId(5),
+        bedrock: game::BlockId(6),
+        rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
     };
     let seed = worldgen::WORLD_SEED;
     let n = 8; // regions per axis

@@ -41,13 +41,7 @@ fn region_tick_cost_fits_keepup_budget() {
             .id_of(name)
             .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
     };
-    let materials = worldgen::material::Materials {
-        stone: resolve("stone"),
-        dirt: resolve("dirt"),
-        grass: resolve("grass"),
-        sand: resolve("sand"),
-        water: resolve("water"),
-    };
+    let materials = worldgen::material::Materials::from_names(resolve);
     let rc = RegionCoords::new(0, 0);
     let columns = worldgen::generate_region(rc, worldgen::WORLD_SEED, materials);
     let mut region = Region::from_columns(rc, columns);
