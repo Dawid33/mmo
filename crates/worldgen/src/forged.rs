@@ -570,11 +570,23 @@ impl crate::Patch for ForgedPatch<'_> {
     }
 }
 
-/// The world named by `VOXEL_WORLD_FILE`, loaded once. `None` when the
-/// variable is unset or empty. A set-but-unreadable file is fatal: silently
-/// falling back to procedural terrain would mix two worlds in one save.
+static ACTIVE: OnceLock<Option<ForgedWorld>> = OnceLock::new();
+
+/// Choose the process's world before anything asks for it: `Some` serves that
+/// forged world, `None` pins procedural terrain (whatever `VOXEL_WORLD_FILE`
+/// says). Panics if [`active`] was already initialised — two worlds in one
+/// process would be a save mixing both.
+pub fn install(world: Option<ForgedWorld>) {
+    if ACTIVE.set(world).is_err() {
+        panic!("forged::install called after the active world was already chosen");
+    }
+}
+
+/// The world in use, loaded once: whatever [`install`] set, else the file named
+/// by `VOXEL_WORLD_FILE` (tools and tests). `None` when neither applies. A
+/// set-but-unreadable file is fatal: silently falling back to procedural
+/// terrain would mix two worlds in one save.
 pub fn active() -> Option<&'static ForgedWorld> {
-    static ACTIVE: OnceLock<Option<ForgedWorld>> = OnceLock::new();
     ACTIVE
         .get_or_init(|| {
             let path = std::env::var(WORLD_FILE_ENV).ok().filter(|p| !p.is_empty())?;

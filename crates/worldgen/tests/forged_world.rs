@@ -304,3 +304,14 @@ fn old_artifact_version_fails_loudly() {
     let err = WorldArtifact::from_bytes(&artifact.to_bytes()).unwrap_err().to_string();
     assert!(err.contains("re-forge"), "{err}");
 }
+
+/// `install` pins the process's world once; a second choice is a bug. (No
+/// other test in this binary calls `forged::active()`, which would
+/// initialise it from the environment first.)
+#[test]
+fn install_pins_the_world_once() {
+    worldgen::forged::install(None);
+    assert!(worldgen::forged::active().is_none());
+    let again = std::panic::catch_unwind(|| worldgen::forged::install(None));
+    assert!(again.is_err(), "a second install must panic");
+}

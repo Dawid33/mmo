@@ -29,13 +29,14 @@ adapter := env_var_or_default("VOXEL_ADAPTER", "")
 world := ""
 export VOXEL_WORLD := world
 
-# Forged world file to serve instead of procedural terrain (empty = procedural).
-# A world file is one finite pre-generated world (16 km, ocean all round) written
-# by `just forge-proto`; the server (and the offline local server) read it via
-# VOXEL_WORLD_FILE — see crates/worldgen/src/forged.rs. e.g.
+# World the server serves. Empty (default) = the default forged world,
+# worlds/default.world, forged on first start if missing (a minute or more).
+# `procedural` = the noise world. Any other value = that world file (e.g. one
+# from `just forge-proto`, one finite 16 km world, ocean all round):
 #   just forge-proto --seed D5C0DE021A --out target/world-forge/best
 #   just world_file=target/world-forge/best.world run
 # Defaults to $VOXEL_WORLD_FILE. Relative paths resolve from the repo root.
+# Tests and the wasm/offline client never go through the server: procedural.
 world_file := env_var_or_default("VOXEL_WORLD_FILE", "")
 export VOXEL_WORLD_FILE := world_file
 

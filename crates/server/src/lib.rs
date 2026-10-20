@@ -48,6 +48,7 @@ pub mod lod_workers;
 pub mod perf;
 pub mod region_threads;
 pub mod webtransport;
+pub mod world_file;
 
 /// One connected client's outgoing half, transport-agnostic. The router
 /// writes bincode ServerPackets; each variant frames them as one
@@ -305,6 +306,23 @@ pub fn run() {
             .unwrap_or_else(|| panic!("block manifest must define \"{name}\""))
     };
     let materials = worldgen::material::Materials::from_names(resolve);
+    // The world must be chosen before anything calls `forged::active()`.
+    match world_file::resolve(std::env::var(worldgen::forged::WORLD_FILE_ENV).ok().as_deref()) {
+        world_file::WorldSource::Procedural => {
+            info!("[server] world: procedural");
+            worldgen::forged::install(None);
+        }
+        world_file::WorldSource::Forged(path) => {
+            let path = world_file::from_repo_root(&path);
+            world_file::ensure_forged(&path, &worldgen::forge::ForgeParams::default())
+                .unwrap_or_else(|e| panic!("{e}"));
+            let world = worldgen::forged::ForgedWorld::load(&path).unwrap_or_else(|e| {
+                panic!("{}: {e} — delete it to forge a new default world", path.display())
+            });
+            info!("[server] world: forged {}", path.display());
+            worldgen::forged::install(Some(world));
+        }
+    }
     let world_seed = worldgen::WORLD_SEED;
     let gen_cache = worldgen::cache::WorldgenCache::from_env(world_seed, &manifest);
     let (lod_result_send, lod_result_recv) = crossbeam::channel::unbounded();
