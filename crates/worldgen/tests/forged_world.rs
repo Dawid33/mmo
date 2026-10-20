@@ -305,6 +305,63 @@ fn old_artifact_version_fails_loudly() {
     assert!(err.contains("re-forge"), "{err}");
 }
 
+#[test]
+fn unsorted_rock_column_fails_loudly() {
+    let mut artifact = synthetic();
+    artifact.column.reverse(); // ascending tops
+    let err = WorldArtifact::from_bytes(&artifact.to_bytes()).unwrap_err().to_string();
+    assert!(err.contains("not sorted by descending top"), "{err}");
+    artifact.column = vec![(-5.0, SANDSTONE), (f32::NAN, SHALE)];
+    assert!(WorldArtifact::from_bytes(&artifact.to_bytes()).is_err(), "a NaN top is unsorted");
+}
+
+#[test]
+#[should_panic(expected = "empty rock column")]
+fn forged_world_new_rejects_an_empty_rock_column() {
+    let mut artifact = synthetic();
+    artifact.column.clear();
+    ForgedWorld::new(artifact);
+}
+
+#[test]
+#[should_panic(expected = "not sorted by descending top")]
+fn forged_world_new_rejects_an_unsorted_rock_column() {
+    let mut artifact = synthetic();
+    artifact.column.reverse();
+    ForgedWorld::new(artifact);
+}
+
+#[test]
+fn save_is_atomic_and_leaves_no_temp_file() {
+    let dir = std::env::temp_dir().join(format!("mmo-forged-save-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("w.world");
+    let artifact = synthetic();
+    artifact.save(&path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), artifact.to_bytes());
+    assert!(!worldgen::forged::save_temp_path(&path).exists(), "the temp file is renamed away");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "only the world file remains");
+    // A save that cannot land (target is a directory) cleans its temp file up.
+    let blocked = dir.join("blocked.world");
+    std::fs::create_dir(&blocked).unwrap();
+    assert!(artifact.save(&blocked).is_err());
+    assert!(!worldgen::forged::save_temp_path(&blocked).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn world_file_env_values() {
+    use worldgen::forged::{from_repo_root, world_file_path, PROCEDURAL_KEYWORD};
+    assert_eq!(world_file_path(None), None);
+    assert_eq!(world_file_path(Some("")), None);
+    assert_eq!(world_file_path(Some(PROCEDURAL_KEYWORD)), None, "procedural is no world file");
+    let rel = world_file_path(Some("worlds/x.world")).unwrap();
+    assert_eq!(rel, from_repo_root(std::path::Path::new("worlds/x.world")));
+    assert!(rel.ends_with("worlds/x.world") && rel.is_absolute(), "relative paths resolve from the repo root");
+    assert_eq!(world_file_path(Some("/abs/x.world")).unwrap(), std::path::PathBuf::from("/abs/x.world"));
+}
+
 /// `install` pins the process's world once; a second choice is a bug. (No
 /// other test in this binary calls `forged::active()`, which would
 /// initialise it from the environment first.)

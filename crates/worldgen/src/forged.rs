@@ -16,7 +16,7 @@
 //! serve that world (the `seed` argument is then ignored); unset, nothing
 //! changes. Only + - * /, floor and sqrt are used on the sampling path.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -164,6 +164,16 @@ impl WorldArtifact {
             .map_err(|e| ArtifactError::Format(format!("corrupt body: {e}")))?;
         let artifact: WorldArtifact =
             bincode::deserialize(&body).map_err(|e| ArtifactError::Format(format!("corrupt body: {e}")))?;
+        artifact.validate()?;
+        Ok(artifact)
+    }
+
+    /// The invariants every reader relies on (`from_bytes` and
+    /// `ForgedWorld::new` both check them): rasters of `n * n`, known rocks,
+    /// and a non-empty rock column sorted by descending top (the strata
+    /// lookups binary-search it).
+    pub fn validate(&self) -> Result<(), ArtifactError> {
+        let artifact = self;
         let cells = artifact.n as usize * artifact.n as usize;
         if [&artifact.height, &artifact.lake_level, &artifact.uplifted, &artifact.bedding]
             .iter()
@@ -183,12 +193,31 @@ impl WorldArtifact {
         if let Some(&(_, rock)) = artifact.column.iter().find(|&&(_, rock)| rock as usize >= known) {
             return Err(ArtifactError::Format(format!("rock index {rock} out of range")));
         }
-        Ok(artifact)
+        // `!(a >= b)` also rejects a NaN top.
+        if artifact.column.windows(2).any(|w| !(w[0].0 >= w[1].0)) {
+            return Err(ArtifactError::Format("rock column not sorted by descending top".into()));
+        }
+        Ok(())
     }
 
+    /// Writes the world file atomically: the bytes go to a temp file next to
+    /// `path`, then a rename puts it in place, so an interrupted save never
+    /// leaves a truncated world behind (a stale temp file at worst).
     pub fn save(&self, path: &Path) -> Result<(), ArtifactError> {
-        std::fs::write(path, self.to_bytes()).map_err(ArtifactError::Io)
+        let tmp = save_temp_path(path);
+        let written = std::fs::write(&tmp, self.to_bytes()).and_then(|()| std::fs::rename(&tmp, path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written.map_err(ArtifactError::Io)
     }
+}
+
+/// The temp file [`WorldArtifact::save`] writes before renaming it to `path`:
+/// same directory (so the rename stays on one filesystem), `.<name>.tmp`.
+pub fn save_temp_path(path: &Path) -> PathBuf {
+    let name = path.file_name().map_or_else(|| "world".into(), |n| n.to_string_lossy().into_owned());
+    path.with_file_name(format!(".{name}.tmp"))
 }
 
 /// One straight piece of a river centerline, in artifact meters.
@@ -222,7 +251,13 @@ pub struct PointSample {
 }
 
 impl ForgedWorld {
+    /// # Panics
+    /// If `artifact` breaks an invariant [`WorldArtifact::validate`] checks
+    /// (the same ones a loaded file must pass).
     pub fn new(artifact: WorldArtifact) -> ForgedWorld {
+        if let Err(e) = artifact.validate() {
+            panic!("ForgedWorld::new: {e}");
+        }
         let content_crc = crc32fast::hash(&artifact.to_bytes());
         Self::with_crc(artifact, content_crc)
     }
@@ -570,6 +605,30 @@ impl crate::Patch for ForgedPatch<'_> {
     }
 }
 
+/// `VOXEL_WORLD_FILE` value that selects the procedural noise world.
+pub const PROCEDURAL_KEYWORD: &str = "procedural";
+
+/// Relative world paths resolve from the repo root (like the block manifest),
+/// so every process reads the same file whatever its working directory.
+pub fn from_repo_root(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path)
+    }
+}
+
+/// The world file a `VOXEL_WORLD_FILE` value names for [`active`]: `None` when
+/// unset, empty or [`PROCEDURAL_KEYWORD`], else the path from the repo root.
+/// (The server instead treats unset/empty as its default world file and
+/// installs its choice before anything calls `active`.)
+pub fn world_file_path(env_value: Option<&str>) -> Option<PathBuf> {
+    match env_value {
+        None | Some("") | Some(PROCEDURAL_KEYWORD) => None,
+        Some(path) => Some(from_repo_root(Path::new(path))),
+    }
+}
+
 static ACTIVE: OnceLock<Option<ForgedWorld>> = OnceLock::new();
 
 /// Choose the process's world before anything asks for it: `Some` serves that
@@ -583,14 +642,17 @@ pub fn install(world: Option<ForgedWorld>) {
 }
 
 /// The world in use, loaded once: whatever [`install`] set, else the file named
-/// by `VOXEL_WORLD_FILE` (tools and tests). `None` when neither applies. A
+/// by `VOXEL_WORLD_FILE` (tools and tests; see [`world_file_path`] — relative
+/// paths resolve from the repo root, `procedural` means none). `None` when
+/// neither applies. A
 /// set-but-unreadable file is fatal: silently falling back to procedural
 /// terrain would mix two worlds in one save.
 pub fn active() -> Option<&'static ForgedWorld> {
     ACTIVE
         .get_or_init(|| {
-            let path = std::env::var(WORLD_FILE_ENV).ok().filter(|p| !p.is_empty())?;
-            match ForgedWorld::load(Path::new(&path)) {
+            let file = world_file_path(std::env::var(WORLD_FILE_ENV).ok().as_deref())?;
+            let path = file.display();
+            match ForgedWorld::load(&file) {
                 Ok(world) => {
                     let a = world.artifact();
                     log::info!(
