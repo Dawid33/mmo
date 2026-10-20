@@ -126,6 +126,24 @@ impl Column {
         self
     }
 
+    /// A column built with its ground recipe attached BEFORE normalising, so
+    /// the band keeps its bottom: worldgen materialises a cliff's face down to
+    /// where the neighbouring terrain opens it, and those slices are uniform
+    /// stone that `new` would trim into implied ground behind open air.
+    /// `base_sub_y` stays `ground.band_base_sub_y`.
+    pub fn grounded(
+        base_sub_y: i32,
+        below: Block,
+        above: Block,
+        sub_chunks: Vec<SubChunk>,
+        ground: crate::ground::ColumnGround,
+    ) -> Self {
+        debug_assert_eq!(base_sub_y, ground.band_base_sub_y);
+        let mut c = Self { base_sub_y, below, above, sub_chunks, ground: Some(ground) };
+        c.normalize();
+        c
+    }
+
     pub fn ground(&self) -> Option<&crate::ground::ColumnGround> {
         self.ground.as_ref()
     }
@@ -151,7 +169,9 @@ impl Column {
 
     /// Canonicalize: collapse all-air `Dense` to `Air`, trim edge slices that
     /// read uniformly as the adjacent sentinel (advancing `base_sub_y` on the
-    /// low edge), and reset `base_sub_y` to 0 when the band is empty. Idempotent.
+    /// low edge — not with a ground recipe, whose band bottom is deliberate,
+    /// see `grounded`), and reset `base_sub_y` to 0 when the band is empty.
+    /// Idempotent.
     pub fn normalize(&mut self) {
         for s in &mut self.sub_chunks {
             if let SubChunk::Dense(c) = s {
@@ -163,7 +183,7 @@ impl Column {
         while matches!(self.sub_chunks.last(), Some(s) if s.is_uniform_block(self.above)) {
             self.sub_chunks.pop();
         }
-        while matches!(self.sub_chunks.first(), Some(s) if s.is_uniform_block(self.below)) {
+        while self.ground.is_none() && matches!(self.sub_chunks.first(), Some(s) if s.is_uniform_block(self.below)) {
             self.sub_chunks.remove(0);
             self.base_sub_y += 1;
         }
@@ -311,6 +331,15 @@ mod column_tests {
         assert!(col.sub_chunks.is_empty());
         assert_eq!(col.get(BlockPos::new(0, 0, 0)), stone());
         assert_eq!(col.get(BlockPos::new(0, 20, 0)), air());
+    }
+
+    #[test]
+    fn grounded_columns_keep_their_stone_bottom() {
+        let ground = crate::ground::ColumnGround::plain([4; 4], -1, BlockId(2), BlockId(6));
+        let col = Column::grounded(-1, stone(), air(), vec![dense_stone(), dense_stone(), SubChunk::Air], ground);
+        assert_eq!(col.base_sub_y(), -1, "uniform stone at the bottom stays materialised");
+        assert_eq!(col.sub_chunks.len(), 2, "the air top still trims");
+        assert_eq!(col.ground().unwrap().band_base_sub_y, col.base_sub_y());
     }
 
     #[test]

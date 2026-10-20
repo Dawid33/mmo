@@ -28,13 +28,20 @@ use game::{
 };
 
 use crate::material::Materials;
-use crate::pipeline::{ProfileGrid, TerrainPipeline, SEA_TOP_BLOCK};
+use crate::pipeline::{ProfileGrid, TerrainPipeline, PROFILE_LATTICE_BLOCKS, SEA_TOP_BLOCK};
 
 // Region span in blocks: REGION_CHUNKS chunks * CHUNK_BLOCKS blocks/chunk.
 const REGION_BLOCKS: i32 = (REGION_CHUNKS * CHUNK_BLOCKS) as i32; // 64
 // Coarse vertical scan bounds (blocks). Terrain lives well inside this band.
+// They bound surfaces only: the ground below a surface is the column's
+// `ColumnGround` recipe, which has no lower bound.
 const SCAN_TOP: i32 = 320;
 const SCAN_BOTTOM: i32 = -64;
+/// Margin (blocks) a region or cell patch covers past its window on every
+/// side, so the cliff rule can read the surfaces just outside it. One whole
+/// lattice step keeps the window on the world-aligned profile lattice, so the
+/// surfaces inside are bit-identical to a window without the margin.
+const PATCH_MARGIN: i32 = PROFILE_LATTICE_BLOCKS as i32;
 // Deepest non-stone material_at depth (dirt/sand band). Keep in sync with
 // material.rs's `depth_below_surface <= 3` bands.
 const MAX_SOIL_DEPTH: i32 = 3;
@@ -97,9 +104,15 @@ pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<
     if let Some(world) = forged::active() {
         return generate_region_forged(world, coords, mats);
     }
-    let (ox, oz) = ((coords.x * REGION_BLOCKS) as f64, (coords.z * REGION_BLOCKS) as f64);
-    let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, REGION_BLOCKS as f64);
+    let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS);
+    let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
     region_from_patch(&ProceduralPatch(grid), coords, mats)
+}
+
+/// Patch origin and span (meters) for the window of `span` blocks at world
+/// block `(x, z)`, margin included.
+fn patch_window(x: i32, z: i32, span: i32) -> (f64, f64, f64) {
+    ((x - PATCH_MARGIN) as f64, (z - PATCH_MARGIN) as f64, (span + 2 * PATCH_MARGIN) as f64)
 }
 
 /// One cell of `generate_region`: the `cell_chunks²` columns of `cell`
@@ -115,9 +128,11 @@ pub fn generate_cell(
     mats: Materials,
 ) -> Vec<(ColumnCoords, Column)> {
     let (x0, z0) = (cell.x as usize * cell_chunks, cell.z as usize * cell_chunks);
-    let ox = (coords.x * REGION_BLOCKS + (x0 * CHUNK_BLOCKS) as i32) as f64;
-    let oz = (coords.z * REGION_BLOCKS + (z0 * CHUNK_BLOCKS) as i32) as f64;
-    let span = (cell_chunks * CHUNK_BLOCKS) as f64;
+    let (ox, oz, span) = patch_window(
+        coords.x * REGION_BLOCKS + (x0 * CHUNK_BLOCKS) as i32,
+        coords.z * REGION_BLOCKS + (z0 * CHUNK_BLOCKS) as i32,
+        (cell_chunks * CHUNK_BLOCKS) as i32,
+    );
     let xs = x0..x0 + cell_chunks;
     let zs = z0..z0 + cell_chunks;
     if let Some(world) = forged::active() {
@@ -133,8 +148,8 @@ pub fn generate_region_forged(
     coords: RegionCoords,
     mats: Materials,
 ) -> Vec<(ColumnCoords, Column)> {
-    let (ox, oz) = ((coords.x * REGION_BLOCKS) as f64, (coords.z * REGION_BLOCKS) as f64);
-    region_from_patch(&world.patch(ox, oz, REGION_BLOCKS as f64), coords, mats)
+    let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS);
+    region_from_patch(&world.patch(ox, oz, span), coords, mats)
 }
 
 /// Material of a solid block: sand under standing water (lake and river
@@ -152,8 +167,16 @@ fn region_from_patch(patch: &dyn Patch, coords: RegionCoords, mats: Materials) -
 }
 
 /// The columns `xs × zs` (region-local chunk columns) of region `coords`,
-/// sampled from `patch` — which must cover them. `region_from_patch` is the
-/// whole range; `generate_cell` one cell's.
+/// sampled from `patch` — which must cover them plus `PATCH_MARGIN`.
+/// `region_from_patch` is the whole range; `generate_cell` one cell's.
+///
+/// Every column carries a `ColumnGround` recipe for the ground below its band
+/// (the sim reads missing chunks under the band from it), and the band's
+/// solids deeper than soil are that recipe's blocks, so band and implied
+/// ground never disagree. The band reaches down far enough that no air or
+/// water block faces implied ground: past the footprint's deepest soil, and
+/// to the lowest open block of every face-neighbouring block column (the
+/// cliff rule — a cliff's face is materialised, not implied).
 fn columns_from_patch(
     patch: &dyn Patch,
     coords: RegionCoords,
@@ -161,68 +184,96 @@ fn columns_from_patch(
     zs: std::ops::Range<usize>,
     mats: Materials,
 ) -> Vec<(ColumnCoords, Column)> {
-    let region_ox = coords.x * REGION_BLOCKS; // world block origin X
-    let region_oz = coords.z * REGION_BLOCKS;
+    let cb = CHUNK_BLOCKS as i32;
     let air = Block::new(BlockId::AIR);
     let stone = Block::new(mats.stone);
 
-    let mut columns = Vec::with_capacity(xs.len() * zs.len());
-    for cx in xs {
-        for cz in zs.clone() {
-            // This Column covers CHUNK_BLOCKS x CHUNK_BLOCKS blocks.
-            let col_ox = region_ox + (cx * CHUNK_BLOCKS) as i32;
-            let col_oz = region_oz + (cz * CHUNK_BLOCKS) as i32;
+    // Per-block-column surface block, whether it is whole (else a half block)
+    // and water top, over the window plus one block on every side (the
+    // cliff rule's neighbours). Index `[bx + 1][bz + 1]`, window-local blocks.
+    let (wx, wz) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
+    let (nx, nz) = (xs.len() * CHUNK_BLOCKS + 2, zs.len() * CHUNK_BLOCKS + 2);
+    let mut samples = vec![(0i32, true, 0i32); nx * nz];
+    for i in 0..nx {
+        for j in 0..nz {
+            let (bx, bz) = (wx + i as i32 - 1, wz + j as i32 - 1);
+            let (prof, water_top) = patch.sample(block_center_m(bx), block_center_m(bz));
+            let s = surface_from_profile(&prof);
+            debug_assert!(s >= SCAN_BOTTOM, "surface below the scan at block ({bx}, {bz})");
+            // Under water the surface block is always whole: a half block's
+            // empty upper half would be an air pocket.
+            let full = surface_is_full(&prof, s) || s <= water_top;
+            samples[i * nz + j] = (s, full, water_top);
+        }
+    }
+    let at = |bx: i32, bz: i32| samples[(bx + 1) as usize * nz + (bz + 1) as usize];
 
-            // Per-block-column surface blocks, whether each is whole (else a
-            // half block), and water tops within this footprint.
-            let mut surfaces = [[SCAN_BOTTOM - 1; CHUNK_BLOCKS]; CHUNK_BLOCKS];
-            let mut surface_full = [[true; CHUNK_BLOCKS]; CHUNK_BLOCKS];
-            let mut water_tops = [[SEA_TOP_BLOCK; CHUNK_BLOCKS]; CHUNK_BLOCKS];
+    let mut columns = Vec::with_capacity(xs.len() * zs.len());
+    for cx in xs.clone() {
+        for cz in zs.clone() {
+            // This Column covers CHUNK_BLOCKS x CHUNK_BLOCKS blocks, from
+            // window-local block (fx, fz).
+            let fx = (cx - xs.start) as i32 * cb;
+            let fz = (cz - zs.start) as i32 * cb;
+
             let mut lo = SCAN_TOP;
             let mut hi = SCAN_BOTTOM - 1;
-            for lx in 0..CHUNK_BLOCKS {
-                for lz in 0..CHUNK_BLOCKS {
-                    let (prof, water_top) = patch.sample(
-                        block_center_m(col_ox + lx as i32),
-                        block_center_m(col_oz + lz as i32),
-                    );
-                    let s = surface_from_profile(&prof);
-                    surfaces[lx][lz] = s;
-                    surface_full[lx][lz] = surface_is_full(&prof, s);
-                    water_tops[lx][lz] = water_top;
+            let mut open_lo = SCAN_TOP;
+            for lx in 0..cb {
+                for lz in 0..cb {
+                    let (s, _, water_top) = at(fx + lx, fz + lz);
                     lo = lo.min(s);
                     hi = hi.max(s.max(water_top)); // include the water column up to its surface
+                    // Cliff rule: the lowest block a face neighbour leaves open
+                    // (its half block's empty upper half included).
+                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let (ns, nfull, _) = at(fx + lx + dx, fz + lz + dz);
+                        open_lo = open_lo.min(if nfull { ns + 1 } else { ns });
+                    }
                 }
             }
             // Extend the band bottom past the shallowest surface in the footprint
             // so the deepest soil (dirt/sand) of the lowest column is still
-            // materialized, rather than falling below the band and reading as
-            // the `below = stone` sentinel.
-            lo -= MAX_SOIL_DEPTH;
+            // materialized, and down to every open neighbour block.
+            lo = (lo - MAX_SOIL_DEPTH).min(open_lo);
 
-            // Materialize block Ys [lo ..= hi]; below reads as stone sentinel,
-            // above as air. Whole blocks, and a half-block chisel (one
-            // cuboid) where the surface rounds to half a block.
-            let base_sub_y = lo.div_euclid(CHUNK_BLOCKS as i32);
-            let top_sub_y = hi.div_euclid(CHUNK_BLOCKS as i32);
+            // Materialize whole sub-chunks [base_sub_y ..= top_sub_y]; below is
+            // the ground recipe, above air. Whole blocks, and a half-block
+            // chisel (one cuboid) where the surface rounds to half a block.
+            let base_sub_y = lo.div_euclid(cb);
+            let top_sub_y = hi.div_euclid(cb);
             let n_sub = (top_sub_y - base_sub_y + 1) as usize;
             let mut chunks: Vec<Chunk> = (0..n_sub).map(|_| Chunk::default()).collect();
 
+            let mut surface = [0i16; CHUNK_BLOCKS * CHUNK_BLOCKS];
             for lx in 0..CHUNK_BLOCKS {
                 for lz in 0..CHUNK_BLOCKS {
-                    let surface = surfaces[lx][lz];
-                    // Under water the surface block is always whole: a half
-                    // block's empty upper half would be an air pocket.
-                    let full = surface_full[lx][lz] || surface <= water_tops[lx][lz];
-                    let water_top = water_tops[lx][lz];
-                    for by in lo..=hi {
-                        let sub_i = (by.div_euclid(CHUNK_BLOCKS as i32) - base_sub_y) as usize;
-                        let local_by = by.rem_euclid(CHUNK_BLOCKS as i32) as usize;
+                    surface[lx * CHUNK_BLOCKS + lz] = at(fx + lx as i32, fz + lz as i32).0 as i16;
+                }
+            }
+            let ground = game::ColumnGround {
+                surface,
+                geo: [0; CHUNK_BLOCKS * CHUNK_BLOCKS],
+                strata: vec![(i16::MAX, mats.stone)],
+                bedrock: mats.bedrock,
+                band_base_sub_y: base_sub_y,
+            };
+
+            for lx in 0..CHUNK_BLOCKS {
+                for lz in 0..CHUNK_BLOCKS {
+                    let (surface, full, water_top) = at(fx + lx as i32, fz + lz as i32);
+                    for by in base_sub_y * cb..=hi {
+                        let sub_i = (by.div_euclid(cb) - base_sub_y) as usize;
+                        let local_by = by.rem_euclid(cb) as usize;
                         let bi = BlockIndex::from_xyz(lx, local_by, lz);
                         let chunk = &mut chunks[sub_i];
-                        if by <= surface {
+                        let depth = surface - by;
+                        if depth > MAX_SOIL_DEPTH {
+                            // Below the soil: the recipe's rock (or bedrock).
+                            chunk.blocks[bi.0 as usize] = ground.block_at(lx, lz, by);
+                        } else if by <= surface {
                             // Solid: whole blocks, topped by a whole or half block.
-                            let mat = solid_material(&mats, surface - by, by, surface, water_top);
+                            let mat = solid_material(&mats, depth, by, surface, water_top);
                             chunk.blocks[bi.0 as usize] = Block::new(mat);
                             if by == surface && !full {
                                 let top = [BLOCK_VOXELS, HALF_BLOCK_VOXELS, BLOCK_VOXELS];
@@ -238,9 +289,8 @@ fn columns_from_patch(
             }
 
             let subs: Vec<SubChunk> = chunks.into_iter().map(|c| SubChunk::Dense(Box::new(c))).collect();
-            // `below = stone` so normalize() trims full-stone bottom slices to the
-            // sentinel; `above = air` trims air tops.
-            let column = Column::new(base_sub_y, stone, air, subs);
+            // `above = air` trims air tops; the bottom is kept (`grounded`).
+            let column = Column::grounded(base_sub_y, stone, air, subs, ground);
             columns.push((ColumnCoords::new(cx, cz), column));
         }
     }

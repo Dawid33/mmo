@@ -24,8 +24,10 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 
 /// `state_hash` after the scene's last tick. Re-recorded for the rapier 0.36
 /// / parry 0.31 switch (with the continuous-surfaces tie-break, `dt` =
-/// `TICK_DT` and the kinematic `can_sleep(false)` fix).
-const SCENE_HASH: u32 = 0x33DB_FC3F;
+/// `TICK_DT` and the kinematic `can_sleep(false)` fix), then for the lazy
+/// underground: columns carry `ColumnGround` recipes, keep their stone band
+/// bottoms, fill the band's bottom sub-chunk, and reach down cliff faces.
+const SCENE_HASH: u32 = 0xBCD4_E673;
 /// Ticks of scripted input.
 const SCENE_TICKS: usize = 60;
 
