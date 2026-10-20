@@ -169,7 +169,7 @@ fn cell_scene() -> (u32, u32) {
 }
 
 /// A 2x2-column region of implied ground (three strata over bedrock) dug
-/// straight down: each dig materialises chunks from the recipe, the last
+/// down a shaft that wanders across all four columns: each dig materialises chunks from the recipe, the last
 /// lands on bedrock and is refused. Returns `(digest, state_hash)`.
 fn underground_scene() -> (u32, u32) {
     let stone = BlockId(2);
@@ -191,17 +191,29 @@ fn underground_scene() -> (u32, u32) {
     let mut region = Region::from_columns(r0(), columns);
     // Surface block Y is 1, so bedrock starts at 1 - UNDERGROUND_DEPTH = -59.
     let ys = [1, -3, -8, -14, -20, -27, -33, -40, -47, -54, -58, -59];
-    let mut dug = 0;
+    let cb = game::CHUNK_BLOCKS as i32;
+    // Materialised chunks of the 2x2 columns over every chunk Y the shaft reaches.
+    let count = |region: &Region| {
+        let mut n = 0;
+        for x in 0..2 {
+            for z in 0..2 {
+                for cy in (-60i32).div_euclid(cb)..=1i32.div_euclid(cb) {
+                    n += region.data().chunk_key_at(ChunkCoords::new(x, cy, z)).is_some() as usize;
+                }
+            }
+        }
+        n
+    };
+    let before = count(&region);
     for (i, y) in ys.into_iter().enumerate() {
         // The shaft wanders across the four columns around their shared corner.
         let pos = [1 + (i as i32 % 2), y, 1 + (i as i32 % 3) / 2];
-        region.with_data(|d| {
-            if d.set_block_safe(pos, Block::new(BlockId::AIR)) {
-                dug += 1;
-            }
-        });
+        let mut changed = false;
+        region.with_data(|d| changed = d.set_block_safe(pos, Block::new(BlockId::AIR)));
+        assert_eq!(changed, i != ys.len() - 1, "dig {i} at y={y}: only the bedrock dig is refused");
     }
-    assert_eq!(dug, 11, "eleven digs land and the bedrock one is refused");
+    let after = count(&region);
+    assert!(after > before + 10, "digging must materialise implied ground: {before} -> {after} chunks");
     let data = region.data();
     let digest = crc32fast::hash(&game::SerializedRegion::from_rollback(data).0);
     let hash = state_hash(data);
