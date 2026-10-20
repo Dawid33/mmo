@@ -53,8 +53,18 @@ export VOXEL_WORLD_FILE := world_file
 # mismatched pair. The default mirrors `[env]` in .cargo/config.toml so `just`
 # and raw `cargo` share one build fingerprint. Per-region costs scale with
 # AREA (x4 at 64, ~x15 at 128): compare perf numbers only within one region size.
-region_chunks := env_var_or_default("VOXEL_REGION_CHUNKS", "32")
-export VOXEL_REGION_CHUNKS := region_chunks
+#
+# Two defaults: recipes that PLAY the game (server, client, run, *-release,
+# web*, diag, perf-capture, fly-probe, shuttle-probe, play-test) build with
+# `play_chunks` = 128 (256 m regions, one-region near window — see
+# `DEFAULT_NEAR_RADIUS` in crates/client/src/world_scale.rs); everything else —
+# tests, check, clippy, render-bench, raw cargo — stays at `test_chunks` = 32.
+# An explicit `just region_chunks=N <recipe>` (or $VOXEL_REGION_CHUNKS) wins for
+# every recipe.
+region_chunks := env_var_or_default("VOXEL_REGION_CHUNKS", "")
+test_chunks := if region_chunks == "" { "32" } else { region_chunks }
+play_chunks := if region_chunks == "" { "128" } else { region_chunks }
+export VOXEL_REGION_CHUNKS := test_chunks
 
 # Cell loading (phase 1b of docs/superpowers/specs/2026-09-25-island-regions-cell-loading-design.md):
 # a BUILD-time constant (`game::CELL_CHUNKS`), 0 = off. Every region then loads
@@ -129,7 +139,7 @@ check:
 
 # Run the QUIC server (listens on 127.0.0.1:6466, WebTransport ingress on :6467).
 server:
-    RUST_BACKTRACE=1 {{cargo}} run --bin server
+    VOXEL_REGION_CHUNKS={{play_chunks}} RUST_BACKTRACE=1 {{cargo}} run --bin server
 
 # Wipe the dev worldgen disk cache (target/worldgen-cache). The cache
 # self-invalidates when crates/worldgen or the block manifest change; use this
@@ -142,6 +152,7 @@ worldgen-cache-clear:
 client:
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client
 
@@ -151,6 +162,7 @@ client:
 run:
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/server &
@@ -165,12 +177,13 @@ run:
 
 # Run the QUIC server in release mode.
 server-release:
-    RUST_BACKTRACE=1 {{cargo}} run --release --bin server
+    VOXEL_REGION_CHUNKS={{play_chunks}} RUST_BACKTRACE=1 {{cargo}} run --release --bin server
 
 # Run the Bevy client in release mode.
 client-release:
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --release --bin client
 
@@ -178,6 +191,7 @@ client-release:
 run-release:
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --release --bin client --bin server
     RUST_BACKTRACE=1 ./target/release/server &
@@ -201,6 +215,7 @@ probe_features := ""
 fly-probe seconds="45":
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     out="target/fly-probe"; mkdir -p "$out"
     {{cap}} {{cargo}} build --release --bin server
@@ -229,6 +244,7 @@ fly-probe seconds="45":
 shuttle-probe boundary="region" seconds="45" overshoot="":
     #!/usr/bin/env bash
     set -euo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{overshoot}}" ]; then export VOXEL_AUTOPILOT_OVERSHOOT_M="{{overshoot}}"; fi
     out="target/shuttle-probe"; mkdir -p "$out"
@@ -250,6 +266,7 @@ shuttle-probe boundary="region" seconds="45" overshoot="":
 play-test:
     #!/usr/bin/env bash
     set -uo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     log_dir="target/play-test"
     mkdir -p "$log_dir"
@@ -463,13 +480,13 @@ render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
 # Needs: rustup target add wasm32-unknown-unknown; cargo install wasm-server-runner.
 # Serve the wasm client via wasm-server-runner (open http://127.0.0.1:1334/).
 web:
-    WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
+    VOXEL_REGION_CHUNKS={{play_chunks}} WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
         {{cargo}} run -p client --target wasm32-unknown-unknown
 
 # Needs: wasm-bindgen-cli and wasm-opt (binaryen) on PATH.
 # Build the optimized wasm release bundle into public/ (see scripts/web_release.rs).
 web-release:
-    {{cap}} {{cargo}} build -p client --profile wasm-release --target wasm32-unknown-unknown
+    VOXEL_REGION_CHUNKS={{play_chunks}} {{cap}} {{cargo}} build -p client --profile wasm-release --target wasm32-unknown-unknown
     wasm-bindgen --out-name client --out-dir public --target web \
         target/wasm32-unknown-unknown/wasm-release/client.wasm
     wasm-opt -O -ol 100 -s 100 -o public/client_bg.wasm public/client_bg.wasm
@@ -755,6 +772,7 @@ clippy:
 diag:
     #!/usr/bin/env bash
     set -uo pipefail
+    export VOXEL_REGION_CHUNKS={{play_chunks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/diag
     log=target/diag/client.log
@@ -788,8 +806,8 @@ diag:
 #
 # One-directory release perf capture (logs + manifest + RSS + verdict) -> target/perf-capture/.
 perf-capture:
-    {{cap}} {{cargo}} build --release --bin client --bin server
-    scripts/perf_capture.sh "{{adapter}}" "{{world}}"
+    VOXEL_REGION_CHUNKS={{play_chunks}} {{cap}} {{cargo}} build --release --bin client --bin server
+    VOXEL_REGION_CHUNKS={{play_chunks}} scripts/perf_capture.sh "{{adapter}}" "{{world}}"
 
 # The independent check on `just diag`'s GPU numbers, measured from outside the process,
 # and it needs no rebuild. Sustained Graphics-Pipe ~100% => GPU-bound; low while a core is
