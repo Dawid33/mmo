@@ -357,6 +357,13 @@ assets *args:
 world-map *args:
     {{cap}} {{cargo}} run --release -p worldgen --example world_map -- {{args}}
 
+# Vertical slice of the generated ground (soil, forge rock layers, bedrock) as a
+# PNG in target/cross-section/, read through the engine's own Column/ColumnGround.
+# Flags: --world <file> --region X,Z --axis x|z --at <block> --out <png>; without
+# --world it uses worlds/default.world if present, else procedural.
+cross-section *args:
+    {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
+
 # Feature census of Blockbench/Bedrock model files (.bbmodel, .geo.json,
 # .animation.json): which format features each file uses, so a model loader
 # knows what it must handle. Defaults to the local test corpus in
