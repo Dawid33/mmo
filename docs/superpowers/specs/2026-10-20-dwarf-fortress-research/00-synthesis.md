@@ -137,6 +137,11 @@ Detail and trade-offs in `engine-mapping.md`; the short form:
 8. **Fluids timing.** Flowing water is the most "DF" system after digging (floods are the
    classic disaster). Put it straight after the MVP (recommended) or earlier?
 
+## UI rule (added after the research)
+
+All player-facing UI is **Slint** (`crates/slint-ui`) where possible; Bevy-side UI is only the F3
+developer panel. See the note at the top of `engine-mapping.md` §8.
+
 ## Not done in this session
 
 - No throwaway spike (e.g. an A\* cost estimate on a real forged embark); estimates in

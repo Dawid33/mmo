@@ -393,6 +393,13 @@ kinds, creature behaviours — through host functions over `FortressState`.
 
 ## 8. Rendering and the view
 
+> **UI rule (Dawid, 2026-10-20, after this research):** every player-facing screen and panel —
+> world map, embark, unit sheets, tile inspector, menus, announcements, build/designation
+> toolbars — is built in **Slint** (`crates/slint-ui`, the `~/Projects/ui` widget library,
+> rendered by `renderer/slint_overlay.rs`) wherever Slint can do it. Bevy-side UI is only for the
+> F3 developer panel (`renderer/dev_ui.rs`). In-world overlays (designation tints, job markers,
+> cutaway) stay renderer work, as below.
+
 ### 8.1 Z-level cutaway
 
 Facts: the pulled-quad path draws per-chunk storage buffers of 8-byte quad records
