@@ -17,6 +17,9 @@ const RIVER_WIDTH_M: f32 = 8.0;
 const LAKE_CELLS: (std::ops::Range<usize>, std::ops::Range<usize>) = (30..36, 10..16);
 const LAKE_LEVEL: f32 = 16.6;
 const SPAWN: [f64; 2] = [512.0, 600.0];
+/// The synthetic geology: indices into `ROCKS` (= `rock_names`).
+const SANDSTONE: u8 = 0;
+const SHALE: u8 = 1;
 
 /// A plain rising eastward out of a western sea: h = 2 + 0.03 x.
 fn plain(ax: f64) -> f64 {
@@ -68,8 +71,8 @@ fn synthetic() -> WorldArtifact {
         lake_level,
         uplifted: vec![0.0; N * N],
         bedding: vec![0.0; N * N],
-        column: vec![(700.0, 0)],
-        rock_names: vec!["sandstone".into()],
+        column: vec![(-5.0, SANDSTONE), (-25.0, SHALE)],
+        rock_names: worldgen::forge::geology::ROCKS.iter().map(|r| r.name.to_string()).collect(),
         rivers: vec![RiverReach { order: 1, discharge_m2: 2.0e6, width_m: RIVER_WIDTH_M, points }],
         lakes: vec![Lake { level: LAKE_LEVEL, area_m2: 36.0 * 256.0, max_depth: 5.0, outlet: [480.0, 200.0] }],
         spawn: SPAWN,
@@ -240,4 +243,64 @@ fn lake_shows_in_regions_and_in_coarse_lod() {
         .filter(|&block| block == water)
         .count();
     assert!(lod_water > 1000, "{lod_water} water cells at the lake level in the factor-16 LOD");
+}
+
+/// Block at world block Y `y` of block column `(lx, lz)` of `col`: the band
+/// where it is materialised, the ground recipe below it.
+fn block_in(col: &Column, lx: usize, lz: usize, y: i32) -> BlockId {
+    let ground = col.ground().expect("every generated column carries ground");
+    if ground.is_implied(y.div_euclid(game::CHUNK_BLOCKS as i32)) {
+        ground.block_at(lx, lz, y).id
+    } else {
+        col.get(BlockPos::new(lx as i32, y, lz as i32)).id
+    }
+}
+
+#[test]
+fn shaft_crosses_soil_then_layers_then_bedrock() {
+    // No uplift or bedding: geo is the sea-level block 64, so s = y - 64 and
+    // sandstone holds s >= -25 (y >= 39), shale below.
+    let world = ForgedWorld::new(synthetic());
+    let columns = worldgen::generate_region_forged(&world, RegionCoords::new(0, 0), mats());
+    // Spawn block (8, 8): on the plain, well away from the river and the lake.
+    let (cc, col) = columns.iter().find(|(c, _)| c.x == 4 && c.z == 4).expect("spawn column");
+    assert_eq!((cc.x, cc.z), (4, 4));
+    let ground = col.ground().unwrap();
+    assert!(ground.geo.iter().all(|&g| g == 64), "geo {:?}", ground.geo);
+    let surface = i32::from(ground.surface[0]);
+    assert!(surface > 50 && surface - 60 < 38, "surface {surface} must cross both layers");
+    assert_eq!(col.get(BlockPos::new(0, surface + 1, 0)).id, BlockId::AIR, "surface {surface} is the top");
+
+    let m = mats();
+    let (sandstone, shale) = (m.rocks[SANDSTONE as usize], m.rocks[SHALE as usize]);
+    for y in (surface - 70..=surface).rev() {
+        let id = block_in(col, 0, 0, y);
+        let want = if y > surface - 4 {
+            assert!([m.grass, m.dirt, m.sand].contains(&id), "soil at y={y} (surface {surface}): {id:?}");
+            continue;
+        } else if y <= surface - 60 {
+            m.bedrock
+        } else if y >= 39 {
+            sandstone
+        } else {
+            shale
+        };
+        assert_eq!(id, want, "y={y} (surface {surface})");
+    }
+}
+
+#[test]
+fn unknown_rock_name_fails_loudly() {
+    let mut artifact = synthetic();
+    artifact.rock_names[0] = "marble".into();
+    let err = WorldArtifact::from_bytes(&artifact.to_bytes()).unwrap_err().to_string();
+    assert!(err.contains("unknown rock marble"), "{err}");
+}
+
+#[test]
+fn old_artifact_version_fails_loudly() {
+    let mut artifact = synthetic();
+    artifact.version = ARTIFACT_VERSION - 1;
+    let err = WorldArtifact::from_bytes(&artifact.to_bytes()).unwrap_err().to_string();
+    assert!(err.contains("re-forge"), "{err}");
 }

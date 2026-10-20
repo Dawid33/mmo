@@ -87,6 +87,27 @@ pub(crate) trait Patch {
     /// that column: `SEA_TOP_BLOCK` everywhere in a procedural world, higher
     /// over a forged world's lakes and rivers.
     fn sample(&self, x: f64, z: f64) -> (crate::pipeline::ColumnProfile, i32);
+
+    /// Stratigraphic offset (blocks) at world meters (x, z): the ground
+    /// recipe reads rock at block Y `y` from `strata` at `s = y - geo`.
+    fn geo(&self, _x: f64, _z: f64) -> i16 {
+        0
+    }
+
+    /// Rock formations top-down by top `s` (blocks): plain stone unless the
+    /// patch has real geology (a forged world).
+    fn strata(&self, mats: &Materials) -> Vec<(i16, BlockId)> {
+        vec![(i16::MAX, mats.stone)]
+    }
+}
+
+/// The formations of `strata` (top-down) that `s` in `lo_s..=hi_s` can hit
+/// under `ColumnGround::block_at`'s rule, plus one more above and below.
+fn footprint_strata(strata: &[(i16, BlockId)], lo_s: i32, hi_s: i32) -> Vec<(i16, BlockId)> {
+    let holding = |s: i32| strata.partition_point(|&(top, _)| i32::from(top) > s).saturating_sub(1);
+    let first = holding(hi_s).saturating_sub(1);
+    let last = (holding(lo_s) + 1).min(strata.len() - 1);
+    strata[first..=last].to_vec()
 }
 
 struct ProceduralPatch(ProfileGrid);
@@ -187,6 +208,7 @@ fn columns_from_patch(
     let cb = CHUNK_BLOCKS as i32;
     let air = Block::new(BlockId::AIR);
     let stone = Block::new(mats.stone);
+    let strata = patch.strata(&mats);
 
     // Per-block-column surface block, whether it is whole (else a half block)
     // and water top, over the window plus one block on every side (the
@@ -246,15 +268,24 @@ fn columns_from_patch(
             let mut chunks: Vec<Chunk> = (0..n_sub).map(|_| Chunk::default()).collect();
 
             let mut surface = [0i16; CHUNK_BLOCKS * CHUNK_BLOCKS];
+            let mut geo = [0i16; CHUNK_BLOCKS * CHUNK_BLOCKS];
             for lx in 0..CHUNK_BLOCKS {
                 for lz in 0..CHUNK_BLOCKS {
-                    surface[lx * CHUNK_BLOCKS + lz] = at(fx + lx as i32, fz + lz as i32).0 as i16;
+                    let (bx, bz) = (fx + lx as i32, fz + lz as i32);
+                    surface[lx * CHUNK_BLOCKS + lz] = at(bx, bz).0 as i16;
+                    geo[lx * CHUNK_BLOCKS + lz] = patch.geo(block_center_m(wx + bx), block_center_m(wz + bz));
                 }
             }
+            // Only the formations this footprint's ground can reach, from its
+            // highest surface down to bedrock under its lowest.
+            let (s_lo, s_hi) = (surface.iter().min().unwrap(), surface.iter().max().unwrap());
+            let (g_lo, g_hi) = (geo.iter().min().unwrap(), geo.iter().max().unwrap());
+            let lo_s = i32::from(*s_lo) - game::UNDERGROUND_DEPTH - i32::from(*g_hi);
+            let hi_s = i32::from(*s_hi) - i32::from(*g_lo);
             let ground = game::ColumnGround {
                 surface,
-                geo: [0; CHUNK_BLOCKS * CHUNK_BLOCKS],
-                strata: vec![(i16::MAX, mats.stone)],
+                geo,
+                strata: footprint_strata(&strata, lo_s, hi_s),
                 bedrock: mats.bedrock,
                 band_base_sub_y: base_sub_y,
             };

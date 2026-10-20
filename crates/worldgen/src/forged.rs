@@ -21,6 +21,10 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
+use game::BlockId;
+
+use crate::forge::geology::rock_index;
+use crate::material::Materials;
 use crate::noise::OctaveNoise;
 use crate::pipeline::{ColumnProfile, ProfileGrid, SEA_LEVEL, SEA_TOP_BLOCK};
 
@@ -107,11 +111,13 @@ pub struct WorldArtifact {
     /// Lake water surface per cell; NaN where there is no lake.
     pub lake_level: Vec<f32>,
     /// Geology: rock at (x, y, z) is `column` looked up at
-    /// `s = (y - uplifted) - bedding`. Not used by the engine yet (needs rock blocks).
+    /// `s = (y - uplifted) - bedding` (meters relative to sea level); regions
+    /// carry it in their ground recipes (`geo_offset_blocks`, `strata_blocks`).
     pub uplifted: Vec<f32>,
     pub bedding: Vec<f32>,
     /// Formations from the top down: (top s, index into `rock_names`).
     pub column: Vec<(f32, u8)>,
+    /// Names from `forge::geology::ROCKS`; an unknown one fails the load.
     pub rock_names: Vec<String>,
     pub rivers: Vec<RiverReach>,
     pub lakes: Vec<Lake>,
@@ -139,7 +145,7 @@ impl WorldArtifact {
     pub fn to_bytes(&self) -> Vec<u8> {
         let body = bincode::serialize(self).expect("artifact serializes");
         let mut out = MAGIC.to_vec();
-        out.extend_from_slice(&ARTIFACT_VERSION.to_le_bytes());
+        out.extend_from_slice(&self.version.to_le_bytes());
         out.extend_from_slice(&lz4_flex::compress_prepend_size(&body));
         out
     }
@@ -159,8 +165,23 @@ impl WorldArtifact {
         let artifact: WorldArtifact =
             bincode::deserialize(&body).map_err(|e| ArtifactError::Format(format!("corrupt body: {e}")))?;
         let cells = artifact.n as usize * artifact.n as usize;
-        if artifact.height.len() != cells || artifact.lake_level.len() != cells {
+        if [&artifact.height, &artifact.lake_level, &artifact.uplifted, &artifact.bedding]
+            .iter()
+            .any(|raster| raster.len() != cells)
+        {
             return Err(ArtifactError::Format("raster size does not match n".into()));
+        }
+        // Every rock must be one this build has a block for: an unknown name
+        // would otherwise quietly become some other stone.
+        if let Some(name) = artifact.rock_names.iter().find(|name| rock_index(name).is_none()) {
+            return Err(ArtifactError::Format(format!("unknown rock {name}")));
+        }
+        if artifact.column.is_empty() {
+            return Err(ArtifactError::Format("empty rock column".into()));
+        }
+        let known = artifact.rock_names.len();
+        if let Some(&(_, rock)) = artifact.column.iter().find(|&&(_, rock)| rock as usize >= known) {
+            return Err(ArtifactError::Format(format!("rock index {rock} out of range")));
         }
         Ok(artifact)
     }
@@ -262,9 +283,53 @@ impl ForgedWorld {
     }
 
     fn cell(&self, ix: i64, iz: i64) -> f64 {
-        let n = self.artifact.n as i64;
+        Self::raster_cell(&self.artifact.height, self.artifact.n, ix, iz)
+    }
+
+    /// One cell of an `n * n` raster, clamped to the edge.
+    fn raster_cell(raster: &[f32], n: u32, ix: i64, iz: i64) -> f64 {
+        let n = n as i64;
         let (ix, iz) = (ix.clamp(0, n - 1), iz.clamp(0, n - 1));
-        self.artifact.height[(iz * n + ix) as usize] as f64
+        raster[(iz * n + ix) as usize] as f64
+    }
+
+    /// Bilinear interpolation of `uplifted + bedding` between cell centers
+    /// (artifact meters), clamped to the edge outside the artifact.
+    fn geo_offset_m(&self, ax: f64, az: f64) -> f64 {
+        let a = &self.artifact;
+        let at = |ix: i64, iz: i64| {
+            Self::raster_cell(&a.uplifted, a.n, ix, iz) + Self::raster_cell(&a.bedding, a.n, ix, iz)
+        };
+        let (u, v) = (ax / a.cell_m - 0.5, az / a.cell_m - 0.5);
+        let (iu, iv) = (u.floor(), v.floor());
+        let (tu, tv) = (u - iu, v - iv);
+        let (iu, iv) = (iu as i64, iv as i64);
+        let row = |iz: i64| at(iu, iz) + tu * (at(iu + 1, iz) - at(iu, iz));
+        row(iv) + tv * (row(iv + 1) - row(iv))
+    }
+
+    /// Stratigraphic offset (blocks) of the engine column at world meters
+    /// `(x, z)`: rock at block Y `y` is `strata_blocks` looked up at
+    /// `s = y - geo`. The forge's `s` is meters relative to sea level, and
+    /// block `SEA_TOP_BLOCK + 1` is 0 m.
+    pub fn geo_offset_blocks(&self, x_m: f64, z_m: f64) -> i16 {
+        let (ax, az) = self.to_artifact(x_m, z_m);
+        let geo = self.geo_offset_m(ax, az).round() + (SEA_TOP_BLOCK + 1) as f64;
+        geo.clamp(i16::MIN as f64, i16::MAX as f64) as i16
+    }
+
+    /// The artifact's rock column in blocks: formation tops (in `s`, top
+    /// down) rounded to whole blocks, each rock resolved to its block.
+    pub fn strata_blocks(&self, mats: &Materials) -> Vec<(i16, BlockId)> {
+        let a = &self.artifact;
+        a.column
+            .iter()
+            .map(|&(top, rock)| {
+                let name = &a.rock_names[rock as usize];
+                let index = rock_index(name).unwrap_or_else(|| panic!("world file names unknown rock {name}"));
+                ((top as f64).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16, mats.rocks[index])
+            })
+            .collect()
     }
 
     /// Catmull-Rom interpolation of the height raster (artifact meters).
@@ -478,6 +543,14 @@ pub struct ForgedPatch<'a> {
 }
 
 impl crate::Patch for ForgedPatch<'_> {
+    fn geo(&self, x: f64, z: f64) -> i16 {
+        self.world.geo_offset_blocks(x, z)
+    }
+
+    fn strata(&self, mats: &Materials) -> Vec<(i16, BlockId)> {
+        self.world.strata_blocks(mats)
+    }
+
     fn sample(&self, x: f64, z: f64) -> (ColumnProfile, i32) {
         let prof = self.grid.profile_at(x, z);
         let (ax, az) = self.world.to_artifact(x, z);
