@@ -31,6 +31,7 @@ mod motion_probe;
 pub(crate) mod join_timeline;
 pub(crate) mod lod_rings;
 pub mod meshing;
+pub mod model;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod render_bench;
 mod skybox;
@@ -80,6 +81,7 @@ impl Plugin for SimBridgePlugin {
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
             voxel_pull::VoxelPullPlugin,
             far_voxel::FarVoxelPlugin,
+            model::BbModelPlugin,
         ))
         .insert_resource(ClientUpdates(self.client_recv.clone()))
         .insert_resource(GameEvents(self.game_send.clone()))

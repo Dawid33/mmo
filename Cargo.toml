@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/bbmodel",
   "crates/client",
   "crates/game",
   "crates/macros",
@@ -61,6 +62,7 @@ bevy = { version = "0.19.1", default-features = false, features = [
   "wayland",
 ] }
 block-mesh = { path = "crates/block-mesh", default-features = false }
+bbmodel = { path = "crates/bbmodel" }
 game = { path = "crates/game" }
 macros = { path = "crates/macros" }
 worldgen = { path = "crates/worldgen" }

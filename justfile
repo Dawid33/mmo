@@ -316,6 +316,22 @@ collider-bench:
 bench-column:
     {{cargo}} run --release -p worldgen --example column_bench
 
+# Look at a Blockbench model (crates/client/examples/model_view.rs): path relative
+# to the repo root; it turns on a floor, hot-reloads on save; `--shot out.png`
+# screenshots and exits. e.g.
+#   just model-view assets/models/soldier.bbmodel
+model-view path *args:
+    {{cap}} {{cargo}} build --example model_view -p client
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi; {{cargo}} run -q --example model_view -p client -- {{path}} {{args}}
+
+# Game models from a text prompt (tools/assets/generate.py): a Leonardo.ai picture,
+# then 3D AI Studio TRELLIS.2 image-to-3D -> assets/models/<name>.glb. Costs
+# credits; keys in the git-ignored repo-root .env; downloads kept in
+# tools/assets/raw/ and never asked for twice. e.g.
+#   just assets --list | --balance | --only archer --picture-only
+assets *args:
+    python3 tools/assets/generate.py {{args}}
+
 # Top-down PNG map of the generated world: colour relief + 16-bit heightmap +
 # terrain stats, into target/world-map/. Flags: --span <m> --size <px>
 # --center <x,z> --out <path stem> --seed <hex> --relief <factor>, e.g.

@@ -21,3 +21,8 @@ perf-folded-server.txt
 deploy/**/.terraform/
 deploy/**/*.tfstate
 deploy/**/*.tfstate.*
+
+# API keys (Leonardo.ai, 3D AI Studio) for tools/assets — never commit
+.env
+# Asset generation downloads (tools/assets/raw): paid for once, kept locally
+tools/assets/raw/

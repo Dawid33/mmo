@@ -12,6 +12,7 @@ name = "client"
 path = "src/main.rs"
 
 [dependencies]
+bbmodel = { workspace = true }
 game = { workspace = true }
 worldgen = { workspace = true }
 slotmapd = { workspace = true }
@@ -22,6 +23,7 @@ crc32fast = { workspace = true }
 bevy = { workspace = true }
 image = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 # F3 developer panel (`renderer/dev_ui.rs`). Dev tooling only — player-facing
 # UI is bevy_ui. The clipboard/open_url defaults are left out (extra deps).
 bevy_egui = { version = "0.42", default-features = false, features = ["render", "default_fonts", "picking"], optional = true }
@@ -30,7 +32,6 @@ bevy_egui = { version = "0.42", default-features = false, features = ["render", 
 quinn = { workspace = true }
 tokio = { workspace = true, features = ["time"] } # connect retry: timeout + sleep
 serde = { workspace = true, features = ["std"] }
-serde_json = { workspace = true }
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }
 # Only for the `gpu_error_panic` diagnostic feature; the version must be the one

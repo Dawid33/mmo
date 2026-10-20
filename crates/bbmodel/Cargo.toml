@@ -1,0 +1,17 @@
+[package]
+name = "bbmodel"
+version = "0.1.0"
+edition = "2024"
+description = "Blockbench .bbmodel reader: groups, cubes and mesh elements to textured triangles. Engine-free."
+
+[dependencies]
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
+base64 = "0.22"
+image = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+base64 = "0.22"
+image = { workspace = true }
