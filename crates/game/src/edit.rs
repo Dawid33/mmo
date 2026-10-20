@@ -259,16 +259,21 @@ impl Rollback {
         }
         let Some((coords, (bx, by, bz))) = locate(pos) else { return false };
         let breaking = block.id == BlockId::AIR;
-        if breaking {
-            // Refused before anything changes, implied bedrock included.
-            match self.current_block(coords, (bx, by, bz)) {
-                Some(current) if self.is_bedrock(coords, current) => return false,
-                _ => {}
+        // Bedrock takes no write at all, implied bedrock included; refused
+        // before anything changes.
+        if let Some(current) = self.current_block(coords, (bx, by, bz)) {
+            if self.is_bedrock(coords, current) {
+                return false;
             }
-            // An implied chunk becomes real before the write lands in it.
-            self.materialize_ground_safe(coords);
+            // An implied slot that already holds `block`: nothing to do.
+            if current == block && self.chunk_key_at(coords).is_none() {
+                return false;
+            }
         }
-        let changed = self.write_block_safe(coords, (bx, by, bz), block);
+        // An implied chunk becomes real before the write lands in it, so its
+        // other blocks keep the ground's values.
+        let materialised = self.materialize_ground_safe(coords).is_some();
+        let changed = self.write_block_safe(coords, (bx, by, bz), block) || materialised;
         if changed && breaking {
             // The new air must never border an implied chunk: materialise
             // every face neighbour in another chunk that still is one.

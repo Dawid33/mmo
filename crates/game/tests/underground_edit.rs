@@ -188,6 +188,57 @@ fn bedrock_cannot_be_broken() {
 }
 
 #[test]
+fn placing_into_implied_ground_keeps_the_siblings() {
+    let mut region = region(0..=1, 0..=1);
+    let c = ChunkCoords::new(0, -1, 0);
+    let expected: Vec<_> = (0..8)
+        .map(|i| (i & 1, (i >> 1) & 1, (i >> 2) & 1))
+        .map(|l| (l, region.data().implied_block(c, l).unwrap()))
+        .collect();
+    let dirt = Block::new(BlockId(1));
+    let mut placed = false;
+    region.with_data(|r| placed = r.set_block_safe([0, -2, 0], dirt));
+    assert!(placed);
+    let r = region.data();
+    let e = r.chunk_key_at(c).expect("the chunk materialised");
+    let chunk = r.ecs.chunk.try_get(e).clone().unwrap();
+    for ((bx, by, bz), want) in expected {
+        let want = if (bx, by, bz) == (0, 0, 0) { dirt } else { want };
+        assert_eq!(chunk.block_at(bx, by, bz), want, "block {:?}", (bx, by, bz));
+    }
+    assert!(exposed_implied(r).is_empty());
+    // Writing an implied slot's own block changes nothing and reports so.
+    let before = state_hash(region.data());
+    let mut same = true;
+    region.with_data(|r| same = r.set_block_safe([3, -2, 3], Block::new(STONE)));
+    assert!(!same);
+    assert!(!has_chunk(region.data(), ChunkCoords::new(1, -1, 1)));
+    assert_eq!(before, state_hash(region.data()));
+}
+
+#[test]
+fn bedrock_cannot_be_replaced() {
+    let mut region = region(0..=1, 0..=1);
+    let floor = SURFACE as i32 - UNDERGROUND_DEPTH;
+    let before = state_hash(region.data());
+    for pos in [[0, floor, 0], [1, floor - 3, 1]] {
+        let mut changed = true;
+        region.with_data(|r| changed = r.set_block_safe(pos, Block::new(STONE)));
+        assert!(!changed, "implied bedrock at {pos:?} takes no write");
+    }
+    assert_eq!(before, state_hash(region.data()));
+    for y in (floor + 1..=SURFACE as i32).rev() {
+        assert!(dig(&mut region, [0, y, 0]));
+    }
+    let before = state_hash(region.data());
+    let mut changed = true;
+    region.with_data(|r| changed = r.set_block_safe([0, floor, 0], Block::new(STONE)));
+    assert!(!changed, "materialised bedrock takes no write");
+    assert_eq!(before, state_hash(region.data()));
+    assert!(!dig(&mut region, [0, floor, 0]));
+}
+
+#[test]
 fn undo_of_a_materialising_dig_restores_the_hash() {
     let mut region = region(0..=1, 0..=1);
     // Block (0, -2, 0) is the bottom of implied chunk sub-Y -1: the dig
