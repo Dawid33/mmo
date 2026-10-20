@@ -26,8 +26,8 @@ use game::rapier3d::math::Vector;
 use glamx::Quat;
 use game::rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
 use game::{
-    state_hash, CellChanges, CellCoords, CellPayload, Chunk, ChunkCoords, DormantCell, GameEventKind, Key, Pose,
-    Region,
+    state_hash, Block, BlockId, CellChanges, CellCoords, CellPayload, Chunk, ChunkCoords, Column, ColumnCoords,
+    ColumnGround, DormantCell, GameEventKind, Key, Pose, Region, SubChunk,
 };
 use slotmapd::Key as _;
 
@@ -43,6 +43,10 @@ const SCENE_TICKS: usize = 120;
 const CELL_HASH: u32 = 0xC528_58CB;
 /// `game::state_hash` of [`cell_scene`]'s region, on every target.
 const CELL_STATE_HASH: u32 = 0xBC45_AAC8;
+/// crc32 of [`underground_scene`]'s region bytes, on every target.
+const UNDERGROUND_DIGEST: u32 = 0x8793_2833;
+/// `game::state_hash` of the same state, on every target.
+const UNDERGROUND_STATE_HASH: u32 = 0x569D_F632;
 
 /// Runs the scene; returns `(portable digest, state_hash)`.
 fn scene() -> (u32, u32) {
@@ -164,6 +168,49 @@ fn cell_scene() -> (u32, u32) {
     (hash, state)
 }
 
+/// A 2x2-column region of implied ground (three strata over bedrock) dug
+/// straight down: each dig materialises chunks from the recipe, the last
+/// lands on bedrock and is refused. Returns `(digest, state_hash)`.
+fn underground_scene() -> (u32, u32) {
+    let stone = BlockId(2);
+    let bedrock = BlockId(3);
+    let column = || {
+        // `below` differs from the band, or normalising trims the band chunk.
+        let band = SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, stone)));
+        let mut ground = ColumnGround::plain([1; 4], 0, stone, bedrock);
+        ground.geo = std::array::from_fn(|i| (i % 3) as i16);
+        ground.strata = vec![(0, stone), (-20, BlockId(4)), (-40, BlockId(5))];
+        Column::new(0, Block::new(BlockId(1)), Block::new(BlockId::AIR), vec![band]).with_ground(ground)
+    };
+    let mut columns = Vec::new();
+    for x in 0..2 {
+        for z in 0..2 {
+            columns.push((ColumnCoords::new(x, z), column()));
+        }
+    }
+    let mut region = Region::from_columns(r0(), columns);
+    // Surface block Y is 1, so bedrock starts at 1 - UNDERGROUND_DEPTH = -59.
+    let ys = [1, -3, -8, -14, -20, -27, -33, -40, -47, -54, -58, -59];
+    let mut dug = 0;
+    for (i, y) in ys.into_iter().enumerate() {
+        // The shaft wanders across the four columns around their shared corner.
+        let pos = [1 + (i as i32 % 2), y, 1 + (i as i32 % 3) / 2];
+        region.with_data(|d| {
+            if d.set_block_safe(pos, Block::new(BlockId::AIR)) {
+                dug += 1;
+            }
+        });
+    }
+    assert_eq!(dug, 11, "eleven digs land and the bedrock one is refused");
+    let data = region.data();
+    let digest = crc32fast::hash(&game::SerializedRegion::from_rollback(data).0);
+    let hash = state_hash(data);
+    if print_hash() {
+        log(&format!("UNDERGROUND_DIGEST = 0x{digest:08X}, UNDERGROUND_STATE_HASH = 0x{hash:08X}"));
+    }
+    (digest, hash)
+}
+
 /// Native prints on request; wasm32 always prints (node has no env to ask).
 #[cfg(not(target_arch = "wasm32"))]
 fn print_hash() -> bool {
@@ -217,4 +264,20 @@ fn cell_hash_wasm() {
     let (hash, state) = cell_scene();
     assert_eq!(hash, CELL_HASH, "wasm32 cell_hash 0x{hash:08X} != golden 0x{CELL_HASH:08X}");
     assert_eq!(state, CELL_STATE_HASH, "wasm32 state_hash 0x{state:08X} != golden 0x{CELL_STATE_HASH:08X}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn underground_hash_native() {
+    let (digest, hash) = underground_scene();
+    assert_eq!(digest, UNDERGROUND_DIGEST, "native digest 0x{digest:08X} != golden 0x{UNDERGROUND_DIGEST:08X}");
+    assert_eq!(hash, UNDERGROUND_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}");
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen_test::wasm_bindgen_test]
+fn underground_hash_wasm() {
+    let (digest, hash) = underground_scene();
+    assert_eq!(digest, UNDERGROUND_DIGEST, "wasm32 digest 0x{digest:08X} != golden 0x{UNDERGROUND_DIGEST:08X}");
+    assert_eq!(hash, UNDERGROUND_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}");
 }
