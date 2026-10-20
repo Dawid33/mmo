@@ -131,3 +131,8 @@ impl Geology {
         self.erodibility[self.surface_rock(w, i) as usize]
     }
 }
+
+/// Index of the rock called `name` in `ROCKS`.
+pub fn rock_index(name: &str) -> Option<usize> {
+    ROCKS.iter().position(|r| r.name == name)
+}

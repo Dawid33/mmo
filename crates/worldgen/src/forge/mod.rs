@@ -1,34 +1,23 @@
-//! World forge prototype (F1): a whole finite world — one "super region",
-//! 16 km, ocean all round — generated OFFLINE by simulating landscape
-//! evolution instead of evaluating noise per point. Touches no engine code and
-//! no world output: it writes PNGs, a river/lake object file and statistics,
-//! to find out what the real forge should be.
-//! Background: docs/superpowers/specs/2026-09-20-df-worldgen-research/00-synthesis.md
-//! (addendum) and docs/superpowers/specs/2026-09-20-world-forge-f0/findings.md.
-//!
-//! Run: just forge-proto                          (16 m cells, ~30 s)
-//!      just forge-proto --cell 32                (quick look, ~5 s)
-//!      just forge-proto --search 64              (rank 64 seeds at 32 m)
-//!      just forge-proto --no-geology --no-climate   (the F0 behaviour)
-//!      just forge-ui                             (tuning page: every knob as a
-//!                                                 slider, live map preview)
+//! The world forge: a whole finite world (default 16 km, ocean all round)
+//! generated OFFLINE by simulating landscape evolution instead of evaluating
+//! noise per point. `forge` runs the pipeline and `Forged::artifact` turns it
+//! into the stored world file the engine serves (`crate::forged`). The CLI,
+//! PNG rendering, seed search and tuning page live in
+//! `examples/forge_proto` (`just forge-proto`, `just forge-ui`).
 //!
 //! Pipeline:
-//!   1. world.rs    noise island inside a guaranteed ocean margin, low initial
-//!                  relief, an UPLIFT map with mountain belts inland;
-//!   2. geology.rs  rock column in a stratigraphic coordinate (tilt + folds,
-//!                  domed by the uplift) -> erodibility of whatever rock the
-//!                  surface currently cuts: geology BEFORE erosion;
-//!   3. climate.rs  orographic rain on the current heights -> discharge weights;
-//!   4. erosion.rs  per iteration: Priority-Flood routing, discharge, implicit
-//!                  stream-power incision, depression silting, hillslope diffusion;
-//!   5. post.rs     valley floors planed beside rivers; overdeepened basins
-//!                  flooded to their true spill level = lakes;
-//!   6. hydrology.rs  lakes and rivers as objects (Strahler order, width,
-//!                  monotone water surface, smoothed polylines) + statistics;
-//!   7. search.rs   generate-and-test over seeds.
-//!   knobs.rs holds every tunable (CLI `--set key=value`); serve.rs + ui.html
-//!   are the local tuning page.
+//!   1. world      noise island inside a guaranteed ocean margin, low initial
+//!                 relief, an UPLIFT map with mountain belts inland;
+//!   2. geology    rock column in a stratigraphic coordinate -> erodibility of
+//!                 whatever rock the surface currently cuts;
+//!   3. climate    orographic rain on the current heights -> discharge weights;
+//!   4. erosion    Priority-Flood routing, stream-power incision, depression
+//!                 silting, hillslope diffusion, per iteration;
+//!   5. post       valley floors planed beside rivers; overdeepened basins
+//!                 flooded to their spill level = lakes;
+//!   6. hydrology  lakes and rivers as objects + statistics;
+//!   7. spawn      a flat dry coastal site.
+//! `knobs` holds every tunable.
 //!
 //! Not bit-reproducible across machines by design (sqrt/ln/sin used freely):
 //! the forge's output is a stored artifact, not a function both sides evaluate.

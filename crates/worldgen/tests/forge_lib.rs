@@ -1,7 +1,7 @@
 //! The forge pipeline as a library: a small world forges, serialises and
 //! round-trips through the world-file format.
 
-use worldgen::forge::geology::ROCKS;
+use worldgen::forge::geology::{rock_index, ROCKS};
 use worldgen::forge::{forge, ForgeParams};
 use worldgen::forged::WorldArtifact;
 
@@ -21,4 +21,8 @@ fn forge_small_world_round_trips() {
     assert_eq!(back.rock_names, names);
     assert_eq!(back.height.len(), n * n);
     assert_eq!(back.to_bytes(), bytes);
+    for (i, r) in ROCKS.iter().enumerate() {
+        assert_eq!(rock_index(r.name), Some(i));
+    }
+    assert_eq!(rock_index("marble"), None);
 }
