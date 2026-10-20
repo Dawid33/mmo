@@ -15,6 +15,7 @@ mod avatar;
 mod block_textures;
 pub mod bridge;
 pub(crate) mod collider_debug;
+pub mod commander;
 pub(crate) mod cursor;
 #[cfg(feature = "dev_ui")]
 pub mod dev_ui;
@@ -72,6 +73,8 @@ pub struct SimBridgePlugin {
     pub client_recv: Receiver<ClientUpdateEvent>,
     pub game_send: Sender<GameEventKind>,
     pub debug_flags: game::DebugFlags,
+    /// Commander (the game) or the legacy first-person body view.
+    pub camera_mode: commander::CameraMode,
 }
 
 impl Plugin for SimBridgePlugin {
@@ -119,6 +122,7 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<lod_rings::HomeCellMask>()
         .init_resource::<grid_debug::TerrainDebug>()
         .init_resource::<join_timeline::WorldReady>()
+        .insert_resource(self.camera_mode)
         .add_systems(
             PreUpdate,
             (
@@ -198,6 +202,9 @@ impl Plugin for SimBridgePlugin {
             Update,
             motion_probe::probe_region_crossing.after(interpolate::interpolate_transforms),
         );
+        if self.camera_mode == commander::CameraMode::Commander {
+            app.add_plugins(commander::CommanderPlugin);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Update, config::configure_native_antialiasing);
         #[cfg(not(target_arch = "wasm32"))]

@@ -271,6 +271,16 @@ impl VoxelData {
     }
 }
 
+/// Marker: the local player's sim body. In commander mode it is hidden and
+/// gets no camera (the commander has no body to look through or show).
+#[derive(Component)]
+pub struct LocalBody;
+
+/// True when the game renders from the commander camera, not the body's.
+fn commander(mode: Option<&super::commander::CameraMode>) -> bool {
+    mode.is_some_and(|m| *m == super::commander::CameraMode::Commander)
+}
+
 /// Mirror of the sim's `EntityKind` for this entity. Consumed by the avatar
 /// system to attach a renderable mesh.
 #[derive(Component, Clone, Copy)]
@@ -470,6 +480,7 @@ pub fn drain_client_updates(
     mut snapshot_voxels: ResMut<SnapshotVoxelQueue>,
     mut retired_roots: ResMut<RetiredRegionRoots>,
     mut home_cells: ResMut<lod_rings::HomeCellMask>,
+    camera_mode: Option<Res<super::commander::CameraMode>>,
 ) {
     // Unbudgeted: drains everything the game thread queued since last frame.
     let mut stall = game::perf::StallGuard::new("drain_client_updates");
@@ -515,6 +526,7 @@ pub fn drain_client_updates(
                     &mut map,
                     player.0,
                     &mut snapshot_voxels,
+                    commander(camera_mode.as_deref()),
                 );
                 // Main-thread cost of one region: an entity per sim entity.
                 // The per-chunk voxel derivation runs off-thread (see
@@ -614,6 +626,7 @@ fn spawn_region_snapshot(
     map: &mut SimEntityMap,
     local_player: Option<game::ClientId>,
     voxel_queue: &mut SnapshotVoxelQueue,
+    commander: bool,
 ) {
     let mut chunk_entities: Vec<(Entity, EntityKey, Vec3)> = Vec::new();
     // Every player in the snapshot has a sim camera, but only the local
@@ -639,7 +652,9 @@ fn spawn_region_snapshot(
             chunk_entities.push((e.id(), key, local_position));
         }
         if let Some(cam) = data.ecs.camera.try_get(key) {
-            if Some(key) == local_camera_key {
+            if Some(key) == local_camera_key && commander {
+                e.insert((LocalBody, Visibility::Hidden));
+            } else if Some(key) == local_camera_key {
                 if let Some(handle) = cam.view_matrix {
                     if let Some(body) = data.physics.bodies.get(handle) {
                         let mut tf = iso_to_transform(body.position());
@@ -698,7 +713,9 @@ pub fn drain_region_updates(
     local_player: Res<LocalPlayer>,
     mut cursor_policy: ResMut<super::cursor::CursorPolicy>,
     mut voxel_queue: ResMut<SnapshotVoxelQueue>,
+    camera_mode: Option<Res<super::commander::CameraMode>>,
 ) {
+    let commander = commander(camera_mode.as_deref());
     // Local cameras inserted by Commands this drain, not yet queryable: a
     // position update for one must keep its camera target (eye offset,
     // smoothing) rather than overwrite it with a body target.
@@ -803,7 +820,15 @@ pub fn drain_region_updates(
                         continue;
                     };
                     let tf = iso_to_transform(&iso);
-                    if local_player.0 == Some(client_id) {
+                    if local_player.0 == Some(client_id) && commander {
+                        // The commander's own body: tracked, never shown.
+                        commands.entity(e).insert((
+                            tf,
+                            SimTarget::body(tf.translation, tf.rotation),
+                            LocalBody,
+                            Visibility::Hidden,
+                        ));
+                    } else if local_player.0 == Some(client_id) {
                         let target = SimTarget::camera(tf.translation, tf.rotation);
                         let tf = Transform { translation: target.goal(), ..tf };
                         new_cameras.push(e);

@@ -109,8 +109,13 @@ pub fn forward_input(
     player: Res<LocalPlayer>,
     game: Res<GameEvents>,
     cursor: Option<Res<super::cursor::CursorPolicy>>,
+    mode: Option<Res<super::commander::CameraMode>>,
 ) {
     let Some(player) = player.0 else { return };
+    // The commander drives no body: its keys, clicks and mouse travel are
+    // client-local (camera, minimap, selection) and must not walk the inert
+    // sim body or break blocks. Only the window size still reaches the sim.
+    let commander = mode.is_some_and(|m| *m == super::commander::CameraMode::Commander);
     // A client-local overlay (dev panel, chat) owns the pointer: its clicks and
     // the mouse travel to reach it must not break blocks or turn the camera.
     // Releases still go through so a button held when it opened never sticks.
@@ -119,6 +124,33 @@ pub fn forward_input(
         let _ = game.0.send(GameEventKind::PlayerInput(player, ev));
     };
 
+    if !commander {
+        forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, &mut coalescer, &window, overlay_open, &send);
+    }
+    if let Ok((w, _)) = window.single() {
+        let size = (w.physical_width(), w.physical_height());
+        if *last_size != Some(size) {
+            if last_size.is_some() {
+                send(InputEvent::Resized { width: size.0, height: size.1 });
+            }
+            *last_size = Some(size);
+        }
+    }
+}
+
+/// Keys, mouse motion and buttons for the walking body (first-person mode).
+#[allow(clippy::too_many_arguments)]
+fn forward_body_input(
+    keys: &ButtonInput<KeyCode>,
+    buttons: &ButtonInput<MouseButton>,
+    motion: &AccumulatedMouseMotion,
+    time: &Time,
+    coalesce_window: &MouseCoalesceWindow,
+    coalescer: &mut MouseCoalescer,
+    window: &Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
+    overlay_open: bool,
+    send: impl Fn(InputEvent),
+) {
     for code in keys.get_just_pressed() {
         if let Some(key) = map_key(*code) {
             send(InputEvent::Key { key, pressed: true });
@@ -142,7 +174,7 @@ pub fn forward_input(
     // `FpsCam` input never grabs — turned the player.
     let pointer_ours = window
         .single()
-        .is_ok_and(|(w, c)| w.focused && c.grab_mode != CursorGrabMode::None);
+        .is_ok_and(|(w, c)| w.focused && c.grab_mode == CursorGrabMode::Locked);
     let delta = if overlay_open || !pointer_ours { Vec2::ZERO } else { motion.delta };
     let pressing = !overlay_open && buttons.get_just_pressed().next().is_some();
     let window_len = if pressing { Duration::ZERO } else { coalesce_window.0 };
@@ -156,15 +188,6 @@ pub fn forward_input(
     }
     for b in buttons.get_just_released() {
         send(InputEvent::MouseButton { button: map_button(*b), pressed: false });
-    }
-    if let Ok((w, _)) = window.single() {
-        let size = (w.physical_width(), w.physical_height());
-        if *last_size != Some(size) {
-            if last_size.is_some() {
-                send(InputEvent::Resized { width: size.0, height: size.1 });
-            }
-            *last_size = Some(size);
-        }
     }
 }
 

@@ -48,7 +48,7 @@ pub fn integrate_local_look(
     // must not turn this camera either.
     let grabbed = cursor
         .single()
-        .is_ok_and(|(w, c)| w.focused && c.grab_mode != CursorGrabMode::None);
+        .is_ok_and(|(w, c)| w.focused && c.grab_mode == CursorGrabMode::Locked);
     let delta = if grabbed { motion.delta } else { Vec2::ZERO };
     if delta == Vec2::ZERO {
         look.idle = look.idle.saturating_add(time.delta());

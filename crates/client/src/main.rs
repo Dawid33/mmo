@@ -289,6 +289,7 @@ fn main() {
         client_recv,
         game_send: game_send.clone(),
         debug_flags: debug_flags.clone(),
+        camera_mode: renderer::commander::CameraMode::from_env(),
     });
     #[cfg(feature = "dev_ui")]
     app.add_plugins(renderer::dev_ui::DevUiPlugin);

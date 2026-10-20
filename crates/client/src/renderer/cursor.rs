@@ -1,5 +1,6 @@
 //! The one writer of the primary window's cursor grab. The sim asks for a
-//! grab (fps-cam toggle via `SetFreeCam`, inventory via `SetCursorGrab`);
+//! grab (fps-cam toggle via `SetFreeCam`, inventory via `SetCursorGrab`); the
+//! commander camera asks for a confined, visible pointer (edge panning);
 //! client-local overlays (the dev panel, later chat) hold the pointer on top
 //! of that. Both used to write `CursorOptions` directly, so an overlay would
 //! either fight the sim or lose its request on close.
@@ -12,11 +13,25 @@ pub struct CursorPolicy {
     pub sim_grab: bool,
     /// A client-local overlay needs a free pointer.
     pub overlay_open: bool,
+    /// Keep the (visible) pointer inside the window: the commander camera's
+    /// edge panning needs it. Only while the window is focused.
+    pub confine: bool,
 }
 
 impl CursorPolicy {
     pub fn grabbed(&self) -> bool {
         self.sim_grab && !self.overlay_open
+    }
+
+    /// The grab mode and cursor visibility the window should have.
+    pub fn mode(&self) -> (CursorGrabMode, bool) {
+        if self.grabbed() {
+            (CursorGrabMode::Locked, false)
+        } else if self.confine && !self.overlay_open {
+            (CursorGrabMode::Confined, true)
+        } else {
+            (CursorGrabMode::None, true)
+        }
     }
 }
 
@@ -27,11 +42,7 @@ pub fn apply_cursor_policy(
     policy: Res<CursorPolicy>,
     mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
-    let (grab_mode, visible) = if policy.grabbed() {
-        (CursorGrabMode::Locked, false)
-    } else {
-        (CursorGrabMode::None, true)
-    };
+    let (grab_mode, visible) = policy.mode();
     if let Ok(mut cursor) = windows.single_mut() {
         if cursor.grab_mode != grab_mode || cursor.visible != visible {
             cursor.grab_mode = grab_mode;
@@ -79,5 +90,15 @@ mod tests {
         app.world_mut().resource_mut::<CursorPolicy>().overlay_open = false;
         app.update();
         assert_eq!(grab_mode(&mut app), CursorGrabMode::Locked);
+    }
+
+    #[test]
+    fn confine_keeps_the_cursor_visible_and_yields_to_lock_and_overlays() {
+        let confined = CursorPolicy { confine: true, ..Default::default() };
+        assert_eq!(confined.mode(), (CursorGrabMode::Confined, true));
+        let locked = CursorPolicy { sim_grab: true, ..confined };
+        assert_eq!(locked.mode(), (CursorGrabMode::Locked, false));
+        let overlay = CursorPolicy { overlay_open: true, ..confined };
+        assert_eq!(overlay.mode(), (CursorGrabMode::None, true));
     }
 }
