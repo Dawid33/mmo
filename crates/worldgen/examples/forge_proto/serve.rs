@@ -18,10 +18,11 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
-use crate::geology::ROCKS;
-use crate::knobs::{CHOICES, SPECS};
-use crate::world::Params;
-use crate::{forge, render, search, Forged};
+use worldgen::forge::geology::ROCKS;
+use worldgen::forge::knobs::{CHOICES, SPECS};
+use crate::Params;
+use worldgen::forge::{forge, ForgeParams, Forged};
+use crate::{render, search};
 
 const PAGE: &str = include_str!("ui.html");
 /// Forged worlds kept for /image (each holds a few rasters; 64 m worlds are tiny).
@@ -157,7 +158,7 @@ fn parse_query(query: &str) -> Vec<(String, String)> {
 /// The page's query -> forge parameters. Knob values are clamped to their
 /// table range, so a typo cannot ask for a million iterations.
 fn params_from_query(base: &Params, query: &str) -> Result<Params, String> {
-    let mut p = Params { quiet: true, search: 0, serve: None, ..base.clone() };
+    let mut p = Params { forge: ForgeParams { quiet: true, ..base.forge.clone() }, search: 0, serve: None, out: base.out.clone() };
     for (key, value) in parse_query(query) {
         match key.as_str() {
             "seed" => {
@@ -289,7 +290,7 @@ fn forge_json(server: &Server, p: &Params, query: &str) -> String {
         Some(world) => world,
         None => {
             let _one_at_a_time = server.forging.lock().unwrap();
-            let world = Arc::new(forge(p));
+            let world = Arc::new(forge(&p.forge));
             let mut worlds = server.worlds.lock().unwrap();
             worlds.push((id.clone(), world.clone()));
             if worlds.len() > KEPT_WORLDS {
@@ -310,8 +311,8 @@ fn forge_json(server: &Server, p: &Params, query: &str) -> String {
 fn export_json(server: &Server, p: &Params) -> String {
     let _one_at_a_time = server.forging.lock().unwrap();
     let started = std::time::Instant::now();
-    let forged = forge(p);
-    let artifact = forged.artifact(p);
+    let forged = forge(&p.forge);
+    let artifact = forged.artifact(&p.forge);
     let path = format!("{}-ui-{:X}.world", server.base.out.to_string_lossy(), p.seed);
     if let Some(dir) = std::path::Path::new(&path).parent() {
         let _ = std::fs::create_dir_all(dir);

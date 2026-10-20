@@ -4,9 +4,11 @@
 //! mouths, longest river and biggest basin agree across 32/16/8 m cells), so a
 //! 5-second 32 m world predicts the 16 m or 8 m one forged from the same seed.
 
-use crate::hydrology::Stats;
-use crate::world::{smoothstep, Params};
-use crate::{forge, render};
+use worldgen::forge::hydrology::Stats;
+use worldgen::forge::world::smoothstep;
+use worldgen::forge::{forge, ForgeParams};
+use crate::Params;
+use crate::render;
 
 /// Cell size used for candidates.
 const SEARCH_CELL_M: f64 = 32.0;
@@ -19,7 +21,7 @@ const THUMBNAILS: usize = 3;
 /// a floor per term so one weak point lowers a world instead of zeroing it.
 pub fn criteria(s: &Stats, cells: usize) -> Vec<(&'static str, f64)> {
     let rocks = s.rock_shares.iter().filter(|&&share| share >= 0.04).count() as f64;
-    let one_island = s.layout == crate::knobs::LAYOUT_ONE_ISLAND;
+    let one_island = s.layout == worldgen::forge::knobs::LAYOUT_ONE_ISLAND;
     // Several islands share the sea between them: less land is right, and an
     // island a few km across cannot hold a 9 km river or an 18 km^2 basin.
     let (land, peaks, river, basin, lakes, buildable) = if one_island {
@@ -70,7 +72,7 @@ pub fn run(base: &Params) {
                 scope.spawn(move || {
                     let mut out = Vec::new();
                     for &seed in seeds.iter().skip(t).step_by(threads) {
-                        let p = Params { seed, cell_m: SEARCH_CELL_M, quiet: true, ..base.clone() };
+                        let p = ForgeParams { seed, cell_m: SEARCH_CELL_M, quiet: true, ..base.forge.clone() };
                         let forged = forge(&p);
                         let cells = forged.world.n * forged.world.n;
                         out.push((score(&forged.analysis.stats, cells), seed, forged.analysis.stats, cells));
@@ -109,7 +111,7 @@ pub fn run(base: &Params) {
     }
     let stem = base.out.to_string_lossy().to_string();
     for (rank, (_, seed, ..)) in results.iter().take(THUMBNAILS).enumerate() {
-        let p = Params { seed: *seed, cell_m: SEARCH_CELL_M, quiet: true, ..base.clone() };
+        let p = ForgeParams { seed: *seed, cell_m: SEARCH_CELL_M, quiet: true, ..base.forge.clone() };
         let forged = forge(&p);
         let path = format!("{stem}-search-{}-{seed:X}.png", rank + 1);
         render::relief(&forged.world, Some(&forged.analysis), &path, false);

@@ -7,6 +7,7 @@ mod noise;
 mod spline;
 mod density;
 pub mod cache;
+pub mod forge;
 pub mod forged;
 pub mod islands;
 pub mod pipeline;

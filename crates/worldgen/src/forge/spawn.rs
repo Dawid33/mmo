@@ -5,8 +5,8 @@
 
 use std::collections::VecDeque;
 
-use crate::hydrology::{Analysis, LAKE_MIN_DEPTH_M};
-use crate::world::{hash01, smoothstep, World};
+use crate::forge::hydrology::{Analysis, LAKE_MIN_DEPTH_M};
+use crate::forge::world::{hash01, smoothstep, World};
 
 /// Height band for a spawn site (m above sea).
 const SPAWN_HEIGHT_M: (f64, f64) = (3.0, 45.0);

@@ -1,9 +1,9 @@
 //! Shaping passes applied once, after the landscape evolution: valley floors
 //! and lake basins — features the erosion law does not make on its own.
 
-use crate::erosion::{discharge, route, FLOOD_EPSILON};
-use crate::knobs::Knobs;
-use crate::world::{hash01, smoothstep, World};
+use crate::forge::erosion::{discharge, route, FLOOD_EPSILON};
+use crate::forge::knobs::Knobs;
+use crate::forge::world::{hash01, smoothstep, World};
 
 // Valley floors: half-width `floodplain_m_per_sqrt_km2` per sqrt(km^2) of
 // discharge (a river draining 16 km^2 gets a ~110 m wide flat floor), capped

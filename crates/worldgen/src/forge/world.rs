@@ -1,14 +1,11 @@
 //! The simulated world grid, run parameters, and the initial condition.
 
-use std::path::PathBuf;
-
-use crate::knobs::{Knobs, LAYOUT_ARC, LAYOUT_ARCHIPELAGO, LAYOUT_ONE_ISLAND};
+use crate::forge::knobs::{Knobs, LAYOUT_ARC, LAYOUT_ARCHIPELAGO, LAYOUT_ONE_ISLAND};
 use crate::noise::OctaveNoise;
 
 pub const DEFAULT_SIZE_M: f64 = 16_000.0;
 pub const DEFAULT_CELL_M: f64 = 16.0;
 pub const DEFAULT_SEED: u64 = 0x00D5_C0DE_0206;
-pub const DEFAULT_OUT: &str = "target/world-forge/f1";
 
 /// The ocean margin ramps from fully open to fully drowned over this share of
 /// the half-width past `Knobs::ocean_margin_start`.
@@ -149,69 +146,27 @@ fn landmass(blobs: &[Blob], rx: f64, rz: f64) -> Landmass {
 const NEIGHBORS: [(i32, i32); 8] =
     [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
 
+/// What a forge run needs: world size, grid, seed and every knob.
 #[derive(Clone)]
-pub struct Params {
+pub struct ForgeParams {
     pub size_m: f64,
     pub cell_m: f64,
     pub seed: u64,
-    pub out: PathBuf,
     /// Every tunable of the simulation (knobs.rs).
     pub knobs: Knobs,
-    /// Try this many seeds at 32 m cells and rank them instead of forging one.
-    pub search: usize,
-    /// Serve the tuning page on this port instead of forging once.
-    pub serve: Option<u16>,
+    /// Skip the progress printouts.
     pub quiet: bool,
 }
 
-impl Params {
-    pub fn parse() -> Params {
-        let mut p = Params {
+impl Default for ForgeParams {
+    fn default() -> Self {
+        ForgeParams {
             size_m: DEFAULT_SIZE_M,
             cell_m: DEFAULT_CELL_M,
             seed: DEFAULT_SEED,
-            out: PathBuf::from(DEFAULT_OUT),
             knobs: Knobs::default(),
-            search: 0,
-            serve: None,
-            quiet: false,
-        };
-        let mut it = std::env::args().skip(1);
-        while let Some(flag) = it.next() {
-            let mut value = || it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
-            match flag.as_str() {
-                "--size" => p.size_m = value().parse().expect("--size <meters>"),
-                "--cell" => p.cell_m = value().parse().expect("--cell <meters>"),
-                "--iters" => p.knobs.iters = value().parse().expect("--iters <count>"),
-                "--seed" => {
-                    let v = value();
-                    let hex = v.trim_start_matches("0x").replace('_', "");
-                    p.seed = u64::from_str_radix(&hex, 16).expect("--seed <hex>");
-                }
-                "--out" => p.out = PathBuf::from(value()),
-                "--dt" => p.knobs.dt_years = value().parse().expect("--dt <years>"),
-                "--uplift" => p.knobs.uplift = value().parse().expect("--uplift <m/yr>"),
-                "--k" => p.knobs.erodibility = value().parse().expect("--k <erodibility>"),
-                "--diffusivity" => p.knobs.diffusivity = value().parse().expect("--diffusivity <m^2/yr>"),
-                "--no-geology" => p.knobs.geology_strength = 0.0,
-                "--no-climate" => p.knobs.climate_strength = 0.0,
-                "--search" => p.search = value().parse().expect("--search <seed count>"),
-                "--serve" => p.serve = Some(value().parse().expect("--serve <port>")),
-                // Any knob by its key (knobs.rs; the tuning page's "Copy as flags").
-                "--set" => {
-                    let v = value();
-                    let (key, number) = v.split_once('=').expect("--set <knob>=<value>");
-                    let number: f64 = number.parse().unwrap_or_else(|_| panic!("--set {key}: not a number"));
-                    assert!(p.knobs.set(key, number), "--set: no knob named {key} (see knobs.rs)");
-                }
-                other => panic!(
-                    "unknown argument {other}; flags: --size --cell --iters --seed --out --dt \
-                     --uplift --k --diffusivity --no-geology --no-climate --set <knob>=<value> \
-                     --search <n> --serve <port>"
-                ),
-            }
+            quiet: true,
         }
-        p
     }
 }
 
@@ -250,7 +205,7 @@ pub struct World {
 impl World {
     /// Island + uplift map from noise. Wavelength of a noise's first octave is
     /// 2^-first_octave meters (all sampled at scale 1).
-    pub fn new(p: &Params) -> World {
+    pub fn new(p: &ForgeParams) -> World {
         let n = (p.size_m / p.cell_m).round() as usize;
         let half = p.size_m * 0.5;
         let shape_lo = OctaveNoise::new(p.seed ^ 0xF001, -13, vec![1.0, 0.6, 0.3]); // 8 km

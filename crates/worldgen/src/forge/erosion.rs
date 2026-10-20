@@ -3,8 +3,8 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use crate::geology::Geology;
-use crate::world::{Params, World};
+use crate::forge::geology::Geology;
+use crate::forge::world::{ForgeParams, World};
 
 /// Priority-Flood epsilon (m per meter of travel): the routing surface falls
 /// at least this much toward the sea, so flats and filled lakes still drain.
@@ -106,7 +106,7 @@ pub fn discharge(w: &World, r: &Routing, rain: &[f64]) -> Vec<f64> {
 /// One time step: uplift + implicit stream-power incision dh/dt = U - K*sqrt(Q)*S
 /// along the routing tree (Braun & Willett 2013, n = 1), sediment into
 /// depressions, then hillslope diffusion. Returns the cells under depressions.
-pub fn step(w: &mut World, p: &Params, geo: &Geology, rain: &[f64], scratch: &mut Vec<f64>) -> usize {
+pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch: &mut Vec<f64>) -> usize {
     let routing = route(w, FLOOD_EPSILON);
     let q = discharge(w, &routing, rain);
     let (k, dt) = (&p.knobs, p.knobs.dt_years);

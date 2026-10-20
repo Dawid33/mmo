@@ -2,9 +2,9 @@
 
 use image::{ImageBuffer, Luma, Rgb};
 
-use crate::geology::ROCKS;
-use crate::hydrology::{Analysis, LAKE_MIN_DEPTH_M};
-use crate::world::World;
+use worldgen::forge::geology::ROCKS;
+use worldgen::forge::hydrology::{Analysis, LAKE_MIN_DEPTH_M};
+use worldgen::forge::World;
 
 // Engine frame, for the 16-bit heightmap (same mapping as examples/world_map.rs).
 const SEA_LEVEL_Y: f64 = 64.0;

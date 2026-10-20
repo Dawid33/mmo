@@ -3,10 +3,10 @@
 
 use std::fmt::Write as _;
 
-use crate::erosion::{discharge, route, Routing, FLOOD_EPSILON};
-use crate::geology::{Geology, ROCKS};
-use crate::knobs::Knobs;
-use crate::world::World;
+use crate::forge::erosion::{discharge, route, Routing, FLOOD_EPSILON};
+use crate::forge::geology::{Geology, ROCKS};
+use crate::forge::knobs::Knobs;
+use crate::forge::world::World;
 
 // `Knobs::river_min_discharge_m2`: a cell is a river once this much
 // rain-weighted land drains through it. `Knobs::river_width_m`: channel width

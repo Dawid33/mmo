@@ -24,6 +24,11 @@ debug = "full"
 [profile.dev.package."*"]
 opt-level = 3
 
+# The forge pipeline (worldgen::forge) is float-heavy offline simulation; in a
+# dev build the server would otherwise spend minutes forging a default world.
+[profile.dev.package.worldgen]
+opt-level = 3
+
 # Optimized build that keeps full debug info — use for representative CPU
 # profiles (`just perf-client` / `just perf-server` / `just profile-*`). Dev's
 # opt-level 1 makes the mesher + derive_voxels hot loops ~2.5x slower than this,

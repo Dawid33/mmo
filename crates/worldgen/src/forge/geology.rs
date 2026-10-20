@@ -12,7 +12,7 @@
 //! through the column; hard bands stand proud, soft ones floor the valleys.
 
 use crate::noise::OctaveNoise;
-use crate::world::{hash01, Params, World};
+use crate::forge::world::{hash01, ForgeParams, World};
 
 pub struct Rock {
     pub name: &'static str,
@@ -58,7 +58,7 @@ pub struct Geology {
 }
 
 impl Geology {
-    pub fn new(p: &Params, w: &World) -> Geology {
+    pub fn new(p: &ForgeParams, w: &World) -> Geology {
         let folds = OctaveNoise::new(p.seed ^ 0x6E01, FOLD_FIRST_OCTAVE, vec![1.0, 0.5]);
         // Dip direction from the seed.
         let angle = hash01(p.seed, 0x6E0, 1) * std::f64::consts::TAU;

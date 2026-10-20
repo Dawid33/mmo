@@ -359,7 +359,7 @@ model-census *paths="target/test-models":
 forge-proto *args:
     {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- {{args}}
 
-# Tuning page for the world forge: every knob (examples/forge_proto/knobs.rs) as
+# Tuning page for the world forge: every knob (crates/worldgen/src/forge/knobs.rs) as
 # a slider with a live map preview, on http://127.0.0.1:<port>/. A change
 # re-forges at a coarse preview cell size (64 m is about a second); "Save world
 # file" forges at 16 m and writes a .world the game can load; "Copy as flags"

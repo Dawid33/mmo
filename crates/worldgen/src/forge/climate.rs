@@ -4,7 +4,7 @@
 //! bigger rivers and erode faster — Dwarf Fortress computes rain shadows AFTER
 //! its rivers, which is why a DF desert river is as wide as a jungle one.
 
-use crate::world::{Params, World};
+use crate::forge::world::{ForgeParams, World};
 
 // Sea recharge, land rain-out distance, orographic scale and the rain bounds
 // are knobs (knobs.rs, "Climate").
@@ -38,7 +38,7 @@ fn box_blur_rows(src: &[f64], n: usize, radius: usize, along_x: bool) -> Vec<f64
 
 /// Rain per cell relative to the land mean (1.0 = average). Wind blows from
 /// the west (+x); uniform 1.0 when the climate is switched off.
-pub fn rainfall(w: &World, p: &Params) -> Vec<f64> {
+pub fn rainfall(w: &World, p: &ForgeParams) -> Vec<f64> {
     let n = w.n;
     let k = &p.knobs;
     if k.climate_strength <= 0.0 {
