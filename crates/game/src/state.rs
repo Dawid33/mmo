@@ -199,7 +199,9 @@ mod game_data {
         cell_edits: BTreeMap<crate::CellCoords, u32>,
         /// Per-column ground recipes from worldgen: what lies below each
         /// column's materialised band. Written only at genesis
-        /// (`seed_ground_genesis`), never mutated, so it never needs undo.
+        /// (`seed_ground_genesis`), never mutated, so it never needs undo; the
+        /// `#[undo(map)]` wrapper is only map plumbing, its logged mutators
+        /// must not be used.
         #[undo(map)]
         ground: BTreeMap<crate::ColumnCoords, crate::ColumnGround>,
     }
@@ -635,26 +637,6 @@ impl Rollback {
     /// The ECS writes (entity + component slots) are raw for the same reason
     /// the physics inserts are — no undo entries, no digests, no renderer
     /// emits.
-    pub fn seed_ground_genesis(&mut self, ground: Vec<(crate::ColumnCoords, crate::ColumnGround)>) {
-        for (coords, g) in ground {
-            self.ground.insert_raw(coords, g);
-        }
-    }
-
-    /// The block the ground recipe implies at `local` of chunk `coords`,
-    /// when that chunk is not materialised. `None` for a chunk entity, cell
-    /// mode, a column without ground, or a sub-chunk inside the band.
-    pub fn implied_block(&self, coords: ChunkCoords, local: (usize, usize, usize)) -> Option<crate::Block> {
-        if self.cells.cell_chunks != 0 || self.chunk_index.contains_key(&chunk_index_key(coords)) {
-            return None;
-        }
-        let ground = self.ground.get(&crate::ColumnCoords::new(coords.x, coords.z))?;
-        if !ground.is_implied(coords.y) {
-            return None;
-        }
-        Some(ground.block_at(local.0, local.2, coords.y * crate::CHUNK_BLOCKS as i32 + local.1 as i32))
-    }
-
     pub fn seed_terrain_genesis(&mut self, chunks: Vec<(ChunkCoords, Chunk)>) {
         for (coords, chunk) in chunks {
             let e = self.ecs.create_chunk_entity_raw();
@@ -706,6 +688,27 @@ impl Rollback {
                     .insert_with_parent(collider, handle, phys.bodies.raw_mut());
             }
         }
+    }
+
+    /// Genesis-only: raw, unlogged insert of the per-column ground recipes.
+    pub fn seed_ground_genesis(&mut self, ground: Vec<(crate::ColumnCoords, crate::ColumnGround)>) {
+        for (coords, g) in ground {
+            self.ground.insert_raw(coords, g);
+        }
+    }
+
+    /// The block the ground recipe implies at `local` of chunk `coords`,
+    /// when that chunk is not materialised. `None` for a chunk entity, cell
+    /// mode, a column without ground, or a sub-chunk inside the band.
+    pub fn implied_block(&self, coords: ChunkCoords, local: (usize, usize, usize)) -> Option<crate::Block> {
+        if self.cells.cell_chunks != 0 || self.chunk_index.contains_key(&chunk_index_key(coords)) {
+            return None;
+        }
+        let ground = self.ground.get(&crate::ColumnCoords::new(coords.x, coords.z))?;
+        if !ground.is_implied(coords.y) {
+            return None;
+        }
+        Some(ground.block_at(local.0, local.2, coords.y * crate::CHUNK_BLOCKS as i32 + local.1 as i32))
     }
 
     /// Attach a voxel-grid collider to an entity's body. One cell per key;

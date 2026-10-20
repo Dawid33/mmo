@@ -33,7 +33,8 @@ use slotmapd::Key as _;
 
 /// crc32 of the scene region's bincode bytes after [`SCENE_TICKS`] ticks,
 /// on every target. Re-recorded for the rapier 0.36 / parry 0.31 switch,
-/// then for `dt` = `TICK_DT` and the kinematic `can_sleep(false)` fix.
+/// then for `dt` = `TICK_DT` and the kinematic `can_sleep(false)` fix,
+/// then for the new `GameData.ground` field (serialized bytes + state hash).
 const WASM_SCENE_DIGEST: u32 = 0x9243_54E8;
 /// `game::state_hash` of the same state, on every target.
 const SCENE_STATE_HASH: u32 = 0x4E06_F06C;

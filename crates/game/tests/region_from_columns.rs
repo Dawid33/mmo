@@ -63,6 +63,9 @@ fn ground_survives_park_and_restore() {
 
 #[test]
 fn cell_mode_has_no_implied_ground() {
-    let region = game::Region::new_cells(RegionCoords::new(0, 0), 16, None, None);
+    let mut region = game::Region::new_cells(RegionCoords::new(0, 0), 16, None, None);
+    // A ground that WOULD imply stone at sub-Y 1 outside cell mode.
+    let ground = game::ColumnGround::plain([10; 4], 2, BlockId(2), BlockId(3));
+    region.with_data(|d| d.seed_ground_genesis(vec![(ColumnCoords::new(0, 0), ground)]));
     assert_eq!(region.data().implied_block(game::ChunkCoords::new(0, 1, 0), (0, 0, 0)), None);
 }
