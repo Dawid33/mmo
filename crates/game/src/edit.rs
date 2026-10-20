@@ -15,6 +15,12 @@
 //!
 //! Scope: whole blocks only (a break clears chisel detail), and only inside
 //! the player's home region. A ray that leaves the region finds nothing.
+//!
+//! Implied ground (rock below the materialised surface band, stored only as
+//! the column's `ColumnGround` recipe) is solid to the ray. Breaking a block
+//! materialises its own chunk and every implied face-neighbour chunk in the
+//! same undoable edit, so reachable air is always bordered by real chunks.
+//! Bedrock cannot be broken.
 
 
 use rapier3d::math::Vector;
@@ -82,8 +88,68 @@ fn cell_solid(chunk: &Chunk, (bx, by, bz): (usize, usize, usize)) -> bool {
 impl Rollback {
     fn block_solid(&self, pos: BlockPos) -> bool {
         let Some((coords, local)) = locate(pos) else { return false };
-        let Some(e) = self.chunk_key_at(coords) else { return false };
+        let Some(e) = self.chunk_key_at(coords) else {
+            return self.implied_block(coords, local).is_some_and(|b| b.id != BlockId::AIR);
+        };
         self.data.ecs.chunk.try_get(e).as_ref().is_some_and(|c| cell_solid(c, local))
+    }
+
+    /// The block at `local` of chunk `coords` as the sim sees it: the chunk
+    /// entity's, else the implied ground's. `None` for an empty slot.
+    fn current_block(&self, coords: ChunkCoords, (bx, by, bz): (usize, usize, usize)) -> Option<Block> {
+        match self.chunk_key_at(coords) {
+            Some(e) => self.data.ecs.chunk.try_get(e).as_ref().map(|c| c.block_at(bx, by, bz)),
+            None => self.implied_block(coords, (bx, by, bz)),
+        }
+    }
+
+    /// Whether `block` is the bedrock of the ground under chunk `coords`.
+    /// Cell mode has no ground semantics (as `implied_block`).
+    fn is_bedrock(&self, coords: ChunkCoords, block: Block) -> bool {
+        self.data.cells.cell_chunks == 0
+            && self
+                .data
+                .ground
+                .get(&crate::ColumnCoords::new(coords.x, coords.z))
+                .is_some_and(|g| block.id == g.bedrock)
+    }
+
+    /// Turns implied chunk `coords` into a real chunk entity built from the
+    /// column's ground recipe, undo-safely (`RemoveEntity` on undo). `None`
+    /// when the chunk is not implied (it exists, cell mode, no ground, or
+    /// inside the band).
+    pub fn materialize_ground_safe(&mut self, coords: ChunkCoords) -> Option<EntityKey> {
+        let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
+        for bx in 0..CHUNK_BLOCKS {
+            for by in 0..CHUNK_BLOCKS {
+                for bz in 0..CHUNK_BLOCKS {
+                    chunk.set_block(bx, by, bz, self.implied_block(coords, (bx, by, bz))?);
+                }
+            }
+        }
+        Some(self.spawn_chunk_safe(coords, chunk))
+    }
+
+    /// Inserts a runtime chunk entity and tells the renderer its place and
+    /// its voxels (`create_mesh` alone sends nothing but `CreateEntity`).
+    /// `create_mesh`'s entity insert emits `RemoveEntity` on undo.
+    fn spawn_chunk_safe(&mut self, coords: ChunkCoords, chunk: Chunk) -> EntityKey {
+        let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
+        let e = self.create_mesh(coords, chunk);
+        let pose = Pose::translation(
+            (coords.x * 32) as f32,
+            (coords.y * 32) as f32,
+            (coords.z * 32) as f32,
+        );
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetEntityPosition(e, pose),
+        ));
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetVoxelComponent(e, Some(voxels)),
+        ));
+        e
     }
 
     /// Walks the block grid from `origin` along `dir` (world units, `dir`
@@ -192,30 +258,40 @@ impl Rollback {
             return false;
         }
         let Some((coords, (bx, by, bz))) = locate(pos) else { return false };
+        let breaking = block.id == BlockId::AIR;
+        if breaking {
+            // Refused before anything changes, implied bedrock included.
+            match self.current_block(coords, (bx, by, bz)) {
+                Some(current) if self.is_bedrock(coords, current) => return false,
+                _ => {}
+            }
+            // An implied chunk becomes real before the write lands in it.
+            self.materialize_ground_safe(coords);
+        }
+        let changed = self.write_block_safe(coords, (bx, by, bz), block);
+        if changed && breaking {
+            // The new air must never border an implied chunk: materialise
+            // every face neighbour in another chunk that still is one.
+            for d in [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] {
+                let n = [pos[0] + d[0], pos[1] + d[1], pos[2] + d[2]];
+                if let Some((nc, _)) = locate(n).filter(|(nc, _)| *nc != coords) {
+                    self.materialize_ground_safe(nc);
+                }
+            }
+        }
+        changed
+    }
+
+    /// Writes one block into chunk `coords` (creating the chunk for a placed
+    /// block in an empty slot). Returns whether anything changed.
+    fn write_block_safe(&mut self, coords: ChunkCoords, (bx, by, bz): (usize, usize, usize), block: Block) -> bool {
         let Some(e) = self.chunk_key_at(coords) else {
             if block.id == BlockId::AIR {
                 return false;
             }
             let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
             chunk.set_block(bx, by, bz, block);
-            let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
-            // create_mesh's entity insert emits RemoveEntity on undo.
-            let e = self.create_mesh(coords, chunk);
-            // create_mesh tells the renderer nothing but CreateEntity: give
-            // the new chunk its place and its voxels.
-            let pose = Pose::translation(
-                (coords.x * 32) as f32,
-                (coords.y * 32) as f32,
-                (coords.z * 32) as f32,
-            );
-            self.data.send(GameDataUpdate::new(
-                GameDataTransactionKind::Do,
-                GameDataUpdateKind::SetEntityPosition(e, pose),
-            ));
-            self.data.send(GameDataUpdate::new(
-                GameDataTransactionKind::Do,
-                GameDataUpdateKind::SetVoxelComponent(e, Some(voxels)),
-            ));
+            self.spawn_chunk_safe(coords, chunk);
             return true;
         };
         let Some(old) = self.data.ecs.chunk.try_get(e).clone() else { return false };
