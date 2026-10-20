@@ -1,0 +1,9 @@
+# One toolchain for everything — builds, tests, clippy, wasm, rust-analyzer.
+# Pinned to the current stable release so every machine and every recipe
+# compiles with the same rustc; bump it deliberately (and run `just smoke` +
+# `just determinism-wasm`), never via a floating `stable`. No nightly, no
+# Cranelift wrapper.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

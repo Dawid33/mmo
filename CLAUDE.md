@@ -13,12 +13,14 @@ A voxel MMO in Rust with client/server architecture over QUIC, built around dete
 ## Building and Running
 
 Common tasks are wrapped in the root `justfile` — prefer it over retyping raw
-`cargo`/`cargo-clif` invocations. `just` (or `just --list`) shows every recipe;
+`cargo` invocations. `just` (or `just --list`) shows every recipe;
 the important ones are `just build`, `just run` (server + client together),
-`just server`, `just client`, `just smoke`, `just test-one`, `just web`, and
-`just clippy`. Machine-specific bits are overridable variables: `cargo` selects the
-toolchain (defaults to stable `cargo`; set `cargo=$CARGO_CLIF` or export `CARGO_CLIF`
-to opt into the Cranelift `cargo-clif` wrapper for faster builds), and `adapter=6700`
+`just server`, `just client`, `just smoke`, `just test-one`, `just web`,
+`just world-map`, and `just clippy`. **One toolchain for everything: stable Rust, pinned in `rust-toolchain.toml`**
+(currently 1.96.0, with `wasm32-unknown-unknown`, rustfmt and clippy) — builds,
+tests, clippy, wasm and rust-analyzer all use it. No nightly, no Cranelift
+`cargo-clif`; bump the pin deliberately (then `just smoke` + `just determinism-wasm`).
+Machine-specific bits are overridable variables: `adapter=6700`
 pins the client to a GPU (e.g. `just adapter=6700 run`; defaults to `$VOXEL_ADAPTER`, so exporting that once pins every recipe — unpinned, this box lands on the NVK T600, which is ~30× slower on the voxel opaque pass than even the Intel iGPU).
 **Keep the justfile in sync**: when you add, rename, or change how a build/run/test
 command is invoked, update the corresponding recipe (and add a new one for any
@@ -26,16 +28,9 @@ workflow worth a one-word command) in the same change.
 
 The raw commands the recipes wrap, for reference:
 
-`cargo build --workspace --bins` works on stable, which is the default. Cranelift
-is opt-in for faster dev builds — point the recipes at a locally built `cargo-clif`
-via `cargo=…` or `CARGO_CLIF`:
-
 ```sh
-# Build everything on stable (see scripts/build.sh)
+# Build everything (see scripts/build.sh)
 cargo build --workspace --bins
-
-# Or with Cranelift:
-~/Software/rustc_codegen_cranelift/dist/cargo-clif build --workspace --bins
 
 # Run server + client together (see scripts/run.sh)
 cargo run --bin server

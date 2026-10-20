@@ -2,14 +2,12 @@
 # Run `just` (or `just --list`) to see available recipes.
 #
 # Machine-specific bits are variables you can override on the command line, e.g.
-#   just cargo=$CARGO_CLIF build   # use the Cranelift wrapper instead of stable cargo
 #   just adapter=6700 client       # pin wgpu to the RX 6700 XT eGPU
 
-# Cargo command used by all build/run/check recipes. Defaults to stable `cargo`.
-# For faster dev builds, opt into the Cranelift codegen wrapper by pointing this at
-# cargo-clif — export CARGO_CLIF, or override per-invocation:
-#   just cargo=~/Software/rustc_codegen_cranelift/dist/cargo-clif build
-cargo := env_var_or_default("CARGO_CLIF", "cargo")
+# Cargo command used by all build/run/check recipes. Always plain `cargo`: the
+# toolchain is pinned by rust-toolchain.toml (one stable toolchain for
+# everything — no nightly, no Cranelift wrapper).
+cargo := "cargo"
 
 # Substring passed to WGPU_ADAPTER_NAME to select a GPU (empty = wgpu default).
 # Defaults to $VOXEL_ADAPTER, so `export VOXEL_ADAPTER=Intel` (or 6700) in your
@@ -87,7 +85,7 @@ perf_flags := "-F9997 --call-graph dwarf,16384 -e cpu-clock"
 cpu_percent := "80"
 jobs := shell('n=$(( $(nproc) * $1 / 100 )); echo $(( n > 0 ? n : 1 ))', cpu_percent)
 
-# Every recipe inherits these: cargo (and the cargo-clif wrapper) reads
+# Every recipe inherits these: cargo reads
 # CARGO_BUILD_JOBS for rustc parallelism, libtest reads RUST_TEST_THREADS for
 # test threads (an explicit `--test-threads`, as in `test-full`, still wins).
 # Raw `cargo` outside `just` is capped by `[build] jobs` in .cargo/config.toml.
