@@ -10,7 +10,7 @@ use worldgen::forge::{forge, ForgeParams};
 pub const DEFAULT_WORLD_PATH: &str = "worlds/default.world";
 
 /// `VOXEL_WORLD_FILE` value that selects the procedural noise world.
-pub const PROCEDURAL_KEYWORD: &str = "procedural";
+pub const PROCEDURAL_KEYWORD: &str = worldgen::forged::PROCEDURAL_KEYWORD;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldSource {
@@ -28,17 +28,16 @@ pub fn resolve(env_value: Option<&str>) -> WorldSource {
     }
 }
 
-/// Relative world paths resolve from the repo root, like the block manifest.
+/// Relative world paths resolve from the repo root, like the block manifest
+/// (and like `worldgen::forged::active` resolves `VOXEL_WORLD_FILE`).
 pub fn from_repo_root(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(path)
-    }
+    worldgen::forged::from_repo_root(path)
 }
 
 /// Forge the world file if it does not exist. An existing file is never read
-/// or replaced here (a corrupt one is the caller's to report).
+/// or replaced here (a corrupt one is the caller's to report). The save is
+/// atomic (temp file + rename, `WorldArtifact::save`), so a forge interrupted
+/// on first start leaves no truncated world to trip the next one.
 pub fn ensure_forged(path: &Path, params: &ForgeParams) -> Result<(), String> {
     if path.exists() {
         return Ok(());
@@ -103,6 +102,20 @@ mod tests {
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
         ensure_forged(&path, &params).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn ensure_forged_leaves_no_temp_file() {
+        let dir = scratch("atomic");
+        let path = dir.join("w.world");
+        let params = ForgeParams { size_m: 2048.0, cell_m: 64.0, seed: 4, ..ForgeParams::default() };
+        ensure_forged(&path, &params).unwrap();
+        assert!(path.exists());
+        assert!(!worldgen::forged::save_temp_path(&path).exists(), "the temp file is renamed away");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("w.world")], "only the world file remains");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
