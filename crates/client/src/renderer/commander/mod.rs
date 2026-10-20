@@ -11,7 +11,7 @@
 //! the systems only gather input and write the results.
 //!
 //! The world is many regions; the commander plays in one — the region its
-//! (inert) body is in, the home region. The focus is kept on that region's
+//! (inert) body is in, the home region. The camera is kept over that region's
 //! rectangle and the minimap shows it. Travelling between regions moves the
 //! body, which moves the home region and the near window with it.
 //!
@@ -216,6 +216,15 @@ pub fn clamp_focus(focus: Vec2, rect: Option<Rect>) -> Vec2 {
         Some(rect) => focus.clamp(rect.min, rect.max),
         None => focus,
     }
+}
+
+/// Keep the camera itself (its ground position, behind the focus along the
+/// heading) on the home region's rectangle, so it can fly right up to an edge
+/// whichever way it faces. Clamping the focus instead stopped a camera facing
+/// an edge `distance·cos(pitch)` short of it. Returns the adjusted focus.
+pub fn clamp_eye(focus: Vec2, yaw: f32, pitch: f32, distance: f32, rect: Option<Rect>) -> Vec2 {
+    let behind = ground_dir(Vec2::Y, yaw) * distance * pitch.cos();
+    clamp_focus(focus + behind, rect) - behind
 }
 
 /// Pan direction from the cursor touching a screen edge: x to the right,
@@ -453,7 +462,8 @@ fn pan_and_zoom(
     if buttons.pressed(MouseButton::Middle) && window.focused {
         step += drag_pan(motion.delta, cam.distance, FOV_Y_DEG.to_radians(), size.y, cam.pitch);
     }
-    cam.focus = clamp_focus(cam.focus + ground_dir(step, cam.yaw), cam.bounds);
+    let pan = ground_dir(step, cam.yaw);
+    cam.focus += pan;
 
     if policy.orbit {
         (cam.yaw, cam.pitch) = orbit(cam.yaw, cam.pitch, motion.delta);
@@ -479,6 +489,8 @@ fn pan_and_zoom(
     }
     cam.distance = smooth(cam.distance, cam.target_distance, dt, ZOOM_SMOOTHING_S);
     cam.rise = clamp_rise(cam.rise, cam.distance, cam.pitch);
+    // Last, after every pan, turn, zoom and minimap jump this frame.
+    cam.focus = clamp_eye(cam.focus, cam.yaw, cam.pitch, cam.distance, cam.bounds);
 }
 
 /// Ease the focus height toward the terrain around it.
@@ -582,6 +594,27 @@ mod tests {
         assert_eq!(clamp_focus(rect.center(), Some(rect)), rect.center());
         let far = Vec2::splat(1e6);
         assert_eq!(clamp_focus(far, None), far, "unclamped until the home region is known");
+    }
+
+    #[test]
+    fn the_camera_reaches_the_region_edge_it_faces() {
+        let rect = region_rect(game::RegionCoords { x: 0, z: 0 });
+        let (d, pitch) = (640.0, PITCH_DEG.to_radians());
+        let eye = |focus: Vec2, yaw: f32| {
+            let tf = camera_transform(Vec3::new(focus.x, 0.0, focus.y), d, yaw, pitch);
+            Vec2::new(tf.translation.x, tf.translation.z)
+        };
+        // Facing north (yaw 0) and pushed far past the north edge: the camera
+        // stops ON the edge, the focus beyond it.
+        let focus = clamp_eye(Vec2::new(rect.center().x, rect.min.y - 1e5), 0.0, pitch, d, Some(rect));
+        assert!((eye(focus, 0.0).y - rect.min.y).abs() < 1e-2);
+        assert!(focus.y < rect.min.y);
+        // Any heading: the eye stays inside.
+        for yaw in [0.4, 2.0, 3.5, 5.9] {
+            let f = clamp_eye(Vec2::splat(-1e5), yaw, pitch, d, Some(rect));
+            let e = eye(f, yaw);
+            assert!(rect.contains(e) || (e - e.clamp(rect.min, rect.max)).length() < 1e-2, "{yaw}: {e:?}");
+        }
     }
 
     #[test]
