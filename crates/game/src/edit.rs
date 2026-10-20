@@ -21,6 +21,13 @@
 //! materialises its own chunk and every implied face-neighbour chunk in the
 //! same undoable edit, so reachable air is always bordered by real chunks.
 //! Bedrock cannot be broken.
+//!
+//! Known limit: the region's outermost block ring cannot be dug below the
+//! surface. Its outward face neighbour is in the next region, whose implied
+//! ground this region cannot materialise, so the new air would show a face
+//! with no mesh and no collider behind it (see-through, fall-through). Such
+//! a break is refused (`breaks_into_neighbour_ground`); the surface block
+//! itself and everything one block column in stay diggable.
 
 
 use rapier3d::math::Vector;
@@ -112,6 +119,26 @@ impl Rollback {
                 .ground
                 .get(&crate::ColumnCoords::new(coords.x, coords.z))
                 .is_some_and(|g| block.id == g.bedrock)
+    }
+
+    /// Whether breaking `pos` (chunk `coords`, block `local`) would open a face
+    /// into a neighbour region's unmaterialised ground: the block lies
+    /// strictly below its own block column's surface and a face neighbour is
+    /// outside this region's columns. Only columns with ground (never cell
+    /// mode) qualify. See the module docs' known limit.
+    fn breaks_into_neighbour_ground(&self, pos: BlockPos, coords: ChunkCoords, (bx, _, bz): (usize, usize, usize)) -> bool {
+        if self.data.cells.cell_chunks != 0 {
+            return false;
+        }
+        let Some(ground) = self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)) else {
+            return false;
+        };
+        if pos[1] >= i32::from(ground.surface[bx * CHUNK_BLOCKS + bz]) {
+            return false;
+        }
+        [[1, 0], [-1, 0], [0, 1], [0, -1]]
+            .into_iter()
+            .any(|[dx, dz]| locate([pos[0] + dx, pos[1], pos[2] + dz]).is_none())
     }
 
     /// Turns implied chunk `coords` into a real chunk entity built from the
@@ -259,6 +286,9 @@ impl Rollback {
         }
         let Some((coords, (bx, by, bz))) = locate(pos) else { return false };
         let breaking = block.id == BlockId::AIR;
+        if breaking && self.breaks_into_neighbour_ground(pos, coords, (bx, by, bz)) {
+            return false;
+        }
         // Bedrock takes no write at all, implied bedrock included; refused
         // before anything changes.
         if let Some(current) = self.current_block(coords, (bx, by, bz)) {
@@ -294,6 +324,14 @@ impl Rollback {
             if block.id == BlockId::AIR {
                 return false;
             }
+            // An all-air new chunk: only reachable where the slot is not
+            // implied ground (cell mode, a column without ground, or a slot
+            // in or above the band) — `set_block_uncounted` materialises an
+            // implied chunk before writing into it.
+            debug_assert!(
+                self.implied_block(coords, (bx, by, bz)).is_none(),
+                "write into implied ground at {coords:?} without materialising it"
+            );
             let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
             chunk.set_block(bx, by, bz, block);
             self.spawn_chunk_safe(coords, chunk);

@@ -103,12 +103,12 @@ fn exposed_implied(r: &Rollback) -> Vec<([i32; 3], ChunkCoords)> {
 
 #[test]
 fn breaking_the_band_floor_materialises_the_chunk_below() {
-    let mut region = region(0..=1, 0..=1);
-    let below = ChunkCoords::new(0, -1, 0);
+    let mut region = region(1..=2, 1..=2);
+    let below = ChunkCoords::new(1, -1, 1);
     assert!(!has_chunk(region.data(), below));
-    assert!(dig(&mut region, [0, 1, 0]), "the band top breaks");
+    assert!(dig(&mut region, [2, 1, 2]), "the band top breaks");
     assert!(!has_chunk(region.data(), below), "a block still covers the chunk below");
-    assert!(dig(&mut region, [0, 0, 0]), "the band floor breaks");
+    assert!(dig(&mut region, [2, 0, 2]), "the band floor breaks");
     let r = region.data();
     let e = r.chunk_key_at(below).expect("the chunk below is materialised");
     let chunk = r.ecs.chunk.try_get(e).clone().unwrap();
@@ -119,12 +119,12 @@ fn breaking_the_band_floor_materialises_the_chunk_below() {
     // The neighbour exists as a real, solid chunk: a ray finds it.
     let hit = r
         .raycast_block(
-            game::rapier3d::math::Vector::new(8.0, 8.0, 8.0),
+            game::rapier3d::math::Vector::new(40.0, 8.0, 40.0),
             game::rapier3d::math::Vector::new(0.0, -1.0, 0.0),
             3.0,
         )
         .expect("the ray stops on the materialised stone");
-    assert_eq!(hit.block, [0, -1, 0]);
+    assert_eq!(hit.block, [2, -1, 2]);
 }
 
 #[test]
@@ -143,16 +143,17 @@ fn implied_ground_is_solid_to_a_ray() {
 
 #[test]
 fn exposure_invariant_after_random_digs() {
-    // Shaft area: blocks 0..4 x 0..4 (chunk columns 0 and 1); column 2 is an
-    // untouched band ring around it.
-    let mut region = region(0..=2, 0..=2);
+    // Shaft area: blocks 2..6 x 2..6 (chunk columns 1 and 2); columns 0 and
+    // 3 are an untouched band ring around it (column 0 holds the region's
+    // edge ring, which can't be dug below the surface).
+    let mut region = region(0..=3, 0..=3);
     let mut depth = [[SURFACE as i32; 4]; 4];
     let mut seed: u64 = 0x5EED_D16;
     let mut refused = 0;
     for i in 0..200 {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let (x, z) = (((seed >> 33) % 4) as usize, ((seed >> 41) % 4) as usize);
-        let pos = [x as i32, depth[x][z], z as i32];
+        let pos = [x as i32 + 2, depth[x][z], z as i32 + 2];
         if dig(&mut region, pos) {
             depth[x][z] -= 1;
         } else {
@@ -166,13 +167,13 @@ fn exposure_invariant_after_random_digs() {
 
 #[test]
 fn bedrock_cannot_be_broken() {
-    let mut region = region(0..=1, 0..=1);
+    let mut region = region(1..=2, 1..=2);
     let floor = SURFACE as i32 - UNDERGROUND_DEPTH; // first bedrock block
     for y in (floor + 1..=SURFACE as i32).rev() {
-        assert!(dig(&mut region, [0, y, 0]), "stone at y={y} breaks");
+        assert!(dig(&mut region, [2, y, 2]), "stone at y={y} breaks");
     }
     assert!(exposed_implied(region.data()).is_empty());
-    let bedrock = [0, floor, 0];
+    let bedrock = [2, floor, 2];
     let (c, local) = locate(bedrock).unwrap();
     let e = region.data().chunk_key_at(c).expect("the bedrock chunk is materialised");
     assert_eq!(region.data().ecs.chunk.try_get(e).as_ref().unwrap().block_at(local.0, local.1, local.2).id, BEDROCK);
@@ -218,36 +219,36 @@ fn placing_into_implied_ground_keeps_the_siblings() {
 
 #[test]
 fn bedrock_cannot_be_replaced() {
-    let mut region = region(0..=1, 0..=1);
+    let mut region = region(1..=2, 1..=2);
     let floor = SURFACE as i32 - UNDERGROUND_DEPTH;
     let before = state_hash(region.data());
-    for pos in [[0, floor, 0], [1, floor - 3, 1]] {
+    for pos in [[2, floor, 2], [3, floor - 3, 3]] {
         let mut changed = true;
         region.with_data(|r| changed = r.set_block_safe(pos, Block::new(STONE)));
         assert!(!changed, "implied bedrock at {pos:?} takes no write");
     }
     assert_eq!(before, state_hash(region.data()));
     for y in (floor + 1..=SURFACE as i32).rev() {
-        assert!(dig(&mut region, [0, y, 0]));
+        assert!(dig(&mut region, [2, y, 2]));
     }
     let before = state_hash(region.data());
     let mut changed = true;
-    region.with_data(|r| changed = r.set_block_safe([0, floor, 0], Block::new(STONE)));
+    region.with_data(|r| changed = r.set_block_safe([2, floor, 2], Block::new(STONE)));
     assert!(!changed, "materialised bedrock takes no write");
     assert_eq!(before, state_hash(region.data()));
-    assert!(!dig(&mut region, [0, floor, 0]));
+    assert!(!dig(&mut region, [2, floor, 2]));
 }
 
 #[test]
 fn undo_of_a_materialising_dig_restores_the_hash() {
-    let mut region = region(0..=1, 0..=1);
-    // Block (0, -2, 0) is the bottom of implied chunk sub-Y -1: the dig
+    let mut region = region(1..=2, 1..=2);
+    // Block (2, -2, 2) is the bottom of implied chunk sub-Y -1: the dig
     // materialises that chunk and the one below it (sub-Y -2).
-    let (own, below) = (ChunkCoords::new(0, -1, 0), ChunkCoords::new(0, -2, 0));
+    let (own, below) = (ChunkCoords::new(1, -1, 1), ChunkCoords::new(1, -2, 1));
     region.with_data(|r| {
         let before = state_hash(r);
         r.new_transaction();
-        assert!(r.set_block_safe([0, -2, 0], air()));
+        assert!(r.set_block_safe([2, -2, 2], air()));
         assert!(has_chunk(r, own) && has_chunk(r, below), "both chunks materialise");
         // The default hash mode verifies every undo entry as it is rolled back.
         r.rollback();
@@ -257,19 +258,32 @@ fn undo_of_a_materialising_dig_restores_the_hash() {
     });
 }
 
+/// Known limit: the outermost block ring can't be dug below the surface (its
+/// outward face would open into the next region's unmaterialised ground).
+/// The surface block itself and blocks one column in stay diggable.
 #[test]
 fn digging_at_the_region_edge_does_not_reach_outside() {
     let last = REGION_CHUNKS - 1;
-    let mut edge_region = region(last..=last, last..=last);
+    let mut high = region(last..=last, last..=last);
     let edge = (REGION_CHUNKS * CHUNK_BLOCKS) as i32 - 1;
-    assert!(dig(&mut edge_region, [edge, 1, edge]));
-    assert!(dig(&mut edge_region, [edge, 0, edge]));
-    let chunks = edge_region.data().terrain_snapshot().chunks;
+    assert!(dig(&mut high, [edge, 1, edge]), "the edge surface block breaks");
+    let before = state_hash(high.data());
+    assert!(!dig(&mut high, [edge, 0, edge]), "below the surface on the edge ring is refused");
+    assert!(!dig(&mut high, [edge - 1, 0, edge]), "edge ring on one axis is enough");
+    assert_eq!(before, state_hash(high.data()), "a refused dig changes nothing");
+    assert!(!has_chunk(high.data(), ChunkCoords::new(last, -1, last)));
+    // One column in: diggable, and materialises the ground below.
+    assert!(dig(&mut high, [edge - 1, 1, edge - 1]));
+    assert!(dig(&mut high, [edge - 1, 0, edge - 1]));
+    let chunks = high.data().terrain_snapshot().chunks;
     assert!(chunks.iter().any(|(c, _)| *c == ChunkCoords::new(last, -1, last)));
     assert!(chunks.iter().all(|(c, _)| c.x < REGION_CHUNKS && c.z < REGION_CHUNKS));
+    assert!(exposed_implied(high.data()).is_empty());
     // The low edge too: a region whose ground starts at column 0.
     let mut low = region(0..=0, 0..=0);
-    assert!(dig(&mut low, [0, 1, 0]) && dig(&mut low, [0, 0, 0]));
+    assert!(dig(&mut low, [0, 1, 0]));
+    assert!(!dig(&mut low, [0, 0, 0]), "the low edge ring is refused below the surface");
+    assert!(!dig(&mut low, [1, 0, 0]), "z = 0 is still the edge ring");
     assert!(low.data().terrain_snapshot().chunks.iter().all(|(c, _)| c.x == 0 && c.z == 0));
 }
 
