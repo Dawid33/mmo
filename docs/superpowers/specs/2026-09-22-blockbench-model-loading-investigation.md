@@ -5,8 +5,10 @@ tested against MIT Blockbench files from hephaestus-engine) and the client's
 `renderer/model.rs` (`.bbmodel` Bevy asset loader + `BbModel` spawn component),
 `just model-view` to look at one. Built differently from the sketch below: its own crate
 (not in `game`), Bevy's asset server (hot reload; works on wasm) instead of
-`include_bytes!`, all faces double-sided, mesh elements supported. Not built yet:
-animations, models→`ChiselData`. Original status: investigation only. The worked example is the slime
+`include_bytes!`, all faces double-sided, mesh elements supported. Animations BUILT the
+same day (`bbmodel::animation` + `bbmodel::molang`, client `BbAnimationPlayer`): linear,
+step, Catmull-Rom, Bézier, pre/post keys, loop modes, the pre-5.0 axis flip, a Molang
+expression subset, crossfades. Not built yet: models→`ChiselData`, locators, effect tracks. Original status: investigation only. The worked example is the slime
 (`crates/game/src/slime.rs`, spec `2026-09-22-slime-entity-investigation.md`).
 The slime entity itself is being built in parallel, so this doc only covers
 getting a Blockbench model on screen. It deliberately does not touch

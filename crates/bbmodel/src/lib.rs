@@ -25,12 +25,21 @@
 //! `outliner` holds `{uuid, children}`; 4.x files put whole group objects in
 //! the `outliner`. Both are read.
 //!
-//! Not read (logged in [`Model::warnings`]): animations (static pose only),
-//! element types other than cube and mesh (locators, null objects, ...),
+//! Animations are read and sampled as Blockbench plays them (see
+//! [`animation`]); [`Model::local_pose`] turns a sample into each node's
+//! local transform.
+//!
+//! Not read (logged in [`Model::warnings`]): element types other than cube
+//! and mesh (locators, null objects, ...), animation effect tracks,
 //! animated texture frames (frame 0 = the whole image is used), external
 //! texture files unless a resolver is given to [`parse_with`].
 
 use std::collections::HashMap;
+
+pub mod animation;
+pub mod molang;
+
+pub use animation::{Animation, BonePose, Interpolation, LoopMode};
 
 use base64::Engine as _;
 use serde::Deserialize;
@@ -111,8 +120,7 @@ pub struct Model {
     pub textures: Vec<Texture>,
     /// `nodes[0]` is the root; a parent always precedes its children.
     pub nodes: Vec<Node>,
-    /// Animation names present in the file (not played; see the crate docs).
-    pub animations: Vec<String>,
+    pub animations: Vec<Animation>,
     /// Things the reader skipped or could not honour.
     pub warnings: Vec<String>,
 }
@@ -291,6 +299,8 @@ struct Reader {
     /// Absolute origin per node (bone pivots are absolute in the file).
     origins: Vec<[f32; 3]>,
     placed: std::collections::HashSet<String>,
+    /// Group uuid -> node, for animators.
+    bones: HashMap<String, usize>,
     warnings: Vec<String>,
 }
 
@@ -326,6 +336,7 @@ impl Reader {
             }],
             origins: vec![[0.0; 3]],
             placed: Default::default(),
+            bones: HashMap::new(),
             warnings: Vec::new(),
         })
     }
@@ -341,15 +352,9 @@ impl Reader {
         for uuid in stray {
             self.element(&uuid, 0);
         }
-        let animations = self
-            .file
-            .animations
-            .iter()
-            .map(|a| a.get("name").and_then(Value::as_str).unwrap_or("?").to_string())
-            .collect::<Vec<_>>();
-        if !animations.is_empty() {
-            self.warnings.push(format!("{} animation(s) not played (static pose only)", animations.len()));
-        }
+        let (animations, warnings) =
+            animation::read(&self.file.animations, &self.bones, &self.file.meta.format_version);
+        self.warnings.extend(warnings);
         for node in &mut self.nodes {
             node.parts.retain(|p| !p.indices.is_empty());
         }
@@ -385,6 +390,7 @@ impl Reader {
                 let rotation = vec3(group.get("rotation"));
                 let parent_origin = self.origins[parent];
                 let index = self.nodes.len();
+                self.bones.insert(uuid.to_string(), index);
                 self.nodes.push(Node {
                     name: group.get("name").and_then(Value::as_str).unwrap_or("group").to_string(),
                     parent: Some(parent),
@@ -745,6 +751,26 @@ impl Model {
             }
         }
         b
+    }
+
+    pub fn animation(&self, name: &str) -> Option<&Animation> {
+        self.animations.iter().find(|a| a.name == name)
+    }
+
+    /// Every node's local transform `(translation, rotation [x,y,z,w], scale)`
+    /// with `poses` (from [`Animation::sample`]) applied: rotation offsets are
+    /// added to the rest Euler angles (Blockbench adds them per component),
+    /// positions added, scales multiplied. Nodes without a pose keep rest.
+    pub fn local_pose(&self, poses: &[(usize, BonePose)]) -> Vec<([f32; 3], [f32; 4], [f32; 3])> {
+        let mut out: Vec<_> =
+            self.nodes.iter().map(|n| (n.translation, n.rotation_quat(), [1.0f32; 3])).collect();
+        for (node, pose) in poses {
+            let Some(n) = self.nodes.get(*node) else { continue };
+            // Groups of bone-less formats carry no transform to animate.
+            let euler = [0, 1, 2].map(|i| n.rotation_deg[i] + pose.rotation[i]);
+            out[*node] = (add(n.translation, pose.position), euler_zyx_quat(euler), pose.scale);
+        }
+        out
     }
 
     pub fn triangle_count(&self) -> usize {

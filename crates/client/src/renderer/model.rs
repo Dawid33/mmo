@@ -12,6 +12,18 @@
 //! model drawn at block scale needs no scaling. Editing the file while the
 //! client runs reloads it in place (Bevy's asset hot reload, native only).
 //!
+//! Animations play through [`BbAnimationPlayer`] on the same entity:
+//!
+//! ```ignore
+//! commands.spawn((BbModel(model), BbAnimationPlayer::playing("walk")));
+//! player.crossfade("idle", 0.2); // later, from a system
+//! ```
+//!
+//! `animate_bbmodels` samples the clip each frame exactly as Blockbench plays
+//! it (`bbmodel::animation`) and writes every group entity's `Transform`.
+//! `once` clips stop on their last frame and report [`BbAnimationPlayer::finished`],
+//! so gameplay can chain them (fall -> land -> standup -> idle).
+//!
 //! Textures are sampled nearest (pixel art) and clamped; each texture's alpha
 //! mode comes from its pixels (`bbmodel::AlphaKind`). Faces are drawn from
 //! both sides, because Blockbench does and modellers rely on it (planes for
@@ -31,8 +43,15 @@ pub struct BbModelAsset {
     pub nodes: Vec<BbModelNode>,
     /// Model-space bounds, world units (min, max).
     pub bounds: Option<(Vec3, Vec3)>,
-    /// Animation names in the file (not played yet).
-    pub animations: Vec<String>,
+    /// The rest skeleton and the animations, for `animate_bbmodels` (the
+    /// geometry and textures live in the labeled assets instead).
+    pub skeleton: bbmodel::Model,
+}
+
+impl BbModelAsset {
+    pub fn animation_names(&self) -> impl Iterator<Item = &str> {
+        self.skeleton.animations.iter().map(|a| a.name.as_str())
+    }
 }
 
 #[derive(Debug)]
@@ -53,9 +72,68 @@ pub struct BbModel(pub Handle<BbModelAsset>);
 #[derive(Component)]
 pub struct BbModelPart;
 
-/// Set on a `BbModel` entity once its children exist.
+/// Set on a `BbModel` entity once its children exist: the entity of every
+/// node, in `BbModelAsset::nodes` order.
 #[derive(Component)]
-pub struct BbModelSpawned;
+pub struct BbModelSpawned(pub Vec<Entity>);
+
+/// Plays one of the model's animations. Put it on the `BbModel` entity.
+#[derive(Component, Debug, Clone)]
+pub struct BbAnimationPlayer {
+    /// The clip playing, `None` for the rest pose.
+    pub animation: Option<String>,
+    /// Seconds since the clip started (scaled by `speed`).
+    pub elapsed: f32,
+    pub speed: f32,
+    pub paused: bool,
+    /// Molang inputs (`variable.*` etc.) the clips may read.
+    pub variables: bbmodel::molang::Context,
+    /// The clip being faded out: (name, its elapsed time, fade length, fade progress).
+    fade: Option<(Option<String>, f32, f32, f32)>,
+}
+
+impl Default for BbAnimationPlayer {
+    fn default() -> Self {
+        Self { animation: None, elapsed: 0.0, speed: 1.0, paused: false, variables: Default::default(), fade: None }
+    }
+}
+
+impl BbAnimationPlayer {
+    pub fn playing(name: &str) -> Self {
+        Self { animation: Some(name.to_string()), ..Self::default() }
+    }
+
+    /// Switch to `name` from its start, at once.
+    pub fn play(&mut self, name: &str) {
+        self.animation = Some(name.to_string());
+        self.elapsed = 0.0;
+        self.fade = None;
+    }
+
+    /// Switch to `name` from its start, blending from the current pose over
+    /// `seconds`.
+    pub fn crossfade(&mut self, name: &str, seconds: f32) {
+        self.fade = Some((self.animation.take(), self.elapsed, seconds.max(1e-3), 0.0));
+        self.animation = Some(name.to_string());
+        self.elapsed = 0.0;
+    }
+
+    /// Back to the rest pose.
+    pub fn stop(&mut self) {
+        self.animation = None;
+        self.elapsed = 0.0;
+        self.fade = None;
+    }
+
+    /// Whether the current `once` clip has played out (always false for
+    /// `loop` / `hold` clips and for no clip).
+    pub fn finished(&self, model: &BbModelAsset) -> bool {
+        self.animation
+            .as_deref()
+            .and_then(|n| model.skeleton.animation(n))
+            .is_some_and(|a| a.finished(self.elapsed))
+    }
+}
 
 pub struct BbModelPlugin;
 
@@ -63,7 +141,7 @@ impl Plugin for BbModelPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<BbModelAsset>()
             .register_asset_loader(BbModelLoader)
-            .add_systems(Update, (respawn_reloaded_bbmodels, spawn_bbmodels).chain());
+            .add_systems(Update, (respawn_reloaded_bbmodels, spawn_bbmodels, animate_bbmodels).chain());
     }
 }
 
@@ -142,6 +220,9 @@ fn build_asset(model: bbmodel::Model, cx: &mut LoadContext<'_>) -> BbModelAsset 
         .collect();
     let untextured = cx.add_labeled_asset("MaterialUntextured".to_string(), material(None, bbmodel::AlphaKind::Opaque));
     let bounds = model.bounds().map(|(lo, hi)| (Vec3::from(lo), Vec3::from(hi)));
+    for a in &model.animations {
+        debug!("bbmodel {}: animation {:?} {:?} {:.2}s", cx.path(), a.name, a.loop_mode, a.length);
+    }
     let nodes = model
         .nodes
         .iter()
@@ -163,7 +244,12 @@ fn build_asset(model: bbmodel::Model, cx: &mut LoadContext<'_>) -> BbModelAsset 
                 .collect(),
         })
         .collect();
-    BbModelAsset { name: model.name, nodes, bounds, animations: model.animations }
+    let mut skeleton = model;
+    skeleton.textures.clear();
+    for node in &mut skeleton.nodes {
+        node.parts.clear();
+    }
+    BbModelAsset { name: skeleton.name.clone(), nodes, bounds, skeleton }
 }
 
 fn texture_image(t: &bbmodel::Texture) -> Image {
@@ -239,8 +325,78 @@ pub fn spawn_bbmodels(
             }
             spawned.push(id);
         }
-        commands.entity(entity).insert(BbModelSpawned);
+        commands.entity(entity).insert(BbModelSpawned(spawned));
     }
+}
+
+/// Poses every animated model's group entities for this frame.
+pub fn animate_bbmodels(
+    time: Res<Time>,
+    models: Res<Assets<BbModelAsset>>,
+    mut players: Query<(&BbModel, &BbModelSpawned, &mut BbAnimationPlayer)>,
+    mut transforms: Query<&mut Transform, With<BbModelPart>>,
+) {
+    let dt = time.delta_secs();
+    for (model, spawned, mut player) in &mut players {
+        let Some(asset) = models.get(&model.0) else { continue };
+        let skeleton = &asset.skeleton;
+        if !player.paused {
+            let step = dt * player.speed;
+            player.elapsed += step;
+            if let Some(fade) = player.fade.as_mut() {
+                fade.1 += step;
+                fade.3 += dt;
+            }
+        }
+        let sample = |name: &Option<String>, elapsed: f32| -> Vec<(usize, bbmodel::BonePose)> {
+            name.as_deref()
+                .and_then(|n| skeleton.animation(n))
+                .map(|a| a.sample(a.local_time(elapsed), &player.variables))
+                .unwrap_or_default()
+        };
+        let mut poses = sample(&player.animation, player.elapsed);
+        if let Some((from, from_elapsed, length, progress)) = player.fade.clone() {
+            let w = (progress / length).clamp(0.0, 1.0);
+            if w >= 1.0 {
+                player.fade = None;
+            } else {
+                poses = blend(&sample(&from, from_elapsed), &poses, w);
+            }
+        }
+        for (i, (t, r, s)) in skeleton.local_pose(&poses).into_iter().enumerate() {
+            let Some(&e) = spawned.0.get(i) else { continue };
+            if let Ok(mut tf) = transforms.get_mut(e) {
+                tf.translation = Vec3::from(t);
+                tf.rotation = Quat::from_array(r);
+                tf.scale = Vec3::from(s);
+            }
+        }
+    }
+}
+
+/// Per-component blend of two bone pose sets (`w` = 0 is `a`, 1 is `b`);
+/// a bone missing from one side blends against its rest offsets.
+fn blend(
+    a: &[(usize, bbmodel::BonePose)],
+    b: &[(usize, bbmodel::BonePose)],
+    w: f32,
+) -> Vec<(usize, bbmodel::BonePose)> {
+    let mut nodes: Vec<usize> = a.iter().chain(b).map(|(n, _)| *n).collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    let get = |set: &[(usize, bbmodel::BonePose)], n| set.iter().find(|(m, _)| *m == n).map(|(_, p)| *p).unwrap_or_default();
+    let lerp = |x: [f32; 3], y: [f32; 3]| [0, 1, 2].map(|i| x[i] + (y[i] - x[i]) * w);
+    nodes
+        .into_iter()
+        .map(|n| {
+            let (p, q) = (get(a, n), get(b, n));
+            (n, bbmodel::BonePose {
+                rotation: lerp(p.rotation, q.rotation),
+                position: lerp(p.position, q.position),
+                scale: lerp(p.scale, q.scale),
+            })
+        })
+        .collect()
 }
 
 /// A model file changed on disk (hot reload): drop its spawned parts so
@@ -326,6 +482,32 @@ mod tests {
                 assert!(world.resource::<Assets<Mesh>>().get(mesh).is_some());
                 assert!(world.resource::<Assets<StandardMaterial>>().get(material).is_some());
             }
+        }
+    }
+
+    /// A playing clip moves the group entities; stopping returns them to rest.
+    #[test]
+    fn the_animation_player_poses_the_groups() {
+        let mut app = app();
+        let e = spawn_and_wait(&mut app, "hephaestus/dragon.bbmodel");
+        let nodes = app.world().get::<BbModelSpawned>(e).unwrap().0.clone();
+        let rest: Vec<Transform> = nodes.iter().map(|n| *app.world().get::<Transform>(*n).unwrap()).collect();
+        let mut player = BbAnimationPlayer::playing("flying");
+        player.elapsed = 0.37;
+        player.paused = true;
+        app.world_mut().entity_mut(e).insert(player);
+        app.update();
+        let moved = nodes
+            .iter()
+            .zip(&rest)
+            .filter(|(n, r)| *app.world().get::<Transform>(**n).unwrap() != **r)
+            .count();
+        assert!(moved > 3, "flying moves several bones: {moved}");
+        app.world_mut().get_mut::<BbAnimationPlayer>(e).unwrap().stop();
+        app.update();
+        for (n, r) in nodes.iter().zip(&rest) {
+            let t = app.world().get::<Transform>(*n).unwrap();
+            assert!(t.translation.distance(r.translation) < 1e-4 && t.rotation.dot(r.rotation).abs() > 1.0 - 1e-5, "{t:?} vs {r:?}");
         }
     }
 

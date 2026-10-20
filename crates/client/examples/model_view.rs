@@ -6,15 +6,21 @@
 //! framed from its bounds. Edit and save the file while it runs: it reloads.
 //! `--shot <png>` saves a screenshot after the model has loaded and exits
 //! (a headless-ish check that it renders).
+//!
+//! Animations: `--anim <name>` plays one from the start (default: the
+//! first); `--time <seconds>` freezes it at that moment (for screenshots).
+//! In the window, N plays the next animation, Space pauses, R restarts.
 use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-use client::renderer::model::{BbModel, BbModelAsset, BbModelPlugin, BbModelSpawned};
+use client::renderer::model::{BbAnimationPlayer, BbModel, BbModelAsset, BbModelPlugin, BbModelSpawned};
 
 #[derive(Resource)]
 struct Args {
     path: String,
     shot: Option<String>,
+    anim: Option<String>,
+    time: Option<f32>,
 }
 
 #[derive(Component)]
@@ -24,9 +30,13 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mut path = None;
     let mut shot = None;
+    let mut anim = None;
+    let mut time = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--shot" => shot = args.next(),
+            "--anim" => anim = args.next(),
+            "--time" => time = args.next().and_then(|t| t.parse().ok()),
             other => path = Some(other.to_string()),
         }
     }
@@ -46,9 +56,9 @@ fn main() {
         )
         .add_plugins(BbModelPlugin)
         .insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.82)))
-        .insert_resource(Args { path, shot })
+        .insert_resource(Args { path, shot, anim, time })
         .add_systems(Startup, setup)
-        .add_systems(Update, (frame_camera, turn, shoot))
+        .add_systems(Update, (frame_camera, turn, shoot, animation_keys))
         .run();
 }
 
@@ -60,7 +70,7 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let model: Handle<BbModelAsset> = assets.load(args.path.clone());
-    commands.spawn((BbModel(model), Turntable));
+    commands.spawn((BbModel(model), Turntable, BbAnimationPlayer::default()));
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(256.0, 256.0))),
         MeshMaterial3d(materials.add(StandardMaterial { base_color: Color::srgb(0.45, 0.45, 0.42), ..default() })),
@@ -75,11 +85,12 @@ fn setup(
 
 /// Point the camera at the model once its bounds are known.
 fn frame_camera(
+    args: Res<Args>,
     models: Res<Assets<BbModelAsset>>,
-    loaded: Query<&BbModel, Added<BbModelSpawned>>,
+    mut loaded: Query<(&BbModel, &mut BbAnimationPlayer), Added<BbModelSpawned>>,
     mut camera: Query<&mut Transform, With<Camera3d>>,
 ) {
-    for model in &loaded {
+    for (model, mut player) in &mut loaded {
         let Some(asset) = models.get(&model.0) else { continue };
         let (lo, hi) = asset.bounds.unwrap_or((Vec3::splat(-8.0), Vec3::splat(8.0)));
         let centre = (lo + hi) / 2.0;
@@ -89,8 +100,17 @@ fn frame_camera(
             asset.name,
             asset.nodes.len(),
             asset.nodes.iter().map(|n| n.parts.len()).sum::<usize>(),
-            asset.animations
+            asset.animation_names().collect::<Vec<_>>()
         );
+        let first = asset.animation_names().next().map(str::to_owned);
+        if let Some(name) = args.anim.clone().or(first) {
+            info!("playing {name:?} (N: next, Space: pause, R: restart)");
+            player.play(&name);
+            if let Some(t) = args.time {
+                player.elapsed = t;
+                player.paused = true;
+            }
+        }
         for mut t in &mut camera {
             *t = Transform::from_translation(centre + Vec3::new(1.0, 0.7, 1.0).normalize() * radius * 1.3)
                 .looking_at(centre, Vec3::Y);
@@ -131,5 +151,34 @@ fn shoot(
     }
     if *after_load == 60 {
         exit.write(AppExit::Success);
+    }
+}
+
+fn animation_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    models: Res<Assets<BbModelAsset>>,
+    mut players: Query<(&BbModel, &mut BbAnimationPlayer)>,
+) {
+    for (model, mut player) in &mut players {
+        let Some(asset) = models.get(&model.0) else { continue };
+        if keys.just_pressed(KeyCode::Space) {
+            player.paused = !player.paused;
+        }
+        if keys.just_pressed(KeyCode::KeyR) {
+            player.elapsed = 0.0;
+        }
+        if keys.just_pressed(KeyCode::KeyN) {
+            let names: Vec<&str> = asset.animation_names().collect();
+            if names.is_empty() {
+                continue;
+            }
+            let next = player
+                .animation
+                .as_deref()
+                .and_then(|cur| names.iter().position(|n| *n == cur))
+                .map_or(0, |i| (i + 1) % names.len());
+            info!("playing {:?}", names[next]);
+            player.crossfade(names[next], 0.25);
+        }
     }
 }
