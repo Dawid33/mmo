@@ -13,7 +13,7 @@ const FOOTPRINT: usize = CHUNK_BLOCKS * CHUNK_BLOCKS;
 /// Ground recipe for one column footprint. Per-footprint arrays are indexed
 /// `lx * CHUNK_BLOCKS + lz`.
 #[derive(
-    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash,
+    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash,
 )]
 pub struct ColumnGround {
     /// Surface block Y per block column.

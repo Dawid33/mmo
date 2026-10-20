@@ -683,6 +683,8 @@ impl Region {
     /// Seed a region from vertical columns: flatten each column's materialized
     /// (Dense) sub-chunks into the existing per-chunk mesh/collider path.
     pub fn from_columns(id: RegionId, columns: Vec<(ColumnCoords, Column)>) -> Self {
+        let ground: Vec<(ColumnCoords, crate::ColumnGround)> =
+            columns.iter().filter_map(|(c, col)| col.ground().map(|g| (*c, g.clone()))).collect();
         let chunks: Vec<(ChunkCoords, Chunk)> = columns
             .into_iter()
             .flat_map(|(col, column)| {
@@ -692,7 +694,9 @@ impl Region {
                     .map(move |(sub_y, chunk)| (ChunkCoords::new(col.x, sub_y, col.z), chunk))
             })
             .collect();
-        Region::from_chunks(id, chunks)
+        let mut region = Region::from_chunks(id, chunks);
+        region.data.seed_ground_genesis(ground);
+        region
     }
 
     /// An empty cell-mode region: no terrain, no active cells. Terrain

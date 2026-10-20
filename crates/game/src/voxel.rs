@@ -114,7 +114,7 @@ impl ChunkCoords {
 
 /// Region-local (x, z) address of a vertical column, 0..REGION_CHUNKS.
 #[derive(
-    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord,
+    Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash, state_hash::StateHash, PartialOrd, Ord,
 )]
 pub struct ColumnCoords {
     pub x: usize,
