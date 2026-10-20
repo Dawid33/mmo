@@ -107,15 +107,27 @@ pub struct Column {
     below: Block,
     above: Block,
     sub_chunks: Vec<SubChunk>,
+    /// Recipe for the ground below the band (lazy underground), if any.
+    #[serde(default)]
+    ground: Option<crate::ground::ColumnGround>,
 }
 
 impl Column {
     const SUB_BLOCKS_Y: i32 = CHUNK_BLOCKS as i32;
 
     pub fn new(base_sub_y: i32, below: Block, above: Block, sub_chunks: Vec<SubChunk>) -> Self {
-        let mut c = Self { base_sub_y, below, above, sub_chunks };
+        let mut c = Self { base_sub_y, below, above, sub_chunks, ground: None };
         c.normalize();
         c
+    }
+
+    pub fn with_ground(mut self, ground: crate::ground::ColumnGround) -> Self {
+        self.ground = Some(ground);
+        self
+    }
+
+    pub fn ground(&self) -> Option<&crate::ground::ColumnGround> {
+        self.ground.as_ref()
     }
 
     pub fn base_sub_y(&self) -> i32 {
