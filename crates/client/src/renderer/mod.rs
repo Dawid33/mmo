@@ -87,6 +87,7 @@ impl Plugin for SimBridgePlugin {
             MaterialPlugin::<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>::default(),
             bevy::diagnostic::FrameTimeDiagnosticsPlugin::default(),
             voxel_pull::VoxelPullPlugin,
+            fortress_view::FortressOverlayPlugin,
             far_voxel::FarVoxelPlugin,
             model::BbModelPlugin,
         ))

@@ -123,6 +123,17 @@ impl TileMirror {
         true
     }
 
+    /// Drop the state of regions no longer loaded. Losing the home region's
+    /// changes what the mirror answers (no designations, no ground), so that
+    /// bumps the version — the overlay rebuilds on it.
+    fn prune_regions(&mut self, loaded: impl Fn(&RegionId) -> bool) {
+        let had_home = self.home_tiles().is_some();
+        self.regions.retain(|r, _| loaded(r));
+        if had_home && self.home_tiles().is_none() {
+            self.version += 1;
+        }
+    }
+
     fn home_tiles(&self) -> Option<&RegionTiles> {
         self.regions.get(&self.home?)
     }
@@ -248,7 +259,7 @@ pub fn update_tile_mirror(
     for msg in msgs.read() {
         mirror.apply(msg.clone());
     }
-    mirror.regions.retain(|r, _| roots.0.contains_key(r));
+    mirror.prune_regions(|r| roots.0.contains_key(r));
     for entity in removed.read() {
         mirror.remove_entity(entity);
     }
@@ -332,6 +343,20 @@ mod tests {
         assert!(m.version() > v);
         m.remove_chunk([0, p[1].div_euclid(CHUNK_BLOCKS as i32), 0]);
         assert_eq!(m.block(p), STONE);
+    }
+
+    #[test]
+    fn pruning_the_home_region_bumps_version() {
+        let mut m = mirror();
+        let v = m.version();
+        m.prune_regions(|_| true);
+        assert_eq!(m.version(), v, "nothing pruned");
+        m.prune_regions(|r| *r != home());
+        assert!(m.version() > v, "the home region's state went away");
+        assert!(m.designations().is_empty());
+        let v = m.version();
+        m.prune_regions(|_| false);
+        assert_eq!(m.version(), v, "the home region was already gone");
     }
 
     #[test]

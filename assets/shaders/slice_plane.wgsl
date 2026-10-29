@@ -14,6 +14,8 @@
 struct SliceParams {
     // xz: home region world origin; y: unused; w: brightness (1 - CAP_DARKEN).
     origin: vec4<f32>,
+    // x: the working level's layer in the overlay texture; y: overlay on (0/1).
+    overlay: vec4<u32>,
 }
 
 // Block ids of the working level, x + z * REGION_BLOCKS (AIR = 0).
@@ -23,6 +25,9 @@ struct SliceParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var blocks: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var blocks_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> params: SliceParams;
+// The designation overlay voxel_pull.wgsl reads (fortress_view.rs
+// OverlayGrid): texel (x, z, layer); the plane's cells are the working level's.
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var overlay: texture_3d<u32>;
 
 const BLOCK_VOXELS: f32 = 16.0;
 
@@ -55,6 +60,57 @@ fn apply_distance_fog(color: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> 
     return color;
 }
 
+// BEGIN fortress overlay patterns — identical in voxel_pull.wgsl and
+// slice_plane.wgsl (test-pinned: fortress_view.rs). The overlay byte's bits
+// are mirrored from fortress_view.rs (the source of truth).
+const OVERLAY_KIND_MASK: u32 = 7u;
+const OVERLAY_DIG: u32 = 1u;
+const OVERLAY_DECONSTRUCT: u32 = 2u;
+const OVERLAY_PREVIEW: u32 = 16u;
+const OVERLAY_INVALID: u32 = 32u;
+// Pattern repeats per block (one metre): a 0.25 m period.
+const OVERLAY_PATTERN_PER_BLOCK: f32 = 4.0;
+// Dig: amber diagonal stripes, half of each period wide.
+const OVERLAY_DIG_COLOR = vec3<f32>(1.0, 0.62, 0.08);
+const OVERLAY_DIG_WIDTH: f32 = 0.5;
+// Deconstruct: a red cross-hatch of thinner lines.
+const OVERLAY_DECONSTRUCT_COLOR = vec3<f32>(0.9, 0.1, 0.06);
+const OVERLAY_HATCH_WIDTH: f32 = 0.22;
+// How strongly a pattern line replaces the surface colour.
+const OVERLAY_PATTERN_ALPHA: f32 = 0.75;
+// Preview: 35 % toward white; invalid: 50 % toward red.
+const OVERLAY_PREVIEW_WHITEN: f32 = 0.35;
+const OVERLAY_INVALID_COLOR = vec3<f32>(1.0, 0.0, 0.0);
+const OVERLAY_INVALID_MIX: f32 = 0.5;
+
+// Coverage (0..1) of lines `width` of each unit period of `s` wide,
+// antialiased over one pixel and fading to the mean coverage where a period
+// shrinks under two pixels. Must run in uniform control flow (fwidth).
+fn overlay_lines(s: f32, width: f32) -> f32 {
+    let fw = max(fwidth(s), 1e-5);
+    let d = abs(fract(s) - 0.5);
+    let edge = 0.5 * width;
+    let lines = 1.0 - smoothstep(edge - 0.5 * fw, edge + 0.5 * fw, d);
+    return mix(lines, width, smoothstep(0.25, 0.5, fw));
+}
+
+// `color` tinted by overlay byte `bits` at surface coordinates `uv` (in
+// blocks). Uniform control flow only (derivatives); a byte of 0 returns
+// `color` unchanged.
+fn overlay_tint(color: vec3<f32>, uv: vec2<f32>, bits: u32) -> vec3<f32> {
+    let p = uv * OVERLAY_PATTERN_PER_BLOCK;
+    let stripes = overlay_lines(p.x + p.y, OVERLAY_DIG_WIDTH);
+    let hatch = max(overlay_lines(p.x + p.y, OVERLAY_HATCH_WIDTH), overlay_lines(p.x - p.y, OVERLAY_HATCH_WIDTH));
+    let kind = bits & OVERLAY_KIND_MASK;
+    var c = color;
+    c = mix(c, OVERLAY_DIG_COLOR, OVERLAY_PATTERN_ALPHA * stripes * f32(kind == OVERLAY_DIG));
+    c = mix(c, OVERLAY_DECONSTRUCT_COLOR, OVERLAY_PATTERN_ALPHA * hatch * f32(kind == OVERLAY_DECONSTRUCT));
+    c = mix(c, vec3<f32>(1.0), OVERLAY_PREVIEW_WHITEN * f32((bits & OVERLAY_PREVIEW) != 0u));
+    c = mix(c, OVERLAY_INVALID_COLOR, OVERLAY_INVALID_MIX * f32((bits & OVERLAY_INVALID) != 0u));
+    return c;
+}
+// END fortress overlay patterns
+
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let p = in.world_position;
@@ -77,6 +133,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         layer = textureLoad(top_layers, vec2<i32>(i32(id), 0), 0).r;
     }
     let tex = textureSampleGrad(blocks, blocks_sampler, crisp, layer, ddx, ddy);
+    // Designations on the working level, as voxel_pull.wgsl tints a cap
+    // (same uv: world xz in blocks) — implied rock has no face to carry them.
+    let marked = textureLoad(overlay, vec3<i32>(cell, i32(params.overlay.x)), 0).r;
+    let albedo = overlay_tint(tex.rgb, uv, select(0u, marked, params.overlay.y != 0u));
 
     // Lit as an up-facing terrain face in voxel_pull.wgsl (no AO).
     let n = vec3<f32>(0.0, 1.0, 0.0);
@@ -97,7 +157,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         lit += light.color.rgb * ndotl * shadow / PI;
     }
     lit *= view.exposure;
-    let color = apply_distance_fog(tex.rgb * lit * params.origin.w, p.xyz);
+    let color = apply_distance_fog(albedo * lit * params.origin.w, p.xyz);
     // Air: the level is open here; look down into it. Last, after every
     // derivative (see voxel_pull.wgsl's discard).
     if (id == 0u) {

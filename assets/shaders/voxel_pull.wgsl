@@ -27,18 +27,22 @@ struct TerrainBoundaries {
 }
 @group(1) @binding(5) var<uniform> boundaries: TerrainBoundaries;
 
-// Fortress view (the z-level cutaway; later the designation overlay),
+// Fortress view (the z-level cutaway and the designation overlay),
 // mirrored from FortressViewUniform in
 // crates/client/src/renderer/fortress_view.rs (the source of truth, incl. the
-// meaning of every field). Read only under the CUTAWAY def, which the
-// pipelines set while cut.x < f32::MAX. The cut applies inside the home
-// region only (cut_applies).
+// meaning of every field). The cut is read only under the CUTAWAY def, which
+// the pipelines set while cut.x < f32::MAX; the overlay (on while cut.z > 0)
+// in every variant. Both apply inside the home region only (cut_applies,
+// overlay_bits).
 struct FortressView {
     cut: vec4<f32>,
     origin: vec4<f32>,
     overlay_dims: vec4<u32>,
 }
 @group(1) @binding(6) var<uniform> fortress: FortressView;
+// The designation overlay: one byte per home-region block cell, texel
+// (x, z, y - base level) — fortress_view.rs OverlayGrid. Fragment stage only.
+@group(1) @binding(7) var overlay: texture_3d<u32>;
 
 // Mirrored from fortress_view.rs (the source of truth). The cap's darkening
 // arrives as fortress.cut.y (CAP_DARKEN there).
@@ -137,6 +141,68 @@ fn cut_collapses(face: u32, lowest_y: f32) -> bool {
     let cut = fortress.cut.x;
     let on_cut = lowest_y > cut - CUT_EPSILON;
     return lowest_y > cut + CUT_EPSILON || ((face == 2u || face == 3u) && on_cut);
+}
+
+// BEGIN fortress overlay patterns — identical in voxel_pull.wgsl and
+// slice_plane.wgsl (test-pinned: fortress_view.rs). The overlay byte's bits
+// are mirrored from fortress_view.rs (the source of truth).
+const OVERLAY_KIND_MASK: u32 = 7u;
+const OVERLAY_DIG: u32 = 1u;
+const OVERLAY_DECONSTRUCT: u32 = 2u;
+const OVERLAY_PREVIEW: u32 = 16u;
+const OVERLAY_INVALID: u32 = 32u;
+// Pattern repeats per block (one metre): a 0.25 m period.
+const OVERLAY_PATTERN_PER_BLOCK: f32 = 4.0;
+// Dig: amber diagonal stripes, half of each period wide.
+const OVERLAY_DIG_COLOR = vec3<f32>(1.0, 0.62, 0.08);
+const OVERLAY_DIG_WIDTH: f32 = 0.5;
+// Deconstruct: a red cross-hatch of thinner lines.
+const OVERLAY_DECONSTRUCT_COLOR = vec3<f32>(0.9, 0.1, 0.06);
+const OVERLAY_HATCH_WIDTH: f32 = 0.22;
+// How strongly a pattern line replaces the surface colour.
+const OVERLAY_PATTERN_ALPHA: f32 = 0.75;
+// Preview: 35 % toward white; invalid: 50 % toward red.
+const OVERLAY_PREVIEW_WHITEN: f32 = 0.35;
+const OVERLAY_INVALID_COLOR = vec3<f32>(1.0, 0.0, 0.0);
+const OVERLAY_INVALID_MIX: f32 = 0.5;
+
+// Coverage (0..1) of lines `width` of each unit period of `s` wide,
+// antialiased over one pixel and fading to the mean coverage where a period
+// shrinks under two pixels. Must run in uniform control flow (fwidth).
+fn overlay_lines(s: f32, width: f32) -> f32 {
+    let fw = max(fwidth(s), 1e-5);
+    let d = abs(fract(s) - 0.5);
+    let edge = 0.5 * width;
+    let lines = 1.0 - smoothstep(edge - 0.5 * fw, edge + 0.5 * fw, d);
+    return mix(lines, width, smoothstep(0.25, 0.5, fw));
+}
+
+// `color` tinted by overlay byte `bits` at surface coordinates `uv` (in
+// blocks). Uniform control flow only (derivatives); a byte of 0 returns
+// `color` unchanged.
+fn overlay_tint(color: vec3<f32>, uv: vec2<f32>, bits: u32) -> vec3<f32> {
+    let p = uv * OVERLAY_PATTERN_PER_BLOCK;
+    let stripes = overlay_lines(p.x + p.y, OVERLAY_DIG_WIDTH);
+    let hatch = max(overlay_lines(p.x + p.y, OVERLAY_HATCH_WIDTH), overlay_lines(p.x - p.y, OVERLAY_HATCH_WIDTH));
+    let kind = bits & OVERLAY_KIND_MASK;
+    var c = color;
+    c = mix(c, OVERLAY_DIG_COLOR, OVERLAY_PATTERN_ALPHA * stripes * f32(kind == OVERLAY_DIG));
+    c = mix(c, OVERLAY_DECONSTRUCT_COLOR, OVERLAY_PATTERN_ALPHA * hatch * f32(kind == OVERLAY_DECONSTRUCT));
+    c = mix(c, vec3<f32>(1.0), OVERLAY_PREVIEW_WHITEN * f32((bits & OVERLAY_PREVIEW) != 0u));
+    c = mix(c, OVERLAY_INVALID_COLOR, OVERLAY_INVALID_MIX * f32((bits & OVERLAY_INVALID) != 0u));
+    return c;
+}
+// END fortress overlay patterns
+
+// The overlay byte of the block cell holding world point `p` (0 = none):
+// while the overlay is on, inside the home region and its levels.
+fn overlay_bits(p: vec3<f32>) -> u32 {
+    let cell = vec3<i32>(floor((p - fortress.origin.xyz) / BLOCK_VOXELS));
+    let at = vec3<i32>(cell.x, cell.z, cell.y - i32(fortress.origin.w));
+    let dims = vec3<i32>(fortress.overlay_dims.xyz);
+    let inside = fortress.cut.z > 0.0 && all(at >= vec3<i32>(0)) && all(at < dims);
+    let texel = clamp(at, vec3<i32>(0), max(dims - vec3<i32>(1), vec3<i32>(0)));
+    return select(0u, textureLoad(overlay, texel, 0).r, inside);
 }
 
 struct PullVertexOutput {
@@ -329,6 +395,9 @@ fn fragment(
     var layer = in.layer;
     var shade = in.shade;
     var n = normalize(in.world_normal);
+    // The block cell the overlay is read for: half a voxel back along the
+    // normal from a face lands inside its solid block.
+    var overlay_point = in.world_position.xyz - 0.5 * n;
 #ifdef CUTAWAY
     let cut = fortress.cut.x;
     let inside = in.cut_here != 0u;
@@ -339,6 +408,8 @@ fn fragment(
     layer = select(in.layer, top_layer(in.layer), cap);
     shade = select(in.shade, 1.0, cap);
     n = select(n, vec3<f32>(0.0, 1.0, 0.0), cap);
+    // A cap is the working level's cell under the cut plane.
+    overlay_point = select(overlay_point, cap_position - vec3<f32>(0.0, 0.5, 0.0), cap);
 #endif
     // Derivatives first, in uniform control flow.
     let texels = vec2<f32>(textureDimensions(mat_array_texture).xy);
@@ -360,7 +431,9 @@ fn fragment(
         tex = mix(tex, top_tex, riser_fade);
         light_n = normalize(mix(n, vec3<f32>(0.0, 1.0, 0.0), riser_fade));
     }
-    let base = tex.rgb * shade;
+    // Designations tint the surface's albedo, so they light and darken with
+    // it (by level below the cut too).
+    let base = overlay_tint(tex.rgb, face_uv, overlay_bits(overlay_point)) * shade;
 
     // Cascade selection z, view-space depth of the fragment. Copied verbatim
     // from the real caller (bevy_pbr-0.18.1/src/render/pbr_functions.wgsl,

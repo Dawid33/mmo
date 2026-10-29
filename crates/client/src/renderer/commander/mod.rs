@@ -338,7 +338,7 @@ impl Plugin for CommanderPlugin {
             )
             .add_systems(
                 Update,
-                super::fortress_view::update_fortress_view
+                (super::fortress_view::update_overlay_grid, super::fortress_view::update_fortress_view)
                     .after(level::step_level_input)
                     .after(tiles::update_tile_mirror),
             );

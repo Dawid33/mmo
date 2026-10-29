@@ -37,7 +37,9 @@ impl FromWorld for VoxelPullPipeline {
         //   storage buffers), 5 uniform TerrainBoundaries (fragment only; the
         //   region boundary overlay, `renderer/boundaries.rs`), 6 uniform
         //   FortressView (vertex + fragment; the z-level cutaway,
-        //   `renderer/fortress_view.rs`).
+        //   `renderer/fortress_view.rs`), 7 texture_3d<u32> designation
+        //   overlay (fragment only, R8Uint, no sampler: textureLoad; the
+        //   same file's `OverlayTexture`).
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
             (
@@ -48,6 +50,7 @@ impl FromWorld for VoxelPullPipeline {
                 bt::storage_buffer_read_only::<u32>(false).visibility(ShaderStages::FRAGMENT),
                 bt::uniform_buffer::<BoundaryUniform>(false).visibility(ShaderStages::FRAGMENT),
                 bt::uniform_buffer::<FortressViewUniform>(false),
+                bt::texture_3d(TextureSampleType::Uint).visibility(ShaderStages::FRAGMENT),
             ),
         );
         let chunk_layout = device.create_bind_group_layout("voxel_pull_chunk_layout", &entries);
@@ -436,6 +439,12 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(positi
             source.contains("(face == 2u || face == 3u) && on_cut"),
             "the forward shader collapses top and ceiling faces on the cut"
         );
+        // The designation overlay at binding 7, read in every variant.
+        assert!(
+            source.contains("@group(1) @binding(7) var overlay: texture_3d<u32>;"),
+            "the forward shader binds the designation overlay at 7"
+        );
+        assert!(source.contains("overlay_tint("), "the forward shader tints by the overlay");
     }
 
     /// The depth/shadow pipelines with the cutaway, with and without the

@@ -20,7 +20,7 @@ use super::gpu::{
     NearRendererMetrics,
 };
 use super::super::boundaries::BoundaryUniform;
-use super::super::fortress_view::FortressViewUniform;
+use super::super::fortress_view::{FortressViewUniform, OverlayTexture};
 use super::pipeline::VoxelPullPipeline;
 use super::queue::{grouped_draw_list, ViewChunkDrawList};
 use super::{BlockArrayTexture, BlockTopLayers, ExtractedChunkQuads, RemovedChunkQuads};
@@ -228,6 +228,7 @@ pub fn prepare_chunk_quads(
     top_layers: Option<Res<BlockTopLayers>>,
     boundaries: Option<Res<BoundaryUniform>>,
     fortress_view: Option<Res<FortressViewUniform>>,
+    overlay: Option<Res<OverlayTexture>>,
     mut arena: ResMut<GpuQuadArena>,
     removed: Res<RemovedChunkQuads>,
 ) {
@@ -376,7 +377,11 @@ pub fn prepare_chunk_quads(
     arena.metadata_dirty.clear();
 
     if rebuild_bind_group {
-        let Some(texture) = texture else {
+        // The designation overlay texture: written in place by
+        // `fortress_view::upload_overlay` (the dirty sub-box), so the bind
+        // group only needs its view.
+        let overlay = overlay.as_ref().and_then(|o| images.get(&o.0));
+        let (Some(texture), Some(overlay)) = (texture, overlay) else {
             return;
         };
         let (
@@ -405,6 +410,7 @@ pub fn prepare_chunk_quads(
                 top_layers.as_entire_binding(),
                 boundaries.as_entire_binding(),
                 fortress_view.as_entire_binding(),
+                &overlay.texture_view,
             )),
         ));
     }

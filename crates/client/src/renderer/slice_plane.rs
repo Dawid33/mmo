@@ -19,6 +19,10 @@
 //! every pass: they belong to cut-away rock, and drawn as back-face caps they
 //! would roof over every dug room the plane leaves open.
 //!
+//! The designation overlay tints it like the cutaway's cap: the plane reads
+//! the same overlay texture (`fortress_view::OverlayTexture`) at the working
+//! level's layer, since designated implied rock at the cut has no face.
+//!
 //! The ids texture is rebuilt (whole: 128 KiB at 256 m regions) only when the
 //! level, the home region or the mirror changes ([`needs_rebuild`]). Commander
 //! mode only; hidden whenever the cut is off (`camera_cut` is `None`, which
@@ -40,7 +44,7 @@ use super::block_textures::BlockTextureLayers;
 use super::config::TerrainRenderConfig;
 use super::commander::level::{camera_cut, WorkingLevel};
 use super::commander::tiles::TileMirror;
-use super::fortress_view::CAP_DARKEN;
+use super::fortress_view::{overlay_base_level, OverlayTexture, CAP_DARKEN};
 use super::voxel_pull::BlockArrayTexture;
 
 /// The block ids of `level` across the home region: `REGION_BLOCKS²` cells,
@@ -80,6 +84,13 @@ pub fn needs_rebuild(state: &SliceState, level: Option<i32>, region: Option<Regi
 pub struct SliceParams {
     /// xz: home region world origin; y: unused; w: brightness (1 - CAP_DARKEN).
     pub origin: Vec4,
+    /// x: the working level's layer in the overlay texture; y: overlay on (0/1).
+    pub overlay: UVec4,
+}
+
+/// The overlay params for working level `level`: its layer, on.
+pub fn overlay_params(level: i32) -> UVec4 {
+    UVec4::new((level - overlay_base_level(level)) as u32, 1, 0, 0)
 }
 
 #[derive(Asset, AsBindGroup, TypePath, Clone)]
@@ -96,6 +107,9 @@ pub struct SlicePlaneMaterial {
     pub blocks: Handle<Image>,
     #[uniform(4)]
     pub params: SliceParams,
+    /// The designation overlay (`fortress_view::OverlayTexture`), R8Uint 3D.
+    #[texture(5, sample_type = "u_int", dimension = "3d")]
+    pub overlay: Handle<Image>,
 }
 
 impl Material for SlicePlaneMaterial {
@@ -152,11 +166,12 @@ fn spawn_slice_plane(
     existing: Query<(), With<SlicePlane>>,
     blocks: Option<Res<BlockArrayTexture>>,
     layers: Option<Res<BlockTextureLayers>>,
+    overlay: Option<Res<OverlayTexture>>,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<SlicePlaneMaterial>>,
 ) {
-    let (Some(blocks), Some(layers)) = (blocks, layers) else { return };
+    let (Some(blocks), Some(layers), Some(overlay)) = (blocks, layers, overlay) else { return };
     if !existing.is_empty() {
         return;
     }
@@ -168,7 +183,8 @@ fn spawn_slice_plane(
         ids: ids.clone(),
         top_layers,
         blocks: blocks.0.clone(),
-        params: SliceParams { origin: Vec4::new(0.0, 0.0, 0.0, 1.0 - CAP_DARKEN) },
+        params: SliceParams { origin: Vec4::new(0.0, 0.0, 0.0, 1.0 - CAP_DARKEN), overlay: UVec4::ZERO },
+        overlay: overlay.0.clone(),
     });
     commands.spawn((
         Name::new("slice plane"),
@@ -212,6 +228,7 @@ fn update_slice_plane(
     }
     if let Some(mut material) = materials.get_mut(&plane.material) {
         material.params.origin = Vec4::new(origin.x, 0.0, origin.z, 1.0 - CAP_DARKEN);
+        material.params.overlay = overlay_params(level);
     }
     *state = SliceState { level: Some(level), region: Some(home), mirror_version: tiles.version() };
 }
@@ -271,6 +288,14 @@ mod tests {
         assert!(needs_rebuild(&SliceState::default(), Some(10), home, 0));
     }
 
+    /// The plane's cells are the working level's: the overlay's top layer.
+    #[test]
+    fn overlay_params_pick_the_working_level_layer() {
+        use crate::renderer::fortress_view::OVERLAY_LEVELS;
+        assert_eq!(overlay_params(L), UVec4::new(OVERLAY_LEVELS - 1, 1, 0, 0));
+        assert_eq!(overlay_params(-3), UVec4::new(OVERLAY_LEVELS - 1, 1, 0, 0));
+    }
+
     #[test]
     fn top_layer_lut_maps_ids_and_defaults_to_missing() {
         let layers = crate::renderer::block_textures::BlockTextureLayers(
@@ -298,6 +323,10 @@ struct VertexOutput {
     @location(1) world_normal: vec3<f32>,
 }
 "#,
+        );
+        assert!(
+            source.contains("@binding(5) var overlay: texture_3d<u32>;"),
+            "the slice plane reads the designation overlay"
         );
         let imports: Vec<(&str, &str)> = IMPORTS.into_iter().chain([forward_io]).collect();
         for fog in [false, true] {
