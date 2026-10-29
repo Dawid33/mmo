@@ -13,7 +13,8 @@
 //! Self-check without a human: `--model <part of a path>` picks a model at
 //! start, `--anim <name>` a clip, `--time <s>` freezes it there, and
 //! `--shot <png>` saves a screenshot once it has loaded and exits (its window
-//! opens unfocused, behind everything, on monitor `VOXEL_SHOT_MONITOR`, default 0);
+//! opens unfocused, behind everything, on the laptop screen: `VOXEL_SHOT_POS` /
+//! `VOXEL_SHOT_MONITOR` move it);
 //! `--yaw <deg>` / `--pitch <deg>` set the view (default: front three-quarter
 //! of a creature facing -Z; pitch 70 is roughly the commander camera's).
 use std::cell::RefCell;
@@ -129,10 +130,19 @@ fn main() {
     let mut window = Window { title: "asset viewer".into(), resolution: (1600, 900).into(), ..default() };
     if args.shot.is_some() {
         // Screenshot runs (creature sheets fire dozens) must not land under the
-        // cursor and take the keyboard: one fixed monitor (`VOXEL_SHOT_MONITOR`,
-        // winit's index, default 0), unfocused, below every other window.
-        let monitor = std::env::var("VOXEL_SHOT_MONITOR").ok().and_then(|m| m.parse().ok()).unwrap_or(0);
-        window.position = WindowPosition::Centered(MonitorSelection::Index(monitor));
+        // cursor and take the keyboard: one fixed place, unfocused, below every
+        // other window. `VOXEL_SHOT_POS=x,y` (desktop pixels; default 160,90:
+        // centred on this box's laptop screen, eDP-1 at the desktop origin), or
+        // `VOXEL_SHOT_MONITOR=<winit index>` to centre on a monitor instead.
+        let env = |name| std::env::var(name).ok();
+        window.position = match env("VOXEL_SHOT_MONITOR").and_then(|m| m.parse().ok()) {
+            Some(monitor) => WindowPosition::Centered(MonitorSelection::Index(monitor)),
+            None => {
+                let pos = env("VOXEL_SHOT_POS").unwrap_or_else(|| "160,90".into());
+                let xy: Vec<i32> = pos.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                WindowPosition::At(IVec2::new(*xy.first().unwrap_or(&160), *xy.get(1).unwrap_or(&90)))
+            }
+        };
         window.focused = false;
         window.window_level = WindowLevel::AlwaysOnBottom;
     }
