@@ -332,12 +332,25 @@ mod tests {
         RegionCoords::new(1, -2)
     }
 
+    /// The band's bottom chunk (`mirror`'s `band_base`): chunks below it
+    /// are implied ground.
+    fn band_base() -> i32 {
+        SURFACE.div_euclid(CHUNK_BLOCKS as i32) - 1
+    }
+
+    /// A block y in implied ground: 3 under the surface (y 37) when that is
+    /// below the band, else the top block under the band (16-block chunks:
+    /// the band starts at y 16).
+    fn implied_y() -> i32 {
+        (SURFACE - 3).min(band_base() * CHUNK_BLOCKS as i32 - 1)
+    }
+
     /// A mirror of `home()` whose column (0, 0) has a plain ground recipe
     /// implied below the surface's chunk.
     fn mirror() -> TileMirror {
         let mut m = TileMirror::default();
         m.set_home(Some(home()));
-        let band_base = SURFACE.div_euclid(CHUNK_BLOCKS as i32) - 1;
+        let band_base = band_base();
         let ground = ColumnGround::plain(vec![SURFACE as i16; game::COLUMN_FOOTPRINT].into_boxed_slice(), band_base, STONE, BEDROCK);
         m.apply(TileMirrorMsg::Reset {
             region: home(),
@@ -385,23 +398,24 @@ mod tests {
     #[test]
     fn missing_chunk_below_surface_is_implied_ground() {
         let m = mirror();
-        assert_eq!(m.block([0, SURFACE - 3, 0]), STONE);
-        assert!(!m.is_bedrock([0, SURFACE - 3, 0]));
+        let y = implied_y();
+        assert_eq!(m.block([0, y, 0]), STONE);
+        assert!(!m.is_bedrock([0, y, 0]));
         let deep = [1, SURFACE - UNDERGROUND_DEPTH, 1];
         assert_eq!(m.block(deep), BEDROCK);
         assert!(m.is_bedrock(deep));
-        assert!(m.edge_locked([0, SURFACE - 3, 0]), "x = 0 borders the next region");
-        assert!(!m.edge_locked([1, SURFACE - 3, 1]));
+        assert!(m.edge_locked([0, y, 0]), "x = 0 borders the next region");
+        assert!(!m.edge_locked([1, y, 1]));
         assert_eq!(m.block([0, SURFACE + 1, 0]), BlockId::AIR, "the band is not implied");
     }
 
     #[test]
     fn mirrored_chunk_overrides_ground() {
         let mut m = mirror();
-        let p = [0, SURFACE - 3, 0];
+        let p = [0, implied_y(), 0];
         let v = m.version();
         let mut ids = vec![BlockId::AIR; CHUNK_BLOCK_COUNT].into_boxed_slice();
-        ids[BlockIndex::from_xyz(1, 1, 0).linear()] = BlockId(9);
+        ids[BlockIndex::from_xyz(1, p[1].rem_euclid(CHUNK_BLOCKS as i32) as usize, 0).linear()] = BlockId(9);
         m.set_chunk([0, p[1].div_euclid(CHUNK_BLOCKS as i32), 0], ids);
         assert_eq!(m.block(p), BlockId::AIR);
         assert_eq!(m.block([1, p[1], 0]), BlockId(9));

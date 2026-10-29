@@ -506,10 +506,17 @@ pub fn apply_snapshot_voxels(
             }
         });
         queue.applied += count as u32;
-        // TODO(chunk flip): a whole chunk lands in one frame, so at 16³
-        // chunks one landing can be ~488 bricks against
-        // MAX_SNAPSHOT_VOXELS_PER_FRAME (160). Splitting a landing across
-        // frames is Task 11's call.
+        // TODO(perf, chunk flip): a whole chunk lands in one frame — at 16³
+        // chunks up to 512 bricks (296 for a uniform solid chunk: its face
+        // shell; ~200 for a typical surface chunk) against
+        // MAX_SNAPSHOT_VOXELS_PER_FRAME (160). Kept whole on purpose: the
+        // landing swaps the SimChunk mirror and lays PendingBlockDeltas on
+        // top in one step, and a half-landed chunk would have edits racing
+        // bricks that are not there yet. The overshoot is bounded to one
+        // chunk per frame (the budget saturates, nothing carries over), the
+        // voxels were derived off-thread, and meshing has its own budget.
+        // If `main_stall` / the join timeline show it, split by staging the
+        // bricks behind the pending marker instead of here.
         budget = budget.saturating_sub(count.max(1));
     }
     if queue.applied > 0 && queue.ready.is_empty() && queue.batches.is_empty() && outstanding == 0 {
@@ -1441,7 +1448,15 @@ mod tests {
         assert!(drained, "the snapshot voxel task never finished");
         app.update(); // one more frame: anything it queued has been applied or dropped
         assert!(!app.world().entity(e).contains::<PendingSnapshotVoxels>());
-        assert_eq!(brick_voxels(&app, e, [0; 3]), Some(VoxelData::new(&edited)));
+        if game::BRICKS_PER_CHUNK_EDGE == 1 {
+            assert_eq!(brick_voxels(&app, e, [0; 3]), Some(VoxelData::new(&edited)));
+        } else {
+            // A dense write is one brick's worth: a chunk of many bricks
+            // ignores it (`write_legacy_voxels`), and the snapshot lands.
+            // Edits racing the snapshot there are `SetBlocks`, covered by
+            // `set_blocks_before_the_snapshot_voxels_is_applied_on_top`.
+            assert_eq!(brick_voxels(&app, e, [0; 3]), Some(snapshot_voxels));
+        }
     }
 
     /// `SetBlocks` for chunk block 0: air, and a chiselled block 1 when the

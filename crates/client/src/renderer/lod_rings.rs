@@ -643,6 +643,11 @@ mod tests {
         app.world().resource::<Assets<Mesh>>().get(h).map(|m| m.count_vertices())
     }
 
+    /// The game cell of the cell-mask tests: 128 units (4 chunks) at 2-block
+    /// chunks; a cell is at least one chunk, so 256 units (1 chunk) at 16.
+    const TEST_CELL_UNITS: usize = if game::CHUNK_UNITS > 128 { game::CHUNK_UNITS } else { 128 };
+    const TEST_CELL_CHUNKS: usize = TEST_CELL_UNITS / game::CHUNK_UNITS;
+
     /// An activated cell's LOD stays until every chunk the sim reported for
     /// it has landed and all their bricks have meshed, held for
     /// NEAR_HANDOFF_HOLD_FRAMES — no hole while the near chunks are still
@@ -660,26 +665,34 @@ mod tests {
         {
             let mut mask = app.world_mut().resource_mut::<HomeCellMask>();
             mask.region = Some(home);
-            mask.cell_chunks = 4; // 128-unit cells: x in [128, 256) is cell (1, 0)
+            // x in [TEST_CELL_UNITS, 2 * TEST_CELL_UNITS) is cell (1, 0).
+            mask.cell_chunks = TEST_CELL_CHUNKS;
             mask.active.insert(cell, 3);
         }
+        // The cell's i-th chunk: along x while the cell is several chunks
+        // wide, else stacked up its one column.
+        let e = game::CHUNK_UNITS as f32;
+        let at = |i: usize| {
+            let x = TEST_CELL_UNITS as f32;
+            if TEST_CELL_CHUNKS > 1 { Vec3::new(x + i as f32 * e, 0.0, 0.0) } else { Vec3::new(x, i as f32 * e, 0.0) }
+        };
         // A landed chunk with one brick (the bridge's shape: both children
         // of the region root, the brick at the chunk's origin).
-        let mut chunk = |x: f32| {
+        let mut chunk = |p: Vec3| {
             let world = app.world_mut();
-            let chunk = world.spawn((Transform::from_xyz(x, 0.0, 0.0), ChildOf(root))).id();
+            let chunk = world.spawn((Transform::from_translation(p), ChildOf(root))).id();
             let brick = world
-                .spawn((BrickOf { chunk, local: [0; 3] }, Transform::from_xyz(x, 0.0, 0.0), ChildOf(root)))
+                .spawn((BrickOf { chunk, local: [0; 3] }, Transform::from_translation(p), ChildOf(root)))
                 .id();
             world.entity_mut(chunk).insert(ChunkBricks(vec![brick]));
             brick
         };
-        let (a, b) = (chunk(128.0), chunk(160.0));
+        let (a, b) = (chunk(at(0)), chunk(at(1)));
         // A third chunk, still deriving its bricks.
         let c = app
             .world_mut()
             .spawn((
-                Transform::from_xyz(192.0, 0.0, 0.0),
+                Transform::from_translation(at(2)),
                 ChildOf(root),
                 ChunkBricks::default(),
                 PendingSnapshotVoxels,
@@ -722,10 +735,13 @@ mod tests {
         {
             let mut mask = app.world_mut().resource_mut::<HomeCellMask>();
             mask.region = Some(home);
-            // One factor-4 LOD cell (32 * 4 units) == one 4-chunk game cell.
-            mask.cell_chunks = 4;
+            // One LOD grid (32 cells of `factor` units) == one game cell:
+            // factor 4 and 4-chunk cells at 2-block chunks, factor 8 and
+            // 1-chunk cells at 16.
+            mask.cell_chunks = TEST_CELL_CHUNKS;
         }
-        let key = LodKey::for_region(4, home);
+        let factor = (TEST_CELL_UNITS / 32) as u32;
+        let key = LodKey::for_region(factor, home);
         let packed = PackedLodGrid::encode(&one_solid_grid());
         push_event(&mut app, LodEventMsg::Data(key, vec![([0, 0, 0], packed.clone()), ([1, 0, 0], packed)]));
         assert!(wait_until(&mut app, |app| slot_root(app, key).is_some()));
@@ -738,7 +754,7 @@ mod tests {
                 .map(|(e, ..)| e)
                 .unwrap()
         };
-        let (kept, masked) = (child_at(&mut app, 0.0), child_at(&mut app, 128.0));
+        let (kept, masked) = (child_at(&mut app, 0.0), child_at(&mut app, TEST_CELL_UNITS as f32));
         assert!(wait_until(&mut app, |app| mesh_vertices(app, kept).is_some()
             && mesh_vertices(app, masked).is_some()));
         let before = mesh_vertices(&app, kept).unwrap();

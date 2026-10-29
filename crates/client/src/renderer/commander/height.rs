@@ -252,15 +252,11 @@ mod tests {
                     } else if rock == 0 && wet == BLOCK_VOXELS {
                         chunk.set_block(bx, by, bz, Block::new(WATER));
                     } else if wet > 0 {
-                        // Mixed block: rock below, water above, as a chisel.
-                        let mut c = ChiselData::new(vec![below, WATER]);
-                        for z in 0..BLOCK_VOXELS {
-                            for x in 0..BLOCK_VOXELS {
-                                for y in 0..wet {
-                                    c.set(x, y, z, true, u8::from(y >= rock));
-                                }
-                            }
-                        }
+                        // Mixed block: rock below, water above, as a chisel
+                        // (built in one canonical merge, not voxel by voxel).
+                        let c = ChiselData::from_fn(vec![below, WATER], |_, y, _| {
+                            (y < wet).then_some(u8::from(y >= rock))
+                        });
                         chunk.blocks.set(bi, Block::new(below));
                         chunk.chisel.insert(bi, c);
                     }
@@ -270,10 +266,11 @@ mod tests {
         chunk
     }
 
-    /// The old reference: tops read from the brick's dense voxels.
+    /// The old reference: tops read from the dense voxels of the bricks
+    /// stacked over each column (one brick at 2-block chunks).
     fn tops_from_voxels(chunk: &Chunk) -> ChunkTops {
-        assert_eq!(game::BRICKS_PER_CHUNK_EDGE, 1, "reference reads the single brick");
-        let voxels = chunk.brick([0; 3]).voxels();
+        let edge = game::BRICK_VOXELS;
+        let mut bricks: HashMap<[usize; 3], Vec<game::Voxel>> = HashMap::new();
         let mut tops = ChunkTops::default();
         let centre = BLOCK_VOXELS / 2;
         for bz in 0..CHUNK_BLOCKS {
@@ -281,7 +278,9 @@ mod tests {
                 let (x, z) = (bx * BLOCK_VOXELS + centre, bz * BLOCK_VOXELS + centre);
                 let column = bx + CHUNK_BLOCKS * bz;
                 for y in 0..CHUNK_EDGE {
-                    let id = voxels[game::voxel_index(x, y, z)].block;
+                    let b = [x / edge, y / edge, z / edge];
+                    let voxels = bricks.entry(b).or_insert_with(|| chunk.brick(b).voxels());
+                    let id = voxels[game::voxel_index(x % edge, y % edge, z % edge)].block;
                     if id == BlockId::AIR {
                         continue;
                     }
@@ -296,6 +295,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn height_from_blocks_matches_voxels() {
         for (h, w) in [(8, 20), (0, 0), (CHUNK_EDGE, CHUNK_EDGE), (5, 5), (1, CHUNK_EDGE)] {
             let chunk = layered(h, w, STONE);
@@ -346,5 +346,37 @@ mod tests {
         grid.remove_entity(low);
         assert_eq!(grid.surface_at(x, z), None);
         assert_eq!(grid.column_at(x, z), None, "unloaded columns are dropped");
+    }
+
+    /// Heights are u16 voxel counts and world heights add the chunk's own y:
+    /// a full chunk's top is `CHUNK_UNITS` (256 at 16-block chunks, past u8
+    /// range), and chunks below y = 0 count down from the region floor.
+    #[test]
+    fn heights_span_u16_and_negative_chunk_y() {
+        let full = chunk_tops(&layered(CHUNK_EDGE, CHUNK_EDGE, STONE), WATER);
+        assert_eq!(full.surface, [CHUNK_EDGE as u16; COLUMNS]);
+        let e = CHUNK_EDGE as f32;
+        let mut grid = HeightGrid::new(WATER);
+        let (deep, top) = (Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap());
+        grid.insert_chunk(deep, [0, -2, 0], full);
+        assert_eq!(grid.surface_at(1.0, 1.0), Some(-e), "chunk y -2's full top is at -CHUNK_UNITS");
+        grid.insert_chunk(top, [0, -1, 0], chunk_tops(&layered(3, 3, STONE), WATER));
+        assert_eq!(grid.surface_at(1.0, 1.0), Some(3.0 - e), "chunk y -1 stacks on top");
+        grid.remove_entity(top);
+        grid.insert_chunk(top, [0, 1, 0], full);
+        assert_eq!(grid.surface_at(1.0, 1.0), Some(2.0 * e), "a full chunk at y 1 tops out at 2·CHUNK_UNITS");
+    }
+
+    /// A sim chunk's key is its region-local position plus the region's
+    /// world offset, in chunks — negative regions and chunk y included.
+    #[test]
+    fn world_chunk_key_adds_the_region_offset() {
+        let e = CHUNK_EDGE as f32;
+        let per_region = game::REGION_CHUNKS as i32;
+        let sim = |x, z| SimEntity { region: game::RegionCoords::new(x, z), key: Default::default() };
+        let local = Transform::from_xyz(3.0 * e, -2.0 * e, 1.0 * e);
+        assert_eq!(world_chunk_key(&local, &sim(0, 0)), [3, -2, 1]);
+        assert_eq!(world_chunk_key(&local, &sim(2, -1)), [2 * per_region + 3, -2, -per_region + 1]);
+        assert_eq!(world_chunk_key(&local, &sim(-1, 3)), [-per_region + 3, -2, 3 * per_region + 1]);
     }
 }

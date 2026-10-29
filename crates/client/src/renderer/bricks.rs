@@ -594,7 +594,8 @@ mod tests {
     #[test]
     fn from_brick_matches_dense_derive() {
         let mut next = rng(0x9E37_79B9_7F4A_7C15);
-        for round in 0..150 {
+        // ~150 random bricks' worth: 150 one-brick chunks, or one 16³ chunk.
+        for round in 0..(150 / BRICKS_PER_CHUNK_EDGE.pow(3)).max(1) {
             let chunk = seeded_chunk(&mut next);
             for (b, view) in chunk.bricks() {
                 let direct = VoxelData::from_brick(&view);
@@ -607,9 +608,11 @@ mod tests {
     /// Every spawned brick holds exactly its view's voxels; every skipped one
     /// is all air or buried inside the chunk.
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn spawned_bricks_match_their_views() {
         let mut next = rng(0x2545_F491_4F6C_DD1D);
-        for _ in 0..100 {
+        // ~100 random chunks at one brick each; at least two many-brick ones.
+        for _ in 0..(100 / BRICKS_PER_CHUNK_EDGE.pow(3)).max(2) {
             let chunk = seeded_chunk(&mut next);
             let DerivedBricks { spawn, buried } = derive_chunk_bricks(&chunk);
             for (local, voxels) in spawn.iter().chain(&buried) {
