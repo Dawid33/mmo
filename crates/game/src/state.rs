@@ -704,11 +704,7 @@ impl Rollback {
         if self.cells.cell_chunks != 0 || self.chunk_index.contains_key(&chunk_index_key(coords)) {
             return None;
         }
-        let ground = self.ground.get(&crate::ColumnCoords::new(coords.x, coords.z))?;
-        if !ground.is_implied(coords.y) {
-            return None;
-        }
-        Some(ground.block_at(local.0, local.2, coords.y * crate::CHUNK_BLOCKS as i32 + local.1 as i32))
+        crate::ground::implied_block(self.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), coords, local)
     }
 
     /// Attach a voxel-grid collider to an entity's body. One cell per key;

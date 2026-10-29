@@ -68,3 +68,18 @@ impl ColumnGround {
         sub_y < self.band_base_sub_y
     }
 }
+
+/// The block a column's ground recipe implies at `local` of chunk `coords`:
+/// `None` for a column without ground or a sub-chunk inside the band. Pure
+/// core of `GameData::implied_block` (which handles cell mode and real chunks).
+pub fn implied_block(
+    ground: Option<&ColumnGround>,
+    coords: crate::ChunkCoords,
+    local: (usize, usize, usize),
+) -> Option<Block> {
+    let ground = ground?;
+    if !ground.is_implied(coords.y) {
+        return None;
+    }
+    Some(ground.block_at(local.0, local.2, coords.y * CHUNK_BLOCKS as i32 + local.1 as i32))
+}

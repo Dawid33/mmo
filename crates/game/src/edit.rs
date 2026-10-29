@@ -92,6 +92,28 @@ fn cell_solid(chunk: &Chunk, (bx, by, bz): (usize, usize, usize)) -> bool {
         || chunk.chisel.contains_key(&BlockIndex::from_xyz(bx, by, bz))
 }
 
+/// Whether `block` is the bedrock of the column `ground` (no ground: never).
+/// Pure core of `Rollback::is_bedrock`; the caller handles cell mode.
+pub fn is_bedrock_at(ground: Option<&crate::ColumnGround>, block: Block) -> bool {
+    ground.is_some_and(|g| block.id == g.bedrock)
+}
+
+/// Whether breaking `pos` would open a face into a neighbour region's
+/// unmaterialised ground: strictly below its block column's surface with a
+/// face neighbour outside this region's columns. Pure core of
+/// `Rollback::breaks_into_neighbour_ground`; the caller handles cell mode.
+pub fn edge_ring_locked(pos: BlockPos, ground: Option<&crate::ColumnGround>) -> bool {
+    let Some(ground) = ground else { return false };
+    let cb = CHUNK_BLOCKS as i32;
+    let (bx, bz) = (pos[0].rem_euclid(cb) as usize, pos[2].rem_euclid(cb) as usize);
+    if pos[1] >= i32::from(ground.surface[bx * CHUNK_BLOCKS + bz]) {
+        return false;
+    }
+    [[1, 0], [-1, 0], [0, 1], [0, -1]]
+        .into_iter()
+        .any(|[dx, dz]| locate([pos[0] + dx, pos[1], pos[2] + dz]).is_none())
+}
+
 impl Rollback {
     fn block_solid(&self, pos: BlockPos) -> bool {
         let Some((coords, local)) = locate(pos) else { return false };
@@ -114,31 +136,22 @@ impl Rollback {
     /// Cell mode has no ground semantics (as `implied_block`).
     fn is_bedrock(&self, coords: ChunkCoords, block: Block) -> bool {
         self.data.cells.cell_chunks == 0
-            && self
-                .data
-                .ground
-                .get(&crate::ColumnCoords::new(coords.x, coords.z))
-                .is_some_and(|g| block.id == g.bedrock)
+            && is_bedrock_at(
+                self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)),
+                block,
+            )
     }
 
-    /// Whether breaking `pos` (chunk `coords`, block `local`) would open a face
+    /// Whether breaking `pos` (in chunk `coords`) would open a face
     /// into a neighbour region's unmaterialised ground: the block lies
     /// strictly below its own block column's surface and a face neighbour is
     /// outside this region's columns. Only columns with ground (never cell
     /// mode) qualify. See the module docs' known limit.
-    fn breaks_into_neighbour_ground(&self, pos: BlockPos, coords: ChunkCoords, (bx, _, bz): (usize, usize, usize)) -> bool {
+    fn breaks_into_neighbour_ground(&self, pos: BlockPos, coords: ChunkCoords) -> bool {
         if self.data.cells.cell_chunks != 0 {
             return false;
         }
-        let Some(ground) = self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)) else {
-            return false;
-        };
-        if pos[1] >= i32::from(ground.surface[bx * CHUNK_BLOCKS + bz]) {
-            return false;
-        }
-        [[1, 0], [-1, 0], [0, 1], [0, -1]]
-            .into_iter()
-            .any(|[dx, dz]| locate([pos[0] + dx, pos[1], pos[2] + dz]).is_none())
+        edge_ring_locked(pos, self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)))
     }
 
     /// Turns implied chunk `coords` into a real chunk entity built from the
@@ -286,7 +299,7 @@ impl Rollback {
         }
         let Some((coords, (bx, by, bz))) = locate(pos) else { return false };
         let breaking = block.id == BlockId::AIR;
-        if breaking && self.breaks_into_neighbour_ground(pos, coords, (bx, by, bz)) {
+        if breaking && self.breaks_into_neighbour_ground(pos, coords) {
             return false;
         }
         // Bedrock takes no write at all, implied bedrock included; refused
