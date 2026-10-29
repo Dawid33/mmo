@@ -94,13 +94,30 @@ impl ChunkBlocks {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash, state_hash::StateHash)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, ::borrow::Partial, Hash, state_hash::StateHash)]
 #[module(crate)]
 pub struct Chunk {
     /// Authoritative block grid, `CHUNK_BLOCK_COUNT` blocks, canonical.
     pub blocks: ChunkBlocks,
     /// Sparse sub-block detail; a block is chiseled iff present here.
     pub chisel: BTreeMap<BlockIndex, ChiselData>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `Chunk::clone` calls on this thread (lib tests only): lets a test pin
+    /// that a hot path copies no chunk.
+    pub(crate) static CHUNK_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Field-for-field what `#[derive(Clone)]` generates, plus the test-only
+/// clone counter.
+impl Clone for Chunk {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        CHUNK_CLONES.with(|c| c.set(c.get() + 1));
+        Self { blocks: self.blocks.clone(), chisel: self.chisel.clone() }
+    }
 }
 
 impl Default for Chunk {

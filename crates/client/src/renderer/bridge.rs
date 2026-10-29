@@ -332,6 +332,36 @@ pub const MAX_OUTSTANDING_SNAPSHOT_VOXEL_TASKS: usize = 8;
 #[derive(Component)]
 pub struct PendingSnapshotVoxels;
 
+/// Block edits (`SetBlocks`) that reached a chunk while its voxels were still
+/// being derived off-thread. Each delta is a block's full new state, so they
+/// are applied in order on top of whatever voxels land.
+#[derive(Component, Default)]
+pub struct PendingBlockDeltas(Vec<game::BlockDelta>);
+
+/// Write one block delta's 16³ voxels (its chisel materials, else its id)
+/// into a chunk's dense voxel grid at the block's offset.
+fn apply_block_delta(voxels: &mut [Voxel], delta: &game::BlockDelta) {
+    use game::BLOCK_VOXELS as B;
+    let (bx, by, bz) = delta.index.xyz();
+    let materials = delta.chisel.as_ref().map(game::ChiselData::materials);
+    for vz in 0..B {
+        for vy in 0..B {
+            for vx in 0..B {
+                let id = materials.as_ref().map_or(delta.block.id, |m| m[vx + vy * B + vz * B * B]);
+                voxels[game::voxel_index(bx * B + vx, by * B + vy, bz * B + vz)] = Voxel::new(id);
+            }
+        }
+    }
+}
+
+/// Apply a chunk's [`PendingBlockDeltas`] (if any) to freshly derived voxels.
+fn with_pending_deltas(mut voxels: VoxelData, pending: Option<PendingBlockDeltas>) -> VoxelData {
+    if let Some(PendingBlockDeltas(deltas)) = pending.filter(|p| !p.0.is_empty()) {
+        voxels.edit(|dense| deltas.iter().for_each(|d| apply_block_delta(dense, d)));
+    }
+    voxels
+}
+
 /// One batch of snapshot-voxel derivation. Child of the region root, so
 /// removing (or replacing) the region despawns — and thereby cancels — it.
 #[derive(Component)]
@@ -457,10 +487,11 @@ pub fn apply_snapshot_voxels(
         if !pending.contains(entity) {
             continue;
         }
-        commands
-            .entity(entity)
-            .insert(voxels)
-            .remove::<PendingSnapshotVoxels>();
+        // Edits that arrived while these voxels were derived are newer.
+        commands.entity(entity).queue(move |mut entity: EntityWorldMut| {
+            let pending = entity.take::<PendingBlockDeltas>();
+            entity.insert(with_pending_deltas(voxels, pending)).remove::<PendingSnapshotVoxels>();
+        });
         queue.applied += 1;
         budget -= 1;
     }
@@ -824,16 +855,38 @@ pub fn drain_region_updates(
                         commands
                             .entity(e)
                             .insert(VoxelData::new(voxels))
-                            .remove::<PendingSnapshotVoxels>();
+                            .remove::<(PendingSnapshotVoxels, PendingBlockDeltas)>();
                     } else {
                         warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }
+                }
+                GameDataUpdateKind::SetBlocks(key, deltas) => {
+                    let Some(&e) = map.0.get(&(region, key)) else {
+                        warn!("bridge: SetBlocks for unmapped {:?}", key);
+                        continue;
+                    };
+                    // Voxels in hand: edit them. Still being derived (or
+                    // inserted later this drain): buffer until they land.
+                    commands.entity(e).queue(move |mut entity: EntityWorldMut| {
+                        if !entity.contains::<PendingSnapshotVoxels>() {
+                            if let Some(mut voxels) = entity.get_mut::<VoxelData>() {
+                                voxels.edit(|dense| deltas.iter().for_each(|d| apply_block_delta(dense, d)));
+                                return;
+                            }
+                        }
+                        match entity.get_mut::<PendingBlockDeltas>() {
+                            Some(mut pending) => pending.0.extend(deltas),
+                            None => {
+                                entity.insert(PendingBlockDeltas(deltas));
+                            }
+                        }
+                    });
                 }
                 GameDataUpdateKind::SetVoxelComponent(key, None) => {
                     if let Some(&e) = map.0.get(&(region, key)) {
                         commands
                             .entity(e)
-                            .remove::<(VoxelData, PendingSnapshotVoxels)>();
+                            .remove::<(VoxelData, PendingSnapshotVoxels, PendingBlockDeltas)>();
                     } else {
                         warn!("bridge: SetVoxelComponent for unmapped {:?}", key);
                     }
@@ -1366,6 +1419,82 @@ mod tests {
         app.update(); // one more frame: anything it queued has been applied or dropped
         assert!(!app.world().entity(e).contains::<PendingSnapshotVoxels>());
         assert_eq!(app.world().entity(e).get::<VoxelData>(), Some(&VoxelData::new(&edited)));
+    }
+
+    /// `SetBlocks` for chunk block 0: air, and a chiselled block 1 when the
+    /// chunk has one.
+    fn set_blocks(key: EntityKey) -> (GameDataUpdate, Vec<game::BlockDelta>) {
+        let air = game::Block::new(game::BlockId::AIR);
+        let stone = game::Block::new(game::BlockId(2));
+        let deltas = vec![
+            game::BlockDelta { index: game::BlockIndex::from_linear(0), block: air, chisel: None },
+            game::BlockDelta {
+                index: game::BlockIndex::from_linear(1),
+                block: stone,
+                chisel: Some(game::ChiselData::cuboid(game::BlockId(2), [0, 0, 0], [16, 8, 16])),
+            },
+        ];
+        let update = GameDataUpdate::new(GameDataTransactionKind::Do, GameDataUpdateKind::SetBlocks(key, deltas.clone()));
+        (update, deltas)
+    }
+
+    /// The voxels `chunk` holds after `deltas`, by the sim's own derivation.
+    fn edited_voxels(chunk: &game::Chunk, deltas: &[game::BlockDelta]) -> VoxelData {
+        let mut chunk = chunk.clone();
+        for d in deltas {
+            chunk.blocks.set(d.index, d.block);
+            match &d.chisel {
+                Some(c) => {
+                    chunk.chisel.insert(d.index, c.clone());
+                }
+                None => {
+                    chunk.chisel.remove(&d.index);
+                }
+            }
+        }
+        VoxelData::new(game::derive_voxels(&chunk))
+    }
+
+    #[test]
+    fn set_blocks_edits_landed_voxels() {
+        let (mut app, client) = app_shell();
+        let (update_send, update_recv) = crossbeam::channel::unbounded();
+        let (data, key, _) = chunk_snapshot();
+        let chunk = data.ecs.chunk.get(key).clone();
+        let region_id = RegionCoords::new(0, 0);
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, key)).expect("chunk mapped");
+        assert!(
+            wait_for(&mut app, |app| app.world().entity(e).contains::<VoxelData>()),
+            "snapshot voxels never arrived"
+        );
+        let (update, deltas) = set_blocks(key);
+        update_send.send(update).unwrap();
+        app.update();
+        assert_eq!(app.world().entity(e).get::<VoxelData>(), Some(&edited_voxels(&chunk, &deltas)));
+    }
+
+    /// An edit that beats the off-thread snapshot voxels is buffered and laid
+    /// over them when they land, not lost.
+    #[test]
+    fn set_blocks_before_the_snapshot_voxels_is_applied_on_top() {
+        let (mut app, client) = app_shell();
+        let (update_send, update_recv) = crossbeam::channel::unbounded();
+        let (data, key, _) = chunk_snapshot();
+        let chunk = data.ecs.chunk.get(key).clone();
+        let region_id = RegionCoords::new(0, 0);
+        client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
+        let (update, deltas) = set_blocks(key);
+        update_send.send(update).unwrap();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, key)).expect("chunk mapped");
+        assert!(
+            wait_for(&mut app, |app| app.world().entity(e).contains::<VoxelData>()),
+            "snapshot voxels never arrived"
+        );
+        assert!(!app.world().entity(e).contains::<PendingBlockDeltas>());
+        assert_eq!(app.world().entity(e).get::<VoxelData>(), Some(&edited_voxels(&chunk, &deltas)));
     }
 
     #[test]

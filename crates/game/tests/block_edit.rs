@@ -236,3 +236,154 @@ fn clicks_do_nothing_while_the_inventory_is_open() {
     run(&mut region, &click(DOWN, MouseButton::Left));
     assert!(changed(&before, &blocks(&region)).is_empty(), "inventory clicks are UI, not edits");
 }
+
+// ---- Block-delta edits (SetBlocks) and per-block undo ----
+
+use game::{Block, BlockDelta, BlockIndex, ChiselData, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback, CHUNK_BLOCKS};
+
+fn air() -> Block {
+    Block::new(BlockId::AIR)
+}
+
+/// World block position of local block `(bx, by, bz)` in chunk `c`.
+fn world_block(c: ChunkCoords, (bx, by, bz): (usize, usize, usize)) -> [i32; 3] {
+    let cb = CHUNK_BLOCKS as i32;
+    [c.x as i32 * cb + bx as i32, c.y * cb + by as i32, c.z as i32 * cb + bz as i32]
+}
+
+/// A rollback-able sim over chunk columns 3..=5 x 3..=5 of `floor`, with its
+/// render-update receiver. No player, no ground recipe.
+fn terrain(floor: impl Fn(ChunkCoords) -> Chunk) -> (Rollback, crossbeam::channel::Receiver<GameDataUpdate>) {
+    let (send, recv) = crossbeam::channel::unbounded();
+    let mut r = Rollback::new(Some(send));
+    let mut chunks = Vec::new();
+    for x in 3..=5 {
+        for z in 3..=5 {
+            let c = ChunkCoords::new(x, 0, z);
+            chunks.push((c, floor(c)));
+        }
+    }
+    r.seed_terrain_genesis(chunks);
+    while recv.try_recv().is_ok() {}
+    (r, recv)
+}
+
+/// Block-, chisel- and air-mixed chunk content from `seed`.
+fn seeded_chunk(seed: u128) -> Chunk {
+    let mut rng = oorandom::Rand64::new(seed);
+    let mut chunk = Chunk::uniform(Block::new(BlockId(2)));
+    for i in 0..game::CHUNK_BLOCK_COUNT {
+        let (bx, by, bz) = BlockIndex::from_linear(i).xyz();
+        let id = BlockId(rng.rand_range(0..4) as _);
+        chunk.set_block(bx, by, bz, Block::new(id));
+        if id != BlockId::AIR && rng.rand_range(0..3) == 0 {
+            chunk.chisel.insert(BlockIndex::from_linear(i), ChiselData::cuboid(id, [0, 0, 0], [16, 8, 16]));
+        }
+    }
+    chunk
+}
+
+#[test]
+fn dig_chunk_to_air_and_undo() {
+    game::set_hash_mode(game::HashMode::Full);
+    let target = ChunkCoords::new(4, 0, 4);
+    let (mut r, _recv) = terrain(|c| if c == target { seeded_chunk(7) } else { Chunk::flat_floor(16) });
+    let before = game::state_hash(&r);
+    let e = r.chunk_key_at(target).unwrap();
+    assert!(r.ecs.chunk.get(e).blocks.uniform().is_none(), "the seeded chunk is dense");
+    r.new_transaction();
+    for i in 0..game::CHUNK_BLOCK_COUNT {
+        let local = BlockIndex::from_linear(i).xyz();
+        let chunk = r.ecs.chunk.get(e);
+        if chunk.block_at(local.0, local.1, local.2).id != BlockId::AIR
+            || chunk.chisel.contains_key(&BlockIndex::from_linear(i))
+        {
+            assert!(r.set_block_safe(world_block(target, local), air()));
+        }
+    }
+    let chunk = r.ecs.chunk.get(e);
+    assert_eq!(chunk.blocks, game::ChunkBlocks::Uniform(air()), "dug to canonical uniform air");
+    assert!(chunk.chisel.is_empty());
+    r.rollback();
+    assert_eq!(before, game::state_hash(&r), "the dig rolls back bit-exact");
+}
+
+#[test]
+fn edit_emits_set_blocks() {
+    let (mut r, recv) = terrain(|_| Chunk::flat_floor(16));
+    let target = ChunkCoords::new(4, 0, 4);
+    let e = r.chunk_key_at(target).unwrap();
+    let index = BlockIndex::from_xyz(0, 0, 0);
+    let old = r.ecs.chunk.get(e).block_at(0, 0, 0);
+    assert_ne!(old.id, BlockId::AIR);
+    r.new_transaction();
+    assert!(r.set_block_safe(world_block(target, (0, 0, 0)), air()));
+    let done: Vec<GameDataUpdate> = recv.try_iter().collect();
+    assert_eq!(done.len(), 1, "one render update per edit: {done:?}");
+    match &done[0] {
+        GameDataUpdate {
+            do_kind: GameDataTransactionKind::Do,
+            update_kind: GameDataUpdateKind::SetBlocks(k, deltas),
+        } => {
+            assert_eq!(*k, e);
+            assert_eq!(deltas, &vec![BlockDelta { index, block: air(), chisel: None }]);
+        }
+        other => panic!("expected Do SetBlocks, got {other:?}"),
+    }
+    r.rollback();
+    let undone: Vec<GameDataUpdate> = recv.try_iter().collect();
+    assert_eq!(undone.len(), 1, "one render update per undone edit: {undone:?}");
+    match &undone[0] {
+        GameDataUpdate {
+            do_kind: GameDataTransactionKind::Undo,
+            update_kind: GameDataUpdateKind::SetBlocks(k, deltas),
+        } => {
+            assert_eq!(*k, e);
+            assert_eq!(deltas, &vec![BlockDelta { index, block: old, chisel: None }]);
+        }
+        other => panic!("expected Undo SetBlocks, got {other:?}"),
+    }
+}
+
+/// One band chunk (sub-Y 0, fully stone) over plain implied ground.
+fn ground_column() -> game::Column {
+    const STONE: BlockId = BlockId(2);
+    const BEDROCK: BlockId = BlockId(3);
+    let band = game::SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, STONE)));
+    game::Column::new(0, Block::new(BlockId(1)), air(), vec![band]).with_ground(game::ColumnGround::plain(
+        vec![1; game::COLUMN_FOOTPRINT].into_boxed_slice(),
+        0,
+        STONE,
+        BEDROCK,
+    ))
+}
+
+#[test]
+fn break_on_chunk_seam_undoes_exactly() {
+    game::set_hash_mode(game::HashMode::Full);
+    let mut columns = Vec::new();
+    for x in 2..=3 {
+        for z in 2..=3 {
+            columns.push((game::ColumnCoords::new(x, z), ground_column()));
+        }
+    }
+    let built = Region::from_columns(r0(), columns);
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(built.data().clone(), Some(send), r0(), None);
+    // The top block of implied chunk (2, -1, 2) on its +x face: the +x
+    // neighbour (3, -1, 2) is implied ground too and materialises with it.
+    let own = ChunkCoords::new(2, -1, 2);
+    let neighbour = ChunkCoords::new(3, -1, 2);
+    let pos = world_block(own, (CHUNK_BLOCKS - 1, CHUNK_BLOCKS - 1, 0));
+    region.with_data(|r| {
+        assert!(r.chunk_key_at(own).is_none() && r.chunk_key_at(neighbour).is_none());
+        let before = game::state_hash(r);
+        r.new_transaction();
+        assert!(r.set_block_safe(pos, air()));
+        assert!(r.chunk_key_at(own).is_some(), "its own chunk materialises");
+        assert!(r.chunk_key_at(neighbour).is_some(), "the seam neighbour materialises");
+        r.rollback();
+        assert_eq!(before, game::state_hash(r), "the seam break rolls back bit-exact");
+        assert!(r.chunk_key_at(own).is_none() && r.chunk_key_at(neighbour).is_none());
+    });
+}

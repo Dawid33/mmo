@@ -9,7 +9,8 @@
 //! across machines.
 //!
 //! An edit is one undoable change to three things: the chunk's block data
-//! (`Component::set_safe`), the renderer (`SetVoxelComponent` both ways), and
+//! (one block, `Undo::<Component<Chunk>>::set_chunk_block_safe` — the chunk
+//! is never copied), the renderer (`SetBlocks` block deltas both ways), and
 //! the chunk's colliders (shape swapped in place, see
 //! `Undo::<ColliderSet>::mutate_collider_safe`).
 //!
@@ -36,9 +37,9 @@ use slotmapd::Key as _;
 
 use crate::movement::PLAYER_EYE_OFFSET;
 use crate::{
-    Block, BlockId, BlockIndex, Chunk, ChunkCoords, ClientId, EntityKey, GameDataTransactionKind,
+    Block, BlockDelta, BlockId, BlockIndex, Chunk, ChunkBlocks, ChunkCoords, ClientId, EntityKey, GameDataTransactionKind,
     GameDataUpdate, GameDataUpdateKind, Pose, MouseButton, Rollback, BLOCK_VOXELS, CHUNK_BLOCKS,
-    REGION_CHUNKS,
+    CHUNK_BLOCK_COUNT, REGION_CHUNKS,
 };
 
 /// How far a player can reach to break or place, in metres (= blocks).
@@ -159,14 +160,13 @@ impl Rollback {
     /// when the chunk is not implied (it exists, cell mode, no ground, or
     /// inside the band).
     pub fn materialize_ground_safe(&mut self, coords: ChunkCoords) -> Option<EntityKey> {
-        let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
-        for bx in 0..CHUNK_BLOCKS {
-            for by in 0..CHUNK_BLOCKS {
-                for bz in 0..CHUNK_BLOCKS {
-                    chunk.set_block(bx, by, bz, self.implied_block(coords, (bx, by, bz))?);
-                }
-            }
+        // One canonicalising build: per-block `set_block` into a uniform
+        // chunk re-scans the grid on every write (O(N^2) at 16³).
+        let mut blocks = Vec::with_capacity(CHUNK_BLOCK_COUNT);
+        for i in 0..CHUNK_BLOCK_COUNT {
+            blocks.push(self.implied_block(coords, BlockIndex::from_linear(i).xyz())?);
         }
+        let chunk = Chunk { blocks: ChunkBlocks::from_vec(blocks), chisel: Default::default() };
         Some(self.spawn_chunk_safe(coords, chunk))
     }
 
@@ -302,26 +302,25 @@ impl Rollback {
             self.spawn_chunk_safe(coords, chunk);
             return true;
         };
-        let Some(old) = self.data.ecs.chunk.try_get(e).clone() else { return false };
-        let bi = BlockIndex::from_xyz(bx, by, bz);
-        if old.block_at(bx, by, bz) == block && !old.chisel.contains_key(&bi) {
+        let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else { return false };
+        let index = BlockIndex::from_xyz(bx, by, bz);
+        let old_block = chunk.blocks.get(index);
+        if old_block == block && !chunk.chisel.contains_key(&index) {
             return false;
         }
-        let mut new = old.clone();
-        new.set_block(bx, by, bz, block);
-        let cells = crate::collider_cells(&new);
-        let new_voxels = crate::derive_voxels(&new);
-        // LIFO: registered before set_safe, so the old voxels are re-sent
+        let old = BlockDelta { index, block: old_block, chisel: chunk.chisel.get(&index).cloned() };
+        // LIFO: registered before the write, so the old block is re-sent
         // after the chunk value is restored.
         self.data.ecs.chunk.emit_on_undo(GameDataUpdate::new(
             GameDataTransactionKind::Undo,
-            GameDataUpdateKind::SetVoxelComponent(e, Some(crate::derive_voxels(&old))),
+            GameDataUpdateKind::SetBlocks(e, vec![old]),
         ));
-        self.data.ecs.chunk.set_safe(e, Some(new));
+        self.data.ecs.chunk.set_chunk_block_safe(e, index, block, None);
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
-            GameDataUpdateKind::SetVoxelComponent(e, Some(new_voxels)),
+            GameDataUpdateKind::SetBlocks(e, vec![BlockDelta { index, block, chisel: None }]),
         ));
+        let cells = crate::collider_cells(self.data.ecs.chunk.get(e));
         self.rebuild_chunk_colliders_safe(e, &cells);
         true
     }
@@ -463,5 +462,33 @@ pub fn raycast_blocks(
         normal = [0; 3];
         normal[axis] = -step[axis];
         t_max[axis] += t_delta[axis];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voxel::CHUNK_CLONES;
+
+    /// A per-block edit must not copy the chunk: at 16³ blocks a clone is a
+    /// 4096-block box per click, re-paid on every replay of the tick.
+    #[test]
+    fn edit_never_clones_the_chunk() {
+        // Delta, not Full: Full-mode rollback clones the whole field for its
+        // mismatch diagnostics (a harness cost, not the edit's). Delta also
+        // checks the per-block entry's slot digest round-trips.
+        let _mode = crate::state::delta_digest_tests::delta_mode();
+        let (send, _recv) = crossbeam::channel::unbounded();
+        let mut r = Rollback::new(Some(send));
+        let coords = ChunkCoords::new(1, 0, 1);
+        r.seed_terrain_genesis(vec![(coords, Chunk::flat_floor(16))]);
+        let cb = CHUNK_BLOCKS as i32;
+        let pos = [cb, 0, cb];
+        let before = CHUNK_CLONES.with(|c| c.get());
+        r.new_transaction();
+        assert!(r.set_block_safe(pos, Block::new(BlockId::AIR)), "the floor block breaks");
+        r.rollback();
+        let after = CHUNK_CLONES.with(|c| c.get());
+        assert_eq!(after, before, "a break + undo cloned the chunk {} times", after - before);
     }
 }

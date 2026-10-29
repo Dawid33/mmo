@@ -89,7 +89,7 @@ pub type ChiselGrid = Vec<Option<u8>>;
 /// The list is canonical: every constructor and edit goes through the dense
 /// [`ChiselGrid`] and one fixed greedy merge ([`ChiselData::from_grid`]), so
 /// equal voxels always give an equal list — equal serialization, equal
-/// hashes. Undo replaces the whole chunk value, so no per-voxel inverse is
+/// hashes. Undo restores a block's whole chisel entry, so no per-voxel inverse is
 /// needed. Edit in bulk through the grid; [`ChiselData::set`] re-merges on
 /// every call.
 #[derive(Clone, Default, PartialEq, Eq, Hash, state_hash::StateHash, serde::Serialize, serde::Deserialize, Debug)]

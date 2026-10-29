@@ -19,6 +19,7 @@ use crate::input::InputState;
 use crate::protocol::{ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
 use crate::registry::BlockId;
 use crate::block::CHUNK_UNITS;
+use crate::block::{Block, BlockIndex, ChiselData};
 use crate::voxel::{Chunk, ChunkCoords, Voxel};
 
 pub type ClientId = usize;
@@ -41,9 +42,22 @@ impl RollbackInfo {
     }
 }
 
+/// One block's full new state in a terrain edit: what `SetBlocks` carries.
+/// The renderer writes the block's 16³ voxels from it (its chisel materials,
+/// else `block.id` throughout).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockDelta {
+    pub index: BlockIndex,
+    pub block: Block,
+    pub chisel: Option<ChiselData>,
+}
+
 #[derive(Clone, Debug)]
 pub enum GameDataUpdateKind {
     SetVoxelComponent(EntityKey, Option<Vec<Voxel>>),
+    /// Blocks of a terrain chunk that changed, each as its full new state.
+    /// An edit sends the new states on Do and the old ones on Undo.
+    SetBlocks(EntityKey, Vec<BlockDelta>),
     /// A terrain chunk loaded with a cell (cell mode): the renderer spawns it
     /// at its pose and derives its voxels off-thread, budgeted — the sim
     /// thread never builds voxels for activated cells.
@@ -547,6 +561,64 @@ where
             component_slot_digest(key, d.list.get(key))
         });
         self.raw_mut().list.remove(key);
+    }
+}
+
+/// Writes one block's full state (block + chisel entry) into a chunk. Going
+/// through `ChunkBlocks::set` keeps the grid canonical in both directions.
+fn write_chunk_block(chunk: &mut Chunk, index: BlockIndex, block: Block, chisel: Option<ChiselData>) {
+    chunk.blocks.set(index, block);
+    match chisel {
+        Some(c) => {
+            chunk.chisel.insert(index, c);
+        }
+        None => {
+            chunk.chisel.remove(&index);
+        }
+    }
+}
+
+impl Undo<Component<Chunk>> {
+    /// Sets one block of chunk entity `key` (its block and chisel entry),
+    /// undo-safely, without copying the chunk. The inverse writes back only
+    /// the old block and old chisel entry for `index`. That is exact because
+    /// `ChunkBlocks` is canonical — a function of its block contents — and
+    /// `ChunkBlocks::set` normalises in both directions (a differing write
+    /// densifies a `Uniform` grid, a `Dense` grid whose blocks all become
+    /// equal collapses), so restoring the old contents restores the old
+    /// value; the chisel `BTreeMap` is restored entry-for-entry. Delta mode
+    /// digests the chunk's slot, as `set_safe` does.
+    pub fn set_chunk_block_safe(
+        &mut self,
+        key: EntityKey,
+        index: BlockIndex,
+        block: Block,
+        chisel: Option<ChiselData>,
+    ) {
+        let chunk = self
+            .list
+            .get(key)
+            .and_then(Option::as_ref)
+            .expect("set_chunk_block_safe: no chunk at key");
+        let old_block = chunk.blocks.get(index);
+        let old_chisel = chunk.chisel.get(&index).cloned();
+        let pre = if crate::hash_mode() == crate::HashMode::Delta {
+            component_slot_digest(key, self.list.get(key))
+        } else {
+            0
+        };
+        self.undo_digest(pre, move |d, _| {
+            let chunk = d.list.get_mut(key).and_then(Option::as_mut).expect("set_chunk_block_safe undo: chunk gone");
+            write_chunk_block(chunk, index, old_block, old_chisel);
+            component_slot_digest(key, d.list.get(key))
+        });
+        let chunk = self
+            .raw_mut()
+            .list
+            .get_mut(key)
+            .and_then(Option::as_mut)
+            .expect("set_chunk_block_safe: no chunk at key");
+        write_chunk_block(chunk, index, block, chisel);
     }
 }
 
@@ -1460,18 +1532,20 @@ mod inventory_tests {
 }
 
 #[cfg(test)]
-mod delta_digest_tests {
+pub(crate) mod delta_digest_tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard};
 
     static MODE_LOCK: Mutex<()> = Mutex::new(());
-    struct ModeGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
+    pub(crate) struct ModeGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
     impl Drop for ModeGuard {
         fn drop(&mut self) {
             set_hash_mode(HashMode::Full);
         }
     }
-    fn delta_mode() -> ModeGuard {
+    /// `HashMode::Delta` until the guard drops (then back to the default
+    /// Full), serialised against every other lib test that switches modes.
+    pub(crate) fn delta_mode() -> ModeGuard {
         let g = MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_hash_mode(HashMode::Delta);
         ModeGuard(g)
