@@ -1,0 +1,79 @@
+# DF PLATYPUS (creature_large_riverlake): 2 kg, egg-laying river mammal.
+# Attack bite (the template's `attack`); kick (the poison spur) optional, not made.
+# AMPHIBIOUS: swim + swim_idle. Low, flat body on splayed legs, a broad flat
+# duck bill and a flat beaver tail (the template tail is off; a flat cube on
+# the tail bone instead).
+name = "platypus"
+template = "quadruped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+body = [5, 3, 6]
+leg = [2, 2]
+leg_inset = -1
+leg_ends = 0
+head = [4, 3, 2]
+head_up = 0
+tail = [2, 0]
+tail_raise = -15
+walk = { cycle = 0.55, swing = 30, bob = 0.1 }
+run = { cycle = 0.34, swing = 44, bob = 0.3, pitch = 4 }
+idle = { length = 4.0, look = 20, breath = 0.1, wag = 8 }
+attack = { length = 0.45, lunge = 2 }
+eat = { length = 1.4, reach = 30, forward = 1 }
+
+# Head pivot: the neck joint; the head cube spans y -2..1, z -1..1 around it.
+[[cubes]]
+name = "bill"
+bone = "head"
+part = "bill"
+from = [-2, -1.5, -4.5]
+to = [2, -0.5, -1]
+
+# Tail pivot: the body's back top (one below it); the flat tail runs back.
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-2, -0.5, -1]
+to = [2, 0.5, 5]
+
+[palette]
+fur = "#6a4a30"
+fur_up = "#5e4029"
+fur_down = "#a68a6a"
+legs = "#4e3826"
+head = "#6a4a30"
+bill = "#2e2a28"
+tail = "#5a3e28"
+eye = "#0a0807"
+nostril = "#141210"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "bill"
+face = "up"
+x = 1
+y = 0
+colour = "nostril"
+
+[[decals]]
+cube = "bill"
+face = "up"
+x = 2
+y = 0
+colour = "nostril"

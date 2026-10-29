@@ -1,0 +1,100 @@
+# DF WOLVERINE (creature_mountain_new): 20 kg, the stocky ferocious mustelid.
+# Attack bite (the template's `attack`); scratch optional, not made. Dark brown,
+# the pale tan band from the shoulders along the flanks to the rump, a pale brow,
+# short legs and a bushy tail.
+name = "wolverine"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [7, 6, 11]
+leg = [3, 4]
+leg_ends = 0
+head = [5, 4, 4]
+head_up = 0
+tail = [3, 5]
+tail_raise = -5
+walk = { cycle = 0.72, swing = 28, bob = 0.25 }
+run = { cycle = 0.42, swing = 44, bob = 0.7, pitch = 6 }
+idle = { length = 4.0, look = 20, breath = 0.15, wag = 5 }
+attack = { length = 0.5, lunge = 3 }
+eat = { length = 1.5, reach = 35, forward = 2 }
+
+# Head pivot: the neck joint; the head cube spans y -3..1, z -3..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1.5, -3, -5]
+to = [1.5, -1, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 1, 0]
+to = [-1.5, 2, 1]
+
+[palette]
+fur = "#3a2a1e"
+fur_up = "#33251a"
+fur_down = "#2a1e16"
+legs = "#1e1612"
+head = "#3a2a1e"
+snout = "#2a1e16"
+ears = "#5a4430"
+tail = "#2a1e16"
+band = "#b08a5a"
+brow = "#8a6e4e"
+eye = "#0a0807"
+nose = "#0e0b09"
+
+# The tan band along each flank (sides 11 × 6, front west-left / east-right)
+# and the pale brow on the face (5 × 4).
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 1
+w = 9
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 1
+w = 9
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+w = 5
+colour = "brow"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+colour = "nose"

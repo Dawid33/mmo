@@ -1,0 +1,404 @@
+# DF TIGER (creature_large_tropical): 225 kg, the striped great cat.
+# Attack bite (the template's `attack`); scratch optional, not made.
+# LARGE_PREDATOR: alert + roar; MOUNT_EXOTIC: ridden. A size over the lion,
+# orange with black stripes across back, flanks and tail, white belly and cheeks.
+name = "tiger"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar", "ridden"]
+
+[proportions]
+body = [9, 8, 20]
+leg = [4, 7]
+head = [7, 6, 5]
+head_up = 2
+tail = [2, 15]
+tail_raise = -25
+walk = { cycle = 1.05, swing = 25, bob = 0.4 }
+run = { cycle = 0.52, swing = 48, bob = 1.2, pitch = 6 }
+idle = { length = 5.0, look = 18, breath = 0.22, wag = 6 }
+attack = { length = 0.7, lunge = 5 }
+eat = { length = 1.8, reach = 45, forward = 3 }
+
+# Head pivot: the neck joint; the head cube spans y -3..3, z -4..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-2, -3, -6.5]
+to = [2, 0, -4]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3.5, 3, -2]
+to = [-2, 4.5, -1]
+
+[[cubes]]
+name = "ruff_l"
+bone = "head"
+part = "cheek"
+mirror = true
+from = [-4.5, -3, -3]
+to = [-3.5, 1, 0]
+
+[palette]
+fur = "#d27a2a"
+fur_up = "#c97024"
+fur_down = "#f0e8da"
+legs = "#cc7628"
+head = "#d27a2a"
+snout = "#f0e8da"
+cheek = "#f0e8da"
+ears = "#1a1614"
+tail = "#d27a2a"
+stripe = "#1a1614"
+eye = "#c8a030"
+nose = "#c27a6e"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 0
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+w = 2
+colour = "nose"
+
+# Stripes: body top 9 wide × 20 long (row 0 front), sides 20 × 8 (front at
+# west's left / east's right), tail faces 2 × 15 from the root.
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 2
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 6
+y = 2
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 17
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 5
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 6
+y = 5
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 14
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 8
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 6
+y = 8
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 11
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 11
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 6
+y = 11
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 11
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 8
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 14
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 6
+y = 14
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 14
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 5
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 17
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 6
+y = 17
+w = 3
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 17
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 0
+h = 5
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 3
+w = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 3
+y = 0
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 11
+y = 0
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 6
+w = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 6
+y = 0
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 8
+y = 0
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 9
+w = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 9
+y = 0
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 5
+y = 0
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 12
+w = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 12
+y = 0
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 2
+y = 0
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 14
+w = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 14
+y = 0
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 0
+y = 0
+h = 2
+colour = "stripe"

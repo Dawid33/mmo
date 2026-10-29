@@ -1,0 +1,118 @@
+# DF WARTHOG (creature_large_tropical): 100 kg, savanna pig.
+# Attack kick (the template's `attack` lunge reads as a tusk charge); bite
+# optional, not made. Grey and sparsely haired, a broad flat head with wart pads,
+# two big upcurved tusks and two small ones, a dark mane down the spine, a thin
+# tail carried straight up.
+name = "warthog"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [8, 8, 16]
+leg = [3, 6]
+head = [7, 6, 6]
+head_up = -1
+tail = [1, 6]
+tail_raise = 80
+walk = { cycle = 0.85, swing = 26, bob = 0.35 }
+run = { cycle = 0.45, swing = 44, bob = 0.9, pitch = 5 }
+idle = { length = 4.0, look = 14, breath = 0.2, wag = 10 }
+attack = { length = 0.6, lunge = 4.5 }
+eat = { length = 1.6, reach = 34, forward = 2 }
+
+# Head pivot: the neck joint; the head cube spans y -6..0, z -5..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-2.5, -6, -8]
+to = [2.5, -3, -5]
+
+[[cubes]]
+name = "tusk_l"
+bone = "head"
+part = "tusks"
+mirror = true
+from = [-4, -5, -8]
+to = [-3, -1, -7]
+
+[[cubes]]
+name = "tusk_small_l"
+bone = "head"
+part = "tusks"
+mirror = true
+from = [-3.5, -6, -7]
+to = [-2.5, -4.5, -6]
+
+[[cubes]]
+name = "wart_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-4.5, -4, -4]
+to = [-3.5, -2, -2]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3.5, 0, 0]
+to = [-2, 1.5, 1]
+
+# The mane along the spine (body pivot: the centre; top at y 4).
+[[cubes]]
+name = "mane"
+bone = "body"
+part = "mane"
+from = [-1, 4, -8.5]
+to = [1, 6, 3]
+
+[[cubes]]
+name = "tail_tuft"
+bone = "tail"
+part = "mane"
+from = [-0.5, -0.5, 5]
+to = [0.5, 0.5, 7]
+
+[palette]
+fur = "#6e625a"
+fur_up = "#665a52"
+fur_down = "#5e534b"
+legs = "#5a4f48"
+head = "#6e625a"
+snout = "#5a4f48"
+tusks = "#ece4d0"
+ears = "#5a4f48"
+mane = "#2e2620"
+tail = "#5a4f48"
+eye = "#0e0b09"
+nostril = "#2a2420"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 1
+colour = "nostril"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 3
+y = 1
+colour = "nostril"

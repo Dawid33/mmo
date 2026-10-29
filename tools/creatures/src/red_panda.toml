@@ -1,0 +1,205 @@
+# DF RED PANDA (creature_large_temperate): 5 kg, small rust-red tree climber.
+# Attack bite (the template's `attack`); scratch optional, not made.
+# Rust back, black legs and belly, a round white-marked face with white-rimmed
+# ears, a long bushy tail ringed rust and dark.
+name = "red panda"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [5, 5, 8]
+leg = [2, 3]
+leg_ends = 0
+head = [5, 4, 3]
+head_up = 1
+tail = [3, 9]
+tail_raise = 0
+walk = { cycle = 0.65, swing = 28, bob = 0.2 }
+run = { cycle = 0.38, swing = 44, bob = 0.5, pitch = 5 }
+idle = { length = 4.0, look = 22, breath = 0.12, wag = 6 }
+attack = { length = 0.45, lunge = 2 }
+eat = { length = 1.5, reach = 38, forward = 1.5 }
+
+# Head pivot: the neck joint; the head cube spans y -2..2, z -2..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1, -2, -3.5]
+to = [1, -0.5, -2]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 2, -1]
+to = [-1, 3.5, 0]
+
+[palette]
+fur = "#b04a1e"
+fur_up = "#a8441a"
+fur_down = "#1c1414"
+legs = "#1c1414"
+head = "#b8562a"
+snout = "#f0e6da"
+ears = "#f0e6da"
+ears_north = "#7a2e12"
+tail = "#b8562a"
+ring = "#6e2a10"
+white = "#f0e6da"
+eye = "#0a0707"
+nose = "#121010"
+
+# White cheeks and brows on the face (5 × 4, the snout over the bottom two rows).
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 2
+w = 1
+h = 2
+colour = "white"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 2
+w = 1
+h = 2
+colour = "white"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 0
+colour = "white"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 0
+colour = "white"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 0
+y = 0
+w = 2
+colour = "nose"
+
+# Rings round the tail (faces 3 × 9; the root at row 0 / west's left / east's right).
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 2
+w = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 4
+w = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 6
+w = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 8
+w = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 2
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 4
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 6
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 8
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 6
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 4
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 2
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 0
+y = 0
+h = 3
+colour = "ring"

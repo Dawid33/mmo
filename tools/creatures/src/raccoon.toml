@@ -1,0 +1,217 @@
+# DF RACCOON (creature_large_temperate): 7 kg, masked forest omnivore and thief.
+# Attack bite (the template's `attack`); scratch optional, not made.
+# CURIOUSBEAST_EATER/ITEM: pick_up + carry. Grizzled grey with the black eye
+# mask on a white face, pale-rimmed ears, a bushy ringed tail.
+name = "raccoon"
+template = "quadruped"
+status = "draft"
+extras = ["pick_up", "carry"]
+
+[proportions]
+body = [6, 5, 9]
+leg = [2, 4]
+leg_ends = 0
+head = [5, 4, 3]
+head_up = 1
+tail = [3, 8]
+tail_raise = 5
+walk = { cycle = 0.7, swing = 28, bob = 0.2 }
+run = { cycle = 0.4, swing = 44, bob = 0.6, pitch = 5 }
+idle = { length = 4.0, look = 22, breath = 0.12, wag = 6 }
+attack = { length = 0.5, lunge = 2 }
+eat = { length = 1.5, reach = 38, forward = 1.5 }
+
+# Head pivot: the neck joint; the head cube spans y -2..2, z -2..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1, -2, -4.5]
+to = [1, -0.5, -2]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 2, -1]
+to = [-1, 3.5, 0]
+
+[palette]
+fur = "#8a8580"
+fur_up = "#7a7570"
+fur_down = "#a8a39c"
+legs = "#2e2b29"
+head = "#e4e0d8"
+snout = "#e4e0d8"
+ears = "#e4e0d8"
+ears_north = "#3a3633"
+tail = "#9a948c"
+ring = "#262321"
+mask = "#1e1c1a"
+eye = "#0a0909"
+nose = "#121010"
+
+# The mask band across the face (5 × 4) and round onto the sides (3 × 4).
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+w = 5
+h = 1
+colour = "mask"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 2
+w = 2
+h = 1
+colour = "mask"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 2
+w = 2
+h = 1
+colour = "mask"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+w = 2
+colour = "mask"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+w = 2
+colour = "mask"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 0
+y = 0
+w = 2
+colour = "nose"
+
+# Rings round the tail (faces 3 × 8; the root at row 0 / west's left / east's right).
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 1
+w = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 3
+w = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 5
+w = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 7
+w = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 1
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 3
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 5
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 7
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 6
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 4
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 2
+y = 0
+h = 3
+colour = "ring"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 0
+y = 0
+h = 3
+colour = "ring"

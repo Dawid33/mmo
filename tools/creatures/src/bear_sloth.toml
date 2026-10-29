@@ -1,0 +1,115 @@
+# DF BEAR_SLOTH (creature_tropical_new): 100 kg, shaggy insect-eating bear.
+# Attack bite (the template's `attack`); scratch optional, not made.
+# CURIOUSBEAST_EATER/GUZZLER: pick_up + carry. Shaggy black coat with a mane over
+# the shoulders, a long pale mobile muzzle, the cream V on the chest.
+name = "sloth bear"
+template = "quadruped"
+status = "draft"
+extras = ["pick_up", "carry"]
+
+[proportions]
+body = [9, 9, 15]
+leg = [4, 6]
+head = [6, 5, 5]
+head_up = -1
+tail = [2, 2]
+tail_raise = -20
+walk = { cycle = 1.05, swing = 24, bob = 0.45 }
+run = { cycle = 0.58, swing = 40, bob = 1.1, pitch = 5 }
+idle = { length = 5.0, look = 18, breath = 0.22, wag = 3 }
+attack = { length = 0.7, lunge = 3.5 }
+eat = { length = 2.0, reach = 40, forward = 2.5 }
+
+# Head pivot: the neck joint; the head cube spans y -5..0, z -4..1 around it.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-2, -5, -8]
+to = [2, -2, -4]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3.5, 0, -1]
+to = [-1.5, 2, 0.5]
+
+# The shaggy shoulder mane (body pivot: its centre, top at y 4.5).
+[[cubes]]
+name = "mane"
+bone = "body"
+part = "mane"
+from = [-5, -2, -8]
+to = [5, 6, -2]
+
+[palette]
+fur = "#1a1716"
+fur_up = "#211d1b"
+legs = "#151312"
+head = "#1a1716"
+muzzle = "#b8a68e"
+muzzle_up = "#a8967e"
+ears = "#151312"
+mane = "#221e1c"
+mane_up = "#2a2523"
+tail = "#1a1716"
+chest = "#e4d8c0"
+eye = "#0a0807"
+nose = "#2e2826"
+
+# The cream V on the chest (the mane's front, 10 × 8).
+[[decals]]
+cube = "mane"
+face = "north"
+x = 2
+y = 4
+w = 2
+colour = "chest"
+
+[[decals]]
+cube = "mane"
+face = "north"
+x = 6
+y = 4
+w = 2
+colour = "chest"
+
+[[decals]]
+cube = "mane"
+face = "north"
+x = 3
+y = 5
+w = 4
+colour = "chest"
+
+[[decals]]
+cube = "mane"
+face = "north"
+x = 4
+y = 6
+w = 2
+colour = "chest"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 0
+w = 2
+colour = "nose"

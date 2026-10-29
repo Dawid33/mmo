@@ -1,0 +1,79 @@
+# DF SEA OTTER (creature_riverlakepool_new): 30 kg, the kelp-coast otter.
+# Attack bite (the template's `attack`); scratch optional, not made.
+# AMPHIBIOUS: swim + swim_idle. Heavier than the river otter: a thick dark brown
+# body, a round pale cream head, short legs and a short flat tail.
+name = "sea otter"
+template = "quadruped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+body = [7, 5, 12]
+leg = [2, 2]
+leg_ends = 0
+head = [5, 4, 4]
+head_up = 0
+tail = [2, 0]
+tail_raise = -8
+walk = { cycle = 0.7, swing = 26, bob = 0.25 }
+run = { cycle = 0.42, swing = 40, bob = 0.6, pitch = 5 }
+idle = { length = 4.5, look = 20, breath = 0.15, wag = 8 }
+attack = { length = 0.5, lunge = 2.5 }
+eat = { length = 1.5, reach = 32, forward = 1.5 }
+
+# Head pivot: the neck joint; the head cube spans y -3..1, z -3..1 around it.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-1.5, -3, -4.5]
+to = [1.5, -1, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 1, 0]
+to = [-2, 1.5, 0.5]
+
+# A flat paddle tail on the tail bone (the template tail is off).
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-1.5, -0.5, -1]
+to = [1.5, 0.5, 6]
+
+[palette]
+fur = "#3e2c20"
+fur_up = "#36261b"
+fur_down = "#5a4232"
+legs = "#2e2119"
+head = "#cbbb9c"
+muzzle = "#ddd0b6"
+ears = "#5a4232"
+tail = "#36261b"
+eye = "#0a0807"
+nose = "#141110"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 0
+colour = "nose"

@@ -1,0 +1,97 @@
+# DF TAPIR (creature_tropical_new): 200 kg, rainforest browser with a short
+# prehensile nose. Attack kick (the template's `attack` lunge); bite optional,
+# not made. Drawn as the Malayan tapir: black with the white saddle over the
+# back half, a drooping proboscis, white-rimmed ears, a stub tail.
+name = "tapir"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [10, 10, 20]
+leg = [4, 7]
+head = [6, 7, 7]
+head_up = -1
+tail = [2, 1]
+tail_raise = -40
+walk = { cycle = 1.1, swing = 22, bob = 0.4 }
+run = { cycle = 0.6, swing = 38, bob = 1.0, pitch = 4 }
+idle = { length = 5.0, look = 16, breath = 0.22, wag = 4 }
+attack = { length = 0.7, lunge = 4 }
+eat = { length = 2.0, reach = 38, forward = 2.5 }
+
+# Head pivot: the neck joint; the head cube spans y -7..0, z -6..1 around it.
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "nose"
+from = [-1.5, -5, -9]
+to = [1.5, -1, -6]
+
+[[cubes]]
+name = "nose_tip"
+bone = "head"
+part = "nose"
+from = [-1, -7, -9]
+to = [1, -5, -7.5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3, 0, -1]
+to = [-1.5, 2, 0]
+
+[palette]
+fur = "#1c1a1a"
+legs = "#161414"
+head = "#1c1a1a"
+nose = "#222020"
+ears = "#1c1a1a"
+ears_north = "#e8e4dc"
+tail = "#e8e4dc"
+saddle = "#e8e4dc"
+eye = "#5a4a3a"
+
+# The saddle: body top 10 wide × 20 long (row 0 front), sides 20 × 10
+# (front at west's left / east's right).
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 8
+w = 10
+h = 9
+colour = "saddle"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 0
+w = 9
+h = 7
+colour = "saddle"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 3
+y = 0
+w = 9
+h = 7
+colour = "saddle"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 2
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 2
+colour = "eye"

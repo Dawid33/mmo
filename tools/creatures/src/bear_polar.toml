@@ -1,0 +1,80 @@
+# DF BEAR_POLAR (creature_large_tundra): 400 kg, the great white bear of the ice.
+# Attack bite (the template's `attack`); scratch optional, not made.
+# LARGE_PREDATOR: alert + roar; MOUNT_EXOTIC: ridden; CURIOUSBEAST_EATER/GUZZLER:
+# pick_up + carry. Bigger than the grizzly, a longer head on a low neck, small ears.
+name = "polar bear"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar", "ridden", "pick_up", "carry"]
+
+[proportions]
+body = [13, 12, 23]
+leg = [5, 9]
+head = [8, 7, 7]
+head_up = -1
+head_overlap = 0
+tail = [2, 2]
+tail_raise = -20
+walk = { cycle = 1.3, swing = 22, bob = 0.6 }
+run = { cycle = 0.7, swing = 36, bob = 1.4, pitch = 4 }
+idle = { length = 5.5, look = 16, breath = 0.3, wag = 3 }
+attack = { length = 0.8, lunge = 5 }
+eat = { length = 2.2, reach = 38, forward = 3 }
+
+# Head pivot: the neck joint; the head cube spans y -7..0, z -7..0 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-2.5, -7, -10]
+to = [2.5, -3, -7]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3.5, 0, -2]
+to = [-2, 1.5, -1]
+
+# The neck: a thick block from the head back into the body's front.
+[[cubes]]
+name = "neck"
+bone = "head"
+part = "fur"
+from = [-4, -7.5, -1]
+to = [4, 0, 2]
+
+[palette]
+fur = "#e8e2d0"
+fur_up = "#efe9d9"
+fur_down = "#d8d0b8"
+legs = "#e2dbc6"
+head = "#efe9d9"
+snout = "#e8e2d0"
+ears = "#e2dbc6"
+tail = "#e2dbc6"
+eye = "#0a0807"
+nose = "#121010"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+w = 3
+colour = "nose"

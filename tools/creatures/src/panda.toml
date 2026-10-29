@@ -1,0 +1,128 @@
+# DF PANDA (creature_large_temperate): 130 kg, the black-and-white bamboo bear.
+# Attack bite (the template's `attack`); scratch optional, not made. White body
+# with the black shoulder band and legs, black ears and eye patches.
+name = "panda"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [11, 10, 18]
+leg = [4, 7]
+head = [8, 7, 6]
+head_up = 1
+tail = [2, 2]
+tail_raise = -20
+walk = { cycle = 1.15, swing = 22, bob = 0.5 }
+run = { cycle = 0.65, swing = 36, bob = 1.1, pitch = 4 }
+idle = { length = 5.0, look = 14, breath = 0.25, wag = 3 }
+attack = { length = 0.75, lunge = 3.5 }
+eat = { length = 2.2, reach = 38, forward = 3 }
+
+# Head pivot: the neck joint; the head cube spans y -5..2, z -5..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-2, -5, -7]
+to = [2, -2, -5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-4, 2, -1]
+to = [-2, 4, 0.5]
+
+[palette]
+fur = "#ece8df"
+fur_up = "#f2eee6"
+fur_down = "#1c1a19"
+legs = "#1c1a19"
+head = "#f2eee6"
+snout = "#f2eee6"
+ears = "#1c1a19"
+tail = "#ece8df"
+band = "#1c1a19"
+patch = "#1c1a19"
+eye = "#5a4a3a"
+nose = "#121010"
+
+# The black band over the shoulders (body sides 18 long × 10 tall; front is
+# west's left / east's right; top: row 0 at the front).
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 0
+w = 5
+h = 10
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 10
+y = 0
+w = 5
+h = 10
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 3
+w = 11
+h = 4
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "north"
+x = 0
+y = 6
+w = 11
+h = 4
+colour = "band"
+
+# Eye patches on the face (8 × 7, the snout covers the lower three rows).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+w = 2
+h = 2
+colour = "patch"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 2
+w = 2
+h = 2
+colour = "patch"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+w = 2
+colour = "nose"

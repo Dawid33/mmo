@@ -1,0 +1,71 @@
+# DF WEASEL (creature_temperate_new): 0.2 kg, the tiny least weasel.
+# Attack bite (the template's `attack`); scratch optional, not made. Smaller
+# than the stoat: slender, brown above and white below, a short brown tail.
+name = "weasel"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [2, 2, 4]
+leg = [1, 1.5]
+leg_ends = 0
+head = [2, 2, 2]
+head_up = 0.5
+tail = [1, 2]
+tail_raise = 15
+walk = { cycle = 0.38, swing = 34, bob = 0.1 }
+run = { cycle = 0.26, swing = 50, bob = 0.4, pitch = 8 }
+idle = { length = 3.5, look = 26, breath = 0.06, wag = 8 }
+attack = { length = 0.32, lunge = 1.2 }
+eat = { length = 1.1, reach = 35, forward = 0.8 }
+
+# Head pivot: the neck joint; the head cube spans y -0.5..1.5, z -1..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-0.5, -0.5, -2]
+to = [0.5, 0.5, -1]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-1, 1.5, 0]
+to = [-0.5, 2, 0.5]
+
+[palette]
+fur = "#94622f"
+fur_up = "#8a5a2a"
+fur_down = "#f2ece0"
+legs = "#865828"
+head = "#94622f"
+head_down = "#f2ece0"
+snout = "#94622f"
+ears = "#865828"
+tail = "#8a5a2a"
+eye = "#0a0807"
+nose = "#2a1a14"
+
+# Eyes on the head's sides (2 × 2 faces; front at west's left / east's right).
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 0
+y = 0
+colour = "nose"

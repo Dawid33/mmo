@@ -1,0 +1,137 @@
+# DF RHINOCEROS (creature_large_tropical): 3000 kg, armoured horned grazer.
+# Attack kick (the template's `attack` lunge reads as a charge); gore optional,
+# not made. MOUNT_EXOTIC: ridden. Massive grey body with a shoulder hump and
+# skin-fold lines, a long low head carrying the big front horn and a smaller
+# second horn, tube ears.
+name = "rhinoceros"
+template = "quadruped"
+status = "draft"
+extras = ["ridden"]
+
+[proportions]
+body = [16, 14, 32]
+leg = [6, 8]
+leg_ends = 2
+head = [9, 8, 12]
+head_up = -3
+head_overlap = 2
+tail = [2, 6]
+tail_raise = -60
+walk = { cycle = 1.4, swing = 18, bob = 0.6 }
+run = { cycle = 0.8, swing = 30, bob = 1.3, pitch = 3 }
+idle = { length = 6.0, look = 12, breath = 0.35, wag = 12 }
+attack = { length = 0.9, lunge = 6 }
+eat = { length = 2.2, reach = 28, forward = 2 }
+
+# Head pivot: the neck joint; the head cube spans y -10..-2, z -10..2 around it.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "head"
+from = [-3.5, -10, -13]
+to = [3.5, -4, -10]
+
+[[cubes]]
+name = "horn"
+bone = "head"
+part = "horn"
+from = [-1.5, -4, -13]
+to = [1.5, 4, -10]
+
+[[cubes]]
+name = "horn2"
+bone = "head"
+part = "horn"
+from = [-1, -2, -8]
+to = [1, 1, -6]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-4.5, -2, -0.5]
+to = [-3, 1.5, 1]
+
+# Body pivot: its centre (16 × 14 × 32, top at y 7). The shoulder hump.
+[[cubes]]
+name = "hump"
+bone = "body"
+part = "fur"
+from = [-6, 7, -13]
+to = [6, 9, -4]
+
+[palette]
+fur = "#8a8580"
+fur_up = "#958f89"
+fur_down = "#77726d"
+legs = "#7e7974"
+head = "#8a8580"
+horn = "#b8ae9c"
+horn_north = "#a89e8a"
+ears = "#7e7974"
+tail = "#6e6964"
+fold = "#6a6560"
+eye = "#141210"
+nostril = "#2e2a28"
+
+# Skin folds behind the shoulder and in front of the hip (sides 32 × 14).
+[[decals]]
+cube = "body"
+face = "west"
+x = 10
+y = 0
+h = 14
+colour = "fold"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 23
+y = 0
+h = 14
+colour = "fold"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 21
+y = 0
+h = 14
+colour = "fold"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 8
+y = 0
+h = 14
+colour = "fold"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 5
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 6
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 3
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 5
+y = 3
+colour = "nostril"
