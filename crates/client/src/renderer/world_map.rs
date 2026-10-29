@@ -15,6 +15,20 @@ pub struct WorldMapState {
     pub map: Option<WorldMap>,
     /// The latest refused Play request; replaced by the next refusal.
     pub refused: Option<(RegionCoords, PlayRefusal)>,
+    /// `Time::elapsed_secs` when `refused` arrived.
+    pub refused_at_secs: f32,
+}
+
+/// How long a refusal stays on the status line.
+pub const REFUSAL_SHOW_SECS: f32 = 5.0;
+
+impl WorldMapState {
+    /// The refusal still worth showing at `now_secs`.
+    pub fn visible_refusal(&self, now_secs: f32) -> Option<PlayRefusal> {
+        self.refused
+            .filter(|_| now_secs - self.refused_at_secs < REFUSAL_SHOW_SECS)
+            .map(|(_, why)| why)
+    }
 }
 
 /// Bridge → [`WorldMapState`].
@@ -27,11 +41,15 @@ pub enum WorldMapMsg {
 pub fn apply_world_map_msgs(
     mut msgs: MessageReader<WorldMapMsg>,
     mut state: ResMut<WorldMapState>,
+    time: Res<Time>,
 ) {
     for msg in msgs.read() {
         match msg {
             WorldMapMsg::Map(map) => state.map = Some(WorldMap::clone(map)),
-            WorldMapMsg::Refused(rc, why) => state.refused = Some((*rc, *why)),
+            WorldMapMsg::Refused(rc, why) => {
+                state.refused = Some((*rc, *why));
+                state.refused_at_secs = time.elapsed_secs();
+            }
         }
     }
 }

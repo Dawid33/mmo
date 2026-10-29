@@ -392,9 +392,19 @@ fn spawn_commander_camera(mut commands: Commands, cam: Res<CommanderCamera>) {
 fn track_home_region(status: Res<super::hud::HudStatus>, mut cam: ResMut<CommanderCamera>) {
     let bounds = status.home_region.map(region_rect);
     if cam.bounds != bounds {
+        // A Play (or any later home change) re-places the camera over the new
+        // region's body; the very first home keeps the normal first placement.
+        if cam.bounds.is_some() && bounds.is_some() {
+            cam.placed = false;
+        }
         cam.bounds = bounds;
         cam.focus = clamp_focus(cam.focus, bounds);
     }
+}
+
+/// Whether the sim-unit point (x, z) lies inside `bounds` (none = anywhere).
+fn inside_bounds(x: f32, z: f32, bounds: Option<Rect>) -> bool {
+    bounds.is_none_or(|b| b.contains(Vec2::new(x, z)))
 }
 
 /// Put the camera over the local (inert) body the first time it is placed.
@@ -406,7 +416,8 @@ fn place_on_body(
         return;
     }
     // A freshly spawned body reads the origin until transforms propagate.
-    let Some(at) = body.iter().map(|gt| gt.translation()).find(|p| *p != Vec3::ZERO) else {
+    let Some(at) = body.iter().map(|gt| gt.translation()).find(|p| *p != Vec3::ZERO && inside_bounds(p.x, p.z, cam.bounds))
+    else {
         return;
     };
     cam.focus = clamp_focus(Vec2::new(at.x, at.z), cam.bounds);
@@ -571,6 +582,16 @@ fn apply_camera_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_body_inside_the_home_bounds_places_the_camera() {
+        let home = region_rect(game::RegionCoords::new(0, 0));
+        let other = region_rect(game::RegionCoords::new(1, 0));
+        let mid = home.center();
+        assert!(inside_bounds(mid.x, mid.y, Some(home)));
+        assert!(!inside_bounds(mid.x, mid.y, Some(other)));
+        assert!(inside_bounds(mid.x, mid.y, None));
+    }
 
     #[test]
     fn camera_looks_at_the_focus_from_the_south_at_the_pitch() {

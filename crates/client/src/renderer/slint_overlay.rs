@@ -730,6 +730,7 @@ struct MapShown {
 #[derive(SystemParam)]
 struct MapParams<'w, 's> {
     world_map: Res<'w, WorldMapState>,
+    time: Res<'w, Time>,
     pending: ResMut<'w, PlayPending>,
     shown: Local<'s, MapShown>,
 }
@@ -787,7 +788,7 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
 
     // In the map window and, with the map closed (Play closes it), on the
     // game-level status line.
-    let status = map_status_text(p.pending.0, p.world_map.refused.map(|(_, why)| why));
+    let status = map_status_text(p.pending.0, p.world_map.visible_refusal(p.time.elapsed_secs()));
     if ui.get_map_status() != status {
         ui.set_map_status(status.into());
     }
@@ -863,6 +864,7 @@ fn unpremultiply(p: slint_ui::slint::platform::software_renderer::PremultipliedR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::world_map::REFUSAL_SHOW_SECS;
     use slint_ui::slint::platform::software_renderer::PremultipliedRgbaColor;
 
     #[test]
@@ -884,6 +886,15 @@ mod tests {
         assert_eq!(map_status_text(Some(rc), Some(PlayRefusal::OffMap)), LOADING_TEXT);
         assert_eq!(map_status_text(None, Some(PlayRefusal::NoDryLand)), "No dry land there");
         assert_eq!(map_status_text(None, None), "");
+    }
+
+    #[test]
+    fn a_refusal_expires_after_the_show_time() {
+        let mut state = WorldMapState::default();
+        state.refused = Some((RegionCoords::new(1, 2), PlayRefusal::OffMap));
+        state.refused_at_secs = 10.0;
+        assert_eq!(state.visible_refusal(10.0 + REFUSAL_SHOW_SECS - 0.1), Some(PlayRefusal::OffMap));
+        assert_eq!(state.visible_refusal(10.0 + REFUSAL_SHOW_SECS), None);
     }
 
     #[test]
