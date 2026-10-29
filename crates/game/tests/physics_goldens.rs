@@ -241,7 +241,7 @@ fn from_csv(text: &str) -> Vec<Row> {
 }
 
 /// The sim-chunk size the chunk-size-dependent fixtures were recorded at.
-const RECORDED_CHUNK_BLOCKS: usize = 2;
+const RECORDED_CHUNK_BLOCKS: usize = 16;
 
 /// Scenarios whose recording depends on the chunk size, so they are compared
 /// only at [`RECORDED_CHUNK_BLOCKS`]: the seam walks start relative to the

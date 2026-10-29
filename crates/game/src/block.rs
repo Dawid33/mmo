@@ -22,7 +22,7 @@ pub const CHUNK_BLOCKS: usize = parse_chunk_blocks(option_env!("VOXEL_CHUNK_BLOC
 
 /// `option_env!` hands over a string; unset or empty means the default.
 const fn parse_chunk_blocks(var: Option<&str>) -> usize {
-    const DEFAULT: usize = 2;
+    const DEFAULT: usize = 16;
     let Some(text) = var else { return DEFAULT };
     let bytes = text.as_bytes();
     if bytes.is_empty() {
@@ -306,7 +306,7 @@ impl ChiselData {
 /// half-block cells on the half-block grid, and the remaining chisel voxels
 /// on the voxel grid. Together they cover exactly the solid cells of
 /// [`derive_voxels`] — this is that function's collider-facing counterpart,
-/// kept coarse instead of expanded to the 32³ grid. Chiseled and plain blocks
+/// kept coarse instead of expanded to a dense voxel grid. Chiseled and plain blocks
 /// go through the same rule: a chisel that fills its block is a block cell, a
 /// half-block chisel is four half cells.
 #[derive(Debug, Clone, PartialEq)]
@@ -340,7 +340,7 @@ impl ColliderCells {
     }
 
     /// True iff every block of the chunk is wholly solid, i.e. its collision
-    /// volume is exactly the full 32³ chunk cube.
+    /// volume is exactly the full chunk cube (`CHUNK_UNITS`³ voxels).
     pub fn is_full_cube(&self) -> bool {
         self.blocks.len() == CHUNK_BLOCK_COUNT
     }
@@ -477,9 +477,9 @@ mod tests {
 
     #[test]
     fn chunk_block_dial_parses() {
-        assert_eq!(parse_chunk_blocks(None), 2);
-        assert_eq!(parse_chunk_blocks(Some("")), 2);
-        assert_eq!(parse_chunk_blocks(Some("16")), 16);
+        assert_eq!(parse_chunk_blocks(None), 16);
+        assert_eq!(parse_chunk_blocks(Some("")), 16);
+        assert_eq!(parse_chunk_blocks(Some("2")), 2);
         assert_eq!(parse_chunk_blocks(Some("32")), 32);
         assert_eq!(CHUNK_BLOCKS, parse_chunk_blocks(option_env!("VOXEL_CHUNK_BLOCKS")));
     }

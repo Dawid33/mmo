@@ -1,5 +1,5 @@
-//! Sparse vertical block storage. A `Column` is an unbounded stack of 32³
-//! `SubChunk`s over one region-local (x, z) cell, with constant sentinels
+//! Sparse vertical block storage. A `Column` is an unbounded stack of
+//! `CHUNK_BLOCKS`³-block `SubChunk`s over one region-local (x, z) chunk column, with constant sentinels
 //! below/above the materialized band. Bevy-free and deterministic.
 
 use crate::block::CHUNK_BLOCKS;
@@ -32,7 +32,7 @@ pub trait WriteVol {
     fn set(&mut self, pos: BlockPos, block: Block) -> Block;
 }
 
-/// One 32³ slice of a column. Only the all-air case is collapsed; every
+/// One chunk-sized (`CHUNK_BLOCKS`³ blocks) slice of a column. Only the all-air case is collapsed; every
 /// other uniform case (including all-stone) stays `Dense` (gets no collider,
 /// see plan §Task 5). This keeps a single canonical form per content.
 ///

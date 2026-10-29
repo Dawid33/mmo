@@ -77,8 +77,9 @@ export VOXEL_REGION_BLOCKS := test_blocks
 # 32³-voxel render/LOD brick does not change with it. The default mirrors
 # `[env]` in .cargo/config.toml (one build fingerprint); switching recompiles
 # `game` and everything downstream. Server and client must share the value.
-#   just chunk_blocks=16 smoke
-chunk_blocks := env_var_or_default("VOXEL_CHUNK_BLOCKS", "2")
+# Default 16 (16 m chunks); 2 is the pre-2026-10-29 size, still tested:
+#   just chunk_blocks=2 smoke
+chunk_blocks := env_var_or_default("VOXEL_CHUNK_BLOCKS", "16")
 export VOXEL_CHUNK_BLOCKS := chunk_blocks
 
 # Cell loading (phase 1b of docs/superpowers/specs/2026-09-25-island-regions-cell-loading-design.md):
@@ -252,8 +253,8 @@ fly-probe seconds="45":
 # flies to the first boundary, then reverses `overshoot` metres past it each leg
 # (VOXEL_AUTOPILOT=shuttle). `boundary=region` (default) shuttles across the seam
 # between two region threads — every leg is a handoff and a near-window shift
-# that releases and re-requests a row; `boundary=chunk` shuttles across a 32-unit
-# chunk edge inside one region (no handoff; PERF_LOG=1 adds the per-chunk-crossing
+# that releases and re-requests a row; `boundary=chunk` shuttles across a sim-chunk
+# edge (CHUNK_UNITS, 256 units at 16-block chunks) inside one region (no handoff; PERF_LOG=1 adds the per-chunk-crossing
 # `[client-motion]` lines). Ends with the `scripts/crossing_summary.py` table;
 # logs in target/shuttle-probe/. e.g. `just adapter=6700 shuttle-probe chunk 30 0.5`.
 # Back and forth across one region seam (or chunk edge), one report per crossing.

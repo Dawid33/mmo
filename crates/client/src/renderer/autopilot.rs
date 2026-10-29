@@ -10,8 +10,9 @@
 //!   back and forth across that one plane, reversing `VOXEL_AUTOPILOT_OVERSHOOT_M`
 //!   metres past it each leg. `VOXEL_AUTOPILOT_BOUNDARY=region` (default: the
 //!   seam between two region threads — every leg is a handoff, and the near
-//!   window releases and re-requests a row) or `chunk` (a 32-unit chunk edge
-//!   inside one region: no handoff, just the per-chunk render work).
+//!   window releases and re-requests a row) or `chunk` (a sim-chunk edge,
+//!   `CHUNK_UNITS` — 256 units at 16-block chunks — inside one region: no
+//!   handoff, just the crossing between two chunks' bodies and bricks).
 //!   `just shuttle-probe`.
 //!
 //! `VOXEL_AUTOPILOT_SECONDS=N` closes the client N seconds after the climb.
@@ -92,7 +93,7 @@ impl Autopilot {
             "shuttle" => {
                 let chunk = std::env::var("VOXEL_AUTOPILOT_BOUNDARY").is_ok_and(|b| b == "chunk");
                 let (cell, default_m) = if chunk {
-                    (32.0, SHUTTLE_OVERSHOOT_CHUNK_M)
+                    (game::CHUNK_UNITS as f32, SHUTTLE_OVERSHOOT_CHUNK_M)
                 } else {
                     (game::REGION_SIZE, SHUTTLE_OVERSHOOT_REGION_M)
                 };
