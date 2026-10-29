@@ -1,0 +1,145 @@
+# DF BLIND_CAVE_BEAR (underground): 200 kg, a huge emaciated white bear of the deep
+# caverns with great drooping ears and many sharp teeth; eyeless (no EYES in its body
+# plan). Lean body on long legs, bony hips and shoulders, ribs showing. Attack bite
+# (the template's `attack`); scratch optional, not made. LARGE_PREDATOR: alert +
+# roar; MOUNT_EXOTIC: ridden.
+name = "blind cave bear"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar", "ridden"]
+
+[proportions]
+body = [8, 8, 19]
+leg = [3, 9]
+leg_ends = 1
+head = [7, 6, 5]
+head_up = 0
+tail = [2, 2]
+tail_raise = -20
+walk = { cycle = 1.1, swing = 26, bob = 0.5 }
+run = { cycle = 0.6, swing = 42, bob = 1.2, pitch = 5 }
+idle = { length = 5.0, look = 22, breath = 0.3, wag = 3 }
+attack = { length = 0.7, lunge = 4 }
+eat = { length = 2.0, reach = 45, forward = 3 }
+
+# Head pivot: the neck joint; the head cube spans y -5..1, z -4..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-2, -5, -8]
+to = [2, -2, -4]
+
+[[cubes]]
+name = "fang_l"
+bone = "head"
+part = "teeth"
+mirror = true
+from = [-1.8, -6, -7.5]
+to = [-1, -5, -6.5]
+
+# Great drooping ears hanging down the sides of the head.
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-5, -6, -2]
+to = [-3.5, 1.5, 1]
+
+# Bony shoulders and hips standing out of the lean back (body pivot: its centre,
+# top at y 4).
+[[cubes]]
+name = "shoulders"
+bone = "body"
+part = "fur"
+from = [-3.5, 4, -9]
+to = [3.5, 5.5, -4]
+
+[[cubes]]
+name = "hips"
+bone = "body"
+part = "fur"
+from = [-3.5, 4, 4]
+to = [3.5, 5, 9]
+
+[palette]
+fur = "#e6e2d8"
+fur_up = "#d8d3c7"
+fur_down = "#c9c3b4"
+legs = "#d8d3c7"
+head = "#e6e2d8"
+tail = "#e6e2d8"
+snout = "#d6cfc2"
+ears = "#d6c8bd"
+teeth = "#fbf7ea"
+rib = "#bdb7a8"
+nose = "#4a3a36"
+mouth = "#5a2a2a"
+
+# No eyes: the skin is closed over them.
+
+# Ribs on the flanks (19 long × 8 tall; the front is the left of west).
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 2
+h = 4
+colour = "rib"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 7
+y = 2
+h = 4
+colour = "rib"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 9
+y = 2
+h = 4
+colour = "rib"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 13
+y = 2
+h = 4
+colour = "rib"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 11
+y = 2
+h = 4
+colour = "rib"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 9
+y = 2
+h = 4
+colour = "rib"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+w = 2
+colour = "nose"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 0
+y = 2
+w = 4
+colour = "mouth"

@@ -1,0 +1,72 @@
+# DF CAP_HOPPER (vermin, underground): 0.2 kg, "a tiny amphibian with a long
+# prehensile tail", living in underground swamps and tower-cap forests on which it
+# feeds. No giant, so the vermin form (`move` + `death`), hopping: a pale blue
+# frog-like body with black spots and bulging black eyes, and a long tail curled up
+# at the tip. Bite: not made.
+name = "cap hopper"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "eye_l", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "eye_r", face = "east", x = 0, y = 0, colour = "eye" },
+  { cube = "body", face = "up", x = 0, y = 1, colour = "spot" },
+]
+
+[proportions]
+body = [1.5, 1, 2.5]
+head = [1.5, 1, 1]
+legs = 0.5
+move = "hop"
+cycle = 0.5
+
+# Body pivot: its centre (y 1); the body spans y -0.5..0.5, z -1.25..1.25. The
+# head's pivot is the body's front (the head spans y -0.5..0.5, z -1..0).
+[[cubes]]
+name = "eye_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-0.75, 0.5, -0.75]
+to = [-0.25, 1, -0.25]
+
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 1.25]
+rest = [5, 0, 0]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-0.25, -0.25, 0]
+to = [0.25, 0.25, 3.5]
+
+[[cubes]]
+name = "tail_curl"
+bone = "tail"
+part = "tail"
+from = [-0.25, 0.25, 3]
+to = [0.25, 1.25, 3.5]
+
+[palette]
+body = "#9cc2da"
+body_up = "#86b0cc"
+body_down = "#d2e2ea"
+head = "#94bad2"
+legs = "#5a7488"
+tail = "#86b0cc"
+eye = "#0a0a0c"
+spot = "#1a1e24"
+
+# The tail swings up behind on each hop.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.5
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.25, value = [-20, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.5, value = [0, 0, 0] },
+]

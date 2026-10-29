@@ -1,0 +1,170 @@
+# DF UNICORN (fantastic, good): 600 kg, "a horse-like creature with a spiral horn
+# growing from its forehead"; white, gold eyes (raws). Built like the horse (neck and
+# mane as cubes on the head bone), a little bigger, with a twisted horn (two stacked
+# cubes with a gold band decal), a white mane and tail.
+# Attack bite (the template's `attack`); kick optional, not made. MOUNT: ridden.
+name = "unicorn"
+template = "quadruped"
+status = "draft"
+extras = ["ridden"]
+
+[proportions]
+body = [10, 11, 23]
+leg = [3, 11]
+head = [5, 5, 9]
+head_up = 9
+tail = [3, 12]
+tail_raise = -50
+walk = { cycle = 1.2, swing = 22, bob = 0.5 }
+run = { cycle = 0.62, swing = 40, bob = 1.3, pitch = 4 }
+idle = { length = 5.0, look = 12, breath = 0.25, wag = 6 }
+eat = { length = 2.0, reach = 60, forward = 3 }
+
+# Head pivot: the neck joint at the body's front top; the head cube spans
+# y 5..10, z -8..1 around it.
+[[cubes]]
+name = "neck"
+bone = "head"
+part = "neck"
+from = [-2.5, -3, -4]
+to = [2.5, 6, 1]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-2, 5, -10]
+to = [2, 8, -8]
+
+[[cubes]]
+name = "mane"
+bone = "head"
+part = "mane"
+from = [-0.5, -1, 1]
+to = [0.5, 10.5, 2]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2, 10, 0]
+to = [-1, 12, 1]
+
+# The horn from the forehead, up and forward (head top at y 10, front at z -8).
+[[cubes]]
+name = "horn"
+bone = "head"
+part = "horn"
+from = [-1, 10, -6]
+to = [1, 14, -4]
+
+[[cubes]]
+name = "horn_tip"
+bone = "head"
+part = "horn"
+from = [-0.5, 14, -6]
+to = [0.5, 18, -5]
+
+[palette]
+fur = "#f2f0ea"
+fur_up = "#f8f6f0"
+fur_down = "#dedad0"
+legs = "#e8e5dc"
+head = "#f2f0ea"
+neck = "#f2f0ea"
+muzzle = "#e2ddd6"
+mane = "#fbfaf6"
+ears = "#e6e2da"
+tail = "#fbfaf6"
+horn = "#efe2b8"
+band = "#c9a640"
+eye = "#c9a020"
+nostril = "#8a7f78"
+
+# Eyes on the head's sides (9 wide × 5 tall; the front is the left of west).
+[[decals]]
+cube = "head"
+face = "west"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 5
+y = 1
+colour = "eye"
+
+# A gold band spiralling up the horn (each face 1 wide; a stripe at a different
+# height on each side reads as a twist).
+[[decals]]
+cube = "horn"
+face = "north"
+x = 0
+y = 1
+colour = "band"
+
+[[decals]]
+cube = "horn"
+face = "east"
+x = 0
+y = 2
+colour = "band"
+
+[[decals]]
+cube = "horn_tip"
+face = "south"
+x = 0
+y = 0
+colour = "band"
+
+[[decals]]
+cube = "horn_tip"
+face = "west"
+x = 0
+y = 1
+colour = "band"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 0
+y = 1
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 3
+y = 1
+colour = "nostril"
+
+# Grazing: the long neck swings right down; the forelegs splay a little.
+[clips.eat]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [-95, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.5, value = [-90, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.0, value = [-95, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.5, value = [-90, 0, 0] },
+  { bone = "head", channel = "rotation", time = 2.0, value = [-95, 0, 0] },
+  { bone = "head", channel = "position", time = 0.0, value = [0, -2, -3] },
+  { bone = "head", channel = "position", time = 2.0, value = [0, -2, -3] },
+]
+
+# Lying down the tail stays hanging instead of the template's horizontal.
+[clips.lie]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 4.0, value = [-30, 0, 0] },
+]
+
+[clips.sleep]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 6.0, value = [-30, 0, 0] },
+]

@@ -1,0 +1,51 @@
+# DF OLM (vermin, underground streams): 0.2 kg, "a tiny amphibian, found in
+# underground streams"; white skin, black eyes (raws). No giant in the roster (the
+# giant olm is its own creature), so the vermin form (`move` + `death`), swimming:
+# a slender pale salamander with red gill tufts and a finned tail, legs too small
+# to show. Bite: not made.
+name = "olm"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 0, y = 0, colour = "eye" },
+]
+
+[proportions]
+body = [1, 0.75, 3.5]
+head = [1, 0.75, 1.25]
+legs = 0
+move = "swim"
+
+# Body pivot: its centre (y 0.375); the body spans y -0.375..0.375, z -1.75..1.75.
+# The head's pivot is the body's front (the head spans y -0.375..0.375, z -1.25..0).
+[[cubes]]
+name = "gill_l"
+bone = "head"
+part = "gills"
+mirror = true
+from = [-1, -0.25, -0.5]
+to = [-0.5, 0.5, 0]
+
+[[cubes]]
+name = "tail"
+bone = "body"
+part = "body"
+from = [-0.25, -0.25, 1.75]
+to = [0.25, 0.25, 3.25]
+
+[[cubes]]
+name = "fin"
+bone = "body"
+part = "fin"
+from = [-0.125, -0.375, 2.25]
+to = [0.125, 0.625, 3.25]
+
+[palette]
+body = "#f0d4ca"
+body_up = "#ecc9bd"
+head = "#ecc9bd"
+gills = "#d9505e"
+fin = "#f6e2da"
+eye = "#2a2222"

@@ -1,0 +1,102 @@
+# DF DRUNIAN (underground): 50 kg, "a large quadruped with a mane circling its
+# manlike face and hands at the end of its forelimbs", fond of raiding the supplies
+# of cavern outposts; grey-brown, purple eyes (raws). A lion-like body with no tail
+# (none in its body plan), a flat human face (the head's front in skin tone, no
+# snout) ringed by a shaggy mane, and pale hands with fingers on the forefeet.
+# Attack bite (the template's `attack`); scratch optional, not made.
+# CURIOUSBEAST_EATER/ITEM: pick_up + carry.
+name = "drunian"
+template = "quadruped"
+status = "draft"
+extras = ["pick_up", "carry"]
+
+[proportions]
+body = [7, 6, 13]
+leg = [2, 6]
+leg_ends = 1
+head = [5, 5, 4]
+head_up = 2
+tail = [0, 0]
+tail_raise = 0
+walk = { cycle = 0.85, swing = 30, bob = 0.3 }
+run = { cycle = 0.45, swing = 50, bob = 0.8, pitch = 6 }
+idle = { length = 4.0, look = 24, breath = 0.15, wag = 0 }
+attack = { length = 0.6, lunge = 3 }
+
+# Head pivot: the neck joint; the head cube spans y -2..3, z -3..1 around it.
+# The mane rings the face: a collar behind it, wider and taller than the head.
+[[cubes]]
+name = "mane"
+bone = "head"
+part = "mane"
+from = [-3.5, -3, -2]
+to = [3.5, 4, 1.5]
+
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "face"
+from = [-0.5, -0.5, -3.75]
+to = [0.5, 1, -3]
+
+# Hands on the forefeet (leg pivot: the leg's top; the leg spans y -6..1).
+[[cubes]]
+name = "hand_l"
+bone = "leg_fl"
+part = "hands"
+from = [-1.25, -6, -2.5]
+to = [1.25, -5, 1]
+
+[[cubes]]
+name = "hand_r"
+bone = "leg_fr"
+part = "hands"
+from = [-1.25, -6, -2.5]
+to = [1.25, -5, 1]
+
+[palette]
+fur = "#7a7068"
+fur_up = "#6a6058"
+fur_down = "#948a80"
+legs = "#6e645c"
+head = "#7a7068"
+head_north = "#c9a48a"
+face = "#c09a80"
+mane = "#4e4038"
+mane_up = "#5a4a40"
+hands = "#c9a48a"
+tail = "#7a7068"
+eye = "#7a3aa0"
+brow = "#4e4038"
+mouth = "#6a3a32"
+
+# The face: 5×5, row 0 at the top.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+w = 5
+colour = "brow"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 3
+colour = "mouth"

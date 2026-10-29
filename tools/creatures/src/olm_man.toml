@@ -1,0 +1,119 @@
+# DF OLM_MAN (animal person): "an animal person with the head of the amphibious olm",
+# living underground near water. Hand-made on the biped template (not derived: the
+# vermin olm's head is one cube, and grafting the giant olm's paddle tail at person
+# scale put it through the ground): pale pink-white skin, a flat long olm head with
+# red gill plumes and dark pin-prick eyes, a short finned tail, a hide loincloth.
+# About 0.8 of a human (size between the olm and a human, as derive.py does). Attacks
+# punch, kick, bite (the template's `attack` is a punch). The worker set comes with
+# the biped; AMPHIBIOUS: swim + swim_idle.
+name = "olm man"
+template = "biped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+leg = [3, 9]
+foot = 1
+body = [8, 9, 5]
+arm = [3, 9]
+hand = 2
+head = [7, 4, 6]
+
+# Head pivot: the neck at the torso top; the head cube spans y 0..4, z -3..3.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-3, 0, -6.5]
+to = [3, 2.5, -3]
+
+[[cubes]]
+name = "gill_a_l"
+bone = "head"
+part = "gills"
+mirror = true
+from = [-6, 3, 0.5]
+to = [-3.5, 4, 1.5]
+
+[[cubes]]
+name = "gill_b_l"
+bone = "head"
+part = "gills"
+mirror = true
+from = [-6.5, 1.5, 1]
+to = [-3.5, 2.5, 2]
+
+[[cubes]]
+name = "gill_c_l"
+bone = "head"
+part = "gills"
+mirror = true
+from = [-6, 0, 1.5]
+to = [-3.5, 1, 2.5]
+
+# Torso pivot: the hips.
+[[cubes]]
+name = "loincloth"
+bone = "torso"
+part = "cloth"
+from = [-4.5, -1.5, -3]
+to = [4.5, 1.5, 3]
+
+# A short finned tail from the small of the back, hanging (hips pivot).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 1, 2]
+rest = [55, 0, 0]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-1.5, -1.5, 0]
+to = [1.5, 1.5, 9]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fin"
+from = [-0.5, -2.5, 2]
+to = [0.5, 2.5, 9]
+
+[palette]
+skin = "#ecc9bd"
+head = "#ecc9bd"
+head_down = "#f4dcd2"
+hands = "#e4bcae"
+torso = "#ecc9bd"
+arms = "#ecc9bd"
+legs = "#e4bcae"
+feet = "#dcb2a4"
+gills = "#d9505e"
+cloth = "#6b5440"
+tail = "#e8c2b5"
+fin = "#f0d4ca"
+eye = "#2a2222"
+mouth = "#b98a80"
+
+[[decals]]
+cube = "snout"
+face = "west"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "east"
+x = 2
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 2
+w = 4
+colour = "mouth"

@@ -1,0 +1,51 @@
+# DF MOGHOPPER (vermin, fantastic): 0.3 kg, "a small mud-dwelling amphibian"; green
+# and black (raws), no tail in its body plan. No giant, so the vermin form (`move` +
+# `death`), hopping: a squat frog with a wide head, bulging eyes and big hind
+# haunches. Bite: not made.
+name = "moghopper"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "eye_l", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "eye_r", face = "east", x = 0, y = 0, colour = "eye" },
+  { cube = "body", face = "up", x = 0, y = 1, colour = "spot" },
+  { cube = "body", face = "up", x = 1, y = 2, colour = "spot" },
+  { cube = "head", face = "north", x = 0, y = 1, w = 2, colour = "mouth" },
+]
+
+[proportions]
+body = [2, 1.5, 2.5]
+head = [2, 1.25, 1.25]
+legs = 0.5
+move = "hop"
+cycle = 0.55
+
+# Body pivot: its centre (y 1.25); the body spans y -0.75..0.75, z -1.25..1.25. The
+# head's pivot is the body's front (the head spans y -0.75..0.5, z -1.25..0).
+[[cubes]]
+name = "eye_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-1, 0.5, -1]
+to = [-0.5, 1, -0.5]
+
+[[cubes]]
+name = "haunch_l"
+bone = "body"
+part = "body"
+mirror = true
+from = [-1.5, -0.75, 0]
+to = [-1, 0.25, 1.25]
+
+[palette]
+body = "#4e7a34"
+body_up = "#426a2c"
+body_down = "#a8b878"
+head = "#4a7432"
+head_down = "#a8b878"
+legs = "#2e4a20"
+eye = "#0a0a08"
+spot = "#141a10"
+mouth = "#1e2a16"

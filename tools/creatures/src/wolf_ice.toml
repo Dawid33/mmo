@@ -1,0 +1,91 @@
+# DF WOLF_ICE (fantastic, evil): 50 kg, "a fierce creature from the evil snowy wilds.
+# It has white fur and a piercing howl." Built like the wolf, a size up, all white with
+# a blue-grey cast on the back, pink eyes (raws), and a ridge of icy spikes down the
+# spine. Attacks bite (the template's `attack`) and scratch (optional, not made).
+# LARGE_PREDATOR: alert + roar (the howl).
+name = "ice wolf"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [8, 7, 14]
+leg = [2, 7]
+head = [6, 5, 5]
+head_up = 2
+tail = [3, 8]
+tail_raise = 15
+walk = { cycle = 0.9, swing = 30, bob = 0.3 }
+run = { cycle = 0.45, swing = 52, bob = 0.9, pitch = 6 }
+idle = { length = 4.0, look = 20, breath = 0.15, wag = 6 }
+attack = { length = 0.6, lunge = 3.5 }
+
+# Head pivot: the neck joint; the head cube spans y -2..3, z -4..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1.5, -2, -7]
+to = [1.5, 0, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 3, 0]
+to = [-0.5, 5.5, 1]
+
+# The thick ruff over the shoulders (body pivot: the body's centre).
+[[cubes]]
+name = "ruff"
+bone = "body"
+part = "ruff"
+from = [-4, -2.5, -7]
+to = [4, 3.5, -3]
+
+# Icy spikes down the spine (body pivot: its centre, top at y 3.5).
+[[cubes]]
+name = "ice"
+bone = "body"
+part = "ice"
+from = [-1, 3.5, -3]
+to = [1, 5.5, 6]
+
+[palette]
+fur = "#eef0f2"
+fur_up = "#d6dde4"
+fur_down = "#f8f9fa"
+legs = "#e4e8ec"
+head = "#eef0f2"
+tail = "#dfe5ea"
+tail_down = "#f8f9fa"
+snout = "#f4f6f8"
+snout_up = "#e4e8ec"
+ears = "#c8d2dc"
+ruff = "#f8f9fa"
+ruff_down = "#ffffff"
+ice = "#a8d8f0"
+eye = "#e86a9a"
+nose = "#2a2c34"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+colour = "nose"

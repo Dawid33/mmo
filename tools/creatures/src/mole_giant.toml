@@ -1,0 +1,84 @@
+# DF MOLE_GIANT (underground): 200 kg, "a gigantic digging creature found
+# underground"; dark brown-black velvet fur (raws). A fat low cylinder of a body on
+# short splayed legs, huge pink spade-like digging hands on the forelegs, a long
+# pointed pink snout, pin-prick eyes and a short pink tail. Attack bite (the
+# template's `attack`); scratch optional, not made. CURIOUSBEAST_EATER/GUZZLER:
+# pick_up + carry.
+name = "giant mole"
+template = "quadruped"
+status = "draft"
+extras = ["pick_up", "carry"]
+
+[proportions]
+body = [12, 9, 22]
+leg = [3, 3]
+leg_inset = -1.5
+leg_ends = 2
+head = [8, 7, 5]
+head_up = -1
+head_overlap = 2
+tail = [2, 4]
+tail_raise = 15
+walk = { cycle = 1.0, swing = 30, bob = 0.4 }
+run = { cycle = 0.6, swing = 42, bob = 0.8, pitch = 4 }
+idle = { length = 5.0, look = 14, breath = 0.3, wag = 4 }
+attack = { length = 0.6, lunge = 3 }
+eat = { length = 1.8, reach = 25, forward = 2 }
+
+# Head pivot: the neck joint; the head cube spans y -7..0, z -3..2 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-2, -6, -8]
+to = [2, -3, -3]
+
+[[cubes]]
+name = "snout_tip"
+bone = "head"
+part = "nose"
+from = [-1.5, -5.5, -9]
+to = [1.5, -3.5, -8]
+
+# Spade hands turned outwards on the forefeet (leg pivot: the leg's top; the leg
+# spans y -3..1).
+[[cubes]]
+name = "spade_l"
+bone = "leg_fl"
+part = "hands"
+from = [-3.5, -3, -3]
+to = [1, -1.5, 1.5]
+
+[[cubes]]
+name = "spade_r"
+bone = "leg_fr"
+part = "hands"
+from = [-1, -3, -3]
+to = [3.5, -1.5, 1.5]
+
+[palette]
+fur = "#3a302c"
+fur_up = "#332a26"
+fur_down = "#4a3e38"
+legs = "#3a302c"
+head = "#3a302c"
+snout = "#d89a94"
+snout_up = "#c88a84"
+nose = "#e8a8a4"
+hands = "#e0a8a0"
+tail = "#d89a94"
+eye = "#0a0808"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 6
+y = 1
+colour = "eye"

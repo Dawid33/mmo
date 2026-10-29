@@ -1,0 +1,83 @@
+# DF FOXSQUIRREL (vermin, fantastic): 2 kg, "a small mammal noted for its tenacity.
+# It has long ears and flashing eyes." No giant, so the vermin form (`move` +
+# `death`): a big brown squirrel with a rusty belly, long upright ears, bright eyes
+# and a bushy tail held up in an S that flicks as it scurries. Bite/scratch: not made.
+name = "fox squirrel"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  { cube = "snout", face = "north", x = 0, y = 0, colour = "nose" },
+]
+
+[proportions]
+body = [2.5, 2.5, 5]
+head = [2, 2, 2]
+legs = 1
+move = "scurry"
+cycle = 0.32
+
+# Body pivot: its centre (y 2.25); the body spans y -1.25..1.25, z -2.5..2.5. The
+# head's pivot is the body's front (the head spans y -1.25..0.75, z -2..0).
+# -X raises the tail (it pivots at the rump).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0.5, 2.5]
+rest = [-55, 0, 0]
+
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-0.5, -1.25, -2.75]
+to = [0.5, -0.25, -2]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ear"
+mirror = true
+from = [-1, 0.75, -0.75]
+to = [-0.5, 2.5, -0.25]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-1, -1, -0.5]
+to = [1, 1, 4.5]
+
+[[cubes]]
+name = "tail_tip"
+bone = "tail"
+part = "tail"
+from = [-0.75, -0.75, 4.5]
+to = [0.75, 2.5, 6]
+
+[palette]
+body = "#8a5a32"
+body_up = "#7a4e2a"
+body_down = "#d0884a"
+head = "#86582f"
+head_down = "#d8a070"
+legs = "#4a3220"
+ear = "#7a4e2a"
+tail = "#9a6232"
+tail_down = "#c47e42"
+nose = "#2a1a12"
+eye = "#e8d050"
+
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.32
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.08, value = [-10, 6, 0] },
+  { bone = "tail", channel = "rotation", time = 0.16, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.24, value = [-10, -6, 0] },
+  { bone = "tail", channel = "rotation", time = 0.32, value = [0, 0, 0] },
+]

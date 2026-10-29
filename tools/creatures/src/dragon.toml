@@ -1,0 +1,158 @@
+# DF DRAGON (megabeast): 25000 kg, a gigantic magical reptile that breathes fire;
+# green scales, black eyes (raws). The DF 0.47 body plan has no wings and no FLIER
+# flag, so it is a wingless quadruped with a long raised neck, swept-back horns,
+# long eye teeth, a spined back and a long tail. Attack bite (the template's
+# `attack`); claw optional, not made. LARGE_PREDATOR: alert + roar; fire breath:
+# breathe; MOUNT_EXOTIC: ridden; CURIOUSBEAST_ITEM: pick_up + carry.
+name = "dragon"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar", "breathe", "ridden", "pick_up", "carry"]
+
+[proportions]
+body = [26, 20, 54]
+leg = [8, 16]
+leg_inset = -1
+leg_ends = 3
+head = [13, 10, 13]
+head_up = 0
+head_overlap = 2
+neck = [11, 20, 42]
+tail = [10, 52]
+tail_raise = -10
+walk = { cycle = 2.0, swing = 20, bob = 0.9 }
+run = { cycle = 1.1, swing = 32, bob = 1.8, pitch = 3 }
+idle = { length = 7.0, look = 18, breath = 0.6, wag = 3 }
+attack = { length = 0.9, lunge = 7 }
+eat = { length = 2.4, reach = 12, forward = 2 }
+
+# Head pivot: the neck's end; the head cube spans y -5..5, z -12..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-4.5, -5, -22]
+to = [4.5, 1, -11]
+
+[[cubes]]
+name = "jaw"
+bone = "head"
+part = "jaw"
+from = [-4, -7, -20]
+to = [4, -5, -4]
+
+[[cubes]]
+name = "fang_l"
+bone = "head"
+part = "teeth"
+mirror = true
+from = [-4, -9, -19]
+to = [-3, -5, -18]
+
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-6, 3, -4]
+to = [-3, 6, 9]
+
+[[cubes]]
+name = "horn_tip_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-5.5, 5, 7]
+to = [-3.5, 9, 10]
+
+[[cubes]]
+name = "brow_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-7, 2, -10]
+to = [-5, 4, -5]
+
+# Spines down the back, the neck and the tail.
+[[cubes]]
+name = "spines"
+bone = "body"
+part = "spines"
+from = [-1.5, 10, -24]
+to = [1.5, 14, 24]
+
+[[cubes]]
+name = "neck_spines"
+bone = "neck"
+part = "spines"
+from = [-1, 5, -20]
+to = [1, 8, -2]
+
+[[cubes]]
+name = "tail_spines"
+bone = "tail"
+part = "spines"
+from = [-1, 5, 0]
+to = [1, 8, 44]
+
+[palette]
+fur = "#3f7a3a"
+fur_up = "#356a31"
+fur_down = "#b8b066"
+legs = "#386e34"
+neck = "#3f7a3a"
+neck_down = "#b8b066"
+head = "#3f7a3a"
+snout = "#3a7135"
+jaw = "#b8b066"
+teeth = "#f2ead2"
+horns = "#d9cfae"
+tail = "#386e34"
+tail_down = "#a9a25c"
+spines = "#24481f"
+eye = "#0c0c0a"
+nostril = "#1a2a17"
+
+[[decals]]
+cube = "brow_l"
+face = "west"
+x = 0
+y = 1
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "brow_r"
+face = "east"
+x = 3
+y = 1
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+w = 2
+colour = "nostril"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 6
+y = 0
+w = 2
+colour = "nostril"
+
+# Asleep the long neck lies forward and low with the head level on it, instead of
+# the template's nose-down droop (the head anim undoes the neck's net rotation).
+[clips.sleep]
+merge = true
+keys = [
+  { bone = "neck", channel = "rotation", time = 0.0, value = [-50, 0, 0] },
+  { bone = "neck", channel = "rotation", time = 6.0, value = [-50, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.0, value = [46, 0, 0] },
+  { bone = "head", channel = "rotation", time = 3.0, value = [49, 0, 0] },
+  { bone = "head", channel = "rotation", time = 6.0, value = [46, 0, 0] },
+]

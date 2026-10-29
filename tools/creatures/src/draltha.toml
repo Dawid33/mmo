@@ -1,0 +1,165 @@
+# DF DRALTHA (underground): 2500 kg, "a large, long-bodied grazer with a thick mane
+# that feeds on the tops of towercap mushrooms deep under the earth"; yellow-ecru
+# hide, brown eyes (raws). Long low body, a tall raised neck (the neck bone) with a
+# thick mane down it and a ruff over the shoulders, no tail (none in its body plan).
+# `eat` reaches UP to a towercap's top instead of down to the ground. Attack kick
+# (the hind-leg kick, as the horse's); bite optional, not made.
+name = "draltha"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [15, 12, 46]
+leg = [5, 11]
+leg_ends = 2
+head = [7, 7, 9]
+head_up = 2
+head_overlap = 2
+neck = [8, 16, 52]
+tail = [0, 0]
+tail_raise = 0
+walk = { cycle = 1.6, swing = 20, bob = 0.7 }
+run = { cycle = 0.85, swing = 34, bob = 1.5, pitch = 3 }
+idle = { length = 6.0, look = 14, breath = 0.4, wag = 0 }
+eat = { length = 2.4, reach = 15, forward = 2 }
+
+# Neck pivot: the body's front top; the neck cube spans y -4..4, z -16..1.
+[[cubes]]
+name = "mane"
+bone = "neck"
+part = "mane"
+from = [-2.5, 3, -17]
+to = [2.5, 7, 2]
+
+# Head pivot: the neck's end; the head cube spans y -1.5..5.5, z -8..1.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-2.5, -1.5, -11]
+to = [2.5, 2.5, -8]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-4.5, 4.5, -1]
+to = [-2.5, 6, 1]
+
+[[cubes]]
+name = "forelock"
+bone = "head"
+part = "mane"
+from = [-2, 5.5, -3]
+to = [2, 7.5, 1.5]
+
+# The shoulder ruff (body pivot: its centre; body y -6..6, z -23..23).
+[[cubes]]
+name = "ruff"
+bone = "body"
+part = "mane"
+from = [-8.5, -3, -23.5]
+to = [8.5, 7, -15]
+
+[palette]
+fur = "#d8c58e"
+fur_up = "#ccb67c"
+fur_down = "#e8dcb6"
+legs = "#bfa870"
+neck = "#d8c58e"
+neck_down = "#e8dcb6"
+head = "#d8c58e"
+muzzle = "#c0ad78"
+ears = "#b89f66"
+mane = "#8a6a3a"
+mane_up = "#7a5c30"
+tail = "#d8c58e"
+eye = "#4a2e18"
+nostril = "#3a2a1a"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 3
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 5
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 1
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 3
+y = 1
+colour = "nostril"
+
+# Grazing on a towercap's top: the neck stretches up further, the head reaches
+# forward and nibbles (head anim -30 holds it about level against the neck's net
+# rise), the forehand lifts a little.
+[clips.eat]
+mode = "loop"
+length = 2.4
+keys = [
+  { bone = "neck", channel = "rotation", time = 0.0, value = [18, 0, 0] },
+  { bone = "neck", channel = "rotation", time = 1.2, value = [22, 0, 0] },
+  { bone = "neck", channel = "rotation", time = 2.4, value = [18, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.3, value = [-20, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.6, value = [-32, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.9, value = [-22, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.2, value = [-30, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.8, value = [-24, 0, 0] },
+  { bone = "head", channel = "rotation", time = 2.4, value = [-30, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.0, value = [4, 0, 0] },
+  { bone = "body", channel = "rotation", time = 2.4, value = [4, 0, 0] },
+]
+
+# The kick: weight onto the forehand (nose down, rump up), hind legs cocked and
+# lashed out backwards.
+[clips.attack]
+mode = "once"
+length = 0.8
+keys = [
+  { bone = "body", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.25, value = [-8, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.5, value = [-8, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.25, value = [0, 1, 0] },
+  { bone = "body", channel = "position", time = 0.5, value = [0, 1, 0] },
+  { bone = "body", channel = "position", time = 0.8, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.2, value = [25, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.38, value = [-70, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.2, value = [25, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.38, value = [-70, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.3, value = [-6, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.3, value = [-6, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.3, value = [-12, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.38, value = [-35, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+]
+

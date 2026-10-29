@@ -1,0 +1,75 @@
+# DF RAT_DEMON (vermin, fantastic, evil): 0.3 kg, "an insidious form of vermin. It
+# lives only to steal food from others." No giant, so the vermin form (`move` +
+# `death`), built like the rat: red fur (raws), a pair of small black horns in place
+# of the ears, glowing yellow eyes and a long naked tail that lashes as it scurries.
+# Bite/scratch: not made.
+name = "demon rat"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  { cube = "snout", face = "north", x = 0, y = 0, colour = "nose" },
+]
+
+[proportions]
+body = [2, 2, 4]
+head = [1.5, 1.5, 1.75]
+legs = 0.5
+move = "scurry"
+cycle = 0.28
+
+# Body pivot: its centre (y 1.5); the head's pivot is the body's front (the head
+# spans y -1..0.5, z -1.75..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, -0.25, 2]
+rest = [-8, 0, 0]
+
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-0.5, -1, -2.5]
+to = [0.5, -0.25, -1.75]
+
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horn"
+mirror = true
+from = [-0.75, 0.5, -1]
+to = [-0.25, 1.5, -0.5]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-0.25, -0.25, 0]
+to = [0.25, 0.25, 5]
+
+[palette]
+body = "#9a2420"
+body_up = "#7f1c19"
+body_down = "#c0605a"
+head = "#8e211d"
+head_down = "#c0605a"
+legs = "#3a1210"
+horn = "#1a1414"
+tail = "#5a1a18"
+nose = "#2a0c0a"
+eye = "#ffd23a"
+
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.28
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.07, value = [0, 20, 0] },
+  { bone = "tail", channel = "rotation", time = 0.14, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.21, value = [0, -20, 0] },
+  { bone = "tail", channel = "rotation", time = 0.28, value = [0, 0, 0] },
+]

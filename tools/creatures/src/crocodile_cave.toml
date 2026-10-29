@@ -1,0 +1,117 @@
+# DF CROCODILE_CAVE (underground): 600 kg, a huge pale ambush reptile of cave lakes
+# with red eyes. Low body on splayed legs (negative leg_inset), long flat snout and a
+# long, slightly drooping tail with a scute ridge. Attack bite (the template's `attack`).
+# LARGE_PREDATOR: alert + roar (a hiss); AMPHIBIOUS: swim + swim_idle; MOUNT_EXOTIC: ridden.
+name = "cave crocodile"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar", "swim", "swim_idle", "ridden"]
+
+[proportions]
+body = [12, 7, 26]
+leg = [3, 4]
+leg_inset = -1.5
+leg_ends = 2
+head = [8, 4, 6]
+head_up = -2
+head_overlap = 1
+tail = [5, 24]
+tail_raise = -6
+walk = { cycle = 1.3, swing = 26, bob = 0.3 }
+run = { cycle = 0.7, swing = 38, bob = 0.6, pitch = 3 }
+idle = { length = 6.0, look = 10, breath = 0.2, wag = 4 }
+attack = { length = 0.6, lunge = 5 }
+eat = { length = 2.0, reach = 8, forward = 3 }
+
+# Head pivot: the neck joint at the body's front, one below its top; the head cube
+# spans y -5..-1, z -5..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-2.5, -5, -15]
+to = [2.5, -2.5, -5]
+
+[[cubes]]
+name = "brow_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-3.5, -1, -4]
+to = [-1.5, 0, -2]
+
+[[cubes]]
+name = "nostrils"
+bone = "head"
+part = "snout"
+from = [-1.5, -2.5, -15]
+to = [1.5, -2, -13]
+
+# A ridge of scutes down the back (body pivot: its centre, top at y 3.5) and the tail.
+[[cubes]]
+name = "scutes"
+bone = "body"
+part = "scutes"
+from = [-4, 3.5, -11]
+to = [4, 4.5, 12]
+
+[[cubes]]
+name = "tail_ridge"
+bone = "tail"
+part = "scutes"
+from = [-1, 2.5, 0]
+to = [1, 3.5, 21]
+
+[palette]
+fur = "#cfcbbd"
+fur_up = "#bfbbac"
+fur_down = "#ebe7dc"
+legs = "#c4c0b1"
+head = "#cfcbbd"
+snout = "#c9c5b6"
+snout_down = "#ebe7dc"
+tail = "#c4c0b1"
+tail_down = "#e2ded2"
+scutes = "#a9a596"
+eye = "#c0202a"
+teeth = "#f8f6ee"
+nose = "#6e6a60"
+
+[[decals]]
+cube = "brow_l"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "brow_r"
+face = "east"
+x = 1
+y = 0
+colour = "eye"
+
+# A row of teeth along each side of the jaw line (snout sides 10 wide × 2.5 tall).
+[[decals]]
+cube = "snout"
+face = "west"
+x = 0
+y = 1
+w = 9
+colour = "teeth"
+
+[[decals]]
+cube = "snout"
+face = "east"
+x = 1
+y = 1
+w = 9
+colour = "teeth"
+
+[[decals]]
+cube = "nostrils"
+face = "up"
+x = 0
+y = 0
+w = 3
+colour = "nose"
