@@ -32,3 +32,33 @@ fn derive_reproduces_floor_height() {
     assert_eq!(voxels[voxel_index(0, 7, 0)].block, BlockId(1), "y<8 solid");
     assert_eq!(voxels[voxel_index(0, 8, 0)].block, BlockId::AIR, "y>=8 air");
 }
+
+/// Oracle: topmost non-air voxel of column `(vx, vz)` in the dense derivation.
+fn oracle_top(voxels: &[game::Voxel], vx: u32, vz: u32) -> Option<(u32, BlockId)> {
+    (0..game::CHUNK_UNITS as u32).rev().find_map(|vy| {
+        let b = voxels[voxel_index(vx as usize, vy as usize, vz as usize)].block;
+        (b != BlockId::AIR).then_some((vy, b))
+    })
+}
+
+#[test]
+fn column_top_matches_derived_voxels() {
+    use game::{Block, BlockIndex, ChiselData};
+    let mut chunks: Vec<Chunk> = [0u32, 1, 8, 16, 17, game::CHUNK_UNITS as u32]
+        .into_iter()
+        .map(Chunk::flat_floor)
+        .collect();
+    let mut half = Chunk::uniform(Block::new(BlockId::AIR));
+    half.set_block(1, 0, 1, Block::new(BlockId(2)));
+    half.chisel
+        .insert(BlockIndex::from_xyz(1, 0, 1), ChiselData::cuboid(BlockId(2), [0, 0, 0], [16, 8, 16]));
+    chunks.push(half);
+    for chunk in &chunks {
+        let voxels = derive_voxels(&chunk.blocks, &chunk.chisel);
+        for vx in 0..game::CHUNK_UNITS as u32 {
+            for vz in 0..game::CHUNK_UNITS as u32 {
+                assert_eq!(chunk.column_top(vx, vz), oracle_top(&voxels, vx, vz), "column ({vx},{vz})");
+            }
+        }
+    }
+}

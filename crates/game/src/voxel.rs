@@ -93,6 +93,37 @@ impl Chunk {
         self.chisel.is_empty() && self.blocks.iter().all(|b| *b == block)
     }
 
+    /// Topmost non-air voxel of the voxel column `(vx, vz)` (each `0..CHUNK_UNITS`):
+    /// its local Y and material. Read straight from blocks plus chisel — no
+    /// dense voxel array. A chiseled block shows its chisel materials (air where
+    /// empty); a plain block shows its id.
+    pub fn column_top(&self, vx: u32, vz: u32) -> Option<(u32, BlockId)> {
+        let (vx, vz) = (vx as usize, vz as usize);
+        let (bx, lx) = (vx / BLOCK_VOXELS, vx % BLOCK_VOXELS);
+        let (bz, lz) = (vz / BLOCK_VOXELS, vz % BLOCK_VOXELS);
+        for by in (0..CHUNK_BLOCKS).rev() {
+            let bi = BlockIndex::from_xyz(bx, by, bz);
+            let base = (by * BLOCK_VOXELS) as u32;
+            match self.chisel.get(&bi) {
+                Some(chisel) => {
+                    for ly in (0..BLOCK_VOXELS).rev() {
+                        let m = chisel.material_at(lx, ly, lz);
+                        if m != BlockId::AIR {
+                            return Some((base + ly as u32, m));
+                        }
+                    }
+                }
+                None => {
+                    let id = self.blocks[bi.0 as usize].id;
+                    if id != BlockId::AIR {
+                        return Some((base + BLOCK_VOXELS as u32 - 1, id));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// True iff every block is air and no chisel detail remains.
     pub fn is_all_air(&self) -> bool {
         self.is_uniform(Block::new(BlockId::AIR))

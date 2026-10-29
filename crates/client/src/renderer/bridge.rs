@@ -748,17 +748,25 @@ pub fn drain_region_updates(
             match update.update_kind {
                 GameDataUpdateKind::AddTerrainChunk(key, iso, chunk) => {
                     let tf = iso_to_transform(&iso);
-                    let e = commands
-                        .spawn((
-                            SimEntity { region, key },
-                            tf,
-                            Visibility::default(),
-                            SimTarget::body(tf.translation, tf.rotation),
-                            PendingSnapshotVoxels,
-                            ChildOf(root),
-                        ))
-                        .id();
-                    map.0.insert((region, key), e);
+                    let bundle = (
+                        SimEntity { region, key },
+                        tf,
+                        Visibility::default(),
+                        SimTarget::body(tf.translation, tf.rotation),
+                        PendingSnapshotVoxels,
+                        ChildOf(root),
+                    );
+                    // A runtime chunk (`spawn_chunk_safe`) already sent its
+                    // `CreateEntity`: adopt that entity instead of spawning a
+                    // second one, so undo's `RemoveEntity` despawns it.
+                    let e = if let Some(&existing) = map.0.get(&(region, key)) {
+                        commands.entity(existing).insert(bundle);
+                        existing
+                    } else {
+                        let e = commands.spawn(bundle).id();
+                        map.0.insert((region, key), e);
+                        e
+                    };
                     new_terrain.push((e, *chunk, tf.translation));
                 }
                 GameDataUpdateKind::CreateEntity(key) => {

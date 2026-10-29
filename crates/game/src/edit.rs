@@ -170,12 +170,11 @@ impl Rollback {
         Some(self.spawn_chunk_safe(coords, chunk))
     }
 
-    /// Inserts a runtime chunk entity and tells the renderer its place and
-    /// its voxels (`create_mesh` alone sends nothing but `CreateEntity`).
+    /// Inserts a runtime chunk entity and hands the renderer the raw chunk
+    /// and its place (`AddTerrainChunk`; the client derives voxels off-thread).
     /// `create_mesh`'s entity insert emits `RemoveEntity` on undo.
     fn spawn_chunk_safe(&mut self, coords: ChunkCoords, chunk: Chunk) -> EntityKey {
-        let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
-        let e = self.create_mesh(coords, chunk);
+        let e = self.create_mesh(coords, chunk.clone());
         let pose = Pose::translation(
             (coords.x * crate::CHUNK_UNITS) as f32,
             (coords.y * crate::CHUNK_UNITS as i32) as f32,
@@ -183,11 +182,7 @@ impl Rollback {
         );
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,
-            GameDataUpdateKind::SetEntityPosition(e, pose),
-        ));
-        self.data.send(GameDataUpdate::new(
-            GameDataTransactionKind::Do,
-            GameDataUpdateKind::SetVoxelComponent(e, Some(voxels)),
+            GameDataUpdateKind::AddTerrainChunk(e, pose, Box::new(chunk)),
         ));
         e
     }

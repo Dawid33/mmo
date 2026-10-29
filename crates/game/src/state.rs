@@ -6,7 +6,6 @@
 //! `lib.rs` re-exports this module to satisfy that.
 
 use macros::rollback;
-use block_mesh::ndshape::ConstShape;
 use rapier3d::math::{IVector, Pose, Vector};
 use rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
 use state_hash::StateHash;
@@ -20,7 +19,7 @@ use crate::input::InputState;
 use crate::protocol::{ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
 use crate::registry::BlockId;
 use crate::block::CHUNK_UNITS;
-use crate::voxel::{Chunk, ChunkCoords, BrickShape, Voxel};
+use crate::voxel::{Chunk, ChunkCoords, Voxel};
 
 pub type ClientId = usize;
 
@@ -843,33 +842,19 @@ impl Rollback {
     pub fn surface_voxel(&self, vx: i32, vz: i32) -> Option<(i32, BlockId)> {
         let (cx, cz) = (vx.div_euclid(CHUNK_UNITS as i32), vz.div_euclid(CHUNK_UNITS as i32));
         let (lx, lz) = (vx.rem_euclid(CHUNK_UNITS as i32) as u32, vz.rem_euclid(CHUNK_UNITS as i32) as u32);
-        let mut best: Option<(i32, BlockId)> = None;
-        for (key, chunk) in self.data.ecs.chunk.iter() {
-            let Some(chunk) = chunk else { continue };
-            let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else {
-                continue;
-            };
-            let Some(body) = self.data.physics.bodies.get(handle) else {
-                continue;
-            };
-            let t = body.translation();
-            let (bx, by, bz) = (t.x as i32, t.y as i32, t.z as i32);
-            if bx.div_euclid(CHUNK_UNITS as i32) != cx || bz.div_euclid(CHUNK_UNITS as i32) != cz {
-                continue;
-            }
-            let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
-            for ly in (0..CHUNK_UNITS as u32).rev() {
-                let block = voxels[BrickShape::linearize([lx, ly, lz]) as usize].block;
-                if block != BlockId::AIR {
-                    let abs = by + ly as i32;
-                    if best.is_none_or(|(b, _)| abs > b) {
-                        best = Some((abs, block));
-                    }
-                    break;
-                }
+        if cx < 0 || cz < 0 {
+            return None;
+        }
+        let (cx, cz) = (cx as usize, cz as usize);
+        // Chunks of this column, highest first: the first with any solid voxel
+        // in the column holds the surface. Chunk Y comes from the index key.
+        for (&(_, _, cy), &e) in self.data.chunk_index.range((cx, cz, i32::MIN)..=(cx, cz, i32::MAX)).rev() {
+            let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else { continue };
+            if let Some((ly, block)) = chunk.column_top(lx, lz) {
+                return Some((cy * CHUNK_UNITS as i32 + ly as i32, block));
             }
         }
-        best
+        None
     }
 
     pub fn create_player_safe(&mut self, client_id: ClientId) {
