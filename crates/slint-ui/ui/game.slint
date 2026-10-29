@@ -84,6 +84,13 @@ export component GameUi inherits Window {
     // A tile clicked on the map (it is now `selected-col/row`).
     callback select-tile(int, int);
     callback play();
+    // The game-level status line ("Loading region…", a Play refusal);
+    // "" draws nothing. Hidden under the open map, which shows `map-status`.
+    in property <string> game-status;
+    // The status line's centre (window logical pixels), for headless tests.
+    out property <length> status-x: root.width / 2;
+    out property <length> status-y: root.status-top + 12px;
+    property <length> status-top: 12px;
 
     // The drag readout's distance right of and below the cursor; it flips
     // to the other side at the window edge rather than slide under it.
@@ -177,6 +184,23 @@ export component GameUi inherits Window {
             x: drag.content-x;
             y: drag.content-y;
             text: root.drag-text;
+        }
+    }
+
+    // Top centre, apart from the F9 panel and the map window; only while
+    // there is something to say, so it takes no pixels or clicks otherwise.
+    if root.game-status != "" && !root.map-open: status := FrameFace {
+        width: self.content-x + status-label.preferred-width + Styles.frame.box.padding.right
+            + GraphicalSets.inset(Styles.frame.graphics).right;
+        height: self.content-y + status-label.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: root.status-top;
+
+        status-label := LabelFace {
+            x: status.content-x;
+            y: status.content-y;
+            text: root.game-status;
         }
     }
 

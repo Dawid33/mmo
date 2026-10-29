@@ -531,14 +531,20 @@ fn apply_ui_actions(
             // The selection lives in Slint; `push_ui_state` follows it.
             UiAction::SelectTile(..) => {}
             UiAction::Play => {
+                // One request at a time: Play is disabled while one is pending.
+                if pending.0.is_some() {
+                    continue;
+                }
                 let home = status.home_region;
                 let target = world_map.map.as_ref().and_then(|map| {
                     let rc = tile_region(map, ui.get_selected_col(), ui.get_selected_row())?;
                     play_blocker(map, rc, home).is_none().then_some(rc)
                 });
                 let Some(rc) = target else { continue };
-                if let Some(requests) = requests.as_ref() {
-                    let _ = requests.0.send(ClientRequest::PlayRegion(rc));
+                let sent = requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::PlayRegion(rc)).is_ok());
+                if !sent {
+                    warn!("[world-map] Play request for ({}, {}) not sent: no game thread", rc.x, rc.z);
+                    continue;
                 }
                 pending.0 = Some(rc);
                 world_map.refused = None;
@@ -715,9 +721,9 @@ struct MapShown {
     map: Option<WorldMap>,
     /// Bumped whenever `map` is replaced.
     generation: u64,
-    /// (generation, selected column, selected row, home) the tile info was
-    /// last computed for.
-    info_for: Option<(u64, i32, i32, Option<RegionCoords>)>,
+    /// (generation, selected column, selected row, home, Play pending) the
+    /// tile info was last computed for.
+    info_for: Option<(u64, i32, i32, Option<RegionCoords>, bool)>,
 }
 
 /// What the world map window reads.
@@ -754,8 +760,17 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
         ui.set_home_row(home_row);
     }
 
+    // Pending until we are home in the target, or the server refused it.
+    if let Some(target) = p.pending.0 {
+        let refused = p.world_map.refused.is_some_and(|(rc, _)| rc == target);
+        if home == Some(target) || refused {
+            p.pending.0 = None;
+        }
+    }
+
     let (col, row) = (ui.get_selected_col(), ui.get_selected_row());
-    let info_for = Some((p.shown.generation, col, row, home));
+    let pending = p.pending.0.is_some();
+    let info_for = Some((p.shown.generation, col, row, home, pending));
     if p.shown.info_for != info_for {
         p.shown.info_for = info_for;
         let picked = map.and_then(|map| Some((map, tile_region(map, col, row)?)));
@@ -766,20 +781,18 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
             .collect();
         ui.set_tile_lines(ModelRc::new(VecModel::from(lines)));
         let blocker = picked.map(|(map, rc)| play_blocker(map, rc, home));
-        ui.set_play_enabled(matches!(blocker, Some(None)));
+        ui.set_play_enabled(!pending && matches!(blocker, Some(None)));
         ui.set_play_reason(blocker.flatten().unwrap_or("").into());
     }
 
-    // Pending until we are home in the target, or the server refused it.
-    if let Some(target) = p.pending.0 {
-        let refused = p.world_map.refused.is_some_and(|(rc, _)| rc == target);
-        if home == Some(target) || refused {
-            p.pending.0 = None;
-        }
-    }
+    // In the map window and, with the map closed (Play closes it), on the
+    // game-level status line.
     let status = map_status_text(p.pending.0, p.world_map.refused.map(|(_, why)| why));
     if ui.get_map_status() != status {
         ui.set_map_status(status.into());
+    }
+    if ui.get_game_status() != status {
+        ui.set_game_status(status.into());
     }
 }
 
@@ -866,12 +879,52 @@ mod tests {
     }
 
     #[test]
-    fn status_text_loading_then_refusal() {
+    fn status_text_is_loading_while_pending_else_the_refusal() {
         let rc = RegionCoords::new(1, 2);
         assert_eq!(map_status_text(Some(rc), Some(PlayRefusal::OffMap)), LOADING_TEXT);
         assert_eq!(map_status_text(None, Some(PlayRefusal::NoDryLand)), "No dry land there");
         assert_eq!(map_status_text(None, None), "");
+    }
+
+    #[test]
+    fn centred_pan_puts_the_tile_centre_mid_view() {
         assert_eq!(centred_pan(100.0, 2, 10.0), 25.0);
+        assert_eq!(centred_pan(100.0, 0, 10.0), 45.0);
+    }
+
+    #[test]
+    fn tile_region_and_map_tile_round_trip_and_reject_off_map() {
+        let tile = game::TileSummary {
+            ground_min_m: 0.0,
+            ground_mean_m: 0.0,
+            ground_max_m: 0.0,
+            relief_m: 0.0,
+            slope: [0.0; 2],
+            sea_fraction: 0.0,
+            lake_fraction: 0.0,
+            lake_level_m: None,
+            rivers: 0,
+            river_max_discharge_m2: 0.0,
+            river_max_width_m: 0.0,
+            surface_rock: None,
+            landing: None,
+        };
+        let map = WorldMap {
+            origin: RegionCoords::new(-2, 3),
+            width: 3,
+            height: 2,
+            tiles: vec![tile; 6],
+            rock_names: Vec::new(),
+        };
+        assert_eq!(tile_region(&map, 0, 0), Some(RegionCoords::new(-2, 3)));
+        assert_eq!(tile_region(&map, 2, 1), Some(RegionCoords::new(0, 4)));
+        assert_eq!(map_tile(&map, RegionCoords::new(0, 4)), Some((2, 1)));
+        for (col, row) in [(-1, 0), (0, -1), (-1, -1), (3, 0), (0, 2)] {
+            assert_eq!(tile_region(&map, col, row), None, "({col}, {row}) is off the map");
+        }
+        for rc in [RegionCoords::new(-3, 3), RegionCoords::new(1, 3), RegionCoords::new(-2, 5)] {
+            assert_eq!(map_tile(&map, rc), None);
+        }
     }
 
     #[test]

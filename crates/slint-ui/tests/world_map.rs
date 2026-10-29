@@ -155,3 +155,22 @@ fn dragging_pans_and_the_wheel_zooms_about_the_cursor() {
     click(&mut overlay, position.x, position.y);
     assert!(selected.borrow().is_empty());
 }
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn status_line_draws_only_with_text() {
+    let mut overlay = overlay();
+    overlay.ui().set_panel_open(false);
+    overlay.ui().set_tools_available(false);
+    overlay.render();
+    let (x, y) = (overlay.ui().get_status_x(), overlay.ui().get_status_y());
+    assert!(!overlay.opaque_at(x as u32, y as u32), "no status, no pixels");
+
+    overlay.ui().set_game_status("Loading region\u{2026}".into());
+    overlay.render();
+    assert!(overlay.opaque_at(x as u32, y as u32), "status line drawn at ({x}, {y})");
+
+    overlay.ui().set_game_status("".into());
+    overlay.render();
+    assert!(!overlay.opaque_at(x as u32, y as u32), "cleared again");
+}
