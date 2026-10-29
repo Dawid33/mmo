@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::system::SystemParam;
 use bevy::image::ImageSampler;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel};
@@ -31,7 +32,12 @@ use slint_ui::slint::{LogicalPosition, ModelRc, SharedString, VecModel};
 use slint_ui::Overlay;
 
 use super::bridge::{SimEntity, SimKind};
+use super::commander::designate::{DesignateState, DragReadout, Tool, TOOL_KEYS};
+use super::commander::height::HeightGrid;
+use super::commander::level::{focus_surface, surface_level, WorkingLevel};
 use super::commander::selection::Selection;
+use super::commander::tiles::TileMirror;
+use super::commander::CommanderCamera;
 use super::cursor::CursorPolicy;
 use super::hud::HudStatus;
 
@@ -285,6 +291,128 @@ fn selection_lines(kinds: impl IntoIterator<Item = game::EntityKind>) -> Vec<Str
     counts.into_iter().map(|(label, n)| format!("{label} ×{n}")).collect()
 }
 
+/// What a tool bar click asked for. Queued apart from [`UiAction`] and
+/// applied by [`sync_toolbar`], which also connects the callbacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarAction {
+    SelectTool(Option<Tool>),
+    SetPriority(u8),
+}
+
+thread_local! {
+    /// Filled by the tool bar's callbacks during event dispatch (main
+    /// thread), drained by [`sync_toolbar`].
+    static TOOLBAR_ACTIONS: RefCell<Vec<ToolbarAction>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Tool bar button `index` (in [`TOOL_KEYS`] order) clicked; -1 (or any
+/// index without a tool) puts the tool down.
+pub fn tool_action(index: i32) -> ToolbarAction {
+    let tool = usize::try_from(index).ok().and_then(|i| TOOL_KEYS.get(i)).map(|(_, tool)| *tool);
+    ToolbarAction::SelectTool(tool)
+}
+
+/// A tool bar button's text: the tool and its hotkey, "[G] Dig".
+fn tool_button_text(tool: Tool) -> String {
+    format!("[{}] {}", tool.key_label(), tool.label())
+}
+
+/// The tool bar index of `tool`, -1 for none.
+fn tool_index(tool: Option<Tool>) -> i32 {
+    tool.and_then(|t| TOOL_KEYS.iter().position(|(_, k)| *k == t)).map_or(-1, |i| i as i32)
+}
+
+/// The level readout: the working level and how far it is from the surface
+/// under the camera focus (just the level while that column isn't loaded).
+pub fn level_text(level: i32, surface_level: Option<i32>) -> String {
+    match surface_level.map(|surface| level - surface) {
+        None => format!("Level {level}"),
+        Some(0) => format!("Level {level} · surface"),
+        Some(d) if d < 0 => format!("Level {level} · {} below surface", -d),
+        Some(d) => format!("Level {level} · {d} above surface"),
+    }
+}
+
+/// What the tool bar and its readouts read and drive. All optional: the
+/// commander resources exist only in commander mode.
+#[derive(SystemParam)]
+struct ToolbarParams<'w, 's> {
+    designate: Option<ResMut<'w, DesignateState>>,
+    readout: Option<Res<'w, DragReadout>>,
+    level: Option<Res<'w, WorkingLevel>>,
+    grid: Option<Res<'w, HeightGrid>>,
+    cam: Option<Res<'w, CommanderCamera>>,
+    mirror: Option<Res<'w, TileMirror>>,
+    window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    /// The callbacks are connected.
+    connected: Local<'s, bool>,
+}
+
+/// Tool bar clicks → [`DesignateState`] (as the hotkeys set it), then the
+/// tool, priority, level and drag readout → the UI, each only when changed.
+fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
+    if !*p.connected {
+        ui.on_tool_clicked(|i| TOOLBAR_ACTIONS.with(|q| q.borrow_mut().push(tool_action(i))));
+        ui.on_priority_clicked(|priority| {
+            let priority = priority.clamp(1, game::MAX_PRIORITY as i32) as u8;
+            TOOLBAR_ACTIONS.with(|q| q.borrow_mut().push(ToolbarAction::SetPriority(priority)));
+        });
+        let labels: Vec<SharedString> = TOOL_KEYS.iter().map(|(_, t)| tool_button_text(*t).into()).collect();
+        ui.set_tool_labels(ModelRc::new(VecModel::from(labels)));
+        *p.connected = true;
+    }
+    let actions = TOOLBAR_ACTIONS.with(|q| std::mem::take(&mut *q.borrow_mut()));
+    // No home region (cell mode, or not joined yet): no tools, as with the hotkeys.
+    let available = p.mirror.as_ref().is_some_and(|m| m.region().is_some());
+    if ui.get_tools_available() != available {
+        ui.set_tools_available(available);
+    }
+    let Some(state) = p.designate.as_mut() else { return };
+    for action in actions {
+        match action {
+            ToolbarAction::SelectTool(tool) if available || tool.is_none() => {
+                if state.tool != tool {
+                    state.tool = tool;
+                    state.drag = None;
+                }
+            }
+            ToolbarAction::SelectTool(_) => {}
+            ToolbarAction::SetPriority(priority) => state.priority = priority,
+        }
+    }
+    let active = tool_index(state.tool);
+    if ui.get_active_tool() != active {
+        ui.set_active_tool(active);
+    }
+    if ui.get_priority() != state.priority as i32 {
+        ui.set_priority(state.priority as i32);
+    }
+
+    let surface = match (&p.grid, &p.cam) {
+        (Some(grid), Some(cam)) => focus_surface(grid, cam.focus).map(surface_level),
+        _ => None,
+    };
+    let level: SharedString =
+        p.level.as_ref().and_then(|l| l.level).map_or(String::new(), |l| level_text(l, surface)).into();
+    if ui.get_level_text() != level {
+        ui.set_level_text(level);
+    }
+
+    let drag = p.readout.as_ref().map_or("", |r| r.0.as_str());
+    if ui.get_drag_text() != drag {
+        ui.set_drag_text(drag.into());
+    }
+    if drag.is_empty() {
+        return;
+    }
+    let Some(cursor) = p.window.single().ok().and_then(|w| w.cursor_position()) else { return };
+    let at = cursor / ui_scale;
+    if ui.get_drag_x() != at.x || ui.get_drag_y() != at.y {
+        ui.set_drag_x(at.x);
+        ui.set_drag_y(at.y);
+    }
+}
+
 /// Client state → panel properties, only when it changed (every set marks
 /// the UI dirty and costs a repaint).
 fn push_ui_state(
@@ -292,9 +420,11 @@ fn push_ui_state(
     status: Res<HudStatus>,
     selection: Option<Res<Selection>>,
     entities: Query<(&SimEntity, &SimKind)>,
+    mut toolbar: ToolbarParams,
 ) {
     let Some(slint) = slint else { return };
     let ui = slint.overlay.ui();
+    sync_toolbar(ui, slint.ui_scale, &mut toolbar);
     if status.is_changed() {
         ui.set_home_region(
             status.home_region.map_or("--".into(), |r| format!("({}, {})", r.x, r.z)).into(),
@@ -367,5 +497,25 @@ mod tests {
         assert_eq!(unpremultiply(p(0, 0, 0, 0)), [0, 0, 0, 0]);
         assert_eq!(unpremultiply(p(10, 20, 30, 255)), [10, 20, 30, 255]);
         assert_eq!(unpremultiply(p(64, 0, 128, 128)), [128, 0, 255, 128]);
+    }
+
+    #[test]
+    fn level_text_above_and_below_surface() {
+        assert_eq!(level_text(64, Some(70)), "Level 64 · 6 below surface");
+        assert_eq!(level_text(72, Some(70)), "Level 72 · 2 above surface");
+        assert_eq!(level_text(70, Some(70)), "Level 70 · surface");
+        assert_eq!(level_text(70, None), "Level 70");
+    }
+
+    #[test]
+    fn ui_actions_map_tool_indices() {
+        assert_eq!(tool_action(2), ToolbarAction::SelectTool(Some(Tool::Wall)));
+        assert_eq!(tool_action(-1), ToolbarAction::SelectTool(None));
+        assert_eq!(tool_action(TOOL_KEYS.len() as i32), ToolbarAction::SelectTool(None));
+        for (i, (_, tool)) in TOOL_KEYS.iter().enumerate() {
+            assert_eq!(tool_index(Some(*tool)), i as i32);
+        }
+        assert_eq!(tool_index(None), -1);
+        assert_eq!(tool_button_text(Tool::Dig), "[G] Dig");
     }
 }

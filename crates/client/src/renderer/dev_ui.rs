@@ -20,6 +20,7 @@ use super::cursor::CursorPolicy;
 use super::grid_debug::{GridDebug, TerrainDebug};
 use super::hud::HudStatus;
 use super::meshing::visibility::CullingConfig;
+use super::{GameEvents, LocalPlayer};
 
 /// Opens and closes the panel.
 pub const DEV_UI_KEY: KeyCode = KeyCode::F3;
@@ -90,6 +91,8 @@ fn draw_dev_ui(
     mut terrain_debug: ResMut<TerrainDebug>,
     debug_flags: Res<DebugFlagsRes>,
     entities: Query<()>,
+    events: Res<GameEvents>,
+    local: Res<LocalPlayer>,
 ) -> Result {
     if !open.0 {
         return Ok(());
@@ -149,6 +152,14 @@ fn draw_dev_ui(
             let mut colliders = debug_flags.0.collider_wireframes();
             if ui.checkbox(&mut colliders, "Collider wireframes").changed() {
                 debug_flags.0.set_collider_wireframes(colliders);
+            }
+            ui.separator();
+            // Stands in for workers until jobs exist: every designation in
+            // the home region done at once (an undoable sim order).
+            if ui.button("Complete all orders").clicked() {
+                if let Some(client) = local.0 {
+                    let _ = events.0.send(game::GameEventKind::Order(client, game::Order::DevCompleteAll));
+                }
             }
         });
     Ok(())

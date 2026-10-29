@@ -15,6 +15,31 @@ export component GameUi inherits Window {
 
     callback clear-selection();
 
+    // Fortress tools (crates/client/src/renderer/commander/designate.rs).
+    // False with no home region (cell mode, or not joined yet).
+    in property <bool> tools-available: true;
+    // The active tool's index in `TOOL_KEYS` order (Dig, Deconstruct, Wall,
+    // Floor, Erase); -1 = none.
+    in property <int> active-tool: -1;
+    in property <int> priority: 4;
+    // "Level 64 · 6 below surface"; "" until the level is known.
+    in property <string> level-text;
+    // The drag's size and refusals; "" when not dragging.
+    in property <string> drag-text;
+    // The cursor, which the drag readout sits next to.
+    in property <length> drag-x;
+    in property <length> drag-y;
+    // One button per tool in `TOOL_KEYS` order, with its hotkey: "[G] Dig".
+    in property <[string]> tool-labels;
+
+    // A tool button clicked: its index, or -1 to put the active tool down.
+    callback tool-clicked(int);
+    callback priority-clicked(int);
+
+    // The drag readout's distance right of and below the cursor; it flips
+    // to the other side at the window edge rather than slide under it.
+    property <length> drag-offset: 16px;
+
     // Top-right, clear of the minimap (bottom-left).
     if root.panel-open: panel := FrameFace {
         title: "Fortress";
@@ -43,6 +68,61 @@ export component GameUi inherits Window {
                     clicked => { root.clear-selection(); }
                 }
             }
+        }
+    }
+
+    // Bottom centre: the level readout over the tool bar and, while a tool
+    // is active, its priority.
+    if root.tools-available: toolbar := FrameFace {
+        width: self.content-x + bar.preferred-width + Styles.frame.box.padding.right
+            + GraphicalSets.inset(Styles.frame.graphics).right;
+        height: self.content-y + bar.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 12px;
+
+        bar := VerticalFlow {
+            x: toolbar.content-x;
+            y: toolbar.content-y;
+
+            if root.level-text != "": LabelFace { text: root.level-text; }
+            HorizontalFlow {
+                for label[i] in root.tool-labels: Button {
+                    text: label;
+                    toggled: root.active-tool == i;
+                    clicked => { root.tool-clicked(root.active-tool == i ? -1 : i); }
+                }
+            }
+            if root.active-tool >= 0: HorizontalFlow {
+                LabelFace {
+                    style: Styles.caption-label;
+                    text: "Priority";
+                }
+                for p in [1, 2, 3, 4, 5, 6, 7]: Button {
+                    style: Styles.tool-button;
+                    text: p;
+                    toggled: root.priority == p;
+                    clicked => { root.priority-clicked(p); }
+                }
+            }
+        }
+    }
+
+    // Next to the cursor while dragging.
+    if root.drag-text != "": drag := FrameFace {
+        width: self.content-x + drag-label.preferred-width + Styles.frame.box.padding.right
+            + GraphicalSets.inset(Styles.frame.graphics).right;
+        height: self.content-y + drag-label.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: root.drag-x + root.drag-offset + self.width <= root.width
+            ? root.drag-x + root.drag-offset : root.drag-x - root.drag-offset - self.width;
+        y: root.drag-y + root.drag-offset + self.height <= root.height
+            ? root.drag-y + root.drag-offset : root.drag-y - root.drag-offset - self.height;
+
+        drag-label := LabelFace {
+            x: drag.content-x;
+            y: drag.content-y;
+            text: root.drag-text;
         }
     }
 }

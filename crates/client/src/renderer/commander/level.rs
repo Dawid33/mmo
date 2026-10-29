@@ -77,7 +77,7 @@ pub fn follow_target(terrain: Option<f32>, cut: Option<f32>) -> Option<f32> {
 }
 
 /// The solid ground height under the camera focus, if loaded.
-fn focus_surface(grid: &HeightGrid, focus: Vec2) -> Option<f32> {
+pub fn focus_surface(grid: &HeightGrid, focus: Vec2) -> Option<f32> {
     grid.column_at(focus.x, focus.y)
         .and_then(|(top, ground)| [ground, top].into_iter().find(|h| !h.is_nan()))
 }
