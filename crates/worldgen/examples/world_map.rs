@@ -24,7 +24,7 @@ use image::{ImageBuffer, Luma, Rgb};
 use worldgen::forged::PointSample;
 use worldgen::pipeline::{ColumnProfile, SEA_LEVEL, SEA_TOP_BLOCK, TerrainPipeline};
 // Topmost solid block / "dry" — the same rules the world map's landing search uses.
-use worldgen::tile_map::{is_dry, surface_block};
+use worldgen::tile_map::{is_dry, lake_color, land_color, sea_color, sun_dir, surface_block};
 
 // The world band the density ramp spans (pipeline.rs RAMP_FROM_Y/RAMP_TO_Y).
 const HEIGHT_MIN_M: f64 = -64.0;
@@ -151,55 +151,14 @@ fn sample_heights(a: &Args) -> (Vec<f32>, Vec<f32>) {
     (heights, waters)
 }
 
-fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
-    let t = t.clamp(0.0, 1.0);
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
-}
-
-/// Piecewise-linear colour ramp over ascending `(value, rgb)` stops.
-fn ramp(stops: &[(f64, [f64; 3])], v: f64) -> [f64; 3] {
-    let mut prev = stops[0];
-    for &stop in stops {
-        if v <= stop.0 {
-            let span = (stop.0 - prev.0).max(f64::EPSILON);
-            return lerp3(prev.1, stop.1, (v - prev.0) / span);
-        }
-        prev = stop;
-    }
-    prev.1
-}
-
-/// Base colour for a column. Follows `Materials::material_at`: sand through
-/// one block above the sea top, grass above — the grass tinted by elevation so
-/// height stays readable; water darkens with depth.
+/// Base colour for a column of ground height `h` (world metres): see
+/// `worldgen::tile_map::{land_color, sea_color}`.
 fn base_color(h: f64) -> [f64; 3] {
-    let by = surface_block(h);
-    if by < SEA_TOP_BLOCK {
-        let depth = SEA_LEVEL - h;
-        return ramp(
-            &[
-                (0.0, [110.0, 190.0, 215.0]),
-                (8.0, [60.0, 140.0, 200.0]),
-                (40.0, [30.0, 80.0, 160.0]),
-                (128.0, [12.0, 30.0, 90.0]),
-            ],
-            depth,
-        );
+    if surface_block(h) < SEA_TOP_BLOCK {
+        sea_color(SEA_LEVEL - h)
+    } else {
+        land_color(h - SEA_LEVEL)
     }
-    if by <= SEA_TOP_BLOCK + 1 {
-        return [222.0, 205.0, 150.0]; // sand
-    }
-    ramp(
-        &[
-            (0.0, [96.0, 168.0, 84.0]),
-            (30.0, [70.0, 140.0, 66.0]),
-            (80.0, [120.0, 130.0, 80.0]),
-            (140.0, [140.0, 120.0, 100.0]),
-            (200.0, [170.0, 165.0, 160.0]),
-            (250.0, [245.0, 245.0, 250.0]),
-        ],
-        h - SEA_LEVEL,
-    )
 }
 
 fn percentile(sorted: &[f32], q: f64) -> f32 {
@@ -222,11 +181,7 @@ fn main() {
     // Hillshade: central differences over the height field, lit from the
     // north-west (top-left of the image), sun 45 degrees up.
     let at = |x: usize, z: usize| heights[z * n + x] as f64;
-    let sun = {
-        let v = [-1.0f64, 1.4142, -1.0];
-        let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        [v[0] / len, v[1] / len, v[2] / len]
-    };
+    let sun = sun_dir();
     let mut color = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(n as u32, n as u32);
     let mut gray = ImageBuffer::<Luma<u16>, Vec<u16>>::new(n as u32, n as u32);
     let mut slopes = Vec::new(); // land slope, meters of rise per meter
@@ -255,7 +210,7 @@ fn main() {
                 base_color(h)
             } else {
                 // Fresh water, darker with depth.
-                ramp(&[(0.0, [120.0, 185.0, 225.0]), (3.0, [60.0, 130.0, 205.0])], fresh as f64 - h)
+                lake_color(fresh as f64 - h)
             };
             let px = |v: f64| (v * shade).clamp(0.0, 255.0) as u8;
             color.put_pixel(x as u32, z as u32, Rgb([px(c[0]), px(c[1]), px(c[2])]));

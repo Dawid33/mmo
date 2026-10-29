@@ -3,8 +3,8 @@
 //! point samples only, on the synthetic world of `common`.
 
 use game::{RegionCoords, TileSummary, WorldMap};
-use worldgen::forged::ForgedWorld;
-use worldgen::tile_map::{build_world_map, is_dry};
+use worldgen::forged::{ForgedWorld, OUTSIDE_HEIGHT_M};
+use worldgen::tile_map::*;
 
 mod common;
 use common::*;
@@ -139,7 +139,7 @@ fn rim_tile_counts_outside_as_sea() {
     let tile = summary(&map, rc);
     assert!(tile.sea_fraction as f64 >= outside - CELL_M / tile_m(), "outside share {outside}: {tile:?}");
     assert!(tile.sea_fraction < 1.0, "{tile:?}");
-    assert_eq!(tile.ground_min_m, -90.0, "outside is ocean at OUTSIDE_HEIGHT_M");
+    assert_eq!(f64::from(tile.ground_min_m), OUTSIDE_HEIGHT_M, "outside is ocean at OUTSIDE_HEIGHT_M");
     if let Some(landing) = tile.landing {
         let (x, _) = landing_m(rc, landing);
         assert!(x < edge_x, "landing {landing:?} outside the artifact");
@@ -156,4 +156,104 @@ fn surface_rock_is_the_top_formation() {
     let tile = summary(&map, tile_at(790.0, 880.0));
     assert_eq!(tile.surface_rock, Some(SANDSTONE));
     assert_eq!(map.rock_names[SANDSTONE as usize], worldgen::forge::geology::ROCKS[SANDSTONE as usize].name);
+}
+
+fn tile(f: impl FnOnce(&mut TileSummary)) -> TileSummary {
+    let mut t = TileSummary {
+        ground_min_m: 0.0,
+        ground_mean_m: 10.0,
+        ground_max_m: 20.0,
+        relief_m: 5.0,
+        slope: [0.0, 0.0],
+        sea_fraction: 0.0,
+        lake_fraction: 0.0,
+        lake_level_m: None,
+        rivers: 0,
+        river_max_discharge_m2: 0.0,
+        river_max_width_m: 0.0,
+        surface_rock: None,
+        landing: Some([1, 1]),
+    };
+    f(&mut t);
+    t
+}
+
+#[test]
+fn terrain_class_thresholds() {
+    use TerrainClass::*;
+    assert_eq!(terrain_class(&tile(|_| {})), Lowland);
+    assert_eq!(terrain_class(&tile(|t| t.landing = None)), Ocean);
+    assert_eq!(terrain_class(&tile(|t| t.sea_fraction = OCEAN_SEA_FRACTION)), Ocean);
+    assert_eq!(terrain_class(&tile(|t| t.sea_fraction = OCEAN_SEA_FRACTION - 0.01)), Coast);
+    assert_eq!(terrain_class(&tile(|t| t.sea_fraction = COAST_SEA_FRACTION)), Lowland);
+    assert_eq!(terrain_class(&tile(|t| t.sea_fraction = COAST_SEA_FRACTION + 0.01)), Coast);
+    assert_eq!(terrain_class(&tile(|t| t.relief_m = HILLS_RELIEF_M)), Hills);
+    assert_eq!(terrain_class(&tile(|t| t.relief_m = HILLS_RELIEF_M - 0.1)), Lowland);
+    assert_eq!(terrain_class(&tile(|t| t.relief_m = MOUNTAINS_RELIEF_M)), Mountains);
+    assert_eq!(terrain_class(&tile(|t| t.relief_m = MOUNTAINS_RELIEF_M - 0.1)), Hills);
+    assert_eq!(terrain_class(&tile(|t| t.ground_max_m = MOUNTAINS_MIN_M)), Mountains);
+    assert_eq!(terrain_class(&tile(|t| t.ground_max_m = MOUNTAINS_MIN_M - 0.1)), Lowland);
+    assert_eq!(Mountains.label(), "Mountains");
+}
+
+fn two_tile_map() -> WorldMap {
+    WorldMap {
+        origin: RegionCoords::new(3, -2),
+        width: 2,
+        height: 1,
+        tiles: vec![tile(|t| t.rivers = 1), tile(|_| {})],
+        rock_names: vec!["granite".into()],
+    }
+}
+
+#[test]
+fn rasterize_size_and_grid() {
+    let (w, h, px) = rasterize(&two_tile_map());
+    assert_eq!((w, h), (2 * MAP_TILE_PX, MAP_TILE_PX));
+    assert_eq!(px.len(), (w * h) as usize);
+    let at = |x: u32, z: u32| px[(z * w + x) as usize];
+    assert!(at(7, 0)[0] < at(3, 3)[0] || at(7, 0)[1] < at(3, 3)[1], "grid pixel darker");
+    assert!(px.iter().all(|p| p[3] == 255));
+    let river = |x: u32, z: u32| at(x, z)[..3] == RIVER_RGB;
+    assert!(river(3, 3) && river(4, 4));
+    assert!(!river(MAP_TILE_PX + 3, 3) && !river(MAP_TILE_PX + 4, 4), "no river mark on the dry tile");
+}
+
+#[test]
+fn info_lines_omit_absent_facts() {
+    let map = two_tile_map();
+    let lines = tile_info_lines(&map, RegionCoords::new(4, -2));
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[0], "Region (4, -2)");
+    assert_eq!(lines[1], "Terrain: Lowland (provisional)");
+    assert_eq!(lines[2], "Elevation: 0\u{2013}20 m (mean 10 m)");
+    assert!(tile_info_lines(&map, RegionCoords::new(0, 0)).is_empty());
+
+    let full = WorldMap {
+        tiles: vec![tile(|t| {
+            t.rivers = 2;
+            t.river_max_width_m = 6.0;
+            t.lake_level_m = Some(12.0);
+            t.surface_rock = Some(0);
+        })],
+        width: 1,
+        ..two_tile_map()
+    };
+    let lines = tile_info_lines(&full, RegionCoords::new(3, -2));
+    assert_eq!(lines[3..], ["Rivers: 2 (largest 6 m wide)", "Lake: level 12 m", "Rock: granite"]);
+    let bad = WorldMap { tiles: vec![tile(|t| t.surface_rock = Some(9))], ..full };
+    assert_eq!(tile_info_lines(&bad, RegionCoords::new(3, -2)).len(), 3, "out-of-range rock omitted");
+}
+
+#[test]
+fn play_blocker_rules() {
+    let mut map = two_tile_map();
+    map.tiles[1].landing = None;
+    let (a, b) = (RegionCoords::new(3, -2), RegionCoords::new(4, -2));
+    assert_eq!(play_blocker(&map, a, None), None);
+    assert_eq!(play_blocker(&map, a, Some(a)), Some("You are here"));
+    assert_eq!(play_blocker(&map, a, Some(b)), None);
+    assert_eq!(play_blocker(&map, b, None), Some("No dry land"));
+    assert_eq!(play_blocker(&map, b, Some(b)), Some("You are here"));
+    assert_eq!(play_blocker(&map, RegionCoords::new(9, 9), None), Some("No dry land"));
 }

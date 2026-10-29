@@ -144,7 +144,9 @@ pub fn summarize_tile(world: &ForgedWorld, rc: RegionCoords) -> TileSummary {
     let mut rock_counts = vec![0u32; a.rock_names.len()];
     for c in cells.iter().filter(|c| c.inside) {
         if let Some(rock) = world.surface_rock(c.x, c.z) {
-            rock_counts[rock as usize] += 1;
+            if let Some(k) = rock_counts.get_mut(rock as usize) {
+                *k += 1;
+            }
         }
     }
     let surface_rock = rock_counts
@@ -193,4 +195,210 @@ fn landing(world: &ForgedWorld, cells: &[Cell], tile_min: [f64; 2]) -> Option<[u
             let col = [column(x, tile_min[0]), column(z, tile_min[1])];
             is_dry(&world.sample(at(col[0], tile_min[0]), at(col[1], tile_min[1]))).then_some(col)
         })
+}
+
+/// Share of a tile under sea at or above which it reads as open ocean.
+pub const OCEAN_SEA_FRACTION: f32 = 0.95;
+/// Share of a tile under sea above which a (non-ocean) tile is coast.
+pub const COAST_SEA_FRACTION: f32 = 0.05;
+/// `relief_m` from which a land tile is hills.
+pub const HILLS_RELIEF_M: f32 = 25.0;
+/// `relief_m` from which a land tile is mountains.
+pub const MOUNTAINS_RELIEF_M: f32 = 80.0;
+/// `ground_max_m` from which a land tile is mountains whatever its relief.
+pub const MOUNTAINS_MIN_M: f32 = 150.0;
+
+/// What a tile looks like at a glance; provisional, from thresholds on the summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerrainClass {
+    Ocean,
+    Coast,
+    Lowland,
+    Hills,
+    Mountains,
+}
+
+impl TerrainClass {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ocean => "Ocean",
+            Self::Coast => "Coast",
+            Self::Lowland => "Lowland",
+            Self::Hills => "Hills",
+            Self::Mountains => "Mountains",
+        }
+    }
+}
+
+/// The terrain class of a tile (first matching rule wins, in the enum's
+/// ocean-to-mountain order of the constants above).
+pub fn terrain_class(t: &TileSummary) -> TerrainClass {
+    if t.landing.is_none() || t.sea_fraction >= OCEAN_SEA_FRACTION {
+        TerrainClass::Ocean
+    } else if t.sea_fraction > COAST_SEA_FRACTION {
+        TerrainClass::Coast
+    } else if t.relief_m >= MOUNTAINS_RELIEF_M || t.ground_max_m >= MOUNTAINS_MIN_M {
+        TerrainClass::Mountains
+    } else if t.relief_m >= HILLS_RELIEF_M {
+        TerrainClass::Hills
+    } else {
+        TerrainClass::Lowland
+    }
+}
+
+fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+
+/// Piecewise-linear colour ramp over ascending `(value, rgb)` stops.
+fn ramp(stops: &[(f64, [f64; 3])], v: f64) -> [f64; 3] {
+    let mut prev = stops[0];
+    for &stop in stops {
+        if v <= stop.0 {
+            let span = (stop.0 - prev.0).max(f64::EPSILON);
+            return lerp3(prev.1, stop.1, (v - prev.0) / span);
+        }
+        prev = stop;
+    }
+    prev.1
+}
+
+/// Sea colour (RGB 0..255) at `depth_m` below the sea surface; darker with depth.
+pub fn sea_color(depth_m: f64) -> [f64; 3] {
+    ramp(
+        &[
+            (0.0, [110.0, 190.0, 215.0]),
+            (8.0, [60.0, 140.0, 200.0]),
+            (40.0, [30.0, 80.0, 160.0]),
+            (128.0, [12.0, 30.0, 90.0]),
+        ],
+        depth_m,
+    )
+}
+
+/// Fresh-water colour at `depth_m` below the lake or river surface.
+pub fn lake_color(depth_m: f64) -> [f64; 3] {
+    ramp(&[(0.0, [120.0, 185.0, 225.0]), (3.0, [60.0, 130.0, 205.0])], depth_m)
+}
+
+/// Land colour (RGB 0..255) at `height_m` above sea level. Follows
+/// `Materials::material_at`: sand through one block above the sea top, grass
+/// above, tinted by elevation so height stays readable.
+pub fn land_color(height_m: f64) -> [f64; 3] {
+    if surface_block(SEA_LEVEL + height_m) <= SEA_TOP_BLOCK + 1 {
+        return [222.0, 205.0, 150.0]; // sand
+    }
+    ramp(
+        &[
+            (0.0, [96.0, 168.0, 84.0]),
+            (30.0, [70.0, 140.0, 66.0]),
+            (80.0, [120.0, 130.0, 80.0]),
+            (140.0, [140.0, 120.0, 100.0]),
+            (200.0, [170.0, 165.0, 160.0]),
+            (250.0, [245.0, 245.0, 250.0]),
+        ],
+        height_m,
+    )
+}
+
+/// Unit vector towards the sun for hillshading: north-west (top-left of a
+/// map), 45 degrees up.
+pub fn sun_dir() -> [f64; 3] {
+    let v = [-1.0f64, 1.4142, -1.0];
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    [v[0] / len, v[1] / len, v[2] / len]
+}
+
+/// Brightness factor for ground sloping `(dhdx, dhdz)` (m per m); flat ground is 1.
+fn hillshade(slope: [f64; 2]) -> f64 {
+    let sun = sun_dir();
+    let nrm = [-slope[0], 1.0, -slope[1]];
+    let len = (nrm[0] * nrm[0] + nrm[1] * nrm[1] + nrm[2] * nrm[2]).sqrt();
+    let lambert = (nrm[0] * sun[0] + nrm[1] * sun[1] + nrm[2] * sun[2]) / len;
+    (0.35 + 0.65 * lambert.max(0.0) / sun[1]).min(1.35)
+}
+
+/// Lake blue a tile blends toward by its `lake_fraction`.
+pub const LAKE_RGB: [f64; 3] = [60.0, 130.0, 205.0];
+/// River mark colour on the map.
+pub const RIVER_RGB: [u8; 3] = [70, 140, 230];
+/// Multiplier for the last pixel row/column of a tile (grid lines).
+pub const GRID_DARKEN: f64 = 0.75;
+/// Map pixels per tile edge.
+pub const MAP_TILE_PX: u32 = 8;
+
+/// The colour of a tile on the map: sea by depth for ocean, else land by mean
+/// height, blended toward lake blue by lake share, shaded by slope (sea is flat).
+pub fn tile_color(t: &TileSummary) -> [u8; 3] {
+    let mean = f64::from(t.ground_mean_m);
+    let (base, shade) = if terrain_class(t) == TerrainClass::Ocean {
+        (sea_color(-mean), 1.0)
+    } else {
+        let base = lerp3(land_color(mean), LAKE_RGB, f64::from(t.lake_fraction));
+        (base, hillshade([f64::from(t.slope[0]), f64::from(t.slope[1])]))
+    };
+    let px = |v: f64| (v * shade).clamp(0.0, 255.0) as u8;
+    [px(base[0]), px(base[1]), px(base[2])]
+}
+
+/// The map as an RGBA picture: `(width_px, height_px, row-major pixels)`,
+/// [`MAP_TILE_PX`] per tile, grid-darkened last row/column, a 2x2 river mark
+/// at the centre of tiles with rivers. Opaque.
+pub fn rasterize(map: &WorldMap) -> (u32, u32, Vec<[u8; 4]>) {
+    let (w, h) = (map.width * MAP_TILE_PX, map.height * MAP_TILE_PX);
+    let mut out = vec![[0, 0, 0, 255]; (w * h) as usize];
+    let edge = MAP_TILE_PX - 1;
+    let mid = MAP_TILE_PX / 2;
+    for (i, t) in map.tiles.iter().enumerate() {
+        let (tx, tz) = (i as u32 % map.width * MAP_TILE_PX, i as u32 / map.width * MAP_TILE_PX);
+        let c = tile_color(t);
+        for dz in 0..MAP_TILE_PX {
+            for dx in 0..MAP_TILE_PX {
+                let mut rgb = c;
+                if dx == edge || dz == edge {
+                    rgb = rgb.map(|v| (f64::from(v) * GRID_DARKEN) as u8);
+                }
+                if t.rivers > 0 && (mid - 1..=mid).contains(&dx) && (mid - 1..=mid).contains(&dz) {
+                    rgb = RIVER_RGB;
+                }
+                out[((tz + dz) * w + tx + dx) as usize] = [rgb[0], rgb[1], rgb[2], 255];
+            }
+        }
+    }
+    (w, h, out)
+}
+
+/// The side-panel facts of tile `rc` (empty off the map), absent facts omitted.
+pub fn tile_info_lines(map: &WorldMap, rc: RegionCoords) -> Vec<String> {
+    let Some(t) = map.tile(rc) else { return Vec::new() };
+    let mut lines = vec![
+        format!("Region ({}, {})", rc.x, rc.z),
+        format!("Terrain: {} (provisional)", terrain_class(t).label()),
+        format!(
+            "Elevation: {:.0}\u{2013}{:.0} m (mean {:.0} m)",
+            t.ground_min_m, t.ground_max_m, t.ground_mean_m
+        ),
+    ];
+    if t.rivers > 0 {
+        lines.push(format!("Rivers: {} (largest {:.0} m wide)", t.rivers, t.river_max_width_m));
+    }
+    if let Some(level) = t.lake_level_m {
+        lines.push(format!("Lake: level {level:.0} m"));
+    }
+    if let Some(name) = t.surface_rock.and_then(|r| map.rock_names.get(usize::from(r))) {
+        lines.push(format!("Rock: {name}"));
+    }
+    lines
+}
+
+/// Why Play is unavailable for tile `rc` (the rule the manager enforces too).
+pub fn play_blocker(map: &WorldMap, rc: RegionCoords, home: Option<RegionCoords>) -> Option<&'static str> {
+    if home == Some(rc) {
+        Some("You are here")
+    } else if map.tile(rc).is_none_or(|t| t.landing.is_none()) {
+        Some("No dry land")
+    } else {
+        None
+    }
 }
