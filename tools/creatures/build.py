@@ -210,7 +210,7 @@ def variant(base_src, src, model):
     out["template"] = base_src["template"]
     out["palette"] = {**base_src["palette"], **src.get("palette", {})}
     out["decals"] = scale_decals(base_src.get("decals", []), s)
-    return out, scale_model(model, s)
+    return out, grounded(scale_model(model, s))
 
 
 # An animal person: a person's build (less stocky than a dwarf), the base
@@ -225,7 +225,6 @@ def animal_person(src):
     params = merge(t.defaults, merge(PERSON, src.get("proportions", {})))
     model = t.skeleton(params)
     pivots = {name: pivot for name, _, pivot, _ in model["bones"]}
-    model["cubes"] = [c for c in model["cubes"] if c[0] != "head"]
 
     def graft(src_model, bones, onto, anchor, k):
         """The cubes of `bones` (their rest pose, absolute) moved so `anchor` (a
@@ -242,15 +241,22 @@ def animal_person(src):
                             [o[i] + (hi[i] - anchor[i]) * k for i in range(3)]))
         return grafted
 
-    heads = subtree_of(base, "head")
-    head_cube = next(c for c in base["cubes"] if c[0] == "head")
-    hpts = rest_points({"bones": base["bones"], "cubes": [head_cube]})
+    heads = subtree_of(base, "head") if any(b[0] == "head" for b in base["bones"]) else set()
+    head_cubes = [c for c in base["cubes"] if c[1] in heads]
+    if not head_cubes:
+        # A headless base (a jellyfish, a sponge): the person keeps its own head.
+        head_cubes = [next(c for c in model["cubes"] if c[0] == "head")]
+        heads = set()
+    volume = lambda c: (c[4][0] - c[3][0]) * (c[4][1] - c[3][1]) * (c[4][2] - c[3][2])  # noqa: E731
+    head_cube = next((c for c in head_cubes if c[0] == "head"), max(head_cubes, key=volume))
+    head_src = base if heads else model
+    hpts = rest_points({"bones": head_src["bones"], "cubes": [head_cube]})
     hlo = [min(p[i] for p in hpts) for i in range(3)]
     hhi = [max(p[i] for p in hpts) for i in range(3)]
     # The base head brought to a person's head width (vermin heads grow a lot).
     k = min(8.0, max(0.8, params["head"][0] / (hhi[0] - hlo[0])))
-    alls = rest_points({"bones": base["bones"], "cubes": [c for c in base["cubes"] if c[1] in heads]})
-    anchor = [(hlo[0] + hhi[0]) / 2, min(p[1] for p in alls), (hlo[2] + hhi[2]) / 2]
+    # The main head cube sits on the neck; a trunk, beard or bill may hang lower.
+    anchor = [(hlo[0] + hhi[0]) / 2, hlo[1], (hlo[2] + hhi[2]) / 2]
     base_bones = {name: (parent, pivot, rest) for name, parent, pivot, rest in base["bones"]}
     legless = src.get("legless", False)
 
@@ -261,7 +267,9 @@ def animal_person(src):
         lower = [c for c in base["cubes"] if c[1] not in heads]
         lpts = rest_points({"bones": base["bones"], "cubes": lower})
         width = max(p[0] for p in lpts) - min(p[0] for p in lpts)
-        s_low = min(2.5, max(0.6, params["body"][0] / width))
+        length = max(p[2] for p in lpts) - min(p[2] for p in lpts)
+        # Wide enough to carry the torso, but a long animal stays under 60 units.
+        s_low = min(2.5, max(0.6, params["body"][0] / width), 60 / length)
         neck = base_bones["head"][1]
         ground = min(p[1] for p in lpts)
         hip = (neck[1] - ground) * s_low
@@ -269,7 +277,7 @@ def animal_person(src):
         params["foot"] = 0
         model = t.skeleton(params)
         model["bones"] = [b for b in model["bones"] if not b[0].startswith("leg_")]
-        model["cubes"] = [c for c in model["cubes"] if c[1] not in ("leg_l", "leg_r") and c[0] != "head"]
+        model["cubes"] = [c for c in model["cubes"] if c[1] not in ("leg_l", "leg_r") and (c[0] != "head" or not heads)]
         pivots = {name: pivot for name, _, pivot, _ in model["bones"]}
 
         def place(v):
@@ -286,11 +294,13 @@ def animal_person(src):
         for name, bone, part, lo, hi in lower:
             model["cubes"].append(("low_" + name, rename.get(bone, "body"), part, place(lo), place(hi)))
         pivots = {name: pivot for name, _, pivot, _ in model["bones"]}
-    else:
+    elif heads:
         model["cubes"] = [c for c in model["cubes"] if c[0] != "head"]
-    model["cubes"] += graft(base, heads, "head", anchor, k)
+    if heads:
+        model["cubes"] += graft(base, heads, "head", anchor, k)
 
-    if "tail" in base_bones and not legless:
+    tail_cubes = [c for c in base["cubes"] if c[1] in subtree_of(base, "tail")] if "tail" in base_bones else []
+    if tail_cubes and not legless:
         lw, ll = params["leg"]
         bd = params["body"][2]
         tail_pivot = [0, ll + 2, bd / 2]
@@ -301,6 +311,11 @@ def animal_person(src):
         flat = {"bones": [(n, p, pv, [0, 0, 0] if n == "tail" else r) for n, p, pv, r in base["bones"]],
                 "cubes": base["cubes"]}
         model["cubes"] += graft(flat, subtree_of(flat, "tail"), "tail", bp, min(k, 1.5))
+        # Droop it (at most 45°) only as far as keeps a long tail off the ground.
+        for droop in range(45, -50, -5):
+            model["bones"][-1] = ("tail", "body", tail_pivot, [droop, 0, 0])
+            if min(p_[1] for p_ in rest_points(model, {"tail"})) >= 0.5:
+                break
 
     model["clips"] = t.clips(params, model)
     has = {b[0] for b in model["bones"]}
@@ -340,13 +355,16 @@ def animal_person(src):
             T = c["length"]
             c["tracks"]["tail"] = {"rotation": [(0, [0, 12, 0]), (T / 2, [0, -12, 0]), (T, [0, 12, 0])]}
     model["required"] = t.required(params)
-    model["budget"] = merge(t.budget, src.get("budget", {}))
+    # A legless person keeps the animal's whole body below the waist.
+    budget = {"cubes": 32, "bones": 18} if legless else {}
+    model["budget"] = merge(merge(t.budget, budget), src.get("budget", {}))
 
     palette = dict(base_src["palette"])
     body_part = next((c[2] for c in base["cubes"] if c[0] == "body"),
                      next(c[2] for c in base["cubes"] if c[1] not in heads))
     leg_part = next((c[2] for c in base["cubes"] if c[1].startswith("leg")), body_part)
     palette.setdefault("torso", palette[body_part])
+    palette.setdefault("head", palette[body_part])
     palette.setdefault("arms", palette[body_part])
     palette.setdefault("hands", palette.get(leg_part, palette[body_part]))
     palette.setdefault("legs", palette.get(leg_part, palette[body_part]))
@@ -357,7 +375,20 @@ def animal_person(src):
            "palette": palette, "decals": scale_decals(base_src.get("decals", []), k, names) + src.get("decals", [])}
     size = src.get("size", PERSON_SIZE)
     s = min(1.5, max(0.7, (size / PERSON_SIZE) ** (1 / 3)))
-    return out, (scale_model(model, s) if abs(s - 1) > 0.02 else model)
+    return out, grounded(scale_model(model, s) if abs(s - 1) > 0.02 else model)
+
+
+def grounded(model):
+    """`model` moved up or down so its rest pose stands exactly on y = 0
+    (scaling rounds to half units; a grafted part may hang a little low)."""
+    dy = -min(p[1] for p in rest_points(model))
+    if abs(dy) < 1e-6:
+        return model
+    out = dict(model)
+    out["bones"] = [(n, parent, [pv[0], pv[1] + dy, pv[2]], r) for n, parent, pv, r in model["bones"]]
+    out["cubes"] = [(n, b, part, [lo[0], lo[1] + dy, lo[2]], [hi[0], hi[1] + dy, hi[2]])
+                    for n, b, part, lo, hi in model["cubes"]]
+    return out
 
 
 def subtree_of(model, root):
@@ -573,11 +604,18 @@ def main(ids):
         ids = sorted(f[:-5] for f in os.listdir(SRC) if f.endswith(".toml"))
     os.makedirs(OUT, exist_ok=True)
     entries = {}
+    failed = []
     for df_id in ids:
-        src, model = load(df_id)
+        try:
+            src, model = load(df_id)
+            data = bbmodel(df_id, src, model)
+        except Exception as e:  # report and go on: one bad source must not stop a batch
+            failed.append(df_id)
+            print(f"{df_id}: FAILED: {type(e).__name__}: {e}", file=sys.stderr)
+            continue
         path = os.path.join(OUT, df_id + ".bbmodel")
         with open(path, "w") as f:
-            json.dump(bbmodel(df_id, src, model), f, indent=1)
+            json.dump(data, f, indent=1)
             f.write("\n")
         entries[df_id] = manifest_entry(df_id, src, model)
         print(f"{df_id}: {len(model['cubes'])} cubes, {len(model['bones'])} bones, "
@@ -597,6 +635,8 @@ def main(ids):
             json.dump(dict(sorted(manifest.items())), f, indent=1)
             f.write("\n")
         os.replace(tmp, MANIFEST)
+    if failed:
+        sys.exit(f"{len(failed)} failed: {' '.join(failed)}")
 
 
 if __name__ == "__main__":

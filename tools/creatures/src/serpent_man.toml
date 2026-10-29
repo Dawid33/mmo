@@ -1,0 +1,22 @@
+# DF SERPENT_MAN (underground, water): 50 kg, "a large white snake with the arms and
+# torso of a man". Not an animal person in the raws, but built like one: the adder
+# man's construction (animal_person_of = "adder", legless: the person's upper body
+# on the snake's coils, the adder's head on the neck), sized for 50 kg and recoloured
+# white. LIMITATION: AMPHIBIOUS wants swim / swim_idle, and LARGE_PREDATOR alert /
+# roar, but derived (animal_person_of) sources do not take extras or cubes — not
+# made. Attacks punch (the template's `attack`), kick, scratch, bite optional.
+name = "serpent man"
+animal_person_of = "adder"
+status = "draft"
+size = 50000
+legless = true
+
+[palette]
+body = "#e6e2d8"
+body_up = "#f2efe6"
+body_down = "#d4cec0"
+head = "#e0dbce"
+zigzag = "#bdb6a6"
+torso = "#e4dccf"
+arms = "#e4dccf"
+hands = "#d8cfc0"
