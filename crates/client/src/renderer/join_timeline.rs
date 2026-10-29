@@ -20,7 +20,7 @@ use super::far_voxel::FarBrickBuildTask;
 use super::hud::HudStatus;
 use super::lod_rings::LodRings;
 use super::meshing::lod::{LodBuildQueue, LodChunk, LodMeshTask, LodRasterReady};
-use super::meshing::queue::{ChunkKey, RemeshQueue};
+use super::meshing::queue::RemeshQueue;
 use super::meshing::{MeshingTask, TerrainQuadCount};
 use crate::world_scale::WorldScale;
 
@@ -101,7 +101,7 @@ pub fn track_join_timeline(
     in_flight_lod: Query<(), With<LodMeshTask>>,
     in_flight_bricks: Query<(), With<FarBrickBuildTask>>,
     in_flight_far_uploads: Query<(), With<FarVoxelUploadPending>>,
-    meshed_chunks: Query<(), (With<ChunkKey>, With<TerrainQuadCount>)>,
+    meshed_bricks: Query<(), (With<super::bricks::BrickOf>, With<TerrainQuadCount>)>,
     pending_snapshot_voxels: Query<(), With<PendingSnapshotVoxels>>,
     lod_cells: Query<(
         &LodChunk,
@@ -160,7 +160,7 @@ pub fn track_join_timeline(
             + in_flight_far_uploads.iter().count(),
     };
 
-    if !state.first_mesh && !meshed_chunks.is_empty() {
+    if !state.first_mesh && !meshed_bricks.is_empty() {
         state.first_mesh = true;
         game::perf_event!("first_near_mesh", "regions={}", depths.near_regions);
     }
@@ -172,9 +172,9 @@ pub fn track_join_timeline(
         state.near_drained = true;
         game::perf_event!(
             "near_meshing_drained",
-            "regions={} meshed_chunks={}",
+            "regions={} meshed_bricks={}",
             depths.near_regions,
-            meshed_chunks.iter().count()
+            meshed_bricks.iter().count()
         );
     }
 

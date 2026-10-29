@@ -72,9 +72,9 @@ pub fn apply_terrain_debug(
     }
 }
 
-/// Chunk edge length in world units (32 voxels at 1 unit each). Matches the
-/// `meshing::queue::ChunkGrid` keying (world position / 32).
-pub const CHUNK_SIZE: f32 = 32.0;
+/// Render-brick edge in world units (`BRICK_VOXELS`, 1 unit per voxel). Matches
+/// the `meshing::queue::ChunkGrid` keying (world position / `BRICK_VOXELS`).
+pub const CHUNK_SIZE: f32 = game::BRICK_VOXELS as f32;
 
 // Tunables (no UI; edit and rebuild).
 /// Chunk cells drawn each side of the camera, horizontally.

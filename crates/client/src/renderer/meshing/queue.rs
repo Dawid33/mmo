@@ -13,8 +13,9 @@ use super::super::bridge::VoxelData;
 use super::neighbors::{gather_padded_rle, zone_index, zone_indices, zone_offsets};
 use super::{mesh_chunk, MeshingTask};
 
-/// World-space chunk grid: key = world position / 32. Render-side spatial
-/// index for neighbor lookups; rebuilt from entities, never persisted.
+/// World-space brick grid: key = world position / `BRICK_VOXELS`. Render-side
+/// spatial index for neighbor lookups; rebuilt from entities, never persisted.
+/// Its entries are render bricks (`bricks::BrickOf`), not sim chunks.
 #[derive(Resource, Default)]
 pub struct ChunkGrid(pub BTreeMap<[i32; 3], Entity>);
 
@@ -145,10 +146,11 @@ pub struct FrameUploads(pub usize);
 /// distance to the camera. No camera (headless/startup) ranks everything 0.
 fn chunk_rank(key: [i32; 3], cam: Option<(&GlobalTransform, Option<&Frustum>)>) -> u64 {
     let Some((tf, frustum)) = cam else { return 0 };
+    let (edge, half) = (game::BRICK_VOXELS as f32, game::BRICK_VOXELS as f32 / 2.0);
     let center = Vec3::new(
-        key[0] as f32 * 32.0 + 16.0,
-        key[1] as f32 * 32.0 + 16.0,
-        key[2] as f32 * 32.0 + 16.0,
+        key[0] as f32 * edge + half,
+        key[1] as f32 * edge + half,
+        key[2] as f32 * edge + half,
     );
     let dist2 = tf.translation().distance_squared(center) as u64;
     let out = frustum
@@ -156,7 +158,7 @@ fn chunk_rank(key: [i32; 3], cam: Option<(&GlobalTransform, Option<&Frustum>)>) 
             !f.intersects_sphere(
                 &Sphere {
                     center: center.into(),
-                    radius: 16.0 * 3f32.sqrt(),
+                    radius: half * 3f32.sqrt(),
                 },
                 false,
             )
@@ -245,12 +247,18 @@ pub fn spawn_mesh_tasks(
 /// corners are irrelevant: they only feed AO, which needs a face. Checked in
 /// the task, not the main thread: the plane scans are ~6k voxel visits.
 pub fn is_buried(center: &VoxelData, neighbors: &[([i32; 3], VoxelData)]) -> bool {
+    is_buried_by(center, |off| neighbors.iter().find(|(o, _)| *o == off).map(|(_, v)| v))
+}
+
+/// [`is_buried`] over any neighbour lookup (`off` is the face offset; `None`
+/// is a missing neighbour, which never buries).
+pub fn is_buried_by<'a>(center: &VoxelData, neighbor: impl Fn([i32; 3]) -> Option<&'a VoxelData>) -> bool {
     if !center.has_no_air() {
         return false;
     }
     let faces = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
     faces.into_iter().all(|off| {
-        neighbors.iter().find(|(o, _)| *o == off).is_some_and(|(_, neighbor)| {
+        neighbor(off).is_some_and(|neighbor| {
             if neighbor.has_no_air() {
                 return true;
             }
@@ -320,12 +328,8 @@ pub fn mark_remesh_dirty(
         let key: Option<[i32; 3]> = key.map(|k| k.0).or_else(|| {
             let (tf, parent) = (tf?, parent?);
             let root = roots.get(parent.parent()).ok()?;
-            let world = root.translation + tf.translation;
-            let k = [
-                (world.x / 32.0).round() as i32,
-                (world.y / 32.0).round() as i32,
-                (world.z / 32.0).round() as i32,
-            ];
+            let world = (root.translation + tf.translation) / game::BRICK_VOXELS as f32;
+            let k = [world.x.round() as i32, world.y.round() as i32, world.z.round() as i32];
             commands.entity(e).insert(ChunkKey(k));
             Some(k)
         });

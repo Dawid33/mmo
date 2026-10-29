@@ -18,7 +18,8 @@ use bevy::prelude::*;
 use game::lod::LodKey;
 use game::{LodPayload, RegionCoords};
 
-use super::bridge::{PendingSnapshotVoxels, RegionRoots, SimEntity, VoxelData};
+use super::bricks::{BrickOf, ChunkBricks};
+use super::bridge::{PendingSnapshotVoxels, RegionRoots, VoxelData};
 use super::far_voxel::FarVoxelReady;
 use super::meshing::lod;
 use super::meshing::lod::LodRasterReady;
@@ -147,14 +148,17 @@ impl Default for HomeCellMask {
 pub const CELL_REVEAL_MAX_FRAMES: u32 = 600;
 
 /// Promote active cells into the LOD mask once every terrain chunk the sim
-/// reported for them has meshed (`ChunkConnectivity`, set for every finished
-/// mesh, all-air ones included) and stayed so for
-/// [`NEAR_HANDOFF_HOLD_FRAMES`] — the render sub-app uploads a frame later.
-/// Scans the home region's meshed chunks only while some cell is pending.
+/// reported for them has landed its bricks and every one of those bricks has
+/// meshed (`ChunkConnectivity`, set for every finished mesh, all-air ones
+/// included), stably for [`NEAR_HANDOFF_HOLD_FRAMES`] — the render sub-app
+/// uploads a frame later. The expected brick count is what the chunks
+/// actually spawned (`ChunkBricks`): all-air and buried bricks never exist.
+/// Scans the home region's chunks and bricks only while some cell is pending.
 pub fn reveal_meshed_cells(
     mut mask: ResMut<HomeCellMask>,
     roots: Res<RegionRoots>,
-    meshed: Query<(&Transform, &ChildOf), (With<SimEntity>, With<ChunkConnectivity>)>,
+    chunks: Query<(&Transform, &ChildOf, &ChunkBricks), Without<PendingSnapshotVoxels>>,
+    meshed: Query<(&Transform, &ChildOf), (With<BrickOf>, With<ChunkConnectivity>)>,
     mut state: Local<BTreeMap<game::CellCoords, (u32, u32)>>,
 ) {
     let pending: BTreeMap<game::CellCoords, u32> = mask
@@ -170,23 +174,37 @@ pub fn reveal_meshed_cells(
         return;
     }
     let Some(&root) = roots.0.get(&home) else { return };
-    let mut counts: BTreeMap<game::CellCoords, u32> = BTreeMap::new();
+    // Per pending cell: (landed chunks, their bricks, meshed bricks).
+    let mut counts: BTreeMap<game::CellCoords, (u32, u32, u32)> = BTreeMap::new();
+    // Chunk and brick transforms are region-local minimum corners; a brick
+    // lies inside its chunk, so both resolve to the same cell.
+    let cell = |tf: &Transform| {
+        game::cell_of_pos(tf.translation.x, tf.translation.z, cc).filter(|c| pending.contains_key(c))
+    };
+    for (tf, parent, bricks) in &chunks {
+        if parent.parent() != root {
+            continue;
+        }
+        if let Some(c) = cell(tf) {
+            let entry = counts.entry(c).or_default();
+            entry.0 += 1;
+            entry.1 += bricks.0.len() as u32;
+        }
+    }
     for (tf, parent) in &meshed {
         if parent.parent() != root {
             continue;
         }
-        // Chunk transforms are region-local chunk minimum corners.
-        if let Some(c) = game::cell_of_pos(tf.translation.x, tf.translation.z, cc) {
-            if pending.contains_key(&c) {
-                *counts.entry(c).or_default() += 1;
-            }
+        if let Some(c) = cell(tf) {
+            counts.entry(c).or_default().2 += 1;
         }
     }
     let mut ready = Vec::new();
     for (cell, want) in pending {
         let (age, streak) = state.entry(cell).or_default();
         *age += 1;
-        if counts.get(&cell).copied().unwrap_or(0) >= want {
+        let (landed, bricks, meshed) = counts.get(&cell).copied().unwrap_or_default();
+        if landed >= want && meshed >= bricks {
             *streak += 1;
         } else {
             *streak = 0;
@@ -626,8 +644,9 @@ mod tests {
     }
 
     /// An activated cell's LOD stays until every chunk the sim reported for
-    /// it has meshed, held for NEAR_HANDOFF_HOLD_FRAMES — no hole while the
-    /// near chunks are still being built.
+    /// it has landed and all their bricks have meshed, held for
+    /// NEAR_HANDOFF_HOLD_FRAMES — no hole while the near chunks are still
+    /// being built.
     #[test]
     fn an_active_cell_is_masked_only_once_its_chunks_have_meshed() {
         let mut app = App::new();
@@ -642,15 +661,30 @@ mod tests {
             let mut mask = app.world_mut().resource_mut::<HomeCellMask>();
             mask.region = Some(home);
             mask.cell_chunks = 4; // 128-unit cells: x in [128, 256) is cell (1, 0)
-            mask.active.insert(cell, 2);
+            mask.active.insert(cell, 3);
         }
+        // A landed chunk with one brick (the bridge's shape: both children
+        // of the region root, the brick at the chunk's origin).
         let mut chunk = |x: f32| {
-            let key = game::EntityKey::default();
-            app.world_mut()
-                .spawn((super::super::bridge::SimEntity { region: home, key }, Transform::from_xyz(x, 0.0, 0.0), ChildOf(root)))
-                .id()
+            let world = app.world_mut();
+            let chunk = world.spawn((Transform::from_xyz(x, 0.0, 0.0), ChildOf(root))).id();
+            let brick = world
+                .spawn((BrickOf { chunk, local: [0; 3] }, Transform::from_xyz(x, 0.0, 0.0), ChildOf(root)))
+                .id();
+            world.entity_mut(chunk).insert(ChunkBricks(vec![brick]));
+            brick
         };
         let (a, b) = (chunk(128.0), chunk(160.0));
+        // A third chunk, still deriving its bricks.
+        let c = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(192.0, 0.0, 0.0),
+                ChildOf(root),
+                ChunkBricks::default(),
+                PendingSnapshotVoxels,
+            ))
+            .id();
         let masked = |app: &App| app.world().resource::<HomeCellMask>().cells.contains(&cell);
         for _ in 0..NEAR_HANDOFF_HOLD_FRAMES + 2 {
             app.update();
@@ -662,6 +696,12 @@ mod tests {
         }
         assert!(!masked(&app), "one of two chunks meshed: the LOD stays");
         app.world_mut().entity_mut(b).insert(ChunkConnectivity(0));
+        for _ in 0..NEAR_HANDOFF_HOLD_FRAMES + 2 {
+            app.update();
+        }
+        assert!(!masked(&app), "a chunk whose bricks have not landed: the LOD stays");
+        // It lands with no bricks at all (all air): nothing more to mesh.
+        app.world_mut().entity_mut(c).remove::<PendingSnapshotVoxels>();
         app.update();
         assert!(!masked(&app), "held for NEAR_HANDOFF_HOLD_FRAMES first");
         for _ in 0..NEAR_HANDOFF_HOLD_FRAMES {

@@ -15,18 +15,19 @@ use super::bridge::SimTarget;
 /// `propagate_parent_transforms` re-walk them all (4.5 ms/frame at `full`,
 /// 2026-09-22 trace).
 ///
-/// Keyed chunks are skipped: they are fixed bodies that never move, and at the
-/// 5x5 window just visiting ~64k of them cost ~1 ms/frame (2026-09-23 trace).
-/// A chunk that does get a new pose snaps in `drain_region_updates`. Chunks
-/// whose snapshot voxels are still being derived are not keyed yet, so they are
-/// skipped by their `PendingSnapshotVoxels` marker — while flying, that backlog
-/// is ~100k chunks (5 regions per seam), and visiting it cost 4.6 ms/frame
-/// (2026-09-23 `fly-probe` trace).
+/// Terrain chunk entities are skipped, by their `ChunkBricks` (present from
+/// spawn): they are fixed bodies that never move, and at the 5x5 window just
+/// visiting ~64k of them cost ~1 ms/frame (2026-09-23 trace). A chunk that
+/// does get a new pose snaps in `drain_region_updates`, bricks included (the
+/// bricks themselves have no `SimTarget`). Chunks whose snapshot bricks are
+/// still being derived are skipped by their `PendingSnapshotVoxels` marker
+/// too — while flying, that backlog is ~100k chunks (5 regions per seam), and
+/// visiting it cost 4.6 ms/frame (2026-09-23 `fly-probe` trace).
 pub fn interpolate_transforms(
     mut query: Query<
         (&mut Transform, &SimTarget),
         (
-            Without<super::meshing::queue::ChunkKey>,
+            Without<super::bricks::ChunkBricks>,
             Without<super::bridge::PendingSnapshotVoxels>,
         ),
     >,
@@ -87,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn keyed_chunks_are_not_interpolated() {
+    fn terrain_chunks_are_not_interpolated() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_systems(Update, interpolate_transforms);
@@ -96,7 +97,7 @@ mod tests {
             .spawn((
                 Transform::IDENTITY,
                 SimTarget::body(Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY),
-                crate::renderer::meshing::queue::ChunkKey([0, 0, 0]),
+                crate::renderer::bricks::ChunkBricks::default(),
             ))
             .id();
         app.update();

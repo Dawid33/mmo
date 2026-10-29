@@ -63,6 +63,9 @@ pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers, pull: bool
     }
 }
 
+/// Half a render brick's edge: its constant `Aabb` is the local 0..BRICK_VOXELS cube.
+const BRICK_HALF: f32 = game::BRICK_VOXELS as f32 / 2.0;
+
 #[derive(Resource)]
 pub struct ChunkMaterial(pub Handle<ExtendedMaterial<StandardMaterial, StandardVoxelMaterial>>);
 
@@ -139,8 +142,8 @@ pub fn apply_meshed_chunks(
             ec.insert((
                 super::voxel_pull::ChunkQuads(std::sync::Arc::new(records)),
                 bevy::camera::primitives::Aabb {
-                    center: bevy::math::Vec3A::splat(16.0),
-                    half_extents: bevy::math::Vec3A::splat(16.0),
+                    center: bevy::math::Vec3A::splat(BRICK_HALF),
+                    half_extents: bevy::math::Vec3A::splat(BRICK_HALF),
                 },
                 bevy::camera::visibility::NoAutoAabb,
                 visibility::ChunkConnectivity(connectivity),
@@ -160,8 +163,8 @@ pub fn apply_meshed_chunks(
                     // drops the POSITION attribute) and independent of mesh
                     // data lifetime (RENDER_WORLD-only assets).
                     bevy::camera::primitives::Aabb {
-                        center: bevy::math::Vec3A::splat(16.0),
-                        half_extents: bevy::math::Vec3A::splat(16.0),
+                        center: bevy::math::Vec3A::splat(BRICK_HALF),
+                        half_extents: bevy::math::Vec3A::splat(BRICK_HALF),
                     },
                     bevy::camera::visibility::NoAutoAabb,
                     visibility::ChunkConnectivity(connectivity),
@@ -842,8 +845,8 @@ mod tests {
             .entity(e)
             .get::<Aabb>()
             .expect("constant chunk Aabb inserted");
-        assert_eq!(aabb.center, bevy::math::Vec3A::splat(16.0));
-        assert_eq!(aabb.half_extents, bevy::math::Vec3A::splat(16.0));
+        assert_eq!(aabb.center, bevy::math::Vec3A::splat(BRICK_HALF));
+        assert_eq!(aabb.half_extents, bevy::math::Vec3A::splat(BRICK_HALF));
         assert!(
             app.world().entity(e).contains::<NoAutoAabb>(),
             "auto-Aabb must not overwrite it"

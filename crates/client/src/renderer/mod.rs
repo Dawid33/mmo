@@ -13,6 +13,7 @@ mod atmosphere;
 mod autopilot;
 mod avatar;
 mod block_textures;
+pub mod bricks;
 pub mod bridge;
 pub(crate) mod collider_debug;
 pub mod commander;
