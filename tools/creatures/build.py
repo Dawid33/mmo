@@ -13,6 +13,7 @@ same bytes. Never hand-edit the .bbmodel: the next build overwrites it; carry a
 Blockbench touch-up back into the source instead.
 """
 import base64
+import fcntl
 import io
 import json
 import math
@@ -39,7 +40,8 @@ def uid(*parts):
     return str(uuid.uuid5(NAMESPACE, "/".join(parts)))
 
 
-from templates import TEMPLATES, WING_CLIPS, add_wings, clip, rest_points, wing_clips  # noqa: E402
+from templates import (TEMPLATES, WING_CLIPS, add_wings, at, clip, extra_clips, hold, osc,  # noqa: E402
+                       rest_points, wing_clips)
 
 
 # --- Creature sources -----------------------------------------------------------
@@ -56,6 +58,8 @@ from templates import TEMPLATES, WING_CLIPS, add_wings, clip, rest_points, wing_
 #              chord, part, + fly-clip tunables: adds wing_l/wing_r and the fly set.
 #   [clips.X]  mode, length, keys; merge = true adds the keys' tracks to the
 #              template's clip X instead of replacing it.
+#   extras     template-independent clips: alert, roar, breathe, swim, swim_idle,
+#              ridden, pick_up, carry, spit (templates.extra_clips).
 #   [budget]   raise a template budget (say why in a comment).
 # Derived sources: variant_of = "<df_id>" + scale (a giant: the base scaled,
 # slower cycles), animal_person_of = "<df_id>" (the biped with the base's head,
@@ -126,6 +130,9 @@ def build_model(src, params=None):
     if wings:
         model["clips"].update(wing_clips(model, wings))
         model["required"] += [c for c in WING_CLIPS if c not in model["required"]]
+    extras = src.get("extras", [])
+    model["clips"].update(extra_clips(extras, model, model["clips"]))
+    model["required"] += [c for c in extras if c not in model["required"]]
     for name, (target, s) in follow.items():
         for c in model["clips"].values():
             if target in c["tracks"]:
@@ -231,10 +238,46 @@ def animal_person(src):
     k = min(2.5, max(0.8, params["head"][0] / (hhi[0] - hlo[0])))
     alls = rest_points({"bones": base["bones"], "cubes": [c for c in base["cubes"] if c[1] in heads]})
     anchor = [(hlo[0] + hhi[0]) / 2, min(p[1] for p in alls), (hlo[2] + hhi[2]) / 2]
+    base_bones = {name: (parent, pivot, rest) for name, parent, pivot, rest in base["bones"]}
+    legless = src.get("legless", False)
+
+    if legless:
+        # The person's upper body on the animal's: the base without its head,
+        # scaled to the torso, its neck under the hips, its bones kept (renamed
+        # low_*) so its own gait still moves it.
+        lower = [c for c in base["cubes"] if c[1] not in heads]
+        lpts = rest_points({"bones": base["bones"], "cubes": lower})
+        width = max(p[0] for p in lpts) - min(p[0] for p in lpts)
+        s_low = min(2.5, max(0.6, params["body"][0] / width))
+        neck = base_bones["head"][1]
+        ground = min(p[1] for p in lpts)
+        hip = (neck[1] - ground) * s_low
+        params["leg"] = [params["leg"][0], hip]
+        params["foot"] = 0
+        model = t.skeleton(params)
+        model["bones"] = [b for b in model["bones"] if not b[0].startswith("leg_")]
+        model["cubes"] = [c for c in model["cubes"] if c[1] not in ("leg_l", "leg_r") and c[0] != "head"]
+        pivots = {name: pivot for name, _, pivot, _ in model["bones"]}
+
+        def place(v):
+            return [(v[0] - neck[0]) * s_low, hip + (v[1] - neck[1]) * s_low, (v[2] - neck[2]) * s_low]
+
+        rename = {}
+        for name, parent, pivot, rest in base["bones"]:
+            if name in heads or parent is None:
+                continue
+            rename[name] = "low_" + name
+        for name, parent, pivot, rest in base["bones"]:
+            if name in rename:
+                model["bones"].append((rename[name], rename.get(parent, "body"), place(pivot), rest))
+        for name, bone, part, lo, hi in lower:
+            model["cubes"].append(("low_" + name, rename.get(bone, "body"), part, place(lo), place(hi)))
+        pivots = {name: pivot for name, _, pivot, _ in model["bones"]}
+    else:
+        model["cubes"] = [c for c in model["cubes"] if c[0] != "head"]
     model["cubes"] += graft(base, heads, "head", anchor, k)
 
-    base_bones = {name: (parent, pivot, rest) for name, parent, pivot, rest in base["bones"]}
-    if "tail" in base_bones:
+    if "tail" in base_bones and not legless:
         lw, ll = params["leg"]
         bd = params["body"][2]
         tail_pivot = [0, ll + 2, bd / 2]
@@ -247,6 +290,37 @@ def animal_person(src):
         model["cubes"] += graft(flat, subtree_of(flat, "tail"), "tail", bp, min(k, 1.5))
 
     model["clips"] = t.clips(params, model)
+    has = {b[0] for b in model["bones"]}
+    for c in model["clips"].values():
+        c["tracks"] = {b: ch for b, ch in c["tracks"].items() if b in has}
+    if legless:
+        model["clips"]["sit"]["tracks"].pop("body", None)
+        # Lying down is the torso sinking back onto its own coils (turning the
+        # whole figure about the hips would stand the tail up in the air).
+        L = 1.2
+        model["clips"]["death"] = clip("hold", L, {
+            "torso": {"rotation": at(L, (0, [0, 0, 0]), (0.5, [95, 0, 10]), (0.65, [82, 0, 8]), (1, [85, 0, 10]))},
+            "head": {"rotation": at(L, (0, [0, 0, 0]), (1, [-10, 30, 0]))},
+            "arm_l": {"rotation": at(L, (0, [0, 0, 0]), (1, [-20, 0, -60]))},
+            "arm_r": {"rotation": at(L, (0, [0, 0, 0]), (1, [-20, 0, 60]))},
+        })
+        L = 4.0
+        model["clips"]["lie"] = clip("loop", L, {
+            "torso": {"rotation": osc(L, [2, 0, 0], base=(80, 0, 0))},
+            "arm_l": {"rotation": hold([10, 0, -10], L)},
+            "arm_r": {"rotation": hold([10, 0, 10], L)},
+        })
+        # The lower body's own gait, re-timed to the person's clip.
+        for name, sources in (("walk", ("walk", "swim")), ("run", ("run", "swim")), ("idle", ("idle", "swim_idle")),
+                              ("carry", ("walk", "swim"))):
+            c = model["clips"][name]
+            b = next(base["clips"][x] for x in sources if x in base["clips"])
+            f = c["length"] / b["length"]
+            for bone, chans in b["tracks"].items():
+                if bone in rename:
+                    c["tracks"][rename[bone]] = {ch: [(t_ * f, v) for t_, v in keys] for ch, keys in chans.items()}
+            if b["stride"]:
+                c["stride"] = b["stride"] * s_low
     if "tail" in pivots:
         for name in ("idle", "walk", "run", "carry"):
             c = model["clips"][name]
@@ -256,7 +330,8 @@ def animal_person(src):
     model["budget"] = merge(t.budget, src.get("budget", {}))
 
     palette = dict(base_src["palette"])
-    body_part = next(c[2] for c in base["cubes"] if c[0] == "body")
+    body_part = next((c[2] for c in base["cubes"] if c[0] == "body"),
+                     next(c[2] for c in base["cubes"] if c[1] not in heads))
     leg_part = next((c[2] for c in base["cubes"] if c[1].startswith("leg")), body_part)
     palette.setdefault("torso", palette[body_part])
     palette.setdefault("arms", palette[body_part])
@@ -484,23 +559,31 @@ def main(ids):
     if not ids:
         ids = sorted(f[:-5] for f in os.listdir(SRC) if f.endswith(".toml"))
     os.makedirs(OUT, exist_ok=True)
-    try:
-        with open(MANIFEST) as f:
-            manifest = json.load(f)
-    except FileNotFoundError:
-        manifest = {}
+    entries = {}
     for df_id in ids:
         src, model = load(df_id)
         path = os.path.join(OUT, df_id + ".bbmodel")
         with open(path, "w") as f:
             json.dump(bbmodel(df_id, src, model), f, indent=1)
             f.write("\n")
-        manifest[df_id] = manifest_entry(df_id, src, model)
+        entries[df_id] = manifest_entry(df_id, src, model)
         print(f"{df_id}: {len(model['cubes'])} cubes, {len(model['bones'])} bones, "
               f"{len(model['clips'])} clips -> {os.path.relpath(path, REPO)}")
-    with open(MANIFEST, "w") as f:
-        json.dump(dict(sorted(manifest.items())), f, indent=1)
-        f.write("\n")
+    # Several builds may run at once (batches in parallel): the manifest's
+    # read-modify-write holds a lock.
+    with open(MANIFEST + ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with open(MANIFEST) as f:
+                manifest = json.load(f)
+        except FileNotFoundError:
+            manifest = {}
+        manifest.update(entries)
+        tmp = MANIFEST + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(dict(sorted(manifest.items())), f, indent=1)
+            f.write("\n")
+        os.replace(tmp, MANIFEST)
 
 
 if __name__ == "__main__":

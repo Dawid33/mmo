@@ -71,6 +71,150 @@
    }
   }
  },
+ "adder_man": {
+  "name": "adder man",
+  "status": "draft",
+  "model": "models/creatures/adder_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -6,
+    0,
+    -4.5
+   ],
+   [
+    6,
+    14,
+    25
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 12,
+  "bones": 11,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8021,
+    "stride": 8.6873,
+    "speed": 10.8307
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4902,
+    "stride": 11.1694,
+    "speed": 22.7854
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3.5649
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.4456
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.3119
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.0695
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 3.5649
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 5.3473
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.4259
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 0.8912
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 0.8912
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.6239
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.0695
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.8021,
+    "stride": 8.6873,
+    "speed": 10.8307
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.0695
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.0695
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.5347
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.4259
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.713
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.2477
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.713
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 0.8912
+   }
+  }
+ },
  "bird_chicken": {
   "name": "chicken",
   "status": "draft",
@@ -172,6 +316,61 @@
    "land": {
     "loop": "once",
     "length": 0.9
+   }
+  }
+ },
+ "cave_blob": {
+  "name": "cave blob",
+  "status": "draft",
+  "model": "models/creatures/cave_blob.bbmodel",
+  "template": "blob",
+  "bounds": [
+   [
+    -4.5,
+    0,
+    -4.5
+   ],
+   [
+    4.5,
+    7,
+    4.5
+   ]
+  ],
+  "budget": {
+   "cubes": 10,
+   "bones": 6
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "attack",
+   "hurt",
+   "death"
+  ],
+  "cubes": 2,
+  "bones": 2,
+  "clips": {
+   "idle": {
+    "loop": "loop",
+    "length": 2
+   },
+   "walk": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 5.4,
+    "speed": 6.75
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
    }
   }
  },
@@ -456,6 +655,205 @@
    },
    "flop": {
     "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
+ "giant_adder": {
+  "name": "giant adder",
+  "status": "draft",
+  "model": "models/creatures/giant_adder.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -16
+   ],
+   [
+    2.5,
+    3.5,
+    14
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 7,
+  "bones": 7,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.8783,
+    "stride": 7.875,
+    "speed": 4.1926
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.9391,
+    "stride": 10.125,
+    "speed": 10.7816
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 5.3666
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.805
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.4696
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.3416
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.3666
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.0498
+   }
+  }
+ },
+ "spider_cave_giant": {
+  "name": "giant cave spider",
+  "status": "draft",
+  "model": "models/creatures/spider_cave_giant.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -14.9341,
+    0,
+    -10.8367
+   ],
+   [
+    14.9341,
+    16.6045,
+    17.6515
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "web_shoot",
+   "alert",
+   "roar"
+  ],
+  "cubes": 21,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 7.5244,
+    "speed": 12.5407
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 12.0869,
+    "speed": 34.5339
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "web_shoot": {
+    "loop": "once",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
+ "worm": {
+  "name": "worm",
+  "status": "draft",
+  "model": "models/creatures/worm.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.5,
+    0,
+    -3.5
+   ],
+   [
+    0.5,
+    1,
+    2.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 2,
+  "bones": 3,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 1.4,
+    "stride": 7.5,
+    "speed": 5.3571
+   },
+   "death": {
+    "loop": "hold",
     "length": 0.6
    }
   }

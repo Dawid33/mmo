@@ -1310,3 +1310,83 @@ TEMPLATES = {
     "blob": Template(BLOB_DEFAULTS, blob, blob_clips, BLOB_BUDGET, BLOB_CLIPS),
     "vermin": Template(VERMIN_DEFAULTS, vermin, vermin_clips, VERMIN_BUDGET, VERMIN_CLIPS),
 }
+
+
+# --- Extras any template can add (a source lists them: extras = ["alert", "roar"]) -------
+#
+# Built from the bones every template shares: `head`, the main body bone (`body`,
+# or `torso` for a biped), the legs (`leg_*`), and from the template's own walk /
+# idle / eat / attack clips where one fits.
+
+EXTRA_CLIPS = ["alert", "roar", "breathe", "swim", "swim_idle", "ridden", "pick_up", "carry", "spit"]
+
+
+def extra_clips(names, model, clips):
+    has = {name for name, *_ in model["bones"]}
+    body = "torso" if "torso" in has else "body" if "body" in has else "root"
+    head = "head" if "head" in has else body
+    legs = bone_names(model, "leg")
+    out = {}
+
+    def slowed(c, factor, extra=None):
+        T = c["length"] * factor
+        tracks = {b: {ch: [(t * factor, v) for t, v in keys] for ch, keys in chans.items()}
+                  for b, chans in c["tracks"].items()}
+        for b, chans in (extra or {}).items():
+            tracks.setdefault(b, {}).update(chans)
+        return T, tracks
+
+    for name in names:
+        if name in clips or name in out:
+            continue
+        if name == "alert":
+            L = 2.0
+            out[name] = clip("loop", L, {
+                head: {"rotation": at(L, (0, [15, 0, 0]), (0.25, [15, 25, 0]), (0.5, [18, 0, 0]),
+                                      (0.75, [15, -25, 0]), (1, [15, 0, 0]))},
+                body: {"rotation": hold([4, 0, 0], L)},
+            })
+        elif name in ("roar", "breathe", "spit"):
+            L = {"roar": 1.2, "breathe": 1.6, "spit": 0.7}[name]
+            up = {"roar": 30, "breathe": 15, "spit": 20}[name]
+            tracks = {
+                head: {"rotation": at(L, (0, [0, 0, 0]), (0.25, [up, 0, 0]), (0.45, [-10, 0, 0]),
+                                      (0.6, [-8, 8, 0]), (0.75, [-8, -8, 0]), (0.9, [-10, 0, 0]),
+                                      (1, [0, 0, 0]))},
+                body: {"rotation": at(L, (0, [0, 0, 0]), (0.25, [8, 0, 0]), (0.45, [-6, 0, 0]),
+                                      (0.9, [-6, 0, 0]), (1, [0, 0, 0]))},
+            }
+            if name == "breathe":
+                tracks[body]["position"] = at(L, (0, [0, 0, 0]), (0.25, [0, 0, 1]), (0.45, [0, 0, -1.5]),
+                                              (0.9, [0, 0, -1.5]), (1, [0, 0, 0]))
+            out[name] = clip("once", L, tracks)
+        elif name in ("swim", "swim_idle"):
+            # A land animal paddling: its walk, slower, the head held up out of the water.
+            base = clips.get("walk") or clips.get("move") or clips.get("idle")
+            factor, amp = (1.6, 1.0) if name == "swim" else (2.5, 0.5)
+            T, tracks = slowed(base, factor)
+            for b in legs:
+                if b in tracks and "rotation" in tracks[b]:
+                    tracks[b]["rotation"] = [(t, [v[0] * amp, v[1] * amp, v[2] * amp]) for t, v in
+                                             tracks[b]["rotation"]]
+            tracks[head] = {"rotation": hold([15, 0, 0], T)}
+            out[name] = clip("loop", T, tracks, stride=(base["stride"] or 0) * amp or None)
+        elif name == "ridden":
+            # Standing under a rider: idle without the looking around.
+            L = 3.0
+            tracks = {body: {"position": osc(L, [0, 0.15, 0], cycles=2)},
+                      head: {"rotation": osc(L, [3, 0, 0], base=(5, 0, 0))}}
+            out[name] = clip("loop", L, tracks)
+        elif name == "pick_up":
+            base = clips.get("eat") or clips["attack"]
+            L = 1.0
+            tracks = {head: {"rotation": at(L, (0, [0, 0, 0]), (0.4, [-40, 0, 0]), (0.6, [-40, 0, 0]),
+                                            (1, [10, 0, 0]))},
+                      body: {"rotation": at(L, (0, [0, 0, 0]), (0.4, [-10, 0, 0]), (1, [0, 0, 0]))}}
+            out[name] = clip("once", L, tracks)
+        elif name == "carry":
+            T, tracks = slowed(clips["walk"], 1.0, {head: {"rotation": hold([10, 0, 0], clips["walk"]["length"])}})
+            out[name] = clip("loop", T, tracks, stride=clips["walk"]["stride"])
+        else:
+            raise SystemExit(f"unknown extra clip {name!r}; known: {', '.join(EXTRA_CLIPS)}")
+    return out

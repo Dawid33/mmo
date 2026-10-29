@@ -7,7 +7,8 @@ ones to build in the agreed order (docs/superpowers/plans/2026-10-29-creature-mo
 python3 tools/creatures/progress.py [--next N]
 
 Placeholders (centaur, chimera, griffon, wagon) need no model. Giants are the
-base creature scaled, so a giant counts as covered once its base has a model.
+base creature scaled (tools/creatures/derive.py writes their sources): a giant
+counts as covered once its own model is built.
 """
 import csv
 import json
@@ -35,16 +36,19 @@ def main(args):
         manifest = json.load(open(MANIFEST))
     except FileNotFoundError:
         manifest = {}
+    # Manifest keys are lowercase ids with spaces and dashes as underscores.
     built = {k.upper(): v.get("status", "draft") for k, v in manifest.items()}
+
+    def key(df_id):
+        return df_id.upper().replace(" ", "_").replace("-", "_")
     ids = {r["id"] for r in rows}
 
     def status(r):
         if r["category"] == "meta":
             return "n/a"
         if r["category"] == "giant":
-            base = r["copy_tags_from"]
-            return "covered" if base and base in built else "needs base"
-        return built.get(r["id"], "todo")
+            return "covered" if key(r["id"]) in built else "needs base"
+        return built.get(key(r["id"]), "todo")
 
     print(f"{'category':<14} {'approved':>8} {'draft':>6} {'todo':>6}  (covered giants / total)")
     totals = {"approved": 0, "draft": 0, "todo": 0}

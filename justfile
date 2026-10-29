@@ -361,6 +361,11 @@ asset-viewer *args:
 creatures *ids:
     python3 tools/creatures/build.py {{ids}}
 
+# Sources for giants and animal people whose base creature is built
+# (tools/creatures/derive.py); existing ones are kept unless --force.
+creature-derive *args:
+    python3 tools/creatures/derive.py {{args}}
+
 # A creature's brief from the DF roster + local raws: size, template, clips.
 #   just creature-brief DOG
 #   just creature-brief "giant cave spider"

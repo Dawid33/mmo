@@ -39,7 +39,7 @@ notes). Don't wait for him between creatures; don't mark anything approved yours
 | Progress `tools/creatures/progress.py` (`just creature-progress [--next N]`) | done |
 | Asset viewer (`just asset-viewer`) | done; `--model --anim --time --yaw --pitch --shot` |
 | **Dog** (quadruped pilot) | built, `draft`, awaiting Dawid's review |
-| Templates biped, bird, fish, serpent, arthropod, blob; vermin form; giant variants | **not built — your first work** |
+| Templates biped, bird, fish, serpent, arthropod, blob; vermin form; giant variants; animal people | built 2026-10-29 (`tools/creatures/templates.py`, `derive.py`); pilots dwarf, chicken, carp, adder, giant cave spider, cave blob, worm; adder man + giant adder as the derived pilots |
 | Blockbench opening a generated file | **unverified** (Blockbench isn't installed here); ask Dawid to try the dog once |
 | Commit | nothing of the creature work is committed yet (see "Committing") |
 
@@ -169,3 +169,43 @@ CLAUDE.md if they also carry someone else's hunks. Commit message style: convent
   allows a swapped head — design that when you get there.
 - DF 0.47 raws are the source of truth for briefs (`DF_RAWS` overrides the path). Creatures
   added in DF v50+ are not in the roster.
+
+## Authoring notes (written once the templates landed)
+
+Read `tools/creatures/templates.py` (each template's `*_DEFAULTS` table is its
+parameter list, with comments) and the pilots in `tools/creatures/src/` before a
+batch. Things that are not obvious from the code:
+
+- **Pick the template by body, not by the brief.** Bats → `bird` (`beak = [0,0,0]`,
+  membrane colours); seals, walruses, whales, dolphins → `fish` (`flukes = true` for
+  whales/dolphins/seals: tail strokes up and down); worms, leeches, slugs, eels,
+  lampreys → `serpent`; crabs, scorpions, insects → `arthropod` (6 legs for insects,
+  8 for spiders/scorpions, 10 for crabs with `legs = 10`: give the first pair claw
+  cubes); jellyfish, sponges, floating guts → `blob`; octopus/squid → `blob` or
+  `serpent` with tentacle cubes. Note the choice in the source's header comment.
+- **Vermin**: those with a giant (the giant needs the full rig) use their body
+  template scaled small; the rest use the `vermin` form (`move` style: scurry,
+  flutter, swim, crawl, hop).
+- **Size**: `just creature-brief` prints a *suggested model length*; aim the body
+  (nose to rump, no tail) near it. Keep the relative sizes believable.
+- **Extra bones** (`[[bones]]`, pivot relative to the parent bone's pivot): horns
+  and ears are just cubes; a second head that should move like the first is a bone
+  with `follow = "head"` (hydra, ettin). `mirror = true` on a cube or bone adds the
+  x-mirrored `_r` twin of an `_l` one.
+- **Wings on a non-bird** (dragon, harpy, giant bat-like things): `[wings]` with
+  `bone`, `at` (left shoulder relative to that bone's pivot), `span`, `chord`,
+  `part`; it adds `wing_l`/`wing_r` and the fly set. Folded wings lie back along
+  the body, so keep `chord` under the shoulder's height above the ground.
+- **Extras** (`extras = [...]`): `alert`, `roar` (LARGE_PREDATOR), `breathe`
+  (breath weapons), `swim`/`swim_idle` (AMPHIBIOUS, or AQUATIC on a non-fish),
+  `ridden` (MOUNT), `pick_up`/`carry` (CURIOUSBEAST on a non-biped), `spit`.
+  Bipeds already have the worker set (incl. pick_up/carry).
+- **Decals**: face texels as seen from outside, row 0 at the top. On side faces
+  the creature's front (−Z) is on the left of `west` and the right of `east`; on
+  `up`, row 0 is the front.
+- **Sheets**: `just adapter=Intel creature-sheet <id>`; if the client crate does
+  not compile because of someone else's edit, the last built viewer still works:
+  `WGPU_ADAPTER_NAME=Intel python3 tools/creatures/sheet.py <id>`. Review it at half
+  size (it is 2400 px wide).
+- **Derived creatures**: after a base is built, `just creature-derive` writes the
+  giant / animal-person sources that were waiting on it; build them like any other.

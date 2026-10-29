@@ -1,0 +1,96 @@
+# DF SPIDER_CAVE_GIANT (underground, chasms): 200 kg, eight legs, venomous fangs,
+# sprays webs (web_shoot), silk. The arthropod pilot. Attack: sting (the
+# template's `attack`: the fangs).
+name = "giant cave spider"
+template = "arthropod"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [8, 5, 8]
+head = [6, 5, 4]
+abdomen = [11, 9, 13]
+abdomen_raise = 12
+legs = 8
+leg = [2, 11, 7]
+splay = 40
+webber = true
+
+# Head pivot: the thorax front, at mid-height; the head spans z -4..0.
+[[cubes]]
+name = "fang_l"
+bone = "head"
+part = "fangs"
+from = [-2.5, -4, -5]
+to = [-0.5, 0, -3.5]
+mirror = true
+
+[palette]
+body = "#3d3a44"
+body_up = "#4d4955"
+head = "#35323b"
+abdomen = "#4a4352"
+abdomen_up = "#5a5163"
+legs = "#2f2c35"
+fangs = "#c9c0a8"
+eye = "#d63a2a"
+mark = "#a39a7d"
+
+# Eight eyes on the head's 6×5 front face, row 0 at the top.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 0
+w = 4
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 2
+w = 2
+colour = "eye"
+
+# A pale hourglass mark on the abdomen's back.
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 4
+y = 3
+w = 3
+h = 2
+colour = "mark"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 5
+y = 5
+w = 1
+h = 3
+colour = "mark"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 4
+y = 8
+w = 3
+h = 2
+colour = "mark"

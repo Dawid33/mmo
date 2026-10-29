@@ -85,8 +85,10 @@ def body_plan(tags):
         plan = "fish"
     elif re.search(r"6LEGS|8LEGS|INSECT|SPIDER|ARACHNID|CRAB|SCORPION", joined):
         plan = "arthropod"
-    elif "LEGS" not in joined and ("BASIC_1PARTBODY" in joined or "SNAKE" in joined):
+    elif "SNAKE" in joined or ("LEGS" not in joined and "BASIC_2PARTBODY" in joined and "TAIL" in joined):
         plan = "serpent"
+    elif "LEGS" not in joined and "BASIC_1PARTBODY" in joined:
+        plan = "blob"
     elif not parts:
         plan = None
     else:
@@ -151,6 +153,13 @@ def main(df_id):
     print(f"- category: {r['category']}, source file creature_{r['source_file']}.txt")
     print(f"- adult size: {size} cm³ ≈ {size / 1000:g} kg; box of that volume at 1:1:2 ≈ "
           f"{side:.1f} × {side:.1f} × {2 * side:.1f} units (w × h × l)")
+    if size:
+        # The style guide's chunky sizes: small things exaggerated more, big ones
+        # less (dog 30 kg ≈ 18 units long, horse 500 kg ≈ 35, cat 4 kg ≈ 11).
+        kg = size / 1000
+        k = max(1.2, 2.3 - 0.45 * math.log10(kg / 30))
+        print(f"- suggested model length (nose to rump, no tail): ≈ {max(4.0, 2 * side * k):.0f} units "
+              f"({k:.1f}× the box)")
     print(f"- biomes: {r['biomes'] or '—'}")
     print(f"- products: {r['products'] or '—'}")
     print(f"- flags: {r['flags'] or '—'}")

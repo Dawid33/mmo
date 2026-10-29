@@ -1,0 +1,40 @@
+# DF CAVE_BLOB (underground, chasms and cavern water): 20 kg, "a strange shapeless
+# life form with an orange leathery skin containing a liquid interior". No attacks
+# in the raws; the template's attack is a lunging slap. The blob pilot.
+name = "cave blob"
+template = "blob"
+status = "draft"
+
+[proportions]
+body = [9, 5, 9]
+top = [6, 2, 6]
+
+[palette]
+body = "#d9772b"
+body_up = "#e88a3c"
+body_down = "#a3561d"
+top = "#e88a3c"
+spot = "#f2b56a"
+
+[[decals]]
+cube = "top"
+face = "up"
+x = 1
+y = 1
+w = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "north"
+x = 6
+y = 1
+w = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 2
+colour = "spot"

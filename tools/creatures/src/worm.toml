@@ -1,0 +1,24 @@
+# DF WORM (vermin, soil): the vermin-form pilot. Vermin are not full units in DF:
+# one `move` loop (crawl: stretching along its length) and a `death`.
+name = "worm"
+template = "vermin"
+status = "draft"
+
+[proportions]
+body = [1, 1, 5]
+head = [1, 1, 1]
+legs = 0
+move = "crawl"
+
+[palette]
+body = "#c7756f"
+body_up = "#d48780"
+head = "#b5625c"
+band = "#e0a39a"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 1
+colour = "band"
