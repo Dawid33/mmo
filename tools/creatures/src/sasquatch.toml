@@ -1,0 +1,108 @@
+# DF SASQUATCH (wild, temperate forests): 300 kg, "A large and mysterious ape-like creature found in temperate forests". Biped, 40 units, apelike:
+# a heavy furred body, long arms, a heavy brow over a bare face. LARGE_PREDATOR:
+# alert + roar. Attack punch (the template's `attack`); kick, scratch, bite
+# optional (not made). SAVAGE: the biped's worker clips are never played.
+name = "sasquatch"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [6, 12]
+foot = 2
+leg_inset = 1
+body = [15, 15, 9]
+arm = [5, 19]
+hand = 4
+head = [9, 9, 8]
+walk = { cycle = 1.15, swing = 25, bob = 0.6 }
+run = { cycle = 0.7, swing = 42, bob = 1.4 }
+
+# Head pivot: the neck; the head spans y 0..9, z -4..4.
+[[cubes]]
+name = "brow"
+bone = "head"
+part = "fur"
+from = [-4.5, 6, -5]
+to = [4.5, 8, -4]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "face"
+from = [-2.5, 0.5, -5]
+to = [2.5, 4, -4]
+
+# Torso pivot: the hips; shoulders hunched under fur.
+[[cubes]]
+name = "shoulders"
+bone = "torso"
+part = "fur"
+from = [-8, 11, -5]
+to = [8, 16, 5]
+
+[palette]
+head = "#6a4a32"
+head_up = "#7a5a40"
+fur = "#6a4a32"
+fur_up = "#7a5a40"
+face = "#9a7a62"
+hands = "#9a7a62"
+torso = "#6a4a32"
+torso_up = "#7a5a40"
+torso_down = "#5a3e2a"
+arms = "#6a4a32"
+legs = "#6a4a32"
+feet = "#3e2a1e"
+eye = "#2a1a12"
+nostril = "#1a1410"
+mouth = "#2a1a16"
+
+# The head's front face is 9×9 (row 0 at the top): the brow covers rows 1-2,
+# the eyes sit under it; the muzzle's 5×3.5.
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 3
+w = 5
+h = 2
+colour = "face"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 0
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 3
+y = 0
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 2
+w = 3
+colour = "mouth"

@@ -451,6 +451,103 @@
    }
   }
  },
+ "beak_dog": {
+  "name": "beak dog",
+  "status": "draft",
+  "model": "models/creatures/beak_dog.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -7,
+    0,
+    -19.5
+   ],
+   [
+    7,
+    28,
+    12.4542
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "brood",
+   "alert",
+   "roar",
+   "ridden"
+  ],
+  "cubes": 12,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.85,
+    "stride": 7.8907,
+    "speed": 9.2832
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 16.8621,
+    "speed": 33.7242
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "brood": {
+    "loop": "loop",
+    "length": 3
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "ridden": {
+    "loop": "loop",
+    "length": 3
+   }
+  }
+ },
  "bear_black": {
   "name": "black bear",
   "status": "draft",
@@ -3519,6 +3616,314 @@
    }
   }
  },
+ "blind_cave_ogre": {
+  "name": "blind cave ogre",
+  "status": "draft",
+  "model": "models/creatures/blind_cave_ogre.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -18,
+    0,
+    -7
+   ],
+   [
+    18,
+    54,
+    7
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 15,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.5,
+    "stride": 14.9843,
+    "speed": 9.9895
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.95,
+    "stride": 35.2671,
+    "speed": 37.1233
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.5,
+    "stride": 12.0948,
+    "speed": 8.0632
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
+ "blizzard_man": {
+  "name": "blizzard man",
+  "status": "draft",
+  "model": "models/creatures/blizzard_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -11,
+    0,
+    -4.5
+   ],
+   [
+    11,
+    39,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 18,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.1,
+    "stride": 13.1511,
+    "speed": 11.9556
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 30.1109,
+    "speed": 43.0155
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.1,
+    "stride": 10.6532,
+    "speed": 9.6847
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
  "bushmaster": {
   "name": "bushmaster",
   "status": "draft",
@@ -3868,6 +4273,160 @@
    "eat": {
     "loop": "loop",
     "length": 1
+   }
+  }
+ },
+ "colossus_bronze": {
+  "name": "bronze colossus",
+  "status": "draft",
+  "model": "models/creatures/colossus_bronze.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -25,
+    0,
+    -9
+   ],
+   [
+    25,
+    79,
+    9
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 17,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.9,
+    "stride": 20.5212,
+    "speed": 10.8006
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.2,
+    "stride": 47.6927,
+    "speed": 39.7439
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.9,
+    "stride": 16.5382,
+    "speed": 8.7043
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
    }
   }
  },
@@ -4224,6 +4783,150 @@
    }
   }
  },
+ "crundle": {
+  "name": "crundle",
+  "status": "draft",
+  "model": "models/creatures/crundle.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -5.5,
+    0,
+    -4
+   ],
+   [
+    5.5,
+    19,
+    8.5825
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 16,
+  "bones": 9,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 5.2992,
+    "speed": 9.6349
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 11.4907,
+    "speed": 32.8305
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 4.3209,
+    "speed": 7.8561
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
  "cuttlefish": {
   "name": "cuttlefish",
   "status": "draft",
@@ -4281,6 +4984,160 @@
    "flop": {
     "loop": "loop",
     "length": 0.6
+   }
+  }
+ },
+ "cyclops": {
+  "name": "cyclops",
+  "status": "draft",
+  "model": "models/creatures/cyclops.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -17,
+    0,
+    -7
+   ],
+   [
+    17,
+    55,
+    7
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 15,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.55,
+    "stride": 15.7335,
+    "speed": 10.1506
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 37.0305,
+    "speed": 37.0305
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.55,
+    "stride": 12.6995,
+    "speed": 8.1932
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
    }
   }
  },
@@ -4663,6 +5520,150 @@
    }
   }
  },
+ "elf": {
+  "name": "elf",
+  "status": "draft",
+  "model": "models/creatures/elf.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -6,
+    0,
+    -3.5
+   ],
+   [
+    6,
+    32,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 15,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.9,
+    "stride": 11.2673,
+    "speed": 12.5192
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 27.5776,
+    "speed": 50.1411
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.9,
+    "stride": 9.1457,
+    "speed": 10.1619
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
  "elk": {
   "name": "elk",
   "status": "draft",
@@ -4737,6 +5738,408 @@
    "eat": {
     "loop": "loop",
     "length": 2
+   }
+  }
+ },
+ "elk_bird": {
+  "name": "elk bird",
+  "status": "draft",
+  "model": "models/creatures/elk_bird.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -7,
+    0,
+    -15
+   ],
+   [
+    7,
+    36,
+    9.9641
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "ridden"
+  ],
+  "cubes": 17,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.95,
+    "stride": 11.3976,
+    "speed": 11.9975
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 23.3975,
+    "speed": 42.5409
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "ridden": {
+    "loop": "loop",
+    "length": 3
+   }
+  }
+ },
+ "ettin": {
+  "name": "ettin",
+  "status": "draft",
+  "model": "models/creatures/ettin.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -19,
+    0,
+    -7
+   ],
+   [
+    19,
+    54,
+    7
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 17,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.55,
+    "stride": 14.9843,
+    "speed": 9.6673
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 35.2671,
+    "speed": 35.2671
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.55,
+    "stride": 12.0948,
+    "speed": 7.8031
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
+ "fairy": {
+  "name": "fairy",
+  "status": "draft",
+  "model": "models/creatures/fairy.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -1.75
+   ],
+   [
+    2.5,
+    9.5,
+    5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 9,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 3.3552,
+    "speed": 7.4559
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 6.8944,
+    "speed": 22.9813
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 2.7426,
+    "speed": 6.0946
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 10.125,
+    "speed": 50.625
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },
@@ -6107,6 +7510,160 @@
    }
   }
  },
+ "giant": {
+  "name": "giant",
+  "status": "draft",
+  "model": "models/creatures/giant.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -16,
+    0,
+    -7.5
+   ],
+   [
+    16,
+    61,
+    6.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 15,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 17.9811,
+    "speed": 11.2382
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 42.3205,
+    "speed": 42.3205
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 14.5138,
+    "speed": 9.0711
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
  "giant_adder": {
   "name": "giant adder",
   "status": "draft",
@@ -6251,6 +7808,294 @@
    }
   }
  },
+ "gnome_dark": {
+  "name": "dark gnome",
+  "status": "draft",
+  "model": "models/creatures/gnome_dark.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -5.5,
+    0,
+    -4.5
+   ],
+   [
+    5.5,
+    22,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 15,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 5.2992,
+    "speed": 8.832
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 11.4907,
+    "speed": 28.7267
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 4.3209,
+    "speed": 7.2014
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
+ "gnome_mountain": {
+  "name": "mountain gnome",
+  "status": "draft",
+  "model": "models/creatures/gnome_mountain.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -5.5,
+    0,
+    -4.5
+   ],
+   [
+    5.5,
+    22,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 15,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 5.2992,
+    "speed": 8.832
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 11.4907,
+    "speed": 28.7267
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 4.3209,
+    "speed": 7.2014
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
  "goat": {
   "name": "goat",
   "status": "draft",
@@ -6325,6 +8170,438 @@
    "eat": {
     "loop": "loop",
     "length": 1.6
+   }
+  }
+ },
+ "goblin": {
+  "name": "goblin",
+  "status": "draft",
+  "model": "models/creatures/goblin.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -8,
+    0,
+    -5.5
+   ],
+   [
+    8,
+    24,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 16,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 7.5115,
+    "speed": 9.3894
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 18.3851,
+    "speed": 36.7701
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 6.0971,
+    "speed": 7.6214
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
+ "gorlak": {
+  "name": "gorlak",
+  "status": "draft",
+  "model": "models/creatures/gorlak.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -7,
+    0,
+    -7
+   ],
+   [
+    7,
+    20,
+    5.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 13,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 4.2394,
+    "speed": 7.0656
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 9.1925,
+    "speed": 22.9813
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 3.4567,
+    "speed": 5.7611
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
+ "gremlin": {
+  "name": "gremlin",
+  "status": "draft",
+  "model": "models/creatures/gremlin.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -7,
+    0,
+    -4
+   ],
+   [
+    7,
+    16,
+    3
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 13,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 4.4735,
+    "speed": 8.9471
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.32,
+    "stride": 9.1925,
+    "speed": 28.7267
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 3.6568,
+    "speed": 7.3136
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
    }
   }
  },
@@ -6569,6 +8846,242 @@
    }
   }
  },
+ "human": {
+  "name": "human",
+  "status": "draft",
+  "model": "models/creatures/human.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -8,
+    0,
+    -4.5
+   ],
+   [
+    8,
+    32,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 14,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.9,
+    "stride": 11.2673,
+    "speed": 12.5192
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 27.5776,
+    "speed": 50.1411
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.9,
+    "stride": 9.1457,
+    "speed": 10.1619
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
+ "jabberer": {
+  "name": "jabberer",
+  "status": "draft",
+  "model": "models/creatures/jabberer.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -13,
+    0,
+    -36
+   ],
+   [
+    13,
+    54,
+    23.1413
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "alert",
+   "roar",
+   "ridden"
+  ],
+  "cubes": 11,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.4,
+    "stride": 13.4858,
+    "speed": 9.6327
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.85,
+    "stride": 28.1833,
+    "speed": 33.1568
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "ridden": {
+    "loop": "loop",
+    "length": 3
+   }
+  }
+ },
  "king_cobra": {
   "name": "king cobra",
   "status": "draft",
@@ -6710,6 +9223,150 @@
    "sleep": {
     "loop": "loop",
     "length": 6
+   }
+  }
+ },
+ "kobold": {
+  "name": "kobold",
+  "status": "draft",
+  "model": "models/creatures/kobold.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -5.5,
+    0,
+    -5.5
+   ],
+   [
+    5.5,
+    21.5,
+    9.571
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 15,
+  "bones": 9,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 6,
+    "speed": 10
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 13.7888,
+    "speed": 34.472
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 4.8808,
+    "speed": 8.1347
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
    }
   }
  },
@@ -6990,6 +9647,160 @@
    "eat": {
     "loop": "loop",
     "length": 1.6
+   }
+  }
+ },
+ "minotaur": {
+  "name": "minotaur",
+  "status": "draft",
+  "model": "models/creatures/minotaur.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -12.5,
+    0,
+    -8
+   ],
+   [
+    12.5,
+    41,
+    4.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 19,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.1,
+    "stride": 11.8333,
+    "speed": 10.7576
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 28.1035,
+    "speed": 40.1478
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.1,
+    "stride": 9.5766,
+    "speed": 8.706
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
    }
   }
  },
@@ -7375,6 +10186,160 @@
    }
   }
  },
+ "ogre": {
+  "name": "ogre",
+  "status": "draft",
+  "model": "models/creatures/ogre.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -18,
+    0,
+    -9
+   ],
+   [
+    18,
+    52,
+    7
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 15,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.5,
+    "stride": 13.4858,
+    "speed": 8.9906
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.95,
+    "stride": 31.7404,
+    "speed": 33.411
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.5,
+    "stride": 10.8853,
+    "speed": 7.2569
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
  "pig": {
   "name": "pig",
   "status": "draft",
@@ -7449,6 +10414,172 @@
    "eat": {
     "loop": "loop",
     "length": 1.6
+   }
+  }
+ },
+ "pixie": {
+  "name": "pixie",
+  "status": "draft",
+  "model": "models/creatures/pixie.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -1.75
+   ],
+   [
+    2.5,
+    9.5,
+    5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 9,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 3.3552,
+    "speed": 7.4559
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 6.8944,
+    "speed": 22.9813
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 2.7426,
+    "speed": 6.0946
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 10.125,
+    "speed": 50.625
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },
@@ -7677,6 +10808,150 @@
    }
   }
  },
+ "reacher": {
+  "name": "reacher",
+  "status": "draft",
+  "model": "models/creatures/reacher.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -6,
+    0,
+    -3.5
+   ],
+   [
+    6,
+    30.5,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 12,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 8.9482,
+    "speed": 8.9482
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 25.2795,
+    "speed": 45.9627
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 7.2351,
+    "speed": 7.2351
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
  "reindeer": {
   "name": "reindeer",
   "status": "draft",
@@ -7751,6 +11026,304 @@
    "eat": {
     "loop": "loop",
     "length": 2
+   }
+  }
+ },
+ "sasquatch": {
+  "name": "sasquatch",
+  "status": "draft",
+  "model": "models/creatures/sasquatch.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -12.5,
+    0,
+    -5
+   ],
+   [
+    12.5,
+    36,
+    5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 13,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.15,
+    "stride": 10.1428,
+    "speed": 8.8199
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 24.0887,
+    "speed": 34.4124
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.15,
+    "stride": 8.2085,
+    "speed": 7.1378
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
+ "satyr": {
+  "name": "satyr",
+  "status": "draft",
+  "model": "models/creatures/satyr.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -8,
+    0,
+    -4
+   ],
+   [
+    8,
+    32,
+    5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 21,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.85,
+    "stride": 12,
+    "speed": 14.1176
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 27.5776,
+    "speed": 50.1411
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.85,
+    "stride": 9.7617,
+    "speed": 11.4843
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
    }
   }
  },
@@ -9281,6 +12854,468 @@
    }
   }
  },
+ "strangler": {
+  "name": "strangler",
+  "status": "draft",
+  "model": "models/creatures/strangler.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -11,
+    0,
+    -5
+   ],
+   [
+    11,
+    26,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 15,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.85,
+    "stride": 7.5115,
+    "speed": 8.8371
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 18.3851,
+    "speed": 33.4274
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.85,
+    "stride": 6.0971,
+    "speed": 7.1731
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
+ "troglodyte": {
+  "name": "troglodyte",
+  "status": "draft",
+  "model": "models/creatures/troglodyte.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -8,
+    0,
+    -4.5
+   ],
+   [
+    8,
+    27.5,
+    4.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 14,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.95,
+    "stride": 8.7674,
+    "speed": 9.2289
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 22.9813,
+    "speed": 41.7842
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.95,
+    "stride": 7.1021,
+    "speed": 7.4759
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
+ "troll": {
+  "name": "troll",
+  "status": "draft",
+  "model": "models/creatures/troll.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -12.5,
+    0,
+    -6
+   ],
+   [
+    12.5,
+    39,
+    5.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 18,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.15,
+    "stride": 10.9881,
+    "speed": 9.5548
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 26.0961,
+    "speed": 37.2801
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.15,
+    "stride": 8.8925,
+    "speed": 7.7326
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
  "voracious_cave_crawler": {
   "name": "voracious cave crawler",
   "status": "draft",
@@ -9909,6 +13944,160 @@
    "eat": {
     "loop": "loop",
     "length": 2.2
+   }
+  }
+ },
+ "yeti": {
+  "name": "yeti",
+  "status": "draft",
+  "model": "models/creatures/yeti.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -12.5,
+    0,
+    -5
+   ],
+   [
+    12.5,
+    36,
+    5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "alert",
+   "roar"
+  ],
+  "cubes": 13,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.15,
+    "stride": 10.1428,
+    "speed": 8.8199
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 24.0887,
+    "speed": 34.4124
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.15,
+    "stride": 8.2085,
+    "speed": 7.1378
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
    }
   }
  }

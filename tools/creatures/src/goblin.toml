@@ -1,0 +1,100 @@
+# DF GOBLIN (civ): 60 kg, "a medium-sized humanoid driven to cruelty by its evil
+# nature". Biped, shorter than a human (25 units) with long arms, a big head,
+# long ears and a hooked nose; green-grey skin, dark leathers. Attacks punch (the
+# template's `attack`), kick, scratch, bite, spit (optional, not made).
+name = "goblin"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [4, 8]
+body = [9, 9, 6]
+arm = [3, 11]
+head = [8, 7, 7]
+walk = { cycle = 0.8 }
+run = { cycle = 0.5 }
+
+# Head pivot: the neck; the head spans y 0..7, z -3.5..3.5.
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "head"
+from = [-1, 2, -5.5]
+to = [1, 4.5, -3.5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-7, 4, -0.5]
+to = [-4, 6, 1]
+
+# Torso pivot: the hips.
+[[cubes]]
+name = "belt"
+bone = "torso"
+part = "belt"
+from = [-5, 0, -3.5]
+to = [5, 1.5, 3.5]
+
+[[cubes]]
+name = "pauldron_l"
+bone = "arm_l"
+part = "armour"
+mirror = true
+from = [-2, -1.5, -2]
+to = [2, 2, 2]
+
+[palette]
+head = "#7a8f5a"
+hands = "#7a8f5a"
+torso = "#4a3a30"
+torso_up = "#56463a"
+arms = "#7a8f5a"
+legs = "#3a3230"
+feet = "#231c18"
+belt = "#6a4a2a"
+armour = "#5c5f66"
+eye = "#c8241a"
+mouth = "#2a1810"
+tooth = "#e8e0c0"
+
+# The head's front face is 8×7 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 2
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 5
+w = 4
+colour = "mouth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 5
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 5
+colour = "tooth"

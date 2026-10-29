@@ -1,0 +1,92 @@
+# DF GORLAK (underground): 50 kg, "a small, round humanoid ... Most of its body is
+# taken up by a huge tusked mouth." Body plan BODY_HEAD (head and body one part), so
+# the biped with a stub torso and an oversized round head that carries the face: a
+# mouth across most of it, two tusks. 21 units. Attack bite → the template's
+# `attack` (a punch-like lunge); punch, scratch, spit optional (not made). It is a
+# civilised cave folk, so the worker set (from the biped) applies.
+name = "gorlak"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [3, 4]
+foot = 1
+leg_inset = 0.5
+body = [10, 4, 8]
+arm = [2, 7]
+hand = 2
+head = [12, 12, 11]
+walk = { cycle = 0.6, swing = 32, bob = 0.6 }
+run = { cycle = 0.4 }
+
+# Head pivot: the neck; the head spans y 0..12, z -5.5..5.5.
+[[cubes]]
+name = "tusk_l"
+bone = "head"
+part = "tusk"
+mirror = true
+from = [-5, 1, -7]
+to = [-3.5, 5, -5.5]
+
+[[cubes]]
+name = "brow"
+bone = "head"
+part = "head"
+from = [-5, 9, -6.5]
+to = [5, 10.5, -5.5]
+
+[palette]
+head = "#8a7f62"
+head_up = "#9a8f72"
+hands = "#7a6f52"
+torso = "#7a6f52"
+arms = "#8a7f62"
+legs = "#7a6f52"
+feet = "#5a5038"
+tusk = "#ece2c4"
+eye = "#1c1610"
+mouth = "#3a1a1a"
+tongue = "#b0505a"
+tooth = "#e8e0c8"
+
+# The head's front face is 12×12 (row 0 at the top): little eyes under the brow,
+# the mouth from row 4 down.
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 8
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 4
+w = 10
+h = 7
+colour = "mouth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 4
+w = 10
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 9
+w = 6
+h = 2
+colour = "tongue"

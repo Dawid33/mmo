@@ -1,0 +1,100 @@
+# DF BLIZZARD_MAN (wild, tundra): 300 kg, "a large humanoid monster from the wild
+# tundra. It has translucent skin, icicles for teeth, red glowing eyes and pointed
+# ears." Biped, 38 units, gaunt and tall; pale ice-blue skin (no translucency:
+# opaque cubes), icicle fangs hanging from the jaw, a ridge of frost on the head.
+# LARGE_PREDATOR: alert + roar. Attack punch (the template's `attack`); kick,
+# scratch, bite optional (not made).
+name = "blizzard man"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [5, 15]
+foot = 2
+leg_inset = 1
+body = [13, 13, 7]
+arm = [4, 17]
+hand = 3
+head = [8, 9, 8]
+walk = { cycle = 1.1, swing = 26, bob = 0.5 }
+run = { cycle = 0.7, swing = 42 }
+
+# Head pivot: the neck; the head spans y 0..9, z -4..4.
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-6.5, 5, 0]
+to = [-4, 9, 1]
+
+[[cubes]]
+name = "frost"
+bone = "head"
+part = "ice"
+from = [-1.5, 9, -3]
+to = [1.5, 11, 4]
+
+[[cubes]]
+name = "icicle_l"
+bone = "head"
+part = "ice"
+mirror = true
+from = [-3, -2, -4.5]
+to = [-2, 2, -3.5]
+
+[[cubes]]
+name = "icicle_mid"
+bone = "head"
+part = "ice"
+from = [-0.5, -1, -4.5]
+to = [0.5, 2, -3.5]
+
+[[cubes]]
+name = "frost_shoulder_l"
+bone = "arm_l"
+part = "ice"
+mirror = true
+from = [-2.5, 0, -2.5]
+to = [2.5, 3, 2.5]
+
+[palette]
+head = "#bcd4e2"
+head_up = "#d4e6f0"
+hands = "#a8c4d6"
+torso = "#bcd4e2"
+torso_up = "#d4e6f0"
+torso_north = "#c8dcea"
+arms = "#bcd4e2"
+legs = "#a8c4d6"
+feet = "#8aa8bc"
+ice = "#eef8ff"
+eye = "#ff2a1a"
+mouth = "#3a5a7a"
+
+# The head's front face is 8×9 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 6
+w = 6
+h = 2
+colour = "mouth"

@@ -1,0 +1,119 @@
+# DF BEAK_DOG (domestic, goblin mount): 150 kg, "it resembles a squat, wingless bird
+# with powerful beak and legs. Its blotchy skin is brightly colored." The body plan
+# is HUMANOID_ARMLESS_NECK with a beak and tail, so the `bird` template (a horizontal
+# body on two legs) fits, not the biped: flier = false, wings shrunk to stubs
+# (the template always has them). A huge hooked beak, thick legs. LAYS_EGGS +
+# COMMON_DOMESTIC: brood. LARGE_PREDATOR: alert + roar; MOUNT: ridden. Attack bite
+# (the template's peck); scratch optional (not made).
+name = "beak dog"
+template = "bird"
+status = "draft"
+extras = ["alert", "roar", "ridden"]
+
+[proportions]
+body = [12, 11, 17]
+leg = [4, 9]
+foot = [6, 1, 6]
+head = [7, 7, 8]
+neck = 2
+head_back = 3
+beak = [5, 4, 6]
+tail = [5, 2, 5]
+tail_raise = 25
+wing = [2, 3]
+flier = false
+brood = true
+walk = { cycle = 0.85, swing = 26, bob = 0.6, nod = 1.5 }
+run = { cycle = 0.5, swing = 42 }
+
+# Head pivot: the neck. The beak's hooked tip.
+[[cubes]]
+name = "hook"
+bone = "head"
+part = "beak"
+from = [-2, 2.5, -10]
+to = [2, 4.5, -8]
+
+[palette]
+body = "#d8762a"
+body_up = "#e48a3a"
+body_down = "#b4602a"
+head = "#d8762a"
+wings = "#c46a28"
+tail = "#c46a28"
+legs = "#5e5a3e"
+beak = "#3e3a30"
+blotch = "#6a8a2a"
+blotch2 = "#a83a2a"
+eye = "#f0d020"
+
+# Blotches on the body's sides (17 long × 11 high; the front is on the left of
+# `west`, the right of `east`) and its back (12 × 17, row 0 at the front).
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 2
+w = 3
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 9
+y = 5
+w = 4
+h = 3
+colour = "blotch2"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 4
+y = 5
+w = 3
+h = 3
+colour = "blotch2"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 11
+y = 2
+w = 3
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 4
+w = 3
+h = 3
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 7
+y = 10
+w = 3
+h = 4
+colour = "blotch2"
+
+# The head's side faces are 8×7.
+[[decals]]
+cube = "head"
+face = "west"
+x = 2
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 5
+y = 2
+colour = "eye"

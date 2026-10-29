@@ -1,0 +1,83 @@
+# DF JABBERER (underground): 4500 kg, "a huge monster that lurks in caverns ... It
+# uses its wide beak to reach down and pluck up unsuspecting intruders." Body plan
+# HUMANOID_ARMLESS_NECK with a beak, so the `bird` template (flier = false, wings
+# shrunk to stubs): a heavy body on thick legs, a long neck and a broad flat beak.
+# Lays eggs, not domestic: no brood. LARGE_PREDATOR: alert + roar; MOUNT_EXOTIC:
+# ridden. Attack bite (the template's peck); scratch optional (not made).
+name = "jabberer"
+template = "bird"
+status = "draft"
+extras = ["alert", "roar", "ridden"]
+
+[proportions]
+body = [20, 18, 30]
+leg = [7, 18]
+foot = [12, 2, 12]
+head = [11, 10, 12]
+neck = 9
+head_back = 5
+beak = [14, 4, 14]
+tail = [10, 4, 9]
+tail_raise = 20
+wing = [3, 5]
+flier = false
+walk = { cycle = 1.4, swing = 22, bob = 1.0, nod = 2.5 }
+run = { cycle = 0.85, swing = 34 }
+
+[palette]
+body = "#5a6a66"
+body_up = "#4a5a56"
+body_down = "#8a948a"
+head = "#5a6a66"
+wings = "#4a5a56"
+tail = "#3e4c48"
+legs = "#6a5a48"
+beak = "#d6c48a"
+beak_down = "#b4a26a"
+eye = "#e8a020"
+stripe = "#2e3a36"
+
+# The head's side faces are 12×10 (front on the left of `west`, right of `east`).
+[[decals]]
+cube = "head"
+face = "west"
+x = 2
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 8
+y = 3
+w = 2
+colour = "eye"
+
+# Dark stripes across the back (20 × 30, row 0 at the front).
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 8
+w = 20
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 16
+w = 20
+h = 2
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 24
+w = 20
+h = 2
+colour = "stripe"

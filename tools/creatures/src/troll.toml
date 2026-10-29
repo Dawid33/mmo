@@ -1,0 +1,106 @@
+# DF TROLL (underground): 250 kg, "a huge humanoid monster with coarse fur, large
+# tusks and horns". Biped, 40 units (well over a human), stooping, long-armed; fur
+# over everything but the face and hands. LARGE_PREDATOR: alert + roar. Attack
+# punch (the template's `attack`); kick, scratch, bite, tusk/horn gore optional (not
+# made). Worker set from the biped (trolls are trained as war beasts; unused).
+name = "troll"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [6, 13]
+foot = 2
+leg_inset = 1
+body = [15, 14, 9]
+arm = [5, 18]
+hand = 4
+head = [10, 9, 9]
+walk = { cycle = 1.15, swing = 25, bob = 0.6 }
+run = { cycle = 0.7, swing = 42, bob = 1.4 }
+
+# Head pivot: the neck; the head spans y 0..9, z -4.5..4.5.
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horn"
+mirror = true
+from = [-6.5, 7, -1]
+to = [-4, 9, 1]
+
+[[cubes]]
+name = "horn_tip_l"
+bone = "head"
+part = "horn"
+mirror = true
+from = [-7.5, 9, -1]
+to = [-5.5, 12, 0.5]
+
+[[cubes]]
+name = "tusk_l"
+bone = "head"
+part = "tusk"
+mirror = true
+from = [-4, 1, -6]
+to = [-2.5, 4.5, -4.5]
+
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "face"
+from = [-2.5, 0.5, -5.5]
+to = [2.5, 4, -4.5]
+
+[[cubes]]
+name = "mane"
+bone = "torso"
+part = "fur"
+from = [-6, 11, 0]
+to = [6, 16, 5.5]
+
+[palette]
+head = "#6a5642"
+head_north = "#8a7460"
+face = "#8a7460"
+hands = "#7e6a58"
+torso = "#6a5642"
+torso_up = "#7a6650"
+arms = "#6a5642"
+legs = "#5e4c3a"
+feet = "#3e3226"
+fur = "#5a4836"
+horn = "#d6ccb0"
+tusk = "#ece4cc"
+eye = "#e0b030"
+nostril = "#2a1e16"
+
+# The head's front face is 10×9 (row 0 at the top); the snout's 5×3.5.
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 2
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 6
+y = 2
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+colour = "nostril"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 3
+y = 0
+colour = "nostril"

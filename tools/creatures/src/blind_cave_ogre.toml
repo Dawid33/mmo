@@ -1,0 +1,141 @@
+# DF BLIND_CAVE_OGRE (underground): 7000 kg, "a large cavern-dwelling humanoid
+# monster. It has a gaping mouth with many sharp teeth. It has no eyes and only two
+# digits on each hand and foot." Biped, 58 units (about twice a human): eyeless
+# head split by a huge toothed mouth, pale cave skin, two-digit hands. Slow gait.
+# LARGE_PREDATOR: alert + roar. Attack punch (the template's `attack`); kick, bite
+# optional (not made).
+name = "blind cave ogre"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [9, 20]
+foot = 3
+leg_inset = 1
+body = [22, 20, 13]
+arm = [7, 25]
+hand = 5
+head = [14, 14, 13]
+walk = { cycle = 1.5, swing = 22, bob = 1.0 }
+run = { cycle = 0.95, swing = 36, bob = 2.0 }
+
+# Two digits per hand, under the hand (arm pivot: the shoulder; the hand ends 21.5 below).
+[[cubes]]
+name = "digit_a_l"
+bone = "arm_l"
+part = "hands"
+mirror = true
+from = [-3.5, -24, -3.5]
+to = [-1, -21.5, 0]
+
+[[cubes]]
+name = "digit_b_l"
+bone = "arm_l"
+part = "hands"
+mirror = true
+from = [1, -24, -3.5]
+to = [3.5, -21.5, 0]
+
+[[cubes]]
+name = "loincloth"
+bone = "torso"
+part = "hide"
+from = [-11.5, -5, -7]
+to = [11.5, 2, 7]
+
+[palette]
+head = "#c4b2a4"
+head_up = "#d0c0b2"
+hands = "#b8ad9c"
+torso = "#c4b2a4"
+torso_north = "#d0c0b2"
+arms = "#c4b2a4"
+legs = "#bdb2a2"
+feet = "#9a8f80"
+hide = "#5a4a3a"
+mouth = "#3a1414"
+tooth = "#f0ead8"
+
+# The head's front face is 14×14: no eyes, a gaping mouth from row 5 down, teeth
+# along its upper and lower edges.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 5
+w = 12
+h = 8
+colour = "mouth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 5
+w = 12
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 12
+w = 12
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 6
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 11
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 6
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 6
+y = 11
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 8
+y = 6
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 9
+y = 11
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 11
+y = 6
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 12
+y = 11
+colour = "tooth"

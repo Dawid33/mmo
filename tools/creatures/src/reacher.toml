@@ -1,0 +1,71 @@
+# DF REACHER (underground): 70 kg, "a humanoid monster found lurking far
+# underground. It feigns death, usually near water ... It then uses its long arms
+# to drag its prey into the water." Biped, human height (30 units), gaunt, with arms
+# reaching nearly to the ground; wet grey-green skin, lank hair. Attack punch (the
+# template's `attack`, here a grab); kick, scratch, bite optional (not made).
+# Feigning death is the template's `death` (hold).
+name = "reacher"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [3, 11]
+foot = 1
+leg_inset = 0.5
+body = [8, 11, 5]
+arm = [2, 19]
+hand = 3
+head = [7, 8, 6]
+walk = { cycle = 1.0, swing = 24 }
+
+# Head pivot: the neck; the head spans y 0..8, z -3..3.
+[[cubes]]
+name = "hair"
+bone = "head"
+part = "hair"
+from = [-4, 5, -3.5]
+to = [4, 8.5, 3.5]
+
+[[cubes]]
+name = "hair_back"
+bone = "head"
+part = "hair"
+from = [-4, -2, 2]
+to = [4, 5, 3.5]
+
+[palette]
+head = "#8a9a86"
+hands = "#7a8a76"
+torso = "#8a9a86"
+torso_north = "#9aaa96"
+arms = "#8a9a86"
+legs = "#7a8a76"
+feet = "#5e6c5a"
+hair = "#2a302a"
+eye = "#e6ecd0"
+mouth = "#2a1a1a"
+
+# The head's front face is 7×8 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 4
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 4
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 6
+w = 3
+colour = "mouth"

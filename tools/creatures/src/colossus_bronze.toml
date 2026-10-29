@@ -1,0 +1,110 @@
+# DF COLOSSUS_BRONZE (megabeast): 20000 kg, "a gigantic magic statue made of bronze
+# and bent on mayhem". Biped, 84 units: a striding bronze statue with a crested
+# helmet, a kilt of plates and greaves; patina green on the downward faces.
+# NOT_LIVING / NO_EAT: it still gets the biped's eat/sleep and worker clips
+# (required by the template; never played). LARGE_PREDATOR: alert + roar. Attack
+# punch (the template's `attack`); kick optional (not made).
+name = "bronze colossus"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [12, 30]
+foot = 4
+leg_inset = 1.5
+body = [28, 28, 16]
+arm = [10, 34]
+hand = 7
+head = [14, 15, 14]
+walk = { cycle = 1.9, swing = 20, bob = 1.2 }
+run = { cycle = 1.2, swing = 32, bob = 2.4 }
+
+# Head pivot: the neck; the head spans y 0..15, z -7..7.
+[[cubes]]
+name = "helmet"
+bone = "head"
+part = "metal_dark"
+from = [-7.5, 10, -7.5]
+to = [7.5, 16, 7.5]
+
+[[cubes]]
+name = "crest"
+bone = "head"
+part = "metal"
+from = [-1.5, 16, -6]
+to = [1.5, 21, 9]
+
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "metal"
+from = [-1.5, 5, -8]
+to = [1.5, 9, -7]
+
+[[cubes]]
+name = "pauldron_l"
+bone = "arm_l"
+part = "metal_dark"
+mirror = true
+from = [-6, -6, -6]
+to = [6, 3, 6]
+
+# Torso pivot: the hips.
+[[cubes]]
+name = "kilt"
+bone = "torso"
+part = "metal_dark"
+from = [-15, -8, -9]
+to = [15, 3, 9]
+
+[[cubes]]
+name = "chest"
+bone = "torso"
+part = "metal"
+from = [-12, 14, -9]
+to = [12, 25, -8]
+
+[palette]
+head = "#c0883e"
+hands = "#c0883e"
+torso = "#c0883e"
+torso_up = "#d8a258"
+arms = "#c0883e"
+legs = "#b47c38"
+feet = "#8a5c2a"
+metal = "#c89250"
+metal_up = "#dcaa64"
+metal_dark = "#946230"
+metal_dark_up = "#ac7840"
+metal_dark_down = "#4f7a62"
+head_down = "#4f7a62"
+torso_down = "#4f7a62"
+arms_down = "#4f7a62"
+legs_down = "#4f7a62"
+eye = "#3a2410"
+
+# The head's front face is 14×15 (row 0 at the top); the helmet covers rows 0-4.
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 7
+w = 3
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 8
+y = 7
+w = 3
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 11
+w = 6
+colour = "eye"

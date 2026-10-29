@@ -1,0 +1,100 @@
+# DF GREMLIN (underground): 10 kg, "a small humanoid creature with a mischievous,
+# toothy grin". Biped, 15 units: a big head with bat ears and a wide grin of teeth,
+# skinny limbs. Attack punch (the template's `attack`); kick, scratch, bite, spit
+# optional (not made). The worker set comes with the biped (it does steal and
+# pull levers).
+name = "gremlin"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [2, 4]
+foot = 1
+leg_inset = 0.5
+body = [6, 5, 4]
+arm = [2, 6]
+hand = 2
+head = [7, 6, 6]
+walk = { cycle = 0.5, swing = 34 }
+run = { cycle = 0.32 }
+
+# Head pivot: the neck; the head spans y 0..6, z -3..3.
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-7, 3, 0]
+to = [-3.5, 7, 1]
+
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "head"
+from = [-1, 2.5, -4]
+to = [1, 4, -3]
+
+[palette]
+head = "#6d8a6a"
+head_up = "#7d9a78"
+hands = "#6d8a6a"
+torso = "#6d8a6a"
+torso_north = "#8aa486"
+arms = "#6d8a6a"
+legs = "#5d7a5a"
+feet = "#4a6046"
+ears = "#5d7a5a"
+ears_north = "#c08a8a"
+eye = "#f0e040"
+pupil = "#141010"
+mouth = "#2a1414"
+tooth = "#f2eedc"
+
+# The head's front face is 7×6 (row 0 at the top): big eyes, a grin of teeth.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+w = 2
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 2
+colour = "pupil"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 2
+colour = "pupil"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 4
+w = 7
+colour = "tooth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 5
+w = 5
+colour = "mouth"

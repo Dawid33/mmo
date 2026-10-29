@@ -1,0 +1,84 @@
+# DF TROGLODYTE (underground): 60 kg, "a savage man-like cave creature". Biped,
+# dwarf-to-human height (28 units) but stooped and heavy-browed, pale grey skin, a
+# hide loincloth, matted hair. LARGE_PREDATOR: alert + roar. Attack punch (the
+# template's `attack`); kick, scratch, bite optional (not made).
+name = "troglodyte"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [4, 10]
+foot = 1
+body = [10, 10, 6]
+arm = [3, 13]
+hand = 3
+head = [8, 7, 7]
+walk = { cycle = 0.95, swing = 26 }
+
+# Head pivot: the neck; the head spans y 0..7, z -3.5..3.5.
+[[cubes]]
+name = "brow"
+bone = "head"
+part = "head"
+from = [-4, 4, -4.5]
+to = [4, 5.5, -3.5]
+
+[[cubes]]
+name = "hair"
+bone = "head"
+part = "hair"
+from = [-4.5, 5.5, -3.5]
+to = [4.5, 7.5, 4.5]
+
+[[cubes]]
+name = "hair_back"
+bone = "head"
+part = "hair"
+from = [-4.5, -1, 3]
+to = [4.5, 5.5, 4.5]
+
+[[cubes]]
+name = "loincloth"
+bone = "torso"
+part = "hide"
+from = [-5.5, -3, -3.5]
+to = [5.5, 1.5, 3.5]
+
+[palette]
+head = "#b9a596"
+hands = "#b9a596"
+torso = "#b9a596"
+torso_north = "#c8b6a8"
+arms = "#b9a596"
+legs = "#b9a596"
+feet = "#8a7666"
+hair = "#3e3a32"
+hide = "#7a5a3a"
+eye = "#d8d0a0"
+mouth = "#3a2a24"
+
+# The head's front face is 8×7 (row 0 at the top); the brow covers rows 1.5-3.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 5
+w = 4
+colour = "mouth"

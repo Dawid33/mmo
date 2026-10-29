@@ -1,0 +1,97 @@
+# DF GIANT (semi-megabeast): 9000 kg, "a gigantic creature resembling a human,
+# almost unparalleled in size". Biped, 64 units (twice a human): human features,
+# long hair and beard, a fur tunic and belt. LARGE_PREDATOR: alert + roar;
+# CURIOUSBEAST: pick_up/carry come with the biped's worker set. Attack punch (the
+# template's `attack`); kick, scratch, bite, spit optional (not made).
+name = "giant"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [8, 24]
+foot = 3
+leg_inset = 1.5
+body = [20, 22, 12]
+arm = [6, 26]
+hand = 5
+head = [12, 14, 12]
+walk = { cycle = 1.6, swing = 22, bob = 1.0 }
+run = { cycle = 1.0, swing = 36, bob = 2.0 }
+
+# Head pivot: the neck; the head spans y 0..14, z -6..6.
+[[cubes]]
+name = "hair"
+bone = "head"
+part = "hair"
+from = [-6.5, 11, -6.5]
+to = [6.5, 15, 6.5]
+
+[[cubes]]
+name = "hair_back"
+bone = "head"
+part = "hair"
+from = [-6.5, -4, 4.5]
+to = [6.5, 11, 6.5]
+
+[[cubes]]
+name = "beard"
+bone = "head"
+part = "beard"
+from = [-5, -5, -7]
+to = [5, 5, -6]
+
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "head"
+from = [-1.5, 6, -7.5]
+to = [1.5, 9, -6]
+
+# Torso pivot: the hips.
+[[cubes]]
+name = "belt"
+bone = "torso"
+part = "belt"
+from = [-10.5, 0, -6.5]
+to = [10.5, 3, 6.5]
+
+[palette]
+head = "#d2a582"
+hands = "#d2a582"
+torso = "#7a6248"
+torso_up = "#8c7458"
+arms = "#d2a582"
+legs = "#5e4a36"
+feet = "#3a2a1c"
+hair = "#8a5a2a"
+beard = "#8a5a2a"
+belt = "#3a2a1c"
+buckle = "#a0a4aa"
+eye = "#1c2a40"
+
+# The head's front face is 12×14 (row 0 at the top); the beard covers rows 5 down.
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 5
+w = 3
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 7
+y = 5
+w = 3
+colour = "eye"
+
+[[decals]]
+cube = "belt"
+face = "north"
+x = 9
+y = 0
+w = 3
+h = 3
+colour = "buckle"

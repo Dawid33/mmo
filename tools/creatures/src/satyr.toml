@@ -1,0 +1,111 @@
+# DF SATYR (fantastic, good forests): 60 kg, "a medium-sized humanoid with the horns
+# and legs of a goat". Biped, human height (30 units): a bare torso, shaggy goat
+# legs ending in dark hooves, curled horns, a goatee, a short tail. Attack punch
+# (the template's `attack`); kick, gore, scratch, bite, spit optional (not made).
+# The worker set comes with the biped (they are a civilised folk).
+name = "satyr"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [4, 12]
+foot = 2
+body = [10, 10, 6]
+arm = [3, 12]
+head = [7, 8, 7]
+walk = { cycle = 0.85, swing = 30 }
+
+# Head pivot: the neck; the head spans y 0..8, z -3.5..3.5.
+[[cubes]]
+name = "hair"
+bone = "head"
+part = "hair"
+from = [-4, 6, -4]
+to = [4, 8.5, 4]
+
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horn"
+mirror = true
+from = [-3.5, 8, -2]
+to = [-1.5, 10, 1]
+
+[[cubes]]
+name = "horn_curl_l"
+bone = "head"
+part = "horn"
+mirror = true
+from = [-4, 7, 1]
+to = [-2, 10, 4]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-5.5, 4, 0]
+to = [-3.5, 5.5, 1.5]
+
+[[cubes]]
+name = "goatee"
+bone = "head"
+part = "hair"
+from = [-1.5, -2, -4]
+to = [1.5, 1.5, -3]
+
+# Leg pivots: the hips; shaggy fur on the thighs.
+[[cubes]]
+name = "thigh_l"
+bone = "leg_l"
+part = "legs"
+mirror = true
+from = [-2.5, -6, -2.5]
+to = [2.5, 0, 2.5]
+
+[[cubes]]
+name = "tail"
+bone = "torso"
+part = "hair"
+from = [-1, -1, 3]
+to = [1, 2, 5]
+
+[palette]
+head = "#d8aa86"
+hands = "#d8aa86"
+torso = "#d8aa86"
+torso_up = "#e2b892"
+arms = "#d8aa86"
+legs = "#7a5636"
+legs_up = "#8a6644"
+feet = "#2a2018"
+hair = "#5a3a22"
+horn = "#a8987a"
+horn_up = "#c0b292"
+eye = "#2a1c10"
+mouth = "#9a5a48"
+
+# The head's front face is 7×8 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 6
+w = 3
+colour = "mouth"

@@ -1,0 +1,85 @@
+# DF GNOME_MOUNTAIN (wild, good mountains): 15 kg, "A tiny, jolly humanoid creature that dwells in the fair mountains". Biped, 17 units to the hat's tip
+# (smaller than a dwarf): a red pointed hat, a rosy face, a blue coat and a white beard.
+# CURIOUSBEAST_GUZZLER (steals booze): pick_up/carry/drink come with the biped's
+# worker set. Attack punch (the template's `attack`); scratch, bite, spit optional
+# (not made).
+name = "mountain gnome"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [3, 5]
+foot = 1
+leg_inset = 0.5
+body = [7, 6, 5]
+arm = [2, 6]
+hand = 2
+head = [6, 6, 6]
+walk = { cycle = 0.6, swing = 32 }
+run = { cycle = 0.4 }
+
+# Head pivot: the neck; the head spans y 0..6, z -3..3. A pointed hat in three
+# stacked tiers, the tip leaning back.
+[[cubes]]
+name = "hat"
+bone = "head"
+part = "hat"
+from = [-3.5, 4.5, -3.5]
+to = [3.5, 7, 3.5]
+
+[[cubes]]
+name = "hat_mid"
+bone = "head"
+part = "hat"
+from = [-2.5, 7, -2]
+to = [2.5, 9, 3]
+
+[[cubes]]
+name = "hat_tip"
+bone = "head"
+part = "hat"
+from = [-1, 9, 0]
+to = [1, 11, 3]
+
+[[cubes]]
+name = "beard"
+bone = "head"
+part = "beard"
+from = [-2.5, -3, -3.5]
+to = [2.5, 2.5, -3]
+
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "nose"
+from = [-1, 2, -4.5]
+to = [1, 4, -3]
+
+[palette]
+head = "#e8b896"
+hands = "#e8b896"
+nose = "#e8b896"
+torso = "#3a5a9a"
+torso_up = "#4a6aaa"
+arms = "#3a5a9a"
+legs = "#5a4630"
+feet = "#3a2a1c"
+hat = "#c03028"
+hat_up = "#d84a3a"
+beard = "#eeeae0"
+eye = "#1a1a2a"
+
+# The head's front face is 6×6 (row 0 at the top); the hat covers rows 0-1.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 2
+colour = "eye"

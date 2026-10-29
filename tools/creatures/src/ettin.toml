@@ -1,0 +1,124 @@
+# DF ETTIN (semi-megabeast): 8000 kg, "a giant humanoid monster with two heads".
+# Biped, 58 units, broad-shouldered. The template's `head` cube is kept as a short,
+# wide neck stump; the two heads are extra bones on its ends, a gap between them (head_l / head_r,
+# follow = "head", mirrored, so every clip turns both, mirror-wise). LARGE_PREDATOR:
+# alert + roar; CURIOUSBEAST: pick_up/carry come with the worker set. Attack punch
+# (the template's `attack`); kick, scratch, bite, spit optional (not made).
+name = "ettin"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [9, 20]
+foot = 3
+leg_inset = 1
+body = [24, 20, 13]
+arm = [7, 24]
+hand = 5
+head = [18, 2, 8]
+walk = { cycle = 1.55, swing = 22, bob = 1.0 }
+run = { cycle = 1.0, swing = 36, bob = 2.0 }
+
+# Head pivot: the neck; the stump spans y 0..3. Each head sits on one end of it.
+[[bones]]
+name = "head_l"
+parent = "head"
+pivot = [-7, 2, 0]
+follow = "head"
+mirror = true
+
+[[cubes]]
+name = "skull_l"
+bone = "head_l"
+part = "skin"
+mirror = true
+from = [-4.5, 0, -4.5]
+to = [4.5, 11, 4.5]
+
+[[cubes]]
+name = "hair_l"
+bone = "head_l"
+part = "hair"
+mirror = true
+from = [-5, 9, -3.5]
+to = [5, 12, 5]
+
+[[cubes]]
+name = "nose_l"
+bone = "head_l"
+part = "skin"
+mirror = true
+from = [-1, 4, -5.5]
+to = [1, 7, -4.5]
+
+# Torso pivot: the hips.
+[[cubes]]
+name = "wrap"
+bone = "torso"
+part = "hide"
+from = [-12.5, -6, -7]
+to = [12.5, 3, 7]
+
+[palette]
+head = "#a88a6a"
+skin = "#a88a6a"
+hands = "#a88a6a"
+torso = "#a88a6a"
+torso_up = "#b49878"
+arms = "#a88a6a"
+legs = "#9a7c5e"
+feet = "#5a4430"
+hide = "#5e4834"
+hair = "#2c241c"
+eye = "#e0c040"
+mouth = "#4a2018"
+
+# Each skull's front face is 9×11 (row 0 at the top).
+[[decals]]
+cube = "skull_l"
+face = "north"
+x = 2
+y = 4
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "skull_l"
+face = "north"
+x = 5
+y = 4
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "skull_l"
+face = "north"
+x = 3
+y = 8
+w = 3
+colour = "mouth"
+
+[[decals]]
+cube = "skull_r"
+face = "north"
+x = 2
+y = 4
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "skull_r"
+face = "north"
+x = 5
+y = 4
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "skull_r"
+face = "north"
+x = 3
+y = 8
+w = 3
+colour = "mouth"

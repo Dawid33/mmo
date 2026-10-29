@@ -1,0 +1,90 @@
+# DF FAIRY (fantastic): 100 g, "A tiny, giggling humanoid with lacy wings". The brief calls it vermin (one move loop),
+# but it is a FLIER humanoid: biped + [wings] (the fly set), 8 units tall so the
+# blocky body still reads (lacy wings (opaque here, pale)). Attacks punch (the template's
+# `attack`), kick, scratch, bite optional (not made). The worker set comes with
+# the biped (never played).
+name = "fairy"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [1, 3]
+foot = 0
+leg_inset = 0.5
+body = [3, 3, 2]
+arm = [1, 3]
+hand = 0
+head = [3, 3, 3]
+walk = { cycle = 0.45, swing = 34 }
+run = { cycle = 0.3 }
+
+# Torso pivot: the hips. The wings' left root, at the shoulder blades.
+[wings]
+bone = "torso"
+at = [-0.5, 2.5, 1]
+span = 4
+chord = 3
+part = "wings"
+cycle = 0.2
+flap = 50
+
+# Head pivot: the neck; the head spans y 0..3, z -1.5..1.5.
+[[cubes]]
+name = "hair"
+bone = "head"
+part = "hair"
+from = [-1.75, 2.5, -1.75]
+to = [1.75, 3.5, 1.75]
+
+[palette]
+head = "#f2d2c0"
+hands = "#f2d2c0"
+torso = "#7ac87a"
+torso_up = "#8ad88a"
+arms = "#f2d2c0"
+legs = "#5aa05a"
+feet = "#3a7a3a"
+hair = "#f0d070"
+wings = "#eef2f8"
+wings_up = "#ffffff"
+eye = "#2a3a5a"
+
+# The head's front face is 3×3 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 1
+colour = "eye"
+
+# Lying down, the folded wings would hang through the ground: lay them flat
+# against the back instead (final angle [-90, 0, 0]; keys add to the fold
+# [90, ±90, 0]).
+
+[clips.lie]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [-180, -90, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [-180, 90, 0] },
+]
+
+[clips.sleep]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [-180, -90, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [-180, 90, 0] },
+]
+
+[clips.death]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [-180, -90, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [-180, 90, 0] },
+]

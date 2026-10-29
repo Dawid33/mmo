@@ -1,0 +1,95 @@
+# DF CRUNDLE (underground): 10 kg, "a tiny underground monster with large claws and
+# horns. It walks on two legs". Biped (the body plan is a humanoid's with a tail):
+# hunched, 15 units tall, big clawed hands, two head horns, a tail (extra bone, no
+# clip moves it). Attack scratch → the template's `attack` (a punch-like swipe);
+# punch, kick, bite optional (not made). The worker set comes with the biped.
+name = "crundle"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [3, 5]
+foot = 1
+leg_inset = 0.5
+body = [7, 6, 5]
+arm = [2, 6]
+hand = 3
+head = [6, 5, 6]
+walk = { cycle = 0.55, swing = 32 }
+run = { cycle = 0.35 }
+
+# Head pivot: the neck; the head spans y 0..5, z -3..3.
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horn"
+mirror = true
+from = [-3, 4, -1]
+to = [-2, 8, 0]
+
+[[cubes]]
+name = "jaw"
+bone = "head"
+part = "head"
+from = [-2.5, 0, -4]
+to = [2.5, 2, -3]
+
+# Claws: a wider hand block with a claw tip.
+[[cubes]]
+name = "claw_l"
+bone = "arm_l"
+part = "claw"
+mirror = true
+from = [-1, -6.5, -1]
+to = [1, -5, 0]
+
+[[bones]]
+name = "tail"
+parent = "torso"
+pivot = [0, 1, 2.5]
+rest = [10, 0, 0]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-1, -1, 0]
+to = [1, 1, 6]
+
+[palette]
+head = "#7d6f86"
+head_up = "#8d80a0"
+hands = "#6a5c74"
+torso = "#7d6f86"
+torso_north = "#a59bb0"
+arms = "#7d6f86"
+legs = "#6a5c74"
+feet = "#4a3e52"
+tail = "#6a5c74"
+horn = "#e3dcc2"
+claw = "#e3dcc2"
+eye = "#e8a020"
+mouth = "#2a1a20"
+
+# The head's front face is 6×5 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "jaw"
+face = "north"
+x = 1
+y = 0
+w = 3
+colour = "mouth"

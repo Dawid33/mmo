@@ -1,0 +1,77 @@
+# DF ELK_BIRD (underground): 100 kg, "a large creature found grazing on mushrooms
+# deep underground. It walks on two legs and has the head of a bird with the
+# antlers of a great elk." The body plan is HUMANOID_ARMLESS_NECK with a beak, so
+# the `bird` template (flier = false, wings shrunk to stubs): long legs, a long
+# neck, branching antlers. Eggs but not domestic: no brood. MOUNT_EXOTIC: ridden.
+# Attack bite (the template's peck); scratch optional (not made).
+name = "elk bird"
+template = "bird"
+status = "draft"
+extras = ["ridden"]
+
+[proportions]
+body = [9, 9, 14]
+leg = [3, 13]
+foot = [5, 1, 5]
+head = [5, 5, 6]
+neck = 6
+head_back = 2
+beak = [3, 2, 4]
+tail = [5, 2, 4]
+tail_raise = 30
+wing = [2, 3]
+flier = false
+walk = { cycle = 0.95, swing = 26, bob = 0.5, nod = 1.5 }
+run = { cycle = 0.55, swing = 40 }
+
+# Head pivot: the neck. Antlers: a beam up and out, a back tine, a front tine.
+[[cubes]]
+name = "antler_l"
+bone = "head"
+part = "antler"
+mirror = true
+from = [-6, 10, 0]
+to = [-1.5, 11, 1]
+
+[[cubes]]
+name = "antler_up_l"
+bone = "head"
+part = "antler"
+mirror = true
+from = [-7, 10, 0]
+to = [-6, 15, 1]
+
+[[cubes]]
+name = "antler_tine_l"
+bone = "head"
+part = "antler"
+mirror = true
+from = [-5, 11, 0]
+to = [-4, 13.5, 1]
+
+[palette]
+body = "#7d6a54"
+body_up = "#8d7862"
+body_down = "#a8987e"
+head = "#8d7862"
+wings = "#6e5c48"
+tail = "#5e4c3a"
+legs = "#4a4036"
+beak = "#c8b070"
+antler = "#e0d2b0"
+eye = "#121010"
+
+# The head's side faces are 6×5.
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 1
+colour = "eye"

@@ -1,0 +1,130 @@
+# DF STRANGLER (underground): 40 kg, "a large, four-armed ape creature with three
+# eyes and razor-sharp teeth". Biped, 26 units, apelike (short legs, long arms).
+# The second pair of arms are extra bones under the first (arm2_l / arm2_r), each
+# following its own side's arm (declared separately: `mirror` + `follow` on an
+# already-sided bone would flip the right arm's Y/Z swing). LARGE_PREDATOR: alert +
+# roar. Attack bite → the template's `attack`; scratch optional (not made).
+name = "strangler"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [4, 8]
+foot = 1
+body = [11, 11, 7]
+arm = [3, 14]
+hand = 3
+head = [7, 7, 7]
+walk = { cycle = 0.85, swing = 28 }
+
+# Torso pivot: the hips (y 0); the upper arms' shoulders are at y 9.5 (= 11 - 1.5),
+# x ±7. The lower pair hangs from y 6, outside them (x ±9.5).
+[[bones]]
+name = "arm2_l"
+parent = "torso"
+pivot = [-9.5, 6, -0.5]
+follow = "arm_l"
+
+[[bones]]
+name = "arm2_r"
+parent = "torso"
+pivot = [9.5, 6, -0.5]
+follow = "arm_r"
+
+[[cubes]]
+name = "arm2_l"
+bone = "arm2_l"
+part = "arms"
+from = [-1.5, -10, -1.5]
+to = [1.5, 1.5, 1.5]
+
+[[cubes]]
+name = "arm2_r"
+bone = "arm2_r"
+part = "arms"
+from = [-1.5, -10, -1.5]
+to = [1.5, 1.5, 1.5]
+
+[[cubes]]
+name = "hand2_l"
+bone = "arm2_l"
+part = "hands"
+from = [-1.5, -12.5, -1.5]
+to = [1.5, -10, 1.5]
+
+[[cubes]]
+name = "hand2_r"
+bone = "arm2_r"
+part = "hands"
+from = [-1.5, -12.5, -1.5]
+to = [1.5, -10, 1.5]
+
+# Head pivot: the neck; the head spans y 0..7, z -3.5..3.5.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "face"
+from = [-2.5, 0, -5]
+to = [2.5, 3, -3.5]
+
+[palette]
+head = "#5e4a3a"
+face = "#7a6252"
+hands = "#3a2c22"
+torso = "#5e4a3a"
+torso_north = "#5e4c3e"
+arms = "#5e4a3a"
+legs = "#523f32"
+feet = "#2a201a"
+eye = "#e04020"
+tooth = "#f0ead8"
+mouth = "#1a0e0a"
+
+# The head's front face is 7×7 (row 0 at the top): three eyes, one above two.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+# The muzzle's front face is 5×3: a mouth of fangs.
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 0
+y = 1
+w = 5
+h = 2
+colour = "mouth"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 0
+y = 1
+colour = "tooth"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 4
+y = 1
+colour = "tooth"

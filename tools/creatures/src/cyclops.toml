@@ -1,0 +1,107 @@
+# DF CYCLOPS (semi-megabeast): 8000 kg, "a giant humanoid monster with a single eye
+# set in its forehead". Biped, 60 units: one great eye, a shaggy head of hair, a
+# hide wrap over one shoulder. LARGE_PREDATOR: alert + roar. Attack punch (the
+# template's `attack`); kick, scratch, bite, spit optional (not made).
+name = "cyclops"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [9, 21]
+foot = 3
+leg_inset = 1
+body = [20, 20, 12]
+arm = [7, 24]
+hand = 5
+head = [13, 13, 12]
+walk = { cycle = 1.55, swing = 22, bob = 1.0 }
+run = { cycle = 1.0, swing = 36, bob = 2.0 }
+
+# Head pivot: the neck; the head spans y 0..13, z -6..6.
+[[cubes]]
+name = "hair"
+bone = "head"
+part = "hair"
+from = [-7, 11, -5]
+to = [7, 14, 7]
+
+[[cubes]]
+name = "hair_back"
+bone = "head"
+part = "hair"
+from = [-7, 2, 5]
+to = [7, 11, 7]
+
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "head"
+from = [-1.5, 4, -7]
+to = [1.5, 7, -6]
+
+# Torso pivot: the hips; a hide wrap.
+[[cubes]]
+name = "wrap"
+bone = "torso"
+part = "hide"
+from = [-10.5, -6, -6.5]
+to = [10.5, 4, 6.5]
+
+[[cubes]]
+name = "strap"
+bone = "torso"
+part = "hide"
+from = [-6, 4, -6.5]
+to = [-2, 20, 6.5]
+
+[palette]
+head = "#c89a74"
+hands = "#c89a74"
+torso = "#c89a74"
+torso_up = "#d4a882"
+arms = "#c89a74"
+legs = "#ba8c68"
+feet = "#5a4430"
+hide = "#7a5a38"
+hair = "#3a2a1a"
+eye_white = "#f2eee0"
+eye = "#2a4a7a"
+pupil = "#0e0c0a"
+mouth = "#5a2a20"
+
+# The head's front face is 13×13 (row 0 at the top): one eye in the forehead.
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 1
+w = 9
+h = 5
+colour = "eye_white"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 1
+w = 3
+h = 5
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 6
+y = 2
+h = 3
+colour = "pupil"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 9
+w = 5
+h = 2
+colour = "mouth"

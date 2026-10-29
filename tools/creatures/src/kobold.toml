@@ -1,0 +1,101 @@
+# DF KOBOLD (civ): 20 kg, "a small, squat humanoid with large pointy ears and
+# yellow glowing eyes"; lays eggs, so a lizard-like look: a snout, scaly ochre
+# skin and a tail (an extra bone, drooping; no clip moves it). 20 units tall.
+# Attacks punch (the template's `attack`), kick, scratch, bite, spit (not made).
+name = "kobold"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [3, 6]
+foot = 1
+leg_inset = 0.5
+body = [7, 7, 5]
+arm = [2, 7]
+hand = 2
+head = [6, 5, 5]
+walk = { cycle = 0.6, swing = 30 }
+run = { cycle = 0.4 }
+
+# Head pivot: the neck; the head spans y 0..5, z -2.5..2.5.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-2, 0.5, -5.5]
+to = [2, 3, -2.5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-5.5, 3, 0]
+to = [-3, 8.5, 1]
+
+[[cubes]]
+name = "loincloth"
+bone = "torso"
+part = "cloth"
+from = [-3.5, -1.5, -3]
+to = [3.5, 1, 3]
+
+# The tail: its own bone at the base of the back, drooping behind.
+[[bones]]
+name = "tail"
+parent = "torso"
+pivot = [0, 1, 2.5]
+rest = [8, 0, 0]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-1, -1, 0]
+to = [1, 1, 7]
+
+[palette]
+head = "#b5793a"
+head_down = "#d0a060"
+hands = "#b5793a"
+torso = "#b5793a"
+torso_north = "#c8955a"
+arms = "#b5793a"
+legs = "#a86d32"
+feet = "#7a4c22"
+ears = "#a86d32"
+tail = "#a86d32"
+cloth = "#6a4a30"
+eye = "#f2d22a"
+nostril = "#4a2a10"
+
+# The head's front face is 6×5; the snout's 4×2.5→3 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+colour = "nostril"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 2
+y = 0
+colour = "nostril"

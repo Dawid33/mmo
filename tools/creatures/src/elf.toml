@@ -1,0 +1,82 @@
+# DF ELF (civ): 60 kg, "dedicated to the ruthless protection of nature". Biped,
+# human height (31 units) but slender: narrower torso, thinner and longer limbs,
+# pointed ears, long hair. Attacks punch (the template's `attack`), kick, scratch,
+# bite, spit (optional, not made). Worker set from the biped.
+name = "elf"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [3, 12]
+leg_inset = 0.5
+body = [8, 11, 5]
+arm = [2, 13]
+hand = 2
+head = [6, 8, 6]
+
+# Head pivot: the neck; the head spans y 0..8, z -3..3.
+[[cubes]]
+name = "hair"
+bone = "head"
+part = "hair"
+from = [-3.5, 6, -3.5]
+to = [3.5, 9, 3.5]
+
+[[cubes]]
+name = "hair_back"
+bone = "head"
+part = "hair"
+from = [-3.5, -3, 2]
+to = [3.5, 6, 3.5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-4.5, 4, -0.5]
+to = [-3, 8, 0.5]
+
+# Torso pivot: the hips. A sash at the waist.
+[[cubes]]
+name = "belt"
+bone = "torso"
+part = "belt"
+from = [-4.5, 0, -3]
+to = [4.5, 1, 3]
+
+[palette]
+head = "#ecc9a8"
+hands = "#ecc9a8"
+torso = "#4f7a3a"
+torso_up = "#5c8a45"
+arms = "#4f7a3a"
+legs = "#8a7350"
+feet = "#5a4630"
+hair = "#d8c070"
+belt = "#7a3e2a"
+eye = "#2a5a3a"
+mouth = "#b07868"
+
+# The head's front face is 6×8 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 6
+w = 2
+colour = "mouth"
