@@ -1,0 +1,117 @@
+# DF ALLIGATOR SNAPPING TURTLE (creature_riverlakepool_new): 80 kg, a huge freshwater
+# turtle with a thick ridged shell and a hooked beak. A big shell cube over a low
+# soft body on stubby splayed legs, a heavy head on a short neck, three keels down
+# the shell, a ridged tail. Attack bite (the template's `attack`).
+# AMPHIBIOUS: swim + swim_idle. Death rolls onto its side lifted by the shell's
+# half-width (merged root position), not the body's.
+name = "alligator snapping turtle"
+template = "quadruped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+body = [10, 4, 14]
+leg = [3, 3]
+leg_inset = -1.5
+leg_ends = 1
+head = [7, 5, 6]
+head_up = 0
+head_overlap = 0
+tail = [2, 8]
+tail_raise = -12
+walk = { cycle = 1.3, swing = 20, bob = 0.2 }
+run = { cycle = 0.85, swing = 28, bob = 0.3, pitch = 2 }
+idle = { length = 6.0, look = 14, breath = 0.1, wag = 3 }
+attack = { length = 0.45, lunge = 3 }
+eat = { length = 1.8, reach = 18, forward = 2 }
+
+# Body pivot: its centre (y 5); the body spans y -2..2, z -7..7.
+[[cubes]]
+name = "shell"
+bone = "body"
+part = "shell"
+from = [-7, -1, -9]
+to = [7, 3, 9]
+
+[[cubes]]
+name = "dome"
+bone = "body"
+part = "shell"
+from = [-5.5, 3, -7]
+to = [5.5, 5, 7.5]
+
+[[cubes]]
+name = "keel"
+bone = "body"
+part = "keel"
+from = [-1, 5, -7]
+to = [1, 6.5, 7.5]
+
+[[cubes]]
+name = "keel_l"
+bone = "body"
+part = "keel"
+mirror = true
+from = [-4.5, 5, -5]
+to = [-3, 6, 6]
+
+# Head pivot: the neck joint; the head cube spans y -4..1, z -6..0 around it.
+[[cubes]]
+name = "beak"
+bone = "head"
+part = "beak"
+from = [-2, -3, -7.5]
+to = [2, 0.5, -6]
+
+[[cubes]]
+name = "tail_ridge"
+bone = "tail"
+part = "keel"
+from = [-0.5, 1, 0]
+to = [0.5, 2, 7]
+
+[palette]
+fur = "#5d5a45"
+fur_down = "#9a9070"
+legs = "#575440"
+head = "#615d48"
+head_down = "#8c8466"
+tail = "#575440"
+shell = "#504c38"
+shell_up = "#5e5a42"
+shell_down = "#7a7458"
+keel = "#3b3a2a"
+beak = "#3e3b2c"
+eye = "#c9b46a"
+pupil = "#14120c"
+mouth = "#2a281e"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 3
+w = 7
+colour = "mouth"
+
+[clips.death]
+merge = true
+keys = [
+  { bone = "root", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "root", channel = "position", time = 0.6, value = [0, 7, 0] },
+  { bone = "root", channel = "position", time = 1.0, value = [0, 7, 0] },
+]

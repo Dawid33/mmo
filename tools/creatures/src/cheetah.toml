@@ -1,0 +1,87 @@
+# DF CHEETAH (creature_large_tropical): 50 kg, the fastest spotted cat.
+# Slim deep-chested body on long legs, small round head with black tear marks, a
+# long hanging tail with dark rings at the tip. Fast long-swing run.
+# Attacks bite (the template's `attack`); scratch optional, not made.
+# LARGE_PREDATOR: alert + roar.
+name = "cheetah"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar"]
+
+decals = [
+  { cube = "head", face = "north", x = 0, y = 1, colour = "eye" },
+  { cube = "head", face = "north", x = 3, y = 1, colour = "eye" },
+  { cube = "head", face = "north", x = 0, y = 2, h = 2, colour = "spot" },
+  { cube = "head", face = "north", x = 3, y = 2, h = 2, colour = "spot" },
+  { cube = "snout", face = "north", x = 0, y = 0, w = 2, colour = "nose" },
+  { cube = "body", face = "up", x = 1, y = 1, colour = "spot" },
+  { cube = "body", face = "up", x = 3, y = 3, colour = "spot" },
+  { cube = "body", face = "up", x = 0, y = 5, colour = "spot" },
+  { cube = "body", face = "up", x = 2, y = 7, colour = "spot" },
+  { cube = "body", face = "up", x = 4, y = 9, colour = "spot" },
+  { cube = "body", face = "up", x = 1, y = 11, colour = "spot" },
+  { cube = "body", face = "up", x = 3, y = 13, colour = "spot" },
+  { cube = "body", face = "west", x = 1, y = 1, colour = "spot" },
+  { cube = "body", face = "west", x = 4, y = 3, colour = "spot" },
+  { cube = "body", face = "west", x = 7, y = 1, colour = "spot" },
+  { cube = "body", face = "west", x = 10, y = 2, colour = "spot" },
+  { cube = "body", face = "west", x = 12, y = 0, colour = "spot" },
+  { cube = "body", face = "east", x = 12, y = 1, colour = "spot" },
+  { cube = "body", face = "east", x = 9, y = 3, colour = "spot" },
+  { cube = "body", face = "east", x = 6, y = 1, colour = "spot" },
+  { cube = "body", face = "east", x = 3, y = 2, colour = "spot" },
+  { cube = "body", face = "east", x = 1, y = 0, colour = "spot" },
+  { cube = "tail", face = "up", x = 0, y = 8, colour = "spot" },
+  { cube = "tail", face = "up", x = 0, y = 10, colour = "spot" },
+]
+
+[proportions]
+body = [5, 5, 14]
+leg = [2, 8]
+leg_ends = 1
+head = [4, 4, 3]
+head_up = 2
+head_overlap = 1
+tail = [1, 12]
+tail_raise = -15
+walk = { cycle = 0.85, swing = 28, bob = 0.25 }
+run = { cycle = 0.36, swing = 62, bob = 1.0, pitch = 9 }
+idle = { length = 4.5, look = 22, breath = 0.12, wag = 8 }
+attack = { length = 0.55, lunge = 4 }
+eat = { length = 1.6, reach = 55, forward = 2 }
+
+# Head pivot: the neck joint; the head cube spans y -1..3, z -2..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1, -1, -3]
+to = [1, 0.5, -2]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2, 3, 0]
+to = [-1, 4, 1]
+
+# The deep chest under the front half (body pivot: its centre; underside at y -2.5).
+[[cubes]]
+name = "chest"
+bone = "body"
+part = "fur"
+from = [-2, -3.5, -6]
+to = [2, -2.5, -1]
+
+[palette]
+fur = "#d6a654"
+fur_down = "#efe0bf"
+legs = "#d0a050"
+head = "#d6a654"
+snout = "#efe0bf"
+ears = "#c49448"
+tail = "#d6a654"
+spot = "#2a2018"
+eye = "#b88a30"
+nose = "#2a2018"

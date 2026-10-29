@@ -1,0 +1,67 @@
+# DF SQUIRREL_FLYING (vermin, creature_small_mammal_new): 0.2 kg, a nocturnal
+# gliding rodent. It has a giant, so the full quadruped rig at small size: soft
+# grey body, white belly, big dark eyes, a gliding membrane (flat cubes along the
+# flanks between the legs) and a flat tail. Attack bite (the template's `attack`).
+# No glide clip: the template has no fly set for quadrupeds.
+name = "flying squirrel"
+template = "quadruped"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+]
+
+[proportions]
+body = [2, 1.5, 3]
+leg = [0.5, 1.5]
+leg_ends = 0
+head = [2, 1.5, 1.5]
+head_up = 0.5
+head_overlap = 0
+tail = [0.5, 4]
+tail_raise = 15
+walk = { cycle = 0.3, swing = 32, bob = 0.12 }
+run = { cycle = 0.2, swing = 48, bob = 0.35, pitch = 6 }
+idle = { length = 3.5, look = 30, breath = 0.05, wag = 6 }
+attack = { length = 0.3, lunge = 0.8 }
+eat = { length = 1.0, reach = 35, forward = 0.4 }
+
+# Head pivot: the neck joint; the head cube spans y 0..1.5, z -1.5..0 around it.
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-1, 1.5, -0.5]
+to = [-0.5, 2, 0]
+
+# The membrane along each flank (body pivot: its centre; flanks at x ±1, the body
+# spans y -0.75..0.75, z -1.5..1.5).
+[[cubes]]
+name = "membrane_l"
+bone = "body"
+part = "membrane"
+mirror = true
+from = [-1.75, -0.75, -1.25]
+to = [-1, -0.25, 1.25]
+
+[[cubes]]
+name = "tail_flat"
+bone = "tail"
+part = "tail"
+from = [-0.75, -0.25, 0.5]
+to = [0.75, 0.25, 3.5]
+
+[palette]
+fur = "#8e8880"
+fur_up = "#7e7870"
+fur_down = "#ece8e0"
+legs = "#7a746c"
+head = "#948e86"
+head_down = "#ece8e0"
+ears = "#7a746c"
+membrane = "#857f77"
+membrane_down = "#ddd8d0"
+tail = "#857f77"
+eye = "#0c0a0a"

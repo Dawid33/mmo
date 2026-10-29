@@ -1,0 +1,79 @@
+# DF AARDVARK (creature_tropical_new): 50 kg, a nocturnal burrowing insect-eater.
+# Arched grey-pink body, long tube snout, tall rabbit-like ears, a thick tapering tail
+# held low. Attacks bite (the template's `attack`) and scratch (optional, not made).
+name = "aardvark"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [7, 7, 13]
+leg = [3, 5]
+leg_ends = 1
+head = [4, 4, 4]
+head_up = -1
+head_overlap = 1
+tail = [3, 10]
+tail_raise = -12
+walk = { cycle = 0.85, swing = 28, bob = 0.3 }
+run = { cycle = 0.5, swing = 42, bob = 0.6, pitch = 5 }
+idle = { length = 4.5, look = 16, breath = 0.15, wag = 5 }
+attack = { length = 0.6, lunge = 2.5 }
+eat = { length = 1.6, reach = 40, forward = 1.5 }
+
+# Head pivot: the neck joint; the head cube spans y -4..0, z -3..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1, -4, -9]
+to = [1, -2, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2, 0, -0.5]
+to = [-1, 4.5, 1]
+
+# A raised rump (body pivot: its centre; the body spans y -3.5..3.5, z -6.5..6.5).
+[[cubes]]
+name = "rump"
+bone = "body"
+part = "fur"
+from = [-3, 3.5, 0]
+to = [3, 4.5, 6]
+
+[palette]
+fur = "#a58e7e"
+fur_up = "#9a8373"
+fur_down = "#c2ab9a"
+legs = "#7e6a5c"
+head = "#a58e7e"
+snout = "#b89f8e"
+ears = "#a58e7e"
+tail = "#a58e7e"
+eye = "#1a1210"
+nose = "#d7a59a"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 0
+y = 0
+w = 2
+colour = "nose"

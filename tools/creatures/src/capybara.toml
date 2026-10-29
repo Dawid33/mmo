@@ -1,0 +1,47 @@
+# DF CAPYBARA (creature_large_temperate): 45 kg, the semi-aquatic herd rodent.
+# Barrel body, blunt square head with eyes and ears high, no visible tail, reddish
+# brown. Attacks bite (the template's `attack`). AMPHIBIOUS: swim + swim_idle.
+name = "capybara"
+template = "quadruped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+decals = [
+  { cube = "head", face = "west", x = 2, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 3, y = 0, colour = "eye" },
+  { cube = "head", face = "north", x = 1, y = 3, w = 3, colour = "nose" },
+]
+
+[proportions]
+body = [8, 7, 14]
+leg = [2, 4]
+leg_ends = 1
+head = [5, 5, 6]
+head_up = 1
+head_overlap = 1
+tail = [1, 0]
+walk = { cycle = 0.85, swing = 26, bob = 0.3 }
+run = { cycle = 0.5, swing = 40, bob = 0.8, pitch = 5 }
+idle = { length = 5.0, look = 14, breath = 0.15, wag = 0 }
+attack = { length = 0.55, lunge = 2.5 }
+eat = { length = 1.6, reach = 35, forward = 1.5 }
+
+# Head pivot: the neck joint; the head cube spans y -3..2, z -5..1 around it.
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 2, 0]
+to = [-1.5, 3, 1]
+
+[palette]
+fur = "#8a6040"
+fur_up = "#7e573a"
+fur_down = "#a07a58"
+legs = "#6e4c32"
+head = "#86603f"
+ears = "#5a3f2a"
+tail = "#8a6040"
+eye = "#16100c"
+nose = "#2c201a"

@@ -1,0 +1,88 @@
+# DF SNAPPING TURTLE (creature_riverlakepool_new): 30 kg, the common snapper.
+# A low, smoothish olive shell over a low body on stubby splayed legs, a big
+# pointed head on a short neck, a long saw-ridged tail. Smaller than the alligator
+# snapping turtle and without its three keels. Attack bite (the template's `attack`).
+# AMPHIBIOUS: swim + swim_idle. Death rolls onto its side lifted by the shell's
+# half-width (merged root position).
+name = "common snapping turtle"
+template = "quadruped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+decals = [
+  { cube = "head", face = "west", x = 1, y = 1, colour = "eye" },
+  { cube = "head", face = "east", x = 3, y = 1, colour = "eye" },
+  { cube = "head", face = "north", x = 0, y = 2, w = 5, colour = "mouth" },
+  { cube = "dome", face = "up", x = 2, y = 2, w = 4, h = 2, colour = "scute" },
+  { cube = "dome", face = "up", x = 2, y = 5, w = 4, h = 2, colour = "scute" },
+  { cube = "dome", face = "up", x = 2, y = 8, w = 4, h = 2, colour = "scute" },
+]
+
+[proportions]
+body = [8, 3, 11]
+leg = [2, 3]
+leg_inset = -1
+leg_ends = 1
+head = [5, 4, 5]
+head_up = 0
+head_overlap = 0
+tail = [2, 9]
+tail_raise = -10
+walk = { cycle = 1.1, swing = 22, bob = 0.15 }
+run = { cycle = 0.7, swing = 30, bob = 0.25, pitch = 2 }
+idle = { length = 6.0, look = 18, breath = 0.08, wag = 3 }
+attack = { length = 0.4, lunge = 3 }
+eat = { length = 1.6, reach = 20, forward = 1.5 }
+
+# Body pivot: its centre (y 4.5); the body spans y -1.5..1.5, z -5.5..5.5.
+[[cubes]]
+name = "shell"
+bone = "body"
+part = "shell"
+from = [-5.5, -0.5, -7]
+to = [5.5, 2, 7]
+
+[[cubes]]
+name = "dome"
+bone = "body"
+part = "shell"
+from = [-4, 2, -5.5]
+to = [4, 3.5, 6]
+
+# Head pivot: the neck joint; the head cube spans y -3..1, z -5..0 around it.
+[[cubes]]
+name = "beak"
+bone = "head"
+part = "beak"
+from = [-1, -2, -6]
+to = [1, 0, -5]
+
+[[cubes]]
+name = "tail_ridge"
+bone = "tail"
+part = "scute"
+from = [-0.5, 1, 0]
+to = [0.5, 1.75, 8]
+
+[palette]
+fur = "#62604a"
+fur_down = "#a59c72"
+legs = "#5a5842"
+head = "#666248"
+head_down = "#a59c72"
+tail = "#5a5842"
+shell = "#57513a"
+shell_up = "#625b42"
+shell_down = "#b0a476"
+scute = "#463f2c"
+beak = "#3e3b2c"
+eye = "#c0a050"
+mouth = "#2a281e"
+
+[clips.death]
+merge = true
+keys = [
+  { bone = "root", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "root", channel = "position", time = 0.6, value = [0, 5.5, 0] },
+  { bone = "root", channel = "position", time = 1.0, value = [0, 5.5, 0] },
+]

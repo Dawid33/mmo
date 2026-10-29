@@ -1,0 +1,65 @@
+# DF CHAMELEON (vermin, creature_reptiles): 0.15 kg, a slow tree lizard with roving
+# eyes and a long tongue. It has a giant, so the full quadruped rig at small size: a
+# tall, narrow body on long thin legs, a casqued head with turret eyes, a tail that
+# hangs and curls at the tip; slow deliberate walk. Attack bite (the template's
+# `attack`). The tongue and colour change are not modelled.
+name = "chameleon"
+template = "quadruped"
+status = "draft"
+
+decals = [
+  { cube = "eye_l", face = "west", x = 0, y = 0, colour = "pupil" },
+  { cube = "eye_r", face = "east", x = 0, y = 0, colour = "pupil" },
+  { cube = "body", face = "west", x = 0, y = 1, w = 3, colour = "stripe" },
+  { cube = "body", face = "east", x = 0, y = 1, w = 3, colour = "stripe" },
+]
+
+[proportions]
+body = [1.5, 2.5, 3]
+leg = [0.5, 2]
+leg_ends = 0
+head = [1.5, 2, 2]
+head_up = 0.5
+head_overlap = 0
+tail = [0.5, 4]
+tail_raise = -35
+walk = { cycle = 0.9, swing = 22, bob = 0.05 }
+run = { cycle = 0.5, swing = 32, bob = 0.1, pitch = 2 }
+idle = { length = 6.0, look = 25, breath = 0.04, wag = 0 }
+attack = { length = 0.4, lunge = 0.8 }
+eat = { length = 1.4, reach = 15, forward = 0.4 }
+
+# Head pivot: the neck joint; the head cube spans y -0.5..1.5, z -2..0 around it.
+[[cubes]]
+name = "casque"
+bone = "head"
+part = "head"
+from = [-0.5, 1.5, -1]
+to = [0.5, 2.25, 0.5]
+
+[[cubes]]
+name = "eye_l"
+bone = "head"
+part = "eyes"
+mirror = true
+from = [-1.25, 0.25, -1.5]
+to = [-0.75, 1, -0.75]
+
+# The curled tip (tail pivot: the rump's top; the tail runs along +z to 3).
+[[cubes]]
+name = "curl"
+bone = "tail"
+part = "tail"
+from = [-0.25, -1.25, 2.5]
+to = [0.25, -0.25, 3]
+
+[palette]
+fur = "#4cae4c"
+fur_up = "#3e9a40"
+fur_down = "#b8dc80"
+legs = "#44a044"
+head = "#52b452"
+tail = "#44a044"
+eyes = "#5cbc58"
+stripe = "#e8d860"
+pupil = "#141a10"

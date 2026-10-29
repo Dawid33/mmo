@@ -1,0 +1,65 @@
+# DF HAMSTER (vermin, creature_small_mammal_new): 0.15 kg, a tiny burrowing rodent
+# kept as a pet. It has a giant, so the full quadruped rig at small size: a round
+# golden body with a white belly, puffy cheek pouches, small round ears, stubby
+# legs, no visible tail. Attack bite (the template's `attack`).
+name = "hamster"
+template = "quadruped"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  { cube = "snout", face = "north", x = 0, y = 0, colour = "nose" },
+]
+
+[proportions]
+body = [3, 2, 3.5]
+leg = [0.5, 1]
+leg_ends = 0
+head = [2, 2, 1.5]
+head_up = 0.5
+head_overlap = 0
+tail = [1, 0]
+tail_raise = 0
+walk = { cycle = 0.28, swing = 30, bob = 0.12 }
+run = { cycle = 0.18, swing = 45, bob = 0.3, pitch = 4 }
+idle = { length = 3.0, look = 30, breath = 0.06, wag = 0 }
+attack = { length = 0.3, lunge = 0.8 }
+eat = { length = 1.0, reach = 30, forward = 0.4 }
+
+# Head pivot: the neck joint; the head cube spans y -0.5..1.5, z -1.5..0 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "cheeks"
+from = [-0.5, -0.5, -2]
+to = [0.5, 0.25, -1.5]
+
+[[cubes]]
+name = "cheek_l"
+bone = "head"
+part = "cheeks"
+mirror = true
+from = [-1.25, -0.5, -1.25]
+to = [-1, 0.25, -0.25]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-1, 1.5, -0.5]
+to = [-0.5, 2, 0]
+
+[palette]
+fur = "#d4954a"
+fur_up = "#c8883e"
+fur_down = "#f2ead8"
+legs = "#f0dcc8"
+head = "#d4954a"
+cheeks = "#e8c08a"
+cheeks_down = "#f2ead8"
+ears = "#e0a6a0"
+tail = "#d4954a"
+eye = "#0c0808"
+nose = "#d88a90"

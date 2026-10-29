@@ -1,0 +1,116 @@
+# DF TOAD (vermin, creature_amphibians): 0.2 kg, a squat warty amphibian of dry
+# places. It has a giant, so the full quadruped rig at small size: a squat brown
+# body on short splayed front legs, folded hind legs (thigh cubes on the hind leg
+# bones), a wide flat head with bulging eyes and parotoid glands, warts as decals,
+# no tail. Walk is the stock crawl (toads walk); run is a hop. Attack bite (the
+# template's `attack`). AMPHIBIOUS: swim + swim_idle.
+name = "toad"
+template = "quadruped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+decals = [
+  { cube = "eye_l", face = "west", x = 0, y = 0, colour = "pupil" },
+  { cube = "eye_r", face = "east", x = 0, y = 0, colour = "pupil" },
+  { cube = "body", face = "up", x = 0, y = 0, colour = "wart" },
+  { cube = "body", face = "up", x = 2, y = 1, colour = "wart" },
+  { cube = "body", face = "up", x = 1, y = 2, colour = "wart" },
+  { cube = "body", face = "west", x = 1, y = 0, colour = "wart" },
+  { cube = "body", face = "east", x = 1, y = 0, colour = "wart" },
+]
+
+[proportions]
+body = [3, 2, 3]
+leg = [0.5, 1]
+leg_inset = -0.5
+leg_ends = 0
+head = [3, 1, 1.5]
+head_up = 0
+head_overlap = 0.5
+tail = [1, 0]
+tail_raise = 0
+walk = { cycle = 0.6, swing = 25, bob = 0.08 }
+run = { cycle = 0.4, swing = 35, bob = 0.2, pitch = 4 }
+idle = { length = 5.0, look = 10, breath = 0.15, wag = 0 }
+attack = { length = 0.3, lunge = 1 }
+eat = { length = 1.0, reach = 12, forward = 0.3 }
+
+# Head pivot: the neck joint; the head cube spans y 0..1, z -1..0.5 around it.
+[[cubes]]
+name = "eye_l"
+bone = "head"
+part = "eyes"
+mirror = true
+from = [-1.5, 1, -0.75]
+to = [-0.75, 1.5, 0]
+
+# Parotoid glands behind the eyes.
+[[cubes]]
+name = "gland_l"
+bone = "head"
+part = "gland"
+mirror = true
+from = [-1.5, 1, 0]
+to = [-0.75, 1.5, 1]
+
+# Hind thighs folded along the flanks (hind leg pivots: the hip, y 1 above the
+# ground; the leg spans x ±0.25).
+[[cubes]]
+name = "thigh_l"
+bone = "leg_bl"
+part = "legs"
+from = [-0.75, -1, -2]
+to = [0.25, -0.25, 0.5]
+
+[[cubes]]
+name = "thigh_r"
+bone = "leg_br"
+part = "legs"
+from = [-0.25, -1, -2]
+to = [0.75, -0.25, 0.5]
+
+[palette]
+fur = "#8a6a44"
+fur_up = "#7e603c"
+fur_down = "#d8c8a4"
+legs = "#806240"
+head = "#8a6a44"
+head_down = "#d8c8a4"
+tail = "#8a6a44"
+eyes = "#c8a040"
+gland = "#a07c50"
+wart = "#5a4228"
+pupil = "#141010"
+
+# A hop: crouch, kick back with the hind legs while the body springs up and
+# forward-tilted, land on the front legs, settle.
+[clips.run]
+mode = "loop"
+length = 0.4
+keys = [
+  { bone = "body", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.05, value = [0, -0.2, 0] },
+  { bone = "body", channel = "position", time = 0.18, value = [0, 2, 0] },
+  { bone = "body", channel = "position", time = 0.32, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.4, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.18, value = [20, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.32, value = [-6, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.14, value = [-75, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.32, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.14, value = [-75, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.32, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.18, value = [50, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.32, value = [10, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.18, value = [50, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.32, value = [10, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+]

@@ -1,0 +1,134 @@
+# DF GREEN_TREE_FROG (vermin, creature_temperate_new): 0.1 kg, a tiny tree frog. It
+# has a giant, so the full quadruped rig at small size: a squat bright-green body
+# on short splayed front legs, long folded hind legs (thigh cubes on the hind leg
+# bones), a wide flat head with bulging gold eyes, a pale side stripe, no tail.
+# Walk and run are replaced by hops (the stock trot reads wrong on a frog). Attack
+# bite (the template's `attack`). AMPHIBIOUS: swim + swim_idle (a slowed hop).
+name = "green tree frog"
+template = "quadruped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+decals = [
+  { cube = "eye_l", face = "west", x = 0, y = 0, colour = "pupil" },
+  { cube = "eye_r", face = "east", x = 0, y = 0, colour = "pupil" },
+  { cube = "body", face = "west", x = 0, y = 0, w = 3, colour = "stripe" },
+  { cube = "body", face = "east", x = 0, y = 0, w = 3, colour = "stripe" },
+]
+
+[proportions]
+body = [2.5, 1.5, 3]
+leg = [0.5, 1]
+leg_inset = -0.5
+leg_ends = 0
+head = [2.5, 1, 1.5]
+head_up = 0
+head_overlap = 0.5
+tail = [1, 0]
+tail_raise = 0
+walk = { cycle = 0.5, swing = 25, bob = 0.1 }
+run = { cycle = 0.35, swing = 35, bob = 0.2, pitch = 4 }
+idle = { length = 4.0, look = 12, breath = 0.12, wag = 0 }
+attack = { length = 0.3, lunge = 1 }
+eat = { length = 1.0, reach = 12, forward = 0.3 }
+
+# Head pivot: the neck joint; the head cube spans y 0..1, z -1..0.5 around it.
+[[cubes]]
+name = "eye_l"
+bone = "head"
+part = "eyes"
+mirror = true
+from = [-1.25, 1, -0.75]
+to = [-0.5, 1.5, 0]
+
+# Hind thighs folded along the flanks (hind leg pivots: the hip, y 1 above the
+# ground; the leg spans x ±0.25).
+[[cubes]]
+name = "thigh_l"
+bone = "leg_bl"
+part = "legs"
+from = [-0.75, -1, -2]
+to = [0.25, -0.25, 0.5]
+
+[[cubes]]
+name = "thigh_r"
+bone = "leg_br"
+part = "legs"
+from = [-0.25, -1, -2]
+to = [0.75, -0.25, 0.5]
+
+[palette]
+fur = "#5cbf3c"
+fur_up = "#58b838"
+fur_down = "#ece8c8"
+legs = "#54b036"
+head = "#5cbf3c"
+head_down = "#ece8c8"
+tail = "#5cbf3c"
+eyes = "#d8b840"
+stripe = "#f2eccc"
+pupil = "#141410"
+
+# A hop: crouch, kick back with the hind legs while the body springs up and
+# forward-tilted, land on the front legs, settle.
+[clips.walk]
+mode = "loop"
+length = 0.6
+keys = [
+  { bone = "body", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.1, value = [0, -0.2, 0] },
+  { bone = "body", channel = "position", time = 0.25, value = [0, 1.2, 0] },
+  { bone = "body", channel = "position", time = 0.4, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.6, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.25, value = [15, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.4, value = [-5, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.2, value = [-60, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.2, value = [-60, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.25, value = [40, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.4, value = [10, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.25, value = [40, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.4, value = [10, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+]
+
+[clips.run]
+mode = "loop"
+length = 0.4
+keys = [
+  { bone = "body", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.05, value = [0, -0.2, 0] },
+  { bone = "body", channel = "position", time = 0.18, value = [0, 2, 0] },
+  { bone = "body", channel = "position", time = 0.32, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.4, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.18, value = [20, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.32, value = [-6, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.14, value = [-75, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.32, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.14, value = [-75, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.32, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.18, value = [50, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.32, value = [10, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.18, value = [50, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.32, value = [10, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+]

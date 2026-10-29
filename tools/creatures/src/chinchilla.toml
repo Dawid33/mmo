@@ -1,0 +1,47 @@
+# DF CHINCHILLA (creature_mountain_new): 0.5 kg, a tiny soft-furred rock rodent.
+# Round grey body, big round ears, a bushy tail held up. Attacks bite (the
+# template's `attack`); scratch optional, not made.
+name = "chinchilla"
+template = "quadruped"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 1, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 1, colour = "eye" },
+  { cube = "head", face = "north", x = 1, y = 2, colour = "nose" },
+]
+
+[proportions]
+body = [3, 3, 4]
+leg = [1, 2]
+leg_ends = 0
+head = [3, 3, 2]
+head_up = 1
+head_overlap = 0
+tail = [1.5, 4]
+tail_raise = 50
+walk = { cycle = 0.3, swing = 30, bob = 0.15 }
+run = { cycle = 0.2, swing = 45, bob = 0.4, pitch = 5 }
+idle = { length = 3.0, look = 25, breath = 0.06, wag = 4 }
+attack = { length = 0.35, lunge = 1 }
+eat = { length = 1.0, reach = 30, forward = 0.5 }
+
+# Head pivot: the neck joint; the head cube spans y -1..2, z -2..0 around it.
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2, 1.5, -0.5]
+to = [-0.5, 3.5, 0]
+
+[palette]
+fur = "#9c9c98"
+fur_up = "#8e8e8a"
+fur_down = "#eceae4"
+legs = "#d8d6d0"
+head = "#a4a4a0"
+ears = "#c9a9a4"
+tail = "#8a8a86"
+eye = "#0e0e0e"
+nose = "#d6a6a0"

@@ -1,0 +1,69 @@
+# DF CHIPMUNK (vermin, creature_small_mammals): 0.3 kg, a tiny striped forest
+# rodent. It has a giant, so the full quadruped rig at small size: orange-brown
+# body with a dark back stripe and pale side stripes, small round ears, a short
+# upright tail. Attack bite (the template's `attack`).
+name = "chipmunk"
+template = "quadruped"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  { cube = "head", face = "west", x = 0, y = 1, w = 2, colour = "pale" },
+  { cube = "head", face = "east", x = 0, y = 1, w = 2, colour = "pale" },
+  { cube = "snout", face = "north", x = 0, y = 0, colour = "nose" },
+  { cube = "body", face = "west", x = 0, y = 0, w = 3, colour = "pale" },
+  { cube = "body", face = "east", x = 0, y = 0, w = 3, colour = "pale" },
+]
+
+[proportions]
+body = [2, 2, 3]
+leg = [0.5, 1]
+leg_ends = 0
+head = [2, 2, 1.5]
+head_up = 1
+head_overlap = 0
+tail = [1, 3]
+tail_raise = 60
+walk = { cycle = 0.28, swing = 32, bob = 0.15 }
+run = { cycle = 0.18, swing = 48, bob = 0.4, pitch = 6 }
+idle = { length = 3.0, look = 30, breath = 0.05, wag = 10 }
+attack = { length = 0.3, lunge = 0.8 }
+eat = { length = 1.0, reach = 35, forward = 0.4 }
+
+# Head pivot: the neck joint; the head cube spans y 0..2, z -1.5..0 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-0.5, 0, -2]
+to = [0.5, 0.75, -1.5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-1, 2, -0.5]
+to = [-0.5, 2.5, 0]
+
+# The dark back stripe (body pivot: its centre, top at y 1).
+[[cubes]]
+name = "stripe"
+bone = "body"
+part = "stripe"
+from = [-0.25, 1, -1.5]
+to = [0.25, 1.25, 1.5]
+
+[palette]
+fur = "#b4783e"
+fur_up = "#a06a36"
+fur_down = "#ead8bc"
+legs = "#a06a36"
+head = "#b4783e"
+ears = "#8a5a2e"
+tail = "#7a5434"
+stripe = "#3a281a"
+pale = "#ecdcc0"
+eye = "#100c08"
+nose = "#3a281e"
