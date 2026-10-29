@@ -1,0 +1,116 @@
+# DF CHIMPANZEE (wild, tropical forests): 50 kg, a large, intelligent and
+# sometimes ferocious ape. Biped template (the raws call it a quadruped with
+# grasping forelimbs; standing it reads as an ape): short legs, long arms, big
+# ears, a pale bare face under a heavy brow. A small forward lean of the torso
+# is merged into idle and walk. Attacks bite (mapped to the template's
+# `attack`, a swing of the arm) and scratch (optional, not made). Not SAVAGE:
+# the biped worker clips are harmless.
+name = "chimpanzee"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [4, 7]
+foot = 1.5
+leg_inset = 1
+body = [10, 10, 6]
+arm = [3, 13]
+hand = 3
+head = [6, 6, 6]
+walk = { cycle = 0.85, swing = 28, bob = 0.4 }
+run = { cycle = 0.5, swing = 46, bob = 1.0, lean = 18 }
+
+# Head pivot: the neck; the head spans y 0..6, z -3..3.
+[[cubes]]
+name = "brow"
+bone = "head"
+part = "fur"
+from = [-3, 3.5, -3.5]
+to = [3, 4.5, -3]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "face"
+from = [-2, 0, -4.5]
+to = [2, 2.5, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "face"
+mirror = true
+from = [-4.5, 2, -0.5]
+to = [-3, 4.5, 1]
+
+[clips.idle]
+merge = true
+keys = [
+  { bone = "torso", channel = "rotation", time = 0, value = [-8, 0, 0] },
+  { bone = "torso", channel = "rotation", time = 4, value = [-8, 0, 0] },
+]
+
+[clips.walk]
+merge = true
+keys = [
+  { bone = "torso", channel = "rotation", time = 0, value = [-12, 0, 0] },
+  { bone = "torso", channel = "rotation", time = 0.85, value = [-12, 0, 0] },
+]
+
+[palette]
+head = "#2c2420"
+head_up = "#342b26"
+fur = "#2c2420"
+fur_up = "#342b26"
+face = "#c8a58a"
+hands = "#6a5444"
+torso = "#2c2420"
+torso_up = "#342b26"
+torso_down = "#3a302a"
+arms = "#2c2420"
+legs = "#2c2420"
+feet = "#6a5444"
+eye = "#3a2214"
+nostril = "#5a4030"
+mouth = "#5a3a30"
+
+# The head's front face is 6×6 (row 0 at the top): the brow covers rows 1-2,
+# the bare face under it; the muzzle's 4×2.5.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+w = 4
+h = 5
+colour = "face"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 0
+w = 2
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 0
+y = 2
+w = 4
+colour = "mouth"

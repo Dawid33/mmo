@@ -1,0 +1,117 @@
+# DF GIBBON_SIAMANG (wild, tropical forests): 12 kg, a medium tree ape known
+# for its loud calls: the largest gibbon, shaggy black all over, with a bare
+# grey-pink throat sac under the chin. Biped template, the bilou's gibbon body
+# scaled up a step (see gibbon_bilou.toml: upright walk with the arms raised,
+# long arms, short legs). Attacks bite (mapped to the template's `attack`, a
+# swing of the arm) and scratch (optional, not made). Not SAVAGE: the biped
+# worker clips are harmless. The sac is not inflated in any clip (no call clip).
+name = "siamang"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [3, 6]
+foot = 1
+leg_inset = 0
+body = [6, 7, 4]
+arm = [3, 12]
+hand = 2
+head = [5, 5, 4]
+walk = { cycle = 0.6, swing = 30, bob = 0.3 }
+run = { cycle = 0.4, swing = 46, bob = 0.7, lean = 10 }
+idle = { length = 3.5, look = 30, breath = 0.1 }
+
+# Head pivot: the neck; the head spans y 0..5, z -2..2.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "face"
+from = [-1.5, 0.5, -2.5]
+to = [1.5, 1.5, -2]
+
+[[cubes]]
+name = "brow"
+bone = "head"
+part = "brow"
+from = [-2.5, 3.5, -2.5]
+to = [2.5, 4, -2]
+
+# The throat sac, hanging under the chin in front of the neck.
+[[cubes]]
+name = "sac"
+bone = "head"
+part = "sac"
+from = [-1.5, -1.5, -2.5]
+to = [1.5, 0.5, -0.5]
+
+# Arms up and out for balance (left arm: -z rotation raises it outward; the
+# right arm mirrors), with a little sway in time with the stride.
+[clips.walk]
+merge = true
+keys = [
+  { bone = "arm_l", channel = "rotation", time = 0, value = [0, 0, -115] },
+  { bone = "arm_l", channel = "rotation", time = 0.3, value = [0, 0, -105] },
+  { bone = "arm_l", channel = "rotation", time = 0.6, value = [0, 0, -115] },
+  { bone = "arm_r", channel = "rotation", time = 0, value = [0, 0, 105] },
+  { bone = "arm_r", channel = "rotation", time = 0.3, value = [0, 0, 115] },
+  { bone = "arm_r", channel = "rotation", time = 0.6, value = [0, 0, 105] },
+]
+
+[clips.run]
+merge = true
+keys = [
+  { bone = "arm_l", channel = "rotation", time = 0, value = [-10, 0, -125] },
+  { bone = "arm_l", channel = "rotation", time = 0.2, value = [-10, 0, -110] },
+  { bone = "arm_l", channel = "rotation", time = 0.4, value = [-10, 0, -125] },
+  { bone = "arm_r", channel = "rotation", time = 0, value = [-10, 0, 110] },
+  { bone = "arm_r", channel = "rotation", time = 0.2, value = [-10, 0, 125] },
+  { bone = "arm_r", channel = "rotation", time = 0.4, value = [-10, 0, 110] },
+]
+
+[palette]
+head = "#2c2826"
+head_up = "#363230"
+torso = "#2c2826"
+torso_up = "#363230"
+torso_down = "#322e2c"
+arms = "#2c2826"
+legs = "#2c2826"
+hands = "#201c1b"
+feet = "#201c1b"
+face = "#121010"
+brow = "#2c2826"
+eye = "#6a4424"
+mouth = "#0a0909"
+sac = "#a8928a"
+
+# The head's front face is 5×5 (row 0 at the top): eyes on row 2 under the brow.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+w = 5
+h = 4
+colour = "face"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 0
+y = 0
+w = 3
+colour = "mouth"

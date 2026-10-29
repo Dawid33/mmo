@@ -1,0 +1,124 @@
+# DF ORANGUTAN (wild, tropical forests): 80 kg, a huge, intelligent, bright
+# red tree ape. Biped template (the raws call it a quadruped with grasping
+# forelimbs; standing it reads as an ape): short legs, a pot belly, arms so
+# long the hands almost reach the ground, shaggy red hair hanging from the
+# arms, and a male's broad cheek flanges around a dark face. A forward lean of
+# the torso is merged into idle and walk. Attacks bite (mapped to the
+# template's `attack`, a swing of the arm) and scratch (optional, not made).
+# Not SAVAGE: the biped worker clips are harmless.
+name = "orangutan"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [5, 7]
+foot = 1.5
+leg_inset = 1
+body = [12, 11, 8]
+arm = [4, 16]
+hand = 3
+head = [7, 7, 6]
+walk = { cycle = 1.0, swing = 22, bob = 0.5 }
+run = { cycle = 0.62, swing = 38, bob = 1.0, lean = 18 }
+
+# Head pivot: the neck; the head spans y 0..7, z -3..3.
+[[cubes]]
+name = "flange_l"
+bone = "head"
+part = "face"
+mirror = true
+from = [-6, 1, -3.5]
+to = [-3.5, 6, -2.5]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "face"
+from = [-2, 0, -4]
+to = [2, 2.5, -3]
+
+# Torso pivot: the hips; the torso spans y 0..11 above it. A pot belly.
+[[cubes]]
+name = "belly"
+bone = "torso"
+part = "torso"
+from = [-5, 1, -5]
+to = [5, 7, -4]
+
+# Shaggy hair hanging from the back of each arm (arm pivot: the shoulder).
+[[cubes]]
+name = "shag_l"
+bone = "arm_l"
+part = "arms"
+mirror = true
+from = [-2, -11, 2]
+to = [2, -1, 3]
+
+[clips.idle]
+merge = true
+keys = [
+  { bone = "torso", channel = "rotation", time = 0, value = [-8, 0, 0] },
+  { bone = "torso", channel = "rotation", time = 4, value = [-8, 0, 0] },
+]
+
+[clips.walk]
+merge = true
+keys = [
+  { bone = "torso", channel = "rotation", time = 0, value = [-12, 0, 0] },
+  { bone = "torso", channel = "rotation", time = 1.0, value = [-12, 0, 0] },
+]
+
+[palette]
+head = "#b04a1c"
+head_up = "#c05a24"
+face = "#3a2a24"
+hands = "#4a3428"
+torso = "#a8441a"
+torso_up = "#b85020"
+torso_down = "#8a3814"
+arms = "#b04a1c"
+legs = "#a8441a"
+feet = "#4a3428"
+eye = "#1a120c"
+nostril = "#120c08"
+mouth = "#22160f"
+
+# The head's front face is 7×7 (row 0 at the top): a dark face, eyes at row 2.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+w = 5
+h = 6
+colour = "face"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 0
+w = 2
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 0
+y = 2
+w = 4
+colour = "mouth"
