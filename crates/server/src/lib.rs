@@ -370,6 +370,20 @@ pub fn run() {
         lod_result_recv,
     );
 
+    // The world map is the forged artifact's rasters summarised per region
+    // tile — no region is generated; procedural worlds have none.
+    if let Some(world) = worldgen::forged::active() {
+        let built = std::time::Instant::now();
+        let map = worldgen::tile_map::build_world_map(world);
+        info!(
+            "[server] world map: {}x{} tiles in {} ms",
+            map.width,
+            map.height,
+            built.elapsed().as_millis()
+        );
+        manager.set_world_map(map);
+    }
+
     let start = std::time::Instant::now();
     let mut report = perf::ServerReport::new();
     'main: loop {

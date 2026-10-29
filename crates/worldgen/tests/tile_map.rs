@@ -257,3 +257,21 @@ fn play_blocker_rules() {
     assert_eq!(play_blocker(&map, b, Some(b)), Some("You are here"));
     assert_eq!(play_blocker(&map, RegionCoords::new(9, 9), None), Some("No dry land"));
 }
+
+/// The shipped default world summarises into a non-empty map with landings.
+/// Skipped when `worlds/default.world` has not been forged yet.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn default_world_map_builds() {
+    let path = worldgen::forged::from_repo_root(std::path::Path::new("worlds/default.world"));
+    if !path.exists() {
+        println!("{} missing: skipping", path.display());
+        return;
+    }
+    let world = ForgedWorld::load(&path).expect("load default world");
+    let started = std::time::Instant::now();
+    let map = build_world_map(&world);
+    println!("{}x{} tiles in {} ms", map.width, map.height, started.elapsed().as_millis());
+    assert!(map.width > 0 && map.height > 0);
+    assert!(map.tiles.iter().any(|t| t.landing.is_some()), "no tile has a landing");
+}
