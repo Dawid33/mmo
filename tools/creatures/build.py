@@ -319,7 +319,10 @@ def animal_person(src):
         neckless = {"bones": base["bones"], "cubes": [c for c in base["cubes"] if c[0] != "neck"]}
         model["cubes"] += graft(neckless, heads, "head", anchor, k)
 
-    tail_cubes = [c for c in base["cubes"] if c[1] in subtree_of(base, "tail")] if "tail" in base_bones else []
+    # The base's tail: `tail`, or the root of a segmented one (a scorpion's tail1, tail2…).
+    tail_root = next((n for n, (parent, _, _) in base_bones.items()
+                      if re.fullmatch(r"tail\d*", n) and not re.fullmatch(r"tail\d*", parent or "")), None)
+    tail_cubes = [c for c in base["cubes"] if c[1] in subtree_of(base, tail_root)] if tail_root else []
     if tail_cubes and not legless:
         lw, ll = params["leg"]
         bd = params["body"][2]
@@ -327,10 +330,10 @@ def animal_person(src):
         model["bones"].append(("tail", "body", tail_pivot, [45, 0, 0]))
         pivots["tail"] = tail_pivot
         # The tail unrotated, from its root, at the head's scale (but never huge).
-        _, bp, _ = base_bones["tail"]
-        flat = {"bones": [(n, p, pv, [0, 0, 0] if n == "tail" else r) for n, p, pv, r in base["bones"]],
+        _, bp, _ = base_bones[tail_root]
+        flat = {"bones": [(n, p, pv, [0, 0, 0] if n == tail_root else r) for n, p, pv, r in base["bones"]],
                 "cubes": base["cubes"]}
-        model["cubes"] += graft(flat, subtree_of(flat, "tail"), "tail", bp, min(k, 1.5))
+        model["cubes"] += graft(flat, subtree_of(flat, tail_root), "tail", bp, min(k, 1.5))
         # Droop it (at most 45°) only as far as keeps a long tail off the ground.
         for droop in range(45, -50, -5):
             model["bones"][-1] = ("tail", "body", tail_pivot, [droop, 0, 0])
