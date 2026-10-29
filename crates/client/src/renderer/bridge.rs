@@ -372,7 +372,7 @@ pub struct PendingBlockDeltas(pub(crate) Vec<game::BlockDelta>);
 pub struct SnapshotVoxelTask(Task<Vec<DerivedChunk>>);
 
 /// A chunk entity, the blocks its bricks were derived from, and the bricks.
-type DerivedChunk = (Entity, game::Chunk, Vec<([u8; 3], VoxelData)>);
+type DerivedChunk = (Entity, game::Chunk, super::bricks::DerivedBricks);
 
 /// Derived voxels waiting for their per-frame insert budget.
 #[derive(Resource, Default)]
@@ -461,11 +461,10 @@ pub fn apply_snapshot_voxels(
             break;
         };
         let task = pool.spawn(async move {
-            let bricks = |chunk: &game::Chunk| -> Vec<([u8; 3], VoxelData)> {
-                super::bricks::spawn_chunk_bricks(chunk)
-                    .into_iter()
-                    .map(|(local, voxels)| (local, voxels.with_boundary_zones()))
-                    .collect()
+            let bricks = |chunk: &game::Chunk| {
+                let mut derived = super::bricks::derive_chunk_bricks(chunk);
+                derived.spawn = derived.spawn.into_iter().map(|(l, v)| (l, v.with_boundary_zones())).collect();
+                derived
             };
             match chunks {
                 BatchChunks::Snapshot(data, items) => items
@@ -505,13 +504,17 @@ pub fn apply_snapshot_voxels(
         }
         // A chunk's bricks land together; edits that arrived while they were
         // derived are newer and go on top (`land_chunk_bricks`).
-        let count = bricks.len();
+        let count = bricks.spawn.len();
         commands.queue(move |world: &mut World| {
             if world.get::<PendingSnapshotVoxels>(entity).is_some() {
                 super::bricks::land_chunk_bricks(world, entity, chunk, bricks);
             }
         });
         queue.applied += count as u32;
+        // TODO(chunk flip): a whole chunk lands in one frame, so at 16³
+        // chunks one landing can be ~488 bricks against
+        // MAX_SNAPSHOT_VOXELS_PER_FRAME (160). Splitting a landing across
+        // frames is Task 11's call.
         budget = budget.saturating_sub(count.max(1));
     }
     if queue.applied > 0 && queue.ready.is_empty() && queue.batches.is_empty() && outstanding == 0 {
@@ -613,6 +616,7 @@ pub fn drain_client_updates(
                 // Unmapped now, despawned over the next frames.
                 if let Some(root) = unmap_region(&mut regions, &mut roots, &mut map, id) {
                     retired_roots.0.push_back((id, root));
+                    commands.queue(move |world: &mut World| super::bricks::prune_region_skipped(world, id));
                 }
                 debug_lines.0.remove(&id);
                 info!("bridge: region {:?} removed", id);
@@ -666,6 +670,7 @@ fn remove_region(
     if let Some(root) = unmap_region(regions, roots, map, id) {
         // despawn() removes descendants via ChildOf relationships (Bevy 0.16+).
         commands.entity(root).despawn();
+        commands.queue(move |world: &mut World| super::bricks::prune_region_skipped(world, id));
     }
 }
 
@@ -802,17 +807,22 @@ pub fn drain_region_updates(
                         Visibility::default(),
                         SimTarget::body(tf.translation, tf.rotation),
                         PendingSnapshotVoxels,
-                        super::bricks::ChunkBricks::default(),
                         ChildOf(root),
                     );
                     // A runtime chunk (`spawn_chunk_safe`) already sent its
                     // `CreateEntity`: adopt that entity instead of spawning a
                     // second one, so undo's `RemoveEntity` despawns it.
+                    // `ChunkBricks` only if absent: an already-landed entity
+                    // keeps its list until the new bricks replace it
+                    // (`land_chunk_bricks`), so no brick is orphaned.
                     let e = if let Some(&existing) = map.0.get(&(region, key)) {
-                        commands.entity(existing).insert(bundle);
+                        commands
+                            .entity(existing)
+                            .insert(bundle)
+                            .insert_if_new(super::bricks::ChunkBricks::default());
                         existing
                     } else {
-                        let e = commands.spawn(bundle).id();
+                        let e = commands.spawn((bundle, super::bricks::ChunkBricks::default())).id();
                         map.0.insert((region, key), e);
                         e
                     };
@@ -1636,6 +1646,36 @@ mod tests {
         for br in bricks {
             assert!(app.world().get_entity(br).is_err(), "brick despawned");
         }
+    }
+
+    /// `AddTerrainChunk` again for a chunk whose bricks already landed: the
+    /// old bricks stay listed until the new ones replace them — none orphaned.
+    #[test]
+    fn re_added_chunk_replaces_its_bricks_without_orphans() {
+        let (mut app, _client, updates, region_id) = test_app();
+        app.update();
+        let k = key(23);
+        let add = |chunk: game::Chunk| {
+            GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::AddTerrainChunk(k, game::Pose::identity(), Box::new(chunk)),
+            )
+        };
+        updates.send(add(game::Chunk::flat_floor(8))).unwrap();
+        app.update();
+        let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).expect("chunk mapped");
+        assert!(wait_for(&mut app, |app| !bricks_of(app, e).is_empty()), "bricks never landed");
+        let old = bricks_of(&app, e);
+        let stone = game::Chunk::uniform(game::Block::new(game::BlockId(2)));
+        updates.send(add(stone.clone())).unwrap();
+        let want = VoxelData::new(stone.brick([0; 3]).voxels());
+        assert!(wait_for(&mut app, |app| brick_voxels(app, e, [0; 3]).as_ref() == Some(&want)), "re-add never landed");
+        for b in old {
+            assert!(app.world().get_entity(b).is_err(), "old brick orphaned");
+        }
+        let mut owned = app.world_mut().query::<&crate::renderer::bricks::BrickOf>();
+        let count = owned.iter(app.world()).filter(|o| o.chunk == e).count();
+        assert_eq!(count, bricks_of(&app, e).len(), "every brick of the chunk is listed");
     }
 
     /// A terrain chunk is never interpolated, so a new pose snaps it — and

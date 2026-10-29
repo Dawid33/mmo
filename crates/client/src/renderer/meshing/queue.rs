@@ -181,6 +181,7 @@ pub fn spawn_mesh_tasks(
     camera: Query<(&GlobalTransform, Option<&Frustum>), With<Camera3d>>,
     layers: Res<BlockTextureLayers>,
     render_config: Option<Res<super::super::config::TerrainRenderConfig>>,
+    skipped: Option<Res<super::super::bricks::SkippedBricks>>,
 ) {
     if queue.dirty.is_empty() {
         return;
@@ -220,6 +221,9 @@ pub fn spawn_mesh_tasks(
                     if let Ok(nv) = chunks.get(ne) {
                         owned_neighbors.push((off, nv.clone()));
                     }
+                } else if let Some((_, nv)) = skipped.as_ref().and_then(|s| s.0.get(&nk)) {
+                    // A buried brick its chunk never spawned: solid, not air.
+                    owned_neighbors.push((off, nv.clone()));
                 }
             }
         }

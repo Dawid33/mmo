@@ -85,6 +85,16 @@ fn brick_linear(b: [usize; 3]) -> usize {
     b[0] + n * (b[1] + n * b[2])
 }
 
+/// A chunk's bricks, split by what the client does with them.
+#[derive(Default, Debug)]
+pub struct DerivedBricks {
+    /// Spawned as brick entities.
+    pub spawn: Vec<([u8; 3], VoxelData)>,
+    /// Buried inside the chunk: no entity, but recorded in [`SkippedBricks`]
+    /// so their neighbours read them as the solid they are.
+    pub buried: Vec<([u8; 3], VoxelData)>,
+}
+
 /// The render bricks of `chunk`: every brick that is neither all air nor
 /// buried inside the chunk (no air, and every face neighbour brick IN THE
 /// CHUNK presents no air across the shared face — `is_buried`, per brick; a
@@ -92,17 +102,23 @@ fn brick_linear(b: [usize; 3]) -> usize {
 /// A `Uniform` chunk produces its list without per-voxel work. Runs off the
 /// main thread (`SnapshotVoxelTask`).
 pub fn spawn_chunk_bricks(chunk: &Chunk) -> Vec<([u8; 3], VoxelData)> {
+    derive_chunk_bricks(chunk).spawn
+}
+
+/// [`spawn_chunk_bricks`] plus the buried bricks it skips.
+pub fn derive_chunk_bricks(chunk: &Chunk) -> DerivedBricks {
     let n = BRICKS_PER_CHUNK_EDGE;
+    let mut out = DerivedBricks::default();
     if let (Some(block), true) = (chunk.blocks.uniform(), chunk.chisel.is_empty()) {
         if block.id == BlockId::AIR {
-            return Vec::new();
+            return out;
         }
         let on_face = |b: [usize; 3]| b.iter().any(|&v| v == 0 || v == n - 1);
-        return chunk
-            .bricks()
-            .filter(|(b, _)| on_face(*b))
-            .map(|(b, _)| (to_local(b), VoxelData::uniform(block.id)))
-            .collect();
+        for (b, _) in chunk.bricks() {
+            let list = if on_face(b) { &mut out.spawn } else { &mut out.buried };
+            list.push((to_local(b), VoxelData::uniform(block.id)));
+        }
+        return out;
     }
     let all: Vec<VoxelData> = chunk.bricks().map(|(_, view)| VoxelData::from_brick(&view)).collect();
     let at = |b: [usize; 3], off: [i32; 3]| -> Option<&VoxelData> {
@@ -116,20 +132,91 @@ pub fn spawn_chunk_bricks(chunk: &Chunk) -> Vec<([u8; 3], VoxelData)> {
         }
         Some(&all[brick_linear(nb)])
     };
-    let keep: Vec<bool> = chunk
+    // 0 = air (dropped), 1 = spawn, 2 = buried.
+    let kind: Vec<u8> = chunk
         .bricks()
         .map(|(b, _)| {
             let voxels = &all[brick_linear(b)];
-            !voxels.is_all_air() && !is_buried_by(voxels, |off| at(b, off))
+            if voxels.is_all_air() {
+                0
+            } else if is_buried_by(voxels, |off| at(b, off)) {
+                2
+            } else {
+                1
+            }
         })
         .collect();
-    chunk
-        .bricks()
-        .zip(all)
-        .zip(keep)
-        .filter(|(_, keep)| *keep)
-        .map(|(((b, _), voxels), _)| (to_local(b), voxels))
-        .collect()
+    for (((b, _), voxels), kind) in chunk.bricks().zip(all).zip(kind) {
+        match kind {
+            1 => out.spawn.push((to_local(b), voxels)),
+            2 => out.buried.push((to_local(b), voxels)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Bricks that exist in their sim chunk but were never spawned because they
+/// are buried inside it, keyed like `ChunkGrid` (world position /
+/// `BRICK_VOXELS`), with their owning chunk entity and voxels. The mesher's
+/// neighbour lookup falls back to this when the grid has no entity, so a
+/// face brick next to a buried one culls the shared face and the buried test
+/// still sees solid there — absent would read as air. Entries go when the
+/// brick is spawned, its chunk despawns or is re-derived, or its region goes.
+#[derive(Resource, Default, Debug)]
+pub struct SkippedBricks(pub std::collections::BTreeMap<[i32; 3], (Entity, VoxelData)>);
+
+/// The `SkippedBricks` keys a chunk entity owns, for its cleanup.
+#[derive(Component, Default, Debug)]
+pub struct SkippedBrickKeys(pub Vec<[i32; 3]>);
+
+/// Grid key of brick `local` of `chunk` (region root + chunk origin + brick
+/// offset, over `BRICK_VOXELS`, rounded as `mark_remesh_dirty` does).
+fn brick_grid_key(world: &World, chunk: Entity, local: [u8; 3]) -> Option<[i32; 3]> {
+    let entity = world.get_entity(chunk).ok()?;
+    let root = entity.get::<ChildOf>()?.parent();
+    let root_t = world.get::<Transform>(root).map_or(Vec3::ZERO, |t| t.translation);
+    let origin = entity.get::<Transform>().map_or(Vec3::ZERO, |t| t.translation);
+    let k = (root_t + brick_translation(origin, local)) / BRICK_VOXELS as f32;
+    Some([k.x.round() as i32, k.y.round() as i32, k.z.round() as i32])
+}
+
+/// Record `chunk`'s buried bricks in [`SkippedBricks`].
+fn record_skipped(world: &mut World, chunk: Entity, buried: Vec<([u8; 3], VoxelData)>) {
+    if buried.is_empty() {
+        return;
+    }
+    let keyed: Vec<([i32; 3], VoxelData)> =
+        buried.into_iter().filter_map(|(l, v)| Some((brick_grid_key(world, chunk, l)?, v))).collect();
+    let keys: Vec<[i32; 3]> = keyed.iter().map(|(k, _)| *k).collect();
+    let mut skipped = world.get_resource_or_insert_with(SkippedBricks::default);
+    for (k, v) in keyed {
+        skipped.0.insert(k, (chunk, v));
+    }
+    world.entity_mut(chunk).insert(SkippedBrickKeys(keys));
+}
+
+/// Drop every [`SkippedBricks`] entry `chunk` owns.
+fn clear_skipped(world: &mut World, chunk: Entity) {
+    let Some(keys) = world.get_entity_mut(chunk).ok().and_then(|mut e| e.take::<SkippedBrickKeys>()) else {
+        return;
+    };
+    if let Some(mut skipped) = world.get_resource_mut::<SkippedBricks>() {
+        for k in keys.0 {
+            if skipped.0.get(&k).is_some_and(|(owner, _)| *owner == chunk) {
+                skipped.0.remove(&k);
+            }
+        }
+    }
+}
+
+/// A region left the window: drop its skipped bricks (its entities despawn
+/// with the root, without passing through [`clear_skipped`]).
+pub fn prune_region_skipped(world: &mut World, region: game::RegionId) {
+    let per = game::REGION_SIZE as i32 / BRICK_VOXELS as i32;
+    if let Some(mut skipped) = world.get_resource_mut::<SkippedBricks>() {
+        skipped.0.retain(|k, _| (k[0].div_euclid(per), k[2].div_euclid(per)) != (region.x, region.z));
+    }
 }
 
 /// Region-local translation of brick `local` of a chunk at `chunk_origin`.
@@ -149,6 +236,14 @@ pub fn write_brick(world: &mut World, chunk: Entity, local: [u8; 3], voxels: Vox
     if let Some(e) = find_brick(world, chunk, local) {
         world.entity_mut(e).insert(voxels);
         return;
+    }
+    // No longer a stand-in: it is spawned now (or all air, and so absent).
+    if let Some(k) = brick_grid_key(world, chunk, local) {
+        if let Some(mut skipped) = world.get_resource_mut::<SkippedBricks>() {
+            if skipped.0.get(&k).is_some_and(|(owner, _)| *owner == chunk) {
+                skipped.0.remove(&k);
+            }
+        }
     }
     if voxels.is_all_air() {
         return;
@@ -190,6 +285,7 @@ pub fn despawn_chunk_bricks(world: &mut World, chunk: Entity) {
 /// Despawn a sim entity and, for a terrain chunk, its bricks.
 pub fn despawn_sim_entity(world: &mut World, e: Entity) {
     despawn_chunk_bricks(world, e);
+    clear_skipped(world, e);
     if let Ok(entity) = world.get_entity_mut(e) {
         entity.despawn();
     }
@@ -209,15 +305,17 @@ pub fn move_chunk_bricks(world: &mut World, chunk: Entity, origin: Vec3) {
 /// A chunk's derived bricks landed (snapshot or cell activation, off-thread):
 /// replace whatever bricks it had, take the mirror, and lay any block edits
 /// that arrived meanwhile on top. The caller checked it is still pending.
-pub fn land_chunk_bricks(world: &mut World, chunk: Entity, source: Chunk, bricks: Vec<([u8; 3], VoxelData)>) {
+pub fn land_chunk_bricks(world: &mut World, chunk: Entity, source: Chunk, bricks: DerivedBricks) {
     despawn_chunk_bricks(world, chunk);
+    clear_skipped(world, chunk);
     let Ok(mut entity) = world.get_entity_mut(chunk) else { return };
     entity.remove::<(PendingSnapshotVoxels, BrickEdits)>().insert(SimChunk(source));
     if !entity.contains::<ChunkBricks>() {
         entity.insert(ChunkBricks::default());
     }
     let pending = entity.take::<PendingBlockDeltas>();
-    for (local, voxels) in bricks {
+    record_skipped(world, chunk, bricks.buried);
+    for (local, voxels) in bricks.spawn {
         write_brick(world, chunk, local, voxels);
     }
     if let Some(PendingBlockDeltas(deltas)) = pending.filter(|p| !p.0.is_empty()) {
@@ -344,16 +442,22 @@ pub fn poll_brick_edits(commands: &mut Commands, edits: &mut Query<(Entity, &mut
         let Some(task) = edit.task.as_mut() else { continue };
         let Some(voxels) = block_on(future::poll_once(task)) else { continue };
         edit.task = None;
-        commands.queue(move |world: &mut World| {
-            let Ok(mut entity) = world.get_entity_mut(chunk) else { return };
-            if entity.get::<BrickEdits>().is_some_and(|e| e.task.is_some()) {
-                return; // a newer edit's task covers these bricks
-            }
-            entity.remove::<BrickEdits>();
-            for (local, v) in voxels {
-                write_brick(world, chunk, local, v);
-            }
-        });
+        commands.queue(move |world: &mut World| land_brick_edit(world, chunk, voxels));
+    }
+}
+
+/// Write a finished off-thread re-derivation — only while its `BrickEdits`
+/// is still the live one (present, task taken by the poll): a newer edit's
+/// task covers these bricks, and a removed one means the bricks were
+/// re-landed or cleared since, which makes these voxels stale.
+fn land_brick_edit(world: &mut World, chunk: Entity, voxels: Vec<([u8; 3], VoxelData)>) {
+    let Ok(mut entity) = world.get_entity_mut(chunk) else { return };
+    if !entity.get::<BrickEdits>().is_some_and(|e| e.task.is_none()) {
+        return;
+    }
+    entity.remove::<BrickEdits>();
+    for (local, v) in voxels {
+        write_brick(world, chunk, local, v);
     }
 }
 
@@ -379,6 +483,7 @@ pub fn write_legacy_voxels(world: &mut World, chunk: Entity, voxels: Vec<Voxel>)
         warn!("bridge: dense SetVoxelComponent on a multi-brick chunk ignored");
         return;
     }
+    clear_skipped(world, chunk);
     let Ok(mut entity) = world.get_entity_mut(chunk) else { return };
     entity.remove::<(PendingSnapshotVoxels, PendingBlockDeltas, BrickEdits, SimChunk)>();
     if !entity.contains::<ChunkBricks>() {
@@ -390,6 +495,7 @@ pub fn write_legacy_voxels(world: &mut World, chunk: Entity, voxels: Vec<Voxel>)
 /// `SetVoxelComponent(None)`: the chunk renders nothing.
 pub fn clear_chunk_voxels(world: &mut World, chunk: Entity) {
     despawn_chunk_bricks(world, chunk);
+    clear_skipped(world, chunk);
     let Ok(mut entity) = world.get_entity_mut(chunk) else { return };
     entity.remove::<(PendingSnapshotVoxels, PendingBlockDeltas, BrickEdits)>();
     if let Some(mut source) = entity.get_mut::<SimChunk>() {
@@ -405,7 +511,7 @@ mod tests {
     use super::*;
     use game::{Block, BlockId, BlockIndex, ChiselData, ChunkBlocks, Voxel, BRICKS_PER_CHUNK_EDGE, BRICK_VOXEL_COUNT};
 
-    fn on_chunk_face(local: [u8; 3]) -> bool {
+    fn on_face(local: [u8; 3]) -> bool {
         local.iter().any(|&c| c == 0 || c as usize == BRICKS_PER_CHUNK_EDGE - 1)
     }
 
@@ -419,11 +525,14 @@ mod tests {
     #[test]
     fn uniform_stone_chunk_buried_bricks_skipped() {
         let stone = BlockId(2);
-        let bricks = spawn_chunk_bricks(&Chunk::uniform(Block::new(stone)));
+        let derived = derive_chunk_bricks(&Chunk::uniform(Block::new(stone)));
         let n = BRICKS_PER_CHUNK_EDGE;
+        assert_eq!(derived.buried.len(), n.saturating_sub(2).pow(3));
+        assert!(derived.buried.iter().all(|(l, _)| !on_face(*l)));
+        let bricks = derived.spawn;
         assert_eq!(bricks.len(), n.pow(3) - n.saturating_sub(2).pow(3));
         for (local, voxels) in &bricks {
-            assert!(on_chunk_face(*local), "{local:?} is buried");
+            assert!(on_face(*local), "{local:?} is buried");
             assert_eq!(voxels.runs(), 1, "a uniform brick is one run");
             assert_eq!(voxels.decode(), vec![Voxel::new(stone); BRICK_VOXEL_COUNT]);
         }
@@ -489,18 +598,150 @@ mod tests {
         let mut next = rng(0x2545_F491_4F6C_DD1D);
         for _ in 0..100 {
             let chunk = seeded_chunk(&mut next);
-            let bricks = spawn_chunk_bricks(&chunk);
-            for (local, voxels) in &bricks {
+            let DerivedBricks { spawn, buried } = derive_chunk_bricks(&chunk);
+            for (local, voxels) in spawn.iter().chain(&buried) {
                 assert_eq!(voxels.decode(), chunk.brick(local.map(usize::from)).voxels());
+            }
+            for (local, _) in &buried {
+                assert!(!on_face(*local), "{local:?}: a chunk-face brick is never buried");
             }
             for (b, view) in chunk.bricks() {
                 let local = b.map(|v| v as u8);
-                if bricks.iter().all(|(l, _)| *l != local) {
-                    let voxels = view.voxels();
-                    let air = voxels.iter().all(|v| v.is_air());
-                    assert!(air || (!on_chunk_face(local) && voxels.iter().all(|v| !v.is_air())), "{b:?} skipped");
-                }
+                let listed = spawn.iter().chain(&buried).filter(|(l, _)| *l == local).count();
+                let air = view.voxels().iter().all(|v| v.is_air());
+                assert_eq!(listed, usize::from(!air), "{b:?}: every non-air brick is spawned or buried, once");
             }
         }
+    }
+
+    /// A world with a region root at the origin and one terrain chunk entity.
+    fn chunk_world(world: &mut World) -> Entity {
+        let root = world.spawn((Transform::IDENTITY, Visibility::default())).id();
+        world.spawn((Transform::IDENTITY, Visibility::default(), ChildOf(root), ChunkBricks::default())).id()
+    }
+
+    fn solid() -> VoxelData {
+        VoxelData::uniform(BlockId(2))
+    }
+
+    /// Buried bricks are stand-ins keyed like the grid; spawning one, the
+    /// chunk's despawn, a re-landing and the region's removal all drop them.
+    #[test]
+    fn skipped_bricks_follow_their_chunk_and_region() {
+        let mut world = World::new();
+        let chunk = chunk_world(&mut world);
+        let derived = DerivedBricks { spawn: vec![([0, 0, 0], solid())], buried: vec![([1, 0, 0], solid()), ([0, 1, 0], solid())] };
+        land_chunk_bricks(&mut world, chunk, Chunk::default(), derived);
+        let skipped = |w: &World| w.resource::<SkippedBricks>().0.keys().copied().collect::<Vec<_>>();
+        assert_eq!(skipped(&world), vec![[0, 1, 0], [1, 0, 0]]);
+        write_brick(&mut world, chunk, [1, 0, 0], solid());
+        assert_eq!(skipped(&world), vec![[0, 1, 0]], "a spawned brick is no stand-in");
+        despawn_sim_entity(&mut world, chunk);
+        assert!(skipped(&world).is_empty());
+
+        let chunk = chunk_world(&mut world);
+        land_chunk_bricks(&mut world, chunk, Chunk::default(), DerivedBricks { spawn: vec![], buried: vec![([1, 1, 1], solid())] });
+        land_chunk_bricks(&mut world, chunk, Chunk::default(), DerivedBricks::default());
+        assert!(skipped(&world).is_empty(), "re-landing replaces the chunk's stand-ins");
+        land_chunk_bricks(&mut world, chunk, Chunk::default(), DerivedBricks { spawn: vec![], buried: vec![([1, 1, 1], solid())] });
+        prune_region_skipped(&mut world, game::RegionCoords::new(1, 0));
+        assert_eq!(skipped(&world).len(), 1, "another region's prune keeps it");
+        prune_region_skipped(&mut world, game::RegionCoords::new(0, 0));
+        assert!(skipped(&world).is_empty());
+    }
+
+    /// A finished off-thread re-derivation is dropped once its `BrickEdits`
+    /// is gone (bricks re-landed or cleared since): its voxels are stale.
+    #[test]
+    fn stale_brick_edit_result_is_dropped() {
+        let mut world = World::new();
+        let chunk = chunk_world(&mut world);
+        write_brick(&mut world, chunk, [0; 3], solid());
+        let stale = VoxelData::uniform(BlockId(9));
+        land_brick_edit(&mut world, chunk, vec![([0; 3], stale.clone())]);
+        let brick = world.get::<ChunkBricks>(chunk).unwrap().0[0];
+        assert_eq!(world.get::<VoxelData>(brick), Some(&solid()), "no live BrickEdits: dropped");
+        world.entity_mut(chunk).insert(BrickEdits::default());
+        land_brick_edit(&mut world, chunk, vec![([0; 3], stale.clone())]);
+        assert_eq!(world.get::<VoxelData>(brick), Some(&stale), "the live task's result lands");
+        assert!(world.get::<BrickEdits>(chunk).is_none());
+    }
+
+    /// Quads the mesher gives `center` with these face neighbours (the
+    /// reference the pipeline must match).
+    fn reference_quads(center: &VoxelData, neighbors: &[([i32; 3], &VoxelData)]) -> u32 {
+        let map: std::collections::BTreeMap<[i32; 3], &VoxelData> = neighbors.iter().copied().collect();
+        let padded = super::super::meshing::neighbors::gather_padded_rle(center, &map);
+        super::super::meshing::mesh_chunk(&padded, &super::super::block_textures::BlockTextureLayers::default(), true)
+            .quad_count
+    }
+
+    fn mesh_app() -> App {
+        use super::super::meshing::{apply_meshed_chunks, queue};
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_resource::<super::super::block_textures::BlockTextureLayers>()
+            .init_resource::<queue::ChunkGrid>()
+            .init_resource::<queue::RemeshQueue>()
+            .init_resource::<queue::MeshBudgets>()
+            .init_resource::<queue::FrameUploads>()
+            .init_resource::<SkippedBricks>()
+            .add_systems(
+                Update,
+                (queue::mark_remesh_dirty, queue::prune_chunk_grid, queue::spawn_mesh_tasks, apply_meshed_chunks)
+                    .chain(),
+            );
+        app
+    }
+
+    /// Run until `e`'s latest mesh carries `want` quads.
+    fn settles_to(app: &mut App, e: Entity, want: u32) -> bool {
+        use super::super::meshing::{MeshingTask, TerrainQuadCount};
+        for _ in 0..2000 {
+            app.update();
+            let w = app.world();
+            let idle = !w.entity(e).contains::<MeshingTask>()
+                && !w.resource::<super::super::meshing::queue::RemeshQueue>().dirty.contains_key(&e);
+            if idle && w.get::<TerrainQuadCount>(e).map(|q| q.0) == Some(want) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        false
+    }
+
+    /// Multi-brick geometry, built by hand (the constant is one brick per
+    /// chunk today): a face brick next to a buried, never-spawned brick must
+    /// cull the shared face — the stand-in reads solid, not air. Exposing the
+    /// buried brick (an edit digs a block on that face) spawns it, and the
+    /// two then mesh exactly as two real neighbours: the face brick shows the
+    /// hole, the exposed brick no wall toward the face brick.
+    #[test]
+    fn face_brick_culls_toward_a_buried_brick_until_an_edit_exposes_it() {
+        let mut app = mesh_app();
+        let chunk = chunk_world(app.world_mut());
+        let derived = DerivedBricks { spawn: vec![([0, 0, 0], solid())], buried: vec![([1, 0, 0], solid())] };
+        land_chunk_bricks(app.world_mut(), chunk, Chunk::default(), derived);
+        let face = app.world().get::<ChunkBricks>(chunk).unwrap().0[0];
+        let open = reference_quads(&solid(), &[]);
+        let culled = reference_quads(&solid(), &[([1, 0, 0], &solid())]);
+        assert!(culled < open, "a solid +x neighbour must remove faces ({culled} vs {open})");
+        assert!(settles_to(&mut app, face, culled), "the face brick walled itself off from the buried brick");
+
+        // Dig the buried brick's -x face block: it is spawned with the hole.
+        let air = game::Block::new(BlockId::AIR);
+        let dig = BlockDelta { index: BlockIndex::from_xyz(0, 0, 0), block: air, chisel: None };
+        let mut dug = solid().decode();
+        apply_delta_to_brick(&mut dug, [0, 0, 0], &dig);
+        let dug = VoxelData::new(dug);
+        write_brick(app.world_mut(), chunk, [1, 0, 0], dug.clone());
+        assert!(app.world().resource::<SkippedBricks>().0.is_empty());
+        let exposed = find_brick(app.world(), chunk, [1, 0, 0]).expect("exposed brick spawned");
+        let face_want = reference_quads(&solid(), &[([1, 0, 0], &dug)]);
+        let exposed_want = reference_quads(&dug, &[([-1, 0, 0], &solid())]);
+        assert!(face_want > culled, "the face brick must show into the hole");
+        assert!(settles_to(&mut app, face, face_want), "face brick after exposure");
+        assert!(settles_to(&mut app, exposed, exposed_want), "exposed brick walled off its neighbour");
     }
 }
