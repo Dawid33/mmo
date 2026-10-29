@@ -39,6 +39,7 @@ notes). Don't wait for him between creatures; don't mark anything approved yours
 | Progress `tools/creatures/progress.py` (`just creature-progress [--next N]`) | done |
 | Asset viewer (`just asset-viewer`) | done; `--model --anim --time --yaw --pitch --shot` |
 | **Dog** (quadruped pilot) | built, `draft`, awaiting Dawid's review |
+| **Every roster creature** (582 models: 0 todo, 181/181 giants) | built 2026-10-29, all `draft`, awaiting Dawid's review in batches (`just asset-viewer`, `target/creature-sheets/`) |
 | Templates biped, bird, fish, serpent, arthropod, blob; vermin form; giant variants; animal people | built 2026-10-29 (`tools/creatures/templates.py`, `derive.py`); pilots dwarf, chicken, carp, adder, giant cave spider, cave blob, worm; adder man + giant adder as the derived pilots |
 | Blockbench opening a generated file | **unverified** (Blockbench isn't installed here); ask Dawid to try the dog once |
 | Commit | nothing of the creature work is committed yet (see "Committing") |
@@ -209,3 +210,29 @@ batch. Things that are not obvious from the code:
   size (it is 2400 px wide).
 - **Derived creatures**: after a base is built, `just creature-derive` writes the
   giant / animal-person sources that were waiting on it; build them like any other.
+
+## Known template limitations (reported while building the roster, 2026-10-29)
+
+Worth fixing in the templates when a creature needs it; each was worked around in sources:
+
+- **Biped:** no legless option for a hand-made source (merperson is a fish); arms always
+  exist (harpy / cave swallow man have stub arms); the head is always centred (ettin's two
+  heads sit on a neck stump); `[wings]` fold back as a slab on an upright body (needs a
+  "hang down the back" fold); extra tail bones need merge keys in lie/death; swim plays an
+  upright pose.
+- **Bird:** `attack` is always a peck (kickers hand-key a kick); long legs stick out in
+  lie/sleep; the fixed eat angle needs shallower merges for long bills / short legs; the body
+  is always a horizontal box (owls/penguins use a tall body).
+- **Fish:** nothing below the belly (no anal/pelvic fins); side fins droop through the ground
+  on flat bodies (rays use their own wing bones); the tail can't be dropped; the head is at
+  mid-height (seals can't raise it).
+- **Quadruped:** legs hang straight (no sprawl for lizards); no glide / curl-into-ball clips;
+  `death` lifts by half the body's width (shells need a merged lift); small heads can't show
+  small eyes at 1 texel per unit.
+- **Serpent:** the chain is rooted at the tail tip, so a tail part that moves alone needs its
+  own child bone.
+- **Arthropod:** claw arms keep the leg shape (pincers rest on the ground); `[wings]` gives one
+  pair, folded back.
+- **Vermin:** the leg slab is wider than the body; the head always sits in front on the ground.
+- **Sheet tool:** under GPU contention a tile is sometimes blank — re-run; tiny compact models
+  are framed too close (the viewer's minimum distance).
