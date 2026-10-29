@@ -1,0 +1,199 @@
+# DF DONKEY (creature_domestic): 300 kg, domestic pack animal (PACK_ANIMAL, no
+# MOUNT flag in the raws, so no ridden clip). Attack kick (a hind-leg kick
+# replaces the template's `attack`); bite optional, not made. Grey with a pale
+# muzzle and belly, long ears, the dorsal cross as decals; neck and mane as
+# extra cubes on the head bone.
+name = "donkey"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [9, 10, 20]
+leg = [3, 9]
+head = [5, 5, 8]
+head_up = 7
+tail = [1, 10]
+tail_raise = -70
+walk = { cycle = 1.1, swing = 22, bob = 0.45 }
+run = { cycle = 0.6, swing = 40, bob = 1.2, pitch = 4 }
+idle = { length = 5.0, look = 14, breath = 0.22, wag = 8 }
+eat = { length = 2.0, reach = 60, forward = 3 }
+
+# Head pivot: the neck joint at the body's front top; the head cube spans
+# y 3..8, z -7..1 around it.
+[[cubes]]
+name = "neck"
+bone = "head"
+part = "neck"
+from = [-2.5, -3, -3]
+to = [2.5, 4, 1]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-2, 3, -9]
+to = [2, 6, -7]
+
+[[cubes]]
+name = "mane"
+bone = "head"
+part = "mane"
+from = [-0.5, -1, 1]
+to = [0.5, 8.5, 2]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2, 8, 0]
+to = [-1, 12, 1]
+
+# The tail runs z -1..9 from its root; the switch of hair at its end.
+[[cubes]]
+name = "tuft"
+bone = "tail"
+part = "mane"
+from = [-1, -1, 8]
+to = [1, 1, 11]
+
+[palette]
+fur = "#8c8278"
+fur_up = "#958b81"
+fur_down = "#d9d2c8"
+legs = "#7c736a"
+head = "#8c8278"
+head_down = "#d9d2c8"
+neck = "#8c8278"
+neck_down = "#d9d2c8"
+muzzle = "#dcd5cb"
+mane = "#3a332e"
+ears = "#6f665e"
+tail = "#7c736a"
+cross = "#4a423b"
+eye = "#0e0b09"
+nostril = "#2a2420"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 0
+y = 1
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 3
+y = 1
+colour = "nostril"
+
+# The dorsal stripe and shoulder cross on the back (9 wide × 20 long).
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 0
+h = 20
+colour = "cross"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 3
+w = 9
+colour = "cross"
+
+[[decals]]
+cube = "ear_l"
+face = "up"
+x = 0
+y = 0
+colour = "mane"
+
+[[decals]]
+cube = "ear_r"
+face = "up"
+x = 0
+y = 0
+colour = "mane"
+
+# The kick: weight onto the forehand (nose down, rump up), hind legs cocked and
+# lashed out backwards.
+[clips.attack]
+mode = "once"
+length = 0.8
+keys = [
+  { bone = "body", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.25, value = [-8, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.5, value = [-8, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.25, value = [0, 1, 0] },
+  { bone = "body", channel = "position", time = 0.5, value = [0, 1, 0] },
+  { bone = "body", channel = "position", time = 0.8, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.2, value = [25, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.38, value = [-70, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.2, value = [25, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.38, value = [-70, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.3, value = [-6, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.3, value = [-6, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.3, value = [-12, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.38, value = [-35, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+]
+
+# Grazing: the long neck swings right down; the forelegs splay a little.
+[clips.eat]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [-95, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.5, value = [-90, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.0, value = [-95, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.5, value = [-90, 0, 0] },
+  { bone = "head", channel = "rotation", time = 2.0, value = [-95, 0, 0] },
+  { bone = "head", channel = "position", time = 0.0, value = [0, -2, -3] },
+  { bone = "head", channel = "position", time = 2.0, value = [0, -2, -3] },
+]
+
+# Lying down the tail stays hanging instead of the template's horizontal.
+[clips.lie]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 4.0, value = [-30, 0, 0] },
+]
+
+[clips.sleep]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 6.0, value = [-30, 0, 0] },
+]

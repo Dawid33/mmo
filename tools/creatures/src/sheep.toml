@@ -1,0 +1,60 @@
+# DF SHEEP (creature_domestic): 50 kg, domestic wool, milk and meat animal.
+# Attacks kick (the template's `attack`: its lunge reads as a butt), bite and
+# hgore (optional, not made). A woolly body with a dark face and legs.
+name = "sheep"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [9, 8, 16]
+leg = [2, 6]
+leg_inset = 1
+head = [4, 5, 5]
+head_up = 2
+tail = [3, 4]
+tail_raise = -60
+walk = { cycle = 0.9, swing = 25, bob = 0.3 }
+run = { cycle = 0.5, swing = 45, bob = 0.9, pitch = 5 }
+idle = { length = 4.5, look = 16, breath = 0.2, wag = 4 }
+attack = { length = 0.6, lunge = 3 }
+eat = { length = 1.8, reach = 50, forward = 2.5 }
+
+# Head pivot: the neck joint; the head cube spans y -2..3, z -4..1 around it.
+[[cubes]]
+name = "wool_cap"
+bone = "head"
+part = "fleece"
+from = [-2.5, 2.5, -2.5]
+to = [2.5, 4, 1.5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-4, 1, -1]
+to = [-2, 2, 0]
+
+[palette]
+fur = "#ebe6d8"
+fur_down = "#d6cfbd"
+fleece = "#ebe6d8"
+legs = "#3a332d"
+head = "#3f3731"
+tail = "#e3ddcd"
+ears = "#352e29"
+eye = "#c9a447"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"

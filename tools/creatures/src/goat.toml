@@ -1,0 +1,95 @@
+# DF GOAT (creature_domestic): 50 kg, domestic milk and meat animal.
+# Attacks kick (the template's `attack`: its lunge reads as a head-butt), bite
+# and hgore (optional, not made). Swept-back horns and a beard as extra cubes.
+name = "goat"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [6, 7, 15]
+leg = [2, 7]
+head = [4, 5, 5]
+head_up = 4
+tail = [2, 3]
+tail_raise = 50
+walk = { cycle = 0.8, swing = 27, bob = 0.3 }
+run = { cycle = 0.45, swing = 48, bob = 1.0, pitch = 6 }
+idle = { length = 4.0, look = 20, breath = 0.15, wag = 12 }
+attack = { length = 0.6, lunge = 3.5 }
+eat = { length = 1.6, reach = 60, forward = 3 }
+
+# Head pivot: the neck joint; the head cube spans y 0..5, z -4..1 around it.
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-2, 5, -0.5]
+to = [-1, 8, 0.5]
+
+[[cubes]]
+name = "horn_back_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-2, 7, 0.5]
+to = [-1, 8, 3]
+
+[[cubes]]
+name = "beard"
+bone = "head"
+part = "beard"
+from = [-1, -2, -4]
+to = [1, 0.5, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-4, 2.5, -0.5]
+to = [-2, 3.5, 0.5]
+
+[palette]
+fur = "#8a6242"
+fur_down = "#e1d3bf"
+legs = "#6e4c33"
+head = "#8a6242"
+tail = "#6e4c33"
+horns = "#8c806c"
+beard = "#5a4130"
+ears = "#6e4c33"
+blaze = "#e1d3bf"
+eye = "#c9a447"
+nose = "#2a1f18"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 0
+w = 2
+h = 5
+colour = "blaze"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 4
+w = 2
+colour = "nose"

@@ -1,0 +1,126 @@
+# DF YAK (creature_domestic): 700 kg, domestic pack, wagon, milk and wool animal
+# (no MOUNT flag in the raws, so no ridden clip). Attack kick (the template's
+# `attack` lunge reads as a horn butt); bite and hgore optional, not made.
+# Shoulder hump and a long shaggy skirt hanging off the flanks as extra cubes on
+# the body bone; up-curving horns.
+name = "yak"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [12, 13, 30]
+leg = [4, 8]
+head = [7, 7, 6]
+head_up = -1
+head_overlap = 2
+tail = [3, 10]
+tail_raise = -60
+walk = { cycle = 1.3, swing = 20, bob = 0.5 }
+run = { cycle = 0.72, swing = 34, bob = 1.0, pitch = 4 }
+idle = { length = 5.5, look = 12, breath = 0.3, wag = 6 }
+attack = { length = 0.9, lunge = 5 }
+eat = { length = 2.2, reach = 40, forward = 3 }
+
+# Head pivot: the neck joint; the head cube spans y -7..0, z -4..2 around it.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-2.5, -7, -6]
+to = [2.5, -4, -4]
+
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-7, -2, -1]
+to = [-3.5, 0, 1]
+
+[[cubes]]
+name = "horn_tip_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-7, 0, -1]
+to = [-5.5, 4, 0.5]
+
+# Body pivot: the body's centre (y -6.5..6.5, z -15..15).
+[[cubes]]
+name = "hump"
+bone = "body"
+part = "fur"
+from = [-5, 6, -14]
+to = [5, 9, -4]
+
+[[cubes]]
+name = "skirt"
+bone = "body"
+part = "skirt"
+from = [-6.5, -9.5, -14]
+to = [6.5, -3, 13]
+
+[palette]
+fur = "#3a2a1f"
+fur_up = "#45332a"
+legs = "#2e2018"
+head = "#3a2a1f"
+muzzle = "#bfb3a4"
+horns = "#d6ccb8"
+skirt = "#2e2018"
+skirt_down = "#251a14"
+tail = "#2e2018"
+eye = "#0a0807"
+nostril = "#3a2f28"
+blaze = "#d9cfc0"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 0
+h = 4
+colour = "blaze"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 1
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 3
+y = 1
+colour = "nostril"
+
+# Lying down the tail stays hanging instead of the template's horizontal.
+[clips.lie]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 4.0, value = [-30, 0, 0] },
+]
+
+[clips.sleep]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 6.0, value = [-30, 0, 0] },
+]

@@ -1,0 +1,124 @@
+# DF REINDEER (creature_domestic): 130 kg, domestic in the raws (no MOUNT flag,
+# so no ridden clip). Attack kick (the template's `attack` lunge); bite and
+# hgore optional, not made. Swept-back antlers with a brow tine, a white neck
+# ruff hanging under the throat, neck on the head bone (no neck bone).
+name = "reindeer"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [8, 9, 17]
+leg = [3, 9]
+head = [4, 5, 6]
+head_up = 6
+tail = [2, 2]
+tail_raise = 30
+walk = { cycle = 0.95, swing = 24, bob = 0.35 }
+run = { cycle = 0.52, swing = 46, bob = 1.2, pitch = 5 }
+idle = { length = 4.5, look = 18, breath = 0.2, wag = 8 }
+attack = { length = 0.7, lunge = 4 }
+eat = { length = 2.0, reach = 60, forward = 3 }
+
+# Head pivot: the neck joint at the body's front top; the head cube spans
+# y 2..7, z -5..1 around it.
+[[cubes]]
+name = "neck"
+bone = "head"
+part = "ruff"
+from = [-2, -2, -3]
+to = [2, 3, 1]
+
+[[cubes]]
+name = "dewlap"
+bone = "head"
+part = "ruff"
+from = [-1.5, -3, -4]
+to = [1.5, 2, -3]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-1.5, 2, -7]
+to = [1.5, 4.5, -5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3.5, 5.5, 0]
+to = [-2, 6.5, 1]
+
+[[cubes]]
+name = "antler_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-2.5, 7, -0.5]
+to = [-1.5, 12, 0.5]
+
+[[cubes]]
+name = "antler_back_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-2.5, 11, 0.5]
+to = [-1.5, 12, 4]
+
+[[cubes]]
+name = "tine_out_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-5, 10, -0.5]
+to = [-2.5, 11, 0.5]
+
+[[cubes]]
+name = "brow_tine_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-1.5, 8, -3.5]
+to = [-0.5, 9, -0.5]
+
+[palette]
+fur = "#7d6a55"
+fur_up = "#73614d"
+fur_down = "#d6cdbf"
+legs = "#5e4f3f"
+head = "#8a7762"
+ruff = "#e6dfd2"
+muzzle = "#3a3028"
+muzzle_up = "#8a7762"
+ears = "#6e5c49"
+antlers = "#cfc2a6"
+tail = "#efe9de"
+eye = "#0e0b09"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 3
+y = 1
+colour = "eye"
+
+# Grazing: the neck swings down, short of putting the antlers into the ground.
+[clips.eat]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [-78, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.5, value = [-73, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.0, value = [-78, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.5, value = [-73, 0, 0] },
+  { bone = "head", channel = "rotation", time = 2.0, value = [-78, 0, 0] },
+  { bone = "head", channel = "position", time = 0.0, value = [0, -2, -2] },
+  { bone = "head", channel = "position", time = 2.0, value = [0, -2, -2] },
+]

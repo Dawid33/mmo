@@ -1,0 +1,110 @@
+# DF DEER (creature_temperate): 140 kg, wild grazer of temperate woodland.
+# Attack hgore (the template's `attack` lunge, antlers first); kick and bite
+# optional, not made. A stag: branched antlers as extra cubes, neck on the head
+# bone (the template has no neck bone), white scut.
+name = "deer"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [8, 9, 18]
+leg = [2, 10]
+head = [4, 5, 6]
+head_up = 6
+tail = [2, 3]
+tail_raise = 40
+walk = { cycle = 0.95, swing = 24, bob = 0.35 }
+run = { cycle = 0.5, swing = 50, bob = 1.4, pitch = 6 }
+idle = { length = 4.5, look = 22, breath = 0.2, wag = 10 }
+attack = { length = 0.7, lunge = 4 }
+eat = { length = 2.0, reach = 60, forward = 3 }
+
+# Head pivot: the neck joint at the body's front top; the head cube spans
+# y 2..7, z -5..1 around it.
+[[cubes]]
+name = "neck"
+bone = "head"
+part = "neck"
+from = [-2, -2, -3]
+to = [2, 3, 1]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-1.5, 2, -7]
+to = [1.5, 4.5, -5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-4, 5.5, 0]
+to = [-2, 6.5, 1]
+
+[[cubes]]
+name = "antler_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-2.5, 7, -0.5]
+to = [-1.5, 11, 0.5]
+
+[[cubes]]
+name = "tine_out_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-5, 10, -0.5]
+to = [-2.5, 11, 0.5]
+
+[[cubes]]
+name = "tine_fwd_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-2.5, 8.5, -2.5]
+to = [-1.5, 9.5, -0.5]
+
+[palette]
+fur = "#9a6b42"
+fur_up = "#8e623c"
+fur_down = "#e3d3bd"
+legs = "#8a5f3a"
+head = "#9a6b42"
+neck = "#9a6b42"
+neck_down = "#e3d3bd"
+muzzle = "#3a2a20"
+muzzle_up = "#9a6b42"
+ears = "#8a5f3a"
+antlers = "#d9cdb4"
+tail = "#f2ece0"
+eye = "#0e0b09"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 3
+y = 1
+colour = "eye"
+
+# Grazing: the neck swings down, short of putting the antlers into the ground.
+[clips.eat]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [-78, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.5, value = [-73, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.0, value = [-78, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.5, value = [-73, 0, 0] },
+  { bone = "head", channel = "rotation", time = 2.0, value = [-78, 0, 0] },
+  { bone = "head", channel = "position", time = 0.0, value = [0, -2, -2] },
+  { bone = "head", channel = "position", time = 2.0, value = [0, -2, -2] },
+]

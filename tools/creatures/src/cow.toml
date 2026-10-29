@@ -1,0 +1,202 @@
+# DF COW (creature_domestic): 600 kg, domestic milk and meat animal.
+# Attacks kick (the template's `attack`: its lunge reads as a shove), bite and
+# hgore (optional, not made). Holstein colours; the udder is an extra cube.
+name = "cow"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [12, 11, 28]
+leg = [4, 10]
+head = [7, 7, 6]
+head_up = 1
+head_overlap = 2
+tail = [2, 12]
+tail_raise = -70
+walk = { cycle = 1.25, swing = 22, bob = 0.5 }
+run = { cycle = 0.7, swing = 36, bob = 1.0, pitch = 4 }
+idle = { length = 5.0, look = 14, breath = 0.25, wag = 6 }
+attack = { length = 0.8, lunge = 4 }
+eat = { length = 2.0, reach = 50, forward = 3 }
+
+# Head pivot: the neck joint; the head cube spans y -5..2, z -4..2 around it.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-3, -5, -6]
+to = [3, -2, -4]
+
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-6, 1, -1]
+to = [-3.5, 2, 0]
+
+[[cubes]]
+name = "horn_tip_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-6, 2, -1]
+to = [-5, 3.5, 0]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-5.5, -1, -0.5]
+to = [-3.5, 0, 1]
+
+# Body pivot: the body's centre (y -5.5..5.5, z -14..14); the hind legs stand
+# at z 9..13, x ±2..6.
+[[cubes]]
+name = "udder"
+bone = "body"
+part = "udder"
+from = [-2, -7.5, 6]
+to = [2, -5, 9]
+
+# The tail runs z -1..11 from its root; the switch of hair at its end.
+[[cubes]]
+name = "tuft"
+bone = "tail"
+part = "tuft"
+from = [-1.5, -1.5, 10]
+to = [1.5, 1.5, 13]
+
+[palette]
+fur = "#efebe3"
+fur_down = "#dcd6cb"
+legs = "#e6e1d8"
+head = "#efebe3"
+tail = "#e6e1d8"
+tuft = "#1f1d1c"
+muzzle = "#e3aaa1"
+horns = "#e2d7bd"
+ears = "#1f1d1c"
+udder = "#e9a9a2"
+patch = "#1f1d1c"
+eye = "#141210"
+nose = "#7a4a46"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 2
+colour = "eye"
+
+# A black patch over the left eye (as seen from outside, the head's right).
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 0
+w = 3
+h = 4
+colour = "patch"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 1
+colour = "nose"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 4
+y = 1
+colour = "nose"
+
+# Holstein patches: flanks are 28 wide × 11 tall (front at the left of west),
+# the back 12 wide × 28 long (row 0 at the front).
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 2
+w = 7
+h = 6
+colour = "patch"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 15
+y = 0
+w = 6
+h = 4
+colour = "patch"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 20
+y = 5
+w = 5
+h = 4
+colour = "patch"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 5
+y = 1
+w = 5
+h = 5
+colour = "patch"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 14
+y = 3
+w = 8
+h = 5
+colour = "patch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 4
+w = 5
+h = 6
+colour = "patch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 6
+y = 14
+w = 6
+h = 6
+colour = "patch"
+
+# Lying down the tail stays hanging instead of the template's horizontal.
+[clips.lie]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 4.0, value = [-30, 0, 0] },
+]
+
+[clips.sleep]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 6.0, value = [-30, 0, 0] },
+]

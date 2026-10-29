@@ -1,0 +1,80 @@
+# DF WOLF (creature_large_temperate): 40 kg, pack-hunting large predator.
+# Attacks bite (the template's `attack`) and scratch (optional, not made).
+# LARGE_PREDATOR: alert + roar (a howl-snarl).
+name = "wolf"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [7, 6, 13]
+leg = [2, 6]
+head = [5, 5, 4]
+head_up = 2
+tail = [3, 8]
+tail_raise = 15
+walk = { cycle = 0.85, swing = 30, bob = 0.3 }
+run = { cycle = 0.45, swing = 52, bob = 0.9, pitch = 6 }
+idle = { length = 4.0, look = 20, breath = 0.15, wag = 6 }
+attack = { length = 0.6, lunge = 3.5 }
+
+# Head pivot: the neck joint; the head cube spans y -2..3, z -3..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1.5, -2, -7]
+to = [1.5, 0, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 3, 0]
+to = [-0.5, 5.5, 1]
+
+# The thick ruff over the shoulders (body pivot: the body's centre).
+[[cubes]]
+name = "ruff"
+bone = "body"
+part = "ruff"
+from = [-4, -2.5, -7]
+to = [4, 3.5, -3]
+
+[palette]
+fur = "#8a857e"
+fur_up = "#6f6a64"
+fur_down = "#d2ccc0"
+legs = "#7d7871"
+head = "#8a857e"
+tail = "#6f6a64"
+tail_down = "#c9c2b5"
+snout = "#c9c2b5"
+snout_up = "#8a857e"
+ears = "#5a5650"
+ruff = "#9a958d"
+ruff_down = "#d2ccc0"
+eye = "#d9b030"
+nose = "#1c1a18"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+colour = "nose"

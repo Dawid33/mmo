@@ -1,0 +1,77 @@
+# DF COUGAR (creature_large_temperate): 60 kg, solitary big cat, large predator.
+# Attacks bite (the template's `attack`) and scratch (optional, not made).
+# LARGE_PREDATOR: alert + roar. Long low tail with a dark tip.
+name = "cougar"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [6, 6, 16]
+leg = [3, 6]
+head = [5, 5, 4]
+head_up = 1
+tail = [2, 13]
+tail_raise = -15
+walk = { cycle = 0.9, swing = 28, bob = 0.25 }
+run = { cycle = 0.45, swing = 55, bob = 1.0, pitch = 8 }
+idle = { length = 4.5, look = 22, breath = 0.15, wag = 8 }
+attack = { length = 0.6, lunge = 4.5 }
+
+# Head pivot: the neck joint; the head cube spans y -3..2, z -3..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1.5, -3, -5]
+to = [1.5, -1, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 2, -0.5]
+to = [-1, 3.5, 0.5]
+
+# The tail runs z -1..12 from its root; the tip continues it.
+[[cubes]]
+name = "tail_tip"
+bone = "tail"
+part = "tail_tip"
+from = [-1, -1, 12]
+to = [1, 1, 14]
+
+[palette]
+fur = "#b9875a"
+fur_up = "#a87a4f"
+fur_down = "#e6d2b4"
+legs = "#b07f53"
+head = "#b9875a"
+tail = "#b07f53"
+tail_tip = "#3a2a1e"
+snout = "#eee2cf"
+ears = "#5a4030"
+eye = "#c99a2e"
+nose = "#c48478"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+colour = "nose"

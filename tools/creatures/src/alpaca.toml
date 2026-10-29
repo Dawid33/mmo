@@ -1,0 +1,92 @@
+# DF ALPACA (creature_domestic): 70 kg, domestic wool animal.
+# Attack kick (the template's `attack` lunge); bite optional, not made. A long
+# upright neck as an extra cube on the head bone (the template has no neck
+# bone), woolly topknot, banana ears.
+name = "alpaca"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [7, 8, 14]
+leg = [2, 8]
+head = [4, 4, 4]
+head_up = 10
+head_overlap = 0
+tail = [2, 3]
+tail_raise = 10
+walk = { cycle = 0.85, swing = 25, bob = 0.3 }
+run = { cycle = 0.48, swing = 45, bob = 1.0, pitch = 5 }
+idle = { length = 4.5, look = 22, breath = 0.18, wag = 4 }
+attack = { length = 0.6, lunge = 3 }
+eat = { length = 2.0, reach = 60, forward = 3 }
+
+# Head pivot: the neck joint at the body's front top; the head cube spans
+# y 7..11, z -4..0 around it.
+[[cubes]]
+name = "neck"
+bone = "head"
+part = "neck"
+from = [-1.5, -2, -3]
+to = [1.5, 8, 0]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-1.5, 7, -5.5]
+to = [1.5, 9, -4]
+
+[[cubes]]
+name = "topknot"
+bone = "head"
+part = "fleece"
+from = [-2.5, 10.5, -3]
+to = [2.5, 12.5, 0.5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2, 11, -1]
+to = [-1, 13.5, 0]
+
+[palette]
+fur = "#d8c3a0"
+fur_up = "#e0cca9"
+fur_down = "#c4ad89"
+fleece = "#e0cca9"
+legs = "#c9b28d"
+head = "#cdb894"
+neck = "#d8c3a0"
+muzzle = "#a8916f"
+ears = "#c4ad89"
+tail = "#d8c3a0"
+eye = "#0e0b09"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+# Grazing: the long neck swings right down.
+[clips.eat]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [-100, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.5, value = [-95, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.0, value = [-100, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.5, value = [-95, 0, 0] },
+  { bone = "head", channel = "rotation", time = 2.0, value = [-100, 0, 0] },
+  { bone = "head", channel = "position", time = 0.0, value = [0, -2, -2] },
+  { bone = "head", channel = "position", time = 2.0, value = [0, -2, -2] },
+]

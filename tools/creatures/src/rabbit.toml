@@ -1,0 +1,62 @@
+# DF RABBIT (creature_domestic): 0.5 kg, domestic rabbit.
+# Attacks bite (the template's `attack`) and scratch (optional, not made).
+# Agouti grey-brown, upright ears, white scut; a quick bounding run.
+name = "rabbit"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [3, 3, 5]
+leg = [1, 2]
+leg_ends = 0
+head = [3, 3, 2]
+head_up = 1
+head_overlap = 0
+tail = [1, 1]
+tail_raise = 30
+walk = { cycle = 0.4, swing = 30, bob = 0.15 }
+run = { cycle = 0.28, swing = 55, bob = 0.9, pitch = 10 }
+idle = { length = 3.0, look = 25, breath = 0.08, wag = 4 }
+attack = { length = 0.4, lunge = 1.5 }
+eat = { length = 1.0, reach = 40, forward = 1 }
+
+# Head pivot: the neck joint; the head cube spans y -1..2, z -2..0 around it.
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-1.5, 2, -0.5]
+to = [-0.5, 5, 0.5]
+
+[palette]
+fur = "#8a7a68"
+fur_up = "#7e6f5e"
+fur_down = "#e2d8ca"
+legs = "#8a7a68"
+head = "#8a7a68"
+ears = "#7e6f5e"
+tail = "#f2ede4"
+eye = "#120e0c"
+nose = "#d7958c"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+colour = "nose"

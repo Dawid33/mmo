@@ -1,0 +1,118 @@
+# DF WATER_BUFFALO (creature_domestic): 1000 kg, domestic pack, wagon, milk and
+# meat animal (no MOUNT flag in the raws, so no ridden clip). Attack hgore (the
+# template's `attack` lunge, horns first); kick and bite optional, not made.
+# Slate grey, head carried low, wide swept-back horns as extra cubes.
+name = "water buffalo"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [13, 12, 31]
+leg = [4, 10]
+head = [7, 7, 7]
+head_up = -1
+head_overlap = 2
+tail = [2, 12]
+tail_raise = -70
+walk = { cycle = 1.35, swing = 20, bob = 0.5 }
+run = { cycle = 0.75, swing = 34, bob = 1.0, pitch = 4 }
+idle = { length = 5.5, look = 12, breath = 0.3, wag = 6 }
+attack = { length = 0.9, lunge = 5 }
+eat = { length = 2.2, reach = 40, forward = 3 }
+
+# Head pivot: the neck joint; the head cube spans y -7..0, z -5..2 around it.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-2.5, -7, -7]
+to = [2.5, -4, -5]
+
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-9, -1, -1]
+to = [-3.5, 1, 1]
+
+[[cubes]]
+name = "horn_tip_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-10, 0, 0.5]
+to = [-8.5, 1.5, 4]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-5.5, -3, -0.5]
+to = [-3.5, -2, 1]
+
+# The tail runs z -1..11 from its root; the switch of hair at its end.
+[[cubes]]
+name = "tuft"
+bone = "tail"
+part = "tuft"
+from = [-1.5, -1.5, 10]
+to = [1.5, 1.5, 13]
+
+[palette]
+fur = "#45403c"
+fur_up = "#4d4844"
+fur_down = "#3a3532"
+legs = "#36312e"
+head = "#45403c"
+muzzle = "#2a2624"
+horns = "#6a6258"
+ears = "#3a3532"
+tail = "#3a3532"
+tuft = "#1e1b19"
+eye = "#0a0807"
+nostril = "#15120f"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 1
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 3
+y = 1
+colour = "nostril"
+
+# Lying down the tail stays hanging instead of the template's horizontal.
+[clips.lie]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 4.0, value = [-30, 0, 0] },
+]
+
+[clips.sleep]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0.0, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 6.0, value = [-30, 0, 0] },
+]

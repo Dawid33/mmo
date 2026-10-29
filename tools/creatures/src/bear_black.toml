@@ -1,0 +1,78 @@
+# DF BEAR_BLACK (creature_large_temperate): 120 kg, woodland omnivore and large predator.
+# Attacks bite (the template's `attack`) and scratch (optional, not made).
+# LARGE_PREDATOR: alert + roar; CURIOUSBEAST_EATER/GUZZLER: pick_up + carry.
+name = "black bear"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar", "pick_up", "carry"]
+
+[proportions]
+body = [10, 9, 16]
+leg = [4, 7]
+head = [7, 6, 5]
+head_up = 0
+tail = [2, 2]
+tail_raise = -20
+walk = { cycle = 1.1, swing = 24, bob = 0.5 }
+run = { cycle = 0.6, swing = 40, bob = 1.2, pitch = 5 }
+idle = { length = 5.0, look = 16, breath = 0.25, wag = 3 }
+attack = { length = 0.75, lunge = 4 }
+eat = { length = 2.0, reach = 40, forward = 3 }
+
+# Head pivot: the neck joint; the head cube spans y -5..1, z -4..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-2, -5, -7]
+to = [2, -2, -4]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3.5, 1, -1]
+to = [-1.5, 3, 0]
+
+# A low rise over the shoulders (body pivot: the body's centre, top at y 4.5).
+[[cubes]]
+name = "shoulders"
+bone = "body"
+part = "fur"
+from = [-4.5, 4, -7]
+to = [4.5, 5.5, -1]
+
+[palette]
+fur = "#34302c"
+fur_up = "#3b3632"
+legs = "#2a2623"
+head = "#34302c"
+tail = "#34302c"
+snout = "#b08a5e"
+snout_up = "#8a6a46"
+ears = "#2a2623"
+eye = "#0a0807"
+nose = "#141110"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+w = 2
+colour = "nose"

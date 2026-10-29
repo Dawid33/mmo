@@ -1,0 +1,137 @@
+# DF ELK (creature_temperate): 300 kg, big wild deer (wapiti).
+# Attack kick (the template's `attack` lunge); bite optional, not made. A bull:
+# wide branched antlers, a dark maned neck on the head bone (no neck bone in the
+# template), pale rump and scut.
+name = "elk"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [10, 11, 20]
+leg = [3, 12]
+head = [5, 6, 8]
+head_up = 8
+tail = [3, 3]
+tail_raise = 30
+walk = { cycle = 1.15, swing = 22, bob = 0.45 }
+run = { cycle = 0.6, swing = 45, bob = 1.4, pitch = 5 }
+idle = { length = 5.0, look = 18, breath = 0.25, wag = 6 }
+attack = { length = 0.8, lunge = 4.5 }
+eat = { length = 2.0, reach = 60, forward = 3 }
+
+# Head pivot: the neck joint at the body's front top; the head cube spans
+# y 3..9, z -7..1 around it.
+[[cubes]]
+name = "neck"
+bone = "head"
+part = "neck"
+from = [-3, -3, -4]
+to = [3, 5, 1]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-2, 3, -9]
+to = [2, 6, -7]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-4.5, 7.5, 0]
+to = [-2.5, 8.5, 1]
+
+[[cubes]]
+name = "antler_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-3, 9, -0.5]
+to = [-2, 15, 0.5]
+
+[[cubes]]
+name = "tine_fwd_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-3, 11, -3.5]
+to = [-2, 12, -0.5]
+
+[[cubes]]
+name = "tine_out_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-6.5, 14, -0.5]
+to = [-3, 15, 0.5]
+
+[[cubes]]
+name = "tine_back_l"
+bone = "head"
+part = "antlers"
+mirror = true
+from = [-3, 13, 0.5]
+to = [-2, 14, 4]
+
+[palette]
+fur = "#a37a52"
+fur_up = "#ad845b"
+fur_down = "#5a3f28"
+legs = "#4a3220"
+head = "#6a4a30"
+neck = "#4a3220"
+muzzle = "#2e2016"
+ears = "#5a3f28"
+antlers = "#d6c9ae"
+tail = "#e3d3b5"
+rump = "#e3d3b5"
+eye = "#0e0b09"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 1
+colour = "eye"
+
+# The pale rump patch: the back's last rows (10 wide × 20 long) and the body's
+# rear face.
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 16
+w = 6
+h = 4
+colour = "rump"
+
+[[decals]]
+cube = "body"
+face = "south"
+x = 2
+y = 0
+w = 6
+h = 7
+colour = "rump"
+
+# Grazing: the neck swings down, short of putting the antlers into the ground.
+[clips.eat]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [-78, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.5, value = [-73, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.0, value = [-78, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.5, value = [-73, 0, 0] },
+  { bone = "head", channel = "rotation", time = 2.0, value = [-78, 0, 0] },
+  { bone = "head", channel = "position", time = 0.0, value = [0, -2, -3] },
+  { bone = "head", channel = "position", time = 2.0, value = [0, -2, -3] },
+]

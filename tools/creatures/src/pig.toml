@@ -1,0 +1,75 @@
+# DF PIG (creature_domestic): 60 kg, domestic meat animal.
+# Attacks kick (the template's `attack`: its lunge reads as a shove) and bite
+# (optional, not made). Snout disc and forward-flopped ears as extra cubes.
+name = "pig"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [9, 8, 16]
+leg = [3, 4]
+head = [6, 6, 4]
+head_up = 0
+tail = [1, 3]
+tail_raise = 40
+walk = { cycle = 0.75, swing = 25, bob = 0.3 }
+run = { cycle = 0.42, swing = 42, bob = 0.8, pitch = 5 }
+idle = { length = 4.0, look = 14, breath = 0.2, wag = 16 }
+attack = { length = 0.6, lunge = 3 }
+eat = { length = 1.6, reach = 35, forward = 2 }
+
+# Head pivot: the neck joint; the head cube spans y -5..1, z -3..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-2, -4, -5]
+to = [2, -1, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3, 1, -2.5]
+to = [-1, 2, 0]
+
+[palette]
+fur = "#e7a8a0"
+fur_up = "#eeb4ac"
+fur_down = "#d9958d"
+legs = "#dc9a92"
+head = "#e7a8a0"
+tail = "#dc9a92"
+snout = "#e39089"
+ears = "#d88d85"
+eye = "#1a1414"
+nostril = "#8a4a46"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 1
+colour = "nostril"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 2
+y = 1
+colour = "nostril"

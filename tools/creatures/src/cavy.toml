@@ -1,0 +1,117 @@
+# DF CAVY (creature_domestic): 0.8 kg, the guinea pig.
+# Attacks bite (the template's `attack`) and scratch (optional, not made).
+# No tail (tail length 0), stubby legs, tricolour patches as decals.
+name = "cavy"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [4, 3, 6]
+leg = [1, 2]
+leg_ends = 0
+head = [3, 3, 2]
+head_up = 1
+head_overlap = 0
+tail = [1, 0]
+walk = { cycle = 0.35, swing = 30, bob = 0.15 }
+run = { cycle = 0.22, swing = 45, bob = 0.3, pitch = 4 }
+idle = { length = 3.0, look = 20, breath = 0.08, wag = 0 }
+attack = { length = 0.4, lunge = 1.5 }
+eat = { length = 1.0, reach = 25, forward = 0.5 }
+
+# Head pivot: the neck joint; the head cube spans y -1..2, z -2..0 around it.
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2, 1.5, -0.5]
+to = [-1, 2.5, 0.5]
+
+[palette]
+fur = "#c98a4a"
+fur_down = "#d9b48a"
+legs = "#e8ddd0"
+head = "#eee6da"
+ears = "#a46a35"
+white = "#eee6da"
+black = "#2a2420"
+eye = "#120e0c"
+nose = "#d7958c"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+colour = "nose"
+
+# Tricolour: a white band and a black rump patch over the back (4 wide × 6
+# long) and flanks (6 wide × 3 tall).
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 2
+w = 4
+h = 2
+colour = "white"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 4
+w = 3
+h = 2
+colour = "black"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 0
+w = 2
+h = 3
+colour = "white"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 0
+w = 2
+h = 3
+colour = "white"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 4
+y = 0
+w = 2
+h = 2
+colour = "black"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 0
+w = 2
+h = 2
+colour = "black"

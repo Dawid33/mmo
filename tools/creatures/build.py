@@ -235,7 +235,8 @@ def animal_person(src):
     hpts = rest_points({"bones": base["bones"], "cubes": [head_cube]})
     hlo = [min(p[i] for p in hpts) for i in range(3)]
     hhi = [max(p[i] for p in hpts) for i in range(3)]
-    k = min(2.5, max(0.8, params["head"][0] / (hhi[0] - hlo[0])))
+    # The base head brought to a person's head width (vermin heads grow a lot).
+    k = min(8.0, max(0.8, params["head"][0] / (hhi[0] - hlo[0])))
     alls = rest_points({"bones": base["bones"], "cubes": [c for c in base["cubes"] if c[1] in heads]})
     anchor = [(hlo[0] + hhi[0]) / 2, min(p[1] for p in alls), (hlo[2] + hhi[2]) / 2]
     base_bones = {name: (parent, pivot, rest) for name, parent, pivot, rest in base["bones"]}
@@ -311,8 +312,8 @@ def animal_person(src):
             "arm_r": {"rotation": hold([10, 0, 10], L)},
         })
         # The lower body's own gait, re-timed to the person's clip.
-        for name, sources in (("walk", ("walk", "swim")), ("run", ("run", "swim")), ("idle", ("idle", "swim_idle")),
-                              ("carry", ("walk", "swim"))):
+        for name, sources in (("walk", ("walk", "swim", "move")), ("run", ("run", "swim", "move")),
+                              ("idle", ("idle", "swim_idle", "move")), ("carry", ("walk", "swim", "move"))):
             c = model["clips"][name]
             b = next(base["clips"][x] for x in sources if x in base["clips"])
             f = c["length"] / b["length"]

@@ -1,0 +1,112 @@
+# DF LLAMA (creature_domestic): 180 kg, domestic wool and pack animal (no MOUNT
+# flag in the raws, so no ridden clip). Attack kick (the template's `attack`
+# lunge); bite optional, not made. Long upright neck as an extra cube on the
+# head bone (no neck bone in the template); white with a brown head and neck.
+name = "llama"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [8, 9, 16]
+leg = [3, 10]
+head = [4, 5, 5]
+head_up = 12
+head_overlap = 0
+tail = [2, 4]
+tail_raise = 20
+walk = { cycle = 0.95, swing = 24, bob = 0.35 }
+run = { cycle = 0.52, swing = 44, bob = 1.1, pitch = 5 }
+idle = { length = 5.0, look = 22, breath = 0.2, wag = 4 }
+attack = { length = 0.7, lunge = 3.5 }
+eat = { length = 2.0, reach = 60, forward = 3 }
+
+# Head pivot: the neck joint at the body's front top; the head cube spans
+# y 8..13, z -5..0 around it.
+[[cubes]]
+name = "neck"
+bone = "head"
+part = "neck"
+from = [-2, -2, -3]
+to = [2, 9, 0.5]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-1.5, 8, -7]
+to = [1.5, 10.5, -5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2, 13, -1]
+to = [-1, 16, 0]
+
+[palette]
+fur = "#ece4d4"
+fur_down = "#d9cfbc"
+legs = "#e2d8c5"
+head = "#7a4e30"
+neck = "#7a4e30"
+muzzle = "#5e3b23"
+ears = "#6a4229"
+tail = "#7a4e30"
+patch = "#7a4e30"
+eye = "#0e0b09"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+# Brown patches on the flanks (16 wide × 9 tall) and back (8 wide × 16 long).
+[[decals]]
+cube = "body"
+face = "west"
+x = 9
+y = 1
+w = 5
+h = 5
+colour = "patch"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 3
+y = 0
+w = 6
+h = 4
+colour = "patch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 9
+w = 5
+h = 5
+colour = "patch"
+
+# Grazing: the long neck swings right down.
+[clips.eat]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [-100, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.5, value = [-95, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.0, value = [-100, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.5, value = [-95, 0, 0] },
+  { bone = "head", channel = "rotation", time = 2.0, value = [-100, 0, 0] },
+  { bone = "head", channel = "position", time = 0.0, value = [0, -2, -2] },
+  { bone = "head", channel = "position", time = 2.0, value = [0, -2, -2] },
+]
