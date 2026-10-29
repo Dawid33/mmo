@@ -416,7 +416,14 @@ fn pick_clamps_open_space_to_the_level() {
 
 #[test]
 fn pick_ignores_blocks_above_the_cut() {
-    let (o, d) = straight_down();
+    use rapier3d::math::Vector;
+    let s = BLOCK_VOXELS as f32;
+    // 45 degrees toward +x: enters the level in column 3, but the open-space
+    // clamp would say column 4.
+    let c = std::f32::consts::FRAC_1_SQRT_2;
+    let d = Vector::new(c, -c, 0.0);
+    // Crosses the cut (y = 11 blocks) at x = 3.5 blocks.
+    let o = Vector::new(3.5 * s - 10.0 * s, 21.0 * s, 3.5 * s);
     assert_eq!(
         pick_level_cell(o, d, 10, pick_solid(&[[3, 11, 3], [3, 10, 3]])),
         Some([3, 10, 3])

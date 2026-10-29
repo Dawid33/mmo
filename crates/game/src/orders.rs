@@ -430,9 +430,11 @@ fn pick_from(
     solid: impl Fn(TilePos) -> bool,
 ) -> Option<TilePos> {
     let size = BLOCK_VOXELS as f32;
+    // Blocks above the cut are not visible at this level (the walk starts in
+    // the cell above the cut plane, so they must not stop it).
     // Reach is in blocks (the walk's parameter is in block units).
     let reach = (level + 1 + UNDERGROUND_DEPTH) as f32;
-    if let Some(hit) = raycast_blocks(start, dir, reach, solid) {
+    if let Some(hit) = raycast_blocks(start, dir, reach, |p| p[1] <= level && solid(p)) {
         if hit.block[1] == level {
             return Some(hit.block);
         }
