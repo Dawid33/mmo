@@ -18,6 +18,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import tomllib
 import uuid
@@ -78,7 +79,9 @@ def read_source(df_id):
 
 
 def other_side(name):
-    return name[:-2] + "_r" if name.endswith("_l") else name
+    """The right-hand twin of a left-side name: `x_l`, `leg_l2`, `leg_fl` / `leg_bl`."""
+    m = re.fullmatch(r"(.*_)l(\d*)", name) or re.fullmatch(r"(.*_[fb])l()", name)
+    return f"{m.group(1)}r{m.group(2)}" if m else name
 
 
 def load(df_id):
