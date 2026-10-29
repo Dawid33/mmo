@@ -39,8 +39,29 @@ fn assert_lands_dry(world: &ForgedWorld, rc: RegionCoords, tile: &TileSummary) -
     let landing = tile.landing.unwrap_or_else(|| panic!("tile {rc:?} has no landing: {tile:?}"));
     assert!(landing.iter().all(|&b| (b as usize) < game::REGION_BLOCKS), "landing {landing:?} off the region");
     let (x, z) = landing_m(rc, landing);
-    assert!(is_dry(&world.sample(x, z)), "landing {landing:?} of {rc:?} is wet: {:?}", world.sample(x, z));
+    let sample = world.sample(x, z);
+    assert!(is_dry(&sample), "landing {landing:?} of {rc:?} is wet: {sample:?}");
+    let above_sea = surface_block(sample.ground_y) - worldgen::pipeline::SEA_TOP_BLOCK;
+    assert!(
+        above_sea >= LANDING_MIN_BLOCKS_ABOVE_SEA,
+        "landing {landing:?} of {rc:?} only {above_sea} blocks above the sea: {sample:?}"
+    );
     landing
+}
+
+#[test]
+fn a_waterline_column_is_dry_but_no_landing() {
+    use worldgen::forged::PointSample;
+    use worldgen::pipeline::SEA_TOP_BLOCK;
+    // The ground height whose surface block is `block` (its centre just under it).
+    let ground = |block: i32| f64::from(block) + 1.0;
+    let at = |block: i32| PointSample { ground_y: ground(block), water_y: None };
+    assert_eq!(surface_block(ground(SEA_TOP_BLOCK)), SEA_TOP_BLOCK);
+    assert!(is_dry(&at(SEA_TOP_BLOCK)), "level with the sea is dry");
+    assert!(!is_landing(&at(SEA_TOP_BLOCK)), "but too marginal to land on");
+    assert!(is_landing(&at(SEA_TOP_BLOCK + LANDING_MIN_BLOCKS_ABOVE_SEA)));
+    let lake = PointSample { water_y: Some(ground(SEA_TOP_BLOCK + 5) + 1.0), ..at(SEA_TOP_BLOCK + 5) };
+    assert!(!is_landing(&lake), "high but under a lake");
 }
 
 #[test]

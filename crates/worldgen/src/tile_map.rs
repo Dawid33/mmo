@@ -27,10 +27,22 @@ pub fn surface_block(ground_y: f64) -> i32 {
 
 /// Whether a column is dry land: its surface block stands at or above the
 /// sea's top block and no lake or river surface lies above its ground. The
-/// one definition of "dry" shared by the map's landing search and
+/// one definition of "dry" shared by the map's landing search (which also
+/// wants [`LANDING_MIN_BLOCKS_ABOVE_SEA`], see [`is_landing`]) and
 /// `examples/world_map.rs`.
 pub fn is_dry(sample: &PointSample) -> bool {
     surface_block(sample.ground_y) >= SEA_TOP_BLOCK && sample.water_y.is_none_or(|w| w <= sample.ground_y)
+}
+
+/// Blocks a landing column's surface block must stand above the sea's top
+/// block, on top of [`is_dry`]: a column level with the sea is dry but sits
+/// right on the waterline, too marginal to put a body down on.
+pub const LANDING_MIN_BLOCKS_ABOVE_SEA: i32 = 1;
+
+/// Whether a column may be landed on: [`is_dry`] and its surface block at
+/// least [`LANDING_MIN_BLOCKS_ABOVE_SEA`] above the sea's top block.
+pub fn is_landing(sample: &PointSample) -> bool {
+    is_dry(sample) && surface_block(sample.ground_y) >= SEA_TOP_BLOCK + LANDING_MIN_BLOCKS_ABOVE_SEA
 }
 
 /// One tile's edge in engine metres.
@@ -78,7 +90,7 @@ struct Cell {
 /// [`OUTSIDE_HEIGHT_M`]), rivers by any reach point inside the footprint, the
 /// most common surface rock, and the landing column — the tile centre's
 /// column or else the in-artifact cell centre nearest it (ties by z, then x)
-/// whose block column [`is_dry`].
+/// whose block column [`is_landing`].
 pub fn summarize_tile(world: &ForgedWorld, rc: RegionCoords) -> TileSummary {
     let a = world.artifact();
     let n = i64::from(a.n);
@@ -175,7 +187,8 @@ pub fn summarize_tile(world: &ForgedWorld, rc: RegionCoords) -> TileSummary {
 
 /// The landing column: the tile centre's own block column, then the
 /// in-artifact cell centres by distance to the tile centre (ties by z, then
-/// x); the first whose block column is dry, as a region-local block column.
+/// x); the first whose block column [`is_landing`], as a region-local block
+/// column.
 /// (Cell centres alone can sit up to half a cell off the centre; the centre
 /// column first keeps a dry tile's landing on its middle.)
 fn landing(world: &ForgedWorld, cells: &[Cell], tile_min: [f64; 2]) -> Option<[u32; 2]> {
@@ -193,7 +206,7 @@ fn landing(world: &ForgedWorld, cells: &[Cell], tile_min: [f64; 2]) -> Option<[u
         .chain(order.into_iter().map(|c| [c.x, c.z]))
         .find_map(|[x, z]| {
             let col = [column(x, tile_min[0]), column(z, tile_min[1])];
-            is_dry(&world.sample(at(col[0], tile_min[0]), at(col[1], tile_min[1]))).then_some(col)
+            is_landing(&world.sample(at(col[0], tile_min[0]), at(col[1], tile_min[1]))).then_some(col)
         })
 }
 
