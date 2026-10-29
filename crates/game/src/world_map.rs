@@ -1,0 +1,74 @@
+//! Wire types for the world map (per-region tile summaries of the forged
+//! world) and the Play request. Pure data: the server fills them from
+//! `ForgedWorld` rasters, the client builds the picture.
+
+use crate::protocol::RegionCoords;
+
+/// What one region looks like from above, summarised from the forged rasters.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TileSummary {
+    /// Ground height over the tile, metres relative to sea level.
+    pub ground_min_m: f32,
+    pub ground_mean_m: f32,
+    pub ground_max_m: f32,
+    /// p90 - p10 of ground over the tile.
+    pub relief_m: f32,
+    /// Mean d(ground)/dx, d(ground)/dz (m per m), for client hillshade.
+    pub slope: [f32; 2],
+    /// 0..=1 of raster cells under sea.
+    pub sea_fraction: f32,
+    /// 0..=1 of raster cells with a lake surface.
+    pub lake_fraction: f32,
+    pub lake_level_m: Option<f32>,
+    /// River reaches with a point inside the tile.
+    pub rivers: u16,
+    /// 0 when `rivers == 0`.
+    pub river_max_discharge_m2: f32,
+    pub river_max_width_m: f32,
+    /// Index into [`WorldMap::rock_names`] (mode over the tile).
+    pub surface_rock: Option<u8>,
+    /// Region-local BLOCK column of the landing spot; `None` = no dry land.
+    pub landing: Option<[u32; 2]>,
+}
+
+/// The whole world as a grid of tile summaries, row-major by z then x.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WorldMap {
+    /// Region of `tiles[0]` (min x, min z).
+    pub origin: RegionCoords,
+    /// Tiles per row / number of rows.
+    pub width: u32,
+    pub height: u32,
+    pub tiles: Vec<TileSummary>,
+    pub rock_names: Vec<String>,
+}
+
+impl WorldMap {
+    /// The tile of `rc`, or `None` outside the map.
+    pub fn tile(&self, rc: RegionCoords) -> Option<&TileSummary> {
+        let dx = i64::from(rc.x) - i64::from(self.origin.x);
+        let dz = i64::from(rc.z) - i64::from(self.origin.z);
+        if dx < 0 || dz < 0 || dx >= i64::from(self.width) || dz >= i64::from(self.height) {
+            return None;
+        }
+        self.tiles.get((dz * i64::from(self.width) + dx) as usize)
+    }
+
+    /// Region coordinates of `tiles[index]`.
+    pub fn coords(&self, index: usize) -> RegionCoords {
+        let w = self.width.max(1) as usize;
+        RegionCoords::new(
+            self.origin.x + (index % w) as i32,
+            self.origin.z + (index / w) as i32,
+        )
+    }
+}
+
+/// Why the server refused a `ClientPacket::PlayRegion`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PlayRefusal {
+    NoWorldMap,
+    OffMap,
+    NoDryLand,
+    AlreadyHere,
+}

@@ -377,6 +377,9 @@ pub enum ClientPacket {
     RequestLod(LodKey),
     /// Unsubscribe; removal is client-driven, there is no "gone" packet.
     ReleaseLod(LodKey),
+    /// Start playing this region (picked on the world map): the server moves
+    /// the player's home there or answers `ServerPacket::PlayRefused`.
+    PlayRegion(RegionCoords),
 }
 
 /// One LOD response: (key-local cell group, RLE grid) pairs.
@@ -396,6 +399,10 @@ pub enum ServerPacket {
     /// Streamed LOD cells for one key (initial send AND refresh —
     /// replace-on-re-receipt).
     LodData(LodKey, LodPayload),
+    /// The world map: per-region tile summaries of the forged world.
+    WorldMap(crate::world_map::WorldMap),
+    /// A `ClientPacket::PlayRegion` for this region was refused.
+    PlayRefused(RegionCoords, crate::world_map::PlayRefusal),
 }
 
 /// A Game event

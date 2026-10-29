@@ -1402,6 +1402,10 @@ impl GameInstanceManager {
                     }
                 }
             }
+            game::ServerPacket::WorldMap(_) | game::ServerPacket::PlayRefused(..) => {
+                // Wired by the client map/Play task.
+                log::debug!("[client] world-map packet ignored for now");
+            }
             game::ServerPacket::LodData(key, payload) => {
                 if !self.lod_subscribed.contains(&key) {
                     // Raced a release: tell the server we really don't want it.

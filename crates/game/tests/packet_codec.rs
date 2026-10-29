@@ -69,3 +69,72 @@ fn hostile_or_corrupt_input_is_an_error_never_a_panic() {
     let wire = encode_packet(&vec![1u8, 2, 3]).unwrap();
     assert!(decode_packet::<ServerPacket>(&wire).is_err());
 }
+
+fn tile(landing: Option<[u32; 2]>) -> game::TileSummary {
+    game::TileSummary {
+        ground_min_m: -3.0,
+        ground_mean_m: 4.5,
+        ground_max_m: 20.0,
+        relief_m: 9.0,
+        slope: [0.1, -0.2],
+        sea_fraction: 0.25,
+        lake_fraction: 0.0,
+        lake_level_m: None,
+        rivers: 2,
+        river_max_discharge_m2: 12.0,
+        river_max_width_m: 3.0,
+        surface_rock: Some(1),
+        landing,
+    }
+}
+
+fn map_2x1() -> game::WorldMap {
+    game::WorldMap {
+        origin: RegionCoords::new(-1, 0),
+        width: 2,
+        height: 1,
+        tiles: vec![tile(Some([3, 4])), tile(None)],
+        rock_names: vec!["granite".into(), "basalt".into()],
+    }
+}
+
+#[test]
+fn world_map_packet_round_trips() {
+    let packet = ServerPacket::WorldMap(map_2x1());
+    let back: ServerPacket = decode_packet(&encode_packet(&packet).unwrap()).unwrap();
+    match back {
+        ServerPacket::WorldMap(map) => assert_eq!(map, map_2x1()),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn play_region_packets_round_trip() {
+    let rc = RegionCoords::new(-2, 5);
+    let back: ClientPacket =
+        decode_packet(&encode_packet(&ClientPacket::PlayRegion(rc)).unwrap()).unwrap();
+    assert!(matches!(back, ClientPacket::PlayRegion(r) if r == rc));
+    let packet = ServerPacket::PlayRefused(rc, game::PlayRefusal::NoDryLand);
+    let back: ServerPacket = decode_packet(&encode_packet(&packet).unwrap()).unwrap();
+    assert!(matches!(back, ServerPacket::PlayRefused(r, game::PlayRefusal::NoDryLand) if r == rc));
+}
+
+#[test]
+fn world_map_tile_lookup() {
+    let tiles: Vec<_> = (0..6).map(|i| {
+        let mut t = tile(None);
+        t.rivers = i;
+        t
+    }).collect();
+    let map = game::WorldMap {
+        origin: RegionCoords::new(-1, -1),
+        width: 3,
+        height: 2,
+        tiles,
+        rock_names: vec![],
+    };
+    assert_eq!(map.tile(RegionCoords::new(1, 0)).unwrap().rivers, 5);
+    assert!(map.tile(RegionCoords::new(2, 0)).is_none());
+    assert!(map.tile(RegionCoords::new(-2, 0)).is_none());
+    assert_eq!(map.coords(4), RegionCoords::new(0, 0));
+}

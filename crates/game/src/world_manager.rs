@@ -471,6 +471,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, rc, now_ms),
                 ClientPacket::RequestLod(key) => self.lod_subscribe(id, key, now_ms),
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
+                ClientPacket::PlayRegion(rc) => {
+                    // Placeholder until the Play handling lands.
+                    log::info!("client {id} asked to play {rc:?}; not handled yet");
+                }
                 packet @ (ClientPacket::GameEvent(_) | ClientPacket::GameEventAfterTick(..)) => {
                     let (event, after_tick) = match packet {
                         ClientPacket::GameEventAfterTick(event, tick) => (event, Some(tick)),

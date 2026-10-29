@@ -38,6 +38,7 @@ pub mod ui;
 pub mod volume;
 pub mod voxel;
 pub mod world_manager;
+pub mod world_map;
 pub use parry3d as parry;
 pub use rapier3d;
 /// The physics fork's math: glam 0.33 through glamx (`Vec3`, `Quat`, `Mat4`,
@@ -71,6 +72,7 @@ pub use ui::*;
 pub use volume::*;
 pub use voxel::*;
 pub use world_manager::*;
+pub use world_map::*;
 
 pub const TICK_RATE: u64 = 50;
 /// TESTING KNOB — deliberately 0 in normal operation. Extra client-ahead lead
