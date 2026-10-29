@@ -24,7 +24,8 @@ use bevy::{
     prelude::*,
     render::{
         render_phase::{
-            BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem, RenderCommand,
+            BinnedPhaseItem, BinnedRenderPhase, BinnedRenderPhaseType, DrawFunctions,
+            InputUniformIndex, PhaseItem, RenderCommand,
             RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewBinnedRenderPhases,
         },
         render_resource::{
@@ -195,6 +196,31 @@ fn specialize_cutaway<P: SpecializedRenderPipeline>(
     }
 }
 
+/// Put a view's one representative `NonMesh` item (its render command draws
+/// every chunk) in the bin for `batch_set_key`. Bevy's binned phases are
+/// RETAINED across frames, and `BinnedRenderPhase::add` never takes an entity
+/// out of the bin it was in before — Bevy's own `queue_material_meshes`
+/// removes before it re-adds. Without the remove, the item queued with the
+/// plain pipeline (cut off, or CUTAWAY still compiling) stayed in that bin
+/// after the cut switched to CUTAWAY, so the terrain drew twice: uncut over
+/// cut, its tops on the cut z-fighting the slice plane.
+fn bin_view_item<BPI: BinnedPhaseItem>(
+    phase: &mut BinnedRenderPhase<BPI>,
+    batch_set_key: BPI::BatchSetKey,
+    bin_key: BPI::BinKey,
+    view_entity: Entity,
+) {
+    let main_entity = MainEntity::from(view_entity);
+    phase.remove(main_entity);
+    phase.add(
+        batch_set_key,
+        bin_key,
+        (view_entity, main_entity),
+        InputUniformIndex::default(),
+        BinnedRenderPhaseType::NonMesh,
+    );
+}
+
 pub fn queue_voxel_pull(
     mode: Res<ActiveNearMode>,
     pipeline: Res<VoxelPullPipeline>,
@@ -239,7 +265,8 @@ pub fn queue_voxel_pull(
             });
         // One representative NonMesh item per view. Its render command loops
         // `ViewChunkDrawList`, so chunk count no longer inflates phase bins.
-        phase.add(
+        bin_view_item(
+            phase,
             Opaque3dBatchSetKey {
                 pipeline: pipeline_id,
                 draw_function: draw,
@@ -250,9 +277,7 @@ pub fn queue_voxel_pull(
             Opaque3dBinKey {
                 asset_id: AssetId::<Mesh>::invalid().untyped(),
             },
-            (view_entity, MainEntity::from(view_entity)),
-            InputUniformIndex::default(),
-            BinnedRenderPhaseType::NonMesh,
+            view_entity,
         );
     }
 }
@@ -296,7 +321,8 @@ pub fn queue_voxel_pull_prepass(
                     cutaway,
                 }
             });
-        phase.add(
+        bin_view_item(
+            phase,
             OpaqueNoLightmap3dBatchSetKey {
                 pipeline: pipeline_id,
                 draw_function: draw,
@@ -306,9 +332,7 @@ pub fn queue_voxel_pull_prepass(
             OpaqueNoLightmap3dBinKey {
                 asset_id: AssetId::<Mesh>::invalid().untyped(),
             },
-            (view_entity, MainEntity::from(view_entity)),
-            InputUniformIndex::default(),
-            BinnedRenderPhaseType::NonMesh,
+            view_entity,
         );
     }
 }
@@ -362,7 +386,8 @@ pub fn queue_voxel_pull_shadows(
                         cutaway,
                     }
                 });
-            phase.add(
+            bin_view_item(
+                phase,
                 ShadowBatchSetKey {
                     pipeline: pipeline_id,
                     draw_function: draw,
@@ -372,9 +397,7 @@ pub fn queue_voxel_pull_shadows(
                 ShadowBinKey {
                     asset_id: AssetId::<Mesh>::invalid().untyped(),
                 },
-                (light_view_entity, MainEntity::from(light_view_entity)),
-                InputUniformIndex::default(),
-                BinnedRenderPhaseType::NonMesh,
+                light_view_entity,
             );
         }
     }
@@ -383,6 +406,40 @@ pub fn queue_voxel_pull_shadows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The view's item follows the pipeline it was last queued with: when the
+    /// z-level cut turns on (plain -> CUTAWAY, through the compile fallback)
+    /// or off, it must leave the old pipeline's bin, else the terrain is
+    /// drawn by both — uncut over cut, the slice plane z-fighting the tops.
+    #[test]
+    fn view_item_leaves_its_previous_pipeline_bin() {
+        use bevy::render::{
+            batching::gpu_preprocessing::GpuPreprocessingMode, render_phase::DrawFunctionId,
+            view::RetainedViewEntity,
+        };
+        let view = Entity::from_raw_u32(7).unwrap();
+        let retained = RetainedViewEntity::new(MainEntity::from(view), None, 0);
+        let mut phases = ViewBinnedRenderPhases::<Opaque3d>::default();
+        let key = |pipeline: usize| Opaque3dBatchSetKey {
+            pipeline: CachedRenderPipelineId::new(pipeline),
+            draw_function: DrawFunctionId(0),
+            material_bind_group_index: None,
+            lightmap_slab: None,
+            slabs: default(),
+        };
+        let bin = || Opaque3dBinKey { asset_id: AssetId::<Mesh>::invalid().untyped() };
+        let (plain, cutaway) = (1, 2);
+        // Frames: plain (cut off / CUTAWAY compiling), CUTAWAY, CUTAWAY,
+        // plain again (cut toggled off).
+        for (frame, pipeline) in [plain, cutaway, cutaway, plain].into_iter().enumerate() {
+            phases.prepare_for_new_frame(retained, GpuPreprocessingMode::None);
+            let phase = phases.get_mut(&retained).expect("phase");
+            bin_view_item(phase, key(pipeline), bin(), view);
+            let bins: Vec<usize> =
+                phase.non_mesh_items.keys().map(|(k, _)| k.pipeline.id()).collect();
+            assert_eq!(bins, [pipeline], "frame {frame}: one bin, the current pipeline's");
+        }
+    }
 
     #[test]
     fn grouped_plan_has_one_phase_item_per_view_not_per_chunk() {
