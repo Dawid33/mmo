@@ -12,8 +12,8 @@
 //! ```
 //!
 //! It lives in `worldgen` because `game` can't depend on it (worldgen
-//! depends on game). It holds for the default build dials only: another
-//! region size, cell mode, spawn island size or a forged world file is a
+//! depends on game). It holds for the default build dials only (both pinned
+//! chunk sizes, 2 and 16): another region size, cell mode, spawn island size or a forged world file is a
 //! different world, and the test says so and skips.
 // The game crate's movement rig: every read of physics-engine types.
 #[path = "../../game/tests/common/mod.rs"]
@@ -30,7 +30,13 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// then (already stale at 0xB42B_F7B3 after an earlier worldgen change) for
 /// the `ChunkBlocks` uniform/dense grid, `u16` `BlockIndex` and boxed
 /// `ColumnGround` footprints — hashed layout only, geometry unchanged.
-const SCENE_HASH: u32 = 0xDB24_FC10;
+/// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
+/// into other chunk entities, bodies and colliders at 2 and 16 blocks.
+const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
+    2 => 0xDB24_FC10,
+    16 => 0x8A57_7DEA,
+    _ => 0,
+};
 /// Ticks of scripted input.
 const SCENE_TICKS: usize = 60;
 
@@ -47,7 +53,8 @@ fn mats() -> worldgen::material::Materials {
 }
 
 fn default_dials() -> bool {
-    game::REGION_BLOCKS == 64
+    matches!(game::CHUNK_BLOCKS, 2 | 16)
+        && game::REGION_BLOCKS == 64
         && game::CELL_CHUNKS == 0
         && option_env!("VOXEL_ISLAND_CELLS").is_none_or(|v| v.is_empty() || v == "0" || v == "16")
         && std::env::var_os(worldgen::forged::WORLD_FILE_ENV).is_none_or(|v| v.is_empty())

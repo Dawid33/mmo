@@ -38,27 +38,68 @@ use slotmapd::Key as _;
 /// then for the `designations` / `constructed` order fields, then for the
 /// `ChunkBlocks` uniform/dense grid, `u16` `BlockIndex` and boxed
 /// `ColumnGround` footprints (serialization + state hash; geometry unchanged).
-const WASM_SCENE_DIGEST: u32 = 0x9ADD_3052;
+///
+/// Every value is pinned per sim-chunk size (`game::CHUNK_BLOCKS`, a build
+/// dial): the same physical scene splits into different chunk entities,
+/// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
+/// Other sizes are not pinned and skip the comparison.
+const WASM_SCENE_DIGEST: u32 = pinned(0x9ADD_3052, 0xB5B3_D519);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = 0x1D38_127B;
+const SCENE_STATE_HASH: u32 = pinned(0x1D38_127B, 0xADE4_9129);
 const SCENE_TICKS: usize = 120;
 /// `cell_hash` of [`cell_scene`]'s activated cell, on every target.
-const CELL_HASH: u32 = 0xD09E_C93A;
+const CELL_HASH: u32 = pinned(0xD09E_C93A, 0xB70D_476F);
 /// `game::state_hash` of [`cell_scene`]'s region, on every target.
-const CELL_STATE_HASH: u32 = 0x86BE_A569;
+const CELL_STATE_HASH: u32 = pinned(0x86BE_A569, 0x138E_6E4F);
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = 0xD4C1_DE27;
+const UNDERGROUND_DIGEST: u32 = pinned(0xD4C1_DE27, 0x24CC_65C7);
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = 0xBA1F_2E0E;
+const UNDERGROUND_STATE_HASH: u32 = pinned(0xBA1F_2E0E, 0x8A5A_428D);
+
+/// The value pinned for this build's chunk size: `at2` at 2-block chunks,
+/// `at16` at 16 (0 elsewhere; see [`pinned_size`]).
+const fn pinned(at2: u32, at16: u32) -> u32 {
+    match game::CHUNK_BLOCKS {
+        2 => at2,
+        16 => at16,
+        _ => 0,
+    }
+}
+
+/// Whether this chunk size has pinned values; prints a skip line if not.
+fn pinned_size() -> bool {
+    let pinned = matches!(game::CHUNK_BLOCKS, 2 | 16);
+    if !pinned {
+        log(&format!("wasm_determinism: nothing pinned at {}-block chunks, comparison skipped", game::CHUNK_BLOCKS));
+    }
+    pinned
+}
 
 /// Runs the scene; returns `(portable digest, state_hash)`.
 fn scene() -> (u32, u32) {
-    // Units 64..320 each way around the spawn at (128, 128); the chunk row
-    // holding z = 192 is half blocks (top 24) over the block-scale floor
-    // (top 16) — a 32-unit strip at 2-block chunks (TODO at larger chunks: a
-    // block-level strip instead of a whole chunk row).
-    let half_row = common::chunk_index_of(192.0);
-    let mut world = world_of(64.0..320.0, 64.0..320.0, |_, z| Chunk::flat_floor(if z == half_row { 24 } else { 16 }));
+    // Units 64..320 each way around the spawn at (128, 128); the 32-unit
+    // strip z 192..224 (block rows 12 and 13 — one chunk row at 2-block
+    // chunks) is half blocks (top 24) over the block-scale floor (top 16).
+    let mut world = world_of(64.0..320.0, 64.0..320.0, |_, z| {
+        let half = Chunk::flat_floor(24);
+        let mut chunk = Chunk::flat_floor(16);
+        for bz in 0..game::CHUNK_BLOCKS {
+            if !(12..14).contains(&(z * game::CHUNK_BLOCKS + bz)) {
+                continue;
+            }
+            for by in 0..game::CHUNK_BLOCKS {
+                for bx in 0..game::CHUNK_BLOCKS {
+                    let i = game::BlockIndex::from_xyz(bx, by, bz);
+                    chunk.set_block(bx, by, bz, half.block_at(bx, by, bz));
+                    match half.chisel.get(&i) {
+                        Some(c) => chunk.chisel.insert(i, c.clone()),
+                        None => chunk.chisel.remove(&i),
+                    };
+                }
+            }
+        }
+        chunk
+    });
     spawn_slime(world.regions.get_mut(&r0()).unwrap(), [176.0, 40.0, 112.0], 1, 0.0, 0);
     let compound = add_compound_body(&mut world);
     // S (+z) over the half-block row and back off it, then D (+x), with jumps.
@@ -88,7 +129,8 @@ fn scene() -> (u32, u32) {
     // properties computed, the digest would only differ if std acos/cos
     // happened to round differently on this floor.
     let (fixed, massive) = fixed_body_mass_count(data);
-    assert!(fixed >= 64 && massive == 0, "{massive} of {fixed} fixed terrain bodies computed mass properties");
+    let chunks = common::chunks_over(64.0..320.0, 64.0..320.0).len();
+    assert!(fixed >= chunks && massive == 0, "{massive} of {fixed} fixed terrain bodies computed mass properties");
     // Upgrade plan Task 5.4 Step 5b: a moving body's mass properties do go
     // through `symmetric_eigen` (glamx's std `acos`/`cos`); the compound's
     // principal frame is off-axis, so the digest carries its result.
@@ -146,13 +188,21 @@ fn add_compound_body(world: &mut game::World) -> RigidBodyHandle {
 /// `(cell_hash, state_hash)`.
 fn cell_scene() -> (u32, u32) {
     let cell = CellCoords::new(1, 2);
-    let cell_chunks = 8;
+    // 16-block cells: 8 chunks at 2-block chunks, one chunk column at 16.
+    let cell_chunks = 16 / game::CHUNK_BLOCKS;
     let (x, z) = (cell.x as usize * cell_chunks, cell.z as usize * cell_chunks);
+    // Three chunks inside the cell: along x and z when it is wider than a
+    // chunk, else stacked up its one column.
+    let (second, third) = if cell_chunks > 1 {
+        (ChunkCoords::new(x + 1, 0, z), ChunkCoords::new(x, 0, z + 1))
+    } else {
+        (ChunkCoords::new(x, 1, z), ChunkCoords::new(x, 2, z))
+    };
     let content = DormantCell {
         chunks: vec![
             (ChunkCoords::new(x, 0, z), Chunk::flat_floor(8)),
-            (ChunkCoords::new(x + 1, 0, z), Chunk::flat_floor(24)),
-            (ChunkCoords::new(x, 0, z + 1), Chunk::flat_floor(4)),
+            (second, Chunk::flat_floor(24)),
+            (third, Chunk::flat_floor(4)),
         ],
         entities: vec![],
     };
@@ -212,13 +262,17 @@ fn underground_scene() -> (u32, u32) {
     };
     let before = count(&region);
     for (i, y) in ys.into_iter().enumerate() {
-        // The shaft wanders across the four columns around their shared corner.
-        let pos = [1 + (i as i32 % 2), y, 1 + (i as i32 % 3) / 2];
+        // The shaft wanders across the four columns around their shared
+        // corner at block (cb, cb).
+        let pos = [cb - 1 + (i as i32 % 2), y, cb - 1 + (i as i32 % 3) / 2];
         let mut changed = false;
         region.with_data(|d| changed = d.set_block_safe(pos, Block::new(BlockId::AIR)));
         assert_eq!(changed, i != ys.len() - 1, "dig {i} at y={y}: only the bedrock dig is refused");
     }
     let after = count(&region);
+    if print_hash() {
+        log(&format!("underground chunks {before} -> {after}"));
+    }
     assert!(after > before + 10, "digging must materialise implied ground: {before} -> {after} chunks");
     let data = region.data();
     let digest = crc32fast::hash(&game::SerializedRegion::from_rollback(data).0);
@@ -256,6 +310,9 @@ fn log(line: &str) {
 #[test]
 fn scene_hash_native() {
     let (digest, hash) = scene();
+    if !pinned_size() {
+        return;
+    }
     assert_eq!(digest, WASM_SCENE_DIGEST, "native scene digest 0x{digest:08X} != golden 0x{WASM_SCENE_DIGEST:08X}");
     assert_eq!(hash, SCENE_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}");
 }
@@ -264,6 +321,9 @@ fn scene_hash_native() {
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn scene_hash_wasm() {
     let (digest, hash) = scene();
+    if !pinned_size() {
+        return;
+    }
     assert_eq!(digest, WASM_SCENE_DIGEST, "wasm32 scene digest 0x{digest:08X} != golden 0x{WASM_SCENE_DIGEST:08X}");
     assert_eq!(hash, SCENE_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}");
 }
@@ -272,6 +332,9 @@ fn scene_hash_wasm() {
 #[test]
 fn cell_hash_native() {
     let (hash, state) = cell_scene();
+    if !pinned_size() {
+        return;
+    }
     assert_eq!(hash, CELL_HASH, "native cell_hash 0x{hash:08X} != golden 0x{CELL_HASH:08X}");
     assert_eq!(state, CELL_STATE_HASH, "native state_hash 0x{state:08X} != golden 0x{CELL_STATE_HASH:08X}");
 }
@@ -280,6 +343,9 @@ fn cell_hash_native() {
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn cell_hash_wasm() {
     let (hash, state) = cell_scene();
+    if !pinned_size() {
+        return;
+    }
     assert_eq!(hash, CELL_HASH, "wasm32 cell_hash 0x{hash:08X} != golden 0x{CELL_HASH:08X}");
     assert_eq!(state, CELL_STATE_HASH, "wasm32 state_hash 0x{state:08X} != golden 0x{CELL_STATE_HASH:08X}");
 }
@@ -288,6 +354,9 @@ fn cell_hash_wasm() {
 #[test]
 fn underground_hash_native() {
     let (digest, hash) = underground_scene();
+    if !pinned_size() {
+        return;
+    }
     assert_eq!(digest, UNDERGROUND_DIGEST, "native digest 0x{digest:08X} != golden 0x{UNDERGROUND_DIGEST:08X}");
     assert_eq!(hash, UNDERGROUND_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}");
 }
@@ -296,6 +365,9 @@ fn underground_hash_native() {
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn underground_hash_wasm() {
     let (digest, hash) = underground_scene();
+    if !pinned_size() {
+        return;
+    }
     assert_eq!(digest, UNDERGROUND_DIGEST, "wasm32 digest 0x{digest:08X} != golden 0x{UNDERGROUND_DIGEST:08X}");
     assert_eq!(hash, UNDERGROUND_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}");
 }

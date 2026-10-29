@@ -157,15 +157,39 @@ fn d8_touching_start_sliding_or_lifting_is_no_hit() {
     }
 }
 
-/// Terraces rising one voxel per chunk along +z (`Chunk::flat_floor(12 + z)`,
-/// columns 3–4, rows 7–10), added in `order`, with the broad phase built at
+/// Terraces rising one voxel per two blocks along +z (block row `bz` is
+/// `Chunk::flat_floor(12 + bz / 2)`'s row — one 2-block chunk per terrace at
+/// the original chunk size), over block columns 6–9 and rows 14–21 (units
+/// x 96..160, z 224..352), added in `order`, with the broad phase built at
 /// `length_unit`: its leaves' fat-AABB margin scales with it, so the two
 /// units give two BVH layouts over the same colliders.
 fn terrace_world(length_unit: f32, reversed: bool) -> PhysicsWorld {
-    let mut chunks: Vec<_> = (3..=4)
-        .flat_map(|x| (7..=10).map(move |z| (x, z)))
-        .map(|(x, z)| ((x, 0, z), game::Chunk::flat_floor(12 + z as u32)))
-        .collect();
+    use game::{BlockIndex, CHUNK_BLOCKS};
+    let (xs, zs) = (6..10usize, 14..22usize); // world block ranges
+    let span = |r: &std::ops::Range<usize>| r.start / CHUNK_BLOCKS..=(r.end - 1) / CHUNK_BLOCKS;
+    let mut chunks = Vec::new();
+    for cx in span(&xs) {
+        for cz in span(&zs) {
+            let mut chunk = game::Chunk::default();
+            for bz in 0..CHUNK_BLOCKS {
+                let wz = cz * CHUNK_BLOCKS + bz;
+                if !zs.contains(&wz) {
+                    continue;
+                }
+                let row = game::Chunk::flat_floor(12 + (wz / 2) as u32);
+                for bx in (0..CHUNK_BLOCKS).filter(|bx| xs.contains(&(cx * CHUNK_BLOCKS + bx))) {
+                    for by in 0..CHUNK_BLOCKS {
+                        chunk.set_block(bx, by, bz, row.block_at(bx, by, bz));
+                        let i = BlockIndex::from_xyz(bx, by, bz);
+                        if let Some(c) = row.chisel.get(&i) {
+                            chunk.chisel.insert(i, c.clone());
+                        }
+                    }
+                }
+            }
+            chunks.push(((cx as i32, 0, cz as i32), chunk));
+        }
+    }
     if reversed {
         chunks.reverse();
     }
