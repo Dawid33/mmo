@@ -440,6 +440,16 @@ fn hold_pointer_while_orbiting(
     }
 }
 
+/// Space / Shift rise and sink direction (+1 / -1 / 0). `level_keys` = Alt
+/// or PgUp/PgDn held: Shift there is the fast working-level step
+/// (`level::step_level_input`), not a sink, so both keys are ignored.
+fn rise_input(space: bool, shift: bool, level_keys: bool) -> f32 {
+    if level_keys {
+        return 0.0;
+    }
+    f32::from(u8::from(space)) - f32::from(u8::from(shift))
+}
+
 /// Keyboard, screen-edge, middle/right-drag and wheel input → focus, heading,
 /// pitch, rise and zoom.
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
@@ -499,13 +509,9 @@ fn pan_and_zoom(
         (cam.yaw, cam.pitch) = orbit(cam.yaw, cam.pitch, motion.delta);
     }
 
-    let mut vertical = 0.0;
-    if keys.pressed(KeyCode::Space) {
-        vertical += 1.0;
-    }
-    if keys.pressed(KeyCode::ShiftLeft) {
-        vertical -= 1.0;
-    }
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
+    let paging = keys.any_pressed([KeyCode::PageUp, KeyCode::PageDown]);
+    let vertical = rise_input(keys.pressed(KeyCode::Space), keys.pressed(KeyCode::ShiftLeft), alt || paging);
     cam.rise += vertical * cam.distance * RISE_ZOOMS_PER_S * dt;
 
     let notches = match scroll.unit {
@@ -513,7 +519,6 @@ fn pan_and_zoom(
         // Touchpads: ~one notch per 40 px.
         MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
     };
-    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
     let over_minimap = cursor.is_some_and(|c| minimap::screen_rect(size).contains(c));
     if notches != 0.0
         && !over_minimap
@@ -571,6 +576,15 @@ mod tests {
         let below = (-forward.y).asin();
         assert!((below - pitch).abs() < 1e-5, "pitch below horizon");
         assert!(tf.right().x > 0.999, "north-up: screen right is +x");
+    }
+
+    #[test]
+    fn level_keys_suppress_rise_and_sink() {
+        assert_eq!(rise_input(true, false, false), 1.0);
+        assert_eq!(rise_input(false, true, false), -1.0);
+        assert_eq!(rise_input(true, true, false), 0.0);
+        assert_eq!(rise_input(false, true, true), 0.0, "Alt+Shift / Shift+PgDn is a fast level step");
+        assert_eq!(rise_input(true, false, true), 0.0);
     }
 
     #[test]

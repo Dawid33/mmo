@@ -282,6 +282,20 @@ fn erase_summary(
 }
 
 /// Keep a picked tile's column inside the home region.
+/// The drag corner this frame: x/z from the hovered tile while there is
+/// one, y the working level whenever it is known — a level step mid-drag
+/// lands even while the pointer is off the terrain (e.g. over the readout).
+pub fn follow_corner(corner: TilePos, hover: Option<TilePos>, level: Option<i32>) -> TilePos {
+    let [mut x, mut y, mut z] = corner;
+    if let Some(h) = hover {
+        (x, z) = (h[0], h[2]);
+    }
+    if let Some(level) = level {
+        y = level;
+    }
+    [x, y, z]
+}
+
 fn clamp_to_region(p: TilePos) -> TilePos {
     [p[0].clamp(0, REGION_BLOCKS - 1), p[1], p[2].clamp(0, REGION_BLOCKS - 1)]
 }
@@ -411,9 +425,7 @@ pub fn drag_input(
         }
     }
     let Some(mut drag) = state.drag else { return };
-    if let (Some(hover), Some(level)) = (state.hover, working.level) {
-        drag.corner = [hover[0], level, hover[2]];
-    }
+    drag.corner = follow_corner(drag.corner, state.hover, working.level);
     drag.erase = ctrl;
     if state.drag != Some(drag) {
         state.drag = Some(drag);
@@ -583,6 +595,14 @@ mod tests {
             Order::Erase { area, only: Some(DesignationKind::Dig) }
         );
         assert_eq!(order_for(Tool::Erase, area, false, op, 6), Order::Erase { area, only: None });
+    }
+
+    #[test]
+    fn corner_follows_the_level_without_a_hover() {
+        assert_eq!(follow_corner([1, 5, 2], Some([7, 9, 8]), Some(6)), [7, 6, 8]);
+        assert_eq!(follow_corner([1, 5, 2], None, Some(6)), [1, 6, 2], "level lands with no hover");
+        assert_eq!(follow_corner([1, 5, 2], Some([7, 9, 8]), None), [7, 5, 8]);
+        assert_eq!(follow_corner([1, 5, 2], None, None), [1, 5, 2]);
     }
 
     #[test]

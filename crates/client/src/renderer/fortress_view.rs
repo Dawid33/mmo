@@ -106,6 +106,23 @@ pub fn overlay_base_level(level: i32) -> i32 {
     level - (OVERLAY_LEVELS as i32 - 1)
 }
 
+/// The overlay texture's extent for a build with `cell_chunks`
+/// ([`game::CELL_CHUNKS`]): `W × D × OVERLAY_LEVELS` over a legacy region,
+/// and 1×1×1 in cell mode — the fortress view is off there, but the
+/// bindings still need a valid texture, and a region-sized one could reach
+/// gigabytes (or exceed wgpu's 2048 3D-texture limit) at large region sizes.
+pub fn overlay_dims_for(cell_chunks: usize) -> UVec3 {
+    if cell_chunks != 0 {
+        return UVec3::ONE;
+    }
+    UVec3::new(REGION_BLOCKS as u32, REGION_BLOCKS as u32, OVERLAY_LEVELS)
+}
+
+/// [`overlay_dims_for`] this build.
+pub fn overlay_dims() -> UVec3 {
+    overlay_dims_for(game::CELL_CHUNKS)
+}
+
 /// The CPU side of the overlay texture: one [`overlay_byte`] per cell of the
 /// home region on levels `base_level ..  base_level + OVERLAY_LEVELS`.
 /// Texture coordinates are `(x, z, y - base_level)` with x and z
@@ -123,7 +140,7 @@ pub struct OverlayGrid {
 
 impl Default for OverlayGrid {
     fn default() -> Self {
-        let dims = UVec3::new(REGION_BLOCKS as u32, REGION_BLOCKS as u32, OVERLAY_LEVELS);
+        let dims = overlay_dims();
         Self { base_level: 0, dims, bytes: vec![0; dims.element_product() as usize], dirty: None }
     }
 }
@@ -252,7 +269,7 @@ pub struct OverlayTexture(pub Handle<Image>);
 
 impl FromWorld for OverlayTexture {
     fn from_world(world: &mut World) -> Self {
-        let dims = OverlayGrid::default().dims;
+        let dims = overlay_dims();
         let mut image = Image::new(
             Extent3d { width: dims.x, height: dims.y, depth_or_array_layers: dims.z },
             TextureDimension::D3,
@@ -375,8 +392,7 @@ pub fn build_uniform(working: &WorkingLevel, home: Option<RegionId>) -> Fortress
     if let Some(level) = working.level {
         u.cut.z = 1.0;
         u.origin.w = overlay_base_level(level) as f32;
-        let dims = OverlayGrid::default().dims;
-        u.overlay_dims = dims.extend(0);
+        u.overlay_dims = overlay_dims().extend(0);
     }
     if let Some(cut) = level::cut_y(working, home) {
         u.cut.x = cut;
@@ -425,6 +441,14 @@ mod tests {
         assert!(!cutaway_active(&build_uniform(&working, None)));
         assert_eq!(build_uniform(&working, None).cut.z, 0.0);
         assert_eq!(build_uniform(&WorkingLevel { level: None, cut: true }, home).cut.z, 0.0);
+    }
+
+    #[test]
+    fn overlay_dims_collapse_in_cell_mode() {
+        assert_eq!(overlay_dims_for(16), UVec3::ONE);
+        assert_eq!(overlay_dims_for(0), UVec3::new(REGION_BLOCKS as u32, REGION_BLOCKS as u32, OVERLAY_LEVELS));
+        assert_eq!(OverlayGrid::default().dims, overlay_dims());
+        assert_eq!(OverlayGrid::default().bytes.len(), overlay_dims().element_product() as usize);
     }
 
     fn designation(kind: DesignationKind) -> Designation {

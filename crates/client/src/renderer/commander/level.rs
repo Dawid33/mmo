@@ -48,6 +48,25 @@ pub fn step_level(level: i32, notches: f32, fast: bool, range: (i32, i32)) -> i3
     (level + whole * step).clamp(range.0, range.1.max(range.0))
 }
 
+/// Touchpad scroll pixels per wheel notch.
+pub const PIXELS_PER_NOTCH: f32 = 40.0;
+
+/// Whole level notches from one frame's scroll. A wheel (`pixel` false)
+/// passes its notches through — `step_level` moves at least one level per
+/// nonzero scroll. A touchpad (`pixel`) sends a trickle of pixels every
+/// frame, so its notches add up in `acc` and only whole ones come out (the
+/// remainder stays, sign kept), else every frame would step a level.
+pub fn scroll_notches(pixel: bool, delta: f32, acc: &mut f32) -> f32 {
+    if !pixel {
+        *acc = 0.0;
+        return delta;
+    }
+    *acc += delta / PIXELS_PER_NOTCH;
+    let whole = acc.trunc();
+    *acc -= whole;
+    whole
+}
+
 /// The reachable levels for loaded surfaces spanning `surface` (sim units).
 pub fn level_range(surface: (f32, f32)) -> (i32, i32) {
     let b = BLOCK_VOXELS as f32;
@@ -103,6 +122,7 @@ pub fn step_level_input(
     grid: Res<HeightGrid>,
     cam: Res<CommanderCamera>,
     mut level: ResMut<WorkingLevel>,
+    mut pixel_acc: Local<f32>,
 ) {
     let Ok(window) = window.single() else { return };
     if policy.overlay_open {
@@ -132,15 +152,14 @@ pub fn step_level_input(
     let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
     if wheel_routes_to_level(alt, window.focused) && !over_minimap && !minimap_ptr.dragging && !policy.ui_pointer
     {
-        let notches = match scroll.unit {
-            MouseScrollUnit::Line => scroll.delta.y,
-            MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
-        };
         // Some desktops turn Alt+wheel into horizontal scroll.
-        let notches = if notches == 0.0 { scroll.delta.x } else { notches };
+        let delta = if scroll.delta.y == 0.0 { scroll.delta.x } else { scroll.delta.y };
+        let notches = scroll_notches(scroll.unit == MouseScrollUnit::Pixel, delta, &mut pixel_acc);
         if notches != 0.0 {
             next = step_level(next, notches, fast, range);
         }
+    } else {
+        *pixel_acc = 0.0;
     }
     if next != current {
         level.level = Some(next);
@@ -173,6 +192,29 @@ mod tests {
     fn alt_wheel_steps_one_or_ten() {
         assert_eq!(step_level(50, 1.0, false, (0, 100)), 51);
         assert_eq!(step_level(50, -2.0, true, (0, 100)), 30);
+    }
+
+    #[test]
+    fn touchpad_pixels_add_up_to_whole_notches() {
+        let mut acc = 0.0;
+        // 10 px a frame: nothing for three frames, one level on the fourth.
+        let steps: Vec<f32> = (0..8).map(|_| scroll_notches(true, 10.0, &mut acc)).collect();
+        assert_eq!(steps, [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        // Reversing first cancels what has built up.
+        assert_eq!(scroll_notches(true, 30.0, &mut acc), 0.0);
+        assert_eq!(scroll_notches(true, -50.0, &mut acc), 0.0);
+        assert_eq!(scroll_notches(true, -30.0, &mut acc), -1.0);
+        // A big flick still steps several at once.
+        let mut acc = 0.0;
+        assert_eq!(scroll_notches(true, 130.0, &mut acc), 3.0);
+    }
+
+    #[test]
+    fn wheel_lines_pass_through_and_keep_the_min_one_rule() {
+        let mut acc = 0.5;
+        assert_eq!(scroll_notches(false, 0.2, &mut acc), 0.2);
+        assert_eq!(acc, 0.0, "a wheel clears the touchpad remainder");
+        assert_eq!(step_level(5, 0.2, false, (0, 100)), 6);
     }
 
     #[test]

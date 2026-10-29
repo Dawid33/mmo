@@ -28,6 +28,11 @@ pub const MAX_PRIORITY: u8 = 7;
 /// A `Designate`/`Erase` whose clipped area exceeds this many tiles is
 /// rejected whole.
 pub const MAX_ORDER_TILES: u64 = 65_536;
+/// Lowest and highest level an order may touch: a box reaching outside is
+/// rejected whole, which keeps chunk coordinates (`level / CHUNK_BLOCKS`,
+/// times the chunk edge in voxels) far from `i32` overflow.
+pub const MIN_ORDER_LEVEL: i32 = i16::MIN as i32;
+pub const MAX_ORDER_LEVEL: i32 = i16::MAX as i32;
 /// A region's edge in blocks.
 pub const REGION_BLOCKS: i32 = (REGION_CHUNKS * CHUNK_BLOCKS) as i32;
 
@@ -223,9 +228,11 @@ pub fn resolve_drag(shape: DragShape, anchor: TilePos, corner: TilePos) -> TileB
 }
 
 /// The part of an order's `area` it acts on: clipped to the region, `None`
-/// (reject) when inverted, empty after clipping, or over [`MAX_ORDER_TILES`].
+/// (reject) when inverted, reaching outside
+/// [`MIN_ORDER_LEVEL`]`..=`[`MAX_ORDER_LEVEL`], empty after clipping, or over
+/// [`MAX_ORDER_TILES`].
 fn order_area(area: TileBox) -> Option<TileBox> {
-    if area.is_inverted() {
+    if area.is_inverted() || area.min[1] < MIN_ORDER_LEVEL || area.max[1] > MAX_ORDER_LEVEL {
         return None;
     }
     area.clip_to_region().filter(|a| a.tile_count() <= MAX_ORDER_TILES)
@@ -266,13 +273,18 @@ impl TileSource for Rollback {
 impl Rollback {
     /// Applies one client's order, undo-safely. `false` = rejected, nothing
     /// changed: an op not issued by `client`, a priority outside
-    /// `1..=MAX_PRIORITY`, or an area that is inverted, misses the region or
-    /// clips to more than [`MAX_ORDER_TILES`]. A designation goes only on
+    /// `1..=MAX_PRIORITY`, a build of anything but
+    /// [`crate::edit::PLACE_BLOCK`], or an area that is inverted, leaves the
+    /// order level range, misses the region or clips to more than
+    /// [`MAX_ORDER_TILES`]. A designation goes only on
     /// tiles that [`validate`], replacing what was there.
     pub fn apply_order_safe(&mut self, client: ClientId, order: Order) -> bool {
         match order {
             Order::Designate { op, kind, priority, area } => {
                 if op.client != client || !(1..=MAX_PRIORITY).contains(&priority) {
+                    return false;
+                }
+                if matches!(kind, DesignationKind::Build(id) if id != crate::edit::PLACE_BLOCK) {
                     return false;
                 }
                 let Some(area) = order_area(area) else { return false };
@@ -337,8 +349,9 @@ impl Rollback {
                     }
                 }
                 DesignationKind::Dig | DesignationKind::Deconstruct => {
-                    self.set_block_safe(p, Block::new(BlockId::AIR));
-                    if self.data.constructed.contains_key(&p) {
+                    // A refused write (e.g. the tile became bedrock) leaves
+                    // the construction standing, flag included.
+                    if self.set_block_safe(p, Block::new(BlockId::AIR)) && self.data.constructed.contains_key(&p) {
                         constructed.push((p, false));
                     }
                 }

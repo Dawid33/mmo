@@ -139,6 +139,13 @@ fn stone_column() -> Column {
 /// A region over chunk columns `0..=3` x `0..=3` (blocks 0..8), with a
 /// render-update channel and client 0.
 fn order_region() -> Region {
+    let (region, recv) = order_region_with_updates();
+    std::mem::forget(recv);
+    region
+}
+
+/// [`order_region`], keeping the render-update receiver.
+fn order_region_with_updates() -> (Region, crossbeam::channel::Receiver<GameDataUpdate>) {
     let r0 = RegionCoords::new(0, 0);
     let mut columns = Vec::new();
     for x in 0..=3 {
@@ -148,11 +155,10 @@ fn order_region() -> Region {
     }
     let built = Region::from_columns(r0, columns);
     let (send, recv) = crossbeam::channel::unbounded();
-    std::mem::forget(recv);
     let mut region = Region::new(built.data().clone(), Some(send), r0, None);
     region.handle_event(GameEventKind::CreateClient(0)).unwrap();
     region.forget_last_event();
-    region
+    (region, recv)
 }
 
 fn op(seq: u32) -> OpId {
@@ -259,6 +265,112 @@ fn full_i32_span_is_rejected_without_panic() {
     let inverted = TileBox { min: [i32::MAX; 3], max: [i32::MIN; 3] };
     assert_rejected(&mut region, designate(op(1), DesignationKind::Dig, inverted));
     assert!(region.data().designations().is_empty());
+}
+
+#[test]
+fn order_beyond_level_range_is_rejected_without_panic() {
+    let mut region = order_region();
+    let build = DesignationKind::Build(game::edit::PLACE_BLOCK);
+    for y in [2_000_000_000, MAX_ORDER_LEVEL + 1, MIN_ORDER_LEVEL - 1, -2_000_000_000] {
+        let tile = TileBox::new([2, y, 2], [2, y, 2]);
+        assert_rejected(&mut region, designate(op(1), build, tile));
+        assert_rejected(&mut region, designate(op(1), DesignationKind::Dig, tile));
+        assert_rejected(&mut region, Order::Erase { area: tile, only: None });
+    }
+    // Straddling a bound is rejected whole too.
+    let straddle = TileBox::new([2, MAX_ORDER_LEVEL - 1, 2], [2, MAX_ORDER_LEVEL + 1, 2]);
+    assert_rejected(&mut region, designate(op(1), build, straddle));
+    // The bounds themselves are fine.
+    let top = TileBox::new([2, MAX_ORDER_LEVEL, 2], [2, MAX_ORDER_LEVEL, 2]);
+    apply_checked(&mut region, designate(op(1), build, top));
+    assert_eq!(region.data().designations().len(), 1);
+}
+
+#[test]
+fn build_with_other_block_id_is_rejected() {
+    let mut region = order_region();
+    let area = TileBox::new([2, SURFACE + 1, 2], [3, SURFACE + 1, 3]);
+    for id in [BEDROCK, BlockId::AIR, BlockId(0xBEEF)] {
+        assert_rejected(&mut region, designate(op(1), DesignationKind::Build(id), area));
+    }
+    assert!(region.data().designations().is_empty());
+}
+
+#[test]
+fn failed_deconstruct_keeps_constructed_flag() {
+    let mut region = order_region();
+    let build = DesignationKind::Build(game::edit::PLACE_BLOCK);
+    let p = [2, SURFACE + 1, 2];
+    let tile = TileBox::new(p, p);
+    apply_checked(&mut region, designate(op(1), build, tile));
+    apply_checked(&mut region, Order::DevCompleteAll);
+    assert!(region.data().constructed().contains_key(&p));
+    // The construction turns to bedrock, which refuses every write.
+    region.with_data(|r| assert!(r.set_block_safe(p, Block::new(BEDROCK))));
+    apply_checked(&mut region, designate(op(2), DesignationKind::Deconstruct, tile));
+    apply_checked(&mut region, Order::DevCompleteAll);
+    assert_eq!(block_at(&region, p), BEDROCK, "the write was refused");
+    assert!(region.data().constructed().contains_key(&p), "so the flag stays");
+    assert!(region.data().designations().is_empty());
+}
+
+/// The `SetDesignations` / `SetConstructed` payloads queued on `recv`, in
+/// order, each tagged `true` for Do and `false` for Undo.
+fn order_payloads(
+    recv: &crossbeam::channel::Receiver<GameDataUpdate>,
+) -> Vec<(bool, GameDataUpdateKind)> {
+    recv.try_iter()
+        .filter(|u| {
+            matches!(u.update_kind, GameDataUpdateKind::SetDesignations(_) | GameDataUpdateKind::SetConstructed(_))
+        })
+        .map(|u| (matches!(u.do_kind, GameDataTransactionKind::Do), u.update_kind))
+        .collect()
+}
+
+#[test]
+fn render_payloads_carry_new_values_and_undo_restores_prior() {
+    let (mut region, recv) = order_region_with_updates();
+    let tile = TileBox::new([2, SURFACE, 2], [2, SURFACE, 2]);
+    let p = tile.min;
+    apply_checked(&mut region, designate(op(1), DesignationKind::Dig, tile));
+    let old = region.data().designations()[&p];
+    recv.try_iter().count();
+
+    let order = Order::Designate { op: op(2), kind: DesignationKind::Dig, priority: 7, area: tile };
+    apply(&mut region, order);
+    let new = region.data().designations()[&p];
+    region.rollback_last_event();
+    let got = order_payloads(&recv);
+    assert_eq!(got.len(), 2, "{got:?}");
+    match &got[0] {
+        (true, GameDataUpdateKind::SetDesignations(c)) => assert_eq!(c, &vec![(p, Some(new))]),
+        other => panic!("do payload {other:?}"),
+    }
+    match &got[1] {
+        (false, GameDataUpdateKind::SetDesignations(c)) => assert_eq!(c, &vec![(p, Some(old))]),
+        other => panic!("undo payload {other:?}"),
+    }
+
+    // A dev-completed build: the constructed flag goes up, and back down.
+    let above = [2, SURFACE + 1, 2];
+    let build = DesignationKind::Build(game::edit::PLACE_BLOCK);
+    apply_checked(&mut region, designate(op(3), build, TileBox::new(above, above)));
+    recv.try_iter().count();
+    apply(&mut region, Order::DevCompleteAll);
+    region.rollback_last_event();
+    let got: Vec<_> = order_payloads(&recv)
+        .into_iter()
+        .filter(|(_, k)| matches!(k, GameDataUpdateKind::SetConstructed(_)))
+        .collect();
+    assert_eq!(got.len(), 2, "{got:?}");
+    match &got[0] {
+        (true, GameDataUpdateKind::SetConstructed(c)) => assert_eq!(c, &vec![(above, true)]),
+        other => panic!("do payload {other:?}"),
+    }
+    match &got[1] {
+        (false, GameDataUpdateKind::SetConstructed(c)) => assert_eq!(c, &vec![(above, false)]),
+        other => panic!("undo payload {other:?}"),
+    }
 }
 
 #[test]
