@@ -106,6 +106,16 @@ impl HeightGrid {
         self.columns.get(&block_of(x, z)).copied()
     }
 
+    /// Lowest and highest solid surface over the loaded columns (world y, sim
+    /// units); `None` while nothing solid is loaded.
+    pub fn surface_range(&self) -> Option<(f32, f32)> {
+        self.columns
+            .values()
+            .map(|c| c.1)
+            .filter(|h| !h.is_nan())
+            .fold(None, |r, h| Some(r.map_or((h, h), |(lo, hi)| (lo.min(h), hi.max(h)))))
+    }
+
     /// File a chunk's tops under its key (chunk coordinates, world / 32).
     pub fn insert_chunk(&mut self, entity: Entity, key: [i32; 3], tops: ChunkTops) {
         if let Some(old) = self.by_entity.insert(entity, key) {

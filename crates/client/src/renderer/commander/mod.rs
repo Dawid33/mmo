@@ -21,6 +21,7 @@
 //! hides it and gives it no camera ([`CameraMode::Commander`]).
 
 pub mod height;
+pub mod level;
 pub mod minimap;
 pub mod selection;
 pub mod tiles;
@@ -301,6 +302,7 @@ impl Plugin for CommanderPlugin {
             .init_resource::<selection::Selection>()
             .init_resource::<selection::GroundPick>()
             .init_resource::<tiles::TileMirror>()
+            .init_resource::<level::WorkingLevel>()
             .add_message::<tiles::TileMirrorMsg>()
             .add_systems(
                 Startup,
@@ -319,6 +321,8 @@ impl Plugin for CommanderPlugin {
                     place_on_body,
                     minimap::minimap_pointer,
                     hold_pointer_while_orbiting,
+                    level::init_level,
+                    level::step_level_input,
                     pan_and_zoom,
                     follow_terrain,
                     apply_camera_transform,
@@ -487,8 +491,13 @@ fn pan_and_zoom(
         // Touchpads: ~one notch per 40 px.
         MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
     };
+    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
     let over_minimap = cursor.is_some_and(|c| minimap::screen_rect(size).contains(c));
-    if notches != 0.0 && !over_minimap && !policy.ui_pointer {
+    if notches != 0.0
+        && !over_minimap
+        && !policy.ui_pointer
+        && !level::wheel_routes_to_level(alt, window.focused)
+    {
         cam.target_distance = zoom_target(cam.target_distance, notches);
     }
     cam.distance = smooth(cam.distance, cam.target_distance, dt, ZOOM_SMOOTHING_S);
@@ -498,8 +507,17 @@ fn pan_and_zoom(
 }
 
 /// Ease the focus height toward the terrain around it.
-fn follow_terrain(grid: Res<HeightGrid>, time: Res<Time>, mut cam: ResMut<CommanderCamera>) {
-    if let Some(target) = focus_ground_target(&grid, cam.focus) {
+/// With the cut on, the camera sinks to the cut plane rather than hovering
+/// over the (cut away) terrain above it.
+fn follow_terrain(
+    grid: Res<HeightGrid>,
+    time: Res<Time>,
+    working: Res<level::WorkingLevel>,
+    tiles: Res<tiles::TileMirror>,
+    mut cam: ResMut<CommanderCamera>,
+) {
+    let terrain = focus_ground_target(&grid, cam.focus);
+    if let Some(target) = level::follow_target(terrain, level::camera_cut(&working, &tiles)) {
         cam.ground_y = smooth(cam.ground_y, target, time.delta_secs(), HEIGHT_SMOOTHING_S);
     }
 }
