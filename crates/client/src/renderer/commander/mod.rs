@@ -542,9 +542,8 @@ fn pan_and_zoom(
     cam.focus = clamp_eye(cam.focus, cam.yaw, cam.pitch, cam.distance, cam.bounds);
 }
 
-/// Ease the focus height toward the terrain around it.
-/// With the cut on, the camera sinks to the cut plane rather than hovering
-/// over the (cut away) terrain above it.
+/// Ease the focus height toward its baseline: the working level's floor when
+/// there is one (Space/Shift `rise` offsets from it), else the terrain.
 fn follow_terrain(
     grid: Res<HeightGrid>,
     time: Res<Time>,
@@ -553,7 +552,7 @@ fn follow_terrain(
     mut cam: ResMut<CommanderCamera>,
 ) {
     let terrain = focus_ground_target(&grid, cam.focus);
-    if let Some(target) = level::follow_target(terrain, level::camera_cut(&working, &tiles)) {
+    if let Some(target) = level::camera_baseline(terrain, level::level_floor_y(&working, tiles.region())) {
         cam.ground_y = smooth(cam.ground_y, target, time.delta_secs(), HEIGHT_SMOOTHING_S);
     }
 }

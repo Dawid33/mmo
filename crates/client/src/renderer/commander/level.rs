@@ -87,12 +87,16 @@ pub fn cut_plane_world_y(level: i32, region: RegionId) -> f32 {
     ((level + 1) * BLOCK_VOXELS as i32) as f32 + region.world_offset()[1]
 }
 
-/// The height the camera rides: the lower of the terrain and the cut plane.
-pub fn follow_target(terrain: Option<f32>, cut: Option<f32>) -> Option<f32> {
-    match (terrain, cut) {
-        (Some(t), Some(c)) => Some(t.min(c)),
-        (t, c) => t.or(c),
-    }
+/// The height the camera rides: the working level's floor when there is one
+/// (whatever the terrain or the cut toggle says), else the terrain.
+pub fn camera_baseline(terrain: Option<f32>, level_floor: Option<f32>) -> Option<f32> {
+    level_floor.or(terrain)
+}
+
+/// World y of the floor of the working level in `home`, independent of the cut.
+pub fn level_floor_y(level: &WorkingLevel, home: Option<RegionId>) -> Option<f32> {
+    let (at, region) = (level.level?, home?);
+    Some(cut_plane_world_y(at, region) - BLOCK_VOXELS as f32)
 }
 
 /// The solid ground height under the camera focus, if loaded.
@@ -228,12 +232,37 @@ mod tests {
         assert_eq!(level_range((1024.0, 1600.0)), (64 - 60, 100 + 8));
     }
 
+    fn home0() -> RegionId {
+        game::RegionCoords::new(0, 0).into()
+    }
+
+    fn wl(cut: bool) -> WorkingLevel {
+        WorkingLevel { level: Some(10), cut }
+    }
+
     #[test]
-    fn follow_target_takes_the_lower_of_terrain_and_cut() {
-        assert_eq!(follow_target(Some(500.0), Some(300.0)), Some(300.0));
-        assert_eq!(follow_target(Some(200.0), Some(300.0)), Some(200.0));
-        assert_eq!(follow_target(None, Some(300.0)), Some(300.0));
-        assert_eq!(follow_target(Some(200.0), None), Some(200.0));
-        assert_eq!(follow_target(None, None), None);
+    fn baseline_is_the_level_floor_with_cut_on_or_off() {
+        let home = Some(home0());
+        for cut in [true, false] {
+            let floor = level_floor_y(&wl(cut), home);
+            assert_eq!(floor, Some(160.0));
+            assert_eq!(camera_baseline(Some(500.0), floor), Some(160.0));
+        }
+    }
+
+    #[test]
+    fn baseline_falls_back_to_terrain_without_a_level() {
+        let none = WorkingLevel { level: None, cut: true };
+        assert_eq!(level_floor_y(&none, Some(home0())), None);
+        assert_eq!(level_floor_y(&wl(true), None), None);
+        assert_eq!(camera_baseline(Some(200.0), None), Some(200.0));
+        assert_eq!(camera_baseline(None, None), None);
+    }
+
+    #[test]
+    fn baseline_ignores_terrain_when_a_level_exists() {
+        assert_eq!(camera_baseline(Some(500.0), Some(160.0)), Some(160.0));
+        assert_eq!(camera_baseline(Some(100.0), Some(160.0)), Some(160.0));
+        assert_eq!(camera_baseline(None, Some(160.0)), Some(160.0));
     }
 }
