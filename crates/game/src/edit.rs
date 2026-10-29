@@ -11,7 +11,8 @@
 //! An edit is one undoable change to three things: the chunk's block data
 //! (one block, `Undo::<Component<Chunk>>::set_chunk_block_safe` — the chunk
 //! is never copied), the renderer (`SetBlocks` block deltas both ways), and
-//! the chunk's colliders (shape swapped in place, see
+//! the chunk's colliders (the edited block's cells patched into the
+//! `Voxels` shapes in place, see `edit_block_colliders_safe` and
 //! `Undo::<ColliderSet>::mutate_collider_safe`).
 //!
 //! Scope: whole blocks only (a break clears chisel detail), and only inside
@@ -309,6 +310,7 @@ impl Rollback {
             return false;
         }
         let old = BlockDelta { index, block: old_block, chisel: chunk.chisel.get(&index).cloned() };
+        let old_cells = crate::collider_cells_of_block(chunk, index);
         // LIFO: registered before the write, so the old block is re-sent
         // after the chunk value is restored.
         self.data.ecs.chunk.emit_on_undo(GameDataUpdate::new(
@@ -320,9 +322,93 @@ impl Rollback {
             GameDataTransactionKind::Do,
             GameDataUpdateKind::SetBlocks(e, vec![BlockDelta { index, block, chisel: None }]),
         ));
-        let cells = crate::collider_cells(self.data.ecs.chunk.get(e));
-        self.rebuild_chunk_colliders_safe(e, &cells);
+        let new_cells = crate::collider_cells_of_block(self.data.ecs.chunk.get(e), index);
+        self.edit_block_colliders_safe(e, &old_cells, &new_cells);
         true
+    }
+
+    /// Patches chunk body `e`'s colliders for one block edit: `old` and `new`
+    /// are that block's collider cells before and after the write
+    /// (`collider_cells_of_block`, chunk-local keys). Each grid's diff goes
+    /// into its `Voxels` shape with one batched `set_voxels`, through
+    /// `mutate_collider_safe` — its pre-write clone shares the shape's `Arc`,
+    /// so `shape_mut` copies the shape on write and the undo puts the old one
+    /// back. An edited shape hashes equal to a fresh build of the same keys
+    /// (physics-next `voxels_batch_edit`), so the result is the one
+    /// `rebuild_chunk_colliders_safe` / `create_mesh` would give.
+    ///
+    /// Falls back to the full rebuild when patching cannot express the edit:
+    /// the body's enabled colliders are not exactly one `Voxels` shape per
+    /// non-empty grid in `grids()` order (the genesis full-chunk cuboid, or
+    /// anything unexpected), a grid gains its first cell, or a grid loses its
+    /// last.
+    fn edit_block_colliders_safe(&mut self, e: EntityKey, old: &crate::ColliderCells, new: &crate::ColliderCells) {
+        use std::collections::HashSet;
+        let Some(body) = *self.data.ecs.rigidbody.try_get(e) else { return };
+        let Some(b) = self.data.physics.bodies.get(body) else { return };
+        // The enabled colliders, which must be one voxels shape per grid,
+        // coarsest first (what every builder attaches).
+        let mut grids: Vec<(f32, rapier3d::prelude::ColliderHandle)> = Vec::with_capacity(3);
+        let mut patchable = true;
+        for &ch in b.colliders() {
+            let Some(c) = self.data.physics.colliders.get(ch) else { continue };
+            if !c.is_enabled() {
+                continue;
+            }
+            match c.shape().as_voxels() {
+                Some(v) if grids.last().is_none_or(|&(prev, _)| v.voxel_size().x < prev) => {
+                    grids.push((v.voxel_size().x, ch));
+                }
+                _ => patchable = false,
+            }
+        }
+        let scales: [(f32, &[rapier3d::math::IVector], &[rapier3d::math::IVector]); 3] = [
+            (BLOCK_VOXELS as f32, &old.blocks, &new.blocks),
+            (crate::HALF_BLOCK_VOXELS as f32, &old.halves, &new.halves),
+            (1.0, &old.voxels, &new.voxels),
+        ];
+        let mut patches = Vec::with_capacity(3);
+        if patchable {
+            for (size, before, after) in scales {
+                let after_set: HashSet<_> = after.iter().copied().collect();
+                let before_set: HashSet<_> = before.iter().copied().collect();
+                // Deterministic order: removals in `before` order, then
+                // additions in `after` order (the sets only test membership).
+                let removed: Vec<_> = before.iter().copied().filter(|k| !after_set.contains(k)).collect();
+                let added: Vec<_> = after.iter().copied().filter(|k| !before_set.contains(k)).collect();
+                if removed.is_empty() && added.is_empty() {
+                    continue;
+                }
+                let Some(&(_, ch)) = grids.iter().find(|(s, _)| *s == size) else {
+                    // A grid gains its first cell: a new collider, in order.
+                    patchable = false;
+                    break;
+                };
+                if added.is_empty() {
+                    // Would this empty the grid? Every key of a block is
+                    // distinct, so it does iff the shape holds no voxel
+                    // beyond the removed ones.
+                    let shape = self.data.physics.colliders.get(ch).and_then(|c| c.shape().as_voxels());
+                    let held = shape.map_or(0, |v| v.voxels().take(removed.len() + 1).count());
+                    if held <= removed.len() {
+                        patchable = false;
+                        break;
+                    }
+                }
+                let edits: Vec<_> = removed.into_iter().map(|k| (k, false)).chain(added.into_iter().map(|k| (k, true))).collect();
+                patches.push((ch, edits));
+            }
+        }
+        if !patchable {
+            let cells = crate::collider_cells(self.data.ecs.chunk.get(e));
+            self.rebuild_chunk_colliders_safe(e, &cells);
+            return;
+        }
+        for (ch, edits) in patches {
+            self.data.physics.colliders.mutate_collider_safe(ch, move |c| {
+                c.shape_mut().as_voxels_mut().expect("checked: a voxels shape").set_voxels(edits);
+            });
+        }
     }
 
     /// Brings a chunk body's colliders in line with `cells`, the same

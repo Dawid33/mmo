@@ -116,13 +116,44 @@ impl Voxels {
     /// # }
     /// ```
     pub fn set_voxel(&mut self, key: IVector, is_filled: bool) -> VoxelState {
+        // mmo-fork: batched set_voxel, one content-hash pass — the body moved
+        // to `set_voxel_unhashed`, shared with `set_voxels`.
+        let (prev, changed) = self.set_voxel_unhashed(key, is_filled);
+        if changed {
+            // mmo-fork: StateHash — content changed (including the neighbour
+            // bits `update_neighbors_state` wrote in adjacent chunks).
+            self.recompute_content_hash();
+        }
+        prev
+    }
+
+    // mmo-fork: batched set_voxel, one content-hash pass
+    /// Applies `(key, is_filled)` edits in order, with the same effect as one
+    /// [`Self::set_voxel`] call per item, but recomputes the cached content
+    /// hash once at the end (and not at all if nothing changed) instead of
+    /// once per changed voxel — `recompute_content_hash` walks every occupied
+    /// chunk, so a per-voxel loop is O(edits × chunks).
+    pub fn set_voxels(&mut self, edits: impl IntoIterator<Item = (IVector, bool)>) {
+        let mut changed = false;
+        for (key, is_filled) in edits {
+            changed |= self.set_voxel_unhashed(key, is_filled).1;
+        }
+        if changed {
+            self.recompute_content_hash();
+        }
+    }
+
+    // mmo-fork: batched set_voxel, one content-hash pass — upstream's
+    // `set_voxel` body minus the content-hash update; returns the previous
+    // state and whether the voxel's emptiness changed.
+    fn set_voxel_unhashed(&mut self, key: IVector, is_filled: bool) -> (VoxelState, bool) {
         let (chunk_key, id_in_chunk) = Self::chunk_key_and_id_in_chunk(key);
         let header_entry = self.chunk_headers.entry(chunk_key);
 
         if !is_filled && matches!(header_entry, Entry::Vacant(_)) {
             // The voxel is already empty (it doesn’t exist at all).
             // Nothing more to do.
-            return VoxelState::EMPTY;
+            return (VoxelState::EMPTY, false);
         }
 
         let chunk_header = header_entry.or_insert_with(|| {
@@ -166,12 +197,10 @@ impl Voxels {
                 self.chunk_keys[chunk_id] = VoxelsChunk::INVALID_CHUNK_KEY;
             }
 
-            // mmo-fork: StateHash — content changed (including the neighbour
-            // bits `update_neighbors_state` wrote in adjacent chunks).
-            self.recompute_content_hash();
+            return (prev, true);
         }
 
-        prev
+        (prev, false)
     }
 
     /// Crops the voxel shape in-place to a rectangular region.

@@ -587,7 +587,11 @@ impl Undo<Component<Chunk>> {
     /// densifies a `Uniform` grid, a `Dense` grid whose blocks all become
     /// equal collapses), so restoring the old contents restores the old
     /// value; the chisel `BTreeMap` is restored entry-for-entry. Delta mode
-    /// digests the chunk's slot, as `set_safe` does.
+    /// digests the chunk's slot, as `set_safe` does; Off and Full never read
+    /// the digest, so neither side computes it there.
+    ///
+    /// Panics if `key` has no chunk: callers write only into an existing
+    /// chunk entity (`write_block_safe` spawns one first for a new slot).
     pub fn set_chunk_block_safe(
         &mut self,
         key: EntityKey,
@@ -602,15 +606,13 @@ impl Undo<Component<Chunk>> {
             .expect("set_chunk_block_safe: no chunk at key");
         let old_block = chunk.blocks.get(index);
         let old_chisel = chunk.chisel.get(&index).cloned();
-        let pre = if crate::hash_mode() == crate::HashMode::Delta {
-            component_slot_digest(key, self.list.get(key))
-        } else {
-            0
-        };
+        let delta = crate::hash_mode() == crate::HashMode::Delta;
+        let pre = if delta { component_slot_digest(key, self.list.get(key)) } else { 0 };
         self.undo_digest(pre, move |d, _| {
             let chunk = d.list.get_mut(key).and_then(Option::as_mut).expect("set_chunk_block_safe undo: chunk gone");
             write_chunk_block(chunk, index, old_block, old_chisel);
-            component_slot_digest(key, d.list.get(key))
+            // Full/Off never read the returned digest.
+            if delta { component_slot_digest(key, d.list.get(key)) } else { 0 }
         });
         let chunk = self
             .raw_mut()

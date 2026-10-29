@@ -387,3 +387,57 @@ fn break_on_chunk_seam_undoes_exactly() {
         assert!(r.chunk_key_at(own).is_none() && r.chunk_key_at(neighbour).is_none());
     });
 }
+
+/// `StateHash` of each enabled collider shape on chunk `e`'s body, in order,
+/// with its pose relative to the body.
+fn collider_shapes(r: &Rollback, e: game::EntityKey) -> Vec<(u32, Option<Pose>)> {
+    use game::StateHash;
+    let body = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap();
+    body.colliders()
+        .iter()
+        .map(|&ch| r.physics.colliders.get(ch).unwrap())
+        .filter(|c| c.is_enabled())
+        .map(|c| {
+            let mut h = game::StateHasher::new();
+            c.shared_shape().state_hash(&mut h);
+            (h.finalize(), c.position_wrt_parent().copied())
+        })
+        .collect()
+}
+
+/// A block edit patches the chunk's `Voxels` shapes in place (or falls back
+/// to the rebuild); either way the colliders must be the ones `create_mesh`
+/// builds for the same chunk, and the whole sequence rolls back bit-exact.
+#[test]
+fn incremental_collider_matches_rebuild() {
+    game::set_hash_mode(game::HashMode::Full);
+    let target = ChunkCoords::new(4, 0, 4);
+    for (seed, start) in [(11u128, seeded_chunk(5)), (12, Chunk::flat_floor(16)), (13, Chunk::flat_floor(32))] {
+        let (mut r, _recv) = terrain(|c| if c == target { start.clone() } else { Chunk::flat_floor(16) });
+        let before = game::state_hash(&r);
+        let e = r.chunk_key_at(target).unwrap();
+        let mut rng = oorandom::Rand64::new(seed);
+        r.new_transaction();
+        let mut edits = 0;
+        for _ in 0..50 {
+            let i = rng.rand_range(0..game::CHUNK_BLOCK_COUNT as u64) as usize;
+            let local = BlockIndex::from_linear(i).xyz();
+            let block = if rng.rand_range(0..2) == 0 { air() } else { Block::new(BlockId(rng.rand_range(1..3) as _)) };
+            if !r.set_block_safe(world_block(target, local), block) {
+                continue;
+            }
+            edits += 1;
+            let mut fresh = Rollback::new(None);
+            fresh.new_transaction();
+            let fe = fresh.create_mesh(target, r.ecs.chunk.get(e).clone());
+            assert_eq!(
+                collider_shapes(&r, e),
+                collider_shapes(&fresh, fe),
+                "seed {seed}, edit {edits} at {local:?} -> {block:?}"
+            );
+        }
+        assert!(edits > 10, "seed {seed}: only {edits} edits changed anything");
+        r.rollback();
+        assert_eq!(before, game::state_hash(&r), "seed {seed}: the edits roll back bit-exact");
+    }
+}

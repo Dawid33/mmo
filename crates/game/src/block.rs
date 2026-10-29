@@ -337,53 +337,69 @@ pub fn collider_cells(chunk: &Chunk) -> ColliderCells {
         }
         return out;
     }
-    let h = HALF_BLOCK_VOXELS;
     for (bi, block) in chunk.blocks.iter() {
-        let (bx, by, bz) = bi.xyz();
-        let Some(c) = chisel.get(&bi) else {
-            if block.id != BlockId::AIR {
-                out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
-            }
-            continue;
-        };
-        let solid: Vec<bool> = c.materials().into_iter().map(|m| m != BlockId::AIR).collect();
-        if solid.iter().all(|&s| s) {
-            out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
-            continue;
-        }
-        for (ox, oy, oz) in (0..8).map(|o| (o % 2, (o / 2) % 2, o / 4)) {
-            let (x0, y0, z0) = (ox * h, oy * h, oz * h);
-            let octant = |f: &mut dyn FnMut(usize, usize, usize)| {
-                for vx in x0..x0 + h {
-                    for vy in y0..y0 + h {
-                        for vz in z0..z0 + h {
-                            f(vx, vy, vz);
-                        }
-                    }
-                }
-            };
-            let mut full = true;
-            octant(&mut |x, y, z| full &= solid[local_index(x, y, z)]);
-            if full {
-                out.halves.push(IVector::new(
-                    (bx * 2 + ox) as i32,
-                    (by * 2 + oy) as i32,
-                    (bz * 2 + oz) as i32,
-                ));
-                continue;
-            }
-            octant(&mut |x, y, z| {
-                if solid[local_index(x, y, z)] {
-                    out.voxels.push(IVector::new(
-                        (bx * BLOCK_VOXELS + x) as i32,
-                        (by * BLOCK_VOXELS + y) as i32,
-                        (bz * BLOCK_VOXELS + z) as i32,
-                    ));
-                }
-            });
-        }
+        push_block_cells(&mut out, bi, block, chisel.get(&bi));
     }
     out
+}
+
+/// The collider cells of block `i` of `chunk` alone, in the chunk-local keys
+/// [`collider_cells`] uses: a block edit diffs these before and after the
+/// write instead of decomposing the whole chunk again.
+pub fn collider_cells_of_block(chunk: &Chunk, i: BlockIndex) -> ColliderCells {
+    let mut out = ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
+    push_block_cells(&mut out, i, chunk.blocks.get(i), chunk.chisel.get(&i));
+    out
+}
+
+/// Appends block `bi`'s cells to `out`: one block key for a solid block,
+/// half keys for a partial chisel's solid octants and voxel keys for its
+/// other solid voxels, or nothing for air.
+fn push_block_cells(out: &mut ColliderCells, bi: BlockIndex, block: Block, chisel: Option<&ChiselData>) {
+    let h = HALF_BLOCK_VOXELS;
+    let (bx, by, bz) = bi.xyz();
+    let Some(c) = chisel else {
+        if block.id != BlockId::AIR {
+            out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
+        }
+        return;
+    };
+    let solid: Vec<bool> = c.materials().into_iter().map(|m| m != BlockId::AIR).collect();
+    if solid.iter().all(|&s| s) {
+        out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
+        return;
+    }
+    for (ox, oy, oz) in (0..8).map(|o| (o % 2, (o / 2) % 2, o / 4)) {
+        let (x0, y0, z0) = (ox * h, oy * h, oz * h);
+        let octant = |f: &mut dyn FnMut(usize, usize, usize)| {
+            for vx in x0..x0 + h {
+                for vy in y0..y0 + h {
+                    for vz in z0..z0 + h {
+                        f(vx, vy, vz);
+                    }
+                }
+            }
+        };
+        let mut full = true;
+        octant(&mut |x, y, z| full &= solid[local_index(x, y, z)]);
+        if full {
+            out.halves.push(IVector::new(
+                (bx * 2 + ox) as i32,
+                (by * 2 + oy) as i32,
+                (bz * 2 + oz) as i32,
+            ));
+            continue;
+        }
+        octant(&mut |x, y, z| {
+            if solid[local_index(x, y, z)] {
+                out.voxels.push(IVector::new(
+                    (bx * BLOCK_VOXELS + x) as i32,
+                    (by * BLOCK_VOXELS + y) as i32,
+                    (bz * BLOCK_VOXELS + z) as i32,
+                ));
+            }
+        });
+    }
 }
 
 /// Derive the 32³ voxel array from the authoritative block layer. Output layout
