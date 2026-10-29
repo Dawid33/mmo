@@ -729,6 +729,7 @@ fn seeded_region_chunks(seed: u64) -> Vec<(ChunkCoords, Chunk)> {
 /// equal the pre-brick downsampler's byte for byte (only meaningful while one
 /// chunk is one brick — the reference's premise).
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn far_lod_from_bricks_matches_reference() {
     // The brick API itself: one chunk is BRICKS_PER_CHUNK_EDGE³ bricks whose
     // dense voxels tile the chunk, and world brick coords scale chunk coords.
@@ -737,13 +738,13 @@ fn far_lod_from_bricks_matches_reference() {
     assert_eq!(sample.bricks().count(), BRICKS_PER_CHUNK_EDGE.pow(3));
     for (b, brick) in sample.bricks() {
         assert_eq!(brick.voxels().len(), BRICK_VOXEL_COUNT);
+        assert!(brick.voxels() == derive_voxels(sample, b), "brick {b:?} voxels match the oracle");
         let w = brick_coords(*coords, b);
         assert_eq!(w[1], coords.y as i64 * BRICKS_PER_CHUNK_EDGE as i64 + b[1] as i64);
     }
     if !lod_reference::reference_applies() {
         return;
     }
-    assert_eq!(sample.brick([0, 0, 0]).voxels(), derive_voxels(sample));
     for factor in [2u32, 4, 16] {
         let got = lod::downsample_chunks(chunks.clone(), factor);
         let want = lod_reference::downsample_reference(chunks.clone(), factor);

@@ -506,8 +506,9 @@ mod tests {
         assert_eq!(parse_cell_blocks(None), 0);
         assert_eq!(parse_cell_blocks(Some("")), 0);
         assert_eq!(parse_cell_blocks(Some("0")), 0);
-        assert_eq!(parse_cell_blocks(Some("8")), 8);
+        // Legal cells are multiples of CHUNK_BLOCKS (up to 32) dividing the region.
         assert_eq!(parse_cell_blocks(Some("32")), 32);
+        assert_eq!(parse_cell_blocks(Some("64")), 64);
         assert_eq!(CELL_BLOCKS, parse_cell_blocks(option_env!("VOXEL_CELL_BLOCKS")));
     }
 

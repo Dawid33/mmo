@@ -403,6 +403,7 @@ mod coord_tests {
     }
 
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn bricks_tile_the_chunk_and_read_its_blocks_and_chisel() {
         let stone = Block::new(BlockId(2));
         assert_eq!(Chunk::uniform(stone).brick([0, 0, 0]).uniform(), Some(stone));

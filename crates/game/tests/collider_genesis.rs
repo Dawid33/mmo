@@ -12,10 +12,10 @@ fn hash_region(r: &Region) -> u32 {
     h.finalize()
 }
 
-// flat_floor(depth) fills the bottom `depth` voxel-layers. 32 -> every one of
-// the 32^3 cells solid (full chunk); 8 -> a partial (surface-like) chunk.
+// flat_floor(depth) fills the bottom `depth` voxel-layers. CHUNK_UNITS ->
+// every cell solid (full chunk); 8 -> a partial (surface-like) chunk.
 fn full_chunk() -> Chunk {
-    Chunk::flat_floor(32)
+    Chunk::flat_floor(game::CHUNK_UNITS as u32)
 }
 fn partial_chunk() -> Chunk {
     Chunk::flat_floor(8)

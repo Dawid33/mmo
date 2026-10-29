@@ -111,10 +111,27 @@ fn step_up_one_block() -> Vec<Row> {
     })
 }
 
-/// +z up one-voxel terraces, a step up per chunk: the gentle generated slope
-/// on which walking uphill dips in speed at each terrace.
+/// +z up one-voxel terraces, a step up every two blocks (one 2-block chunk
+/// row at the original chunk size): the gentle generated slope on which
+/// walking uphill dips in speed at each terrace.
 fn terrace_uphill_1_voxel() -> Vec<Row> {
-    let world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(12 + z as u32));
+    let world = world_of(96.0..160.0, 96.0..576.0, |_, z| {
+        // Each block row z copies its row of a flat floor 12 + z/2 voxels deep.
+        let mut chunk = Chunk::default();
+        for bz in 0..CHUNK_BLOCKS {
+            let row = Chunk::flat_floor(12 + ((z * CHUNK_BLOCKS + bz) / 2) as u32);
+            for by in 0..CHUNK_BLOCKS {
+                for bx in 0..CHUNK_BLOCKS {
+                    chunk.set_block(bx, by, bz, row.block_at(bx, by, bz));
+                    let i = game::BlockIndex::from_xyz(bx, by, bz);
+                    if let Some(c) = row.chisel.get(&i) {
+                        chunk.chisel.insert(i, c.clone());
+                    }
+                }
+            }
+        }
+        chunk
+    });
     run_player(world, |w, t| {
         if t == 0 {
             key(w, Key::KeyS, true);
@@ -223,8 +240,23 @@ fn from_csv(text: &str) -> Vec<Row> {
         .collect()
 }
 
+/// The sim-chunk size the chunk-size-dependent fixtures were recorded at.
+const RECORDED_CHUNK_BLOCKS: usize = 2;
+
+/// Scenarios whose recording depends on the chunk size, so they are compared
+/// only at [`RECORDED_CHUNK_BLOCKS`]: the seam walks start relative to the
+/// first chunk border past the spawn (x/z 160 at 2-block chunks, 256 at 16 —
+/// the same trajectory translated), and the slime's hop rolls are seeded by
+/// its entity key, which follows the number of chunk entities created first.
+const CHUNK_SIZE_DEPENDENT: &[&str] =
+    &["walk_flat_across_chunk_seam", "walk_scale_seam", "step_up_one_block", "slime_hop_sequence"];
+
 /// Records the fixture in record mode; otherwise compares against it.
 fn check(name: &str) {
+    if CHUNK_BLOCKS != RECORDED_CHUNK_BLOCKS && CHUNK_SIZE_DEPENDENT.contains(&name) {
+        eprintln!("{name}: recorded at {RECORDED_CHUNK_BLOCKS}-block chunks, skipped at {CHUNK_BLOCKS}");
+        return;
+    }
     let actual = run_scenario(name);
     assert_eq!(actual.len(), SCENARIO_TICKS);
     let path = fixture(name);

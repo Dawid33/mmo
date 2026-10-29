@@ -453,11 +453,14 @@ impl Rollback {
 mod geometry_tests {
     use super::*;
 
+    /// Cells 16 blocks (256 units) wide, in chunks: 8 at 2-block chunks, 1 at 16.
+    const CELL: usize = 16 / crate::CHUNK_BLOCKS;
+
     #[test]
     fn grid_divides_the_region() {
         assert_eq!(cells_per_side(crate::REGION_CHUNKS), 1);
         assert_eq!(cells_per_side(crate::REGION_CHUNKS / 4), 4);
-        assert_eq!(cell_size_units(8), 256.0);
+        assert_eq!(cell_size_units(CELL), 256.0);
     }
 
     #[test]
@@ -468,41 +471,44 @@ mod geometry_tests {
 
     #[test]
     fn chunk_and_position_map_to_the_same_cell() {
-        let c = ChunkCoords::new(9, -2, 17);
-        assert_eq!(cell_of_chunk(c, 8), CellCoords::new(1, 2));
-        // Chunk (9, _, 17) starts at voxel (288, _, 544).
-        assert_eq!(cell_of_pos(288.0, 544.0, 8), Some(CellCoords::new(1, 2)));
+        // The chunk holding block (18, _, 34): chunk (9, _, 17) at 2-block chunks.
+        let cb = crate::CHUNK_BLOCKS;
+        let c = ChunkCoords::new(18 / cb, -2, 34 / cb);
+        assert_eq!(cell_of_chunk(c, CELL), CellCoords::new(1, 2));
+        // Its minimum corner, in voxels ((288, _, 544) at 2-block chunks).
+        let u = crate::CHUNK_UNITS as f32;
+        assert_eq!(cell_of_pos(c.x as f32 * u, c.z as f32 * u, CELL), Some(CellCoords::new(1, 2)));
     }
 
     #[test]
     fn a_position_exactly_on_a_cell_edge_belongs_to_the_higher_cell() {
-        let edge = cell_size_units(8);
-        assert_eq!(cell_of_pos(edge, 0.0, 8), Some(CellCoords::new(1, 0)));
-        assert_eq!(cell_of_pos(edge - 0.001, 0.0, 8), Some(CellCoords::new(0, 0)));
+        let edge = cell_size_units(CELL);
+        assert_eq!(cell_of_pos(edge, 0.0, CELL), Some(CellCoords::new(1, 0)));
+        assert_eq!(cell_of_pos(edge - 0.001, 0.0, CELL), Some(CellCoords::new(0, 0)));
     }
 
     #[test]
     fn positions_outside_the_region_have_no_cell() {
-        assert_eq!(cell_of_pos(-0.5, 10.0, 8), None);
-        assert_eq!(cell_of_pos(crate::REGION_SIZE, 10.0, 8), None);
+        assert_eq!(cell_of_pos(-0.5, 10.0, CELL), None);
+        assert_eq!(cell_of_pos(crate::REGION_SIZE, 10.0, CELL), None);
     }
 
     #[test]
     fn blocks_map_through_their_chunk() {
-        // CHUNK_BLOCKS = 2 blocks per chunk: block 16 is chunk 8 → cell 1 at 8-chunk cells.
-        assert_eq!(cell_of_block([16, 5, 0], 8), Some(CellCoords::new(1, 0)));
-        assert_eq!(cell_of_block([-1, 5, 0], 8), None);
+        // Block 16 is the first block of cell 1 (through its chunk).
+        assert_eq!(cell_of_block([16, 5, 0], CELL), Some(CellCoords::new(1, 0)));
+        assert_eq!(cell_of_block([-1, 5, 0], CELL), None);
     }
 
     #[test]
     fn cells_within_is_clipped_and_sorted() {
-        let n = cells_per_side(8);
-        let around_corner = cells_within(CellCoords::new(0, 0), 1, 8);
+        let n = cells_per_side(CELL);
+        let around_corner = cells_within(CellCoords::new(0, 0), 1, CELL);
         assert_eq!(
             around_corner,
             vec![CellCoords::new(0, 0), CellCoords::new(0, 1), CellCoords::new(1, 0), CellCoords::new(1, 1)]
         );
-        let all = cells_within(CellCoords::new(1, 1), 10, 8);
+        let all = cells_within(CellCoords::new(1, 1), 10, CELL);
         assert_eq!(all.len() as u32, n * n);
         assert!(all.windows(2).all(|w| w[0] < w[1]));
     }
@@ -556,6 +562,9 @@ mod protocol_tests {
 mod lod_mask_tests {
     use super::*;
 
+    /// Cells 16 blocks (256 units) wide, in chunks.
+    const CELL: usize = 16 / crate::CHUNK_BLOCKS;
+
     fn active(cells: &[(u32, u32)]) -> BTreeSet<CellCoords> {
         cells.iter().map(|&(x, z)| CellCoords::new(x, z)).collect()
     }
@@ -563,35 +572,35 @@ mod lod_mask_tests {
     #[test]
     fn a_lod_cell_inside_an_active_cell_is_masked() {
         let home = RegionCoords::new(0, 0);
-        let cell = cell_size_units(8); // 256 units
+        let cell = cell_size_units(CELL); // 256 units
         // A 64-unit LOD cell in the middle of cell (1,1).
-        let m = lod_cell_masked(home, &active(&[(1, 1)]), 8, [cell + 64.0, cell + 64.0], 64.0);
+        let m = lod_cell_masked(home, &active(&[(1, 1)]), CELL, [cell + 64.0, cell + 64.0], 64.0);
         assert!(m);
-        assert!(!lod_cell_masked(home, &active(&[(0, 0)]), 8, [cell + 64.0, cell + 64.0], 64.0));
+        assert!(!lod_cell_masked(home, &active(&[(0, 0)]), CELL, [cell + 64.0, cell + 64.0], 64.0));
     }
 
     #[test]
     fn a_lod_cell_spanning_cells_is_masked_only_when_all_are_active() {
         let home = RegionCoords::new(0, 0);
-        let cell = cell_size_units(8);
+        let cell = cell_size_units(CELL);
         // 512 units wide from the origin: covers cells (0,0),(1,0),(0,1),(1,1).
         let rect = [0.0, 0.0];
-        assert!(!lod_cell_masked(home, &active(&[(0, 0), (1, 0), (0, 1)]), 8, rect, 2.0 * cell));
-        assert!(lod_cell_masked(home, &active(&[(0, 0), (1, 0), (0, 1), (1, 1)]), 8, rect, 2.0 * cell));
+        assert!(!lod_cell_masked(home, &active(&[(0, 0), (1, 0), (0, 1)]), CELL, rect, 2.0 * cell));
+        assert!(lod_cell_masked(home, &active(&[(0, 0), (1, 0), (0, 1), (1, 1)]), CELL, rect, 2.0 * cell));
     }
 
     #[test]
     fn lod_cells_of_other_regions_are_never_masked() {
         let home = RegionCoords::new(0, 0);
         let world = RegionCoords::new(1, 0).world_offset();
-        assert!(!lod_cell_masked(home, &active(&[(0, 0)]), 8, [world[0], world[2]], 64.0));
+        assert!(!lod_cell_masked(home, &active(&[(0, 0)]), CELL, [world[0], world[2]], 64.0));
     }
 
     #[test]
     fn home_region_offsets_are_respected() {
         let home = RegionCoords::new(-1, 2);
         let o = home.world_offset();
-        assert!(lod_cell_masked(home, &active(&[(0, 0)]), 8, [o[0] + 8.0, o[2] + 8.0], 64.0));
-        assert!(!lod_cell_masked(RegionCoords::new(0, 0), &active(&[(0, 0)]), 8, [o[0] + 8.0, o[2] + 8.0], 64.0));
+        assert!(lod_cell_masked(home, &active(&[(0, 0)]), CELL, [o[0] + 8.0, o[2] + 8.0], 64.0));
+        assert!(!lod_cell_masked(RegionCoords::new(0, 0), &active(&[(0, 0)]), CELL, [o[0] + 8.0, o[2] + 8.0], 64.0));
     }
 }

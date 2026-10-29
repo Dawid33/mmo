@@ -128,11 +128,14 @@ impl CellTickets {
 mod tests {
     use super::*;
 
+    /// Cells 16 blocks (256 units) wide, in chunks: 8 at 2-block chunks, 1 at 16.
+    const CELL: usize = 16 / crate::CHUNK_BLOCKS;
+
     fn cfg() -> CellConfig {
-        CellConfig::new(8) // 4×4 grid of 256-unit cells
+        CellConfig::new(CELL) // 4×4 grid of 256-unit cells
     }
     fn centre(x: u32, z: u32) -> (f32, f32) {
-        let s = crate::cell_size_units(8);
+        let s = crate::cell_size_units(CELL);
         ((x as f32 + 0.5) * s, (z as f32 + 0.5) * s)
     }
 
@@ -142,7 +145,7 @@ mod tests {
         let plan = t.plan(&BTreeSet::new(), &[centre(1, 1)], &cfg());
         // 3×3 around (1,1) = 9 required, plus the budgeted wanted cells.
         assert_eq!(plan.activate.len(), 9 + MAX_CELL_ACTIVATIONS_PER_TICK);
-        for c in required_cells(centre(1, 1), 8) {
+        for c in required_cells(centre(1, 1), CELL) {
             assert!(plan.activate.contains(&c));
         }
     }
@@ -150,7 +153,7 @@ mod tests {
     #[test]
     fn wanted_cells_come_nearest_first_one_per_tick() {
         let mut t = CellTickets::default();
-        let mut active: BTreeSet<CellCoords> = required_cells(centre(0, 0), 8).into_iter().collect();
+        let mut active: BTreeSet<CellCoords> = required_cells(centre(0, 0), CELL).into_iter().collect();
         let plan = t.plan(&active, &[centre(0, 0)], &cfg());
         assert_eq!(plan.activate.len(), 1);
         // Distance-2 ring, smallest coords first among equals.

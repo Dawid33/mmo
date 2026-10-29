@@ -11,9 +11,9 @@ fn crc(c: &Chunk) -> u32 {
 fn flat_floor_is_block_based_with_a_chiseled_slab() {
     let c = Chunk::flat_floor(8);
     assert!(c.blocks.uniform().is_none(), "a floor mixes solid and air blocks");
-    // depth 8 leaves the 4 bottom blocks partially filled → chiseled;
-    // the 4 top blocks are fully air.
-    assert_eq!(c.chisel.len(), 4, "the 4 bottom blocks are partial → chiseled");
+    // depth 8 leaves the bottom block layer partially filled → chiseled;
+    // every block above it is fully air.
+    assert_eq!(c.chisel.len(), game::CHUNK_BLOCKS * game::CHUNK_BLOCKS, "the bottom layer is partial → chiseled");
 }
 
 #[test]
@@ -28,20 +28,33 @@ fn chunk_hash_is_stable_and_bincode_roundtrips() {
 #[test]
 fn derive_reproduces_floor_height() {
     let c = Chunk::flat_floor(8);
-    let voxels = derive_voxels(&c);
+    let voxels = derive_voxels(&c, [0, 0, 0]);
     assert_eq!(voxels[voxel_index(0, 7, 0)].block, BlockId(1), "y<8 solid");
     assert_eq!(voxels[voxel_index(0, 8, 0)].block, BlockId::AIR, "y>=8 air");
 }
 
-/// Oracle: topmost non-air voxel of column `(vx, vz)` in the dense derivation.
-fn oracle_top(voxels: &[game::Voxel], vx: u32, vz: u32) -> Option<(u32, BlockId)> {
-    (0..game::CHUNK_UNITS as u32).rev().find_map(|vy| {
-        let b = voxels[voxel_index(vx as usize, vy as usize, vz as usize)].block;
-        (b != BlockId::AIR).then_some((vy, b))
+/// Oracle: topmost non-air voxel of chunk column `(vx, vz)`, read from the
+/// derived voxels of the bricks stacked over it (dense per brick only;
+/// `bricks` caches each derived brick).
+fn oracle_top(
+    chunk: &Chunk,
+    bricks: &mut std::collections::HashMap<[usize; 3], Vec<game::Voxel>>,
+    vx: u32,
+    vz: u32,
+) -> Option<(u32, BlockId)> {
+    let edge = game::BRICK_VOXELS as u32;
+    let (bx, bz) = ((vx / edge) as usize, (vz / edge) as usize);
+    (0..game::BRICKS_PER_CHUNK_EDGE).rev().find_map(|by| {
+        let voxels = bricks.entry([bx, by, bz]).or_insert_with(|| derive_voxels(chunk, [bx, by, bz]));
+        (0..edge).rev().find_map(|ly| {
+            let b = voxels[voxel_index((vx % edge) as usize, ly as usize, (vz % edge) as usize)].block;
+            (b != BlockId::AIR).then_some((by as u32 * edge + ly, b))
+        })
     })
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn column_top_matches_derived_voxels() {
     use game::{Block, BlockIndex, ChiselData};
     let mut chunks: Vec<Chunk> = [0u32, 1, 8, 16, 17, game::CHUNK_UNITS as u32]
@@ -53,11 +66,21 @@ fn column_top_matches_derived_voxels() {
     half.chisel
         .insert(BlockIndex::from_xyz(1, 0, 1), ChiselData::cuboid(BlockId(2), [0, 0, 0], [16, 8, 16]));
     chunks.push(half);
+    // Every column at a 2-block chunk; at bigger chunks a sample that still
+    // crosses every brick boundary (both sides of each 32-voxel seam) and the
+    // half block's columns.
+    let step = if game::CHUNK_UNITS <= 64 { 1 } else { 13 };
+    let mut cols: Vec<u32> = (0..game::CHUNK_UNITS as u32).step_by(step).collect();
+    for seam in (0..game::CHUNK_UNITS as u32).step_by(game::BRICK_VOXELS).skip(1) {
+        cols.extend([seam - 1, seam]);
+    }
+    cols.extend([16, 31, game::CHUNK_UNITS as u32 - 1]);
     for chunk in &chunks {
-        let voxels = derive_voxels(chunk);
-        for vx in 0..game::CHUNK_UNITS as u32 {
-            for vz in 0..game::CHUNK_UNITS as u32 {
-                assert_eq!(chunk.column_top(vx, vz), oracle_top(&voxels, vx, vz), "column ({vx},{vz})");
+        let mut bricks = std::collections::HashMap::new();
+        for &vx in &cols {
+            for &vz in &cols {
+                let want = oracle_top(chunk, &mut bricks, vx, vz);
+                assert_eq!(chunk.column_top(vx, vz), want, "column ({vx},{vz})");
             }
         }
     }

@@ -6,20 +6,26 @@
 use game::edit::PLACE_BLOCK;
 use game::{
     BlockId, Chunk, ChunkCoords, GameEventKind, InputEvent, Pose, Key, MouseButton, Region,
-    RegionCoords, BLOCK_VOXELS,
+    RegionCoords, BLOCK_VOXELS, CHUNK_UNITS,
 };
+
+/// Chunk column holding the player spawn (128, 128): chunk 4 at 2-block
+/// chunks, chunk 0 at 16.
+const SPAWN_CHUNK: usize = 128 / CHUNK_UNITS;
 
 fn r0() -> RegionCoords {
     RegionCoords::new(0, 0)
 }
 
-/// Chunk columns 3..=5 x 3..=5 of `floor`, with player 0 spawned and settled
-/// at (128, 128), controls on. Setup events are forgotten, so only what a
+/// The chunk columns around the spawn chunk (3..=5 at 2-block chunks, 0..=1
+/// at 16) of `floor`, with player 0 spawned and settled at (128, 128),
+/// controls on. Setup events are forgotten, so only what a
 /// test does afterwards can be rolled back.
 fn region(floor: impl Fn() -> Chunk) -> Region {
     let mut chunks = Vec::new();
-    for x in 3..=5 {
-        for z in 3..=5 {
+    let around = SPAWN_CHUNK.saturating_sub(1)..=SPAWN_CHUNK + 1;
+    for x in around.clone() {
+        for z in around.clone() {
             chunks.push((ChunkCoords::new(x, 0, z), floor()));
         }
     }
@@ -109,14 +115,20 @@ fn changed(
     before: &[((usize, i32, usize), usize, BlockId)],
     after: &[((usize, i32, usize), usize, BlockId)],
 ) -> Vec<((usize, i32, usize), usize, BlockId)> {
+    let before: std::collections::HashMap<_, _> = before.iter().map(|b| ((b.0, b.1), b.2)).collect();
     after
         .iter()
-        .filter(|a| match before.iter().find(|b| b.0 == a.0 && b.1 == a.1) {
-            Some(b) => b.2 != a.2,
+        .filter(|a| match before.get(&(a.0, a.1)) {
+            Some(&b) => b != a.2,
             None => a.2 != BlockId::AIR,
         })
         .cloned()
         .collect()
+}
+
+/// World block of a `changed` entry.
+fn world_of(((cx, cy, cz), i, _): ((usize, i32, usize), usize, BlockId)) -> [i32; 3] {
+    world_block(ChunkCoords::new(cx, cy, cz), BlockIndex::from_linear(i).xyz())
 }
 
 #[test]
@@ -132,8 +144,8 @@ fn left_click_breaks_the_block_underfoot_and_the_player_falls_in() {
     run(&mut region, &click(DOWN, MouseButton::Left));
     let diff = changed(&before, &blocks(&region));
     assert_eq!(diff.len(), 1, "exactly one block must change: {diff:?}");
-    // Chunk (4, 0, 4), block (0, 1, 0) = index 2: world block (8, 1, 8).
-    assert_eq!(diff[0], ((4, 0, 4), 2, BlockId::AIR));
+    // World block (8, 1, 8): chunk (4, 0, 4) block index 2 at 2-block chunks.
+    assert_eq!((world_of(diff[0]), diff[0].2), ([8, 1, 8], BlockId::AIR), "{diff:?}");
 
     for _ in 0..20 {
         region.handle_event(GameEventKind::Tick).unwrap();
@@ -154,11 +166,12 @@ fn right_click_places_a_block_that_stops_the_player() {
     run(&mut region, &click(DOWN_45, MouseButton::Right));
     let diff = changed(&before, &blocks(&region));
     assert_eq!(diff.len(), 1, "exactly one block must appear: {diff:?}");
-    // On top of the two-block floor, in the chunk slot above it, which had
-    // no chunk until now.
-    let ((_, cy, cz), _, id) = diff[0];
-    assert_eq!((cy, id), (1, PLACE_BLOCK), "placed on the floor: {diff:?}");
-    assert_eq!(cz, 3, "placed ahead of the player (-z): {diff:?}");
+    // On top of the two-block floor (world block y 2: at 2-block chunks the
+    // chunk slot above it, which had no chunk until now), ahead of the
+    // player (-z) at block z 6.
+    let [_, y, z] = world_of(diff[0]);
+    assert_eq!((y, diff[0].2), (2, PLACE_BLOCK), "placed on the floor: {diff:?}");
+    assert_eq!(z, 6, "placed ahead of the player (-z): {diff:?}");
 
     // Walk forward: the new block is taller than the step height.
     region.handle_event(input(InputEvent::MouseMotion { dx: 0.0, dy: -DOWN_45 })).unwrap();
@@ -251,14 +264,17 @@ fn world_block(c: ChunkCoords, (bx, by, bz): (usize, usize, usize)) -> [i32; 3] 
     [c.x as i32 * cb + bx as i32, c.y * cb + by as i32, c.z as i32 * cb + bz as i32]
 }
 
-/// A rollback-able sim over chunk columns 3..=5 x 3..=5 of `floor`, with its
+/// The edited chunk of the `terrain` tests: the middle of its 3×3.
+const TARGET: ChunkCoords = ChunkCoords { x: 1, y: 0, z: 1 };
+
+/// A rollback-able sim over chunk columns 0..=2 x 0..=2 of `floor`, with its
 /// render-update receiver. No player, no ground recipe.
 fn terrain(floor: impl Fn(ChunkCoords) -> Chunk) -> (Rollback, crossbeam::channel::Receiver<GameDataUpdate>) {
     let (send, recv) = crossbeam::channel::unbounded();
     let mut r = Rollback::new(Some(send));
     let mut chunks = Vec::new();
-    for x in 3..=5 {
-        for z in 3..=5 {
+    for x in 0..=2 {
+        for z in 0..=2 {
             let c = ChunkCoords::new(x, 0, z);
             chunks.push((c, floor(c)));
         }
@@ -283,10 +299,13 @@ fn seeded_chunk(seed: u128) -> Chunk {
     chunk
 }
 
+/// Slow at 16-block chunks: 4096 edits, each undo entry verified by a full
+/// state hash on rollback (the edits alone take ~0.1 s).
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn dig_chunk_to_air_and_undo() {
     game::set_hash_mode(game::HashMode::Full);
-    let target = ChunkCoords::new(4, 0, 4);
+    let target = TARGET;
     let (mut r, _recv) = terrain(|c| if c == target { seeded_chunk(7) } else { Chunk::flat_floor(16) });
     let before = game::state_hash(&r);
     let e = r.chunk_key_at(target).unwrap();
@@ -311,7 +330,7 @@ fn dig_chunk_to_air_and_undo() {
 #[test]
 fn edit_emits_set_blocks() {
     let (mut r, recv) = terrain(|_| Chunk::flat_floor(16));
-    let target = ChunkCoords::new(4, 0, 4);
+    let target = TARGET;
     let e = r.chunk_key_at(target).unwrap();
     let index = BlockIndex::from_xyz(0, 0, 0);
     let old = r.ecs.chunk.get(e).block_at(0, 0, 0);
@@ -409,9 +428,10 @@ fn collider_shapes(r: &Rollback, e: game::EntityKey) -> Vec<(u32, Option<Pose>)>
 /// to the rebuild); either way the colliders must be the ones `create_mesh`
 /// builds for the same chunk, and the whole sequence rolls back bit-exact.
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn incremental_collider_matches_rebuild() {
     game::set_hash_mode(game::HashMode::Full);
-    let target = ChunkCoords::new(4, 0, 4);
+    let target = TARGET;
     for (seed, start) in [(11u128, seeded_chunk(5)), (12, Chunk::flat_floor(16)), (13, Chunk::flat_floor(32))] {
         let (mut r, _recv) = terrain(|c| if c == target { start.clone() } else { Chunk::flat_floor(16) });
         let before = game::state_hash(&r);

@@ -1,7 +1,7 @@
 //! Near-chunk meshing cost on real terrain, off the render path: generate the
 //! production 3x3 join window, then run each stage the client runs per chunk
 //! (derive + RLE, padded gather, greedy quads, face connectivity) and report
-//! per-stage cost plus worker-thread scaling.
+//! per-stage cost (per 32³ render brick) plus worker-thread scaling.
 //!
 //! `cargo run --release -p client --example mesh_bench [-- threads=1,2,4,8]`
 
@@ -107,17 +107,23 @@ fn main() {
                 }
             }
         }
-        let voxels = game::derive_voxels(chunk);
-        grid.insert(*key, VoxelData::new(voxels));
+        // The client meshes 32³ render bricks, not sim chunks.
+        let n = game::BRICKS_PER_CHUNK_EDGE as i32;
+        for (b, brick) in chunk.bricks() {
+            let bk = [key[0] * n + b[0] as i32, key[1] * n + b[1] as i32, key[2] * n + b[2] as i32];
+            grid.insert(bk, VoxelData::new(brick.voxels()));
+        }
     }
     stage.derive = t.elapsed();
-    let n = chunks.len();
     println!(
         "chunks: unchiselled {unchiselled} ({:.0}%), uniform solid {uniform_solid}, uniform air {uniform_air}",
-        100.0 * unchiselled as f64 / n as f64
+        100.0 * unchiselled as f64 / chunks.len() as f64
     );
 
-    let keys: Vec<Key> = chunks.iter().map(|(k, _)| *k).collect();
+    let mut keys: Vec<Key> = grid.keys().copied().collect();
+    keys.sort();
+    let n = keys.len();
+    println!("render bricks: {n}");
     let (mut empty, mut total_quads) = (0usize, 0usize);
     let t = Instant::now();
     for &k in &keys {
@@ -128,11 +134,11 @@ fn main() {
     let single = t.elapsed();
     let per = |d: Duration| d.as_secs_f64() * 1e6 / n as f64;
     println!(
-        "zero-quad chunks: {empty} ({:.0}%), quads total {total_quads}, avg {:.1}/chunk",
+        "zero-quad bricks: {empty} ({:.0}%), quads total {total_quads}, avg {:.1}/brick",
         100.0 * empty as f64 / n as f64,
         total_quads as f64 / n as f64
     );
-    println!("per chunk (us, 1 thread):");
+    println!("per brick (us, 1 thread):");
     println!("  derive+rle    {:7.1}   (snapshot-voxel task)", per(stage.derive));
     println!("  gather_padded {:7.1}", per(stage.gather));
     println!("  mesh_quads    {:7.1}", per(stage.quads));
@@ -153,7 +159,7 @@ fn main() {
         });
         let wall = t.elapsed();
         println!(
-            "threads={t_count:2}: {wall:?} -> {:.0} chunks/s",
+            "threads={t_count:2}: {wall:?} -> {:.0} bricks/s",
             n as f64 / wall.as_secs_f64()
         );
     }

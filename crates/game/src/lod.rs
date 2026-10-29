@@ -723,6 +723,7 @@ mod tests {
     /// The block-wise path must be bit-identical to the dense one: LOD
     /// payloads are cached, compared and streamed, so "close" is not enough.
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn block_wise_far_lod_cells_match_the_dense_reference_exactly() {
         use crate::{BlockIndex, ChiselData};
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
@@ -732,9 +733,11 @@ mod tests {
             seed ^= seed << 17;
             seed % modulus
         };
-        for round in 0..12 {
+        // A 16-block chunk is 512 bricks of random blocks: fewer, smaller rounds.
+        let (rounds, extra) = if crate::BRICKS_PER_CHUNK_EDGE == 1 { (12, 10) } else { (2, 2) };
+        for round in 0..rounds {
             let mut chunks = Vec::new();
-            for _ in 0..(3 + next(10)) {
+            for _ in 0..(3 + next(extra)) {
                 let coords = ChunkCoords::new(next(4) as usize, next(5) as i32 - 2, next(4) as usize);
                 let mut chunk = Chunk::default();
                 for b in 0..crate::CHUNK_BLOCK_COUNT {
@@ -775,24 +778,18 @@ mod tests {
 
     #[test]
     fn build_far_lod_cells_groups_signed_y_correctly() {
-        // y=-2 and y=-1 both div_euclid(2) to group y=-1 (div_euclid rounds
-        // toward -inf, not zero), but land in different octant halves:
-        // rem_euclid(2) is 0 for y=-2 (lower half) and 1 for y=-1 (upper
-        // half) — the same ordering as the positive-y case, so a chunk
-        // stack straddling y=0 groups and orders exactly like one that
-        // doesn't.
-        let mut lower = Chunk::default();
-        lower.set_block(0, 0, 0, Block::new(BlockId(1)));
-        let mut upper = Chunk::default();
-        upper.set_block(0, 0, 0, Block::new(BlockId(2)));
+        // World blocks y=-4 and y=-2 sit in bricks y=-2 and y=-1 (one brick
+        // is BRICK_BLOCKS = 2 blocks tall; chunks y -2 / -1 at 2-block
+        // chunks, both chunk y -1 at 16). Both bricks div_euclid(2) to group
+        // y=-1 (div_euclid rounds toward -inf, not zero), but land in
+        // different octant halves: rem_euclid(2) is 0 for brick -2 (lower
+        // half) and 1 for brick -1 (upper half) — the same ordering as the
+        // positive-y case, so a stack straddling y=0 groups and orders
+        // exactly like one that doesn't.
+        let chunks = world_blocks(&[([0, -4, 0], 1), ([0, -2, 0], 2)]);
+        let cells = populated(build_far_lod_cells(chunks));
 
-        let chunks = vec![
-            (ChunkCoords::new(0, -2, 0), lower),
-            (ChunkCoords::new(0, -1, 0), upper),
-        ];
-        let cells = build_far_lod_cells(chunks);
-
-        assert_eq!(cells.len(), 1, "both chunks land in the same 2x2x2 group");
+        assert_eq!(cells.len(), 1, "both bricks land in the same 2x2x2 group");
         assert_eq!(cells[0].group, [0, -1, 0], "(-2).div_euclid(2) == (-1).div_euclid(2) == -1");
 
         // Coarse index x + 32*y + 32*32*z, at x=0, z=0: y=0 for the low half, y=16 for the high half.
@@ -800,12 +797,12 @@ mod tests {
         assert_eq!(
             grid[0].block,
             BlockId(1),
-            "y=-2 chunk (rem_euclid 0) occupies the lower octant half"
+            "brick y=-2 (rem_euclid 0) occupies the lower octant half"
         );
         assert_eq!(
             grid[32 * 16].block,
             BlockId(2),
-            "y=-1 chunk (rem_euclid 1) occupies the upper octant half"
+            "brick y=-1 (rem_euclid 1) occupies the upper octant half"
         );
     }
 
@@ -823,6 +820,28 @@ mod tests {
         assert_eq!(out.iter().filter(|v| !v.is_air()).count(), 1);
     }
 
+    /// The grids holding any solid cell. A chunk wider than one brick also
+    /// yields the all-air groups of its other bricks: they stay in the output
+    /// (a factor-16 overlay's groups mark the columns it is authoritative
+    /// for) and `encode_cells` drops them before the wire.
+    fn populated(cells: Vec<LodCell>) -> Vec<LodCell> {
+        cells.into_iter().filter(|c| c.grid.iter().any(|v| !v.is_air())).collect()
+    }
+
+    /// Chunks holding one solid whole block of `id` at each WORLD block
+    /// coord (region-local x/z, signed y), sorted by chunk: fixtures stated in
+    /// blocks land in whichever chunk and brick holds them at any chunk size.
+    fn world_blocks(blocks: &[([i32; 3], u16)]) -> Vec<(ChunkCoords, Chunk)> {
+        let cb = crate::CHUNK_BLOCKS as i32;
+        let mut out: BTreeMap<ChunkCoords, Chunk> = BTreeMap::new();
+        for &([x, y, z], id) in blocks {
+            let c = ChunkCoords::new(x.div_euclid(cb) as usize, y.div_euclid(cb), z.div_euclid(cb) as usize);
+            let l = [x, y, z].map(|v| v.rem_euclid(cb) as usize);
+            out.entry(c).or_default().set_block(l[0], l[1], l[2], Block::new(BlockId(id)));
+        }
+        out.into_iter().collect()
+    }
+
     /// One solid whole block (16³ voxels) at block coords `b` of chunk `c`.
     fn chunk_with_block(b: [usize; 3], id: u16) -> Chunk {
         let mut chunk = Chunk::default();
@@ -832,16 +851,13 @@ mod tests {
 
     #[test]
     fn factor4_two_pass_places_cells_at_world_voxel_over_4() {
-        // Chunk (3,1,2), block (1,1,1): world voxels x 112..128, y 48..64,
-        // z 80..96 → factor-4 cells x 28..32, y 12..16, z 20..24, all inside
-        // group4 [0,0,0] (chunk div 4). Chunk (7,0,7), block (1,0,1): world
-        // voxels x 240..256, y 0..16, z 240..256 → cells 60..64 / 0..4 /
-        // 60..64 → group4 [1,0,1], local cells 28..32 / 0..4 / 28..32.
-        let chunks = vec![
-            (ChunkCoords::new(3, 1, 2), chunk_with_block([1, 1, 1], 7)),
-            (ChunkCoords::new(7, 0, 7), chunk_with_block([1, 0, 1], 9)),
-        ];
-        let cells = downsample_cells(build_far_lod_cells(chunks));
+        // World block (7,3,5): world voxels x 112..128, y 48..64, z 80..96
+        // → factor-4 cells x 28..32, y 12..16, z 20..24, all inside group4
+        // [0,0,0] (brick div 4). World block (15,0,15): world voxels x
+        // 240..256, y 0..16, z 240..256 → cells 60..64 / 0..4 / 60..64 →
+        // group4 [1,0,1], local cells 28..32 / 0..4 / 28..32.
+        let chunks = world_blocks(&[([7, 3, 5], 7), ([15, 0, 15], 9)]);
+        let cells = populated(downsample_cells(build_far_lod_cells(chunks)));
         assert_eq!(cells.len(), 2, "two distinct factor-4 groups");
 
         let cell = |g: [i32; 3]| cells.iter().find(|c| c.group == g).expect("group present");
@@ -861,15 +877,9 @@ mod tests {
 
     #[test]
     fn block_scale_cells_pack_the_region_into_one_grid_per_tile_and_band() {
-        // Block cells are 16 world units: chunk (cx, sub_y, cz), block
-        // (bx,by,bz) → grid cell (rem_euclid(cx,16)*2+bx,
-        // rem_euclid(sub_y,16)*2+by, rem_euclid(cz,16)*2+bz) in group
-        // [cx.div_euclid(16), sub_y.div_euclid(16), cz.div_euclid(16)].
-        let chunks = vec![
-            (ChunkCoords::new(5, 0, 7), chunk_with_block([1, 1, 0], 4)),
-            (ChunkCoords::new(0, -1, 0), chunk_with_block([0, 0, 0], 2)),
-            (ChunkCoords::new(17, 0, 20), chunk_with_block([0, 0, 0], 6)),
-        ];
+        // Block cells are 16 world units: world block (x, y, z) → grid cell
+        // (x, y, z).rem_euclid(32) in group (x, y, z).div_euclid(32).
+        let chunks = world_blocks(&[([11, 1, 14], 4), ([0, -2, 0], 2), ([34, 0, 40], 6)]);
         let cells = block_scale_cells(chunks);
         assert_eq!(cells.len(), 3, "two bands at tile (0,0) plus band 0 of tile (1,1)");
 
@@ -878,10 +888,10 @@ mod tests {
         assert_eq!(band0.grid[11 + 32 + 32 * 32 * 14].block, BlockId(4), "cell (11, 1, 14)");
         assert_eq!(band0.grid.iter().filter(|v| !v.is_air()).count(), 1);
         let band_neg = cell([0, -1, 0]);
-        // rem_euclid(-1, 16) = 15 → cell y = 30 (top chunk of the band below 0).
+        // rem_euclid(-2, 32) = 30 → cell y = 30 (near the top of the band below 0).
         assert_eq!(band_neg.grid[32 * 30].block, BlockId(2));
         assert_eq!(band_neg.grid.iter().filter(|v| !v.is_air()).count(), 1);
-        // Chunk (17, 0, 20) is tile-local (1, 0, 4) → cell (2, 0, 8).
+        // World block (34, 0, 40) → cell (2, 0, 8) of tile (1, 1).
         let tile11 = cell([1, 0, 1]);
         assert_eq!(tile11.grid[2 + 32 * 32 * 8].block, BlockId(6), "cell (2, 0, 8)");
         assert_eq!(tile11.grid.iter().filter(|v| !v.is_air()).count(), 1);
@@ -1104,6 +1114,54 @@ mod tests {
         assert!(long.decode().is_none());
     }
 
+    /// Group and octant placement for a chunk of many bricks (16-block
+    /// chunks: 8³ bricks; at 2-block chunks it is the single brick): every
+    /// brick of one chunk carries one whole block of its own id, at
+    /// brick-local block (1, 0, 1). Each block must land, at factors 2, 4 and
+    /// 16, exactly on the cells computed from its WORLD voxel position —
+    /// group = voxel.div_euclid(32·f), cell = voxel.div_euclid(f).rem_euclid(32)
+    /// — independent of how the builders walk bricks and octants.
+    #[test]
+    fn many_brick_chunks_place_every_brick_at_its_world_cells() {
+        let coords = ChunkCoords::new(1, -1, 2);
+        let mut chunk = Chunk::default();
+        let mut placed = Vec::new(); // (world block, id)
+        let n = crate::BRICKS_PER_CHUNK_EDGE;
+        for i in 0..n * n * n {
+            let b = [i % n, (i / n) % n, i / (n * n)];
+            let local = [b[0] * BRICK_BLOCKS + 1, b[1] * BRICK_BLOCKS, b[2] * BRICK_BLOCKS + 1];
+            let id = BlockId(1 + i as u16);
+            chunk.set_block(local[0], local[1], local[2], Block::new(id));
+            let cb = crate::CHUNK_BLOCKS as i64;
+            let origin = [coords.x as i64 * cb, coords.y as i64 * cb, coords.z as i64 * cb];
+            placed.push(([0, 1, 2].map(|a| origin[a] + local[a] as i64), id));
+        }
+        for factor in [2u32, 4, 16] {
+            let f = factor as i64;
+            let cells = downsample_chunks(vec![(coords, chunk.clone())], factor);
+            let per_block = (BLOCK_VOXELS as i64 / f) as usize; // cells per block axis
+            for &(w, id) in &placed {
+                let v = w.map(|b| b * BLOCK_VOXELS as i64); // world voxel min corner
+                let group = v.map(|c| c.div_euclid(32 * f) as i32);
+                let cell = v.map(|c| c.div_euclid(f).rem_euclid(32) as usize);
+                let grid = &cells.iter().find(|c| c.group == group).unwrap_or_else(|| {
+                    panic!("factor {factor}: no group {group:?} for block {w:?}")
+                }).grid;
+                for d in [[0, 0, 0], [per_block - 1; 3]] {
+                    let [x, y, z] = [0, 1, 2].map(|a| cell[a] + d[a]);
+                    assert_eq!(
+                        grid[x + 32 * y + 32 * 32 * z].block,
+                        id,
+                        "factor {factor}: block {w:?} at group {group:?} cell {:?}",
+                        [x, y, z]
+                    );
+                }
+            }
+            let solid: usize = cells.iter().map(|c| c.grid.iter().filter(|v| !v.is_air()).count()).sum();
+            assert_eq!(solid, placed.len() * per_block.pow(3), "factor {factor}: nothing else is solid");
+        }
+    }
+
     #[test]
     fn downsample_chunks_dispatches_every_factor() {
         // One solid block at chunk (0,0,0), block (0,0,0): world voxels 0..16 on
@@ -1113,7 +1171,7 @@ mod tests {
             &[(2u32, 8usize), (4, 4), (8, 2), (16, 1), (32, 1), (64, 1), (256, 1)]
         {
             let chunks = vec![(ChunkCoords::new(0, 0, 0), chunk_with_block([0, 0, 0], 5))];
-            let cells = downsample_chunks(chunks, factor);
+            let cells = populated(downsample_chunks(chunks, factor));
             assert_eq!(cells.len(), 1, "factor {factor}: one populated grid");
             assert_eq!(cells[0].group, [0, 0, 0]);
             let n = cells[0].grid.iter().filter(|v| !v.is_air()).count();

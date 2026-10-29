@@ -281,21 +281,29 @@ impl CellStore {
 mod tests {
     use super::*;
 
+    /// Cells 16 blocks (256 units) wide, in chunks: 8 at 2-block chunks, 1 at 16.
+    const CELL: usize = 16 / crate::CHUNK_BLOCKS;
+
+    /// The chunks holding blocks (18, 0, 2) — cell (1, 0) — and (0, 0, 0) and
+    /// (2, -2, 0) — both cell (0, 0).
     fn chunks() -> Vec<(ChunkCoords, Chunk)> {
+        let cb = crate::CHUNK_BLOCKS;
         vec![
-            (ChunkCoords::new(9, 0, 1), Chunk::flat_floor(8)),
+            (ChunkCoords::new(18 / cb, 0, 2 / cb), Chunk::flat_floor(8)),
             (ChunkCoords::new(0, 0, 0), Chunk::flat_floor(4)),
-            (ChunkCoords::new(1, -1, 0), Chunk::flat_floor(2)),
+            (ChunkCoords::new(2 / cb, -1, 0), Chunk::flat_floor(2)),
         ]
     }
 
     #[test]
     fn every_grid_cell_exists_and_chunks_land_sorted_in_their_cell() {
-        let mut s = CellStore::from_chunks(chunks(), 8);
+        let mut s = CellStore::from_chunks(chunks(), CELL);
         assert_eq!(s.len(), 16);
         let p = s.payload(CellCoords::new(0, 0)).unwrap();
         let coords: Vec<_> = p.content.chunks.iter().map(|(c, _)| *c).collect();
-        assert_eq!(coords, vec![ChunkCoords::new(0, 0, 0), ChunkCoords::new(1, -1, 0)]);
+        let mut want = vec![ChunkCoords::new(0, 0, 0), chunks()[2].0];
+        want.sort();
+        assert_eq!(coords, want);
         assert_eq!(s.payload(CellCoords::new(1, 0)).unwrap().content.chunks.len(), 1);
         assert!(s.payload(CellCoords::new(3, 3)).unwrap().content.chunks.is_empty());
         assert_eq!(p.materialized_hash, 0);
@@ -304,7 +312,7 @@ mod tests {
 
     #[test]
     fn put_bumps_the_version_only_on_change() {
-        let mut s = CellStore::from_chunks(chunks(), 8);
+        let mut s = CellStore::from_chunks(chunks(), CELL);
         let c = CellCoords::new(0, 0);
         let same = s.payload(c).unwrap().content;
         s.put(c, same);
@@ -334,11 +342,11 @@ mod tests {
     #[test]
     fn a_lazy_store_generates_only_the_cells_asked_for() {
         use std::sync::atomic::Ordering;
-        let (mut s, calls) = counting_store(8);
+        let (mut s, calls) = counting_store(CELL);
         assert_eq!(calls.load(Ordering::SeqCst), 0, "nothing generated up front");
         let p = s.payload(CellCoords::new(2, 1)).expect("inside the grid");
         assert_eq!(p.content.chunks.len(), 1);
-        assert_eq!(p.content.chunks[0].0, ChunkCoords::new(16, 0, 8));
+        assert_eq!(p.content.chunks[0].0, ChunkCoords::new(2 * CELL, 0, CELL));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         s.payload(CellCoords::new(2, 1));
         assert_eq!(calls.load(Ordering::SeqCst), 1, "generated once, then stored");
@@ -348,7 +356,7 @@ mod tests {
     #[test]
     fn dormant_chunks_never_force_generation() {
         use std::sync::atomic::Ordering;
-        let (mut s, calls) = counting_store(8);
+        let (mut s, calls) = counting_store(CELL);
         assert!(s.dormant_chunks(&Default::default()).is_empty());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         s.payload(CellCoords::new(0, 0));
@@ -359,7 +367,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn prefetched_cells_are_generated_off_the_callers_thread() {
         use std::sync::atomic::Ordering;
-        let (mut s, calls) = counting_store(8);
+        let (mut s, calls) = counting_store(CELL);
         let caller = std::thread::current().id();
         s.prefetch(&[CellCoords::new(1, 1), CellCoords::new(1, 1), CellCoords::new(2, 2)]);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -377,13 +385,13 @@ mod tests {
 
     #[test]
     fn a_lazy_store_has_nothing_outside_the_grid() {
-        let (mut s, _) = counting_store(8);
+        let (mut s, _) = counting_store(CELL);
         assert!(s.payload(CellCoords::new(99, 0)).is_none());
     }
 
     #[test]
     fn unknown_cells_have_no_payload() {
-        let mut s = CellStore::from_chunks(chunks(), 8);
+        let mut s = CellStore::from_chunks(chunks(), CELL);
         assert!(s.payload(CellCoords::new(9, 9)).is_none());
     }
 }

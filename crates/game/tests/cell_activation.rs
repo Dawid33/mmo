@@ -82,6 +82,7 @@ fn server_fills_the_materialized_hash() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn a_client_replica_matches_the_server_bit_exact() {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut s = Region::new_cells(r0(), CC, None, None);
@@ -99,6 +100,7 @@ fn a_client_replica_matches_the_server_bit_exact() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn a_tampered_hash_is_rejected_by_a_client() {
     let (send, _recv) = crossbeam::channel::unbounded();
     let mut s = Region::new_cells(r0(), CC, None, None);
@@ -128,6 +130,7 @@ fn dematerialize_returns_the_content_and_empties_the_cell() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn reactivation_round_trips_content() {
     let mut s = Region::new_cells(r0(), CC, None, None);
     let cell = CellCoords::new(0, 3);
@@ -201,6 +204,7 @@ fn freezing_a_stray_rolls_back_bit_exact() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn edits_in_dormant_cells_are_refused() {
     let mut s = Region::new_cells(r0(), CC, None, None);
     server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
@@ -208,7 +212,7 @@ fn edits_in_dormant_cells_are_refused() {
     let mut placed_dormant = true;
     let mut placed_active = false;
     s.with_data(|rb| {
-        // Cell (3,3) starts at chunk 24 = block 48.
+        // Cell (3,3) starts at block 48.
         placed_dormant = rb.set_block_safe([50, 3, 50], block);
         placed_active = rb.set_block_safe([3, 20, 3], block);
     });
@@ -218,6 +222,7 @@ fn edits_in_dormant_cells_are_refused() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn the_chunk_index_follows_activation_and_release() {
     let mut s = Region::new_cells(r0(), CC, None, None);
     server_apply(&mut s, activate(&[CellCoords::new(0, 0), CellCoords::new(1, 0)]));
@@ -243,11 +248,12 @@ fn an_edit_created_chunk_is_indexed_and_released_with_its_cell() {
     server_apply(&mut s, activate(&[CellCoords::new(0, 0)]));
     let n = s.data().data.chunk_index.len();
     let mut placed = false;
-    // Block y = 40 is chunk y = 20: air above the floor, no chunk yet.
+    // Block y = 40 (chunk y 20 at 2-block chunks, 2 at 16): air above the
+    // floor, no chunk yet.
     s.with_data(|rb| placed = rb.set_block_safe([1, 40, 1], game::Block::new(game::BlockId(1))));
     assert!(placed);
     assert_eq!(s.data().data.chunk_index.len(), n + 1);
-    let new_chunk = ChunkCoords::new(0, 20, 0);
+    let new_chunk = ChunkCoords::new(0, 40 / game::CHUNK_BLOCKS as i32, 0);
     assert!(s.data().chunk_key_at(new_chunk).is_some());
     let ev = server_apply(&mut s, deactivate(&[CellCoords::new(0, 0)]));
     assert!(matches!(ev.kind, GameEventKind::CellChanges(_)));
@@ -547,20 +553,20 @@ fn a_legacy_region_ignores_cell_changes() {
     assert_eq!(r.data().ecs.chunk.iter().filter(|(_, c)| c.is_some()).count(), 0);
 }
 
-/// 1-chunk cells, so cell (x, z) is exactly chunk column (x, z) at any chunk
-/// size, and the player pose is derived from the cell origin. The scenario's
-/// distances are not size-independent, though (see the TODO below).
+/// 1-chunk cells, so cell (x, z) is exactly chunk column (x, z) and is
+/// `CHUNK_BLOCKS` wide at any chunk size; the poses derive from cell origins.
+/// A cell can be no narrower than a sim chunk, so the look ray cannot cross
+/// a whole cell within `REACH` (5 blocks) at 16-block chunks; instead it cuts
+/// the corner of one.
 ///
-/// TODO(chunk flip): the geometry itself is in blocks at 2-block chunks
-/// (player 2 blocks from the wall, `REACH` = 5); at 16-block cells the player
-/// would be 16+ blocks from the wall, so the scenario needs a cell edge below
-/// the chunk size to keep its intent.
-///
-/// (2-block cells at 2-block chunks.) The player stands in cell (4,5) looking −Z
-/// (yaw 0) across cell (4,4) at a two-chunk-tall wall in cell (4,3); a
-/// right click places against the wall's +Z face, i.e. at block z = 8, which
-/// is inside cell (4,4). `middle_active` controls whether (4,4) is active.
-fn place_across_a_cell(middle_active: bool) -> Region {
+/// The player stands in cell A = (2,2), half a block from its −X edge and two
+/// blocks from its −Z edge, at eye level with a two-chunk-tall wall filling
+/// cell B = (1,1). Looking 45° left of −Z, the ray leaves A across x = A.x0
+/// into cell D = (1,2) first and then hits B's +Z face at z = B.z1, so the
+/// right click places against it at a block inside D, whose activity
+/// `target_active` controls. (Cell (2,1), the other corner cell, is never
+/// entered.)
+fn place_into_a_corner_cell(target_active: bool) -> Region {
     use game::{InputEvent, Pose, Key, MouseButton};
     let cell = |x, z| CellCoords::new(x, z);
     let solid = || Chunk::flat_floor(game::CHUNK_UNITS as u32);
@@ -571,11 +577,11 @@ fn place_across_a_cell(middle_active: bool) -> Region {
         content: DormantCell { chunks, entities: vec![] },
     };
     let mut activate = vec![
-        payload(cell(4, 3), vec![(ChunkCoords::new(4, 0, 3), solid()), (ChunkCoords::new(4, 1, 3), solid())]),
-        payload(cell(4, 5), vec![(ChunkCoords::new(4, 0, 5), solid())]),
+        payload(cell(1, 1), vec![(ChunkCoords::new(1, 0, 1), solid()), (ChunkCoords::new(1, 1, 1), solid())]),
+        payload(cell(2, 2), vec![(ChunkCoords::new(2, 0, 2), solid())]),
     ];
-    if middle_active {
-        activate.push(payload(cell(4, 4), vec![]));
+    if target_active {
+        activate.push(payload(cell(1, 2), vec![]));
     }
     activate.sort_by_key(|p| p.cell);
     let mut s = Region::new_cells(r0(), 1, None, None);
@@ -584,17 +590,21 @@ fn place_across_a_cell(middle_active: bool) -> Region {
     let input = |ev| GameEventKind::PlayerInput(0, ev);
     server_apply(&mut s, input(InputEvent::Key { key: Key::KeyE, pressed: true }));
     server_apply(&mut s, input(InputEvent::Key { key: Key::KeyE, pressed: false }));
-    // Half a block into cell (4, 5) from its origin: voxel (136, _, 168) at
-    // 2-block chunks (block 8.5 x 10.5), dropped onto the floor.
+    // Cell A's origin plus (0.5, 2) blocks, dropped onto its one-chunk floor.
     let edge = game::cell_size_units(1);
+    let block = game::BLOCK_VOXELS as f32;
     s.with_data(|rb| {
         let e = *rb.data.player_entites.get(&0).unwrap();
-        rb.set_body_pose_safe(e, Pose::translation(4.0 * edge + 8.0, 60.0, 5.0 * edge + 8.0));
+        let y = game::CHUNK_UNITS as f32 + 20.0;
+        rb.set_body_pose_safe(e, Pose::translation(2.0 * edge + 0.5 * block, y, 2.0 * edge + 2.0 * block));
     });
     for _ in 0..12 {
         server_apply(&mut s, GameEventKind::Tick);
     }
+    // 302 px is about 45° at the default sensitivity; negative dx turns
+    // left, towards −X.
     for ev in [
+        input(InputEvent::MouseMotion { dx: -302.0, dy: 0.0 }),
         input(InputEvent::MouseButton { button: MouseButton::Right, pressed: true }),
         GameEventKind::Tick,
         input(InputEvent::MouseButton { button: MouseButton::Right, pressed: false }),
@@ -607,17 +617,18 @@ fn place_across_a_cell(middle_active: bool) -> Region {
 
 #[test]
 fn placing_into_an_active_neighbour_cell_works() {
-    // Control: proves the look ray reaches the wall across the middle cell.
-    let s = place_across_a_cell(true);
-    assert_eq!(s.data().cell_chunk_keys(CellCoords::new(4, 4)).len(), 1);
+    // Control: proves the look ray reaches the wall through the corner cell.
+    let s = place_into_a_corner_cell(true);
+    assert_eq!(s.data().cell_chunk_keys(CellCoords::new(1, 2)).len(), 1);
+    assert!(s.data().cell_chunk_keys(CellCoords::new(2, 1)).is_empty(), "the other corner cell is never entered");
 }
 
 #[test]
 fn a_player_cannot_place_into_a_dormant_cell() {
-    let s = place_across_a_cell(false);
+    let s = place_into_a_corner_cell(false);
     assert!(
-        s.data().cell_chunk_keys(CellCoords::new(4, 4)).is_empty(),
-        "player_edit_safe created a chunk inside dormant cell (4,4)"
+        s.data().cell_chunk_keys(CellCoords::new(1, 2)).is_empty(),
+        "player_edit_safe created a chunk inside dormant cell (1,2)"
     );
 }
 
@@ -680,6 +691,7 @@ fn render_kinds(recv: &Receiver<game::GameDataUpdate>) -> Vec<&'static str> {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn a_client_tells_the_renderer_about_activated_and_released_terrain() {
     let (send, recv) = unbounded();
     let mut s = Region::new_cells(r0(), CC, None, None);
@@ -698,6 +710,7 @@ fn a_client_tells_the_renderer_about_activated_and_released_terrain() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn a_reused_chunk_key_is_removed_before_it_is_recreated() {
     let (send, recv) = unbounded();
     let mut s = Region::new_cells(r0(), CC, None, None);

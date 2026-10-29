@@ -45,9 +45,12 @@ fn region_load_cost() {
     let mut total_voxels = 0usize;
     let mut derived = Vec::with_capacity(chunks.len());
     for (_, c) in &chunks {
-        let v = game::derive_voxels(c);
-        total_voxels += v.len();
-        derived.push(v);
+        // Dense voxels exist per 32³ render brick, never per sim chunk.
+        for (_, brick) in c.bricks() {
+            let v = brick.voxels();
+            total_voxels += v.len();
+            derived.push(v);
+        }
     }
     let derive = t.elapsed();
 
@@ -75,10 +78,11 @@ fn region_load_cost() {
 
     eprintln!("--- region load cost ({} chunks) ---", chunks.len());
     eprintln!("generate_region:      {:>12?}", gen_t);
-    eprintln!("derive_voxels x{:<3}:    {:>12?}   ({} voxels, sync on main)", chunks.len(), derive, total_voxels);
+    eprintln!("brick voxels  x{:<3}:    {:>12?}   ({} voxels, sync on main)", chunks.len(), derive, total_voxels);
     eprintln!("bincode serialize:    {:>12?}   ({} bytes/region)", ser, bytes.len());
     eprintln!("bincode deserialize:  {:>12?}", de);
-    eprintln!("greedy_quads x{:<3}:     {:>12?}   ({} quads, async pool)", chunks.len(), mesh, quads_total);
+    eprintln!("greedy_quads x{:<3}:     {:>12?}   ({} quads over {} bricks, async pool)", chunks.len(), mesh, quads_total, derived.len());
     eprintln!("  per-chunk derive:   {:>12?}", derive / chunks.len() as u32);
     eprintln!("  per-chunk mesh:     {:>12?}", mesh / chunks.len() as u32);
+    eprintln!("  per-brick mesh:     {:>12?}", mesh / derived.len().max(1) as u32);
 }

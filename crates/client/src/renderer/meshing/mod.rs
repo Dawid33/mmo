@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn derives_and_meshes_a_generated_floor_chunk() {
         let chunk = game::Chunk::flat_floor(8);
-        let voxels = game::derive_voxels(&chunk);
+        let voxels = game::derive_voxels(&chunk, [0, 0, 0]);
         let mesh = build_chunk_mesh(
             &PaddedVoxels::from_interior(&voxels),
             &BlockTextureLayers::default(),

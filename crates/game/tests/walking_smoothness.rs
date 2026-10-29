@@ -92,8 +92,6 @@ fn chiselled_floor() -> Chunk {
 
 /// Ticks of a walk long enough to also catch what only shows up now and then.
 const LONG: usize = 80;
-/// Ticks of a walk down three terraces.
-const SHORT: usize = 30;
 
 #[test]
 fn block_scale_floor_is_level_across_chunk_borders() {

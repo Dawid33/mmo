@@ -155,6 +155,7 @@ fn implied_ground_is_solid_to_a_ray() {
 }
 
 #[test]
+#[ignore = "slow: >100ms — run via just test-full"]
 fn exposure_invariant_after_random_digs() {
     // Shaft area: a 4x4 block square straddling the chunk faces at block
     // 2 * CHUNK_BLOCKS (blocks 2..6 at 2-block chunks, in chunk columns 1 and
@@ -195,8 +196,10 @@ fn bedrock_cannot_be_broken() {
     let before = state_hash(region.data());
     assert!(!dig(&mut region, bedrock), "bedrock is unbreakable");
     assert_eq!(before, state_hash(region.data()));
-    // Implied bedrock (no chunk yet) is refused too, without materialising.
-    let deep = [3, floor - 4, 3];
+    // Implied bedrock (no chunk yet) is refused too, without materialising:
+    // two chunks below the bedrock block's own (y -63 at 2-block chunks).
+    let cb = CHUNK_BLOCKS as i32;
+    let deep = [3, (floor.div_euclid(cb) - 1) * cb - 1, 3];
     let (dc, _) = locate(deep).unwrap();
     assert!(!dig(&mut region, deep));
     assert!(!has_chunk(region.data(), dc));

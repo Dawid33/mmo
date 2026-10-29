@@ -51,7 +51,7 @@ pub const BLOCK_VOXEL_COUNT: usize = BLOCK_VOXELS * BLOCK_VOXELS * BLOCK_VOXELS;
 /// Edge of a half block, and the cell size of the half-block collider grid.
 pub const HALF_BLOCK_VOXELS: usize = BLOCK_VOXELS / 2; // = 8
 
-/// Linear voxel index within a chunk, matching `BrickShape` (x fastest).
+/// Linear voxel index within a 32³ render brick, matching `BrickShape` (x fastest).
 /// Reuses `voxel::BrickShape` so the 32³ layout has a single source of truth.
 pub fn voxel_index(x: usize, y: usize, z: usize) -> usize {
     BrickShape::linearize([x as u32, y as u32, z as u32]) as usize
@@ -431,25 +431,37 @@ fn push_block_cells(out: &mut ColliderCells, bi: BlockIndex, block: Block, chise
     }
 }
 
-/// Derive the 32³ voxel array from the authoritative block layer. Output layout
-/// is byte-identical to the old `Chunk.voxels`, so the mesher and collider
-/// consume it unchanged. Deterministic; the single source of truth for both sim
-/// (collider) and client (mesh).
-pub fn derive_voxels(chunk: &Chunk) -> Vec<Voxel> {
+/// Derive the dense 32³ voxels of render brick `brick` (each axis
+/// `0..BRICKS_PER_CHUNK_EDGE`) straight from the chunk's blocks and chisel —
+/// an oracle independent of [`crate::BrickView::voxels`], kept for tests and
+/// tools. Output order is `BrickShape` (index with [`voxel_index`]). Never a
+/// whole chunk: dense voxel arrays are per brick.
+pub fn derive_voxels(chunk: &Chunk, brick: [usize; 3]) -> Vec<Voxel> {
+    use crate::voxel::BRICK_BLOCKS;
     let chisel = &chunk.chisel;
+    let origin = brick.map(|b| b * BRICK_BLOCKS);
     let mut voxels = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
-    for (bi, block) in chunk.blocks.iter() {
-        let (bx, by, bz) = bi.xyz();
-        let materials = chisel.get(&bi).map(ChiselData::materials);
-        for vz in 0..BLOCK_VOXELS {
-            for vy in 0..BLOCK_VOXELS {
-                for vx in 0..BLOCK_VOXELS {
-                    let id = match &materials {
-                        Some(m) => m[local_index(vx, vy, vz)],
-                        None => block.id,
-                    };
-                    let li = voxel_index(bx * BLOCK_VOXELS + vx, by * BLOCK_VOXELS + vy, bz * BLOCK_VOXELS + vz);
-                    voxels[li] = Voxel::new(id);
+    for lz in 0..BRICK_BLOCKS {
+        for ly in 0..BRICK_BLOCKS {
+            for lx in 0..BRICK_BLOCKS {
+                let bi = BlockIndex::from_xyz(origin[0] + lx, origin[1] + ly, origin[2] + lz);
+                let block = chunk.blocks.get(bi);
+                let materials = chisel.get(&bi).map(ChiselData::materials);
+                for vz in 0..BLOCK_VOXELS {
+                    for vy in 0..BLOCK_VOXELS {
+                        for vx in 0..BLOCK_VOXELS {
+                            let id = match &materials {
+                                Some(m) => m[local_index(vx, vy, vz)],
+                                None => block.id,
+                            };
+                            let li = voxel_index(
+                                lx * BLOCK_VOXELS + vx,
+                                ly * BLOCK_VOXELS + vy,
+                                lz * BLOCK_VOXELS + vz,
+                            );
+                            voxels[li] = Voxel::new(id);
+                        }
+                    }
                 }
             }
         }
@@ -485,14 +497,14 @@ mod tests {
     #[test]
     fn uniform_stone_block_fills_its_subcube() {
         let blocks = vec![Block::new(BlockId(1)); CHUNK_BLOCK_COUNT];
-        let voxels = derive_voxels(&chunk_of(blocks, BTreeMap::new()));
+        let voxels = derive_voxels(&chunk_of(blocks, BTreeMap::new()), [0, 0, 0]);
         assert!(voxels.iter().all(|v| v.block == BlockId(1)));
     }
 
     #[test]
     fn all_air_blocks_derive_to_all_air() {
         let blocks = vec![Block::new(BlockId::AIR); CHUNK_BLOCK_COUNT];
-        let voxels = derive_voxels(&chunk_of(blocks, BTreeMap::new()));
+        let voxels = derive_voxels(&chunk_of(blocks, BTreeMap::new()), [0, 0, 0]);
         assert!(voxels.iter().all(|v| v.block == BlockId::AIR));
     }
 
@@ -506,7 +518,7 @@ mod tests {
         let mut chisel = BTreeMap::new();
         chisel.insert(BlockIndex::from_linear(0), c);
 
-        let voxels = derive_voxels(&chunk_of(blocks, chisel));
+        let voxels = derive_voxels(&chunk_of(blocks, chisel), [0, 0, 0]);
         assert_eq!(voxels[voxel_index(0, 0, 0)].block, BlockId(1));
         assert_eq!(voxels[voxel_index(1, 0, 0)].block, BlockId::AIR, "rest of the chiseled block is empty");
     }
@@ -515,8 +527,8 @@ mod tests {
     fn derive_is_deterministic() {
         let mut blocks = vec![Block::new(BlockId::AIR); CHUNK_BLOCK_COUNT];
         blocks[3] = Block::new(BlockId(1));
-        let a = derive_voxels(&chunk_of(blocks.clone(), BTreeMap::new()));
-        let b = derive_voxels(&chunk_of(blocks, BTreeMap::new()));
+        let a = derive_voxels(&chunk_of(blocks.clone(), BTreeMap::new()), [0, 0, 0]);
+        let b = derive_voxels(&chunk_of(blocks, BTreeMap::new()), [0, 0, 0]);
         assert_eq!(a, b);
     }
 
@@ -528,53 +540,45 @@ mod tests {
         }
     }
 
-    use std::collections::BTreeSet;
-
-    /// Voxel-grid coords of solid cells in a derived 32³ grid — the oracle.
-    fn solid_set(voxels: &[Voxel]) -> BTreeSet<(i32, i32, i32)> {
-        (0..BRICK_VOXEL_COUNT)
-            .filter(|i| voxels[*i].block != BlockId::AIR)
-            .map(|i| {
-                let [x, y, z] = BrickShape::delinearize(i as u32);
-                (x as i32, y as i32, z as i32)
-            })
-            .collect()
+    /// Brick-local occupancy of the solid voxels of derived brick `b` — the oracle.
+    fn solid_mask(chunk: &Chunk, b: [usize; 3]) -> Vec<bool> {
+        derive_voxels(chunk, b).iter().map(|v| v.block != BlockId::AIR).collect()
     }
 
-    /// Voxel-grid coords covered by the multi-scale cells: each block cell
-    /// expands to its 16³ voxels, each half cell to its 8³, chisel cells are
-    /// already voxel-grid.
-    fn covered_set(cells: &ColliderCells) -> BTreeSet<(i32, i32, i32)> {
-        let mut s = BTreeSet::new();
-        for b in &cells.blocks {
-            for vx in 0..BLOCK_VOXELS as i32 {
-                for vy in 0..BLOCK_VOXELS as i32 {
-                    for vz in 0..BLOCK_VOXELS as i32 {
-                        s.insert((
-                            b.x * BLOCK_VOXELS as i32 + vx,
-                            b.y * BLOCK_VOXELS as i32 + vy,
-                            b.z * BLOCK_VOXELS as i32 + vz,
-                        ));
+    /// Brick-local occupancy of brick `b` covered by the multi-scale cells,
+    /// each clipped to the brick: block cells expand to 16³ voxels, half
+    /// cells to 8³, chisel cells are already voxel-grid. Asserts no voxel is
+    /// covered twice. Per brick, so a 16³-block chunk never needs a dense
+    /// whole-chunk grid.
+    fn covered_mask(cells: &ColliderCells, b: [usize; 3]) -> Vec<bool> {
+        let edge = crate::voxel::BRICK_VOXELS as i32;
+        let origin = b.map(|v| v as i32 * edge);
+        let mut mask = vec![false; BRICK_VOXEL_COUNT];
+        let mut cover = |min: [i32; 3], size: i32, what: &str| {
+            // The cell's box clipped to the brick, brick-local.
+            let lo = [0, 1, 2].map(|a| (min[a] - origin[a]).max(0));
+            let hi = [0, 1, 2].map(|a| (min[a] + size - origin[a]).min(edge));
+            for vz in lo[2]..hi[2] {
+                for vy in lo[1]..hi[1] {
+                    for vx in lo[0]..hi[0] {
+                        let i = voxel_index(vx as usize, vy as usize, vz as usize);
+                        assert!(!mask[i], "{what} cell at {min:?} overlaps a covered cell");
+                        mask[i] = true;
                     }
                 }
             }
+        };
+        let (bv, h) = (BLOCK_VOXELS as i32, HALF_BLOCK_VOXELS as i32);
+        for c in &cells.blocks {
+            cover([c.x * bv, c.y * bv, c.z * bv], bv, "block-scale");
         }
-        let h = HALF_BLOCK_VOXELS as i32;
         for c in &cells.halves {
-            for vx in 0..h {
-                for vy in 0..h {
-                    for vz in 0..h {
-                        let dup = !s.insert((c.x * h + vx, c.y * h + vy, c.z * h + vz));
-                        assert!(!dup, "half-scale cell {c:?} overlaps a covered cell");
-                    }
-                }
-            }
+            cover([c.x * h, c.y * h, c.z * h], h, "half-scale");
         }
         for v in &cells.voxels {
-            let dup = !s.insert((v.x, v.y, v.z));
-            assert!(!dup, "voxel-scale cell {v:?} duplicates a covered cell");
+            cover([v.x, v.y, v.z], 1, "voxel-scale");
         }
-        s
+        mask
     }
 
     #[test]
@@ -597,13 +601,14 @@ mod tests {
 
     #[test]
     fn collider_cells_mixed_floor_splits_scales() {
-        // flat_floor(24): the by=0 block layer (4 blocks) is whole solid, the
-        // by=1 layer is chiseled 8 voxel-layers deep: a half block each, so
-        // its four lower octants per block land on the half-block grid.
+        // flat_floor(24): the by=0 block layer is whole solid, the by=1
+        // layer is chiseled 8 voxel-layers deep: a half block each, so its
+        // four lower octants per block land on the half-block grid.
         let c = Chunk::flat_floor(24);
         let cells = collider_cells(&c);
-        assert_eq!(cells.blocks.len(), 4);
-        assert_eq!(cells.halves.len(), 4 * 4);
+        let layer = CHUNK_BLOCKS * CHUNK_BLOCKS;
+        assert_eq!(cells.blocks.len(), layer);
+        assert_eq!(cells.halves.len(), layer * 4);
         assert!(cells.voxels.is_empty());
         assert!(!cells.is_full_cube());
     }
@@ -614,7 +619,7 @@ mod tests {
         let c = Chunk::flat_floor(8);
         let cells = collider_cells(&c);
         assert!(cells.blocks.is_empty());
-        assert_eq!(cells.halves.len(), 4 * 4);
+        assert_eq!(cells.halves.len(), CHUNK_BLOCKS * CHUNK_BLOCKS * 4);
         assert!(cells.voxels.is_empty());
     }
 
@@ -635,23 +640,27 @@ mod tests {
 
     /// A half block, a full chisel, a carved half block and a chisel with one
     /// solid octant beside plain blocks: every scale in one chunk.
+    /// Blocks named by their 2-block-chunk linear index: 0 = (0,0,0),
+    /// 1 = (1,0,0), 2 = (0,1,0), 6 = (0,1,1), 7 = (1,1,1).
     fn mixed_scales_chunk() -> Chunk {
+        let at = |x, y, z| BlockIndex::from_xyz(x, y, z);
         let mut c = Chunk::default();
-        put(&mut c, 0, Block::new(BlockId(1)));
-        c.chisel.insert(BlockIndex::from_linear(0), ChiselData::cuboid(BlockId(1), [0, 0, 0], [16, 8, 16]));
-        put(&mut c, 1, Block::new(BlockId(1)));
-        put(&mut c, 2, Block::new(BlockId(2)));
-        c.chisel.insert(BlockIndex::from_linear(2), ChiselData::cuboid(BlockId(2), [0, 0, 0], [16, 16, 16]));
-        put(&mut c, 6, Block::new(BlockId(2)));
+        put(&mut c, at(0, 0, 0).linear(), Block::new(BlockId(1)));
+        c.chisel.insert(at(0, 0, 0), ChiselData::cuboid(BlockId(1), [0, 0, 0], [16, 8, 16]));
+        put(&mut c, at(1, 0, 0).linear(), Block::new(BlockId(1)));
+        put(&mut c, at(0, 1, 0).linear(), Block::new(BlockId(2)));
+        c.chisel.insert(at(0, 1, 0), ChiselData::cuboid(BlockId(2), [0, 0, 0], [16, 16, 16]));
+        put(&mut c, at(0, 1, 1).linear(), Block::new(BlockId(2)));
         let mut carved = ChiselData::cuboid(BlockId(2), [0, 0, 0], [16, 8, 16]);
         carved.set(15, 7, 15, false, 0);
-        c.chisel.insert(BlockIndex::from_linear(6), carved);
-        put(&mut c, 7, Block::new(BlockId(2)));
-        c.chisel.insert(BlockIndex::from_linear(7), ChiselData::cuboid(BlockId(2), [8, 8, 8], [16, 16, 16]));
+        c.chisel.insert(at(0, 1, 1), carved);
+        put(&mut c, at(1, 1, 1).linear(), Block::new(BlockId(2)));
+        c.chisel.insert(at(1, 1, 1), ChiselData::cuboid(BlockId(2), [8, 8, 8], [16, 16, 16]));
         c
     }
 
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn collider_cells_cover_exactly_the_derived_solid_voxels() {
         let mut single_chisel = Chunk::default();
         put(&mut single_chisel, 0, Block::new(BlockId(1)));
@@ -682,12 +691,12 @@ mod tests {
         ];
         for (i, chunk) in cases.iter().enumerate() {
             let cells = collider_cells(chunk);
-            let derived = derive_voxels(chunk);
-            assert_eq!(
-                covered_set(&cells),
-                solid_set(&derived),
-                "case {i}: multi-scale cells must cover exactly the solid voxels"
-            );
+            for (b, _) in chunk.bricks() {
+                assert!(
+                    covered_mask(&cells, b) == solid_mask(chunk, b),
+                    "case {i}, brick {b:?}: multi-scale cells must cover exactly the solid voxels"
+                );
+            }
         }
     }
 
@@ -714,7 +723,7 @@ mod tests {
         chisel.insert(BlockIndex::from_xyz(1, 1, 0), half);
         let mut blocks = vec![Block::new(BlockId::AIR); CHUNK_BLOCK_COUNT];
         blocks[BlockIndex::from_xyz(1, 1, 0).linear()] = Block::new(BlockId(3));
-        let voxels = derive_voxels(&chunk_of(blocks, chisel));
+        let voxels = derive_voxels(&chunk_of(blocks, chisel), [0, 0, 0]);
         for y in 16..32 {
             let want = if y < 24 { BlockId(3) } else { BlockId::AIR };
             assert_eq!(voxels[voxel_index(16, y, 0)].block, want, "y {y}");
