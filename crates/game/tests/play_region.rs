@@ -101,6 +101,14 @@ fn client_left_reconciles_on_a_client_replica() {
         .expect("authoritative ClientLeft reconciles without a GameError");
     assert!(client.data().player_entites.get(&0).is_none(), "body for 0 must be gone");
     assert!(client.data().clients.get(&0).is_none(), "client 0 must be gone");
+    // The replica keeps its Tick prediction, replayed after the server's
+    // event: the server running that Tick next must land on the same state.
+    server.handle_event(GameEventKind::Tick).unwrap();
+    assert_eq!(
+        game::state_hash(client.data()),
+        game::state_hash(server.data()),
+        "the replica must end in the server's state"
+    );
 }
 
 // ---- WorldManager section ----
