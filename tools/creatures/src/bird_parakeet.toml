@@ -1,0 +1,116 @@
+# DF BIRD_PARAKEET (wild): 120 g, "a tiny parrot found in flocks of many hundreds"
+# (the budgerigar): green body, yellow face with black barring on the nape and wings,
+# black throat spots, a long blue tail, grey-horn bill with a blue cere. Vermin in DF,
+# but it has a giant, so it uses the full bird rig, small. FLIER; no brood. Attack:
+# bite (the template's peck).
+name = "parakeet"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [3, 3, 4]
+leg = [1, 1]
+foot = [2, 0.5, 1.5]
+head = [2, 2, 2]
+neck = 1
+head_back = 1
+beak = [1, 1, 0.5]
+tail = [1, 0.5, 5]
+tail_raise = -15
+wing = [5, 2]
+walk = { cycle = 0.35, swing = 30 }
+run = { cycle = 0.22 }
+fly = { cycle = 0.2, flap = 45 }
+
+[palette]
+body = "#6ac43a"
+body_up = "#62b23a"
+head = "#f0e040"
+wings = "#e0d040"
+tail = "#2a5aa8"
+legs = "#8a8aa0"
+beak = "#b8a888"
+eye = "#141414"
+bars = "#1a1a1a"
+cere = "#3a5ac8"
+
+# The head's side faces are 2×2 (row 0 at the top); the front is on
+# the left of west and the right of east. Body `up`: row 0 is the front.
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "bars"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 1
+colour = "bars"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 0
+y = 1
+w = 2
+colour = "bars"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 0
+y = 0
+colour = "bars"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 2
+y = 1
+colour = "bars"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 4
+y = 0
+colour = "bars"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 0
+y = 1
+colour = "bars"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 2
+y = 0
+colour = "bars"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 4
+y = 1
+colour = "bars"

@@ -1,0 +1,85 @@
+# DF BIRD_RW_BLACKBIRD (wild): 50 g, "a small black bird with bright red markings
+# under the wings" of the marshland (the male red-winged blackbird): glossy black all
+# over, red shoulder epaulets edged yellow on each wing, black conical bill. Vermin in
+# DF, but it has a giant, so it uses the full bird rig, small. FLIER; no brood.
+# Attack: peck (the template's `attack`); scratch optional.
+name = "red-winged blackbird"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [3, 3, 4]
+leg = [1, 1]
+foot = [2, 0.5, 1.5]
+head = [2, 2, 2]
+neck = 1
+head_back = 1
+beak = [1, 0.5, 1]
+tail = [2, 0.5, 3]
+tail_raise = 10
+wing = [5, 2]
+walk = { cycle = 0.35, swing = 30 }
+run = { cycle = 0.22 }
+fly = { cycle = 0.2, flap = 45 }
+
+[palette]
+body = "#141416"
+body_up = "#1a1a20"
+head = "#141416"
+wings = "#16161a"
+wings_down = "#16161a"
+tail = "#121214"
+legs = "#1a1a1c"
+beak = "#101012"
+eye = "#3a3438"
+red = "#d8202a"
+yellow = "#f0d040"
+
+# The head's side faces are 2×2 (row 0 at the top); the front is on
+# the left of west and the right of east. Body `up`: row 0 is the front.
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 3
+y = 0
+w = 2
+colour = "yellow"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 3
+y = 1
+w = 2
+colour = "red"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 0
+y = 0
+w = 2
+colour = "yellow"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 0
+y = 1
+w = 2
+colour = "red"

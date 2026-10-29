@@ -1,0 +1,96 @@
+# DF BIRD_ORIOLE (wild): 40 g, "a small yellow and black bird" of the forest canopy
+# (the Eurasian golden oriole): golden-yellow body and head, black wings with a yellow
+# bar, black tail with yellow corners, a black streak through the eye, pinkish-red
+# bill. Vermin in DF, but it has a giant, so it uses the full bird rig, small. FLIER;
+# no brood. Attack: peck (the template's `attack`); scratch optional.
+name = "oriole"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [3, 3, 4]
+leg = [1, 1]
+foot = [2, 0.5, 1.5]
+head = [2, 2, 2]
+neck = 1
+head_back = 1
+beak = [1, 0.5, 1]
+tail = [2, 0.5, 3]
+tail_raise = 10
+wing = [5, 2]
+walk = { cycle = 0.35, swing = 30 }
+run = { cycle = 0.22 }
+fly = { cycle = 0.2, flap = 45 }
+
+[palette]
+body = "#f0c818"
+body_down = "#f4d030"
+head = "#f0c818"
+wings = "#16161a"
+tail = "#16161a"
+legs = "#4a4a50"
+beak = "#c8505a"
+eye = "#3a0c0c"
+lore = "#16161a"
+bar = "#f0c818"
+
+# The head's side faces are 2×2 (row 0 at the top); the front is on
+# the left of west and the right of east. Body `up`: row 0 is the front.
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "lore"
+w = 2
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 0
+colour = "lore"
+w = 2
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 2
+y = 1
+colour = "bar"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 2
+y = 1
+colour = "bar"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 2
+colour = "bar"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 1
+y = 2
+colour = "bar"

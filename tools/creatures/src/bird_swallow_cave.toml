@@ -1,0 +1,71 @@
+# DF BIRD_SWALLOW_CAVE (underground): 0.1 kg, "a small blue and orange bird" of
+# subterranean chasms. Vermin in DF, but it has a giant, so it uses the full bird
+# rig, small: glossy blue back and wings, orange throat, breast and rump, short bill,
+# long pointed wings and a forked tail (two fork cubes on the tail). FLIER; eggs, no
+# nest-box brood (not domestic). Attack: bite (the template's peck); scratch optional.
+name = "cave swallow"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [3, 3, 4]
+leg = [1, 1]
+foot = [2, 0.5, 1.5]
+head = [2, 2, 2]
+neck = 1
+head_back = 1
+beak = [1, 0.5, 0.5]
+tail = [2, 0.5, 2]
+tail_raise = 10
+wing = [6, 2]
+walk = { cycle = 0.35, swing = 30 }
+run = { cycle = 0.22 }
+fly = { cycle = 0.22, flap = 45 }
+
+# Tail pivot: its root; the tail spans z 0..2. The fork's two prongs.
+[[cubes]]
+name = "fork_l"
+bone = "tail"
+part = "tail"
+from = [-1, -0.25, 2]
+to = [-0.5, 0.25, 3.5]
+mirror = true
+
+[palette]
+body = "#2a4a8a"
+body_up = "#24407a"
+body_down = "#e08a3a"
+body_north = "#e08a3a"
+body_south = "#e8a050"
+head = "#2a4a8a"
+wings = "#1e3468"
+wings_up = "#28468a"
+tail = "#1e3468"
+legs = "#3a2a24"
+beak = "#1a1a1e"
+throat = "#d8742a"
+eye = "#0e0e10"
+
+# The head's side faces are 2×2 (row 0 at the top); the front is on the left of
+# west and the right of east.
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+w = 2
+colour = "throat"

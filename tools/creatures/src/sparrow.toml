@@ -1,0 +1,107 @@
+# DF SPARROW (wild): 30 g, "a tiny brown bird that can be found in most temperate
+# regions" (the male house sparrow): chestnut-brown back streaked black, grey crown,
+# pale cheeks, a black bib, grey-buff belly, a stout dark seed bill. Vermin in DF, but
+# it has a giant, so it uses the full bird rig, small. FLIER; no brood. Attack: peck
+# (the template's `attack`); scratch optional.
+name = "sparrow"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [3, 3, 4]
+leg = [1, 1]
+foot = [2, 0.5, 1.5]
+head = [2, 2, 2]
+neck = 1
+head_back = 1
+beak = [1, 1, 1]
+tail = [2, 0.5, 3]
+tail_raise = 10
+wing = [5, 2]
+walk = { cycle = 0.35, swing = 30 }
+run = { cycle = 0.22 }
+fly = { cycle = 0.2, flap = 45 }
+
+[palette]
+body = "#8a6040"
+body_down = "#b8b0a0"
+body_north = "#b8b0a0"
+head = "#a07650"
+head_up = "#7a7a80"
+wings = "#7a5232"
+tail = "#6a4a30"
+legs = "#a07a6a"
+beak = "#2a2624"
+eye = "#141210"
+bib = "#1a1816"
+cheek = "#d8d4cc"
+streak = "#2a1c12"
+
+# The head's side faces are 2×2 (row 0 at the top); the front is on
+# the left of west and the right of east. Body `up`: row 0 is the front.
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "cheek"
+w = 2
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 1
+colour = "cheek"
+w = 2
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+w = 2
+colour = "bib"
+
+[[decals]]
+cube = "body"
+face = "north"
+x = 1
+y = 0
+colour = "bib"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 1
+colour = "streak"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 2
+colour = "streak"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 3
+colour = "streak"

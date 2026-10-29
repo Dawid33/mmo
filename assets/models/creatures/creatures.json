@@ -890,6 +890,204 @@
    }
   }
  },
+ "bird_bluejay": {
+  "name": "blue jay",
+  "status": "draft",
+  "model": "models/creatures/bird_bluejay.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -4
+   ],
+   [
+    2.5,
+    7,
+    4.9826
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 11,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 13.474,
+    "speed": 67.3698
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "bird_bushtit": {
+  "name": "bushtit",
+  "status": "draft",
+  "model": "models/creatures/bird_bushtit.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -3
+   ],
+   [
+    2.5,
+    6,
+    4.4826
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 1.0598,
+    "speed": 3.5328
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 1.9799,
+    "speed": 9.8995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.15,
+    "stride": 11.224,
+    "speed": 74.8264
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.105
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
  "bird_buzzard": {
   "name": "buzzard",
   "status": "draft",
@@ -998,6 +1196,105 @@
     "length": 0.6,
     "stride": 2.6302,
     "speed": 4.3837
+   }
+  }
+ },
+ "bird_cardinal": {
+  "name": "cardinal",
+  "status": "draft",
+  "model": "models/creatures/bird_cardinal.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -4
+   ],
+   [
+    2.5,
+    7.5,
+    4.9826
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 12,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 13.474,
+    "speed": 67.3698
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },
@@ -1171,6 +1468,204 @@
    "hover": {
     "loop": "loop",
     "length": 0.35
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "bird_cockatiel": {
+  "name": "cockatiel",
+  "status": "draft",
+  "model": "models/creatures/bird_cockatiel.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -3.5
+   ],
+   [
+    2.5,
+    8,
+    5.6372
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 12,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 13.7058,
+    "speed": 68.529
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "bird_crow": {
+  "name": "crow",
+  "status": "draft",
+  "model": "models/creatures/bird_crow.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -3,
+    0,
+    -6
+   ],
+   [
+    3,
+    9,
+    5.0412
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 1.8779,
+    "speed": 3.7558
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 3.9598,
+    "speed": 13.1993
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 16.5619,
+    "speed": 36.8042
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.315
    },
    "takeoff": {
     "loop": "once",
@@ -1690,6 +2185,105 @@
     "length": 1.875,
     "stride": 1.3151,
     "speed": 0.7014
+   }
+  }
+ },
+ "bird_grackle": {
+  "name": "grackle",
+  "status": "draft",
+  "model": "models/creatures/bird_grackle.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -5.5
+   ],
+   [
+    2.5,
+    6,
+    6.5109
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 18.0163,
+    "speed": 90.0815
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },
@@ -2373,6 +2967,501 @@
    }
   }
  },
+ "bird_lorikeet": {
+  "name": "lorikeet",
+  "status": "draft",
+  "model": "models/creatures/bird_lorikeet.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -4
+   ],
+   [
+    2.5,
+    6,
+    6.284
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 15.426,
+    "speed": 77.1298
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "bird_lovebird_masked": {
+  "name": "masked lovebird",
+  "status": "draft",
+  "model": "models/creatures/bird_lovebird_masked.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -3
+   ],
+   [
+    2.5,
+    6,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 9.75,
+    "speed": 48.75
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "bird_lovebird_peach_faced": {
+  "name": "peach-faced lovebird",
+  "status": "draft",
+  "model": "models/creatures/bird_lovebird_peach_faced.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -3
+   ],
+   [
+    2.5,
+    6,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 9.75,
+    "speed": 48.75
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "bird_magpie": {
+  "name": "magpie",
+  "status": "draft",
+  "model": "models/creatures/bird_magpie.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -5
+   ],
+   [
+    2.5,
+    6,
+    8.3262
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 1,
+    "speed": 2.5
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 19.9893,
+    "speed": 99.9464
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "bird_oriole": {
+  "name": "oriole",
+  "status": "draft",
+  "model": "models/creatures/bird_oriole.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -4
+   ],
+   [
+    2.5,
+    6,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 12,
+    "speed": 60
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
  "bird_osprey": {
   "name": "osprey",
   "status": "draft",
@@ -2846,6 +3935,105 @@
    }
   }
  },
+ "bird_parakeet": {
+  "name": "parakeet",
+  "status": "draft",
+  "model": "models/creatures/bird_parakeet.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -3.5
+   ],
+   [
+    2.5,
+    6,
+    5.8943
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 14.0915,
+    "speed": 70.4575
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
  "bird_parrot_grey": {
   "name": "grey parrot",
   "status": "draft",
@@ -3261,6 +4449,231 @@
    }
   }
  },
+ "bird_roc": {
+  "name": "roc",
+  "status": "draft",
+  "model": "models/creatures/bird_roc.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -23,
+    0,
+    -63
+   ],
+   [
+    23,
+    87,
+    67.5498
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land",
+   "alert",
+   "roar",
+   "ridden",
+   "pick_up",
+   "carry"
+  ],
+  "cubes": 14,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.5,
+    "stride": 16.417,
+    "speed": 10.9446
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.9,
+    "stride": 35.6106,
+    "speed": 39.5673
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 195.8247,
+    "speed": 122.3904
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 1.12
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "ridden": {
+    "loop": "loop",
+    "length": 3
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.5,
+    "stride": 16.417,
+    "speed": 10.9446
+   }
+  }
+ },
+ "bird_rw_blackbird": {
+  "name": "red-winged blackbird",
+  "status": "draft",
+  "model": "models/creatures/bird_rw_blackbird.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -4
+   ],
+   [
+    2.5,
+    6,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 12,
+    "speed": 60
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
  "bird_stork_white": {
   "name": "white stork",
   "status": "draft",
@@ -3357,6 +4770,209 @@
    "land": {
     "loop": "once",
     "length": 0.9
+   }
+  }
+ },
+ "bird_swallow_cave": {
+  "name": "cave swallow",
+  "status": "draft",
+  "model": "models/creatures/bird_swallow_cave.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -3.5
+   ],
+   [
+    2.5,
+    6,
+    5
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 12,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 12.75,
+    "speed": 57.9545
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.154
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "bird_swallow_cave_giant": {
+  "name": "giant cave swallow",
+  "status": "draft",
+  "model": "models/creatures/bird_swallow_cave_giant.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -8,
+    0,
+    -18
+   ],
+   [
+    8,
+    26,
+    25.9154
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land",
+   "ridden"
+  ],
+  "cubes": 12,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 4.3837,
+    "speed": 5.4796
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 9.8995,
+    "speed": 21.9989
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 65.8731,
+    "speed": 109.7884
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.42
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "ridden": {
+    "loop": "loop",
+    "length": 3
    }
   }
  },
@@ -3685,6 +5301,105 @@
     "length": 0.8,
     "stride": 2.4404,
     "speed": 3.0505
+   }
+  }
+ },
+ "bird_wren": {
+  "name": "wren",
+  "status": "draft",
+  "model": "models/creatures/bird_wren.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -3.5
+   ],
+   [
+    2.5,
+    6,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 1.0598,
+    "speed": 3.5328
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 1.9799,
+    "speed": 9.8995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.15,
+    "stride": 10.5,
+    "speed": 70
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.105
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },
@@ -4681,6 +6396,172 @@
    "fly": {
     "loop": "loop",
     "length": 2
+   }
+  }
+ },
+ "cave_swallow_man": {
+  "name": "cave swallow man",
+  "status": "draft",
+  "model": "models/creatures/cave_swallow_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -7,
+    0,
+    -5
+   ],
+   [
+    7,
+    25,
+    13.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 17,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 10,
+    "speed": 12.5
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.48,
+    "stride": 22.9813,
+    "speed": 47.8778
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 8.1347,
+    "speed": 10.1684
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 27.75,
+    "speed": 61.6667
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.315
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },
@@ -11398,6 +13279,182 @@
    }
   }
  },
+ "harpy": {
+  "name": "harpy",
+  "status": "draft",
+  "model": "models/creatures/harpy.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -7,
+    0,
+    -4
+   ],
+   [
+    7,
+    29,
+    13.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "fly",
+   "hover",
+   "takeoff",
+   "land",
+   "alert",
+   "roar"
+  ],
+  "cubes": 21,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.85,
+    "stride": 11,
+    "speed": 12.9412
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 25.2795,
+    "speed": 50.5589
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.85,
+    "stride": 8.9482,
+    "speed": 10.5273
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 26.25,
+    "speed": 43.75
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.42
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
  "helmet_snake": {
   "name": "helmet snake",
   "status": "draft",
@@ -17915,6 +19972,105 @@
    "death": {
     "loop": "hold",
     "length": 0.6
+   }
+  }
+ },
+ "sparrow": {
+  "name": "sparrow",
+  "status": "draft",
+  "model": "models/creatures/sparrow.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -4
+   ],
+   [
+    2.5,
+    6,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1,
+    "speed": 2.8571
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.9799,
+    "speed": 8.9995
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 12,
+    "speed": 60
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },

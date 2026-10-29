@@ -1,0 +1,50 @@
+# DF BIRD_BUSHTIT (wild): 5 g, "a tiny brown bird" of open woodland: a round grey-
+# brown ball with a long tail and a stubby bill, browner crown. Vermin in DF, but it
+# has a giant, so it uses the full bird rig, small. FLIER (fast flaps); no brood.
+# Attack: peck (the template's `attack`); scratch optional.
+name = "bushtit"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [3, 3, 3]
+leg = [1, 1]
+foot = [2, 0.5, 1.5]
+head = [2, 2, 2]
+neck = 1
+head_back = 1
+beak = [0.5, 0.5, 0.5]
+tail = [1, 0.5, 4]
+tail_raise = 10
+wing = [4, 2]
+walk = { cycle = 0.3, swing = 32 }
+run = { cycle = 0.2 }
+fly = { cycle = 0.15, flap = 50 }
+
+[palette]
+body = "#8a8478"
+body_down = "#b8b0a2"
+head = "#8a7a64"
+head_up = "#7a6248"
+wings = "#6e685e"
+tail = "#5e5850"
+legs = "#2a2624"
+beak = "#1c1a18"
+eye = "#141210"
+
+# The head's side faces are 2×2 (row 0 at the top); the front is on
+# the left of west and the right of east. Body `up`: row 0 is the front.
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"

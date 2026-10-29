@@ -1,0 +1,52 @@
+# DF BIRD_GRACKLE (wild): 120 g, "a small gregarious bird, blue and black with yellow
+# eyes" (the common grackle): black body glossed bronze-black, an iridescent blue
+# head, long keeled tail, long black bill, staring yellow eyes. Vermin in DF, but it
+# has a giant, so it uses the full bird rig, small. FLIER; no brood. Attack: peck (the
+# template's `attack`); scratch optional.
+name = "grackle"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [3, 3, 5]
+leg = [1, 1]
+foot = [2, 0.5, 1.5]
+head = [2, 2, 3]
+neck = 1
+head_back = 1.5
+beak = [1, 0.5, 1.5]
+tail = [2, 1, 5]
+tail_raise = 10
+wing = [5, 2]
+walk = { cycle = 0.35, swing = 30 }
+run = { cycle = 0.22 }
+fly = { cycle = 0.2, flap = 45 }
+
+[palette]
+body = "#22201e"
+body_up = "#2c2620"
+head = "#1e2a6a"
+head_up = "#2a3a8a"
+wings = "#1c1c22"
+tail = "#18181e"
+legs = "#1a1a1c"
+beak = "#121214"
+eye = "#f0d020"
+pupil = "#101010"
+
+# The head's side faces are 3×2 (row 0 at the top); the front is on
+# the left of west and the right of east. Body `up`: row 0 is the front.
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"

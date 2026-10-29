@@ -1,0 +1,67 @@
+# DF BIRD_LORIKEET (wild): 0.2 kg, "a tiny, brightly-colored tree parrot" (the rainbow
+# lorikeet): violet-blue head, orange-red breast, yellow-green collar, green back,
+# wings and long tail, red-orange bill. Vermin in DF, but it has a giant, so it uses
+# the full bird rig, small. FLIER; no brood. Attack: bite (the template's peck).
+name = "lorikeet"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [3, 3, 5]
+leg = [1, 1]
+foot = [2, 0.5, 1.5]
+head = [2, 2, 2]
+neck = 1
+head_back = 1
+beak = [1, 1, 0.5]
+tail = [2, 0.5, 5]
+tail_raise = -20
+wing = [5, 2]
+walk = { cycle = 0.35, swing = 30 }
+run = { cycle = 0.22 }
+fly = { cycle = 0.2, flap = 45 }
+
+[palette]
+body = "#2e9a3a"
+body_down = "#2a4a9a"
+body_north = "#e85a24"
+head = "#3a3ab8"
+wings = "#2a8a34"
+tail = "#2e8e38"
+legs = "#6a6a6e"
+beak = "#e84a28"
+collar = "#b8d83a"
+eye = "#3a0c08"
+
+# The head's side faces are 2×2 (row 0 at the top); the front is on
+# the left of west and the right of east. Body `up`: row 0 is the front.
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 0
+w = 3
+colour = "collar"
+
+[[decals]]
+cube = "body"
+face = "north"
+x = 0
+y = 0
+w = 3
+colour = "collar"

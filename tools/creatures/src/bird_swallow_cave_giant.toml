@@ -1,0 +1,77 @@
+# DF BIRD_SWALLOW_CAVE_GIANT (underground): 200 kg, "a gigantic blue and orange
+# bird": the cave swallow at mount size, hand-written rather than a scaled variant
+# (it needs `ridden`): glossy blue back and wings, orange throat, breast and rump,
+# short bill, long pointed wings, forked tail. FLIER, MOUNT_EXOTIC (ridden), eggs (no
+# nest-box brood). Attack: bite (the template's peck); scratch optional.
+name = "giant cave swallow"
+template = "bird"
+status = "draft"
+extras = ["ridden"]
+
+[proportions]
+body = [14, 12, 20]
+leg = [3, 5]
+foot = [7, 2, 6]
+head = [9, 9, 9]
+neck = 1
+head_back = 4
+beak = [3, 2, 3]
+tail = [10, 2, 10]
+tail_raise = 10
+wing = [30, 10]
+walk = { cycle = 0.8, swing = 26, bob = 0.6 }
+run = { cycle = 0.45 }
+fly = { cycle = 0.6, flap = 40 }
+
+# Tail pivot: its root; the tail spans z 0..10. The fork's two prongs.
+[[cubes]]
+name = "fork_l"
+bone = "tail"
+part = "tail"
+from = [-5, -1, 10]
+to = [-2, 1, 17]
+mirror = true
+
+[palette]
+body = "#2a4a8a"
+body_up = "#24407a"
+body_down = "#e08a3a"
+body_north = "#e08a3a"
+body_south = "#e8a050"
+head = "#2a4a8a"
+wings = "#1e3468"
+wings_up = "#28468a"
+tail = "#1e3468"
+legs = "#3a2a24"
+beak = "#1a1a1e"
+throat = "#d8742a"
+eye = "#0e0e10"
+
+# The head's side faces are 9×9 (row 0 at the top); the front is on the left of
+# west and the right of east.
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 2
+w = 2
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 6
+y = 2
+w = 2
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 5
+w = 7
+h = 4
+colour = "throat"

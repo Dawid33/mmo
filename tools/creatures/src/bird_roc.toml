@@ -1,0 +1,112 @@
+# DF BIRD_ROC (megabeast): 20 t, "a bird of prey so large and ferocious it dwarfs
+# many dragons": built as an enormous eagle (dark brown, golden nape, yellow feet
+# and cere, dark hooked bill, broad wings), slow heavy gaits and wingbeats. FLIER,
+# LARGE_PREDATOR (alert, roar), MOUNT_EXOTIC (ridden), CURIOUSBEAST_ITEM (pick_up,
+# carry). Attack: bite (the template's peck); the talon scratch is optional.
+name = "roc"
+template = "bird"
+status = "draft"
+extras = ["alert", "roar", "ridden", "pick_up", "carry"]
+
+[proportions]
+body = [44, 38, 66]
+leg = [7, 24]
+foot = [20, 5, 16]
+head = [22, 22, 28]
+neck = 4
+head_back = 12
+beak = [8, 12, 14]
+tail = [36, 6, 36]
+tail_raise = 15
+wing = [80, 36]
+walk = { cycle = 1.5, swing = 20, bob = 1.5 }
+run = { cycle = 0.9, swing = 32 }
+fly = { cycle = 1.6, flap = 26 }
+
+# Head pivot: the neck, at the body's top front; the head spans y 3..25 above it.
+# A hooked tip on the bill.
+[[cubes]]
+name = "hook"
+bone = "head"
+part = "beak"
+from = [-3, 7, -28]
+to = [3, 12, -24]
+
+# Ruff of hackles at the nape, golden like the head's top.
+[[cubes]]
+name = "nape"
+bone = "head"
+part = "nape"
+from = [-12, 4, 6]
+to = [12, 20, 14]
+
+# Brows over the eyes.
+[[cubes]]
+name = "brow"
+bone = "head"
+part = "head"
+from = [-12, 18, -18]
+to = [12, 21, -8]
+
+[palette]
+body = "#4a3322"
+body_down = "#3d2a1c"
+head = "#5a3e28"
+head_up = "#b88a3c"
+head_south = "#c99a48"
+nape = "#b88a3c"
+wings = "#45301f"
+wings_down = "#5c4430"
+tail = "#4f3826"
+legs = "#e2b93a"
+beak = "#3a3734"
+eye = "#e0a020"
+pupil = "#1a0e04"
+cere = "#e2b93a"
+
+# The head's side faces are 28 wide × 22 tall (row 0 at the top); the front is on
+# the left of west and the right of east.
+[[decals]]
+cube = "head"
+face = "west"
+x = 6
+y = 4
+w = 5
+h = 4
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 7
+y = 5
+w = 2
+h = 2
+colour = "pupil"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 17
+y = 4
+w = 5
+h = 4
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 19
+y = 5
+w = 2
+h = 2
+colour = "pupil"
+
+[[decals]]
+cube = "beak"
+face = "up"
+x = 0
+y = 9
+w = 8
+h = 5
+colour = "cere"

@@ -1,0 +1,159 @@
+# DF HARPY (fantastic): 60 kg, "a monster in the shape of a woman with a bird's
+# wings in place of arms and talons for feet". The brief suggests the bird template,
+# but the body is a standing woman: biped + [wings] (the fly set) at the shoulder
+# blades, the template's arms cut to feather-coloured stubs (HUMANOID_ARMLESS: the
+# wings are the arms; the biped rig cannot drop its arm bones, so the worker set's
+# arm motion plays on the stubs), yellow scaly legs with talon toes, a feathered
+# lower body and tail, a woman's face with wild dark hair. LARGE_PREDATOR (alert,
+# roar). Attack: scratch (the template's `attack`, a kick-like strike); bite and spit
+# optional (not made).
+name = "harpy"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [3, 11]
+foot = 2
+body = [8, 10, 5]
+arm = [3, 3]
+hand = 0
+head = [6, 7, 6]
+walk = { cycle = 0.85, swing = 30 }
+run = { cycle = 0.5 }
+
+# Torso pivot: the hips; the torso spans y 0..10, z -2.5..2.5. The wings' left
+# root, at the shoulder blades.
+[wings]
+bone = "torso"
+at = [-1, 9, 2.5]
+span = 11
+chord = 14
+part = "wings"
+cycle = 0.6
+flap = 45
+
+# The tail feathers, fanned out behind the hips.
+[[cubes]]
+name = "tail"
+bone = "torso"
+part = "tail"
+from = [-3, 0.5, 2.5]
+to = [3, 1.5, 9]
+
+# A feather skirt over the hips.
+[[cubes]]
+name = "skirt"
+bone = "torso"
+part = "feathers"
+from = [-4.5, -1, -3]
+to = [4.5, 3, 3]
+
+# Head pivot: the neck; the head spans y 0..7, z -3..3. Wild hair down the back.
+[[cubes]]
+name = "hair"
+bone = "head"
+part = "hair"
+from = [-3.5, 5, -3.5]
+to = [3.5, 8, 3.5]
+
+[[cubes]]
+name = "hair_back"
+bone = "head"
+part = "hair"
+from = [-3.5, -3, 2]
+to = [3.5, 5, 4]
+
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "head"
+from = [-0.5, 2.5, -3.5]
+to = [0.5, 4, -3]
+
+# Leg pivots: the hips; the legs span y -11..0. Feathered thighs, talons forward of each foot, and
+# the hind toe.
+[[cubes]]
+name = "thigh_l"
+bone = "leg_l"
+part = "feathers"
+from = [-2, -5, -2]
+to = [2, 0, 2]
+mirror = true
+
+[[cubes]]
+name = "talon_l"
+bone = "leg_l"
+part = "claws"
+from = [-1.5, -11, -4]
+to = [1.5, -10, -1.5]
+mirror = true
+
+[[cubes]]
+name = "spur_l"
+bone = "leg_l"
+part = "claws"
+from = [-0.5, -11, 1.5]
+to = [0.5, -10, 3]
+mirror = true
+
+[palette]
+head = "#d8b090"
+torso = "#6a4a2e"
+torso_north = "#c89c7a"
+torso_up = "#c89c7a"
+feathers = "#5a3e26"
+feathers_up = "#6a4a2e"
+tail = "#4a3220"
+arms = "#5a3e26"
+legs = "#c8a040"
+feet = "#b89030"
+claws = "#2a2420"
+wings = "#5a3e26"
+wings_up = "#6e5034"
+wings_down = "#624428"
+hair = "#2a1c14"
+eye = "#c8a020"
+brow = "#1a1008"
+mouth = "#7a3a30"
+
+# The torso's front: feathers below the bare chest (8×10, row 0 at the top).
+[[decals]]
+cube = "torso"
+face = "north"
+x = 0
+y = 5
+w = 8
+h = 5
+colour = "feathers"
+
+# The head's front face is 6×7 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+w = 4
+colour = "brow"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 5
+w = 2
+colour = "mouth"

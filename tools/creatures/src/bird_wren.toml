@@ -1,0 +1,98 @@
+# DF BIRD_WREN (wild): 40 g, "a tiny brown bird given to singing complex songs" (the
+# Eurasian wren): a round warm-brown ball, finely barred darker, a pale eyebrow, a
+# thin bill and a short tail cocked straight up. Vermin in DF, but it has a giant, so
+# it uses the full bird rig, small. FLIER (fast flaps); no brood. Attack: peck (the
+# template's `attack`); scratch optional.
+name = "wren"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [3, 3, 3]
+leg = [1, 1]
+foot = [2, 0.5, 1.5]
+head = [2, 2, 2]
+neck = 1
+head_back = 1
+beak = [0.5, 0.5, 1]
+tail = [2, 0.5, 2]
+tail_raise = 70
+wing = [4, 2]
+walk = { cycle = 0.3, swing = 32 }
+run = { cycle = 0.2 }
+fly = { cycle = 0.15, flap = 50 }
+
+[palette]
+body = "#8a5a32"
+body_down = "#b88a5a"
+head = "#8a5a32"
+wings = "#7a4e2a"
+tail = "#7a4e2a"
+legs = "#b08a70"
+beak = "#4a3a2e"
+eye = "#141210"
+brow = "#e0c8a0"
+bar = "#4a2e18"
+
+# The head's side faces are 2×2 (row 0 at the top); the front is on
+# the left of west and the right of east. Body `up`: row 0 is the front.
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "brow"
+w = 2
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 0
+colour = "brow"
+w = 2
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 1
+w = 3
+colour = "bar"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 1
+w = 2
+colour = "bar"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 1
+y = 0
+colour = "bar"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 2
+y = 0
+colour = "bar"

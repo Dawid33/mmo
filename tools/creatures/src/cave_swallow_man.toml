@@ -1,0 +1,141 @@
+# DF CAVE_SWALLOW_MAN (underground animal person): "a feathered man with the wings
+# and head of a bird", of subterranean chasms. Hand-written, not derived: the
+# animal-person rig keeps arms and has no wings, but the body plan is armless with
+# two wings. Biped + [wings] at the shoulder blades (the template's arms cut to
+# feather-coloured stubs: the biped rig cannot drop them, so the worker set plays
+# on the stubs), the cave swallow's blue-and-orange plumage on a man's build a
+# little under human height, a bird head (blue crown, orange throat, short black
+# bill), dark scaly legs with toes, a forked tail. FLIER. The raws' 0.1 kg is the
+# swallow's; it is built person-sized. Attack: bite (the template's `attack`);
+# scratch optional.
+name = "cave swallow man"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [3, 10]
+foot = 0
+body = [8, 9, 5]
+arm = [3, 3]
+hand = 0
+head = [6, 6, 7]
+walk = { cycle = 0.8, swing = 30 }
+run = { cycle = 0.48 }
+
+# Torso pivot: the hips; the torso spans y 0..9, z -2.5..2.5. The wings' left
+# root, at the shoulder blades.
+[wings]
+bone = "torso"
+at = [-1, 8, 2.5]
+span = 11
+chord = 13
+part = "wings"
+cycle = 0.45
+flap = 50
+
+# The forked tail behind the hips: two prongs.
+[[cubes]]
+name = "tail_l"
+bone = "torso"
+part = "tail"
+from = [-3, 0.5, 2.5]
+to = [-1, 1.5, 10]
+mirror = true
+
+# Head pivot: the neck; the head spans y 0..6, z -3.5..3.5. The short bill.
+[[cubes]]
+name = "beak"
+bone = "head"
+part = "beak"
+from = [-1, 2, -5]
+to = [1, 3.5, -3.5]
+
+# Leg pivots: the hips; the legs span y -10..0. Feathered thighs, three toes forward
+# (one wide cube) and the hind toe.
+[[cubes]]
+name = "thigh_l"
+bone = "leg_l"
+part = "feathers"
+from = [-2, -4, -2]
+to = [2, 0, 2]
+mirror = true
+
+[[cubes]]
+name = "toes_l"
+bone = "leg_l"
+part = "legs"
+from = [-1.5, -10, -4]
+to = [1.5, -9, -1.5]
+mirror = true
+
+[[cubes]]
+name = "spur_l"
+bone = "leg_l"
+part = "legs"
+from = [-0.5, -10, 1.5]
+to = [0.5, -9, 3]
+mirror = true
+
+[palette]
+head = "#2a4a8a"
+head_north = "#2a4a8a"
+head_down = "#d8742a"
+torso = "#2a4a8a"
+torso_up = "#24407a"
+torso_north = "#e08a3a"
+feathers = "#24407a"
+tail = "#1e3468"
+arms = "#24407a"
+legs = "#3a2a24"
+wings = "#1e3468"
+wings_up = "#28468a"
+beak = "#1a1a1e"
+throat = "#d8742a"
+eye = "#0e0e10"
+
+# The head's sides are 7 wide × 6 tall (row 0 at the top); the front is on the
+# left of west and the right of east. Eyes, and the orange throat and cheeks.
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 1
+w = 2
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 4
+w = 4
+h = 2
+colour = "throat"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 3
+y = 4
+w = 4
+h = 2
+colour = "throat"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 4
+w = 6
+h = 2
+colour = "throat"
