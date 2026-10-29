@@ -1,0 +1,73 @@
+# DF SQUID (vermin, ocean): 0.2 kg, "eight arms and two tentacles. It can spray
+# ink." Fish, not the vermin form: the gigantic squid is derived from it and
+# needs the full rig. About 75 cm here with its arms. The fish's body is the
+# mantle, the tail stalk the mantle tip and its fin the squid's terminal fin
+# (flukes: horizontal); the head leads, with a bundle of four arm cubes and two
+# long clubbed tentacles. Pinkish with chromatophore dots. Attack: bite (beak).
+# Not made: ink spray.
+name = "squid"
+template = "fish"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, w = 1, h = 1, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, w = 1, h = 1, colour = "eye" },
+  { cube = "body", face = "up", x = 0, y = 1, w = 1, h = 1, colour = "dot" },
+  { cube = "body", face = "up", x = 1, y = 3, w = 1, h = 1, colour = "dot" },
+  { cube = "body", face = "up", x = 0, y = 4, w = 1, h = 1, colour = "dot" },
+  { cube = "body", face = "west", x = 2, y = 0, w = 1, h = 1, colour = "dot" },
+  { cube = "body", face = "east", x = 3, y = 1, w = 1, h = 1, colour = "dot" },
+]
+
+[proportions]
+body = [2, 2, 5]
+head = [2, 2, 1.5]
+tail = [1.5, 1.5, 1]
+fin = [0.5, 4, 2]
+flukes = true
+pectoral = [0, 0]
+dorsal = [1, 0, 1]
+swim = { cycle = 0.6, amp = 14 }
+
+# Head pivot: the mantle's front at mid-height (y = 1); the head is z -1.5..0.
+[[cubes]]
+name = "arm_ul"
+bone = "head"
+part = "arms"
+from = [-1, 0, -4.5]
+to = [-0.25, 0.75, -1.5]
+mirror = true
+
+[[cubes]]
+name = "arm_dl"
+bone = "head"
+part = "arms"
+from = [-1, -0.75, -4]
+to = [-0.25, 0, -1.5]
+mirror = true
+
+[[cubes]]
+name = "tentacle_l"
+bone = "head"
+part = "arms"
+from = [-0.5, -0.25, -6.5]
+to = [-0.25, 0.25, -4]
+mirror = true
+
+[[cubes]]
+name = "club_l"
+bone = "head"
+part = "arms"
+from = [-0.75, -0.5, -7.5]
+to = [-0.25, 0.5, -6.5]
+mirror = true
+
+[palette]
+body = "#d98c7a"
+body_up = "#c97a68"
+body_down = "#ecc0b4"
+head = "#d98c7a"
+fins = "#e0a090"
+arms = "#d4806e"
+eye = "#1a1414"
+dot = "#9a3e34"

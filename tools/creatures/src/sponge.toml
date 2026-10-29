@@ -1,0 +1,38 @@
+# DF SPONGE (ocean floor): 50 kg, "devoid of senses or motion". Blob: a red (DF
+# 4:0:1) barrel sponge with a lip around the dark osculum on top and pores down
+# the sides. The template's walk/attack are kept (required) though DF's sponge
+# never moves. AQUATIC on a non-fish: swim, swim_idle (the creep, slowed).
+name = "sponge"
+template = "blob"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+decals = [
+  { cube = "top", face = "up", x = 2, y = 2, w = 7, h = 7, colour = "osculum" },
+  { cube = "body", face = "north", x = 1, y = 2, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "north", x = 4, y = 5, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "north", x = 7, y = 3, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "north", x = 2, y = 8, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "north", x = 8, y = 9, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "west", x = 2, y = 3, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "west", x = 6, y = 6, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "west", x = 8, y = 2, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "east", x = 1, y = 7, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "east", x = 5, y = 2, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "east", x = 7, y = 8, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "south", x = 3, y = 4, w = 1, h = 1, colour = "pore" },
+  { cube = "body", face = "south", x = 6, y = 8, w = 1, h = 1, colour = "pore" },
+]
+
+[proportions]
+body = [10, 11, 10]
+top = [11, 1.5, 11]
+walk = { cycle = 1.6 }
+
+[palette]
+body = "#c83a2c"
+body_up = "#d4473a"
+body_down = "#9a2a20"
+top = "#d4473a"
+osculum = "#4a1410"
+pore = "#7a1e16"

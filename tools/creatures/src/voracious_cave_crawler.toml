@@ -1,0 +1,96 @@
+# DF VORACIOUS_CAVE_CRAWLER (underground): 900 kg, "hundreds of feet moving along
+# the bottom of its long body. In place of a head, it has an enormous toothy maw."
+# Serpent; about 4 m here, midnight blue (DF skin colour). The feet are a dark
+# fringe slab under each segment, wider than it; the head is a wide maw (red
+# throat and teeth on its front face) over a jutting lower jaw. Attack: bite.
+# LARGE_PREDATOR + MOUNT_EXOTIC: alert, roar, ridden.
+name = "voracious cave crawler"
+template = "serpent"
+status = "draft"
+extras = ["alert", "roar", "ridden"]
+
+decals = [
+  { cube = "head", face = "north", x = 1, y = 2, w = 8, h = 5, colour = "throat" },
+  { cube = "head", face = "north", x = 1, y = 2, w = 8, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 2, y = 3, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 4, y = 3, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 5, y = 3, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 7, y = 3, w = 1, h = 1, colour = "teeth" },
+  { cube = "jaw", face = "up", x = 0, y = 0, w = 9, h = 1, colour = "teeth" },
+  { cube = "jaw", face = "up", x = 1, y = 1, w = 7, h = 1, colour = "throat" },
+  { cube = "seg0", face = "up", x = 0, y = 4, w = 10, h = 1, colour = "plate" },
+  { cube = "seg1", face = "up", x = 0, y = 4, w = 9, h = 1, colour = "plate" },
+  { cube = "seg2", face = "up", x = 0, y = 4, w = 9, h = 1, colour = "plate" },
+  { cube = "seg3", face = "up", x = 0, y = 4, w = 8, h = 1, colour = "plate" },
+  { cube = "seg4", face = "up", x = 0, y = 4, w = 7, h = 1, colour = "plate" },
+  { cube = "seg5", face = "up", x = 0, y = 4, w = 6, h = 1, colour = "plate" },
+]
+
+[proportions]
+segments = 6
+seg = [10, 6, 9]
+taper = 0.6
+head = [10, 7, 8]
+walk = { cycle = 2.4, amp = 14 }
+run = { cycle = 1.3, amp = 18 }
+
+# Head pivot: the neck, mid-height of seg0 (y = 3); the head is y -3..4, z -8..0.
+[[cubes]]
+name = "jaw"
+bone = "head"
+part = "head"
+from = [-4.5, -3, -9.5]
+to = [4.5, -1.5, -7]
+
+# Feet: one fringe per segment (each segment's pivot is its back end, mid-height y = 3).
+[[cubes]]
+name = "feet0"
+bone = "seg0"
+part = "legs"
+from = [-6.5, -3, -8.5]
+to = [6.5, -2.25, -0.5]
+
+[[cubes]]
+name = "feet1"
+bone = "seg1"
+part = "legs"
+from = [-6.0, -3, -8.5]
+to = [6.0, -2.25, -0.5]
+
+[[cubes]]
+name = "feet2"
+bone = "seg2"
+part = "legs"
+from = [-5.75, -3, -8.5]
+to = [5.75, -2.25, -0.5]
+
+[[cubes]]
+name = "feet3"
+bone = "seg3"
+part = "legs"
+from = [-5.25, -3, -8.5]
+to = [5.25, -2.25, -0.5]
+
+[[cubes]]
+name = "feet4"
+bone = "seg4"
+part = "legs"
+from = [-5.0, -3, -8.5]
+to = [5.0, -2.25, -0.5]
+
+[[cubes]]
+name = "feet5"
+bone = "seg5"
+part = "legs"
+from = [-4.5, -3, -8.5]
+to = [4.5, -2.25, -0.5]
+
+[palette]
+body = "#232a4f"
+body_up = "#1c2242"
+body_down = "#3a3f5e"
+head = "#262d55"
+legs = "#14172b"
+throat = "#7a1f24"
+teeth = "#e6e0c8"
+plate = "#161b36"

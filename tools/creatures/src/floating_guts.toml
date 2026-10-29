@@ -1,0 +1,53 @@
+# DF FLOATING_GUTS (underground): 20 kg, "a transparent and amorphous monster ...
+# found crawling across the cavern floor. Its organs appear to be floating inside
+# of its body." Blob (it crawls; "floating" is the organs). The pack paints no
+# alpha, so the clear body is a pale blue-grey jelly and the organs show through
+# as cubes bulging from the top (a gut coil, the heart) plus decals on the sides.
+# No attacks in the raws; the template's lunge stands in.
+name = "floating guts"
+template = "blob"
+status = "draft"
+
+decals = [
+  { cube = "body", face = "west", x = 2, y = 1, w = 4, h = 1, colour = "gut" },
+  { cube = "body", face = "west", x = 5, y = 2, w = 1, h = 2, colour = "gut" },
+  { cube = "body", face = "west", x = 7, y = 2, w = 2, h = 2, colour = "liver" },
+  { cube = "body", face = "east", x = 5, y = 1, w = 4, h = 1, colour = "gut" },
+  { cube = "body", face = "east", x = 5, y = 2, w = 1, h = 2, colour = "gut" },
+  { cube = "body", face = "east", x = 2, y = 2, w = 2, h = 2, colour = "liver" },
+  { cube = "body", face = "north", x = 3, y = 1, w = 2, h = 2, colour = "heart" },
+  { cube = "body", face = "north", x = 6, y = 2, w = 2, h = 1, colour = "gut" },
+  { cube = "top", face = "up", x = 0, y = 1, w = 2, h = 5, colour = "gut" },
+  { cube = "gut_coil", face = "up", x = 1, y = 1, w = 2, h = 1, colour = "gut_dark" },
+  { cube = "gut_coil", face = "up", x = 0, y = 3, w = 2, h = 1, colour = "gut_dark" },
+]
+
+[proportions]
+body = [10, 5, 11]
+top = [7, 2, 8]
+walk = { cycle = 1.1 }
+
+# Organs in the top of the jelly (the body pivot is at the ground; top is y 5..7).
+[[cubes]]
+name = "gut_coil"
+bone = "body"
+part = "gut"
+from = [-2, 5.5, -1]
+to = [1.5, 7.75, 3.5]
+
+[[cubes]]
+name = "heart"
+bone = "body"
+part = "heart"
+from = [1, 5.5, -3]
+to = [3, 7.5, -1]
+
+[palette]
+body = "#b3c6c6"
+body_up = "#c3d6d4"
+body_down = "#93a6a8"
+top = "#c3d6d4"
+gut = "#d98c8c"
+gut_dark = "#b06464"
+heart = "#a8282c"
+liver = "#7a3a30"

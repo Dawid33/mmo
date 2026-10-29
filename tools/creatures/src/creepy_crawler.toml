@@ -1,0 +1,127 @@
+# DF CREEPY_CRAWLER (vermin, chasms, evil): 1 kg, "a mass of appendages resembling
+# human fingers. It creeps across the ground like a starfish and eats with a
+# mouth on the bottom of its body." No giant, so the vermin form, without a head:
+# a flat palm with five fingers like a starfish's arms (one a cube pointing
+# forward, four on bones yawed 72° apart, which curl in turn in `move`), in a
+# human skin tone with pale nails. The underside mouth is a decal.
+name = "creepy crawler"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "finger0", face = "up", x = 0, y = 0, w = 1, h = 1, colour = "nail" },
+  { cube = "finger1", face = "up", x = 0, y = 0, w = 1, h = 1, colour = "nail" },
+  { cube = "finger2", face = "up", x = 0, y = 0, w = 1, h = 1, colour = "nail" },
+  { cube = "finger3", face = "up", x = 0, y = 0, w = 1, h = 1, colour = "nail" },
+  { cube = "finger4", face = "up", x = 0, y = 0, w = 1, h = 1, colour = "nail" },
+  { cube = "finger0", face = "up", x = 0, y = 2, w = 1, h = 1, colour = "crease" },
+  { cube = "finger1", face = "up", x = 0, y = 2, w = 1, h = 1, colour = "crease" },
+  { cube = "finger2", face = "up", x = 0, y = 2, w = 1, h = 1, colour = "crease" },
+  { cube = "finger3", face = "up", x = 0, y = 2, w = 1, h = 1, colour = "crease" },
+  { cube = "finger4", face = "up", x = 0, y = 2, w = 1, h = 1, colour = "crease" },
+  { cube = "body", face = "down", x = 1, y = 1, w = 1, h = 1, colour = "mouth" },
+  { cube = "body", face = "up", x = 1, y = 1, w = 1, h = 1, colour = "crease" },
+]
+
+[proportions]
+body = [3, 1.25, 3]
+head = [0, 0, 0]
+legs = 0
+move = "crawl"
+cycle = 1.6
+
+# The body pivot is its centre (y = 0.625). Fingers reach from under the palm's
+# edge; each finger bone pivots at the centre, yawed, its finger pointing along
+# its own -Z.
+[[cubes]]
+name = "finger0"
+bone = "body"
+part = "skin"
+from = [-0.5, -0.625, -4.5]
+to = [0.5, 0.375, -1]
+
+[[bones]]
+name = "f1"
+parent = "body"
+pivot = [0, 0, 0]
+rest = [0, 72, 0]
+
+[[cubes]]
+name = "finger1"
+bone = "f1"
+part = "skin"
+from = [-0.5, -0.625, -4.5]
+to = [0.5, 0.375, -1]
+
+[[bones]]
+name = "f2"
+parent = "body"
+pivot = [0, 0, 0]
+rest = [0, 144, 0]
+
+[[cubes]]
+name = "finger2"
+bone = "f2"
+part = "skin"
+from = [-0.5, -0.625, -4.5]
+to = [0.5, 0.375, -1]
+
+[[bones]]
+name = "f3"
+parent = "body"
+pivot = [0, 0, 0]
+rest = [0, 216, 0]
+
+[[cubes]]
+name = "finger3"
+bone = "f3"
+part = "skin"
+from = [-0.5, -0.625, -4.5]
+to = [0.5, 0.375, -1]
+
+[[bones]]
+name = "f4"
+parent = "body"
+pivot = [0, 0, 0]
+rest = [0, 288, 0]
+
+[[cubes]]
+name = "finger4"
+bone = "f4"
+part = "skin"
+from = [-0.5, -0.625, -4.5]
+to = [0.5, 0.375, -1]
+
+[palette]
+body = "#d6a386"
+body_up = "#cf9a7c"
+body_down = "#b8826a"
+skin = "#dcaa8c"
+nail = "#f2dccf"
+crease = "#a8735c"
+mouth = "#5a2020"
+
+# The fingers curl their tips up in turn as the palm stretches (+X lifts a
+# forward-pointing tip).
+[clips.move]
+merge = true
+mode = "loop"
+length = 1.6
+keys = [
+  { bone = "f1", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "f1", channel = "rotation", time = 0.4, value = [14, 0, 0] },
+  { bone = "f1", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "f1", channel = "rotation", time = 1.6, value = [0, 0, 0] },
+  { bone = "f2", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "f2", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "f2", channel = "rotation", time = 1.2, value = [14, 0, 0] },
+  { bone = "f2", channel = "rotation", time = 1.6, value = [0, 0, 0] },
+  { bone = "f3", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "f3", channel = "rotation", time = 0.4, value = [14, 0, 0] },
+  { bone = "f3", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "f3", channel = "rotation", time = 1.6, value = [0, 0, 0] },
+  { bone = "f4", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "f4", channel = "rotation", time = 0.8, value = [0, 0, 0] },
+  { bone = "f4", channel = "rotation", time = 1.2, value = [14, 0, 0] },
+  { bone = "f4", channel = "rotation", time = 1.6, value = [0, 0, 0] },
+]

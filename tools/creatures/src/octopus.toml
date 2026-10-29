@@ -1,0 +1,44 @@
+# DF OCTOPUS (wild, ocean): 5 kg, "a medium-sized underwater mollusk with eight
+# arms". Arthropod, picked by hand (the brief guesses serpent): its eight legs
+# are the arms, splayed wide (60°) so they radiate like an octopus crawling on
+# the sea floor, the head is the eye block and the raised abdomen the bulbous
+# mantle; the arthropod gaits, lie and eat suit a bottom-crawler. Reddish-brown
+# with pale suckers. Attack: bite (the beak; the template's lunge). AQUATIC on a
+# non-fish: swim, swim_idle (the walk slowed).
+name = "octopus"
+template = "arthropod"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 1, w = 2, h = 1, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 1, w = 2, h = 1, colour = "eye" },
+  { cube = "head", face = "north", x = 2, y = 3, w = 1, h = 1, colour = "beak" },
+  { cube = "abdomen", face = "up", x = 2, y = 2, w = 1, h = 1, colour = "spot" },
+  { cube = "abdomen", face = "up", x = 4, y = 5, w = 1, h = 1, colour = "spot" },
+  { cube = "abdomen", face = "west", x = 3, y = 2, w = 1, h = 1, colour = "spot" },
+  { cube = "abdomen", face = "east", x = 5, y = 3, w = 1, h = 1, colour = "spot" },
+]
+
+[proportions]
+body = [5, 3, 4]
+head = [5, 4, 3]
+abdomen = [7, 6, 8]
+abdomen_raise = 25
+legs = 8
+leg = [1.5, 6, 1.5]
+splay = 60
+walk = { cycle = 1.0, swing = 18, lift = 14 }
+run = { cycle = 0.6, swing = 22, lift = 18 }
+
+[palette]
+body = "#b0553a"
+body_up = "#a14b32"
+head = "#b75c40"
+abdomen = "#b0553a"
+abdomen_up = "#a14b32"
+legs = "#b75c40"
+legs_down = "#e8c4a8"
+eye = "#1e1410"
+beak = "#2a2018"
+spot = "#7e3624"

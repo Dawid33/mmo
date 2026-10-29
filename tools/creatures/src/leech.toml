@@ -1,0 +1,46 @@
+# DF LEECH (vermin, lakes and pools): 0.1 kg, a blood-sucking worm. Serpent, not
+# the vermin form: the giant leech is derived from it and needs the full rig.
+# About 60 cm here so it reads (tiny in DF). Narrow at the front, widening to a
+# rear sucker (taper > 1); dark olive with orange dotted stripes. Attack: bite
+# (DF: suck). Lives in water: swim, swim_idle.
+name = "leech"
+template = "serpent"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+decals = [
+  { cube = "seg0", face = "up", x = 0, y = 0, w = 1, h = 1, colour = "stripe" },
+  { cube = "seg1", face = "up", x = 0, y = 1, w = 1, h = 1, colour = "stripe" },
+  { cube = "seg1", face = "up", x = 2, y = 0, w = 1, h = 1, colour = "stripe" },
+  { cube = "seg2", face = "up", x = 0, y = 0, w = 1, h = 1, colour = "stripe" },
+  { cube = "seg2", face = "up", x = 2, y = 1, w = 1, h = 1, colour = "stripe" },
+  { cube = "seg3", face = "up", x = 0, y = 1, w = 1, h = 1, colour = "stripe" },
+  { cube = "seg3", face = "up", x = 2, y = 0, w = 1, h = 1, colour = "stripe" },
+  { cube = "seg0", face = "up", x = 1, y = 1, w = 1, h = 1, colour = "stripe" },
+  { cube = "head", face = "north", x = 0, y = 0, w = 2, h = 1, colour = "mouth" },
+]
+
+[proportions]
+segments = 4
+seg = [2, 1, 2]
+taper = 1.5
+head = [1.5, 0.75, 1.5]
+walk = { cycle = 1.6, amp = 24 }
+run = { cycle = 0.9, amp = 30 }
+
+# The rear sucker: a disc under the tail end (seg3's pivot; it is y -0.5..1).
+[[cubes]]
+name = "sucker"
+bone = "seg3"
+part = "sucker"
+from = [-1.75, -0.5, -1]
+to = [1.75, 0.25, 0.75]
+
+[palette]
+body = "#3b4429"
+body_up = "#333b23"
+body_down = "#6b6a3a"
+head = "#3b4429"
+sucker = "#2c3320"
+stripe = "#c26a2a"
+mouth = "#1a1d12"

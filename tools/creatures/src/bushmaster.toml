@@ -1,0 +1,57 @@
+# DF BUSHMASTER (wild): 8.5 kg, the longest pit viper. Serpent; about 2.2 m here,
+# a broad triangular viper head on a thinner neck, tan with dark brown diamond
+# blotches down the back. Attack: bite.
+name = "bushmaster"
+template = "serpent"
+status = "draft"
+
+decals = [
+  # One dark diamond per segment (up faces: row 0 at the front).
+  { cube = "seg0", face = "up", x = 1, y = 1, w = 2, h = 1, colour = "blotch" },
+  { cube = "seg0", face = "up", x = 0, y = 2, w = 4, h = 2, colour = "blotch" },
+  { cube = "seg0", face = "up", x = 1, y = 4, w = 2, h = 1, colour = "blotch" },
+  { cube = "seg1", face = "up", x = 1, y = 1, w = 2, h = 1, colour = "blotch" },
+  { cube = "seg1", face = "up", x = 0, y = 2, w = 4, h = 2, colour = "blotch" },
+  { cube = "seg1", face = "up", x = 1, y = 4, w = 2, h = 1, colour = "blotch" },
+  { cube = "seg2", face = "up", x = 1, y = 1, w = 1, h = 1, colour = "blotch" },
+  { cube = "seg2", face = "up", x = 0, y = 2, w = 3, h = 2, colour = "blotch" },
+  { cube = "seg2", face = "up", x = 1, y = 4, w = 1, h = 1, colour = "blotch" },
+  { cube = "seg3", face = "up", x = 0, y = 2, w = 3, h = 2, colour = "blotch" },
+  { cube = "seg4", face = "up", x = 0, y = 2, w = 2, h = 2, colour = "blotch" },
+  # Blotches reach down the flanks.
+  { cube = "seg0", face = "west", x = 2, y = 0, w = 2, h = 2, colour = "blotch" },
+  { cube = "seg0", face = "east", x = 2, y = 0, w = 2, h = 2, colour = "blotch" },
+  { cube = "seg1", face = "west", x = 2, y = 0, w = 2, h = 2, colour = "blotch" },
+  { cube = "seg1", face = "east", x = 2, y = 0, w = 2, h = 2, colour = "blotch" },
+  { cube = "seg2", face = "west", x = 2, y = 0, w = 2, h = 1, colour = "blotch" },
+  { cube = "seg2", face = "east", x = 2, y = 0, w = 2, h = 1, colour = "blotch" },
+  # Head: dark stripe behind the eye.
+  { cube = "head", face = "west", x = 1, y = 1, w = 4, h = 1, colour = "blotch" },
+  { cube = "head", face = "east", x = 0, y = 1, w = 4, h = 1, colour = "blotch" },
+  { cube = "head", face = "west", x = 1, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 3, y = 0, colour = "eye" },
+]
+
+[proportions]
+segments = 5
+seg = [4, 3, 6]
+taper = 0.35
+head = [5, 2.5, 5]
+walk = { cycle = 1.5, amp = 20 }
+run = { cycle = 0.8, amp = 26 }
+
+# Head pivot: the neck, mid-height of seg0 (y = 1.5).
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-1.5, -1.5, -6.5]
+to = [1.5, 0.5, -5]
+
+[palette]
+body = "#b88f5c"
+body_up = "#c29a66"
+body_down = "#e0cfa4"
+head = "#a98352"
+blotch = "#3f2a18"
+eye = "#1c140c"

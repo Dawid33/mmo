@@ -1,0 +1,65 @@
+# DF MOON_SNAIL (vermin, temperate ocean): 0.2 kg, "a tiny predatory mollusk. It
+# is brightly colored." Serpent, not the vermin form: the giant moon snail is
+# derived from it and needs the full rig. About 50 cm here. A broad, low foot
+# under a big round shell (orange-tan with a brown spiral band and a pale
+# umbilicus); no eyestalks in the raws, a short siphon instead. No attacks in
+# the raws (it drills prey in life); the template's strike stands in. It crawls
+# on the sea floor (walk/crawl gaits only), so no swim clips.
+name = "moon snail"
+template = "serpent"
+status = "draft"
+
+decals = [
+  # A square spiral on each side (5 × 5 texels) and a band over the top.
+  { cube = "shell", face = "west", x = 0, y = 0, w = 5, h = 1, colour = "band" },
+  { cube = "shell", face = "west", x = 4, y = 0, w = 1, h = 5, colour = "band" },
+  { cube = "shell", face = "west", x = 0, y = 4, w = 5, h = 1, colour = "band" },
+  { cube = "shell", face = "west", x = 0, y = 1, w = 1, h = 3, colour = "band" },
+  { cube = "shell", face = "west", x = 1, y = 1, w = 2, h = 1, colour = "band" },
+  { cube = "shell", face = "west", x = 2, y = 2, w = 1, h = 1, colour = "pale" },
+  { cube = "shell", face = "east", x = 0, y = 0, w = 5, h = 1, colour = "band" },
+  { cube = "shell", face = "east", x = 0, y = 0, w = 1, h = 5, colour = "band" },
+  { cube = "shell", face = "east", x = 0, y = 4, w = 5, h = 1, colour = "band" },
+  { cube = "shell", face = "east", x = 4, y = 1, w = 1, h = 3, colour = "band" },
+  { cube = "shell", face = "east", x = 2, y = 1, w = 2, h = 1, colour = "band" },
+  { cube = "shell", face = "east", x = 2, y = 2, w = 1, h = 1, colour = "pale" },
+  { cube = "shell", face = "up", x = 0, y = 2, w = 5, h = 1, colour = "band" },
+  { cube = "head", face = "west", x = 0, y = 0, w = 1, h = 1, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, w = 1, h = 1, colour = "eye" },
+]
+
+[proportions]
+segments = 3
+seg = [6, 1.5, 3]
+taper = 0.7
+head = [4, 1.5, 2]
+walk = { cycle = 2.8, amp = 8 }
+run = { cycle = 2.0, amp = 10 }
+
+# The shell over seg1 (pivot at seg1's back end, y = 0.75; seg1 is 5 wide, z -3..0).
+[[cubes]]
+name = "shell"
+bone = "seg1"
+part = "shell"
+from = [-2.5, 0.25, -5]
+to = [2.5, 5.25, 0]
+
+# Head pivot: the neck (y = 0.75); the siphon rises from the front of the head.
+[[cubes]]
+name = "siphon"
+bone = "head"
+part = "siphon"
+from = [-0.5, 0.75, -1.75]
+to = [0.5, 2.25, -0.75]
+
+[palette]
+body = "#d7b3a4"
+body_up = "#cfa898"
+body_down = "#e6cfc4"
+head = "#d7b3a4"
+siphon = "#c99a88"
+shell = "#d9873a"
+shell_up = "#e6964a"
+band = "#7a4420"
+pale = "#f2e6d0"
+eye = "#2a1e18"

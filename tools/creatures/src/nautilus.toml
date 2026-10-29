@@ -1,0 +1,83 @@
+# DF NAUTILUS (vermin, ocean): 0.5 kg, "a tiny mollusk with a large shell and many
+# tentacles". Fish, not the vermin form: the giant nautilus is derived from it and
+# needs the full rig (it only swims). About 40 cm here. The fish's body is the
+# shell (cream with brown tiger stripes), its tail stalk the outer whorl curling
+# back, the tail fin a shell-coloured nub; the head leads, under a dark hood,
+# with a cluster of six short tentacles. Attack: bite (beak). Not modelled: the
+# shell's curve (boxes only).
+name = "nautilus"
+template = "fish"
+status = "draft"
+
+decals = [
+  { cube = "body", face = "west", x = 1, y = 0, w = 1, h = 3, colour = "stripe" },
+  { cube = "body", face = "west", x = 3, y = 0, w = 1, h = 4, colour = "stripe" },
+  { cube = "body", face = "west", x = 5, y = 0, w = 1, h = 3, colour = "stripe" },
+  { cube = "body", face = "east", x = 0, y = 0, w = 1, h = 3, colour = "stripe" },
+  { cube = "body", face = "east", x = 2, y = 0, w = 1, h = 4, colour = "stripe" },
+  { cube = "body", face = "east", x = 4, y = 0, w = 1, h = 3, colour = "stripe" },
+  { cube = "body", face = "up", x = 0, y = 1, w = 5, h = 1, colour = "stripe" },
+  { cube = "body", face = "up", x = 0, y = 3, w = 5, h = 1, colour = "stripe" },
+  { cube = "body", face = "up", x = 0, y = 5, w = 5, h = 1, colour = "stripe" },
+  { cube = "tail", face = "up", x = 0, y = 0, w = 4, h = 1, colour = "stripe" },
+  { cube = "head", face = "west", x = 1, y = 1, w = 1, h = 1, colour = "eye" },
+  { cube = "head", face = "east", x = 0, y = 1, w = 1, h = 1, colour = "eye" },
+]
+
+[proportions]
+body = [5, 6, 6]
+head = [4, 4, 2]
+tail = [4, 5, 1.5]
+fin = [1, 2, 0.5]
+pectoral = [0, 0]
+dorsal = [1, 0, 1]
+swim = { cycle = 1.2, amp = 8 }
+
+# Head pivot: the shell's front at mid-height (y = 3); the head is y -2..2,
+# z -2..0.
+[[cubes]]
+name = "hood"
+bone = "head"
+part = "hood"
+from = [-2.25, 1, -2.5]
+to = [2.25, 2.5, 0.5]
+
+[[cubes]]
+name = "tentacle_ul"
+bone = "head"
+part = "tentacles"
+from = [-1.5, -0.5, -4.5]
+to = [-0.75, 0.25, -2]
+mirror = true
+
+[[cubes]]
+name = "tentacle_dl"
+bone = "head"
+part = "tentacles"
+from = [-1.5, -1.5, -4]
+to = [-0.75, -0.75, -2]
+mirror = true
+
+[[cubes]]
+name = "tentacle_u"
+bone = "head"
+part = "tentacles"
+from = [-0.375, -0.75, -5]
+to = [0.375, 0, -2]
+
+[[cubes]]
+name = "tentacle_d"
+bone = "head"
+part = "tentacles"
+from = [-0.375, -1.75, -4.25]
+to = [0.375, -1, -2]
+
+[palette]
+body = "#eee2c8"
+body_down = "#f6efe0"
+head = "#d9b89a"
+hood = "#7a4a2a"
+tentacles = "#e0c4a8"
+fins = "#eee2c8"
+stripe = "#9a5a2e"
+eye = "#1a1410"

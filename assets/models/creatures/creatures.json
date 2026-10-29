@@ -292,6 +292,88 @@
    }
   }
  },
+ "anaconda": {
+  "name": "anaconda",
+  "status": "draft",
+  "model": "models/creatures/anaconda.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -3,
+    0,
+    -31.5
+   ],
+   [
+    3,
+    4,
+    29.5
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "alert",
+   "roar"
+  ],
+  "cubes": 8,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 2.2,
+    "stride": 18.9,
+    "speed": 8.5909
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.2,
+    "stride": 24.3,
+    "speed": 20.25
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
  "badger": {
   "name": "badger",
   "status": "draft",
@@ -572,6 +654,150 @@
    }
   }
  },
+ "black_mamba": {
+  "name": "black mamba",
+  "status": "draft",
+  "model": "models/creatures/black_mamba.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -22
+   ],
+   [
+    1.5,
+    2.5,
+    20
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 8,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 12.6,
+    "speed": 12.6
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 16.2,
+    "speed": 36
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   }
+  }
+ },
+ "bushmaster": {
+  "name": "bushmaster",
+  "status": "draft",
+  "model": "models/creatures/bushmaster.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -19
+   ],
+   [
+    2.5,
+    3,
+    17.5
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 7,
+  "bones": 7,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.5,
+    "stride": 10.5,
+    "speed": 7
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 13.5,
+    "speed": 16.875
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   }
+  }
+ },
  "cat": {
   "name": "cat",
   "status": "draft",
@@ -704,6 +930,77 @@
    }
   }
  },
+ "cave_floater": {
+  "name": "cave floater",
+  "status": "draft",
+  "model": "models/creatures/cave_floater.bbmodel",
+  "template": "blob",
+  "bounds": [
+   [
+    -5.5,
+    0,
+    -6.5
+   ],
+   [
+    5.5,
+    16.4429,
+    6.5
+   ]
+  ],
+  "budget": {
+   "cubes": 10,
+   "bones": 6
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "attack",
+   "hurt",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 4,
+  "clips": {
+   "idle": {
+    "loop": "loop",
+    "length": 2
+   },
+   "walk": {
+    "loop": "loop",
+    "length": 1.2,
+    "stride": 7.8,
+    "speed": 6.5
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 1
+   },
+   "land": {
+    "loop": "once",
+    "length": 1
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 3
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 2
+   }
+  }
+ },
  "cavy": {
   "name": "cavy",
   "status": "draft",
@@ -778,6 +1075,78 @@
    "eat": {
     "loop": "loop",
     "length": 1
+   }
+  }
+ },
+ "copperhead_snake": {
+  "name": "copperhead snake",
+  "status": "draft",
+  "model": "models/creatures/copperhead_snake.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -1.75,
+    0,
+    -12.5
+   ],
+   [
+    1.75,
+    2,
+    11.5
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 7,
+  "bones": 7,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.3,
+    "stride": 7,
+    "speed": 5.3846
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 9,
+    "speed": 12.8571
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
    }
   }
  },
@@ -942,6 +1311,106 @@
    "eat": {
     "loop": "loop",
     "length": 2
+   }
+  }
+ },
+ "creepy_crawler": {
+  "name": "creepy crawler",
+  "status": "draft",
+  "model": "models/creatures/creepy_crawler.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -4.4343,
+    0,
+    -4.5
+   ],
+   [
+    4.4343,
+    1.25,
+    3.9345
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 6,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 4.5,
+    "speed": 2.8125
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "cuttlefish": {
+  "name": "cuttlefish",
+  "status": "draft",
+  "model": "models/creatures/cuttlefish.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -4,
+    0,
+    -8
+   ],
+   [
+    4,
+    3,
+    5
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 10,
+  "bones": 5,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 0.9,
+    "stride": 9.1,
+    "speed": 10.1111
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
    }
   }
  },
@@ -1461,6 +1930,116 @@
    }
   }
  },
+ "flesh_ball": {
+  "name": "flesh ball",
+  "status": "draft",
+  "model": "models/creatures/flesh_ball.bbmodel",
+  "template": "blob",
+  "bounds": [
+   [
+    -6.5,
+    0,
+    -6.5
+   ],
+   [
+    6.5,
+    12.5,
+    6.5
+   ]
+  ],
+  "budget": {
+   "cubes": 10,
+   "bones": 6
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "attack",
+   "hurt",
+   "death"
+  ],
+  "cubes": 4,
+  "bones": 2,
+  "clips": {
+   "idle": {
+    "loop": "loop",
+    "length": 2
+   },
+   "walk": {
+    "loop": "loop",
+    "length": 1.4,
+    "stride": 6.6,
+    "speed": 4.7143
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   }
+  }
+ },
+ "floating_guts": {
+  "name": "floating guts",
+  "status": "draft",
+  "model": "models/creatures/floating_guts.bbmodel",
+  "template": "blob",
+  "bounds": [
+   [
+    -5,
+    0,
+    -5.5
+   ],
+   [
+    5,
+    7.75,
+    5.5
+   ]
+  ],
+  "budget": {
+   "cubes": 10,
+   "bones": 6
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "attack",
+   "hurt",
+   "death"
+  ],
+  "cubes": 4,
+  "bones": 2,
+  "clips": {
+   "idle": {
+    "loop": "loop",
+    "length": 2
+   },
+   "walk": {
+    "loop": "loop",
+    "length": 1.1,
+    "stride": 6.6,
+    "speed": 6
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   }
+  }
+ },
  "fox": {
   "name": "fox",
   "status": "draft",
@@ -1607,6 +2186,78 @@
    "sleep": {
     "loop": "loop",
     "length": 8.0498
+   }
+  }
+ },
+ "giant_earthworm": {
+  "name": "giant earthworm",
+  "status": "draft",
+  "model": "models/creatures/giant_earthworm.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -2.75,
+    0,
+    -27.5
+   ],
+   [
+    2.75,
+    4,
+    26
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 9,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 2.6,
+    "stride": 16.8,
+    "speed": 6.4615
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 21.6,
+    "speed": 13.5
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
    }
   }
  },
@@ -1764,6 +2415,88 @@
    }
   }
  },
+ "helmet_snake": {
+  "name": "helmet snake",
+  "status": "draft",
+  "model": "models/creatures/helmet_snake.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -3.5,
+    0,
+    -27
+   ],
+   [
+    3.5,
+    5.75,
+    24.5
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "alert",
+   "roar"
+  ],
+  "cubes": 12,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 2,
+    "stride": 14.7,
+    "speed": 7.35
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 18.9,
+    "speed": 18.9
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
  "horse": {
   "name": "horse",
   "status": "draft",
@@ -1846,6 +2579,236 @@
    }
   }
  },
+ "king_cobra": {
+  "name": "king cobra",
+  "status": "draft",
+  "model": "models/creatures/king_cobra.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -2,
+    0,
+    -21.5
+   ],
+   [
+    2,
+    2.5,
+    20
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 10,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.3,
+    "stride": 12.6,
+    "speed": 9.6923
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.65,
+    "stride": 16.2,
+    "speed": 24.9231
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   }
+  }
+ },
+ "kingsnake": {
+  "name": "kingsnake",
+  "status": "draft",
+  "model": "models/creatures/kingsnake.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -12.5
+   ],
+   [
+    1.5,
+    2,
+    11.5
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 7,
+  "bones": 7,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.2,
+    "stride": 7,
+    "speed": 5.8333
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.65,
+    "stride": 9,
+    "speed": 13.8462
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   }
+  }
+ },
+ "leech": {
+  "name": "leech",
+  "status": "draft",
+  "model": "models/creatures/leech.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -1.75,
+    0,
+    -4.75
+   ],
+   [
+    1.75,
+    1.5,
+    5.5
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 6,
+  "bones": 6,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 2.8,
+    "speed": 1.75
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.9,
+    "stride": 3.6,
+    "speed": 4
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 2.56,
+    "stride": 2.8,
+    "speed": 1.0938
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 4,
+    "stride": 1.4,
+    "speed": 0.35
+   }
+  }
+ },
  "llama": {
   "name": "llama",
   "status": "draft",
@@ -1920,6 +2883,118 @@
    "eat": {
     "loop": "loop",
     "length": 2
+   }
+  }
+ },
+ "maggot_purring": {
+  "name": "purring maggot",
+  "status": "draft",
+  "model": "models/creatures/maggot_purring.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -4.5
+   ],
+   [
+    1.5,
+    2.5,
+    3
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 2,
+  "bones": 3,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 1.2,
+    "stride": 9,
+    "speed": 7.5
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "moon_snail": {
+  "name": "moon snail",
+  "status": "draft",
+  "model": "models/creatures/moon_snail.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -3,
+    0,
+    -5.5
+   ],
+   [
+    3,
+    6,
+    5.5
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 6,
+  "bones": 5,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 2.8,
+    "stride": 3.15,
+    "speed": 1.125
+   },
+   "run": {
+    "loop": "loop",
+    "length": 2,
+    "stride": 4.05,
+    "speed": 2.025
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
    }
   }
  },
@@ -2000,6 +3075,152 @@
    }
   }
  },
+ "nautilus": {
+  "name": "nautilus",
+  "status": "draft",
+  "model": "models/creatures/nautilus.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -8
+   ],
+   [
+    2.5,
+    6,
+    5
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 11,
+  "bones": 5,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 1.2,
+    "stride": 9.1,
+    "speed": 7.5833
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
+ "octopus": {
+  "name": "octopus",
+  "status": "draft",
+  "model": "models/creatures/octopus.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -8.3947,
+    0,
+    -7.0712
+   ],
+   [
+    8.3947,
+    9.553,
+    10.307
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 3.7082,
+    "speed": 3.7082
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 5.8439,
+    "speed": 9.7398
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 3.7082,
+    "speed": 2.3176
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.5,
+    "stride": 1.8541,
+    "speed": 0.7416
+   }
+  }
+ },
  "pig": {
   "name": "pig",
   "status": "draft",
@@ -2077,6 +3298,78 @@
    }
   }
  },
+ "python": {
+  "name": "python",
+  "status": "draft",
+  "model": "models/creatures/python.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -3.5,
+    0,
+    -29
+   ],
+   [
+    3.5,
+    4.5,
+    27
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 8,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 2.4,
+    "stride": 16.8,
+    "speed": 7
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.3,
+    "stride": 21.6,
+    "speed": 16.6154
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   }
+  }
+ },
  "rabbit": {
   "name": "rabbit",
   "status": "draft",
@@ -2151,6 +3444,82 @@
    "eat": {
     "loop": "loop",
     "length": 1
+   }
+  }
+ },
+ "rattlesnake": {
+  "name": "rattlesnake",
+  "status": "draft",
+  "model": "models/creatures/rattlesnake.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -16
+   ],
+   [
+    2.5,
+    2.5,
+    16.8651
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 8,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 8.75,
+    "speed": 5.4688
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.85,
+    "stride": 11.25,
+    "speed": 13.2353
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "rattle": {
+    "loop": "loop",
+    "length": 0.2
    }
   }
  },
@@ -2308,6 +3677,190 @@
    }
   }
  },
+ "slug": {
+  "name": "slug",
+  "status": "draft",
+  "model": "models/creatures/slug.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -1.75,
+    0,
+    -5.5
+   ],
+   [
+    1.75,
+    3.75,
+    5
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 10,
+  "bones": 6,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 2.4,
+    "stride": 2.8,
+    "speed": 1.1667
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 3.6,
+    "speed": 2.25
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   }
+  }
+ },
+ "snail": {
+  "name": "snail",
+  "status": "draft",
+  "model": "models/creatures/snail.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -1.75,
+    0,
+    -4.75
+   ],
+   [
+    1.75,
+    5,
+    4.75
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 8,
+  "bones": 6,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 2.6,
+    "stride": 2.8,
+    "speed": 1.0769
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.8,
+    "stride": 3.6,
+    "speed": 2
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   }
+  }
+ },
+ "snake_fire": {
+  "name": "fire snake",
+  "status": "draft",
+  "model": "models/creatures/snake_fire.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1,
+    0,
+    -6
+   ],
+   [
+    1,
+    2.25,
+    5.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 3,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 12,
+    "speed": 26.6667
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "spider_cave_giant": {
   "name": "giant cave spider",
   "status": "draft",
@@ -2392,6 +3945,222 @@
    "roar": {
     "loop": "once",
     "length": 1.2
+   }
+  }
+ },
+ "sponge": {
+  "name": "sponge",
+  "status": "draft",
+  "model": "models/creatures/sponge.bbmodel",
+  "template": "blob",
+  "bounds": [
+   [
+    -5.5,
+    0,
+    -5.5
+   ],
+   [
+    5.5,
+    12.5,
+    5.5
+   ]
+  ],
+  "budget": {
+   "cubes": 10,
+   "bones": 6
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "attack",
+   "hurt",
+   "death",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 2,
+  "bones": 2,
+  "clips": {
+   "idle": {
+    "loop": "loop",
+    "length": 2
+   },
+   "walk": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 6,
+    "speed": 3.75
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 2.56,
+    "stride": 6,
+    "speed": 2.3438
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 4,
+    "stride": 3,
+    "speed": 0.75
+   }
+  }
+ },
+ "squid": {
+  "name": "squid",
+  "status": "draft",
+  "model": "models/creatures/squid.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -2,
+    0,
+    -10
+   ],
+   [
+    2,
+    2,
+    5.5
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 12,
+  "bones": 5,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 10.85,
+    "speed": 18.0833
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
+ "voracious_cave_crawler": {
+  "name": "voracious cave crawler",
+  "status": "draft",
+  "model": "models/creatures/voracious_cave_crawler.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -6.5,
+    0,
+    -32.5
+   ],
+   [
+    6.5,
+    7,
+    31
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "alert",
+   "roar",
+   "ridden"
+  ],
+  "cubes": 14,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 2.4,
+    "stride": 18.9,
+    "speed": 7.875
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.3,
+    "stride": 24.3,
+    "speed": 18.6923
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "ridden": {
+    "loop": "loop",
+    "length": 3
    }
   }
  },
@@ -2669,6 +4438,46 @@
     "length": 1.4,
     "stride": 7.5,
     "speed": 5.3571
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "worm_knuckle": {
+  "name": "knuckle worm",
+  "status": "draft",
+  "model": "models/creatures/worm_knuckle.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.875,
+    0,
+    -2.375
+   ],
+   [
+    1.7329,
+    3.7085,
+    4.4112
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 5,
+  "bones": 6,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 2.625,
+    "speed": 2.625
    },
    "death": {
     "loop": "hold",

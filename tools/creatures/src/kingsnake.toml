@@ -1,0 +1,71 @@
+# DF KINGSNAKE (wild): 1.5 kg, a small brightly coloured snake mistaken for its
+# venomous cousins. Serpent; about 1.4 m here, the scarlet kingsnake's rings
+# (red, black-yellow-black) all the way round. Attack: bite.
+name = "kingsnake"
+template = "serpent"
+status = "draft"
+
+decals = [
+  # Rings: black, yellow, black at the front of each segment, over the back...
+  { cube = "seg0", face = "up", x = 0, y = 0, w = 3, h = 1, colour = "black" },
+  { cube = "seg0", face = "up", x = 0, y = 1, w = 3, h = 1, colour = "yellow" },
+  { cube = "seg0", face = "up", x = 0, y = 2, w = 3, h = 1, colour = "black" },
+  { cube = "seg1", face = "up", x = 0, y = 0, w = 3, h = 1, colour = "black" },
+  { cube = "seg1", face = "up", x = 0, y = 1, w = 3, h = 1, colour = "yellow" },
+  { cube = "seg1", face = "up", x = 0, y = 2, w = 3, h = 1, colour = "black" },
+  { cube = "seg2", face = "up", x = 0, y = 0, w = 3, h = 1, colour = "black" },
+  { cube = "seg2", face = "up", x = 0, y = 1, w = 3, h = 1, colour = "yellow" },
+  { cube = "seg2", face = "up", x = 0, y = 2, w = 3, h = 1, colour = "black" },
+  { cube = "seg3", face = "up", x = 0, y = 0, w = 3, h = 1, colour = "black" },
+  { cube = "seg3", face = "up", x = 0, y = 1, w = 3, h = 1, colour = "yellow" },
+  { cube = "seg3", face = "up", x = 0, y = 2, w = 3, h = 1, colour = "black" },
+  { cube = "seg4", face = "up", x = 0, y = 1, w = 2, h = 1, colour = "black" },
+  # ...and down the flanks (west: front on the left; east: front on the right).
+  { cube = "seg0", face = "west", x = 0, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg0", face = "west", x = 1, y = 0, w = 1, h = 2, colour = "yellow" },
+  { cube = "seg0", face = "west", x = 2, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg0", face = "east", x = 3, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg0", face = "east", x = 2, y = 0, w = 1, h = 2, colour = "yellow" },
+  { cube = "seg0", face = "east", x = 1, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg1", face = "west", x = 0, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg1", face = "west", x = 1, y = 0, w = 1, h = 2, colour = "yellow" },
+  { cube = "seg1", face = "west", x = 2, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg1", face = "east", x = 3, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg1", face = "east", x = 2, y = 0, w = 1, h = 2, colour = "yellow" },
+  { cube = "seg1", face = "east", x = 1, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg2", face = "west", x = 0, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg2", face = "west", x = 1, y = 0, w = 1, h = 2, colour = "yellow" },
+  { cube = "seg2", face = "west", x = 2, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg2", face = "east", x = 3, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg2", face = "east", x = 2, y = 0, w = 1, h = 2, colour = "yellow" },
+  { cube = "seg2", face = "east", x = 1, y = 0, w = 1, h = 2, colour = "black" },
+  # Black snout band, eyes.
+  { cube = "head", face = "up", x = 0, y = 2, w = 3, h = 1, colour = "black" },
+  { cube = "snout", face = "up", x = 0, y = 0, w = 2, h = 1, colour = "black" },
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 2, y = 0, colour = "eye" },
+]
+
+[proportions]
+segments = 5
+seg = [3, 2, 4]
+taper = 0.5
+head = [3, 2, 3]
+walk = { cycle = 1.2, amp = 22 }
+run = { cycle = 0.65, amp = 28 }
+
+# Head pivot: the neck, mid-height of seg0 (y = 1).
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-1, -1, -4]
+to = [1, 0.5, -3]
+
+[palette]
+body = "#c42a1f"
+body_down = "#e0d6c0"
+head = "#c42a1f"
+black = "#151515"
+yellow = "#e8c93a"
+eye = "#151515"

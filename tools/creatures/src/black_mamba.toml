@@ -1,0 +1,40 @@
+# DF BLACK_MAMBA (wild): 5 kg, a fast, slender, deadly snake. Serpent; long and
+# thin (about 2.5 m here), olive-grey with no pattern, a narrow coffin-shaped head
+# and the inky-black mouth it is named for (a dark band along the jaw). Fast
+# gaits. Attack: bite.
+name = "black mamba"
+template = "serpent"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 2, w = 4, h = 1, colour = "mouth" },
+  { cube = "head", face = "east", x = 0, y = 2, w = 4, h = 1, colour = "mouth" },
+  { cube = "snout", face = "west", x = 0, y = 1, w = 2, h = 1, colour = "mouth" },
+  { cube = "snout", face = "east", x = 0, y = 1, w = 2, h = 1, colour = "mouth" },
+  { cube = "head", face = "west", x = 1, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 2, y = 0, colour = "eye" },
+]
+
+[proportions]
+segments = 6
+seg = [3, 2.5, 6]
+taper = 0.35
+head = [3, 2.5, 4]
+walk = { cycle = 1.0, amp = 24 }
+run = { cycle = 0.45, amp = 30 }
+
+# Head pivot: the neck, mid-height of seg0 (y = 1.25).
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-1, -1.25, -6]
+to = [1, 0.75, -4]
+
+[palette]
+body = "#6c6a58"
+body_up = "#5d5b4b"
+body_down = "#bdb995"
+head = "#636150"
+mouth = "#141414"
+eye = "#141414"

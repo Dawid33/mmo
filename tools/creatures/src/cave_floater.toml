@@ -1,0 +1,127 @@
+# DF CAVE_FLOATER (underground): 40 kg, "a floating pod with eye-stalks. It can
+# spray poison and it gives off poison gas when punctured." Blob: a yellow (DF
+# 6:0:1) gas pod with two eye-stalk bones on top. It rests on y = 0 like
+# everything else (the game positions it); FLIER, so the fly set is made as
+# creature clips: takeoff and land lift/lower the root 8 units, hover and fly
+# keep it there. Not made: spray_juice (optional).
+name = "cave floater"
+template = "blob"
+status = "draft"
+
+decals = [
+  { cube = "top", face = "up", x = 1, y = 2, w = 2, h = 2, colour = "spot" },
+  { cube = "top", face = "up", x = 5, y = 6, w = 2, h = 2, colour = "spot" },
+  { cube = "body", face = "west", x = 3, y = 2, w = 2, h = 2, colour = "spot" },
+  { cube = "body", face = "west", x = 9, y = 4, w = 2, h = 2, colour = "spot" },
+  { cube = "body", face = "east", x = 2, y = 4, w = 2, h = 2, colour = "spot" },
+  { cube = "body", face = "east", x = 8, y = 2, w = 2, h = 2, colour = "spot" },
+  { cube = "body", face = "north", x = 2, y = 3, w = 2, h = 2, colour = "spot" },
+  { cube = "body", face = "north", x = 7, y = 5, w = 2, h = 1, colour = "spot" },
+  { cube = "eye_l", face = "north", x = 0, y = 0, w = 2, h = 1, colour = "pupil" },
+  { cube = "eye_r", face = "north", x = 0, y = 0, w = 2, h = 1, colour = "pupil" },
+  { cube = "eye_l", face = "west", x = 0, y = 0, w = 1, h = 1, colour = "pupil" },
+  { cube = "eye_r", face = "east", x = 1, y = 0, w = 1, h = 1, colour = "pupil" },
+]
+
+[proportions]
+body = [11, 8, 13]
+top = [8, 2, 10]
+walk = { cycle = 1.2 }
+
+# Eye stalks on the top's front corners (the body pivot is at the ground, so the
+# top is y 8..10), leaning forward and out (mirror flips the outward lean).
+[[bones]]
+name = "stalk_l"
+parent = "body"
+pivot = [-2.5, 9.5, -3]
+rest = [-20, 0, 15]
+mirror = true
+
+[[cubes]]
+name = "stalk_l"
+bone = "stalk_l"
+part = "stalk"
+from = [-0.5, 0, -0.5]
+to = [0.5, 5, 0.5]
+mirror = true
+
+[[cubes]]
+name = "eye_l"
+bone = "stalk_l"
+part = "eye"
+from = [-1, 5, -1]
+to = [1, 7, 1]
+mirror = true
+
+[palette]
+body = "#d6c05a"
+body_up = "#e3cf6c"
+body_down = "#b39c3e"
+top = "#e3cf6c"
+spot = "#a88f34"
+stalk = "#c9b04c"
+eye = "#efeadc"
+pupil = "#1c1a12"
+
+[clips.takeoff]
+mode = "once"
+length = 1.0
+keys = [
+  { bone = "root", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "root", channel = "position", time = 0.25, value = [0, 0, 0] },
+  { bone = "root", channel = "position", time = 1.0, value = [0, 8, 0] },
+  { bone = "body", channel = "scale", time = 0.0, value = [1, 1, 1] },
+  { bone = "body", channel = "scale", time = 0.2, value = [1.1, 0.85, 1.1] },
+  { bone = "body", channel = "scale", time = 0.5, value = [0.95, 1.08, 0.95] },
+  { bone = "body", channel = "scale", time = 1.0, value = [1, 1, 1] },
+]
+
+[clips.land]
+mode = "once"
+length = 1.0
+keys = [
+  { bone = "root", channel = "position", time = 0.0, value = [0, 8, 0] },
+  { bone = "root", channel = "position", time = 0.75, value = [0, 0, 0] },
+  { bone = "root", channel = "position", time = 1.0, value = [0, 0, 0] },
+  { bone = "body", channel = "scale", time = 0.0, value = [1, 1, 1] },
+  { bone = "body", channel = "scale", time = 0.75, value = [1, 1, 1] },
+  { bone = "body", channel = "scale", time = 0.85, value = [1.12, 0.85, 1.12] },
+  { bone = "body", channel = "scale", time = 1.0, value = [1, 1, 1] },
+]
+
+[clips.hover]
+mode = "loop"
+length = 3.0
+keys = [
+  { bone = "root", channel = "position", time = 0.0, value = [0, 8, 0] },
+  { bone = "root", channel = "position", time = 1.5, value = [0, 9, 0] },
+  { bone = "root", channel = "position", time = 3.0, value = [0, 8, 0] },
+  { bone = "body", channel = "scale", time = 0.0, value = [1, 1, 1] },
+  { bone = "body", channel = "scale", time = 1.5, value = [1.03, 0.96, 1.03] },
+  { bone = "body", channel = "scale", time = 3.0, value = [1, 1, 1] },
+  { bone = "stalk_l", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "stalk_l", channel = "rotation", time = 1.5, value = [0, 15, 5] },
+  { bone = "stalk_l", channel = "rotation", time = 3.0, value = [0, 0, 0] },
+  { bone = "stalk_r", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "stalk_r", channel = "rotation", time = 1.5, value = [0, 10, -5] },
+  { bone = "stalk_r", channel = "rotation", time = 3.0, value = [0, 0, 0] },
+]
+
+# Drifting forward: nose tipped down a little, the stalks trailing.
+[clips.fly]
+mode = "loop"
+length = 2.0
+keys = [
+  { bone = "root", channel = "position", time = 0.0, value = [0, 8, 0] },
+  { bone = "root", channel = "position", time = 1.0, value = [0, 8.6, 0] },
+  { bone = "root", channel = "position", time = 2.0, value = [0, 8, 0] },
+  { bone = "body", channel = "rotation", time = 0.0, value = [-8, 0, 0] },
+  { bone = "body", channel = "rotation", time = 1.0, value = [-6, 0, 0] },
+  { bone = "body", channel = "rotation", time = 2.0, value = [-8, 0, 0] },
+  { bone = "stalk_l", channel = "rotation", time = 0.0, value = [25, 0, 0] },
+  { bone = "stalk_l", channel = "rotation", time = 1.0, value = [30, 0, 0] },
+  { bone = "stalk_l", channel = "rotation", time = 2.0, value = [25, 0, 0] },
+  { bone = "stalk_r", channel = "rotation", time = 0.0, value = [25, 0, 0] },
+  { bone = "stalk_r", channel = "rotation", time = 1.0, value = [30, 0, 0] },
+  { bone = "stalk_r", channel = "rotation", time = 2.0, value = [25, 0, 0] },
+]

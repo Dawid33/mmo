@@ -1,0 +1,65 @@
+# DF ANACONDA (wild): 100 kg, a big constrictor of tropical wetlands. Serpent;
+# about 4 m here (the adder is 1 m), heavy-bodied, olive with black oval saddles
+# and yellow-ringed side spots. Attack: bite (DF kills by crushing; the template
+# strike stands in for a grab). LARGE_PREDATOR: alert, roar.
+name = "anaconda"
+template = "serpent"
+status = "draft"
+extras = ["alert", "roar"]
+
+decals = [
+  # Paired black ovals along the back (up faces: row 0 at the front).
+  { cube = "seg0", face = "up", x = 1, y = 1, w = 2, h = 3, colour = "spot" },
+  { cube = "seg0", face = "up", x = 4, y = 5, w = 2, h = 3, colour = "spot" },
+  { cube = "seg1", face = "up", x = 3, y = 1, w = 2, h = 3, colour = "spot" },
+  { cube = "seg1", face = "up", x = 1, y = 5, w = 2, h = 3, colour = "spot" },
+  { cube = "seg2", face = "up", x = 1, y = 1, w = 2, h = 3, colour = "spot" },
+  { cube = "seg2", face = "up", x = 3, y = 5, w = 2, h = 3, colour = "spot" },
+  { cube = "seg3", face = "up", x = 2, y = 1, w = 2, h = 3, colour = "spot" },
+  { cube = "seg3", face = "up", x = 0, y = 6, w = 2, h = 2, colour = "spot" },
+  { cube = "seg4", face = "up", x = 1, y = 2, w = 2, h = 2, colour = "spot" },
+  { cube = "seg5", face = "up", x = 1, y = 3, w = 1, h = 2, colour = "spot" },
+  # Side spots.
+  { cube = "seg0", face = "west", x = 2, y = 1, w = 2, h = 2, colour = "spot" },
+  { cube = "seg0", face = "east", x = 5, y = 1, w = 2, h = 2, colour = "spot" },
+  { cube = "seg1", face = "west", x = 5, y = 1, w = 2, h = 2, colour = "spot" },
+  { cube = "seg1", face = "east", x = 2, y = 1, w = 2, h = 2, colour = "spot" },
+  { cube = "seg2", face = "west", x = 2, y = 1, w = 2, h = 2, colour = "spot" },
+  { cube = "seg2", face = "east", x = 5, y = 1, w = 2, h = 2, colour = "spot" },
+  { cube = "seg3", face = "west", x = 5, y = 1, w = 2, h = 1, colour = "spot" },
+  { cube = "seg3", face = "east", x = 2, y = 1, w = 2, h = 1, colour = "spot" },
+  # Head: the dark stripe behind the eye, eyes on top-sides.
+  { cube = "head", face = "up", x = 2, y = 2, w = 2, h = 3, colour = "spot" },
+  { cube = "head", face = "west", x = 0, y = 0, w = 5, h = 1, colour = "stripe" },
+  { cube = "head", face = "east", x = 1, y = 0, w = 5, h = 1, colour = "stripe" },
+  { cube = "head", face = "west", x = 1, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 4, y = 0, colour = "eye" },
+  { cube = "snout", face = "north", x = 1, y = 0, colour = "nostril" },
+  { cube = "snout", face = "north", x = 2, y = 0, colour = "nostril" },
+]
+
+[proportions]
+segments = 6
+seg = [6, 4, 9]
+taper = 0.45
+head = [5, 3, 5]
+walk = { cycle = 2.2, amp = 18 }
+run = { cycle = 1.2, amp = 24 }
+
+# Head pivot: the neck, at the back of the head, mid-height of seg0 (y = 2).
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-2, -2, -7]
+to = [2, 0.5, -5]
+
+[palette]
+body = "#5b6332"
+body_up = "#4f5a2b"
+body_down = "#c9b45a"
+head = "#545c2e"
+spot = "#1d1f12"
+stripe = "#c99a3a"
+eye = "#d8a630"
+nostril = "#1d1f12"

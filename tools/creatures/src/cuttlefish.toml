@@ -1,0 +1,72 @@
+# DF CUTTLEFISH (vermin, ocean): 1 kg, "it can change color and skin patterns".
+# Fish, not the vermin form: the giant cuttlefish is derived from it and needs
+# the full rig. About 60 cm here. A broad flattened mantle (the body) with long
+# skirt fins down both sides (flat cubes on the body: the template's pectorals
+# droop 25° and would dip below the ground at this mantle height), a stubby
+# rounded rear (tail; its fin is a token nub), the head leading with four short
+# arm cubes (the two tentacles stay hidden, as a cuttlefish keeps them). Mottled
+# brown with the white zebra bars it flashes. Attack: bite (beak).
+name = "cuttlefish"
+template = "fish"
+status = "draft"
+
+decals = [
+  { cube = "body", face = "up", x = 0, y = 1, w = 2, h = 1, colour = "bar" },
+  { cube = "body", face = "up", x = 3, y = 1, w = 2, h = 1, colour = "bar" },
+  { cube = "body", face = "up", x = 1, y = 3, w = 3, h = 1, colour = "bar" },
+  { cube = "body", face = "up", x = 0, y = 5, w = 2, h = 1, colour = "bar" },
+  { cube = "body", face = "up", x = 3, y = 5, w = 2, h = 1, colour = "bar" },
+  { cube = "body", face = "up", x = 2, y = 2, w = 1, h = 1, colour = "mottle" },
+  { cube = "body", face = "up", x = 2, y = 6, w = 1, h = 1, colour = "mottle" },
+  { cube = "head", face = "west", x = 0, y = 0, w = 2, h = 1, colour = "eye" },
+  { cube = "head", face = "east", x = 0, y = 0, w = 2, h = 1, colour = "eye" },
+  { cube = "head", face = "up", x = 1, y = 0, w = 2, h = 1, colour = "bar" },
+]
+
+[proportions]
+body = [5, 3, 7]
+head = [4, 3, 2]
+tail = [3, 2, 1]
+fin = [0.5, 1.5, 0.5]
+flukes = true
+pectoral = [0, 0]
+dorsal = [1, 0, 1]
+swim = { cycle = 0.9, amp = 10 }
+
+# The skirt fins, level at mid-height (the body pivot is its centre, y = 1.5).
+[[cubes]]
+name = "skirt_l"
+bone = "body"
+part = "fins"
+from = [-4, -0.25, -3]
+to = [-2.5, 0.25, 3.25]
+mirror = true
+
+# Head pivot: the mantle's front at mid-height (y = 1.5); the head is z -2..0.
+[[cubes]]
+name = "arm_ol"
+bone = "head"
+part = "arms"
+from = [-1.75, -1.25, -4]
+to = [-0.75, 0, -2]
+mirror = true
+
+[[cubes]]
+name = "arm_il"
+bone = "head"
+part = "arms"
+from = [-0.75, -1, -4.5]
+to = [0, 0.25, -2]
+mirror = true
+
+[palette]
+body = "#8a6a4e"
+body_up = "#7a5c42"
+body_down = "#d8c8b4"
+head = "#8a6a4e"
+head_up = "#7a5c42"
+fins = "#b8a48a"
+arms = "#9a7a5c"
+bar = "#ece4d4"
+mottle = "#4e3a28"
+eye = "#1c1610"

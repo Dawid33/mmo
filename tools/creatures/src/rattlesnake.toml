@@ -1,0 +1,98 @@
+# DF RATTLESNAKE (wild): 7 kg, "a tell-tale rattle and vicious bite". Serpent;
+# about 1.6 m here, heavy-bodied: a western diamondback, grey-brown with dark
+# pale-edged diamonds, a black-and-white banded tail and a buff rattle. The
+# rattle is its own bone on the tail tip (seg4's pivot), held raised; `rattle`
+# shakes it (a creature clip). Attack: bite.
+name = "rattlesnake"
+template = "serpent"
+status = "draft"
+
+decals = [
+  # Diamonds: pale rim, dark centre (up faces: row 0 at the front).
+  { cube = "seg0", face = "up", x = 1, y = 0, w = 2, h = 1, colour = "rim" },
+  { cube = "seg0", face = "up", x = 0, y = 1, w = 4, h = 3, colour = "rim" },
+  { cube = "seg0", face = "up", x = 1, y = 4, w = 2, h = 1, colour = "rim" },
+  { cube = "seg0", face = "up", x = 1, y = 1, w = 2, h = 3, colour = "diamond" },
+  { cube = "seg1", face = "up", x = 1, y = 0, w = 2, h = 1, colour = "rim" },
+  { cube = "seg1", face = "up", x = 0, y = 1, w = 4, h = 3, colour = "rim" },
+  { cube = "seg1", face = "up", x = 1, y = 4, w = 2, h = 1, colour = "rim" },
+  { cube = "seg1", face = "up", x = 1, y = 1, w = 2, h = 3, colour = "diamond" },
+  { cube = "seg2", face = "up", x = 1, y = 0, w = 1, h = 1, colour = "rim" },
+  { cube = "seg2", face = "up", x = 0, y = 1, w = 3, h = 3, colour = "rim" },
+  { cube = "seg2", face = "up", x = 1, y = 4, w = 1, h = 1, colour = "rim" },
+  { cube = "seg2", face = "up", x = 1, y = 1, w = 1, h = 3, colour = "diamond" },
+  # The coon tail.
+  { cube = "seg3", face = "up", x = 0, y = 1, w = 3, h = 1, colour = "black" },
+  { cube = "seg3", face = "up", x = 0, y = 3, w = 3, h = 1, colour = "black" },
+  { cube = "seg4", face = "up", x = 0, y = 0, w = 2, h = 1, colour = "black" },
+  { cube = "seg4", face = "up", x = 0, y = 2, w = 2, h = 1, colour = "black" },
+  { cube = "seg3", face = "west", x = 1, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg3", face = "west", x = 3, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg3", face = "east", x = 0, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg3", face = "east", x = 2, y = 0, w = 1, h = 2, colour = "black" },
+  { cube = "seg3", face = "up", x = 0, y = 0, w = 3, h = 1, colour = "white" },
+  { cube = "seg3", face = "up", x = 0, y = 2, w = 3, h = 1, colour = "white" },
+  # Rattle rings.
+  { cube = "rattle", face = "up", x = 0, y = 1, w = 1, h = 1, colour = "ring" },
+  { cube = "rattle", face = "west", x = 1, y = 0, w = 1, h = 1, colour = "ring" },
+  { cube = "rattle", face = "east", x = 1, y = 0, w = 1, h = 1, colour = "ring" },
+  # Head: dark band behind the eye bordered pale.
+  { cube = "head", face = "west", x = 0, y = 1, w = 4, h = 1, colour = "diamond" },
+  { cube = "head", face = "east", x = 0, y = 1, w = 4, h = 1, colour = "diamond" },
+  { cube = "head", face = "west", x = 1, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 2, y = 0, colour = "eye" },
+]
+
+[proportions]
+segments = 5
+seg = [4, 2.5, 5]
+taper = 0.4
+head = [5, 2.5, 4]
+walk = { cycle = 1.6, amp = 20 }
+run = { cycle = 0.85, amp = 26 }
+
+# Head pivot: the neck, mid-height of seg0 (y = 1.25).
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-1.5, -1.25, -5.5]
+to = [1.5, 0.75, -4]
+
+# seg4's pivot is the tail tip (y = 1.25); the tail segment is 1 unit tall.
+[[bones]]
+name = "rattle"
+parent = "seg4"
+pivot = [0, -0.75, 0]
+rest = [-30, 0, 0]
+
+[[cubes]]
+name = "rattle"
+bone = "rattle"
+part = "rattle"
+from = [-0.75, -0.4, 0]
+to = [0.75, 0.75, 2.5]
+
+[palette]
+body = "#8a7c66"
+body_up = "#958670"
+body_down = "#d6ccb2"
+head = "#857761"
+diamond = "#3e3226"
+rim = "#e6dfcc"
+black = "#1b1b1b"
+white = "#e8e4da"
+rattle = "#c9b58a"
+ring = "#8d7a55"
+eye = "#1b1b1b"
+
+[clips.rattle]
+mode = "loop"
+length = 0.2
+keys = [
+  { bone = "rattle", channel = "rotation", time = 0.0, value = [-10, 0, 0] },
+  { bone = "rattle", channel = "rotation", time = 0.05, value = [-10, 14, 0] },
+  { bone = "rattle", channel = "rotation", time = 0.1, value = [-10, 0, 0] },
+  { bone = "rattle", channel = "rotation", time = 0.15, value = [-10, -14, 0] },
+  { bone = "rattle", channel = "rotation", time = 0.2, value = [-10, 0, 0] },
+]

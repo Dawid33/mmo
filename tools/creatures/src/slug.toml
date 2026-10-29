@@ -1,0 +1,65 @@
+# DF SLUG (vermin, soil): a tiny land mollusk. Serpent, not the vermin form: the
+# giant slug is derived from it and needs the full rig. About 60 cm here (tiny in
+# DF). A low tapering foot, a mantle saddle over the front, two eyestalks and two
+# short lower tentacles; brown-grey with dark mantle spots. No attacks in the
+# raws; the template's strike stands in.
+name = "slug"
+template = "serpent"
+status = "draft"
+
+decals = [
+  { cube = "mantle", face = "up", x = 0, y = 1, w = 1, h = 1, colour = "spot" },
+  { cube = "mantle", face = "up", x = 2, y = 0, w = 1, h = 1, colour = "spot" },
+  { cube = "mantle", face = "up", x = 3, y = 2, w = 1, h = 1, colour = "spot" },
+  { cube = "mantle", face = "up", x = 1, y = 3, w = 1, h = 1, colour = "spot" },
+  { cube = "seg2", face = "up", x = 0, y = 0, w = 2, h = 2, colour = "keel" },
+  { cube = "seg3", face = "up", x = 0, y = 0, w = 1, h = 2, colour = "keel" },
+  { cube = "stalk_l", face = "north", x = 0, y = 0, w = 1, h = 1, colour = "eye" },
+  { cube = "stalk_r", face = "north", x = 0, y = 0, w = 1, h = 1, colour = "eye" },
+  { cube = "stalk_l", face = "up", x = 0, y = 0, w = 1, h = 1, colour = "eye" },
+  { cube = "stalk_r", face = "up", x = 0, y = 0, w = 1, h = 1, colour = "eye" },
+]
+
+[proportions]
+segments = 4
+seg = [3, 2, 2]
+taper = 0.5
+head = [2.5, 1.5, 2]
+walk = { cycle = 2.4, amp = 10 }
+run = { cycle = 1.6, amp = 14 }
+
+# The mantle over the front of the foot (seg0's pivot is its back end, y = 1;
+# seg0 is 3 × 2, y -1..1).
+[[cubes]]
+name = "mantle"
+bone = "seg0"
+part = "mantle"
+from = [-1.75, -0.5, -2.1]
+to = [1.75, 1.4, 0.75]
+
+# Head pivot: the neck (y = 1); the head is y -1..0.5, z -2..0.
+[[cubes]]
+name = "stalk_l"
+bone = "head"
+part = "head"
+from = [-1, 0.5, -1.75]
+to = [-0.5, 2.75, -1.25]
+mirror = true
+
+[[cubes]]
+name = "feeler_l"
+bone = "head"
+part = "head"
+from = [-1, -0.75, -2.5]
+to = [-0.5, -0.25, -2]
+mirror = true
+
+[palette]
+body = "#7a6a55"
+body_up = "#6e5f4b"
+body_down = "#a3927a"
+head = "#7f6e58"
+mantle = "#665846"
+spot = "#3a3128"
+keel = "#8a7a62"
+eye = "#1e1a15"

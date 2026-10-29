@@ -1,0 +1,69 @@
+# DF GIANT_EARTHWORM (underground, chasms): 200 kg, "a gigantic version of its tiny
+# cousin" that tunnels through rock. The brief has no template (BODY_WITH_HEAD_FLAG):
+# serpent, as the handoff says for worms. About 3.2 m here; grey-pink (DF 7:0:0,
+# grey skin) with ring furrows, a thicker pale clitellum on seg1 and a pointed
+# prostomium. No attacks in the raws; the template's strike stands in.
+name = "giant earthworm"
+template = "serpent"
+status = "draft"
+
+decals = [
+  { cube = "seg0", face = "up", x = 0, y = 1, w = 5, h = 1, colour = "ring" },
+  { cube = "seg0", face = "up", x = 0, y = 3, w = 5, h = 1, colour = "ring" },
+  { cube = "seg0", face = "up", x = 0, y = 5, w = 5, h = 1, colour = "ring" },
+  { cube = "seg0", face = "up", x = 0, y = 7, w = 5, h = 1, colour = "ring" },
+  { cube = "seg1", face = "up", x = 0, y = 1, w = 5, h = 1, colour = "ring" },
+  { cube = "seg1", face = "up", x = 0, y = 3, w = 5, h = 1, colour = "ring" },
+  { cube = "seg1", face = "up", x = 0, y = 5, w = 5, h = 1, colour = "ring" },
+  { cube = "seg1", face = "up", x = 0, y = 7, w = 5, h = 1, colour = "ring" },
+  { cube = "seg2", face = "up", x = 0, y = 1, w = 5, h = 1, colour = "ring" },
+  { cube = "seg2", face = "up", x = 0, y = 3, w = 5, h = 1, colour = "ring" },
+  { cube = "seg2", face = "up", x = 0, y = 5, w = 5, h = 1, colour = "ring" },
+  { cube = "seg2", face = "up", x = 0, y = 7, w = 5, h = 1, colour = "ring" },
+  { cube = "seg3", face = "up", x = 0, y = 1, w = 5, h = 1, colour = "ring" },
+  { cube = "seg3", face = "up", x = 0, y = 3, w = 5, h = 1, colour = "ring" },
+  { cube = "seg3", face = "up", x = 0, y = 5, w = 5, h = 1, colour = "ring" },
+  { cube = "seg3", face = "up", x = 0, y = 7, w = 5, h = 1, colour = "ring" },
+  { cube = "seg4", face = "up", x = 0, y = 1, w = 5, h = 1, colour = "ring" },
+  { cube = "seg4", face = "up", x = 0, y = 3, w = 5, h = 1, colour = "ring" },
+  { cube = "seg4", face = "up", x = 0, y = 5, w = 5, h = 1, colour = "ring" },
+  { cube = "seg4", face = "up", x = 0, y = 7, w = 5, h = 1, colour = "ring" },
+  { cube = "seg5", face = "up", x = 0, y = 1, w = 5, h = 1, colour = "ring" },
+  { cube = "seg5", face = "up", x = 0, y = 3, w = 5, h = 1, colour = "ring" },
+  { cube = "seg5", face = "up", x = 0, y = 5, w = 5, h = 1, colour = "ring" },
+  { cube = "seg5", face = "up", x = 0, y = 7, w = 5, h = 1, colour = "ring" },
+  { cube = "tip", face = "north", x = 1, y = 1, w = 1, h = 1, colour = "mouth" },
+]
+
+[proportions]
+segments = 6
+seg = [5, 4, 8]
+taper = 0.55
+head = [4, 3.5, 4]
+walk = { cycle = 2.6, amp = 14 }
+run = { cycle = 1.6, amp = 18 }
+
+# Head pivot: the neck, mid-height of seg0 (y = 2); the head is y -2..1.5.
+[[cubes]]
+name = "tip"
+bone = "head"
+part = "head"
+from = [-1.5, -1.75, -5.5]
+to = [1.5, 0.75, -4]
+
+# The clitellum: a fatter pale saddle on seg1 (4.5 × 3.5; pivot at its back end).
+[[cubes]]
+name = "clitellum"
+bone = "seg1"
+part = "clitellum"
+from = [-2.75, -2, -6.5]
+to = [2.75, 1.9, -1.5]
+
+[palette]
+body = "#9c7f80"
+body_up = "#8f7273"
+body_down = "#b89a96"
+head = "#a88a8a"
+ring = "#7a5f60"
+clitellum = "#c4a3a0"
+mouth = "#4a3434"

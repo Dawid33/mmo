@@ -1,0 +1,62 @@
+# DF SNAKE_FIRE (vermin, subterranean lava): 1 kg, "a serpent made of pure fire
+# which can inject liquid fire as venom". No giant, so the vermin form: one body
+# box with a head, flame licks along the back and a flame tail-tip; orange-red
+# with a yellow back. `move` is the "swim" style (a side-to-side wiggle), which
+# reads as slithering better than "crawl"'s stretch. Not modelled: glow (the
+# renderer has no emissive material).
+name = "fire snake"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, w = 1, h = 1, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, w = 1, h = 1, colour = "eye" },
+  { cube = "body", face = "west", x = 0, y = 0, w = 8, h = 1, colour = "flame" },
+  { cube = "body", face = "east", x = 0, y = 0, w = 8, h = 1, colour = "flame" },
+]
+
+[proportions]
+body = [1.5, 1, 8]
+head = [2, 1.25, 2]
+legs = 0
+move = "swim"
+cycle = 0.45
+
+# The body pivot is its centre (y = 0.5); the body is z -4..4.
+[[cubes]]
+name = "lick1"
+bone = "body"
+part = "flame"
+from = [-0.25, 0.5, -3]
+to = [0.25, 1.5, -2]
+
+[[cubes]]
+name = "lick2"
+bone = "body"
+part = "flame"
+from = [-0.25, 0.5, -0.5]
+to = [0.25, 1.75, 0.5]
+
+[[cubes]]
+name = "lick3"
+bone = "body"
+part = "flame"
+from = [-0.25, 0.5, 2]
+to = [0.25, 1.25, 3]
+
+[[cubes]]
+name = "tip"
+bone = "body"
+part = "tip"
+from = [-0.5, -0.25, 4]
+to = [0.5, 0.75, 5.5]
+
+[palette]
+body = "#e0561c"
+body_up = "#f29a1e"
+body_down = "#b8301a"
+head = "#e86a1c"
+head_up = "#f29a1e"
+flame = "#ffd23a"
+tip = "#ffe680"
+eye = "#fff6c8"

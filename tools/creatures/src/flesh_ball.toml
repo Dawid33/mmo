@@ -1,0 +1,46 @@
+# DF FLESH_BALL (underground, near cavern ponds): 70 kg, "a large ball of skin"
+# that absorbs dead matter. Blob: a rounded lump (two crossed girth cubes round
+# off the box) in a pale fleshy tone (DF skin colours vary; one is picked), with
+# darker skin folds. No attacks in the raws; the template's lunge stands in.
+name = "flesh ball"
+template = "blob"
+status = "draft"
+
+decals = [
+  { cube = "top", face = "up", x = 2, y = 3, w = 5, h = 1, colour = "fold" },
+  { cube = "top", face = "up", x = 4, y = 6, w = 4, h = 1, colour = "fold" },
+  { cube = "girth_x", face = "west", x = 2, y = 2, w = 4, h = 1, colour = "fold" },
+  { cube = "girth_x", face = "east", x = 5, y = 3, w = 4, h = 1, colour = "fold" },
+  { cube = "girth_z", face = "north", x = 3, y = 2, w = 5, h = 1, colour = "fold" },
+  { cube = "girth_z", face = "south", x = 2, y = 3, w = 4, h = 1, colour = "fold" },
+  { cube = "girth_z", face = "north", x = 6, y = 4, w = 1, h = 1, colour = "pore" },
+  { cube = "girth_x", face = "west", x = 7, y = 4, w = 1, h = 1, colour = "pore" },
+]
+
+[proportions]
+body = [11, 11, 11]
+top = [9, 1.5, 9]
+walk = { cycle = 1.4 }
+
+# Bulges round the middle (the body pivot is at the ground).
+[[cubes]]
+name = "girth_x"
+bone = "body"
+part = "body"
+from = [-6.5, 2, -5]
+to = [6.5, 9, 5]
+
+[[cubes]]
+name = "girth_z"
+bone = "body"
+part = "body"
+from = [-5, 2, -6.5]
+to = [5, 9, 6.5]
+
+[palette]
+body = "#d39c86"
+body_up = "#dcab95"
+body_down = "#b07a66"
+top = "#dcab95"
+fold = "#a8705c"
+pore = "#7a4a3c"

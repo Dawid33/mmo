@@ -1,0 +1,71 @@
+# DF WORM_KNUCKLE (vermin, evil): 1 kg, "a series of crackling knobs set at
+# strange angles". No giant, so the vermin form: the body and head are two knobs
+# and three more knobs hang off the back as a bone chain (knob1..3), each bent at
+# its own odd angle in the rest pose; nearly black (DF 0:0:1) with pale
+# knuckle-crease marks. `move` is the crawl stretch.
+name = "knuckle worm"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "body", face = "up", x = 0, y = 1, w = 2, h = 1, colour = "crease" },
+  { cube = "knob1", face = "up", x = 0, y = 0, w = 2, h = 1, colour = "crease" },
+  { cube = "knob2", face = "up", x = 0, y = 1, w = 2, h = 1, colour = "crease" },
+  { cube = "knob3", face = "up", x = 0, y = 0, w = 1, h = 1, colour = "crease" },
+  { cube = "head", face = "north", x = 0, y = 1, w = 1, h = 1, colour = "mouth" },
+]
+
+[proportions]
+body = [1.75, 1.75, 1.75]
+head = [1.25, 1.25, 1.5]
+legs = 0
+move = "crawl"
+cycle = 1.0
+
+# The body pivot is its centre (y = 0.875). Each knob hangs off the back of the
+# previous one, raised a little so its bent corners stay above the ground.
+[[bones]]
+name = "knob1"
+parent = "body"
+pivot = [0, 0.3, 0.75]
+rest = [-10, 35, 15]
+
+[[cubes]]
+name = "knob1"
+bone = "knob1"
+part = "body"
+from = [-0.75, -0.75, 0]
+to = [0.75, 0.75, 1.75]
+
+[[bones]]
+name = "knob2"
+parent = "knob1"
+pivot = [0, 0.1, 1.6]
+rest = [-15, -60, -10]
+
+[[cubes]]
+name = "knob2"
+bone = "knob2"
+part = "body"
+from = [-0.75, -0.75, 0]
+to = [0.75, 0.75, 1.5]
+
+[[bones]]
+name = "knob3"
+parent = "knob2"
+pivot = [0, 0, 1.4]
+rest = [-20, 50, 20]
+
+[[cubes]]
+name = "knob3"
+bone = "knob3"
+part = "body"
+from = [-0.6, -0.6, 0]
+to = [0.6, 0.6, 1.25]
+
+[palette]
+body = "#2b2a2f"
+body_up = "#36343b"
+head = "#26252a"
+crease = "#6b6772"
+mouth = "#8a2a2a"
