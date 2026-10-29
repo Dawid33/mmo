@@ -8,6 +8,7 @@ use game::{ClientUpdateEvent, GameData, GameDataUpdate, GameDataUpdateKind, Regi
 use game::{EntityKey, Voxel};
 
 use super::convert::{iso_to_transform, perspective_to_projection};
+use super::commander::tiles::TileMirrorMsg;
 use super::hud::HudStatus;
 use super::lod_rings;
 use super::{ClientUpdates, LocalPlayer};
@@ -269,6 +270,11 @@ impl VoxelData {
     pub fn runs(&self) -> usize {
         self.0.len()
     }
+
+    /// The runs themselves, `(length, block)` in dense-index order.
+    pub(crate) fn run_slice(&self) -> &[(u16, game::BlockId)] {
+        &self.0
+    }
 }
 
 /// Marker: the local player's sim body. In commander mode it is hidden and
@@ -481,6 +487,7 @@ pub fn drain_client_updates(
     mut retired_roots: ResMut<RetiredRegionRoots>,
     mut home_cells: ResMut<lod_rings::HomeCellMask>,
     camera_mode: Option<Res<super::commander::CameraMode>>,
+    mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
 ) {
     // Unbudgeted: drains everything the game thread queued since last frame.
     let mut stall = game::perf::StallGuard::new("drain_client_updates");
@@ -516,6 +523,16 @@ pub fn drain_client_updates(
                     .id();
                 roots.0.insert(id, root);
                 regions.0.insert(id, receiver);
+                // The fortress tools' tile mirror (commander only; no ground
+                // semantics in cell mode).
+                if let Some(msgs) = tile_msgs.as_mut().filter(|_| game::CELL_CHUNKS == 0) {
+                    msgs.write(TileMirrorMsg::Reset {
+                        region: id,
+                        ground: data.ground_recipes().clone(),
+                        designations: data.designations().iter().map(|(p, d)| (*p, *d)).collect(),
+                        constructed: data.constructed().keys().copied().collect(),
+                    });
+                }
                 let spawn = game::perf::Stopwatch::start();
                 let data = Arc::new(data);
                 spawn_region_snapshot(
@@ -714,6 +731,7 @@ pub fn drain_region_updates(
     mut cursor_policy: ResMut<super::cursor::CursorPolicy>,
     mut voxel_queue: ResMut<SnapshotVoxelQueue>,
     camera_mode: Option<Res<super::commander::CameraMode>>,
+    mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
 ) {
     let commander = commander(camera_mode.as_deref());
     // Local cameras inserted by Commands this drain, not yet queryable: a
@@ -892,8 +910,18 @@ pub fn drain_region_updates(
                         None => { commands.entity(e).remove::<GhostSource>(); }
                     }
                 }
-                // Task 4 mirrors these into the fortress overlay.
-                GameDataUpdateKind::SetDesignations(_) | GameDataUpdateKind::SetConstructed(_) => {}
+                // Plain per-tile writes, undo included: forwarded to the
+                // fortress tools' tile mirror.
+                GameDataUpdateKind::SetDesignations(changes) => {
+                    if let Some(msgs) = tile_msgs.as_mut() {
+                        msgs.write(TileMirrorMsg::Designations { region, changes });
+                    }
+                }
+                GameDataUpdateKind::SetConstructed(changes) => {
+                    if let Some(msgs) = tile_msgs.as_mut() {
+                        msgs.write(TileMirrorMsg::Constructed { region, changes });
+                    }
+                }
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
                     // Only the local player's toggle may grab this window's cursor.
                     if local_player.0 != Some(client_id) {

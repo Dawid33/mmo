@@ -23,6 +23,7 @@
 pub mod height;
 pub mod minimap;
 pub mod selection;
+pub mod tiles;
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
@@ -299,6 +300,8 @@ impl Plugin for CommanderPlugin {
             .init_resource::<minimap::MinimapPointer>()
             .init_resource::<selection::Selection>()
             .init_resource::<selection::GroundPick>()
+            .init_resource::<tiles::TileMirror>()
+            .add_message::<tiles::TileMirrorMsg>()
             .add_systems(
                 Startup,
                 (
@@ -311,6 +314,7 @@ impl Plugin for CommanderPlugin {
                 Update,
                 (
                     height::update_height_grid,
+                    tiles::update_tile_mirror,
                     track_home_region,
                     place_on_body,
                     minimap::minimap_pointer,

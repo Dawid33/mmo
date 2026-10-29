@@ -70,7 +70,7 @@ pub struct BlockHit {
 
 /// The chunk holding `pos` and the block's index inside it, or `None` if the
 /// block is outside this region's chunk columns.
-pub(crate) fn locate(pos: BlockPos) -> Option<(ChunkCoords, (usize, usize, usize))> {
+pub fn locate(pos: BlockPos) -> Option<(ChunkCoords, (usize, usize, usize))> {
     let cb = CHUNK_BLOCKS as i32;
     let (cx, cz) = (pos[0].div_euclid(cb), pos[2].div_euclid(cb));
     let columns = REGION_CHUNKS as i32;
