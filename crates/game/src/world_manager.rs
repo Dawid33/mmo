@@ -365,9 +365,10 @@ pub struct WorldManager<S: RegionSpawner> {
     /// The forged world's tile summaries, pushed to every client on connect
     /// and consulted by Play. `None` = no forged world (procedural / tests).
     world_map: Option<WorldMap>,
-    /// `ClientLeft`s for a home region that was mid-stop when Play arrived;
-    /// replayed (waking the region from its parked blob) once it parks.
-    pending_leaves: BTreeMap<RegionCoords, Vec<ClientId>>,
+    /// Server-authored Play events (`ClientLeft` / `CreateClientAt`) for a
+    /// region that was mid-stop when Play arrived; replayed in order (waking
+    /// the region from its parked blob) once it parks.
+    pending_events: BTreeMap<RegionCoords, Vec<RegionInput>>,
     out: Sender<(Option<ClientId>, ServerPacket)>,
     region_out_send: Sender<(RegionCoords, RegionOutput)>,
     /// LOD subscriptions per key, and the reverse map for disconnects.
@@ -415,7 +416,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             sessions: BTreeMap::new(),
             homes: BTreeMap::new(),
             world_map: None,
-            pending_leaves: BTreeMap::new(),
+            pending_events: BTreeMap::new(),
             out,
             region_out_send,
             lod_subscribers: BTreeMap::new(),
@@ -460,18 +461,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             _ => return refuse(self, PlayRefusal::NoDryLand),
         };
         if let Some(home) = home {
-            // The home may be parked (disconnected owner, grace expired):
-            // wake it so the leave is not dropped. A home mid-stop cannot
-            // take events; queue the leave for when it parks.
-            self.ensure_running(home);
-            if self.regions.get(&home).map_or(false, |l| l.stopping) {
-                self.pending_leaves.entry(home).or_default().push(id);
-            } else {
-                self.send_to_region(home, RegionInput::Event(GameEventKind::ClientLeft(id)));
-            }
+            self.send_play_event(home, GameEventKind::ClientLeft(id));
         }
-        self.ensure_running(target);
-        self.send_to_region(target, RegionInput::Event(GameEventKind::CreateClientAt(id, landing)));
+        self.send_play_event(target, GameEventKind::CreateClientAt(id, landing));
         self.homes.insert(id, target);
         let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
         if let Some(home) = home {
@@ -485,6 +477,19 @@ impl<S: RegionSpawner> WorldManager<S> {
             target.x,
             target.z
         );
+    }
+
+    /// Deliver a server-authored Play event to `rc`, waking it if parked. A
+    /// region mid-stop cannot take events (they would be dropped): queue them
+    /// for when it parks.
+    fn send_play_event(&mut self, rc: RegionCoords, kind: GameEventKind) {
+        self.ensure_running(rc);
+        let input = RegionInput::Event(kind);
+        if self.regions.get(&rc).map_or(false, |l| l.stopping) {
+            self.pending_events.entry(rc).or_default().push(input);
+        } else {
+            self.send_to_region(rc, input);
+        }
     }
 
     /// Returns false when the server should quit (a Quit game event).
@@ -652,18 +657,18 @@ impl<S: RegionSpawner> WorldManager<S> {
                     .map(|l| l.resubscribe_pending)
                     .unwrap_or_default();
                 self.spawner.reap(rc);
-                if let Some(leavers) = self.pending_leaves.remove(&rc) {
+                if let Some(events) = self.pending_events.remove(&rc) {
                     self.ensure_running(rc);
-                    for client in leavers {
-                        self.send_to_region(rc, RegionInput::Event(GameEventKind::ClientLeft(client)));
+                    for input in events {
+                        self.send_to_region(rc, input);
                     }
+                    self.refresh_keepalive(rc, now_ms);
                 }
                 for client in pending {
                     // A client asked for this region while it was stopping:
                     // now that the state is parked, cycle it right back in.
                     self.subscribe(client, rc);
                 }
-                let _ = now_ms;
             }
             RegionOutput::Departures(list) => {
                 for (mut bundle, target) in list {
@@ -735,6 +740,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 // Already dead: nothing to park (state lost), just clean up.
                 log::error!("region {:?} died before shutdown", rc);
                 self.regions.remove(&rc);
+                self.pending_events.remove(&rc);
                 self.spawner.reap(rc);
             }
         }
@@ -912,6 +918,7 @@ impl<S: RegionSpawner> WorldManager<S> {
         }
         log::error!("region {:?} thread died; respawning", rc);
         let subscribers = self.regions.remove(&rc).unwrap().subscribers;
+        self.pending_events.remove(&rc);
         self.spawner.reap(rc);
         self.ensure_running(rc);
         let link = self.regions.get_mut(&rc).unwrap();

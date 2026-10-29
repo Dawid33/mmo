@@ -331,4 +331,42 @@ mod manager {
         assert_eq!(players_in(&mut h, SPAWN_REGION), 0);
         assert_eq!(players_in(&mut h, target), 1);
     }
+
+    #[test]
+    fn play_while_home_is_mid_shutdown() {
+        let mut h = with_map();
+        // Disconnect-free: drop the home's keep-alive by releasing nothing;
+        // drive the stop directly. Disconnect, expire, Shutdown sent but not
+        // yet processed (no settle), then reconnect and Play.
+        h.event(ServerEvent::ClientDisconnected(0), 10);
+        let late = 10 + UNLOAD_GRACE_MS + 1;
+        h.manager.maintain(late); // Shutdown queued; Stopped not yet handled
+        h.manager.handle_server_event(ServerEvent::ClientConnected(0), late);
+        let target = RegionCoords::new(1, 0);
+        h.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(target), 0), late);
+        h.settle(late);
+        assert_eq!(players_in(&mut h, SPAWN_REGION), 0);
+        assert_eq!(players_in(&mut h, target), 1);
+        // The re-woken old region has no keep-alive reason: it re-parks.
+        let later = late + UNLOAD_GRACE_MS + 1;
+        h.manager.maintain(later);
+        h.settle(later);
+        assert!(!h.manager.running_regions().contains(&SPAWN_REGION));
+    }
+
+    #[test]
+    fn play_into_a_region_that_is_mid_shutdown() {
+        let mut h = with_map();
+        let target = RegionCoords::new(1, 0);
+        // Run the target, subscribe then release so it times out.
+        h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(target), 0), 0);
+        h.event(ServerEvent::ClientPacket(ClientPacket::ReleaseRegionConnection(target), 0), 10);
+        let late = 10 + UNLOAD_GRACE_MS + 1;
+        h.manager.maintain(late); // Shutdown sent, Stopped pending
+        h.manager.handle_server_event(ServerEvent::ClientPacket(ClientPacket::PlayRegion(target), 0), late);
+        h.settle(late);
+        assert!(h.manager.running_regions().contains(&target));
+        assert_eq!(players_in(&mut h, target), 1);
+        assert_eq!(players_in(&mut h, SPAWN_REGION), 0);
+    }
 }
