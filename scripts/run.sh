@@ -8,6 +8,9 @@
 # Play builds use 256 m regions, as the justfile's play recipes (`play_chunks`);
 # an exported VOXEL_REGION_CHUNKS wins.
 export VOXEL_REGION_CHUNKS="${VOXEL_REGION_CHUNKS:-128}"
+# Pin the client to the RX 6700 XT eGPU (unpinned, wgpu picks the ~30x slower
+# NVK T600). An exported WGPU_ADAPTER_NAME or VOXEL_ADAPTER wins.
+export WGPU_ADAPTER_NAME="${WGPU_ADAPTER_NAME:-${VOXEL_ADAPTER:-6700}}"
 {
 # Server first: it takes the build lock first and is listening by the time the
 # client connects (the client retries its connect either way).

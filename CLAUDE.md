@@ -23,7 +23,7 @@ the important ones are `just build`, `just run` (server + client together),
 tests, clippy, wasm and rust-analyzer all use it. No nightly, no Cranelift
 `cargo-clif`; bump the pin deliberately (then `just smoke` + `just determinism-wasm`).
 Machine-specific bits are overridable variables: `adapter=6700`
-pins the client to a GPU (e.g. `just adapter=6700 run`; defaults to `$VOXEL_ADAPTER`, so exporting that once pins every recipe — unpinned, this box lands on the NVK T600, which is ~30× slower on the voxel opaque pass than even the Intel iGPU).
+pins the client to a GPU (e.g. `just adapter=6700 run`; defaults to `$VOXEL_ADAPTER`, so exporting that once pins every recipe; `scripts/run.sh` defaults to `6700` instead — unpinned, this box lands on the NVK T600, which is ~30× slower on the voxel opaque pass than even the Intel iGPU).
 **Keep the justfile in sync**: when you add, rename, or change how a build/run/test
 command is invoked, update the corresponding recipe (and add a new one for any
 workflow worth a one-word command) in the same change.
