@@ -1,4 +1,8 @@
 import { Button, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, Styles, VerticalFlow } from "@widgets";
+import { GameMenu } from "menu.slint";
+import { WorldMap, WorldMapConfig } from "world-map.slint";
+
+export { WorldMapConfig }
 
 // The whole in-game UI: one transparent window-sized layer that the client
 // draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
@@ -39,6 +43,45 @@ export component GameUi inherits Window {
     callback priority-clicked(int);
     // The "Hide above" button clicked: flip the cutaway.
     callback cut-clicked();
+
+    // The Esc menu and the world map (M). Neither pauses anything; the
+    // client keeps them exclusive (opening the map closes the menu).
+    in-out property <bool> menu-open;
+    in-out property <bool> map-open;
+    // The whole tile grid, `WorldMapConfig.tile-px` pixels per tile.
+    in property <image> map-image;
+    in property <int> map-cols;
+    in property <int> map-rows;
+    // False without a forged world: the map says so instead.
+    in property <bool> map-available;
+    // Tile coordinates on the map (column right, row down); -1 = none.
+    in property <int> home-col: -1;
+    in property <int> home-row: -1;
+    in-out property <int> selected-col: -1;
+    in-out property <int> selected-row: -1;
+    // The selected tile's info, one line each.
+    in property <[string]> tile-lines;
+    in property <bool> play-enabled;
+    // Why Play is disabled; "" when it is not.
+    in property <string> play-reason;
+    // "Loading region…", a refusal; "" for none.
+    in property <string> map-status;
+    in-out property <float> map-zoom: 1;
+    in-out property <length> map-pan-x;
+    in-out property <length> map-pan-y;
+    // Hit-test positions for headless tests (window logical pixels): the
+    // map view's top-left and the Play button's centre.
+    out property <length> map-view-x: map.view-x;
+    out property <length> map-view-y: map.view-y;
+    out property <length> play-button-x: map.play-button-x;
+    out property <length> play-button-y: map.play-button-y;
+
+    callback open-map();
+    callback close-menu();
+    callback close-map();
+    // A tile clicked on the map (it is now `selected-col/row`).
+    callback select-tile(int, int);
+    callback play();
 
     // The drag readout's distance right of and below the cursor; it flips
     // to the other side at the window edge rather than slide under it.
@@ -133,5 +176,38 @@ export component GameUi inherits Window {
             y: drag.content-y;
             text: root.drag-text;
         }
+    }
+
+    if root.menu-open: GameMenu {
+        width: 100%;
+        height: 100%;
+        open-map => { root.open-map(); }
+        close-menu => { root.close-menu(); }
+    }
+
+    // Over everything else. `visible` rather than `if`, so its hit-test
+    // positions above stay readable.
+    map := WorldMap {
+        visible: root.map-open;
+        width: 100%;
+        height: 100%;
+        map-image: root.map-image;
+        map-cols: root.map-cols;
+        map-rows: root.map-rows;
+        map-available: root.map-available;
+        home-col: root.home-col;
+        home-row: root.home-row;
+        selected-col <=> root.selected-col;
+        selected-row <=> root.selected-row;
+        tile-lines: root.tile-lines;
+        play-enabled: root.play-enabled;
+        play-reason: root.play-reason;
+        map-status: root.map-status;
+        map-zoom <=> root.map-zoom;
+        map-pan-x <=> root.map-pan-x;
+        map-pan-y <=> root.map-pan-y;
+        select-tile(col, row) => { root.select-tile(col, row); }
+        play => { root.play(); }
+        close-map => { root.close-map(); }
     }
 }

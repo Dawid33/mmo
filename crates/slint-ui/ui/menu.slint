@@ -1,0 +1,32 @@
+import { Button, FrameFace, GraphicalSets, Styles, VerticalFlow } from "@widgets";
+
+// The in-game menu (Esc). It pauses nothing: the sim keeps running under it.
+export component GameMenu {
+    callback open-map();
+    callback close-menu();
+
+    menu := FrameFace {
+        title: "Menu";
+        width: max(160px, self.content-x + body.preferred-width + Styles.frame.box.padding.right
+            + GraphicalSets.inset(Styles.frame.graphics).right);
+        height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+
+        body := VerticalFlow {
+            x: menu.content-x;
+            y: menu.content-y;
+            width: menu.content-right - menu.content-x;
+
+            Button {
+                text: "World Map";
+                clicked => { root.open-map(); }
+            }
+            Button {
+                text: "Close";
+                clicked => { root.close-menu(); }
+            }
+        }
+    }
+}

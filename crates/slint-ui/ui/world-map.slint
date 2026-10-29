@@ -1,0 +1,212 @@
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
+
+// The map window's tunables. Exported to Rust (`WorldMapConfig`) so the
+// client and the tests share them.
+export global WorldMapConfig {
+    // Logical pixels per tile at zoom 1: the map image has this many pixels
+    // per tile. Must match `worldgen::tile_map::MAP_TILE_PX`.
+    out property <int> tile-px: 8;
+    out property <float> zoom-min: 0.5;
+    out property <float> zoom-max: 8;
+    // Zoom multiplies by this per wheel notch (`wheel-notch` of scroll).
+    out property <float> zoom-step: 1.25;
+    // Matches the client's `WHEEL_LINE_PX`.
+    out property <length> wheel-notch: 40px;
+    // A press that moves further than this is a drag (pan), not a click.
+    out property <length> drag-slop: 4px;
+    // Between the window edge and the map window.
+    out property <length> margin: 24px;
+    out property <length> side-width: 260px;
+    // Between the map and the side panel.
+    out property <length> gap: 8px;
+    out property <color> hover-color: #ffffffa0;
+    out property <color> selected-color: #ffd23c;
+    out property <color> home-color: #3cc8ff;
+    out property <color> view-background: #1a1a1a;
+}
+
+// The world map (M, or the menu's World Map button): one tile per region,
+// zoomable about the cursor (wheel) and pannable (drag); click selects a
+// tile. The side panel shows what is known about the selected tile and the
+// Play button. The client builds `map-image` (`tile-px` pixels per tile) and
+// owns every property but the ones this window edits (selection, zoom, pan).
+export component WorldMap {
+    in property <image> map-image;
+    in property <int> map-cols;
+    in property <int> map-rows;
+    in property <bool> map-available;
+    in property <int> home-col: -1;
+    in property <int> home-row: -1;
+    in-out property <int> selected-col: -1;
+    in-out property <int> selected-row: -1;
+    in property <[string]> tile-lines;
+    in property <bool> play-enabled;
+    in property <string> play-reason;
+    in property <string> map-status;
+    in-out property <float> map-zoom: 1;
+    // Where the map's top-left corner sits in the view.
+    in-out property <length> map-pan-x;
+    in-out property <length> map-pan-y;
+
+    callback select-tile(int, int);
+    callback play();
+    callback close-map();
+
+    // The map view's top-left and the Play button's centre, in window
+    // logical pixels: hit-test positions for headless tests.
+    out property <length> view-x: view.absolute-position.x;
+    out property <length> view-y: view.absolute-position.y;
+    out property <length> play-button-x: play-button.absolute-position.x + play-button.width / 2;
+    out property <length> play-button-y: play-button.absolute-position.y + play-button.height / 2;
+
+    property <length> tile-len: WorldMapConfig.tile-px * 1px * root.map-zoom;
+    // The tile under the pointer, -1 when off the map.
+    property <int> hover-col: touch.has-hover ? root.tile-at(touch.mouse-x - root.map-pan-x, root.map-cols) : -1;
+    property <int> hover-row: touch.has-hover ? root.tile-at(touch.mouse-y - root.map-pan-y, root.map-rows) : -1;
+    // Pan at the press, and whether the press became a drag.
+    property <length> drag-start-x;
+    property <length> drag-start-y;
+    property <bool> dragged;
+
+    pure function tile-at(offset: length, count: int) -> int {
+        offset < 0 || offset >= count * root.tile-len ? -1 : floor(offset / root.tile-len)
+    }
+
+    window := FrameFace {
+        title: "World Map";
+        x: WorldMapConfig.margin;
+        y: WorldMapConfig.margin;
+        width: root.width - 2 * WorldMapConfig.margin;
+        height: root.height - 2 * WorldMapConfig.margin;
+
+        property <length> content-bottom: self.height - Styles.frame.box.padding.bottom
+            - GraphicalSets.inset(Styles.frame.graphics).bottom;
+
+        view := Rectangle {
+            x: window.content-x;
+            y: window.content-y;
+            width: max(0px, window.content-right - window.content-x - WorldMapConfig.side-width - WorldMapConfig.gap);
+            height: max(0px, window.content-bottom - window.content-y);
+            clip: true;
+            background: WorldMapConfig.view-background;
+
+            if root.map-available: Image {
+                x: root.map-pan-x;
+                y: root.map-pan-y;
+                width: root.map-cols * root.tile-len;
+                height: root.map-rows * root.tile-len;
+                source: root.map-image;
+                image-fit: fill;
+                image-rendering: pixelated;
+            }
+            if root.map-available && root.home-col >= 0 && root.home-row >= 0: Rectangle {
+                x: root.map-pan-x + root.home-col * root.tile-len;
+                y: root.map-pan-y + root.home-row * root.tile-len;
+                width: root.tile-len;
+                height: root.tile-len;
+                border-width: 2px;
+                border-color: WorldMapConfig.home-color;
+            }
+            if root.map-available && root.selected-col >= 0 && root.selected-row >= 0: Rectangle {
+                // Inside the home marker when both are on one tile.
+                x: root.map-pan-x + root.selected-col * root.tile-len + 2px;
+                y: root.map-pan-y + root.selected-row * root.tile-len + 2px;
+                width: max(0px, root.tile-len - 4px);
+                height: max(0px, root.tile-len - 4px);
+                border-width: 2px;
+                border-color: WorldMapConfig.selected-color;
+            }
+            if root.map-available && !root.dragged && root.hover-col >= 0 && root.hover-row >= 0: Rectangle {
+                x: root.map-pan-x + root.hover-col * root.tile-len;
+                y: root.map-pan-y + root.hover-row * root.tile-len;
+                width: root.tile-len;
+                height: root.tile-len;
+                border-width: 1px;
+                border-color: WorldMapConfig.hover-color;
+            }
+            if !root.map-available: LabelFace {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: self.preferred-width;
+                height: self.preferred-height;
+                text: "No world map (procedural world)";
+            }
+
+            touch := TouchArea {
+                enabled: root.map-available;
+                pointer-event(event) => {
+                    if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                        root.drag-start-x = root.map-pan-x;
+                        root.drag-start-y = root.map-pan-y;
+                        root.dragged = false;
+                    }
+                }
+                moved => {
+                    if self.pressed {
+                        if !root.dragged && (abs(self.mouse-x - self.pressed-x) > WorldMapConfig.drag-slop
+                            || abs(self.mouse-y - self.pressed-y) > WorldMapConfig.drag-slop) {
+                            root.dragged = true;
+                        }
+                        if root.dragged {
+                            root.map-pan-x = root.drag-start-x + self.mouse-x - self.pressed-x;
+                            root.map-pan-y = root.drag-start-y + self.mouse-y - self.pressed-y;
+                        }
+                    }
+                }
+                clicked => {
+                    if !root.dragged {
+                        let col = root.tile-at(self.pressed-x - root.map-pan-x, root.map-cols);
+                        let row = root.tile-at(self.pressed-y - root.map-pan-y, root.map-rows);
+                        if col >= 0 && row >= 0 {
+                            root.selected-col = col;
+                            root.selected-row = row;
+                            root.select-tile(col, row);
+                        }
+                    }
+                    root.dragged = false;
+                }
+                // Zoom about the cursor: the map point under it stays put.
+                scroll-event(event) => {
+                    if event.delta-y == 0 {
+                        return reject;
+                    }
+                    let zoom = clamp(root.map-zoom * pow(WorldMapConfig.zoom-step, event.delta-y / WorldMapConfig.wheel-notch),
+                        WorldMapConfig.zoom-min, WorldMapConfig.zoom-max);
+                    root.map-pan-x = self.mouse-x - (self.mouse-x - root.map-pan-x) * zoom / root.map-zoom;
+                    root.map-pan-y = self.mouse-y - (self.mouse-y - root.map-pan-y) * zoom / root.map-zoom;
+                    root.map-zoom = zoom;
+                    accept
+                }
+            }
+        }
+
+        side := VerticalFlow {
+            x: view.x + view.width + WorldMapConfig.gap;
+            y: window.content-y;
+            width: WorldMapConfig.side-width;
+
+            if root.selected-col < 0: LabelFace {
+                style: Styles.caption-label;
+                text: root.map-available ? "Select a tile" : "";
+            }
+            for line in root.tile-lines: LabelFace { text: line; }
+            if root.play-reason != "": LabelFace {
+                style: Styles.caption-label;
+                text: root.play-reason;
+            }
+            play-button := Button {
+                text: "Play";
+                enabled: root.play-enabled;
+                clicked => { root.play(); }
+            }
+            Button {
+                text: "Close";
+                clicked => { root.close-map(); }
+            }
+            if root.map-status != "": LabelFace {
+                style: Styles.caption-label;
+                text: root.map-status;
+            }
+        }
+    }
+}
