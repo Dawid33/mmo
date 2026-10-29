@@ -85,6 +85,7 @@ fn draw_dev_ui(
     camera: Query<&GlobalTransform, With<IsDefaultUiCamera>>,
     terrain: Res<TerrainRenderConfig>,
     mut grid: ResMut<GridDebug>,
+    mut boundaries: ResMut<super::boundaries::BoundaryOverlay>,
     mut culling: ResMut<CullingConfig>,
     mut terrain_debug: ResMut<TerrainDebug>,
     debug_flags: Res<DebugFlagsRes>,
@@ -139,6 +140,7 @@ fn draw_dev_ui(
                 ui.end_row();
             });
             ui.separator();
+            ui.checkbox(&mut boundaries.enabled, "Region boundaries (F8)");
             ui.checkbox(&mut grid.enabled, "Chunk grid (F5)");
             ui.checkbox(&mut culling.graph_enabled, "Cave culling (F4)");
             ui.checkbox(&mut terrain_debug.hide_lod, "Hide LOD (F6)");

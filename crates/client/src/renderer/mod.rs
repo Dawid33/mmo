@@ -19,6 +19,7 @@ pub mod commander;
 pub(crate) mod cursor;
 #[cfg(feature = "dev_ui")]
 pub mod dev_ui;
+pub(crate) mod boundaries;
 pub mod config;
 pub mod convert;
 pub(crate) mod diag;
@@ -96,6 +97,8 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<bridge::SnapshotVoxelQueue>()
         .init_resource::<bridge::RetiredRegionRoots>()
         .init_resource::<hud::HudStatus>()
+        .init_resource::<boundaries::BoundaryOverlay>()
+        .init_resource::<boundaries::BoundaryUniform>()
         .init_resource::<avatar::AvatarAssets>()
         .init_resource::<ui_bridge::UiUpdates>()
         .init_resource::<ui_bridge::UiWidgetMap>()
@@ -193,6 +196,7 @@ impl Plugin for SimBridgePlugin {
                 atmosphere::attach_fog,
                 meshing::visibility::toggle_culling,
                 collider_debug::draw_collider_wireframes,
+                (boundaries::toggle_boundary_overlay, boundaries::update_boundary_uniform).chain(),
                 grid_debug::toggle_grid_debug,
                 grid_debug::draw_grid_debug.after(grid_debug::toggle_grid_debug),
                 (grid_debug::toggle_terrain_debug, grid_debug::apply_terrain_debug).chain(),

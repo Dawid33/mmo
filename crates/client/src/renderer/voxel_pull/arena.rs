@@ -161,6 +161,9 @@ pub struct GpuQuadArena {
     /// chunk's records), so it only needs the largest single chunk's quad
     /// count; it grows, never shrinks.
     pub quad_indices: Option<(Buffer, u32)>,
+    /// The region boundary overlay uniform (`BoundaryUniform`), rewritten
+    /// whenever the main world changes it.
+    pub boundaries: Option<Buffer>,
 }
 
 /// The shared quad index buffer's size for a chunk of `quads` quads: at least
@@ -196,6 +199,7 @@ impl Default for GpuQuadArena {
             bind_group: None,
             top_layers: None,
             quad_indices: None,
+            boundaries: None,
         }
     }
 }

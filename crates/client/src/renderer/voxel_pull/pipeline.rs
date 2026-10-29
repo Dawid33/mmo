@@ -14,6 +14,8 @@ use bevy::{
     shader::ShaderDefVal,
 };
 
+use crate::renderer::boundaries::BoundaryUniform;
+
 #[derive(Resource)]
 pub struct VoxelPullPipeline {
     /// Real layout used to build the shared arena bind group in `prepare`.
@@ -31,7 +33,8 @@ impl FromWorld for VoxelPullPipeline {
         // Binding order LOCKED to voxel_pull.wgsl group(1):
         //   0 storage quads, 1 storage transforms, 2 texture_2d_array, 3 sampler,
         //   4 storage top_layers (fragment only — keeps the vertex stage at two
-        //   storage buffers).
+        //   storage buffers), 5 uniform TerrainBoundaries (fragment only; the
+        //   region boundary overlay, `renderer/boundaries.rs`).
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
             (
@@ -40,6 +43,7 @@ impl FromWorld for VoxelPullPipeline {
                 bt::texture_2d_array(TextureSampleType::Float { filterable: true }),
                 bt::sampler(SamplerBindingType::Filtering),
                 bt::storage_buffer_read_only::<u32>(false).visibility(ShaderStages::FRAGMENT),
+                bt::uniform_buffer::<BoundaryUniform>(false).visibility(ShaderStages::FRAGMENT),
             ),
         );
         let chunk_layout = device.create_bind_group_layout("voxel_pull_chunk_layout", &entries);

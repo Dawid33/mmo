@@ -19,6 +19,7 @@ use super::gpu::{
     exact_indirect_draw_count, synchronize_near_metric_mode, ActiveNearMode, ForwardCullSource,
     NearRendererMetrics,
 };
+use super::super::boundaries::BoundaryUniform;
 use super::pipeline::VoxelPullPipeline;
 use super::queue::{grouped_draw_list, ViewChunkDrawList};
 use super::{BlockArrayTexture, BlockTopLayers, ExtractedChunkQuads, RemovedChunkQuads};
@@ -224,6 +225,7 @@ pub fn prepare_chunk_quads(
     images: Res<RenderAssets<GpuImage>>,
     block_texture: Res<BlockArrayTexture>,
     top_layers: Option<Res<BlockTopLayers>>,
+    boundaries: Option<Res<BoundaryUniform>>,
     mut arena: ResMut<GpuQuadArena>,
     removed: Res<RemovedChunkQuads>,
 ) {
@@ -245,6 +247,21 @@ pub fn prepare_chunk_quads(
         });
         arena.top_layers = Some((buffer, top_layers.is_some()));
         rebuild_bind_group = true;
+    }
+    // The boundary overlay uniform: created once, rewritten when the
+    // extracted value changes (or before the main world has sent one, as the
+    // all-off default).
+    if arena.boundaries.is_none() {
+        arena.boundaries = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("voxel_pull_boundaries"),
+            size: BoundaryUniform::min_size().get(),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        write_boundaries(&queue, &arena, &boundaries.as_deref().copied().unwrap_or_default());
+        rebuild_bind_group = true;
+    } else if let Some(value) = boundaries.as_ref().filter(|b| b.is_changed()) {
+        write_boundaries(&queue, &arena, value);
     }
     // The shared quad index buffer must cover the largest single chunk.
     let largest = chunks
@@ -343,9 +360,12 @@ pub fn prepare_chunk_quads(
         let Some(texture) = texture else {
             return;
         };
-        let (Some(records), Some(transforms), Some((top_layers, _))) =
-            (arena.records.binding(), arena.transforms.binding(), arena.top_layers.as_ref())
-        else {
+        let (Some(records), Some(transforms), Some((top_layers, _)), Some(boundaries)) = (
+            arena.records.binding(),
+            arena.transforms.binding(),
+            arena.top_layers.as_ref(),
+            arena.boundaries.as_ref(),
+        ) else {
             return;
         };
         arena.bind_group = Some(device.create_bind_group(
@@ -357,9 +377,19 @@ pub fn prepare_chunk_quads(
                 &texture.texture_view,
                 &texture.sampler,
                 top_layers.as_entire_binding(),
+                boundaries.as_entire_binding(),
             )),
         ));
     }
+}
+
+fn write_boundaries(queue: &RenderQueue, arena: &GpuQuadArena, value: &BoundaryUniform) {
+    let Some(buffer) = arena.boundaries.as_ref() else {
+        return;
+    };
+    let mut bytes = encase::UniformBuffer::new(Vec::<u8>::new());
+    bytes.write(value).expect("BoundaryUniform encodes");
+    queue.write_buffer(buffer, 0, bytes.as_ref());
 }
 
 #[cfg(test)]

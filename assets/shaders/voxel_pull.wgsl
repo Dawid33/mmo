@@ -16,6 +16,17 @@
 // (BlockTextureLayers::side_to_top). Fragment stage only.
 @group(1) @binding(4) var<storage, read> top_layers: array<u32>;
 
+// Region boundary overlay, mirrored from BoundaryUniform in
+// crates/client/src/renderer/boundaries.rs (the source of truth, incl. the
+// meaning of every field). A home opacity (home_color.a) of 0 turns it off.
+struct TerrainBoundaries {
+    home_rect: vec4<f32>,
+    home_color: vec4<f32>,
+    shape: vec4<f32>,
+    dim: vec4<f32>,
+}
+@group(1) @binding(5) var<uniform> boundaries: TerrainBoundaries;
+
 // Locked to Face::index() order (PosX, NegX, PosY, NegY, PosZ, NegZ) — same
 // tables as voxel_texture.wgsl (copied: WGSL has no cross-file consts here).
 const FACE_NORMALS = array<vec3<f32>, 6>(
@@ -171,6 +182,35 @@ fn apply_distance_fog(color: vec3<f32>, world_position: vec3<f32>) -> vec3<f32> 
     return color;
 }
 
+// Draw the home region's perimeter onto `color` at ground point `p` (world
+// xz) as a line `shape.x` world units wide (at least `shape.y` pixels) that
+// starts on the edge and grows outward — nothing is drawn inside the play
+// area — and dim what lies outside it.
+fn apply_boundaries(color: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
+    let b = boundaries;
+    if (b.home_color.a <= 0.0) {
+        return color;
+    }
+    // Signed distance to the home rect (negative inside), and its screen
+    // footprint, which converts it to pixels for antialiasing.
+    let q = max(b.home_rect.xy - p, p - b.home_rect.zw);
+    let sd = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0);
+    let unit_px = 1.0 / max(fwidth(sd), 1e-4);
+    let sd_px = sd * unit_px;
+    var c = color;
+    if (sd > 0.0) {
+        // Outside home: darken and desaturate, eased in from the edge.
+        let t = smoothstep(0.0, b.shape.z, sd);
+        let luma = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        c = mix(c, vec3<f32>(luma), b.dim.y * t) * (1.0 - b.dim.x * t);
+    }
+    // Both antialiased edges sit outside the perimeter: the inner one fades
+    // in over the first pixel past it.
+    let w = max(b.shape.x * unit_px, b.shape.y);
+    let line = smoothstep(0.0, 1.0, sd_px) * (1.0 - smoothstep(w, w + 1.0, sd_px));
+    return mix(c, b.home_color.rgb, line * b.home_color.a);
+}
+
 @fragment
 fn fragment(in: PullVertexOutput) -> @location(0) vec4<f32> {
     // Derivatives first, in uniform control flow.
@@ -229,5 +269,6 @@ fn fragment(in: PullVertexOutput) -> @location(0) vec4<f32> {
     // `view.exposure * (transmitted_light + direct_light + indirect_light)`
     // line) — without it every pixel saturates to white.
     lit *= view.exposure;
-    return vec4<f32>(apply_distance_fog(base * lit, in.world_position.xyz), 1.0);
+    let overlaid = apply_boundaries(base * lit, in.world_position.xz);
+    return vec4<f32>(apply_distance_fog(overlaid, in.world_position.xyz), 1.0);
 }

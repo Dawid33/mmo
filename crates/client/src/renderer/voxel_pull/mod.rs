@@ -194,6 +194,7 @@ impl Plugin for VoxelPullPlugin {
         app.add_plugins((
             ExtractResourcePlugin::<BlockArrayTexture>::default(),
             ExtractResourcePlugin::<BlockTopLayers>::default(),
+            ExtractResourcePlugin::<super::boundaries::BoundaryUniform>::default(),
         ));
         // Main-world tally driving the `[pull-mem]` headline log in
         // `apply_meshed_chunks`. Registered here (not in `renderer/mod.rs`) so
