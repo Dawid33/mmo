@@ -20,7 +20,7 @@ pub fn derive_state_hash(input: TokenStream) -> TokenStream {
 
 enum Attr {
     Skip,
-    Bound(syn::WherePredicate),
+    Bound(Box<syn::WherePredicate>),
     With(syn::Path),
 }
 
@@ -36,7 +36,7 @@ fn attrs(attrs: &[syn::Attribute]) -> syn::Result<Vec<Attr>> {
                 let preds = s.parse_with(
                     syn::punctuated::Punctuated::<syn::WherePredicate, syn::Token![,]>::parse_terminated,
                 )?;
-                out.extend(preds.into_iter().map(Attr::Bound));
+                out.extend(preds.into_iter().map(|p| Attr::Bound(Box::new(p))));
                 Ok(())
             } else if m.path.is_ident("with") {
                 let s: syn::LitStr = m.value()?.parse()?;
@@ -75,7 +75,7 @@ fn expand(input: &mut DeriveInput) -> syn::Result<TokenStream2> {
     let custom_bounds: Vec<_> = type_attrs
         .into_iter()
         .filter_map(|a| match a {
-            Attr::Bound(p) => Some(p),
+            Attr::Bound(p) => Some(*p),
             _ => None,
         })
         .collect();

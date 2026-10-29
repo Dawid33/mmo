@@ -19,7 +19,7 @@ Common tasks are wrapped in the root `justfile` — prefer it over retyping raw
 the important ones are `just build`, `just run` (server + client together),
 `just server`, `just client`, `just smoke`, `just test-one`, `just web`,
 `just world-map`, and `just clippy`. **One toolchain for everything: stable Rust, pinned in `rust-toolchain.toml`**
-(currently 1.96.0, with `wasm32-unknown-unknown`, rustfmt and clippy) — builds,
+(currently 1.99.1, with `wasm32-unknown-unknown`, rustfmt and clippy) — builds,
 tests, clippy, wasm and rust-analyzer all use it. No nightly, no Cranelift
 `cargo-clif`; bump the pin deliberately (then `just smoke` + `just determinism-wasm`).
 Machine-specific bits are overridable variables: `adapter=6700`

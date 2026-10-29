@@ -4,6 +4,6 @@
 # `just determinism-wasm`), never via a floating `stable`. No nightly, no
 # Cranelift wrapper.
 [toolchain]
-channel = "1.96.0"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]
 targets = ["wasm32-unknown-unknown"]
