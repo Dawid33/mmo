@@ -342,6 +342,8 @@ fn selection_lines(kinds: impl IntoIterator<Item = game::EntityKind>) -> Vec<Str
 pub enum ToolbarAction {
     SelectTool(Option<Tool>),
     SetPriority(u8),
+    /// The "Hide above" button: flip the cutaway, as `C` does.
+    ToggleCut,
 }
 
 thread_local! {
@@ -355,6 +357,26 @@ thread_local! {
 pub fn tool_action(index: i32) -> ToolbarAction {
     let tool = usize::try_from(index).ok().and_then(|i| TOOL_KEYS.get(i)).map(|(_, tool)| *tool);
     ToolbarAction::SelectTool(tool)
+}
+
+/// Apply one tool bar click. Tools are picked only with a home region
+/// (`available`), as with the hotkeys; putting the tool down always works.
+pub fn apply_toolbar_action(
+    action: ToolbarAction,
+    available: bool,
+    state: &mut DesignateState,
+    level: Option<&mut WorkingLevel>,
+) {
+    match action {
+        ToolbarAction::SelectTool(tool) if available || tool.is_none() => state.set_tool(tool),
+        ToolbarAction::SelectTool(_) => {}
+        ToolbarAction::SetPriority(priority) => state.priority = priority,
+        ToolbarAction::ToggleCut => {
+            if let Some(level) = level {
+                level.cut = !level.cut;
+            }
+        }
+    }
 }
 
 /// A tool bar button's text: the tool and its hotkey, "[G] Dig".
@@ -384,7 +406,7 @@ pub fn level_text(level: i32, surface_level: Option<i32>) -> String {
 struct ToolbarParams<'w, 's> {
     designate: Option<ResMut<'w, DesignateState>>,
     readout: Option<Res<'w, DragReadout>>,
-    level: Option<Res<'w, WorkingLevel>>,
+    level: Option<ResMut<'w, WorkingLevel>>,
     grid: Option<Res<'w, HeightGrid>>,
     cam: Option<Res<'w, CommanderCamera>>,
     mirror: Option<Res<'w, TileMirror>>,
@@ -393,8 +415,9 @@ struct ToolbarParams<'w, 's> {
     connected: Local<'s, bool>,
 }
 
-/// Tool bar clicks → [`DesignateState`] (as the hotkeys set it), then the
-/// tool, priority, level and drag readout → the UI, each only when changed.
+/// Tool bar clicks → [`DesignateState`] / [`WorkingLevel`] (as the hotkeys
+/// set them), then the tool, priority, cut, level and drag readout → the
+/// UI, each only when changed.
 fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     if !*p.connected {
         ui.on_tool_clicked(|i| TOOLBAR_ACTIONS.with(|q| q.borrow_mut().push(tool_action(i))));
@@ -402,6 +425,7 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
             let priority = priority.clamp(1, game::MAX_PRIORITY as i32) as u8;
             TOOLBAR_ACTIONS.with(|q| q.borrow_mut().push(ToolbarAction::SetPriority(priority)));
         });
+        ui.on_cut_clicked(|| TOOLBAR_ACTIONS.with(|q| q.borrow_mut().push(ToolbarAction::ToggleCut)));
         let labels: Vec<SharedString> = TOOL_KEYS.iter().map(|(_, t)| tool_button_text(*t).into()).collect();
         ui.set_tool_labels(ModelRc::new(VecModel::from(labels)));
         *p.connected = true;
@@ -414,16 +438,7 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     }
     let Some(state) = p.designate.as_mut() else { return };
     for action in actions {
-        match action {
-            ToolbarAction::SelectTool(tool) if available || tool.is_none() => {
-                if state.tool != tool {
-                    state.tool = tool;
-                    state.drag = None;
-                }
-            }
-            ToolbarAction::SelectTool(_) => {}
-            ToolbarAction::SetPriority(priority) => state.priority = priority,
-        }
+        apply_toolbar_action(action, available, state, p.level.as_deref_mut());
     }
     let active = tool_index(state.tool);
     if ui.get_active_tool() != active {
@@ -431,6 +446,12 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     }
     if ui.get_priority() != state.priority as i32 {
         ui.set_priority(state.priority as i32);
+    }
+
+    // The cut is on by default; without a working level it shows as on.
+    let cut = p.level.as_ref().is_none_or(|l| l.cut);
+    if ui.get_cut_above() != cut {
+        ui.set_cut_above(cut);
     }
 
     let surface = match (&p.grid, &p.cam) {
@@ -553,7 +574,7 @@ mod tests {
 
     #[test]
     fn ui_actions_map_tool_indices() {
-        assert_eq!(tool_action(2), ToolbarAction::SelectTool(Some(Tool::Wall)));
+        assert_eq!(tool_action(2), ToolbarAction::SelectTool(Some(Tool::Build)));
         assert_eq!(tool_action(-1), ToolbarAction::SelectTool(None));
         assert_eq!(tool_action(TOOL_KEYS.len() as i32), ToolbarAction::SelectTool(None));
         for (i, (_, tool)) in TOOL_KEYS.iter().enumerate() {
@@ -561,5 +582,34 @@ mod tests {
         }
         assert_eq!(tool_index(None), -1);
         assert_eq!(tool_button_text(Tool::Dig), "[G] Dig");
+        assert_eq!(tool_button_text(Tool::Build), "[B] Build");
+    }
+
+    #[test]
+    fn cut_button_flips_the_cut_like_c() {
+        let mut state = DesignateState::default();
+        let mut level = WorkingLevel::default();
+        assert!(level.cut, "hiding what is above is the default");
+        apply_toolbar_action(ToolbarAction::ToggleCut, true, &mut state, Some(&mut level));
+        assert!(!level.cut);
+        apply_toolbar_action(ToolbarAction::ToggleCut, true, &mut state, Some(&mut level));
+        assert!(level.cut);
+        // Not in commander mode: nothing to flip, no panic.
+        apply_toolbar_action(ToolbarAction::ToggleCut, true, &mut state, None);
+    }
+
+    #[test]
+    fn tool_buttons_select_and_clear_the_box() {
+        let mut state = DesignateState::default();
+        apply_toolbar_action(tool_action(2), false, &mut state, None);
+        assert_eq!(state.tool, None, "no tools without a home region");
+        apply_toolbar_action(tool_action(2), true, &mut state, None);
+        assert_eq!(state.tool, Some(Tool::Build));
+        let drag = crate::renderer::commander::designate::Drag { anchor: [0; 3], corner: [0; 3], erase: false };
+        state.drag = Some(drag);
+        apply_toolbar_action(tool_action(0), true, &mut state, None);
+        assert_eq!((state.tool, state.drag), (Some(Tool::Dig), None));
+        apply_toolbar_action(tool_action(-1), false, &mut state, None);
+        assert_eq!(state.tool, None, "putting the tool down always works");
     }
 }

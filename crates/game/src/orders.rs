@@ -1,6 +1,7 @@
-//! Fortress orders: what a player may designate on a region's tiles, the
-//! pure rules for which tiles accept which designation, and how a mouse drag
-//! resolves to a box. Engine-free and state-free; the sim state and the
+//! Fortress orders: what a player may designate on a region's tiles and the
+//! pure rules for which tiles accept which designation. An order covers
+//! exactly the box between the two corners the player picked
+//! ([`TileBox::new`]). Engine-free and state-free; the sim state and the
 //! client tools build on these names.
 //!
 //! A tile is one 1 m block; `TilePos` is region-local block coordinates and a
@@ -19,8 +20,6 @@ use state_hash::StateHash;
 /// Region-local block coordinates `[x, y, z]`.
 pub type TilePos = BlockPos;
 
-/// The one race's height in levels: what a wall drag on a single level covers.
-pub const DWARF_HEIGHT_LEVELS: i32 = 2;
 /// Priority of an order that does not choose one.
 pub const DEFAULT_PRIORITY: u8 = 4;
 /// Priorities run `1..=MAX_PRIORITY`.
@@ -197,34 +196,6 @@ pub fn summarize(src: &impl TileSource, kind: DesignationKind, area: TileBox) ->
         }
     }
     out
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DragShape {
-    Box,
-    /// One level high becomes dwarf height; an explicit `y` range is kept.
-    Wall,
-    /// A single layer under the level you stand on.
-    Floor,
-}
-
-/// The box a drag from `anchor` to `corner` covers.
-pub fn resolve_drag(shape: DragShape, anchor: TilePos, corner: TilePos) -> TileBox {
-    let mut b = TileBox::new(anchor, corner);
-    match shape {
-        DragShape::Box => {}
-        DragShape::Wall => {
-            if anchor[1] == corner[1] {
-                b.max[1] = b.min[1] + DWARF_HEIGHT_LEVELS - 1;
-            }
-        }
-        DragShape::Floor => {
-            let y = anchor[1].min(corner[1]) - 1;
-            b.min[1] = y;
-            b.max[1] = y;
-        }
-    }
-    b
 }
 
 /// The part of an order's `area` it acts on: clipped to the region, `None`

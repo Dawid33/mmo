@@ -1,20 +1,24 @@
-//! Designation tools: DF-style dig / deconstruct / wall / floor / erase
-//! orders painted onto the home region's tiles at the working level.
+//! Designation tools: DF-style dig / deconstruct / build / erase orders
+//! painted onto the home region's tiles at the working level.
 //!
 //! A tool key ([`TOOL_KEYS`]) picks a tool; the tile under the cursor at the
-//! working level is the hover ([`pick_level_cell`]). A left drag spans a box
-//! from the tile it started on to the hovered column at the CURRENT working
-//! level — Alt+wheel steps the level mid-drag, so one drag covers several
-//! levels — and its release sends the box as a sim [`Order`] (Ctrl held: an
-//! erase of the tool's kind). While it is held, [`DragPreview`] carries the
-//! box and each tile's validity for the overlay, and [`DragReadout`] the
-//! size-and-reasons line. Esc or a right click (not a right drag, which still
-//! orbits) drops the drag, or with none the tool; Ctrl+Z cancels the last
-//! order sent; 1–7 set the priority while a tool is active.
+//! working level is the hover ([`pick_level_cell`]). A box is picked by its
+//! two corners ([`step_corners`]), either way: click a tile (press and
+//! release without moving) to anchor the first corner, then click again for
+//! the second; or press, drag and release. The moving corner is the hovered
+//! column at the CURRENT working level — Alt+wheel / PgUp / PgDn step the
+//! level between the clicks or mid-drag, and the camera may move, so one box
+//! covers several levels — and the commit sends exactly that box as a sim
+//! [`Order`] (Ctrl held at the commit: an erase of the tool's kind). While a
+//! box is open, [`DragPreview`] carries it and each tile's validity for the
+//! overlay, and [`DragReadout`] the size-and-reasons line. Esc or a right
+//! click (not a right drag, which still orbits) drops the box, or with none
+//! the tool; Ctrl+Z cancels the last order sent; 1–7 set the priority while a
+//! tool is active.
 //!
-//! Gizmos draw the drag box (bright where visible, dimmed through terrain),
-//! the hover cell, and the build designations (walls and floors sit in air,
-//! where the overlay has no face to tint) as merged ghost cuboids.
+//! Gizmos draw the open box (bright where visible, dimmed through terrain),
+//! the hover cell, and the build designations (they sit in air, where the
+//! overlay has no face to tint) as merged ghost cuboids.
 //!
 //! Legacy regions only: in cell mode the tile mirror has no home region, so
 //! there is nothing to pick and no tool can be chosen.
@@ -26,9 +30,9 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::rapier3d::math::Vector;
 use game::{
-    pick_level_cell, resolve_drag, validate, BlockId, Designation, DesignationKind, DragShape, Invalid,
-    OpId, Order, OrderSummary, RegionId, TileBox, TilePos, TileSource, BLOCK_VOXELS, DEFAULT_PRIORITY,
-    DWARF_HEIGHT_LEVELS, MAX_ORDER_TILES, MAX_PRIORITY, REGION_BLOCKS,
+    pick_level_cell, validate, BlockId, Designation, DesignationKind, Invalid, OpId, Order, OrderSummary,
+    RegionId, TileBox, TilePos, TileSource, BLOCK_VOXELS, DEFAULT_PRIORITY, MAX_ORDER_TILES, MAX_PRIORITY,
+    REGION_BLOCKS,
 };
 
 use super::level::WorkingLevel;
@@ -44,18 +48,18 @@ use crate::renderer::{GameEvents, LocalPlayer};
 pub enum Tool {
     Dig,
     Deconstruct,
-    Wall,
-    Floor,
+    /// Fills exactly the picked box with [`game::edit::PLACE_BLOCK`]; a wall
+    /// or a tower is a box whose corners sit on different levels.
+    Build,
     Erase,
 }
 
 /// Tool hotkeys (bare, no Ctrl — Ctrl+Z is undo). Kept off the camera's
 /// WASD / arrows / Space / Shift.
-pub const TOOL_KEYS: [(KeyCode, Tool); 5] = [
+pub const TOOL_KEYS: [(KeyCode, Tool); 4] = [
     (KeyCode::KeyG, Tool::Dig),
     (KeyCode::KeyX, Tool::Deconstruct),
-    (KeyCode::KeyB, Tool::Wall),
-    (KeyCode::KeyV, Tool::Floor),
+    (KeyCode::KeyB, Tool::Build),
     (KeyCode::KeyZ, Tool::Erase),
 ];
 
@@ -73,6 +77,10 @@ pub const PRIORITY_KEYS: [KeyCode; MAX_PRIORITY as usize] = [
 
 /// At most this many merged build-ghost cuboids are drawn per frame.
 pub const MAX_GHOST_BOXES: usize = 4096;
+/// Build ghosts are drawn from the overlay's base level up to this many
+/// levels above the working level, so the top of a two-level wall built
+/// from the level below still shows above the cut.
+pub const GHOST_LEVELS_ABOVE: i32 = 1;
 
 /// How much the hover outline is grown past its cell, in sim units, so it
 /// does not z-fight the block faces.
@@ -93,16 +101,8 @@ impl Tool {
         match self {
             Tool::Dig => Some(DesignationKind::Dig),
             Tool::Deconstruct => Some(DesignationKind::Deconstruct),
-            Tool::Wall | Tool::Floor => Some(DesignationKind::Build(game::edit::PLACE_BLOCK)),
+            Tool::Build => Some(DesignationKind::Build(game::edit::PLACE_BLOCK)),
             Tool::Erase => None,
-        }
-    }
-
-    pub fn shape(self) -> DragShape {
-        match self {
-            Tool::Wall => DragShape::Wall,
-            Tool::Floor => DragShape::Floor,
-            Tool::Dig | Tool::Deconstruct | Tool::Erase => DragShape::Box,
         }
     }
 
@@ -110,8 +110,7 @@ impl Tool {
         match self {
             Tool::Dig => "Dig",
             Tool::Deconstruct => "Deconstruct",
-            Tool::Wall => "Wall",
-            Tool::Floor => "Floor",
+            Tool::Build => "Build",
             Tool::Erase => "Erase",
         }
     }
@@ -121,14 +120,13 @@ impl Tool {
         match self {
             Tool::Dig => "G",
             Tool::Deconstruct => "X",
-            Tool::Wall => "B",
-            Tool::Floor => "V",
+            Tool::Build => "B",
             Tool::Erase => "Z",
         }
     }
 }
 
-/// A left drag in progress: the tile it started on, the tile it reaches now
+/// An open box: its first corner, the corner that follows the cursor now
 /// (its `y` the working level), and whether it erases (Ctrl held).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Drag {
@@ -137,11 +135,90 @@ pub struct Drag {
     pub erase: bool,
 }
 
+/// Where the two-corner pick stands. Pure: [`step_corners`] moves it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum CornerPhase {
+    #[default]
+    Idle,
+    /// The left button is down. `start` is the box's first corner: the
+    /// pressed tile, or the anchor when the press came while `anchored`.
+    Pressed { start: TilePos, press_px: Vec2, anchored: bool },
+    /// The first corner is set by a click; the next click sets the second.
+    Anchored { anchor: TilePos },
+}
+
+impl CornerPhase {
+    /// The box's first corner, while one is open.
+    pub fn start(self) -> Option<TilePos> {
+        match self {
+            CornerPhase::Idle => None,
+            CornerPhase::Pressed { start, .. } => Some(start),
+            CornerPhase::Anchored { anchor } => Some(anchor),
+        }
+    }
+}
+
+/// Left press / release at a tile (`px`: the cursor, window pixels), or Esc /
+/// right click.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CornerEvent {
+    Press { cell: TilePos, px: Vec2 },
+    Release { cell: TilePos, px: Vec2 },
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CornerOutcome {
+    None,
+    /// The box from `a` to `b` is picked: send it.
+    Commit { a: TilePos, b: TilePos },
+    /// An open box was dropped.
+    Cancelled,
+}
+
+/// One step of the two-corner pick. A release within `drag_threshold_px` of
+/// its press is a click: the first click anchors, the second commits from
+/// the anchor to the released tile. A release further away is a drag and
+/// commits from the press to it — or, if the press came while anchored,
+/// from the anchor (a drag finishes an anchored box rather than starting a
+/// new one). Cancel drops an open box; with none it is a no-op here (the
+/// caller then puts the tool down).
+pub fn step_corners(phase: &mut CornerPhase, ev: CornerEvent, drag_threshold_px: f32) -> CornerOutcome {
+    match (*phase, ev) {
+        (CornerPhase::Idle, CornerEvent::Press { cell, px }) => {
+            *phase = CornerPhase::Pressed { start: cell, press_px: px, anchored: false };
+            CornerOutcome::None
+        }
+        (CornerPhase::Anchored { anchor }, CornerEvent::Press { px, .. }) => {
+            *phase = CornerPhase::Pressed { start: anchor, press_px: px, anchored: true };
+            CornerOutcome::None
+        }
+        (CornerPhase::Pressed { start, press_px, anchored }, CornerEvent::Release { cell, px }) => {
+            if !anchored && px.distance(press_px) <= drag_threshold_px {
+                *phase = CornerPhase::Anchored { anchor: start };
+                CornerOutcome::None
+            } else {
+                *phase = CornerPhase::Idle;
+                CornerOutcome::Commit { a: start, b: cell }
+            }
+        }
+        (CornerPhase::Idle, CornerEvent::Cancel) => CornerOutcome::None,
+        (_, CornerEvent::Cancel) => {
+            *phase = CornerPhase::Idle;
+            CornerOutcome::Cancelled
+        }
+        // A second press while held, or a release whose press was not ours.
+        _ => CornerOutcome::None,
+    }
+}
+
 /// The designation tools' client-local state.
 #[derive(Resource, Debug)]
 pub struct DesignateState {
     pub tool: Option<Tool>,
     pub priority: u8,
+    /// The two-corner pick; `drag` is `Some` exactly while it is not idle.
+    pub corners: CornerPhase,
     pub drag: Option<Drag>,
     /// The tile under the cursor at the working level (region-local).
     pub hover: Option<TilePos>,
@@ -153,22 +230,45 @@ pub struct DesignateState {
 
 impl Default for DesignateState {
     fn default() -> Self {
-        Self { tool: None, priority: DEFAULT_PRIORITY, drag: None, hover: None, next_seq: 0, sent: Vec::new() }
+        Self {
+            tool: None,
+            priority: DEFAULT_PRIORITY,
+            corners: CornerPhase::Idle,
+            drag: None,
+            hover: None,
+            next_seq: 0,
+            sent: Vec::new(),
+        }
     }
 }
 
 impl DesignateState {
-    /// Esc / right click: drop the drag if there is one, else the tool.
+    /// Esc / right click: drop the open box if there is one, else the tool.
     pub fn cancel(&mut self) {
-        if self.drag.take().is_none() {
+        if step_corners(&mut self.corners, CornerEvent::Cancel, DRAG_THRESHOLD_PX) == CornerOutcome::None {
             self.tool = None;
+        }
+        self.drag = None;
+    }
+
+    /// Drop any open box (the tool changed or went away).
+    pub fn clear_box(&mut self) {
+        self.corners = CornerPhase::Idle;
+        self.drag = None;
+    }
+
+    /// Pick `tool` (or none), dropping the open box when it changes.
+    pub fn set_tool(&mut self, tool: Option<Tool>) {
+        if self.tool != tool {
+            self.tool = tool;
+            self.clear_box();
         }
     }
 
     /// The box the drag covers and whether it erases, with the tool.
     fn drag_area(&self) -> Option<(Tool, TileBox, bool)> {
         let (tool, drag) = (self.tool?, self.drag?);
-        Some((tool, resolve_drag(tool.shape(), drag.anchor, drag.corner), drag.erase))
+        Some((tool, TileBox::new(drag.anchor, drag.corner), drag.erase))
     }
 }
 
@@ -186,7 +286,7 @@ pub fn no_tool_active(state: Res<DesignateState>) -> bool {
     state.tool.is_none()
 }
 
-/// The order a released drag sends: an erase for the erase tool or with
+/// The order a committed box sends: an erase for the erase tool or with
 /// Ctrl (of the tool's kind only), otherwise the tool's designation.
 pub fn order_for(tool: Tool, area: TileBox, erase: bool, op: OpId, priority: u8) -> Order {
     match tool.kind() {
@@ -329,17 +429,13 @@ pub fn designate_keys(
     // No home region (cell mode, or not joined yet): no tools.
     if mirror.region().is_none() {
         if state.tool.is_some() {
-            state.tool = None;
-            state.drag = None;
+            state.set_tool(None);
         }
         return;
     }
     for key in keys.get_just_pressed() {
         if let Some(tool) = tool_for_key(*key, ctrl) {
-            if state.tool != Some(tool) {
-                state.tool = Some(tool);
-                state.drag = None;
-            }
+            state.set_tool(Some(tool));
         }
     }
     if state.tool.is_some() {
@@ -382,7 +478,8 @@ pub fn update_hover(
     }
 }
 
-/// Left press / hold / release → drags and orders; a right click cancels.
+/// Left presses and releases → corners ([`step_corners`]) and orders; a
+/// right click cancels.
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn drag_input(
     buttons: Res<ButtonInput<MouseButton>>,
@@ -416,29 +513,39 @@ pub fn drag_input(
 
     let Some(tool) = state.tool else { return };
     let ctrl = ctrl_held(&keys);
+    let cursor = window.cursor_position();
     if buttons.just_pressed(MouseButton::Left) {
-        let over_minimap =
-            window.cursor_position().is_some_and(|c| minimap::screen_rect(window.size()).contains(c));
+        let over_minimap = cursor.is_some_and(|c| minimap::screen_rect(window.size()).contains(c));
         let blocked = policy.overlay_open || policy.ui_pointer || minimap_pointer.dragging || over_minimap;
-        if let (false, Some(at)) = (blocked, state.hover) {
-            state.drag = Some(Drag { anchor: at, corner: at, erase: ctrl });
+        if let (false, Some(at), Some(px)) = (blocked, state.hover, cursor) {
+            step_corners(&mut state.corners, CornerEvent::Press { cell: at, px }, DRAG_THRESHOLD_PX);
         }
     }
-    let Some(mut drag) = state.drag else { return };
-    drag.corner = follow_corner(drag.corner, state.hover, working.level);
-    drag.erase = ctrl;
+    let Some(start) = state.corners.start() else { return };
+    // The moving corner follows the hover and the working level, whether
+    // the button is held (a drag) or not (anchored, waiting for the click).
+    let corner = follow_corner(state.drag.map_or(start, |d| d.corner), state.hover, working.level);
+    let drag = Drag { anchor: start, corner, erase: ctrl };
     if state.drag != Some(drag) {
         state.drag = Some(drag);
     }
+    let pressed = matches!(state.corners, CornerPhase::Pressed { .. });
     if !buttons.just_released(MouseButton::Left) {
-        if !buttons.pressed(MouseButton::Left) {
-            // The release went elsewhere (focus loss): drop the drag.
-            state.drag = None;
+        if pressed && !buttons.pressed(MouseButton::Left) {
+            // The release went elsewhere (focus loss): drop the box.
+            state.clear_box();
         }
         return;
     }
+    // Releasing with the cursor outside the window counts as a drag.
+    let px = cursor.unwrap_or(Vec2::INFINITY);
+    let CornerOutcome::Commit { a, b } =
+        step_corners(&mut state.corners, CornerEvent::Release { cell: corner, px }, DRAG_THRESHOLD_PX)
+    else {
+        return;
+    };
     state.drag = None;
-    let area = resolve_drag(tool.shape(), drag.anchor, drag.corner);
+    let area = TileBox::new(a, b);
     let fits = area.clip_to_region().is_some_and(|a| a.tile_count() <= MAX_ORDER_TILES);
     let Some(client) = local.0 else { return };
     if !fits {
@@ -545,7 +652,7 @@ pub fn draw_designate_gizmos(
         let key = Some((mirror.version(), level));
         if ghosts.key != key {
             ghosts.key = key;
-            let (lo, hi) = (overlay_base_level(level), level + DWARF_HEIGHT_LEVELS);
+            let (lo, hi) = (overlay_base_level(level), level + GHOST_LEVELS_ABOVE);
             let mut builds: Vec<TilePos> = mirror
                 .designations()
                 .iter()
@@ -606,11 +713,108 @@ mod tests {
     }
 
     #[test]
-    fn wall_tool_resolves_two_levels() {
-        let area = resolve_drag(Tool::Wall.shape(), [1, 10, 1], [4, 10, 1]);
-        assert_eq!(area.min[1], 10);
-        assert_eq!(area.max[1], 11, "a same-level wall drag is dwarf height");
-        assert_eq!(Tool::Wall.kind(), Some(DesignationKind::Build(game::edit::PLACE_BLOCK)));
+    fn build_tool_places_the_construction_block_on_b() {
+        assert_eq!(Tool::Build.kind(), Some(DesignationKind::Build(game::edit::PLACE_BLOCK)));
+        assert_eq!(tool_for_key(KeyCode::KeyB, false), Some(Tool::Build));
+        assert_eq!(tool_for_key(KeyCode::KeyV, false), None, "V is free");
+    }
+
+    const T: f32 = DRAG_THRESHOLD_PX;
+
+    fn press(phase: &mut CornerPhase, cell: TilePos, px: Vec2) -> CornerOutcome {
+        step_corners(phase, CornerEvent::Press { cell, px }, T)
+    }
+
+    fn release(phase: &mut CornerPhase, cell: TilePos, px: Vec2) -> CornerOutcome {
+        step_corners(phase, CornerEvent::Release { cell, px }, T)
+    }
+
+    #[test]
+    fn click_click_commits_on_second_click() {
+        let mut phase = CornerPhase::Idle;
+        let (here, there) = (Vec2::new(100.0, 100.0), Vec2::new(300.0, 200.0));
+        assert_eq!(press(&mut phase, [1, 10, 1], here), CornerOutcome::None);
+        assert_eq!(release(&mut phase, [1, 10, 1], here), CornerOutcome::None);
+        assert_eq!(phase, CornerPhase::Anchored { anchor: [1, 10, 1] });
+        assert_eq!(phase.start(), Some([1, 10, 1]), "the anchored box stays open");
+        assert_eq!(press(&mut phase, [6, 10, 4], there), CornerOutcome::None);
+        let out = release(&mut phase, [6, 10, 4], there);
+        assert_eq!(out, CornerOutcome::Commit { a: [1, 10, 1], b: [6, 10, 4] });
+        assert_eq!(phase, CornerPhase::Idle);
+    }
+
+    #[test]
+    fn click_drag_commits_on_release() {
+        let mut phase = CornerPhase::Idle;
+        press(&mut phase, [1, 10, 1], Vec2::new(100.0, 100.0));
+        let out = release(&mut phase, [5, 10, 3], Vec2::new(100.0 + T + 1.0, 100.0));
+        assert_eq!(out, CornerOutcome::Commit { a: [1, 10, 1], b: [5, 10, 3] });
+        assert_eq!(phase, CornerPhase::Idle);
+    }
+
+    #[test]
+    fn level_change_between_clicks_spans_levels() {
+        let mut phase = CornerPhase::Idle;
+        let px = Vec2::new(50.0, 50.0);
+        press(&mut phase, [2, 10, 2], px);
+        release(&mut phase, [2, 10, 2], px);
+        // Alt+wheel to level 12 (and the camera may move) before the second click.
+        let px = Vec2::new(400.0, 80.0);
+        press(&mut phase, [4, 12, 2], px);
+        let CornerOutcome::Commit { a, b } = release(&mut phase, [4, 12, 2], px) else {
+            panic!("second click commits")
+        };
+        let area = TileBox::new(a, b);
+        assert_eq!((area.min[1], area.max[1]), (10, 12));
+        assert_eq!(area.tile_count(), 3 * 3);
+    }
+
+    #[test]
+    fn small_jitter_counts_as_click() {
+        let mut phase = CornerPhase::Idle;
+        press(&mut phase, [1, 10, 1], Vec2::new(100.0, 100.0));
+        let out = release(&mut phase, [2, 10, 1], Vec2::new(100.0 + T * 0.6, 100.0 - T * 0.6));
+        assert_eq!(out, CornerOutcome::None);
+        assert_eq!(phase, CornerPhase::Anchored { anchor: [1, 10, 1] }, "anchored at the press");
+    }
+
+    #[test]
+    fn cancel_clears_anchor() {
+        let mut phase = CornerPhase::Idle;
+        let px = Vec2::ZERO;
+        press(&mut phase, [1, 10, 1], px);
+        release(&mut phase, [1, 10, 1], px);
+        assert_eq!(step_corners(&mut phase, CornerEvent::Cancel, T), CornerOutcome::Cancelled);
+        assert_eq!(phase, CornerPhase::Idle);
+        let again = step_corners(&mut phase, CornerEvent::Cancel, T);
+        assert_eq!(again, CornerOutcome::None, "nothing left to drop");
+        // Mid-press too.
+        press(&mut phase, [1, 10, 1], px);
+        assert_eq!(step_corners(&mut phase, CornerEvent::Cancel, T), CornerOutcome::Cancelled);
+        assert_eq!(release(&mut phase, [3, 10, 3], px), CornerOutcome::None, "its release is not ours");
+    }
+
+    #[test]
+    fn drag_while_anchored_finishes_the_box() {
+        let mut phase = CornerPhase::Idle;
+        let px = Vec2::new(10.0, 10.0);
+        press(&mut phase, [1, 10, 1], px);
+        release(&mut phase, [1, 10, 1], px);
+        // Press somewhere else and drag: the anchor stays the first corner.
+        press(&mut phase, [8, 11, 8], Vec2::new(200.0, 200.0));
+        let out = release(&mut phase, [9, 11, 9], Vec2::new(260.0, 240.0));
+        assert_eq!(out, CornerOutcome::Commit { a: [1, 10, 1], b: [9, 11, 9] });
+    }
+
+    #[test]
+    fn switching_tools_clears_the_anchor() {
+        let mut state = DesignateState { tool: Some(Tool::Dig), ..default() };
+        state.corners = CornerPhase::Anchored { anchor: [1, 2, 3] };
+        state.drag = Some(Drag { anchor: [1, 2, 3], corner: [1, 2, 3], erase: false });
+        state.set_tool(Some(Tool::Dig));
+        assert!(state.drag.is_some(), "re-picking the same tool keeps the box");
+        state.set_tool(Some(Tool::Build));
+        assert_eq!((state.corners, state.drag), (CornerPhase::Idle, None));
     }
 
     #[test]
@@ -667,9 +871,10 @@ mod tests {
     #[test]
     fn cancel_drops_the_drag_then_the_tool() {
         let mut state = DesignateState { tool: Some(Tool::Dig), ..default() };
+        state.corners = CornerPhase::Anchored { anchor: [0, 0, 0] };
         state.drag = Some(Drag { anchor: [0, 0, 0], corner: [1, 0, 1], erase: false });
         state.cancel();
-        assert_eq!((state.tool, state.drag), (Some(Tool::Dig), None));
+        assert_eq!((state.tool, state.drag, state.corners), (Some(Tool::Dig), None, CornerPhase::Idle));
         state.cancel();
         assert_eq!(state.tool, None);
     }

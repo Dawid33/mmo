@@ -88,24 +88,6 @@ fn build_needs_air() {
 }
 
 #[test]
-fn wall_drag_on_one_level_extrudes_dwarf_height() {
-    let b = resolve_drag(DragShape::Wall, [2, 10, 2], [5, 10, 3]);
-    assert_eq!(b, TileBox { min: [2, 10, 2], max: [5, 11, 3] });
-}
-
-#[test]
-fn wall_drag_across_levels_keeps_explicit_range() {
-    let b = resolve_drag(DragShape::Wall, [2, 10, 2], [5, 13, 3]);
-    assert_eq!((b.min[1], b.max[1]), (10, 13));
-}
-
-#[test]
-fn floor_drag_goes_under_the_level() {
-    let b = resolve_drag(DragShape::Floor, [0, 10, 0], [3, 12, 3]);
-    assert_eq!((b.min[1], b.max[1]), (9, 9));
-}
-
-#[test]
 fn summary_counts_by_reason() {
     let mut s = Src::default();
     s.blocks.insert([0, 0, 0], STONE);
@@ -434,7 +416,7 @@ fn erase_filters_by_kind() {
 fn dev_complete_builds_a_two_level_wall_then_deconstructs_it() {
     let mut region = order_region();
     let build = DesignationKind::Build(game::edit::PLACE_BLOCK);
-    let wall = resolve_drag(DragShape::Wall, [2, SURFACE + 1, 2], [5, SURFACE + 1, 2]);
+    let wall = TileBox::new([2, SURFACE + 1, 2], [5, SURFACE + 2, 2]);
     assert_eq!(wall.tile_count(), 8);
     apply_checked(&mut region, designate(op(1), build, wall));
     apply_checked(&mut region, Order::DevCompleteAll);

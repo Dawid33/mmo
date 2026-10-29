@@ -18,8 +18,8 @@ export component GameUi inherits Window {
     // Fortress tools (crates/client/src/renderer/commander/designate.rs).
     // False with no home region (cell mode, or not joined yet).
     in property <bool> tools-available: true;
-    // The active tool's index in `TOOL_KEYS` order (Dig, Deconstruct, Wall,
-    // Floor, Erase); -1 = none.
+    // The active tool's index in `TOOL_KEYS` order (Dig, Deconstruct, Build,
+    // Erase); -1 = none.
     in property <int> active-tool: -1;
     in property <int> priority: 4;
     // "Level 64 · 6 below surface"; "" until the level is known.
@@ -31,10 +31,14 @@ export component GameUi inherits Window {
     in property <length> drag-y;
     // One button per tool in `TOOL_KEYS` order, with its hotkey: "[G] Dig".
     in property <[string]> tool-labels;
+    // The cutaway hides everything above the working level (`C` toggles it).
+    in property <bool> cut-above: true;
 
     // A tool button clicked: its index, or -1 to put the active tool down.
     callback tool-clicked(int);
     callback priority-clicked(int);
+    // The "Hide above" button clicked: flip the cutaway.
+    callback cut-clicked();
 
     // The drag readout's distance right of and below the cursor; it flips
     // to the other side at the window edge rather than slide under it.
@@ -91,6 +95,11 @@ export component GameUi inherits Window {
                     text: label;
                     toggled: root.active-tool == i;
                     clicked => { root.tool-clicked(root.active-tool == i ? -1 : i); }
+                }
+                Button {
+                    text: "[C] Hide above";
+                    toggled: root.cut-above;
+                    clicked => { root.cut-clicked(); }
                 }
             }
             if root.active-tool >= 0: HorizontalFlow {

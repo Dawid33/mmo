@@ -181,6 +181,11 @@ One client-side binding table feeds both the input systems and the Slint button 
      (2 levels)** (Dawid, 2026-10-29) — a named constant `DWARF_HEIGHT_LEVELS = 2`, moving to a
      raws race table when a second race exists. A "build wall" footprint drag extrudes 2 levels
      without needing Alt+wheel; Alt+wheel during the drag overrides it.
+     **Superseded (Dawid, 2026-10-29, after the first live run):** walls no longer auto-extrude
+     and `DWARF_HEIGHT_LEVELS` is gone. There is one **Build** tool (key B; Wall/Floor removed)
+     that fills exactly the selected box, and the height is chosen by picking the box's corners
+     on different levels — click a corner, Alt+wheel / PgUp / PgDn to another level, click the
+     second (click-click corners, alongside click-drag).
    - **Furniture and doors span two levels.** A door or bed model belongs to one footprint cell
      but occupies the level above too. Picking a multi-level object from either level selects the
      whole object, and deconstructing it removes the whole object — selection resolves to objects
