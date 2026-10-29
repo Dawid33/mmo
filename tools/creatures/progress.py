@@ -40,7 +40,7 @@ def main(args):
     built = {k.upper(): v.get("status", "draft") for k, v in manifest.items()}
 
     def key(df_id):
-        return df_id.upper().replace(" ", "_").replace("-", "_")
+        return df_id.upper().replace(",", "").replace(" ", "_").replace("-", "_")
     ids = {r["id"] for r in rows}
 
     def status(r):

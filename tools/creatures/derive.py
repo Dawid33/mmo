@@ -27,7 +27,7 @@ MANIFEST = os.path.join(brief.REPO, "assets", "models", "creatures", "creatures.
 
 
 def key(df_id):
-    return df_id.lower().replace(" ", "_").replace("-", "_")
+    return df_id.lower().replace(",", "").replace(" ", "_").replace("-", "_")
 
 
 def size_perc(block):
