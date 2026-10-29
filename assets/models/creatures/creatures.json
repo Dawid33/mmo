@@ -19208,7 +19208,7 @@
    [
     6,
     23.5,
-    3.4142
+    5.5
    ]
   ],
   "budget": {
@@ -19239,7 +19239,7 @@
    "cheer",
    "cower"
   ],
-  "cubes": 11,
+  "cubes": 12,
   "bones": 9,
   "clips": {
    "walk": {
@@ -23774,6 +23774,66 @@
    },
    "death": {
     "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_grouper_giant": {
+  "name": "giant grouper",
+  "status": "draft",
+  "model": "models/creatures/fish_grouper_giant.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -11.6492,
+    0,
+    -20
+   ],
+   [
+    11.6492,
+    17,
+    21
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 9,
+  "bones": 7,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 1.3,
+    "stride": 28.7,
+    "speed": 22.0769
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
     "length": 0.6
    }
   }
@@ -39553,6 +39613,227 @@
    }
   }
  },
+ "giant_tortoise": {
+  "name": "giant tortoise",
+  "status": "draft",
+  "model": "models/creatures/giant_tortoise.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -10,
+    0,
+    -17.5
+   ],
+   [
+    10,
+    19,
+    12.6913
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat"
+  ],
+  "cubes": 9,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.8974,
+    "stride": 3.4202,
+    "speed": 1.8026
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.2649,
+    "stride": 7.0139,
+    "speed": 5.5451
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 9.4868
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.7906
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.5534
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.5811
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 6.3246
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 9.4868
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 2.846
+   }
+  }
+ },
+ "giant_tortoise_man": {
+  "name": "giant tortoise man",
+  "status": "draft",
+  "model": "models/creatures/giant_tortoise_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -10.5,
+    0,
+    -4.5
+   ],
+   [
+    10.5,
+    39.5,
+    9
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 12,
+  "bones": 9,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.0582,
+    "stride": 14.2798,
+    "speed": 13.4945
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.6467,
+    "stride": 34.951,
+    "speed": 54.0451
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4.7033
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5879
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.4115
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.411
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4.7033
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 7.055
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.8813
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1.1758
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1.1758
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.8231
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.411
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.0582,
+    "stride": 11.591,
+    "speed": 10.9535
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.411
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.411
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.7055
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.8813
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.9407
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.6462
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.9407
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1.1758
+   }
+  }
+ },
  "giant_vulture": {
   "name": "giant vulture",
   "status": "draft",
@@ -41687,6 +41968,83 @@
    "flop": {
     "loop": "loop",
     "length": 0.827
+   }
+  }
+ },
+ "gigantic_tortoise": {
+  "name": "gigantic tortoise",
+  "status": "draft",
+  "model": "models/creatures/gigantic_tortoise.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -20,
+    0,
+    -35
+   ],
+   [
+    20,
+    38,
+    25.3825
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat"
+  ],
+  "cubes": 9,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 2.6833,
+    "stride": 6.8404,
+    "speed": 2.5493
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.7888,
+    "stride": 14.0279,
+    "speed": 7.8421
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 13.4164
+   },
+   "attack": {
+    "loop": "once",
+    "length": 1.1181
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.7826
+   },
+   "death": {
+    "loop": "hold",
+    "length": 2.236
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 8.9443
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 13.4164
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 4.0249
    }
   }
  },
@@ -61124,7 +61482,7 @@
    [
     6,
     21,
-    3
+    5
    ]
   ],
   "budget": {
@@ -61157,7 +61515,7 @@
    "swim",
    "swim_idle"
   ],
-  "cubes": 11,
+  "cubes": 12,
   "bones": 9,
   "clips": {
    "walk": {
@@ -67744,7 +68102,7 @@
    "swim",
    "swim_idle"
   ],
-  "cubes": 13,
+  "cubes": 14,
   "bones": 9,
   "clips": {
    "walk": {

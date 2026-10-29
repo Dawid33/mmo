@@ -4,3 +4,12 @@ name = "pond turtle man"
 animal_person_of = "pond_turtle"
 status = "draft"
 size = 35250
+
+# "A person with a large shell": the carapace over the back, relative to the torso's
+# pivot (the hips; a person's torso spans y 0..11, z -2.5..2.5), in the shell colour.
+[[cubes]]
+name = "shell"
+bone = "torso"
+part = "shell"
+from = [-5.5, -1, 2.5]
+to = [5.5, 12, 6.5]

@@ -317,6 +317,12 @@ def animal_person(src):
             if min(p_[1] for p_ in rest_points(model, {"tail"})) >= 0.5:
                 break
 
+    # The source's own cubes (a turtle person's shell), relative to the person's bones.
+    pivots = {name: pivot for name, _, pivot, _ in model["bones"]}
+    for i, c in enumerate(src.get("cubes", [])):
+        o = pivots[c["bone"]]
+        model["cubes"].append((c.get("name", f"{c['bone']}_{i}"), c["bone"], c["part"],
+                               [o[k] + c["from"][k] for k in range(3)], [o[k] + c["to"][k] for k in range(3)]))
     model["clips"] = t.clips(params, model)
     has = {b[0] for b in model["bones"]}
     for c in model["clips"].values():
