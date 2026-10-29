@@ -1,0 +1,108 @@
+# DF BIRD_OWL_SNOWY (wild): 2 kg, the snowy owl: white with sparse black flecks, a
+# round head with yellow eyes looking forward, feathered feet. FLIER; no brood.
+# Attack: peck (the template's `attack`); the talon scratch is optional.
+name = "snowy owl"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [5, 6, 6]
+leg = [1, 2]
+foot = [2, 1, 2]
+head = [5, 4, 4]
+neck = 1
+head_back = 3
+beak = [1, 1, 1]
+tail = [4, 1, 3]
+tail_raise = -35
+wing = [6, 4]
+walk = { cycle = 0.55, swing = 26, nod = 0.5 }
+run = { cycle = 0.32 }
+
+[palette]
+body = "#f4f3ee"
+body_down = "#ecebe5"
+head = "#f6f5f0"
+wings = "#eeede7"
+tail = "#efeee8"
+legs = "#f4f3ee"
+beak = "#2a2a2a"
+eye = "#f2c12e"
+fleck = "#2c2c30"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 1
+colour = "fleck"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 2
+colour = "fleck"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 4
+colour = "fleck"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 1
+y = 1
+colour = "fleck"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 3
+y = 2
+colour = "fleck"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 5
+y = 1
+colour = "fleck"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 0
+y = 2
+colour = "fleck"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 2
+y = 1
+colour = "fleck"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 4
+y = 2
+colour = "fleck"

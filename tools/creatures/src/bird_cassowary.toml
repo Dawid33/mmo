@@ -1,0 +1,92 @@
+# DF BIRD_CASSOWARY (wild): 50 kg, the southern cassowary: shaggy black body, bare
+# blue neck with red wattles, a tall brown casque, thick grey legs. Not a FLIER
+# (flier = false). Attack: kick — a creature clip replacing the template's peck.
+name = "cassowary"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [9, 10, 14]
+leg = [2, 11]
+foot = [4, 1, 4]
+head = [3, 3, 4]
+neck = 6
+head_back = 2
+beak = [2, 1, 2]
+tail = [6, 3, 3]
+tail_raise = -40
+wing = [3, 3]
+flier = false
+walk = { cycle = 1, swing = 24, bob = 0.5, nod = 1.5 }
+run = { cycle = 0.55, swing = 40, lean = 10 }
+
+# Head pivot: the neck base, at the body's top front.
+[[cubes]]
+name = "casque"
+bone = "head"
+part = "casque"
+from = [-0.75, 9, -1.5]
+to = [0.75, 12, 1]
+
+[[cubes]]
+name = "wattle"
+bone = "head"
+part = "wattle"
+from = [-0.75, 3, -2]
+to = [0.75, 5.5, -1.5]
+
+[palette]
+body = "#1b1a1a"
+body_up = "#242222"
+head = "#2f5fb8"
+wings = "#1b1a1a"
+tail = "#1d1c1c"
+legs = "#7d7a68"
+beak = "#2a2a2a"
+casque = "#8a6a3a"
+wattle = "#c42d2a"
+eye = "#8a3a10"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+# A forward kick with the right leg.
+[clips.attack]
+mode = "once"
+length = 0.6
+keys = [
+  { bone = "leg_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.21, value = [-30, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.36, value = [75, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.36, value = [-8, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.21, value = [4, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.36, value = [12, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.36, value = [0, 0.5, 0.5] },
+  { bone = "body", channel = "position", time = 0.6, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.36, value = [12, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.36, value = [0, 0, -30] },
+  { bone = "wing_l", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.36, value = [0, 0, 30] },
+  { bone = "wing_r", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+]

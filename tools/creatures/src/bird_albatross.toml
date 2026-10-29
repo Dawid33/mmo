@@ -1,0 +1,61 @@
+# DF BIRD_ALBATROSS (wild): 8 kg, a wandering albatross: white body, dark long wings
+# (folded they reach past the tail), pink hooked bill. FLIER; lays eggs but is not a
+# nest-box layer, so no brood. Slow, shallow flaps. Attack: peck (the template's
+# `attack`).
+name = "albatross"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [5, 5, 10]
+leg = [1, 2]
+foot = [3, 1, 3]
+head = [3, 3, 4]
+neck = 1
+head_back = 2
+beak = [1, 1, 3]
+tail = [4, 1, 2]
+tail_raise = 10
+wing = [14, 4]
+walk = { cycle = 0.8, swing = 24, bob = 0.4 }
+run = { cycle = 0.45 }
+fly = { cycle = 0.9, flap = 25 }
+
+[palette]
+body = "#f2f0ea"
+body_down = "#e8e5dd"
+head = "#f4f2ec"
+wings = "#3a3533"
+tail = "#3a3533"
+legs = "#d9b8b0"
+beak = "#e3b8a0"
+eye = "#121010"
+brow = "#9a9590"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+colour = "brow"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 0
+colour = "brow"

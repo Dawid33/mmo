@@ -1,0 +1,77 @@
+# DF BIRD_OSTRICH (wild): 90 kg, the ostrich (male): black body, white wing plumes and
+# tail, a long bare pinkish-grey neck, small head, long bare pink legs. Not a FLIER
+# (flier = false). Attack: kick — a creature clip replacing the template's peck.
+# The one-segment neck cannot bend down to the ground, so eat dips the head to
+# shrub height.
+name = "ostrich"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [10, 10, 15]
+leg = [2, 14]
+foot = [4, 1, 4]
+head = [3, 3, 4]
+neck = 13
+head_back = 2
+beak = [2, 1, 2]
+tail = [7, 3, 4]
+tail_raise = 15
+wing = [9, 6]
+flier = false
+walk = { cycle = 1.1, swing = 22, bob = 0.6, nod = 1.5 }
+run = { cycle = 0.6, swing = 40, lean = 10 }
+
+[palette]
+body = "#1d1b1a"
+body_up = "#252220"
+head = "#c7aaa0"
+wings = "#ece8e0"
+tail = "#f2efe8"
+legs = "#d9a294"
+beak = "#d6b48c"
+eye = "#141414"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+# A forward kick with the right leg.
+[clips.attack]
+mode = "once"
+length = 0.7
+keys = [
+  { bone = "leg_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.24499999999999997, value = [-30, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.42, value = [75, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.42, value = [-8, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.24499999999999997, value = [4, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.42, value = [12, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.42, value = [0, 0.5, 0.5] },
+  { bone = "body", channel = "position", time = 0.7, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.42, value = [12, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.42, value = [0, 0, -30] },
+  { bone = "wing_l", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.42, value = [0, 0, 30] },
+  { bone = "wing_r", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+]

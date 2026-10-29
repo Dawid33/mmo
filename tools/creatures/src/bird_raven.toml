@@ -1,0 +1,46 @@
+# DF BIRD_RAVEN (wild): 1.2 kg, the common raven: glossy black all over, heavy black
+# bill, wedge tail. FLIER; no brood. Attack: peck (the template's `attack`); the
+# scratch is optional.
+name = "raven"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [4, 4, 7]
+leg = [1, 2]
+foot = [2, 1, 2]
+head = [3, 3, 3]
+neck = 1
+head_back = 2
+beak = [1, 1, 2]
+tail = [4, 1, 4]
+tail_raise = 10
+wing = [8, 3]
+walk = { cycle = 0.55, swing = 28 }
+run = { cycle = 0.32 }
+fly = { cycle = 0.5, flap = 40 }
+
+[palette]
+body = "#18181c"
+body_up = "#20222c"
+head = "#1a1a1f"
+wings = "#1c1d24"
+wings_up = "#23263a"
+tail = "#18181d"
+legs = "#141416"
+beak = "#121214"
+eye = "#4a4250"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+colour = "eye"

@@ -1,0 +1,64 @@
+# DF BIRD_OWL_BARN (wild): 0.5 kg, the barn owl: upright (body taller than long), a
+# big head with the white heart-shaped facial disc and dark eyes looking forward,
+# buff-orange back, white belly. FLIER; no brood. Attack: peck (the template's
+# `attack`); the talon scratch is optional and not modelled.
+name = "barn owl"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [4, 6, 4]
+leg = [1, 2]
+foot = [2, 1, 2]
+head = [5, 4, 4]
+neck = 1
+head_back = 3
+beak = [1, 1, 1]
+tail = [3, 1, 3]
+tail_raise = -40
+wing = [4, 3]
+walk = { cycle = 0.5, swing = 26, nod = 0.5 }
+run = { cycle = 0.3 }
+
+[palette]
+body = "#d8a560"
+body_north = "#fbf9f4"
+body_down = "#f3eee4"
+head = "#d8a560"
+head_north = "#ffffff"
+wings = "#c99a58"
+wings_up = "#bfa080"
+tail = "#cfa060"
+legs = "#f1ece2"
+beak = "#e6d2c4"
+eye = "#121010"
+disc = "#c58a5a"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+w = 5
+colour = "disc"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 0
+colour = "disc"

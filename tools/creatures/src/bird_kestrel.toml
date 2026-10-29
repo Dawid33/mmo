@@ -1,0 +1,122 @@
+# DF BIRD_KESTREL (wild): 0.25 kg, the common kestrel (male): rufous back spotted
+# black, blue-grey head and tail with a black tail band, buff breast, dark
+# moustache stripe. FLIER (fast flaps); no brood. Attack: peck (the template's
+# `attack`); the talon scratch is optional.
+name = "kestrel"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [3, 3, 5]
+leg = [1, 2]
+foot = [2, 1, 2]
+head = [2, 3, 2]
+neck = 1
+head_back = 1.5
+beak = [1, 1, 1]
+tail = [2, 1, 4]
+tail_raise = 10
+wing = [6, 2]
+walk = { cycle = 0.45, swing = 28 }
+run = { cycle = 0.28 }
+fly = { cycle = 0.3, flap = 40 }
+
+[palette]
+body = "#b5653a"
+body_down = "#e3c497"
+body_north = "#e3c497"
+head = "#7d8794"
+wings = "#a85c36"
+tail = "#7d8794"
+legs = "#e2c040"
+beak = "#3a3a3e"
+eye = "#141414"
+spot = "#2a1a12"
+band = "#1c1c1e"
+cheek = "#2a2e36"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 2
+colour = "cheek"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 2
+colour = "cheek"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 2
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 4
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 1
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 3
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 3
+w = 2
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "down"
+x = 0
+y = 3
+w = 2
+colour = "band"

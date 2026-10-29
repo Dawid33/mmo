@@ -1,0 +1,55 @@
+# DF BIRD_EAGLE (wild): 4 kg, a golden eagle: dark brown, golden nape, yellow feet
+# and cere, dark hooked bill, long broad wings. FLIER; no brood. Attack: peck (the
+# template's `attack`); the talon scratch is optional.
+name = "eagle"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [6, 5, 9]
+leg = [1, 3]
+foot = [3, 1, 2]
+head = [3, 3, 4]
+neck = 1
+head_back = 2
+beak = [1, 2, 2]
+tail = [5, 1, 5]
+tail_raise = 15
+wing = [11, 5]
+walk = { cycle = 0.7, swing = 24 }
+run = { cycle = 0.4 }
+fly = { cycle = 0.8, flap = 30 }
+
+[palette]
+body = "#4a3322"
+body_down = "#3d2a1c"
+head = "#5a3e28"
+head_up = "#b88a3c"
+head_south = "#c99a48"
+wings = "#45301f"
+tail = "#4f3826"
+legs = "#e2b93a"
+beak = "#3a3734"
+eye = "#3a2008"
+cere = "#e2b93a"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "beak"
+face = "up"
+x = 0
+y = 1
+colour = "cere"

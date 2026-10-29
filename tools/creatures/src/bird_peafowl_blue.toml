@@ -1,0 +1,162 @@
+# DF BIRD_PEAFOWL_BLUE (domestic): 4 kg, the Indian peacock (the male's colours: the
+# peahen is brown). Lays eggs (brood). Not a FLIER in the raws, but it flies up to
+# roost, so like the chicken it keeps the fly set. Attack: peck (the template's
+# `attack`). The train is held up in display: the tail bone raised 70° carries a
+# fan of three slabs whose `up` faces (facing forward once raised) hold the eyespots.
+name = "peafowl"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [5, 5, 8]
+leg = [1, 5]
+foot = [3, 1, 3]
+head = [2, 3, 3]
+neck = 4
+head_back = 2
+beak = [1, 1, 1]
+tail = [6, 1, 6]
+tail_raise = 70
+wing = [7, 4]
+brood = true
+walk = { cycle = 0.8, swing = 26 }
+run = { cycle = 0.45 }
+
+# Tail pivot: the rump. Slabs in the tail's own frame (z out along the train).
+[[cubes]]
+name = "fan_low"
+bone = "tail"
+part = "fan"
+from = [-6, -0.4, 3]
+to = [6, 0.4, 9]
+
+[[cubes]]
+name = "fan_mid"
+bone = "tail"
+part = "fan"
+from = [-8, -0.3, 8]
+to = [8, 0.3, 13]
+
+[[cubes]]
+name = "fan_top"
+bone = "tail"
+part = "fan"
+from = [-6, -0.2, 12.5]
+to = [6, 0.2, 15]
+
+# Head pivot: the neck, at the body's top front; the crest stands on the head.
+[[cubes]]
+name = "crest"
+bone = "head"
+part = "crest"
+from = [-1, 7, -0.25]
+to = [1, 8.5, 0.25]
+
+[palette]
+body = "#1f4fa6"
+body_up = "#2e6a52"
+body_south = "#2e6a52"
+body_down = "#1a2f55"
+head = "#2357b8"
+wings = "#b49c74"
+wings_south = "#8a4a2a"
+tail = "#5a6a3c"
+fan = "#2f6440"
+fan_up = "#4f8a3a"
+ocellus = "#152a6a"
+crest = "#2357b8"
+legs = "#8c8a86"
+beak = "#c8bfae"
+eye = "#121010"
+face = "#f0f0f0"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "face"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+colour = "face"
+
+[[decals]]
+cube = "fan_mid"
+face = "up"
+x = 1
+y = 3
+colour = "ocellus"
+
+[[decals]]
+cube = "fan_mid"
+face = "up"
+x = 4
+y = 3
+colour = "ocellus"
+
+[[decals]]
+cube = "fan_mid"
+face = "up"
+x = 11
+y = 3
+colour = "ocellus"
+
+[[decals]]
+cube = "fan_mid"
+face = "up"
+x = 14
+y = 3
+colour = "ocellus"
+
+[[decals]]
+cube = "fan_top"
+face = "up"
+x = 2
+y = 1
+colour = "ocellus"
+
+[[decals]]
+cube = "fan_top"
+face = "up"
+x = 5
+y = 1
+colour = "ocellus"
+
+[[decals]]
+cube = "fan_top"
+face = "up"
+x = 9
+y = 1
+colour = "ocellus"
+
+[[decals]]
+cube = "fan_low"
+face = "up"
+x = 1
+y = 4
+colour = "ocellus"
+
+[[decals]]
+cube = "fan_low"
+face = "up"
+x = 10
+y = 4
+colour = "ocellus"

@@ -1,0 +1,59 @@
+# DF BIRD_STORK_WHITE (wild): 3 kg, the white stork: white with black flight feathers
+# (the folded wing's outer face), long red bill and long red legs (`leg`), a
+# moderate neck. FLIER (slow flaps); no brood. Attack: bite (the template's peck).
+name = "white stork"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [5, 5, 8]
+leg = [1, 9]
+foot = [3, 1, 3]
+head = [3, 3, 3]
+neck = 5
+head_back = 2
+beak = [1, 1, 5]
+tail = [4, 1, 3]
+tail_raise = 10
+wing = [9, 4]
+walk = { cycle = 0.9, swing = 22, bob = 0.3, nod = 1.2 }
+run = { cycle = 0.5, swing = 36 }
+fly = { cycle = 0.8, flap = 30 }
+
+[palette]
+body = "#f3f2ed"
+body_down = "#eae9e3"
+head = "#f5f4ef"
+wings = "#f0efe9"
+wings_down = "#1c1c1c"
+tail = "#efeee8"
+legs = "#d6402e"
+beak = "#d6402e"
+eye = "#141414"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+colour = "eye"
+
+# The long bill: the template's eat (head −55°) drives it into the ground.
+[clips.eat]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [-38, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.2, value = [-48, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.4, value = [-38, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.6, value = [-48, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.8, value = [-38, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.0, value = [-48, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.2, value = [-38, 0, 0] },
+]

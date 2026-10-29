@@ -1,0 +1,64 @@
+# DF BIRD_PARROT_GREY (wild): 0.4 kg, the African grey parrot: grey, paler on the
+# head, white bare face around the eye, black hooked bill, red tail. FLIER; no
+# brood. Attack: bite (the template's peck).
+name = "grey parrot"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [4, 5, 5]
+leg = [1, 2]
+foot = [2, 1, 2]
+head = [3, 3, 3]
+neck = 1
+head_back = 2
+beak = [1, 1.5, 1]
+tail = [3, 1, 3]
+tail_raise = -30
+wing = [5, 3]
+walk = { cycle = 0.55, swing = 26 }
+run = { cycle = 0.32 }
+fly = { cycle = 0.35 }
+
+[palette]
+body = "#8c9096"
+body_down = "#9da1a6"
+head = "#a9adb2"
+wings = "#7c8086"
+tail = "#c4282a"
+legs = "#5a5a5e"
+beak = "#1c1c1e"
+face = "#eeeeea"
+eye = "#e2d68a"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+w = 2
+h = 2
+colour = "face"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+w = 2
+h = 2
+colour = "face"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+colour = "eye"

@@ -1,0 +1,78 @@
+# DF BIRD_KEA (wild): 1 kg, the kea: an olive-green mountain parrot with an orange
+# rump and a long curved grey bill. FLIER; a curious beast that eats and steals
+# (pick_up / carry). Attack: bite (the template's peck).
+name = "kea"
+template = "bird"
+status = "draft"
+extras = ["pick_up", "carry"]
+
+[proportions]
+body = [4, 4, 7]
+leg = [1, 2]
+foot = [2, 1, 2]
+head = [3, 3, 3]
+neck = 1
+head_back = 2
+beak = [1, 2, 2]
+tail = [3, 1, 4]
+tail_raise = 15
+wing = [7, 3]
+walk = { cycle = 0.55, swing = 28 }
+run = { cycle = 0.32 }
+fly = { cycle = 0.45 }
+
+[palette]
+body = "#66753a"
+body_south = "#c8602a"
+body_down = "#5c6a34"
+head = "#6e7c40"
+wings = "#5e6c34"
+tail = "#56643a"
+legs = "#5a5852"
+beak = "#4a4a4c"
+eye = "#141414"
+scale = "#3a4422"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 1
+colour = "scale"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 3
+colour = "scale"
+
+[[decals]]
+cube = "wing_l"
+face = "down"
+x = 1
+y = 1
+w = 5
+colour = "scale"
+
+[[decals]]
+cube = "wing_r"
+face = "down"
+x = 1
+y = 1
+w = 5
+colour = "scale"

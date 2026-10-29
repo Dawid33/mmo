@@ -1,0 +1,75 @@
+# DF BIRD_KIWI (wild): 2.5 kg, the brown kiwi: a round shaggy brown body with no tail
+# and no visible wings (stubs the colour of the body), short grey legs, a long pale
+# bill with nostrils at the tip. Not a FLIER (flier = false). Attack: scratch — the
+# same forward kick as the big ratites, replacing the template's peck.
+name = "kiwi"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [6, 6, 8]
+leg = [1, 2]
+foot = [3, 1, 3]
+head = [3, 3, 3]
+neck = 1
+head_back = 2
+beak = [1, 1, 5]
+tail = [4, 1, 0]
+wing = [2, 2]
+flier = false
+walk = { cycle = 0.6, swing = 30, bob = 0.3 }
+run = { cycle = 0.35, swing = 40 }
+
+[palette]
+body = "#6b5136"
+body_up = "#5f472f"
+head = "#6e553a"
+wings = "#62492f"
+tail = "#6b5136"
+legs = "#7e7a70"
+beak = "#d8cbb0"
+eye = "#141414"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+# A forward scratch-kick with the right leg.
+[clips.attack]
+mode = "once"
+length = 0.5
+keys = [
+  { bone = "leg_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.175, value = [-30, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.3, value = [75, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.5, value = [0, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.3, value = [-8, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.5, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.175, value = [4, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.3, value = [12, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.5, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.3, value = [0, 0.5, 0.5] },
+  { bone = "body", channel = "position", time = 0.5, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.3, value = [12, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.5, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.3, value = [0, 0, -30] },
+  { bone = "wing_l", channel = "rotation", time = 0.5, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.3, value = [0, 0, 30] },
+  { bone = "wing_r", channel = "rotation", time = 0.5, value = [0, 0, 0] },
+]

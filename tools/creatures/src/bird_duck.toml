@@ -1,0 +1,88 @@
+# DF BIRD_DUCK (domestic): 1 kg, a mallard-type duck (drake colours); FLIER, lays
+# eggs (brood). Not AMPHIBIOUS in the raws, but a duck swims, so it gets
+# swim / swim_idle. Attack: peck (the template's `attack`). Webbed feet are the
+# template's foot cubes, widened.
+name = "duck"
+template = "bird"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+body = [5, 4, 7]
+leg = [1, 2]
+foot = [3, 1, 3]
+head = [3, 3, 3]
+neck = 2
+head_back = 2
+beak = [2, 1, 2]
+tail = [4, 1, 2]
+tail_raise = 25
+wing = [6, 3]
+brood = true
+walk = { cycle = 0.6, swing = 30, bob = 0.2 }
+run = { cycle = 0.35 }
+
+[palette]
+body = "#a5a097"
+body_north = "#6e3f2b"
+body_down = "#c9c4ba"
+head = "#2c6b3c"
+wings = "#7d6f5f"
+wings_south = "#3b55a0"
+tail = "#2a2a2a"
+legs = "#e58a2e"
+beak = "#d9c23a"
+ring = "#f2f0ea"
+eye = "#121010"
+
+# The neck cube is 2 wide, 3 tall, 2 long: a white collar on its bottom row.
+[[decals]]
+cube = "neck"
+face = "west"
+x = 0
+y = 2
+w = 2
+colour = "ring"
+
+[[decals]]
+cube = "neck"
+face = "east"
+x = 0
+y = 2
+w = 2
+colour = "ring"
+
+[[decals]]
+cube = "neck"
+face = "north"
+x = 0
+y = 2
+w = 2
+colour = "ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"
+
+# Short legs: the template's eat (head −55°) pushes the bill into the ground.
+[clips.eat]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [-35, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.2, value = [-45, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.4, value = [-35, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.6, value = [-45, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.8, value = [-35, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.0, value = [-45, 0, 0] },
+  { bone = "head", channel = "rotation", time = 1.2, value = [-35, 0, 0] },
+]

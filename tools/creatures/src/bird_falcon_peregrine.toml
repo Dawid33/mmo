@@ -1,0 +1,89 @@
+# DF BIRD_FALCON_PEREGRINE (wild): 0.6 kg, the peregrine falcon: slate-grey back,
+# pale barred breast, a black hood with a heavy moustache on a white cheek, yellow
+# feet and cere. FLIER (fast flaps); no brood. Attack: peck (the template's
+# `attack`); the talon scratch is optional.
+name = "peregrine falcon"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [4, 4, 6]
+leg = [1, 2]
+foot = [2, 1, 2]
+head = [3, 3, 3]
+neck = 1
+head_back = 2
+beak = [1, 1, 1]
+tail = [3, 1, 4]
+tail_raise = 10
+wing = [7, 3]
+walk = { cycle = 0.5, swing = 28 }
+run = { cycle = 0.3 }
+fly = { cycle = 0.35, flap = 40 }
+
+[palette]
+body = "#4a5562"
+body_north = "#e3dccd"
+body_down = "#d8d0be"
+head = "#262b32"
+wings = "#45505c"
+tail = "#4e5966"
+legs = "#e4c23e"
+beak = "#3a3e46"
+eye = "#141414"
+cheek = "#ece8de"
+bar = "#6a6a70"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 2
+w = 2
+colour = "cheek"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 2
+w = 2
+colour = "cheek"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "body"
+face = "down"
+x = 0
+y = 1
+w = 4
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "down"
+x = 0
+y = 3
+w = 4
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "north"
+x = 0
+y = 2
+w = 4
+colour = "bar"

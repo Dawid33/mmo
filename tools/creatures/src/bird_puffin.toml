@@ -1,0 +1,84 @@
+# DF BIRD_PUFFIN (wild): 0.75 kg, the Atlantic puffin: black back and collar, white
+# belly and face, a tall striped orange bill, orange feet. FLIER; not AMPHIBIOUS in
+# the raws, but it swims and dives, so it gets swim / swim_idle. Attack: bite (the
+# template's peck).
+name = "puffin"
+template = "bird"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+body = [4, 5, 6]
+leg = [1, 2]
+foot = [2, 1, 2]
+head = [3, 3, 3]
+neck = 1
+head_back = 2
+beak = [1, 1.9, 2]
+tail = [2, 1, 2]
+tail_raise = 15
+wing = [5, 3]
+walk = { cycle = 0.45, swing = 30, bob = 0.3 }
+run = { cycle = 0.28 }
+fly = { cycle = 0.25, flap = 40 }
+
+[palette]
+body = "#1a1a1c"
+body_north = "#ffffff"
+body_down = "#f2f0ea"
+head = "#1a1a1c"
+wings = "#1c1c1e"
+tail = "#1a1a1c"
+legs = "#ee7a2a"
+beak = "#e8642a"
+face = "#e9e6de"
+eye = "#141414"
+bill_base = "#5a6a80"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+w = 3
+h = 2
+colour = "face"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 1
+w = 3
+h = 2
+colour = "face"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "beak"
+face = "west"
+x = 1
+y = 0
+h = 2
+colour = "bill_base"
+
+[[decals]]
+cube = "beak"
+face = "east"
+x = 0
+y = 0
+h = 2
+colour = "bill_base"

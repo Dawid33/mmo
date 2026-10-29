@@ -1,0 +1,56 @@
+# DF BIRD_BUZZARD (wild): 1.4 kg, the common buzzard: brown with a pale breast band,
+# yellow feet, dark hooked bill. FLIER; a curious beast that eats (pick_up / carry).
+# Attack: peck (the template's `attack`); the talon scratch is optional.
+name = "buzzard"
+template = "bird"
+status = "draft"
+extras = ["pick_up", "carry"]
+
+[proportions]
+body = [5, 5, 7]
+leg = [1, 3]
+foot = [3, 1, 2]
+head = [3, 3, 3]
+neck = 1
+head_back = 2
+beak = [1, 1, 1.5]
+tail = [4, 1, 4]
+tail_raise = 15
+wing = [9, 4]
+walk = { cycle = 0.6, swing = 26 }
+run = { cycle = 0.35 }
+fly = { cycle = 0.7, flap = 35 }
+
+[palette]
+body = "#6b4b30"
+body_north = "#c9b08a"
+body_down = "#a88a62"
+head = "#73543a"
+wings = "#5e422b"
+tail = "#7a5a3c"
+legs = "#e2c040"
+beak = "#3a3734"
+eye = "#2a1a10"
+brow = "#4a3220"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "body"
+face = "north"
+x = 0
+y = 2
+w = 5
+colour = "brow"

@@ -1,0 +1,57 @@
+# DF BIRD_VULTURE (wild): 9 kg, a griffon vulture: buff-brown body, dark flight
+# feathers and tail, a pale bald head on a longish neck rising from a cream ruff,
+# hooked grey bill. FLIER (slow, shallow flaps); a curious beast that eats
+# (pick_up / carry). Attack: peck (the template's `attack`); the scratch is optional.
+name = "vulture"
+template = "bird"
+status = "draft"
+extras = ["pick_up", "carry"]
+
+[proportions]
+body = [6, 6, 9]
+leg = [1, 3]
+foot = [3, 1, 2]
+head = [3, 3, 3]
+neck = 4
+head_back = 2
+beak = [1, 2, 2]
+tail = [5, 1, 3]
+tail_raise = 10
+wing = [11, 5]
+walk = { cycle = 0.8, swing = 24, bob = 0.4 }
+run = { cycle = 0.45 }
+fly = { cycle = 0.9, flap = 25 }
+
+# Head pivot: the neck base, at the body's top front: the ruff collars it.
+[[cubes]]
+name = "ruff"
+bone = "head"
+part = "ruff"
+from = [-2, 0, -2]
+to = [2, 2, 2]
+
+[palette]
+body = "#a07a52"
+body_down = "#8e6a46"
+head = "#d9ccb8"
+wings = "#3a2a20"
+wings_up = "#8a6a48"
+tail = "#30241c"
+legs = "#9a948a"
+beak = "#8a8a86"
+ruff = "#ede2cc"
+eye = "#3a2a18"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"

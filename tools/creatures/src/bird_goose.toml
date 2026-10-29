@@ -1,0 +1,48 @@
+# DF BIRD_GOOSE (domestic): 4.5 kg, a greylag-type farm goose; FLIER, lays eggs
+# (brood). Not AMPHIBIOUS in the raws, but a goose swims, so it gets
+# swim / swim_idle. Long neck via `neck`. Attack: peck (the template's `attack`).
+name = "goose"
+template = "bird"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+body = [6, 6, 9]
+leg = [1, 3]
+foot = [3, 1, 3]
+head = [3, 3, 4]
+neck = 6
+head_back = 2
+beak = [2, 1, 2]
+tail = [4, 1, 3]
+tail_raise = 30
+wing = [8, 4]
+brood = true
+walk = { cycle = 0.75, swing = 26, bob = 0.25 }
+run = { cycle = 0.42 }
+
+[palette]
+body = "#8c877c"
+body_down = "#d2cdc2"
+body_south = "#e6e2d8"
+head = "#7f7a70"
+wings = "#6f6a60"
+wings_up = "#837d72"
+tail = "#e3dfd6"
+legs = "#e8916a"
+beak = "#ea8a35"
+eye = "#121010"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 0
+colour = "eye"

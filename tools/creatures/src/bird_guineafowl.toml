@@ -1,0 +1,156 @@
+# DF BIRD_GUINEAFOWL (domestic): 1.5 kg, the helmeted guineafowl: round slate body
+# spotted white, bare blue-white face, red wattles, bony casque. Lays eggs
+# (brood). Not a FLIER in the raws, but it flies up to roost, so like the chicken
+# it keeps the fly set. Attack: peck (the template's `attack`).
+name = "guineafowl"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [5, 5, 7]
+leg = [1, 3]
+foot = [3, 1, 2]
+head = [2, 3, 2]
+neck = 2
+head_back = 1.5
+beak = [1, 1, 1]
+tail = [3, 1, 2]
+tail_raise = -25
+wing = [6, 4]
+brood = true
+walk = { cycle = 0.6, swing = 30 }
+run = { cycle = 0.35 }
+
+[[cubes]]
+name = "casque"
+bone = "head"
+part = "casque"
+from = [-0.5, 5, -0.5]
+to = [0.5, 6, 0.5]
+
+[[cubes]]
+name = "wattles"
+bone = "head"
+part = "wattle"
+from = [-1, 1.5, -1.25]
+to = [1, 3, -0.75]
+
+[palette]
+body = "#3e434d"
+body_down = "#353943"
+head = "#c9dbe6"
+neck = "#c9dbe6"
+wings = "#444955"
+tail = "#3a3e47"
+legs = "#5a5650"
+beak = "#d8c79c"
+casque = "#c9a46a"
+wattle = "#c7332c"
+spot = "#e8ecef"
+eye = "#121010"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+colour = "eye"
+
+# White spots: the body's sides (7 long × 5 tall) and back (5 wide × 7 long).
+[[decals]]
+cube = "body"
+face = "west"
+x = 1
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 4
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 5
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 4
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 1
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 6
+colour = "spot"
+
+[[decals]]
+cube = "wing_l"
+face = "up"
+x = 2
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "wing_r"
+face = "up"
+x = 3
+y = 2
+colour = "spot"
