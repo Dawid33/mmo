@@ -136,7 +136,7 @@ pub fn minimap_pointer(
     let Some(cursor) = window.cursor_position() else { return };
     let rect = screen_rect(window.size());
     if buttons.just_pressed(MouseButton::Left)
-        && !policy.overlay_open
+        && !policy.blocks_game()
         && !policy.ui_pointer
         && rect.contains(cursor)
     {

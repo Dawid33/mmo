@@ -129,7 +129,7 @@ pub fn step_level_input(
     mut pixel_acc: Local<f32>,
 ) {
     let Ok(window) = window.single() else { return };
-    if policy.overlay_open {
+    if policy.blocks_game() {
         return;
     }
     if keys.just_pressed(KeyCode::KeyC) {

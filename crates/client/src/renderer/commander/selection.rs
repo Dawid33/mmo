@@ -195,7 +195,7 @@ pub fn select_input(
         // A press on the minimap or the game UI (or under an overlay) is not
         // a selection.
         *press = cursor.filter(|c| {
-            !policy.overlay_open
+            !policy.blocks_game()
                 && !policy.ui_pointer
                 && !minimap_pointer.dragging
                 && !minimap::screen_rect(window.size()).contains(*c)

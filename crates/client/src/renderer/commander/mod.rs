@@ -429,12 +429,12 @@ fn hold_pointer_while_orbiting(
     let Ok(mut window) = window.single_mut() else { return };
     if buttons.just_pressed(MouseButton::Right)
         && window.focused
-        && !policy.overlay_open
+        && !policy.blocks_game()
         && !policy.ui_pointer
     {
         *anchor = window.cursor_position();
     }
-    let held = buttons.pressed(MouseButton::Right) && window.focused && !policy.overlay_open;
+    let held = buttons.pressed(MouseButton::Right) && window.focused && !policy.blocks_game();
     let Some(at) = *anchor else { return };
     // Only a real displacement is written: a `Window` change re-syncs the
     // whole window to winit.
@@ -474,8 +474,9 @@ fn pan_and_zoom(
     mut cam: ResMut<CommanderCamera>,
 ) {
     let Ok(window) = window.single() else { return };
-    // A client-local overlay (dev panel) owns the pointer and the keyboard.
-    if policy.overlay_open {
+    // A client-local overlay (dev panel) or the menu / world map owns the
+    // pointer and the keyboard.
+    if policy.blocks_game() {
         return;
     }
     let dt = time.delta_secs();

@@ -56,6 +56,9 @@ export component WorldMap {
     // logical pixels: hit-test positions for headless tests.
     out property <length> view-x: view.absolute-position.x;
     out property <length> view-y: view.absolute-position.y;
+    // The view's size: the client centres the pan on the home tile with it.
+    out property <length> view-width: view.width;
+    out property <length> view-height: view.height;
     out property <length> play-button-x: play-button.absolute-position.x + play-button.width / 2;
     out property <length> play-button-y: play-button.absolute-position.y + play-button.height / 2;
 
@@ -140,6 +143,13 @@ export component WorldMap {
                         root.drag-start-y = root.map-pan-y;
                         root.dragged = false;
                     }
+                    // A drag released (or cancelled) outside the view gets
+                    // no `clicked`: end it here, or hover stays hidden.
+                    // `clicked` runs before `up`, so it still sees the drag.
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up)
+                        || event.kind == PointerEventKind.cancel {
+                        root.dragged = false;
+                    }
                 }
                 moved => {
                     if self.pressed {
@@ -185,9 +195,9 @@ export component WorldMap {
             y: window.content-y;
             width: WorldMapConfig.side-width;
 
-            if root.selected-col < 0: LabelFace {
+            if root.map-available && root.selected-col < 0: LabelFace {
                 style: Styles.caption-label;
-                text: root.map-available ? "Select a tile" : "";
+                text: "Select a tile";
             }
             for line in root.tile-lines: LabelFace { text: line; }
             if root.play-reason != "": LabelFace {

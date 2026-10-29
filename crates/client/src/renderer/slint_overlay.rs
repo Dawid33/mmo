@@ -30,22 +30,38 @@ use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
+use game::{PlayRefusal, RegionCoords, WorldMap};
 use slint_ui::slint::platform::{Key as SlintKey, PointerEventButton, WindowEvent};
-use slint_ui::slint::{ComponentHandle, LogicalPosition, ModelRc, SharedString, VecModel};
-use slint_ui::{GameUi, Overlay};
+use slint_ui::slint::{
+    ComponentHandle, Image as SlintImage, LogicalPosition, ModelRc, Rgba8Pixel, SharedPixelBuffer,
+    SharedString, VecModel,
+};
+use slint_ui::{GameUi, Overlay, WorldMapConfig};
+use worldgen::tile_map::{play_blocker, rasterize, tile_info_lines};
 
 use super::bridge::{SimEntity, SimKind};
 use super::commander::designate::{DesignateState, DragReadout, Tool, TOOL_KEYS};
 use super::commander::height::HeightGrid;
 use super::commander::level::{focus_surface, surface_level, WorkingLevel};
+use super::commander::minimap;
 use super::commander::selection::Selection;
 use super::commander::tiles::TileMirror;
 use super::commander::CommanderCamera;
 use super::cursor::CursorPolicy;
 use super::hud::HudStatus;
+use super::world_map::WorldMapState;
+use super::ClientRequests;
+use crate::instance::ClientRequest;
 
 /// Shows and hides the panel.
 pub const SLINT_PANEL_KEY: KeyCode = KeyCode::F9;
+/// Closes the world map if it is open, else opens / closes the menu —
+/// unless a designation is in progress, which it cancels instead.
+pub const MENU_KEY: KeyCode = KeyCode::Escape;
+/// Opens / closes the world map (opening it closes the menu).
+pub const MAP_KEY: KeyCode = KeyCode::KeyM;
+/// The map's status line from Play until we are home in the new region.
+pub const LOADING_TEXT: &str = "Loading region\u{2026}";
 /// UI pixels per window logical pixel. The widgets are pixel-exact at a
 /// total scale (this × the window's scale factor) of 1 and 2. Overridden by
 /// `VOXEL_UI_SCALE`.
@@ -67,6 +83,58 @@ fn ui_scale() -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiAction {
     ClearSelection,
+    /// The menu's World Map button.
+    OpenMap,
+    CloseMap,
+    CloseMenu,
+    /// A map tile clicked (column, row); Slint has already selected it.
+    SelectTile(i32, i32),
+    /// The map's Play button: ask the server for the selected tile.
+    Play,
+}
+
+/// The region a Play request was sent for, until we are home there or the
+/// server refuses it.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayPending(pub Option<RegionCoords>);
+
+/// Which modal game screens are open. The client keeps them exclusive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Screens {
+    pub menu: bool,
+    pub map: bool,
+}
+
+impl Screens {
+    fn of(ui: &GameUi) -> Self {
+        Self { menu: ui.get_menu_open(), map: ui.get_map_open() }
+    }
+
+    pub fn any(self) -> bool {
+        self.menu || self.map
+    }
+
+    /// [`MENU_KEY`] (with no designation to cancel): the map closes first.
+    pub fn escape(self) -> Self {
+        if self.map {
+            Self { map: false, ..self }
+        } else {
+            Self { menu: !self.menu, ..self }
+        }
+    }
+
+    /// [`MAP_KEY`].
+    pub fn toggle_map(self) -> Self {
+        if self.map {
+            Self { map: false, ..self }
+        } else {
+            Self::open_map()
+        }
+    }
+
+    pub fn open_map() -> Self {
+        Self { menu: false, map: true }
+    }
 }
 
 /// Filled by the game UI's callbacks during event dispatch (`!Send`, a
@@ -130,7 +198,21 @@ pub struct SlintOverlayPlugin;
 impl Plugin for SlintOverlayPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(SlintLayerPlugin::new(GameUi::new).with_init(connect_game_ui))
-            .add_systems(Update, (toggle_panel, apply_ui_actions, push_ui_state).chain());
+            .init_resource::<PlayPending>()
+            .add_systems(
+                Update,
+                (
+                    toggle_panel,
+                    // Before every commander input system (the chain starts
+                    // at `minimap_pointer`, `designate_keys` is in it), so
+                    // `CursorPolicy::ui_modal` holds this frame and one Esc
+                    // press does one thing.
+                    menu_keys.before(minimap::minimap_pointer),
+                    apply_ui_actions.before(minimap::minimap_pointer),
+                    push_ui_state,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -138,6 +220,21 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     let actions = Rc::new(RefCell::new(Vec::new()));
     let queue = actions.clone();
     ui.on_clear_selection(move || queue.borrow_mut().push(UiAction::ClearSelection));
+    let push = |action: UiAction| {
+        let queue = actions.clone();
+        move || queue.borrow_mut().push(action)
+    };
+    ui.on_open_map(push(UiAction::OpenMap));
+    ui.on_close_map(push(UiAction::CloseMap));
+    ui.on_close_menu(push(UiAction::CloseMenu));
+    ui.on_play(push(UiAction::Play));
+    let queue = actions.clone();
+    ui.on_select_tile(move |col, row| queue.borrow_mut().push(UiAction::SelectTile(col, row)));
+    debug_assert_eq!(
+        ui.global::<WorldMapConfig>().get_tile_px(),
+        worldgen::tile_map::MAP_TILE_PX as i32,
+        "the map image's pixels per tile and the map window's must agree"
+    );
     world.insert_non_send(GameUiActions(actions));
 }
 
@@ -306,16 +403,149 @@ fn toggle_panel(keys: Res<ButtonInput<KeyCode>>, slint: Option<NonSend<SlintLaye
     }
 }
 
-fn apply_ui_actions(actions: Option<NonSend<GameUiActions>>, mut selection: Option<ResMut<Selection>>) {
-    let Some(actions) = actions else { return };
+/// The map tile (column, row) of region `rc`, `None` off the map.
+pub fn map_tile(map: &WorldMap, rc: RegionCoords) -> Option<(i32, i32)> {
+    map.tile(rc)?;
+    Some((rc.x - map.origin.x, rc.z - map.origin.z))
+}
+
+/// The region of map tile (`col`, `row`), `None` off the map.
+pub fn tile_region(map: &WorldMap, col: i32, row: i32) -> Option<RegionCoords> {
+    let rc = RegionCoords::new(map.origin.x + col, map.origin.z + row);
+    (col >= 0 && row >= 0 && map.tile(rc).is_some()).then_some(rc)
+}
+
+/// The pan (view-relative position of the map's top-left) that puts the
+/// centre of tile `index` at the centre of a view `view_len` long.
+pub fn centred_pan(view_len: f32, index: i32, tile_len: f32) -> f32 {
+    view_len / 2.0 - (index as f32 + 0.5) * tile_len
+}
+
+/// What the player reads when the server refuses Play.
+pub fn refusal_text(why: PlayRefusal) -> &'static str {
+    match why {
+        PlayRefusal::NoWorldMap => "No world map",
+        PlayRefusal::OffMap => "Not on the map",
+        PlayRefusal::NoDryLand => "No dry land there",
+        PlayRefusal::AlreadyHere => "You are already here",
+    }
+}
+
+/// The map's status line: loading while a Play is pending, else the last
+/// refusal, else nothing.
+pub fn map_status_text(pending: Option<RegionCoords>, refused: Option<PlayRefusal>) -> &'static str {
+    match (pending, refused) {
+        (Some(_), _) => LOADING_TEXT,
+        (None, Some(why)) => refusal_text(why),
+        (None, None) => "",
+    }
+}
+
+/// Show `to`; on opening the map, drop a stale refusal and centre the view
+/// on the home tile. Keeps `CursorPolicy::ui_modal` in step (its only writer).
+fn set_screens(
+    ui: &GameUi,
+    to: Screens,
+    world_map: &mut WorldMapState,
+    home: Option<RegionCoords>,
+    policy: Option<&mut CursorPolicy>,
+) {
+    let from = Screens::of(ui);
+    if to.map && !from.map {
+        if world_map.refused.is_some() {
+            world_map.refused = None;
+        }
+        let home_tile = world_map.map.as_ref().zip(home).and_then(|(map, home)| map_tile(map, home));
+        if let Some((col, row)) = home_tile {
+            let tile_len = ui.global::<WorldMapConfig>().get_tile_px() as f32 * ui.get_map_zoom();
+            ui.set_map_pan_x(centred_pan(ui.get_map_view_width(), col, tile_len));
+            ui.set_map_pan_y(centred_pan(ui.get_map_view_height(), row, tile_len));
+        }
+    }
+    if from.menu != to.menu {
+        ui.set_menu_open(to.menu);
+    }
+    if from.map != to.map {
+        ui.set_map_open(to.map);
+    }
+    if let Some(policy) = policy.filter(|p| p.ui_modal != to.any()) {
+        policy.ui_modal = to.any();
+    }
+}
+
+/// [`MENU_KEY`] and [`MAP_KEY`]. Esc with a designation in progress (and no
+/// screen open) is left to `designate_keys`, which cancels it; otherwise it
+/// is consumed here, so `designate_keys` never sees the same press.
+fn menu_keys(
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    slint: Option<NonSend<SlintLayer<GameUi>>>,
+    designate: Option<Res<DesignateState>>,
+    mut policy: Option<ResMut<CursorPolicy>>,
+    mut world_map: ResMut<WorldMapState>,
+    status: Res<HudStatus>,
+) {
+    let Some(slint) = slint else { return };
+    // The dev panel holds the keyboard.
+    if policy.as_ref().is_some_and(|p| p.overlay_open) {
+        return;
+    }
+    let ui = slint.overlay.ui();
+    let mut to = Screens::of(ui);
+    if keys.just_pressed(MENU_KEY) {
+        let designating = designate.as_ref().is_some_and(|d| d.in_progress());
+        if to.any() || !designating {
+            to = to.escape();
+            keys.clear_just_pressed(MENU_KEY);
+        }
+    }
+    if keys.just_pressed(MAP_KEY) {
+        to = to.toggle_map();
+    }
+    set_screens(ui, to, &mut world_map, status.home_region, policy.as_deref_mut());
+}
+
+#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
+fn apply_ui_actions(
+    actions: Option<NonSend<GameUiActions>>,
+    slint: Option<NonSend<SlintLayer<GameUi>>>,
+    mut selection: Option<ResMut<Selection>>,
+    mut world_map: ResMut<WorldMapState>,
+    mut pending: ResMut<PlayPending>,
+    mut policy: Option<ResMut<CursorPolicy>>,
+    requests: Option<Res<ClientRequests>>,
+    status: Res<HudStatus>,
+) {
+    let (Some(actions), Some(slint)) = (actions, slint) else { return };
+    let ui = slint.overlay.ui();
     for action in actions.0.borrow_mut().drain(..) {
+        let mut to = Screens::of(ui);
         match action {
             UiAction::ClearSelection => {
                 if let Some(selection) = selection.as_mut() {
                     selection.0.clear();
                 }
             }
+            UiAction::OpenMap => to = Screens::open_map(),
+            UiAction::CloseMap => to.map = false,
+            UiAction::CloseMenu => to.menu = false,
+            // The selection lives in Slint; `push_ui_state` follows it.
+            UiAction::SelectTile(..) => {}
+            UiAction::Play => {
+                let home = status.home_region;
+                let target = world_map.map.as_ref().and_then(|map| {
+                    let rc = tile_region(map, ui.get_selected_col(), ui.get_selected_row())?;
+                    play_blocker(map, rc, home).is_none().then_some(rc)
+                });
+                let Some(rc) = target else { continue };
+                if let Some(requests) = requests.as_ref() {
+                    let _ = requests.0.send(ClientRequest::PlayRegion(rc));
+                }
+                pending.0 = Some(rc);
+                world_map.refused = None;
+                to.map = false;
+            }
         }
+        set_screens(ui, to, &mut world_map, status.home_region, policy.as_deref_mut());
     }
 }
 
@@ -479,6 +709,80 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     }
 }
 
+/// The map as last pushed to the UI.
+#[derive(Default)]
+struct MapShown {
+    map: Option<WorldMap>,
+    /// Bumped whenever `map` is replaced.
+    generation: u64,
+    /// (generation, selected column, selected row, home) the tile info was
+    /// last computed for.
+    info_for: Option<(u64, i32, i32, Option<RegionCoords>)>,
+}
+
+/// What the world map window reads.
+#[derive(SystemParam)]
+struct MapParams<'w, 's> {
+    world_map: Res<'w, WorldMapState>,
+    pending: ResMut<'w, PlayPending>,
+    shown: Local<'s, MapShown>,
+}
+
+/// The map picture, home and selected tile, tile info, Play state and
+/// status line → the UI, each only when changed.
+fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
+    if p.world_map.is_changed() && p.shown.map.as_ref() != p.world_map.map.as_ref() {
+        match &p.world_map.map {
+            Some(map) => {
+                let (width, height, pixels) = rasterize(map);
+                let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(pixels.as_flattened(), width, height);
+                ui.set_map_image(SlintImage::from_rgba8(buffer));
+                ui.set_map_cols(map.width as i32);
+                ui.set_map_rows(map.height as i32);
+            }
+            None => ui.set_map_image(SlintImage::default()),
+        }
+        ui.set_map_available(p.world_map.map.is_some());
+        p.shown.map = p.world_map.map.clone();
+        p.shown.generation += 1;
+    }
+    let map = p.world_map.map.as_ref();
+
+    let (home_col, home_row) = map.zip(home).and_then(|(map, home)| map_tile(map, home)).unwrap_or((-1, -1));
+    if ui.get_home_col() != home_col || ui.get_home_row() != home_row {
+        ui.set_home_col(home_col);
+        ui.set_home_row(home_row);
+    }
+
+    let (col, row) = (ui.get_selected_col(), ui.get_selected_row());
+    let info_for = Some((p.shown.generation, col, row, home));
+    if p.shown.info_for != info_for {
+        p.shown.info_for = info_for;
+        let picked = map.and_then(|map| Some((map, tile_region(map, col, row)?)));
+        let lines: Vec<SharedString> = picked
+            .map_or_else(Vec::new, |(map, rc)| tile_info_lines(map, rc))
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        ui.set_tile_lines(ModelRc::new(VecModel::from(lines)));
+        let blocker = picked.map(|(map, rc)| play_blocker(map, rc, home));
+        ui.set_play_enabled(matches!(blocker, Some(None)));
+        ui.set_play_reason(blocker.flatten().unwrap_or("").into());
+    }
+
+    // Pending until we are home in the target, or the server refused it.
+    if let Some(target) = p.pending.0 {
+        let refused = p.world_map.refused.is_some_and(|(rc, _)| rc == target);
+        if home == Some(target) || refused {
+            p.pending.0 = None;
+        }
+    }
+    let status = map_status_text(p.pending.0, p.world_map.refused.map(|(_, why)| why));
+    if ui.get_map_status() != status {
+        ui.set_map_status(status.into());
+    }
+}
+
 /// Client state → panel properties, only when it changed (every set marks
 /// the UI dirty and costs a repaint).
 fn push_ui_state(
@@ -487,10 +791,12 @@ fn push_ui_state(
     selection: Option<Res<Selection>>,
     entities: Query<(&SimEntity, &SimKind)>,
     mut toolbar: ToolbarParams,
+    mut map: MapParams,
 ) {
     let Some(slint) = slint else { return };
     let ui = slint.overlay.ui();
     sync_toolbar(ui, slint.ui_scale, &mut toolbar);
+    sync_world_map(ui, status.home_region, &mut map);
     if status.is_changed() {
         ui.set_home_region(
             status.home_region.map_or("--".into(), |r| format!("({}, {})", r.x, r.z)).into(),
@@ -545,6 +851,28 @@ fn unpremultiply(p: slint_ui::slint::platform::software_renderer::PremultipliedR
 mod tests {
     use super::*;
     use slint_ui::slint::platform::software_renderer::PremultipliedRgbaColor;
+
+    #[test]
+    fn escape_closes_the_map_first_then_toggles_the_menu() {
+        let none = Screens::default();
+        let menu = Screens { menu: true, map: false };
+        let map = Screens { menu: false, map: true };
+        assert_eq!(none.escape(), menu);
+        assert_eq!(menu.escape(), none);
+        assert_eq!(map.escape(), none);
+        assert_eq!(none.toggle_map(), map);
+        assert_eq!(menu.toggle_map(), map, "opening the map closes the menu");
+        assert_eq!(map.toggle_map(), none);
+    }
+
+    #[test]
+    fn status_text_loading_then_refusal() {
+        let rc = RegionCoords::new(1, 2);
+        assert_eq!(map_status_text(Some(rc), Some(PlayRefusal::OffMap)), LOADING_TEXT);
+        assert_eq!(map_status_text(None, Some(PlayRefusal::NoDryLand)), "No dry land there");
+        assert_eq!(map_status_text(None, None), "");
+        assert_eq!(centred_pan(100.0, 2, 10.0), 25.0);
+    }
 
     #[test]
     fn selection_lines_count_each_kind() {

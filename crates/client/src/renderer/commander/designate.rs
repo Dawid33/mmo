@@ -243,6 +243,12 @@ impl Default for DesignateState {
 }
 
 impl DesignateState {
+    /// A tool is up or a box is being picked: Esc cancels that before it
+    /// opens the menu.
+    pub fn in_progress(&self) -> bool {
+        self.tool.is_some() || self.corners != CornerPhase::Idle
+    }
+
     /// Esc / right click: drop the open box if there is one, else the tool.
     pub fn cancel(&mut self) {
         if step_corners(&mut self.corners, CornerEvent::Cancel, DRAG_THRESHOLD_PX) == CornerOutcome::None {
@@ -413,7 +419,7 @@ pub fn designate_keys(
     local: Res<LocalPlayer>,
     mut state: ResMut<DesignateState>,
 ) {
-    if policy.overlay_open {
+    if policy.blocks_game() {
         return;
     }
     let ctrl = ctrl_held(&keys);
@@ -456,7 +462,7 @@ pub fn update_hover(
 ) {
     let hover = (|| {
         state.tool?;
-        if policy.overlay_open || policy.ui_pointer {
+        if policy.blocks_game() || policy.ui_pointer {
             return None;
         }
         let (region, level) = (mirror.region()?, working.level?);
@@ -500,7 +506,7 @@ pub fn drag_input(
     // A right press is a click unless the mouse travels: orbiting holds the
     // pointer still, so the travel is the raw motion, not the cursor.
     if buttons.just_pressed(MouseButton::Right) {
-        *right_travel = (!policy.overlay_open && !policy.ui_pointer).then_some(0.0);
+        *right_travel = (!policy.blocks_game() && !policy.ui_pointer).then_some(0.0);
     }
     if let Some(travel) = right_travel.as_mut() {
         *travel += motion.delta.length();
@@ -516,7 +522,7 @@ pub fn drag_input(
     let cursor = window.cursor_position();
     if buttons.just_pressed(MouseButton::Left) {
         let over_minimap = cursor.is_some_and(|c| minimap::screen_rect(window.size()).contains(c));
-        let blocked = policy.overlay_open || policy.ui_pointer || minimap_pointer.dragging || over_minimap;
+        let blocked = policy.blocks_game() || policy.ui_pointer || minimap_pointer.dragging || over_minimap;
         if let (false, Some(at), Some(px)) = (blocked, state.hover, cursor) {
             step_corners(&mut state.corners, CornerEvent::Press { cell: at, px }, DRAG_THRESHOLD_PX);
         }

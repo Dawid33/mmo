@@ -18,6 +18,10 @@ pub struct CursorPolicy {
     /// is still held (`slint_overlay`): world clicks, drags, edge panning and
     /// zoom leave it alone. Unlike `overlay_open` it frees nothing.
     pub ui_pointer: bool,
+    /// The Slint menu or world map is open (written only by
+    /// `slint_overlay`): the game behind it takes no keys, clicks, drags or
+    /// wheel. Like `ui_pointer` it frees nothing.
+    pub ui_modal: bool,
     /// A commander right-drag is turning the camera: the pointer is held
     /// hidden and still (`commander::hold_pointer_while_orbiting` puts it back
     /// where the press was) until the button is released.
@@ -27,6 +31,12 @@ pub struct CursorPolicy {
 impl CursorPolicy {
     pub fn grabbed(&self) -> bool {
         self.sim_grab && !self.overlay_open
+    }
+
+    /// A client-local overlay or a modal game screen is open: commander
+    /// input leaves the world alone.
+    pub fn blocks_game(&self) -> bool {
+        self.overlay_open || self.ui_modal
     }
 
     /// The grab mode and cursor visibility the window should have.
