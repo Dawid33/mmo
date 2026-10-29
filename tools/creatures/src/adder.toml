@@ -1,0 +1,77 @@
+# DF ADDER (wild): a small venomous snake, 150 g (~60 cm). The serpent pilot;
+# about 1 m here so it still reads from the commander camera. Attack: bite.
+name = "adder"
+template = "serpent"
+status = "draft"
+
+[proportions]
+segments = 5
+seg = [2.5, 1.5, 2.5]
+taper = 0.4
+head = [3, 2, 3]
+
+# Head pivot: the neck, at the back of the head, mid-height of the first segment.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-1, -0.75, -4]
+to = [1, 0.25, -3]
+
+[palette]
+body = "#7b7462"
+body_up = "#8e866f"
+body_down = "#c2b79b"
+head = "#6b6352"
+eye = "#b8261d"
+zigzag = "#2a241c"
+tongue = "#b8261d"
+
+# The adder's zigzag along the back (up faces are 3 wide, row 0 at the front).
+[[decals]]
+cube = "seg0"
+face = "up"
+x = 1
+y = 0
+h = 3
+colour = "zigzag"
+
+[[decals]]
+cube = "seg1"
+face = "up"
+x = 1
+y = 0
+h = 3
+colour = "zigzag"
+
+[[decals]]
+cube = "seg2"
+face = "up"
+x = 0
+y = 0
+h = 3
+w = 2
+colour = "zigzag"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "zigzag"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 0
+colour = "eye"

@@ -1,4 +1,180 @@
 {
+ "adder": {
+  "name": "adder",
+  "status": "draft",
+  "model": "models/creatures/adder.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -8.75
+   ],
+   [
+    1.5,
+    2,
+    7.75
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep"
+  ],
+  "cubes": 7,
+  "bones": 7,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.4,
+    "stride": 4.375,
+    "speed": 3.125
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 5.625,
+    "speed": 8.0357
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   }
+  }
+ },
+ "bird_chicken": {
+  "name": "chicken",
+  "status": "draft",
+  "model": "models/creatures/bird_chicken.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -3.5,
+    0,
+    -6.5
+   ],
+   [
+    3.5,
+    12.5,
+    5.2039
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land",
+   "brood"
+  ],
+  "cubes": 12,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 2.8168,
+    "speed": 4.024
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 5.9397,
+    "speed": 14.8492
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "brood": {
+    "loop": "loop",
+    "length": 3
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 17.5558,
+    "speed": 35.1116
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.35
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
  "dog": {
   "name": "dog",
   "status": "draft",
@@ -76,6 +252,210 @@
    },
    "sit": {
     "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "dwarf": {
+  "name": "dwarf",
+  "status": "draft",
+  "model": "models/creatures/dwarf.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -8,
+    0,
+    -5
+   ],
+   [
+    8,
+    28,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 14,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.9,
+    "stride": 8.4505,
+    "speed": 9.3894
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 20.6832,
+    "speed": 37.6058
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.9,
+    "stride": 6.8593,
+    "speed": 7.6214
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.8
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
+ "fish_carp": {
+  "name": "carp",
+  "status": "draft",
+  "model": "models/creatures/fish_carp.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -5.4302,
+    0,
+    -9.5
+   ],
+   [
+    5.4302,
+    9,
+    11
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 8,
+  "bones": 7,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 14.35,
+    "speed": 17.9375
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
     "length": 0.6
    }
   }

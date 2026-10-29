@@ -22,8 +22,8 @@ REPO = os.path.dirname(os.path.dirname(HERE))
 VIEWER = os.path.join(REPO, "target", "debug", "examples", "asset_viewer")
 MANIFEST = os.path.join(REPO, "assets", "models", "creatures", "creatures.json")
 OUT = os.path.join(REPO, "target", "creature-sheets")
-# The 3D view between the viewer's panels at its 1600×900 window.
-CROP = (420, 120, 1220, 820)
+# The 3D view between the viewer's panels at its 1600×900 window (tall bipeds fill it).
+CROP = (340, 20, 1300, 860)
 TILE = (400, 350)
 COLUMNS = 6
 # Where in a clip to look: a loop or one-shot at 30% (mid-motion), a hold at its end.

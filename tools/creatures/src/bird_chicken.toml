@@ -1,0 +1,59 @@
+# DF BIRD_CHICKEN (domestic): 3 kg, lays eggs (nest boxes: the brood clip). Not a
+# FLIER in the raws, but a chicken flutters up onto things, so it keeps the fly
+# set. Attack: peck (the template's `attack`).
+name = "chicken"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [5, 5, 7]
+leg = [1, 3]
+foot = [3, 1, 3]
+head = [3, 4, 3]
+neck = 1
+beak = [1, 1, 1.5]
+tail = [3, 1, 4]
+tail_raise = 55
+wing = [6, 4]
+brood = true
+
+# Head pivot: the neck, at the body's top front.
+[[cubes]]
+name = "comb"
+bone = "head"
+part = "comb"
+from = [-0.5, 4, -2]
+to = [0.5, 5.5, 0.5]
+
+[[cubes]]
+name = "wattle"
+bone = "head"
+part = "comb"
+from = [-0.5, 0.5, -3.5]
+to = [0.5, 2, -2.5]
+
+[palette]
+body = "#ece6d6"
+body_down = "#d4ccba"
+head = "#ece6d6"
+wings = "#e2dac6"
+tail = "#d9d0bb"
+legs = "#e3a33a"
+beak = "#e8b13c"
+comb = "#c8302b"
+eye = "#121010"
+
+# The head's side faces are 3×4 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"

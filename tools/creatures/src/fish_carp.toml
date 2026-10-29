@@ -1,0 +1,63 @@
+# DF FISH_CARP (wild, large river/lake): 40 kg, aquatic, a bottom-feeder. The fish
+# pilot. Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "carp"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [5, 7, 10]
+head = [4, 6, 4]
+tail = [3, 4, 3]
+fin = [1, 7, 3]
+pectoral = [3, 2]
+dorsal = [1, 2, 6]
+
+# Head pivot: the body's front, at mid-height; the head spans z -4..0.
+[[cubes]]
+name = "barbels"
+bone = "head"
+part = "fins"
+from = [-1.5, -2, -4.5]
+to = [1.5, -1.5, -3.5]
+
+[palette]
+body = "#8c7a3c"
+body_down = "#d7c79a"
+body_up = "#5d5530"
+head = "#8c7a3c"
+head_down = "#d7c79a"
+fins = "#9c5f34"
+eye = "#121010"
+eye_ring = "#d8c27a"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"

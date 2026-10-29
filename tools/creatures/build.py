@@ -39,204 +39,27 @@ def uid(*parts):
     return str(uuid.uuid5(NAMESPACE, "/".join(parts)))
 
 
-# --- Templates ----------------------------------------------------------------
-#
-# A template turns proportions into a skeleton: bones (name, parent, pivot, rest
-# rotation), cubes (bone, part, from, to, all in model units, absolute) and clips
-# (name → mode, length, {bone: {channel: [(time, [x, y, z])]}}). Creatures facing
-# -Z, feet on y = 0. Signs: +X rotation swings a hanging leg's foot forward (-Z)
-# and lifts a forward-pointing head's nose; a +Z-pointing tail goes down.
-
-QUADRUPED_BUDGET = {"cubes": 24, "bones": 12}
-# Every quadruped has these (the lint checks); a creature may add more.
-QUADRUPED_CLIPS = ["idle", "walk", "run", "attack", "hurt", "death", "lie", "sleep", "eat"]
-
-QUADRUPED_DEFAULTS = {
-    "body": [6, 6, 13],          # width (x), height (y), length (z)
-    "leg": [2, 6],               # thickness, length
-    "leg_inset": 0,              # legs moved in from the body's sides
-    "leg_ends": 1,               # legs moved in from the body's ends
-    "head": [5, 5, 4],           # width, height, length
-    "head_up": 2,                # head top above the body top
-    "head_overlap": 1,           # head pushed back into the body
-    "tail": [2, 7],              # thickness, length
-    "tail_raise": 40,            # degrees above horizontal at rest
-    # Gaits: cycle seconds and leg swing degrees.
-    "walk": {"cycle": 0.8, "swing": 30, "bob": 0.3},
-    "run": {"cycle": 0.45, "swing": 50, "bob": 0.8, "pitch": 6},
-    "idle": {"length": 4.0, "look": 18, "breath": 0.15, "wag": 10},
-    "attack": {"length": 0.6, "lunge": 3},
-    "eat": {"length": 1.6, "reach": 45, "forward": 2.5},
-}
-
-
-def quadruped(p):
-    bw, bh, bl = p["body"]
-    lw, ll = p["leg"]
-    hw, hh, hlen = p["head"]
-    tw, tl = p["tail"]
-    top = ll + bh
-    bones = [
-        ("root", None, [0, 0, 0], [0, 0, 0]),
-        ("body", "root", [0, ll + bh / 2, 0], [0, 0, 0]),
-        ("head", "body", [0, top - 1, -bl / 2], [0, 0, 0]),
-        ("tail", "body", [0, top - 1, bl / 2], [-p["tail_raise"], 0, 0]),
-    ]
-    cubes = [("body", "body", "fur", [-bw / 2, ll, -bl / 2], [bw / 2, top, bl / 2])]
-    lx = bw / 2 - lw / 2 - p["leg_inset"]
-    fz = -bl / 2 + lw / 2 + p["leg_ends"]
-    bz = bl / 2 - lw / 2 - p["leg_ends"]
-    for name, x, z in (("leg_fl", -lx, fz), ("leg_fr", lx, fz), ("leg_bl", -lx, bz), ("leg_br", lx, bz)):
-        bones.append((name, "body", [x, ll, z], [0, 0, 0]))
-        # One unit up into the body, so a swinging leg never shows a gap.
-        cubes.append((name, name, "legs", [x - lw / 2, 0, z - lw / 2], [x + lw / 2, ll + 1, z + lw / 2]))
-    head_top = top + p["head_up"]
-    hz = -bl / 2 + p["head_overlap"]
-    cubes.append(("head", "head", "head", [-hw / 2, head_top - hh, hz - hlen], [hw / 2, head_top, hz]))
-    ty = top - 1
-    cubes.append(("tail", "tail", "tail", [-tw / 2, ty - tw / 2, bl / 2 - 1], [tw / 2, ty + tw / 2, bl / 2 - 1 + tl]))
-    return {"bones": bones, "cubes": cubes, "clips": quadruped_clips(p), "budget": QUADRUPED_BUDGET,
-            "required": QUADRUPED_CLIPS}
-
-
-def quadruped_clips(p):
-    bw, bh, bl = p["body"]
-    lw, ll = p["leg"]
-    clips = {}
-
-    w = p["walk"]
-    T, A, bob = w["cycle"], w["swing"], w["bob"]
-    a = [(0, [A, 0, 0]), (T / 2, [-A, 0, 0]), (T, [A, 0, 0])]
-    b = [(0, [-A, 0, 0]), (T / 2, [A, 0, 0]), (T, [-A, 0, 0])]
-    clips["walk"] = clip("loop", T, {
-        "leg_fl": {"rotation": a}, "leg_br": {"rotation": a},
-        "leg_fr": {"rotation": b}, "leg_bl": {"rotation": b},
-        "body": {"position": [(0, [0, 0, 0]), (T / 4, [0, bob, 0]), (T / 2, [0, 0, 0]),
-                              (3 * T / 4, [0, bob, 0]), (T, [0, 0, 0])]},
-        "head": {"rotation": [(0, [0, 0, 0]), (T / 4, [-3, 0, 0]), (T / 2, [0, 0, 0]),
-                              (3 * T / 4, [-3, 0, 0]), (T, [0, 0, 0])]},
-        "tail": {"rotation": [(0, [0, 8, 0]), (T / 2, [0, -8, 0]), (T, [0, 8, 0])]},
-    }, stride=2 * ll * math.sin(math.radians(A)))
-
-    r = p["run"]
-    T, A = r["cycle"], r["swing"]
-    front = [(0, [A, 0, 0]), (T / 2, [-A, 0, 0]), (T, [A, 0, 0])]
-    back = [(0, [-A, 0, 0]), (T / 2, [A, 0, 0]), (T, [-A, 0, 0])]
-    clips["run"] = clip("loop", T, {
-        "leg_fl": {"rotation": front}, "leg_fr": {"rotation": shift(front, T * 0.08, T)},
-        "leg_bl": {"rotation": back}, "leg_br": {"rotation": shift(back, T * 0.08, T)},
-        "body": {
-            "rotation": [(0, [r["pitch"], 0, 0]), (T / 2, [-r["pitch"], 0, 0]), (T, [r["pitch"], 0, 0])],
-            "position": [(0, [0, 0, 0]), (T / 4, [0, r["bob"], 0]), (T / 2, [0, 0, 0]),
-                         (3 * T / 4, [0, r["bob"], 0]), (T, [0, 0, 0])],
-        },
-        "head": {"rotation": [(0, [-r["pitch"], 0, 0]), (T / 2, [r["pitch"], 0, 0]), (T, [-r["pitch"], 0, 0])]},
-        "tail": {"rotation": [(0, [15, 0, 0]), (T / 2, [5, 0, 0]), (T, [15, 0, 0])]},
-    }, stride=2 * ll * math.sin(math.radians(A)) * 1.6)
-
-    i = p["idle"]
-    L, look, breath, wag = i["length"], i["look"], i["breath"], i["wag"]
-    clips["idle"] = clip("loop", L, {
-        "body": {"position": [(t, [0, breath * math.sin(2 * math.pi * t / (L / 2)), 0])
-                              for t in frange(0, L, L / 8)]},
-        "head": {"rotation": [(0, [0, 0, 0]), (L * 0.2, [0, look, 0]), (L * 0.35, [0, look, 0]),
-                              (L * 0.5, [0, 0, 0]), (L * 0.7, [-6, -look, 0]), (L * 0.85, [-6, -look, 0]),
-                              (L, [0, 0, 0])]},
-        "tail": {"rotation": [(t, [0, wag * math.sin(2 * math.pi * t / (L / 5)), 0])
-                              for t in frange(0, L, L / 20)]},
-    })
-
-    at = p["attack"]
-    L, lunge = at["length"], at["lunge"]
-    clips["attack"] = clip("once", L, {
-        "body": {"position": [(0, [0, 0, 0]), (L * 0.25, [0, 0.5, -lunge]), (L * 0.45, [0, -0.5, -lunge]),
-                              (L, [0, 0, 0])],
-                 "rotation": [(0, [0, 0, 0]), (L * 0.25, [6, 0, 0]), (L * 0.45, [-4, 0, 0]), (L, [0, 0, 0])]},
-        "head": {"rotation": [(0, [0, 0, 0]), (L * 0.2, [20, 0, 0]), (L * 0.42, [-25, 0, 0]), (L, [0, 0, 0])]},
-        "leg_fl": {"rotation": [(0, [0, 0, 0]), (L * 0.3, [-25, 0, 0]), (L, [0, 0, 0])]},
-        "leg_fr": {"rotation": [(0, [0, 0, 0]), (L * 0.3, [-25, 0, 0]), (L, [0, 0, 0])]},
-        "leg_bl": {"rotation": [(0, [0, 0, 0]), (L * 0.3, [20, 0, 0]), (L, [0, 0, 0])]},
-        "leg_br": {"rotation": [(0, [0, 0, 0]), (L * 0.3, [20, 0, 0]), (L, [0, 0, 0])]},
-    })
-
-    L = 0.35
-    clips["hurt"] = clip("once", L, {
-        "body": {"position": [(0, [0, 0, 0]), (L * 0.3, [0, 0.5, 1.5]), (L, [0, 0, 0])],
-                 "rotation": [(0, [0, 0, 0]), (L * 0.3, [-6, 0, 8]), (L, [0, 0, 0])]},
-        "head": {"rotation": [(0, [0, 0, 0]), (L * 0.3, [15, 0, 0]), (L, [0, 0, 0])]},
-    })
-
-    # Onto its side: a quarter turn about the ground under the body, lifted by
-    # half the body's width so it lies on the ground, not through it.
-    L = 1.0
-    clips["death"] = clip("hold", L, {
-        "root": {"rotation": [(0, [0, 0, 0]), (L * 0.6, [0, 0, 92]), (L * 0.75, [0, 0, 88]), (L, [0, 0, 90])],
-                 "position": [(0, [0, 0, 0]), (L * 0.6, [0, bw / 2, 0]), (L, [0, bw / 2, 0])]},
-        "head": {"rotation": [(0, [0, 0, 0]), (L * 0.6, [10, 0, 0]), (L, [-10, 0, 0])]},
-        "leg_fl": {"rotation": [(0, [0, 0, 0]), (L * 0.6, [-20, 0, 0]), (L, [-15, 0, 0])]},
-        "leg_fr": {"rotation": [(0, [0, 0, 0]), (L * 0.6, [-20, 0, 0]), (L, [-15, 0, 0])]},
-        "leg_bl": {"rotation": [(0, [0, 0, 0]), (L * 0.6, [20, 0, 0]), (L, [15, 0, 0])]},
-        "leg_br": {"rotation": [(0, [0, 0, 0]), (L * 0.6, [20, 0, 0]), (L, [15, 0, 0])]},
-        "tail": {"rotation": [(0, [0, 0, 0]), (L, [p["tail_raise"], 0, 0])]},
-    })
-
-    # Folded: all four legs swing forward to lie flat under the body (the hind
-    # ones tucked beneath it), which drops by the leg length less the folded
-    # leg's thickness.
-    drop = -(ll - lw)
-    for name, head_down, period in (("lie", 0, 4.0), ("sleep", -28, 6.0)):
-        fold = {"rotation": [(0, [80, 0, 0]), (period, [80, 0, 0])]}
-        clips[name] = clip("loop", period, {
-            "body": {"position": [(0, [0, drop, 0]), (period / 2, [0, drop + 0.25, 0]), (period, [0, drop, 0])]},
-            "head": {"rotation": [(0, [head_down, 0, 0]), (period / 2, [head_down + 3, 0, 0]),
-                                  (period, [head_down, 0, 0])],
-                     "position": [(0, [0, -1 if head_down else 0, 0]), (period, [0, -1 if head_down else 0, 0])]},
-            "leg_fl": fold, "leg_fr": fold, "leg_bl": fold, "leg_br": fold,
-            "tail": {"rotation": [(0, [p["tail_raise"], 0, 0]), (period, [p["tail_raise"], 0, 0])]},
-        })
-
-    e = p["eat"]
-    L, reach = e["length"], e["reach"]
-    clips["eat"] = clip("loop", L, {
-        "body": {"rotation": [(0, [-10, 0, 0]), (L, [-10, 0, 0])], "position": [(0, [0, -1, 0]), (L, [0, -1, 0])]},
-        # Pushed forward so the muzzle reaches the ground ahead of the forelegs
-        # instead of folding back under the chest.
-        "head": {"rotation": [(t, [-reach + 6 * math.sin(2 * math.pi * t / (L / 4)), 0, 0])
-                              for t in frange(0, L, L / 16)],
-                 "position": [(0, [0, -0.5, -e["forward"]]), (L, [0, -0.5, -e["forward"]])]},
-        "leg_fl": {"rotation": [(0, [8, 0, 0]), (L, [8, 0, 0])]},
-        "leg_fr": {"rotation": [(0, [8, 0, 0]), (L, [8, 0, 0])]},
-        "tail": {"rotation": [(0, [0, 6, 0]), (L / 2, [0, -6, 0]), (L, [0, 6, 0])]},
-    })
-    return clips
-
-
-TEMPLATES = {"quadruped": (quadruped, QUADRUPED_DEFAULTS)}
-
-
-def clip(mode, length, tracks, stride=None):
-    return {"mode": mode, "length": round(length, 4), "tracks": tracks, "stride": stride}
-
-
-def frange(a, b, step):
-    n = round((b - a) / step)
-    return [a + i * step for i in range(n + 1)]
-
-
-def shift(keys, dt, period):
-    """A looping track delayed by `dt`: the same curve, keyed from 0 to `period`."""
-    def value(t):
-        t = (t - dt) % period
-        for (t0, v0), (t1, v1) in zip(keys, keys[1:]):
-            if t0 <= t <= t1:
-                f = (t - t0) / (t1 - t0) if t1 > t0 else 0
-                return [a + (b - a) * f for a, b in zip(v0, v1)]
-        return keys[-1][1]
-    times = sorted({0.0, period} | {(t + dt) % period for t, _ in keys})
-    return [(t, value(t)) for t in times]
+from templates import TEMPLATES, WING_CLIPS, add_wings, clip, rest_points, wing_clips  # noqa: E402
 
 
 # --- Creature sources -----------------------------------------------------------
+#
+# A source names a template and overrides its proportions, then adds to it:
+#   [[bones]]  name, parent, pivot (relative to the parent's pivot), rest, and
+#              optionally follow = "<bone>" (every clip moves it like that bone:
+#              a hydra's extra heads) and mirror = true (also a "_r" twin of an
+#              "_l" bone, mirrored in x).
+#   [[cubes]]  name, bone, part, from, to (relative to the bone's pivot);
+#              mirror = true adds the x-mirrored twin ("_l" → "_r" in the cube
+#              and bone names).
+#   [wings]    bone, at (left shoulder, relative to the bone's pivot), span,
+#              chord, part, + fly-clip tunables: adds wing_l/wing_r and the fly set.
+#   [clips.X]  mode, length, keys; merge = true adds the keys' tracks to the
+#              template's clip X instead of replacing it.
+#   [budget]   raise a template budget (say why in a comment).
+# Derived sources: variant_of = "<df_id>" + scale (a giant: the base scaled,
+# slower cycles), animal_person_of = "<df_id>" (the biped with the base's head,
+# tail and colours).
 
 def merge(defaults, override):
     out = dict(defaults)
@@ -245,24 +68,220 @@ def merge(defaults, override):
     return out
 
 
-def load(df_id):
+def read_source(df_id):
     with open(os.path.join(SRC, df_id + ".toml"), "rb") as f:
-        src = tomllib.load(f)
-    make, defaults = TEMPLATES[src["template"]]
-    params = merge(defaults, src.get("proportions", {}))
-    model = make(params)
+        return tomllib.load(f)
+
+
+def other_side(name):
+    return name[:-2] + "_r" if name.endswith("_l") else name
+
+
+def load(df_id):
+    src = read_source(df_id)
+    if "variant_of" in src:
+        base_src, model = load(src["variant_of"])
+        return variant(base_src, src, model)
+    if "animal_person_of" in src:
+        return animal_person(src)
+    return src, build_model(src)
+
+
+def build_model(src, params=None):
+    t = TEMPLATES[src["template"]]
+    params = params or merge(t.defaults, src.get("proportions", {}))
+    model = t.skeleton(params)
     pivots = {name: pivot for name, _, pivot, _ in model["bones"]}
-    # Extra cubes are given relative to their bone's pivot.
+    follow = {}
+    for b in src.get("bones", []):
+        twins = [(b["name"], 1)] + ([(other_side(b["name"]), -1)] if b.get("mirror") else [])
+        for name, s in twins:
+            parent = other_side(b["parent"]) if s < 0 and other_side(b["parent"]) in pivots else b["parent"]
+            o = pivots[parent]
+            pivot = [o[0] + s * b["pivot"][0], o[1] + b["pivot"][1], o[2] + b["pivot"][2]]
+            rest = b.get("rest", [0, 0, 0])
+            model["bones"].append((name, parent, pivot, [rest[0], s * rest[1], s * rest[2]]))
+            pivots[name] = pivot
+            if "follow" in b:
+                follow[name] = (other_side(b["follow"]) if s < 0 else b["follow"], s)
     for i, c in enumerate(src.get("cubes", [])):
-        o = pivots[c["bone"]]
-        model["cubes"].append((c.get("name", f"{c['bone']}_{i}"), c["bone"], c["part"],
-                               [o[k] + c["from"][k] for k in range(3)], [o[k] + c["to"][k] for k in range(3)]))
+        name = c.get("name", f"{c['bone']}_{i}")
+        twins = [(name, c["bone"], 1)]
+        if c.get("mirror"):
+            twins.append((other_side(name) if other_side(name) != name else name + "_m",
+                          other_side(c["bone"]) if other_side(c["bone"]) in pivots else c["bone"], -1))
+        for cname, bone, s in twins:
+            o = pivots[bone]
+            xs = sorted((s * c["from"][0], s * c["to"][0]))
+            model["cubes"].append((cname, bone, c["part"], [o[0] + xs[0], o[1] + c["from"][1], o[2] + c["from"][2]],
+                                   [o[0] + xs[1], o[1] + c["to"][1], o[2] + c["to"][2]]))
+    wings = src.get("wings")
+    if wings:
+        wings = dict(wings)
+        o = pivots[wings.get("bone", "body")]
+        wings["at"] = [o[k] + wings["at"][k] for k in range(3)]
+        add_wings(model, wings)
+    model["clips"] = t.clips(params, model)
+    model["required"] = t.required(params)
+    if wings:
+        model["clips"].update(wing_clips(model, wings))
+        model["required"] += [c for c in WING_CLIPS if c not in model["required"]]
+    for name, (target, s) in follow.items():
+        for c in model["clips"].values():
+            if target in c["tracks"]:
+                c["tracks"][name] = {ch: [(t, [v[0], s * v[1], s * v[2]] if ch == "rotation" else
+                                           [s * v[0], v[1], v[2]] if ch == "position" else list(v))
+                                          for t, v in keys]
+                                     for ch, keys in c["tracks"][target].items()}
     for name, c in src.get("clips", {}).items():
         tracks = {}
         for k in c.get("keys", []):
             tracks.setdefault(k["bone"], {}).setdefault(k["channel"], []).append((k["time"], k["value"]))
-        model["clips"][name] = clip(c["mode"], c["length"], tracks)
-    return src, model
+        if c.get("merge"):
+            base = model["clips"][name]
+            for bone, channels in tracks.items():
+                base["tracks"].setdefault(bone, {}).update(channels)
+        else:
+            model["clips"][name] = clip(c["mode"], c["length"], tracks)
+    model["budget"] = merge(t.budget, src.get("budget", {}))
+    return model
+
+
+def scale_model(model, s):
+    """`model` `s` times bigger, its cycles slower by √s (pendulum legs), on half units."""
+    k = math.sqrt(s)
+
+    def sc(v):
+        return [round(x * s * 2) / 2 for x in v]
+
+    out = dict(model)
+    out["bones"] = [(n, parent, sc(pivot), rest) for n, parent, pivot, rest in model["bones"]]
+    out["cubes"] = []
+    for n, bone, part, lo, hi in model["cubes"]:
+        lo, hi = sc(lo), sc(hi)
+        hi = [max(h, l_ + 0.5) for l_, h in zip(lo, hi)]
+        out["cubes"].append((n, bone, part, lo, hi))
+    out["clips"] = {}
+    for name, c in model["clips"].items():
+        tracks = {bone: {ch: [(t * k, [x * s for x in v] if ch == "position" else v) for t, v in keys]
+                         for ch, keys in channels.items()}
+                  for bone, channels in c["tracks"].items()}
+        out["clips"][name] = clip(c["mode"], c["length"] * k, tracks, c["stride"] and c["stride"] * s)
+    return out
+
+
+def scale_decals(decals, s, names=None):
+    out = []
+    for d in decals:
+        if names is not None and d["cube"] not in names:
+            continue
+        d = dict(d)
+        for key in ("x", "y"):
+            d[key] = int(math.floor(d[key] * s + 0.5))
+        for key in ("w", "h"):
+            d[key] = max(1, int(round(d.get(key, 1) * s)))
+        out.append(d)
+    return out
+
+
+def variant(base_src, src, model):
+    s = src["scale"]
+    out = dict(base_src)
+    out.update({k: v for k, v in src.items() if k not in ("palette",)})
+    out["template"] = base_src["template"]
+    out["palette"] = {**base_src["palette"], **src.get("palette", {})}
+    out["decals"] = scale_decals(base_src.get("decals", []), s)
+    return out, scale_model(model, s)
+
+
+# An animal person: a person's build (less stocky than a dwarf), the base
+# animal's head on the neck and its tail at the hips, its colours on the body.
+PERSON = {"leg": [4, 11], "foot": 2, "body": [9, 11, 5], "arm": [3, 11], "head": [7, 7, 7]}
+PERSON_SIZE = 70000  # cm³: a human; animal people scale by the cube root from here
+
+
+def animal_person(src):
+    base_src, base = load(src["animal_person_of"])
+    t = TEMPLATES["biped"]
+    params = merge(t.defaults, merge(PERSON, src.get("proportions", {})))
+    model = t.skeleton(params)
+    pivots = {name: pivot for name, _, pivot, _ in model["bones"]}
+    model["cubes"] = [c for c in model["cubes"] if c[0] != "head"]
+
+    def graft(src_model, bones, onto, anchor, k):
+        """The cubes of `bones` (their rest pose, absolute) moved so `anchor` (a
+        point in the source model) lands on the bone `onto`'s pivot, scaled by k."""
+        grafted = []
+        for cube in src_model["cubes"]:
+            if cube[1] not in bones:
+                continue
+            pts = rest_points({"bones": src_model["bones"], "cubes": [cube]})
+            lo = [min(p[i] for p in pts) for i in range(3)]
+            hi = [max(p[i] for p in pts) for i in range(3)]
+            o = pivots[onto]
+            grafted.append((cube[0], onto, cube[2], [o[i] + (lo[i] - anchor[i]) * k for i in range(3)],
+                            [o[i] + (hi[i] - anchor[i]) * k for i in range(3)]))
+        return grafted
+
+    heads = subtree_of(base, "head")
+    head_cube = next(c for c in base["cubes"] if c[0] == "head")
+    hpts = rest_points({"bones": base["bones"], "cubes": [head_cube]})
+    hlo = [min(p[i] for p in hpts) for i in range(3)]
+    hhi = [max(p[i] for p in hpts) for i in range(3)]
+    k = min(2.5, max(0.8, params["head"][0] / (hhi[0] - hlo[0])))
+    alls = rest_points({"bones": base["bones"], "cubes": [c for c in base["cubes"] if c[1] in heads]})
+    anchor = [(hlo[0] + hhi[0]) / 2, min(p[1] for p in alls), (hlo[2] + hhi[2]) / 2]
+    model["cubes"] += graft(base, heads, "head", anchor, k)
+
+    base_bones = {name: (parent, pivot, rest) for name, parent, pivot, rest in base["bones"]}
+    if "tail" in base_bones:
+        lw, ll = params["leg"]
+        bd = params["body"][2]
+        tail_pivot = [0, ll + 2, bd / 2]
+        model["bones"].append(("tail", "body", tail_pivot, [45, 0, 0]))
+        pivots["tail"] = tail_pivot
+        # The tail unrotated, from its root, at the head's scale (but never huge).
+        _, bp, _ = base_bones["tail"]
+        flat = {"bones": [(n, p, pv, [0, 0, 0] if n == "tail" else r) for n, p, pv, r in base["bones"]],
+                "cubes": base["cubes"]}
+        model["cubes"] += graft(flat, subtree_of(flat, "tail"), "tail", bp, min(k, 1.5))
+
+    model["clips"] = t.clips(params, model)
+    if "tail" in pivots:
+        for name in ("idle", "walk", "run", "carry"):
+            c = model["clips"][name]
+            T = c["length"]
+            c["tracks"]["tail"] = {"rotation": [(0, [0, 12, 0]), (T / 2, [0, -12, 0]), (T, [0, 12, 0])]}
+    model["required"] = t.required(params)
+    model["budget"] = merge(t.budget, src.get("budget", {}))
+
+    palette = dict(base_src["palette"])
+    body_part = next(c[2] for c in base["cubes"] if c[0] == "body")
+    leg_part = next((c[2] for c in base["cubes"] if c[1].startswith("leg")), body_part)
+    palette.setdefault("torso", palette[body_part])
+    palette.setdefault("arms", palette[body_part])
+    palette.setdefault("hands", palette.get(leg_part, palette[body_part]))
+    palette.setdefault("legs", palette.get(leg_part, palette[body_part]))
+    palette.setdefault("feet", palette["legs"])
+    palette.update(src.get("palette", {}))
+    names = {c[0] for c in model["cubes"]}
+    out = {"name": src["name"], "status": src.get("status", "draft"), "template": "biped",
+           "palette": palette, "decals": scale_decals(base_src.get("decals", []), k, names) + src.get("decals", [])}
+    size = src.get("size", PERSON_SIZE)
+    s = min(1.5, max(0.7, (size / PERSON_SIZE) ** (1 / 3)))
+    return out, (scale_model(model, s) if abs(s - 1) > 0.02 else model)
+
+
+def subtree_of(model, root):
+    names = {root}
+    grew = True
+    while grew:
+        grew = False
+        for name, parent, *_ in model["bones"]:
+            if parent in names and name not in names:
+                names.add(name)
+                grew = True
+    return names
 
 
 # --- Texture painter --------------------------------------------------------------
@@ -431,28 +450,9 @@ def bbmodel(df_id, src, model):
     }
 
 
-def rotate(p, deg):
-    """`p` rotated by Euler degrees in three.js ZYX order (X first), like the loader."""
-    x, y, z = p
-    a, b, c = (math.radians(d) for d in deg)
-    y, z = y * math.cos(a) - z * math.sin(a), y * math.sin(a) + z * math.cos(a)
-    x, z = x * math.cos(b) + z * math.sin(b), -x * math.sin(b) + z * math.cos(b)
-    x, y = x * math.cos(c) - y * math.sin(c), x * math.sin(c) + y * math.cos(c)
-    return [x, y, z]
-
-
 def rest_bounds(model):
     """The rest pose's box: every cube corner through its bones' rest rotations."""
-    bones = {name: (parent, pivot, rest) for name, parent, pivot, rest in model["bones"]}
-    points = []
-    for _, bone, _, lo, hi in model["cubes"]:
-        for corner in ([x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])):
-            b = bone
-            while b:
-                parent, pivot, rest = bones[b]
-                corner = [r + o for r, o in zip(rotate([c - o for c, o in zip(corner, pivot)], rest), pivot)]
-                b = parent
-            points.append(corner)
+    points = rest_points(model)
     return [min(p[i] for p in points) for i in range(3)], [max(p[i] for p in points) for i in range(3)]
 
 
