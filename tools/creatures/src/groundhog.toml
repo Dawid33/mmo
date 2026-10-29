@@ -1,0 +1,86 @@
+# DF GROUNDHOG (creature_temperate_new): 4 kg, big round burrowing rodent.
+# Attacks bite (the template's `attack`) and scratch (optional, not made).
+# Round and low on stubby legs, small ears, a short furry tail, white incisors.
+name = "groundhog"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [6, 5, 8]
+leg = [2, 2]
+leg_ends = 0
+head = [4, 4, 3]
+head_up = 1
+tail = [2, 3]
+tail_raise = 0
+walk = { cycle = 0.6, swing = 30, bob = 0.2 }
+run = { cycle = 0.36, swing = 45, bob = 0.5, pitch = 5 }
+idle = { length = 4.0, look = 22, breath = 0.12, wag = 4 }
+attack = { length = 0.5, lunge = 2 }
+eat = { length = 1.2, reach = 35, forward = 1 }
+
+# Head pivot: the neck joint; the head cube spans y -2..2, z -2..1 around it.
+
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1.5, -2, -3]
+to = [1.5, 0, -2]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2, 2, 0]
+to = [-1, 3, 1]
+
+[palette]
+fur = "#8a6a46"
+fur_up = "#7a5c3c"
+fur_down = "#a8885e"
+legs = "#3a2a1e"
+head = "#7a5c3c"
+snout = "#b8a080"
+ears = "#5a4430"
+tail = "#4a3626"
+eye = "#0e0b09"
+nose = "#1e1612"
+teeth = "#f2ecdc"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+w = 1
+h = 1
+colour = "nose"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 1
+w = 1
+h = 1
+colour = "teeth"

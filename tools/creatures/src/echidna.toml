@@ -1,0 +1,469 @@
+# DF ECHIDNA (creature_temperate_new): 10 kg, small spiny egg-laying anteater.
+# Attack scratch (the template's `attack` lunge). Low and round: short splayed
+# legs, a spine coat as a cube over the back, a long thin beak-like snout, a
+# stub tail.
+name = "echidna"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [6, 4, 10]
+leg = [2, 2]
+leg_inset = -0.5
+leg_ends = 0
+head = [4, 3, 3]
+head_up = 0
+head_overlap = 1
+tail = [2, 1]
+tail_raise = 0
+walk = { cycle = 0.7, swing = 28, bob = 0.15 }
+run = { cycle = 0.45, swing = 40, bob = 0.3, pitch = 3 }
+idle = { length = 4.5, look = 16, breath = 0.12, wag = 2 }
+attack = { length = 0.55, lunge = 1.5 }
+eat = { length = 1.6, reach = 30, forward = 1 }
+
+# Body pivot: the body's centre (top at y 2, 6 wide, 10 long). The spine coat
+# sits over the back and flanks, a narrower crown on it rounds the hump.
+[[cubes]]
+name = "spines"
+bone = "body"
+part = "spines"
+from = [-3.5, -0.5, -4.5]
+to = [3.5, 2.5, 5.5]
+
+[[cubes]]
+name = "crown"
+bone = "body"
+part = "spines"
+from = [-2.5, 2.5, -3.5]
+to = [2.5, 3.5, 4.5]
+
+# Head pivot: the neck joint; the head cube spans y -2..1, z -2..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-0.5, -2, -6]
+to = [0.5, -1, -2]
+
+[palette]
+fur = "#4a3a2c"
+fur_down = "#3a2e24"
+spines = "#d9c690"
+spines_up = "#e3d3a2"
+legs = "#2e241c"
+head = "#4a3a2c"
+snout = "#1e1915"
+tail = "#4a3a2c"
+tip = "#1e1915"
+eye = "#0a0807"
+
+
+
+# Dark spine tips speckled over the coat (top 7 x 10, sides 10 x 3) and crown (5 x 8).
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 1
+y = 9
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 6
+y = 1
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 2
+y = 1
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 3
+y = 7
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 3
+y = 6
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 6
+y = 3
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 0
+y = 7
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 0
+y = 6
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 3
+y = 9
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 6
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 5
+y = 7
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 2
+y = 3
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 4
+y = 1
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 2
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 0
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 5
+y = 8
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 0
+y = 6
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "up"
+x = 5
+y = 3
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 4
+y = 4
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 2
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 3
+y = 3
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 0
+y = 2
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 0
+y = 5
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 3
+y = 3
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 3
+y = 1
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 4
+y = 3
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 0
+y = 3
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 3
+y = 4
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 1
+y = 6
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "up"
+x = 1
+y = 1
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "west"
+x = 0
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "west"
+x = 1
+y = 1
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "west"
+x = 2
+y = 2
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "west"
+x = 4
+y = 1
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "west"
+x = 9
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "west"
+x = 9
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "west"
+x = 9
+y = 2
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "west"
+x = 2
+y = 1
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "west"
+x = 6
+y = 2
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "west"
+x = 8
+y = 1
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "east"
+x = 3
+y = 2
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "east"
+x = 8
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "east"
+x = 5
+y = 2
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "east"
+x = 7
+y = 2
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "east"
+x = 9
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "east"
+x = 9
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "east"
+x = 7
+y = 1
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "east"
+x = 8
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "east"
+x = 3
+y = 2
+colour = "tip"
+
+[[decals]]
+cube = "spines"
+face = "east"
+x = 7
+y = 2
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "west"
+x = 1
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "west"
+x = 4
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "west"
+x = 0
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "west"
+x = 7
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "east"
+x = 5
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "east"
+x = 6
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "east"
+x = 1
+y = 0
+colour = "tip"
+
+[[decals]]
+cube = "crown"
+face = "east"
+x = 5
+y = 0
+colour = "tip"

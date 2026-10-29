@@ -1,0 +1,211 @@
+# DF IGUANA (creature_tropical_new): 4 kg, large green tree lizard.
+# Attack bite (the template's `attack`); the tail whip of the description is
+# not an attack in the raws. Splayed short legs, a spiny crest along the back,
+# a dewlap under the jaw, a very long banded tail.
+name = "iguana"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [4, 4, 9]
+leg = [2, 3]
+leg_inset = -1
+leg_ends = 0
+head = [3, 3, 4]
+head_up = 1
+tail = [2, 15]
+tail_raise = -5
+walk = { cycle = 0.7, swing = 30, bob = 0.1 }
+run = { cycle = 0.4, swing = 45, bob = 0.2, pitch = 3 }
+idle = { length = 5.0, look = 24, breath = 0.08, wag = 5 }
+attack = { length = 0.5, lunge = 2 }
+eat = { length = 1.6, reach = 30, forward = 1 }
+
+# Body pivot: the body's centre (top at y 2). The crest runs along the spine.
+
+[[cubes]]
+name = "crest"
+bone = "body"
+part = "crest"
+from = [-0.5, 2, -4.5]
+to = [0.5, 3, 3]
+
+# Head pivot: the neck joint; the head cube spans y -1..2, z -3..1 around it.
+
+[[cubes]]
+name = "head_crest"
+bone = "head"
+part = "crest"
+from = [-0.5, 2, -1]
+to = [0.5, 3, 1]
+
+[[cubes]]
+name = "dewlap"
+bone = "head"
+part = "dewlap"
+from = [-0.5, -3, -2]
+to = [0.5, -1, 0.5]
+
+[palette]
+fur = "#5e9a48"
+fur_down = "#9ab86a"
+legs = "#548a40"
+head = "#6aa652"
+crest = "#3e6a30"
+dewlap = "#8ab05a"
+tail = "#5e9a48"
+band = "#3a5a2c"
+eye = "#c08a30"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 0
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 2
+w = 2
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 2
+y = 0
+w = 1
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 12
+y = 0
+w = 1
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 5
+w = 2
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 5
+y = 0
+w = 1
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 9
+y = 0
+w = 1
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 8
+w = 2
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 8
+y = 0
+w = 1
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 6
+y = 0
+w = 1
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 11
+w = 2
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 11
+y = 0
+w = 1
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 3
+y = 0
+w = 1
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 13
+w = 2
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 13
+y = 0
+w = 1
+h = 2
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 1
+y = 0
+w = 1
+h = 2
+colour = "band"

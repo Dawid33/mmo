@@ -1,0 +1,307 @@
+# DF HYENA (creature_large_tropical): 60 kg, spotted pack predator, large predator.
+# Attacks bite (the template's `attack`) and scratch (optional, not made).
+# LARGE_PREDATOR: alert + roar. Sloping back (a shoulder hump on the body),
+# heavy head, round ears, short dark tail, dark spots on sandy fur.
+name = "hyena"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [7, 7, 14]
+leg = [3, 6]
+head = [5, 5, 4]
+head_up = 2
+tail = [2, 5]
+tail_raise = -30
+walk = { cycle = 0.85, swing = 28, bob = 0.35 }
+run = { cycle = 0.48, swing = 48, bob = 1.0, pitch = 6 }
+idle = { length = 4.5, look = 20, breath = 0.18, wag = 6 }
+attack = { length = 0.6, lunge = 4 }
+eat = { length = 1.6, reach = 45, forward = 2.5 }
+
+# Body pivot: the body's centre (top at y 3.5). The shoulders rise over the
+# forelegs; the rump stays low.
+[[cubes]]
+name = "shoulders"
+bone = "body"
+part = "fur"
+from = [-3.5, 3.5, -7]
+to = [3.5, 5, -1]
+
+# Head pivot: the neck joint; the head cube spans y -2..3, z -3..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1.5, -2, -6]
+to = [1.5, 0.5, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3, 3, -0.5]
+to = [-1, 5, 0.5]
+
+[palette]
+fur = "#b39a70"
+fur_up = "#a88e64"
+fur_down = "#cdb995"
+legs = "#a88f68"
+head = "#a88e64"
+snout = "#3a302a"
+ears = "#5a4a3a"
+tail = "#2e2620"
+spot = "#4a3a2c"
+eye = "#1a1410"
+nose = "#141010"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+w = 1
+colour = "nose"
+
+# Spots on the flanks (14 long x 7 tall), back and legs.
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 13
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 4
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 11
+y = 5
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 10
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 9
+y = 5
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 4
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 4
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 11
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 7
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 6
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 12
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 13
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 5
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 10
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 6
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 13
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 7
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 11
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 11
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 5
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 5
+y = 7
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 5
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 6
+y = 0
+colour = "spot"

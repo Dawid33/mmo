@@ -1,0 +1,506 @@
+# DF LEOPARD (creature_large_tropical): 60 kg, spotted big cat, large predator.
+# Attacks bite (the template's `attack`) and scratch (optional, not made).
+# LARGE_PREDATOR: alert + roar. Golden with dark rosettes (decals), long tail.
+name = "leopard"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [6, 6, 15]
+leg = [3, 5]
+head = [5, 5, 4]
+head_up = 1
+tail = [2, 13]
+tail_raise = -15
+walk = { cycle = 0.85, swing = 28, bob = 0.25 }
+run = { cycle = 0.42, swing = 55, bob = 1.0, pitch = 8 }
+idle = { length = 4.5, look = 22, breath = 0.15, wag = 8 }
+attack = { length = 0.6, lunge = 4.5 }
+
+# Head pivot: the neck joint; the head cube spans y -3..2, z -3..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1.5, -3, -5]
+to = [1.5, -1, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 2, -0.5]
+to = [-1, 3.5, 0.5]
+
+[palette]
+fur = "#d4a65a"
+fur_up = "#c99a50"
+fur_down = "#f0e4cc"
+legs = "#d0a45c"
+head = "#d4a65a"
+snout = "#f0e4cc"
+ears = "#3a2c22"
+tail = "#d0a45c"
+spot = "#2a2018"
+eye = "#9aa040"
+nose = "#a4706a"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+w = 1
+colour = "nose"
+
+# Rosettes: flanks 15 long x 6 tall, back 6 wide x 15 long, legs, tail, head top.
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 1
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 11
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 10
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 1
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 1
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 11
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 7
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 11
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 1
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 8
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 13
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 8
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 5
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 12
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 8
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 7
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 13
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 14
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 5
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 7
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 5
+y = 14
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 14
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 5
+y = 14
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 8
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 10
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 7
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 5
+y = 10
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 7
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 11
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 4
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 4
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 1
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 3
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 1
+y = 12
+colour = "spot"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 11
+colour = "spot"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 1
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 1
+y = 6
+colour = "spot"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 1
+y = 9
+colour = "spot"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 11
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 2
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 2
+colour = "spot"

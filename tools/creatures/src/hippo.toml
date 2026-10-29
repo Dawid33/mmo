@@ -1,0 +1,105 @@
+# DF HIPPO (creature_large_tropical): 3000 kg, huge round river grazer.
+# Attack kick (the template's `attack` lunge); bite optional, not made.
+# AMPHIBIOUS: swim + swim_idle. Barrel body on short legs, a huge square muzzle,
+# eye and ear knobs on top of the head, small tusks, pinkish belly.
+name = "hippo"
+template = "quadruped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+body = [16, 12, 30]
+leg = [5, 6]
+head = [11, 9, 10]
+head_up = -1
+head_overlap = 2
+tail = [2, 4]
+tail_raise = -40
+walk = { cycle = 1.3, swing = 18, bob = 0.5 }
+run = { cycle = 0.75, swing = 30, bob = 1.0, pitch = 3 }
+idle = { length = 5.5, look = 14, breath = 0.3, wag = 10 }
+attack = { length = 0.9, lunge = 5 }
+eat = { length = 2.0, reach = 25, forward = 2 }
+
+# Head pivot: the neck joint; the head cube spans y -9..0, z -8..2 around it.
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-6.5, -9, -13]
+to = [6.5, -2.5, -8]
+
+[[cubes]]
+name = "eye_l"
+bone = "head"
+part = "knobs"
+mirror = true
+from = [-4.5, 0, -4]
+to = [-2.5, 1.5, -2]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "knobs"
+mirror = true
+from = [-4.5, 0, 0]
+to = [-3.5, 1.5, 1]
+
+[[cubes]]
+name = "tusk_l"
+bone = "head"
+part = "tusks"
+mirror = true
+from = [-5, -10, -12.5]
+to = [-4, -8, -11.5]
+
+[palette]
+fur = "#6e5f63"
+fur_up = "#73646a"
+fur_down = "#b88a86"
+legs = "#655659"
+head = "#6e5f63"
+muzzle = "#7a6a6c"
+muzzle_down = "#b88a86"
+knobs = "#6e5f63"
+tusks = "#ece4cc"
+tail = "#655659"
+eye = "#141010"
+nostril = "#2a2224"
+
+[[decals]]
+cube = "eye_l"
+face = "north"
+x = 0
+y = 0
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "eye_r"
+face = "north"
+x = 1
+y = 0
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "up"
+x = 3
+y = 1
+w = 2
+h = 1
+colour = "nostril"
+
+[[decals]]
+cube = "muzzle"
+face = "up"
+x = 8
+y = 1
+w = 2
+h = 1
+colour = "nostril"

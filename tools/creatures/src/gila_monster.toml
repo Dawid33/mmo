@@ -1,0 +1,281 @@
+# DF GILA_MONSTER (creature_desert_new): 2 kg, small venomous desert lizard.
+# Attack bite (the template's `attack`). AMPHIBIOUS in the raws: swim +
+# swim_idle. Low and long: short legs splayed out past the body (negative
+# leg_inset), a fat tail held low; black with pink-orange bands and blotches.
+name = "gila monster"
+template = "quadruped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+body = [5, 3, 8]
+leg = [2, 2]
+leg_inset = -1.5
+leg_ends = 0
+head = [4, 3, 3]
+head_up = 0
+head_overlap = 1
+tail = [3, 6]
+tail_raise = -5
+walk = { cycle = 0.7, swing = 30, bob = 0.1 }
+run = { cycle = 0.42, swing = 42, bob = 0.2, pitch = 2 }
+idle = { length = 4.5, look = 20, breath = 0.1, wag = 6 }
+attack = { length = 0.5, lunge = 2 }
+eat = { length = 1.4, reach = 20, forward = 1 }
+
+# Head pivot: the neck joint; the head cube spans y -2..1, z -2..1 around it.
+
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-1.5, -2, -3.5]
+to = [1.5, 0, -2]
+
+[palette]
+fur = "#1e1a18"
+fur_down = "#2a2420"
+legs = "#1e1a18"
+head = "#1e1a18"
+tail = "#1e1a18"
+band = "#e08a5a"
+eye = "#0a0807"
+tongue = "#2a3a5a"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+w = 1
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+w = 1
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 1
+w = 5
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 4
+w = 5
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 6
+w = 5
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 1
+w = 3
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 1
+y = 0
+w = 1
+h = 3
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 1
+y = 0
+w = 1
+h = 3
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 3
+w = 3
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 3
+y = 0
+w = 1
+h = 3
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 3
+y = 0
+w = 1
+h = 3
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "up"
+x = 0
+y = 5
+w = 3
+h = 1
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "west"
+x = 5
+y = 0
+w = 1
+h = 3
+colour = "band"
+
+[[decals]]
+cube = "tail"
+face = "east"
+x = 5
+y = 0
+w = 1
+h = 3
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 7
+y = 1
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 6
+y = 1
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 0
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 1
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 1
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 1
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 4
+y = 0
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 1
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 0
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 6
+y = 1
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 7
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 2
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 0
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 3
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 2
+colour = "band"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 1
+colour = "band"

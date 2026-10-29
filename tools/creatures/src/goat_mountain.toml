@@ -1,0 +1,102 @@
+# DF GOAT_MOUNTAIN (creature_mountain_new): 90 kg, shaggy white mountain goat.
+# Attack kick (the template's `attack`: its lunge reads as a head-butt); bite
+# optional, not made. White coat with a shoulder hump and pantaloons of shag,
+# short black dagger horns, long beard, black hooves and eyes.
+name = "mountain goat"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [8, 9, 15]
+leg = [3, 7]
+head = [4, 5, 5]
+head_up = 3
+tail = [2, 2]
+tail_raise = 20
+walk = { cycle = 0.9, swing = 24, bob = 0.3 }
+run = { cycle = 0.5, swing = 44, bob = 1.0, pitch = 5 }
+idle = { length = 4.5, look = 20, breath = 0.18, wag = 6 }
+attack = { length = 0.65, lunge = 3.5 }
+eat = { length = 1.8, reach = 55, forward = 3 }
+
+# Body pivot: the body's centre (top at y 4.5). The shag rises over the shoulders.
+
+[[cubes]]
+name = "hump"
+bone = "body"
+part = "fur"
+from = [-4, 4.5, -7.5]
+to = [4, 6, -1.5]
+
+# Head pivot: the neck joint; the head cube spans y -1..4, z -4..1 around it.
+
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-2, 4, -0.5]
+to = [-1, 7, 0.5]
+
+[[cubes]]
+name = "horn_tip_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-2, 6.5, 0.5]
+to = [-1, 7.5, 1.5]
+
+[[cubes]]
+name = "beard"
+bone = "head"
+part = "beard"
+from = [-1.5, -4, -4]
+to = [1.5, -1, -2]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3.5, 3, 0]
+to = [-2, 4, 1]
+
+[palette]
+fur = "#eeeae0"
+fur_down = "#dcd6c8"
+legs = "#e6e1d5"
+legs_down = "#1a1714"
+head = "#f2eee6"
+horns = "#16130f"
+beard = "#e2dccf"
+ears = "#e6e1d5"
+tail = "#e6e1d5"
+eye = "#16130f"
+nose = "#2a2622"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 4
+w = 2
+h = 1
+colour = "nose"

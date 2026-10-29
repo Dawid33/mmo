@@ -1,0 +1,133 @@
+# DF ELEPHANT (creature_large_tropical): 5000 kg, the biggest land animal.
+# Attack kick (the template's `attack` lunge reads as a charge); gore optional,
+# not made. MOUNT_EXOTIC: ridden. Trunk (three cubes hanging from the face),
+# tusks and big flat ears are head cubes; lying down the head lifts so the
+# trunk rests on the ground instead of going through it.
+name = "elephant"
+template = "quadruped"
+status = "draft"
+extras = ["ridden"]
+
+[proportions]
+body = [18, 17, 32]
+leg = [6, 15]
+leg_ends = 1
+head = [12, 13, 8]
+head_up = 4
+head_overlap = 2
+tail = [2, 10]
+tail_raise = -70
+walk = { cycle = 1.6, swing = 16, bob = 0.6 }
+run = { cycle = 0.95, swing = 26, bob = 1.2, pitch = 3 }
+idle = { length = 6.0, look = 12, breath = 0.35, wag = 8 }
+attack = { length = 1.0, lunge = 6 }
+eat = { length = 2.4, reach = 22, forward = 2 }
+
+# Head pivot: the neck joint at the body's front top; the head cube spans
+# y -8..5, z -6..2 around it.
+
+[[cubes]]
+name = "trunk"
+bone = "head"
+part = "trunk"
+from = [-3, -8, -9]
+to = [3, -2, -5.5]
+
+[[cubes]]
+name = "trunk_mid"
+bone = "head"
+part = "trunk"
+from = [-2.5, -19, -9]
+to = [2.5, -8, -6.5]
+
+[[cubes]]
+name = "trunk_tip"
+bone = "head"
+part = "trunk"
+from = [-2, -22, -10]
+to = [2, -19, -7]
+
+[[cubes]]
+name = "tusk_l"
+bone = "head"
+part = "tusks"
+mirror = true
+from = [-4, -10, -10]
+to = [-3, -8, -5]
+
+[[cubes]]
+name = "tusk_tip_l"
+bone = "head"
+part = "tusks"
+mirror = true
+from = [-4, -8, -11]
+to = [-3, -6, -9]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-12, -7, -0.5]
+to = [-6, 5, 1]
+
+# The tail cube runs z -1..9 from its root; the tuft ends it.
+
+[[cubes]]
+name = "tuft"
+bone = "tail"
+part = "tuft"
+from = [-1.5, -1.5, 9]
+to = [1.5, 1.5, 11]
+
+[palette]
+fur = "#8a8580"
+fur_up = "#928d88"
+fur_down = "#7a7570"
+legs = "#837e79"
+head = "#8e8984"
+trunk = "#9a948e"
+tusks = "#ece4cc"
+ears = "#857f7a"
+tail = "#7a7570"
+tuft = "#2a2624"
+eye = "#1a1614"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 2
+y = 4
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 5
+y = 4
+w = 1
+h = 1
+colour = "eye"
+
+# Lying and sleeping: the head lifts so the trunk lies on the ground ahead.
+[clips.lie]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [22, 0, 0] },
+  { bone = "head", channel = "rotation", time = 2.0, value = [24, 0, 0] },
+  { bone = "head", channel = "rotation", time = 4.0, value = [22, 0, 0] },
+  { bone = "head", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "head", channel = "position", time = 4.0, value = [0, 0, 0] },
+]
+
+[clips.sleep]
+merge = true
+keys = [
+  { bone = "head", channel = "rotation", time = 0.0, value = [18, 0, 0] },
+  { bone = "head", channel = "rotation", time = 3.0, value = [20, 0, 0] },
+  { bone = "head", channel = "rotation", time = 6.0, value = [18, 0, 0] },
+  { bone = "head", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "head", channel = "position", time = 6.0, value = [0, 0, 0] },
+]

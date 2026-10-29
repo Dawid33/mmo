@@ -1,0 +1,79 @@
+# DF DINGO (creature_temperate_new): 20 kg, wild dog, large predator of livestock.
+# Attacks bite (the template's `attack`) and scratch (optional, not made).
+# LARGE_PREDATOR: alert + roar. Ginger coat, cream belly, socks and tail tip.
+name = "dingo"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [5, 5, 11]
+leg = [2, 5]
+head = [5, 4, 4]
+head_up = 2
+tail = [2, 7]
+tail_raise = 20
+walk = { cycle = 0.75, swing = 30, bob = 0.3 }
+run = { cycle = 0.42, swing = 52, bob = 0.8, pitch = 6 }
+idle = { length = 4.0, look = 20, breath = 0.14, wag = 8 }
+attack = { length = 0.55, lunge = 3 }
+
+# Head pivot: the neck joint; the head cube spans y -1..3, z -3..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1.5, -1, -6]
+to = [1.5, 1, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 3, -0.5]
+to = [-1, 5, 0.5]
+
+# The tail cube runs z -1..6 from its root; the white tip continues it.
+[[cubes]]
+name = "tail_tip"
+bone = "tail"
+part = "tail_tip"
+from = [-1, -1, 6]
+to = [1, 1, 8]
+
+[palette]
+fur = "#c98a45"
+fur_up = "#bd7f3d"
+fur_down = "#eedcbc"
+legs = "#d6a66e"
+head = "#c98a45"
+snout = "#eedcbc"
+snout_up = "#c98a45"
+ears = "#b8783a"
+tail = "#c98a45"
+tail_tip = "#f2e8d6"
+eye = "#2a1a0e"
+nose = "#1e1612"
+sock = "#f2e8d6"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+colour = "nose"

@@ -1,0 +1,117 @@
+# DF MUSKOX (creature_large_tundra): 300 kg, shaggy arctic bovine, pack and
+# wagon animal. Attack kick (the template's `attack`: its lunge reads as a
+# butt); bite optional, not made. The long coat hangs as a skirt cube under the
+# body (it touches the ground lying down, not through it), a pale saddle, the
+# horn boss over the brow with horns hooking down and up.
+name = "muskox"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [12, 11, 20]
+leg = [3, 8]
+head = [6, 6, 6]
+head_up = 0
+tail = [2, 1]
+tail_raise = -40
+walk = { cycle = 1.2, swing = 20, bob = 0.4 }
+run = { cycle = 0.65, swing = 38, bob = 1.0, pitch = 4 }
+idle = { length = 5.0, look = 14, breath = 0.22, wag = 2 }
+attack = { length = 0.8, lunge = 4.5 }
+eat = { length = 2.0, reach = 45, forward = 3 }
+
+# Body pivot: the body's centre (top at y 5.5, bottom at -5.5). The skirt hangs
+# 3 below the belly; the hump over the shoulders.
+
+[[cubes]]
+name = "skirt"
+bone = "body"
+part = "skirt"
+from = [-6.5, -8.5, -10.5]
+to = [6.5, -5, 10.5]
+
+[[cubes]]
+name = "hump"
+bone = "body"
+part = "fur"
+from = [-5, 5.5, -10]
+to = [5, 7.5, -2]
+
+# Head pivot: the neck joint; the head cube spans y -5..1, z -5..1 around it.
+
+[[cubes]]
+name = "beard"
+bone = "head"
+part = "skirt"
+from = [-2.5, -7, -4]
+to = [2.5, -5, 0]
+
+[[cubes]]
+name = "boss"
+bone = "head"
+part = "horns"
+from = [-4, 0, -4]
+to = [4, 2, -1]
+
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-5, -3, -4]
+to = [-4, 2, -1]
+
+[[cubes]]
+name = "hook_l"
+bone = "head"
+part = "horns"
+mirror = true
+from = [-6, -4, -4]
+to = [-5, -1, -2]
+
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-2, -5, -7]
+to = [2, -2, -5]
+
+[palette]
+fur = "#3a2a1e"
+fur_up = "#8a7a62"
+skirt = "#2e2118"
+legs = "#d2c8b4"
+head = "#3a2a1e"
+horns = "#d8ccb0"
+horns_up = "#c4b696"
+muzzle = "#b8aa94"
+tail = "#3a2a1e"
+eye = "#0e0b09"
+nose = "#1a1410"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 2
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 2
+w = 1
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 1
+w = 2
+h = 1
+colour = "nose"
