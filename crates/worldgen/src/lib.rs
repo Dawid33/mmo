@@ -12,6 +12,7 @@ pub mod forged;
 pub mod islands;
 pub mod pipeline;
 pub mod material;
+pub mod tile_map;
 
 /// The world seed shared by every `generate_region` caller (server + offline
 /// client) so they produce the SAME world. Kept in one place so the server and

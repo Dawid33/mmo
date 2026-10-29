@@ -21,7 +21,10 @@
 use std::path::PathBuf;
 
 use image::{ImageBuffer, Luma, Rgb};
+use worldgen::forged::PointSample;
 use worldgen::pipeline::{ColumnProfile, SEA_LEVEL, SEA_TOP_BLOCK, TerrainPipeline};
+// Topmost solid block / "dry" — the same rules the world map's landing search uses.
+use worldgen::tile_map::{is_dry, surface_block};
 
 // The world band the density ramp spans (pipeline.rs RAMP_FROM_Y/RAMP_TO_Y).
 const HEIGHT_MIN_M: f64 = -64.0;
@@ -57,12 +60,6 @@ fn surface_m(prof: &ColumnProfile) -> f64 {
         }
     }
     0.5 * (lo + hi)
-}
-
-/// Topmost solid block for a continuous surface height — `generate_region`'s
-/// rule: a block is solid when its CENTER (`by + 0.5`) is below the surface.
-fn surface_block(h: f64) -> i32 {
-    (h - 0.5).ceil() as i32 - 1
 }
 
 struct Args {
@@ -242,7 +239,8 @@ fn main() {
             let dhdz = (at(x, zd) - at(x, zu)) / ((zd - zu) as f64 * step);
 
             let fresh = waters[z * n + x]; // lake or river surface above this column
-            let water = surface_block(h) < SEA_TOP_BLOCK || (fresh as f64) > h;
+            let sample = PointSample { ground_y: h, water_y: (!fresh.is_nan()).then_some(fresh as f64) };
+            let water = !is_dry(&sample);
             let shade = if water {
                 1.0 // the sea surface is flat; depth already carries the shape
             } else {

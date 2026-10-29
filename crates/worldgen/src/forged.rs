@@ -37,7 +37,7 @@ const MAGIC: &[u8; 4] = b"VXWF";
 /// (0, 0), where players are created (see `examples/seed_scan.rs`).
 const ENGINE_SPAWN_M: f64 = 8.5;
 /// Ground height outside the artifact (m relative to sea): open ocean.
-const OUTSIDE_HEIGHT_M: f64 = -90.0;
+pub const OUTSIDE_HEIGHT_M: f64 = -90.0;
 
 /// Detail noise added to the interpolated ground: first octave 2^5 = 32 m,
 /// then 16 m. Amplitude grows with slope — smooth plains, rougher flanks.
@@ -365,6 +365,32 @@ impl ForgedWorld {
                 ((top as f64).round().clamp(i16::MIN as f64, i16::MAX as f64) as i16, mats.rocks[index])
             })
             .collect()
+    }
+
+    /// Engine world meters covered by the artifact: `([min_x, min_z], [max_x, max_z])`,
+    /// max exclusive.
+    pub fn artifact_bounds_engine_m(&self) -> ([f64; 2], [f64; 2]) {
+        let a = &self.artifact;
+        let min = [ENGINE_SPAWN_M - a.spawn[0], ENGINE_SPAWN_M - a.spawn[1]];
+        (min, [min[0] + a.size_m, min[1] + a.size_m])
+    }
+
+    /// The rock formation (index into the artifact's `rock_names`) at the
+    /// ground surface of the engine column at world meters `(x, z)`, before
+    /// soil: the artifact `column` looked up at `s = ground - geo` with
+    /// `game::ColumnGround::block_at`'s rule
+    /// (the last formation whose top is above `s`, else the top one). Ground
+    /// is the interpolated raster (exact at cell centres; no detail noise or
+    /// river carving). `None` outside the artifact.
+    pub fn surface_rock(&self, x_m: f64, z_m: f64) -> Option<u8> {
+        let (ax, az) = self.to_artifact(x_m, z_m);
+        let size = self.artifact.size_m;
+        if ax < 0.0 || az < 0.0 || ax >= size || az >= size {
+            return None;
+        }
+        let s = self.bicubic(ax, az) - self.geo_offset_m(ax, az);
+        let column = &self.artifact.column;
+        column.iter().rev().find(|&&(top, _)| f64::from(top) > s).or(column.first()).map(|&(_, rock)| rock)
     }
 
     /// Catmull-Rom interpolation of the height raster (artifact meters).
