@@ -12,15 +12,17 @@
 //! [`CAP_DARKEN`]. Front faces below the cut darken per level down
 //! ([`DEPTH_DARKEN_PER_LEVEL`], never below [`DEPTH_DARKEN_FLOOR`]). The GPU
 //! face-direction cull keeps every face range meanwhile: the cap is made of
-//! back faces. The clip applies to everything the pull path draws, the
-//! server-streamed LOD rings outside the home region included.
+//! back faces. All of it applies inside the home region's xz rect only
+//! (`origin.xz` .. `origin.xz + cut.w`, decided per quad): outside it — the
+//! neighbouring terrain and the LOD rings — the terrain draws exactly as
+//! without the cut, the shader dropping back faces itself there.
 //!
 //! Not supported by the per-chunk Mesh fallback (WebGL2) or the brick far
 //! renderer: there the terrain draws uncut.
 
 use bevy::prelude::*;
 use bevy::render::{extract_resource::ExtractResource, render_resource::ShaderType};
-use game::RegionId;
+use game::{RegionId, REGION_SIZE};
 
 use super::commander::level::{self, WorkingLevel};
 use super::commander::tiles::TileMirror;
@@ -41,7 +43,8 @@ pub const DEPTH_DARKEN_FLOOR: f32 = 0.35;
 /// pipeline variant from it.
 #[derive(Resource, Clone, Copy, PartialEq, Debug, ExtractResource, ShaderType)]
 pub struct FortressViewUniform {
-    /// x: cut plane world y (f32::MAX = off); y: cap darkening 0..1; z: overlay on (0/1); w: unused
+    /// x: cut plane world y (f32::MAX = off); y: cap darkening 0..1; z: overlay on (0/1);
+    /// w: home region extent (world units) — the cut applies in [origin.xz, origin.xz + w)
     pub cut: Vec4,
     /// xyz: home region world offset; w: overlay base level (block y of texture layer 0) as f32
     pub origin: Vec4,
@@ -73,7 +76,7 @@ pub fn build_uniform(working: &WorkingLevel, home: Option<RegionId>) -> Fortress
         u.origin = Vec3::from_array(home.world_offset()).extend(0.0);
     }
     if let Some(cut) = level::cut_y(working, home) {
-        u.cut = Vec4::new(cut, CAP_DARKEN, 0.0, 0.0);
+        u.cut = Vec4::new(cut, CAP_DARKEN, 0.0, REGION_SIZE);
     }
     u
 }
@@ -131,10 +134,13 @@ mod tests {
         }
     }
 
+    /// The cut is confined to the home region: its rect is origin.xz ..
+    /// origin.xz + cut.w.
     #[test]
-    fn origin_is_the_home_region_offset() {
+    fn uniform_carries_the_home_region_rect() {
         let working = WorkingLevel { level: Some(10), cut: true };
         let u = build_uniform(&working, Some(RegionId { x: 2, z: -1 }));
-        assert_eq!(u.origin.truncate(), Vec3::new(2.0, 0.0, -1.0) * game::REGION_SIZE);
+        assert_eq!(u.origin.truncate(), Vec3::new(2.0, 0.0, -1.0) * REGION_SIZE);
+        assert_eq!(u.cut.w, REGION_SIZE);
     }
 }

@@ -37,6 +37,32 @@ const CUT_EPSILON: f32 = 0.01;
 const FACE_UA = array<u32, 6>(1u, 1u, 0u, 0u, 0u, 0u);
 const FACE_VA = array<u32, 6>(2u, 2u, 2u, 2u, 1u, 1u);
 
+// The cutaway's region gate, copied from voxel_pull.wgsl (see there).// fortress.cut.x at or above this means the cut is off (f32::MAX); every
+// cutaway effect is then a no-op even in a CUTAWAY pipeline.
+const CUT_OFF: f32 = 3.0e38;
+
+// Whether the cut applies at world point `p`: the cut is on and `p` lies in
+// the home region's xz rect [origin.xz, origin.xz + cut.w). Outside it the
+// terrain draws as without the cut.
+fn cut_applies(p: vec3<f32>) -> bool {
+    let lo = fortress.origin.xz;
+    let hi = lo + vec2<f32>(fortress.cut.w);
+    return fortress.cut.x < CUT_OFF && all(p.xz >= lo) && all(p.xz < hi);
+}
+
+// The point a quad is judged by, so all four of its vertices agree: its
+// centre, pulled half a cell back along the face normal into the block the
+// face belongs to (a face lying exactly on the region edge then counts for
+// the region of its block). Quads are chunk-local, so never span the edge.
+fn quad_owner(world_from_local: mat4x4<f32>, record_pos: vec3<u32>, face: u32, w1: u32) -> vec3<f32> {
+    var mid = vec3<f32>(record_pos);
+    mid[FACE_UA[face]] += 0.5 * f32(w1 & 63u);
+    mid[FACE_VA[face]] += 0.5 * f32((w1 >> 6u) & 63u);
+    var normal = vec3<f32>(0.0);
+    normal[face / 2u] = select(-1.0, 1.0, face % 2u == 0u);
+    return (world_from_local * vec4<f32>(mid - 0.5 * normal, 1.0)).xyz;
+}
+
 // CORNER_PERM from records.rs, flattened: variant*4 + local vertex. Drawn
 // indexed: 4 vertices per quad (vertex_index = quad*4 + local, base_vertex =
 // record_start*4) and QUAD_INDEX_PATTERN 0,1,2, 2,1,3 from one shared buffer.
@@ -59,6 +85,7 @@ struct VertexOutput {
 #endif // UNCLIPPED_DEPTH_ORTHO_EMULATION
 #ifdef CUTAWAY
     @location(1) world_y: f32,
+    @location(2) @interpolate(flat) cut_here: u32,
 #endif // CUTAWAY
 }
 
@@ -91,13 +118,15 @@ fn vertex(
     let world_position = world_from_local * vec4<f32>(local_pos, 1.0);
     var out: VertexOutput;
 #ifdef CUTAWAY
-    // Collapse a quad wholly above the cut (see voxel_pull.wgsl).
+    // Collapse a home-region quad wholly above the cut (see voxel_pull.wgsl).
+    let cut_here = cut_applies(quad_owner(world_from_local, record_pos, face, w1));
     let lowest = world_from_local * vec4<f32>(vec3<f32>(record_pos), 1.0);
-    if (lowest.y > fortress.cut.x + CUT_EPSILON) {
+    if (cut_here && lowest.y > fortress.cut.x + CUT_EPSILON) {
         out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
     }
     out.world_y = world_position.y;
+    out.cut_here = select(0u, 1u, cut_here);
 #endif // CUTAWAY
     out.position = position_world_to_clip(world_position.xyz);
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
@@ -107,11 +136,20 @@ fn vertex(
     return out;
 }
 
+#ifdef CUTAWAY
+// In the home region: clipped above the cut. Outside it: back faces dropped,
+// as the Back cull mode the CUTAWAY pipeline gives up would.
+fn cut_discards(in: VertexOutput, front_facing: bool) -> bool {
+    let inside = in.cut_here != 0u;
+    return (inside && in.world_y > fortress.cut.x + CUT_EPSILON) || (!inside && !front_facing);
+}
+#endif // CUTAWAY
+
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
 @fragment
-fn fragment(in: VertexOutput) -> @builtin(frag_depth) f32 {
+fn fragment(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @builtin(frag_depth) f32 {
 #ifdef CUTAWAY
-    if (in.world_y > fortress.cut.x + CUT_EPSILON) {
+    if (cut_discards(in, front_facing)) {
         discard;
     }
 #endif // CUTAWAY
@@ -119,10 +157,10 @@ fn fragment(in: VertexOutput) -> @builtin(frag_depth) f32 {
 }
 #else // UNCLIPPED_DEPTH_ORTHO_EMULATION
 #ifdef CUTAWAY
-// No depth to write: only the discard above the cut.
+// No depth to write: only the cutaway's discard.
 @fragment
-fn fragment(in: VertexOutput) {
-    if (in.world_y > fortress.cut.x + CUT_EPSILON) {
+fn fragment(in: VertexOutput, @builtin(front_facing) front_facing: bool) {
+    if (cut_discards(in, front_facing)) {
         discard;
     }
 }

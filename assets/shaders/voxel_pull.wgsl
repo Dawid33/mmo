@@ -31,7 +31,8 @@ struct TerrainBoundaries {
 // mirrored from FortressViewUniform in
 // crates/client/src/renderer/fortress_view.rs (the source of truth, incl. the
 // meaning of every field). Read only under the CUTAWAY def, which the
-// pipelines set exactly while cut.x < f32::MAX.
+// pipelines set while cut.x < f32::MAX. The cut applies inside the home
+// region only (cut_applies).
 struct FortressView {
     cut: vec4<f32>,
     origin: vec4<f32>,
@@ -101,6 +102,32 @@ const CORNER_PERM = array<u32, 16>(
 const FACE_UA = array<u32, 6>(1u, 1u, 0u, 0u, 0u, 0u);
 const FACE_VA = array<u32, 6>(2u, 2u, 2u, 2u, 1u, 1u);
 
+// fortress.cut.x at or above this means the cut is off (f32::MAX); every
+// cutaway effect is then a no-op even in a CUTAWAY pipeline.
+const CUT_OFF: f32 = 3.0e38;
+
+// Whether the cut applies at world point `p`: the cut is on and `p` lies in
+// the home region's xz rect [origin.xz, origin.xz + cut.w). Outside it the
+// terrain draws as without the cut.
+fn cut_applies(p: vec3<f32>) -> bool {
+    let lo = fortress.origin.xz;
+    let hi = lo + vec2<f32>(fortress.cut.w);
+    return fortress.cut.x < CUT_OFF && all(p.xz >= lo) && all(p.xz < hi);
+}
+
+// The point a quad is judged by, so all four of its vertices agree: its
+// centre, pulled half a cell back along the face normal into the block the
+// face belongs to (a face lying exactly on the region edge then counts for
+// the region of its block). Quads are chunk-local, so never span the edge.
+fn quad_owner(world_from_local: mat4x4<f32>, record_pos: vec3<u32>, face: u32, w1: u32) -> vec3<f32> {
+    var mid = vec3<f32>(record_pos);
+    mid[FACE_UA[face]] += 0.5 * f32(w1 & 63u);
+    mid[FACE_VA[face]] += 0.5 * f32((w1 >> 6u) & 63u);
+    var normal = vec3<f32>(0.0);
+    normal[face / 2u] = select(-1.0, 1.0, face % 2u == 0u);
+    return (world_from_local * vec4<f32>(mid - 0.5 * normal, 1.0)).xyz;
+}
+
 struct PullVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
@@ -108,6 +135,8 @@ struct PullVertexOutput {
     @location(2) uv: vec2<f32>,
     @location(3) shade: f32,
     @location(4) @interpolate(flat) layer: u32,
+    // 1 when the z-level cut applies to this quad (CUTAWAY only; 0 otherwise).
+    @location(5) @interpolate(flat) cut_here: u32,
 }
 
 @vertex
@@ -152,15 +181,17 @@ fn vertex(
 
     var out: PullVertexOutput;
 #ifdef CUTAWAY
-    // A quad whose lowest corner (its record position: extents only add)
-    // lies above the cut is collapsed to one point outside the clip volume
-    // in x and y as well as z (depth clipping can be off in shadow views) —
-    // a zero-area triangle pair the rasterizer drops.
+    // In the home region, a quad whose lowest corner (its record position:
+    // extents only add) lies above the cut is collapsed to one point outside
+    // the clip volume in x and y as well as z (depth clipping can be off in
+    // shadow views) — a zero-area triangle pair the rasterizer drops.
+    let cut_here = cut_applies(quad_owner(world_from_local, record_pos, face, w1));
     let lowest = world_from_local * vec4<f32>(vec3<f32>(record_pos), 1.0);
-    if (lowest.y > fortress.cut.x + CUT_EPSILON) {
+    if (cut_here && lowest.y > fortress.cut.x + CUT_EPSILON) {
         out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
     }
+    out.cut_here = select(0u, 1u, cut_here);
 #endif
     out.world_position = world_from_local * vec4<f32>(local_pos, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
@@ -288,7 +319,8 @@ fn fragment(
     var n = normalize(in.world_normal);
 #ifdef CUTAWAY
     let cut = fortress.cut.x;
-    let cap = !front_facing;
+    let inside = in.cut_here != 0u;
+    let cap = inside && !front_facing;
     let cap_position = cut_crossing(in.world_position.xyz, cut);
     world_position = select(in.world_position, vec4<f32>(cap_position, 1.0), cap);
     face_uv = select(in.uv, cap_position.xz / BLOCK_VOXELS, cap);
@@ -349,16 +381,20 @@ fn fragment(
     lit *= view.exposure;
     var color = base * lit;
 #ifdef CUTAWAY
-    // The cap is darkened by cut.y; front faces below the cut by depth.
-    color *= select(depth_darkening(in.world_position.y, cut), 1.0 - fortress.cut.y, cap);
+    // In the home region the cap is darkened by cut.y, front faces below the
+    // cut by depth; outside it nothing changes.
+    let darkening = select(depth_darkening(in.world_position.y, cut), 1.0 - fortress.cut.y, cap);
+    color *= select(1.0, darkening, inside);
 #endif
     let overlaid = apply_boundaries(color, world_position.xz);
 #ifdef CUTAWAY
-    // Clip above the cut. Last, after every derivative (apply_boundaries'
-    // fwidth included): a discard compiled to SPIR-V OpKill leaves the
-    // quad's derivatives undefined for the rest of the shader. Only quads
-    // straddling the plane reach here — those wholly above collapsed.
-    if (in.world_position.y > cut + CUT_EPSILON) {
+    // Clip above the cut in the home region, and outside it drop back faces
+    // (the CUTAWAY pipeline does not cull them). Last, after every derivative
+    // (apply_boundaries' fwidth included): a discard compiled to SPIR-V
+    // OpKill leaves the quad's derivatives undefined for the rest of the
+    // shader. Only quads straddling the plane are clipped here — those wholly
+    // above collapsed.
+    if ((inside && in.world_position.y > cut + CUT_EPSILON) || (!inside && !front_facing)) {
         discard;
     }
 #endif

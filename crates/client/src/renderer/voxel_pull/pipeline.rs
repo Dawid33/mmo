@@ -428,6 +428,8 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(positi
                 .unwrap_or_else(|e| panic!("voxel_pull.wgsl with {defs:?}: {e:?}"));
         }
         assert!(source.contains("#ifdef CUTAWAY"), "the forward shader implements CUTAWAY");
+        // R10: the cut is confined to the home region (and off at f32::MAX).
+        assert!(source.contains("fn cut_applies"), "the forward shader gates the cut to the home region");
     }
 
     /// The depth/shadow pipelines with the cutaway, with and without the
@@ -446,6 +448,8 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(positi
                 .unwrap_or_else(|e| panic!("voxel_pull_depth.wgsl with {defs:?}: {e:?}"));
         }
         assert!(source.contains("#ifdef CUTAWAY"), "the depth shader implements CUTAWAY");
+        // R10: the cut is confined to the home region (and off at f32::MAX).
+        assert!(source.contains("fn cut_applies"), "the depth shader gates the cut to the home region");
     }
 
     /// Every def combination the four cull pipelines compile with.

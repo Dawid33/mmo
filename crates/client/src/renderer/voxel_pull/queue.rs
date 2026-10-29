@@ -171,10 +171,11 @@ fn cutaway_wanted(view: Option<&FortressViewUniform>) -> bool {
     view.is_some_and(cutaway_active)
 }
 
-/// Specialize `key` with the cutaway bit set to `cutaway`, but keep drawing
-/// with the other variant while the wanted one is still compiling — a
-/// not-yet-ready pipeline skips its phase item, which would blank the terrain
-/// for the frames after the cut is first toggled.
+/// Specialize `key` with the cutaway bit set to `cutaway`, but while a
+/// wanted CUTAWAY variant is still compiling keep drawing with the plain one
+/// — a not-yet-ready pipeline skips its phase item, which would blank the
+/// terrain for the frames after the cut is first toggled. Never the other
+/// way: the plain variant is not replaced by a CUTAWAY one.
 fn specialize_cutaway<P: SpecializedRenderPipeline>(
     cache: &PipelineCache,
     pipelines: &mut SpecializedRenderPipelines<P>,
@@ -183,12 +184,12 @@ fn specialize_cutaway<P: SpecializedRenderPipeline>(
     key: impl Fn(bool) -> P::Key,
 ) -> CachedRenderPipelineId {
     let wanted = pipelines.specialize(cache, pipeline, key(cutaway));
-    if cache.get_render_pipeline(wanted).is_some() {
+    if !cutaway || cache.get_render_pipeline(wanted).is_some() {
         return wanted;
     }
-    let other = pipelines.specialize(cache, pipeline, key(!cutaway));
-    if cache.get_render_pipeline(other).is_some() {
-        other
+    let plain = pipelines.specialize(cache, pipeline, key(false));
+    if cache.get_render_pipeline(plain).is_some() {
+        plain
     } else {
         wanted
     }
