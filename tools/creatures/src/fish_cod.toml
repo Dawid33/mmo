@@ -1,0 +1,151 @@
+# DF FISH_COD (wild, large ocean): 50 kg, a heavy-headed oceanic food fish.
+# Three dorsal fins as extra cubes, a chin barbel, a pale lateral line. The
+# anal fins would hang below the belly (the ground line), so they are not made.
+# Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "cod"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [5, 7, 13]
+head = [4, 6, 5]
+tail = [2, 4, 3]
+fin = [1, 7, 3]
+pectoral = [2.5, 2]
+dorsal = [1, 0, 0]
+swim = { cycle = 0.8, amp = 16 }
+
+# Body pivot: its centre; the body spans y -3.5..3.5, z -6.5..6.5.
+[[cubes]]
+name = "dorsal_1"
+bone = "body"
+part = "fins"
+from = [-0.5, 3.5, -5]
+to = [0.5, 5.5, -2]
+
+[[cubes]]
+name = "dorsal_2"
+bone = "body"
+part = "fins"
+from = [-0.5, 3.5, -1]
+to = [0.5, 5.5, 2]
+
+[[cubes]]
+name = "dorsal_3"
+bone = "body"
+part = "fins"
+from = [-0.5, 3.5, 3]
+to = [0.5, 5, 6]
+
+# Head pivot: the body's front at mid-height; the head spans y -3..3, z -5..0.
+[[cubes]]
+name = "barbel"
+bone = "head"
+part = "fins"
+from = [-0.5, -3.5, -4]
+to = [0.5, -3, -3]
+
+[palette]
+body = "#7b7448"
+body_up = "#5c5636"
+body_down = "#e8e2c8"
+head = "#7b7448"
+head_up = "#5c5636"
+head_down = "#e8e2c8"
+fins = "#6a6440"
+line = "#ddd6b4"
+spot = "#4d482d"
+eye = "#121010"
+eye_ring = "#cfc490"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 3
+w = 13
+h = 1
+colour = "line"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 3
+w = 13
+h = 1
+colour = "line"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 10
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 6
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 6
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 9
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 3
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 3
+y = 1
+colour = "eye"

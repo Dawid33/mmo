@@ -1,0 +1,193 @@
+# DF MANERA (underground, evil): 60 kg, a man's head that crawls on four long
+# arms, its mouth full of shark teeth. Template: quadruped (the brief's "fish"
+# guess is wrong — BODY_HEAD with 4ARMS_STANCE): the long thin legs are the arms
+# (splayed out, hands as extra cubes at their ends), the `head` cube is the big
+# face over a short body that is the back of the skull; brows, yellow eyes and a
+# mouth of jagged teeth are decals, the nose and ears extra cubes. DF has it
+# cling to the cavern ceiling; ceiling poses are not made (it stands on its
+# hands). Attacks bite (the template's `attack`) and scratch (optional, not made).
+name = "manera"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [8, 8, 8]
+leg = [1.5, 9]
+leg_inset = -1
+leg_ends = 0.5
+head = [9, 10, 5]
+head_up = 1
+head_overlap = 2
+tail = [2, 0]
+tail_raise = 0
+walk = { cycle = 0.9, swing = 28, bob = 0.4 }
+run = { cycle = 0.5, swing = 45, bob = 0.8, pitch = 5 }
+eat = { length = 1.6, reach = 35, forward = 2 }
+
+# Leg pivot: the shoulder, at the body's bottom; the arm spans y -9..1.
+[[cubes]]
+name = "hand_fl"
+bone = "leg_fl"
+part = "hands"
+from = [-1.25, -9, -2.25]
+to = [1.25, -8.5, 0.75]
+
+[[cubes]]
+name = "hand_fr"
+bone = "leg_fr"
+part = "hands"
+from = [-1.25, -9, -2.25]
+to = [1.25, -8.5, 0.75]
+
+[[cubes]]
+name = "hand_bl"
+bone = "leg_bl"
+part = "hands"
+from = [-1.25, -9, -2.25]
+to = [1.25, -8.5, 0.75]
+
+[[cubes]]
+name = "hand_br"
+bone = "leg_br"
+part = "hands"
+from = [-1.25, -9, -2.25]
+to = [1.25, -8.5, 0.75]
+
+# Head pivot: the body's front, 1 below its top; the face spans y -8..2, z -3..2.
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "head"
+from = [-1, -4, -4]
+to = [1, -1.5, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "head"
+from = [-5.5, -4, -1]
+to = [-4.5, -1, 1]
+mirror = true
+
+[palette]
+fur = "#8a6446"
+fur_up = "#7a573c"
+fur_down = "#6e4f37"
+legs = "#7d5a3f"
+hands = "#8f6a4b"
+head = "#94704f"
+head_north = "#9c7754"
+brow = "#3b2a1d"
+white = "#efe6d6"
+iris = "#e2c032"
+mouth = "#2a1512"
+teeth = "#f4f0e4"
+eye = "#120c08"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+w = 3
+h = 1
+colour = "brow"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 2
+w = 3
+h = 1
+colour = "brow"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+h = 1
+colour = "white"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 6
+y = 3
+w = 2
+h = 1
+colour = "white"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 3
+colour = "iris"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 6
+y = 3
+colour = "iris"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 6
+w = 7
+h = 3
+colour = "mouth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 6
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 6
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 6
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 7
+y = 6
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 8
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 8
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 6
+y = 8
+colour = "teeth"

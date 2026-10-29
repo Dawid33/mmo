@@ -1,0 +1,113 @@
+# DF FISH_HALIBUT (wild, large ocean): 200 kg, a flatfish lying on its blind
+# side: a wide low body, both eyes on top (decals on the head's top face), the
+# dorsal and anal fins as a fringe along both edges, a horizontal tail fin.
+# `flukes = true`: lying on its side it strokes up and down. No pectorals (they
+# would dip through the ground). Attacks bite (the template's `attack`) and slap
+# (optional, not made).
+name = "halibut"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [11, 3, 17]
+head = [8, 3, 5]
+tail = [4, 2, 3]
+fin = [1, 10, 4]
+pectoral = [0, 0]
+dorsal = [1, 0, 0]
+flukes = true
+swim = { cycle = 1.2, amp = 14 }
+
+# Body pivot: its centre; the body spans x -5.5..5.5, y -1.5..1.5, z -8.5..8.5.
+[[cubes]]
+name = "fringe_l"
+bone = "body"
+part = "fins"
+from = [-7, -1.5, -7.5]
+to = [-5.5, -0.5, 7.5]
+mirror = true
+
+[palette]
+body = "#5e4b3a"
+body_down = "#f1ece2"
+head = "#5e4b3a"
+head_down = "#f1ece2"
+fins = "#4e3e30"
+blotch = "#8a7458"
+eye = "#121010"
+eye_ring = "#d6c58e"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 5
+y = 2
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 6
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 3
+w = 2
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 7
+y = 6
+w = 2
+h = 1
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 10
+w = 1
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 8
+y = 13
+w = 2
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 5
+y = 1
+colour = "blotch"

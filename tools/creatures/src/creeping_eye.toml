@@ -1,0 +1,122 @@
+# DF CREEPING_EYE (underground, evil): 20 kg, a small stony monster that crawls
+# the cavern walls on four clawed hands, with one large eye that glows red.
+# Template: quadruped (the brief's "fish" guess is wrong — BASIC_1PARTBODY with
+# 4ARMS_STANCE): the four arms are the legs, claws are extra cubes at their ends,
+# the `head` cube is the bulging eye (lid in the stone colour, red iris and black
+# pupil as decals on its front), no tail. It has no mouth and DF gives it no
+# attacks; the quadruped's required eat/attack clips stay as generic motions.
+# Climbing (wall/ceiling) poses are not made.
+name = "creeping eye"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [7, 5, 7]
+leg = [2, 3]
+leg_inset = -0.5
+leg_ends = 0.5
+head = [5, 5, 2]
+head_up = 0
+head_overlap = 1
+tail = [2, 0]
+tail_raise = 0
+walk = { cycle = 0.6, swing = 35, bob = 0.3 }
+run = { cycle = 0.35, swing = 50, bob = 0.6, pitch = 4 }
+eat = { length = 1.6, reach = 20, forward = 1 }
+
+# Leg pivot: the hip, at the body's bottom; the leg spans y -3..1.
+[[cubes]]
+name = "claws_fl"
+bone = "leg_fl"
+part = "claws"
+from = [-1.5, -3, -2]
+to = [1.5, -2.5, 0]
+
+[[cubes]]
+name = "claws_fr"
+bone = "leg_fr"
+part = "claws"
+from = [-1.5, -3, -2]
+to = [1.5, -2.5, 0]
+
+[[cubes]]
+name = "claws_bl"
+bone = "leg_bl"
+part = "claws"
+from = [-1.5, -3, -2]
+to = [1.5, -2.5, 0]
+
+[[cubes]]
+name = "claws_br"
+bone = "leg_br"
+part = "claws"
+from = [-1.5, -3, -2]
+to = [1.5, -2.5, 0]
+
+# Body pivot: its centre; the body spans y -2.5..2.5, z -3.5..3.5.
+[[cubes]]
+name = "lump_1"
+bone = "body"
+part = "fur"
+from = [-2.5, 2.5, -1]
+to = [0.5, 3.5, 2]
+
+[[cubes]]
+name = "lump_2"
+bone = "body"
+part = "fur"
+from = [1, 2.5, 0.5]
+to = [3, 3, 3]
+
+[palette]
+fur = "#6d6863"
+fur_up = "#5f5a55"
+fur_down = "#57524d"
+legs = "#5a5550"
+head = "#6d6863"
+claws = "#2c2926"
+iris = "#d8323a"
+eye = "#0c0a0a"
+glint = "#ffb0a8"
+crack = "#4a4642"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+w = 3
+h = 3
+colour = "iris"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "glint"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 1
+w = 1
+h = 2
+colour = "crack"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 4
+y = 2
+w = 2
+h = 1
+colour = "crack"

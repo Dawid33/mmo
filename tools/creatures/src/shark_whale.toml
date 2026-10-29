@@ -1,0 +1,496 @@
+# DF SHARK_WHALE (wild, large ocean): 20000 kg, the biggest fish: a broad flat
+# head with a wide mouth across its front, a grey-blue back covered in white
+# spots and pale stripes (decals), ridges along the flanks (extra cubes), a big
+# dorsal and tall tail. Slow swim.
+# Built like the other sharks: the fish template plus a swept two-cube
+# dorsal, an upper tail lobe, gill slits and a white lower flank (decals).
+# Attacks slap (the template's `attack`).
+name = "whale shark"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [22, 18, 44]
+head = [20, 13, 12]
+tail = [6, 8, 8]
+fin = [1, 18, 6]
+pectoral = [8, 10]
+dorsal = [1, 0, 0]
+swim = { cycle = 2.2, amp = 8 }
+
+# Body pivot: its centre; the body spans y -9..9, z -22..22. The dorsal is a three-step swept triangle.
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.5, 9, -2]
+to = [0.5, 14.5, 8]
+
+[[cubes]]
+name = "dorsal_mid"
+bone = "body"
+part = "fins"
+from = [-0.5, 14.5, 1]
+to = [0.5, 18, 8.5]
+
+[[cubes]]
+name = "dorsal_tip"
+bone = "body"
+part = "fins"
+from = [-0.5, 18, 4]
+to = [0.5, 21, 9]
+
+# Tail fin pivot: the stalk's end; the fin spans y -9..9, z 0..6. The upper lobe is a two-step sweep up and back.
+[[cubes]]
+name = "lobe_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 0, 2]
+to = [0.5, 15, 7]
+
+[[cubes]]
+name = "lobe_tip"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 14, 6]
+to = [0.5, 21, 12]
+
+# Body pivot: its centre; the body spans x -11..11, y -9..9, z -22..22.
+[[cubes]]
+name = "ridge_l"
+bone = "body"
+part = "ridge"
+from = [-11.5, 3, -18]
+to = [-10.5, 4, 18]
+mirror = true
+
+[palette]
+body = "#4d5c6b"
+body_up = "#3f4c59"
+body_down = "#e3e7ea"
+head = "#4d5c6b"
+head_up = "#3f4c59"
+head_down = "#e3e7ea"
+fins = "#435160"
+belly = "#d5dbe0"
+spot = "#e8ecef"
+ridge = "#58697a"
+mouth = "#20262c"
+eye = "#0b0c0d"
+gill = "#2e3336"
+teeth = "#f4f1ea"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 14
+w = 44
+h = 4
+colour = "belly"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 14
+w = 44
+h = 4
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 9
+w = 12
+h = 4
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 9
+w = 12
+h = 4
+colour = "belly"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 1
+y = 5
+w = 1
+h = 6
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 42
+y = 5
+w = 1
+h = 6
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 5
+w = 1
+h = 6
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 40
+y = 5
+w = 1
+h = 6
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 5
+w = 1
+h = 6
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 38
+y = 5
+w = 1
+h = 6
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 7
+y = 5
+w = 1
+h = 6
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 36
+y = 5
+w = 1
+h = 6
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 9
+y = 5
+w = 1
+h = 6
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 34
+y = 5
+w = 1
+h = 6
+colour = "gill"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 4
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 10
+y = 4
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 8
+w = 18
+h = 1
+colour = "mouth"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 41
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 5
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 38
+y = 5
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 35
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 11
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 32
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 14
+y = 7
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 29
+y = 7
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 17
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 26
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 20
+y = 5
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 23
+y = 5
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 23
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 20
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 26
+y = 6
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 17
+y = 6
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 29
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 14
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 32
+y = 7
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 11
+y = 7
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 35
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 8
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 38
+y = 5
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 5
+y = 5
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 41
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 5
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 8
+y = 9
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 14
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 18
+y = 12
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 5
+y = 16
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 11
+y = 20
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 16
+y = 25
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 30
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 10
+y = 34
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 17
+y = 38
+colour = "spot"

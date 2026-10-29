@@ -1,0 +1,102 @@
+# DF FISH_STINGRAY (wild, large ocean): 5 kg, a small flat ray with a rounded
+# disc (extra bones wing_l/_r, two cubes each, flapping in swim) and a whip tail
+# with a barb. Attacks slap (the template's `attack`, here the barbed tail's
+# lash is not modelled separately).
+name = "stingray"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [5, 2, 6]
+head = [4, 1.5, 2]
+tail = [1, 1, 7]
+fin = [1, 1, 1]
+pectoral = [0, 0]
+dorsal = [1, 0, 0]
+flukes = true
+swim = { cycle = 1, amp = 6 }
+
+[[bones]]
+name = "wing_l"
+parent = "body"
+pivot = [-2.5, 0, 0]
+mirror = true
+
+# Wing pivot: the body's side at mid-height.
+[[cubes]]
+name = "wing_in_l"
+bone = "wing_l"
+part = "body"
+from = [-3, -0.5, -3.5]
+to = [0, 0.5, 3]
+mirror = true
+
+[[cubes]]
+name = "wing_tip_l"
+bone = "wing_l"
+part = "body"
+from = [-4, -0.5, -2]
+to = [-3, 0.5, 2]
+mirror = true
+
+# Tail pivot: the body's back at mid-height; the tail spans y -0.5..0.5, z 0..7.
+[[cubes]]
+name = "barb"
+bone = "tail"
+part = "barb"
+from = [-0.25, 0.5, 2]
+to = [0.25, 1, 4]
+
+[palette]
+body = "#7d6b55"
+body_down = "#ebe5da"
+head = "#7d6b55"
+head_down = "#ebe5da"
+fins = "#5c4e3e"
+barb = "#e6dcc6"
+eye = "#121010"
+eye_ring = "#bfae86"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 3
+y = 0
+colour = "eye"
+
+[clips.swim]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.3, value = [0, 0, -22] },
+  { bone = "wing_l", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.8, value = [0, 0, 6] },
+  { bone = "wing_l", channel = "rotation", time = 1, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.3, value = [0, 0, 22] },
+  { bone = "wing_r", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.8, value = [0, 0, -6] },
+  { bone = "wing_r", channel = "rotation", time = 1, value = [0, 0, 0] },
+]
+
+[clips.swim_idle]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.75, value = [0, 0, -8] },
+  { bone = "wing_l", channel = "rotation", time = 1.5, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 2.25, value = [0, 0, -8] },
+  { bone = "wing_l", channel = "rotation", time = 3, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.75, value = [0, 0, 8] },
+  { bone = "wing_r", channel = "rotation", time = 1.5, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 2.25, value = [0, 0, 8] },
+  { bone = "wing_r", channel = "rotation", time = 3, value = [0, 0, 0] },
+]

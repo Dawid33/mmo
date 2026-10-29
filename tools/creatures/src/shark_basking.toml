@@ -1,0 +1,200 @@
+# DF SHARK_BASKING (wild, large ocean): 15000 kg, a gigantic filter feeder:
+# a grey-brown body, a conical snout over a vast gaping mouth (decals), gill
+# slits wrapping the throat, a big dorsal and tail. Slow swim.
+# Built like the other sharks: the fish template plus a swept two-cube
+# dorsal, an upper tail lobe, gill slits and a white lower flank (decals).
+# Attacks slap (the template's `attack`).
+name = "basking shark"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [20, 20, 40]
+head = [16, 17, 14]
+tail = [6, 7, 8]
+fin = [1, 20, 6]
+pectoral = [8, 8]
+dorsal = [1, 0, 0]
+swim = { cycle = 2, amp = 8 }
+
+# Body pivot: its centre; the body spans y -10..10, z -20..20. The dorsal is a three-step swept triangle.
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.5, 10, -6]
+to = [0.5, 15.5, 4]
+
+[[cubes]]
+name = "dorsal_mid"
+bone = "body"
+part = "fins"
+from = [-0.5, 15.5, -3]
+to = [0.5, 19, 4.5]
+
+[[cubes]]
+name = "dorsal_tip"
+bone = "body"
+part = "fins"
+from = [-0.5, 19, 0]
+to = [0.5, 22, 5]
+
+# Tail fin pivot: the stalk's end; the fin spans y -10..10, z 0..6. The upper lobe is a two-step sweep up and back.
+[[cubes]]
+name = "lobe_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 0, 2]
+to = [0.5, 16, 7]
+
+[[cubes]]
+name = "lobe_tip"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 15, 6]
+to = [0.5, 22, 12]
+
+# Head pivot: the body's front at mid-height; the head spans y -8.5..8.5, z -14..0.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-4, 3, -18]
+to = [4, 8, -14]
+
+[palette]
+body = "#5f5f58"
+body_up = "#4c4c46"
+body_down = "#8b8b82"
+head = "#5f5f58"
+head_up = "#4c4c46"
+head_down = "#8b8b82"
+fins = "#53534d"
+belly = "#7d7d74"
+snout = "#5f5f58"
+mouth = "#d9d0c8"
+gill = "#38382f"
+eye = "#0b0c0d"
+teeth = "#f4f1ea"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 14
+w = 40
+h = 6
+colour = "belly"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 14
+w = 40
+h = 6
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 11
+w = 14
+h = 6
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 11
+w = 14
+h = 6
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 2
+y = 4
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 11
+y = 4
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 9
+w = 12
+h = 6
+colour = "mouth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 10
+w = 10
+h = 4
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 1
+y = 3
+w = 1
+h = 12
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 38
+y = 3
+w = 1
+h = 12
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 3
+w = 1
+h = 12
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 36
+y = 3
+w = 1
+h = 12
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 3
+w = 1
+h = 12
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 34
+y = 3
+w = 1
+h = 12
+colour = "gill"

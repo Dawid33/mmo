@@ -1,0 +1,106 @@
+# DF FISH_STURGEON (wild, large ocean): 1500 kg, a huge armoured bottom fish.
+# Pointed shovel snout with barbels, rows of bony scutes along the back and
+# flanks, a shark-like tail with a long upper lobe, the dorsal set far back.
+# Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "sturgeon"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [9, 9, 30]
+head = [6, 6, 8]
+tail = [3, 5, 5]
+fin = [1, 6, 3]
+pectoral = [4, 4]
+dorsal = [1, 0, 0]
+swim = { cycle = 1.3, amp = 12 }
+
+# Head pivot: the body's front at mid-height; the head spans y -3..3, z -8..0.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-2, -2.5, -12]
+to = [2, -0.5, -8]
+
+[[cubes]]
+name = "barbels"
+bone = "head"
+part = "fins"
+from = [-1.5, -3.5, -11]
+to = [1.5, -2.5, -10]
+
+# Body pivot: its centre; the body spans x -4.5..4.5, y -4.5..4.5, z -15..15.
+[[cubes]]
+name = "scutes_back"
+bone = "body"
+part = "scutes"
+from = [-1, 4.5, -14]
+to = [1, 5.5, 12]
+
+[[cubes]]
+name = "scutes_l"
+bone = "body"
+part = "scutes"
+from = [-5, -0.5, -13]
+to = [-4.5, 0.5, 13]
+mirror = true
+
+[[cubes]]
+name = "dorsal_back"
+bone = "body"
+part = "fins"
+from = [-0.5, 4.5, 9]
+to = [0.5, 8, 15]
+
+# Tail fin pivot: the stalk's end; the fin spans y -3..3, z 0..3.
+[[cubes]]
+name = "lobe_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 1, 1]
+to = [0.5, 6, 8]
+
+[palette]
+body = "#6b6352"
+body_up = "#4f493c"
+body_down = "#d6cdb5"
+head = "#6b6352"
+head_up = "#4f493c"
+head_down = "#d6cdb5"
+fins = "#5a5244"
+scutes = "#d8cfb6"
+eye = "#121010"
+eye_ring = "#9c9078"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 2
+y = 2
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 2
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 2
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 5
+y = 2
+colour = "eye"

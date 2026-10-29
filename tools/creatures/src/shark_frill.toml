@@ -1,0 +1,75 @@
+# DF SHARK_FRILL (wild, large ocean): 60 kg, an eel-like brown shark: a long
+# thin body, a snake-like head with a frilly gill collar (an extra cube), low
+# fins set far back, a long low tail; wide swim bends.
+# LARGE_PREDATOR: alert, roar. Attacks bite (the template's `attack`) and slap
+# (optional, not made).
+name = "frill shark"
+template = "fish"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [4, 4, 16]
+head = [4, 3.5, 4]
+tail = [3, 3, 6]
+fin = [1, 4, 4]
+pectoral = [1, 2]
+dorsal = [1, 0, 0]
+swim = { cycle = 1, amp = 26 }
+
+# Body pivot: its centre; the body spans y -2..2, z -8..8. The dorsal is a three-step swept triangle.
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.5, 2, 5]
+to = [0.5, 2.5, 8]
+
+[[cubes]]
+name = "dorsal_mid"
+bone = "body"
+part = "fins"
+from = [-0.5, 2.5, 6]
+to = [0.5, 3, 8.5]
+
+[[cubes]]
+name = "dorsal_tip"
+bone = "body"
+part = "fins"
+from = [-0.5, 3, 7]
+to = [0.5, 3.5, 9]
+
+[[cubes]]
+name = "frill"
+bone = "body"
+part = "frill"
+from = [-2.5, -2, -8]
+to = [2.5, 2.5, -6.5]
+
+[palette]
+body = "#5d4b3d"
+body_up = "#4a3b30"
+body_down = "#7b6656"
+head = "#5d4b3d"
+head_up = "#4a3b30"
+head_down = "#7b6656"
+fins = "#4f4034"
+frill = "#7d5f4a"
+eye = "#0b0c0d"
+gill = "#2e3336"
+mouth = "#2a1c1c"
+teeth = "#f4f1ea"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"

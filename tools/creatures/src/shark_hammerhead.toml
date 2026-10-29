@@ -1,0 +1,215 @@
+# DF SHARK_HAMMERHEAD (wild, large ocean): 500 kg, a grey-bronze shark whose
+# head spreads into a flat hammer with the eyes at its tips; a tall sickle dorsal.
+# Built like the other sharks: the fish template plus a swept two-cube
+# dorsal, an upper tail lobe, gill slits and a white lower flank (decals).
+# LARGE_PREDATOR: alert, roar. Attacks bite (the template's `attack`) and slap
+# (optional, not made).
+name = "hammerhead shark"
+template = "fish"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [8, 9, 22]
+head = [6, 6, 7]
+tail = [3, 4, 5]
+fin = [1, 9, 2]
+pectoral = [4, 4]
+dorsal = [1, 0, 0]
+swim = { cycle = 1, amp = 14 }
+
+# Body pivot: its centre; the body spans y -4.5..4.5, z -11..11. The dorsal is a three-step swept triangle.
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.5, 4.5, -5]
+to = [0.5, 8.5, 1]
+
+[[cubes]]
+name = "dorsal_mid"
+bone = "body"
+part = "fins"
+from = [-0.5, 8.5, -3]
+to = [0.5, 11.5, 1.5]
+
+[[cubes]]
+name = "dorsal_tip"
+bone = "body"
+part = "fins"
+from = [-0.5, 11.5, -1.5]
+to = [0.5, 13.5, 2]
+
+# Tail fin pivot: the stalk's end; the fin spans y -4.5..4.5, z 0..2. The upper lobe is a two-step sweep up and back.
+[[cubes]]
+name = "lobe_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 0, 0.5]
+to = [0.5, 7.5, 3]
+
+[[cubes]]
+name = "lobe_tip"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 7, 2.5]
+to = [0.5, 10.5, 5.5]
+
+# Head pivot: the body's front at mid-height; the head spans y -3..3, z -7..0.
+[[cubes]]
+name = "hammer"
+bone = "head"
+part = "hammer"
+from = [-8, -1, -7]
+to = [8, 1, -4]
+
+[palette]
+body = "#7d7f76"
+body_up = "#62645c"
+body_down = "#eef0f0"
+head = "#7d7f76"
+head_up = "#62645c"
+head_down = "#eef0f0"
+fins = "#6c6e66"
+belly = "#e9ecec"
+hammer = "#7d7f76"
+eye = "#0b0c0d"
+gill = "#2e3336"
+mouth = "#2a1c1c"
+teeth = "#f4f1ea"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 6
+w = 22
+h = 3
+colour = "belly"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 6
+w = 22
+h = 3
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 3
+w = 7
+h = 3
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 3
+w = 7
+h = 3
+colour = "belly"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 1
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 20
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 18
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 16
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 4
+w = 4
+h = 1
+colour = "mouth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 4
+h = 1
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 9
+y = 9
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = -3
+y = 9
+colour = "eye"
+
+[[decals]]
+cube = "hammer"
+face = "west"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "hammer"
+face = "east"
+x = 1
+y = 0
+colour = "eye"

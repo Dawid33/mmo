@@ -1,0 +1,140 @@
+# DF FISH_COELACANTH (wild, large ocean): 80 kg, a steel-blue lobe-finned fish
+# with pale blotches. The three-lobed tail's middle lobe is an extra cube; the
+# paired lower lobe fins would hang below the belly, so only the pectorals are made.
+# Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "coelacanth"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [6, 8, 14]
+head = [5, 7, 5]
+tail = [3, 5, 3]
+fin = [1, 8, 3]
+pectoral = [3, 3]
+dorsal = [1, 3, 4]
+swim = { cycle = 1, amp = 14 }
+
+# Body pivot: its centre; the body spans y -4..4, z -7..7.
+[[cubes]]
+name = "dorsal_2"
+bone = "body"
+part = "fins"
+from = [-0.5, 4, 3]
+to = [0.5, 6, 6]
+
+# Tail fin pivot: the stalk's end; the fin spans y -4..4, z 0..3.
+[[cubes]]
+name = "tail_lobe"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, -1, 3]
+to = [0.5, 1, 5]
+
+[palette]
+body = "#3e5276"
+body_up = "#2e3d5a"
+body_down = "#58698a"
+head = "#3e5276"
+head_up = "#2e3d5a"
+head_down = "#58698a"
+fins = "#33456a"
+blotch = "#d4dbe6"
+eye = "#0c1210"
+eye_ring = "#7fb08a"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 2
+w = 2
+h = 1
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 10
+y = 2
+w = 2
+h = 1
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 6
+y = 4
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 7
+y = 4
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 9
+y = 1
+w = 2
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 3
+y = 1
+w = 2
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 12
+y = 5
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 1
+y = 5
+colour = "blotch"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 3
+y = 1
+colour = "eye"

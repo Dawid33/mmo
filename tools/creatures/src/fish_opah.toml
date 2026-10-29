@@ -1,0 +1,166 @@
+# DF FISH_OPAH (wild, large ocean): 200 kg, a flat round red fish with white
+# spots and crimson fins; a tall sickle dorsal up front over a long low one.
+# Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "opah"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [5, 14, 14]
+head = [5, 10, 5]
+tail = [2, 4, 3]
+fin = [1, 10, 2]
+pectoral = [4, 4]
+dorsal = [1, 2, 10]
+swim = { cycle = 1, amp = 12 }
+
+# Body pivot: its centre; the body spans y -7..7, z -7..7.
+[[cubes]]
+name = "dorsal_front"
+bone = "body"
+part = "fins"
+from = [-0.5, 7, -6]
+to = [0.5, 12, -2]
+
+# Tail fin pivot: the stalk's end; the fin spans y -5..5, z 0..2.
+[[cubes]]
+name = "lobe_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 2, 2]
+to = [0.5, 5, 4]
+
+[[cubes]]
+name = "lobe_down"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, -5, 2]
+to = [0.5, -2, 4]
+
+[palette]
+body = "#b24a4f"
+body_up = "#6f4566"
+body_down = "#d98272"
+head = "#b24a4f"
+head_up = "#6f4566"
+head_down = "#d98272"
+fins = "#d6201f"
+spot = "#f2ebe2"
+eye = "#121010"
+eye_ring = "#e2b13a"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 11
+y = 3
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 6
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 8
+y = 6
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 5
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 10
+y = 8
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 3
+y = 8
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 12
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 1
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 4
+y = 10
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 9
+y = 10
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 3
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 3
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 3
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 3
+y = 3
+colour = "eye"

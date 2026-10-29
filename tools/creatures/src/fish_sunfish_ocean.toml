@@ -1,0 +1,85 @@
+# DF FISH_SUNFISH_OCEAN (wild, large ocean): 1000 kg, a giant tall disc that is
+# all head: a stub of a tail stalk with the wavy clavus (the caudal fin) and a
+# tall dorsal. Its matching anal fin would hang below the belly (the ground
+# line), so it is not made. Slow sculling swim.
+# Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "ocean sunfish"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [7, 20, 14]
+head = [6, 16, 3]
+tail = [3, 4, 1]
+fin = [2, 18, 3]
+pectoral = [3, 4]
+dorsal = [1, 0, 0]
+swim = { cycle = 1.6, amp = 10 }
+
+# Body pivot: its centre; the body spans y -10..10, z -7..7.
+[[cubes]]
+name = "dorsal_tall"
+bone = "body"
+part = "fins"
+from = [-1, 10, 0]
+to = [1, 19, 7]
+
+[[cubes]]
+name = "anal_stub"
+bone = "body"
+part = "fins"
+from = [-1, -10, 5]
+to = [1, -4, 9]
+
+[palette]
+body = "#8e979d"
+body_up = "#6a737a"
+body_down = "#cfd4d7"
+head = "#8e979d"
+head_up = "#6a737a"
+head_down = "#cfd4d7"
+fins = "#7a838a"
+mouth = "#3a3f43"
+eye = "#101214"
+eye_ring = "#b8bec2"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 10
+w = 2
+h = 2
+colour = "mouth"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 5
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 5
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 5
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 5
+colour = "eye"

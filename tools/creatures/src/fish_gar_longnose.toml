@@ -1,0 +1,106 @@
+# DF FISH_GAR_LONGNOSE (wild, large river/lake): 20 kg, a slim armoured fish
+# with a long narrow toothy snout (an extra cube on the head) and dark spots.
+# No dorsal fin in DF's body plan.
+# Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "longnose gar"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [3, 4, 10]
+head = [3, 3, 3]
+tail = [2, 3, 2]
+fin = [1, 4, 3]
+pectoral = [1, 1.5]
+dorsal = [1, 0, 0]
+swim = { cycle = 0.7, amp = 16 }
+
+# Head pivot: the body's front at mid-height; the head spans y -1.5..1.5, z -3..0.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-0.75, -1.5, -9]
+to = [0.75, -0.5, -3]
+
+[palette]
+body = "#6d7141"
+body_up = "#4c4f2c"
+body_down = "#e0dcbc"
+head = "#6d7141"
+head_up = "#4c4f2c"
+head_down = "#e0dcbc"
+fins = "#7b6b3c"
+spot = "#2f2f1d"
+eye = "#101010"
+eye_ring = "#d8c46a"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 2
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 7
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 4
+y = 0
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 7
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "tail_fin"
+face = "west"
+x = 1
+y = 1
+colour = "spot"
+
+[[decals]]
+cube = "tail_fin"
+face = "east"
+x = 1
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"

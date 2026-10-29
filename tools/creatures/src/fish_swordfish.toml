@@ -1,0 +1,98 @@
+# DF FISH_SWORDFISH (wild, large ocean): 650 kg, a huge billfish with a long
+# flat sword (extra cube), a tall crescent dorsal, a crescent tail (bar plus
+# swept tips) and stalk keels; purple-brown back, silver belly.
+# Attacks bite (the template's `attack`; the sword slash is DF's slap, not made).
+name = "swordfish"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [8, 10, 20]
+head = [6, 8, 6]
+tail = [3, 3, 5]
+fin = [1, 10, 1.5]
+pectoral = [4, 4]
+dorsal = [1, 0, 0]
+swim = { cycle = 1, amp = 12 }
+
+# Head pivot: the body's front at mid-height; the head spans y -4..4, z -6..0.
+[[cubes]]
+name = "sword"
+bone = "head"
+part = "bill"
+from = [-1, -0.5, -20]
+to = [1, 0.5, -6]
+
+# Body pivot: its centre; the body spans y -5..5, z -10..10.
+[[cubes]]
+name = "dorsal_tall"
+bone = "body"
+part = "fins"
+from = [-0.5, 5, -8]
+to = [0.5, 11, -4]
+
+[[cubes]]
+name = "keel_l"
+bone = "tail"
+part = "fins"
+from = [-2, -0.5, 1]
+to = [2, 0.5, 4]
+
+# Tail fin pivot: the stalk's end; the bar spans y -5..5, z 0..1.5.
+[[cubes]]
+name = "tip_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 2, 1.5]
+to = [0.5, 5, 5]
+
+[[cubes]]
+name = "tip_down"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, -5, 1.5]
+to = [0.5, -2, 5]
+
+[palette]
+body = "#5c4a5c"
+body_up = "#3d2f40"
+body_down = "#c8c4c8"
+head = "#5c4a5c"
+head_up = "#3d2f40"
+head_down = "#c8c4c8"
+bill = "#3d2f40"
+fins = "#3b2f3f"
+eye = "#0c0c10"
+eye_ring = "#8fa0b0"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 2
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 3
+y = 2
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 2
+colour = "eye"

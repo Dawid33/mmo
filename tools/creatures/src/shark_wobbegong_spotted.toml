@@ -1,0 +1,169 @@
+# DF SHARK_WOBBEGONG_SPOTTED (wild, large ocean): 80 kg, a flat carpet shark
+# lying camouflaged on the sea bed: a wide low body and head, a fringe of
+# skin-flap "beard" across the snout, eyes on top, broad pectoral and pelvic
+# fins laid flat on the ground (static extra cubes: the template's hinged
+# pectorals would dip through the ground on a body this low), two small dorsals
+# on the long tail, pale ringed spots over dark blotches.
+# Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "spotted wobbegong"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [10, 3, 14]
+head = [9, 3, 4]
+tail = [3, 2, 7]
+fin = [1, 2, 4]
+pectoral = [0, 0]
+dorsal = [1, 0, 0]
+swim = { cycle = 1.3, amp = 14 }
+
+# Head pivot: the body's front at mid-height; the head spans y -1.5..1.5, z -4..0.
+[[cubes]]
+name = "beard"
+bone = "head"
+part = "beard"
+from = [-4.5, -1.5, -5]
+to = [4.5, -0.5, -4]
+
+# Body pivot: its centre; the body spans x -5..5, y -1.5..1.5, z -7..7.
+[[cubes]]
+name = "pectoral_l"
+bone = "body"
+part = "fins"
+from = [-8, -1.5, -5]
+to = [-5, -0.5, 1]
+mirror = true
+
+[[cubes]]
+name = "pelvic_l"
+bone = "body"
+part = "fins"
+from = [-7, -1.5, 4]
+to = [-5, -0.5, 7]
+mirror = true
+
+# Tail pivot: the body's back at mid-height; the tail spans y -1..1, z 0..7.
+[[cubes]]
+name = "dorsal_1"
+bone = "tail"
+part = "fins"
+from = [-0.5, 1, 0.5]
+to = [0.5, 2.5, 2.5]
+
+[[cubes]]
+name = "dorsal_2"
+bone = "tail"
+part = "fins"
+from = [-0.5, 1, 4]
+to = [0.5, 2, 6]
+
+[palette]
+body = "#86764a"
+body_down = "#c9b88e"
+head = "#86764a"
+head_down = "#c9b88e"
+fins = "#7a6a42"
+beard = "#a08d5a"
+ring = "#dccb90"
+blotch = "#4f432b"
+eye = "#121010"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 6
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 2
+w = 2
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 6
+y = 4
+w = 2
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 3
+y = 8
+w = 2
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 7
+y = 11
+w = 2
+h = 2
+colour = "blotch"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 4
+y = 1
+colour = "ring"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 6
+colour = "ring"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 8
+y = 7
+colour = "ring"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 5
+y = 12
+colour = "ring"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 11
+colour = "ring"
+
+[[decals]]
+cube = "pectoral_l"
+face = "up"
+x = 1
+y = 2
+colour = "ring"
+
+[[decals]]
+cube = "pectoral_r"
+face = "up"
+x = 1
+y = 2
+colour = "ring"

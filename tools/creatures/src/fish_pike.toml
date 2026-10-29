@@ -1,0 +1,116 @@
+# DF FISH_PIKE (wild, large river/lake): 35 kg, a long green ambush predator.
+# Long slim body, flat duck-bill jaws, dorsal and anal fins set far back by the
+# tail. Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "pike"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [4, 5, 13]
+head = [3, 3, 5]
+tail = [2, 3, 3]
+fin = [1, 5, 3]
+pectoral = [1.5, 2]
+dorsal = [1, 0, 0]
+swim = { cycle = 0.7, amp = 16 }
+
+# Tail pivot: the body's back at mid-height (the stalk spans y -1.5..1.5).
+# Body pivot: its centre (y 2.5 up); the body spans x -2..2, y -2.5..2.5, z -6.5..6.5.
+[[cubes]]
+name = "dorsal_back"
+bone = "body"
+part = "fins"
+from = [-0.5, 2.5, 2]
+to = [0.5, 4.5, 6.5]
+
+[[cubes]]
+name = "anal_fin"
+bone = "tail"
+part = "fins"
+from = [-0.5, -2.5, -0.5]
+to = [0.5, -1.5, 2]
+
+# Head pivot: the body's front at mid-height; the head spans y -1.5..1.5, z -5..0.
+[[cubes]]
+name = "jaw"
+bone = "head"
+part = "jaw"
+from = [-1.5, -2.5, -5.5]
+to = [1.5, -1.5, 0]
+
+[palette]
+body = "#5b6e33"
+body_up = "#3f4d24"
+body_down = "#d8d6a6"
+head = "#5b6e33"
+head_up = "#3f4d24"
+jaw = "#cfcc9a"
+fins = "#7a6a35"
+spots = "#c9c87c"
+eye = "#16130c"
+eye_ring = "#d7b843"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 1
+w = 2
+h = 1
+colour = "spots"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 8
+y = 1
+w = 2
+h = 1
+colour = "spots"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 8
+y = 2
+colour = "spots"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 4
+y = 2
+colour = "spots"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 0
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 3
+y = 0
+colour = "eye"
+

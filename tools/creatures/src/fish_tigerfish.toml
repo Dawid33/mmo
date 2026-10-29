@@ -1,0 +1,152 @@
+# DF FISH_TIGERFISH (wild, large river/lake): 50 kg, a silver predator with
+# black stripes, red fins and interlocking fangs (decals at the mouth).
+# Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "tigerfish"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [5, 7, 12]
+head = [4, 6, 5]
+tail = [2, 4, 3]
+fin = [1, 7, 1.5]
+pectoral = [2, 2]
+dorsal = [1, 2, 3]
+swim = { cycle = 0.7, amp = 16 }
+
+[[cubes]]
+name = "lobe_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 1, 1.5]
+to = [0.5, 3.5, 3.5]
+
+[[cubes]]
+name = "lobe_down"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, -3.5, 1.5]
+to = [0.5, -1, 3.5]
+
+[palette]
+body = "#c3cac6"
+body_up = "#66735f"
+body_down = "#eef0ec"
+head = "#c3cac6"
+head_up = "#66735f"
+head_down = "#eef0ec"
+fins = "#c8312a"
+stripe = "#1d201c"
+teeth = "#ffffff"
+eye = "#101010"
+eye_ring = "#d8b648"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 2
+w = 12
+h = 1
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 2
+w = 12
+h = 1
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 4
+w = 12
+h = 1
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 4
+w = 12
+h = 1
+colour = "stripe"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 4
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 4
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 5
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 5
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 4
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 4
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 3
+y = 1
+colour = "eye"

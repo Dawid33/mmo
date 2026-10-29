@@ -1,0 +1,86 @@
+# DF FISH_BLUEFISH (wild, large ocean): 15 kg, a fork-tailed blue-green fish.
+# Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "bluefish"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [3, 5, 9]
+head = [3, 4, 4]
+tail = [2, 3, 2]
+fin = [1, 5, 1]
+pectoral = [1.5, 1.5]
+dorsal = [1, 1.5, 3]
+swim = { cycle = 0.6, amp = 18 }
+
+[[cubes]]
+name = "lobe_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 0.5, 1]
+to = [0.5, 2.5, 3]
+
+[[cubes]]
+name = "lobe_down"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, -2.5, 1]
+to = [0.5, -0.5, 3]
+
+[palette]
+body = "#3d7486"
+body_up = "#2b5866"
+body_down = "#e3e9e9"
+head = "#3d7486"
+head_up = "#2b5866"
+head_down = "#e3e9e9"
+fins = "#5b8a8e"
+spot = "#1e2f33"
+eye = "#101014"
+eye_ring = "#e0d8a8"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 8
+y = 2
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"

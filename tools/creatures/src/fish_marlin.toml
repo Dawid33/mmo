@@ -1,0 +1,196 @@
+# DF FISH_MARLIN (wild, large ocean): 800 kg, a huge fast billfish: a long
+# round bill (extra cube), a tall sail of a dorsal up front, a crescent tail
+# (bar plus swept tips), keels on the stalk and pale blue bars on the flanks.
+# Attacks bite (the template's `attack`; the bill slash is DF's slap, not made).
+name = "marlin"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [8, 11, 22]
+head = [6, 8, 6]
+tail = [3, 4, 5]
+fin = [1, 11, 1.5]
+pectoral = [5, 5]
+dorsal = [1, 0, 0]
+swim = { cycle = 1, amp = 12 }
+
+# Head pivot: the body's front at mid-height; the head spans y -4..4, z -6..0.
+[[cubes]]
+name = "bill"
+bone = "head"
+part = "bill"
+from = [-0.5, -0.5, -18]
+to = [0.5, 0.5, -6]
+
+# Body pivot: its centre; the body spans y -5.5..5.5, z -11..11.
+[[cubes]]
+name = "sail"
+bone = "body"
+part = "fins"
+from = [-0.5, 5.5, -10]
+to = [0.5, 14.5, -3]
+
+[[cubes]]
+name = "sail_low"
+bone = "body"
+part = "fins"
+from = [-0.5, 5.5, -2]
+to = [0.5, 7, 6]
+
+[[cubes]]
+name = "keel_l"
+bone = "tail"
+part = "fins"
+from = [-2, -0.5, 1]
+to = [2, 0.5, 4]
+
+# Tail fin pivot: the stalk's end; the bar spans y -5.5..5.5, z 0..1.5.
+[[cubes]]
+name = "tip_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 2.5, 1.5]
+to = [0.5, 5.5, 5]
+
+[[cubes]]
+name = "tip_down"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, -5.5, 1.5]
+to = [0.5, -2.5, 5]
+
+[palette]
+body = "#2a4a72"
+body_up = "#1d3350"
+body_down = "#cfd7de"
+head = "#2a4a72"
+head_up = "#1d3350"
+head_down = "#cfd7de"
+bill = "#1d3350"
+fins = "#243e66"
+bar = "#79b0d6"
+eye = "#0c0e12"
+eye_ring = "#9fb3c6"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 2
+w = 1
+h = 4
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 18
+y = 2
+w = 1
+h = 4
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 7
+y = 2
+w = 1
+h = 4
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 14
+y = 2
+w = 1
+h = 4
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 11
+y = 2
+w = 1
+h = 4
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 10
+y = 2
+w = 1
+h = 4
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 15
+y = 2
+w = 1
+h = 4
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 6
+y = 2
+w = 1
+h = 4
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 19
+y = 2
+w = 1
+h = 3
+colour = "bar"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 2
+y = 2
+w = 1
+h = 3
+colour = "bar"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 2
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 3
+y = 2
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 2
+colour = "eye"

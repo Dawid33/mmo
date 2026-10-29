@@ -1,0 +1,168 @@
+# DF FISH_SKATE_COMMON (wild, large ocean): 100 kg, a flat bottom-dwelling ray
+# with a pointed snout, a diamond disc and a long thin tail. The disc's sides are
+# two extra bones (wing_l/_r, two cubes each) that flap in swim (merged keys,
+# mostly up-strokes so the tips stay out of the ground). Attacks bite (the
+# template's `attack`).
+name = "common skate"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [6, 3, 12]
+head = [5, 2, 4]
+tail = [1.5, 1, 10]
+fin = [1, 3, 2]
+pectoral = [0, 0]
+dorsal = [1, 0, 0]
+flukes = true
+swim = { cycle = 1.4, amp = 6 }
+
+[[bones]]
+name = "wing_l"
+parent = "body"
+pivot = [-3, -0.5, 0]
+mirror = true
+
+# Head pivot: the body's front at mid-height; the head spans y -1..1, z -4..0.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-1.5, -1, -7]
+to = [1.5, 0.5, -4]
+
+# Wing pivot: the body's side, 0.5 below its middle.
+[[cubes]]
+name = "wing_in_l"
+bone = "wing_l"
+part = "body"
+from = [-5, -0.5, -6]
+to = [0, 0.5, 6]
+mirror = true
+
+[[cubes]]
+name = "wing_tip_l"
+bone = "wing_l"
+part = "body"
+from = [-8, -0.5, -3]
+to = [-5, 0.5, 3]
+mirror = true
+
+# Tail pivot: the body's back at mid-height; the tail spans y -0.5..0.5, z 0..10.
+[[cubes]]
+name = "tail_spines"
+bone = "tail"
+part = "spines"
+from = [-0.5, 0.5, 2]
+to = [0.5, 1, 8]
+
+[palette]
+body = "#7a6c58"
+body_up = "#6b5d4a"
+body_down = "#e9e4dc"
+head = "#7a6c58"
+head_down = "#e9e4dc"
+fins = "#6b5d4a"
+spines = "#cfc4b0"
+spot = "#4d4335"
+eye = "#121010"
+eye_ring = "#c9b98c"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 0
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 3
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 4
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "wing_in_l"
+face = "up"
+x = 2
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "wing_in_r"
+face = "up"
+x = 2
+y = 4
+colour = "spot"
+
+[[decals]]
+cube = "wing_in_l"
+face = "up"
+x = 1
+y = 8
+colour = "spot"
+
+[[decals]]
+cube = "wing_in_r"
+face = "up"
+x = 3
+y = 8
+colour = "spot"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 2
+y = 5
+w = 2
+h = 1
+colour = "spot"
+
+[clips.swim]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.42, value = [0, 0, -22] },
+  { bone = "wing_l", channel = "rotation", time = 0.84, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 1.12, value = [0, 0, 6] },
+  { bone = "wing_l", channel = "rotation", time = 1.4, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.42, value = [0, 0, 22] },
+  { bone = "wing_r", channel = "rotation", time = 0.84, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 1.12, value = [0, 0, -6] },
+  { bone = "wing_r", channel = "rotation", time = 1.4, value = [0, 0, 0] },
+]
+
+[clips.swim_idle]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.75, value = [0, 0, -8] },
+  { bone = "wing_l", channel = "rotation", time = 1.5, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 2.25, value = [0, 0, -8] },
+  { bone = "wing_l", channel = "rotation", time = 3, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.75, value = [0, 0, 8] },
+  { bone = "wing_r", channel = "rotation", time = 1.5, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 2.25, value = [0, 0, 8] },
+  { bone = "wing_r", channel = "rotation", time = 3, value = [0, 0, 0] },
+]

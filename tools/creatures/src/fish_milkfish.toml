@@ -1,0 +1,71 @@
+# DF FISH_MILKFISH (wild, large ocean): 10 kg, a slim silver fork-tailed fish.
+# Attacks bite (the template's `attack`) and slap (optional, not made).
+name = "milkfish"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [3, 4, 8]
+head = [3, 3, 4]
+tail = [2, 2, 2]
+fin = [1, 4, 1]
+pectoral = [1, 1.5]
+dorsal = [1, 1.5, 2]
+swim = { cycle = 0.55, amp = 18 }
+
+[[cubes]]
+name = "lobe_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 0.5, 1]
+to = [0.5, 2, 3]
+
+[[cubes]]
+name = "lobe_down"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, -2, 1]
+to = [0.5, -0.5, 3]
+
+[palette]
+body = "#b8c6cc"
+body_up = "#6f8a99"
+body_down = "#eef2f2"
+head = "#b8c6cc"
+head_up = "#6f8a99"
+head_down = "#eef2f2"
+fins = "#8ea2ab"
+eye = "#101014"
+eye_ring = "#e6ecec"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 1
+w = 2
+h = 2
+colour = "eye_ring"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"

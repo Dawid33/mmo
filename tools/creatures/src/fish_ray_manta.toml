@@ -1,0 +1,132 @@
+# DF FISH_RAY_MANTA (wild, large ocean): 2300 kg, a huge filter-feeding ray:
+# wide wings (extra bones wing_l/_r, two cubes each, flapping in swim — mostly
+# up-strokes so the tips stay out of the ground), horn-like cephalic lobes either
+# side of the wide mouth, a black back with white shoulder patches, a white belly,
+# a thin tail. DF gives it no attacks; the template's `attack` lunge stays.
+name = "manta ray"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [10, 5, 16]
+head = [8, 3, 3]
+tail = [1, 1, 8]
+fin = [1, 2, 1]
+pectoral = [0, 0]
+dorsal = [1, 1, 2]
+flukes = true
+swim = { cycle = 2, amp = 4 }
+
+[[bones]]
+name = "wing_l"
+parent = "body"
+pivot = [-5, 0, 0]
+mirror = true
+
+# Head pivot: the body's front at mid-height; the head spans y -1.5..1.5, z -3..0.
+[[cubes]]
+name = "lobe_l"
+bone = "head"
+part = "lobes"
+from = [-4, -1.5, -6]
+to = [-2.5, 0.5, -3]
+mirror = true
+
+# Wing pivot: the body's side at mid-height.
+[[cubes]]
+name = "wing_in_l"
+bone = "wing_l"
+part = "body"
+from = [-10, -0.75, -8]
+to = [0, 0.75, 7]
+mirror = true
+
+[[cubes]]
+name = "wing_tip_l"
+bone = "wing_l"
+part = "body"
+from = [-18, -0.75, -2]
+to = [-10, 0.75, 5]
+mirror = true
+
+[palette]
+body = "#20252b"
+body_down = "#eef0f0"
+head = "#20252b"
+head_down = "#eef0f0"
+lobes = "#2b3138"
+fins = "#20252b"
+patch = "#d8dde0"
+mouth = "#e8ecee"
+eye = "#0a0a0a"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+w = 6
+h = 1
+colour = "mouth"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "wing_in_l"
+face = "up"
+x = 5
+y = 3
+w = 4
+h = 3
+colour = "patch"
+
+[[decals]]
+cube = "wing_in_r"
+face = "up"
+x = 1
+y = 3
+w = 4
+h = 3
+colour = "patch"
+
+[clips.swim]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.6, value = [0, 0, -25] },
+  { bone = "wing_l", channel = "rotation", time = 1.2, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 1.6, value = [0, 0, 7] },
+  { bone = "wing_l", channel = "rotation", time = 2, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.6, value = [0, 0, 25] },
+  { bone = "wing_r", channel = "rotation", time = 1.2, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 1.6, value = [0, 0, -7] },
+  { bone = "wing_r", channel = "rotation", time = 2, value = [0, 0, 0] },
+]
+
+[clips.swim_idle]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.75, value = [0, 0, -8] },
+  { bone = "wing_l", channel = "rotation", time = 1.5, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 2.25, value = [0, 0, -8] },
+  { bone = "wing_l", channel = "rotation", time = 3, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.75, value = [0, 0, 8] },
+  { bone = "wing_r", channel = "rotation", time = 1.5, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 2.25, value = [0, 0, 8] },
+  { bone = "wing_r", channel = "rotation", time = 3, value = [0, 0, 0] },
+]

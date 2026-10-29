@@ -1,0 +1,145 @@
+# DF SHARK_REEF_WHITETIP (wild, large ocean): 15 kg, a slender grey reef shark
+# with white fin tips (a white cube atop the dorsal, decals on the tail).
+# Built like the other sharks: the fish template plus a swept two-cube
+# dorsal, an upper tail lobe, gill slits and a white lower flank (decals).
+# Benign: no alert/roar. Attacks bite (the template's `attack`) and slap
+# (optional, not made).
+name = "whitetip reef shark"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [3, 4, 10]
+head = [3, 3, 4]
+tail = [2, 2, 2]
+fin = [1, 4, 1]
+pectoral = [1, 2]
+dorsal = [1, 0, 0]
+swim = { cycle = 0.6, amp = 18 }
+
+# Body pivot: its centre; the body spans y -2..2, z -5..5. The dorsal is a three-step swept triangle.
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.5, 2, -2]
+to = [0.5, 3.5, 1]
+
+[[cubes]]
+name = "dorsal_mid"
+bone = "body"
+part = "fins"
+from = [-0.5, 3.5, -1]
+to = [0.5, 4, 1.5]
+
+[[cubes]]
+name = "dorsal_tip"
+bone = "body"
+part = "fins"
+from = [-0.5, 4, 0]
+to = [0.5, 5, 2]
+
+# Tail fin pivot: the stalk's end; the fin spans y -2..2, z 0..1. The upper lobe is a two-step sweep up and back.
+[[cubes]]
+name = "lobe_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 0, 0.5]
+to = [0.5, 3.5, 1.5]
+
+[[cubes]]
+name = "lobe_tip"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 3, 1.5]
+to = [0.5, 5, 2.5]
+
+[[cubes]]
+name = "dorsal_white"
+bone = "body"
+part = "tip"
+from = [-0.5, 5, 0.5]
+to = [0.5, 5.5, 2]
+
+[palette]
+body = "#77746e"
+body_up = "#5f5c57"
+body_down = "#eef0f0"
+head = "#77746e"
+head_up = "#5f5c57"
+head_down = "#eef0f0"
+fins = "#6a6762"
+belly = "#e9ecec"
+tip = "#f4f4f0"
+eye = "#0b0c0d"
+gill = "#2e3336"
+mouth = "#2a1c1c"
+teeth = "#f4f1ea"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 3
+w = 10
+h = 1
+colour = "belly"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 3
+w = 10
+h = 1
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 2
+w = 4
+h = 1
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 2
+w = 4
+h = 1
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "lobe_tip"
+face = "west"
+x = 0
+y = 0
+w = 1
+h = 1
+colour = "tip"
+
+[[decals]]
+cube = "lobe_tip"
+face = "east"
+x = 0
+y = 0
+w = 1
+h = 1
+colour = "tip"

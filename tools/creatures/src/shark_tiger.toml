@@ -1,0 +1,283 @@
+# DF SHARK_TIGER (wild, large ocean): 500 kg, a blunt-headed grey-green shark
+# with dark vertical stripes (decals) down its back.
+# Built like the other sharks: the fish template plus a swept two-cube
+# dorsal, an upper tail lobe, gill slits and a white lower flank (decals).
+# LARGE_PREDATOR: alert, roar. Attacks bite (the template's `attack`) and slap
+# (optional, not made).
+name = "tiger shark"
+template = "fish"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [9, 9, 21]
+head = [8, 8, 7]
+tail = [3, 4, 5]
+fin = [1, 9, 2]
+pectoral = [4, 4]
+dorsal = [1, 0, 0]
+swim = { cycle = 1.1, amp = 13 }
+
+# Body pivot: its centre; the body spans y -4.5..4.5, z -10.5..10.5. The dorsal is a three-step swept triangle.
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.5, 4.5, -5]
+to = [0.5, 7.5, 1]
+
+[[cubes]]
+name = "dorsal_mid"
+bone = "body"
+part = "fins"
+from = [-0.5, 7.5, -3]
+to = [0.5, 9.5, 1.5]
+
+[[cubes]]
+name = "dorsal_tip"
+bone = "body"
+part = "fins"
+from = [-0.5, 9.5, -1.5]
+to = [0.5, 11.5, 2]
+
+# Tail fin pivot: the stalk's end; the fin spans y -4.5..4.5, z 0..2. The upper lobe is a two-step sweep up and back.
+[[cubes]]
+name = "lobe_up"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 0, 0.5]
+to = [0.5, 7.5, 3.5]
+
+[[cubes]]
+name = "lobe_tip"
+bone = "tail_fin"
+part = "fins"
+from = [-0.5, 7, 3]
+to = [0.5, 10.5, 6.5]
+
+[palette]
+body = "#737a64"
+body_up = "#5c6250"
+body_down = "#eef0f0"
+head = "#737a64"
+head_up = "#5c6250"
+head_down = "#eef0f0"
+fins = "#646a56"
+belly = "#e9ecec"
+stripe = "#3e4234"
+eye = "#0b0c0d"
+gill = "#2e3336"
+mouth = "#2a1c1c"
+teeth = "#f4f1ea"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 0
+y = 6
+w = 21
+h = 3
+colour = "belly"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 0
+y = 6
+w = 21
+h = 3
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 5
+w = 7
+h = 3
+colour = "belly"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 5
+w = 7
+h = 3
+colour = "belly"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 1
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 19
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 3
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 17
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 5
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 15
+y = 2
+w = 1
+h = 3
+colour = "gill"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 6
+w = 6
+h = 1
+colour = "mouth"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 5
+w = 6
+h = 1
+colour = "teeth"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 1
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 5
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 7
+y = 0
+w = 1
+h = 4
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 13
+y = 0
+w = 1
+h = 4
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 10
+y = 0
+w = 1
+h = 4
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 10
+y = 0
+w = 1
+h = 4
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 13
+y = 0
+w = 1
+h = 4
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 7
+y = 0
+w = 1
+h = 4
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 16
+y = 0
+w = 1
+h = 4
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 4
+y = 0
+w = 1
+h = 4
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 19
+y = 0
+w = 1
+h = 4
+colour = "stripe"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 1
+y = 0
+w = 1
+h = 4
+colour = "stripe"

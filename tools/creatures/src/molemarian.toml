@@ -1,0 +1,154 @@
+# DF MOLEMARIAN (underground): 90 kg, a centaur of a giant naked mole-rat's body
+# and a mole-rat man's torso. Template: quadruped (the brief's "fish" guess is
+# wrong — HAND_FOOT_CENTAUR_NECK): the low pink body on short legs, the upright
+# torso is an extra cube on the `head` bone (so look/eat/attack bend it at the
+# waist), the `head` cube sits on top of it via head_up, and the two arms are
+# extra bones (arm_l/_r, mirrored) on the head bone; they rake forward in
+# `attack` (merged keys). Big rodent incisors under the snout.
+# LARGE_PREDATOR: alert, roar. Attacks bite (the template's `attack`) and
+# scratch (folded into `attack` as the arm rake).
+name = "molemarian"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+body = [8, 6, 16]
+leg = [2, 3]
+leg_ends = 1
+head = [5, 5, 5]
+head_up = 13
+head_overlap = 0.5
+tail = [1, 5]
+tail_raise = 10
+walk = { cycle = 0.8, swing = 32, bob = 0.3 }
+run = { cycle = 0.45, swing = 48, bob = 0.6, pitch = 4 }
+eat = { length = 1.6, reach = 25, forward = 1 }
+
+[[bones]]
+name = "arm_l"
+parent = "head"
+pivot = [-3.5, 8.5, -2]
+mirror = true
+
+# Head pivot: the waist, at the body's front 1 below its top; the head cube spans y 9..14, z -4.5..0.5.
+[[cubes]]
+name = "torso"
+bone = "head"
+part = "fur"
+from = [-3.5, 0, -4.5]
+to = [3.5, 9, 0.5]
+
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1.5, 9.5, -6.5]
+to = [1.5, 11.5, -4.5]
+
+[[cubes]]
+name = "incisors"
+bone = "head"
+part = "teeth"
+from = [-1, 8.5, -6]
+to = [1, 9.5, -5.5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "snout"
+from = [-3, 12, -2]
+to = [-2.5, 13, -1]
+mirror = true
+
+# Arm pivot: the shoulder, at the torso's top corner.
+[[cubes]]
+name = "arm_l"
+bone = "arm_l"
+part = "legs"
+from = [-2, -7, -1]
+to = [0, 0.5, 1]
+mirror = true
+
+[[cubes]]
+name = "claws_l"
+bone = "arm_l"
+part = "teeth"
+from = [-2, -7.5, -1.5]
+to = [0, -7, 0.5]
+mirror = true
+
+[palette]
+fur = "#d79e9a"
+fur_up = "#c98e8a"
+fur_down = "#e3b3ae"
+legs = "#c48682"
+head = "#d79e9a"
+tail = "#c48682"
+snout = "#e3aaa5"
+teeth = "#f2e6c8"
+fold = "#b97a77"
+eye = "#0c0808"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 4
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 4
+y = 1
+w = 1
+h = 3
+colour = "fold"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 11
+y = 1
+w = 1
+h = 3
+colour = "fold"
+
+[[decals]]
+cube = "body"
+face = "west"
+x = 9
+y = 1
+w = 1
+h = 3
+colour = "fold"
+
+[[decals]]
+cube = "body"
+face = "east"
+x = 6
+y = 1
+w = 1
+h = 3
+colour = "fold"
+
+[clips.attack]
+merge = true
+keys = [
+  { bone = "arm_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "arm_l", channel = "rotation", time = 0.25, value = [70, 0, -10] },
+  { bone = "arm_l", channel = "rotation", time = 0.4, value = [-20, 0, 0] },
+  { bone = "arm_l", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "arm_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "arm_r", channel = "rotation", time = 0.3, value = [70, 0, 10] },
+  { bone = "arm_r", channel = "rotation", time = 0.45, value = [-20, 0, 0] },
+  { bone = "arm_r", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+]
