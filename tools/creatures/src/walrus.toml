@@ -1,0 +1,70 @@
+# DF WALRUS (wild, arctic ocean): 1500 kg, "a huge aquatic mammal with giant
+# tusks and dense whiskers". Fish template with flukes (the rear flippers as the
+# horizontal tail fin), front flippers as the pectorals, no dorsal. A fat,
+# wrinkled pinkish-brown body; the broad whiskered muzzle pad and the two tusks
+# are head cubes (the tusks stop just above the ground at rest). AMPHIBIOUS:
+# swim, swim_idle from the template; flop on land. No attacks in the raws; the
+# template's `attack` lunge stands in for a tusk jab.
+name = "walrus"
+template = "fish"
+status = "draft"
+
+decals = [
+  # Head sides (11×12, front on the left of west): small eyes high up.
+  { cube = "head", face = "west", x = 5, y = 3, colour = "eye" },
+  { cube = "head", face = "east", x = 5, y = 3, colour = "eye" },
+  # Whisker rows on the muzzle pad's front (10×6).
+  { cube = "muzzle", face = "north", x = 1, y = 2, w = 8, h = 1, colour = "whisker" },
+  { cube = "muzzle", face = "north", x = 1, y = 4, w = 8, h = 1, colour = "whisker" },
+  { cube = "muzzle", face = "north", x = 3, y = 0, w = 1, colour = "nostril" },
+  { cube = "muzzle", face = "north", x = 6, y = 0, w = 1, colour = "nostril" },
+  # Skin folds on the neck and flanks (34×18).
+  { cube = "body", face = "west", x = 2, y = 4, w = 1, h = 10, colour = "fold" },
+  { cube = "body", face = "west", x = 5, y = 3, w = 1, h = 12, colour = "fold" },
+  { cube = "body", face = "west", x = 8, y = 4, w = 1, h = 10, colour = "fold" },
+  { cube = "body", face = "east", x = 31, y = 4, w = 1, h = 10, colour = "fold" },
+  { cube = "body", face = "east", x = 28, y = 3, w = 1, h = 12, colour = "fold" },
+  { cube = "body", face = "east", x = 25, y = 4, w = 1, h = 10, colour = "fold" },
+]
+
+[proportions]
+body = [22, 18, 34]
+head = [14, 12, 11]
+tail = [10, 6, 6]
+fin = [2, 18, 6]
+flukes = true
+pectoral = [7, 8]
+dorsal = [1, 0, 0]
+swim = { cycle = 1.6, amp = 12 }
+
+# Head pivot: the body's front at mid-height (y = 9; the ground is y = -9);
+# the head spans y -6..6, z -11..0.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-5, -5, -14]
+to = [5, 1, -10]
+
+[[cubes]]
+name = "tusk_l"
+bone = "head"
+part = "tusk"
+from = [-4, -8.5, -13.5]
+to = [-2.5, -5, -12]
+mirror = true
+
+[palette]
+body = "#9c6c56"
+body_up = "#8a5e4a"
+body_down = "#b88470"
+head = "#9a6a54"
+head_up = "#885c48"
+head_down = "#b07c68"
+muzzle = "#a8786a"
+fins = "#7a5242"
+tusk = "#efe6cc"
+fold = "#7e5644"
+whisker = "#d8c8a8"
+nostril = "#3a2420"
+eye = "#0a0807"

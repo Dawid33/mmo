@@ -1,0 +1,152 @@
+# DF SEA_MONSTER (fantastic, ocean): 8000 kg, "a giant creature with many eyes
+# and arms to terrify the sea". Fish template (the body plan is a fish-like
+# body with rear flippers and a tail): a hulking body, the head with four eyes
+# (decals) and two eyestalks, a pair of crab pincers (head cubes) and six
+# tentacles reaching forward along the ground from under the head. The
+# tentacles are bones that follow the tail (mirrored), so they writhe with
+# every swim stroke. LARGE_PREDATOR: alert, roar. Attack bite (the template's
+# `attack`); slap optional, not made.
+name = "sea monster"
+template = "fish"
+status = "draft"
+extras = ["alert", "roar"]
+
+decals = [
+  # Four eyes across the head's front (20×16, row 0 at the top), and the maw.
+  { cube = "head", face = "north", x = 2, y = 3, w = 3, h = 2, colour = "eye" },
+  { cube = "head", face = "north", x = 15, y = 3, w = 3, h = 2, colour = "eye" },
+  { cube = "head", face = "north", x = 6, y = 6, w = 2, h = 2, colour = "eye" },
+  { cube = "head", face = "north", x = 12, y = 6, w = 2, h = 2, colour = "eye" },
+  { cube = "head", face = "north", x = 4, y = 10, w = 12, h = 3, colour = "mouth" },
+  { cube = "head", face = "north", x = 5, y = 10, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 8, y = 10, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 11, y = 10, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 14, y = 10, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 6, y = 12, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 13, y = 12, w = 1, h = 1, colour = "teeth" },
+  # The eyestalks' tips (2×2 tops and fronts).
+  { cube = "stalk_l", face = "north", x = 0, y = 0, w = 2, h = 2, colour = "eye" },
+  { cube = "stalk_r", face = "north", x = 0, y = 0, w = 2, h = 2, colour = "eye" },
+  # Warts down the back (24×34, row 0 at the front).
+  { cube = "body", face = "up", x = 4, y = 4, w = 2, h = 2, colour = "wart" },
+  { cube = "body", face = "up", x = 16, y = 8, w = 3, h = 2, colour = "wart" },
+  { cube = "body", face = "up", x = 9, y = 15, w = 2, h = 3, colour = "wart" },
+  { cube = "body", face = "up", x = 18, y = 22, w = 2, h = 2, colour = "wart" },
+  { cube = "body", face = "up", x = 5, y = 26, w = 3, h = 2, colour = "wart" },
+  # Sucker dots under the tentacles' tops (3 wide, 16 long).
+  { cube = "tentacle_l1", face = "up", x = 1, y = 2, w = 1, h = 12, colour = "sucker" },
+  { cube = "tentacle_r1", face = "up", x = 1, y = 2, w = 1, h = 12, colour = "sucker" },
+  { cube = "tentacle_l2", face = "up", x = 1, y = 2, w = 1, h = 12, colour = "sucker" },
+  { cube = "tentacle_r2", face = "up", x = 1, y = 2, w = 1, h = 12, colour = "sucker" },
+  { cube = "tentacle_l3", face = "up", x = 1, y = 2, w = 1, h = 12, colour = "sucker" },
+  { cube = "tentacle_r3", face = "up", x = 1, y = 2, w = 1, h = 12, colour = "sucker" },
+]
+
+# Six tentacles, two pincers (two cubes each) and two eyestalks on top of the
+# fish's four cubes; six tentacle bones on top of its five.
+[budget]
+cubes = 18
+bones = 12
+
+[proportions]
+body = [24, 20, 34]
+head = [20, 16, 12]
+tail = [10, 10, 14]
+fin = [3, 20, 10]
+pectoral = [0, 0]
+dorsal = [2, 6, 18]
+swim = { cycle = 2.2, amp = 12 }
+
+# Head pivot: the body's front at mid-height (y = 10; the ground is y = -10);
+# the head spans x -10..10, y -8..8, z -12..0.
+[[cubes]]
+name = "stalk_l"
+bone = "head"
+part = "stalk"
+from = [-7, 8, -10]
+to = [-5, 14, -8]
+mirror = true
+
+[[cubes]]
+name = "pincer_l"
+bone = "head"
+part = "pincer"
+from = [-14, -5, -16]
+to = [-9, 1, -4]
+mirror = true
+
+[[cubes]]
+name = "claw_l"
+bone = "head"
+part = "pincer"
+from = [-15, -8, -23]
+to = [-8, -1, -16]
+mirror = true
+
+# Tentacles: bones under the head's front, splayed outward, writhing with the
+# tail. Each lies on the ground (its pivot is 4 above it) and reaches 16 forward.
+[[bones]]
+name = "tentacle_l1"
+parent = "head"
+pivot = [-2, -6, -11]
+follow = "tail"
+mirror = true
+
+[[bones]]
+name = "tentacle_l2"
+parent = "head"
+pivot = [-5, -6, -11]
+rest = [0, 12, 0]
+follow = "tail"
+mirror = true
+
+[[bones]]
+name = "tentacle_l3"
+parent = "head"
+pivot = [-7, -6, -10]
+rest = [0, 26, 0]
+follow = "tail"
+mirror = true
+
+[[cubes]]
+name = "tentacle_l1"
+bone = "tentacle_l1"
+part = "tentacle"
+from = [-1.5, -4, -16]
+to = [1.5, -1.5, 0]
+mirror = true
+
+[[cubes]]
+name = "tentacle_l2"
+bone = "tentacle_l2"
+part = "tentacle"
+from = [-1.5, -4, -16]
+to = [1.5, -1.5, 0]
+mirror = true
+
+[[cubes]]
+name = "tentacle_l3"
+bone = "tentacle_l3"
+part = "tentacle"
+from = [-1.5, -4, -14]
+to = [1.5, -1.5, 0]
+mirror = true
+
+[palette]
+body = "#3c4a3a"
+body_up = "#2e3a2e"
+body_down = "#8a8a6a"
+head = "#3e4c3c"
+head_up = "#303c30"
+head_down = "#8a8a6a"
+fins = "#5a3a4e"
+stalk = "#4a5a46"
+pincer = "#7a2e26"
+pincer_up = "#8e3a2e"
+tentacle = "#6a3a5a"
+tentacle_down = "#c08aa0"
+sucker = "#c89ab0"
+wart = "#5a6a3e"
+mouth = "#1a0c10"
+teeth = "#e8e0c8"
+eye = "#e8d020"

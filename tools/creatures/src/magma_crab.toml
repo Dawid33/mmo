@@ -1,0 +1,66 @@
+# DF MAGMA_CRAB (underground, magma sea): 30 kg, "a small rock-eating creature
+# that lives in molten rock. It scurries on little feet and swims through
+# liquid rock with sharp wings. It uses magma to digest rock and spits out
+# burning globs." Arthropod: a wide basalt carapace with glowing cracks, eight
+# short legs (the raws give it no pincers, so no claw pair), the two sharp
+# swimming wings as swept-back fins on the carapace sides. No eyes in the body
+# plan. Spit: the molten-rock emission. No attacks in the raws; the template's
+# lunge stands in for a bite at rock.
+name = "magma crab"
+template = "arthropod"
+status = "draft"
+extras = ["spit"]
+
+decals = [
+  # Glowing cracks across the carapace (12 wide × 10 long, row 0 at the front).
+  { cube = "body", face = "up", x = 2, y = 2, w = 4, h = 1, colour = "glow" },
+  { cube = "body", face = "up", x = 5, y = 3, w = 1, h = 3, colour = "glow" },
+  { cube = "body", face = "up", x = 6, y = 5, w = 4, h = 1, colour = "glow" },
+  { cube = "body", face = "up", x = 2, y = 7, w = 3, h = 1, colour = "glow" },
+  { cube = "body", face = "up", x = 8, y = 7, w = 1, h = 2, colour = "glow" },
+  { cube = "body", face = "west", x = 2, y = 2, w = 5, h = 1, colour = "glow" },
+  { cube = "body", face = "east", x = 3, y = 2, w = 5, h = 1, colour = "glow" },
+  # The mouth (head front 6×3): a glowing maw.
+  { cube = "head", face = "north", x = 1, y = 1, w = 4, h = 1, colour = "glow" },
+  { cube = "head", face = "north", x = 2, y = 2, w = 2, h = 1, colour = "maw" },
+]
+
+[proportions]
+body = [12, 5, 10]
+head = [6, 3, 3]
+abdomen = [0, 0, 0]
+legs = 8
+leg = [1.5, 4, 2]
+splay = 40
+walk = { cycle = 0.45, swing = 22, lift = 20 }
+run = { cycle = 0.28, swing = 26, lift = 24 }
+
+# Body pivot: its centre (y = 4.5); the carapace spans x -6..6, y -2.5..2.5, z -5..5.
+# The wings: thin blades on the carapace's upper sides, swept back to a point.
+[[cubes]]
+name = "wing_l"
+bone = "body"
+part = "wings"
+mirror = true
+from = [-9, 1.5, -2]
+to = [-5, 2.5, 5]
+
+[[cubes]]
+name = "wing_tip_l"
+bone = "body"
+part = "wings"
+mirror = true
+from = [-11, 1.5, 3]
+to = [-8, 2.5, 9]
+
+[palette]
+body = "#2c2624"
+body_up = "#3a312c"
+body_down = "#1e1a18"
+head = "#2a2422"
+legs = "#241f1d"
+legs_down = "#e06a1a"
+wings = "#4a3a30"
+wings_up = "#5a4434"
+glow = "#ff8a1e"
+maw = "#ffd040"

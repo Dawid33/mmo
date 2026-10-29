@@ -1,0 +1,111 @@
+# DF SEA_SERPENT (fantastic, ocean): 9000 kg, "a giant limbless dragon that
+# lives in the sea". Serpent template, six big segments (about 4 m): a
+# blue-green scaled body with a pale belly, two pairs of flippers (front on
+# seg0, rear on seg3) lying flat on the ground, swept-back horns, a crest fin on
+# the head and dorsal sails on seg1/seg2. Large eye teeth as mouth decals (a
+# hanging fang would go through the ground). LARGE_PREDATOR: alert, roar;
+# AQUATIC: swim, swim_idle. Attack bite (the template's strike); slap optional.
+name = "sea serpent"
+template = "serpent"
+status = "draft"
+extras = ["alert", "roar", "swim", "swim_idle"]
+
+decals = [
+  # Head sides (9 long × 7 high, front on the left of west).
+  { cube = "head", face = "west", x = 4, y = 1, w = 2, h = 2, colour = "eye" },
+  { cube = "head", face = "east", x = 3, y = 1, w = 2, h = 2, colour = "eye" },
+  { cube = "head", face = "west", x = 0, y = 4, w = 7, h = 1, colour = "mouth" },
+  { cube = "head", face = "east", x = 2, y = 4, w = 7, h = 1, colour = "mouth" },
+  { cube = "head", face = "west", x = 1, y = 3, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "west", x = 1, y = 5, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "east", x = 7, y = 3, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "east", x = 7, y = 5, w = 1, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 1, y = 4, w = 8, h = 1, colour = "mouth" },
+  { cube = "head", face = "north", x = 2, y = 3, w = 1, h = 3, colour = "teeth" },
+  { cube = "head", face = "north", x = 7, y = 3, w = 1, h = 3, colour = "teeth" },
+  { cube = "head", face = "north", x = 2, y = 1, w = 2, h = 1, colour = "nostril" },
+  { cube = "head", face = "north", x = 6, y = 1, w = 2, h = 1, colour = "nostril" },
+  # Scale bands across the back.
+  { cube = "seg0", face = "up", x = 0, y = 2, w = 10, h = 1, colour = "band" },
+  { cube = "seg0", face = "up", x = 0, y = 6, w = 10, h = 1, colour = "band" },
+  { cube = "seg1", face = "up", x = 0, y = 2, w = 9, h = 1, colour = "band" },
+  { cube = "seg1", face = "up", x = 0, y = 6, w = 9, h = 1, colour = "band" },
+  { cube = "seg2", face = "up", x = 0, y = 2, w = 8, h = 1, colour = "band" },
+  { cube = "seg2", face = "up", x = 0, y = 6, w = 8, h = 1, colour = "band" },
+  { cube = "seg3", face = "up", x = 0, y = 2, w = 7, h = 1, colour = "band" },
+  { cube = "seg3", face = "up", x = 0, y = 6, w = 7, h = 1, colour = "band" },
+  { cube = "seg4", face = "up", x = 0, y = 3, w = 5, h = 1, colour = "band" },
+  { cube = "seg5", face = "up", x = 0, y = 4, w = 4, h = 1, colour = "band" },
+]
+
+[proportions]
+segments = 6
+seg = [10, 9, 9]
+taper = 0.4
+head = [10, 7, 9]
+walk = { cycle = 2.6, amp = 16 }
+run = { cycle = 1.4, amp = 22 }
+
+# Head pivot: the neck, at the back of the head, y = 4.5 (the head spans y -4.5..2.5, z -9..0).
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horn"
+from = [-4.5, 2.5, -3]
+to = [-3, 4, 4]
+mirror = true
+
+[[cubes]]
+name = "crest"
+bone = "head"
+part = "crest"
+from = [-0.5, 2.5, -6]
+to = [0.5, 5.5, 1]
+
+# Segment pivots: the back end of each segment at y = 4.5; a segment spans z -9..0.
+# seg0 is 10 wide (x ±5); seg1 top at y = 3.5, seg2 at 2.5; seg3 is 6.5 wide.
+[[cubes]]
+name = "sail1"
+bone = "seg1"
+part = "crest"
+from = [-0.5, 3.5, -8]
+to = [0.5, 7, -1]
+
+[[cubes]]
+name = "sail2"
+bone = "seg2"
+part = "crest"
+from = [-0.5, 2.5, -8]
+to = [0.5, 5.5, -1]
+
+[[cubes]]
+name = "flipper_l"
+bone = "seg0"
+part = "flipper"
+from = [-11, -4.5, -7]
+to = [-5, -3.5, -2]
+mirror = true
+
+[[cubes]]
+name = "rflipper_l"
+bone = "seg3"
+part = "flipper"
+from = [-8, -4.5, -6]
+to = [-3.25, -3.5, -2]
+mirror = true
+
+[palette]
+body = "#2e6a6a"
+body_up = "#24585a"
+body_down = "#b8c8a0"
+head = "#2a6464"
+head_up = "#225456"
+head_down = "#b8c8a0"
+band = "#1c4648"
+horn = "#d8d0b4"
+crest = "#c8562e"
+flipper = "#3a7a70"
+mouth = "#2a1416"
+teeth = "#f0ead8"
+nostril = "#14282a"
+eye = "#e8c020"

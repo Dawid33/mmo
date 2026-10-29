@@ -1,0 +1,57 @@
+# DF SPERM_WHALE (wild, ocean): 25000 kg, "a giant marine mammal with a toothy
+# jaw". Fish template with flukes (tail strokes up and down): the huge square
+# head a third of the length, a narrow underslung lower jaw (extra head cube with
+# white teeth), a low dorsal hump, dark wrinkled grey-brown skin. Attack bite (the
+# template's `attack`); slap optional, not made. Flop: stranded on land.
+name = "sperm whale"
+template = "fish"
+status = "draft"
+
+decals = [
+  # Head sides (34×22, front on the left of west): the small eye low and far back.
+  { cube = "head", face = "west", x = 29, y = 15, colour = "eye" },
+  { cube = "head", face = "east", x = 4, y = 15, colour = "eye" },
+  # The blowhole, front-left of the head top (22×34, row 0 at the front).
+  { cube = "head", face = "up", x = 4, y = 2, w = 2, h = 1, colour = "eye" },
+  # Wrinkles along the flanks.
+  { cube = "body", face = "west", x = 6, y = 6, w = 40, h = 1, colour = "wrinkle" },
+  { cube = "body", face = "east", x = 8, y = 6, w = 40, h = 1, colour = "wrinkle" },
+  { cube = "body", face = "west", x = 12, y = 12, w = 36, h = 1, colour = "wrinkle" },
+  { cube = "body", face = "east", x = 6, y = 12, w = 36, h = 1, colour = "wrinkle" },
+  { cube = "body", face = "west", x = 4, y = 18, w = 30, h = 1, colour = "wrinkle" },
+  { cube = "body", face = "east", x = 20, y = 18, w = 30, h = 1, colour = "wrinkle" },
+  # A row of teeth along the jaw's top edge.
+  { cube = "jaw", face = "west", x = 1, y = 0, w = 22, h = 1, colour = "teeth" },
+  { cube = "jaw", face = "east", x = 5, y = 0, w = 22, h = 1, colour = "teeth" },
+]
+
+[proportions]
+body = [24, 28, 54]
+head = [22, 22, 34]
+tail = [12, 12, 16]
+fin = [3, 40, 12]
+flukes = true
+pectoral = [8, 8]
+dorsal = [3, 4, 12]
+swim = { cycle = 2.6, amp = 8 }
+
+# Head pivot: the body's front at mid-height (y = 14); the head spans y -11..11, z -34..0.
+[[cubes]]
+name = "jaw"
+bone = "head"
+part = "jaw"
+from = [-3, -13, -30]
+to = [3, -10, -2]
+
+[palette]
+body = "#4a4540"
+body_up = "#3e3a36"
+body_down = "#6a635c"
+head = "#4c4742"
+head_up = "#423e39"
+head_down = "#6a635c"
+fins = "#3e3a36"
+jaw = "#d8d2c4"
+teeth = "#f4f0e4"
+wrinkle = "#38342f"
+eye = "#0b0a09"

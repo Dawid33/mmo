@@ -1,0 +1,61 @@
+# DF HORSESHOE_CRAB (wild, ocean): 2 kg, "a tiny sea animal that lives in the
+# sand just offshore. It has a flat body with legs underneath." Arthropod: the
+# wide, low domed front shell (prosoma: the body, with the head as its front
+# rim), the hinged rear shell (the abdomen) and the long tail spike (telson, a
+# cube on the abdomen); six short legs hidden under the shell's side rims (cubes).
+# AMPHIBIOUS: swim, swim_idle. No attacks in the raws; the template's lunge
+# stands in for a burrowing push.
+name = "horseshoe crab"
+template = "arthropod"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+decals = [
+  # Compound eyes on the shell's top sides and the central ridge (7 × 4, row 0 at the front).
+  { cube = "body", face = "up", x = 1, y = 1, colour = "eye" },
+  { cube = "body", face = "up", x = 5, y = 1, colour = "eye" },
+  { cube = "body", face = "up", x = 3, y = 0, w = 1, h = 4, colour = "ridge" },
+  { cube = "abdomen", face = "up", x = 2, y = 0, w = 1, h = 3, colour = "ridge" },
+]
+
+[proportions]
+body = [7, 2, 4]
+head = [8, 1.5, 1.5]
+abdomen = [5, 1.5, 3]
+abdomen_raise = 0
+legs = 6
+leg = [0.5, 0.5, 0.5]
+splay = 25
+walk = { cycle = 0.5, swing = 15, lift = 12 }
+run = { cycle = 0.32, swing = 20, lift = 16 }
+
+# Abdomen pivot: the shell's back at mid-height (y = 1.5); the abdomen spans
+# y -0.75..0.75, z -0.5..3. The telson trails from its end, just off the ground.
+[[cubes]]
+name = "telson"
+bone = "abdomen"
+part = "tail"
+from = [-0.25, -0.5, 3]
+to = [0.25, 0, 8]
+
+# Body pivot: the shell's centre (y = 1.5); the shell spans x -3.5..3.5, z -2..2.
+# Its sloping side rims hang over the legs.
+[[cubes]]
+name = "rim_l"
+bone = "body"
+part = "body"
+mirror = true
+from = [-4.5, -1.25, -2]
+to = [-3.5, 0.5, 2]
+
+[palette]
+body = "#6a5232"
+body_up = "#7a6038"
+body_down = "#b8a070"
+head = "#62492c"
+abdomen = "#654d2e"
+abdomen_up = "#735834"
+legs = "#4a3a24"
+tail = "#4e3c26"
+eye = "#1a140c"
+ridge = "#58442a"

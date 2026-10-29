@@ -21909,6 +21909,66 @@
    }
   }
  },
+ "elephant_seal": {
+  "name": "elephant seal",
+  "status": "draft",
+  "model": "models/creatures/elephant_seal.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -16.5555,
+    0,
+    -34
+   ],
+   [
+    16.5555,
+    18,
+    34
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 7,
+  "bones": 7,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 47.6,
+    "speed": 29.75
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
  "elf": {
   "name": "elf",
   "status": "draft",
@@ -23638,6 +23698,92 @@
    }
   }
  },
+ "fish_conger_eel": {
+  "name": "conger eel",
+  "status": "draft",
+  "model": "models/creatures/fish_conger_eel.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -12.5
+   ],
+   [
+    2.5,
+    3.5,
+    14
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 14,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.2,
+    "stride": 7.35,
+    "speed": 6.125
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 9.45,
+    "speed": 13.5
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.92,
+    "stride": 7.35,
+    "speed": 3.8281
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3,
+    "stride": 3.675,
+    "speed": 1.225
+   }
+  }
+ },
  "fish_flounder": {
   "name": "flounder",
   "status": "draft",
@@ -24135,6 +24281,102 @@
    "death": {
     "loop": "hold",
     "length": 0.6
+   }
+  }
+ },
+ "fish_lamprey_sea": {
+  "name": "sea lamprey",
+  "status": "draft",
+  "model": "models/creatures/fish_lamprey_sea.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -9
+   ],
+   [
+    1.5,
+    3,
+    9.5
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "alert",
+   "roar",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 9,
+  "bones": 7,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 5.25,
+    "speed": 5.25
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.55,
+    "stride": 6.75,
+    "speed": 12.2727
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 5.25,
+    "speed": 3.2812
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.5,
+    "stride": 2.625,
+    "speed": 1.05
    }
   }
  },
@@ -45880,6 +46122,66 @@
    }
   }
  },
+ "harp_seal": {
+  "name": "harp seal",
+  "status": "draft",
+  "model": "models/creatures/harp_seal.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -8.8365,
+    0,
+    -19
+   ],
+   [
+    8.8365,
+    9,
+    17
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 7,
+  "bones": 7,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 1,
+    "stride": 25.2,
+    "speed": 25.2
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
  "harpy": {
   "name": "harpy",
   "status": "draft",
@@ -47285,6 +47587,92 @@
    }
   }
  },
+ "horseshoe_crab": {
+  "name": "horseshoe crab",
+  "status": "draft",
+  "model": "models/creatures/horseshoe_crab.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -4.5,
+    0,
+    -3.5
+   ],
+   [
+    4.5,
+    2.5,
+    10
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 18,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 0.2588,
+    "speed": 0.5176
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.32,
+    "stride": 0.4446,
+    "speed": 1.3895
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 0.2588,
+    "speed": 0.3235
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 1.25,
+    "stride": 0.1294,
+    "speed": 0.1035
+   }
+  }
+ },
  "human": {
   "name": "human",
   "status": "draft",
@@ -47426,6 +47814,202 @@
    "cower": {
     "loop": "loop",
     "length": 1
+   }
+  }
+ },
+ "hungry_head": {
+  "name": "hungry head",
+  "status": "draft",
+  "model": "models/creatures/hungry_head.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -5.5,
+    0,
+    -5.5
+   ],
+   [
+    5.5,
+    9,
+    9
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land",
+   "alert",
+   "roar"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 0.684,
+    "speed": 1.3681
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 1.9799,
+    "speed": 6.5997
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.2
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.32,
+    "stride": 21.75,
+    "speed": 67.9688
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.224
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
+ "hydra": {
+  "name": "hydra",
+  "status": "draft",
+  "model": "models/creatures/hydra.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -29.1311,
+    0,
+    -30.6835
+   ],
+   [
+    29.1311,
+    54,
+    60.1889
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 14
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "alert",
+   "roar"
+  ],
+  "cubes": 21,
+  "bones": 14,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.9,
+    "stride": 9.5766,
+    "speed": 5.0403
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.05,
+    "stride": 23.7404,
+    "speed": 22.6099
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 6
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.8
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 2.2
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
    }
   }
  },
@@ -51513,6 +52097,66 @@
    }
   }
  },
+ "leopard_seal": {
+  "name": "leopard seal",
+  "status": "draft",
+  "model": "models/creatures/leopard_seal.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -10.2428,
+    0,
+    -22.5
+   ],
+   [
+    10.2428,
+    11,
+    21.5
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 6,
+  "bones": 7,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 1.1,
+    "stride": 30.8,
+    "speed": 28
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
  "lion": {
   "name": "lion",
   "status": "draft",
@@ -53413,6 +54057,83 @@
    "death": {
     "loop": "hold",
     "length": 0.6
+   }
+  }
+ },
+ "magma_crab": {
+  "name": "magma crab",
+  "status": "draft",
+  "model": "models/creatures/magma_crab.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -11,
+    0,
+    -8
+   ],
+   [
+    11,
+    7,
+    9
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "spit"
+  ],
+  "cubes": 22,
+  "bones": 11,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 2.9969,
+    "speed": 6.6597
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.28,
+    "stride": 4.5591,
+    "speed": 16.2824
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "spit": {
+    "loop": "once",
+    "length": 0.7
    }
   }
  },
@@ -57075,6 +57796,66 @@
    }
   }
  },
+ "narwhal": {
+  "name": "narwhal",
+  "status": "draft",
+  "model": "models/creatures/narwhal.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -10.7428,
+    0,
+    -49.5
+   ],
+   [
+    10.7428,
+    14,
+    29.5
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 8,
+  "bones": 7,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 1.5,
+    "stride": 55.3,
+    "speed": 36.8667
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
  "nautilus": {
   "name": "nautilus",
   "status": "draft",
@@ -58740,6 +59521,66 @@
    "cower": {
     "loop": "loop",
     "length": 1
+   }
+  }
+ },
+ "orca": {
+  "name": "orca",
+  "status": "draft",
+  "model": "models/creatures/orca.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -16.3681,
+    0,
+    -33
+   ],
+   [
+    16.3681,
+    32,
+    41
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 8,
+  "bones": 7,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 1.8,
+    "stride": 51.8,
+    "speed": 28.7778
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
    }
   }
  },
@@ -61374,6 +62215,102 @@
    "cower": {
     "loop": "loop",
     "length": 1
+   }
+  }
+ },
+ "pond_grabber": {
+  "name": "pond grabber",
+  "status": "draft",
+  "model": "models/creatures/pond_grabber.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -10.6386,
+    0,
+    -10.063
+   ],
+   [
+    10.6386,
+    10.0251,
+    11.7146
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "alert",
+   "roar",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 17,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 5.9937,
+    "speed": 7.4921
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 9.1181,
+    "speed": 20.2625
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.28,
+    "stride": 5.9937,
+    "speed": 4.6826
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2,
+    "stride": 2.9969,
+    "speed": 1.4984
    }
   }
  },
@@ -65299,6 +66236,76 @@
    }
   }
  },
+ "sea_monster": {
+  "name": "sea monster",
+  "status": "draft",
+  "model": "models/creatures/sea_monster.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -15,
+    0,
+    -44
+   ],
+   [
+    15,
+    26,
+    41
+   ]
+  ],
+  "budget": {
+   "cubes": 18,
+   "bones": 12
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop",
+   "alert",
+   "roar"
+  ],
+  "cubes": 17,
+  "bones": 11,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 2.2,
+    "stride": 59.5,
+    "speed": 27.0455
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   }
+  }
+ },
  "sea_otter": {
   "name": "sea otter",
   "status": "draft",
@@ -65387,6 +66394,102 @@
     "length": 1.75,
     "stride": 0.8767,
     "speed": 0.501
+   }
+  }
+ },
+ "sea_serpent": {
+  "name": "sea serpent",
+  "status": "draft",
+  "model": "models/creatures/sea_serpent.bbmodel",
+  "template": "serpent",
+  "bounds": [
+   [
+    -11,
+    0,
+    -31.5
+   ],
+   [
+    11,
+    11.5,
+    31.5
+   ]
+  ],
+  "budget": {
+   "cubes": 16,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "alert",
+   "roar",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 16,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 2.6,
+    "stride": 18.9,
+    "speed": 7.2692
+   },
+   "run": {
+    "loop": "loop",
+    "length": 1.4,
+    "stride": 24.3,
+    "speed": 17.3571
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 4.16,
+    "stride": 18.9,
+    "speed": 4.5433
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 6.5,
+    "stride": 9.45,
+    "speed": 1.4538
    }
   }
  },
@@ -68597,6 +69700,66 @@
    "cower": {
     "loop": "loop",
     "length": 0.891
+   }
+  }
+ },
+ "sperm_whale": {
+  "name": "sperm whale",
+  "status": "draft",
+  "model": "models/creatures/sperm_whale.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -20,
+    0,
+    -61
+   ],
+   [
+    20,
+    32,
+    55
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 8,
+  "bones": 7,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 2.6,
+    "stride": 81.2,
+    "speed": 31.2308
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
    }
   }
  },
@@ -72626,6 +73789,66 @@
    "cower": {
     "loop": "loop",
     "length": 0.909
+   }
+  }
+ },
+ "walrus": {
+  "name": "walrus",
+  "status": "draft",
+  "model": "models/creatures/walrus.bbmodel",
+  "template": "fish",
+  "bounds": [
+   [
+    -17.5555,
+    0,
+    -31
+   ],
+   [
+    17.5555,
+    18,
+    29
+   ]
+  ],
+  "budget": {
+   "cubes": 14,
+   "bones": 8
+  },
+  "required_clips": [
+   "swim_idle",
+   "swim",
+   "attack",
+   "hurt",
+   "death",
+   "flop"
+  ],
+  "cubes": 9,
+  "bones": 7,
+  "clips": {
+   "swim": {
+    "loop": "loop",
+    "length": 1.6,
+    "stride": 42,
+    "speed": 26.25
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "flop": {
+    "loop": "loop",
+    "length": 0.6
    }
   }
  },

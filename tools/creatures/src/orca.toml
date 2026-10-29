@@ -1,0 +1,56 @@
+# DF ORCA (wild, ocean): 5000 kg, "a huge ocean mammal ... a vicious predator".
+# Fish template with flukes (a whale's tail strokes up and down): a black body,
+# white belly and chin, the white eye patch and grey saddle as decals, a tall
+# dorsal fin. Attack bite (the template's `attack`); slap optional, not made.
+# Flop: stranded on land.
+name = "orca"
+template = "fish"
+status = "draft"
+
+# Body sides (42×18, front on the left of west): the white flank sweeping up behind the belly.
+decals = [
+  { cube = "body", face = "west", x = 0, y = 14, w = 42, h = 4, colour = "white" },
+  { cube = "body", face = "east", x = 0, y = 14, w = 42, h = 4, colour = "white" },
+  { cube = "body", face = "west", x = 22, y = 10, w = 10, h = 4, colour = "white" },
+  { cube = "body", face = "east", x = 10, y = 10, w = 10, h = 4, colour = "white" },
+  # The grey saddle behind the dorsal.
+  { cube = "body", face = "up", x = 3, y = 24, w = 10, h = 6, colour = "saddle" },
+  # Head sides (12×14): white chin, the eye, the white patch above and behind it.
+  { cube = "head", face = "west", x = 0, y = 10, w = 12, h = 4, colour = "white" },
+  { cube = "head", face = "east", x = 0, y = 10, w = 12, h = 4, colour = "white" },
+  { cube = "head", face = "west", x = 7, y = 4, w = 4, h = 2, colour = "white" },
+  { cube = "head", face = "east", x = 1, y = 4, w = 4, h = 2, colour = "white" },
+  { cube = "head", face = "west", x = 5, y = 7, colour = "eye" },
+  { cube = "head", face = "east", x = 6, y = 7, colour = "eye" },
+  { cube = "head", face = "north", x = 0, y = 10, w = 14, h = 4, colour = "white" },
+]
+
+[proportions]
+body = [16, 18, 42]
+head = [14, 14, 12]
+tail = [8, 8, 12]
+fin = [2, 26, 8]
+flukes = true
+pectoral = [9, 8]
+dorsal = [2, 14, 8]
+swim = { cycle = 1.8, amp = 10 }
+
+# Head pivot: the body's front at mid-height (y = 9); the head spans y -7..7, z -12..0.
+# A rounded melon on the forehead.
+[[cubes]]
+name = "melon"
+bone = "head"
+part = "head"
+from = [-6, 1, -11]
+to = [6, 6, -6]
+
+[palette]
+body = "#16181b"
+body_down = "#f2f2ee"
+head = "#16181b"
+head_down = "#f2f2ee"
+fins = "#121416"
+fins_down = "#202326"
+white = "#f2f2ee"
+saddle = "#8a8f94"
+eye = "#050505"

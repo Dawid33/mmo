@@ -94,8 +94,21 @@ def load(df_id):
     return src, build_model(src)
 
 
+def check_source(src, defaults):
+    """Catch keys TOML silently put in the wrong table (a `decals = [...]` line written
+    after `[proportions]` lands in it and would be ignored)."""
+    unknown = sorted(set(src.get("proportions", {})) - set(defaults))
+    if unknown:
+        raise ValueError(f"[proportions] has keys the template does not know: {unknown} "
+                         "(a top-level key written after a [table] header?)")
+    bad = sorted(k for k, v in src.get("palette", {}).items() if not isinstance(v, str))
+    if bad:
+        raise ValueError(f"[palette] has non-colour entries: {bad}")
+
+
 def build_model(src, params=None):
     t = TEMPLATES[src["template"]]
+    check_source(src, t.defaults)
     params = params or merge(t.defaults, src.get("proportions", {}))
     model = t.skeleton(params)
     pivots = {name: pivot for name, _, pivot, _ in model["bones"]}

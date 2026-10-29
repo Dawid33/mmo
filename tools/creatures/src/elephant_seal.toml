@@ -1,0 +1,56 @@
+# DF ELEPHANT_SEAL (wild, arctic ocean): 3000 kg, "a large, predatory marine
+# mammal". Fish template with flukes (seals and whales per the authoring notes:
+# the rear flippers are the horizontal tail fin, stroking up and down), front
+# flippers as the pectorals, no dorsal. A bull: a fat grey-brown body, the
+# drooping proboscis over the mouth (extra head cube), pale scarred chest.
+# AMPHIBIOUS: swim/swim_idle come with the template; flop is its gait on land.
+# Attack bite (the template's `attack`).
+name = "elephant seal"
+template = "fish"
+status = "draft"
+
+decals = [
+  # Head sides (11×12, front on the left of west).
+  { cube = "head", face = "west", x = 4, y = 3, w = 2, h = 2, colour = "eye" },
+  { cube = "head", face = "east", x = 5, y = 3, w = 2, h = 2, colour = "eye" },
+  { cube = "head", face = "north", x = 2, y = 10, w = 8, h = 1, colour = "mouth" },
+  { cube = "nose", face = "north", x = 2, y = 6, w = 1, colour = "mouth" },
+  { cube = "nose", face = "north", x = 5, y = 6, w = 1, colour = "mouth" },
+  # Pale scars on the chest (body sides 40×18).
+  { cube = "body", face = "west", x = 2, y = 9, w = 6, h = 1, colour = "scar" },
+  { cube = "body", face = "west", x = 4, y = 12, w = 5, h = 1, colour = "scar" },
+  { cube = "body", face = "east", x = 32, y = 9, w = 6, h = 1, colour = "scar" },
+  { cube = "body", face = "east", x = 31, y = 12, w = 5, h = 1, colour = "scar" },
+]
+
+[proportions]
+body = [20, 18, 40]
+head = [13, 12, 11]
+tail = [10, 7, 7]
+fin = [2, 18, 7]
+flukes = true
+pectoral = [7, 8]
+dorsal = [1, 0, 0]
+swim = { cycle = 1.6, amp = 12 }
+
+# Head pivot: the body's front at mid-height (y = 9); the head spans y -6..6, z -11..0.
+# The proboscis droops from the brow over the mouth.
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "nose"
+from = [-3.5, -5, -14]
+to = [3.5, 3, -11]
+
+[palette]
+body = "#6e6255"
+body_up = "#5c5247"
+body_down = "#9a8c7a"
+head = "#6a5e52"
+head_up = "#5a5046"
+head_down = "#958775"
+nose = "#64584c"
+fins = "#4e453c"
+scar = "#b8ab98"
+mouth = "#2a1e1a"
+eye = "#0a0807"

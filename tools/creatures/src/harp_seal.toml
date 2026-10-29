@@ -1,0 +1,54 @@
+# DF HARP_SEAL (wild, arctic ocean): 165 kg, "a small marine mammal". Fish
+# template with flukes (the rear flippers as the horizontal tail fin), front
+# flippers as the pectorals, no dorsal. An adult: silver-grey with the black
+# face and the black harp (horseshoe) saddle on the back. AMPHIBIOUS: swim,
+# swim_idle from the template; flop on land. Attack bite (the template's `attack`).
+name = "harp seal"
+template = "fish"
+status = "draft"
+
+decals = [
+  # The harp on the back (10×20, row 0 at the front): a band across the
+  # shoulders and two arms running back down the flanks.
+  { cube = "body", face = "up", x = 2, y = 4, w = 6, h = 2, colour = "black" },
+  { cube = "body", face = "up", x = 0, y = 5, w = 2, h = 10, colour = "black" },
+  { cube = "body", face = "up", x = 8, y = 5, w = 2, h = 10, colour = "black" },
+  { cube = "body", face = "west", x = 6, y = 0, w = 10, h = 2, colour = "black" },
+  { cube = "body", face = "east", x = 4, y = 0, w = 10, h = 2, colour = "black" },
+  # Head (7×7): eyes and the whiskered muzzle.
+  { cube = "head", face = "west", x = 2, y = 2, colour = "eye" },
+  { cube = "head", face = "east", x = 4, y = 2, colour = "eye" },
+  { cube = "head", face = "north", x = 1, y = 2, colour = "eye" },
+  { cube = "head", face = "north", x = 5, y = 2, colour = "eye" },
+  { cube = "muzzle", face = "north", x = 1, y = 0, w = 3, h = 1, colour = "nose" },
+]
+
+[proportions]
+body = [10, 9, 20]
+head = [7, 7, 7]
+tail = [5, 3, 3]
+fin = [1, 10, 4]
+flukes = true
+pectoral = [4, 5]
+dorsal = [1, 0, 0]
+swim = { cycle = 1.0, amp = 16 }
+
+# Head pivot: the body's front at mid-height (y = 4.5); the head spans y -3.5..3.5, z -7..0.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "muzzle"
+from = [-2.5, -3, -9]
+to = [2.5, 0, -7]
+
+[palette]
+body = "#b6b8b4"
+body_up = "#a4a6a2"
+body_down = "#d4d4ce"
+head = "#2a2a2a"
+head_down = "#4a4a48"
+muzzle = "#2e2e2e"
+fins = "#7a7c78"
+black = "#262626"
+nose = "#0e0e0e"
+eye = "#050505"

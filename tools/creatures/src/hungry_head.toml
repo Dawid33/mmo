@@ -1,0 +1,76 @@
+# DF HUNGRY_HEAD (underground, chasms): 5 kg, "a fearsome, long-toothed mouth
+# the size of a man's head, flying on bat wings". Bird template like the bats
+# (membrane wings, no beak, the fly set): the body is the lower jaw and the
+# template's head sits on it as the upper jaw and skull (head_back pulls it
+# over the body), so the bite (`attack`) opens the mouth. No eyes in the body
+# plan (EXTRAVISION). Long eye teeth as cubes, gums and teeth as decals; stub
+# legs hidden under the jaw (the body plan has none). LARGE_PREDATOR: alert, roar.
+name = "hungry head"
+template = "bird"
+status = "draft"
+extras = ["alert", "roar"]
+
+decals = [
+  # The jaw's front (9×5, row 0 at the top): teeth over red gums.
+  { cube = "body", face = "north", x = 0, y = 0, w = 9, h = 1, colour = "teeth" },
+  { cube = "body", face = "north", x = 0, y = 1, w = 9, h = 1, colour = "gum" },
+  { cube = "body", face = "west", x = 0, y = 0, w = 7, h = 1, colour = "teeth" },
+  { cube = "body", face = "east", x = 3, y = 0, w = 7, h = 1, colour = "teeth" },
+  # The upper jaw's front (9×4): gums over teeth at the bottom, nostril slits.
+  { cube = "head", face = "north", x = 0, y = 3, w = 9, h = 1, colour = "teeth" },
+  { cube = "head", face = "north", x = 0, y = 2, w = 9, h = 1, colour = "gum" },
+  { cube = "head", face = "north", x = 3, y = 0, colour = "nostril" },
+  { cube = "head", face = "north", x = 5, y = 0, colour = "nostril" },
+  { cube = "head", face = "west", x = 0, y = 3, w = 7, h = 1, colour = "teeth" },
+  { cube = "head", face = "east", x = 2, y = 3, w = 7, h = 1, colour = "teeth" },
+  # Veins on the scalp (9×9, row 0 at the front).
+  { cube = "head", face = "up", x = 2, y = 2, w = 1, h = 5, colour = "vein" },
+  { cube = "head", face = "up", x = 6, y = 3, w = 1, h = 4, colour = "vein" },
+]
+
+[proportions]
+body = [9, 5, 10]
+leg = [0.5, 1]
+foot = [0, 0, 0]
+head = [9, 4, 9]
+neck = 0
+head_back = 9
+beak = [0, 0, 0]
+tail = [0, 0, 0]
+wing = [13, 3]
+walk = { cycle = 0.5, swing = 20, bob = 0.4 }
+run = { cycle = 0.3 }
+fly = { cycle = 0.32, flap = 55 }
+
+# Head pivot: the upper jaw's middle (y = 5, z = -0.5); the head spans
+# y 0..4, z -4.5..4.5 around it, its front flush with the jaw's (z = -5).
+[[cubes]]
+name = "fang_l"
+bone = "head"
+part = "teeth"
+mirror = true
+from = [-3.5, -2.5, -5]
+to = [-2.5, 0, -4]
+
+# Body pivot: its centre (y = 3.5); the lower jaw's front is z = -5.
+[[cubes]]
+name = "tusk_l"
+bone = "body"
+part = "teeth"
+mirror = true
+from = [-1.5, 2.5, -5.5]
+to = [-0.5, 4.5, -4.5]
+
+[palette]
+body = "#b89c8c"
+body_down = "#a08474"
+head = "#c2a696"
+head_up = "#b09484"
+wings = "#3e3236"
+wings_up = "#4a3c40"
+tail = "#3e3236"
+legs = "#8a7466"
+teeth = "#f2ead2"
+gum = "#a8242a"
+nostril = "#3a2020"
+vein = "#8e5a62"

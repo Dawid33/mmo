@@ -1,0 +1,56 @@
+# DF LEOPARD_SEAL (wild, arctic ocean): 400 kg, "a large predatory amphibious
+# mammal". Fish template with flukes (the rear flippers as the horizontal tail
+# fin), long front flippers as the pectorals, no dorsal. Slender, with the big
+# reptile-like head and wide gape; dark grey back, pale throat with dark spots.
+# AMPHIBIOUS: swim, swim_idle from the template; flop on land. Attack bite.
+name = "leopard seal"
+template = "fish"
+status = "draft"
+
+decals = [
+  # Head (10 long × 7 high, front on the left of west): eye and the long gape.
+  { cube = "head", face = "west", x = 4, y = 2, colour = "eye" },
+  { cube = "head", face = "east", x = 5, y = 2, colour = "eye" },
+  { cube = "head", face = "west", x = 0, y = 4, w = 7, h = 1, colour = "mouth" },
+  { cube = "head", face = "east", x = 3, y = 4, w = 7, h = 1, colour = "mouth" },
+  { cube = "head", face = "north", x = 1, y = 4, w = 7, h = 1, colour = "mouth" },
+  # Spots on the pale lower flanks (25×11).
+  { cube = "body", face = "west", x = 0, y = 6, w = 25, h = 5, colour = "throat" },
+  { cube = "body", face = "east", x = 0, y = 6, w = 25, h = 5, colour = "throat" },
+  { cube = "body", face = "west", x = 2, y = 7, colour = "spot" },
+  { cube = "body", face = "west", x = 6, y = 8, w = 2, colour = "spot" },
+  { cube = "body", face = "west", x = 10, y = 6, colour = "spot" },
+  { cube = "body", face = "west", x = 14, y = 8, colour = "spot" },
+  { cube = "body", face = "west", x = 18, y = 7, w = 2, colour = "spot" },
+  { cube = "body", face = "east", x = 22, y = 7, colour = "spot" },
+  { cube = "body", face = "east", x = 17, y = 8, w = 2, colour = "spot" },
+  { cube = "body", face = "east", x = 14, y = 6, colour = "spot" },
+  { cube = "body", face = "east", x = 10, y = 8, colour = "spot" },
+  { cube = "body", face = "east", x = 5, y = 7, w = 2, colour = "spot" },
+  # The pale throat on the head's lower sides.
+  { cube = "head", face = "west", x = 0, y = 5, w = 10, h = 2, colour = "throat" },
+  { cube = "head", face = "east", x = 0, y = 5, w = 10, h = 2, colour = "throat" },
+]
+
+[proportions]
+body = [11, 11, 25]
+head = [9, 7, 10]
+tail = [5, 4, 4]
+fin = [1, 12, 5]
+flukes = true
+pectoral = [5, 7]
+dorsal = [1, 0, 0]
+swim = { cycle = 1.1, amp = 16 }
+
+[palette]
+body = "#5e6266"
+body_up = "#4a4e52"
+body_down = "#c4c4bc"
+head = "#5a5e62"
+head_up = "#484c50"
+head_down = "#c4c4bc"
+fins = "#45494c"
+throat = "#b8b8b0"
+spot = "#3a3d40"
+mouth = "#2a1e1e"
+eye = "#050505"

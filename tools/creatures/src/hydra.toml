@@ -1,0 +1,181 @@
+# DF HYDRA (megabeast): 8000 kg, "a giant dragon-like monster with seven biting
+# heads". Quadruped (the brief has no template for 7HEADNECKS): a heavy
+# scaled body on thick legs, a long hanging tail, and seven heads, each a
+# head cube on top of its own upright neck cube. The template's `head` bone
+# carries the centre neck and head (head_up lifts the head cube above the body
+# front, the neck cube fills the gap); the six others are bones on the body's
+# front with follow = "head", mirrored in pairs and fanned out by a rest roll,
+# so every clip (bite, look, graze, sleep, death) sways the whole bunch.
+# LARGE_PREDATOR: alert, roar. Attack bite (the template's `attack`); claw
+# optional, not made.
+name = "hydra"
+template = "quadruped"
+status = "draft"
+extras = ["alert", "roar"]
+
+decals = [
+  # Each head (7 wide, 7 high, 10 long): eyes, the mouth line and two fangs.
+  { cube = "head", face = "west", x = 3, y = 1, colour = "eye" },
+  { cube = "head", face = "east", x = 6, y = 1, colour = "eye" },
+  { cube = "head", face = "north", x = 1, y = 4, w = 5, h = 1, colour = "mouth" },
+  { cube = "head", face = "north", x = 1, y = 5, colour = "teeth" },
+  { cube = "head", face = "north", x = 5, y = 5, colour = "teeth" },
+  { cube = "head_l1", face = "west", x = 3, y = 1, colour = "eye" },
+  { cube = "head_l1", face = "east", x = 6, y = 1, colour = "eye" },
+  { cube = "head_l1", face = "north", x = 1, y = 4, w = 5, h = 1, colour = "mouth" },
+  { cube = "head_l1", face = "north", x = 1, y = 5, colour = "teeth" },
+  { cube = "head_l1", face = "north", x = 5, y = 5, colour = "teeth" },
+  { cube = "head_l2", face = "west", x = 3, y = 1, colour = "eye" },
+  { cube = "head_l2", face = "east", x = 6, y = 1, colour = "eye" },
+  { cube = "head_l2", face = "north", x = 1, y = 4, w = 5, h = 1, colour = "mouth" },
+  { cube = "head_l2", face = "north", x = 1, y = 5, colour = "teeth" },
+  { cube = "head_l2", face = "north", x = 5, y = 5, colour = "teeth" },
+  { cube = "head_l3", face = "west", x = 3, y = 1, colour = "eye" },
+  { cube = "head_l3", face = "east", x = 6, y = 1, colour = "eye" },
+  { cube = "head_l3", face = "north", x = 1, y = 4, w = 5, h = 1, colour = "mouth" },
+  { cube = "head_l3", face = "north", x = 1, y = 5, colour = "teeth" },
+  { cube = "head_l3", face = "north", x = 5, y = 5, colour = "teeth" },
+  { cube = "head_r1", face = "west", x = 3, y = 1, colour = "eye" },
+  { cube = "head_r1", face = "east", x = 6, y = 1, colour = "eye" },
+  { cube = "head_r1", face = "north", x = 1, y = 4, w = 5, h = 1, colour = "mouth" },
+  { cube = "head_r1", face = "north", x = 1, y = 5, colour = "teeth" },
+  { cube = "head_r1", face = "north", x = 5, y = 5, colour = "teeth" },
+  { cube = "head_r2", face = "west", x = 3, y = 1, colour = "eye" },
+  { cube = "head_r2", face = "east", x = 6, y = 1, colour = "eye" },
+  { cube = "head_r2", face = "north", x = 1, y = 4, w = 5, h = 1, colour = "mouth" },
+  { cube = "head_r2", face = "north", x = 1, y = 5, colour = "teeth" },
+  { cube = "head_r2", face = "north", x = 5, y = 5, colour = "teeth" },
+  { cube = "head_r3", face = "west", x = 3, y = 1, colour = "eye" },
+  { cube = "head_r3", face = "east", x = 6, y = 1, colour = "eye" },
+  { cube = "head_r3", face = "north", x = 1, y = 4, w = 5, h = 1, colour = "mouth" },
+  { cube = "head_r3", face = "north", x = 1, y = 5, colour = "teeth" },
+  { cube = "head_r3", face = "north", x = 5, y = 5, colour = "teeth" },
+]
+
+# Six extra heads on top of the quadruped: one bone and two cubes each.
+[budget]
+bones = 14
+
+[proportions]
+body = [24, 18, 42]
+leg = [7, 14]
+leg_inset = -1
+leg_ends = 3
+head = [7, 7, 10]
+head_up = 22
+head_overlap = 1
+tail = [9, 40]
+tail_raise = -10
+walk = { cycle = 1.9, swing = 20, bob = 0.9 }
+run = { cycle = 1.05, swing = 32, bob = 1.6, pitch = 3 }
+idle = { length = 6.0, look = 20, breath = 0.5, wag = 4 }
+attack = { length = 0.8, lunge = 6 }
+eat = { length = 2.2, reach = 40, forward = 2 }
+
+# Head pivot: the body's front top (y = 31, z = -21); the head cube spans
+# y 15..22, z -9..1 around it. The centre neck fills the gap.
+[[cubes]]
+name = "neck"
+bone = "head"
+part = "neck"
+from = [-2.5, -1, -7]
+to = [2.5, 15.5, -1]
+
+# Body pivot: its centre (y = 23); the body spans y -9..9, z -21..21.
+[[cubes]]
+name = "ridge"
+bone = "body"
+part = "spines"
+from = [-1.5, 9, -16]
+to = [1.5, 12, 20]
+
+# Extra head l1: a bone at the body's front top, rolled outward 16°.
+[[bones]]
+name = "head_l1"
+parent = "body"
+pivot = [-5, 8, -18]
+rest = [-10, 0, 16]
+follow = "head"
+mirror = true
+
+[[cubes]]
+name = "neck_l1"
+bone = "head_l1"
+part = "neck"
+from = [-2.5, -1, -7]
+to = [2.5, 15.5, -1]
+mirror = true
+
+[[cubes]]
+name = "head_l1"
+bone = "head_l1"
+part = "head"
+from = [-3.5, 15, -9]
+to = [3.5, 22, 1]
+mirror = true
+
+# Extra head l2: a bone at the body's front top, rolled outward 34°.
+[[bones]]
+name = "head_l2"
+parent = "body"
+pivot = [-8, 8, -14]
+rest = [0, 0, 34]
+follow = "head"
+mirror = true
+
+[[cubes]]
+name = "neck_l2"
+bone = "head_l2"
+part = "neck"
+from = [-2.5, -1, -7]
+to = [2.5, 14.5, -1]
+mirror = true
+
+[[cubes]]
+name = "head_l2"
+bone = "head_l2"
+part = "head"
+from = [-3.5, 14, -9]
+to = [3.5, 21, 1]
+mirror = true
+
+# Extra head l3: a bone at the body's front top, rolled outward 52°.
+[[bones]]
+name = "head_l3"
+parent = "body"
+pivot = [-11, 8, -10]
+rest = [10, 0, 52]
+follow = "head"
+mirror = true
+
+[[cubes]]
+name = "neck_l3"
+bone = "head_l3"
+part = "neck"
+from = [-2.5, -1, -7]
+to = [2.5, 12.5, -1]
+mirror = true
+
+[[cubes]]
+name = "head_l3"
+bone = "head_l3"
+part = "head"
+from = [-3.5, 12, -9]
+to = [3.5, 19, 1]
+mirror = true
+
+[palette]
+fur = "#4a5e2e"
+fur_up = "#3e5026"
+fur_down = "#b0a868"
+legs = "#44562a"
+neck = "#4a5e2e"
+neck_down = "#b0a868"
+head = "#4e6430"
+head_up = "#425628"
+head_down = "#b0a868"
+tail = "#46582a"
+spines = "#8a6a2e"
+mouth = "#2a1010"
+teeth = "#f0e8d0"
+eye = "#e8c420"

@@ -1,0 +1,67 @@
+# DF NARWHAL (wild, arctic ocean): 1200 kg, "a medium-sized sea mammal with a
+# long thin horn on its nose". Fish template with flukes: a mottled grey back,
+# pale belly, no dorsal fin (a low ridge), the long straight tusk off the upper
+# lip's left side (extra head cube, spiral bands as decals). Attack stab (the
+# template's lunge `attack` drives the tusk); slap optional, not made.
+name = "narwhal"
+template = "fish"
+status = "draft"
+
+decals = [
+  # Dark mottles on the back (12×30, row 0 at the front).
+  { cube = "body", face = "up", x = 2, y = 3, w = 2, h = 2, colour = "mottle" },
+  { cube = "body", face = "up", x = 7, y = 6, w = 2, h = 1, colour = "mottle" },
+  { cube = "body", face = "up", x = 4, y = 11, w = 2, h = 2, colour = "mottle" },
+  { cube = "body", face = "up", x = 9, y = 15, w = 1, h = 2, colour = "mottle" },
+  { cube = "body", face = "up", x = 1, y = 19, w = 2, h = 1, colour = "mottle" },
+  { cube = "body", face = "up", x = 6, y = 23, w = 2, h = 2, colour = "mottle" },
+  { cube = "body", face = "west", x = 5, y = 2, w = 2, h = 2, colour = "mottle" },
+  { cube = "body", face = "west", x = 15, y = 4, w = 2, h = 1, colour = "mottle" },
+  { cube = "body", face = "west", x = 23, y = 2, w = 1, h = 2, colour = "mottle" },
+  { cube = "body", face = "east", x = 7, y = 3, w = 2, h = 1, colour = "mottle" },
+  { cube = "body", face = "east", x = 17, y = 2, w = 2, h = 2, colour = "mottle" },
+  { cube = "body", face = "east", x = 25, y = 4, w = 1, h = 2, colour = "mottle" },
+  # Head sides (10×10, front on the left of west).
+  { cube = "head", face = "west", x = 5, y = 4, colour = "eye" },
+  { cube = "head", face = "east", x = 4, y = 4, colour = "eye" },
+  # Spiral bands down the tusk (its sides are 24 long, front on the left of west).
+  { cube = "tusk", face = "west", x = 3, y = 0, colour = "tusk_band" },
+  { cube = "tusk", face = "west", x = 8, y = 0, colour = "tusk_band" },
+  { cube = "tusk", face = "west", x = 13, y = 0, colour = "tusk_band" },
+  { cube = "tusk", face = "west", x = 18, y = 0, colour = "tusk_band" },
+  { cube = "tusk", face = "east", x = 5, y = 0, colour = "tusk_band" },
+  { cube = "tusk", face = "east", x = 10, y = 0, colour = "tusk_band" },
+  { cube = "tusk", face = "east", x = 15, y = 0, colour = "tusk_band" },
+  { cube = "tusk", face = "east", x = 20, y = 0, colour = "tusk_band" },
+]
+
+[proportions]
+body = [12, 13, 31]
+head = [10, 10, 10]
+tail = [6, 6, 8]
+fin = [2, 18, 6]
+flukes = true
+pectoral = [5, 5]
+dorsal = [2, 1, 12]
+swim = { cycle = 1.5, amp = 12 }
+
+# Head pivot: the body's front at mid-height (y = 6.5); the head spans y -5..5, z -10..0.
+[[cubes]]
+name = "tusk"
+bone = "head"
+part = "tusk"
+from = [-2, -1.5, -34]
+to = [-1, -0.5, -10]
+
+[palette]
+body = "#8c8f8c"
+body_up = "#6f726f"
+body_down = "#e8e6de"
+head = "#8c8f8c"
+head_up = "#6f726f"
+head_down = "#e8e6de"
+fins = "#5f625f"
+mottle = "#4a4d4a"
+tusk = "#ece2c6"
+tusk_band = "#c8bc9a"
+eye = "#0b0b0b"

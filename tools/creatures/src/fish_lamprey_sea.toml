@@ -1,0 +1,75 @@
+# DF FISH_LAMPREY_SEA (wild, ocean and rivers): 20 kg, "a small oceanic eel-like
+# creature that latches onto the side of its victim and tears into them".
+# Serpent template (lampreys per the authoring notes): five segments, a
+# mottled olive-brown back, the round toothed sucker disc on the front of the
+# head (extra cube, the ring of teeth as decals), gill pores, two low
+# dorsal fins toward the tail. LARGE_PREDATOR: alert, roar; AQUATIC: swim,
+# swim_idle. Attack bite (the template's strike, latching on); slap optional.
+name = "sea lamprey"
+template = "serpent"
+status = "draft"
+extras = ["alert", "roar", "swim", "swim_idle"]
+
+decals = [
+  { cube = "head", face = "west", x = 1, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  # The disc's front (3×3): a pale ring of teeth round a dark throat.
+  { cube = "disc", face = "north", x = 0, y = 0, w = 3, h = 3, colour = "teeth" },
+  { cube = "disc", face = "north", x = 1, y = 1, colour = "mouth" },
+  # Gill pores along seg0's sides (3 long × 2.5 high, front on the left of west).
+  { cube = "seg0", face = "west", x = 0, y = 1, colour = "pore" },
+  { cube = "seg0", face = "west", x = 2, y = 1, colour = "pore" },
+  { cube = "seg0", face = "east", x = 0, y = 1, colour = "pore" },
+  { cube = "seg0", face = "east", x = 2, y = 1, colour = "pore" },
+  # Mottles on the back.
+  { cube = "seg1", face = "up", x = 0, y = 1, colour = "mottle" },
+  { cube = "seg1", face = "up", x = 1, y = 2, colour = "mottle" },
+  { cube = "seg2", face = "up", x = 1, y = 0, colour = "mottle" },
+  { cube = "seg3", face = "up", x = 0, y = 2, colour = "mottle" },
+]
+
+[proportions]
+segments = 5
+seg = [2.5, 2.5, 3]
+taper = 0.5
+head = [2.5, 2.5, 2]
+walk = { cycle = 1.0, amp = 24 }
+run = { cycle = 0.55, amp = 30 }
+
+# Head pivot: the neck, at the back of the head (y = 1.25, mid-height of seg0);
+# the head spans y -1.25..1.25, z -2..0.
+[[cubes]]
+name = "disc"
+bone = "head"
+part = "disc"
+from = [-1.5, -1.25, -2.5]
+to = [1.5, 1.75, -2]
+
+# Segment pivots: the back end of each segment (y = 1.25); segment k's top is
+# at y = 1.25, 0.75, 0.75, 0.25, -0.25 for k = 0..4 (rounded half-unit taper).
+[[cubes]]
+name = "dorsal1"
+bone = "seg3"
+part = "fins"
+from = [-0.25, 0.25, -2.5]
+to = [0.25, 1, -0.5]
+
+[[cubes]]
+name = "dorsal2"
+bone = "seg4"
+part = "fins"
+from = [-0.25, -0.25, -3]
+to = [0.25, 0.5, 1]
+
+[palette]
+body = "#6a6440"
+body_up = "#5a5434"
+body_down = "#b8b08c"
+head = "#625c3a"
+disc = "#8a7e5c"
+teeth = "#e8dcb4"
+mouth = "#3a1e1a"
+fins = "#58522f"
+mottle = "#3e3a24"
+pore = "#2a2618"
+eye = "#1a1a12"
