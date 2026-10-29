@@ -266,8 +266,9 @@ def animal_person(src):
     hpts = rest_points({"bones": head_src["bones"], "cubes": [head_cube]})
     hlo = [min(p[i] for p in hpts) for i in range(3)]
     hhi = [max(p[i] for p in hpts) for i in range(3)]
-    # The base head brought to a person's head width (vermin heads grow a lot).
-    k = min(8.0, max(0.8, params["head"][0] / (hhi[0] - hlo[0])))
+    # The base head brought to a person's head width (vermin heads grow a lot, a
+    # whale's shrinks a lot).
+    k = min(8.0, max(0.3, params["head"][0] / (hhi[0] - hlo[0])))
     # The main head cube sits on the neck; a trunk, beard or bill may hang lower.
     anchor = [(hlo[0] + hhi[0]) / 2, hlo[1], (hlo[2] + hhi[2]) / 2]
     base_bones = {name: (parent, pivot, rest) for name, parent, pivot, rest in base["bones"]}
@@ -338,7 +339,10 @@ def animal_person(src):
         o = pivots[c["bone"]]
         model["cubes"].append((c.get("name", f"{c['bone']}_{i}"), c["bone"], c["part"],
                                [o[k] + c["from"][k] for k in range(3)], [o[k] + c["to"][k] for k in range(3)]))
-    model["clips"] = t.clips(params, model)
+    # Ground contact (lie, death) measured without the tail: it lies flat along the
+    # legs in those clips rather than hanging as it does standing.
+    model["clips"] = t.clips(params, {"bones": model["bones"],
+                                      "cubes": [c for c in model["cubes"] if c[1] != "tail"]})
     has = {b[0] for b in model["bones"]}
     for c in model["clips"].values():
         c["tracks"] = {b: ch for b, ch in c["tracks"].items() if b in has}

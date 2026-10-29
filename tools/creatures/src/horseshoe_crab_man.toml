@@ -4,3 +4,35 @@ name = "horseshoe crab man"
 animal_person_of = "horseshoe_crab"
 status = "draft"
 size = 36000
+
+# The crab's head is only a thin front rim, so the person gets the carapace as a
+# domed helmet (relative to the head's pivot, the neck) with the crab's eyes and
+# ridge on top, and the shell over the back (relative to the torso's pivot, the hips).
+decals = [
+  { cube = "helmet", face = "up", x = 1, y = 1, colour = "eye" },
+  { cube = "helmet", face = "up", x = 5, y = 1, colour = "eye" },
+  { cube = "helmet", face = "up", x = 3, y = 0, w = 1, h = 7, colour = "ridge" },
+  { cube = "helmet", face = "north", x = 1, y = 2, colour = "eye" },
+  { cube = "helmet", face = "north", x = 5, y = 2, colour = "eye" },
+]
+
+[[cubes]]
+name = "helmet"
+bone = "head"
+part = "body"
+from = [-3.5, 0.5, -3.5]
+to = [3.5, 5.5, 3.5]
+
+[[cubes]]
+name = "brim"
+bone = "head"
+part = "head"
+from = [-4.5, 0, -4]
+to = [4.5, 1.5, 4]
+
+[[cubes]]
+name = "shell"
+bone = "torso"
+part = "body"
+from = [-4.5, 0, 2]
+to = [4.5, 8.5, 4.5]
