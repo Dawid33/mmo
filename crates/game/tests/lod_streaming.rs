@@ -666,3 +666,91 @@ fn a_partial_overlay_keeps_pristine_terrain_where_it_has_no_columns() {
     assert!(grid.iter().any(|v| v.block == BlockId(7)), "the overlaid column is authoritative");
     assert!(!grid.iter().all(|v| v.block == BlockId(1)), "not the coarse fill");
 }
+
+#[path = "support/lod_reference.rs"]
+mod lod_reference;
+
+/// A seeded region-shaped chunk list: per column a stack of chunks from
+/// below y=0 up — uniform stone at the bottom, mixed surface chunks (random
+/// blocks, half-block and random chisels), uniform air on top — at
+/// region-local x/z, so every factor's group lattice is exercised.
+fn seeded_region_chunks(seed: u64) -> Vec<(ChunkCoords, Chunk)> {
+    let mut s = seed | 1;
+    let mut next = move |m: u64| {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s % m
+    };
+    let mut chunks = Vec::new();
+    // Both sides of the factor-4 and factor-16 group seams (chunk 16).
+    let cols = [0usize, 1, 2, 3, 14, 15, 16, 17];
+    for &cx in &cols {
+        for &cz in &cols {
+            let surface = next(4) as i32 - 2;
+            for cy in -3..4 {
+                let chunk = if cy < surface {
+                    Chunk::uniform(Block::new(BlockId(2)))
+                } else if cy > surface {
+                    Chunk::default()
+                } else {
+                    let mut c = Chunk::default();
+                    for b in 0..CHUNK_BLOCK_COUNT {
+                        let bi = BlockIndex::from_linear(b);
+                        let (bx, by, bz) = bi.xyz();
+                        c.set_block(bx, by, bz, Block::new(BlockId(next(4) as u16)));
+                        match next(6) {
+                            0 => {
+                                let palette = vec![BlockId(1), BlockId(3), BlockId::AIR];
+                                let mut grid = vec![None; BLOCK_VOXEL_COUNT];
+                                for _ in 0..next(2000) {
+                                    let i = next(BLOCK_VOXEL_COUNT as u64) as usize;
+                                    grid[i] = (next(4) != 0).then(|| next(3) as u8);
+                                }
+                                c.chisel.insert(bi, ChiselData::from_grid(palette, &grid));
+                            }
+                            1 => {
+                                let top = [BLOCK_VOXELS, HALF_BLOCK_VOXELS, BLOCK_VOXELS];
+                                c.chisel.insert(bi, ChiselData::cuboid(BlockId(3), [0, 0, 0], top));
+                            }
+                            _ => {}
+                        }
+                    }
+                    c
+                };
+                chunks.push((ChunkCoords::new(cx, cy, cz), chunk));
+            }
+        }
+    }
+    chunks
+}
+
+/// LOD reads chunks as 32³ brick views: the factor-2/4/16 grids from that path
+/// equal the pre-brick downsampler's byte for byte (only meaningful while one
+/// chunk is one brick — the reference's premise).
+#[test]
+fn far_lod_from_bricks_matches_reference() {
+    // The brick API itself: one chunk is BRICKS_PER_CHUNK_EDGE³ bricks whose
+    // dense voxels tile the chunk, and world brick coords scale chunk coords.
+    let chunks = seeded_region_chunks(0x9E37_79B9_7F4A_7C15);
+    let (coords, sample) = chunks.iter().find(|(_, c)| c.blocks.uniform().is_none()).unwrap();
+    assert_eq!(sample.bricks().count(), BRICKS_PER_CHUNK_EDGE.pow(3));
+    for (b, brick) in sample.bricks() {
+        assert_eq!(brick.voxels().len(), BRICK_VOXEL_COUNT);
+        let w = brick_coords(*coords, b);
+        assert_eq!(w[1], coords.y as i64 * BRICKS_PER_CHUNK_EDGE as i64 + b[1] as i64);
+    }
+    if !lod_reference::reference_applies() {
+        return;
+    }
+    assert_eq!(sample.brick([0, 0, 0]).voxels(), derive_voxels(sample));
+    for factor in [2u32, 4, 16] {
+        let got = lod::downsample_chunks(chunks.clone(), factor);
+        let want = lod_reference::downsample_reference(chunks.clone(), factor);
+        assert_eq!(
+            bincode::serialize(&lod_reference::packed(&got)).unwrap(),
+            bincode::serialize(&lod_reference::packed(&want)).unwrap(),
+            "factor {factor}"
+        );
+    }
+}

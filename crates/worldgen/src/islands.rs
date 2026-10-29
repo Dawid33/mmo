@@ -13,7 +13,8 @@
 //! splits, and holds the SPAWN island at exactly that centre, sized by the
 //! `VOXEL_ISLAND_CELLS` build dial (`just island=<cells>`).
 
-/// The dial's / spec's cell unit (a 32-chunk cell).
+/// The dial's / spec's cell unit: a 64 m (64-block) cell, independent of the
+/// sim chunk size.
 pub const ISLAND_CELL_M: f64 = 64.0;
 /// Root slot edge in cells (65.5 km).
 pub const ISLAND_MAX_CELLS: u32 = 1024;

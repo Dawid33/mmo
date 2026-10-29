@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 use game::{
     Block, BlockId, BlockIndex, ChiselData, Chunk, ChunkBlocks, Column, ColumnCoords, RegionCoords, SubChunk,
-    BLOCK_VOXELS, HALF_BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BRICK_VOXEL_COUNT, REGION_CHUNKS,
+    BLOCK_VOXELS, HALF_BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BRICK_VOXELS, BRICK_VOXEL_COUNT, REGION_CHUNKS,
 };
 
 use crate::material::Materials;
@@ -383,12 +383,14 @@ fn coarse_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: Materials
     use game::lod::LodCell;
     use game::Voxel;
 
+    // A LOD grid's edge in cells: the 32³ render/LOD brick.
+    const G: i32 = BRICK_VOXELS as i32;
     // Blocks per cell edge: 1 at factor 16, 2 at 32, 4 at 64, 16 at 256.
     debug_assert!(key.factor >= game::lod::COARSE_MIN_FACTOR, "sub-block factor {}", key.factor);
     let cb = (key.factor / BLOCK_VOXELS as u32) as i32;
     let span_blocks = key.region_span() * REGION_BLOCKS;
     let cells = span_blocks / cb; // cell columns per key edge: 64 at factor 16, else 32
-    debug_assert_eq!(cells % 32, 0, "a key is a whole number of 32³ grids");
+    debug_assert_eq!(cells % G, 0, "a key is a whole number of 32³ grids");
 
     let (ox, oz, _) = coarse_window(key);
 
@@ -417,12 +419,12 @@ fn coarse_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: Materials
                 } else {
                     mats.water
                 };
-                let group = [cx.div_euclid(32), cy.div_euclid(32), cz.div_euclid(32)];
-                let (lx, ly, lz) = ((cx % 32) as usize, cy.rem_euclid(32) as usize, (cz % 32) as usize);
+                let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
+                let (lx, ly, lz) = ((cx % G) as usize, cy.rem_euclid(G) as usize, (cz % G) as usize);
                 let g = grids
                     .entry(group)
                     .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
-                g[lx + 32 * ly + 32 * 32 * lz] = Voxel::new(mat);
+                g[lx + BRICK_VOXELS * ly + BRICK_VOXELS * BRICK_VOXELS * lz] = Voxel::new(mat);
             }
         }
     }

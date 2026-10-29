@@ -5,7 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::{BlockId, Chunk, ChunkCoords, RegionCoords, Voxel, BRICK_VOXEL_COUNT, REGION_SIZE};
+use crate::{
+    brick_coords, BlockId, BrickView, Chunk, ChunkCoords, RegionCoords, Voxel, BLOCK_VOXELS, BRICK_BLOCKS,
+    BRICK_VOXELS, BRICK_VOXEL_COUNT, REGION_SIZE,
+};
 
 /// Merge up to 2×2×2 source 32³ grids (index `sx + 2*sy + 4*sz`; `None` = all-air) into one 32³ coarse grid at 2× the cell size.
 /// Each coarse cell (x,y,z) draws from source grid `(x/16, y/16, z/16)`'s 2×2×2 voxel block at `((x%16)*2, (y%16)*2, (z%16)*2)`.
@@ -79,47 +82,35 @@ pub fn merge_group(group: &[BlockId; 8]) -> Voxel {
     winner.map_or_else(Voxel::default, |(id, _)| Voxel::new(id))
 }
 
-/// Block-scale (factor-16) downsample: each source chunk contributes its
-/// 2×2×2 `blocks` directly as coarse cells. Chiseled blocks count as their
-/// block id — chisel detail is invisible at 16×.
-/// Output: fills only the 0..4 corner of the 32³ grid (4×4×4 cells = 8 source chunks × 8 blocks each).
+/// Block-scale (factor-16) downsample: each source brick contributes its
+/// `BRICK_BLOCKS`³ blocks directly as coarse cells. Chiseled blocks count as
+/// their block id — chisel detail is invisible at 16×.
+/// Output: fills only the `0..2 * BRICK_BLOCKS` corner of the 32³ grid
+/// (8 source bricks × `BRICK_BLOCKS`³ blocks each).
 ///
 /// NOTE: production factor-16 goes through `block_scale_cells` (which packs
 /// a whole region per grid); this is the test-covered reference
 /// implementation of the per-group block-read rule.
 ///
 /// **Layout contract:** LOD grids are always 32³ `Vec<Voxel>` in the standard `x + 32*y + 32*32*z` order.
-pub fn downsample_blocks(chunks: &[Option<&Chunk>; 8]) -> Vec<Voxel> {
+pub fn downsample_blocks(bricks: &[Option<BrickView<'_>>; 8]) -> Vec<Voxel> {
     let mut output = vec![Voxel::default(); BRICK_VOXEL_COUNT];
-
-    for (chunk_idx, chunk_opt) in chunks.iter().enumerate() {
-        if let Some(chunk) = chunk_opt {
-            // Determine which octant this chunk belongs to
-            let sx = chunk_idx % 2;
-            let sy = (chunk_idx / 2) % 2;
-            let sz = (chunk_idx / 4) % 2;
-
-            // For each of the 8 blocks in this chunk
-            for bz in 0..2 {
-                for by in 0..2 {
-                    for bx in 0..2 {
-                        let block = chunk.block_at(bx, by, bz);
-
-                        if block.id != BlockId::AIR {
-                            // Map to coarse cell position
-                            let coarse_x = sx * 2 + bx;
-                            let coarse_y = sy * 2 + by;
-                            let coarse_z = sz * 2 + bz;
-
-                            let idx = coarse_x + 32 * coarse_y + 32 * 32 * coarse_z;
-                            output[idx] = Voxel::new(block.id);
-                        }
+    for (brick_idx, brick) in bricks.iter().enumerate() {
+        let Some(brick) = brick else { continue };
+        // The octant this brick fills.
+        let s = [brick_idx % 2, (brick_idx / 2) % 2, brick_idx / 4];
+        for bz in 0..BRICK_BLOCKS {
+            for by in 0..BRICK_BLOCKS {
+                for bx in 0..BRICK_BLOCKS {
+                    let block = brick.block_at(bx, by, bz);
+                    if block.id != BlockId::AIR {
+                        let [x, y, z] = [s[0] * BRICK_BLOCKS + bx, s[1] * BRICK_BLOCKS + by, s[2] * BRICK_BLOCKS + bz];
+                        output[x + BRICK_VOXELS * y + BRICK_VOXELS * BRICK_VOXELS * z] = Voxel::new(block.id);
                     }
                 }
             }
         }
     }
-
     output
 }
 
@@ -131,30 +122,28 @@ pub struct LodCell {
     pub grid: Vec<Voxel>,
 }
 
-/// Group a region's `(ChunkCoords, Chunk)` list into 2×2×2 clusters and
-/// downsample each cluster into one `LodCell`. `coords.x`/`coords.z` are
-/// region-local `0..REGION_CHUNKS` (unsigned) but `coords.y` is signed (chunks stack both
-/// above and below y=0 as the world grows) — every axis uses
-/// `div_euclid`/`rem_euclid` uniformly so the grouping and octant math stay
-/// correct regardless of sign, matching `downsample2`'s `sx + 2*sy + 4*sz`
-/// octant convention (more negative y lands in the lower octant half, same as
-/// positive y — `div_euclid`/`rem_euclid` round toward negative infinity, not
-/// toward zero, so this holds across the y=0 boundary).
+/// Group a region's `(ChunkCoords, Chunk)` list, read as 32³ bricks
+/// ([`Chunk::bricks`]), into 2×2×2-brick clusters and downsample each cluster
+/// into one `LodCell`, keyed by world brick coords `div_euclid` 2. `coords.x`/
+/// `coords.z` are region-local `0..REGION_CHUNKS` (unsigned) but `coords.y` is
+/// signed (chunks stack both above and below y=0 as the world grows) — every
+/// axis uses `div_euclid`/`rem_euclid` uniformly so the grouping and octant
+/// math stay correct regardless of sign, matching `downsample2`'s
+/// `sx + 2*sy + 4*sz` octant convention (more negative y lands in the lower
+/// octant half, same as positive y — `div_euclid`/`rem_euclid` round toward
+/// negative infinity, not toward zero, so this holds across the y=0 boundary).
 pub fn build_far_lod_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
     let mut groups: BTreeMap<[i32; 3], Vec<Voxel>> = BTreeMap::new();
     for (coords, chunk) in chunks {
-        let cx = coords.x as i32;
-        let cz = coords.z as i32;
-        let group = [cx.div_euclid(2), coords.y.div_euclid(2), cz.div_euclid(2)];
-        let octant = [
-            cx.rem_euclid(2) as usize,
-            coords.y.rem_euclid(2) as usize,
-            cz.rem_euclid(2) as usize,
-        ];
-        let grid = groups
-            .entry(group)
-            .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
-        write_chunk_at_half_scale(grid, octant, &chunk);
+        for (b, brick) in chunk.bricks() {
+            let w = brick_coords(coords, b);
+            let group = w.map(|v| v.div_euclid(2) as i32);
+            let octant = w.map(|v| v.rem_euclid(2) as usize);
+            let grid = groups
+                .entry(group)
+                .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
+            write_brick_at_half_scale(grid, octant, &brick);
+        }
     }
     groups
         .into_iter()
@@ -162,48 +151,60 @@ pub fn build_far_lod_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
         .collect()
 }
 
-/// Write `chunk`, downsampled 2x, into its octant of a coarse 32^3 grid —
-/// exactly what `downsample2` produces from `derive_voxels(chunk)`, without
-/// ever materializing the dense 32^3 source. That expansion was ~70% of a
+/// Write `brick`, downsampled 2x, into its octant of a coarse 32^3 grid —
+/// exactly what `downsample2` produces from `brick.voxels()`, without ever
+/// materializing the dense 32^3 source. That expansion was ~70% of a
 /// factor-2/4 server LOD build (690 of ~950 ms per region, 2026-09-19
 /// profile), and LOD delivery is what paces the horizon filling after a join.
 ///
 /// It works per block: the 2x2x2 source groups sit on even coordinates, so
 /// none straddles a 16-voxel block boundary. An un-chiseled block is uniform,
 /// hence so is its 8^3 image (one fill); only chiseled blocks need
-/// [`merge_group`], fed from their decoded materials. The whole octant
-/// is overwritten, air included, so a later chunk at the same coordinates
-/// replaces an earlier one just as the old octant table did.
-fn write_chunk_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], chunk: &Chunk) {
-    use crate::BLOCK_VOXELS;
+/// [`merge_group`], fed from their decoded materials. A uniform brick (e.g.
+/// every brick of a `Uniform` chunk) fills its whole octant without visiting
+/// blocks. The whole octant is overwritten, air included, so a later brick at
+/// the same coordinates replaces an earlier one just as the old octant table did.
+fn write_brick_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], brick: &BrickView<'_>) {
+    const HALF_GRID: usize = BRICK_VOXELS / 2; // an octant's edge in coarse cells (16)
     let half = BLOCK_VOXELS / 2; // coarse cells per block axis (8)
-    for (bi, block) in chunk.blocks.iter() {
-        let (bx, by, bz) = bi.xyz();
-        let base = [
-            octant[0] * 16 + bx * half,
-            octant[1] * 16 + by * half,
-            octant[2] * 16 + bz * half,
-        ];
-        // Decoded once per chiseled block: grid order, x fastest.
-        let chisel = chunk.chisel.get(&bi).map(crate::ChiselData::materials);
-        for z in 0..half {
-            for y in 0..half {
-                let row = (base[1] + y) * 32 + (base[2] + z) * 32 * 32 + base[0];
-                match &chisel {
-                    None => grid[row..row + half].fill(Voxel::new(block.id)),
-                    Some(materials) => {
-                        for x in 0..half {
-                            let mut group = [BlockId::AIR; 8];
-                            for dz in 0..2 {
-                                for dy in 0..2 {
-                                    for dx in 0..2 {
-                                        let (vx, vy, vz) = (2 * x + dx, 2 * y + dy, 2 * z + dz);
-                                        group[dx + 2 * dy + 4 * dz] =
-                                            materials[vx + vy * BLOCK_VOXELS + vz * BLOCK_VOXELS * BLOCK_VOXELS];
+    let row_at = |x: usize, y: usize, z: usize| x + y * BRICK_VOXELS + z * BRICK_VOXELS * BRICK_VOXELS;
+    let origin = octant.map(|o| o * HALF_GRID);
+    if let Some(block) = brick.uniform() {
+        for z in 0..HALF_GRID {
+            for y in 0..HALF_GRID {
+                let row = row_at(origin[0], origin[1] + y, origin[2] + z);
+                grid[row..row + HALF_GRID].fill(Voxel::new(block.id));
+            }
+        }
+        return;
+    }
+    for bz in 0..BRICK_BLOCKS {
+        for by in 0..BRICK_BLOCKS {
+            for bx in 0..BRICK_BLOCKS {
+                let id = brick.block_at(bx, by, bz).id;
+                let base = [origin[0] + bx * half, origin[1] + by * half, origin[2] + bz * half];
+                // Decoded once per chiseled block: grid order, x fastest.
+                let chisel = brick.chisel(bx, by, bz).map(crate::ChiselData::materials);
+                for z in 0..half {
+                    for y in 0..half {
+                        let row = row_at(base[0], base[1] + y, base[2] + z);
+                        match &chisel {
+                            None => grid[row..row + half].fill(Voxel::new(id)),
+                            Some(materials) => {
+                                for x in 0..half {
+                                    let mut group = [BlockId::AIR; 8];
+                                    for dz in 0..2 {
+                                        for dy in 0..2 {
+                                            for dx in 0..2 {
+                                                let (vx, vy, vz) = (2 * x + dx, 2 * y + dy, 2 * z + dz);
+                                                group[dx + 2 * dy + 4 * dz] = materials
+                                                    [vx + vy * BLOCK_VOXELS + vz * BLOCK_VOXELS * BLOCK_VOXELS];
+                                            }
+                                        }
                                     }
+                                    grid[row + x] = merge_group(&group);
                                 }
                             }
-                            grid[row + x] = merge_group(&group);
                         }
                     }
                 }
@@ -235,37 +236,44 @@ pub fn downsample_cells(cells: Vec<LodCell>) -> Vec<LodCell> {
         .collect()
 }
 
-/// Factor-16 (block scale) packing: ONE 32³ grid per 16×16-chunk x/z tile and
-/// 16-sub-chunk vertical band, group key `[cx.div_euclid(16),
-/// sub_y.div_euclid(16), cz.div_euclid(16)]` — instead of one
-/// `downsample_blocks` grid per 2×2×2-chunk group. A block cell is 16 world
-/// units, so a 16-chunk tile fills a grid's 32×32-cell x/z span exactly (the
-/// grid's full 512-unit span) and 32 cells of height cover one 16-sub-chunk
-/// band (512 units). Mapping: chunk `(cx, sub_y, cz)`, block `(bx, by, bz)` →
-/// cell `(cx.rem_euclid(16)*2 + bx, sub_y.rem_euclid(16)*2 + by,
-/// cz.rem_euclid(16)*2 + bz)`. With `REGION_BLOCKS = 64` a region spans 2×2
-/// tiles per band (4×4 at 64); a region smaller than one tile leaves the grid's excess
-/// x/z volume as air (the corner-packing trade the plan documents for
-/// `downsample_blocks`) — over-draw from the shared LOD `Aabb`, never
-/// under-draw. Chiseled blocks count as their block id — chisel detail is
-/// invisible at 16×, matching `downsample_blocks`.
+/// Factor-16 (block scale) packing: ONE 32³ grid per 16×16-brick x/z tile and
+/// 16-brick vertical band, group key = world brick coords `div_euclid` 16 —
+/// instead of one `downsample_blocks` grid per 2×2×2-brick group. A block cell
+/// is 16 world units, so a 16-brick tile fills a grid's 32×32-cell x/z span
+/// exactly (the grid's full 512-unit span) and 32 cells of height cover one
+/// 16-brick band (512 units). Mapping: world brick `w`, brick-local block
+/// `(bx, by, bz)` → cell `(w.rem_euclid(16) * BRICK_BLOCKS + bx, ...)`. With
+/// `REGION_BLOCKS = 64` a region spans 2×2 tiles per band; a region smaller
+/// than one tile leaves the grid's excess x/z volume as air (the
+/// corner-packing trade the plan documents for `downsample_blocks`) —
+/// over-draw from the shared LOD `Aabb`, never under-draw. Chiseled blocks
+/// count as their block id — chisel detail is invisible at 16×, matching
+/// `downsample_blocks`. An all-air uniform brick writes nothing; any other
+/// uniform brick fills its cells without visiting blocks.
 pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
+    const BRICKS_PER_GRID: i64 = (BRICK_VOXELS / BRICK_BLOCKS) as i64; // 16
     let mut bands: BTreeMap<[i32; 3], Vec<Voxel>> = BTreeMap::new();
     for (coords, chunk) in chunks {
-        let (cx, cz) = (coords.x as i32, coords.z as i32);
-        let group = [cx.div_euclid(16), coords.y.div_euclid(16), cz.div_euclid(16)];
-        let band =
-            bands.entry(group).or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
-        let lx = cx.rem_euclid(16) as usize;
-        let ly = coords.y.rem_euclid(16) as usize;
-        let lz = cz.rem_euclid(16) as usize;
-        for bz in 0..2 {
-            for by in 0..2 {
-                for bx in 0..2 {
-                    let block = chunk.block_at(bx, by, bz);
-                    if block.id != BlockId::AIR {
-                        let idx = (lx * 2 + bx) + 32 * (ly * 2 + by) + 32 * 32 * (lz * 2 + bz);
-                        band[idx] = Voxel::new(block.id);
+        for (b, brick) in chunk.bricks() {
+            let w = brick_coords(coords, b);
+            let group = w.map(|v| v.div_euclid(BRICKS_PER_GRID) as i32);
+            let band =
+                bands.entry(group).or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
+            let l = w.map(|v| v.rem_euclid(BRICKS_PER_GRID) as usize * BRICK_BLOCKS);
+            let uniform = brick.uniform();
+            if uniform.is_some_and(|u| u.id == BlockId::AIR) {
+                continue;
+            }
+            for bz in 0..BRICK_BLOCKS {
+                for by in 0..BRICK_BLOCKS {
+                    for bx in 0..BRICK_BLOCKS {
+                        let id = uniform.unwrap_or_else(|| brick.block_at(bx, by, bz)).id;
+                        if id != BlockId::AIR {
+                            let idx = (l[0] + bx)
+                                + BRICK_VOXELS * (l[1] + by)
+                                + BRICK_VOXELS * BRICK_VOXELS * (l[2] + bz);
+                            band[idx] = Voxel::new(id);
+                        }
                     }
                 }
             }
@@ -673,8 +681,6 @@ mod tests {
         assert_eq!(downsample2(&sources), downsample2(&sources));
     }
 
-    use crate::derive_voxels;
-
     #[test]
     fn packed_grid_well_formedness_matches_decodability() {
         let grid = vec![Voxel::new(BlockId(3)); BRICK_VOXEL_COUNT];
@@ -692,17 +698,18 @@ mod tests {
     }
 
     /// The pre-2026-09-19 implementation, kept as the behavioural reference:
-    /// dense `derive_voxels` per chunk, then `downsample2` over the octants.
+    /// the dense voxels of every brick (`BrickView::voxels`), then
+    /// `downsample2` over the octants.
     fn reference_far_lod_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
         let mut groups: BTreeMap<[i32; 3], [Option<Vec<Voxel>>; 8]> = BTreeMap::new();
         for (coords, chunk) in chunks {
-            let cx = coords.x as i32;
-            let cz = coords.z as i32;
-            let group = [cx.div_euclid(2), coords.y.div_euclid(2), cz.div_euclid(2)];
-            let octant =
-                (cx.rem_euclid(2) + 2 * coords.y.rem_euclid(2) + 4 * cz.rem_euclid(2)) as usize;
-            let entry = groups.entry(group).or_insert_with(|| std::array::from_fn(|_| None));
-            entry[octant] = Some(derive_voxels(&chunk));
+            for (b, brick) in chunk.bricks() {
+                let w = brick_coords(coords, b);
+                let group = w.map(|v| v.div_euclid(2) as i32);
+                let octant = (w[0].rem_euclid(2) + 2 * w[1].rem_euclid(2) + 4 * w[2].rem_euclid(2)) as usize;
+                let entry = groups.entry(group).or_insert_with(|| std::array::from_fn(|_| None));
+                entry[octant] = Some(brick.voxels());
+            }
         }
         groups
             .into_iter()
@@ -804,13 +811,13 @@ mod tests {
 
     #[test]
     fn blocks_fast_path_maps_blocks_to_cells() {
-        // A chunk with one solid block at block-index (1,0,1): with the chunk
-        // in source slot 0, the coarse cell (1,0,1) of the 4³ corner is solid.
+        // A chunk with one solid block at block-index (1,0,1): with its first
+        // brick in source slot 0, the coarse cell (1,0,1) of the corner is solid.
         let mut chunk = Chunk::default();
         chunk.set_block(1, 0, 1, Block::new(BlockId(4)));
-        let mut chunks: [Option<&Chunk>; 8] = [None; 8];
-        chunks[0] = Some(&chunk);
-        let out = downsample_blocks(&chunks);
+        let mut bricks: [Option<BrickView<'_>>; 8] = [None; 8];
+        bricks[0] = Some(chunk.brick([0, 0, 0]));
+        let out = downsample_blocks(&bricks);
         let idx = |x: usize, y: usize, z: usize| x + 32 * y + 32 * 32 * z;
         assert_eq!(out[idx(1, 0, 1)].block, BlockId(4));
         assert_eq!(out.iter().filter(|v| !v.is_air()).count(), 1);
@@ -1117,17 +1124,18 @@ mod tests {
 
     #[test]
     fn downsample_chunks_places_region_content_in_the_low_corner_rect() {
-        // The region's far-corner SIM chunk (`REGION_CHUNKS - 1` on x and z).
-        // `downsample_chunks` still treats one chunk as one 32-voxel grid
-        // (`BRICK_VOXELS`), so a later task ports it to brick views; until
-        // then the expected footprint is REGION_CHUNKS grids of BRICK_VOXELS.
-        // At factor 64 the region spans cells 0..per (16 at 64 blocks), so
-        // that chunk's far block lands in the last of them.
-        let far = crate::REGION_CHUNKS - 1;
+        // The region's far-corner BRICK (`REGION_BRICKS - 1` on x and z) and
+        // its far block: LOD grids are brick grids, so the region's footprint
+        // is REGION_BRICKS bricks of BRICK_VOXELS, whatever a chunk holds. At
+        // factor 64 the region spans cells 0..per (16 at 64 blocks), so that
+        // block lands in the last of them.
         let per = cells_per_region(64);
-        assert_eq!(per, crate::REGION_CHUNKS * crate::BRICK_VOXELS / 64);
-        assert_eq!(cells_per_region(256), crate::REGION_CHUNKS * crate::BRICK_VOXELS / 256);
-        let chunks = vec![(ChunkCoords::new(far, 0, far), chunk_with_block([1, 0, 1], 9))];
+        assert_eq!(per, crate::REGION_BRICKS * BRICK_VOXELS / 64);
+        assert_eq!(cells_per_region(256), crate::REGION_BRICKS * BRICK_VOXELS / 256);
+        let far_brick = crate::REGION_BRICKS - 1;
+        let (chunk, b) = (far_brick / crate::BRICKS_PER_CHUNK_EDGE, far_brick % crate::BRICKS_PER_CHUNK_EDGE);
+        let far_block = b * BRICK_BLOCKS + BRICK_BLOCKS - 1;
+        let chunks = vec![(ChunkCoords::new(chunk, 0, chunk), chunk_with_block([far_block, 0, far_block], 9))];
         let cells = downsample_chunks(chunks, 64);
         assert_eq!(cells.len(), 1);
         // `per` may exceed one grid (64 at 256 blocks): then the last

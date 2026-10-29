@@ -98,7 +98,7 @@ pub struct ChiselData {
     palette: Vec<BlockId>, // ≤ 256 materials, indexed by a cuboid's top byte
 }
 
-fn local_index(vx: usize, vy: usize, vz: usize) -> usize {
+pub(crate) fn local_index(vx: usize, vy: usize, vz: usize) -> usize {
     vx + vy * BLOCK_VOXELS + vz * BLOCK_VOXELS * BLOCK_VOXELS
 }
 

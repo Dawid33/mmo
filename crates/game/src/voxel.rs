@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use block_mesh::ndshape::ConstShape3u32;
 use block_mesh::{MergeVoxel, VoxelVisibility};
 
-use crate::block::{Block, BlockIndex, ChiselData, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BLOCK_VOXELS};
+use crate::block::{
+    local_index, voxel_index, Block, BlockIndex, ChiselData, BLOCK_VOXELS, BRICKS_PER_CHUNK_EDGE, CHUNK_BLOCKS,
+    CHUNK_BLOCK_COUNT,
+};
 use crate::registry::BlockId;
 
 /// Edge of a render/LOD brick in voxels: the dense voxel array the mesher, the
@@ -224,6 +227,112 @@ impl Chunk {
     }
 }
 
+/// One 32³ render/LOD brick of a chunk (`BRICK_BLOCKS`³ blocks), read in
+/// place: LOD builders and worldgen consume chunks through this, so they stay
+/// correct whether a chunk is one brick or `BRICKS_PER_CHUNK_EDGE`³ of them.
+/// [`BrickView::voxels`] is the one dense form, and it is per brick.
+#[derive(Clone, Copy)]
+pub struct BrickView<'a> {
+    chunk: &'a Chunk,
+    /// Chunk-local block coords of the brick's minimum corner.
+    origin: [usize; 3],
+}
+
+impl Chunk {
+    /// Brick `b` (each axis `0..BRICKS_PER_CHUNK_EDGE`) of this chunk.
+    pub fn brick(&self, b: [usize; 3]) -> BrickView<'_> {
+        debug_assert!(b.iter().all(|&v| v < BRICKS_PER_CHUNK_EDGE), "brick {b:?} outside the chunk");
+        BrickView { chunk: self, origin: b.map(|v| v * BRICK_BLOCKS) }
+    }
+
+    /// Every brick with its chunk-local brick coords, x fastest, then y, then z.
+    pub fn bricks(&self) -> impl Iterator<Item = ([usize; 3], BrickView<'_>)> {
+        let n = BRICKS_PER_CHUNK_EDGE;
+        (0..n * n * n).map(move |i| {
+            let b = [i % n, (i / n) % n, i / (n * n)];
+            (b, self.brick(b))
+        })
+    }
+}
+
+impl BrickView<'_> {
+    fn index(&self, bx: usize, by: usize, bz: usize) -> BlockIndex {
+        debug_assert!(bx < BRICK_BLOCKS && by < BRICK_BLOCKS && bz < BRICK_BLOCKS);
+        BlockIndex::from_xyz(self.origin[0] + bx, self.origin[1] + by, self.origin[2] + bz)
+    }
+
+    /// Block at brick-local block coords (each axis `0..BRICK_BLOCKS`).
+    pub fn block_at(&self, bx: usize, by: usize, bz: usize) -> Block {
+        self.chunk.blocks.get(self.index(bx, by, bz))
+    }
+
+    /// Chisel detail of a brick-local block, if it is chiseled.
+    pub fn chisel(&self, bx: usize, by: usize, bz: usize) -> Option<&ChiselData> {
+        self.chunk.chisel.get(&self.index(bx, by, bz))
+    }
+
+    /// The single block of a brick whose blocks are all equal and unchiseled.
+    /// O(1) on a `Uniform` chunk without chisel detail.
+    pub fn uniform(&self) -> Option<Block> {
+        if let (Some(b), true) = (self.chunk.blocks.uniform(), self.chunk.chisel.is_empty()) {
+            return Some(b);
+        }
+        let first = self.block_at(0, 0, 0);
+        for bz in 0..BRICK_BLOCKS {
+            for by in 0..BRICK_BLOCKS {
+                for bx in 0..BRICK_BLOCKS {
+                    if self.block_at(bx, by, bz) != first || self.chisel(bx, by, bz).is_some() {
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(first)
+    }
+
+    /// The brick's dense `BRICK_VOXEL_COUNT` voxels in `BrickShape` order,
+    /// derived from its own blocks and chisel only.
+    pub fn voxels(&self) -> Vec<Voxel> {
+        if let Some(b) = self.uniform() {
+            return vec![Voxel::new(b.id); BRICK_VOXEL_COUNT];
+        }
+        let mut voxels = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
+        for bz in 0..BRICK_BLOCKS {
+            for by in 0..BRICK_BLOCKS {
+                for bx in 0..BRICK_BLOCKS {
+                    let id = self.block_at(bx, by, bz).id;
+                    let materials = self.chisel(bx, by, bz).map(ChiselData::materials);
+                    for vz in 0..BLOCK_VOXELS {
+                        for vy in 0..BLOCK_VOXELS {
+                            for vx in 0..BLOCK_VOXELS {
+                                let m = materials.as_ref().map_or(id, |m| m[local_index(vx, vy, vz)]);
+                                let li = voxel_index(
+                                    bx * BLOCK_VOXELS + vx,
+                                    by * BLOCK_VOXELS + vy,
+                                    bz * BLOCK_VOXELS + vz,
+                                );
+                                voxels[li] = Voxel::new(m);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        voxels
+    }
+}
+
+/// World brick coords of brick `b` of the chunk at `chunk` (x/z as given —
+/// region-local for region chunk lists — and signed y).
+pub fn brick_coords(chunk: ChunkCoords, b: [usize; 3]) -> [i64; 3] {
+    let n = BRICKS_PER_CHUNK_EDGE as i64;
+    [
+        chunk.x as i64 * n + b[0] as i64,
+        chunk.y as i64 * n + b[1] as i64,
+        chunk.z as i64 * n + b[2] as i64,
+    ]
+}
+
 // Keep the struct's EXISTING derive list verbatim — only the `y` field type
 // changes (usize -> i32). Do not add/remove derives.
 #[derive(
@@ -291,6 +400,45 @@ mod coord_tests {
         assert_eq!(c.y, -2);
         assert_eq!(c.x, 3);
         assert_eq!(c.z, 5);
+    }
+
+    #[test]
+    fn bricks_tile_the_chunk_and_read_its_blocks_and_chisel() {
+        let stone = Block::new(BlockId(2));
+        assert_eq!(Chunk::uniform(stone).brick([0, 0, 0]).uniform(), Some(stone));
+        // A Uniform grid with one chiseled block is no longer uniform there.
+        let mut c = Chunk::uniform(stone);
+        let half = ChiselData::cuboid(BlockId(3), [0, 0, 0], [BLOCK_VOXELS, BLOCK_VOXELS / 2, BLOCK_VOXELS]);
+        c.chisel.insert(BlockIndex::from_xyz(1, 0, 1), half);
+        c.set_block(0, 1, 0, Block::new(BlockId(4)));
+        let n = BRICKS_PER_CHUNK_EDGE;
+        assert_eq!(c.bricks().count(), n * n * n);
+        for (b, brick) in c.bricks() {
+            let voxels = brick.voxels();
+            assert_eq!(voxels.len(), BRICK_VOXEL_COUNT);
+            let mut uniform = true;
+            for i in 0..BRICK_VOXEL_COUNT {
+                let [x, y, z] = [i % BRICK_VOXELS, (i / BRICK_VOXELS) % BRICK_VOXELS, i / (BRICK_VOXELS * BRICK_VOXELS)];
+                // Chunk-local block and in-block voxel of brick voxel (x, y, z).
+                let cb = [b[0] * BRICK_BLOCKS + x / BLOCK_VOXELS, b[1] * BRICK_BLOCKS + y / BLOCK_VOXELS, b[2] * BRICK_BLOCKS + z / BLOCK_VOXELS];
+                let bi = BlockIndex::from_xyz(cb[0], cb[1], cb[2]);
+                let want = match c.chisel.get(&bi) {
+                    Some(ch) => ch.material_at(x % BLOCK_VOXELS, y % BLOCK_VOXELS, z % BLOCK_VOXELS),
+                    None => c.blocks.get(bi).id,
+                };
+                uniform &= want == BlockId(2) && c.chisel.get(&bi).is_none();
+                assert_eq!(voxels[i].block, want, "brick {b:?} voxel ({x}, {y}, {z})");
+            }
+            assert_eq!(brick.uniform().is_some(), uniform, "brick {b:?}");
+        }
+    }
+
+    #[test]
+    fn brick_coords_scale_chunk_coords_with_signed_y() {
+        let n = BRICKS_PER_CHUNK_EDGE as i64;
+        assert_eq!(brick_coords(ChunkCoords::new(3, -2, 5), [0, 0, 0]), [3 * n, -2 * n, 5 * n]);
+        let last = BRICKS_PER_CHUNK_EDGE - 1;
+        assert_eq!(brick_coords(ChunkCoords::new(0, -1, 0), [last; 3]), [n - 1, -1, n - 1]);
     }
 
     #[test]
