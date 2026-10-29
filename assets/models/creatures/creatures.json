@@ -15247,7 +15247,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 12,
   "bones": 8,
@@ -15345,6 +15347,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.9071
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.3062,
+    "stride": 8.4987,
+    "speed": 6.5065
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.041,
+    "stride": 4.2494,
+    "speed": 2.082
    }
   }
  },
@@ -52002,7 +52016,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 10,
   "bones": 8,
@@ -52100,6 +52116,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.9012
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2977,
+    "stride": 8.3883,
+    "speed": 6.464
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.0277,
+    "stride": 4.1942,
+    "speed": 2.0684
    }
   }
  },

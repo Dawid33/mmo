@@ -1097,7 +1097,9 @@ def arthropod_clips(p, model):
     bw, bh, bl = p["body"]
     t, reach, lh = p["leg"]
     legs = [(name, -1 if name[4] == "l" else 1, int(name[5:]) - 1) for name in bone_names(model, "leg_")]
-    rest = {name: r for name, _, _, r in model["bones"]}
+    # Keys add to a bone's rest angles (the legs' splay), so the leg tracks below
+    # are offsets from rest: their base is zero, not the rest rotation.
+    rest = {name: [0, 0, 0] for name, *_ in model["bones"]}
     has_abdomen = "abdomen" in rest
     top = lift_for(model, [0, 0, 180])
     clips = {}
