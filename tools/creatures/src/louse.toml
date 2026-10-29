@@ -1,0 +1,51 @@
+# DF LOUSE (wild, soil): "a tiny parasitic insect. It feeds on skin and blood."
+# Vermin with a giant, so the full arthropod rig at small size: six short,
+# clinging legs, a small head, a flat, wide abdomen. Wingless (no 2WINGS).
+# Pale grey-tan with a darker gut showing through. No attacks in the raws; the
+# template's lunge stands in for a bite.
+name = "louse"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 1, 1.5]
+head = [1.5, 1, 1]
+abdomen = [3, 1.5, 3.5]
+abdomen_raise = 0
+legs = 6
+leg = [0.5, 1.5, 0.5]
+splay = 30
+walk = { cycle = 0.45, swing = 18, lift = 14 }
+run = { cycle = 0.3, swing = 22, lift = 18 }
+
+[palette]
+body = "#c4b498"
+body_up = "#b8a88a"
+head = "#b8a88a"
+abdomen = "#cdbfa4"
+abdomen_up = "#c0b090"
+legs = "#a89878"
+gut = "#7a5a48"
+eye = "#2a2018"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 1
+y = 1
+h = 2
+colour = "gut"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 0
+colour = "eye"

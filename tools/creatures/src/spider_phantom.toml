@@ -1,0 +1,46 @@
+# DF SPIDER_PHANTOM (evil forests): "a tiny translucent creature, found in evil
+# forests". Vermin with a giant, so the full arthropod rig at small size: eight
+# long, thin legs, WEBBER (web_shoot). Translucency is not modelled (opaque,
+# a pale ghostly grey-white). No attacks in the raws; the template's lunge
+# stands in for its bite.
+name = "phantom spider"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 1.5, 2]
+head = [2, 1.5, 1]
+abdomen = [3, 2.5, 3.5]
+abdomen_raise = 10
+legs = 8
+leg = [0.5, 4, 2]
+splay = 45
+webber = true
+walk = { cycle = 0.45, swing = 22, lift = 18 }
+run = { cycle = 0.28, swing = 26, lift = 22 }
+
+[palette]
+body = "#d6dce0"
+body_up = "#e4e8ec"
+head = "#ccd2d8"
+abdomen = "#dde3e8"
+abdomen_up = "#eef2f4"
+legs = "#c4cad0"
+eye = "#5a6a8a"
+mark = "#aab4c0"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 1
+y = 1
+h = 2
+colour = "mark"

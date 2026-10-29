@@ -1,0 +1,96 @@
+# DF BUTTERFLY_MONARCH (wild): "a small insect with large orange wings. It is
+# admired for its beauty." Vermin with a giant, so the full arthropod rig at
+# small size: six thin legs, a slim black body, and big flat [wings] on the
+# thorax (FLIER: the fly set): orange with black tips and trailing edges
+# (decals) and a paler underside. One pair stands in for the two. Folded
+# wings lie back along the body (the template's fold), not up over the back
+# as a real butterfly rests. No attacks in the raws; the template's lunge
+# stands in.
+name = "monarch butterfly"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [1, 1.5, 1.5]
+head = [1, 1, 1]
+abdomen = [1, 1, 3]
+abdomen_raise = 4
+legs = 6
+leg = [0.5, 1.5, 1.5]
+splay = 35
+walk = { cycle = 0.4, swing = 18, lift = 16 }
+run = { cycle = 0.25, swing = 22, lift = 20 }
+
+[wings]
+bone = "body"
+at = [-0.25, 0.75, -0.75]
+span = 5
+chord = 2.5
+part = "wings"
+cycle = 0.25
+flap = 55
+
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "body"
+from = [-0.5, 0.5, -2.5]
+to = [0, 1, -1]
+mirror = true
+
+[palette]
+body = "#1e1a18"
+head = "#1e1a18"
+abdomen = "#1e1a18"
+legs = "#1e1a18"
+wings = "#e07a1e"
+wings_down = "#e89a4a"
+tip = "#1e1a18"
+dot = "#f0ece0"
+
+# Up face: row 0 is the front; the wing tips are on the outer columns.
+[[decals]]
+cube = "wing_l"
+face = "up"
+x = 0
+y = 0
+h = 3
+colour = "tip"
+
+[[decals]]
+cube = "wing_l"
+face = "up"
+x = 0
+y = 2
+w = 5
+colour = "tip"
+
+[[decals]]
+cube = "wing_l"
+face = "up"
+x = 0
+y = 0
+colour = "dot"
+
+[[decals]]
+cube = "wing_r"
+face = "up"
+x = 4
+y = 0
+h = 3
+colour = "tip"
+
+[[decals]]
+cube = "wing_r"
+face = "up"
+x = 0
+y = 2
+w = 5
+colour = "tip"
+
+[[decals]]
+cube = "wing_r"
+face = "up"
+x = 4
+y = 0
+colour = "dot"

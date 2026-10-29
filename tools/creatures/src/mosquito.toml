@@ -1,0 +1,67 @@
+# DF MOSQUITO (wild): "a tiny pest insect. It uses its long nose to suck blood
+# from its host." Vermin with a giant, so the full arthropod rig at small size:
+# six long, thin legs standing tall, a slim striped abdomen, the proboscis as a
+# long cube on the head, and narrow [wings] on the thorax (FLIER: the fly set).
+# No attacks in the raws; the template's lunge stands in for the stab.
+name = "mosquito"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [1.5, 1.5, 1.5]
+head = [1, 1, 1]
+abdomen = [1, 1, 3.5]
+abdomen_raise = 6
+legs = 6
+leg = [0.5, 3, 2.5]
+splay = 45
+walk = { cycle = 0.45, swing = 18, lift = 16 }
+run = { cycle = 0.28, swing = 22, lift = 20 }
+
+[wings]
+bone = "body"
+at = [-0.25, 0.75, 0]
+span = 3
+chord = 1
+part = "wings"
+cycle = 0.06
+flap = 40
+
+# Head pivot: the thorax front at mid-height; the head spans z -1..0.
+[[cubes]]
+name = "proboscis"
+bone = "head"
+part = "legs"
+from = [-0.25, -0.5, -3]
+to = [0.25, 0, -1]
+
+[palette]
+body = "#4a4038"
+body_up = "#5a5046"
+head = "#3a322c"
+abdomen = "#3e3630"
+legs = "#2e2824"
+wings = "#c8ccd0"
+stripe = "#d0c8b8"
+eye = "#1a1614"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 0
+y = 1
+colour = "stripe"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 0
+y = 3
+colour = "stripe"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+colour = "eye"

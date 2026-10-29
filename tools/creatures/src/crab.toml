@@ -1,0 +1,48 @@
+# DF CRAB (wild, ocean): 8 kg, "a tiny shelled ocean creature with many long
+# legs. It has two large pincers on its front limbs." Arthropod with ten legs:
+# the first pair are the claw arms with big pincer cubes; a wide, flat carapace
+# and no abdomen (a crab's is tucked under). AMPHIBIOUS: swim, swim_idle. No
+# attacks in the raws; the template's lunge stands in for a pinch.
+name = "crab"
+template = "arthropod"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+body = [9, 3, 7]
+head = [4, 2, 1]
+abdomen = [0, 0, 0]
+legs = 10
+leg = [1, 5, 2]
+splay = 50
+walk = { cycle = 0.6, swing = 18, lift = 16 }
+run = { cycle = 0.35, swing = 22, lift = 20 }
+
+# Leg pivots on the carapace side; the tip at x = -5, the ground at y = -3.
+[[cubes]]
+name = "claw_l"
+bone = "leg_l1"
+part = "claws"
+from = [-6, -3, -5]
+to = [-3, 0, 0.5]
+mirror = true
+
+# Eye stalks on the head (pivot: the carapace front at mid-height).
+[[cubes]]
+name = "stalk_l"
+bone = "head"
+part = "eyes"
+from = [-2, 1, -1]
+to = [-1, 2.5, 0]
+mirror = true
+
+[palette]
+body = "#c0452a"
+body_up = "#d0583a"
+body_down = "#e8c8a0"
+head = "#b83f26"
+legs = "#a83a22"
+legs_down = "#e0b890"
+claws = "#c84a2c"
+claws_up = "#d65c3c"
+eyes = "#1e1410"

@@ -1,0 +1,38 @@
+# DF SPIDER_CAVE (underground, chasms): 0.05 kg, "a tiny underground bug, sought
+# after for its thread". Vermin with a giant (the giant cave spider is derived
+# from this), so the full arthropod rig at small size: eight legs, a round
+# abdomen, WEBBER (web_shoot). No attacks in the raws; the template's lunge
+# stands in for its bite.
+name = "cave spider"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 1.5, 2]
+head = [2, 1.5, 1]
+abdomen = [3, 2.5, 3]
+abdomen_raise = 12
+legs = 8
+leg = [0.5, 3, 1.5]
+splay = 40
+webber = true
+walk = { cycle = 0.4, swing = 22, lift = 18 }
+run = { cycle = 0.25, swing = 26, lift = 22 }
+
+[palette]
+body = "#4a4450"
+body_up = "#58515f"
+head = "#3e3944"
+abdomen = "#5a5163"
+abdomen_up = "#6a6074"
+legs = "#36323c"
+eye = "#d63a2a"
+mark = "#a39a7d"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+w = 2
+colour = "eye"

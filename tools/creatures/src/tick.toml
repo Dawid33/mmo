@@ -1,0 +1,44 @@
+# DF TICK (wild, soil): "a tiny, blood-sucking bug found in wooded areas".
+# Vermin with a giant, so the full arthropod rig at small size: eight short
+# legs at the front of a big flat oval abdomen, a tiny head with the
+# mouthparts (a cube), a dark shield on the thorax. Not a WEBBER. No attacks
+# in the raws; the template's lunge stands in for the bite.
+name = "tick"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 1, 1.5]
+head = [1, 0.5, 0.5]
+abdomen = [3.5, 1.5, 4]
+abdomen_raise = 0
+legs = 8
+leg = [0.5, 1.5, 0.5]
+splay = 40
+walk = { cycle = 0.5, swing = 16, lift = 14 }
+run = { cycle = 0.32, swing = 20, lift = 18 }
+
+# Head pivot: the thorax front at mid-height; the head spans z -0.5..0.
+[[cubes]]
+name = "mouth"
+bone = "head"
+part = "head"
+from = [-0.25, -0.25, -1.25]
+to = [0.25, 0.25, -0.5]
+
+[palette]
+body = "#2a1c16"
+head = "#2a1c16"
+abdomen = "#6a3424"
+abdomen_up = "#7a3e2c"
+legs = "#4a2a1e"
+shield = "#2a1c16"
+
+# The dark scutum at the front of the back.
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 1
+y = 0
+w = 2
+colour = "shield"

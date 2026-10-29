@@ -1,0 +1,56 @@
+# DF FLY (wild): "a tiny flying insect found around rotting meat and garbage".
+# Vermin with a giant, so the full arthropod rig at small size: six legs, big
+# red compound eyes (cubes), a striped grey abdomen, and [wings] on the thorax
+# (FLIER: the fly set). No attacks in the raws; the template's lunge stands in
+# for a bite.
+name = "fly"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 2, 2]
+head = [2, 1.5, 1]
+abdomen = [2, 1.5, 2.5]
+abdomen_raise = 4
+legs = 6
+leg = [0.5, 1.5, 0.5]
+splay = 35
+walk = { cycle = 0.3, swing = 20, lift = 18 }
+run = { cycle = 0.2, swing = 25, lift = 22 }
+
+[wings]
+bone = "body"
+at = [-0.5, 1, 0]
+span = 3
+chord = 1.5
+part = "wings"
+cycle = 0.08
+flap = 45
+
+# Head pivot: the thorax front at mid-height; the head spans z -1..0.
+[[cubes]]
+name = "eye_l"
+bone = "head"
+part = "eyes"
+from = [-1.25, -0.5, -1.25]
+to = [-0.5, 1, -0.25]
+mirror = true
+
+[palette]
+body = "#4a4a48"
+body_up = "#5a5a56"
+head = "#3a3a38"
+abdomen = "#5a5c58"
+abdomen_up = "#6a6c66"
+legs = "#1e1e1e"
+wings = "#d4d8d8"
+eyes = "#a02a1e"
+stripe = "#2e2e2c"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 0
+y = 1
+w = 2
+colour = "stripe"

@@ -1,0 +1,54 @@
+# DF SPIDER_BROWN_RECLUSE (wild): "a tiny brown bug known for its powerful
+# poison". Vermin with a giant, so the full arthropod rig at small size: eight
+# long legs, an oval abdomen, the violin mark on the thorax, WEBBER
+# (web_shoot). No attacks in the raws; the template's lunge stands in for its
+# bite.
+name = "brown recluse spider"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 1.5, 2]
+head = [1.5, 1.5, 1]
+abdomen = [2.5, 2, 3]
+abdomen_raise = 6
+legs = 8
+leg = [0.5, 3.5, 1.5]
+splay = 45
+webber = true
+walk = { cycle = 0.4, swing = 22, lift = 18 }
+run = { cycle = 0.25, swing = 26, lift = 22 }
+
+[palette]
+body = "#a87a4c"
+body_up = "#b88a5a"
+head = "#9a6e44"
+abdomen = "#8e6640"
+abdomen_up = "#9e7448"
+legs = "#b08454"
+eye = "#1e1610"
+mark = "#4a3420"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+w = 2
+colour = "eye"
+
+# The violin on the thorax back, its neck towards the rear.
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 0
+w = 2
+colour = "mark"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 1
+colour = "mark"

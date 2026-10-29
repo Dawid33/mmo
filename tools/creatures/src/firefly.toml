@@ -1,0 +1,79 @@
+# DF FIREFLY (wild): "a tiny flying insect that can be seen at night by its
+# glowing tail". Vermin with a giant, so the full arthropod rig at small size:
+# six legs, an orange-red shield over the head (the thorax), dark wing cases
+# (the abdomen) with a pale yellow lantern underneath at the tip (a cube; no
+# real glow), and [wings] on the thorax (FLIER: the fly set). No attacks in
+# the raws; the template's lunge stands in for a bite.
+name = "firefly"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 1, 1.5]
+head = [1.5, 1, 1]
+abdomen = [2, 1.5, 3.5]
+abdomen_raise = 0
+legs = 6
+leg = [0.5, 1.5, 0.5]
+splay = 35
+walk = { cycle = 0.4, swing = 20, lift = 18 }
+run = { cycle = 0.25, swing = 25, lift = 22 }
+
+[wings]
+bone = "body"
+at = [-0.25, 0.5, 0.5]
+span = 2.5
+chord = 1
+part = "wings"
+cycle = 0.1
+flap = 40
+
+# Abdomen pivot: the thorax back at mid-height; the abdomen ends at z 3.25.
+[[cubes]]
+name = "lantern"
+bone = "abdomen"
+part = "lantern"
+from = [-0.75, -0.75, 2.5]
+to = [0.75, 0.25, 4]
+
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "legs"
+from = [-0.5, 0, -2]
+to = [0, 0.5, -1]
+mirror = true
+
+[palette]
+body = "#d05a2a"
+body_up = "#e06a34"
+head = "#2a2420"
+abdomen = "#2e2a26"
+abdomen_up = "#3a342e"
+legs = "#1e1a18"
+wings = "#c8c4b8"
+lantern = "#f0f070"
+eye = "#5a5248"
+spot = "#2a2420"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 0
+y = 0
+w = 2
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 0
+colour = "eye"

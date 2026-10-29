@@ -1,0 +1,49 @@
+# DF FLY_ACORN (fantastic, pools): 0.02 kg, "an insect many times the size of
+# its peers. It is known for its deafening buzz." Vermin with a giant, so the
+# full arthropod rig at small size: six legs, a round thorax, big eyes, and
+# [wings] on the thorax (FLIER: the fly set). Acorn-brown with a capped thorax.
+# No attacks in the raws; the template's lunge stands in for a bite.
+name = "acorn fly"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 1.5, 2]
+head = [2, 2, 1.5]
+abdomen = [2, 1.5, 2.5]
+abdomen_raise = 6
+legs = 6
+leg = [0.5, 1.5, 0.5]
+splay = 35
+walk = { cycle = 0.35, swing = 20, lift = 18 }
+run = { cycle = 0.22, swing = 25, lift = 22 }
+
+# Body pivot: the thorax centre. Wings root on its back, lying back along the
+# abdomen when folded.
+[wings]
+bone = "body"
+at = [-0.5, 1, 0]
+span = 3
+chord = 1.5
+part = "wings"
+cycle = 0.1
+flap = 40
+
+# Head pivot: the thorax front at mid-height; the head spans z -1.5..0.
+[[cubes]]
+name = "eye_l"
+bone = "head"
+part = "eyes"
+from = [-1.25, -0.25, -1.25]
+to = [-0.75, 0.75, -0.25]
+mirror = true
+
+[palette]
+body = "#7a5230"
+body_up = "#5e3c22"
+head = "#8a6038"
+abdomen = "#9a6c3e"
+abdomen_up = "#7e5630"
+legs = "#4a3220"
+wings = "#d8d2c0"
+eyes = "#9a2a1a"

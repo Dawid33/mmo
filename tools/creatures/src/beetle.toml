@@ -1,0 +1,60 @@
+# DF BEETLE (wild, soil): "a tiny insect that can be found almost anywhere
+# outside". Vermin with a giant, so the full arthropod rig at small size: six
+# legs, a small head and pronotum, the abdomen as the domed wing cases (not a
+# FLIER: no fly set), short antennae. Glossy black with a green sheen on the
+# back. No attacks in the raws; the template's lunge stands in for a bite.
+name = "beetle"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2.5, 1.5, 1.5]
+head = [1.5, 1, 1]
+abdomen = [3, 2, 3.5]
+abdomen_raise = 0
+legs = 6
+leg = [0.5, 1.5, 0.5]
+splay = 35
+walk = { cycle = 0.4, swing = 20, lift = 16 }
+run = { cycle = 0.25, swing = 24, lift = 20 }
+
+# Head pivot: the thorax front at mid-height; the head spans z -1..0.
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "legs"
+from = [-0.75, 0, -2]
+to = [-0.25, 0.5, -1]
+mirror = true
+
+# The wing-case seam down the back (abdomen pivot: the thorax back).
+[[cubes]]
+name = "seam"
+bone = "abdomen"
+part = "seam"
+from = [-0.25, 1, 0]
+to = [0.25, 1.25, 3]
+
+[palette]
+body = "#1e2420"
+body_up = "#24302a"
+head = "#1a1e1c"
+abdomen = "#1e2622"
+abdomen_up = "#2c4a38"
+legs = "#141614"
+seam = "#16201a"
+eye = "#5a5a50"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 0
+colour = "eye"

@@ -1,0 +1,78 @@
+# DF MOTH (wild): "a tiny nocturnal insect. It flies toward flames in the
+# night." Vermin with a giant, so the full arthropod rig at small size: six
+# legs, a stout furry body, feathery antennae, and broad dusty [wings] on the
+# thorax (FLIER: the fly set), folded back over the body like a resting moth.
+# No attacks in the raws; the template's lunge stands in.
+name = "moth"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 2, 2]
+head = [1.5, 1.5, 1]
+abdomen = [1.5, 1.5, 3]
+abdomen_raise = 4
+legs = 6
+leg = [0.5, 1.5, 1]
+splay = 35
+walk = { cycle = 0.4, swing = 18, lift = 16 }
+run = { cycle = 0.25, swing = 22, lift = 20 }
+
+[wings]
+bone = "body"
+at = [-0.5, 1, -0.5]
+span = 4
+chord = 2.5
+part = "wings"
+cycle = 0.15
+flap = 50
+
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "antennae"
+from = [-1, 0.5, -2.5]
+to = [-0.25, 1, -1]
+mirror = true
+
+[palette]
+body = "#8a7a64"
+body_up = "#9a8a72"
+head = "#7e705c"
+abdomen = "#8a7a64"
+legs = "#5e5244"
+wings = "#a8987c"
+wings_down = "#bcae94"
+antennae = "#6e624e"
+band = "#6a5c48"
+eye = "#1e1a16"
+
+[[decals]]
+cube = "wing_l"
+face = "up"
+x = 0
+y = 1
+w = 4
+colour = "band"
+
+[[decals]]
+cube = "wing_r"
+face = "up"
+x = 0
+y = 1
+w = 4
+colour = "band"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 0
+colour = "eye"

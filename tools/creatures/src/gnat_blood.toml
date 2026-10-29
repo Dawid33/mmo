@@ -1,0 +1,77 @@
+# DF GNAT_BLOOD (evil): "a tiny insect with a pulsating, lumpy body. It is an
+# evil bug that seeks blood." Vermin with a giant, so the full arthropod rig at
+# small size: six thin legs, a swollen blood-red abdomen with lumps (cubes; the
+# idle's abdomen breathing is the pulse), a needle mouth, and [wings] on the
+# thorax (FLIER: the fly set). No attacks in the raws; the template's lunge
+# stands in for the bite.
+name = "blood gnat"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [1.5, 1.5, 1.5]
+head = [1.5, 1.5, 1]
+abdomen = [2.5, 2.5, 3]
+abdomen_raise = 10
+legs = 6
+leg = [0.5, 2, 1]
+splay = 35
+walk = { cycle = 0.35, swing = 20, lift = 18 }
+run = { cycle = 0.22, swing = 25, lift = 22 }
+
+[wings]
+bone = "body"
+at = [-0.25, 0.75, 0]
+span = 2.5
+chord = 1.5
+part = "wings"
+cycle = 0.08
+flap = 45
+
+# Head pivot: the thorax front at mid-height; the head spans z -1..0.
+[[cubes]]
+name = "needle"
+bone = "head"
+part = "legs"
+from = [-0.25, -0.5, -2.5]
+to = [0.25, 0, -1]
+
+# Abdomen pivot: the thorax back at mid-height; the abdomen spans z 0.25..3.75.
+[[cubes]]
+name = "lump_l"
+bone = "abdomen"
+part = "lumps"
+from = [-1.75, -0.5, 1]
+to = [-0.75, 0.5, 2.5]
+mirror = true
+
+[[cubes]]
+name = "lump_top"
+bone = "abdomen"
+part = "lumps"
+from = [-0.75, 1, 1.5]
+to = [0.5, 1.75, 3]
+
+[palette]
+body = "#3a2a2a"
+head = "#342424"
+abdomen = "#8e1a1e"
+abdomen_up = "#a42228"
+lumps = "#b8343a"
+legs = "#2a1e1e"
+wings = "#b8b0a8"
+eye = "#d63a2a"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 0
+colour = "eye"

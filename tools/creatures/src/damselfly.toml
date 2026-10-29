@@ -1,0 +1,47 @@
+# DF DAMSELFLY (wild): "a tiny, colorful, long-bodied insect". Vermin with a
+# giant, so the full arthropod rig at small size: six thin legs, a wide head
+# with side eyes, a long needle abdomen, and [wings] on the thorax (FLIER: the
+# fly set; one pair stands in for the two). No attacks in the raws; the
+# template's lunge stands in for a bite.
+name = "damselfly"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [1.5, 1.5, 1.5]
+head = [2, 1.5, 1]
+abdomen = [0.75, 0.75, 6]
+abdomen_raise = 0
+legs = 6
+leg = [0.5, 1.5, 0.5]
+splay = 35
+walk = { cycle = 0.35, swing = 20, lift = 18 }
+run = { cycle = 0.22, swing = 25, lift = 22 }
+
+[wings]
+bone = "body"
+at = [-0.25, 0.75, -0.25]
+span = 3.5
+chord = 1
+part = "wings"
+cycle = 0.12
+flap = 40
+
+# Head pivot: the thorax front at mid-height; the head spans z -1..0.
+[[cubes]]
+name = "eye_l"
+bone = "head"
+part = "eyes"
+from = [-1.5, -0.25, -1]
+to = [-0.75, 0.75, 0]
+mirror = true
+
+[palette]
+body = "#2a6a9a"
+body_up = "#2e7cb4"
+head = "#2a5a80"
+abdomen = "#3a8ac8"
+abdomen_up = "#2a6a9a"
+legs = "#1e2a34"
+wings = "#d8e4ea"
+eyes = "#1e3a5a"

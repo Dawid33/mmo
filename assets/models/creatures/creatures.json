@@ -2537,6 +2537,78 @@
    }
   }
  },
+ "bark_scorpion": {
+  "name": "bark scorpion",
+  "status": "draft",
+  "model": "models/creatures/bark_scorpion.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -3.4588,
+    0,
+    -4.5935
+   ],
+   [
+    3.4588,
+    5.184,
+    6.1293
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat"
+  ],
+  "cubes": 25,
+  "bones": 15,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 1.3681,
+    "speed": 3.4202
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 2.115,
+    "speed": 8.4601
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
  "barn_owl_man": {
   "name": "barn owl man",
   "status": "draft",
@@ -3824,6 +3896,78 @@
    "cower": {
     "loop": "loop",
     "length": 0.929
+   }
+  }
+ },
+ "beetle": {
+  "name": "beetle",
+  "status": "draft",
+  "model": "models/creatures/beetle.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.75,
+    0,
+    -2.75
+   ],
+   [
+    2.75,
+    2.5,
+    4.25
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat"
+  ],
+  "cubes": 18,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 1.0261,
+    "speed": 2.5652
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 1.5863,
+    "speed": 6.3451
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
    }
   }
  },
@@ -9974,6 +10118,100 @@
    }
   }
  },
+ "butterfly_monarch": {
+  "name": "monarch butterfly",
+  "status": "draft",
+  "model": "models/creatures/butterfly_monarch.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2,
+    0,
+    -3.25
+   ],
+   [
+    2,
+    3.25,
+    4.25
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 0.9271,
+    "speed": 2.3176
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 1.461,
+    "speed": 5.8439
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 11.25,
+    "speed": 45
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.175
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
  "buzzard_man": {
   "name": "buzzard man",
   "status": "draft",
@@ -13927,6 +14165,92 @@
    }
   }
  },
+ "crab": {
+  "name": "crab",
+  "status": "draft",
+  "model": "models/creatures/crab.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -9.5,
+    0,
+    -10.6102
+   ],
+   [
+    9.5,
+    6,
+    6.9516
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 26,
+  "bones": 13,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 3.0902,
+    "speed": 5.1503
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 4.8699,
+    "speed": 13.914
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 0.96,
+    "stride": 3.0902,
+    "speed": 3.2189
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 1.5,
+    "stride": 1.5451,
+    "speed": 1.0301
+   }
+  }
+ },
  "creeping_eye": {
   "name": "creeping eye",
   "status": "draft",
@@ -15046,6 +15370,100 @@
    }
   }
  },
+ "damselfly": {
+  "name": "damselfly",
+  "status": "draft",
+  "model": "models/creatures/damselfly.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.25,
+    0,
+    -1.75
+   ],
+   [
+    2.25,
+    2,
+    6.75
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1.0261,
+    "speed": 2.9316
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.6482,
+    "speed": 7.4919
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.12,
+    "stride": 12.75,
+    "speed": 106.25
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.084
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
  "deer": {
   "name": "deer",
   "status": "draft",
@@ -15983,6 +16401,100 @@
     "length": 2,
     "stride": 10.9446,
     "speed": 5.4723
+   }
+  }
+ },
+ "dragonfly": {
+  "name": "dragonfly",
+  "status": "draft",
+  "model": "models/creatures/dragonfly.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -2.75
+   ],
+   [
+    2.5,
+    2.75,
+    8
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1.0261,
+    "speed": 2.9316
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.6482,
+    "speed": 7.4919
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.12,
+    "stride": 16.125,
+    "speed": 134.375
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.084
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },
@@ -17787,6 +18299,100 @@
    "hover": {
     "loop": "loop",
     "length": 0.14
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "firefly": {
+  "name": "firefly",
+  "status": "draft",
+  "model": "models/creatures/firefly.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -2.75
+   ],
+   [
+    2.5,
+    2,
+    4.75
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 20,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 1.0261,
+    "speed": 2.5652
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 1.6482,
+    "speed": 6.5928
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.1,
+    "stride": 11.25,
+    "speed": 112.5
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.07
    },
    "takeoff": {
     "loop": "once",
@@ -20245,6 +20851,194 @@
    "death": {
     "loop": "hold",
     "length": 1
+   }
+  }
+ },
+ "fly": {
+  "name": "fly",
+  "status": "draft",
+  "model": "models/creatures/fly.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -2.25
+   ],
+   [
+    2.5,
+    2.5,
+    3.5462
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 1.0261,
+    "speed": 3.4202
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.2,
+    "stride": 1.6482,
+    "speed": 8.2411
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.08,
+    "stride": 8.6943,
+    "speed": 108.6793
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.056
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "fly_acorn": {
+  "name": "acorn fly",
+  "status": "draft",
+  "model": "models/creatures/fly_acorn.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -2.5
+   ],
+   [
+    2.5,
+    2.2572,
+    3.5647
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1.0261,
+    "speed": 2.9316
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.6482,
+    "speed": 7.4919
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.1,
+    "stride": 9.0971,
+    "speed": 90.9705
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.07
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },
@@ -33151,6 +33945,100 @@
    }
   }
  },
+ "gnat_blood": {
+  "name": "blood gnat",
+  "status": "draft",
+  "model": "models/creatures/gnat_blood.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.75,
+    0,
+    -3.25
+   ],
+   [
+    2.75,
+    3.9944,
+    3.9215
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 21,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1.3681,
+    "speed": 3.9088
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 2.1976,
+    "speed": 9.9892
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.08,
+    "stride": 10.7572,
+    "speed": 134.4653
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.056
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
  "gnome_dark": {
   "name": "dark gnome",
   "status": "draft",
@@ -34166,6 +35054,78 @@
    "cower": {
     "loop": "loop",
     "length": 0.8912
+   }
+  }
+ },
+ "grasshopper": {
+  "name": "grasshopper",
+  "status": "draft",
+  "model": "models/creatures/grasshopper.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.25,
+    0,
+    -3.25
+   ],
+   [
+    2.25,
+    2.9917,
+    4.2938
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat"
+  ],
+  "cubes": 20,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 1.0261,
+    "speed": 2.5652
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 1.6482,
+    "speed": 6.5928
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
    }
   }
  },
@@ -41150,6 +42110,92 @@
    }
   }
  },
+ "lobster_cave": {
+  "name": "cave lobster",
+  "status": "draft",
+  "model": "models/creatures/lobster_cave.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -5.0355,
+    0,
+    -7.2569
+   ],
+   [
+    5.0355,
+    3,
+    8.9655
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 28,
+  "bones": 14,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 1.5451,
+    "speed": 3.0902
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 2.4349,
+    "speed": 8.1165
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 1.5451,
+    "speed": 1.9314
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 1.25,
+    "stride": 0.7725,
+    "speed": 0.618
+   }
+  }
+ },
  "loon_man": {
   "name": "loon man",
   "status": "draft",
@@ -41435,6 +42481,78 @@
    "cower": {
     "loop": "loop",
     "length": 0.8913
+   }
+  }
+ },
+ "louse": {
+  "name": "louse",
+  "status": "draft",
+  "model": "models/creatures/louse.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -1.75
+   ],
+   [
+    2.5,
+    2,
+    4.25
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat"
+  ],
+  "cubes": 15,
+  "bones": 10,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 0.9271,
+    "speed": 2.0601
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 1.461,
+    "speed": 4.8699
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
    }
   }
  },
@@ -41917,6 +43035,100 @@
    "eat": {
     "loop": "loop",
     "length": 1.6
+   }
+  }
+ },
+ "mantis": {
+  "name": "mantis",
+  "status": "draft",
+  "model": "models/creatures/mantis.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.5317,
+    0,
+    -3.75
+   ],
+   [
+    2.5317,
+    3.2772,
+    5.5426
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 17,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 1.2361,
+    "speed": 2.4721
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 1.948,
+    "speed": 6.4932
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.12,
+    "stride": 13.9389,
+    "speed": 116.1572
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.084
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },
@@ -43928,6 +45140,194 @@
    "cower": {
     "loop": "loop",
     "length": 1.2247
+   }
+  }
+ },
+ "mosquito": {
+  "name": "mosquito",
+  "status": "draft",
+  "model": "models/creatures/mosquito.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -3.75,
+    0,
+    -3.75
+   ],
+   [
+    3.75,
+    4.1131,
+    4.2831
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 18,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 1.8541,
+    "speed": 4.1202
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.28,
+    "stride": 2.9219,
+    "speed": 10.4355
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.06,
+    "stride": 12.0496,
+    "speed": 200.8273
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.042
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "moth": {
+  "name": "moth",
+  "status": "draft",
+  "model": "models/creatures/moth.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -3.5
+   ],
+   [
+    2.5,
+    3,
+    4.045
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 0.9271,
+    "speed": 2.3176
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 1.461,
+    "speed": 5.8439
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.15,
+    "stride": 11.3175,
+    "speed": 75.4501
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.105
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
    }
   }
  },
@@ -50472,6 +51872,100 @@
    }
   }
  },
+ "roach_large": {
+  "name": "large roach",
+  "status": "draft",
+  "model": "models/creatures/roach_large.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -3.25,
+    0,
+    -3.75
+   ],
+   [
+    3.25,
+    1.5,
+    4.75
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 1.4984,
+    "speed": 4.9948
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.18,
+    "stride": 2.2795,
+    "speed": 12.6641
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.1,
+    "stride": 12.75,
+    "speed": 127.5
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.07
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
  "rutherer": {
   "name": "rutherer",
   "status": "draft",
@@ -54259,6 +55753,160 @@
    }
   }
  },
+ "spider_brown_recluse": {
+  "name": "brown recluse spider",
+  "status": "draft",
+  "model": "models/creatures/spider_brown_recluse.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -4.4454,
+    0,
+    -3.4017
+   ],
+   [
+    4.4454,
+    3.5581,
+    4.0881
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "web_shoot"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 2.6222,
+    "speed": 6.5556
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 3.9892,
+    "speed": 15.9567
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "web_shoot": {
+    "loop": "once",
+    "length": 1
+   }
+  }
+ },
+ "spider_cave": {
+  "name": "cave spider",
+  "status": "draft",
+  "model": "models/creatures/spider_cave.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -3.9768,
+    0,
+    -2.8699
+   ],
+   [
+    3.9768,
+    4.0964,
+    4.1943
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "web_shoot"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 2.2476,
+    "speed": 5.6191
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 3.4193,
+    "speed": 13.6772
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "web_shoot": {
+    "loop": "once",
+    "length": 1
+   }
+  }
+ },
  "spider_cave_giant": {
   "name": "giant cave spider",
   "status": "draft",
@@ -54343,6 +55991,155 @@
    "roar": {
     "loop": "once",
     "length": 1.2
+   }
+  }
+ },
+ "spider_jumping": {
+  "name": "jumping spider",
+  "status": "draft",
+  "model": "models/creatures/spider_jumping.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -3.2537,
+    0,
+    -2.2271
+   ],
+   [
+    3.2537,
+    3.2558,
+    3.5908
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 1.3681,
+    "speed": 3.4202
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 2.1976,
+    "speed": 8.7905
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   }
+  }
+ },
+ "spider_phantom": {
+  "name": "phantom spider",
+  "status": "draft",
+  "model": "models/creatures/spider_phantom.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -4.9284,
+    0,
+    -3.7552
+   ],
+   [
+    4.9284,
+    4.5888,
+    4.6639
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "web_shoot"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 2.9969,
+    "speed": 6.6597
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.28,
+    "stride": 4.5591,
+    "speed": 16.2824
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "web_shoot": {
+    "loop": "once",
+    "length": 1
    }
   }
  },
@@ -56059,6 +57856,172 @@
    "death": {
     "loop": "hold",
     "length": 0.6
+   }
+  }
+ },
+ "thrips": {
+  "name": "thrips",
+  "status": "draft",
+  "model": "models/creatures/thrips.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.25,
+    0,
+    -2.75
+   ],
+   [
+    2.25,
+    1.7087,
+    4.7707
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat",
+   "fly",
+   "hover",
+   "takeoff",
+   "land"
+  ],
+  "cubes": 19,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 1.0261,
+    "speed": 2.9316
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.22,
+    "stride": 1.5863,
+    "speed": 7.2103
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
+   },
+   "fly": {
+    "loop": "loop",
+    "length": 0.08,
+    "stride": 11.281,
+    "speed": 141.0129
+   },
+   "hover": {
+    "loop": "loop",
+    "length": 0.056
+   },
+   "takeoff": {
+    "loop": "once",
+    "length": 0.9
+   },
+   "land": {
+    "loop": "once",
+    "length": 0.9
+   }
+  }
+ },
+ "tick": {
+  "name": "tick",
+  "status": "draft",
+  "model": "models/creatures/tick.bbmodel",
+  "template": "arthropod",
+  "bounds": [
+   [
+    -2.5172,
+    0,
+    -2
+   ],
+   [
+    2.5172,
+    2,
+    4.75
+   ]
+  ],
+  "budget": {
+   "cubes": 30,
+   "bones": 16
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "eat"
+  ],
+  "cubes": 20,
+  "bones": 12,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 0.8269,
+    "speed": 1.6538
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.32,
+    "stride": 1.3339,
+    "speed": 4.1684
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1
    }
   }
  },

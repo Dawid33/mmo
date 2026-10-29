@@ -1,0 +1,65 @@
+# DF DRAGONFLY (wild, swamps): "a relatively large insect found in swamps and
+# marshland". Vermin with a giant, so the full arthropod rig at small size:
+# six legs, a big head that is mostly eye, a long abdomen, and [wings] on the
+# thorax (FLIER: the fly set). Only one wing pair: [wings] makes two bones and
+# extra cubes cannot hang on them, so the second pair is not modelled; the
+# chord is widened instead. No attacks in the raws; the template's lunge
+# stands in for a bite.
+name = "dragonfly"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 2, 2]
+head = [2.5, 2, 1.5]
+abdomen = [1, 1, 7]
+abdomen_raise = 0
+legs = 6
+leg = [0.5, 1.5, 0.5]
+splay = 35
+walk = { cycle = 0.35, swing = 20, lift = 18 }
+run = { cycle = 0.22, swing = 25, lift = 22 }
+
+[wings]
+bone = "body"
+at = [-0.5, 1, -0.5]
+span = 5
+chord = 2
+part = "wings"
+cycle = 0.12
+flap = 35
+
+# Head pivot: the thorax front at mid-height; the head spans z -1.5..0.
+[[cubes]]
+name = "eye_l"
+bone = "head"
+part = "eyes"
+from = [-1.5, -0.5, -1.75]
+to = [-0.25, 1.25, -0.25]
+mirror = true
+
+[palette]
+body = "#3a6a3a"
+body_up = "#4a7e44"
+head = "#3a5a34"
+abdomen = "#3a7aa0"
+abdomen_up = "#2e6688"
+legs = "#1e2420"
+wings = "#dce6e8"
+eyes = "#2a6aa8"
+band = "#1e3a50"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 0
+y = 2
+colour = "band"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 0
+y = 4
+colour = "band"
+

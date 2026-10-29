@@ -1,0 +1,97 @@
+# DF BARK_SCORPION (wild): "a tiny yellow bug. It has pincers and a stinging tail
+# which can prove fatal." Vermin with a giant, so the full arthropod rig at
+# small size: eight legs, the first pair the pincer arms (claw cubes at the
+# tips), a low abdomen and a tail of three extra bones curling up over the back
+# to the stinger. No attacks in the raws; the template's lunge stands in for
+# the sting (the tail is static: it follows the abdomen).
+name = "bark scorpion"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2, 1, 2]
+head = [1.5, 1, 1]
+abdomen = [2, 1, 3]
+abdomen_raise = 0
+legs = 8
+leg = [0.5, 2, 0.5]
+splay = 40
+walk = { cycle = 0.4, swing = 20, lift = 16 }
+run = { cycle = 0.25, swing = 24, lift = 20 }
+
+# Leg pivots on the thorax side; the tip at x = -2, the ground at y = -1.5.
+[[cubes]]
+name = "claw_l"
+bone = "leg_l1"
+part = "claws"
+from = [-3, -1.5, -2.5]
+to = [-1.5, -0.5, 0.25]
+mirror = true
+
+# The tail: abdomen pivot is the thorax back at mid-height; the abdomen ends
+# at z 3.5. Each segment hangs off the previous one's end and bends up.
+[[bones]]
+name = "tail1"
+parent = "abdomen"
+pivot = [0, 0, 3.25]
+rest = [-35, 0, 0]
+
+[[bones]]
+name = "tail2"
+parent = "tail1"
+pivot = [0, 0, 1.5]
+rest = [-50, 0, 0]
+
+[[bones]]
+name = "tail3"
+parent = "tail2"
+pivot = [0, 0, 1.5]
+rest = [-55, 0, 0]
+
+[[cubes]]
+name = "tail1"
+bone = "tail1"
+part = "body"
+from = [-0.5, -0.5, 0]
+to = [0.5, 0.5, 1.75]
+
+[[cubes]]
+name = "tail2"
+bone = "tail2"
+part = "body"
+from = [-0.5, -0.5, 0]
+to = [0.5, 0.5, 1.75]
+
+[[cubes]]
+name = "tail3"
+bone = "tail3"
+part = "body"
+from = [-0.5, -0.5, 0]
+to = [0.5, 0.5, 1.5]
+
+[[cubes]]
+name = "stinger"
+bone = "tail3"
+part = "stinger"
+from = [-0.25, -0.5, 1.5]
+to = [0.25, 0, 2.25]
+
+[palette]
+body = "#c8a040"
+body_up = "#b48c34"
+head = "#c09838"
+abdomen = "#c8a040"
+abdomen_up = "#b08830"
+legs = "#d4b050"
+claws = "#c8a040"
+claws_up = "#b48c34"
+stinger = "#4a3418"
+eye = "#1e1610"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+w = 2
+colour = "eye"

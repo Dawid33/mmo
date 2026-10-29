@@ -1,0 +1,71 @@
+# DF GRASSHOPPER (wild): 0.001 kg, "a tiny insect which uses its powerful legs
+# to leap and make noise". Vermin with a giant, so the full arthropod rig at
+# small size: six legs, a tall head, a long abdomen; the big jumping thighs are
+# cubes on the hind legs, the folded wings a cube along the back (not a FLIER:
+# no fly set). No attacks in the raws; the template's lunge stands in for a bite.
+name = "grasshopper"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [1.5, 1.5, 1.5]
+head = [1.5, 2, 1.5]
+abdomen = [1.5, 1.5, 3.5]
+abdomen_raise = 4
+legs = 6
+leg = [0.5, 1.5, 1]
+splay = 35
+walk = { cycle = 0.4, swing = 20, lift = 18 }
+run = { cycle = 0.25, swing = 25, lift = 22 }
+
+# Hind-leg pivot: the thorax side, 2 above the ground; the folded thigh rises
+# above it and runs back along the abdomen.
+[[cubes]]
+name = "thigh_l"
+bone = "leg_l3"
+part = "thighs"
+from = [-1, -0.25, -0.5]
+to = [-0.5, 0.75, 2.5]
+mirror = true
+
+# Folded wings along the back (abdomen pivot: the thorax back, mid-height).
+[[cubes]]
+name = "wings"
+bone = "abdomen"
+part = "wings"
+from = [-0.75, 0.5, -1.5]
+to = [0.75, 1, 3.5]
+
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "antennae"
+from = [-0.75, 0.5, -2.5]
+to = [-0.25, 1, -1.5]
+mirror = true
+
+[palette]
+body = "#6f9a3a"
+body_up = "#7fae44"
+head = "#7aa842"
+abdomen = "#6a9436"
+abdomen_down = "#a8c46a"
+legs = "#5e8630"
+thighs = "#7fae44"
+wings = "#8a9a50"
+antennae = "#4e6e28"
+eye = "#3a2a18"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"

@@ -1,0 +1,56 @@
+# DF ROACH_LARGE (wild): "a small insect that seeks out unwatched food and
+# garbage. They fear light." Vermin with a giant, so the full arthropod rig at
+# small size: six legs, a flat body with a broad shield (the thorax) over a
+# tucked head, long antennae, the abdomen as the flat folded wings, and
+# [wings] on the thorax (FLIER: the fly set). No attacks in the raws; the
+# template's lunge stands in for a bite.
+name = "large roach"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2.5, 1, 1.5]
+head = [1.5, 1, 0.5]
+abdomen = [2.5, 1, 4]
+abdomen_raise = 0
+legs = 6
+leg = [0.5, 2, 0.5]
+splay = 40
+walk = { cycle = 0.3, swing = 22, lift = 16 }
+run = { cycle = 0.18, swing = 26, lift = 20 }
+
+[wings]
+bone = "body"
+at = [-0.25, 0.5, 0.5]
+span = 2.5
+chord = 1
+part = "wings"
+cycle = 0.1
+flap = 40
+
+# Head pivot: the thorax front at mid-height; the head spans z -0.5..0.
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "antennae"
+from = [-0.75, 0, -3]
+to = [-0.25, 0.5, -0.5]
+mirror = true
+
+[palette]
+body = "#6a3e20"
+body_up = "#8a5a32"
+head = "#4a2a16"
+abdomen = "#7a4824"
+abdomen_up = "#8e5a30"
+legs = "#5a3418"
+wings = "#a07040"
+antennae = "#4a2a16"
+mark = "#c09060"
+
+[[decals]]
+cube = "body"
+face = "up"
+x = 1
+y = 0
+colour = "mark"

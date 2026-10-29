@@ -1,0 +1,74 @@
+# DF LOBSTER_CAVE (underground, streams): 0.6 kg, "a small, pale arthropod found
+# in underground streams and ponds". Vermin with a giant, so the full arthropod
+# rig at small size: ten legs (the first pair are the claw arms, with big
+# pincer cubes at the tips), the abdomen is the long, low segmented tail with a
+# fan. AQUATIC on a non-fish: swim, swim_idle. No attacks in the raws; the
+# template's lunge stands in for a pinch.
+name = "cave lobster"
+template = "arthropod"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+body = [3, 2, 4]
+head = [2, 1.5, 1.5]
+abdomen = [2.5, 1.5, 4]
+abdomen_raise = -4
+legs = 10
+leg = [0.5, 2.5, 1]
+splay = 45
+walk = { cycle = 0.5, swing = 18, lift = 16 }
+run = { cycle = 0.3, swing = 22, lift = 20 }
+
+# Leg pivots sit on the thorax side; the leg tip is at x = -2.5, the ground at y = -2.
+# The pincer reaches forward from the claw arm's tip.
+[[cubes]]
+name = "claw_l"
+bone = "leg_l1"
+part = "claws"
+from = [-4.5, -2, -3.5]
+to = [-1.5, 0, 0.5]
+mirror = true
+
+# Head pivot: the thorax front at mid-height; the head spans z -1.5..0.
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "antennae"
+from = [-1, 0, -4.5]
+to = [-0.5, 0.5, -1.5]
+mirror = true
+
+# Abdomen pivot: the thorax back; the tail spans z 1.5..6.
+[[cubes]]
+name = "fan"
+bone = "abdomen"
+part = "body"
+from = [-1.5, -0.75, 5.5]
+to = [1.5, -0.25, 7]
+
+[palette]
+body = "#d8d0c4"
+body_up = "#e6ded2"
+head = "#d2c9bc"
+abdomen = "#d8d0c4"
+abdomen_up = "#e6ded2"
+legs = "#c8bfb2"
+claws = "#e6cfc0"
+claws_up = "#f0dccd"
+antennae = "#bfb6a8"
+eye = "#2a2420"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 0
+colour = "eye"

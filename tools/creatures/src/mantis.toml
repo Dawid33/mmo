@@ -1,0 +1,80 @@
+# DF MANTIS (wild): "a tiny green insect. It has long, distinctive forelimbs
+# that it uses to catch its prey." Body plan INSECT_4LEGS_2ARMS: the arthropod
+# rig with legs = 4 (walking legs) plus the raptorial arms as an extra bone
+# pair on the thorax front (mirror; they follow the head, so the attack's
+# head lunge is the strike). A long thorax, a triangular-ish head with side
+# eyes, the folded wings on the abdomen, and [wings] (FLIER: the fly set).
+# No attacks in the raws; the template's lunge stands in for the grab.
+name = "mantis"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [1.5, 1.5, 3]
+head = [2, 1.5, 1]
+abdomen = [2, 1.5, 4]
+abdomen_raise = 4
+legs = 4
+leg = [0.5, 2, 1.5]
+splay = 35
+walk = { cycle = 0.5, swing = 18, lift = 16 }
+run = { cycle = 0.3, swing = 22, lift = 20 }
+
+[wings]
+bone = "body"
+at = [-0.25, 0.75, 1]
+span = 3
+chord = 2
+part = "wings"
+cycle = 0.12
+flap = 40
+
+# Body pivot: the thorax centre; the thorax front is z -1.5. The arm folds
+# forward (femur) and hangs down (tibia), held in front of the head.
+[[bones]]
+name = "arm_l"
+parent = "body"
+pivot = [-0.5, 0.25, -1.25]
+follow = "head"
+mirror = true
+
+[[cubes]]
+name = "femur_l"
+bone = "arm_l"
+part = "arms"
+from = [-0.75, -0.25, -2.5]
+to = [-0.25, 0.25, 0]
+mirror = true
+
+[[cubes]]
+name = "tibia_l"
+bone = "arm_l"
+part = "arms"
+from = [-0.75, -1.75, -2.5]
+to = [-0.25, -0.25, -2]
+mirror = true
+
+[palette]
+body = "#6aa040"
+body_up = "#7ab44a"
+head = "#7ab44a"
+abdomen = "#68a03e"
+abdomen_up = "#5e9238"
+legs = "#5e9238"
+arms = "#7ab44a"
+wings = "#9ac860"
+eye = "#c8c870"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 0
+y = 0
+colour = "eye"

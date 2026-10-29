@@ -1,0 +1,62 @@
+# DF SPIDER_JUMPING (wild): "a tiny black bug that lacks a web but can leap short
+# distances". Vermin with a giant, so the full arthropod rig at small size:
+# eight short, stout legs, a big square head with two large front eyes, a
+# small round abdomen, white markings. Not a WEBBER. No attacks in the raws;
+# the template's lunge stands in for its bite (it reads as the pounce).
+name = "jumping spider"
+template = "arthropod"
+status = "draft"
+
+[proportions]
+body = [2.5, 2, 2]
+head = [2.5, 2, 1]
+abdomen = [2.5, 2, 2.5]
+abdomen_raise = 6
+legs = 8
+leg = [0.5, 2, 1]
+splay = 40
+walk = { cycle = 0.4, swing = 20, lift = 18 }
+run = { cycle = 0.25, swing = 25, lift = 22 }
+
+[palette]
+body = "#26221e"
+body_up = "#2e2a26"
+head = "#4a4038"
+abdomen = "#2a2622"
+abdomen_up = "#34302a"
+legs = "#1e1a16"
+eye = "#0e0c0a"
+eye_shine = "#060504"
+mark = "#e8e2d4"
+
+# Two big front eyes on the head's 3×2 front face.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+h = 2
+colour = "eye_shine"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 0
+h = 2
+colour = "eye_shine"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 0
+y = 1
+w = 3
+colour = "mark"
+
+[[decals]]
+cube = "abdomen"
+face = "up"
+x = 1
+y = 2
+colour = "mark"
