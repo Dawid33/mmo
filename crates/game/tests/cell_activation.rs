@@ -548,7 +548,8 @@ fn a_legacy_region_ignores_cell_changes() {
 }
 
 /// 1-chunk cells, so cell (x, z) is exactly chunk column (x, z) at any chunk
-/// size and the cell/chunk pairing below always holds.
+/// size, and the player pose is derived from the cell origin. The scenario's
+/// distances are not size-independent, though (see the TODO below).
 ///
 /// TODO(chunk flip): the geometry itself is in blocks at 2-block chunks
 /// (player 2 blocks from the wall, `REACH` = 5); at 16-block cells the player
@@ -583,10 +584,12 @@ fn place_across_a_cell(middle_active: bool) -> Region {
     let input = |ev| GameEventKind::PlayerInput(0, ev);
     server_apply(&mut s, input(InputEvent::Key { key: Key::KeyE, pressed: true }));
     server_apply(&mut s, input(InputEvent::Key { key: Key::KeyE, pressed: false }));
-    // Block (8.5, _, 10.5): voxel (136, _, 168), dropped onto the floor.
+    // Half a block into cell (4, 5) from its origin: voxel (136, _, 168) at
+    // 2-block chunks (block 8.5 x 10.5), dropped onto the floor.
+    let edge = game::cell_size_units(1);
     s.with_data(|rb| {
         let e = *rb.data.player_entites.get(&0).unwrap();
-        rb.set_body_pose_safe(e, Pose::translation(136.0, 60.0, 168.0));
+        rb.set_body_pose_safe(e, Pose::translation(4.0 * edge + 8.0, 60.0, 5.0 * edge + 8.0));
     });
     for _ in 0..12 {
         server_apply(&mut s, GameEventKind::Tick);
