@@ -42,8 +42,10 @@ pub fn start_wasm_sim(
     SimDriverRes,
     Sender<GameEventKind>,
     Receiver<ClientUpdateEvent>,
+    Sender<crate::instance::ClientRequest>,
 ) {
     let (game_send, game_recv) = crossbeam::channel::unbounded();
+    let (request_send, request_recv) = crossbeam::channel::unbounded();
     let (client_send, client_recv) = crossbeam::channel::unbounded();
     let (server_send, server_recv) = crossbeam::channel::unbounded();
     // The addr is unused on wasm; GameInstanceManager::new keeps one
@@ -58,6 +60,8 @@ pub fn start_wasm_sim(
     );
     // Same subscription scale as the native game thread (`?world=` here).
     manager.set_world_scale(world_scale);
+    // Offline the local server has no world map, so the UI never sends Play.
+    manager.set_request_recv(request_recv);
 
     // Online (real WebTransport server) is the default; `?offline` anywhere
     // in the query string opts into the embedded single-player world instead.
@@ -88,6 +92,7 @@ pub fn start_wasm_sim(
         })),
         game_send,
         client_recv,
+        request_send,
     )
 }
 

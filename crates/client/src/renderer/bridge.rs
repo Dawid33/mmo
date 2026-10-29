@@ -541,6 +541,7 @@ pub fn drain_client_updates(
     mut home_cells: ResMut<lod_rings::HomeCellMask>,
     camera_mode: Option<Res<super::commander::CameraMode>>,
     mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
+    mut world_map_msgs: Option<ResMut<Messages<super::world_map::WorldMapMsg>>>,
 ) {
     // Unbudgeted: drains everything the game thread queued since last frame.
     let mut stall = game::perf::StallGuard::new("drain_client_updates");
@@ -654,6 +655,16 @@ pub fn drain_client_updates(
             }
             ClientUpdateEvent::DebugLines(id, lines) => {
                 debug_lines.0.insert(id, lines);
+            }
+            ClientUpdateEvent::WorldMap(world_map) => {
+                if let Some(msgs) = world_map_msgs.as_mut() {
+                    msgs.write(super::world_map::WorldMapMsg::Map(world_map));
+                }
+            }
+            ClientUpdateEvent::PlayRefused(rc, why) => {
+                if let Some(msgs) = world_map_msgs.as_mut() {
+                    msgs.write(super::world_map::WorldMapMsg::Refused(rc, why));
+                }
             }
         }
     }

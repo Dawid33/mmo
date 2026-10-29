@@ -33,10 +33,22 @@ struct JoinTimeline {
     connection_ready: bool,
 }
 
+/// Requests from the UI that go to the server rather than into the sim
+/// (they are not predicted events).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientRequest {
+    /// Play this region: the server moves our session there (or refuses,
+    /// answered as `ClientUpdateEvent::PlayRefused`).
+    PlayRegion(RegionCoords),
+}
+
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
     game_event_send: Sender<GameEventKind>,
     game_event_recv: Receiver<GameEventKind>,
+    /// UI requests for the server (`ClientRequest`). `never()` until
+    /// `set_request_recv`: harnesses and the offline world send none.
+    request_recv: Receiver<ClientRequest>,
     client_event_send: Sender<ClientUpdateEvent>,
     /// Only read by the native netcode path (`connect_and_run`); kept on wasm
     /// so `new()` has one signature on both targets.
@@ -470,6 +482,7 @@ impl GameInstanceManager {
         Self {
             game_event_recv,
             game_event_send,
+            request_recv: crossbeam::channel::never(),
             client_event_send,
             server,
             world: None,
@@ -513,6 +526,21 @@ impl GameInstanceManager {
         self.server_game_send
             .send(ClientPacket::RequestPlayerRegion)
             .unwrap();
+    }
+
+    /// Take UI requests (`ClientRequest`) from this channel.
+    pub fn set_request_recv(&mut self, request_recv: Receiver<ClientRequest>) {
+        self.request_recv = request_recv;
+    }
+
+    /// Forward one UI request to the server.
+    fn handle_request(&mut self, request: ClientRequest) {
+        match request {
+            ClientRequest::PlayRegion(rc) => {
+                info!("[client] requesting Play in region {rc:?}");
+                let _ = self.server_game_send.send(ClientPacket::PlayRegion(rc));
+            }
+        }
     }
 
     /// Inject a client-side tick (wasm frame driver replaces the native
@@ -737,6 +765,9 @@ impl GameInstanceManager {
             if !self.handle_game_event(event)? {
                 return Ok(false);
             }
+        }
+        while let Ok(request) = self.request_recv.try_recv() {
+            self.handle_request(request);
         }
         self.emit_active_cells();
         self.emit_hud_status();
@@ -1405,9 +1436,17 @@ impl GameInstanceManager {
                     }
                 }
             }
-            game::ServerPacket::WorldMap(_) | game::ServerPacket::PlayRefused(..) => {
-                // Wired by the client map/Play task.
-                log::debug!("[client] world-map packet ignored for now");
+            game::ServerPacket::WorldMap(map) => {
+                info!("[client] world map received: {}x{} tiles", map.width, map.height);
+                let _ = self
+                    .client_event_send
+                    .send(ClientUpdateEvent::WorldMap(Box::new(map)));
+            }
+            game::ServerPacket::PlayRefused(rc, why) => {
+                warn!("[client] Play in region {rc:?} refused: {why:?}");
+                let _ = self
+                    .client_event_send
+                    .send(ClientUpdateEvent::PlayRefused(rc, why));
             }
             game::ServerPacket::LodData(key, payload) => {
                 if !self.lod_subscribed.contains(&key) {
@@ -1504,6 +1543,15 @@ impl GameInstanceManager {
                             }
                         }
                         Err(e) => panic!("{}", e),
+                    }
+                }
+                // UI requests for the server (Play). A disconnected channel
+                // (UI gone) just stops the arm from ever firing again.
+                recv(self.request_recv) -> request => {
+                    self.perf.idle_total += wait_start.elapsed();
+                    match request {
+                        Ok(request) => self.handle_request(request),
+                        Err(_) => self.request_recv = crossbeam::channel::never(),
                     }
                 }
             }

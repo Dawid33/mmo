@@ -212,6 +212,11 @@ pub enum ClientUpdateEvent {
     /// buffers, so the render side's replace-on-receipt clears stale
     /// geometry as the viewer moves. Debug-only; never serialized.
     DebugLines(RegionId, Vec<DebugLine>),
+    /// The server's world map (forged worlds only; sent once on connect).
+    /// Boxed: it is the one large variant.
+    WorldMap(Box<WorldMap>),
+    /// The server refused a Play request for this region.
+    PlayRefused(RegionCoords, PlayRefusal),
 }
 
 #[cfg(not(target_arch = "wasm32"))]

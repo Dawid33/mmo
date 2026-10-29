@@ -92,6 +92,7 @@ pub enum Command {
         Sender<GameEventKind>,
         Receiver<GameEventKind>,
         Sender<ClientUpdateEvent>,
+        Receiver<client::instance::ClientRequest>,
         SocketAddr,
         game::DebugFlags,
         WorldScale,
@@ -110,6 +111,7 @@ fn start_game_thread() -> Sender<Command> {
                     sender,
                     receiver,
                     client_sender,
+                    request_recv,
                     server,
                     debug_flags,
                     world_scale,
@@ -122,6 +124,7 @@ fn start_game_thread() -> Sender<Command> {
                         debug_flags,
                     );
                     manager.set_world_scale(world_scale);
+                    manager.set_request_recv(request_recv);
                     if let Err(e) = manager.connect_and_run() {
                         warn!("Game Crashed: {:?}", e);
                     };
@@ -204,25 +207,27 @@ fn main() {
     let debug_flags = game::DebugFlags::default();
 
     #[cfg(not(target_arch = "wasm32"))]
-    let (command_send, game_send, client_recv) = {
+    let (command_send, game_send, client_recv, request_send) = {
         let command_send = start_game_thread();
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded();
+        let (request_send, request_recv) = crossbeam::channel::unbounded();
         command_send
             .send(Command::ConnectToServerAndScene(
                 game_send.clone(),
                 game_recv,
                 client_send,
+                request_recv,
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466)),
                 debug_flags.clone(),
                 world_scale,
             ))
             .unwrap();
-        (command_send, game_send, client_recv)
+        (command_send, game_send, client_recv, request_send)
     };
 
     #[cfg(target_arch = "wasm32")]
-    let (sim, game_send, client_recv) = sim_driver::start_wasm_sim(debug_flags.clone(), world_scale);
+    let (sim, game_send, client_recv, request_send) = sim_driver::start_wasm_sim(debug_flags.clone(), world_scale);
 
     // Bevy's default asset root is CARGO_MANIFEST_DIR/assets (crates/client/assets,
     // a local, gitignored scratch dir left over from earlier prototyping). The
@@ -288,6 +293,7 @@ fn main() {
     app.add_plugins(renderer::SimBridgePlugin {
         client_recv,
         game_send: game_send.clone(),
+        requests: request_send,
         debug_flags: debug_flags.clone(),
         camera_mode: renderer::commander::CameraMode::from_env(),
     });

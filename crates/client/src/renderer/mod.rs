@@ -45,6 +45,7 @@ pub(crate) mod ui_bridge;
 pub(crate) mod ui_input;
 mod voxel_material;
 pub mod voxel_pull;
+pub mod world_map;
 use block_textures::build_layers;
 use voxel_material::StandardVoxelMaterial;
 
@@ -71,12 +72,18 @@ pub struct ClientUpdates(pub Receiver<ClientUpdateEvent>);
 #[derive(Resource)]
 pub struct GameEvents(pub Sender<GameEventKind>);
 
+/// UI → game thread: requests for the server (`ClientRequest::PlayRegion`).
+#[derive(Resource)]
+pub struct ClientRequests(pub Sender<crate::instance::ClientRequest>);
+
 #[derive(Resource, Default)]
 pub struct LocalPlayer(pub Option<ClientId>);
 
 pub struct SimBridgePlugin {
     pub client_recv: Receiver<ClientUpdateEvent>,
     pub game_send: Sender<GameEventKind>,
+    /// Requests for the server, read by the game thread's manager.
+    pub requests: Sender<crate::instance::ClientRequest>,
     pub debug_flags: game::DebugFlags,
     /// Commander (the game) or the legacy first-person body view.
     pub camera_mode: commander::CameraMode,
@@ -94,6 +101,9 @@ impl Plugin for SimBridgePlugin {
         ))
         .insert_resource(ClientUpdates(self.client_recv.clone()))
         .insert_resource(GameEvents(self.game_send.clone()))
+        .insert_resource(ClientRequests(self.requests.clone()))
+        .init_resource::<world_map::WorldMapState>()
+        .add_message::<world_map::WorldMapMsg>()
         .init_resource::<LocalPlayer>()
         .init_resource::<bridge::Regions>()
         .init_resource::<bridge::RegionRoots>()
@@ -189,6 +199,7 @@ impl Plugin for SimBridgePlugin {
                 )
                     .chain(),
                 interpolate::interpolate_transforms,
+                world_map::apply_world_map_msgs,
                 // Per-frame mouse look replaces the per-tick sim look that
                 // interpolate_transforms just snapped the camera to.
                 look::apply_local_look.after(interpolate::interpolate_transforms),
