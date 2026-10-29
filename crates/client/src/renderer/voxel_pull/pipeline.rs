@@ -430,6 +430,12 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(positi
         assert!(source.contains("#ifdef CUTAWAY"), "the forward shader implements CUTAWAY");
         // R10: the cut is confined to the home region (and off at f32::MAX).
         assert!(source.contains("fn cut_applies"), "the forward shader gates the cut to the home region");
+        // Faces lying on the cut: tops under the slice plane, and ceilings
+        // that would cap the dug room below (face 3 = NegY).
+        assert!(
+            source.contains("(face == 2u || face == 3u) && on_cut"),
+            "the forward shader collapses top and ceiling faces on the cut"
+        );
     }
 
     /// The depth/shadow pipelines with the cutaway, with and without the
@@ -450,6 +456,12 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(positi
         assert!(source.contains("#ifdef CUTAWAY"), "the depth shader implements CUTAWAY");
         // R10: the cut is confined to the home region (and off at f32::MAX).
         assert!(source.contains("fn cut_applies"), "the depth shader gates the cut to the home region");
+        // Faces lying on the cut: tops under the slice plane, and ceilings
+        // that would cap the dug room below (face 3 = NegY).
+        assert!(
+            source.contains("(face == 2u || face == 3u) && on_cut"),
+            "the depth shader collapses top and ceiling faces on the cut"
+        );
     }
 
     /// Every def combination the four cull pipelines compile with.

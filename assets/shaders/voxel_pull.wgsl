@@ -128,6 +128,17 @@ fn quad_owner(world_from_local: mat4x4<f32>, record_pos: vec3<u32>, face: u32, w
     return (world_from_local * vec4<f32>(mid - 0.5 * normal, 1.0)).xyz;
 }
 
+// Whether a home-region quad is dropped by the cut (its lowest corner at
+// `lowest_y`): wholly above it, or a horizontal face lying ON it — a top
+// (+Y, face 2) of a block at the working level, where the slice plane
+// (slice_plane.wgsl) is drawn coplanar, or a ceiling (-Y, face 3) of a block
+// wholly above the cut, which would otherwise cap the dug room under it.
+fn cut_collapses(face: u32, lowest_y: f32) -> bool {
+    let cut = fortress.cut.x;
+    let on_cut = lowest_y > cut - CUT_EPSILON;
+    return lowest_y > cut + CUT_EPSILON || ((face == 2u || face == 3u) && on_cut);
+}
+
 struct PullVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
@@ -184,13 +195,11 @@ fn vertex(
     // In the home region, a quad whose lowest corner (its record position:
     // extents only add) lies above the cut is collapsed to one point outside
     // the clip volume in x and y as well as z (depth clipping can be off in
-    // shadow views) — a zero-area triangle pair the rasterizer drops. So is
-    // a top face lying ON the cut: its block is solid at the working level,
-    // where the slice plane (slice_plane.wgsl) is drawn coplanar with it.
+    // shadow views) — a zero-area triangle pair the rasterizer drops. So are
+    // the top and ceiling faces lying ON the cut (cut_collapses).
     let cut_here = cut_applies(quad_owner(world_from_local, record_pos, face, w1));
     let lowest = world_from_local * vec4<f32>(vec3<f32>(record_pos), 1.0);
-    let top_on_cut = face == 2u && lowest.y > fortress.cut.x - CUT_EPSILON;
-    if (cut_here && (lowest.y > fortress.cut.x + CUT_EPSILON || top_on_cut)) {
+    if (cut_here && cut_collapses(face, lowest.y)) {
         out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
     }

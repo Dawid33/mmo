@@ -37,8 +37,9 @@ const CUT_EPSILON: f32 = 0.01;
 const FACE_UA = array<u32, 6>(1u, 1u, 0u, 0u, 0u, 0u);
 const FACE_VA = array<u32, 6>(2u, 2u, 2u, 2u, 1u, 1u);
 
-// The cutaway's region gate, copied from voxel_pull.wgsl (see there).
-
+// The cutaway's region gate and collapse rule (CUT_OFF, cut_applies,
+// quad_owner, cut_collapses), copied from voxel_pull.wgsl (see there).
+//
 // fortress.cut.x at or above this means the cut is off (f32::MAX); every
 // cutaway effect is then a no-op even in a CUTAWAY pipeline.
 const CUT_OFF: f32 = 3.0e38;
@@ -63,6 +64,17 @@ fn quad_owner(world_from_local: mat4x4<f32>, record_pos: vec3<u32>, face: u32, w
     var normal = vec3<f32>(0.0);
     normal[face / 2u] = select(-1.0, 1.0, face % 2u == 0u);
     return (world_from_local * vec4<f32>(mid - 0.5 * normal, 1.0)).xyz;
+}
+
+// Whether a home-region quad is dropped by the cut (its lowest corner at
+// `lowest_y`): wholly above it, or a horizontal face lying ON it — a top
+// (+Y, face 2) of a block at the working level, where the slice plane
+// (slice_plane.wgsl) is drawn coplanar, or a ceiling (-Y, face 3) of a block
+// wholly above the cut, which would otherwise cap the dug room under it.
+fn cut_collapses(face: u32, lowest_y: f32) -> bool {
+    let cut = fortress.cut.x;
+    let on_cut = lowest_y > cut - CUT_EPSILON;
+    return lowest_y > cut + CUT_EPSILON || ((face == 2u || face == 3u) && on_cut);
 }
 
 // CORNER_PERM from records.rs, flattened: variant*4 + local vertex. Drawn
@@ -120,10 +132,13 @@ fn vertex(
     let world_position = world_from_local * vec4<f32>(local_pos, 1.0);
     var out: VertexOutput;
 #ifdef CUTAWAY
-    // Collapse a home-region quad wholly above the cut (see voxel_pull.wgsl).
+    // Collapse what the forward pass drops (see voxel_pull.wgsl): a
+    // home-region quad wholly above the cut, and the top and ceiling faces
+    // lying on it — so the prepass and shadows never write depth for a face
+    // the forward pass no longer draws.
     let cut_here = cut_applies(quad_owner(world_from_local, record_pos, face, w1));
     let lowest = world_from_local * vec4<f32>(vec3<f32>(record_pos), 1.0);
-    if (cut_here && lowest.y > fortress.cut.x + CUT_EPSILON) {
+    if (cut_here && cut_collapses(face, lowest.y)) {
         out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
     }

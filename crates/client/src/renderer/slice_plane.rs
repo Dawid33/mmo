@@ -14,7 +14,10 @@
 //! with no z-fight. The one coplanar case — top faces of working-level blocks
 //! open to the air above, lying exactly on the cut — is removed by the
 //! cutaway shader (`voxel_pull.wgsl` collapses +Y quads on the cut inside the
-//! home region): their cell is solid, so the plane covers it.
+//! home region): their cell is solid, so the plane covers it. Ceilings (-Y
+//! faces of blocks above the cut) lying on the plane are collapsed too, in
+//! every pass: they belong to cut-away rock, and drawn as back-face caps they
+//! would roof over every dug room the plane leaves open.
 //!
 //! The ids texture is rebuilt (whole: 128 KiB at 256 m regions) only when the
 //! level, the home region or the mirror changes ([`needs_rebuild`]). Commander
