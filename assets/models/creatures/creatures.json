@@ -2017,6 +2017,83 @@
    }
   }
  },
+ "armadillo_giant": {
+  "name": "giant armadillo",
+  "status": "draft",
+  "model": "models/creatures/armadillo_giant.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -5,
+    0,
+    -16
+   ],
+   [
+    5,
+    13.5,
+    16.1956
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat"
+  ],
+  "cubes": 11,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.7171,
+    "stride": 4.7886,
+    "speed": 6.6777
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4172,
+    "stride": 10.9202,
+    "speed": 26.175
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 5.2154
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5867
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.4563
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.3038
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.2154
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 7.823
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.5646
+   }
+  }
+ },
  "armadillo_man": {
   "name": "armadillo man",
   "status": "draft",
@@ -2712,6 +2789,83 @@
   "name": "giant badger",
   "status": "draft",
   "model": "models/creatures/badger,_giant.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -6.5,
+    0,
+    -20
+   ],
+   [
+    6.5,
+    17,
+    14.2941
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.827,
+    "stride": 5.7,
+    "speed": 6.8924
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4962,
+    "stride": 13.555,
+    "speed": 27.3175
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 5.5136
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6892
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.4824
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.3784
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.5136
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.2704
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.9298
+   }
+  }
+ },
+ "badger_giant": {
+  "name": "giant badger",
+  "status": "draft",
+  "model": "models/creatures/badger_giant.bbmodel",
   "template": "quadruped",
   "bounds": [
    [
@@ -8842,6 +8996,97 @@
    }
   }
  },
+ "bird_penguin_giant": {
+  "name": "giant penguin",
+  "status": "draft",
+  "model": "models/creatures/bird_penguin_giant.bbmodel",
+  "template": "bird",
+  "bounds": [
+   [
+    -11.5,
+    0,
+    -18
+   ],
+   [
+    11.5,
+    46,
+    13
+   ]
+  ],
+  "budget": {
+   "cubes": 20,
+   "bones": 10
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 12,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.9083,
+    "stride": 4.9448,
+    "speed": 5.444
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.5995,
+    "stride": 10.3339,
+    "speed": 17.2375
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 7.2664
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.9083
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.6358
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.8166
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 7.2664
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 10.8995
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 2.1799
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.4533,
+    "stride": 4.9448,
+    "speed": 3.4025
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.2707,
+    "stride": 2.4724,
+    "speed": 1.0888
+   }
+  }
+ },
  "bird_penguin_little": {
   "name": "little penguin",
   "status": "draft",
@@ -13138,6 +13383,150 @@
    }
   }
  },
+ "capuchin_man": {
+  "name": "capuchin man",
+  "status": "draft",
+  "model": "models/creatures/capuchin_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -6,
+    0,
+    -4
+   ],
+   [
+    6,
+    24.5,
+    9.0711
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 13,
+  "bones": 9,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8084,
+    "stride": 8.332,
+    "speed": 10.3068
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.494,
+    "stride": 20.3933,
+    "speed": 41.282
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3.5927
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.4491
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.3144
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.0778
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 3.5927
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 5.389
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.4371
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 0.8982
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 0.8982
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.6287
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.0778
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.8084,
+    "stride": 6.7631,
+    "speed": 8.3661
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.0778
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.0778
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.5389
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.4371
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.7185
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.2574
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.7185
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 0.8982
+   }
+  }
+ },
  "capybara": {
   "name": "capybara",
   "status": "draft",
@@ -13233,6 +13622,97 @@
   "name": "giant capybara",
   "status": "draft",
   "model": "models/creatures/capybara,_giant.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -9,
+    0,
+    -26.5
+   ],
+   [
+    9,
+    28.5,
+    15.5
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 8,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.2608,
+    "stride": 7.7153,
+    "speed": 6.1194
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.7416,
+    "stride": 18.1009,
+    "speed": 24.4079
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 7.4162
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.8158
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.5191
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.4832
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.933
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.8994
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 2.3732
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 2.0172,
+    "stride": 7.7153,
+    "speed": 3.8248
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 3.1519,
+    "stride": 3.8577,
+    "speed": 1.2239
+   }
+  }
+ },
+ "capybara_giant": {
+  "name": "giant capybara",
+  "status": "draft",
+  "model": "models/creatures/capybara_giant.bbmodel",
   "template": "quadruped",
   "bounds": [
    [
@@ -28390,6 +28870,95 @@
    }
   }
  },
+ "giant_capuchin": {
+  "name": "giant capuchin",
+  "status": "draft",
+  "model": "models/creatures/giant_capuchin.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -3,
+    0,
+    -11.5
+   ],
+   [
+    3,
+    20.116,
+    20.4234
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "pick_up",
+   "carry"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.6892,
+    "stride": 8.0548,
+    "speed": 11.6871
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4135,
+    "stride": 18.6302,
+    "speed": 45.0549
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4.8244
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6203
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.4824
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.3784
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.5136
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.2704
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.7919
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.3784
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.6892,
+    "stride": 8.0548,
+    "speed": 11.6871
+   }
+  }
+ },
  "giant_cardinal": {
   "name": "giant cardinal",
   "status": "draft",
@@ -31412,6 +31981,95 @@
    }
   }
  },
+ "giant_gray_langur": {
+  "name": "giant gray langur",
+  "status": "draft",
+  "model": "models/creatures/giant_gray_langur.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -4,
+    0,
+    -11
+   ],
+   [
+    4,
+    23.9264,
+    22.6654
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "pick_up",
+   "carry"
+  ],
+  "cubes": 13,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.9186,
+    "stride": 9.2058,
+    "speed": 10.0215
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.5144,
+    "stride": 23.3405,
+    "speed": 45.3743
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4.899
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6124
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.4287
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2247
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4.899
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 7.3485
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.8371
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.2247
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.9186,
+    "stride": 9.2058,
+    "speed": 10.0215
+   }
+  }
+ },
  "giant_great_horned_owl": {
   "name": "giant great horned owl",
   "status": "draft",
@@ -32826,6 +33484,150 @@
    }
   }
  },
+ "giant_kangaroo": {
+  "name": "giant kangaroo",
+  "status": "draft",
+  "model": "models/creatures/giant_kangaroo.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -12.5,
+    0,
+    -14.5
+   ],
+   [
+    12.5,
+    61,
+    32.3686
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 16,
+  "bones": 9,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.0144,
+    "stride": 14.3648,
+    "speed": 14.1609
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.6521,
+    "stride": 31.5,
+    "speed": 48.3055
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 5.7966
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.7246
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.5072
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.739
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.7966
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.6948
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 2.3186
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1.4491
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1.4491
+   },
+   "build": {
+    "loop": "loop",
+    "length": 1.0144
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.739
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.0144,
+    "stride": 11.5768,
+    "speed": 11.4124
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.739
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.739
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.8695
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 2.3186
+   },
+   "swing": {
+    "loop": "once",
+    "length": 1.1593
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 2.0288
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 1.1593
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1.4491
+   }
+  }
+ },
  "giant_kea": {
   "name": "giant kea",
   "status": "draft",
@@ -34114,6 +34916,95 @@
    }
   }
  },
+ "giant_macaque_rhesus": {
+  "name": "giant rhesus macaque",
+  "status": "draft",
+  "model": "models/creatures/giant_macaque_rhesus.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -4.5,
+    0,
+    -12.5
+   ],
+   [
+    4.5,
+    20,
+    18.884
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "pick_up",
+   "carry"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.805,
+    "stride": 9.5385,
+    "speed": 11.8491
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.483,
+    "stride": 22.0621,
+    "speed": 45.6772
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 5.3666
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6708
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.4696
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.3416
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.3666
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.0498
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.8783
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.3416
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.805,
+    "stride": 9.5385,
+    "speed": 11.8491
+   }
+  }
+ },
  "giant_magpie": {
   "name": "giant magpie",
   "status": "draft",
@@ -34210,6 +35101,95 @@
    "land": {
     "loop": "once",
     "length": 1.3349
+   }
+  }
+ },
+ "giant_mandrill": {
+  "name": "giant mandrill",
+  "status": "draft",
+  "model": "models/creatures/giant_mandrill.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -6,
+    0,
+    -22
+   ],
+   [
+    6,
+    28,
+    13.2321
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "pick_up",
+   "carry"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.0607,
+    "stride": 11.2673,
+    "speed": 10.6225
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.594,
+    "stride": 27.6226,
+    "speed": 46.5028
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 5.6569
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.7778
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.495
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.4142
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.6569
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.4853
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 2.1213
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.4142
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 1.0607,
+    "stride": 11.2673,
+    "speed": 10.6225
    }
   }
  },
@@ -37656,6 +38636,83 @@
    "land": {
     "loop": "once",
     "length": 1.7312
+   }
+  }
+ },
+ "giant_spider_monkey": {
+  "name": "giant spider monkey",
+  "status": "draft",
+  "model": "models/creatures/giant_spider_monkey.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -3.5,
+    0,
+    -11.5
+   ],
+   [
+    3.5,
+    35.1981,
+    20.516
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat"
+  ],
+  "cubes": 9,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.0733,
+    "stride": 11.714,
+    "speed": 10.914
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.6172,
+    "stride": 29.6197,
+    "speed": 47.9904
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 5.3666
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6708
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.4696
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.3416
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.3666
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.0498
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 2.0125
    }
   }
  },
@@ -42669,6 +43726,150 @@
    }
   }
  },
+ "gray_langur_man": {
+  "name": "gray langur man",
+  "status": "draft",
+  "model": "models/creatures/gray_langur_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -6.5,
+    0,
+    -3
+   ],
+   [
+    6.5,
+    24.5,
+    12.253
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 13,
+  "bones": 9,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8282,
+    "stride": 8.7457,
+    "speed": 10.5599
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.5061,
+    "stride": 21.4058,
+    "speed": 42.2956
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3.6808
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.4601
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.3221
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.1042
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 3.6808
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 5.5212
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.4723
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 0.9202
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 0.9202
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.6441
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.1042
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.8282,
+    "stride": 7.0989,
+    "speed": 8.5715
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.1042
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.1042
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.5521
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.4723
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.7362
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.2883
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.7362
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 0.9202
+   }
+  }
+ },
  "great_horned_owl_man": {
   "name": "great horned owl man",
   "status": "draft",
@@ -45142,6 +46343,95 @@
   "name": "giant honey badger",
   "status": "draft",
   "model": "models/creatures/honey_badger,_giant.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -6,
+    0,
+    -19
+   ],
+   [
+    6,
+    17.2475,
+    15.4428
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "pick_up",
+   "carry"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8485,
+    "stride": 6,
+    "speed": 7.0713
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.5091,
+    "stride": 14.2684,
+    "speed": 28.0267
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 5.6569
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6364
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.495
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.4142
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.6569
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.4853
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.9799
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.4142
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.8485,
+    "stride": 6,
+    "speed": 7.0713
+   }
+  }
+ },
+ "honey_badger_giant": {
+  "name": "giant honey badger",
+  "status": "draft",
+  "model": "models/creatures/honey_badger_giant.bbmodel",
   "template": "quadruped",
   "bounds": [
    [
@@ -47860,6 +49150,150 @@
    "cower": {
     "loop": "loop",
     "length": 1
+   }
+  }
+ },
+ "kangaroo_man": {
+  "name": "kangaroo man",
+  "status": "draft",
+  "model": "models/creatures/kangaroo_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -8,
+    0,
+    -9
+   ],
+   [
+    8,
+    36,
+    21.7535
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 14,
+  "bones": 9,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.9203,
+    "stride": 10.7985,
+    "speed": 11.7337
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.5624,
+    "stride": 26.4301,
+    "speed": 46.9952
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4.09
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5113
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.3579
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.227
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4.09
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6.135
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.636
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 1.0225
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 1.0225
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.7158
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.227
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.9203,
+    "stride": 8.7651,
+    "speed": 9.5242
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.227
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.227
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6135
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.636
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.818
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.4315
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.818
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 1.0225
    }
   }
  },
@@ -51440,6 +52874,150 @@
    }
   }
  },
+ "macaque_rhesus_man": {
+  "name": "rhesus macaque man",
+  "status": "draft",
+  "model": "models/creatures/macaque_rhesus_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -6,
+    0,
+    -3
+   ],
+   [
+    6,
+    23.5,
+    7.6569
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 14,
+  "bones": 9,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8111,
+    "stride": 8.3883,
+    "speed": 10.3419
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4957,
+    "stride": 20.5311,
+    "speed": 41.4184
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3.6048
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.4506
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.3154
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.0814
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 3.6048
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 5.4072
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.4419
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 0.9012
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 0.9012
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.6308
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.0814
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.8111,
+    "stride": 6.8088,
+    "speed": 8.3946
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.0814
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.0814
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.5407
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.4419
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.721
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.2617
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.721
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 0.9012
+   }
+  }
+ },
  "maggot_purring": {
   "name": "purring maggot",
   "status": "draft",
@@ -51710,6 +53288,150 @@
     "length": 0.75,
     "stride": 5.6337,
     "speed": 7.5115
+   }
+  }
+ },
+ "mandrill_man": {
+  "name": "mandrill man",
+  "status": "draft",
+  "model": "models/creatures/mandrill_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -6.5,
+    0,
+    -5.5
+   ],
+   [
+    6.5,
+    25,
+    3.7678
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 13,
+  "bones": 9,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8361,
+    "stride": 8.9139,
+    "speed": 10.6613
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.511,
+    "stride": 21.8176,
+    "speed": 42.6958
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3.716
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.4645
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.3252
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.1148
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 3.716
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 5.574
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.4864
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 0.929
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 0.929
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.6503
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.1148
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.8361,
+    "stride": 7.2355,
+    "speed": 8.6538
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.1148
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.1148
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.5574
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.4864
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.7432
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.3006
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.7432
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 0.929
    }
   }
  },
@@ -53877,6 +55599,88 @@
   "name": "giant moose",
   "status": "draft",
   "model": "models/creatures/moose,_giant.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -22,
+    0,
+    -46
+   ],
+   [
+    22,
+    74,
+    26.7321
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "ridden"
+  ],
+  "cubes": 19,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.8385,
+    "stride": 22.4764,
+    "speed": 12.2254
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.9899,
+    "stride": 61.7076,
+    "speed": 62.3372
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 7.0711
+   },
+   "attack": {
+    "loop": "once",
+    "length": 1.2021
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.495
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.4142
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.6569
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.4853
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 3.1113
+   },
+   "ridden": {
+    "loop": "loop",
+    "length": 4.2426
+   }
+  }
+ },
+ "moose_giant": {
+  "name": "giant moose",
+  "status": "draft",
+  "model": "models/creatures/moose_giant.bbmodel",
   "template": "quadruped",
   "bounds": [
    [
@@ -57365,6 +59169,83 @@
    }
   }
  },
+ "panda_gigantic": {
+  "name": "gigantic panda",
+  "status": "draft",
+  "model": "models/creatures/panda_gigantic.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -11,
+    0,
+    -32
+   ],
+   [
+    11,
+    40,
+    20.5634
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 1.6263,
+    "stride": 10.489,
+    "speed": 6.4496
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.9192,
+    "stride": 26.3328,
+    "speed": 28.6475
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 7.0711
+   },
+   "attack": {
+    "loop": "once",
+    "length": 1.0607
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.495
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.4142
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.6569
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.4853
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 3.1113
+   }
+  }
+ },
  "panda_man": {
   "name": "panda man",
   "status": "draft",
@@ -58018,6 +59899,164 @@
    }
   }
  },
+ "penguin_man": {
+  "name": "penguin man",
+  "status": "draft",
+  "model": "models/creatures/penguin_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -6,
+    0,
+    -5.5
+   ],
+   [
+    6,
+    23.5,
+    3
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 11,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8093,
+    "stride": 8.3509,
+    "speed": 10.3187
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4946,
+    "stride": 20.4394,
+    "speed": 41.3252
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3.5968
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.4496
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.3147
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.079
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 3.5968
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 5.3951
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.4387
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 0.8992
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 0.8992
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.6294
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.079
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.8093,
+    "stride": 6.7784,
+    "speed": 8.3757
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.079
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.079
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.5395
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.4387
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.7194
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.2589
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.7194
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 0.8992
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2948,
+    "stride": 8.3509,
+    "speed": 6.4496
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.0232,
+    "stride": 4.1754,
+    "speed": 2.0638
+   }
+  }
+ },
  "peregrine_falcon_man": {
   "name": "peregrine falcon man",
   "status": "draft",
@@ -58500,6 +60539,97 @@
   "name": "giant platypus",
   "status": "draft",
   "model": "models/creatures/platypus,_giant.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -7,
+    0,
+    -15
+   ],
+   [
+    7,
+    10,
+    15.9181
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "swim",
+   "swim_idle"
+  ],
+  "cubes": 8,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.7778,
+    "stride": 4,
+    "speed": 5.1427
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4808,
+    "stride": 8.8916,
+    "speed": 18.4934
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 5.6569
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6364
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.495
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.4142
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.6569
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 8.4853
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.9799
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2445,
+    "stride": 4,
+    "speed": 3.2141
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 1.9445,
+    "stride": 2,
+    "speed": 1.0285
+   }
+  }
+ },
+ "platypus_giant": {
+  "name": "giant platypus",
+  "status": "draft",
+  "model": "models/creatures/platypus_giant.bbmodel",
   "template": "quadruped",
   "bounds": [
    [
@@ -61039,6 +63169,83 @@
   "name": "giant red panda",
   "status": "draft",
   "model": "models/creatures/red_panda,_giant.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -4,
+    0,
+    -12
+   ],
+   [
+    4,
+    17,
+    19
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8222,
+    "stride": 4.5069,
+    "speed": 5.4815
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4807,
+    "stride": 10.67,
+    "speed": 22.1967
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 5.0596
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.5692
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.4427
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.2649
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 5.0596
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 7.5895
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.8974
+   }
+  }
+ },
+ "red_panda_giant": {
+  "name": "giant red panda",
+  "status": "draft",
+  "model": "models/creatures/red_panda_giant.bbmodel",
   "template": "quadruped",
   "bounds": [
    [
@@ -66422,6 +68629,150 @@
    "eat": {
     "loop": "loop",
     "length": 1.5
+   }
+  }
+ },
+ "spider_monkey_man": {
+  "name": "spider monkey man",
+  "status": "draft",
+  "model": "models/creatures/spider_monkey_man.bbmodel",
+  "template": "biped",
+  "bounds": [
+   [
+    -6,
+    0,
+    -3
+   ],
+   [
+    6,
+    24,
+    13.3137
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat",
+   "mine",
+   "chop",
+   "build",
+   "craft",
+   "carry",
+   "pick_up",
+   "put_down",
+   "sit",
+   "drink",
+   "swing",
+   "shoot",
+   "cheer",
+   "cower"
+  ],
+  "cubes": 13,
+  "bones": 9,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8173,
+    "stride": 8.5169,
+    "speed": 10.4207
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.4994,
+    "stride": 20.8456,
+    "speed": 41.7414
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 3.6323
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.454
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.3178
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1.0897
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 3.6323
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 5.4485
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.4529
+   },
+   "mine": {
+    "loop": "loop",
+    "length": 0.9081
+   },
+   "chop": {
+    "loop": "loop",
+    "length": 0.9081
+   },
+   "build": {
+    "loop": "loop",
+    "length": 0.6357
+   },
+   "craft": {
+    "loop": "loop",
+    "length": 1.0897
+   },
+   "carry": {
+    "loop": "loop",
+    "length": 0.8173,
+    "stride": 6.9131,
+    "speed": 8.4585
+   },
+   "pick_up": {
+    "loop": "once",
+    "length": 1.0897
+   },
+   "put_down": {
+    "loop": "once",
+    "length": 1.0897
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.5448
+   },
+   "drink": {
+    "loop": "loop",
+    "length": 1.4529
+   },
+   "swing": {
+    "loop": "once",
+    "length": 0.7265
+   },
+   "shoot": {
+    "loop": "once",
+    "length": 1.2713
+   },
+   "cheer": {
+    "loop": "loop",
+    "length": 0.7265
+   },
+   "cower": {
+    "loop": "loop",
+    "length": 0.9081
    }
   }
  },
