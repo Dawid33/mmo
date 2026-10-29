@@ -376,3 +376,49 @@ fn dig_box_down_to_bedrock_skips_bedrock() {
         assert_eq!(block_at(&region, p), expect, "{p:?}");
     }
 }
+
+fn pick_solid(cells: &[TilePos]) -> impl Fn(TilePos) -> bool {
+    let set: BTreeSet<TilePos> = cells.iter().copied().collect();
+    move |p| set.contains(&p)
+}
+
+fn straight_down() -> (rapier3d::math::Vector, rapier3d::math::Vector) {
+    let s = BLOCK_VOXELS as f32;
+    (
+        rapier3d::math::Vector::new(3.5 * s, 40.0 * s, 3.5 * s),
+        rapier3d::math::Vector::new(0.0, -1.0, 0.0),
+    )
+}
+
+#[test]
+fn pick_hits_rock_cap_on_the_level() {
+    let (o, d) = straight_down();
+    assert_eq!(pick_level_cell(o, d, 10, pick_solid(&[[3, 10, 3]])), Some([3, 10, 3]));
+}
+
+#[test]
+fn pick_sees_the_floor_below_an_air_cell() {
+    let (o, d) = straight_down();
+    assert_eq!(pick_level_cell(o, d, 10, pick_solid(&[[3, 9, 3]])), Some([3, 10, 3]));
+}
+
+#[test]
+fn pick_clamps_open_space_to_the_level() {
+    use rapier3d::math::Vector;
+    let s = BLOCK_VOXELS as f32;
+    let pitch = 55.0_f32.to_radians();
+    let d = Vector::new(pitch.cos(), -pitch.sin(), 0.0);
+    let o = Vector::new(0.5 * s, 40.0 * s, 3.5 * s);
+    let t = (10.0 * s - o.y) / d.y;
+    let x = ((o.x + d.x * t) / s).floor() as i32;
+    assert_eq!(pick_level_cell(o, d, 10, pick_solid(&[])), Some([x, 10, 3]));
+}
+
+#[test]
+fn pick_ignores_blocks_above_the_cut() {
+    let (o, d) = straight_down();
+    assert_eq!(
+        pick_level_cell(o, d, 10, pick_solid(&[[3, 11, 3], [3, 10, 3]])),
+        Some([3, 10, 3])
+    );
+}

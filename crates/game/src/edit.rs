@@ -199,51 +199,8 @@ impl Rollback {
         self.raycast_block_in(origin, dir, reach)
     }
 
-    fn raycast_block_in(
-        &self,
-        origin: Vector,
-        dir: Vector,
-        reach: f32,
-    ) -> Option<BlockHit> {
-        let size = BLOCK_VOXELS as f32;
-        let p = [origin.x / size, origin.y / size, origin.z / size];
-        let d = [dir.x, dir.y, dir.z];
-        let mut cell = [p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32];
-        let mut step = [0i32; 3];
-        let mut t_max = [f32::INFINITY; 3];
-        let mut t_delta = [f32::INFINITY; 3];
-        for a in 0..3 {
-            if d[a] > 0.0 {
-                step[a] = 1;
-                t_delta[a] = 1.0 / d[a];
-                t_max[a] = (cell[a] as f32 + 1.0 - p[a]) / d[a];
-            } else if d[a] < 0.0 {
-                step[a] = -1;
-                t_delta[a] = -1.0 / d[a];
-                t_max[a] = (p[a] - cell[a] as f32) / -d[a];
-            }
-        }
-        let mut normal = [0i32; 3];
-        loop {
-            if self.block_solid(cell) {
-                return Some(BlockHit { block: cell, normal });
-            }
-            // Fixed tie order (x, then y, then z) keeps the walk deterministic.
-            let mut axis = 0;
-            if t_max[1] < t_max[axis] {
-                axis = 1;
-            }
-            if t_max[2] < t_max[axis] {
-                axis = 2;
-            }
-            if t_max[axis] > reach {
-                return None;
-            }
-            cell[axis] += step[axis];
-            normal = [0; 3];
-            normal[axis] = -step[axis];
-            t_max[axis] += t_delta[axis];
-        }
+    fn raycast_block_in(&self, origin: Vector, dir: Vector, reach: f32) -> Option<BlockHit> {
+        raycast_blocks(origin, dir, reach, |p| self.block_solid(p))
     }
 
     /// True if any non-fixed body's collider overlaps block `pos`. Keeps a
@@ -454,5 +411,62 @@ impl Rollback {
                 self.set_block_in(target, Block::new(PLACE_BLOCK))
             }
         }
+    }
+}
+
+/// Pure Amanatides–Woo walk of the block grid from `origin` along `dir` (sim
+/// units, `dir` normalised): the first block `solid` accepts within `reach`
+/// blocks. Ties step x, then y, then z, so the walk is deterministic.
+pub fn raycast_blocks(
+    origin: Vector,
+    dir: Vector,
+    reach: f32,
+    solid: impl Fn(BlockPos) -> bool,
+) -> Option<BlockHit> {
+    let size = BLOCK_VOXELS as f32;
+    let p = [origin.x / size, origin.y / size, origin.z / size];
+    let d = [dir.x, dir.y, dir.z];
+    let mut cell = [
+        p[0].floor() as i32,
+        p[1].floor() as i32,
+        p[2].floor() as i32,
+    ];
+    let mut step = [0i32; 3];
+    let mut t_max = [f32::INFINITY; 3];
+    let mut t_delta = [f32::INFINITY; 3];
+    for a in 0..3 {
+        if d[a] > 0.0 {
+            step[a] = 1;
+            t_delta[a] = 1.0 / d[a];
+            t_max[a] = (cell[a] as f32 + 1.0 - p[a]) / d[a];
+        } else if d[a] < 0.0 {
+            step[a] = -1;
+            t_delta[a] = -1.0 / d[a];
+            t_max[a] = (p[a] - cell[a] as f32) / -d[a];
+        }
+    }
+    let mut normal = [0i32; 3];
+    loop {
+        if solid(cell) {
+            return Some(BlockHit {
+                block: cell,
+                normal,
+            });
+        }
+        // Fixed tie order (x, then y, then z) keeps the walk deterministic.
+        let mut axis = 0;
+        if t_max[1] < t_max[axis] {
+            axis = 1;
+        }
+        if t_max[2] < t_max[axis] {
+            axis = 2;
+        }
+        if t_max[axis] > reach {
+            return None;
+        }
+        cell[axis] += step[axis];
+        normal = [0; 3];
+        normal[axis] = -step[axis];
+        t_max[axis] += t_delta[axis];
     }
 }

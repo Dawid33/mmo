@@ -8,11 +8,12 @@
 
 use std::collections::BTreeMap;
 
-use crate::edit::BlockPos;
+use crate::edit::{raycast_blocks, BlockPos};
 use crate::{
     Block, BlockId, ClientId, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback,
-    CHUNK_BLOCKS, REGION_CHUNKS,
+    BLOCK_VOXELS, CHUNK_BLOCKS, REGION_CHUNKS, UNDERGROUND_DEPTH,
 };
+use rapier3d::math::Vector;
 use state_hash::StateHash;
 
 /// Region-local block coordinates `[x, y, z]`.
@@ -393,4 +394,54 @@ impl Rollback {
             GameDataUpdateKind::SetConstructed(changes),
         ));
     }
+}
+
+/// DF's "tile under the cursor at the working level": the ray (region-local
+/// sim units, `dir` normalised) is cut at the top of `level`
+/// (`y = (level + 1) * BLOCK_VOXELS`) and walked down. A hit on `level` is
+/// that cell, a hit on `level - 1` is the floor shown at `level`, anything
+/// deeper or nothing is open space, clamped to the level where the ray
+/// crosses `y = level * BLOCK_VOXELS`. `None` for a ray that points up or
+/// runs parallel to the cut.
+pub fn pick_level_cell(
+    origin: Vector,
+    dir: Vector,
+    level: i32,
+    solid: impl Fn(TilePos) -> bool,
+) -> Option<TilePos> {
+    let size = BLOCK_VOXELS as f32;
+    let cut_y = (level + 1) as f32 * size;
+    if dir.y >= 0.0 {
+        return None;
+    }
+    let t = (cut_y - origin.y) / dir.y;
+    if t < 0.0 {
+        // Camera already below the cut: start from the camera.
+        return pick_from(origin, dir, level, solid);
+    }
+    let start = Vector::new(origin.x + dir.x * t, cut_y, origin.z + dir.z * t);
+    pick_from(start, dir, level, solid)
+}
+
+fn pick_from(
+    start: Vector,
+    dir: Vector,
+    level: i32,
+    solid: impl Fn(TilePos) -> bool,
+) -> Option<TilePos> {
+    let size = BLOCK_VOXELS as f32;
+    // Reach is in blocks (the walk's parameter is in block units).
+    let reach = (level + 1 + UNDERGROUND_DEPTH) as f32;
+    if let Some(hit) = raycast_blocks(start, dir, reach, solid) {
+        if hit.block[1] == level {
+            return Some(hit.block);
+        }
+        if hit.block[1] == level - 1 {
+            return Some([hit.block[0], level, hit.block[2]]);
+        }
+    }
+    // Open space: where the ray crosses the bottom of the level.
+    let t = (level as f32 * size - start.y) / dir.y;
+    let (x, z) = (start.x + dir.x * t, start.z + dir.z * t);
+    Some([(x / size).floor() as i32, level, (z / size).floor() as i32])
 }
