@@ -123,7 +123,9 @@ QUADRUPED_DEFAULTS = {
     "head_up": 2,                # head top above the body top
     "head_overlap": 1,           # head pushed back into the body
     "tail": [2, 7],              # thickness, length
-    "tail_raise": 40,            # degrees above horizontal at rest
+    "tail_raise": 40,            # degrees above horizontal at rest (negative: hanging)
+    "neck": None,                # [thickness, length, raise°]: a neck bone the head hangs
+                                 # from (long-necked grazers); None: head on the body
     # Gaits: cycle seconds and leg swing degrees.
     "walk": {"cycle": 0.8, "swing": 30, "bob": 0.3},
     "run": {"cycle": 0.45, "swing": 50, "bob": 0.8, "pitch": 6},
@@ -155,7 +157,19 @@ def quadruped(p):
         cubes.append((name, name, "legs", [x - lw / 2, 0, z - lw / 2], [x + lw / 2, ll + 1, z + lw / 2]))
     head_top = top + p["head_up"]
     hz = -bl / 2 + p["head_overlap"]
-    cubes.append(("head", "head", "head", [-hw / 2, head_top - hh, hz - hlen], [hw / 2, head_top, hz]))
+    if p["neck"]:
+        # The neck leaves the body's front top, modelled forward and raised by its
+        # rest rotation; the head at its end counter-rotates to stay level.
+        nt, nl, raise_ = p["neck"]
+        py, pz = top - 1, -bl / 2 + p["head_overlap"]
+        bones[2] = ("neck", "body", [0, py, pz], [raise_, 0, 0])
+        bones.insert(3, ("head", "neck", [0, py, pz - nl], [-raise_, 0, 0]))
+        cubes.append(("neck", "neck", "neck", [-nt / 2, py - nt / 2, pz - nl], [nt / 2, py + nt / 2, pz + 1]))
+        hy = py + p["head_up"]
+        cubes.append(("head", "head", "head", [-hw / 2, hy - hh / 2, pz - nl - hlen + 1],
+                      [hw / 2, hy + hh / 2, pz - nl + 1]))
+    else:
+        cubes.append(("head", "head", "head", [-hw / 2, head_top - hh, hz - hlen], [hw / 2, head_top, hz]))
     ty = top - 1
     if tl > 0:
         cubes.append(("tail", "tail", "tail", [-tw / 2, ty - tw / 2, bl / 2 - 1],
@@ -241,7 +255,7 @@ def quadruped_clips(p, model):
         "leg_fr": {"rotation": [(0, [0, 0, 0]), (L * 0.6, [-20, 0, 0]), (L, [-15, 0, 0])]},
         "leg_bl": {"rotation": [(0, [0, 0, 0]), (L * 0.6, [20, 0, 0]), (L, [15, 0, 0])]},
         "leg_br": {"rotation": [(0, [0, 0, 0]), (L * 0.6, [20, 0, 0]), (L, [15, 0, 0])]},
-        "tail": {"rotation": [(0, [0, 0, 0]), (L, [p["tail_raise"], 0, 0])]},
+        "tail": {"rotation": [(0, [0, 0, 0]), (L, [max(0, p["tail_raise"]), 0, 0])]},
     })
 
     # Folded: all four legs swing forward to lie flat under the body (the hind
@@ -256,7 +270,7 @@ def quadruped_clips(p, model):
                                   (period, [head_down, 0, 0])],
                      "position": [(0, [0, -1 if head_down else 0, 0]), (period, [0, -1 if head_down else 0, 0])]},
             "leg_fl": fold, "leg_fr": fold, "leg_bl": fold, "leg_br": fold,
-            "tail": {"rotation": [(0, [p["tail_raise"], 0, 0]), (period, [p["tail_raise"], 0, 0])]},
+            "tail": {"rotation": [(0, [max(0, p["tail_raise"]), 0, 0]), (period, [max(0, p["tail_raise"]), 0, 0])]},
         })
 
     e = p["eat"]
@@ -272,6 +286,14 @@ def quadruped_clips(p, model):
         "leg_fr": {"rotation": [(0, [8, 0, 0]), (L, [8, 0, 0])]},
         "tail": {"rotation": [(0, [0, 6, 0]), (L / 2, [0, -6, 0]), (L, [0, 6, 0])]},
     })
+    if p["neck"]:
+        # Grazing: the neck swings down past horizontal, the head nibbles at its end.
+        down = -(p["neck"][2] + reach)
+        clips["eat"]["tracks"]["neck"] = {"rotation": hold([down, 0, 0], L)}
+        clips["eat"]["tracks"]["head"] = {"rotation": [(t, [-20 + 6 * math.sin(2 * math.pi * t / (L / 4)), 0, 0])
+                                                       for t in frange(0, L, L / 16)]}
+        clips["sleep"]["tracks"]["neck"] = {"rotation": hold([-p["neck"][2] * 0.6, 0, 0], clips["sleep"]["length"])}
+        clips["death"]["tracks"]["neck"] = {"rotation": at(1.0, (0, [0, 0, 0]), (1, [-p["neck"][2] * 0.8, 0, 0]))}
     return clips
 
 
