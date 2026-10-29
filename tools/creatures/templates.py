@@ -661,7 +661,7 @@ BIRD_DEFAULTS = {
     "beak": [1, 1, 2],           # width, height, length (0 length: none)
     "tail": [4, 1, 4],           # width, thickness, length
     "tail_raise": 45,
-    "wing": None,                # [span, chord]; default from the body
+    "wing": None,                # [span, chord]; default from the body; [0, 0]: no wings
     "flier": True,               # the fly set (fly, hover, takeoff, land)
     "brood": False,              # a brood clip, for egg layers in nest boxes
     "walk": {"cycle": 0.7, "swing": 28, "bob": 0.3, "nod": 1.0},
@@ -708,13 +708,15 @@ def bird(p):
             cubes.append((f"foot_{side}", name, "legs", [x - fw / 2, 0, -fl + lw / 2], [x + fw / 2, fh, lw / 2]))
     span, chord = p["wing"] or [bl - 1, bh - 1]
     model = {"bones": bones, "cubes": cubes}
-    add_wings(model, {"at": [-(bw / 2 + 0.5), top - 0.5, -bl / 2 + 1], "span": span, "chord": chord,
-                      "part": "wings"})
+    if span:
+        add_wings(model, {"at": [-(bw / 2 + 0.5), top - 0.5, -bl / 2 + 1], "span": span, "chord": chord,
+                          "part": "wings"})
     return model
 
 
 def bird_required(p):
-    return BIRD_CORE + (WING_CLIPS if p["flier"] else []) + (["brood"] if p["brood"] else [])
+    flies = p["flier"] and (p["wing"] is None or p["wing"][0])
+    return BIRD_CORE + (WING_CLIPS if flies else []) + (["brood"] if p["brood"] else [])
 
 
 def bird_clips(p, model):
@@ -814,7 +816,7 @@ def bird_clips(p, model):
         "tail": {"rotation": hold([10, 0, 0], L)},
     })
 
-    if p["flier"]:
+    if p["flier"] and (p["wing"] is None or p["wing"][0]):
         clips.update(wing_clips(model, p["fly"]))
     return clips
 

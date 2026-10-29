@@ -107,7 +107,12 @@ def build_model(src, params=None):
             model["bones"].append((name, parent, pivot, [rest[0], s * rest[1], s * rest[2]]))
             pivots[name] = pivot
             if "follow" in b:
-                follow[name] = (other_side(b["follow"]) if s < 0 else b["follow"], s)
+                target = b["follow"]
+                if s < 0 and other_side(target) != target:
+                    # A sided target's twin already moves mirror-wise: follow it as is.
+                    follow[name] = (other_side(target), 1)
+                else:
+                    follow[name] = (target, s)
     for i, c in enumerate(src.get("cubes", [])):
         name = c.get("name", f"{c['bone']}_{i}")
         twins = [(name, c["bone"], 1)]
@@ -130,6 +135,10 @@ def build_model(src, params=None):
     if wings:
         model["clips"].update(wing_clips(model, wings))
         model["required"] += [c for c in WING_CLIPS if c not in model["required"]]
+    # Template tracks for bones this creature does not have (a wingless bird).
+    has = {b[0] for b in model["bones"]}
+    for c in model["clips"].values():
+        c["tracks"] = {b: ch for b, ch in c["tracks"].items() if b in has}
     extras = src.get("extras", [])
     model["clips"].update(extra_clips(extras, model, model["clips"]))
     model["required"] += [c for c in extras if c not in model["required"]]
