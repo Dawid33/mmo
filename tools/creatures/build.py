@@ -202,7 +202,11 @@ def scale_model(model, s):
     return out
 
 
-def scale_decals(decals, s, names=None):
+def scale_decals(decals, s, names=None, grow=None):
+    """Decals moved with a face scaled by `s`. Their size grows by `grow` (default `s`):
+    an animal person's head may be several times its animal's, and a 1-texel eye
+    grown as much would cover the face."""
+    grow = s if grow is None else grow
     out = []
     for d in decals:
         if names is not None and d["cube"] not in names:
@@ -211,7 +215,7 @@ def scale_decals(decals, s, names=None):
         for key in ("x", "y"):
             d[key] = int(math.floor(d[key] * s + 0.5))
         for key in ("w", "h"):
-            d[key] = max(1, int(round(d.get(key, 1) * s)))
+            d[key] = max(1, int(round(d.get(key, 1) * grow)))
         out.append(d)
     return out
 
@@ -410,7 +414,7 @@ def animal_person(src):
     palette.update(src.get("palette", {}))
     names = {c[0] for c in model["cubes"]}
     out = {"name": src["name"], "status": src.get("status", "draft"), "template": "biped",
-           "palette": palette, "decals": scale_decals(base_src.get("decals", []), k, names) + src.get("decals", [])}
+           "palette": palette, "decals": scale_decals(base_src.get("decals", []), k, names, grow=min(k, 2)) + src.get("decals", [])}
     size = src.get("size", PERSON_SIZE)
     s = min(1.5, max(0.7, (size / PERSON_SIZE) ** (1 / 3)))
     return out, grounded(scale_model(model, s) if abs(s - 1) > 0.02 else model)
