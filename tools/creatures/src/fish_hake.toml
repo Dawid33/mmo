@@ -1,0 +1,77 @@
+# DF FISH_HAKE (vermin, ocean): 0.2 kg, "an oceanic fish". Vermin form: `move` + `death` only (vermin have no attack clip). An elongated
+# silver-grey fish with a dark back, a short first dorsal and a long second one.
+name = "hake"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+]
+
+[proportions]
+body = [1.5, 1.75, 5]
+head = [1.5, 1.75, 1.5]
+legs = 0
+move = "swim"
+cycle = 0.5
+
+# Body pivot: its centre; the body spans y -0.875..0.875, z -2.5..2.5.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -0.875..0.875, z -1.5..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 2.5]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.25, -0.75, 0]
+to = [0.25, 0.75, 1]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.25, 0.875, -1.75]
+to = [0.25, 1.375, -1]
+
+[[cubes]]
+name = "fin_l"
+bone = "body"
+part = "fins"
+from = [-1.5, -0.625, -2.25]
+to = [-0.75, -0.375, -1.25]
+mirror = true
+
+[[cubes]]
+name = "dorsal_2"
+bone = "body"
+part = "fins"
+from = [-0.25, 0.875, -0.5]
+to = [0.25, 1.25, 2.25]
+
+[palette]
+eye = "#101010"
+body = "#9a9ea2"
+body_up = "#5a6068"
+body_down = "#e4e4de"
+head = "#90959a"
+head_up = "#555b63"
+fins = "#6e737a"
+inside = "#2a2a30"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.5
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.125, value = [0, 25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.25, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.375, value = [0, -25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.5, value = [0, 0, 0] },
+]

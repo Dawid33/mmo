@@ -1,0 +1,43 @@
+# DF ANT (vermin, soil colonies): 0.001 kg, "this tiny insect can be found in huge
+# colonies in the dirt". Vermin form: `move` + `death` only (vermin have no attack clip). Head, thorax (the vermin body) and a big gaster
+# behind it, antennae; the legs slab stands in for six legs. Dark red-brown. (DF gives it
+# wings for its flying castes; the worker form here has none.)
+name = "ant"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+]
+
+[proportions]
+body = [1, 1, 1.5]
+head = [1.25, 1, 1.25]
+legs = 0.5
+move = "scurry"
+cycle = 0.25
+
+# Body pivot: its centre (y 1); the thorax spans y -0.5..0.5, z -0.75..0.75. The head's
+# pivot is the thorax's front (the head spans y -0.5..0.5, z -1.25..0).
+[[cubes]]
+name = "gaster"
+bone = "body"
+part = "body"
+from = [-0.75, -0.5, 0.75]
+to = [0.75, 0.75, 2.75]
+
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "legs"
+from = [-0.625, 0.5, -1.75]
+to = [-0.375, 0.75, -0.75]
+mirror = true
+
+[palette]
+body = "#4a2a1e"
+body_up = "#3a2018"
+head = "#40241a"
+legs = "#2a1a14"
+eye = "#0a0808"

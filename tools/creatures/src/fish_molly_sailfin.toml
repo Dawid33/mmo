@@ -1,0 +1,72 @@
+# DF FISH_MOLLY_SAILFIN (vermin, coastal rivers/temperate lakes): 0.2 kg, "a tiny
+# spotted fish". Vermin form: `move` + `death` only (vermin have no attack clip). The male's tall sail-like dorsal (spotted), a silver-green
+# spotted body and an orange-edged tail.
+name = "sailfin molly"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 0, y = 0, colour = "eye" },
+  { cube = "dorsal", face = "west", x = 0, y = 0, colour = "dot" },
+  { cube = "dorsal", face = "west", x = 2, y = 1, colour = "dot" },
+  { cube = "dorsal", face = "east", x = 2, y = 0, colour = "dot" },
+  { cube = "dorsal", face = "east", x = 0, y = 1, colour = "dot" },
+  { cube = "body", face = "west", x = 1, y = 0, colour = "spot" },
+  { cube = "body", face = "east", x = 1, y = 1, colour = "spot" },
+  { cube = "body", face = "west", x = 2, y = 1, colour = "spot" },
+  { cube = "body", face = "east", x = 0, y = 0, colour = "spot" },
+]
+
+[proportions]
+body = [1, 1.5, 3]
+head = [1, 1.25, 0.75]
+legs = 0
+move = "swim"
+cycle = 0.4
+
+# Body pivot: its centre; the body spans y -0.75..0.75, z -1.5..1.5.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -0.75..0.5, z -0.75..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 1.5]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "tail"
+from = [-0.25, -0.75, 0]
+to = [0.25, 0.75, 1.25]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.25, 0.75, -1]
+to = [0.25, 2.25, 1.5]
+
+[palette]
+eye = "#101010"
+body = "#9faa82"
+body_up = "#6e7a58"
+body_down = "#dcdcc4"
+head = "#94a07a"
+fins = "#8ca07a"
+tail = "#d8a040"
+spot = "#e8902a"
+dot = "#3a4430"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.4
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.1, value = [0, 25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.2, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.3, value = [0, -25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+]

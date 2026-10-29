@@ -1,0 +1,69 @@
+# DF FISH_FLOUNDER (vermin, coastal mud/ponds): 0.2 kg, "a small flat fish found in the
+# muddy bottom of coastal run-offs and ponds". Vermin form: `move` + `death` only (vermin have no attack clip). A flatfish lying on its
+# blind side: mottled brown on top, white below, both eyes on top, a fin fringe round
+# the edges, a horizontal tail.
+name = "flounder"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "up", x = 1, y = 0, colour = "eye" },
+  { cube = "head", face = "up", x = 2, y = 1, colour = "eye" },
+  { cube = "body", face = "up", x = 0, y = 1, colour = "mottle" },
+  { cube = "body", face = "up", x = 2, y = 0, colour = "pale" },
+  { cube = "body", face = "up", x = 1, y = 3, colour = "mottle" },
+  { cube = "body", face = "up", x = 2, y = 2, colour = "mottle" },
+  { cube = "body", face = "up", x = 0, y = 4, colour = "pale" },
+]
+
+[proportions]
+body = [3, 0.75, 4.5]
+head = [2.25, 0.75, 1.5]
+legs = 0
+move = "swim"
+cycle = 0.7
+
+# Body pivot: its centre; the body spans y -0.375..0.375, z -2.25..2.25.
+# The head's pivot is the body's front (the head spans y -0.375..0.375, z -1.5..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 2.25]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-1.25, -0.375, 0]
+to = [1.25, -0.125, 1.5]
+
+[[cubes]]
+name = "fringe_l"
+bone = "body"
+part = "fins"
+from = [-2, -0.375, -1.75]
+to = [-1.5, -0.125, 2]
+mirror = true
+
+[palette]
+eye = "#101010"
+body = "#8a7558"
+body_down = "#ece8de"
+head = "#82704f"
+head_down = "#ece8de"
+fins = "#9a8664"
+mottle = "#5e4c36"
+pale = "#b8a684"
+
+# The tail fin beats up and down (+X: the +Z tail goes down).
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.7
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.175, value = [20, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.35, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.525, value = [-20, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+]

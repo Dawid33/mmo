@@ -1,0 +1,85 @@
+# DF FISH_RATFISH_SPOTTED (vermin, muddy shallows): 0.2 kg, "a small, shark-like
+# creature ... its skin sparkles and it has a venomous spine". Vermin form: `move` + `death` only (vermin have no attack clip). A chimaera:
+# big head with large green eyes, broad wing-like pectorals, a tall venom spine in front
+# of the dorsal, and a long tapering rat tail. Silvery bronze with white spots.
+name = "spotted ratfish"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  { cube = "body", face = "west", x = 1, y = 0, colour = "spot" },
+  { cube = "body", face = "west", x = 3, y = 1, colour = "spot" },
+  { cube = "body", face = "east", x = 2, y = 0, colour = "spot" },
+  { cube = "body", face = "east", x = 0, y = 1, colour = "spot" },
+  { cube = "body", face = "up", x = 0, y = 1, colour = "spot" },
+  { cube = "body", face = "up", x = 1, y = 3, colour = "spot" },
+]
+
+[proportions]
+body = [1.5, 2, 3.5]
+head = [1.5, 2, 1.5]
+legs = 0
+move = "swim"
+cycle = 0.7
+
+# Body pivot: its centre; the body spans y -1..1, z -1.75..1.75.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -1..1, z -1.5..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 1.75]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.25, -0.25, 0]
+to = [0.25, 0.25, 3]
+
+[[cubes]]
+name = "spine"
+bone = "body"
+part = "spine"
+from = [-0.125, 1, -1.5]
+to = [0.125, 2.25, -1.25]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.25, 1, -1.25]
+to = [0.25, 1.75, 0]
+
+[[cubes]]
+name = "pec_l"
+bone = "body"
+part = "fins"
+from = [-2.5, -0.75, -1.5]
+to = [-0.75, -0.5, 0.5]
+mirror = true
+
+[palette]
+eye = "#2fae6a"
+body = "#a08e7a"
+body_up = "#7a6a58"
+body_down = "#e0d8cc"
+head = "#988674"
+fins = "#7a6e64"
+spine = "#e8e2d8"
+spot = "#f4f0e8"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.7
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.175, value = [0, 25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.35, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.525, value = [0, -25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+]

@@ -1,0 +1,82 @@
+# DF FISH_TROUT_RAINBOW (vermin, temperate rivers/lakes): 0.2 kg, "a medium-sized spotted fish found in temperate rivers and lakes". Vermin form: `move` + `death` only (vermin have no attack clip).
+# Olive back, a broad pink stripe along each flank, black spots on back, sides and tail.
+name = "rainbow trout"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  { cube = "body", face = "west", x = 0, y = 1, w = 5, h = 1, colour = "stripe" },
+  { cube = "body", face = "east", x = 0, y = 1, w = 5, h = 1, colour = "stripe" },
+  { cube = "body", face = "up", x = 0, y = 0, colour = "spot" },
+  { cube = "body", face = "up", x = 1, y = 2, colour = "spot" },
+  { cube = "body", face = "up", x = 0, y = 4, colour = "spot" },
+  { cube = "body", face = "west", x = 1, y = 0, colour = "spot" },
+  { cube = "body", face = "west", x = 3, y = 0, colour = "spot" },
+  { cube = "body", face = "east", x = 1, y = 0, colour = "spot" },
+  { cube = "body", face = "east", x = 3, y = 0, colour = "spot" },
+  { cube = "tail_fin", face = "west", x = 0, y = 0, colour = "spot" },
+  { cube = "tail_fin", face = "east", x = 1, y = 1, colour = "spot" },
+]
+
+[proportions]
+body = [1.5, 2, 5]
+head = [1.25, 1.75, 1.5]
+legs = 0
+move = "swim"
+cycle = 0.5
+
+# Body pivot: its centre; the body spans y -1..1, z -2.5..2.5.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -1..0.75, z -1.5..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 2.5]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.25, -1, 0]
+to = [0.25, 1, 1.5]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.25, 1, -1]
+to = [0.25, 1.75, 0.5]
+
+[[cubes]]
+name = "fin_l"
+bone = "body"
+part = "fins"
+from = [-1.5, -0.75, -2.25]
+to = [-0.75, -0.5, -1.25]
+mirror = true
+
+[palette]
+eye = "#101010"
+body = "#b8b490"
+body_up = "#5e6a46"
+body_down = "#ecebe0"
+head = "#a8a684"
+head_up = "#56623f"
+fins = "#8e8a6c"
+stripe = "#d8708a"
+spot = "#2a2a22"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.5
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.125, value = [0, 25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.25, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.375, value = [0, -25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.5, value = [0, 0, 0] },
+]

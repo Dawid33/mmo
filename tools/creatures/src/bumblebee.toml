@@ -1,0 +1,42 @@
+# DF BUMBLEBEE (vermin, hive colonies): 0.001 kg, "a small woolly insect that lives in
+# hive colonies". Vermin form: `move` + `death` only (vermin have no attack clip). A round fuzzy body banded yellow, black, yellow and a
+# white tail, a black head, two fluttering grey wings (the template's [span, chord]).
+# The sting is rarely used and not drawn.
+name = "bumblebee"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "body", face = "west", x = 1, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "east", x = 1, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "west", x = 2, y = 0, w = 1, h = 2, colour = "tail" },
+  { cube = "body", face = "east", x = 0, y = 0, w = 1, h = 2, colour = "tail" },
+  { cube = "body", face = "up", x = 0, y = 1, w = 2, h = 1, colour = "band" },
+  { cube = "body", face = "up", x = 0, y = 2, w = 2, h = 1, colour = "tail" },
+  { cube = "body", face = "south", x = 0, y = 0, w = 2, h = 2, colour = "tail" },
+]
+
+[proportions]
+body = [2, 2, 3]
+head = [1.25, 1.25, 0.75]
+legs = 0
+wings = [1.75, 1.5]
+move = "flutter"
+cycle = 0.1
+
+# Body pivot: its centre; the body spans y -1..1, z -1.5..1.5.
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "head"
+from = [-0.5, 0.75, -1.25]
+to = [-0.25, 1, -0.5]
+mirror = true
+
+[palette]
+body = "#e8c030"
+head = "#1c1a18"
+wings = "#c8d0d8"
+band = "#1c1a18"
+tail = "#f0ece0"
+eye = "#050505"

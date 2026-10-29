@@ -1,0 +1,85 @@
+# DF FISH_LUNGFISH (vermin, tropical inland waters, AMPHIBIOUS): 0.2 kg, "a small fish
+# which can walk on the land and breathe air". Vermin form: `move` + `death` only (vermin have no attack clip). (no swim/swim_idle extras:
+# the vermin form has a single move loop). An eel-ish grey-brown spotted body with a fin
+# fold to the pointed tail, and thread-like paired fins (front and rear) it walks on.
+name = "lungfish"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  { cube = "body", face = "up", x = 0, y = 1, colour = "spot" },
+  { cube = "body", face = "up", x = 1, y = 3, colour = "spot" },
+  { cube = "body", face = "west", x = 1, y = 0, colour = "spot" },
+  { cube = "body", face = "west", x = 3, y = 1, colour = "spot" },
+  { cube = "body", face = "east", x = 3, y = 0, colour = "spot" },
+  { cube = "body", face = "east", x = 1, y = 1, colour = "spot" },
+]
+
+[proportions]
+body = [1.25, 1.25, 5]
+head = [1.25, 1.25, 1.25]
+legs = 0
+move = "swim"
+cycle = 0.7
+
+# Body pivot: its centre; the body spans y -0.625..0.625, z -2.5..2.5.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -0.625..0.625, z -1.25..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 2.5]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.25, -0.5, 0]
+to = [0.25, 0.5, 1.5]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.25, 0.625, 0.5]
+to = [0.25, 0.875, 2.5]
+
+[[cubes]]
+name = "thread_l"
+bone = "body"
+part = "fins"
+from = [-1.75, -0.625, -2]
+to = [-0.625, -0.375, -1.75]
+mirror = true
+
+[[cubes]]
+name = "rthread_l"
+bone = "body"
+part = "fins"
+from = [-1.75, -0.625, 0.75]
+to = [-0.625, -0.375, 1]
+mirror = true
+
+[palette]
+eye = "#101010"
+body = "#7a705c"
+body_up = "#5c5444"
+body_down = "#b8ad92"
+head = "#72684f"
+fins = "#8a7f68"
+spot = "#3a3428"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.7
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.175, value = [0, 25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.35, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.525, value = [0, -25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+]

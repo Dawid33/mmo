@@ -1,0 +1,49 @@
+# DF HONEY_BEE (vermin, hive colonies): 0.001 kg, "a small flying insect that lives in
+# large colonies. It has a powerful stinger on its tail". Vermin form: `move` + `death` only (vermin have no attack clip). A slimmer
+# golden-brown body with dark bands, a dark head, two fluttering clear-grey wings, the
+# stinger as a small cube.
+name = "honey bee"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "body", face = "west", x = 1, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "east", x = 1, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "up", x = 0, y = 1, w = 2, h = 1, colour = "band" },
+  { cube = "body", face = "west", x = 2, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "east", x = 0, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "up", x = 0, y = 2, w = 2, h = 1, colour = "band" },
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 0, y = 0, colour = "eye" },
+]
+
+[proportions]
+body = [1.25, 1.25, 3]
+head = [1, 1, 0.75]
+legs = 0
+wings = [1.5, 1.25]
+move = "flutter"
+cycle = 0.1
+
+# Body pivot: its centre; the body spans y -0.625..0.625, z -1.5..1.5.
+[[cubes]]
+name = "sting"
+bone = "body"
+part = "head"
+from = [-0.125, -0.25, 1.5]
+to = [0.125, 0, 2]
+
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "head"
+from = [-0.5, 0.375, -1.25]
+to = [-0.25, 0.625, -0.5]
+mirror = true
+
+[palette]
+body = "#c8902a"
+head = "#2e2418"
+wings = "#dce4ec"
+band = "#2a2016"
+eye = "#050505"

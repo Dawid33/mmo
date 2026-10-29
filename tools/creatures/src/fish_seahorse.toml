@@ -1,0 +1,95 @@
+# DF FISH_SEAHORSE (vermin, coral reefs): 0.2 kg, "a tiny, curved and colorful fish".
+# Vermin form: `move` + `death` only (vermin have no attack clip). Upright: the trunk is the vermin body (the template's head would sit
+# low in front, so it is off and the head is a custom `head` bone on top of the trunk,
+# pitched forward, with a tube snout and a little crown), the tail curls back along the
+# ground, a small dorsal fin on the back. Orange-yellow with darker rings.
+name = "seahorse"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  { cube = "body", face = "west", x = 0, y = 1, w = 2, h = 1, colour = "ring" },
+  { cube = "body", face = "east", x = 0, y = 1, w = 2, h = 1, colour = "ring" },
+  { cube = "body", face = "north", x = 0, y = 1, w = 2, h = 1, colour = "ring" },
+  { cube = "tail_1", face = "up", x = 0, y = 0, colour = "ring" },
+]
+
+[proportions]
+body = [1.25, 2.5, 1.5]
+head = [0, 0, 0]
+legs = 0
+move = "swim"
+cycle = 2
+
+# Body pivot: its centre (y 1.25); the trunk spans y -1.25..1.25, z -0.75..0.75.
+# The head bone sits on the trunk's top, pitched 15 degrees nose-down.
+[[bones]]
+name = "head"
+parent = "body"
+pivot = [0, 1.25, -0.25]
+rest = [-15, 0, 0]
+
+[[cubes]]
+name = "head"
+bone = "head"
+part = "head"
+from = [-0.625, 0, -0.75]
+to = [0.625, 1.25, 0.75]
+
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-0.25, 0.25, -1.75]
+to = [0.25, 0.75, -0.75]
+
+[[cubes]]
+name = "crown"
+bone = "head"
+part = "fins"
+from = [-0.25, 1.25, -0.25]
+to = [0.25, 1.75, 0.25]
+
+[[cubes]]
+name = "tail_1"
+bone = "body"
+part = "body"
+from = [-0.375, -1.25, 0.75]
+to = [0.375, -0.75, 2]
+
+[[cubes]]
+name = "tail_2"
+bone = "body"
+part = "body"
+from = [-0.375, -0.75, 1.5]
+to = [0.375, 0, 2]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.125, -0.25, 0.75]
+to = [0.125, 0.5, 1.25]
+
+[palette]
+body = "#e8a030"
+body_up = "#e8a030"
+head = "#e09a2c"
+fins = "#f0c870"
+ring = "#b86a1a"
+eye = "#101010"
+
+# On top of the swim sway it bobs gently up and down.
+[clips.move]
+merge = true
+mode = "loop"
+length = 2
+keys = [
+  { bone = "root", channel = "position", time = 0, value = [0, 0, 0] },
+  { bone = "root", channel = "position", time = 0.5, value = [0, 0.5, 0] },
+  { bone = "root", channel = "position", time = 1, value = [0, 0, 0] },
+  { bone = "root", channel = "position", time = 1.5, value = [0, 0.5, 0] },
+  { bone = "root", channel = "position", time = 2, value = [0, 0, 0] },
+]

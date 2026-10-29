@@ -1,0 +1,64 @@
+# DF FISH_LAMPREY_BROOK (vermin, brooks): 0.2 kg, "a small, jawless, filter-feeding
+# fish". Vermin form: `move` + `death` only (vermin have no attack clip). Eel-like: a long thin body, a low fin fold toward the tail, no
+# paired fins, a round sucker mouth (decal) and a row of gill pores behind the eye.
+name = "brook lamprey"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "north", x = 0, y = 0, colour = "mouth" },
+]
+
+[proportions]
+body = [0.75, 0.75, 5.5]
+head = [0.75, 0.75, 1]
+legs = 0
+move = "swim"
+cycle = 0.6
+
+# Body pivot: its centre; the body spans y -0.375..0.375, z -2.75..2.75.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -0.375..0.375, z -1..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 2.75]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.25, -0.375, 0]
+to = [0.25, 0.375, 1]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.25, 0.375, 0.5]
+to = [0.25, 0.625, 2.75]
+
+[palette]
+eye = "#101010"
+body = "#7c7058"
+body_up = "#5e5442"
+body_down = "#c2b89a"
+head = "#746850"
+fins = "#8a7e64"
+mouth = "#3a2a24"
+pore = "#2e2820"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.6
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.15, value = [0, 30, 0] },
+  { bone = "tail", channel = "rotation", time = 0.3, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.45, value = [0, -30, 0] },
+  { bone = "tail", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+]

@@ -1,0 +1,78 @@
+# DF FISH_BULLHEAD_BLACK (vermin, inland waters): 0.2 kg, "a small whiskered fish found in inland waters". Vermin form: `move` + `death` only (vermin have no attack clip).
+# A bullhead catfish: broad flat head, four barbels as two whisker cubes either side of
+# the mouth plus a chin pair, a rounded tail and a small dorsal.
+name = "black bullhead"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+]
+
+[proportions]
+body = [1.75, 1.5, 4]
+head = [2, 1.5, 1.5]
+legs = 0
+move = "swim"
+cycle = 0.6
+
+# Body pivot: its centre; the body spans y -0.75..0.75, z -2..2.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -0.75..0.75, z -1.5..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 2]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.25, -0.75, 0]
+to = [0.25, 0.75, 1.25]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.25, 0.75, -1]
+to = [0.25, 1.5, 0]
+
+[[cubes]]
+name = "barbel_l"
+bone = "head"
+part = "barbel"
+from = [-1.75, -0.25, -1.75]
+to = [-0.75, 0, -1.25]
+mirror = true
+
+[[cubes]]
+name = "chin"
+bone = "head"
+part = "barbel"
+from = [-0.5, -0.75, -1.75]
+to = [0.5, -0.5, -1.25]
+
+[palette]
+eye = "#c8b060"
+body = "#2f2d28"
+body_up = "#22201c"
+body_down = "#b5ae8e"
+head = "#2a2824"
+head_down = "#b5ae8e"
+fins = "#24221e"
+barbel = "#1a1816"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.6
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.15, value = [0, 25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.3, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.45, value = [0, -25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+]

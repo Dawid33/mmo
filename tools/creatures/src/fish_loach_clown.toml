@@ -1,0 +1,83 @@
+# DF FISH_LOACH_CLOWN (vermin, inland waters): 0.2 kg, "a tiny orange-striped fish".
+# Vermin form: `move` + `death` only (vermin have no attack clip). Orange with three broad black bands (through the eye, mid-body, and
+# before the tail) and red fins; mouth barbels as a small cube.
+name = "clown loach"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  { cube = "head", face = "west", x = 1, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "head", face = "east", x = 0, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "west", x = 2, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "east", x = 2, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "west", x = 4, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "east", x = 0, y = 0, w = 1, h = 2, colour = "band" },
+]
+
+[proportions]
+body = [1.25, 1.75, 4.5]
+head = [1.25, 1.5, 1.25]
+legs = 0
+move = "swim"
+cycle = 0.5
+
+# Body pivot: its centre; the body spans y -0.875..0.875, z -2.25..2.25.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -0.875..0.625, z -1.25..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 2.25]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.25, -0.875, 0]
+to = [0.25, 0.875, 1.25]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.25, 0.875, -0.75]
+to = [0.25, 1.625, 0.5]
+
+[[cubes]]
+name = "fin_l"
+bone = "body"
+part = "fins"
+from = [-1.375, -0.625, -2]
+to = [-0.625, -0.375, -1]
+mirror = true
+
+[[cubes]]
+name = "barbels"
+bone = "head"
+part = "barbel"
+from = [-0.5, -0.875, -1.5]
+to = [0.5, -0.625, -1.25]
+
+[palette]
+eye = "#101010"
+body = "#e8862a"
+body_down = "#f0b060"
+head = "#e07e26"
+fins = "#d8402a"
+band = "#1c1a18"
+barbel = "#c87030"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.5
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.125, value = [0, 25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.25, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.375, value = [0, -25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.5, value = [0, 0, 0] },
+]

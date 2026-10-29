@@ -1,0 +1,78 @@
+# DF FISH_RAY_BAT (vermin, muddy coasts): 0.2 kg, "a medium-sized, winged fish". Vermin form: `move` + `death` only (vermin have no attack clip).
+# A flat body with broad pointed wings on bones that undulate, the bat ray's raised
+# head, a long thin whip tail. Dark brown-black above, white below. The template's
+# swim yaw stays (it reads as gliding).
+name = "bat ray"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "up", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "up", x = 1, y = 0, colour = "eye" },
+]
+
+[proportions]
+body = [2, 0.75, 3]
+head = [1.5, 1, 1]
+legs = 0
+move = "swim"
+cycle = 1.2
+
+# Body pivot: its centre; the body spans y -0.375..0.375, z -1.5..1.5.
+# Wing bones sit on the body's sides at its centre; the tail bone at its rear.
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 1.5]
+
+[[bones]]
+name = "wing_l"
+parent = "body"
+pivot = [-1, 0, 0]
+mirror = true
+
+[[cubes]]
+name = "tail_whip"
+bone = "tail"
+part = "tail"
+from = [-0.25, -0.375, 0]
+to = [0.25, -0.125, 4]
+
+[[cubes]]
+name = "wing_l"
+bone = "wing_l"
+part = "body"
+from = [-2.5, -0.25, -1.25]
+to = [0, 0.25, 1.25]
+mirror = true
+
+[palette]
+eye = "#101010"
+body = "#4a4038"
+body_down = "#ece8e2"
+head = "#433a32"
+head_down = "#ece8e2"
+tail = "#3a322c"
+
+# The wings undulate (+Z lowers the left wing, -Z the right) and the tail sways.
+[clips.move]
+merge = true
+mode = "loop"
+length = 1.2
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.3, value = [0, 0, 20] },
+  { bone = "wing_l", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0.9, value = [0, 0, -20] },
+  { bone = "wing_l", channel = "rotation", time = 1.2, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.3, value = [0, 0, -20] },
+  { bone = "wing_r", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0.9, value = [0, 0, 20] },
+  { bone = "wing_r", channel = "rotation", time = 1.2, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.3, value = [0, 15, 0] },
+  { bone = "tail", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.9, value = [0, -15, 0] },
+  { bone = "tail", channel = "rotation", time = 1.2, value = [0, 0, 0] },
+]

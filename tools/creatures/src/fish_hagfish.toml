@@ -1,0 +1,71 @@
+# DF FISH_HAGFISH (vermin, deep ocean): 0.2 kg, "a small, spineless, eel-like fish that
+# lives on the bottom of the ocean". Vermin form: `move` + `death` only (vermin have no attack clip). Pinkish-grey, a long thin body with a
+# fin fold only round the tail, barbels round the mouth, eyes only vestigial (none
+# drawn).
+name = "hagfish"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "north", x = 0, y = 0, colour = "mouth" },
+]
+
+[proportions]
+body = [1, 1, 6]
+head = [1, 1, 1]
+legs = 0
+move = "swim"
+cycle = 0.7
+
+# Body pivot: its centre; the body spans y -0.5..0.5, z -3..3.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -0.5..0.5, z -1..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 3]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.25, -0.5, 0]
+to = [0.25, 0.75, 1]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.25, 0.5, 1.5]
+to = [0.25, 0.75, 3]
+
+[[cubes]]
+name = "barbel_l"
+bone = "head"
+part = "barbel"
+from = [-0.75, -0.5, -1.5]
+to = [-0.25, -0.25, -1]
+mirror = true
+
+[palette]
+eye = "#101010"
+body = "#b8908a"
+body_up = "#9c7670"
+body_down = "#d4b8b2"
+head = "#b08680"
+fins = "#c4a29c"
+barbel = "#e0c8c2"
+mouth = "#5a2a2a"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.7
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.175, value = [0, 30, 0] },
+  { bone = "tail", channel = "rotation", time = 0.35, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.525, value = [0, -30, 0] },
+  { bone = "tail", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+]

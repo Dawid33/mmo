@@ -374,6 +374,46 @@
    }
   }
  },
+ "ant": {
+  "name": "ant",
+  "status": "draft",
+  "model": "models/creatures/ant.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1,
+    0,
+    -2.5
+   ],
+   [
+    1,
+    1.75,
+    2.75
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 3,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.25,
+    "stride": 2.25,
+    "speed": 9
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "badger": {
   "name": "badger",
   "status": "draft",
@@ -3924,6 +3964,46 @@
    }
   }
  },
+ "bumblebee": {
+  "name": "bumblebee",
+  "status": "draft",
+  "model": "models/creatures/bumblebee.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -2.7668,
+    0,
+    -2.75
+   ],
+   [
+    2.7668,
+    2.5501,
+    1.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 5,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 4.5,
+    "speed": 7.5
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "bushmaster": {
   "name": "bushmaster",
   "status": "draft",
@@ -6143,6 +6223,46 @@
    }
   }
  },
+ "fish_anchovy": {
+  "name": "anchovy",
+  "status": "draft",
+  "model": "models/creatures/fish_anchovy.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.5,
+    0,
+    -2.75
+   ],
+   [
+    0.5,
+    1.75,
+    2.75
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 4,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 5.25,
+    "speed": 13.125
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "fish_barracuda_great": {
   "name": "great barracuda",
   "status": "draft",
@@ -6263,6 +6383,126 @@
    }
   }
  },
+ "fish_bullhead_black": {
+  "name": "black bullhead",
+  "status": "draft",
+  "model": "models/creatures/fish_bullhead_black.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.75,
+    0,
+    -3.75
+   ],
+   [
+    1.75,
+    2.25,
+    3.25
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 7,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 6,
+    "speed": 10
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_bullhead_brown": {
+  "name": "brown bullhead",
+  "status": "draft",
+  "model": "models/creatures/fish_bullhead_brown.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.75,
+    0,
+    -3.75
+   ],
+   [
+    1.75,
+    2.25,
+    3.25
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 7,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 6,
+    "speed": 10
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_bullhead_yellow": {
+  "name": "yellow bullhead",
+  "status": "draft",
+  "model": "models/creatures/fish_bullhead_yellow.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.75,
+    0,
+    -3.75
+   ],
+   [
+    1.75,
+    2.25,
+    3.25
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 7,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 6,
+    "speed": 10
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "fish_carp": {
   "name": "carp",
   "status": "draft",
@@ -6356,6 +6596,86 @@
     "length": 0.5,
     "stride": 6,
     "speed": 12
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_char": {
+  "name": "char",
+  "status": "draft",
+  "model": "models/creatures/fish_char.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -3.5
+   ],
+   [
+    1.5,
+    2.75,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 6.75,
+    "speed": 13.5
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_clownfish": {
+  "name": "clownfish",
+  "status": "draft",
+  "model": "models/creatures/fish_clownfish.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.375,
+    0,
+    -3.25
+   ],
+   [
+    1.375,
+    2.75,
+    3.25
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 6.75,
+    "speed": 16.875
    },
    "death": {
     "loop": "hold",
@@ -6483,6 +6803,46 @@
    }
   }
  },
+ "fish_flounder": {
+  "name": "flounder",
+  "status": "draft",
+  "model": "models/creatures/fish_flounder.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -2,
+    0,
+    -3.75
+   ],
+   [
+    2,
+    0.75,
+    3.75
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 5,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 6.75,
+    "speed": 9.6429
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "fish_gar_longnose": {
   "name": "longnose gar",
   "status": "draft",
@@ -6543,6 +6903,166 @@
    }
   }
  },
+ "fish_glasseye": {
+  "name": "glasseye",
+  "status": "draft",
+  "model": "models/creatures/fish_glasseye.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -3.25
+   ],
+   [
+    1.5,
+    3.5,
+    3
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 5.25,
+    "speed": 8.75
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_guppy": {
+  "name": "guppy",
+  "status": "draft",
+  "model": "models/creatures/fish_guppy.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.375,
+    0,
+    -2
+   ],
+   [
+    0.375,
+    1.75,
+    3
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 4,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 3.75,
+    "speed": 10.7143
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_hagfish": {
+  "name": "hagfish",
+  "status": "draft",
+  "model": "models/creatures/fish_hagfish.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.75,
+    0,
+    -4.5
+   ],
+   [
+    0.75,
+    1.25,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 9,
+    "speed": 12.8571
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_hake": {
+  "name": "hake",
+  "status": "draft",
+  "model": "models/creatures/fish_hake.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -4
+   ],
+   [
+    1.5,
+    2.25,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 7,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 7.5,
+    "speed": 15
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "fish_halibut": {
   "name": "halibut",
   "status": "draft",
@@ -6599,6 +7119,246 @@
    },
    "flop": {
     "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_herring": {
+  "name": "herring",
+  "status": "draft",
+  "model": "models/creatures/fish_herring.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.5,
+    0,
+    -2.75
+   ],
+   [
+    0.5,
+    2,
+    2.75
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 4,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 5.25,
+    "speed": 13.125
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_knifefish_banded": {
+  "name": "banded knifefish",
+  "status": "draft",
+  "model": "models/creatures/fish_knifefish_banded.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.25,
+    0,
+    -3.25
+   ],
+   [
+    1.25,
+    2,
+    4.25
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 5,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 6.75,
+    "speed": 11.25
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_lamprey_brook": {
+  "name": "brook lamprey",
+  "status": "draft",
+  "model": "models/creatures/fish_lamprey_brook.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.375,
+    0,
+    -3.75
+   ],
+   [
+    0.375,
+    1,
+    3.75
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 4,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 8.25,
+    "speed": 13.75
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_loach_clown": {
+  "name": "clown loach",
+  "status": "draft",
+  "model": "models/creatures/fish_loach_clown.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.375,
+    0,
+    -3.75
+   ],
+   [
+    1.375,
+    2.5,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 7,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 6.75,
+    "speed": 13.5
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_lungfish": {
+  "name": "lungfish",
+  "status": "draft",
+  "model": "models/creatures/fish_lungfish.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.75,
+    0,
+    -3.75
+   ],
+   [
+    1.75,
+    1.5,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 8,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 7.5,
+    "speed": 10.7143
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_mackerel": {
+  "name": "mackerel",
+  "status": "draft",
+  "model": "models/creatures/fish_mackerel.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.375,
+    0,
+    -3.75
+   ],
+   [
+    1.375,
+    2.25,
+    3.75
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 7,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 7.5,
+    "speed": 18.75
+   },
+   "death": {
+    "loop": "hold",
     "length": 0.6
    }
   }
@@ -6723,6 +7483,46 @@
    }
   }
  },
+ "fish_molly_sailfin": {
+  "name": "sailfin molly",
+  "status": "draft",
+  "model": "models/creatures/fish_molly_sailfin.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.5,
+    0,
+    -2.25
+   ],
+   [
+    0.5,
+    3,
+    2.75
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 4,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.4,
+    "stride": 4.5,
+    "speed": 11.25
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "fish_opah": {
   "name": "opah",
   "status": "draft",
@@ -6779,6 +7579,46 @@
    },
    "flop": {
     "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_perch": {
+  "name": "perch",
+  "status": "draft",
+  "model": "models/creatures/fish_perch.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -3.5
+   ],
+   [
+    1.5,
+    3,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 6.75,
+    "speed": 13.5
+   },
+   "death": {
+    "loop": "hold",
     "length": 0.6
    }
   }
@@ -6843,6 +7683,126 @@
    }
   }
  },
+ "fish_puffer_white_spotted": {
+  "name": "white-spotted puffer",
+  "status": "draft",
+  "model": "models/creatures/fish_puffer_white_spotted.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -2,
+    0,
+    -2.5
+   ],
+   [
+    2,
+    3,
+    2.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 4.5,
+    "speed": 7.5
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_ratfish_spotted": {
+  "name": "spotted ratfish",
+  "status": "draft",
+  "model": "models/creatures/fish_ratfish_spotted.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -2.5,
+    0,
+    -3.25
+   ],
+   [
+    2.5,
+    3.25,
+    4.75
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 7,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 5.25,
+    "speed": 7.5
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_ray_bat": {
+  "name": "bat ray",
+  "status": "draft",
+  "model": "models/creatures/fish_ray_bat.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -3.5,
+    0,
+    -2.5
+   ],
+   [
+    3.5,
+    1,
+    5.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 5,
+  "bones": 6,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 1.2,
+    "stride": 4.5,
+    "speed": 3.75
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "fish_ray_manta": {
   "name": "manta ray",
   "status": "draft",
@@ -6903,6 +7863,166 @@
    }
   }
  },
+ "fish_ray_thornback": {
+  "name": "thornback ray",
+  "status": "draft",
+  "model": "models/creatures/fish_ray_thornback.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -3,
+    0,
+    -2.5
+   ],
+   [
+    3,
+    0.75,
+    4.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 6,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 1.2,
+    "stride": 4.5,
+    "speed": 3.75
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_salmon": {
+  "name": "salmon",
+  "status": "draft",
+  "model": "models/creatures/fish_salmon.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -4
+   ],
+   [
+    1.5,
+    2.75,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 7.5,
+    "speed": 15
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_seahorse": {
+  "name": "seahorse",
+  "status": "draft",
+  "model": "models/creatures/fish_seahorse.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.625,
+    0,
+    -2.1345
+   ],
+   [
+    0.625,
+    4.2551,
+    2
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 7,
+  "bones": 3,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 2,
+    "stride": 2.25,
+    "speed": 1.125
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_shad": {
+  "name": "shad",
+  "status": "draft",
+  "model": "models/creatures/fish_shad.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.625,
+    0,
+    -3.25
+   ],
+   [
+    0.625,
+    2.75,
+    3.25
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 4,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 6,
+    "speed": 13.3333
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "fish_skate_common": {
   "name": "common skate",
   "status": "draft",
@@ -6959,6 +8079,46 @@
    },
    "flop": {
     "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_sole": {
+  "name": "sole",
+  "status": "draft",
+  "model": "models/creatures/fish_sole.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.75,
+    0,
+    -4
+   ],
+   [
+    1.75,
+    0.75,
+    3.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 5,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.7,
+    "stride": 7.5,
+    "speed": 10.7143
+   },
+   "death": {
+    "loop": "hold",
     "length": 0.6
    }
   }
@@ -7259,6 +8419,86 @@
    },
    "flop": {
     "loop": "loop",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_trout_rainbow": {
+  "name": "rainbow trout",
+  "status": "draft",
+  "model": "models/creatures/fish_trout_rainbow.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -4
+   ],
+   [
+    1.5,
+    2.75,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 7.5,
+    "speed": 15
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
+ "fish_trout_steelhead": {
+  "name": "steelhead trout",
+  "status": "draft",
+  "model": "models/creatures/fish_trout_steelhead.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -4
+   ],
+   [
+    1.5,
+    2.75,
+    4
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 6,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.5,
+    "stride": 7.5,
+    "speed": 15
+   },
+   "death": {
+    "loop": "hold",
     "length": 0.6
    }
   }
@@ -8764,6 +10004,46 @@
    }
   }
  },
+ "honey_bee": {
+  "name": "honey bee",
+  "status": "draft",
+  "model": "models/creatures/honey_bee.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -2.1456,
+    0,
+    -2.75
+   ],
+   [
+    2.1456,
+    1.7567,
+    2
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 7,
+  "bones": 5,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.6,
+    "stride": 4.5,
+    "speed": 7.5
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "horse": {
   "name": "horse",
   "status": "draft",
@@ -9079,6 +10359,44 @@
    "ridden": {
     "loop": "loop",
     "length": 3
+   }
+  }
+ },
+ "jellyfish_sea_nettle": {
+  "name": "sea nettle jellyfish",
+  "status": "draft",
+  "model": "models/creatures/jellyfish_sea_nettle.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -1.5
+   ],
+   [
+    1.5,
+    5,
+    1.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 5,
+  "bones": 2,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 1.8
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
    }
   }
  },
@@ -10040,6 +11358,46 @@
    }
   }
  },
+ "mussel": {
+  "name": "mussel",
+  "status": "draft",
+  "model": "models/creatures/mussel.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -0.75,
+    0,
+    -1.5
+   ],
+   [
+    0.75,
+    1.5,
+    1.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 3,
+  "bones": 3,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 3,
+    "stride": 4.5,
+    "speed": 1.5
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ },
  "nautilus": {
   "name": "nautilus",
   "status": "draft",
@@ -10337,6 +11695,46 @@
    "roar": {
     "loop": "once",
     "length": 1.2
+   }
+  }
+ },
+ "oyster": {
+  "name": "oyster",
+  "status": "draft",
+  "model": "models/creatures/oyster.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.25,
+    0,
+    -1.5
+   ],
+   [
+    1.25,
+    1.25,
+    1.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 3,
+  "bones": 3,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 3,
+    "stride": 4.5,
+    "speed": 1.5
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
    }
   }
  },
@@ -10729,6 +12127,46 @@
    "eat": {
     "loop": "loop",
     "length": 1
+   }
+  }
+ },
+ "rat": {
+  "name": "rat",
+  "status": "draft",
+  "model": "models/creatures/rat.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.5,
+    0,
+    -4.5
+   ],
+   [
+    1.5,
+    2.75,
+    6.9861
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 7,
+  "bones": 4,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.3,
+    "stride": 6,
+    "speed": 20
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
    }
   }
  },
@@ -13005,6 +14443,46 @@
    "roar": {
     "loop": "once",
     "length": 1.2
+   }
+  }
+ },
+ "termite": {
+  "name": "termite",
+  "status": "draft",
+  "model": "models/creatures/termite.bbmodel",
+  "template": "vermin",
+  "bounds": [
+   [
+    -1.125,
+    0,
+    -3
+   ],
+   [
+    1.125,
+    1.5,
+    1.5
+   ]
+  ],
+  "budget": {
+   "cubes": 8,
+   "bones": 6
+  },
+  "required_clips": [
+   "move",
+   "death"
+  ],
+  "cubes": 5,
+  "bones": 3,
+  "clips": {
+   "move": {
+    "loop": "loop",
+    "length": 0.35,
+    "stride": 4.5,
+    "speed": 12.8571
+   },
+   "death": {
+    "loop": "hold",
+    "length": 0.6
    }
   }
  },

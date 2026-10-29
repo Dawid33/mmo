@@ -1,0 +1,81 @@
+# DF FISH_CLOWNFISH (vermin, tropical ocean): 0.2 kg, "a tiny orange marine fish that
+# lives inside the tentacles of a poisonous invertebrate". Vermin form: `move` + `death` only (vermin have no attack clip). Bright orange
+# with three white bands (behind the eye, mid-body, at the tail), black-edged fins.
+name = "clownfish"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 0, y = 0, colour = "eye" },
+  { cube = "body", face = "west", x = 0, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "east", x = 4, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "west", x = 2, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "east", x = 2, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "west", x = 4, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "east", x = 0, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "up", x = 0, y = 0, w = 2, h = 1, colour = "band" },
+  { cube = "body", face = "up", x = 0, y = 2, w = 2, h = 1, colour = "band" },
+  { cube = "body", face = "up", x = 0, y = 4, w = 2, h = 1, colour = "band" },
+  { cube = "tail_fin", face = "west", x = 1, y = 0, w = 1, h = 2, colour = "edge" },
+  { cube = "tail_fin", face = "east", x = 0, y = 0, w = 1, h = 2, colour = "edge" },
+]
+
+[proportions]
+body = [1.25, 2, 4.5]
+head = [1.25, 1.75, 1]
+legs = 0
+move = "swim"
+cycle = 0.4
+
+# Body pivot: its centre; the body spans y -1..1, z -2.25..2.25.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -1..0.75, z -1..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 2.25]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.25, -0.875, 0]
+to = [0.25, 0.875, 1]
+
+[[cubes]]
+name = "dorsal"
+bone = "body"
+part = "fins"
+from = [-0.25, 1, -1.25]
+to = [0.25, 1.75, 1]
+
+[[cubes]]
+name = "fin_l"
+bone = "body"
+part = "fins"
+from = [-1.375, -0.75, -2]
+to = [-0.625, -0.5, -1]
+mirror = true
+
+[palette]
+eye = "#101010"
+body = "#f07a1a"
+body_down = "#f49a40"
+head = "#ec7418"
+fins = "#e86a14"
+band = "#f6f4ee"
+edge = "#1a1614"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.4
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.1, value = [0, 25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.2, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.3, value = [0, -25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.4, value = [0, 0, 0] },
+]

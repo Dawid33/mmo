@@ -1,0 +1,62 @@
+# DF MUSSEL (vermin, salt and fresh water): 0.2 kg, "a small creature ... that lives in
+# an asymmetrical shell rooted to the bottom". Vermin form: `move` + `death` only (vermin have no attack clip). No head (head = 0): an
+# elongated blue-black shell of two valves, the top one hinged at the rear on a bone so
+# it gapes now and then over orange flesh; brown growth bands as decals.
+name = "mussel"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "valve", face = "up", x = 0, y = 2, w = 2, h = 1, colour = "growth" },
+  { cube = "valve", face = "west", x = 2, y = 0, colour = "growth" },
+  { cube = "valve", face = "east", x = 0, y = 0, colour = "growth" },
+]
+
+[proportions]
+body = [1.5, 0.75, 3]
+head = [0, 0, 0]
+legs = 0
+move = "crawl"
+cycle = 3
+
+# Body pivot: the lower valve's centre; it spans y -0.375..0.375, z -1.5..1.5.
+# The top valve hinges at the rear on the `shell` bone.
+[[bones]]
+name = "shell"
+parent = "body"
+pivot = [0, 0.375, 1.5]
+
+[[cubes]]
+name = "valve"
+bone = "shell"
+part = "shell"
+from = [-0.75, 0, -3]
+to = [0.75, 0.75, 0]
+
+[[cubes]]
+name = "flesh"
+bone = "body"
+part = "flesh"
+from = [-0.5, 0.25, -1.25]
+to = [0.5, 0.375, 1]
+
+[palette]
+body = "#22283a"
+shell = "#262e42"
+shell_up = "#2c3550"
+flesh = "#e0905a"
+growth = "#5a5040"
+
+# Barely moving: the template's slow crawl stretch, and the top valve gapes open
+# (+X lifts its front) once a cycle to show the flesh.
+[clips.move]
+merge = true
+mode = "loop"
+length = 3
+keys = [
+  { bone = "shell", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "shell", channel = "rotation", time = 0.75, value = [0, 0, 0] },
+  { bone = "shell", channel = "rotation", time = 1.5, value = [14, 0, 0] },
+  { bone = "shell", channel = "rotation", time = 2.25, value = [0, 0, 0] },
+  { bone = "shell", channel = "rotation", time = 3, value = [0, 0, 0] },
+]

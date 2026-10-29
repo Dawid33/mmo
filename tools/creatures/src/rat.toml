@@ -1,0 +1,77 @@
+# DF RAT (vermin, everywhere not freezing; on the game's shortlist): 0.3 kg, "a small,
+# intelligent vermin with a long naked tail". Vermin form: `move` + `death` only (vermin have no attack clip). Grey-brown with a paler
+# belly, a pointed snout with a pink nose, round pink-lined ears, the dark legs slab
+# for its feet, and the long pink naked tail on a bone that lashes as it scurries.
+# Bite/scratch: not made.
+name = "rat"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 1, y = 0, colour = "eye" },
+  { cube = "snout", face = "north", x = 0, y = 0, colour = "nose" },
+]
+
+[proportions]
+body = [2, 2, 4]
+head = [1.5, 1.5, 1.75]
+legs = 0.5
+move = "scurry"
+cycle = 0.3
+
+# Body pivot: its centre (y 1.5); the body spans y -1..1, z -2..2. The head's pivot is
+# the body's front (the head spans y -1..0.5, z -1.75..0). The tail droops 8 degrees (here -X lowers it, as the sheet shows).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, -0.25, 2]
+rest = [-8, 0, 0]
+
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-0.5, -1, -2.5]
+to = [0.5, -0.25, -1.75]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ear"
+from = [-0.875, 0.5, -1]
+to = [-0.25, 1.25, -0.75]
+mirror = true
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-0.25, -0.25, 0]
+to = [0.25, 0.25, 5]
+
+[palette]
+body = "#6e625a"
+body_up = "#5e534c"
+body_down = "#a89a8c"
+head = "#665a52"
+head_down = "#a89a8c"
+legs = "#3e3632"
+ear = "#7a6a64"
+ear_north = "#d89a9c"
+tail = "#d4a0a0"
+nose = "#e88a94"
+eye = "#0c0a0a"
+
+# The tail lashes side to side as it scurries.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.3
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.075, value = [0, 18, 0] },
+  { bone = "tail", channel = "rotation", time = 0.15, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.225, value = [0, -18, 0] },
+  { bone = "tail", channel = "rotation", time = 0.3, value = [0, 0, 0] },
+]

@@ -1,0 +1,68 @@
+# DF FISH_KNIFEFISH_BANDED (vermin, tropical rivers/lakes): 0.2 kg, "a small spotted
+# fish". Vermin form: `move` + `death` only (vermin have no attack clip). A deep, knife-shaped body tapering to a thin tail with no
+# dorsal fin; tan with dark bands. Its long anal fin would hang below the belly (the
+# ground line), so it is not made.
+name = "banded knifefish"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "west", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "east", x = 0, y = 0, colour = "eye" },
+  { cube = "body", face = "west", x = 1, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "west", x = 3, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "east", x = 1, y = 0, w = 1, h = 2, colour = "band" },
+  { cube = "body", face = "east", x = 3, y = 0, w = 1, h = 2, colour = "band" },
+]
+
+[proportions]
+body = [1, 2, 4.5]
+head = [1, 1.5, 1]
+legs = 0
+move = "swim"
+cycle = 0.6
+
+# Body pivot: its centre; the body spans y -1..1, z -2.25..2.25.
+# The tail bone sits at the body's rear; the head's pivot is the body's front
+# (the head spans y -1..0.5, z -1..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 2.25]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.25, -0.375, 0]
+to = [0.25, 0.375, 2]
+
+[[cubes]]
+name = "fin_l"
+bone = "body"
+part = "fins"
+from = [-1.25, -0.75, -2]
+to = [-0.5, -0.5, -1]
+mirror = true
+
+[palette]
+eye = "#101010"
+body = "#b59a6e"
+body_up = "#8a7350"
+body_down = "#d7c7a6"
+head = "#a88d62"
+fins = "#c8b48e"
+band = "#4a3a28"
+
+# The tail fin wags harder than the body's swim yaw.
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.6
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.15, value = [0, 25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.3, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.45, value = [0, -25, 0] },
+  { bone = "tail", channel = "rotation", time = 0.6, value = [0, 0, 0] },
+]

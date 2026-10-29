@@ -1,0 +1,76 @@
+# DF JELLYFISH_SEA_NETTLE (vermin, coastal ocean): 0.2 kg, "an invertebrate found off the
+# coast. It has a sting which can be severe". Vermin form: `move` + `death` only (vermin have no attack clip). No head (head = 0). The
+# vermin body is the bundle of maroon tentacles standing on the ground, the amber bell
+# an extra cube on top of it with radiating stripes, two long cream oral arms beside
+# the tentacles. (The legs clearance is not used: its slab would be a wide block.) It
+# `move` replaces the template's crawl: a bell pulse that lifts it a little and lets it
+# sink back (the flutter hover would float it 2-3 units up, out of the sheet's frame).
+# The sting is not made.
+name = "sea nettle jellyfish"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "bell", face = "up", x = 0, y = 1, w = 3, h = 1, colour = "stripe" },
+  { cube = "bell", face = "up", x = 1, y = 0, w = 1, h = 3, colour = "stripe" },
+  { cube = "bell", face = "west", x = 1, y = 0, w = 1, h = 2, colour = "stripe" },
+  { cube = "bell", face = "east", x = 1, y = 0, w = 1, h = 2, colour = "stripe" },
+  { cube = "bell", face = "north", x = 1, y = 0, w = 1, h = 2, colour = "stripe" },
+  { cube = "bell", face = "south", x = 1, y = 0, w = 1, h = 2, colour = "stripe" },
+]
+
+[proportions]
+body = [1.5, 3, 1.5]
+head = [0, 0, 0]
+legs = 0
+move = "crawl"
+cycle = 1.8
+
+# Body pivot: the tentacle bundle's centre (y 1.5); it spans y -1.5..1.5, the bell sits on it.
+[[cubes]]
+name = "bell"
+bone = "body"
+part = "bell"
+from = [-1.5, 1.5, -1.5]
+to = [1.5, 3, 1.5]
+
+[[cubes]]
+name = "cap"
+bone = "body"
+part = "bell"
+from = [-0.75, 3, -0.75]
+to = [0.75, 3.5, 0.75]
+
+[[cubes]]
+name = "arm_l"
+bone = "body"
+part = "arm"
+from = [-1.25, -1.5, -0.25]
+to = [-0.75, 1.5, 0.25]
+mirror = true
+
+[palette]
+body = "#9a3a3a"
+body_up = "#9a3a3a"
+bell = "#e0a858"
+bell_up = "#e8b468"
+bell_down = "#b07a3a"
+arm = "#f0e2c8"
+stripe = "#a8582a"
+
+# The bell squeezes (rising) then relaxes (sinking back).
+[clips.move]
+mode = "loop"
+length = 1.8
+keys = [
+  { bone = "body", channel = "scale", time = 0, value = [1, 1, 1] },
+  { bone = "body", channel = "scale", time = 0.45, value = [0.85, 1.12, 0.85] },
+  { bone = "body", channel = "scale", time = 0.9, value = [1.1, 0.92, 1.1] },
+  { bone = "body", channel = "scale", time = 1.35, value = [1, 1, 1] },
+  { bone = "body", channel = "scale", time = 1.8, value = [1, 1, 1] },
+  { bone = "root", channel = "position", time = 0, value = [0, 0, 0] },
+  { bone = "root", channel = "position", time = 0.45, value = [0, 0.75, 0] },
+  { bone = "root", channel = "position", time = 0.9, value = [0, 1, 0] },
+  { bone = "root", channel = "position", time = 1.35, value = [0, 0.4, 0] },
+  { bone = "root", channel = "position", time = 1.8, value = [0, 0, 0] },
+]

@@ -1,0 +1,65 @@
+# DF FISH_SOLE (vermin, shallow seas): 0.2 kg, "a small flat fish found on the muddy
+# bottom of shallow seas". Vermin form: `move` + `death` only (vermin have no attack clip). An oval flatfish lying on its blind side:
+# grey-brown above with a dark spot on the pectoral, white below, both eyes on top, a
+# fin fringe all round, a short rounded tail.
+name = "sole"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "head", face = "up", x = 0, y = 0, colour = "eye" },
+  { cube = "head", face = "up", x = 1, y = 1, colour = "eye" },
+  { cube = "body", face = "up", x = 0, y = 0, colour = "dark" },
+  { cube = "body", face = "up", x = 2, y = 3, colour = "dark" },
+]
+
+[proportions]
+body = [2.5, 0.75, 5]
+head = [1.75, 0.75, 1.5]
+legs = 0
+move = "swim"
+cycle = 0.7
+
+# Body pivot: its centre; the body spans y -0.375..0.375, z -2.5..2.5.
+# The head's pivot is the body's front (the head spans y -0.375..0.375, z -1.5..0).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 0, 2.5]
+
+[[cubes]]
+name = "tail_fin"
+bone = "tail"
+part = "fins"
+from = [-0.75, -0.375, 0]
+to = [0.75, -0.125, 1]
+
+[[cubes]]
+name = "fringe_l"
+bone = "body"
+part = "fins"
+from = [-1.75, -0.375, -2]
+to = [-1.25, -0.125, 2.25]
+mirror = true
+
+[palette]
+eye = "#101010"
+body = "#7a6a56"
+body_down = "#eeeae2"
+head = "#72624e"
+head_down = "#eeeae2"
+fins = "#6a5c4a"
+dark = "#2a241e"
+
+# The tail fin beats up and down (+X: the +Z tail goes down).
+[clips.move]
+merge = true
+mode = "loop"
+length = 0.7
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.175, value = [20, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.35, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.525, value = [-20, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+]

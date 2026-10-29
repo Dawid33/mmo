@@ -1,0 +1,64 @@
+# DF OYSTER (vermin, sea floor): 0.2 kg, "a small marine creature that lives in a shell
+# rooted to the sea floor". Vermin form: `move` + `death` only (vermin have no attack clip). No head (head = 0): a broad, rough grey shell
+# of two valves, the flatter top one hinged at the rear on a bone so it gapes now and
+# then over the cream flesh; darker ridges as decals.
+name = "oyster"
+template = "vermin"
+status = "draft"
+
+decals = [
+  { cube = "valve", face = "up", x = 0, y = 0, colour = "ridge" },
+  { cube = "valve", face = "up", x = 2, y = 1, colour = "ridge" },
+  { cube = "valve", face = "up", x = 1, y = 2, colour = "ridge" },
+  { cube = "body", face = "west", x = 1, y = 0, colour = "ridge" },
+  { cube = "body", face = "east", x = 1, y = 0, colour = "ridge" },
+]
+
+[proportions]
+body = [2.5, 0.75, 3]
+head = [0, 0, 0]
+legs = 0
+move = "crawl"
+cycle = 3
+
+# Body pivot: the lower valve's centre; it spans y -0.375..0.375, z -1.5..1.5.
+# The top valve hinges at the rear on the `shell` bone.
+[[bones]]
+name = "shell"
+parent = "body"
+pivot = [0, 0.375, 1.375]
+
+[[cubes]]
+name = "valve"
+bone = "shell"
+part = "shell"
+from = [-1.125, 0, -2.75]
+to = [1.125, 0.5, 0]
+
+[[cubes]]
+name = "flesh"
+bone = "body"
+part = "flesh"
+from = [-1, 0.25, -1.25]
+to = [1, 0.375, 1]
+
+[palette]
+body = "#7e786c"
+shell = "#a29c8e"
+shell_up = "#aaa496"
+flesh = "#d8ccb0"
+ridge = "#6a6458"
+
+# Barely moving: the template's slow crawl stretch, and the top valve gapes open
+# (+X lifts its front) once a cycle to show the flesh.
+[clips.move]
+merge = true
+mode = "loop"
+length = 3
+keys = [
+  { bone = "shell", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "shell", channel = "rotation", time = 0.75, value = [0, 0, 0] },
+  { bone = "shell", channel = "rotation", time = 1.5, value = [14, 0, 0] },
+  { bone = "shell", channel = "rotation", time = 2.25, value = [0, 0, 0] },
+  { bone = "shell", channel = "rotation", time = 3, value = [0, 0, 0] },
+]
