@@ -85,8 +85,10 @@ def body_plan(tags):
         plan = "fish"
     elif re.search(r"6LEGS|8LEGS|INSECT|SPIDER|ARACHNID|CRAB|SCORPION", joined):
         plan = "arthropod"
-    elif "SNAKE" in joined or ("LEGS" not in joined and "BASIC_2PARTBODY" in joined and "TAIL" in joined):
-        plan = "serpent"
+    elif "LEGS" not in joined and "FLIPPER" in joined:
+        plan = "fish"  # seals and whales: fish with flukes
+    elif "LEGS" not in joined and "BASIC_1PARTBODY" in joined and "BASIC_HEAD" in joined:
+        plan = "serpent"  # snakes, slugs, leeches (an octopus is a judgement call)
     elif "LEGS" not in joined and "BASIC_1PARTBODY" in joined:
         plan = "blob"
     elif not parts:
