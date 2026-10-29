@@ -355,6 +355,10 @@ def animal_person(src):
             T = c["length"]
             c["tracks"]["tail"] = {"rotation": [(0, [0, 12, 0]), (T / 2, [0, -12, 0]), (T, [0, 12, 0])]}
     model["required"] = t.required(params)
+    # The animal's own extras (its swim, alert, roar…), less riding, plus the source's.
+    extras = [e for e in base_src.get("extras", []) if e != "ridden"] + src.get("extras", [])
+    model["clips"].update(extra_clips(extras, model, model["clips"]))
+    model["required"] += [c for c in extras if c not in model["required"]]
     # A legless person keeps the animal's whole body below the waist.
     budget = {"cubes": 32, "bones": 18} if legless else {}
     model["budget"] = merge(merge(t.budget, budget), src.get("budget", {}))

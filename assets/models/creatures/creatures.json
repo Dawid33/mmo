@@ -729,7 +729,11 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 16,
   "bones": 9,
@@ -827,6 +831,26 @@
    "cower": {
     "loop": "loop",
     "length": 1.2237
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2.4473
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.4684
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.7621,
+    "stride": 15.4652,
+    "speed": 8.7766
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.7532,
+    "stride": 7.7326,
+    "speed": 2.8086
    }
   }
  },
@@ -1291,7 +1315,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 13,
   "bones": 12,
@@ -1389,6 +1415,14 @@
    "cower": {
     "loop": "loop",
     "length": 1.0329
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2.0658
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2395
    }
   }
  },
@@ -2261,7 +2295,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 18,
   "bones": 9,
@@ -2359,6 +2395,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.8913
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2835,
+    "stride": 8.2054,
+    "speed": 6.393
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.0055,
+    "stride": 4.1027,
+    "speed": 2.0457
    }
   }
  },
@@ -3859,7 +3907,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 14,
   "bones": 9,
@@ -3957,6 +4007,14 @@
    "cower": {
     "loop": "loop",
     "length": 1.0522
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2.1044
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2627
    }
   }
  },
@@ -4107,7 +4165,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 14,
   "bones": 9,
@@ -4205,6 +4265,14 @@
    "cower": {
     "loop": "loop",
     "length": 1.1157
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2.2314
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.3388
    }
   }
  },
@@ -4355,7 +4423,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 15,
   "bones": 9,
@@ -4453,6 +4523,14 @@
    "cower": {
     "loop": "loop",
     "length": 1.2237
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2.4473
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.4684
    }
   }
  },
@@ -13285,7 +13363,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 12,
   "bones": 8,
@@ -13383,6 +13463,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.9677
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.3936,
+    "stride": 9.6729,
+    "speed": 6.9409
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.1774,
+    "stride": 4.8364,
+    "speed": 2.2212
    }
   }
  },
@@ -14716,7 +14808,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 14,
   "bones": 9,
@@ -14814,6 +14908,14 @@
    "cower": {
     "loop": "loop",
     "length": 0.9746
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 1.9493
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.1696
    }
   }
  },
@@ -16280,7 +16382,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 15,
   "bones": 9,
@@ -16378,6 +16482,14 @@
    "cower": {
     "loop": "loop",
     "length": 0.9877
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 1.9754
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.1853
    }
   }
  },
@@ -17295,7 +17407,11 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 16,
   "bones": 9,
@@ -17393,6 +17509,26 @@
    "cower": {
     "loop": "loop",
     "length": 1.2247
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2.4495
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.4697
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.7636,
+    "stride": 15.4926,
+    "speed": 8.7846
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.7557,
+    "stride": 7.7463,
+    "speed": 2.811
    }
   }
  },
@@ -18852,7 +18988,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 15,
   "bones": 9,
@@ -18950,6 +19088,14 @@
    "cower": {
     "loop": "loop",
     "length": 0.929
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 1.858
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.1148
    }
   }
  },
@@ -40621,7 +40767,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 12,
   "bones": 9,
@@ -40719,6 +40867,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.8951
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2889,
+    "stride": 8.275,
+    "speed": 6.4202
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.014,
+    "stride": 4.1375,
+    "speed": 2.0544
    }
   }
  },
@@ -42927,7 +43087,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 12,
   "bones": 8,
@@ -43025,6 +43187,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.8911
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2832,
+    "stride": 8.2015,
+    "speed": 6.3915
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.005,
+    "stride": 4.1008,
+    "speed": 2.0453
    }
   }
  },
@@ -44760,7 +44934,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 18,
   "bones": 9,
@@ -44858,6 +45034,18 @@
    "cower": {
     "loop": "loop",
     "length": 1.2247
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.7636,
+    "stride": 15.4926,
+    "speed": 8.7846
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.7557,
+    "stride": 7.7463,
+    "speed": 2.811
    }
   }
  },
@@ -45723,7 +45911,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 14,
   "bones": 9,
@@ -45821,6 +46011,14 @@
    "cower": {
     "loop": "loop",
     "length": 0.9877
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 1.9754
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.1853
    }
   }
  },
@@ -47084,7 +47282,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 14,
   "bones": 9,
@@ -47182,6 +47382,14 @@
    "cower": {
     "loop": "loop",
     "length": 1
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.2
    }
   }
  },
@@ -49013,7 +49221,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 11,
   "bones": 10,
@@ -49111,6 +49321,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.8911
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2832,
+    "stride": 5.5585,
+    "speed": 4.3318
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.005,
+    "stride": 2.7793,
+    "speed": 1.3862
    }
   }
  },
@@ -49388,7 +49610,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 14,
   "bones": 9,
@@ -49486,6 +49710,14 @@
    "cower": {
     "loop": "loop",
     "length": 0.9746
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 1.9493
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.1696
    }
   }
  },
@@ -49624,7 +49856,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 16,
   "bones": 9,
@@ -49722,6 +49956,14 @@
    "cower": {
     "loop": "loop",
     "length": 1.1157
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2.2314
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.3388
    }
   }
  },
@@ -50413,7 +50655,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 13,
   "bones": 9,
@@ -50511,6 +50755,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.9032
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.3006,
+    "stride": 8.4255,
+    "speed": 6.4781
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.0322,
+    "stride": 4.2127,
+    "speed": 2.073
    }
   }
  },
@@ -56800,7 +57056,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 15,
   "bones": 9,
@@ -56898,6 +57156,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.9109
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.3118,
+    "stride": 8.5708,
+    "speed": 6.5336
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.0496,
+    "stride": 4.2854,
+    "speed": 2.0908
    }
   }
  },
@@ -58360,7 +58630,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 12,
   "bones": 9,
@@ -58458,6 +58730,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.8951
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2889,
+    "stride": 8.275,
+    "speed": 6.4202
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.014,
+    "stride": 4.1375,
+    "speed": 2.0544
    }
   }
  },
@@ -58739,7 +59023,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 11,
   "bones": 9,
@@ -58837,6 +59123,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.892
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2844,
+    "stride": 8.2171,
+    "speed": 6.3976
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.0069,
+    "stride": 4.1086,
+    "speed": 2.0472
    }
   }
  },
@@ -59104,7 +59402,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 12,
   "bones": 9,
@@ -59202,6 +59502,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.8925
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2852,
+    "stride": 8.2268,
+    "speed": 6.4012
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.0081,
+    "stride": 4.1134,
+    "speed": 2.0484
    }
   }
  },
@@ -65221,7 +65533,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 13,
   "bones": 9,
@@ -65319,6 +65633,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.9455
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.3615,
+    "stride": 9.2326,
+    "speed": 6.7812
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.1273,
+    "stride": 4.6163,
+    "speed": 2.17
    }
   }
  },
@@ -66288,7 +66614,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 10,
   "bones": 8,
@@ -66386,6 +66714,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.9746
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.4035,
+    "stride": 9.8111,
+    "speed": 6.9904
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.1929,
+    "stride": 4.9055,
+    "speed": 2.237
    }
   }
  },
@@ -67530,7 +67870,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 14,
   "bones": 9,
@@ -67628,6 +67970,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.9109
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.3118,
+    "stride": 8.5708,
+    "speed": 6.5336
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.0496,
+    "stride": 4.2854,
+    "speed": 2.0908
    }
   }
  },
@@ -68481,7 +68835,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 16,
   "bones": 9,
@@ -68579,6 +68935,14 @@
    "cower": {
     "loop": "loop",
     "length": 1.1323
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 2.2645
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.3587
    }
   }
  },
@@ -68820,7 +69184,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "swim",
+   "swim_idle"
   ],
   "cubes": 14,
   "bones": 8,
@@ -68918,6 +69284,18 @@
    "cower": {
     "loop": "loop",
     "length": 0.8913
+   },
+   "swim": {
+    "loop": "loop",
+    "length": 1.2835,
+    "stride": 8.2054,
+    "speed": 6.393
+   },
+   "swim_idle": {
+    "loop": "loop",
+    "length": 2.0055,
+    "stride": 4.1027,
+    "speed": 2.0457
    }
   }
  },
@@ -70683,7 +71061,9 @@
    "swing",
    "shoot",
    "cheer",
-   "cower"
+   "cower",
+   "alert",
+   "roar"
   ],
   "cubes": 14,
   "bones": 9,
@@ -70781,6 +71161,14 @@
    "cower": {
     "loop": "loop",
     "length": 0.9606
+   },
+   "alert": {
+    "loop": "loop",
+    "length": 1.9212
+   },
+   "roar": {
+    "loop": "once",
+    "length": 1.1527
    }
   }
  },
