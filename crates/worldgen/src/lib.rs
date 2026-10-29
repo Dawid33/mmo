@@ -431,7 +431,7 @@ mod tests {
     #[ignore = "slow: >100ms — run via just test-full"]
     fn a_cell_generated_alone_matches_the_whole_region_build() {
         let rc = RegionCoords::new(1, -2);
-        let cc = 8;
+        let cc = (REGION_CHUNKS / 4).max(1); // 8 at 64 blocks / 2-block chunks
         let whole = generate_region(rc, WORLD_SEED, mats());
         let n = (REGION_CHUNKS / cc) as u32;
         for x in 0..n {

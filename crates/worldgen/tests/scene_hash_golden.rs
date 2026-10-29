@@ -44,7 +44,7 @@ fn mats() -> worldgen::material::Materials {
 }
 
 fn default_dials() -> bool {
-    game::REGION_CHUNKS == 32
+    game::REGION_BLOCKS == 64
         && game::CELL_CHUNKS == 0
         && option_env!("VOXEL_ISLAND_CELLS").is_none_or(|v| v.is_empty() || v == "0" || v == "16")
         && std::env::var_os(worldgen::forged::WORLD_FILE_ENV).is_none_or(|v| v.is_empty())

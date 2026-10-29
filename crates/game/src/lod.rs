@@ -1120,13 +1120,16 @@ mod tests {
 
     #[test]
     fn downsample_chunks_places_region_content_in_the_low_corner_rect() {
-        // The region's far-corner chunk — (31, 0, 31) at the default size. At
-        // factor 64 the region spans cells 0..per (16 by default), so that
-        // chunk's far block lands in the last of them.
+        // The region's far-corner SIM chunk (`REGION_CHUNKS - 1` on x and z).
+        // `downsample_chunks` still treats one chunk as one 32-voxel grid
+        // (`BRICK_VOXELS`), so a later task ports it to brick views; until
+        // then the expected footprint is REGION_CHUNKS grids of BRICK_VOXELS.
+        // At factor 64 the region spans cells 0..per (16 at 64 blocks), so
+        // that chunk's far block lands in the last of them.
         let far = crate::REGION_CHUNKS - 1;
         let per = cells_per_region(64);
-        assert_eq!(per, crate::REGION_BRICKS / 2);
-        assert_eq!(cells_per_region(256), crate::REGION_BRICKS / 8);
+        assert_eq!(per, crate::REGION_CHUNKS * crate::BRICK_VOXELS / 64);
+        assert_eq!(cells_per_region(256), crate::REGION_CHUNKS * crate::BRICK_VOXELS / 256);
         let chunks = vec![(ChunkCoords::new(far, 0, far), chunk_with_block([1, 0, 1], 9))];
         let cells = downsample_chunks(chunks, 64);
         assert_eq!(cells.len(), 1);
