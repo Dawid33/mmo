@@ -11,8 +11,37 @@ use crate::registry::BlockId;
 use crate::voxel::{BrickShape, Chunk, Voxel, BRICK_VOXEL_COUNT};
 
 pub const BLOCK_VOXELS: usize = 16; // 1 block = 16³ voxels = 1 m³
-pub const CHUNK_BLOCKS: usize = 2; // blocks per axis of a sim chunk
-pub const CHUNK_BLOCK_COUNT: usize = CHUNK_BLOCKS * CHUNK_BLOCKS * CHUNK_BLOCKS; // = 8
+/// Blocks per axis of a sim chunk — the unit that owns one entity, one rapier
+/// body and one collider set. A BUILD-time dial (`VOXEL_CHUNK_BLOCKS`, set in
+/// `.cargo/config.toml [env]`, `just chunk_blocks=N …`) for the same reason as
+/// `REGION_BLOCKS`: client, server and the wasm LocalServer must agree on it
+/// bit-exactly. Legal values are the powers of two `2..=32` (a chunk edge must
+/// be a whole number of 32-voxel render bricks, i.e. an even block count, and
+/// a `BlockIndex` must fit a `u16`); anything else fails the BUILD.
+pub const CHUNK_BLOCKS: usize = parse_chunk_blocks(option_env!("VOXEL_CHUNK_BLOCKS"));
+
+/// `option_env!` hands over a string; unset or empty means the default.
+const fn parse_chunk_blocks(var: Option<&str>) -> usize {
+    const DEFAULT: usize = 2;
+    let Some(text) = var else { return DEFAULT };
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return DEFAULT;
+    }
+    let mut value = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        assert!(bytes[i].is_ascii_digit(), "VOXEL_CHUNK_BLOCKS must be a number");
+        value = value * 10 + (bytes[i] - b'0') as usize;
+        i += 1;
+    }
+    assert!(
+        value.is_power_of_two() && value >= 2 && value <= 32,
+        "VOXEL_CHUNK_BLOCKS must be a power of two, 2..=32"
+    );
+    value
+}
+pub const CHUNK_BLOCK_COUNT: usize = CHUNK_BLOCKS * CHUNK_BLOCKS * CHUNK_BLOCKS;
 /// Sim-chunk edge in voxels = world units. Not the render brick (`BRICK_VOXELS`).
 pub const CHUNK_UNITS: usize = CHUNK_BLOCKS * BLOCK_VOXELS;
 /// Bricks along one chunk edge.
@@ -433,6 +462,15 @@ mod tests {
     use super::*;
     use crate::registry::BlockId;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn chunk_block_dial_parses() {
+        assert_eq!(parse_chunk_blocks(None), 2);
+        assert_eq!(parse_chunk_blocks(Some("")), 2);
+        assert_eq!(parse_chunk_blocks(Some("16")), 16);
+        assert_eq!(parse_chunk_blocks(Some("32")), 32);
+        assert_eq!(CHUNK_BLOCKS, parse_chunk_blocks(option_env!("VOXEL_CHUNK_BLOCKS")));
+    }
 
     /// A chunk from a linear block list and its chisel map.
     fn chunk_of(blocks: Vec<Block>, chisel: BTreeMap<BlockIndex, ChiselData>) -> Chunk {

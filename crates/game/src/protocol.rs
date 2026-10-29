@@ -49,6 +49,7 @@ pub type EntityId = usize;
 pub const REGION_BLOCKS: usize = parse_region_blocks(option_env!("VOXEL_REGION_BLOCKS"));
 /// Region edge in sim chunks (derived: the sim-chunk columns of a region).
 pub const REGION_CHUNKS: usize = REGION_BLOCKS / CHUNK_BLOCKS;
+const _: () = assert!(REGION_BLOCKS % CHUNK_BLOCKS == 0, "a region must be a whole number of sim chunks");
 /// Region edge in 32-voxel bricks (the LOD / render-brick grid unit).
 pub const REGION_BRICKS: usize = REGION_BLOCKS / BRICK_BLOCKS;
 /// Region edge in world units; a power of two, so exact in f32.
