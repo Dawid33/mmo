@@ -4,3 +4,138 @@ name = "snail man"
 animal_person_of = "snail"
 status = "draft"
 size = 35000
+
+# "A great shell on its back" (the snail's brown spiral shell): the carapace over the back, relative
+# to the torso's pivot (the hips; a person's torso spans y 0..11, z -2.5..2.5).
+[[cubes]]
+name = "shell"
+bone = "torso"
+part = "shell"
+from = [-4, 1, 2.5]
+to = [4, 11, 8.5]
+
+[[decals]]
+cube = "shell"
+face = "west"
+x = 0
+y = 0
+w = 5
+h = 1
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "west"
+x = 0
+y = 7
+w = 5
+h = 1
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "west"
+x = 0
+y = 0
+w = 1
+h = 8
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "west"
+x = 4
+y = 0
+w = 1
+h = 6
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "west"
+x = 2
+y = 2
+w = 2
+h = 1
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "west"
+x = 2
+y = 2
+w = 1
+h = 4
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "west"
+x = 2
+y = 5
+w = 3
+h = 1
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "east"
+x = 0
+y = 0
+w = 5
+h = 1
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "east"
+x = 0
+y = 7
+w = 5
+h = 1
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "east"
+x = 4
+y = 0
+w = 1
+h = 8
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "east"
+x = 0
+y = 0
+w = 1
+h = 6
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "east"
+x = 1
+y = 2
+w = 2
+h = 1
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "east"
+x = 2
+y = 2
+w = 1
+h = 4
+colour = "whorl"
+
+[[decals]]
+cube = "shell"
+face = "east"
+x = 0
+y = 5
+w = 3
+h = 1
+colour = "whorl"

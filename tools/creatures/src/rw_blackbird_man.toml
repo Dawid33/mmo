@@ -4,3 +4,41 @@ name = "red-winged blackbird man"
 animal_person_of = "bird_rw_blackbird"
 status = "draft"
 size = 35025
+
+# The red shoulder epaulets edged yellow (on the bird's wings) on the outside of
+# each upper arm; without them the person is black all over.
+[[decals]]
+cube = "arm_l"
+face = "west"
+x = 0
+y = 0
+w = 2
+h = 2
+colour = "red"
+
+[[decals]]
+cube = "arm_l"
+face = "west"
+x = 0
+y = 2
+w = 2
+h = 1
+colour = "yellow"
+
+[[decals]]
+cube = "arm_r"
+face = "east"
+x = 0
+y = 0
+w = 2
+h = 2
+colour = "red"
+
+[[decals]]
+cube = "arm_r"
+face = "east"
+x = 0
+y = 2
+w = 2
+h = 1
+colour = "yellow"
