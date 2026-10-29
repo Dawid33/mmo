@@ -133,11 +133,20 @@ pub struct CommanderCamera {
     pub pitch: f32,
     /// Space / Shift offset of the focus above `ground_y`, in sim units.
     pub rise: f32,
-    /// Set once the camera has been put over the local body.
+    /// Set once the camera has been put over the local body (cleared again
+    /// when the home region changes, until it is put over the body there).
     pub placed: bool,
     /// The home region's rectangle on the ground (world x, z); `None` until
     /// the first status arrives. The focus is clamped to it.
     pub bounds: Option<Rect>,
+}
+
+impl CommanderCamera {
+    /// Whether the camera has been put over the local body inside `rc`, i.e.
+    /// `rc` is the home and its region is loaded far enough to show the body.
+    pub fn placed_in(&self, rc: game::RegionCoords) -> bool {
+        self.placed && self.bounds == Some(region_rect(rc))
+    }
 }
 
 impl Default for CommanderCamera {
@@ -398,7 +407,18 @@ fn track_home_region(status: Res<super::hud::HudStatus>, mut cam: ResMut<Command
             cam.placed = false;
         }
         cam.bounds = bounds;
-        cam.focus = clamp_focus(cam.focus, bounds);
+        cam.focus = home_change_focus(cam.focus, bounds, cam.placed);
+    }
+}
+
+/// The focus right after the home rect changed to `bounds`: centred on the
+/// new rect while the camera waits for `place_on_body` (a Play, or the first
+/// home), so a travelled-to region is not entered at the edge nearest the old
+/// place; kept (clamped) when the camera is already placed.
+pub fn home_change_focus(focus: Vec2, bounds: Option<Rect>, placed: bool) -> Vec2 {
+    match bounds {
+        Some(rect) if !placed => rect.center(),
+        _ => clamp_focus(focus, bounds),
     }
 }
 
@@ -671,6 +691,27 @@ mod tests {
         let slow = smooth(smooth(0.0, 10.0, 0.5, 0.15), 10.0, 0.5, 0.15);
         assert!((fast - slow).abs() < 1e-3, "60 small steps ≈ 2 big ones: {fast} vs {slow}");
         assert_eq!(smooth(3.0, 7.0, 0.016, 0.0), 7.0, "tau 0 snaps");
+    }
+
+    #[test]
+    fn a_home_change_centres_the_focus_until_the_camera_is_placed() {
+        let old = region_rect(game::RegionCoords { x: 0, z: 0 });
+        let new = region_rect(game::RegionCoords { x: 3, z: -2 });
+        let near_old = old.max - Vec2::splat(1.0);
+        assert_eq!(home_change_focus(near_old, Some(new), false), new.center());
+        assert_eq!(home_change_focus(near_old, Some(new), true), clamp_focus(near_old, Some(new)));
+        assert_eq!(home_change_focus(near_old, None, false), near_old);
+    }
+
+    #[test]
+    fn placed_in_needs_the_camera_placed_over_that_home() {
+        let a = game::RegionCoords { x: 0, z: 0 };
+        let b = game::RegionCoords { x: 1, z: 0 };
+        let mut cam = CommanderCamera { bounds: Some(region_rect(b)), placed: false, ..Default::default() };
+        assert!(!cam.placed_in(b), "home known, body not shown yet");
+        cam.placed = true;
+        assert!(cam.placed_in(b));
+        assert!(!cam.placed_in(a));
     }
 
     #[test]

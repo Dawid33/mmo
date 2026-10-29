@@ -60,7 +60,7 @@ pub const SLINT_PANEL_KEY: KeyCode = KeyCode::F9;
 pub const MENU_KEY: KeyCode = KeyCode::Escape;
 /// Opens / closes the world map (opening it closes the menu).
 pub const MAP_KEY: KeyCode = KeyCode::KeyM;
-/// The map's status line from Play until we are home in the new region.
+/// The map's status line from Play until the new region has loaded.
 pub const LOADING_TEXT: &str = "Loading region\u{2026}";
 /// UI pixels per window logical pixel. The widgets are pixel-exact at a
 /// total scale (this × the window's scale factor) of 1 and 2. Overridden by
@@ -93,8 +93,8 @@ pub enum UiAction {
     Play,
 }
 
-/// The region a Play request was sent for, until we are home there or the
-/// server refuses it.
+/// The region a Play request was sent for, until we are there with its region
+/// loaded ([`play_settled`]) or the server refuses it.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlayPending(pub Option<RegionCoords>);
 
@@ -431,6 +431,14 @@ pub fn refusal_text(why: PlayRefusal) -> &'static str {
     }
 }
 
+/// Whether a Play pending for `target` is over: refused, or we are there —
+/// home in `target` with the camera put over the body inside it, i.e. its
+/// region snapshot has loaded (`HudStatus` names the new home as soon as
+/// `PlayerRegion` arrives, long before that).
+pub fn play_settled(target: RegionCoords, arrived_in: impl Fn(RegionCoords) -> bool, refused: bool) -> bool {
+    refused || arrived_in(target)
+}
+
 /// The map's status line: loading while a Play is pending, else the last
 /// refusal, else nothing.
 pub fn map_status_text(pending: Option<RegionCoords>, refused: Option<PlayRefusal>) -> &'static str {
@@ -443,12 +451,15 @@ pub fn map_status_text(pending: Option<RegionCoords>, refused: Option<PlayRefusa
 
 /// Show `to`; on opening the map, drop a stale refusal and centre the view
 /// on the home tile. Keeps `CursorPolicy::ui_modal` in step (its only writer).
+/// Takes the `ResMut`s themselves and writes through them only on a real
+/// change, so an idle frame does not mark either resource changed (that
+/// would make `sync_world_map` compare the whole map every frame).
 fn set_screens(
     ui: &GameUi,
     to: Screens,
-    world_map: &mut WorldMapState,
+    world_map: &mut ResMut<WorldMapState>,
     home: Option<RegionCoords>,
-    policy: Option<&mut CursorPolicy>,
+    policy: Option<&mut ResMut<CursorPolicy>>,
 ) {
     let from = Screens::of(ui);
     if to.map && !from.map {
@@ -501,7 +512,7 @@ fn menu_keys(
     if keys.just_pressed(MAP_KEY) {
         to = to.toggle_map();
     }
-    set_screens(ui, to, &mut world_map, status.home_region, policy.as_deref_mut());
+    set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut());
 }
 
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
@@ -551,7 +562,7 @@ fn apply_ui_actions(
                 to.map = false;
             }
         }
-        set_screens(ui, to, &mut world_map, status.home_region, policy.as_deref_mut());
+        set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut());
     }
 }
 
@@ -732,6 +743,7 @@ struct MapParams<'w, 's> {
     world_map: Res<'w, WorldMapState>,
     time: Res<'w, Time>,
     pending: ResMut<'w, PlayPending>,
+    cam: Option<Res<'w, CommanderCamera>>,
     shown: Local<'s, MapShown>,
 }
 
@@ -761,10 +773,13 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
         ui.set_home_row(home_row);
     }
 
-    // Pending until we are home in the target, or the server refused it.
+    // Pending until we are in the target with its region loaded, or the
+    // server refused it. Without a commander camera, being home has to do.
     if let Some(target) = p.pending.0 {
         let refused = p.world_map.refused.is_some_and(|(rc, _)| rc == target);
-        if home == Some(target) || refused {
+        let cam = p.cam.as_deref();
+        let arrived_in = |rc| cam.map_or(home == Some(rc), |cam| cam.placed_in(rc));
+        if play_settled(target, arrived_in, refused) {
             p.pending.0 = None;
         }
     }
@@ -886,6 +901,19 @@ mod tests {
         assert_eq!(map_status_text(Some(rc), Some(PlayRefusal::OffMap)), LOADING_TEXT);
         assert_eq!(map_status_text(None, Some(PlayRefusal::NoDryLand)), "No dry land there");
         assert_eq!(map_status_text(None, None), "");
+    }
+
+    #[test]
+    fn play_settles_on_arrival_with_the_region_loaded_or_a_refusal() {
+        let target = RegionCoords::new(1, 2);
+        let rect = super::super::commander::region_rect(target);
+        let mut cam = CommanderCamera { bounds: Some(rect), placed: false, ..Default::default() };
+        // Home is the target (PlayerRegion arrived) but the snapshot has not.
+        assert!(!play_settled(target, |rc| cam.placed_in(rc), false));
+        assert!(play_settled(target, |rc| cam.placed_in(rc), true), "a refusal ends it");
+        cam.placed = true;
+        assert!(play_settled(target, |rc| cam.placed_in(rc), false));
+        assert!(!play_settled(RegionCoords::new(0, 0), |rc| cam.placed_in(rc), false));
     }
 
     #[test]
