@@ -118,8 +118,12 @@ fn stone_column() -> Column {
         .with_ground(ColumnGround::plain([SURFACE as i16; 4], 0, STONE, BEDROCK))
 }
 
-/// A region over chunk columns `0..=3` x `0..=3` (blocks 0..8), with a
-/// render-update channel and client 0.
+/// Extent of the test region in blocks along x and z: every order here stays
+/// inside blocks 0..8.
+const ORDER_REGION_BLOCKS: usize = 8;
+
+/// A region over the chunk columns covering blocks 0..[`ORDER_REGION_BLOCKS`]
+/// (4 x 4 chunks at 2-block chunks), with a render-update channel and client 0.
 fn order_region() -> Region {
     let (region, recv) = order_region_with_updates();
     std::mem::forget(recv);
@@ -130,8 +134,9 @@ fn order_region() -> Region {
 fn order_region_with_updates() -> (Region, crossbeam::channel::Receiver<GameDataUpdate>) {
     let r0 = RegionCoords::new(0, 0);
     let mut columns = Vec::new();
-    for x in 0..=3 {
-        for z in 0..=3 {
+    let chunks = ORDER_REGION_BLOCKS.div_ceil(CHUNK_BLOCKS);
+    for x in 0..chunks {
+        for z in 0..chunks {
             columns.push((ColumnCoords::new(x, z), stone_column()));
         }
     }

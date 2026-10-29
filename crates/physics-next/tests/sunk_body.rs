@@ -20,15 +20,15 @@ use game::{Block, BlockId, Chunk};
 use rapier3d::control::KinematicCharacterController;
 use rapier3d::prelude::*;
 
-/// Floor top at y = 8 over chunks 3..=5 x 3..=5: half-block `Voxels`.
+/// Floor top at y = 8 over x/z units 96..192: half-block `Voxels`.
 fn floor() -> Walker {
-    Walker::on(3..=5, 3..=5, |_, _| Chunk::flat_floor(8))
+    Walker::on(96.0..192.0, 96.0..192.0, |_, _| Chunk::flat_floor(8))
 }
 
 /// Full chunks, top at y = `CHUNK`: each collapses to one cuboid collider —
 /// the only terrain upstream's #485 depenetration acts on.
 fn cuboid_floor() -> Walker {
-    Walker::on(3..=5, 3..=5, |_, _| Chunk::uniform(Block::new(BlockId(1))))
+    Walker::on(96.0..192.0, 96.0..192.0, |_, _| Chunk::uniform(Block::new(BlockId(1))))
 }
 
 /// Resting height of the body's centre on a floor whose top is `top`.

@@ -20,7 +20,8 @@ const HALF_HEIGHT: f32 = PLAYER_CAPSULE_HALF_HEIGHT;
 const RADIUS: f32 = PLAYER_CAPSULE_RADIUS;
 const SKIN: f32 = CHARACTER_SKIN;
 const BLOCK: f32 = UNITS_PER_METER;
-/// A chunk's edge: two blocks.
+/// A fixture chunk's edge: two blocks. Hand-built colliders here, so it is
+/// independent of the game's `CHUNK_BLOCKS`.
 const CHUNK: f32 = 2.0 * BLOCK;
 /// Capsule centre height resting on a floor whose top is at y = `BLOCK`.
 const REST: f32 = BLOCK + HALF_HEIGHT + RADIUS;

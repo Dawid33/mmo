@@ -12,9 +12,9 @@
 //! the snap gate's pins.
 mod common;
 
-use common::{Body, CHUNK, Walker};
+use common::{Body, CHUNK, Walker, chunks_over, seam_row, seam_z, spawn_x_band, spawn_z_walk};
 use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, TICK_DT, UNITS_PER_METER, WALK_SPEED};
-use game::{BLOCK_VOXELS, Block, BlockId, BlockIndex, ChiselData, Chunk};
+use game::{BLOCK_VOXELS, Block, BlockId, BlockIndex, CHUNK_BLOCKS, ChiselData, Chunk};
 
 const SOLID: BlockId = BlockId(1);
 /// Distance covered by one tick of walking.
@@ -23,14 +23,15 @@ const STEP: f32 = WALK_SPEED * UNITS_PER_METER * TICK_DT;
 /// fraction of a millimetre now and then.
 const LEVEL: f32 = 0.005;
 
-/// Chunk rows along z a walk of that many ticks from the spawn needs.
-fn rows_for(walk_ticks: usize) -> std::ops::RangeInclusive<i32> {
-    3..=(4 + (walk_ticks as f32 * STEP / CHUNK) as i32 + 1)
+/// The z extent (world units) a walk of that many ticks from the spawn needs.
+fn rows_for(walk_ticks: usize) -> std::ops::Range<f32> {
+    spawn_z_walk(walk_ticks as f32 * STEP)
 }
 
-/// Chunk columns x 3..=4 over `rows` along z: all a walk along z from the spawn touches.
-fn world(rows: std::ops::RangeInclusive<i32>, chunk: impl Fn(i32, i32) -> Chunk) -> Walker {
-    Walker::on(3..=4, rows, chunk)
+/// One chunk either side of the spawn column in x, over `z_units` along z: all
+/// a walk along z from the spawn touches.
+fn world(z_units: std::ops::Range<f32>, chunk: impl Fn(i32, i32) -> Chunk) -> Walker {
+    Walker::on(spawn_x_band(), z_units, chunk)
 }
 
 fn chunk_row(z: f32) -> f32 {
@@ -41,7 +42,9 @@ fn chunk_row(z: f32) -> f32 {
 /// +x, asserting level, straight, constant-speed, grounded motion throughout.
 /// `side = 0` walks the x = 128 seam between two chunk columns.
 fn assert_level_walk(w: &mut Walker, side: usize, n: usize) {
-    assert_level_walk_across(w, side, n, 3);
+    // Up to three chunk borders; a walk too short for that crosses as many as
+    // it is long.
+    assert_level_walk_across(w, side, n, 3.min((n as f32 * STEP / CHUNK) as usize));
 }
 
 /// [`assert_level_walk`] that must cross at least `borders` chunk borders.
@@ -103,7 +106,11 @@ fn block_scale_floor_is_level_across_chunk_borders() {
 #[test]
 fn voxel_scale_floor_is_level_across_a_chunk_border() {
     // Small and short: voxel-scale colliders are slow to build and sweep.
-    assert_level_walk_across(&mut world(4..=5, |_, _| Chunk::flat_floor(8)), 0, 12, 1);
+    // A chunk either side of the seam ahead of the spawn (z 128..192 at
+    // 2-block chunks), the walk starting just short of it.
+    let mut w = world(seam_z() - 32.0..seam_z() + 32.0, |_, _| Chunk::flat_floor(8));
+    w.approach_seam(32.0);
+    assert_level_walk_across(&mut w, 0, 12, 1);
 }
 
 #[test]
@@ -115,7 +122,8 @@ fn voxel_scale_floor_is_level_on_a_long_walk() {
 
 #[test]
 fn diagonal_walk_is_level() {
-    let mut w = Walker::on(3..=5, rows_for(20), |_, _| Chunk::flat_floor(16));
+    let x = spawn_x_band();
+    let mut w = Walker::on(x.start..x.end + CHUNK, rows_for(20), |_, _| Chunk::flat_floor(16));
     w.keys.back = true;
     w.keys.right = true;
     w.ticks(1);
@@ -152,8 +160,15 @@ fn collapsed_cuboid_to_voxels_seam_is_level() {
     let mixed = |x: i32, z: i32| {
         let mut chunk = Chunk::uniform(Block::new(SOLID));
         if z % 2 == 1 {
-            let far = if x <= 3 { 0 } else { 1 };
-            chunk.set_block(far, 1, 0, Block::new(BlockId::AIR));
+            // The top block farthest from the walking line (x = spawn).
+            let centre = |bx: usize| x as f32 * CHUNK + (bx * BLOCK_VOXELS + BLOCK_VOXELS / 2) as f32;
+            let far = (0..CHUNK_BLOCKS)
+                .max_by(|&a, &b| {
+                    let off = |bx| (centre(bx) - common::SPAWN[0]).abs();
+                    off(a).total_cmp(&off(b))
+                })
+                .unwrap();
+            chunk.set_block(far, CHUNK_BLOCKS - 1, 0, Block::new(BlockId::AIR));
         }
         chunk
     };
@@ -162,59 +177,65 @@ fn collapsed_cuboid_to_voxels_seam_is_level() {
 
 #[test]
 fn low_step_at_a_chunk_border_is_walked_up() {
-    // 4 units (0.25 m) up at z = 160, under the 0.6 m step height.
-    let mut w = world(rows_for(25), |_, z| Chunk::flat_floor(if z >= 5 { 20 } else { 16 }));
+    // 4 units (0.25 m) up at the seam ahead of the spawn (z = 160 at 2-block
+    // chunks), under the 0.6 m step height.
+    let mut w = world(rows_for(25), |_, z| Chunk::flat_floor(if z >= seam_row() { 20 } else { 16 }));
+    w.approach_seam(32.0);
     let low = w.body();
     w.keys.back = true;
     w.ticks(25);
     let high = w.body();
-    assert!(high.z > 200.0, "the step must not stop the walk: {high:?}");
+    assert!(high.z > seam_z() + 40.0, "the step must not stop the walk: {high:?}");
     assert!(high.grounded);
     assert!((high.y - low.y - 4.0).abs() < 0.05, "must stand on the step: {low:?} -> {high:?}");
 }
 
 #[test]
 fn full_block_wall_at_a_chunk_border_blocks() {
-    // 16 units (1 m) up at z = 160: above the step height.
-    let mut w = world(rows_for(25), |_, z| Chunk::flat_floor(if z >= 5 { 32 } else { 16 }));
+    // 16 units (1 m) up at the seam ahead of the spawn: above the step height.
+    let mut w = world(rows_for(25), |_, z| Chunk::flat_floor(if z >= seam_row() { 32 } else { 16 }));
+    w.approach_seam(32.0);
     let before = w.body();
     w.keys.back = true;
     w.ticks(25);
     let after = w.body();
-    let wall = 5.0 * CHUNK;
+    let wall = seam_z();
     assert!(after.z < wall - 6.0, "walked into the wall: {after:?}");
     assert!(after.z > wall - 7.0, "stopped short of the wall: {after:?}");
     assert!(after.grounded);
     assert!((after.y - before.y).abs() < LEVEL, "the wall must not lift the body: {after:?}");
 }
 
-/// A floor one block deep and, from row 5 on, a one-block-thick ceiling
-/// whose underside is `clear_blocks` blocks above the floor.
+/// A floor one block deep and, from the chunk seam ahead of the spawn on, a
+/// one-block-thick ceiling whose underside is `clear_blocks` blocks above the
+/// floor.
 fn tunnel(clear_blocks: usize) -> Walker {
     let floor = BLOCK_VOXELS;
     let ceiling = floor + clear_blocks * BLOCK_VOXELS;
+    // Chunk layers up to the one holding the ceiling's top face.
+    let top_layer = (ceiling + BLOCK_VOXELS - 1) / CHUNK as usize;
     let mut chunks = Vec::new();
-    for x in 3..=4 {
-        for z in rows_for(25) {
-            for cy in 0..=1usize {
-                let mut chunk = if cy == 0 { Chunk::flat_floor(floor as u32) } else { Chunk::default() };
-                if z >= 5 {
-                    for bx in 0..2 {
-                        for by in 0..2 {
-                            for bz in 0..2 {
-                                let y0 = cy * (CHUNK as usize) + by * BLOCK_VOXELS;
-                                if y0 >= ceiling && y0 < ceiling + BLOCK_VOXELS {
-                                    chunk.set_block(bx, by, bz, Block::new(SOLID));
-                                }
+    for (x, z) in chunks_over(spawn_x_band(), rows_for(25)) {
+        for cy in 0..=top_layer {
+            let mut chunk = if cy == 0 { Chunk::flat_floor(floor as u32) } else { Chunk::default() };
+            if z >= seam_row() {
+                for bx in 0..CHUNK_BLOCKS {
+                    for by in 0..CHUNK_BLOCKS {
+                        for bz in 0..CHUNK_BLOCKS {
+                            let y0 = cy * (CHUNK as usize) + by * BLOCK_VOXELS;
+                            if y0 >= ceiling && y0 < ceiling + BLOCK_VOXELS {
+                                chunk.set_block(bx, by, bz, Block::new(SOLID));
                             }
                         }
                     }
                 }
-                chunks.push(((x, cy as i32, z), chunk));
             }
+            chunks.push(((x, cy as i32, z), chunk));
         }
     }
-    Walker::new(chunks)
+    let mut w = Walker::new(chunks);
+    w.approach_seam(32.0);
+    w
 }
 
 #[test]
@@ -225,7 +246,7 @@ fn player_walks_through_a_two_block_tunnel() {
     w.keys.back = true;
     w.ticks(25);
     let after = w.body();
-    assert!(after.z > 175.0, "a two-block tunnel must not stop the body: {after:?}");
+    assert!(after.z > seam_z() + 15.0, "a two-block tunnel must not stop the body: {after:?}");
     assert!(after.grounded);
     assert!((after.y - before.y).abs() < LEVEL, "the ceiling must not push the body: {after:?}");
 }
@@ -236,7 +257,7 @@ fn player_does_not_fit_a_one_block_tunnel() {
     w.keys.back = true;
     w.ticks(25);
     let after = w.body();
-    assert!(after.z < 5.0 * CHUNK, "a one-block gap is lower than the body: {after:?}");
+    assert!(after.z < seam_z(), "a one-block gap is lower than the body: {after:?}");
 }
 
 /// Not in the game's file — pins the snap gate's other half (`// mmo-fork:`
@@ -252,7 +273,7 @@ fn a_jump_under_a_low_ceiling_leaves_the_ground() {
     w.keys.back = false;
     w.ticks(2);
     let before = w.body();
-    assert!(before.z > 5.0 * CHUNK + 10.0 && before.grounded, "must stand in the tunnel: {before:?}");
+    assert!(before.z > seam_z() + 10.0 && before.grounded, "must stand in the tunnel: {before:?}");
     w.keys.jump_pressed = true;
     w.keys.jump_held = true;
     w.tick();
@@ -263,8 +284,8 @@ fn a_jump_under_a_low_ceiling_leaves_the_ground() {
 
 /// One-voxel terraces, a step down per chunk along +z: the gentle slopes of
 /// generated terrain.
-fn terraces(rows: std::ops::RangeInclusive<i32>) -> Walker {
-    Walker::on(3..=4, rows, |_, z| Chunk::flat_floor(28 - z as u32))
+fn terraces(z_units: std::ops::Range<f32>) -> Walker {
+    Walker::on(spawn_x_band(), z_units, |_, z| Chunk::flat_floor(28 - z as u32))
 }
 
 #[test]
@@ -272,10 +293,13 @@ fn walking_down_terraces_stays_on_the_ground() {
     // The slide along level ground ends with no downward part, which used to
     // keep snap-to-ground from engaging: a tick of hovering past each edge,
     // ungrounded, then a drop.
-    let mut w = terraces(rows_for(SHORT));
+    // Three seams ahead: the walk is as long as it takes to pass them.
+    let end_z = seam_z() + 2.0 * CHUNK;
+    let walk = ((end_z - common::SPAWN[1]) / STEP).ceil() as usize + 2;
+    let mut w = terraces(rows_for(walk));
     w.keys.back = true;
     let mut prev = w.body();
-    for tick in 0..SHORT {
+    for tick in 0..walk {
         w.tick();
         let now = w.body();
         let at = format!("tick {tick}: {prev:?} -> {now:?}");
@@ -284,14 +308,24 @@ fn walking_down_terraces_stays_on_the_ground() {
         assert!(prev.y - now.y < 1.1, "fell more than a terrace at {at}");
         prev = now;
     }
-    assert!(prev.z > 7.0 * CHUNK, "must have walked down three terraces: {prev:?}");
+    assert!(prev.z > end_z, "must have walked down three terraces: {prev:?}");
 }
 
 #[test]
 fn walking_up_terraces_stays_on_the_ground() {
     // Sliding over a terrace's edge overshoots it; the body must be put back
     // down on the terrace within the tick rather than fall for the next one.
-    let mut w = terraces(2..=4);
+    // Start a few ticks short of a chunk border, going back toward -z: the
+    // spawn itself at 2-block chunks (z = 128 is a border), 20 units into the
+    // second chunk row otherwise.
+    let z0 = common::SPAWN[1].max(CHUNK + 20.0);
+    let border = ((z0 / CHUNK).ceil() - 1.0) * CHUNK;
+    let mut w = terraces((border - CHUNK).max(0.0)..z0 + CHUNK);
+    if z0 != common::SPAWN[1] {
+        let b = w.body();
+        w.teleport(rapier3d::prelude::Vector::new(b.x, b.y, z0));
+        w.ticks(4);
+    }
     let start = w.body();
     w.keys.forward = true;
     let mut prev: Body = start;
@@ -305,7 +339,7 @@ fn walking_up_terraces_stays_on_the_ground() {
     }
     // Standing on the terrace it has reached: floor + capsule half-extent + skin.
     let floor = 28.0 - chunk_row(prev.z);
-    assert!(prev.z < 3.0 * CHUNK && prev.y > start.y + 0.9, "must have climbed: {start:?} -> {prev:?}");
+    assert!(prev.z < border && prev.y > start.y + 0.9, "must have climbed: {start:?} -> {prev:?}");
     let half_extent = PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS;
     assert!((prev.y - (floor + half_extent + CHARACTER_SKIN)).abs() < 0.05, "must stand on the terrace: {prev:?}");
 }
@@ -315,6 +349,6 @@ fn walking_up_terraces_stays_on_the_ground() {
 /// while the game runs rapier's default `dt`).
 #[test]
 fn walker_steps_with_the_games_integration_parameters() {
-    let w = Walker::on(3..=4, 3..=4, |_, _| Chunk::flat_floor(16));
+    let w = Walker::on(spawn_x_band(), 96.0..160.0, |_, _| Chunk::flat_floor(16));
     assert_eq!(w.w.params, game::PhysicsParams::default().0);
 }

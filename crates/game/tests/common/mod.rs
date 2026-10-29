@@ -5,30 +5,92 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use game::{
-    Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Pose, Key, Region,
-    RegionCoords, Rollback, World,
+    chunk_coords_from_translation, Chunk, ChunkCoords, EntityKey, GameEventKind, InputEvent, Pose,
+    Key, Region, RegionCoords, Rollback, World, CHUNK_UNITS, PLAYER_SPAWN_X, PLAYER_SPAWN_Z,
 };
+
+/// A chunk's edge in world units, as `f32`.
+pub const CHUNK_EDGE: f32 = CHUNK_UNITS as f32;
+
+/// The chunk holding the world-unit position `units` (floor by `CHUNK_UNITS`).
+pub fn chunk_of(units: game::rapier3d::math::Vector) -> ChunkCoords {
+    chunk_coords_from_translation(units)
+}
+
+/// Chunk index along one horizontal axis of the world-unit coordinate `u`.
+pub fn chunk_index_of(u: f32) -> usize {
+    (u / CHUNK_EDGE).floor() as usize
+}
+
+/// Chunk coordinates whose footprint overlaps the half-open world-unit
+/// rectangle (negative edges clamp to 0). Fixtures state their terrain in
+/// units through this, never in chunk indices, so they build the same
+/// physical world at any `CHUNK_BLOCKS`.
+pub fn chunks_over(x_units: Range<f32>, z_units: Range<f32>) -> Vec<(usize, usize)> {
+    let span = |r: Range<f32>| {
+        let lo = chunk_index_of(r.start.max(0.0));
+        let hi = (r.end / CHUNK_EDGE).ceil() as usize;
+        lo..hi
+    };
+    let zs = span(z_units);
+    span(x_units).flat_map(|x| zs.clone().map(move |z| (x, z))).collect()
+}
+
+/// Every chunk overlapping the unit rectangle, each a `Chunk::flat_floor(depth)`.
+pub fn floor_chunks(x_units: Range<f32>, z_units: Range<f32>, depth: u32) -> Vec<(ChunkCoords, Chunk)> {
+    chunks_over(x_units, z_units)
+        .into_iter()
+        .map(|(x, z)| (ChunkCoords::new(x, 0, z), Chunk::flat_floor(depth)))
+        .collect()
+}
+
+/// The first chunk row past the spawn's: where a chunk seam lies ahead of the
+/// player walking +z / +x from the spawn column (row 5, z = 160, at 2-block
+/// chunks).
+pub fn seam_row() -> usize {
+    chunk_index_of(PLAYER_SPAWN_Z) + 1
+}
+/// World z of [`seam_row`]'s border.
+pub fn seam_z() -> f32 {
+    seam_row() as f32 * CHUNK_EDGE
+}
+/// World x of the first chunk border ahead of the spawn along +x.
+pub fn seam_x() -> f32 {
+    (chunk_index_of(PLAYER_SPAWN_X) + 1) as f32 * CHUNK_EDGE
+}
+
+/// Unit range one chunk either side of the spawn column in x (`3..=4` at
+/// 2-block chunks): all a walk straight along z touches.
+pub fn spawn_x_band() -> Range<f32> {
+    PLAYER_SPAWN_X - CHUNK_EDGE..PLAYER_SPAWN_X + CHUNK_EDGE
+}
+/// Unit range from one chunk behind the spawn to `ahead` units past it,
+/// padded by two chunks — the z extent of a walk of `ahead` units.
+pub fn spawn_z_walk(ahead: f32) -> Range<f32> {
+    let end = (chunk_index_of(PLAYER_SPAWN_Z) + 2 + (ahead / CHUNK_EDGE) as usize) as f32 * CHUNK_EDGE;
+    PLAYER_SPAWN_Z - CHUNK_EDGE..end
+}
 
 pub fn r0() -> RegionCoords {
     RegionCoords::new(0, 0)
 }
 
-/// A world of chunks (y 0) with one player whose controls are on, settled on
-/// the ground at the spawn column (128, 128) — the corner where columns 3 and
-/// 4 meet rows 3 and 4.
+/// A world of chunks (y 0) over the world-unit rectangle `x_units` x `z_units`
+/// (`chunk(x, z)` gets each overlapping chunk's coordinates), with one player
+/// whose controls are on, settled on the ground at the spawn column
+/// (128, 128). The rectangle must cover the spawn.
 pub fn world_of(
-    columns: std::ops::RangeInclusive<usize>,
-    rows: std::ops::RangeInclusive<usize>,
+    x_units: Range<f32>,
+    z_units: Range<f32>,
     chunk: impl Fn(usize, usize) -> Chunk,
 ) -> World {
-    let mut chunks = Vec::new();
-    for x in columns {
-        for z in rows.clone() {
-            chunks.push((ChunkCoords::new(x, 0, z), chunk(x, z)));
-        }
-    }
+    let chunks = chunks_over(x_units, z_units)
+        .into_iter()
+        .map(|(x, z)| (ChunkCoords::new(x, 0, z), chunk(x, z)))
+        .collect();
     let mut world = World::new();
     world.load(&r0(), Region::from_chunks(r0(), chunks));
     world.handle_region_event(GameEventKind::CreateClient(0), r0()).unwrap();
@@ -43,8 +105,8 @@ pub fn world_of(
 
 /// One-voxel terraces, a step down per chunk along +z: the gentle slopes of
 /// generated terrain.
-pub fn terraces(rows: std::ops::RangeInclusive<usize>) -> World {
-    world_of(3..=4, rows, |_, z| Chunk::flat_floor(28 - z as u32))
+pub fn terraces(z_units: Range<f32>) -> World {
+    world_of(spawn_x_band(), z_units, |_, z| Chunk::flat_floor(28 - z as u32))
 }
 
 pub fn key(world: &mut World, key: Key, pressed: bool) {
@@ -89,6 +151,18 @@ pub fn teleport(world: &mut World, x: f32, y: f32, z: f32) {
         let e = *d.data.player_entites.get(&0).unwrap();
         d.set_body_pose_safe(e, Pose::translation(x, y, z));
     });
+}
+
+/// Moves a settled player forward along +z so it stands `gap` units short of
+/// the chunk seam at [`seam_z`]. Where the spawn already is within `gap` of the
+/// seam (2-block chunks: 32 away) the player stays put.
+pub fn approach_seam(world: &mut World, gap: f32) {
+    let z = seam_z() - gap;
+    let now = body(world);
+    if z > now.z {
+        teleport(world, now.x, now.y, z);
+        ticks(world, 2);
+    }
 }
 
 /// Spawns a slime of `size` with its body centre at `pos`, undo-safely.

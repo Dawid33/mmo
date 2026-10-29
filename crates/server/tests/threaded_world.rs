@@ -32,16 +32,28 @@ fn floor_column(x: usize, z: usize) -> (ColumnCoords, Column) {
     )
 }
 
-fn lightweight_columns() -> Vec<(ColumnCoords, Column)> {
-    vec![floor_column(4, 4)]
+/// Floor columns over the world-unit rectangle `xs` x `zs`: every chunk
+/// column it overlaps (the chunk edge is `CHUNK_UNITS`; negative edges clamp).
+fn floor_columns(xs: std::ops::Range<f32>, zs: std::ops::Range<f32>) -> Vec<(ColumnCoords, Column)> {
+    let edge = game::CHUNK_UNITS as f32;
+    let span = |r: std::ops::Range<f32>| (r.start.max(0.0) / edge).floor() as usize..(r.end / edge).ceil() as usize;
+    let zs = span(zs);
+    span(xs).flat_map(|x| zs.clone().map(move |z| floor_column(x, z))).collect()
 }
 
-/// Floor under the whole square between the spawn point (x=128,z=128 — on the
-/// seam between columns 3 and 4) and the region's -x/-z corner, continuing two
-/// columns deep into the three neighbours around that corner. Every walk in
-/// this file therefore crosses GROUNDED, with voxel colliders on both sides.
+fn lightweight_columns() -> Vec<(ColumnCoords, Column)> {
+    // Just the chunk under the spawn column.
+    floor_columns(128.0..160.0, 128.0..160.0)
+}
+
+/// Floor under the whole square between the spawn point (x=128,z=128) and the
+/// region's -x/-z corner, continuing 128 units deep into the three
+/// neighbours around that corner. Every walk in this file therefore crosses
+/// GROUNDED, with voxel colliders on both sides. Stated in world units, so it
+/// holds at any chunk size.
 fn seam_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
-    let (near, far) = (0..=4, 30..=31);
+    let near = 0.0..5.0 * 64.0;
+    let far = REGION_SIZE - 128.0..REGION_SIZE;
     let (xs, zs) = if rc == SPAWN_REGION {
         (near.clone(), near)
     } else if rc == RegionCoords::new(0, -1) {
@@ -53,7 +65,7 @@ fn seam_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
     } else {
         return lightweight_columns();
     };
-    xs.flat_map(|x| zs.clone().map(move |z| floor_column(x, z))).collect()
+    floor_columns(xs, zs)
 }
 
 /// A key-down `PlayerInput` from client 0. Stamped with the spawn region on

@@ -21,9 +21,12 @@ mod common;
 
 use std::fmt::Write as _;
 
-use common::{body, entity_body, key, r0, spawn_slime, teleport, ticks, world_of, Body};
+use common::{
+    body, entity_body, floor_chunks, key, r0, seam_row, seam_x, spawn_slime,
+    teleport, ticks, world_of, Body,
+};
 use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER};
-use game::{Block, BlockId, Chunk, GameEventKind, Key, Region, World, BLOCK_VOXELS};
+use game::{Block, BlockId, Chunk, GameEventKind, Key, Region, World, BLOCK_VOXELS, CHUNK_BLOCKS};
 
 /// Ticks recorded per scenario.
 const SCENARIO_TICKS: usize = 120;
@@ -66,20 +69,23 @@ fn tap(world: &mut World, k: Key, at: usize, tick: usize) {
     }
 }
 
-/// +x at walk speed on a block-scale floor, from 2 units before the x = 160
-/// chunk boundary, across a dozen more.
+/// +x at walk speed on a block-scale floor, from 2 units before the chunk
+/// border ahead of the spawn (x = 160 at 2-block chunks), across a dozen
+/// more. Floor: x 96..608, z 96..160 units.
 fn walk_flat_across_chunk_seam() -> Vec<Row> {
-    let mut world = world_of(3..=18, 3..=4, |_, _| Chunk::flat_floor(16));
+    let mut world = world_of(96.0..608.0, 96.0..160.0, |_, _| Chunk::flat_floor(16));
     let y = body(&world).y;
-    teleport(&mut world, 158.0, y, 136.0);
+    teleport(&mut world, seam_x() - 2.0, y, 136.0);
     key(&mut world, Key::KeyD, true);
     run_player(world, |_, _| {})
 }
 
 /// +z from a block-scale floor (top 16) onto half blocks (one-cuboid
-/// chisels, top 24) at z = 160: a scale seam and a half-block autostep.
+/// chisels, top 24) at the chunk border ahead of the spawn (z = 160 at 2-block
+/// chunks): a scale seam and a half-block autostep. Floor: x 96..160,
+/// z 96..576 units.
 fn walk_scale_seam() -> Vec<Row> {
-    let world = world_of(3..=4, 3..=17, |_, z| Chunk::flat_floor(if z >= 5 { 24 } else { 16 }));
+    let world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(if z >= seam_row() { 24 } else { 16 }));
     run_player(world, |w, t| {
         if t == 0 {
             key(w, Key::KeyS, true);
@@ -87,11 +93,12 @@ fn walk_scale_seam() -> Vec<Row> {
     })
 }
 
-/// +z into a one-block (16-unit) ledge at z = 160, jumping just before it:
-/// a block is taller than the step height, so it takes a jump, as in
-/// Minecraft.
+/// +z into a one-block (16-unit) ledge at the chunk border ahead of the spawn
+/// (z = 160 at 2-block chunks), jumping just before it: a block is taller
+/// than the step height, so it takes a jump, as in Minecraft. Floor: x 96..160,
+/// z 96..576 units.
 fn step_up_one_block() -> Vec<Row> {
-    let world = world_of(3..=4, 3..=17, |_, z| Chunk::flat_floor(if z >= 5 { 32 } else { 16 }));
+    let world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(if z >= seam_row() { 32 } else { 16 }));
     run_player(world, |w, t| {
         if t == 0 {
             key(w, Key::KeyS, true);
@@ -103,7 +110,7 @@ fn step_up_one_block() -> Vec<Row> {
 /// +z up one-voxel terraces, a step up per chunk: the gentle generated slope
 /// on which walking uphill dips in speed at each terrace.
 fn terrace_uphill_1_voxel() -> Vec<Row> {
-    let world = world_of(3..=4, 3..=17, |_, z| Chunk::flat_floor(12 + z as u32));
+    let world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(12 + z as u32));
     run_player(world, |w, t| {
         if t == 0 {
             key(w, Key::KeyS, true);
@@ -113,24 +120,29 @@ fn terrace_uphill_1_voxel() -> Vec<Row> {
 
 /// Space tapped once, standing on a flat floor: one jump, then standing.
 fn jump_in_place() -> Vec<Row> {
-    let world = world_of(3..=4, 3..=4, |_, _| Chunk::flat_floor(16));
+    let world = world_of(96.0..160.0, 96.0..160.0, |_, _| Chunk::flat_floor(16));
     run_player(world, |w, t| tap(w, Key::Space, 0, t))
 }
 
 /// Sprinting forward (−z) over a one-block trench (z 560..576, one block
 /// deep) with a jump just before its edge, then on to the end.
 fn sprint_jump_over_gap() -> Vec<Row> {
-    let trench_row = 17;
-    let floor = |_: usize, z: usize| {
+    // The trench is block row 35 along z (units 560..576), spanning the floor's
+    // block columns 6..10 (units 96..160).
+    let trench_z_block = 560 / BLOCK_VOXELS;
+    let floor = |x: usize, z: usize| {
         let mut chunk = Chunk::flat_floor(2 * BLOCK_VOXELS as u32);
-        if z == trench_row {
-            for bx in 0..2 {
-                chunk.set_block(bx, 1, 1, Block::new(BlockId::AIR));
+        for bx in 0..CHUNK_BLOCKS {
+            for bz in 0..CHUNK_BLOCKS {
+                let block_x = x * CHUNK_BLOCKS + bx;
+                if z * CHUNK_BLOCKS + bz == trench_z_block && (6..10).contains(&block_x) {
+                    chunk.set_block(bx, 1, bz, Block::new(BlockId::AIR));
+                }
             }
         }
         chunk
     };
-    let mut world = world_of(3..=4, 2..=19, floor);
+    let mut world = world_of(96.0..160.0, 64.0..640.0, floor);
     teleport(&mut world, 144.0, rest_y(2.0 * BLOCK_VOXELS as f32), 620.0);
     ticks(&mut world, 2);
     key(&mut world, Key::ControlLeft, true);
@@ -141,7 +153,7 @@ fn sprint_jump_over_gap() -> Vec<Row> {
 /// Starts 0.3 units sunk into a flat floor — into the solid, past the skin
 /// gap it normally rests on — stands, walks +z, stands.
 fn sunk_start_depenetrates() -> Vec<Row> {
-    let mut world = world_of(3..=4, 3..=6, |_, _| Chunk::flat_floor(16));
+    let mut world = world_of(96.0..160.0, 96.0..224.0, |_, _| Chunk::flat_floor(16));
     teleport(&mut world, 136.0, rest_y(16.0) - CHARACTER_SKIN - 0.3, 136.0);
     run_player(world, |w, t| {
         if t == 20 {
@@ -155,13 +167,7 @@ fn sunk_start_depenetrates() -> Vec<Row> {
 /// One size-1 slime (spawn tick 0, so a fixed roll sequence) dropped on a
 /// flat floor with no player: it lands, sits and hops.
 fn slime_hop_sequence() -> Vec<Row> {
-    let mut chunks = Vec::new();
-    for x in 2..=8 {
-        for z in 2..=8 {
-            chunks.push((game::ChunkCoords::new(x, 0, z), Chunk::flat_floor(16)));
-        }
-    }
-    let mut region = Region::from_chunks(r0(), chunks);
+    let mut region = Region::from_chunks(r0(), floor_chunks(64.0..288.0, 64.0..288.0, 16));
     let slime = spawn_slime(&mut region, [176.0, 40.0, 176.0], 1, 0.0, 0);
     (0..SCENARIO_TICKS)
         .map(|_| {

@@ -7,7 +7,8 @@ use game::{
     WorldManager, REGION_CHUNKS, SPAWN_REGION, UNLOAD_GRACE_MS,
 };
 
-pub const CC: usize = 8;
+/// Cell edge in blocks (16 = a 4×4 grid in the 64-block test region) and in chunks.
+pub const CC: usize = 16 / game::CHUNK_BLOCKS;
 
 pub struct Harness {
     pub manager: WorldManager<InlineSpawner>,

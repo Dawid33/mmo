@@ -2,10 +2,13 @@
 //! then alternates Minecraft-style between sitting still and hopping forward;
 //! it turns back before a region edge; and its ticks — the spawn included —
 //! undo bit-exact and replay identically.
+mod common;
+
+use common::floor_chunks;
 use game::slime::{slime_edge_units, slime_spawn_plan, SLIME_HOP_DELAY_MIN_TICKS};
 use crossbeam::channel::Receiver;
 use game::{
-    state_hash, Chunk, ChunkCoords, EntityKey, EntityKind, GameDataUpdate, GameDataUpdateKind,
+    state_hash, EntityKey, EntityKind, GameDataUpdate, GameDataUpdateKind,
     GameEventKind, Region, RegionCoords, GHOST_MARGIN,
 };
 use game::rapier3d::math::Vector;
@@ -17,15 +20,10 @@ fn r0() -> RegionCoords {
 /// Flat floor (top face at y = 16) over chunk columns `xs × zs`, with a
 /// render-update channel as client regions (the ones that roll back) have.
 fn floor_region(
-    xs: std::ops::RangeInclusive<usize>,
-    zs: std::ops::RangeInclusive<usize>,
+    x_units: std::ops::Range<f32>,
+    z_units: std::ops::Range<f32>,
 ) -> (Region, Receiver<GameDataUpdate>) {
-    let mut chunks = Vec::new();
-    for x in xs {
-        for z in zs.clone() {
-            chunks.push((ChunkCoords::new(x, 0, z), Chunk::flat_floor(16)));
-        }
-    }
+    let chunks = floor_chunks(x_units, z_units, 16);
     let (send, recv) = crossbeam::channel::unbounded();
     let mut region = Region::new(game::Rollback::new(Some(send.clone())), Some(send), r0(), None);
     region.with_data(|r| r.seed_terrain_genesis(chunks));
@@ -56,8 +54,8 @@ fn pose(region: &Region, e: EntityKey) -> ([f32; 3], bool) {
 
 #[test]
 fn slime_rests_then_hops_forward() {
-    // Chunks 2..=8: voxels 64..288, the slime starts in the middle.
-    let (mut region, updates) = floor_region(2..=8, 2..=8);
+    // Voxels 64..288 each way, the slime starts in the middle.
+    let (mut region, updates) = floor_region(64.0..288.0, 64.0..288.0);
     let e = spawn(&mut region, 176.0, 176.0, 1, 0.0);
     assert_eq!(*region.data().ecs.kind.try_get(e), Some(EntityKind::Slime { size: 1 }));
 
@@ -111,7 +109,7 @@ fn slime_rests_then_hops_forward() {
 fn slime_turns_back_before_the_region_edge() {
     // Floor along the −X edge; the slime starts heading straight at it
     // (yaw π/2 faces −X).
-    let (mut region, _updates) = floor_region(0..=6, 2..=6);
+    let (mut region, _updates) = floor_region(0.0..224.0, 64.0..224.0);
     let e = spawn(&mut region, 80.0, 128.0, 2, std::f32::consts::FRAC_PI_2);
     let mut min_x = f32::MAX;
     for _ in 0..400 {
@@ -130,8 +128,13 @@ fn slime_ticks_and_spawn_undo_bit_exact_and_replay() {
         .map(|k| k * game::slime::SLIME_SPAWN_INTERVAL_TICKS)
         .find_map(|t| slime_spawn_plan(r0(), t).map(|p| (t, p)))
         .expect("some attempt within 200 intervals succeeds");
-    let (cx, cz) = (plan.vx as usize / 32, plan.vz as usize / 32);
-    let (mut region, _updates) = floor_region(cx - 1..=cx + 1, cz - 1..=cz + 1);
+    // A floor of the 3x3 chunks around the one holding the planned spawn.
+    let (cx, cz) = (common::chunk_index_of(plan.vx as f32), common::chunk_index_of(plan.vz as f32));
+    let edge = common::CHUNK_EDGE;
+    let (mut region, _updates) = floor_region(
+        (cx as f32 - 1.0) * edge..(cx as f32 + 2.0) * edge,
+        (cz as f32 - 1.0) * edge..(cz as f32 + 2.0) * edge,
+    );
     // Fast-forward to the attempt. An earlier attempt whose column happens to
     // land on this floor spawns too; the count check below is a delta.
     for _ in 0..t {

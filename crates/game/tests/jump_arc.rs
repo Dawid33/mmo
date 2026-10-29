@@ -9,7 +9,7 @@ use game::movement::{FALL_GRAVITY, GRAVITY, JUMP_SPEED, TICK_DT, UNITS_PER_METER
 use game::{Chunk, Key};
 
 fn world() -> game::World {
-    world_of(3..=4, 3..=4, |_, _| Chunk::flat_floor(16))
+    world_of(96.0..160.0, 96.0..160.0, |_, _| Chunk::flat_floor(16))
 }
 
 #[test]

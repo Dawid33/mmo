@@ -51,9 +51,12 @@ const UNDERGROUND_STATE_HASH: u32 = 0x0B76_9E49;
 
 /// Runs the scene; returns `(portable digest, state_hash)`.
 fn scene() -> (u32, u32) {
-    // Chunks 2..=9 each way: voxels 64..320 around the spawn at (128, 128);
-    // row 6 is half blocks (top 24) over the block-scale floor (top 16).
-    let mut world = world_of(2..=9, 2..=9, |_, z| Chunk::flat_floor(if z == 6 { 24 } else { 16 }));
+    // Units 64..320 each way around the spawn at (128, 128); the chunk row
+    // holding z = 192 is half blocks (top 24) over the block-scale floor
+    // (top 16) — a 32-unit strip at 2-block chunks (TODO at larger chunks: a
+    // block-level strip instead of a whole chunk row).
+    let half_row = common::chunk_index_of(192.0);
+    let mut world = world_of(64.0..320.0, 64.0..320.0, |_, z| Chunk::flat_floor(if z == half_row { 24 } else { 16 }));
     spawn_slime(world.regions.get_mut(&r0()).unwrap(), [176.0, 40.0, 112.0], 1, 0.0, 0);
     let compound = add_compound_body(&mut world);
     // S (+z) over the half-block row and back off it, then D (+x), with jumps.

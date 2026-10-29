@@ -263,18 +263,22 @@ fn shaft_crosses_soil_then_layers_then_bedrock() {
     let world = ForgedWorld::new(synthetic());
     let columns = worldgen::generate_region_forged(&world, RegionCoords::new(0, 0), mats());
     // Spawn block (8, 8): on the plain, well away from the river and the lake.
-    let (cc, col) = columns.iter().find(|(c, _)| c.x == 4 && c.z == 4).expect("spawn column");
-    assert_eq!((cc.x, cc.z), (4, 4));
+    // Its chunk column and block-in-chunk follow from the chunk size.
+    let cb = game::CHUNK_BLOCKS;
+    let spawn_block = (game::PLAYER_SPAWN_X / game::BLOCK_VOXELS as f32) as usize;
+    let (col_xz, lx) = (spawn_block / cb, spawn_block % cb);
+    let (cc, col) = columns.iter().find(|(c, _)| c.x == col_xz && c.z == col_xz).expect("spawn column");
+    assert_eq!((cc.x, cc.z), (col_xz, col_xz));
     let ground = col.ground().unwrap();
     assert!(ground.geo.iter().all(|&g| g == 64), "geo {:?}", ground.geo);
-    let surface = i32::from(ground.surface[0]);
+    let surface = i32::from(ground.surface[lx * cb + lx]);
     assert!(surface > 50 && surface - 60 < 38, "surface {surface} must cross both layers");
-    assert_eq!(col.get(BlockPos::new(0, surface + 1, 0)).id, BlockId::AIR, "surface {surface} is the top");
+    assert_eq!(col.get(BlockPos::new(lx as i32, surface + 1, lx as i32)).id, BlockId::AIR, "surface {surface} is the top");
 
     let m = mats();
     let (sandstone, shale) = (m.rocks[SANDSTONE as usize], m.rocks[SHALE as usize]);
     for y in (surface - 70..=surface).rev() {
-        let id = block_in(col, 0, 0, y);
+        let id = block_in(col, lx, lx, y);
         let want = if y > surface - 4 {
             assert!([m.grass, m.dirt, m.sand].contains(&id), "soil at y={y} (surface {surface}): {id:?}");
             continue;

@@ -11,8 +11,11 @@ use crossbeam::channel::{unbounded, Receiver};
 use game::{
     Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind,
     InlineLodBuilder, InlineSchedule, InlineSpawner, InputEvent, Key, LodBuilder, RegionCoords,
-    RegionOutput, ServerEvent, ServerPacket, SubChunk, WorldManager, SPAWN_REGION, TICK_RATE,
+    RegionOutput, ServerEvent, ServerPacket, SubChunk, WorldManager, REGION_SIZE, SPAWN_REGION,
+    TICK_RATE,
 };
+
+mod common;
 
 /// Seeds swept per schedule mode.
 const SEEDS: u64 = 12;
@@ -62,12 +65,20 @@ fn floor_column(x: usize, z: usize) -> (ColumnCoords, Column) {
     (ColumnCoords::new(x, z), Column::new(0, air, air, vec![sub]))
 }
 
+/// Floor columns over the world-unit rectangle `xs` x `zs`: every chunk
+/// column the rectangle overlaps.
+fn floor_columns(xs: std::ops::Range<f32>, zs: std::ops::Range<f32>) -> Vec<(ColumnCoords, Column)> {
+    common::chunks_over(xs, zs).into_iter().map(|(x, z)| floor_column(x, z)).collect()
+}
+
 /// Floor under the whole square between the spawn point (x=128,z=128) and the
-/// region's -x/-z corner, continuing two columns deep into the three
-/// neighbours around that corner — so every route is walked grounded, with
-/// colliders on both sides of each handoff.
+/// region's -x/-z corner, continuing 128 units deep into
+/// the three neighbours around that corner — so every route is walked
+/// grounded, with colliders on both sides of each handoff. Stated in world
+/// units, so it holds at any chunk size.
 fn seam_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
-    let (near, far) = (0..=4, 30..=31);
+    let near = 0.0..5.0 * 64.0;
+    let far = REGION_SIZE - 128.0..REGION_SIZE;
     let (xs, zs) = if rc == SPAWN_REGION {
         (near.clone(), near)
     } else if rc == north() {
@@ -77,9 +88,10 @@ fn seam_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
     } else if rc == north_west() {
         (far.clone(), far)
     } else {
-        return vec![floor_column(4, 4)];
+        // Far regions: just the chunk under the spawn column.
+        return floor_columns(128.0..160.0, 128.0..160.0);
     };
-    xs.flat_map(|x| zs.clone().map(move |z| floor_column(x, z))).collect()
+    floor_columns(xs, zs)
 }
 
 struct Rig {

@@ -6,8 +6,10 @@ pub fn r0() -> RegionCoords {
     RegionCoords::new(0, 0)
 }
 
-/// 8-chunk cells: a 4×4 grid in the default 32-chunk region.
-pub const CC: usize = 8;
+/// Cell edge in blocks: a 4×4 grid in the 64-block test region.
+pub const CC_BLOCKS: usize = 16;
+/// The cell edge in chunks (8 at 2-block chunks, 1 at 16).
+pub const CC: usize = CC_BLOCKS / game::CHUNK_BLOCKS;
 
 #[test]
 fn legacy_regions_are_not_in_cell_mode() {

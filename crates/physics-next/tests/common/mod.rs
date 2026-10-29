@@ -9,12 +9,58 @@ use game::movement::{self, Motion, MoveKeys, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_
 use game::{BLOCK_VOXELS, CHUNK_BLOCKS, Chunk};
 use physics_next::PhysicsWorld;
 use rapier3d::prelude::*;
+use std::ops::Range;
 
 /// A chunk's edge in world units.
 pub const CHUNK: f32 = (CHUNK_BLOCKS * BLOCK_VOXELS) as f32;
-/// The game's spawn column (`PLAYER_SPAWN_X`/`_Z`): the corner where chunk
-/// columns 3 and 4 meet rows 3 and 4.
+/// The game's spawn column (`PLAYER_SPAWN_X`/`_Z`). At 2-block chunks it is
+/// the corner where chunk columns 3 and 4 meet rows 3 and 4; at larger chunks
+/// it lies inside a chunk, so fixtures state their terrain in world units
+/// around it (`chunks_over`, `spawn_x_band`, `spawn_z_walk`), never in chunk
+/// indices.
 pub const SPAWN: [f32; 2] = [game::PLAYER_SPAWN_X, game::PLAYER_SPAWN_Z];
+
+/// Chunk index along one horizontal axis of the world-unit coordinate `u`.
+pub fn chunk_index_of(u: f32) -> i32 {
+    (u / CHUNK).floor() as i32
+}
+
+/// The chunk holding the world-unit position `units`.
+pub fn chunk_of(units: Vector) -> game::ChunkCoords {
+    game::chunk_coords_from_translation(game::rapier3d::math::Vector::new(units.x, units.y, units.z))
+}
+
+/// Chunk `(x, z)` pairs overlapping the half-open world-unit rectangle
+/// (negative edges clamp to 0).
+pub fn chunks_over(x_units: Range<f32>, z_units: Range<f32>) -> Vec<(i32, i32)> {
+    let span = |r: Range<f32>| chunk_index_of(r.start.max(0.0))..(r.end / CHUNK).ceil() as i32;
+    let zs = span(z_units);
+    span(x_units).flat_map(|x| zs.clone().map(move |z| (x, z))).collect()
+}
+
+/// Every chunk overlapping the unit rectangle, each a `Chunk::flat_floor(depth)`.
+pub fn floor_chunks(x_units: Range<f32>, z_units: Range<f32>, depth: u32) -> Vec<((i32, i32, i32), Chunk)> {
+    chunks_over(x_units, z_units).into_iter().map(|(x, z)| ((x, 0, z), Chunk::flat_floor(depth))).collect()
+}
+
+/// The first chunk row past the spawn's (row 5, z = 160, at 2-block chunks).
+pub fn seam_row() -> i32 {
+    chunk_index_of(SPAWN[1]) + 1
+}
+/// World z of [`seam_row`]'s border.
+pub fn seam_z() -> f32 {
+    seam_row() as f32 * CHUNK
+}
+/// One chunk either side of the spawn column in x.
+pub fn spawn_x_band() -> Range<f32> {
+    SPAWN[0] - CHUNK..SPAWN[0] + CHUNK
+}
+/// From one chunk behind the spawn to `ahead` units past it, padded by two
+/// chunks: the z extent of a walk of `ahead` units.
+pub fn spawn_z_walk(ahead: f32) -> Range<f32> {
+    let end = (chunk_index_of(SPAWN[1]) + 2 + (ahead / CHUNK) as i32) as f32 * CHUNK;
+    SPAWN[1] - CHUNK..end
+}
 
 /// Adds `chunk`'s terrain at chunk coordinates `(x, y, z)`, the way
 /// `seed_terrain_genesis` does: one fixed body at the chunk origin; a full
@@ -81,14 +127,24 @@ impl Walker {
         walker
     }
 
-    /// Chunk columns `columns` x `rows` at y 0, one chunk each.
-    pub fn on(
-        columns: std::ops::RangeInclusive<i32>,
-        rows: std::ops::RangeInclusive<i32>,
-        chunk: impl Fn(i32, i32) -> Chunk,
-    ) -> Self {
-        let chunks: Vec<_> = columns.flat_map(|x| rows.clone().map(move |z| (x, z))).map(|(x, z)| ((x, 0, z), chunk(x, z))).collect();
+    /// The chunks at y 0 overlapping the world-unit rectangle `x_units` x
+    /// `z_units`, one each (`chunk(x, z)` gets its chunk coordinates).
+    pub fn on(x_units: Range<f32>, z_units: Range<f32>, chunk: impl Fn(i32, i32) -> Chunk) -> Self {
+        let chunks: Vec<_> =
+            chunks_over(x_units, z_units).into_iter().map(|(x, z)| ((x, 0, z), chunk(x, z))).collect();
         Self::new(chunks)
+    }
+
+    /// Moves the settled player along +z to stand `gap` units short of the
+    /// chunk seam at [`seam_z`]; where the spawn is already within `gap` of it
+    /// (2-block chunks: 32 away) the player stays put.
+    pub fn approach_seam(&mut self, gap: f32) {
+        let z = seam_z() - gap;
+        let b = self.body();
+        if z > b.z {
+            self.teleport(Vector::new(b.x, b.y, z));
+            self.ticks(2);
+        }
     }
 
     /// One region tick of the player: plan, sweep, settle, step.

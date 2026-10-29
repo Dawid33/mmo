@@ -1,6 +1,6 @@
 use game::{
     GameEvent, GameEventKind, Pose, Region, RegionCoords, Rollback, FLIP_HYSTERESIS,
-    REGION_SIZE,
+    GHOST_MARGIN, REGION_SIZE,
 };
 use game::StateHash;
 
@@ -122,18 +122,19 @@ fn kindless_terrain_in_margin_does_not_mirror() {
     // Chunk entities get a fixed rigidbody but their `kind` component stays
     // `None` (create_entity_safe never sets it) — the kind-None guard in
     // scan_boundaries is what excludes them. A chunk's own min-corner can
-    // never land strictly inside the margin (it's a multiple of 32, and the
-    // margin boundary in ghost_offsets is `> REGION_SIZE - GHOST_MARGIN` =
-    // `> 224`, itself a multiple of 32), so spawning the chunk at its
+    // never land strictly inside the margin (it's a multiple of `CHUNK_UNITS`,
+    // and the margin boundary in ghost_offsets is `> REGION_SIZE -
+    // GHOST_MARGIN`, a multiple of it too), so spawning the chunk at its
     // natural position wouldn't exercise the guard at all — a chunk sitting
     // ON the boundary never mirrors regardless of `kind`. To actually put a
     // kindless bodied entity strictly inside the margin, teleport the
     // chunk's fixed body there directly via the same undo-safe primitive the
     // other tests use for player teleports.
     let id = RegionCoords::new(0, 0);
+    let last = game::REGION_CHUNKS - 1;
     let mut region = Region::from_chunks(
         id,
-        vec![(game::ChunkCoords::new(7, 0, 7), game::Chunk::flat_floor(8))],
+        vec![(game::ChunkCoords::new(last, 0, last), game::Chunk::flat_floor(8))],
     );
     let chunk_key = region
         .data()
@@ -142,13 +143,15 @@ fn kindless_terrain_in_margin_does_not_mirror() {
         .iter()
         .find_map(|(k, c)| c.is_some().then_some(k))
         .expect("terrain chunk registered as an entity with a chunk component");
-    // 224 < 250 < 256: strictly inside the +x margin, but not past the
-    // departure line (258), so only the ghost path is in play.
-    region.with_data(|d| d.set_body_pose_safe(chunk_key, pose(250.0, 128.0)));
+    // Strictly inside the +x margin (half of it in), but short of the
+    // departure line (REGION_SIZE + FLIP_HYSTERESIS), so only the ghost path
+    // is in play.
+    let x = REGION_SIZE - GHOST_MARGIN / 2.0;
+    region.with_data(|d| d.set_body_pose_safe(chunk_key, pose(x, 128.0)));
     region.handle_event(GameEventKind::Tick).unwrap();
     region.forget_last_event();
     let (departures, ghosts) = region.take_transfers();
-    assert!(departures.is_empty(), "terrain never departs (fixed bodies, and 250 < the 258 flip line anyway)");
+    assert!(departures.is_empty(), "terrain never departs (fixed bodies, and short of the flip line anyway)");
     assert!(
         ghosts.is_empty(),
         "kindless terrain never mirrors — this fails if the `kind`-None guard in scan_boundaries is removed"
