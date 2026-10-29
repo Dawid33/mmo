@@ -12,7 +12,8 @@
 //!
 //! Self-check without a human: `--model <part of a path>` picks a model at
 //! start, `--anim <name>` a clip, `--time <s>` freezes it there, and
-//! `--shot <png>` saves a screenshot once it has loaded and exits;
+//! `--shot <png>` saves a screenshot once it has loaded and exits (its window
+//! opens unfocused, behind everything, on monitor `VOXEL_SHOT_MONITOR`, default 0);
 //! `--yaw <deg>` / `--pitch <deg>` set the view (default: front three-quarter
 //! of a creature facing -Z; pitch 70 is roughly the commander camera's).
 use std::cell::RefCell;
@@ -23,6 +24,7 @@ use bevy::app::AppExit;
 use bevy::asset::LoadState;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
+use bevy::window::WindowLevel;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use client::renderer::model::{BbAnimationPlayer, BbModel, BbModelAsset, BbModelPlugin, BbModelSpawned};
 use client::renderer::slint_overlay::{SlintLayer, SlintLayerPlugin};
@@ -124,6 +126,16 @@ fn main() {
         args.roots = DEFAULT_ROOTS.iter().map(|r| r.to_string()).collect();
     }
     let start_view = Orbit { focus: Vec3::ZERO, distance: 60.0, yaw: args.yaw.to_radians(), pitch: args.pitch.to_radians() };
+    let mut window = Window { title: "asset viewer".into(), resolution: (1600, 900).into(), ..default() };
+    if args.shot.is_some() {
+        // Screenshot runs (creature sheets fire dozens) must not land under the
+        // cursor and take the keyboard: one fixed monitor (`VOXEL_SHOT_MONITOR`,
+        // winit's index, default 0), unfocused, below every other window.
+        let monitor = std::env::var("VOXEL_SHOT_MONITOR").ok().and_then(|m| m.parse().ok()).unwrap_or(0);
+        window.position = WindowPosition::Centered(MonitorSelection::Index(monitor));
+        window.focused = false;
+        window.window_level = WindowLevel::AlwaysOnBottom;
+    }
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -133,14 +145,7 @@ fn main() {
                     watch_for_changes_override: Some(true),
                     ..default()
                 })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "asset viewer".into(),
-                        resolution: (1600, 900).into(),
-                        ..default()
-                    }),
-                    ..default()
-                })
+                .set(WindowPlugin { primary_window: Some(window), ..default() })
                 .set(client::renderer::render_plugin()),
         )
         .add_plugins(BbModelPlugin)
