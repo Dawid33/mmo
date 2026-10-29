@@ -289,11 +289,6 @@ impl VoxelData {
     pub fn runs(&self) -> usize {
         self.0.len()
     }
-
-    /// The runs themselves, `(length, block)` in dense-index order.
-    pub(crate) fn run_slice(&self) -> &[(u16, game::BlockId)] {
-        &self.0
-    }
 }
 
 /// Marker: the local player's sim body. In commander mode it is hidden and

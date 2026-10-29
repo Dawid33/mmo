@@ -8,9 +8,8 @@
 //! `VoxelData` / `ChunkKey` and is never interpolated. Each brick is a
 //! `ChildOf(region root)` sibling at the region-local chunk origin plus
 //! `local * BRICK_VOXELS`, with [`BrickOf`], `VoxelData` and (stamped by
-//! `mark_remesh_dirty`) a `ChunkKey`. Bricks also carry a copy of their
-//! chunk's `SimEntity`, which the commander's height grid and tile mirror
-//! still read voxels through.
+//! `mark_remesh_dirty`) a `ChunkKey`. The commander's height grid and tile
+//! mirror key by the sim chunk entity and read [`SimChunk`], never bricks.
 //!
 //! All-air bricks and bricks buried inside their chunk are never spawned
 //! ([`spawn_chunk_bricks`]). An edit that needs one ([`apply_block_deltas`])
@@ -22,7 +21,7 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task};
 use game::{BlockDelta, BlockId, BlockIndex, Chunk, Voxel, BRICKS_PER_CHUNK_EDGE, BRICK_BLOCKS, BRICK_VOXELS};
 
-use super::bridge::{PendingBlockDeltas, PendingSnapshotVoxels, SimEntity, VoxelData};
+use super::bridge::{PendingBlockDeltas, PendingSnapshotVoxels, VoxelData};
 use super::meshing::queue::is_buried_by;
 
 /// The render bricks of a sim chunk entity. Present (maybe empty) on every
@@ -44,6 +43,15 @@ pub struct BrickOf {
 /// bricks materialised from it when an edit exposes them.
 #[derive(Component, Debug)]
 pub struct SimChunk(pub Chunk);
+
+/// What changed in a chunk's [`SimChunk`] since the commander's tile mirror
+/// last looked: `full` for a fresh/replaced mirror, else the edited blocks.
+/// The mirror consumes (clears) it.
+#[derive(Component, Default, Debug)]
+pub struct ChunkEdits {
+    pub full: bool,
+    pub blocks: BTreeSet<BlockIndex>,
+}
 
 /// Bricks edited since their voxels were last written, and the off-thread
 /// re-derivation covering ALL of them, if one is running. A newer edit
@@ -251,17 +259,13 @@ pub fn write_brick(world: &mut World, chunk: Entity, local: [u8; 3], voxels: Vox
     let Ok(entity) = world.get_entity(chunk) else { return };
     let Some(root) = entity.get::<ChildOf>().map(ChildOf::parent) else { return };
     let origin = entity.get::<Transform>().map_or(Vec3::ZERO, |t| t.translation);
-    let sim = entity.get::<SimEntity>().map(|s| SimEntity { region: s.region, key: s.key });
-    let mut brick = world.spawn((
+    let brick = world.spawn((
         BrickOf { chunk, local },
         Transform::from_translation(brick_translation(origin, local)),
         Visibility::default(),
         ChildOf(root),
         voxels,
     ));
-    if let Some(sim) = sim {
-        brick.insert(sim);
-    }
     let brick = brick.id();
     let mut entity = world.entity_mut(chunk);
     match entity.get_mut::<ChunkBricks>() {
@@ -309,7 +313,7 @@ pub fn land_chunk_bricks(world: &mut World, chunk: Entity, source: Chunk, bricks
     despawn_chunk_bricks(world, chunk);
     clear_skipped(world, chunk);
     let Ok(mut entity) = world.get_entity_mut(chunk) else { return };
-    entity.remove::<(PendingSnapshotVoxels, BrickEdits)>().insert(SimChunk(source));
+    entity.remove::<(PendingSnapshotVoxels, BrickEdits)>().insert((SimChunk(source), ChunkEdits { full: true, ..default() }));
     if !entity.contains::<ChunkBricks>() {
         entity.insert(ChunkBricks::default());
     }
@@ -380,6 +384,7 @@ pub fn apply_block_deltas(world: &mut World, chunk: Entity, deltas: Vec<BlockDel
         return;
     };
     let n = BRICKS_PER_CHUNK_EDGE;
+    let indices: Vec<BlockIndex> = deltas.iter().map(|d| d.index).collect();
     let mut touched = BTreeSet::new();
     let mut exposed = BTreeSet::new();
     for delta in &deltas {
@@ -396,6 +401,13 @@ pub fn apply_block_deltas(world: &mut World, chunk: Entity, deltas: Vec<BlockDel
                 continue;
             }
             exposed.insert(to_local(nb));
+        }
+    }
+    let mut entity = world.entity_mut(chunk);
+    match entity.get_mut::<ChunkEdits>() {
+        Some(mut edits) => edits.blocks.extend(indices),
+        None => {
+            entity.insert(ChunkEdits { full: false, blocks: indices.into_iter().collect() });
         }
     }
     exposed.retain(|l| !touched.contains(l) && find_brick(world, chunk, *l).is_none());
@@ -500,6 +512,7 @@ pub fn clear_chunk_voxels(world: &mut World, chunk: Entity) {
     entity.remove::<(PendingSnapshotVoxels, PendingBlockDeltas, BrickEdits)>();
     if let Some(mut source) = entity.get_mut::<SimChunk>() {
         source.0 = Chunk::default();
+        entity.insert(ChunkEdits { full: true, ..default() });
     }
     if !entity.contains::<ChunkBricks>() {
         entity.insert(ChunkBricks::default());
