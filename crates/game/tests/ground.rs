@@ -16,7 +16,10 @@ fn id(n: u16) -> BlockId {
 #[test]
 fn bedrock_starts_sixty_below_each_columns_surface() {
     let (stone, bedrock) = (id(1), id(2));
-    let g = ColumnGround::plain(cols(&[100, 90, 100, 100]), 0, stone, bedrock);
+    // Every column's surface at 100 except (lx 0, lz 1) — index 1 — at 90.
+    let mut surface = vec![100; COLUMN_FOOTPRINT];
+    surface[1] = 90;
+    let g = ColumnGround::plain(cols(&surface), 0, stone, bedrock);
     assert_eq!(UNDERGROUND_DEPTH, 60);
     assert_eq!(g.block_at(0, 0, 41).id, stone);
     assert_eq!(g.block_at(0, 0, 40).id, bedrock);

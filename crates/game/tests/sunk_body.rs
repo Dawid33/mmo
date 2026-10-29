@@ -21,10 +21,24 @@ fn body(r: &Region) -> (f32, f32, f32) {
 /// Floor top at y = 8 over x, z in 96..192; the player placed at (x, y, z)
 /// walking W+A (towards -x, -z) for four ticks. Returns its trail.
 fn walk_from(x: f32, y: f32, z: f32) -> Vec<(f32, f32, f32)> {
+    // The floor is block columns 6..12 each way (chunks 3..=5 at 2-block
+    // chunks), its edges and corner where they are at any chunk size.
+    let (cb, blocks) = (game::CHUNK_BLOCKS, 6..12usize);
+    let floor = Chunk::flat_floor(8);
     let mut chunks = Vec::new();
-    for cx in 3..=5 {
-        for cz in 3..=5 {
-            chunks.push((ChunkCoords::new(cx, 0, cz), Chunk::flat_floor(8)));
+    for cx in blocks.start / cb..=(blocks.end - 1) / cb {
+        for cz in blocks.start / cb..=(blocks.end - 1) / cb {
+            let mut chunk = Chunk::default();
+            for bx in (0..cb).filter(|b| blocks.contains(&(cx * cb + b))) {
+                for bz in (0..cb).filter(|b| blocks.contains(&(cz * cb + b))) {
+                    let i = game::BlockIndex::from_xyz(bx, 0, bz);
+                    chunk.set_block(bx, 0, bz, floor.block_at(bx, 0, bz));
+                    if let Some(c) = floor.chisel.get(&i) {
+                        chunk.chisel.insert(i, c.clone());
+                    }
+                }
+            }
+            chunks.push((ChunkCoords::new(cx, 0, cz), chunk));
         }
     }
     let mut r = Region::from_chunks(RegionCoords::new(0, 0), chunks);

@@ -3,13 +3,17 @@
 //! below real generated terrain).
 use game::{Chunk, ChunkCoords, GameEventKind, Region, RegionId};
 
-// Build a region whose only terrain is a full chunk covering the spawn column
-// (region-local voxel (128,128) -> chunk column (4,4)) at sub_y=3, so its
-// highest solid voxel is at Y = 3*32 + 31 = 127 (top face at 128).
+// Build a region whose only terrain is a floor in the chunk covering the
+// spawn column (region-local voxel (128,128)) whose top face is at Y = 128:
+// a full chunk at sub_y=3 at 2-block chunks (3*32 + 32), the bottom 128
+// voxels of sub_y=0 at 16.
 fn region_with_high_floor() -> Region {
+    let cu = game::CHUNK_UNITS;
+    let (cy, depth) = ((128 - 1) / cu, 128 - (128 - 1) / cu * cu);
+    let c = 128 / cu;
     Region::from_chunks(
         RegionId::new(0, 0),
-        vec![(ChunkCoords::new(4, 3, 4), Chunk::flat_floor(32))],
+        vec![(ChunkCoords::new(c, cy as i32, c), Chunk::flat_floor(depth as u32))],
     )
 }
 

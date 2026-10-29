@@ -22,7 +22,16 @@ fn minimal_world() -> World {
         &r0(),
         Region::from_chunks(
             r0(),
-            vec![(ChunkCoords::new(4, 0, 4), Chunk::flat_floor(8))],
+            // The chunk under the spawn at (128, 128): chunk (4, 0, 4) at
+            // 2-block chunks, (0, 0, 0) at 16.
+            vec![(
+                ChunkCoords::new(
+                    (game::PLAYER_SPAWN_X / game::CHUNK_UNITS as f32) as usize,
+                    0,
+                    (game::PLAYER_SPAWN_Z / game::CHUNK_UNITS as f32) as usize,
+                ),
+                Chunk::flat_floor(8),
+            )],
         ),
     );
     world
