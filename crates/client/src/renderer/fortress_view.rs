@@ -91,9 +91,9 @@ pub fn overlay_byte(d: Option<&Designation>, preview: Option<Result<(), Invalid>
 
 /// The designation tool's drag in progress: the tiles it would cover and
 /// whether the order is valid on each. Empty when no drag is on. Filled by
-/// the designation tools; the overlay reads only `cells`.
+/// the designation tools (`commander::designate`); the overlay reads `cells`
+/// and `kind` (`None` for an erase).
 #[derive(Resource, Default)]
-#[allow(dead_code)]
 pub struct DragPreview {
     pub area: Option<TileBox>,
     pub kind: Option<DesignationKind>,
@@ -143,7 +143,8 @@ impl OverlayGrid {
     }
 
     /// Rebuild every byte for `base_level` from the designations and the
-    /// drag preview (whose cells keep their designation's kind), marking the
+    /// drag preview (whose cells show the drag's kind for a dig or
+    /// deconstruct drag, else keep their designation's kind), marking the
     /// changed box dirty — all of it when `full`.
     pub fn rebuild(
         &mut self,
@@ -158,9 +159,15 @@ impl OverlayGrid {
                 next[i] = overlay_byte(Some(d), None);
             }
         }
+        // A dig or deconstruct drag previews its own kind; an erase (or a
+        // build, which has no face tint) keeps each tile's designation.
+        let drag_kind = preview
+            .kind
+            .filter(|k| matches!(k, DesignationKind::Dig | DesignationKind::Deconstruct))
+            .map(|kind| Designation { kind, op: game::OpId::default(), priority: game::DEFAULT_PRIORITY });
         for (p, result) in &preview.cells {
             if let Some(i) = Self::index_at(self.dims, base_level, *p) {
-                next[i] = overlay_byte(designations.get(p), Some(*result));
+                next[i] = overlay_byte(drag_kind.as_ref().or(designations.get(p)), Some(*result));
             }
         }
         let dirty = if full { Some((UVec3::ZERO, self.dims)) } else { diff_box(&self.bytes, &next, self.dims) };
@@ -472,6 +479,29 @@ mod tests {
         assert_eq!(grid.bytes[grid.index([3, 22, 5]).unwrap()], OVERLAY_DIG | OVERLAY_PREVIEW | OVERLAY_INVALID);
         assert_eq!(grid.bytes[grid.index([9, 22, 1]).unwrap()], OVERLAY_PREVIEW);
         assert_eq!(grid.dirty, Some((UVec3::new(3, 1, 2), UVec3::new(10, 6, 3))));
+    }
+
+    /// A dig / deconstruct drag previews its own kind; an erase keeps the
+    /// tile's.
+    #[test]
+    fn preview_shows_the_drags_kind() {
+        let mut grid = OverlayGrid::default();
+        let mut marks = BTreeMap::new();
+        marks.insert([3, 22, 5], designation(DesignationKind::Dig));
+        let cells = vec![([3, 22, 5], Ok(())), ([9, 22, 1], Err(Invalid::NothingToDig))];
+        let dig = DragPreview { kind: Some(DesignationKind::Dig), cells: cells.clone(), ..default() };
+        grid.rebuild(20, &BTreeMap::new(), &dig, true);
+        assert_eq!(grid.bytes[grid.index([3, 22, 5]).unwrap()], OVERLAY_DIG | OVERLAY_PREVIEW);
+        assert_eq!(grid.bytes[grid.index([9, 22, 1]).unwrap()], OVERLAY_DIG | OVERLAY_PREVIEW | OVERLAY_INVALID);
+
+        let deconstruct = DragPreview { kind: Some(DesignationKind::Deconstruct), cells: cells.clone(), ..default() };
+        grid.rebuild(20, &marks, &deconstruct, false);
+        assert_eq!(grid.bytes[grid.index([3, 22, 5]).unwrap()], OVERLAY_DECONSTRUCT | OVERLAY_PREVIEW);
+
+        let erase = DragPreview { kind: None, cells, ..default() };
+        grid.rebuild(20, &marks, &erase, false);
+        assert_eq!(grid.bytes[grid.index([3, 22, 5]).unwrap()], OVERLAY_DIG | OVERLAY_PREVIEW);
+        assert_eq!(grid.bytes[grid.index([9, 22, 1]).unwrap()], OVERLAY_PREVIEW | OVERLAY_INVALID);
     }
 
     #[test]

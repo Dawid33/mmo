@@ -5,7 +5,9 @@
 //! rides a smoothed terrain height. None of it is sim state —
 //! nothing in the sim depends on where a commander looks — so it lives here,
 //! with the minimap (`minimap`), the client-local selection and the ground
-//! pick (`selection`), all of which read the client height grid (`height`).
+//! pick (`selection`), all of which read the client height grid (`height`),
+//! and the fortress designation tools (`designate`), which read the tile
+//! mirror (`tiles`) at the working level (`level`).
 //!
 //! The math is pure functions over plain values (tested without a window);
 //! the systems only gather input and write the results.
@@ -20,6 +22,7 @@
 //! never turns on fps-cam mode, never walks and never edits blocks. The bridge
 //! hides it and gives it no camera ([`CameraMode::Commander`]).
 
+pub mod designate;
 pub mod height;
 pub mod level;
 pub mod minimap;
@@ -303,6 +306,9 @@ impl Plugin for CommanderPlugin {
             .init_resource::<selection::GroundPick>()
             .init_resource::<tiles::TileMirror>()
             .init_resource::<level::WorkingLevel>()
+            .init_resource::<designate::DesignateState>()
+            .init_resource::<designate::DragReadout>()
+            .init_gizmo_group::<designate::HiddenEdgeGizmos>()
             .add_message::<tiles::TileMirrorMsg>()
             .add_systems(
                 Startup,
@@ -310,6 +316,7 @@ impl Plugin for CommanderPlugin {
                     spawn_commander_camera,
                     minimap::setup_minimap,
                     selection::setup_selection_box,
+                    designate::setup_designate_gizmos,
                 ),
             )
             .add_systems(
@@ -326,8 +333,16 @@ impl Plugin for CommanderPlugin {
                     pan_and_zoom,
                     follow_terrain,
                     apply_camera_transform,
+                    (
+                        designate::designate_keys,
+                        designate::update_hover,
+                        designate::drag_input,
+                        designate::update_drag_preview,
+                        designate::draw_designate_gizmos,
+                    )
+                        .chain(),
                     selection::update_ground_pick,
-                    selection::select_input,
+                    selection::select_input.run_if(designate::no_tool_active),
                     selection::prune_selection,
                     selection::draw_selection_rings,
                     minimap::rebuild_minimap_base,
@@ -340,7 +355,8 @@ impl Plugin for CommanderPlugin {
                 Update,
                 (super::fortress_view::update_overlay_grid, super::fortress_view::update_fortress_view)
                     .after(level::step_level_input)
-                    .after(tiles::update_tile_mirror),
+                    .after(tiles::update_tile_mirror)
+                    .after(designate::update_drag_preview),
             );
     }
 }
