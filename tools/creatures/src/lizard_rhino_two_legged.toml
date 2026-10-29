@@ -1,0 +1,53 @@
+# DF LIZARD_RHINO_TWO_LEGGED (fantastic, vermin): 1 kg, "a tiny reptile, running on
+# two legs. It has a horn on the end of its nose". Vermin form (one `move` loop +
+# death): 6 units nose to rump, sand-brown scales, a pale horn, a tail. Scurry.
+# Attack bite (vermin: not animated).
+name = "two-legged rhino lizard"
+template = "vermin"
+status = "draft"
+
+[proportions]
+body = [1.5, 1.5, 3]
+head = [1.5, 1.5, 1.5]
+legs = 1
+move = "scurry"
+cycle = 0.25
+
+# Head pivot: the neck (head spans y -0.75..0.75, z -1.5..0); the horn on the nose.
+[[cubes]]
+name = "horn"
+bone = "head"
+part = "horn"
+from = [-0.25, 0.25, -1.75]
+to = [0.25, 1.25, -1.25]
+
+# Body pivot: its centre; the tail behind.
+[[cubes]]
+name = "tail"
+bone = "body"
+part = "tail"
+from = [-0.5, -0.5, 1.5]
+to = [0.5, 0.25, 4.5]
+
+[palette]
+body = "#a08a5a"
+body_up = "#8a7448"
+head = "#a08a5a"
+tail = "#8a7448"
+legs = "#6a5a3a"
+horn = "#e8e0c8"
+eye = "#141008"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 1
+y = 0
+colour = "eye"

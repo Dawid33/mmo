@@ -1,0 +1,53 @@
+# DF WAMBLER_FLUFFY (fantastic, vermin): 2 kg, "a fluffy, pudge-filled being, known
+# for its warm heart and stumble bumblings". Vermin form (one `move` loop + death):
+# a round pink-cream puffball, 5 units, with a little face; scurry (bumbling).
+# No attacks.
+name = "fluffy wambler"
+template = "vermin"
+status = "draft"
+
+[proportions]
+body = [4, 3.5, 4]
+head = [3, 2.5, 1]
+legs = 0.5
+move = "scurry"
+cycle = 0.35
+
+# Body pivot: its centre; a tuft on top.
+[[cubes]]
+name = "tuft"
+bone = "body"
+part = "fluff"
+from = [-1, 1.75, -1]
+to = [1, 2.5, 1]
+
+[palette]
+body = "#f0c8d0"
+body_up = "#f8dce2"
+head = "#f4d4da"
+fluff = "#fae4ea"
+legs = "#c89aa4"
+eye = "#2a1a20"
+nose = "#d07888"
+
+# The head's front face is 3×3 (2.5 rounds up; row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "nose"

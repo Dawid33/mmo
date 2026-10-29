@@ -1,0 +1,179 @@
+# DF ANT_MAN (underground, chasm): 20 kg, "a humanoid with the head and body of an
+# ant". Biped + [wings] (FLIER, 2WINGS: the fly set), 22 units: a shiny red-brown
+# chitin ant head with mandibles and antennae, a narrow thorax, FOUR arms (the
+# second pair is a bone pair, each following its own side's arm), thin legs, and
+# an ant's gaster hanging behind the hips. LARGE_PREDATOR: alert + roar. Attacks
+# punch (the template's `attack`); kick and bite optional (not made). Worker set
+# from the biped (they can learn).
+name = "antman"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[budget]
+bones = 14   # four arms (2), wings (2) and the gaster on top of the biped's 8
+
+[proportions]
+leg = [2, 9]
+foot = 1
+leg_inset = 1
+body = [7, 8, 4]
+arm = [2, 9]
+hand = 2
+head = [5, 5, 5]
+walk = { cycle = 0.7, swing = 30, bob = 0.3 }
+run = { cycle = 0.42, swing = 48, bob = 0.7 }
+
+[wings]
+bone = "torso"
+at = [-1, 7.5, 2]
+span = 9
+chord = 4
+part = "wings"
+cycle = 0.15
+flap = 40
+
+# Head pivot: the neck; the head spans y 0..5, z -2.5..2.5.
+[[cubes]]
+name = "mandible_l"
+bone = "head"
+part = "mandible"
+mirror = true
+from = [-2.5, 0, -4.5]
+to = [-0.5, 1, -2.5]
+
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "chitin_dark"
+mirror = true
+from = [-2.5, 5, -2.5]
+to = [-1.5, 8, -1.5]
+
+[[cubes]]
+name = "antenna_tip_l"
+bone = "head"
+part = "chitin_dark"
+mirror = true
+from = [-3.5, 7, -4.5]
+to = [-2.5, 8, -1.5]
+
+# The lower arm pair, mid-torso (torso pivot: the hips). Declared per side: each
+# follows its own side's arm.
+[[bones]]
+name = "arm2_l"
+parent = "torso"
+pivot = [-4.5, 4, 0]
+follow = "arm_l"
+
+[[bones]]
+name = "arm2_r"
+parent = "torso"
+pivot = [4.5, 4, 0]
+follow = "arm_r"
+
+[[cubes]]
+name = "arm2_l"
+bone = "arm2_l"
+part = "arms"
+from = [-1, -7, -1]
+to = [1, 1, 1]
+
+[[cubes]]
+name = "arm2_r"
+bone = "arm2_r"
+part = "arms"
+from = [-1, -7, -1]
+to = [1, 1, 1]
+
+# The gaster: from the small of the back, hanging (hips pivot).
+[[bones]]
+name = "gaster"
+parent = "body"
+pivot = [0, 1, 2]
+rest = [30, 0, 0]
+
+[[cubes]]
+name = "gaster"
+bone = "gaster"
+part = "gaster"
+from = [-3, -2.5, 0]
+to = [3, 2.5, 7]
+
+[palette]
+head = "#7a2a18"
+head_up = "#94361e"
+hands = "#4a1a10"
+torso = "#6a2414"
+torso_up = "#82301c"
+arms = "#5a1e12"
+legs = "#5a1e12"
+feet = "#3a120a"
+mandible = "#3a120a"
+chitin_dark = "#2a0e08"
+gaster = "#6a2414"
+gaster_up = "#82301c"
+wings = "#c8c8b8"
+wings_up = "#dcdccc"
+eye = "#0e0806"
+band = "#3a120a"
+
+# The head's front face is 5×5 (row 0 at the top): big dark eyes at the sides.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+w = 2
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+w = 2
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "gaster"
+face = "up"
+x = 0
+y = 2
+w = 6
+colour = "band"
+
+[[decals]]
+cube = "gaster"
+face = "up"
+x = 0
+y = 5
+w = 6
+colour = "band"
+
+# Lying down, the hanging gaster would sink into the ground: swing it up along
+# the back (keys add to the rest [30, 0, 0]); wings flat as on the pixie.
+[clips.lie]
+merge = true
+keys = [
+  { bone = "gaster", channel = "rotation", time = 0, value = [-130, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0, value = [-180, -90, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [-180, 90, 0] },
+]
+
+[clips.death]
+merge = true
+keys = [
+  { bone = "gaster", channel = "rotation", time = 0, value = [-130, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0, value = [-180, -90, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [-180, 90, 0] },
+]
+
+[clips.sleep]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [-180, -90, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [-180, 90, 0] },
+]

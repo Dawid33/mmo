@@ -1,0 +1,92 @@
+# DF ELEMENTMAN_AMETHYST (underground, chasm): 70 kg, "a strange crystalline creature
+# the shape of a man". Biped, 31 units, heavier-set than a human (a statue of
+# faceted violet crystal, crystal spurs on the head, shoulders and back, pale
+# glowing eyes). NOT_LIVING / NO_EAT: eat comes with the template, never played.
+# LARGE_PREDATOR: alert + roar. Attacks punch (the template's `attack`), kick
+# optional (not made). Worker set from the biped (unused).
+name = "amethyst man"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [5, 12]
+foot = 0
+body = [12, 12, 7]
+arm = [4, 13]
+hand = 3
+head = [7, 7, 7]
+walk = { cycle = 1.05, swing = 24, bob = 0.5 }
+run = { cycle = 0.65, swing = 40, bob = 1.0 }
+
+# Head pivot: the neck; the head spans y 0..7, z -3.5..3.5.
+[[cubes]]
+name = "crown"
+bone = "head"
+part = "crystal"
+from = [-1.5, 6, -2]
+to = [1.5, 11.5, 1]
+
+[[cubes]]
+name = "crown_side_l"
+bone = "head"
+part = "crystal"
+mirror = true
+from = [-4, 5.5, -0.5]
+to = [-1.5, 9.5, 2]
+
+# Arm pivots: the shoulders (the arm cube reaches 2 above it).
+[[cubes]]
+name = "spur_l"
+bone = "arm_l"
+part = "crystal"
+mirror = true
+from = [-2.5, 1.5, -1.5]
+to = [0.5, 7, 1.5]
+
+# Torso pivot: the hips; the torso spans y 0..12, z -3.5..3.5.
+[[cubes]]
+name = "back_spur_l"
+bone = "torso"
+part = "crystal"
+mirror = true
+from = [-4, 7, 3]
+to = [-2, 13, 5]
+
+[[cubes]]
+name = "chest_facet"
+bone = "torso"
+part = "facet"
+from = [-4, 5, -4]
+to = [4, 11, -3.5]
+
+[palette]
+head = "#7a42b4"
+head_up = "#9a62d4"
+hands = "#6a3aa0"
+torso = "#7a42b4"
+torso_up = "#9a62d4"
+arms = "#7a42b4"
+arms_up = "#9a62d4"
+legs = "#5e3090"
+facet = "#a070d8"
+crystal = "#c59cf0"
+crystal_up = "#e0c8ff"
+eye = "#f2e8ff"
+
+# The head's front face is 7×7 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+w = 2
+colour = "eye"

@@ -1,0 +1,121 @@
+# DF IMP_FIRE (underground, magma): 6 kg, "a small humanoid surrounded by fire which
+# they can hurl at their enemies". Biped, 14 units tall with its flames: red skin,
+# little horns, a flame crown, a thin tail. LARGE_PREDATOR: alert + roar. Attacks
+# bite (the template's `attack` is a punch), punch, kick, scratch; the fireball and
+# fire jet emissions are optional (not made). Worker set from the biped (unused).
+name = "fire imp"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [2, 4]
+foot = 1
+leg_inset = 0
+body = [5, 4, 3]
+arm = [2, 5]
+hand = 1
+head = [5, 4, 4]
+walk = { cycle = 0.6, swing = 32, bob = 0.3 }
+run = { cycle = 0.38, swing = 50, bob = 0.6 }
+
+# Head pivot: the neck; the head spans y 0..4, z -2..2.
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horn"
+mirror = true
+from = [-2.5, 3.5, -1]
+to = [-1.5, 5, 0]
+
+[[cubes]]
+name = "flame_a"
+bone = "head"
+part = "flame"
+from = [-1.5, 4, -1]
+to = [1.5, 5.5, 1.5]
+
+[[cubes]]
+name = "flame_b"
+bone = "head"
+part = "flame_tip"
+from = [-0.5, 5.5, 0]
+to = [1, 7, 1.5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-3.5, 1.5, 0]
+to = [-2.5, 3, 1]
+
+# A thin tail from the small of the back (hips pivot), hanging.
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 1, 1.5]
+rest = [35, 0, 0]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "torso"
+from = [-0.5, -0.5, 0]
+to = [0.5, 0.5, 5]
+
+[[cubes]]
+name = "tail_tip"
+bone = "tail"
+part = "flame"
+from = [-1, -1, 4.5]
+to = [1, 1, 6]
+
+[palette]
+head = "#c8341c"
+head_north = "#d8442a"
+hands = "#a82814"
+torso = "#c8341c"
+torso_up = "#d8442a"
+arms = "#c8341c"
+legs = "#a82814"
+feet = "#3a1a10"
+horn = "#2a1a14"
+flame = "#ff8a1a"
+flame_up = "#ffb030"
+flame_tip = "#ffd84a"
+eye = "#ffe060"
+mouth = "#3a0c06"
+
+# The head's front face is 5×4 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 3
+colour = "mouth"
+
+# Lying down, the hanging tail would point into the ground: swing it up along the
+# back (keys add to the rest [35, 0, 0]).
+[clips.lie]
+merge = true
+keys = [{ bone = "tail", channel = "rotation", time = 0, value = [-140, 0, 0] }]
+
+[clips.death]
+merge = true
+keys = [{ bone = "tail", channel = "rotation", time = 0, value = [-140, 0, 0] }]

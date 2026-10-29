@@ -1,0 +1,111 @@
+# DF REPTILE_MAN (underground, water): 50 kg, "shaped like men covered with rough
+# scales. They have the head and tail of a lizard". Biped, 29 units: green-brown
+# scales with a yellowish belly, a long lizard snout, a spiny crest, a thick tail
+# from the small of the back. AMPHIBIOUS: swim + swim_idle; LARGE_PREDATOR: alert +
+# roar. Attacks punch (the template's `attack`); kick, scratch, bite optional (not
+# made). Worker set from the biped (they can learn).
+name = "reptile man"
+template = "biped"
+status = "draft"
+extras = ["swim", "swim_idle", "alert", "roar"]
+
+[proportions]
+leg = [4, 11]
+foot = 1
+body = [9, 11, 6]
+arm = [3, 11]
+hand = 2
+head = [6, 6, 6]
+
+# Head pivot: the neck; the head spans y 0..6, z -3..3.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-2.5, 0.5, -8]
+to = [2.5, 4, -3]
+
+[[cubes]]
+name = "crest"
+bone = "head"
+part = "crest"
+from = [-0.5, 6, -2]
+to = [0.5, 8, 3]
+
+[[cubes]]
+name = "back_crest"
+bone = "torso"
+part = "crest"
+from = [-0.5, 3, 3]
+to = [0.5, 11, 4.5]
+
+# The tail, from the small of the back (hips pivot).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 1, 2.5]
+rest = [35, 0, 0]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "torso"
+from = [-1.5, -1.5, 0]
+to = [1.5, 1.5, 12]
+
+[palette]
+head = "#5a6a34"
+head_up = "#6a7a3c"
+head_down = "#c8b878"
+hands = "#4a5a2c"
+torso = "#5a6a34"
+torso_up = "#6a7a3c"
+torso_north = "#c8b878"
+torso_down = "#c8b878"
+arms = "#5a6a34"
+legs = "#4e5e2e"
+feet = "#3a4622"
+crest = "#8a4a22"
+eye = "#e0b020"
+mouth = "#2a2412"
+
+# The head's front face is 6×6; the snout covers its middle.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "west"
+x = 0
+y = 2
+w = 5
+colour = "mouth"
+
+[[decals]]
+cube = "snout"
+face = "east"
+x = 0
+y = 2
+w = 5
+colour = "mouth"
+
+# Lying down, the hanging tail would point into the ground: swing it up along the
+# back (keys add to the rest).
+[clips.lie]
+merge = true
+keys = [{ bone = "tail", channel = "rotation", time = 0, value = [-140, 0, 0] }]
+
+[clips.death]
+merge = true
+keys = [{ bone = "tail", channel = "rotation", time = 0, value = [-140, 0, 0] }]

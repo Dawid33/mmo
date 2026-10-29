@@ -1,0 +1,157 @@
+# DF ELEMENTMAN_MAGMA (underground, magma): 70 kg, "magma moving in the shape of a
+# man. It has a cracked black crust". Biped, 31 units, built like the other
+# elemental men: a black crust with glowing orange cracks (decals) and molten
+# hands, feet and eyes. NOT_LIVING / NO_EAT: eat comes with the template, never
+# played. LARGE_PREDATOR: alert + roar. Attacks punch (the template's `attack`),
+# kick optional (not made).
+name = "magma man"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [5, 12]
+foot = 0
+body = [12, 12, 7]
+arm = [4, 13]
+hand = 3
+head = [7, 7, 7]
+walk = { cycle = 1.1, swing = 22, bob = 0.5 }
+run = { cycle = 0.68, swing = 38, bob = 1.0 }
+
+# Head pivot: the neck; a crust plate on the crown.
+[[cubes]]
+name = "crust_top"
+bone = "head"
+part = "crust"
+from = [-4, 5.5, -3]
+to = [3, 7.5, 4]
+
+# Arm pivots: the shoulders.
+[[cubes]]
+name = "crust_shoulder_l"
+bone = "arm_l"
+part = "crust"
+mirror = true
+from = [-3, 0.5, -2]
+to = [1.5, 3, 2.5]
+
+# Leg pivots: the hips; molten feet.
+[[cubes]]
+name = "foot_l"
+bone = "leg_l"
+part = "molten"
+mirror = true
+from = [-2.5, -12, -3.5]
+to = [2.5, -10.5, 2.5]
+
+[palette]
+head = "#262020"
+hands = "#ff7a1a"
+torso = "#2a2220"
+torso_up = "#342a26"
+arms = "#2a2220"
+legs = "#262020"
+crust = "#1c1818"
+crust_up = "#2c2624"
+molten = "#ff6a10"
+molten_up = "#ffa030"
+crack = "#ff8420"
+eye = "#ffc040"
+
+# The head's front face is 7×7 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 5
+w = 3
+colour = "crack"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 3
+y = 1
+h = 5
+colour = "crack"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 4
+y = 5
+w = 4
+colour = "crack"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 8
+y = 5
+h = 6
+colour = "crack"
+
+[[decals]]
+cube = "torso"
+face = "south"
+x = 5
+y = 2
+h = 8
+colour = "crack"
+
+[[decals]]
+cube = "torso"
+face = "up"
+x = 2
+y = 3
+w = 8
+colour = "crack"
+
+[[decals]]
+cube = "arm_l"
+face = "north"
+x = 1
+y = 2
+h = 6
+colour = "crack"
+
+[[decals]]
+cube = "arm_r"
+face = "north"
+x = 2
+y = 4
+h = 5
+colour = "crack"
+
+[[decals]]
+cube = "leg_l"
+face = "north"
+x = 2
+y = 1
+h = 7
+colour = "crack"
+
+[[decals]]
+cube = "leg_r"
+face = "north"
+x = 1
+y = 3
+h = 6
+colour = "crack"

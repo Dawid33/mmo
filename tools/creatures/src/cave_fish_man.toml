@@ -1,0 +1,80 @@
+# DF CAVE_FISH_MAN (underground, water): an animal person of the blind cave fish,
+# "a humanoid creature with the head of a blind cave fish". Hand-made on the biped
+# (the cave fish is a vermin form whose one-cube head grafts badly): 22 units, pale
+# pink-white skin, a long blunt fish head with no eyes (DF gives none) and a wide
+# mouth, a dorsal fin running from the crown down the back, side fins at the
+# cheeks, a short tail fin. AQUATIC: swim + swim_idle. Attacks bite (the template's
+# `attack` is a punch), punch, kick optional. Worker set from the biped.
+name = "cave fish man"
+template = "biped"
+status = "draft"
+extras = ["swim", "swim_idle"]
+
+[proportions]
+leg = [3, 8]
+foot = 1
+body = [8, 8, 5]
+arm = [3, 8]
+hand = 2
+head = [6, 6, 7]
+walk = { cycle = 0.8, swing = 28 }
+run = { cycle = 0.5 }
+
+# Head pivot: the neck; the head spans y 0..6, z -3.5..3.5.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-2.5, 0.5, -5.5]
+to = [2.5, 4.5, -3.5]
+
+[[cubes]]
+name = "crest"
+bone = "head"
+part = "fins"
+from = [-0.5, 6, -2]
+to = [0.5, 8, 3.5]
+
+[[cubes]]
+name = "cheek_fin_l"
+bone = "head"
+part = "fins"
+mirror = true
+from = [-5, 1, 0]
+to = [-3, 3.5, 2.5]
+
+# Torso pivot: the hips; the dorsal fin down the back, a tail fin at the base.
+[[cubes]]
+name = "dorsal"
+bone = "torso"
+part = "fins"
+from = [-0.5, 2, 2.5]
+to = [0.5, 8, 4.5]
+
+[[cubes]]
+name = "tail_fin"
+bone = "torso"
+part = "fins"
+from = [-0.5, -2, 2.5]
+to = [0.5, 1.5, 6]
+
+[palette]
+head = "#e8d4cb"
+head_down = "#f2e2da"
+hands = "#dcc4ba"
+torso = "#e8d4cb"
+torso_north = "#f2e2da"
+arms = "#e8d4cb"
+legs = "#dcc4ba"
+feet = "#ccb2a8"
+fins = "#e8a0a0"
+mouth = "#a07068"
+
+# The snout's front face is 5×4 (row 0 at the top): a wide mouth, no eyes.
+[[decals]]
+cube = "snout"
+face = "north"
+x = 0
+y = 2
+w = 5
+colour = "mouth"

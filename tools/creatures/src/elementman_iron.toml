@@ -1,0 +1,103 @@
+# DF ELEMENTMAN_IRON (underground, chasm): 70 kg, "a man-shaped creature made of
+# iron". Biped, 31 units, built like the other elemental men: dark grey metal with
+# riveted plates (chest plate, pauldrons, a visor-like brow), rust-red glints for
+# eyes. NOT_LIVING / NO_EAT: eat comes with the template, never played.
+# LARGE_PREDATOR: alert + roar. Attacks punch (the template's `attack`), kick
+# optional (not made).
+name = "iron man"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [5, 12]
+foot = 0
+body = [12, 12, 7]
+arm = [4, 13]
+hand = 3
+head = [7, 7, 7]
+walk = { cycle = 1.1, swing = 22, bob = 0.5 }
+run = { cycle = 0.68, swing = 38, bob = 1.0 }
+
+# Head pivot: the neck; the head spans y 0..7, z -3.5..3.5.
+[[cubes]]
+name = "visor"
+bone = "head"
+part = "plate"
+from = [-4, 4, -4]
+to = [4, 5, -3]
+
+# Arm pivots: the shoulders.
+[[cubes]]
+name = "pauldron_l"
+bone = "arm_l"
+part = "plate"
+mirror = true
+from = [-3, 0, -2.5]
+to = [2, 3, 2.5]
+
+# Torso pivot: the hips; a riveted plate on the chest.
+[[cubes]]
+name = "chest_plate"
+bone = "torso"
+part = "plate"
+from = [-5, 5, -4.5]
+to = [5, 11.5, -3]
+
+[palette]
+head = "#5e6266"
+head_up = "#72767a"
+hands = "#4e5256"
+torso = "#5e6266"
+torso_up = "#72767a"
+arms = "#5e6266"
+legs = "#505458"
+plate = "#6e7378"
+plate_up = "#878c91"
+eye = "#d0502a"
+rivet = "#3a3d40"
+
+# The head's front face is 7×7 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "chest_plate"
+face = "north"
+x = 1
+y = 1
+colour = "rivet"
+
+[[decals]]
+cube = "chest_plate"
+face = "north"
+x = 8
+y = 1
+colour = "rivet"
+
+[[decals]]
+cube = "chest_plate"
+face = "north"
+x = 1
+y = 5
+colour = "rivet"
+
+[[decals]]
+cube = "chest_plate"
+face = "north"
+x = 8
+y = 5
+colour = "rivet"

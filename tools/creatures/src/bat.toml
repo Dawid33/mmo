@@ -1,0 +1,66 @@
+# DF BAT (underground, vermin): 0.1 kg, "a tiny winged creature that hunts at night
+# and rests in caves during the day". Vermin, but the giant bat needs the full rig,
+# so it is the bird template scaled small (the handoff: bats → bird, no beak,
+# membrane wings): 5 units nose to rump, big ears, a pug snout, dark brown fur and
+# black membranes. Attack bite (the template's peck); scratch optional (not made).
+name = "bat"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [2, 2, 3]
+leg = [0.5, 1]
+foot = [1, 0.5, 1]
+head = [2, 2, 2]
+neck = 0
+head_back = 1
+beak = [0, 0, 0]
+tail = [1.5, 0.5, 1]
+tail_raise = 10
+wing = [4, 2]
+walk = { cycle = 0.35, swing = 30, bob = 0.2 }
+run = { cycle = 0.22 }
+fly = { cycle = 0.16, flap = 55 }
+
+# Head pivot: the neck; the head spans y 0..2, z -1..1.
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-1, 2, -0.5]
+to = [-0.5, 3, 0.5]
+
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-0.5, 0.5, -1.5]
+to = [0.5, 1, -1]
+
+[palette]
+body = "#5a4030"
+body_down = "#6e5240"
+head = "#5a4030"
+wings = "#2a2220"
+wings_up = "#342a26"
+tail = "#2a2220"
+legs = "#2a2220"
+ears = "#3a2a22"
+snout = "#2a1c16"
+eye = "#0a0606"
+
+# The head's front face is 2×2.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 0
+colour = "eye"

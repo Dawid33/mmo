@@ -1,0 +1,121 @@
+# DF RODENT MAN (underground, chasm): 40 kg, "an evil humanoid with a long tail,
+# black spiky fur and a twitching nose". Biped, 26 units: black fur with spiky
+# tufts on the head and back, a rat snout with a pink nose and yellow incisors,
+# round ears, a long bare pink tail. LARGE_PREDATOR: alert + roar. Attacks punch
+# (the template's `attack`); kick, scratch, bite optional (not made). Worker set
+# from the biped (they can learn).
+name = "rodent man"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [3, 10]
+foot = 1
+body = [8, 10, 5]
+arm = [3, 10]
+hand = 2
+head = [6, 6, 6]
+walk = { cycle = 0.8, swing = 30 }
+run = { cycle = 0.48 }
+
+# Head pivot: the neck; the head spans y 0..6, z -3..3.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-2, 0.5, -6.5]
+to = [2, 3.5, -3]
+
+[[cubes]]
+name = "nose"
+bone = "head"
+part = "nose"
+from = [-1, 2, -7.5]
+to = [1, 3.5, -6.5]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-4.5, 5, -0.5]
+to = [-2, 8, 1]
+
+[[cubes]]
+name = "spikes_head"
+bone = "head"
+part = "spikes"
+from = [-1.5, 6, -1]
+to = [1.5, 7.5, 3.5]
+
+[[cubes]]
+name = "spikes_back"
+bone = "torso"
+part = "spikes"
+from = [-3, 5, 2.5]
+to = [3, 11, 4]
+
+# The tail, from the small of the back (hips pivot).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 1, 2.5]
+rest = [40, 0, 0]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-0.5, -0.5, 0]
+to = [0.5, 0.5, 14]
+
+[palette]
+head = "#1e1c1e"
+head_up = "#2a282a"
+hands = "#c89a94"
+torso = "#1e1c1e"
+torso_up = "#2a282a"
+arms = "#1e1c1e"
+legs = "#1a181a"
+feet = "#c89a94"
+ears = "#b88a86"
+nose = "#e0a0a8"
+spikes = "#0e0c0e"
+tail = "#c89a94"
+eye = "#d02020"
+tooth = "#e8c860"
+
+# The head's front face is 6×6; the snout covers rows 2-5.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+colour = "eye"
+
+# The snout's front face is 4×3: incisors at the bottom.
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 2
+w = 2
+colour = "tooth"
+
+# Lying down, the hanging tail would point into the ground: swing it up along the
+# back (keys add to the rest).
+[clips.lie]
+merge = true
+keys = [{ bone = "tail", channel = "rotation", time = 0, value = [-145, 0, 0] }]
+
+[clips.death]
+merge = true
+keys = [{ bone = "tail", channel = "rotation", time = 0, value = [-145, 0, 0] }]

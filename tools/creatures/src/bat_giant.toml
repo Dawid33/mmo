@@ -1,0 +1,95 @@
+# DF BAT_GIANT (underground, chasm): 200 kg, "a giant flying mammal found
+# underground". Hand-made on the bird template like the bat (not a variant_of: the
+# bat's half-unit parts would scale lumpy, and the giant needs its own extras):
+# 26 units nose to rump, big ears, a pug snout with fangs, dark brown fur, black
+# membrane wings. LARGE_PREDATOR: alert + roar; MOUNT_EXOTIC: ridden. Attack bite
+# (the template's peck).
+name = "giant bat"
+template = "bird"
+status = "draft"
+extras = ["ridden", "alert", "roar"]
+
+[proportions]
+body = [8, 8, 13]
+leg = [2, 4]
+foot = [3, 1, 3]
+head = [7, 7, 6]
+neck = 0
+head_back = 3
+beak = [0, 0, 0]
+tail = [5, 1, 4]
+tail_raise = 10
+wing = [13, 5]
+walk = { cycle = 0.8, swing = 26, bob = 0.4 }
+run = { cycle = 0.5 }
+fly = { cycle = 0.6, flap = 50 }
+
+# Head pivot: the neck; the head spans y 0..7, z -3..3.
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-3.5, 6, -1]
+to = [-1.5, 11, 1.5]
+
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-2, 1, -4.5]
+to = [2, 4, -3]
+
+[[cubes]]
+name = "fang_l"
+bone = "head"
+part = "fang"
+mirror = true
+from = [-1.5, 0, -4.5]
+to = [-0.5, 1, -3.5]
+
+[palette]
+body = "#4a3426"
+body_down = "#5e4434"
+head = "#4a3426"
+wings = "#221a18"
+wings_up = "#2c2220"
+tail = "#221a18"
+legs = "#221a18"
+ears = "#2c201a"
+ears_north = "#5a3a32"
+snout = "#2a1a14"
+fang = "#ece4d0"
+eye = "#e0a020"
+nostril = "#0e0806"
+
+# The head's front face is 7×7 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+colour = "nostril"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 2
+y = 0
+colour = "nostril"

@@ -1,0 +1,70 @@
+# DF BUGBAT (underground, chasm): 10 kg, "a small bat-like creature with the head of
+# an insect". Bird template like the bats (membrane wings, no beak), 13 units nose
+# to rump: a dusky purple-grey furred body with an insect head (big red compound
+# eyes, mandibles, antennae). BENIGN, no extras. Attack bite (the template's peck).
+name = "bugbat"
+template = "bird"
+status = "draft"
+
+[proportions]
+body = [6, 5, 9]
+leg = [1, 3]
+foot = [2, 1, 2]
+head = [4, 4, 3]
+neck = 0
+head_back = 1
+beak = [0, 0, 0]
+tail = [3, 1, 3]
+tail_raise = 10
+wing = [10, 4]
+walk = { cycle = 0.55, swing = 28, bob = 0.3 }
+run = { cycle = 0.35 }
+fly = { cycle = 0.3, flap = 50 }
+
+# Head pivot: the neck; the head spans y 0..4, z -1.5..1.5.
+[[cubes]]
+name = "mandible_l"
+bone = "head"
+part = "mandible"
+mirror = true
+from = [-2, 0, -3]
+to = [-0.5, 1, -1.5]
+
+[[cubes]]
+name = "antenna_l"
+bone = "head"
+part = "mandible"
+mirror = true
+from = [-1.5, 4, -1.5]
+to = [-1, 6.5, -1]
+
+[palette]
+body = "#5e5468"
+body_down = "#706680"
+head = "#4a6040"
+head_up = "#56704a"
+wings = "#3a3040"
+wings_up = "#443a4a"
+tail = "#3a3040"
+legs = "#2e2a30"
+mandible = "#2a2a1e"
+eye = "#d02a2a"
+
+# The head's front face is 4×4: compound eyes at the corners.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+w = 2
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 0
+w = 2
+h = 2
+colour = "eye"

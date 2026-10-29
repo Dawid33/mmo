@@ -1,0 +1,89 @@
+# DF GRIMELING (fantastic, evil swamps): 70 kg, "an evil monster from the swamp. It
+# resembles a knot of waterlogged weeds". Biped, 31 units: dark olive weed-matter,
+# strands hanging off the head, shoulders, arms and hips, dull yellow eyes peering
+# through. NO_EAT: eat comes with the template, never played. AMPHIBIOUS: swim +
+# swim_idle; LARGE_PREDATOR: alert + roar. Attacks punch (the template's `attack`),
+# kick optional (not made).
+name = "grimeling"
+template = "biped"
+status = "draft"
+extras = ["swim", "swim_idle", "alert", "roar"]
+
+[proportions]
+leg = [4, 11]
+foot = 0
+body = [10, 11, 7]
+arm = [4, 13]
+hand = 2
+head = [7, 7, 7]
+walk = { cycle = 1.1, swing = 22, bob = 0.6 }
+run = { cycle = 0.7, swing = 36 }
+
+# Head pivot: the neck; the head spans y 0..7, z -3.5..3.5. Strands over the face.
+[[cubes]]
+name = "veil_l"
+bone = "head"
+part = "strand"
+mirror = true
+from = [-3.5, -2, -4.5]
+to = [-2, 5, -3.5]
+
+[[cubes]]
+name = "top_knot"
+bone = "head"
+part = "weed"
+from = [-4, 6, -3]
+to = [3, 8.5, 4]
+
+# Arm pivots: the shoulders; a shoulder clump and a trailing strand.
+[[cubes]]
+name = "clump_l"
+bone = "arm_l"
+part = "weed"
+mirror = true
+from = [-3, -1, -2.5]
+to = [1.5, 3, 2.5]
+
+[[cubes]]
+name = "strand_arm_l"
+bone = "arm_l"
+part = "strand"
+mirror = true
+from = [-2.5, -14, 0]
+to = [-1.5, -6, 1]
+
+# Torso pivot: the hips; a skirt of strands.
+[[cubes]]
+name = "skirt"
+bone = "torso"
+part = "strand"
+from = [-5.5, -4, -4]
+to = [5.5, 2, 4]
+
+[palette]
+head = "#3e4a24"
+head_up = "#4a5a2a"
+hands = "#34401e"
+torso = "#3e4a24"
+torso_up = "#4a5a2a"
+arms = "#3e4a24"
+legs = "#34401e"
+weed = "#4a5426"
+weed_up = "#5a6630"
+strand = "#2e3818"
+eye = "#d8c040"
+
+# The head's front face is 7×7; the veil strands cover columns 0-1 and 5-6.
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 3
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+colour = "eye"

@@ -1,0 +1,77 @@
+# DF GREEN_DEVOURER (underground, chasm): 70 kg, "a medium-sized monster walking on
+# two clawed legs. It has two mouths on the ends of a pair of tentacles". The body
+# plan is armless, no eyes, no head: built on the biped with the arm bones as the
+# two long tentacles (the `hands` cubes are the toothed mouths) and the template
+# head as a low eyeless hump (kept: derived models need it). 26 units, slimy green,
+# clawed feet. No extras (not a LARGE_PREDATOR). Attack bite (the template's
+# `attack` punch swings a tentacle-mouth: reads as a bite). The worker set comes
+# with the biped (never played).
+name = "green devourer"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [4, 11]
+foot = 2
+body = [10, 10, 7]
+arm = [3, 17]
+hand = 3
+head = [7, 4, 6]
+walk = { cycle = 1.0, swing = 26, bob = 0.5 }
+run = { cycle = 0.6, swing = 42, bob = 1.0 }
+
+# Head pivot: the neck; a low hump, y 0..4.
+[[cubes]]
+name = "hump_ridge"
+bone = "head"
+part = "ridge"
+from = [-1.5, 4, -2]
+to = [1.5, 5, 3]
+
+# Arm (tentacle) pivots: the shoulders, the arm cube from y 1.5 down to -12.5,
+# the mouth at -15.5..-12.5. Fangs ring the mouth's front.
+[[cubes]]
+name = "fang_l"
+bone = "arm_l"
+part = "fang"
+mirror = true
+from = [-1.5, -16.5, -1.5]
+to = [1.5, -15.5, 1.5]
+
+# Leg pivots: the hips; claws at the toes.
+[[cubes]]
+name = "claw_l"
+bone = "leg_l"
+part = "claw"
+mirror = true
+from = [-2, -11, -4.5]
+to = [2, -10, -3]
+
+[palette]
+head = "#4a8a2a"
+head_up = "#5a9c34"
+hands = "#7a1a20"
+torso = "#4a8a2a"
+torso_up = "#5a9c34"
+torso_north = "#8ab45a"
+arms = "#3e7a24"
+legs = "#3e7a24"
+feet = "#2e5a1a"
+ridge = "#2e5a1a"
+fang = "#ece6c8"
+claw = "#2a2418"
+gullet = "#2a0608"
+
+[[decals]]
+cube = "hand_l"
+face = "down"
+x = 1
+y = 1
+colour = "gullet"
+
+[[decals]]
+cube = "hand_r"
+face = "down"
+x = 1
+y = 1
+colour = "gullet"

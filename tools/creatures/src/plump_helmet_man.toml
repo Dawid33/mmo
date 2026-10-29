@@ -1,0 +1,87 @@
+# DF PLUMP_HELMET_MAN (underground, water): 50 kg, "a small humanoid resembling a
+# walking mushroom with arms and legs". Biped, 24 units with the cap: a pale stalk
+# body and limbs, the template head as the stem top with a face, a huge domed
+# maroon-purple plump helmet cap on it. BENIGN, no extras. Attacks punch (the
+# template's `attack`), kick optional. Worker set from the biped (they can learn).
+name = "plump helmet man"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [3, 7]
+foot = 1
+body = [7, 8, 5]
+arm = [2, 7]
+hand = 1
+head = [6, 4, 6]
+walk = { cycle = 0.75, swing = 28, bob = 0.5 }
+run = { cycle = 0.48 }
+
+# Head pivot: the neck; the head spans y 0..4, z -3..3. The cap.
+[[cubes]]
+name = "cap"
+bone = "head"
+part = "cap"
+from = [-6, 3.5, -6]
+to = [6, 9, 6]
+
+[[cubes]]
+name = "cap_top"
+bone = "head"
+part = "cap"
+from = [-4.5, 9, -4.5]
+to = [4.5, 10.5, 4.5]
+
+[palette]
+head = "#e6dccb"
+hands = "#d8ccb8"
+torso = "#e6dccb"
+torso_up = "#efe6d6"
+arms = "#e6dccb"
+legs = "#d8ccb8"
+feet = "#bcae98"
+cap = "#7a2a4a"
+cap_up = "#8e3858"
+cap_down = "#d8c8b4"
+eye = "#2a1a1a"
+mouth = "#8a6a5a"
+fleck = "#a85878"
+
+# The head's front face is 6×4 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 3
+w = 2
+colour = "mouth"
+
+[[decals]]
+cube = "cap"
+face = "up"
+x = 2
+y = 3
+w = 2
+colour = "fleck"
+
+[[decals]]
+cube = "cap"
+face = "up"
+x = 8
+y = 7
+w = 2
+colour = "fleck"

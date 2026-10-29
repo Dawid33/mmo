@@ -1,0 +1,175 @@
+# DF KANGAROO (wild): 90 kg, "a medium-sized creature that can be found hopping
+# through the grassland". Biped (it stands and moves on its hind legs) with a big
+# tail, 28 units to the ear tips: reddish-brown fur with a pale belly, long hind
+# feet and thick thighs, short forearms held up, a deer-like head with tall ears,
+# a heavy tail resting on the ground. Walk and run are hops (clip merges: both legs
+# together, the body bouncing, the torso leaning forward, the tail as a
+# counterweight). BENIGN, no extras. Attack kick (the template's `attack` is a
+# punch); bite optional (not made). The worker set comes with the biped (unused).
+name = "kangaroo"
+template = "biped"
+status = "draft"
+
+[proportions]
+leg = [4, 10]
+foot = 0
+body = [8, 10, 6]
+arm = [2, 6]
+hand = 1
+head = [5, 5, 6]
+walk = { cycle = 0.7, swing = 20 }
+run = { cycle = 0.45, swing = 30 }
+
+# Head pivot: the neck; the head spans y 0..5, z -3..3.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "head"
+from = [-1.5, 0, -6]
+to = [1.5, 3, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+mirror = true
+from = [-2.5, 5, 0]
+to = [-1, 9, 1.5]
+
+# Leg pivots: the hips (legs span y -10..0); thick thighs, long hind feet.
+[[cubes]]
+name = "thigh_l"
+bone = "leg_l"
+part = "legs"
+mirror = true
+from = [-2.5, -6, -3]
+to = [2.5, 0, 3]
+
+[[cubes]]
+name = "foot_l"
+bone = "leg_l"
+part = "feet"
+mirror = true
+from = [-2, -10, -7]
+to = [2, -8.5, 1]
+
+# The tail, from the small of the back (hips pivot), resting on the ground.
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 1, 3]
+rest = [37, 0, 0]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-2, -2, 0]
+to = [2, 2, 14]
+
+[palette]
+head = "#a8704a"
+head_up = "#b47c54"
+hands = "#5a3e2a"
+torso = "#a8704a"
+torso_up = "#b47c54"
+torso_north = "#d8b890"
+arms = "#a07048"
+legs = "#a06a44"
+feet = "#5a3e2a"
+ears = "#a8704a"
+ears_north = "#d0a080"
+tail = "#9a6440"
+eye = "#141008"
+nose = "#2a1a12"
+
+# The head's front face is 5×5; the snout covers its lower middle.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+colour = "nose"
+
+# Hops: both legs together (swing back on the push, forward for the landing), the
+# body bouncing up, the torso leaning forward, the forearms held up, the tail
+# swinging as a counterweight. Keys replace the template's tracks on those bones.
+[clips.walk]
+merge = true
+keys = [
+  { bone = "leg_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.25, value = [-30, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.5, value = [20, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.25, value = [-30, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.5, value = [20, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.1, value = [0, -1, 0] },
+  { bone = "body", channel = "position", time = 0.35, value = [0, 4, 0] },
+  { bone = "body", channel = "position", time = 0.6, value = [0, 0.5, 0] },
+  { bone = "body", channel = "position", time = 0.7, value = [0, 0, 0] },
+  { bone = "torso", channel = "rotation", time = 0, value = [-15, 0, 0] },
+  { bone = "torso", channel = "rotation", time = 0.35, value = [-25, 0, 0] },
+  { bone = "torso", channel = "rotation", time = 0.7, value = [-15, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.35, value = [-20, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.7, value = [0, 0, 0] },
+  { bone = "arm_l", channel = "rotation", time = 0, value = [40, 0, 0] },
+  { bone = "arm_l", channel = "rotation", time = 0.7, value = [40, 0, 0] },
+  { bone = "arm_r", channel = "rotation", time = 0, value = [40, 0, 0] },
+  { bone = "arm_r", channel = "rotation", time = 0.7, value = [40, 0, 0] },
+]
+
+[clips.run]
+merge = true
+keys = [
+  { bone = "leg_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.15, value = [-40, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.32, value = [30, 0, 0] },
+  { bone = "leg_l", channel = "rotation", time = 0.45, value = [0, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.15, value = [-40, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.32, value = [30, 0, 0] },
+  { bone = "leg_r", channel = "rotation", time = 0.45, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.06, value = [0, -1.5, 0] },
+  { bone = "body", channel = "position", time = 0.22, value = [0, 6, 0] },
+  { bone = "body", channel = "position", time = 0.4, value = [0, 0.5, 0] },
+  { bone = "body", channel = "position", time = 0.45, value = [0, 0, 0] },
+  { bone = "torso", channel = "rotation", time = 0, value = [-30, 0, 0] },
+  { bone = "torso", channel = "rotation", time = 0.22, value = [-40, 0, 0] },
+  { bone = "torso", channel = "rotation", time = 0.45, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0, value = [-10, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.22, value = [-30, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.45, value = [-10, 0, 0] },
+  { bone = "arm_l", channel = "rotation", time = 0, value = [50, 0, 0] },
+  { bone = "arm_l", channel = "rotation", time = 0.45, value = [50, 0, 0] },
+  { bone = "arm_r", channel = "rotation", time = 0, value = [50, 0, 0] },
+  { bone = "arm_r", channel = "rotation", time = 0.45, value = [50, 0, 0] },
+]
+
+# Lying down, the tail would point into the ground: swing it up along the back
+# (keys add to the rest [37, 0, 0]).
+[clips.lie]
+merge = true
+keys = [{ bone = "tail", channel = "rotation", time = 0, value = [-142, 0, 0] }]
+
+[clips.death]
+merge = true
+keys = [{ bone = "tail", channel = "rotation", time = 0, value = [-142, 0, 0] }]

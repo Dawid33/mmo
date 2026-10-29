@@ -1,0 +1,99 @@
+# DF ELEMENTMAN_MUD (underground, water): 70 kg, "a humanoid made of mud which lives
+# near water underground". Biped, 31 units, built like the other elemental men but
+# slumped: wet brown mud, lumps on the head and shoulders, drips hanging from the
+# arms, dark hollow eyes. NOT_LIVING / NO_EAT: eat comes with the template, never
+# played. LARGE_PREDATOR: alert + roar. Attacks punch (the template's `attack`),
+# kick optional (not made).
+name = "mud man"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [5, 12]
+foot = 0
+body = [12, 12, 7]
+arm = [4, 13]
+hand = 3
+head = [7, 7, 7]
+walk = { cycle = 1.2, swing = 20, bob = 0.7 }
+run = { cycle = 0.75, swing = 34, bob = 1.2 }
+
+# Head pivot: the neck; lumps on the crown.
+[[cubes]]
+name = "lump_a"
+bone = "head"
+part = "mud_wet"
+from = [-3, 6, -2]
+to = [1, 8, 2]
+
+[[cubes]]
+name = "lump_b"
+bone = "head"
+part = "mud_wet"
+from = [0, 6, 0]
+to = [3, 7.5, 3]
+
+# Arm pivots: the shoulders; a lump on each and a drip off the forearm.
+[[cubes]]
+name = "shoulder_lump_l"
+bone = "arm_l"
+part = "mud_wet"
+mirror = true
+from = [-2.5, 0.5, -2]
+to = [1.5, 3.5, 2]
+
+[[cubes]]
+name = "drip_l"
+bone = "arm_l"
+part = "mud_wet"
+mirror = true
+from = [-1, -13, 1]
+to = [0, -11, 2]
+
+# Torso pivot: the hips; a sagging belly lump.
+[[cubes]]
+name = "belly"
+bone = "torso"
+part = "mud"
+from = [-5, 1, -4.5]
+to = [5, 6, -3]
+
+[palette]
+head = "#6b4f32"
+head_up = "#7d5e3c"
+hands = "#5e442a"
+torso = "#6b4f32"
+torso_up = "#7d5e3c"
+arms = "#6b4f32"
+legs = "#5e442a"
+mud = "#644a2e"
+mud_wet = "#4e3a24"
+mud_wet_up = "#6a5236"
+eye = "#1a120a"
+mouth = "#2a1c10"
+
+# The head's front face is 7×7 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 5
+w = 3
+colour = "mouth"

@@ -1,0 +1,89 @@
+# DF ELEMENTMAN_GABBRO (underground, chasm): 70 kg, "living gabbro in the shape of a
+# man". Biped, 31 units, built like the other elemental men but the bulkiest: dark
+# speckled green-black stone, boulder shoulders, a brow ridge, dull pale eyes.
+# NOT_LIVING / NO_EAT: eat comes with the template, never played. LARGE_PREDATOR:
+# alert + roar. Attacks punch (the template's `attack`), kick optional (not made).
+name = "gabbro man"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [5, 12]
+foot = 0
+body = [12, 12, 7]
+arm = [4, 13]
+hand = 3
+head = [7, 7, 7]
+walk = { cycle = 1.15, swing = 22, bob = 0.6 }
+run = { cycle = 0.7, swing = 36, bob = 1.1 }
+
+# Head pivot: the neck; the head spans y 0..7, z -3.5..3.5.
+[[cubes]]
+name = "brow"
+bone = "head"
+part = "rock"
+from = [-4, 4.5, -4.5]
+to = [4, 6.5, -2]
+
+# Arm pivots: the shoulders (the arm cube reaches 2 above it).
+[[cubes]]
+name = "boulder_l"
+bone = "arm_l"
+part = "rock"
+mirror = true
+from = [-3.5, -1, -3]
+to = [2, 4, 3]
+
+# Torso pivot: the hips.
+[[cubes]]
+name = "back_slab"
+bone = "torso"
+part = "rock"
+from = [-5, 6, 3]
+to = [5, 12.5, 5]
+
+[palette]
+head = "#363b38"
+hands = "#2c302e"
+torso = "#363b38"
+torso_up = "#454b47"
+arms = "#363b38"
+legs = "#2c302e"
+rock = "#2e3330"
+rock_up = "#4a504c"
+eye = "#b8c4b0"
+fleck = "#5e665f"
+
+# The head's front face is 7×7 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 2
+y = 3
+w = 2
+colour = "fleck"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 8
+y = 7
+w = 2
+colour = "fleck"

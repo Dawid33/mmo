@@ -1,0 +1,104 @@
+# DF ELEMENTMAN_FIRE (underground, magma): 70 kg, "fire in the shape of a human that
+# can hurl fireballs". Biped, 31 units, built like the other elemental men: an
+# orange-yellow body, flames licking up from the head and shoulders, white-hot
+# eyes. NOT_LIVING / NO_EAT: eat comes with the template, never played.
+# LARGE_PREDATOR: alert + roar. Attacks punch (the template's `attack`); kick and
+# the fireball / fire jet emissions optional (not made). Worker set from the biped.
+name = "fire man"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [5, 12]
+foot = 0
+body = [12, 12, 7]
+arm = [4, 13]
+hand = 3
+head = [7, 7, 7]
+walk = { cycle = 1.0, swing = 24, bob = 0.5 }
+run = { cycle = 0.6, swing = 40, bob = 1.0 }
+
+# Head pivot: the neck; the head spans y 0..7, z -3.5..3.5.
+[[cubes]]
+name = "flame_a"
+bone = "head"
+part = "flame"
+from = [-3, 6, -2.5]
+to = [3, 9, 3]
+
+[[cubes]]
+name = "flame_b"
+bone = "head"
+part = "flame_tip"
+from = [-1.5, 9, -1]
+to = [1.5, 12, 2.5]
+
+[[cubes]]
+name = "flame_c_l"
+bone = "head"
+part = "flame_tip"
+mirror = true
+from = [-3, 9, 1]
+to = [-1.5, 10.5, 3]
+
+# Arm pivots: the shoulders.
+[[cubes]]
+name = "shoulder_flame_l"
+bone = "arm_l"
+part = "flame"
+mirror = true
+from = [-2.5, 1.5, -1.5]
+to = [1, 4.5, 2]
+
+# Torso pivot: the hips.
+[[cubes]]
+name = "back_flame"
+bone = "torso"
+part = "flame"
+from = [-4, 8, 3]
+to = [4, 14, 5]
+
+[palette]
+head = "#ffb030"
+head_up = "#ffd060"
+hands = "#ffc848"
+torso = "#f07a1e"
+torso_up = "#ff9a2a"
+torso_north = "#ff9a2a"
+arms = "#f07a1e"
+arms_up = "#ff9a2a"
+legs = "#d8501a"
+flame = "#ff8a1a"
+flame_up = "#ffc040"
+flame_tip = "#ffe060"
+flame_tip_up = "#fff2a0"
+eye = "#fffbe0"
+core = "#ffe680"
+
+# The head's front face is 7×7 (row 0 at the top).
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 3
+w = 2
+colour = "eye"
+
+# A brighter core in the chest (12×12 front face).
+[[decals]]
+cube = "torso"
+face = "north"
+x = 4
+y = 3
+w = 4
+h = 4
+colour = "core"

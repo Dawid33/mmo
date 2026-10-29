@@ -1,0 +1,168 @@
+# DF NIGHTWING (fantastic, evil): 120 kg, "a flying monster with stretched skin over
+# its emaciated body. It has the head of a jackal with needle-like horns protruding
+# through its mane". Biped + [wings] (2WINGS: the fly set), 32 units: thin limbs,
+# grey-brown stretched skin, a jackal head (long muzzle, tall ears), a black mane
+# behind, needle horns through it, leathery wings, a thin tail. LARGE_PREDATOR:
+# alert + roar. Attacks bite (the template's `attack` is a punch), scratch optional.
+# Worker set from the biped (CAN_LEARN; unused).
+name = "nightwing"
+template = "biped"
+status = "draft"
+extras = ["alert", "roar"]
+
+[proportions]
+leg = [3, 13]
+foot = 1
+leg_inset = 1
+body = [8, 12, 5]
+arm = [2, 14]
+hand = 2
+head = [6, 6, 6]
+walk = { cycle = 1.0, swing = 26 }
+run = { cycle = 0.6 }
+
+[wings]
+bone = "torso"
+at = [-1, 11, 2]
+span = 11
+chord = 9
+part = "wings"
+cycle = 0.55
+flap = 50
+
+# Head pivot: the neck; the head spans y 0..6, z -3..3.
+[[cubes]]
+name = "muzzle"
+bone = "head"
+part = "head"
+from = [-1.5, 0.5, -7.5]
+to = [1.5, 3, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-3, 6, -1]
+to = [-1.5, 10, 1]
+
+[[cubes]]
+name = "mane"
+bone = "head"
+part = "mane"
+from = [-3.5, -1, 2]
+to = [3.5, 7, 5]
+
+[[cubes]]
+name = "horn_l"
+bone = "head"
+part = "horn"
+mirror = true
+from = [-2.5, 6.5, 2.5]
+to = [-1.5, 12, 3.5]
+
+# The tail, from the small of the back (hips pivot).
+[[bones]]
+name = "tail"
+parent = "body"
+pivot = [0, 1, 2]
+rest = [40, 0, 0]
+
+[[cubes]]
+name = "tail"
+bone = "tail"
+part = "tail"
+from = [-0.5, -0.5, 0]
+to = [0.5, 0.5, 12]
+
+[palette]
+head = "#6a5a4a"
+head_up = "#7a6a58"
+hands = "#4e443a"
+torso = "#6a6058"
+torso_up = "#766c62"
+arms = "#5e554c"
+legs = "#5e554c"
+feet = "#2a2420"
+mane = "#1e1a18"
+horn = "#d8d0bc"
+wings = "#3a302c"
+wings_up = "#463a34"
+tail = "#4e443a"
+rib = "#4e463e"
+eye = "#e04020"
+nose = "#140e0c"
+
+# The head's front face is 6×6; the muzzle covers its lower middle.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 1
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 1
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "muzzle"
+face = "north"
+x = 1
+y = 0
+colour = "nose"
+
+# Ribs showing through the stretched skin (the torso's front is 8×12).
+[[decals]]
+cube = "torso"
+face = "north"
+x = 1
+y = 3
+w = 6
+colour = "rib"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 1
+y = 5
+w = 6
+colour = "rib"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 1
+y = 7
+w = 6
+colour = "rib"
+
+# Lying down: the tail up along the back (keys add to the rest [40, 0, 0]) and
+# the wings flat (as on the pixie).
+[clips.lie]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [-145, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0, value = [-180, -90, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [-180, 90, 0] },
+]
+
+[clips.death]
+merge = true
+keys = [
+  { bone = "tail", channel = "rotation", time = 0, value = [-145, 0, 0] },
+  { bone = "wing_l", channel = "rotation", time = 0, value = [-180, -90, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [-180, 90, 0] },
+]
+
+[clips.sleep]
+merge = true
+keys = [
+  { bone = "wing_l", channel = "rotation", time = 0, value = [-180, -90, 0] },
+  { bone = "wing_r", channel = "rotation", time = 0, value = [-180, 90, 0] },
+]

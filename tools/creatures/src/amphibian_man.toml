@@ -1,0 +1,121 @@
+# DF AMPHIBIAN_MAN (underground, water): 20 kg, "these evil creatures resemble
+# walking frogs with arms and the intelligence to use them". Biped, 22 units: a
+# wide flat frog head with bulging eyes on top and a wide mouth, mottled green skin
+# with a pale belly, long webbed feet. AMPHIBIOUS: swim + swim_idle;
+# LARGE_PREDATOR: alert + roar. Attacks punch (the template's `attack`); kick and
+# bite optional (not made). Worker set from the biped (they can learn).
+name = "amphibian man"
+template = "biped"
+status = "draft"
+extras = ["swim", "swim_idle", "alert", "roar"]
+
+[proportions]
+leg = [3, 7]
+foot = 1
+leg_inset = 0.5
+body = [8, 8, 5]
+arm = [3, 8]
+hand = 2
+head = [8, 5, 7]
+walk = { cycle = 0.8, swing = 30, bob = 0.5 }
+run = { cycle = 0.5, swing = 46, bob = 1.0 }
+
+# Head pivot: the neck; the head spans y 0..5, z -3.5..3.5. Bulging eyes on top.
+[[cubes]]
+name = "eye_bulge_l"
+bone = "head"
+part = "head"
+mirror = true
+from = [-4, 4, -3]
+to = [-1.5, 6.5, -0.5]
+
+[[cubes]]
+name = "throat"
+bone = "head"
+part = "belly"
+from = [-3, -0.5, -4]
+to = [3, 1.5, -1]
+
+# Leg pivots: the hips (legs span y -7..0); webbed feet, long at the toe.
+[[cubes]]
+name = "web_l"
+bone = "leg_l"
+part = "web"
+mirror = true
+from = [-2.5, -7, -5.5]
+to = [2, -6.5, -1.5]
+
+[palette]
+head = "#5a7a34"
+head_up = "#6a8c3e"
+hands = "#4e6c2c"
+torso = "#5a7a34"
+torso_north = "#c8c890"
+arms = "#5a7a34"
+legs = "#4e6c2c"
+feet = "#425c26"
+belly = "#c8c890"
+web = "#3e5a24"
+eye = "#e0c030"
+pupil = "#141410"
+mouth = "#2a3418"
+spot = "#3a5220"
+
+# Bulge faces are 2.5×2.5 → 3×3 texels (row 0 at the top).
+[[decals]]
+cube = "eye_bulge_l"
+face = "north"
+x = 0
+y = 0
+w = 3
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "eye_bulge_r"
+face = "north"
+x = 0
+y = 0
+w = 3
+h = 2
+colour = "eye"
+
+[[decals]]
+cube = "eye_bulge_l"
+face = "north"
+x = 1
+y = 1
+colour = "pupil"
+
+[[decals]]
+cube = "eye_bulge_r"
+face = "north"
+x = 1
+y = 1
+colour = "pupil"
+
+# The head's front face is 8×5: a wide mouth.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 3
+w = 6
+colour = "mouth"
+
+[[decals]]
+cube = "torso"
+face = "up"
+x = 2
+y = 1
+w = 2
+colour = "spot"
+
+[[decals]]
+cube = "head"
+face = "up"
+x = 3
+y = 4
+w = 2
+h = 2
+colour = "spot"

@@ -1,0 +1,110 @@
+# DF MERPERSON (fantastic, oceans): 70 kg, "a man-like creature with the tail of a
+# fish instead of legs". There is no legless biped template, so this is the FISH
+# template swimming prone: the template head is the person's head (face forward,
+# hair trailing back), the body cube the chest, arm bones along the sides (they
+# stroke in swim), the tail stalk and whale-like flukes (flukes = true: a
+# merperson's tail strokes up and down) covered in teal scales. 25 units long.
+# LIMITATION: it never stands; the fish set (swim, swim_idle, attack, hurt, death,
+# flop) replaces the biped's, so no worker set although DF merfolk CAN_LEARN.
+# AQUATIC: swim + swim_idle are the template's. Attacks punch (the template's
+# `attack` is a lunge-bite), scratch, bite; spit optional (not made).
+name = "merperson"
+template = "fish"
+status = "draft"
+
+[proportions]
+body = [7, 5, 8]
+head = [5, 5, 5]
+tail = [5, 4, 8]
+fin = [1, 10, 4]
+pectoral = [0, 0]
+dorsal = [0, 0, 0]
+flukes = true
+swim = { cycle = 1.0, amp = 14 }
+
+# Head pivot: the neck at the chest front; the head spans y -2.5..2.5, z -5..0.
+[[cubes]]
+name = "hair"
+bone = "head"
+part = "hair"
+from = [-2.75, 1.5, -5.25]
+to = [2.75, 3, 1.5]
+
+# Body pivot: the chest's centre (y -2.5..2.5, z -4..4); scales from the waist.
+[[cubes]]
+name = "hips"
+bone = "body"
+part = "scales"
+from = [-3.6, -2.5, 1]
+to = [3.6, 2.6, 4.1]
+
+# Tail pivot: the waist; the stalk spans y -2..2, z 0..8.
+[[cubes]]
+name = "tail_scales"
+bone = "tail"
+part = "scales"
+from = [-2.6, -2.1, -0.1]
+to = [2.6, 2.1, 8.1]
+
+# Arms from the shoulders, lying back along the sides.
+[[bones]]
+name = "arm_l"
+parent = "body"
+pivot = [-3.5, 1, -3]
+mirror = true
+
+[[cubes]]
+name = "arm_l"
+bone = "arm_l"
+part = "arms"
+mirror = true
+from = [-2, -1, 0]
+to = [0, 1, 7]
+
+[palette]
+body = "#e0b090"
+body_up = "#e8bc9c"
+head = "#e0b090"
+arms = "#d8a888"
+hair = "#a8402a"
+hair_up = "#b84e34"
+scales = "#2a8a84"
+scales_up = "#36a098"
+scales_down = "#8ac8b8"
+fins = "#3ab0a0"
+eye = "#1a3a4a"
+mouth = "#a86a5a"
+
+# The head's front face is 5×5 (row 0 at the top); the hair covers rows 0-1.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 4
+colour = "mouth"
+
+# Breast-stroke arms on the swim (out and back each cycle).
+[clips.swim]
+merge = true
+keys = [
+  { bone = "arm_l", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "arm_l", channel = "rotation", time = 0.5, value = [0, -25, 0] },
+  { bone = "arm_l", channel = "rotation", time = 1.0, value = [0, 0, 0] },
+  { bone = "arm_r", channel = "rotation", time = 0, value = [0, 0, 0] },
+  { bone = "arm_r", channel = "rotation", time = 0.5, value = [0, 25, 0] },
+  { bone = "arm_r", channel = "rotation", time = 1.0, value = [0, 0, 0] },
+]
