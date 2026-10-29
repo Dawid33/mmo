@@ -67,14 +67,15 @@ fn quad_owner(world_from_local: mat4x4<f32>, record_pos: vec3<u32>, face: u32, w
 }
 
 // Whether a home-region quad is dropped by the cut (its lowest corner at
-// `lowest_y`): wholly above it, or a horizontal face lying ON it — a top
-// (+Y, face 2) of a block at the working level, where the slice plane
-// (slice_plane.wgsl) is drawn coplanar, or a ceiling (-Y, face 3) of a block
-// wholly above the cut, which would otherwise cap the dug room under it.
+// `lowest_y`): wholly above it, or a ceiling (-Y, face 3) of a block wholly
+// above the cut lying ON it, which would otherwise cap the dug room under it.
+// Tops (+Y, face 2) on the cut stay: one exists only where the level above
+// is air (or not a full block), which is exactly where the slice plane
+// (slice_plane.wgsl) discards — no coplanar pair.
 fn cut_collapses(face: u32, lowest_y: f32) -> bool {
     let cut = fortress.cut.x;
     let on_cut = lowest_y > cut - CUT_EPSILON;
-    return lowest_y > cut + CUT_EPSILON || ((face == 2u || face == 3u) && on_cut);
+    return lowest_y > cut + CUT_EPSILON || (face == 3u && on_cut);
 }
 
 // CORNER_PERM from records.rs, flattened: variant*4 + local vertex. Drawn
@@ -133,8 +134,8 @@ fn vertex(
     var out: VertexOutput;
 #ifdef CUTAWAY
     // Collapse what the forward pass drops (see voxel_pull.wgsl): a
-    // home-region quad wholly above the cut, and the top and ceiling faces
-    // lying on it — so the prepass and shadows never write depth for a face
+    // home-region quad wholly above the cut, and the ceiling faces lying on
+    // it — so the prepass and shadows never write depth for a face
     // the forward pass no longer draws.
     let cut_here = cut_applies(quad_owner(world_from_local, record_pos, face, w1));
     let lowest = world_from_local * vec4<f32>(vec3<f32>(record_pos), 1.0);

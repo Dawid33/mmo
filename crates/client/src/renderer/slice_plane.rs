@@ -6,18 +6,21 @@
 //! void where rock is. This plane fills it: one `REGION_SIZE` square lying
 //! exactly on the cut plane over the home region, coloured per block cell by
 //! the top texture of the block the mirror reports at the working level
-//! (materialised or implied), darkened like the cap ([`CAP_DARKEN`]), and
-//! discarded over air cells so dug spaces stay open to look down into.
+//! (materialised or implied), darkened like the cap ([`CAP_DARKEN`]). It is
+//! drawn only where the cut slices through material — the working level AND
+//! the level above both solid ([`slice_ids`]); everywhere else it discards,
+//! so dug spaces stay open to look down into and a working-level block open
+//! to the air shows its own top face (a half block at its true height),
+//! undarkened.
 //!
 //! Depth: the plane is at the cut. The back-face cap lies deeper (the solid's
 //! exit face), and solid below the cut is under it, so the plane wins there
-//! with no z-fight. The one coplanar case — top faces of working-level blocks
-//! open to the air above, lying exactly on the cut — is removed by the
-//! cutaway shader (`voxel_pull.wgsl` collapses +Y quads on the cut inside the
-//! home region): their cell is solid, so the plane covers it. Ceilings (-Y
-//! faces of blocks above the cut) lying on the plane are collapsed too, in
-//! every pass: they belong to cut-away rock, and drawn as back-face caps they
-//! would roof over every dug room the plane leaves open.
+//! with no z-fight. No top face lies coplanar with it: a +Y face on the cut
+//! exists only where the level above is air (or not a full block), exactly
+//! where the plane discards. Ceilings (-Y faces of blocks above the cut)
+//! lying on the plane are collapsed by the cutaway shader, in every pass:
+//! they belong to cut-away rock, and drawn as back-face caps they would roof
+//! over every dug room the plane leaves open.
 //!
 //! The designation overlay tints it like the cutaway's cap: the plane reads
 //! the same overlay texture (`fortress_view::OverlayTexture`) at the working
@@ -38,7 +41,7 @@ use bevy::{
     render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
     shader::ShaderRef,
 };
-use game::{RegionId, TileSource, REGION_BLOCKS, REGION_SIZE};
+use game::{BlockId, RegionId, TileSource, REGION_BLOCKS, REGION_SIZE};
 
 use super::block_textures::BlockTextureLayers;
 use super::config::TerrainRenderConfig;
@@ -47,11 +50,22 @@ use super::commander::tiles::TileMirror;
 use super::fortress_view::{overlay_base_level, OverlayTexture, CAP_DARKEN};
 use super::voxel_pull::BlockArrayTexture;
 
-/// The block ids of `level` across the home region: `REGION_BLOCKS²` cells,
-/// index `x + z * REGION_BLOCKS`, `BlockId` as u16 (`AIR` = 0).
+/// The cap's cells across the home region: `REGION_BLOCKS²` cells, index
+/// `x + z * REGION_BLOCKS`, `BlockId` as u16. A cell holds the id of the
+/// block at `level` only where the cut slices through material — the blocks
+/// at `level` and `level + 1` both solid (materialised or implied) — and
+/// `AIR` (0, discarded) everywhere else: over air at `level`, and over a
+/// block open to the level above, whose own top face (full or half block)
+/// then shows at its true height, undarkened.
 pub fn slice_ids(src: &impl TileSource, level: i32) -> Vec<u16> {
     (0..REGION_BLOCKS)
-        .flat_map(|z| (0..REGION_BLOCKS).map(move |x| src.block([x, level, z]).0))
+        .flat_map(|z| {
+            (0..REGION_BLOCKS).map(move |x| {
+                let below = src.block([x, level, z]);
+                let above = src.block([x, level + 1, z]);
+                if below != BlockId::AIR && above != BlockId::AIR { below.0 } else { 0 }
+            })
+        })
         .collect()
 }
 
@@ -249,12 +263,14 @@ mod tests {
     const STONE: BlockId = BlockId(2);
     const L: i32 = 40;
 
-    /// Solid wherever `solid` says, at level `L` only.
-    struct Stub(fn(i32, i32) -> bool);
+    const HALF: BlockId = BlockId(7);
+
+    /// `f(x, y, z)` decides the block at each tile.
+    struct Stub(fn(i32, i32, i32) -> BlockId);
 
     impl TileSource for Stub {
         fn block(&self, p: TilePos) -> BlockId {
-            if p[1] == L && (self.0)(p[0], p[2]) { STONE } else { BlockId::AIR }
+            (self.0)(p[0], p[1], p[2])
         }
         fn is_bedrock(&self, _: TilePos) -> bool {
             false
@@ -267,19 +283,36 @@ mod tests {
         }
     }
 
+    /// R20: the cap is drawn only where the cut slices through material —
+    /// the block at `L` and the one above it both solid. A top open to the
+    /// air (full or half block) is left to its own top face.
     #[test]
-    fn slice_ids_reads_implied_ground_and_air() {
-        let ids = slice_ids(&Stub(|x, _| x < 2), L);
+    fn slice_ids_cap_only_where_the_level_above_is_solid() {
+        let ids = slice_ids(
+            &Stub(|x, y, _| match (x, y) {
+                // x = 0: L solid, L+1 air.
+                (0, L) => STONE,
+                // x = 1: L and L+1 solid (implied rock through the cut).
+                (1, L) | (1, 41) => STONE,
+                // x = 2: L air, L+1 solid (a dug room's ceiling).
+                (2, 41) => STONE,
+                // x = 3: a half block at L, air above.
+                (3, L) => HALF,
+                _ => BlockId::AIR,
+            }),
+            L,
+        );
         assert_eq!(ids.len(), (REGION_BLOCKS * REGION_BLOCKS) as usize);
-        assert_eq!(ids[0], STONE.0);
-        assert_eq!(ids[1], STONE.0);
-        assert_eq!(ids[2], 0);
-        assert_eq!(ids[REGION_BLOCKS as usize], STONE.0, "row z = 1 starts solid too");
+        assert_eq!(ids[0], 0, "L solid, L+1 air: the top face shows");
+        assert_eq!(ids[1], STONE.0, "L and L+1 solid: capped with L's block");
+        assert_eq!(ids[2], 0, "L air: open to look down into");
+        assert_eq!(ids[3], 0, "half block with air above: its own top shows");
+        assert_eq!(ids[4], 0);
     }
 
     #[test]
     fn slice_ids_index_is_x_plus_z_times_width() {
-        let ids = slice_ids(&Stub(|x, z| x == 3 && z == 5), L);
+        let ids = slice_ids(&Stub(|x, y, z| if x == 3 && z == 5 && (y == L || y == L + 1) { STONE } else { BlockId::AIR }), L);
         let at = (3 + 5 * REGION_BLOCKS) as usize;
         assert_eq!(ids[at], STONE.0);
         assert_eq!(ids.iter().filter(|&&id| id != 0).count(), 1);

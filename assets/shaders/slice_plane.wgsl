@@ -3,7 +3,9 @@
 // bindings and SliceParams). A REGION_SIZE square on the cut plane over the
 // home region, one cell per block: the block the tile mirror reports at the
 // working level, drawn with its top texture lit like an up-facing terrain
-// face and darkened like the cutaway cap; air cells are discarded.
+// face and darkened like the cutaway cap. Only cells where the cut slices
+// through material (the working level and the level above both solid) carry
+// an id; every other cell is 0 and discarded.
 #import bevy_pbr::forward_io::VertexOutput
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::mesh_view_types
