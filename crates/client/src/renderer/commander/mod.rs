@@ -7,7 +7,8 @@
 //! with the minimap (`minimap`), the client-local selection and the ground
 //! pick (`selection`), all of which read the client height grid (`height`),
 //! and the fortress designation tools (`designate`), which read the tile
-//! mirror (`tiles`) at the working level (`level`).
+//! mirror (`tiles`) at the working level (`level`); units above the
+//! working level's cut are hidden (`cut_entities`).
 //!
 //! The math is pure functions over plain values (tested without a window);
 //! the systems only gather input and write the results.
@@ -22,6 +23,7 @@
 //! never turns on fps-cam mode, never walks and never edits blocks. The bridge
 //! hides it and gives it no camera ([`CameraMode::Commander`]).
 
+pub mod cut_entities;
 pub mod designate;
 pub mod height;
 pub mod level;
@@ -350,6 +352,13 @@ impl Plugin for CommanderPlugin {
                 )
                     .chain()
                     .after(super::interpolate::interpolate_transforms),
+            )
+            .add_systems(
+                Update,
+                cut_entities::hide_cut_entities
+                    .after(super::interpolate::interpolate_transforms)
+                    .after(level::step_level_input)
+                    .after(tiles::update_tile_mirror),
             )
             .add_systems(
                 Update,

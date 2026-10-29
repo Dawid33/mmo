@@ -112,7 +112,7 @@ impl TileMirror {
 
     /// Switch the mirrored region; `true` when it changed (chunks dropped,
     /// to be re-read for the new home).
-    fn set_home(&mut self, home: Option<RegionId>) -> bool {
+    pub(crate) fn set_home(&mut self, home: Option<RegionId>) -> bool {
         if self.home == home {
             return false;
         }
