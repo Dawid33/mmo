@@ -12,7 +12,7 @@ use crossbeam::channel::{unbounded, Receiver, Sender};
 use crate::{
     Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, TerrainSnapshot, GameEventKind,
     LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput,
-    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket,
+    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap,
 };
 
 pub const SPAWN_REGION: RegionCoords = RegionCoords { x: 0, z: 0 };
@@ -362,6 +362,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// Survives disconnects: which region holds this client's player entity.
     /// (The player parks with its region; reconnects create nothing.)
     homes: BTreeMap<ClientId, RegionCoords>,
+    /// The forged world's tile summaries, pushed to every client on connect
+    /// and consulted by Play. `None` = no forged world (procedural / tests).
+    world_map: Option<WorldMap>,
     out: Sender<(Option<ClientId>, ServerPacket)>,
     region_out_send: Sender<(RegionCoords, RegionOutput)>,
     /// LOD subscriptions per key, and the reverse map for disconnects.
@@ -408,6 +411,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             pristine_terrain_max: PRISTINE_TERRAIN_CACHE_MAX,
             sessions: BTreeMap::new(),
             homes: BTreeMap::new(),
+            world_map: None,
             out,
             region_out_send,
             lod_subscribers: BTreeMap::new(),
@@ -422,6 +426,55 @@ impl<S: RegionSpawner> WorldManager<S> {
             lod_builder,
             lod_results,
         }
+    }
+
+    /// Install the world map; connecting clients receive it and Play checks
+    /// targets against it.
+    pub fn set_world_map(&mut self, map: WorldMap) {
+        self.world_map = Some(map);
+    }
+
+    /// Play: move the client's player to the landing spot of `target`.
+    /// Refusals change no state.
+    fn play_region(&mut self, id: ClientId, target: RegionCoords, now_ms: u64) {
+        let refuse = |this: &Self, r: PlayRefusal| {
+            let _ = this.out.send((Some(id), ServerPacket::PlayRefused(target, r)));
+        };
+        let Some(map) = &self.world_map else {
+            return refuse(self, PlayRefusal::NoWorldMap);
+        };
+        let Some(tile) = map.tile(target) else {
+            return refuse(self, PlayRefusal::OffMap);
+        };
+        let home = self.homes.get(&id).copied();
+        if home == Some(target) {
+            return refuse(self, PlayRefusal::AlreadyHere);
+        }
+        let edge = crate::REGION_BLOCKS as u32;
+        let landing = match tile.landing {
+            Some(l) if l[0] < edge && l[1] < edge => l,
+            _ => return refuse(self, PlayRefusal::NoDryLand),
+        };
+        if let Some(home) = home {
+            self.send_to_region(home, RegionInput::Event(GameEventKind::ClientLeft(id)));
+        }
+        self.ensure_running(target);
+        self.send_to_region(target, RegionInput::Event(GameEventKind::CreateClientAt(id, landing)));
+        self.homes.insert(id, target);
+        let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
+        if let Some(home) = home {
+            self.refresh_keepalive(home, now_ms);
+        }
+        self.refresh_keepalive(target, now_ms);
+        let (fx, fz) = home.map_or((0, 0), |h| (h.x, h.z));
+        crate::perf_event!(
+            "play_region",
+            "client={id} from={},{} to={},{}",
+            fx,
+            fz,
+            target.x,
+            target.z
+        );
     }
 
     /// Returns false when the server should quit (a Quit game event).
@@ -441,6 +494,9 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // Reconnect: the player already exists in its home
                     // region (running or parked); nothing to create.
                     log::info!("client {id} reconnected");
+                }
+                if let Some(map) = &self.world_map {
+                    let _ = self.out.send((Some(id), ServerPacket::WorldMap(map.clone())));
                 }
             }
             ServerEvent::ClientDisconnected(id) => {
@@ -471,10 +527,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::ReleaseRegionConnection(rc) => self.unsubscribe(id, rc, now_ms),
                 ClientPacket::RequestLod(key) => self.lod_subscribe(id, key, now_ms),
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
-                ClientPacket::PlayRegion(rc) => {
-                    // Placeholder until the Play handling lands.
-                    log::info!("client {id} asked to play {rc:?}; not handled yet");
-                }
+                ClientPacket::PlayRegion(rc) => self.play_region(id, rc, now_ms),
                 packet @ (ClientPacket::GameEvent(_) | ClientPacket::GameEventAfterTick(..)) => {
                     let (event, after_tick) = match packet {
                         ClientPacket::GameEventAfterTick(event, tick) => (event, Some(tick)),
