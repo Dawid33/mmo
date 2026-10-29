@@ -72,8 +72,8 @@ play_blocks := if region_blocks == "" { "256" } else { region_blocks }
 export VOXEL_REGION_BLOCKS := test_blocks
 
 # Sim-chunk edge in BLOCKS — a BUILD-time constant (`game::CHUNK_BLOCKS`,
-# crates/game/src/block.rs; powers of two 2..=32, anything else fails the
-# build). A chunk owns one entity, one rapier body and one collider set; the
+# crates/game/src/block.rs; exactly 2 or 16 (the sizes with pinned
+# goldens), anything else fails the build). A chunk owns one entity, one rapier body and one collider set; the
 # 32³-voxel render/LOD brick does not change with it. The default mirrors
 # `[env]` in .cargo/config.toml (one build fingerprint); switching recompiles
 # `game` and everything downstream. Server and client must share the value.

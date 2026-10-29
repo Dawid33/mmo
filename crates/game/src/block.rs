@@ -15,9 +15,8 @@ pub const BLOCK_VOXELS: usize = 16; // 1 block = 16³ voxels = 1 m³
 /// body and one collider set. A BUILD-time dial (`VOXEL_CHUNK_BLOCKS`, set in
 /// `.cargo/config.toml [env]`, `just chunk_blocks=N …`) for the same reason as
 /// `REGION_BLOCKS`: client, server and the wasm LocalServer must agree on it
-/// bit-exactly. Legal values are the powers of two `2..=32` (a chunk edge must
-/// be a whole number of 32-voxel render bricks, i.e. an even block count, and
-/// a `BlockIndex` must fit a `u16`); anything else fails the BUILD.
+/// bit-exactly. Legal values are exactly 2 and 16 — the only sizes with pinned
+/// goldens (2 = the pre-2026-10-29 size); anything else fails the BUILD.
 pub const CHUNK_BLOCKS: usize = parse_chunk_blocks(option_env!("VOXEL_CHUNK_BLOCKS"));
 
 /// `option_env!` hands over a string; unset or empty means the default.
@@ -36,8 +35,8 @@ const fn parse_chunk_blocks(var: Option<&str>) -> usize {
         i += 1;
     }
     assert!(
-        value.is_power_of_two() && value >= 2 && value <= 32,
-        "VOXEL_CHUNK_BLOCKS must be a power of two, 2..=32"
+        value == 2 || value == 16,
+        "VOXEL_CHUNK_BLOCKS must be 2 or 16 (the only chunk sizes with pinned goldens)"
     );
     value
 }
@@ -480,7 +479,6 @@ mod tests {
         assert_eq!(parse_chunk_blocks(None), 16);
         assert_eq!(parse_chunk_blocks(Some("")), 16);
         assert_eq!(parse_chunk_blocks(Some("2")), 2);
-        assert_eq!(parse_chunk_blocks(Some("32")), 32);
         assert_eq!(CHUNK_BLOCKS, parse_chunk_blocks(option_env!("VOXEL_CHUNK_BLOCKS")));
     }
 
@@ -582,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn collider_cells_uniform_chunk_is_eight_blocks() {
+    fn collider_cells_uniform_chunk_is_all_blocks() {
         let c = Chunk::uniform(Block::new(BlockId(1)));
         let cells = collider_cells(&c);
         assert_eq!(cells.blocks.len(), CHUNK_BLOCK_COUNT);

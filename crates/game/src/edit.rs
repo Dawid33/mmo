@@ -116,7 +116,20 @@ pub fn edge_ring_locked(pos: BlockPos, ground: Option<&crate::ColumnGround>) -> 
         .any(|[dx, dz]| locate([pos[0] + dx, pos[1], pos[2] + dz]).is_none())
 }
 
+thread_local! {
+    /// Full collider rebuilds on this thread — a test probe for "did the edit
+    /// patch incrementally". Not state: never hashed, serialized or undone.
+    static COLLIDER_REBUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 impl Rollback {
+    /// How many block edits on this thread fell back to a full chunk collider
+    /// rebuild instead of patching the `Voxels` shapes. Test hook only.
+    #[doc(hidden)]
+    pub fn collider_rebuilds() -> u64 {
+        COLLIDER_REBUILDS.with(|c| c.get())
+    }
+
     fn block_solid(&self, pos: BlockPos) -> bool {
         let Some((coords, local)) = locate(pos) else { return false };
         let Some(e) = self.chunk_key_at(coords) else {
@@ -400,6 +413,7 @@ impl Rollback {
             }
         }
         if !patchable {
+            COLLIDER_REBUILDS.with(|c| c.set(c.get() + 1));
             let cells = crate::collider_cells(self.data.ecs.chunk.get(e));
             self.rebuild_chunk_colliders_safe(e, &cells);
             return;

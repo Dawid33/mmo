@@ -461,3 +461,48 @@ fn incremental_collider_matches_rebuild() {
         assert_eq!(before, game::state_hash(&r), "seed {seed}: the edits roll back bit-exact");
     }
 }
+
+/// Pins that a block edit takes the incremental path: in a partial chunk
+/// built by `create_mesh`, breaking one block keeps the same collider handles
+/// (none added, none disabled), changes the block shape in place, and never
+/// calls the full rebuild (`Rollback::collider_rebuilds`, a thread-local
+/// probe that is not state).
+#[test]
+fn partial_chunk_edit_patches_colliders_without_rebuild() {
+    use game::StateHash;
+    let target = TARGET;
+    let (mut r, _recv) = terrain(|c| if c == target { seeded_chunk(5) } else { Chunk::flat_floor(16) });
+    let e = r.chunk_key_at(target).unwrap();
+    let body = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap();
+    let handles: Vec<_> = body.colliders().to_vec();
+    let state = |r: &Rollback| -> Vec<(bool, u32)> {
+        let body = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap();
+        body.colliders()
+            .iter()
+            .map(|&ch| {
+                let c = r.physics.colliders.get(ch).unwrap();
+                let mut h = game::StateHasher::new();
+                c.shared_shape().state_hash(&mut h);
+                (c.is_enabled(), h.finalize())
+            })
+            .collect()
+    };
+    let before = state(&r);
+    assert!(before.len() >= 2 && before.iter().all(|(on, _)| *on), "a multi-grid partial chunk");
+    // A plain (unchiselled) solid block: the block grid keeps other cells.
+    let chunk = r.ecs.chunk.get(e);
+    let local = (0..game::CHUNK_BLOCK_COUNT)
+        .map(|i| BlockIndex::from_linear(i))
+        .find(|&i| chunk.block_at(i.xyz().0, i.xyz().1, i.xyz().2).id != BlockId::AIR && !chunk.chisel.contains_key(&i))
+        .expect("a plain solid block")
+        .xyz();
+    let rebuilds = Rollback::collider_rebuilds();
+    r.new_transaction();
+    assert!(r.set_block_safe(world_block(target, local), air()));
+    assert_eq!(Rollback::collider_rebuilds(), rebuilds, "the edit patched in place");
+    let body = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap();
+    assert_eq!(body.colliders(), &handles[..], "no collider added");
+    let after = state(&r);
+    assert!(after.iter().all(|(on, _)| *on), "none disabled");
+    assert_ne!(before, after, "the shape changed");
+}
