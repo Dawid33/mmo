@@ -1,0 +1,94 @@
+# DF DOG (creature_domestic): 30 kg, domestic, pet, trainable (war/hunting).
+# Attacks bite (the template's `attack`) and scratch (optional, not made).
+name = "dog"
+template = "quadruped"
+status = "draft"
+
+[proportions]
+body = [6, 5, 12]
+leg = [2, 5]
+head = [5, 5, 4]
+head_up = 2
+tail = [2, 6]
+tail_raise = 40
+
+# Relative to the bone's pivot. Head pivot: the neck joint, the head cube spans
+# y -2..3 and z -3..1 around it.
+[[cubes]]
+name = "snout"
+bone = "head"
+part = "snout"
+from = [-1.5, -2, -6]
+to = [1.5, 0, -3]
+
+[[cubes]]
+name = "ear_l"
+bone = "head"
+part = "ears"
+from = [-2.5, 3, 0]
+to = [-0.5, 5, 1]
+
+[[cubes]]
+name = "ear_r"
+bone = "head"
+part = "ears"
+from = [0.5, 3, 0]
+to = [2.5, 5, 1]
+
+[palette]
+fur = "#8f6b45"
+fur_down = "#d2b48e"
+legs = "#7c5b3b"
+head = "#8f6b45"
+tail = "#8f6b45"
+snout = "#d2b48e"
+ears = "#5c4129"
+eye = "#16110d"
+nose = "#2b201a"
+
+# Face texels as seen from outside, top row 0. The head's front face is 5×5;
+# the snout covers its lower two rows.
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "snout"
+face = "north"
+x = 1
+y = 0
+colour = "nose"
+
+# Sitting down and staying there: the body tips up about its centre, the front
+# legs swing back to vertical, the hind legs fold flat along the ground.
+[clips.sit]
+mode = "hold"
+length = 0.6
+keys = [
+  { bone = "body", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "rotation", time = 0.6, value = [28, 0, 0] },
+  { bone = "body", channel = "position", time = 0.0, value = [0, 0, 0] },
+  { bone = "body", channel = "position", time = 0.6, value = [0, -2.2, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fl", channel = "rotation", time = 0.6, value = [-28, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_fr", channel = "rotation", time = 0.6, value = [-28, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_bl", channel = "rotation", time = 0.6, value = [60, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "leg_br", channel = "rotation", time = 0.6, value = [60, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "head", channel = "rotation", time = 0.6, value = [-18, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.0, value = [0, 0, 0] },
+  { bone = "tail", channel = "rotation", time = 0.6, value = [35, 0, 0] },
+]

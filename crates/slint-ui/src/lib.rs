@@ -26,7 +26,7 @@ slint::include_modules!();
 
 thread_local! {
     /// The window the next component is created in. Slint's platform can be
-    /// set only once, so [`Overlay::new`] parks its window here and the
+    /// set only once, so [`Overlay::with`] parks its window here and the
     /// platform hands it out.
     static NEXT_WINDOW: RefCell<Option<Rc<MinimalSoftwareWindow>>> = const { RefCell::new(None) };
 }
@@ -51,9 +51,10 @@ pub struct Dirty {
     pub height: u32,
 }
 
-/// One [`GameUi`] in its own headless window, with the pixels it drew.
-pub struct Overlay {
-    ui: GameUi,
+/// One Slint component (the game's [`GameUi`] by default) in its own
+/// headless window, with the pixels it drew.
+pub struct Overlay<C = GameUi> {
+    ui: C,
     window: Rc<MinimalSoftwareWindow>,
     /// Row-major, `size.0` pixels per row. Transparent where nothing is drawn.
     pixels: Vec<PremultipliedRgbaColor>,
@@ -65,19 +66,26 @@ pub struct Overlay {
     full_repaint: bool,
 }
 
-impl Overlay {
+impl Overlay<GameUi> {
     pub fn new() -> Result<Self, slint::PlatformError> {
+        Self::with(GameUi::new)
+    }
+}
+
+impl<C: ComponentHandle> Overlay<C> {
+    /// `make` is the component's generated `new` (e.g. `AssetViewerUi::new`).
+    pub fn with(make: impl FnOnce() -> Result<C, slint::PlatformError>) -> Result<Self, slint::PlatformError> {
         // Fails harmlessly when an earlier Overlay already installed it.
         let _ = slint::platform::set_platform(Box::new(OverlayPlatform));
         let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
         NEXT_WINDOW.with(|next| *next.borrow_mut() = Some(window.clone()));
-        let ui = GameUi::new()?;
+        let ui = make()?;
         ui.show()?;
         Ok(Self { ui, window, pixels: Vec::new(), size: (0, 0), scale: 1.0, full_repaint: true })
     }
 
     /// The component: set its properties and connect its callbacks.
-    pub fn ui(&self) -> &GameUi {
+    pub fn ui(&self) -> &C {
         &self.ui
     }
 

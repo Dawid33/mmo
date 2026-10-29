@@ -45,6 +45,10 @@ wgpu-hal = { version = "29.0.4", optional = true }
 default = ["dev_ui"]
 # egui developer panel (F3). `--no-default-features` builds without egui.
 dev_ui = ["dep:bevy_egui"]
+# Hot reload: Bevy watches the asset files and reloads what changed. Off for
+# the game; the model viewers (`just model-view`, `just asset-viewer`) turn
+# it on so a .bbmodel saved in Blockbench shows at once.
+file_watcher = ["bevy/file_watcher"]
 # Continuous profiling (native only): the deps live in the non-wasm target
 # table, so enabling this on a wasm build is a harmless no-op.
 pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]

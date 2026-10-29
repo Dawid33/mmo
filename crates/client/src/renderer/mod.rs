@@ -39,7 +39,7 @@ pub mod model;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod render_bench;
 mod skybox;
-pub(crate) mod slint_overlay;
+pub mod slint_overlay;
 pub(crate) mod ui_bridge;
 pub(crate) mod ui_input;
 mod voxel_material;

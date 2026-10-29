@@ -1,0 +1,83 @@
+{
+ "dog": {
+  "name": "dog",
+  "status": "draft",
+  "model": "models/creatures/dog.bbmodel",
+  "template": "quadruped",
+  "bounds": [
+   [
+    -3,
+    0,
+    -12
+   ],
+   [
+    3,
+    14,
+    10.473
+   ]
+  ],
+  "budget": {
+   "cubes": 24,
+   "bones": 12
+  },
+  "required_clips": [
+   "idle",
+   "walk",
+   "run",
+   "attack",
+   "hurt",
+   "death",
+   "lie",
+   "sleep",
+   "eat"
+  ],
+  "cubes": 10,
+  "bones": 8,
+  "clips": {
+   "walk": {
+    "loop": "loop",
+    "length": 0.8,
+    "stride": 5,
+    "speed": 6.25
+   },
+   "run": {
+    "loop": "loop",
+    "length": 0.45,
+    "stride": 12.2567,
+    "speed": 27.2371
+   },
+   "idle": {
+    "loop": "loop",
+    "length": 4
+   },
+   "attack": {
+    "loop": "once",
+    "length": 0.6
+   },
+   "hurt": {
+    "loop": "once",
+    "length": 0.35
+   },
+   "death": {
+    "loop": "hold",
+    "length": 1
+   },
+   "lie": {
+    "loop": "loop",
+    "length": 4
+   },
+   "sleep": {
+    "loop": "loop",
+    "length": 6
+   },
+   "eat": {
+    "loop": "loop",
+    "length": 1.6
+   },
+   "sit": {
+    "loop": "hold",
+    "length": 0.6
+   }
+  }
+ }
+}

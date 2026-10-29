@@ -1,0 +1,214 @@
+import { Button, ButtonFace, Checkbox, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, ScrollPaneFace, SliderFace, Styles, VerticalFlow } from "@widgets";
+
+// A list box you can use: the widgets' `ListBoxFace` look (list-box items
+// down a list-box scroll pane), with clickable items and wheel scrolling.
+component PickList inherits TouchArea {
+    in property <[string]> items;
+    in property <int> selected: -1;
+    callback picked(int);
+    // Tall enough for every item: a height to cap, since flows give their
+    // children their preferred size.
+    out property <length> natural-height: content-height + Styles.list-box.scroll-pane.box.padding.top
+        + Styles.list-box.scroll-pane.box.padding.bottom + Styles.list-box.scroll-pane.vertical-flow.box.padding.top
+        + Styles.list-box.scroll-pane.vertical-flow.box.padding.bottom;
+
+    property <length> offset;
+    property <length> item-height: probe.preferred-height;
+    property <length> content-height: items.length * item-height;
+    property <length> max-offset: max(0px, content-height - (pane.content-bottom - pane.content-y));
+
+    // The children get a scroll first; the items don't take it, so it ends here.
+    scroll-event(e) => {
+        root.offset = clamp(root.offset - e.delta-y, 0px, root.max-offset);
+        accept
+    }
+
+    probe := ButtonFace {
+        visible: false;
+        style: Styles.list-box.item;
+    }
+    pane := ScrollPaneFace {
+        width: 100%;
+        height: 100%;
+        style: Styles.list-box.scroll-pane;
+        content-height: root.content-height;
+        activated: root.content-height > root.height - self.style.box.padding.top - self.style.box.padding.bottom;
+        offset: min(root.offset, root.max-offset);
+        for item[i] in root.items: Button {
+            x: 0;
+            y: i * root.item-height;
+            width: pane.content-width - pane.style.vertical-flow.box.padding.left - pane.style.vertical-flow.box.padding.right;
+            height: root.item-height;
+            style: Styles.list-box.item;
+            text: item;
+            toggled: i == root.selected;
+            clicked => { root.picked(i); }
+        }
+    }
+}
+
+// A slider whose thumb follows a press or drag: `scrubbed` with the value
+// under the pointer.
+component Scrubber inherits TouchArea {
+    in property <float> value;
+    in property <float> maximum: 1;
+    callback scrubbed(float);
+
+    preferred-height: face.preferred-height;
+    min-width: face.min-width;
+
+    function at(x: length) -> float {
+        root.maximum * clamp(x / max(1px, root.width), 0, 1)
+    }
+    pointer-event(e) => {
+        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+            root.scrubbed(root.at(self.mouse-x));
+        }
+    }
+    moved => {
+        if self.pressed { root.scrubbed(root.at(self.mouse-x)); }
+    }
+
+    face := SliderFace {
+        width: 100%;
+        height: 100%;
+        minimum: 0;
+        maximum: root.maximum;
+        value: root.value;
+        disabled: root.maximum <= 0;
+    }
+}
+
+// The asset viewer (`crates/client/examples/asset_viewer.rs`): every
+// Blockbench model on the left, the picked one's animations on the right,
+// the model itself in the 3D view between them. Transparent elsewhere, so
+// the pointer reaches the view (orbit, zoom).
+export component AssetViewerUi inherits Window {
+    background: transparent;
+
+    // Paths of every .bbmodel found, relative to the repo root.
+    in property <[string]> models;
+    in property <int> selected-model: -1;
+    // The picked model's clips, "(rest pose)" first.
+    in property <[string]> clips;
+    in property <int> selected-clip: -1;
+    // "walk — loop, 1.20 s"
+    in property <string> clip-info;
+    in property <float> time;
+    in property <float> length;
+    in property <bool> paused;
+    in property <string> speed;
+    in-out property <bool> turntable: true;
+    // Nodes, parts, bounds, reader warnings: one line each.
+    in property <[string]> model-info;
+    in property <string> status;
+
+    callback pick-model(int);
+    callback pick-clip(int);
+    callback rescan();
+    callback toggle-pause();
+    callback restart();
+    callback scrub(float);
+    // ×2 or ×0.5.
+    callback change-speed(float);
+
+    property <length> margin: 12px;
+    property <length> frame-bottom-pad: Styles.frame.box.padding.bottom + GraphicalSets.inset(Styles.frame.graphics).bottom;
+
+    models-frame := FrameFace {
+        title: "Models (" + root.models.length + ")";
+        x: root.margin;
+        y: root.margin;
+        width: 320px;
+        height: root.height - 2 * root.margin;
+
+        property <length> bottom: self.height - root.frame-bottom-pad;
+
+        // The list fills the frame down to the footer.
+        PickList {
+            x: models-frame.content-x;
+            y: models-frame.content-y;
+            width: models-frame.content-right - models-frame.content-x;
+            height: models-frame.bottom - self.y - footer.preferred-height;
+            items: root.models;
+            selected: root.selected-model;
+            picked(i) => { root.pick-model(i); }
+        }
+        footer := VerticalFlow {
+            x: models-frame.content-x;
+            y: models-frame.bottom - self.preferred-height;
+            width: models-frame.content-right - models-frame.content-x;
+
+            HorizontalFlow {
+                Button {
+                    text: "Rescan";
+                    clicked => { root.rescan(); }
+                }
+            }
+            if root.status != "": LabelFace {
+                style: Styles.caption-label;
+                text: root.status;
+            }
+        }
+    }
+
+    anim-frame := FrameFace {
+        title: "Animations";
+        x: root.width - self.width - root.margin;
+        y: root.margin;
+        width: 280px;
+        height: root.height - 2 * root.margin;
+
+        VerticalFlow {
+            x: anim-frame.content-x;
+            y: anim-frame.content-y;
+            width: anim-frame.content-right - anim-frame.content-x;
+            height: anim-frame.height - anim-frame.content-y - root.frame-bottom-pad;
+
+            PickList {
+                height: min(self.natural-height, anim-frame.height / 2);
+                items: root.clips;
+                selected: root.selected-clip;
+                picked(i) => { root.pick-clip(i); }
+            }
+            LabelFace { text: root.clip-info; }
+            Scrubber {
+                value: root.time;
+                maximum: root.length;
+                scrubbed(t) => { root.scrub(t); }
+            }
+            LabelFace {
+                style: Styles.caption-label;
+                text: round(root.time * 100) / 100 + " / " + round(root.length * 100) / 100 + " s   speed " + root.speed;
+            }
+            HorizontalFlow {
+                Button {
+                    text: root.paused ? "Play" : "Pause";
+                    clicked => { root.toggle-pause(); }
+                }
+                Button {
+                    text: "Restart";
+                    clicked => { root.restart(); }
+                }
+            }
+            HorizontalFlow {
+                Button {
+                    text: "Slower";
+                    clicked => { root.change-speed(0.5); }
+                }
+                Button {
+                    text: "Faster";
+                    clicked => { root.change-speed(2.0); }
+                }
+            }
+            Checkbox {
+                text: "Turntable";
+                checked <=> root.turntable;
+            }
+            for line in root.model-info: LabelFace {
+                style: Styles.caption-label;
+                text: line;
+            }
+        }
+    }
+}

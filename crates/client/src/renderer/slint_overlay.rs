@@ -12,7 +12,10 @@
 //!   un-premultiplied into a window-sized `Image` shown by an `ImageNode`
 //!   over everything else, one texel per physical pixel.
 //!
-//! Commander mode only. Design and trade-offs (CPU raster, blending,
+//! The component-agnostic part — sizing, input, pointer ownership, upload —
+//! is [`SlintLayerPlugin`], generic over the Slint component, so other apps
+//! can show their own screen the same way (the asset viewer example,
+//! `just asset-viewer`). The game UI is commander mode only. Design and trade-offs (CPU raster, blending,
 //! licences): docs/superpowers/specs/2026-10-20-slint-ui-library-in-bevy-investigation.md.
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -28,8 +31,8 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
 use slint_ui::slint::platform::{Key as SlintKey, PointerEventButton, WindowEvent};
-use slint_ui::slint::{LogicalPosition, ModelRc, SharedString, VecModel};
-use slint_ui::Overlay;
+use slint_ui::slint::{ComponentHandle, LogicalPosition, ModelRc, SharedString, VecModel};
+use slint_ui::{GameUi, Overlay};
 
 use super::bridge::{SimEntity, SimKind};
 use super::commander::designate::{DesignateState, DragReadout, Tool, TOOL_KEYS};
@@ -66,17 +69,52 @@ pub enum UiAction {
     ClearSelection,
 }
 
-/// The Slint side, `!Send` (kept as a non-send resource on the main thread).
-struct SlintUi {
-    overlay: Overlay,
-    /// Filled by the component's callbacks during event dispatch.
-    actions: Rc<RefCell<Vec<UiAction>>>,
-    ui_scale: f32,
+/// Filled by the game UI's callbacks during event dispatch (`!Send`, a
+/// non-send resource on the main thread).
+struct GameUiActions(Rc<RefCell<Vec<UiAction>>>);
+
+/// Any Slint component drawn as a window-sized layer over the 3D view:
+/// sized to the window, fed its input, deciding who owns the pointer, and
+/// uploaded into the texture it is shown with. The game UI is one
+/// ([`SlintOverlayPlugin`]); the asset viewer example is another.
+pub struct SlintLayerPlugin<C> {
+    make: fn() -> Result<C, slint_ui::slint::PlatformError>,
+    /// Runs once on the new component, before it is inserted: connect its
+    /// callbacks here.
+    init: fn(&C, &mut World),
 }
 
-/// The texture the overlay is drawn into.
-#[derive(Resource)]
-struct SlintTarget(Handle<Image>);
+impl<C> SlintLayerPlugin<C> {
+    /// `make` is the component's generated `new` (e.g. `GameUi::new`).
+    pub fn new(make: fn() -> Result<C, slint_ui::slint::PlatformError>) -> Self {
+        Self { make, init: |_, _| {} }
+    }
+
+    pub fn with_init(mut self, init: fn(&C, &mut World)) -> Self {
+        self.init = init;
+        self
+    }
+}
+
+impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
+    fn build(&self, app: &mut App) {
+        let (make, init) = (self.make, self.init);
+        app.add_systems(Startup, move |world: &mut World| setup_slint_layer(world, make, init))
+            .add_systems(PreUpdate, slint_input::<C>.after(bevy::input::InputSystems))
+            .add_systems(PostUpdate, render_slint_layer::<C>);
+    }
+}
+
+/// One component's layer, `!Send` (a non-send resource on the main thread).
+pub struct SlintLayer<C: 'static> {
+    pub overlay: Overlay<C>,
+    ui_scale: f32,
+    /// The texture the overlay is drawn into.
+    target: Handle<Image>,
+    /// The pointer is over a pixel the UI drew, or a press that started
+    /// there is still held: the view underneath should leave it alone.
+    pub owns_pointer: bool,
+}
 
 /// Pointer bookkeeping between frames.
 #[derive(Default)]
@@ -91,25 +129,31 @@ pub struct SlintOverlayPlugin;
 
 impl Plugin for SlintOverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_slint_overlay)
-            .add_systems(PreUpdate, slint_input.after(bevy::input::InputSystems))
-            .add_systems(Update, (toggle_panel, apply_ui_actions, push_ui_state).chain())
-            .add_systems(PostUpdate, render_slint_overlay);
+        app.add_plugins(SlintLayerPlugin::new(GameUi::new).with_init(connect_game_ui))
+            .add_systems(Update, (toggle_panel, apply_ui_actions, push_ui_state).chain());
     }
 }
 
-fn setup_slint_overlay(world: &mut World) {
-    let overlay = match Overlay::new() {
+fn connect_game_ui(ui: &GameUi, world: &mut World) {
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let queue = actions.clone();
+    ui.on_clear_selection(move || queue.borrow_mut().push(UiAction::ClearSelection));
+    world.insert_non_send(GameUiActions(actions));
+}
+
+fn setup_slint_layer<C: ComponentHandle + 'static>(
+    world: &mut World,
+    make: fn() -> Result<C, slint_ui::slint::PlatformError>,
+    init: fn(&C, &mut World),
+) {
+    let overlay = match Overlay::with(make) {
         Ok(overlay) => overlay,
         Err(e) => {
-            error!("[slint] game UI unavailable: {e}");
+            error!("[slint] {} unavailable: {e}", std::any::type_name::<C>());
             return;
         }
     };
-    let actions = Rc::new(RefCell::new(Vec::new()));
-    let queue = actions.clone();
-    overlay.ui().on_clear_selection(move || queue.borrow_mut().push(UiAction::ClearSelection));
-    world.insert_non_send(SlintUi { overlay, actions, ui_scale: ui_scale() });
+    init(overlay.ui(), world);
 
     let mut image = Image::new_fill(
         Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -119,11 +163,11 @@ fn setup_slint_overlay(world: &mut World) {
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
     image.sampler = ImageSampler::nearest();
-    let handle = world.resource_mut::<Assets<Image>>().add(image);
+    let target = world.resource_mut::<Assets<Image>>().add(image);
     world.spawn((
         Name::new("slint overlay"),
         Pickable::IGNORE,
-        ImageNode::new(handle.clone()),
+        ImageNode::new(target.clone()),
         Node {
             position_type: PositionType::Absolute,
             width: Val::Percent(100.0),
@@ -132,7 +176,7 @@ fn setup_slint_overlay(world: &mut World) {
         },
         GlobalZIndex(OVERLAY_Z),
     ));
-    world.insert_resource(SlintTarget(handle));
+    world.insert_non_send(SlintLayer { overlay, ui_scale: ui_scale(), target, owns_pointer: false });
 }
 
 fn pointer_button(button: MouseButton) -> PointerEventButton {
@@ -176,15 +220,15 @@ fn key_text(key: &Key) -> Option<SharedString> {
 /// Size the overlay to the window, forward this frame's input, and decide
 /// who owns the pointer.
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
-fn slint_input(
-    slint: Option<NonSendMut<SlintUi>>,
+fn slint_input<C: ComponentHandle + 'static>(
+    slint: Option<NonSendMut<SlintLayer<C>>>,
     window: Query<&Window, With<PrimaryWindow>>,
     mut buttons: MessageReader<MouseButtonInput>,
     mut wheel: MessageReader<MouseWheel>,
     mut keys: MessageReader<KeyboardInput>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut pointer: Local<PointerState>,
-    mut policy: ResMut<CursorPolicy>,
+    policy: Option<ResMut<CursorPolicy>>,
 ) {
     let Some(mut slint) = slint else { return };
     let Ok(window) = window.single() else { return };
@@ -248,12 +292,13 @@ fn slint_input(
     }
 
     let owns = over_ui || pointer.captured;
-    if policy.ui_pointer != owns {
+    slint.owns_pointer = owns;
+    if let Some(mut policy) = policy.filter(|p| p.ui_pointer != owns) {
         policy.ui_pointer = owns;
     }
 }
 
-fn toggle_panel(keys: Res<ButtonInput<KeyCode>>, slint: Option<NonSend<SlintUi>>) {
+fn toggle_panel(keys: Res<ButtonInput<KeyCode>>, slint: Option<NonSend<SlintLayer<GameUi>>>) {
     let Some(slint) = slint else { return };
     if keys.just_pressed(SLINT_PANEL_KEY) {
         let ui = slint.overlay.ui();
@@ -261,9 +306,9 @@ fn toggle_panel(keys: Res<ButtonInput<KeyCode>>, slint: Option<NonSend<SlintUi>>
     }
 }
 
-fn apply_ui_actions(slint: Option<NonSend<SlintUi>>, mut selection: Option<ResMut<Selection>>) {
-    let Some(slint) = slint else { return };
-    for action in slint.actions.borrow_mut().drain(..) {
+fn apply_ui_actions(actions: Option<NonSend<GameUiActions>>, mut selection: Option<ResMut<Selection>>) {
+    let Some(actions) = actions else { return };
+    for action in actions.0.borrow_mut().drain(..) {
         match action {
             UiAction::ClearSelection => {
                 if let Some(selection) = selection.as_mut() {
@@ -416,7 +461,7 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
 /// Client state → panel properties, only when it changed (every set marks
 /// the UI dirty and costs a repaint).
 fn push_ui_state(
-    slint: Option<NonSend<SlintUi>>,
+    slint: Option<NonSend<SlintLayer<GameUi>>>,
     status: Res<HudStatus>,
     selection: Option<Res<Selection>>,
     entities: Query<(&SimEntity, &SimKind)>,
@@ -443,14 +488,13 @@ fn push_ui_state(
 
 /// Redraw what changed and copy that rect into the texture, un-premultiplied
 /// (`ImageNode` blends straight alpha). The texture follows the window size.
-fn render_slint_overlay(
-    slint: Option<NonSendMut<SlintUi>>,
-    target: Option<Res<SlintTarget>>,
+fn render_slint_layer<C: ComponentHandle + 'static>(
+    slint: Option<NonSendMut<SlintLayer<C>>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let (Some(mut slint), Some(target)) = (slint, target) else { return };
+    let Some(mut slint) = slint else { return };
     let Some(dirty) = slint.overlay.render() else { return };
-    let Some(mut image) = images.get_mut(&target.0) else { return };
+    let Some(mut image) = images.get_mut(&slint.target) else { return };
     let (width, height) = slint.overlay.size();
     let size = Extent3d { width, height, depth_or_array_layers: 1 };
     if image.texture_descriptor.size != size {

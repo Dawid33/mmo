@@ -341,8 +341,46 @@ bench-column:
 # screenshots and exits. e.g.
 #   just model-view assets/models/soldier.bbmodel
 model-view path *args:
-    {{cap}} {{cargo}} build --example model_view -p client
-    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi; {{cargo}} run -q --example model_view -p client -- {{path}} {{args}}
+    {{cap}} {{cargo}} build --example model_view -p client --features file_watcher
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi; {{cargo}} run -q --example model_view -p client --features file_watcher -- {{path}} {{args}}
+
+# Browse every Blockbench model (crates/client/examples/asset_viewer.rs): all
+# .bbmodel files listed on the left, the picked one's animations on the right
+# (play, scrub, pause, speed); drag orbits, wheel zooms, saves hot-reload.
+# Roots default to assets/ + the bbmodel fixtures. `--model <part of path>
+# [--anim NAME] [--time S] --shot out.png` screenshots and exits. e.g.
+#   just asset-viewer
+#   just asset-viewer assets/models
+asset-viewer *args:
+    {{cap}} {{cargo}} build --example asset_viewer -p client --features file_watcher
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi; {{cargo}} run -q --example asset_viewer -p client --features file_watcher -- {{args}}
+
+# Creature models (docs/superpowers/specs/2026-10-29-creature-asset-pipeline.md):
+# tools/creatures/src/<df_id>.toml → assets/models/creatures/<df_id>.bbmodel +
+# the manifest creatures.json. No ids: every source. Then `just creature-check`.
+creatures *ids:
+    python3 tools/creatures/build.py {{ids}}
+
+# A creature's brief from the DF roster + local raws: size, template, clips.
+#   just creature-brief DOG
+#   just creature-brief "giant cave spider"
+creature-brief id:
+    python3 tools/creatures/brief.py "{{id}}"
+
+# A creature's review contact sheet: every clip, top-down and side views, in
+# target/creature-sheets/<id>.png (builds the viewer first).
+creature-sheet id:
+    {{cap}} {{cargo}} build --example asset_viewer -p client --features file_watcher
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi; python3 tools/creatures/sheet.py {{id}}
+
+# Creature models done (approved / draft / todo per category) and the next to build.
+creature-progress *args:
+    python3 tools/creatures/progress.py {{args}}
+
+# The creature lint: every manifest model through the real parser (no reader
+# warnings, required clips + loop modes, budgets, rest bounds).
+creature-check:
+    {{cap}} {{cargo}} test -q -p bbmodel --test creatures
 
 # Game models from a text prompt (tools/assets/generate.py): a Leonardo.ai picture,
 # then 3D AI Studio TRELLIS.2 image-to-3D -> assets/models/<name>.glb. Costs
