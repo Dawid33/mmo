@@ -263,12 +263,21 @@ mod manager {
 
     #[test]
     fn play_refusals() {
+        fn home_of(h: &mut Harness) -> Option<RegionCoords> {
+            h.event(ServerEvent::ClientPacket(ClientPacket::RequestPlayerRegion, 0), 1);
+            h.drain().iter().find_map(|(_, p)| match p {
+                ServerPacket::PlayerRegion(rc, 0) => *rc,
+                _ => None,
+            })
+        }
         // No map.
         let mut h = harness();
         h.event(ServerEvent::ClientConnected(0), 0);
         h.drain();
         h.play(RegionCoords::new(1, 0), 1);
         assert_eq!(refusal(&h.drain()), Some((RegionCoords::new(1, 0), PlayRefusal::NoWorldMap)));
+        assert_eq!(h.manager.running_regions(), vec![SPAWN_REGION]);
+        assert_eq!(home_of(&mut h), Some(SPAWN_REGION));
 
         let mut h = with_map();
         for (rc, want) in [
@@ -278,6 +287,8 @@ mod manager {
         ] {
             h.play(rc, 1);
             assert_eq!(refusal(&h.drain()), Some((rc, want)));
+            assert_eq!(h.manager.running_regions(), vec![SPAWN_REGION]);
+            assert_eq!(home_of(&mut h), Some(SPAWN_REGION));
         }
         // Landing column outside the region.
         let mut m = map();
@@ -298,6 +309,26 @@ mod manager {
         h.play(target, 1);
         h.play(target, 1);
         assert_eq!(refusal(&h.drain()), Some((target, PlayRefusal::AlreadyHere)));
+        assert_eq!(players_in(&mut h, target), 1);
+    }
+
+    #[test]
+    fn play_from_a_parked_home_removes_the_old_body() {
+        let mut h = harness();
+        h.manager.set_world_map(map());
+        h.event(ServerEvent::ClientConnected(0), 0);
+        h.event(ServerEvent::ClientDisconnected(0), 10);
+        let late = 10 + UNLOAD_GRACE_MS + 1;
+        h.manager.maintain(late);
+        h.settle(late);
+        assert!(!h.manager.running_regions().contains(&SPAWN_REGION), "home parked");
+        h.event(ServerEvent::ClientConnected(0), late);
+        let target = RegionCoords::new(1, 0);
+        h.play(target, late);
+        h.settle(late);
+        h.drain();
+        assert!(h.manager.running_regions().contains(&SPAWN_REGION), "home woken for the leave");
+        assert_eq!(players_in(&mut h, SPAWN_REGION), 0);
         assert_eq!(players_in(&mut h, target), 1);
     }
 }

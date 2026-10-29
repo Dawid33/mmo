@@ -365,6 +365,9 @@ pub struct WorldManager<S: RegionSpawner> {
     /// The forged world's tile summaries, pushed to every client on connect
     /// and consulted by Play. `None` = no forged world (procedural / tests).
     world_map: Option<WorldMap>,
+    /// `ClientLeft`s for a home region that was mid-stop when Play arrived;
+    /// replayed (waking the region from its parked blob) once it parks.
+    pending_leaves: BTreeMap<RegionCoords, Vec<ClientId>>,
     out: Sender<(Option<ClientId>, ServerPacket)>,
     region_out_send: Sender<(RegionCoords, RegionOutput)>,
     /// LOD subscriptions per key, and the reverse map for disconnects.
@@ -412,6 +415,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             sessions: BTreeMap::new(),
             homes: BTreeMap::new(),
             world_map: None,
+            pending_leaves: BTreeMap::new(),
             out,
             region_out_send,
             lod_subscribers: BTreeMap::new(),
@@ -456,7 +460,15 @@ impl<S: RegionSpawner> WorldManager<S> {
             _ => return refuse(self, PlayRefusal::NoDryLand),
         };
         if let Some(home) = home {
-            self.send_to_region(home, RegionInput::Event(GameEventKind::ClientLeft(id)));
+            // The home may be parked (disconnected owner, grace expired):
+            // wake it so the leave is not dropped. A home mid-stop cannot
+            // take events; queue the leave for when it parks.
+            self.ensure_running(home);
+            if self.regions.get(&home).map_or(false, |l| l.stopping) {
+                self.pending_leaves.entry(home).or_default().push(id);
+            } else {
+                self.send_to_region(home, RegionInput::Event(GameEventKind::ClientLeft(id)));
+            }
         }
         self.ensure_running(target);
         self.send_to_region(target, RegionInput::Event(GameEventKind::CreateClientAt(id, landing)));
@@ -466,12 +478,10 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.refresh_keepalive(home, now_ms);
         }
         self.refresh_keepalive(target, now_ms);
-        let (fx, fz) = home.map_or((0, 0), |h| (h.x, h.z));
+        let from = home.map_or("none".to_string(), |h| format!("{},{}", h.x, h.z));
         crate::perf_event!(
             "play_region",
-            "client={id} from={},{} to={},{}",
-            fx,
-            fz,
+            "client={id} from={from} to={},{}",
             target.x,
             target.z
         );
@@ -642,6 +652,12 @@ impl<S: RegionSpawner> WorldManager<S> {
                     .map(|l| l.resubscribe_pending)
                     .unwrap_or_default();
                 self.spawner.reap(rc);
+                if let Some(leavers) = self.pending_leaves.remove(&rc) {
+                    self.ensure_running(rc);
+                    for client in leavers {
+                        self.send_to_region(rc, RegionInput::Event(GameEventKind::ClientLeft(client)));
+                    }
+                }
                 for client in pending {
                     // A client asked for this region while it was stopping:
                     // now that the state is parked, cycle it right back in.
