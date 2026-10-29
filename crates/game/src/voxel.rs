@@ -6,9 +6,13 @@ use block_mesh::{MergeVoxel, VoxelVisibility};
 use crate::block::{Block, BlockIndex, ChiselData, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BLOCK_VOXELS};
 use crate::registry::BlockId;
 
-pub type ChunkShape = ConstShape3u32<32, 32, 32>;
+/// Edge of a render/LOD brick in voxels: the dense voxel array the mesher, the
+/// LOD grids and the client consume. Not the sim chunk (see `CHUNK_UNITS`).
+pub const BRICK_VOXELS: usize = 32;
+pub const BRICK_BLOCKS: usize = BRICK_VOXELS / BLOCK_VOXELS;
+pub type BrickShape = ConstShape3u32<32, 32, 32>;
 
-pub const CHUNK_VOXEL_COUNT: usize = 32 * 32 * 32;
+pub const BRICK_VOXEL_COUNT: usize = BRICK_VOXELS * BRICK_VOXELS * BRICK_VOXELS;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, ::borrow::Partial, Hash, state_hash::StateHash)]
 #[module(crate)]

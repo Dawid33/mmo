@@ -35,9 +35,9 @@ pub fn cells_per_side(cell_chunks: usize) -> u32 {
     (REGION_CHUNKS / cell_chunks) as u32
 }
 
-/// Cell edge in world units (32 units per chunk).
+/// Cell edge in world units (`CHUNK_UNITS` per chunk).
 pub fn cell_size_units(cell_chunks: usize) -> f32 {
-    (cell_chunks * 32) as f32
+    (cell_chunks * crate::CHUNK_UNITS) as f32
 }
 
 pub fn cell_of_chunk(c: ChunkCoords, cell_chunks: usize) -> CellCoords {
@@ -206,12 +206,8 @@ impl Rollback {
     pub(crate) fn chunk_coords_of(&self, key: EntityKey) -> Option<ChunkCoords> {
         let handle = (*self.data.ecs.rigidbody.try_get(key))?;
         let t = self.data.physics.bodies.get(handle)?.translation();
-        // Chunk bodies sit at exact multiples of 32 (seed_terrain_genesis / create_mesh).
-        Some(ChunkCoords::new(
-            (t.x / 32.0) as usize,
-            (t.y / 32.0).floor() as i32,
-            (t.z / 32.0) as usize,
-        ))
+        // Chunk bodies sit at exact multiples of CHUNK_UNITS (seed_terrain_genesis / create_mesh).
+        Some(crate::chunk_coords_from_translation(t))
     }
 
     /// Chunk entities in `cell`, sorted by coordinates. One index range per
@@ -317,9 +313,9 @@ impl Rollback {
             for (c, chunk) in raw {
                 let e = self.chunk_key_at(c).expect("genesis indexed the chunk");
                 let pose = crate::Pose::translation(
-                    (c.x * 32) as f32,
-                    (c.y * 32) as f32,
-                    (c.z * 32) as f32,
+                    (c.x * crate::CHUNK_UNITS) as f32,
+                    (c.y * crate::CHUNK_UNITS as i32) as f32,
+                    (c.z * crate::CHUNK_UNITS) as f32,
                 );
                 self.data.send(crate::GameDataUpdate::new(
                     crate::GameDataTransactionKind::Do,

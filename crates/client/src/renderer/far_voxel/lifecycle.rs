@@ -612,7 +612,7 @@ mod tests {
     use std::time::Duration;
 
     use bevy::prelude::*;
-    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
     use super::*;
     use crate::renderer::block_textures::BlockTextureLayers;
@@ -666,7 +666,7 @@ mod tests {
     }
 
     fn grid(material: BlockId) -> Vec<Voxel> {
-        let mut grid = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         grid[0] = Voxel::new(material);
         grid
     }

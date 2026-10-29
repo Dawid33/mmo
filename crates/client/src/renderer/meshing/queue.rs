@@ -409,7 +409,7 @@ pub(crate) mod tests {
     /// no quads, no connectivity, in both render modes.
     #[test]
     fn buried_shortcut_matches_the_full_mesher() {
-        use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+        use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
         let mut next = move |modulus: u64| {
             seed ^= seed << 13;
@@ -421,10 +421,10 @@ pub(crate) mod tests {
         // 0: all stone, 1: stone + water (both non-air), 2: stone with one
         // air voxel at a random spot (interior, face, edge or corner).
         let chunk = |next: &mut dyn FnMut(u64) -> u64, kind: u64| -> VoxelData {
-            let mut v = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+            let mut v = vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT];
             match kind {
                 1 => {
-                    for i in 0..CHUNK_VOXEL_COUNT / 2 {
+                    for i in 0..BRICK_VOXEL_COUNT / 2 {
                         v[i] = Voxel::new(BlockId(7));
                     }
                 }
@@ -506,10 +506,10 @@ pub(crate) mod tests {
         assert_eq!(budgets.uploads_per_frame, 100);
         assert_eq!(budgets.max_in_flight, 100 * IN_FLIGHT_PER_UPLOAD);
     }
-    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
     pub(crate) fn voxels_with(cells: &[[usize; 3]]) -> Vec<Voxel> {
-        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for [x, y, z] in cells {
             v[x + 32 * y + 32 * 32 * z] = Voxel::new(BlockId(1));
         }
@@ -829,7 +829,7 @@ pub(crate) mod tests {
         // Two solid X-adjacent chunks: after both mesh, neither may have quads
         // on the shared plane. This is the end-to-end neighbor-culling test.
         let mut app = pipeline_app(MeshBudgets::default());
-        let full: Vec<Voxel> = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+        let full: Vec<Voxel> = vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT];
         let a = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, full.clone());
         let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), full);
         assert!(
@@ -973,7 +973,7 @@ pub(crate) mod tests {
         // and cull their shared plane; despawning one must re-dirty the
         // survivor so it re-grows the wall instead of leaving a hole.
         let mut app = pipeline_app(MeshBudgets::default());
-        let full: Vec<Voxel> = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+        let full: Vec<Voxel> = vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT];
         let a = spawn_chunk(&mut app, Vec3::ZERO, Vec3::ZERO, full.clone());
         let b = spawn_chunk(&mut app, Vec3::ZERO, Vec3::new(32.0, 0.0, 0.0), full);
         assert!(

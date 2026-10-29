@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{BlockId, Chunk, ChunkCoords, RegionCoords, Voxel, CHUNK_VOXEL_COUNT, REGION_SIZE};
+use crate::{BlockId, Chunk, ChunkCoords, RegionCoords, Voxel, BRICK_VOXEL_COUNT, REGION_SIZE};
 
 /// Merge up to 2×2×2 source 32³ grids (index `sx + 2*sy + 4*sz`; `None` = all-air) into one 32³ coarse grid at 2× the cell size.
 /// Each coarse cell (x,y,z) draws from source grid `(x/16, y/16, z/16)`'s 2×2×2 voxel block at `((x%16)*2, (y%16)*2, (z%16)*2)`.
@@ -13,7 +13,7 @@ use crate::{BlockId, Chunk, ChunkCoords, RegionCoords, Voxel, CHUNK_VOXEL_COUNT,
 ///
 /// **Layout contract:** LOD grids are always 32³ `Vec<Voxel>` in the standard `x + 32*y + 32*32*z` order.
 pub fn downsample2(sources: &[Option<&[Voxel]>; 8]) -> Vec<Voxel> {
-    let mut output = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+    let mut output = vec![Voxel::default(); BRICK_VOXEL_COUNT];
 
     for z in 0..32 {
         for y in 0..32 {
@@ -90,7 +90,7 @@ pub fn merge_group(group: &[BlockId; 8]) -> Voxel {
 ///
 /// **Layout contract:** LOD grids are always 32³ `Vec<Voxel>` in the standard `x + 32*y + 32*32*z` order.
 pub fn downsample_blocks(chunks: &[Option<&Chunk>; 8]) -> Vec<Voxel> {
-    let mut output = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+    let mut output = vec![Voxel::default(); BRICK_VOXEL_COUNT];
 
     for (chunk_idx, chunk_opt) in chunks.iter().enumerate() {
         if let Some(chunk) = chunk_opt {
@@ -153,7 +153,7 @@ pub fn build_far_lod_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
         ];
         let grid = groups
             .entry(group)
-            .or_insert_with(|| vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+            .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
         write_chunk_at_half_scale(grid, octant, &chunk);
     }
     groups
@@ -257,7 +257,7 @@ pub fn block_scale_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
         let (cx, cz) = (coords.x as i32, coords.z as i32);
         let group = [cx.div_euclid(16), coords.y.div_euclid(16), cz.div_euclid(16)];
         let band =
-            bands.entry(group).or_insert_with(|| vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+            bands.entry(group).or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
         let lx = cx.rem_euclid(16) as usize;
         let ly = coords.y.rem_euclid(16) as usize;
         let lz = cz.rem_euclid(16) as usize;
@@ -417,13 +417,13 @@ impl LodKey {
 /// Run-length encoding of one 32³ LOD grid in the standard layout order.
 /// Terrain grids are dominated by air/uniform-rock runs: ~64 KB raw
 /// typically packs to ~1 KB. Runs are capped at u16::MAX (< 32768 total
-/// cells, so any grid fits in <= CHUNK_VOXEL_COUNT runs).
+/// cells, so any grid fits in <= BRICK_VOXEL_COUNT runs).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PackedLodGrid(pub Vec<(u16, BlockId)>);
 
 impl PackedLodGrid {
     pub fn encode(grid: &[Voxel]) -> Self {
-        debug_assert_eq!(grid.len(), CHUNK_VOXEL_COUNT);
+        debug_assert_eq!(grid.len(), BRICK_VOXEL_COUNT);
         let mut runs: Vec<(u16, BlockId)> = Vec::new();
         for v in grid {
             match runs.last_mut() {
@@ -439,7 +439,7 @@ impl PackedLodGrid {
     /// client validate untrusted wire data on its main thread and leave the
     /// 64 KiB expansion to the mesh task.
     pub fn is_well_formed(&self) -> bool {
-        self.0.iter().map(|&(n, _)| n as usize).sum::<usize>() == CHUNK_VOXEL_COUNT
+        self.0.iter().map(|&(n, _)| n as usize).sum::<usize>() == BRICK_VOXEL_COUNT
     }
 
     /// None when the run total is not exactly one grid — wire data is
@@ -448,7 +448,7 @@ impl PackedLodGrid {
         if !self.is_well_formed() {
             return None;
         }
-        let mut grid = Vec::with_capacity(CHUNK_VOXEL_COUNT);
+        let mut grid = Vec::with_capacity(BRICK_VOXEL_COUNT);
         for &(n, block) in &self.0 {
             for _ in 0..n {
                 grid.push(Voxel::new(block));
@@ -540,7 +540,7 @@ pub fn copy_region_cells_into_tile(
         debug_assert_eq!((cell.group[0], cell.group[2]), (0, 0), "region cells are low-corner");
         let grid = tile
             .entry([0, cell.group[1], 0])
-            .or_insert_with(|| vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+            .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
         for lz in 0..per {
             for ly in 0..32 {
                 for lx in 0..per {
@@ -558,7 +558,7 @@ mod tests {
     use crate::Block;
 
     fn grid_with(cells: &[([usize; 3], u16)]) -> Vec<Voxel> {
-        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for ([x, y, z], id) in cells {
             v[x + 32 * y + 32 * 32 * z] = Voxel::new(BlockId(*id));
         }
@@ -569,7 +569,7 @@ mod tests {
     fn empty_sources_downsample_to_air() {
         let out = downsample2(&[None; 8]);
         assert!(out.iter().all(|v| v.is_air()));
-        assert_eq!(out.len(), CHUNK_VOXEL_COUNT);
+        assert_eq!(out.len(), BRICK_VOXEL_COUNT);
     }
 
     #[test]
@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn packed_grid_well_formedness_matches_decodability() {
-        let grid = vec![Voxel::new(BlockId(3)); CHUNK_VOXEL_COUNT];
+        let grid = vec![Voxel::new(BlockId(3)); BRICK_VOXEL_COUNT];
         let good = PackedLodGrid::encode(&grid);
         assert!(good.is_well_formed());
         assert!(good.decode().is_some());
@@ -1068,20 +1068,20 @@ mod tests {
     #[test]
     fn packed_grid_round_trips() {
         // Mixed content incl. a lone voxel at the very end.
-        let mut grid = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for i in 0..5000 {
             grid[i] = Voxel::new(BlockId(1));
         }
         grid[9000] = Voxel::new(BlockId(7));
-        grid[CHUNK_VOXEL_COUNT - 1] = Voxel::new(BlockId(3));
+        grid[BRICK_VOXEL_COUNT - 1] = Voxel::new(BlockId(3));
         let packed = PackedLodGrid::encode(&grid);
         assert_eq!(packed.decode().expect("valid"), grid);
         // All-air compresses to one run.
-        let air = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let air = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         assert_eq!(PackedLodGrid::encode(&air).0.len(), 1);
         assert_eq!(PackedLodGrid::encode(&air).decode().unwrap(), air);
         // Worst case: alternating ids still round-trips (u16 runs of 1).
-        let mut alt = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut alt = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for (i, v) in alt.iter_mut().enumerate() {
             *v = Voxel::new(BlockId((i % 2) as u16));
         }
@@ -1091,7 +1091,7 @@ mod tests {
     #[test]
     fn packed_grid_rejects_wrong_total() {
         let short = PackedLodGrid(vec![(100, BlockId(1))]);
-        assert!(short.decode().is_none(), "runs must sum to CHUNK_VOXEL_COUNT");
+        assert!(short.decode().is_none(), "runs must sum to BRICK_VOXEL_COUNT");
         let long = PackedLodGrid(vec![(u16::MAX, BlockId(0)), (u16::MAX, BlockId(0))]);
         assert!(long.decode().is_none());
     }
@@ -1148,9 +1148,9 @@ mod tests {
         let key = LodKey { factor, coords: [0, 0] };
         // Coarse tile band 0: fully solid everywhere.
         let mut tile: BTreeMap<[i32; 3], Vec<Voxel>> = BTreeMap::new();
-        tile.insert([0, 0, 0], vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT]);
+        tile.insert([0, 0, 0], vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT]);
         // Region (1, 0)'s authoritative cells: a single solid cell at its local (0,0,0).
-        let mut grid = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         grid[0] = Voxel::new(BlockId(7));
         let region_cells = vec![LodCell { group: [0, 0, 0], grid }];
         copy_region_cells_into_tile(&mut tile, &region_cells, RegionCoords::new(1, 0), &key);

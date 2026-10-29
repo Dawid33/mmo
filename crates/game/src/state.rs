@@ -19,7 +19,8 @@ use crate::cells::CellState;
 use crate::input::InputState;
 use crate::protocol::{ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
 use crate::registry::BlockId;
-use crate::voxel::{Chunk, ChunkCoords, ChunkShape, Voxel};
+use crate::block::CHUNK_UNITS;
+use crate::voxel::{Chunk, ChunkCoords, BrickShape, Voxel};
 
 pub type ClientId = usize;
 
@@ -283,6 +284,13 @@ impl std::ops::DerefMut for PhysicsParams {
 
 /// `(x, z, y)` of a chunk — the key of `GameData::chunk_index`.
 pub type ChunkIndexKey = (usize, usize, i32);
+
+/// Chunk coords recovered from a chunk body's translation (bodies sit at exact
+/// multiples of `CHUNK_UNITS`). The only place coords are derived from a body.
+pub fn chunk_coords_from_translation(t: Vector) -> ChunkCoords {
+    let u = CHUNK_UNITS as f32;
+    ChunkCoords::new((t.x / u) as usize, (t.y / u).floor() as i32, (t.z / u) as usize)
+}
 
 pub fn chunk_index_key(c: ChunkCoords) -> ChunkIndexKey {
     (c.x, c.z, c.y)
@@ -623,7 +631,7 @@ impl Rollback {
         let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
         self.ecs.chunk.set_safe(e, Some(chunk));
         self.chunk_index.insert(chunk_index_key(coords), e);
-        let position = Pose::from_translation(Vector::new((coords.x * 32) as f32, (coords.y * 32) as f32, (coords.z * 32) as f32));
+        let position = Pose::from_translation(Vector::new((coords.x * CHUNK_UNITS) as f32, (coords.y * CHUNK_UNITS as i32) as f32, (coords.z * CHUNK_UNITS) as f32));
         let body = RigidBodyBuilder::fixed()
             .pose(position)
             .user_data(e.data().as_ffi() as u128)
@@ -667,7 +675,7 @@ impl Rollback {
             let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
             self.ecs.chunk.raw_mut().insert(e, Some(chunk));
             self.chunk_index.insert_raw(chunk_index_key(coords), e);
-            let position = Pose::from_translation(Vector::new((coords.x * 32) as f32, (coords.y * 32) as f32, (coords.z * 32) as f32));
+            let position = Pose::from_translation(Vector::new((coords.x * CHUNK_UNITS) as f32, (coords.y * CHUNK_UNITS as i32) as f32, (coords.z * CHUNK_UNITS) as f32));
             let body = RigidBodyBuilder::fixed()
                 .pose(position)
                 .user_data(e.data().as_ffi() as u128)
@@ -681,15 +689,12 @@ impl Rollback {
             let user_data = e.data().as_ffi() as u128;
             let mut colliders = Vec::with_capacity(3);
             if cells.is_full_cube() {
-                // A fully-solid 32^3 chunk's collision surface is exactly a
-                // 32x32x32 cuboid (half-extents 16, centered body-local 16,16,16).
+                // A fully-solid chunk's collision surface is exactly one
+                // CHUNK_UNITS-edge cuboid, centred body-local at its half edge.
+                let h = CHUNK_UNITS as f32 / 2.0;
                 colliders.push(
-                    ColliderBuilder::cuboid(16.0, 16.0, 16.0)
-                        .translation(Vector::new(
-                            16.0,
-                            16.0,
-                            16.0,
-                        ))
+                    ColliderBuilder::cuboid(h, h, h)
+                        .translation(Vector::new(h, h, h))
                         .user_data(user_data)
                         .build(),
                 );
@@ -828,7 +833,7 @@ impl Rollback {
     /// is all air or no chunk covers it. Voxel units — the same space as body
     /// and collider coordinates. Chunk entities don't store `ChunkCoords`, so
     /// the owning chunk column is recovered from each chunk body's translation
-    /// (`coords * 32`). Pure read of built terrain, hence deterministic: client
+    /// (`coords * CHUNK_UNITS`). Pure read of built terrain, hence deterministic: client
     /// and server derive the same surface height.
     pub fn surface_voxel_y(&self, vx: i32, vz: i32) -> Option<i32> {
         self.surface_voxel(vx, vz).map(|(y, _)| y)
@@ -836,8 +841,8 @@ impl Rollback {
 
     /// [`Self::surface_voxel_y`] plus the material of that topmost voxel.
     pub fn surface_voxel(&self, vx: i32, vz: i32) -> Option<(i32, BlockId)> {
-        let (cx, cz) = (vx.div_euclid(32), vz.div_euclid(32));
-        let (lx, lz) = (vx.rem_euclid(32) as u32, vz.rem_euclid(32) as u32);
+        let (cx, cz) = (vx.div_euclid(CHUNK_UNITS as i32), vz.div_euclid(CHUNK_UNITS as i32));
+        let (lx, lz) = (vx.rem_euclid(CHUNK_UNITS as i32) as u32, vz.rem_euclid(CHUNK_UNITS as i32) as u32);
         let mut best: Option<(i32, BlockId)> = None;
         for (key, chunk) in self.data.ecs.chunk.iter() {
             let Some(chunk) = chunk else { continue };
@@ -849,12 +854,12 @@ impl Rollback {
             };
             let t = body.translation();
             let (bx, by, bz) = (t.x as i32, t.y as i32, t.z as i32);
-            if bx.div_euclid(32) != cx || bz.div_euclid(32) != cz {
+            if bx.div_euclid(CHUNK_UNITS as i32) != cx || bz.div_euclid(CHUNK_UNITS as i32) != cz {
                 continue;
             }
             let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
-            for ly in (0..32u32).rev() {
-                let block = voxels[ChunkShape::linearize([lx, ly, lz]) as usize].block;
+            for ly in (0..CHUNK_UNITS as u32).rev() {
+                let block = voxels[BrickShape::linearize([lx, ly, lz]) as usize].block;
                 if block != BlockId::AIR {
                     let abs = by + ly as i32;
                     if best.is_none_or(|(b, _)| abs > b) {
@@ -1406,14 +1411,15 @@ impl Rollback {
         let t = body.translation();
         let mut h = crate::StateHasher::new();
         // Same coordinate derivation as `terrain_snapshot`.
-        ((t.x / 32.0) as i64, (t.y / 32.0) as i64, (t.z / 32.0) as i64).state_hash(&mut h);
+        let c = chunk_coords_from_translation(t);
+        (c.x as i64, c.y as i64, c.z as i64).state_hash(&mut h);
         chunk.state_hash(&mut h);
         Some(h.finalize())
     }
 
     /// Terrain-only extraction for far-region views. Iterates chunk
     /// components; recovers each chunk's `ChunkCoords` from its fixed body
-    /// translation (`create_mesh` places bodies at `(cx*32, cy*32, cz*32)`,
+    /// translation (`create_mesh` places bodies at `(cx*CHUNK_UNITS, cy*CHUNK_UNITS, cz*CHUNK_UNITS)`,
     /// exact). No entities/physics/undo state leaks out.
     pub fn terrain_snapshot(&self) -> crate::TerrainSnapshot {
         let mut chunks = Vec::new();
@@ -1422,11 +1428,7 @@ impl Rollback {
             let Some(handle) = *self.data.ecs.rigidbody.try_get(key) else { continue };
             let Some(body) = self.data.physics.bodies.get(handle) else { continue };
             let t = body.translation();
-            let coords = ChunkCoords::new(
-                (t.x / 32.0) as usize,
-                (t.y / 32.0) as i32,
-                (t.z / 32.0) as usize,
-            );
+            let coords = chunk_coords_from_translation(t);
             chunks.push((coords, chunk.clone()));
         }
         // Sort by coordinate: `terrain_hash` bincode-serializes this Vec

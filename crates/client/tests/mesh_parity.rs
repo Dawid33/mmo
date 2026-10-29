@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use block_mesh::ndshape::ConstShape3u32;
 use block_mesh::{greedy_quads, GreedyQuadsBuffer, RIGHT_HANDED_Y_UP_CONFIG};
 use client::renderer::meshing::binary::{mesh_quads, PaddedVoxels};
-use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
 type OracleShape = ConstShape3u32<34, 34, 34>;
 
@@ -19,7 +19,7 @@ fn random_chunk(seed: u64) -> Vec<Voxel> {
         s ^= s << 17;
         s
     };
-    let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+    let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
     for cell in v.iter_mut() {
         if rng() % 4 == 0 {
             *cell = Voxel::new(BlockId((rng() % 3 + 1) as u16));
@@ -112,7 +112,7 @@ fn parity_with_a_neighbor_filled_shell() {
     use client::renderer::meshing::neighbors::gather_padded;
 
     let center = random_chunk(7);
-    let full_neighbor = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+    let full_neighbor = vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT];
     let mut neighbors: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
     neighbors.insert([1, 0, 0], full_neighbor.as_slice());
     let padded = gather_padded(&center, &neighbors);
@@ -122,7 +122,7 @@ fn parity_with_a_neighbor_filled_shell() {
 #[test]
 fn parity_on_structured_chunks() {
     for chunk in [
-        vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT], // full
+        vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT], // full
         {
             let c = game::Chunk::flat_floor(24);
             game::derive_voxels(&c.blocks, &c.chisel)

@@ -225,7 +225,7 @@ pub fn apply_meshed_chunks(
 mod tests {
     use super::*;
     use bevy::mesh::VertexAttributeValues;
-    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
     fn render_config(
         near: crate::renderer::config::NearRenderBackend,
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn empty_chunk_yields_no_mesh() {
-        let voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         assert!(build_chunk_mesh(
             &PaddedVoxels::from_interior(&voxels),
             &BlockTextureLayers::default()
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn single_voxel_yields_cube() {
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         let idx = 5 + 32 * 5 + 32 * 32 * 5;
         voxels[idx] = Voxel::new(BlockId(1));
         let mesh = build_chunk_mesh(
@@ -300,7 +300,7 @@ mod tests {
         // so meshing the bare 32^3 buffer with [0..31] silently drops the
         // boundary shell and every chunk renders with a 2-voxel gap to its
         // neighbours.
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         voxels[0 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let mesh = build_chunk_mesh(
             &PaddedVoxels::from_interior(&voxels),
@@ -314,7 +314,7 @@ mod tests {
     fn full_chunk_mesh_spans_full_extent() {
         // A fully solid chunk must mesh as the whole 32-voxel cube, i.e. vertex
         // positions spanning [0, 32] on every axis — not shrunk to the interior.
-        let voxels = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+        let voxels = vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT];
         let mesh = build_chunk_mesh(
             &PaddedVoxels::from_interior(&voxels),
             &BlockTextureLayers::default(),
@@ -359,7 +359,7 @@ mod tests {
                 )
                     .chain(),
             );
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let e = app
             .world_mut()
@@ -426,7 +426,7 @@ mod tests {
                 )
                     .chain(),
             );
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let e = app
             .world_mut()
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn mesh_output_keeps_quad_count_for_mesh_and_pull_formats() {
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let padded = binary::PaddedVoxels::from_interior(&voxels);
         let layers = BlockTextureLayers::default();
@@ -526,7 +526,7 @@ mod tests {
             });
         app.insert_resource(ChunkMaterial(handle));
 
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         let idx = 5 + 32 * 5 + 32 * 32 * 5;
         voxels[idx] = Voxel::new(BlockId(1));
 
@@ -582,7 +582,7 @@ mod tests {
                     .chain(),
             );
 
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
 
         let e = app.world_mut().spawn(VoxelData::new(voxels.clone())).id();
@@ -639,7 +639,7 @@ mod tests {
                     .chain(),
             );
 
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let e = app.world_mut().spawn(VoxelData::new(voxels)).id();
 
@@ -696,7 +696,7 @@ mod tests {
                     .chain(),
             );
 
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let e = app.world_mut().spawn(VoxelData::new(voxels)).id();
 
@@ -762,7 +762,7 @@ mod tests {
             );
         // A solid chunk with a single straight X tunnel: mask must be exactly
         // the ±X pair — proves the real task computed real connectivity.
-        let mut voxels = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT];
         for x in 0..32 {
             voxels[x + 32 * 5 + 32 * 32 * 5] = Voxel::default();
         }
@@ -784,7 +784,7 @@ mod tests {
         );
 
         // All-air chunk: mesh stripped, mask = ALL_CONNECTED.
-        let air = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let air = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         let e2 = app
             .world_mut()
             .spawn(crate::renderer::bridge::VoxelData::new(air))
@@ -830,7 +830,7 @@ mod tests {
                 )
                     .chain(),
             );
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let e = app
             .world_mut()

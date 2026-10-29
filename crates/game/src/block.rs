@@ -10,19 +10,24 @@ use block_mesh::ndshape::ConstShape;
 use parry3d::math::IVector;
 
 use crate::registry::BlockId;
-use crate::voxel::{ChunkShape, Voxel, CHUNK_VOXEL_COUNT};
+use crate::voxel::{BrickShape, Voxel, BRICK_VOXEL_COUNT};
 
 pub const BLOCK_VOXELS: usize = 16; // 1 block = 16³ voxels = 1 m³
-pub const CHUNK_BLOCKS: usize = 32 / BLOCK_VOXELS; // = 2 blocks per axis
+pub const CHUNK_BLOCKS: usize = 2; // blocks per axis of a sim chunk
 pub const CHUNK_BLOCK_COUNT: usize = CHUNK_BLOCKS * CHUNK_BLOCKS * CHUNK_BLOCKS; // = 8
+/// Sim-chunk edge in voxels = world units. Not the render brick (`BRICK_VOXELS`).
+pub const CHUNK_UNITS: usize = CHUNK_BLOCKS * BLOCK_VOXELS;
+/// Bricks along one chunk edge.
+pub const BRICKS_PER_CHUNK_EDGE: usize = CHUNK_UNITS / crate::voxel::BRICK_VOXELS;
+const _: () = assert!(CHUNK_UNITS % crate::voxel::BRICK_VOXELS == 0);
 pub const BLOCK_VOXEL_COUNT: usize = BLOCK_VOXELS * BLOCK_VOXELS * BLOCK_VOXELS; // = 4096
 /// Edge of a half block, and the cell size of the half-block collider grid.
 pub const HALF_BLOCK_VOXELS: usize = BLOCK_VOXELS / 2; // = 8
 
-/// Linear voxel index within a chunk, matching `ChunkShape` (x fastest).
-/// Reuses `voxel::ChunkShape` so the 32³ layout has a single source of truth.
+/// Linear voxel index within a chunk, matching `BrickShape` (x fastest).
+/// Reuses `voxel::BrickShape` so the 32³ layout has a single source of truth.
 pub fn voxel_index(x: usize, y: usize, z: usize) -> usize {
-    ChunkShape::linearize([x as u32, y as u32, z as u32]) as usize
+    BrickShape::linearize([x as u32, y as u32, z as u32]) as usize
 }
 
 /// Index of a block within a chunk, linear over `CHUNK_BLOCKS³` (0..8).
@@ -372,7 +377,7 @@ pub fn derive_voxels(blocks: &[Block], chisel: &BTreeMap<BlockIndex, ChiselData>
     // must hold exactly the chunk's 8 blocks. A wrong length would silently
     // under/over-fill the voxel array (or panic on an out-of-range block coord).
     debug_assert_eq!(blocks.len(), CHUNK_BLOCK_COUNT);
-    let mut voxels = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+    let mut voxels = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
     for (idx, block) in blocks.iter().enumerate() {
         let bi = BlockIndex(idx as u8);
         let (bx, by, bz) = bi.xyz();
@@ -450,10 +455,10 @@ mod tests {
 
     /// Voxel-grid coords of solid cells in a derived 32³ grid — the oracle.
     fn solid_set(voxels: &[Voxel]) -> BTreeSet<(i32, i32, i32)> {
-        (0..CHUNK_VOXEL_COUNT)
+        (0..BRICK_VOXEL_COUNT)
             .filter(|i| voxels[*i].block != BlockId::AIR)
             .map(|i| {
-                let [x, y, z] = ChunkShape::delinearize(i as u32);
+                let [x, y, z] = BrickShape::delinearize(i as u32);
                 (x as i32, y as i32, z as i32)
             })
             .collect()

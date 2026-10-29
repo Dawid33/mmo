@@ -121,7 +121,7 @@ pub fn gather_padded_rle(
     neighbors: &BTreeMap<[i32; 3], &VoxelData>,
 ) -> PaddedVoxels {
     let mut padded = PaddedVoxels(vec![Voxel::default(); PADDED * PADDED * PADDED]);
-    center.for_each_index_sorted(0..game::CHUNK_VOXEL_COUNT, |index, voxel| {
+    center.for_each_index_sorted(0..game::BRICK_VOXEL_COUNT, |index, voxel| {
         let (x, y, z) = (index % 32, (index / 32) % 32, index / (32 * 32));
         padded.0[PaddedVoxels::index(x + 1, y + 1, z + 1)] = voxel;
     });
@@ -146,10 +146,10 @@ mod tests {
     use super::super::binary::{mesh_quads, Face};
     use super::*;
     use crate::renderer::bridge::VoxelData;
-    use game::{BlockId, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, BRICK_VOXEL_COUNT};
 
     fn full_chunk(id: BlockId) -> Vec<Voxel> {
-        vec![Voxel::new(id); CHUNK_VOXEL_COUNT]
+        vec![Voxel::new(id); BRICK_VOXEL_COUNT]
     }
 
     #[test]
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn face_neighbor_boundary_fills_the_shell() {
         // Neighbor at +X: its x=0 plane becomes our x=33 shell plane.
-        let mut nv = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut nv = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         nv[0 + 32 * 4 + 32 * 32 * 4] = Voxel::new(BlockId(2)); // its (0,4,4)
         let mut neighbors: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
         neighbors.insert([1, 0, 0], nv.as_slice());
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn corner_neighbor_fills_the_corner_cell() {
         // Neighbor at (-1,-1,-1): its voxel (31,31,31) is our padded (0,0,0).
-        let mut nv = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut nv = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         nv[31 + 32 * 31 + 32 * 32 * 31] = Voxel::new(BlockId(2));
         let mut neighbors: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
         neighbors.insert([-1, -1, -1], nv.as_slice());
@@ -218,14 +218,14 @@ mod tests {
 
     #[test]
     fn rle_padding_matches_dense_padding_for_all_neighbor_zones() {
-        let center_dense = (0..CHUNK_VOXEL_COUNT)
+        let center_dense = (0..BRICK_VOXEL_COUNT)
             .map(|i| Voxel::new(BlockId(((i / 37) % 5) as u16)))
             .collect::<Vec<_>>();
         let center_rle = VoxelData::new(&center_dense);
         let mut dense_owned = BTreeMap::new();
         let mut rle_owned = BTreeMap::new();
         for (i, off) in zone_offsets().enumerate() {
-            let voxels = vec![Voxel::new(BlockId(i as u16 + 1)); CHUNK_VOXEL_COUNT];
+            let voxels = vec![Voxel::new(BlockId(i as u16 + 1)); BRICK_VOXEL_COUNT];
             dense_owned.insert(off, voxels.clone());
             rle_owned.insert(off, VoxelData::new(voxels));
         }
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn rle_padding_leaves_missing_neighbors_as_air() {
-        let center = VoxelData::new(vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT]);
+        let center = VoxelData::new(vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT]);
         let padded = gather_padded_rle(&center, &BTreeMap::new());
         assert_eq!(padded.get(0, 10, 10), Voxel::default());
         assert_eq!(padded.get(33, 10, 10), Voxel::default());

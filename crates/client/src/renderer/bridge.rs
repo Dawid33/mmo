@@ -147,7 +147,7 @@ impl VoxelData {
     /// Encode a dense 32³ grid.
     pub fn new(voxels: impl AsRef<[Voxel]>) -> Self {
         let voxels = voxels.as_ref();
-        debug_assert_eq!(voxels.len(), game::CHUNK_VOXEL_COUNT);
+        debug_assert_eq!(voxels.len(), game::BRICK_VOXEL_COUNT);
         let mut runs: Vec<(u16, game::BlockId)> = Vec::new();
         for v in voxels {
             match runs.last_mut() {
@@ -222,7 +222,7 @@ impl VoxelData {
 
     /// Expand back to the dense 32³ grid the mesher consumes.
     pub fn decode(&self) -> Vec<Voxel> {
-        let mut out = Vec::with_capacity(game::CHUNK_VOXEL_COUNT);
+        let mut out = Vec::with_capacity(game::BRICK_VOXEL_COUNT);
         for &(len, id) in &self.0 {
             out.extend(std::iter::repeat_n(Voxel::new(id), len as usize));
         }
@@ -246,7 +246,7 @@ impl VoxelData {
         let mut previous = None;
         for index in indices {
             debug_assert!(previous.is_none_or(|p| index >= p), "RLE indices must be sorted");
-            debug_assert!(index < game::CHUNK_VOXEL_COUNT, "voxel index out of bounds");
+            debug_assert!(index < game::BRICK_VOXEL_COUNT, "voxel index out of bounds");
             previous = Some(index);
             while index >= run_end {
                 let &(next_len, next_block) = runs.next().expect("RLE covers the full chunk");
@@ -1332,7 +1332,7 @@ mod tests {
         let (update_send, update_recv) = crossbeam::channel::unbounded();
         let (data, key, snapshot_voxels) = chunk_snapshot();
         let region_id = RegionCoords::new(0, 0);
-        let edited = vec![Voxel::new(game::BlockId(9)); game::CHUNK_VOXEL_COUNT];
+        let edited = vec![Voxel::new(game::BlockId(9)); game::BRICK_VOXEL_COUNT];
         assert_ne!(VoxelData::new(&edited), snapshot_voxels);
         // Same frame as the snapshot: independent of how fast the task runs.
         client.send(ClientUpdateEvent::NewRegion(region_id, data, update_recv)).unwrap();
@@ -1735,10 +1735,10 @@ mod tests {
 #[cfg(test)]
 mod voxel_data_tests {
     use super::VoxelData;
-    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
     fn dense(f: impl Fn(usize) -> u16) -> Vec<Voxel> {
-        (0..CHUNK_VOXEL_COUNT).map(|i| Voxel::new(BlockId(f(i)))).collect()
+        (0..BRICK_VOXEL_COUNT).map(|i| Voxel::new(BlockId(f(i)))).collect()
     }
 
     /// The contract the mesher depends on: decode(new(v)) == v, bit for bit.
@@ -1773,7 +1773,7 @@ mod voxel_data_tests {
         let v = dense(|i| if i % 32 < 16 { 1 } else { 2 });
         let runs = VoxelData::new(&v).runs();
         assert_eq!(runs, 2048, "one run per 16-voxel half-row");
-        assert!(runs * 4 < CHUNK_VOXEL_COUNT * 2, "still smaller than the dense form");
+        assert!(runs * 4 < BRICK_VOXEL_COUNT * 2, "still smaller than the dense form");
     }
 
     /// edit() must decode, apply, and re-encode — the path chisels take.
@@ -1785,7 +1785,7 @@ mod voxel_data_tests {
         let out = d.decode();
         assert_eq!(out[100], Voxel::new(BlockId(3)));
         assert_eq!(out[99], Voxel::new(BlockId(0)));
-        assert_eq!(out.len(), CHUNK_VOXEL_COUNT);
+        assert_eq!(out.len(), BRICK_VOXEL_COUNT);
         assert_eq!(d.runs(), 3, "air | one voxel | air");
     }
 
@@ -1825,7 +1825,7 @@ mod voxel_data_tests {
     fn sorted_index_visit_reads_rle_without_dense_decode() {
         let dense = dense(|i| (i % 11) as u16);
         let data = VoxelData::new(&dense);
-        let indices = [0usize, 1, 31, 32, 1024, 8191, CHUNK_VOXEL_COUNT - 1];
+        let indices = [0usize, 1, 31, 32, 1024, 8191, BRICK_VOXEL_COUNT - 1];
         let mut got = Vec::new();
 
         data.for_each_index_sorted(indices, |index, voxel| got.push((index, voxel)));

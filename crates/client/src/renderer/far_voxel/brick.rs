@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
 pub const ROOT_ENTRY_COUNT: usize = 64;
 pub const BRICK_EDGE: usize = 8;
@@ -146,9 +146,9 @@ pub struct PreparedBrickRoot {
 
 impl PreparedBrickRoot {
     pub fn from_voxels(voxels: &[Voxel]) -> Result<Self, FallbackReason> {
-        if voxels.len() != CHUNK_VOXEL_COUNT {
+        if voxels.len() != BRICK_VOXEL_COUNT {
             return Err(FallbackReason::InvalidVoxelCount {
-                expected: CHUNK_VOXEL_COUNT,
+                expected: BRICK_VOXEL_COUNT,
                 actual: voxels.len(),
             });
         }
@@ -437,7 +437,7 @@ impl BrickDag {
 
     pub fn reconstruct(&self, handle: RootHandle) -> Option<Vec<Voxel>> {
         let root = self.root(handle)?;
-        let mut voxels = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         for bz in 0..BRICKS_PER_AXIS {
             for by in 0..BRICKS_PER_AXIS {
                 for bx in 0..BRICKS_PER_AXIS {
@@ -793,7 +793,7 @@ mod tests {
     use super::*;
 
     fn sparse_grid(material: BlockId) -> Vec<Voxel> {
-        let mut grid = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         grid[voxel_index(0, 0, 0)] = Voxel::new(material);
         grid
     }
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn empty_grid_reconstructs_exactly() {
-        let grid = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let grid = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         let mut dag = BrickDag::default();
 
         let outcome = dag.refresh_cell(CellId(7), &grid);
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn uniform_grid_reconstructs_exactly_without_mixed_bricks() {
         let material = BlockId(42);
-        let grid = vec![Voxel::new(material); CHUNK_VOXEL_COUNT];
+        let grid = vec![Voxel::new(material); BRICK_VOXEL_COUNT];
         let mut dag = BrickDag::default();
 
         let root = dag
@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn sparse_grid_uses_exact_mixed_layout_and_reconstructs() {
-        let mut grid = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         grid[voxel_index(3, 4, 5)] = Voxel::new(BlockId(17));
         let mut dag = BrickDag::default();
 
@@ -911,7 +911,7 @@ mod tests {
 
     #[test]
     fn mixed_material_grid_preserves_air_and_full_u16_ids() {
-        let mut grid = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         for z in 0..32 {
             for y in 0..32 {
                 for x in 0..32 {
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn mixed_handles_distinguish_page_zero_from_page_one() {
-        let mut grid = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         grid[voxel_index(0, 0, 0)] = Voxel::new(BlockId(1));
         grid[voxel_index(8, 0, 0)] = Voxel::new(BlockId(2));
         let limits = DagLimits {
@@ -1179,7 +1179,7 @@ mod tests {
             max_mixed_bricks_per_page: 1,
             max_roots: 1,
         };
-        let mut grid = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         grid[voxel_index(0, 0, 0)] = Voxel::new(BlockId(1));
         grid[voxel_index(8, 0, 0)] = Voxel::new(BlockId(2));
         grid[voxel_index(16, 0, 0)] = Voxel::new(BlockId(3));
@@ -1206,7 +1206,7 @@ mod tests {
 
     #[test]
     fn repeated_identical_bricks_in_one_root_hold_one_reference_per_entry() {
-        let mut grid = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         grid[voxel_index(0, 0, 0)] = Voxel::new(BlockId(4));
         grid[voxel_index(8, 0, 0)] = Voxel::new(BlockId(4));
         let mut dag = BrickDag::default();

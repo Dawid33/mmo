@@ -24,7 +24,7 @@ pub const WORLD_SEED: u64 = 0x00D5_C0DE_007B;
 
 use game::{
     Block, BlockId, BlockIndex, ChiselData, Chunk, Column, ColumnCoords, RegionCoords, SubChunk,
-    BLOCK_VOXELS, HALF_BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_VOXEL_COUNT, REGION_CHUNKS,
+    BLOCK_VOXELS, HALF_BLOCK_VOXELS, CHUNK_BLOCKS, BRICK_VOXEL_COUNT, REGION_CHUNKS,
 };
 
 use crate::material::Materials;
@@ -411,7 +411,7 @@ fn coarse_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: Materials
                 let (lx, ly, lz) = ((cx % 32) as usize, cy.rem_euclid(32) as usize, (cz % 32) as usize);
                 let g = grids
                     .entry(group)
-                    .or_insert_with(|| vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+                    .or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
                 g[lx + 32 * ly + 32 * 32 * lz] = Voxel::new(mat);
             }
         }

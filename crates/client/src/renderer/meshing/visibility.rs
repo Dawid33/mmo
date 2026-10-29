@@ -872,10 +872,10 @@ mod tests {
     use super::super::binary::Face;
     use super::*;
     use std::collections::HashSet;
-    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
     fn interior(cells: &[[usize; 3]]) -> PaddedVoxels {
-        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for [x, y, z] in cells {
             v[x + 32 * y + 32 * 32 * z] = Voxel::new(BlockId(1));
         }
@@ -883,7 +883,7 @@ mod tests {
     }
 
     fn solid_except(air: &[[usize; 3]]) -> PaddedVoxels {
-        let mut v = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+        let mut v = vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT];
         for [x, y, z] in air {
             v[x + 32 * y + 32 * 32 * z] = Voxel::default();
         }
@@ -1258,7 +1258,7 @@ mod tests {
             app,
             Vec3::ZERO,
             Vec3::new(32.0, 0.0, 0.0),
-            vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT],
+            vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT],
         );
         let behind = spawn_chunk(
             app,
@@ -1483,7 +1483,7 @@ mod tests {
             &mut app,
             Vec3::ZERO,
             Vec3::new(32.0, 0.0, 0.0),
-            vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT],
+            vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT],
         );
         let behind = spawn_chunk(
             &mut app,
@@ -1588,7 +1588,7 @@ mod tests {
             bevy::camera::CameraProjectionPlugin,
         ));
         // Ground band: half-solid chunks along +X at cell y = 0.
-        let mut ground = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut ground = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for z in 0..32 {
             for y in 0..16 {
                 for x in 0..32 {

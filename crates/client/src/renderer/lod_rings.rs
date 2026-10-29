@@ -564,7 +564,7 @@ fn near_regions_meshed(
 mod tests {
     use super::*;
     use game::lod::PackedLodGrid;
-    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
     use super::super::far_voxel::FarVoxelReady;
     use super::super::meshing::lod::{LodChunk, LodVoxelData};
@@ -613,7 +613,7 @@ mod tests {
     }
 
     fn one_solid_grid() -> Vec<Voxel> {
-        vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT]
+        vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT]
     }
 
     fn solid_payload(group: [i32; 3]) -> LodPayload {
@@ -1011,7 +1011,7 @@ mod tests {
         // Two of three chunks mesh (one solid, one all air): the third is
         // still waiting for voxels, so the LOD must stay.
         land_voxels(&mut app, chunks[0], one_solid_grid());
-        land_voxels(&mut app, chunks[2], vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+        land_voxels(&mut app, chunks[2], vec![Voxel::default(); BRICK_VOXEL_COUNT]);
         assert!(wait_until(&mut app, |app| {
             [chunks[0], chunks[2]]
                 .iter()

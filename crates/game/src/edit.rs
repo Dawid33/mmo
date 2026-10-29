@@ -177,9 +177,9 @@ impl Rollback {
         let voxels = crate::derive_voxels(&chunk.blocks, &chunk.chisel);
         let e = self.create_mesh(coords, chunk);
         let pose = Pose::translation(
-            (coords.x * 32) as f32,
-            (coords.y * 32) as f32,
-            (coords.z * 32) as f32,
+            (coords.x * crate::CHUNK_UNITS) as f32,
+            (coords.y * crate::CHUNK_UNITS as i32) as f32,
+            (coords.z * crate::CHUNK_UNITS) as f32,
         );
         self.data.send(GameDataUpdate::new(
             GameDataTransactionKind::Do,

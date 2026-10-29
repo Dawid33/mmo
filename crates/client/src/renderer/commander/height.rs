@@ -207,7 +207,7 @@ mod tests {
 
     /// A chunk filled up to `h` voxels with `below`, then up to `w` with water.
     fn layered(h: usize, w: usize, below: BlockId) -> VoxelData {
-        let mut dense = vec![Voxel::new(BlockId::AIR); game::CHUNK_VOXEL_COUNT];
+        let mut dense = vec![Voxel::new(BlockId::AIR); game::BRICK_VOXEL_COUNT];
         for (i, v) in dense.iter_mut().enumerate() {
             let y = (i / CHUNK_EDGE) % CHUNK_EDGE;
             if y < h {
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn chunk_tops_are_per_block_column() {
-        let mut dense = vec![Voxel::new(BlockId::AIR); game::CHUNK_VOXEL_COUNT];
+        let mut dense = vec![Voxel::new(BlockId::AIR); game::BRICK_VOXEL_COUNT];
         // Column (bx 1, bz 0) gets a voxel at y = 30 at its centre.
         dense[24 + CHUNK_EDGE * 30 + CHUNK_EDGE * CHUNK_EDGE * 8] = Voxel::new(STONE);
         let tops = chunk_tops(&VoxelData::new(dense), WATER);

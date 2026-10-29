@@ -75,7 +75,7 @@ pub fn ao_flips_quad(ao: &[u8; 4]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
     #[test]
     fn lut_matches_vertex_ao() {
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn lone_voxel_top_face_is_unoccluded() {
-        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         v[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let p = PaddedVoxels::from_interior(&v);
         assert_eq!(face_ao(&p, 1, true, [6, 6, 6]), [3, 3, 3, 3]);
@@ -111,7 +111,7 @@ mod tests {
     fn side_neighbor_darkens_the_two_corners_it_touches() {
         // Voxel at (5,5,5); a second voxel at (4,6,5) sits diagonally above
         // along -X: for the top (+Y) face it occludes the two cu=0 corners.
-        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         v[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         v[4 + 32 * 6 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let p = PaddedVoxels::from_interior(&v);

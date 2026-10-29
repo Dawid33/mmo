@@ -1170,7 +1170,7 @@ impl Default for FarVoxelResidency {
 #[cfg(test)]
 mod tests {
     use bevy::prelude::*;
-    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
     use super::*;
     use crate::renderer::far_voxel::brick::{
@@ -1179,7 +1179,7 @@ mod tests {
     };
 
     fn sparse(material: BlockId) -> PreparedBrickRoot {
-        let mut voxels = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         voxels[0] = Voxel::new(material);
         PreparedBrickRoot::from_voxels(&voxels).unwrap()
     }

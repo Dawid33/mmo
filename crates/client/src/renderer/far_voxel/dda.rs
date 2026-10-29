@@ -501,7 +501,7 @@ impl DdaState {
 #[cfg(test)]
 mod tests {
     use bevy::prelude::*;
-    use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
     use super::*;
     use crate::renderer::far_voxel::brick::{BrickDag, CellId, RootHandle};
@@ -519,7 +519,7 @@ mod tests {
     }
 
     fn sparse_grid(position: [usize; 3], material: BlockId) -> Vec<Voxel> {
-        let mut grid = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         grid[voxel_index(position[0], position[1], position[2])] = Voxel::new(material);
         grid
     }
@@ -650,7 +650,7 @@ mod tests {
     fn same_factor_neighbor_contributes_face_edge_and_corner_ao() {
         let mut dag = BrickDag::default();
         let center_root = root_for(&mut dag, 5, &sparse_grid([31, 10, 10], BlockId(1)));
-        let mut neighbor_grid = vec![Voxel::new(BlockId::AIR); CHUNK_VOXEL_COUNT];
+        let mut neighbor_grid = vec![Voxel::new(BlockId::AIR); BRICK_VOXEL_COUNT];
         neighbor_grid[voxel_index(0, 9, 10)] = Voxel::new(BlockId(2));
         let neighbor_root = root_for(&mut dag, 6, &neighbor_grid);
         let center = TraceCell::new(Vec3::ZERO, 1, center_root);

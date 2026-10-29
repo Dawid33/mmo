@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn chunk_block_ids_take_the_first_solid_voxel() {
-        let mut dense = vec![Voxel::new(BlockId::AIR); game::CHUNK_VOXEL_COUNT];
+        let mut dense = vec![Voxel::new(BlockId::AIR); game::BRICK_VOXEL_COUNT];
         // Block 5 = (bx 1, by 0, bz 1): one voxel deep inside it.
         let (x, y, z) = (BLOCK_VOXELS + 3, 7, BLOCK_VOXELS + 9);
         dense[x + CHUNK_EDGE * y + CHUNK_EDGE * CHUNK_EDGE * z] = Voxel::new(STONE);

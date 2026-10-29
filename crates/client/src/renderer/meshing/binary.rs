@@ -3,7 +3,7 @@
 //! over per-slice bitplanes with a flat merge-key grid. Pure functions — no
 //! Bevy types here.
 
-use game::{BlockId, Voxel, CHUNK_VOXEL_COUNT};
+use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
 use super::ao::VERTEX_AO_LUT;
 
@@ -31,7 +31,7 @@ impl PaddedVoxels {
 
     /// Interior from a chunk's 32³ voxels, shell all-air (isolated chunk).
     pub fn from_interior(voxels: &[Voxel]) -> Self {
-        debug_assert_eq!(voxels.len(), CHUNK_VOXEL_COUNT);
+        debug_assert_eq!(voxels.len(), BRICK_VOXEL_COUNT);
         let mut p = vec![Voxel::default(); PADDED * PADDED * PADDED];
         for (i, v) in voxels.iter().enumerate() {
             let (x, y, z) = (i % 32, (i / 32) % 32, i / (32 * 32));
@@ -290,7 +290,7 @@ mod tests {
     use game::BlockId;
 
     fn interior_with(cells: &[([usize; 3], BlockId)]) -> Vec<Voxel> {
-        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for ([x, y, z], id) in cells {
             v[x + 32 * y + 32 * 32 * z] = Voxel::new(*id);
         }
@@ -385,7 +385,7 @@ mod tests {
     fn shell_cells_never_emit_faces() {
         // A solid cell in the shell itself (padded x=33) must not produce
         // visible faces — only interior bits 1..=32 may emit.
-        let mut p = PaddedVoxels::from_interior(&vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+        let mut p = PaddedVoxels::from_interior(&vec![Voxel::default(); BRICK_VOXEL_COUNT]);
         p.0[PaddedVoxels::index(33, 6, 6)] = Voxel::new(BlockId(1));
         let occ = Occupancy::new(&p);
         for u in 0..PADDED {
@@ -474,7 +474,7 @@ mod tests {
             state ^= state << 17;
             state
         };
-        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for cell in v.iter_mut() {
             if rng() % 4 == 0 {
                 *cell = Voxel::new(BlockId((rng() % 3 + 1) as u16));
@@ -532,7 +532,7 @@ mod tests {
             state ^= state << 17;
             state
         };
-        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for cell in v.iter_mut() {
             if rng() % 4 == 0 {
                 *cell = Voxel::new(BlockId((rng() % 3 + 1) as u16));

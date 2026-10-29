@@ -64,8 +64,8 @@ fn main() {
             .map(|x| match map.get(&(x, z)) {
                 None => '.',
                 Some((_, 0)) => '0',
-                Some((_, solid)) if *solid == game::CHUNK_VOXEL_COUNT => '#',
-                Some((_, solid)) => char::from(b'1' + (solid * 9 / game::CHUNK_VOXEL_COUNT).min(8) as u8),
+                Some((_, solid)) if *solid == game::BRICK_VOXEL_COUNT => '#',
+                Some((_, solid)) => char::from(b'1' + (solid * 9 / game::BRICK_VOXEL_COUNT).min(8) as u8),
             })
             .collect();
         println!("  {row}");

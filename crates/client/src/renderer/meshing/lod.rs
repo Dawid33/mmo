@@ -169,7 +169,7 @@ impl LodVoxelData {
 pub fn decode_lod_grid(packed: &game::lod::PackedLodGrid) -> Vec<Voxel> {
     packed
         .decode()
-        .unwrap_or_else(|| vec![Voxel::default(); game::CHUNK_VOXEL_COUNT])
+        .unwrap_or_else(|| vec![Voxel::default(); game::BRICK_VOXEL_COUNT])
 }
 
 /// Optional same-batch neighbor refs for padding gather, set by the spawner.
@@ -431,7 +431,7 @@ pub fn apply_lod_meshes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game::{BlockId, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, BRICK_VOXEL_COUNT};
 
     /// Two side quads on the same plane, facing the same way, whose rects
     /// overlap: coplanar duplicates that z-fight (flicker) under any camera
@@ -465,7 +465,7 @@ mod tests {
     /// edges, flipped by a ~0.002-unit camera wobble.
     #[test]
     fn skirts_never_overlap_a_coplanar_wall_below() {
-        let mut grid = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for (i, v) in grid.iter_mut().enumerate() {
             let y = (i / 32) % 32;
             if y <= 10 {
@@ -500,7 +500,7 @@ mod tests {
     /// the client's RSS when this was measured).
     #[test]
     fn lod_voxel_data_is_packed_and_round_trips_exactly() {
-        let mut grid = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut grid = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for (i, v) in grid.iter_mut().enumerate() {
             let y = (i / 32) % 32;
             if y < 12 {
@@ -514,7 +514,7 @@ mod tests {
         // A malformed run list (only possible if validation was skipped) decodes
         // to air rather than panicking inside a mesh task.
         let broken = LodVoxelData(game::lod::PackedLodGrid(vec![(7, BlockId(1))]));
-        assert_eq!(broken.decode(), vec![Voxel::default(); CHUNK_VOXEL_COUNT]);
+        assert_eq!(broken.decode(), vec![Voxel::default(); BRICK_VOXEL_COUNT]);
     }
 
     #[test]
@@ -623,7 +623,7 @@ mod tests {
     fn skirted_mesh_shifts_up_and_extends_border_side_faces_down() {
         // Full-solid 32^3 grid, no neighbors (air shell): every outer face is
         // visible and each of the 6 faces merges to one quad.
-        let voxels = vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT];
+        let voxels = vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT];
         let neighbors: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
         let mesh = mesh_lod_grid(&voxels, &neighbors, &BlockTextureLayers::default())
             .expect("solid grid meshes");
@@ -674,7 +674,7 @@ mod tests {
     fn interior_side_faces_are_not_skirted() {
         // A lone solid cell away from every grid edge: its side faces must
         // stay at the biased unit span, with no skirt reaching y=0.
-        let mut voxels = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut voxels = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         voxels[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let neighbors: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
         let mesh = mesh_lod_grid(&voxels, &neighbors, &BlockTextureLayers::default())
@@ -720,7 +720,7 @@ mod tests {
     /// A solid floor at y=0 across the whole 32³ grid: enough content for
     /// `mesh_lod_grid` to produce a mesh, simple enough to reason about.
     fn floor_grid() -> Vec<Voxel> {
-        let mut v = vec![Voxel::default(); CHUNK_VOXEL_COUNT];
+        let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         for z in 0..32 {
             for x in 0..32 {
                 v[x + 32 * 32 * z] = Voxel::new(BlockId(1));
@@ -781,7 +781,7 @@ mod tests {
             &mut app,
             Vec3::ZERO,
             Vec3::new(32.0, 0.0, 0.0),
-            vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT],
+            vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT],
         );
         let behind = spawn_chunk(
             &mut app,

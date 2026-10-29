@@ -21,7 +21,7 @@ fn manager_with_lod() -> (
     let coarse = Box::new(|_key: &LodKey| {
         vec![LodCell {
             group: [0, 0, 0],
-            grid: vec![Voxel::new(BlockId(42)); CHUNK_VOXEL_COUNT],
+            grid: vec![Voxel::new(BlockId(42)); BRICK_VOXEL_COUNT],
         }]
     });
     let builder: Box<dyn LodBuilder> =
@@ -639,7 +639,7 @@ fn a_partial_overlay_keeps_pristine_terrain_where_it_has_no_columns() {
     // Cell-mode regions only hold generated cells: the LOD of such a region
     // must fall back to pristine coarse terrain everywhere else, not go empty.
     use game::lod::{LodCell, LodKey};
-    use game::{BlockId, Chunk, ChunkCoords, Voxel, CHUNK_VOXEL_COUNT};
+    use game::{BlockId, Chunk, ChunkCoords, Voxel, BRICK_VOXEL_COUNT};
     let key = LodKey::for_region(16, game::RegionCoords::new(0, 0));
     assert_eq!(key.region_span(), 1, "fixture: a one-region factor-16 key");
     let per_side = (game::lod::cells_per_region(16) / 32).max(1) as i32;
@@ -647,7 +647,7 @@ fn a_partial_overlay_keeps_pristine_terrain_where_it_has_no_columns() {
         let mut cells = Vec::new();
         for x in 0..per_side {
             for z in 0..per_side {
-                cells.push(LodCell { group: [x, 0, z], grid: vec![Voxel::new(BlockId(1)); CHUNK_VOXEL_COUNT] });
+                cells.push(LodCell { group: [x, 0, z], grid: vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT] });
             }
         }
         cells

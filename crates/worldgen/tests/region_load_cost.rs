@@ -68,7 +68,7 @@ fn region_load_cost() {
     let mut quads_total = 0usize;
     for v in &derived {
         let mut buffer = GreedyQuadsBuffer::new(v.len());
-        greedy_quads(v, &game::ChunkShape {}, [0; 3], [31; 3], &RIGHT_HANDED_Y_UP_CONFIG.faces, &mut buffer);
+        greedy_quads(v, &game::BrickShape {}, [0; 3], [31; 3], &RIGHT_HANDED_Y_UP_CONFIG.faces, &mut buffer);
         quads_total += buffer.quads.num_quads();
     }
     let mesh = t.elapsed();
