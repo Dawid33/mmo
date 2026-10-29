@@ -37,7 +37,9 @@ const CUT_EPSILON: f32 = 0.01;
 const FACE_UA = array<u32, 6>(1u, 1u, 0u, 0u, 0u, 0u);
 const FACE_VA = array<u32, 6>(2u, 2u, 2u, 2u, 1u, 1u);
 
-// The cutaway's region gate, copied from voxel_pull.wgsl (see there).// fortress.cut.x at or above this means the cut is off (f32::MAX); every
+// The cutaway's region gate, copied from voxel_pull.wgsl (see there).
+
+// fortress.cut.x at or above this means the cut is off (f32::MAX); every
 // cutaway effect is then a no-op even in a CUTAWAY pipeline.
 const CUT_OFF: f32 = 3.0e38;
 

@@ -316,13 +316,13 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::renderer::far_voxel::pipeline::tests::validate_shader;
 
     /// Minimal stand-ins for the Bevy modules `voxel_pull.wgsl` imports:
     /// only the names and types it uses, so a typo or a type/uniformity error
     /// in the shader's own code fails here instead of at pipeline creation.
-    const IMPORTS: [(&str, &str); 6] = [
+    pub(crate) const IMPORTS: [(&str, &str); 6] = [
         (
             "mesh_view_types.wgsl",
             r#"

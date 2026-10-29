@@ -21,6 +21,7 @@ pub(crate) mod cursor;
 pub mod dev_ui;
 pub(crate) mod boundaries;
 pub(crate) mod fortress_view;
+pub(crate) mod slice_plane;
 pub mod config;
 pub mod convert;
 pub(crate) mod diag;
@@ -210,7 +211,11 @@ impl Plugin for SimBridgePlugin {
             motion_probe::probe_region_crossing.after(interpolate::interpolate_transforms),
         );
         if self.camera_mode == commander::CameraMode::Commander {
-            app.add_plugins((commander::CommanderPlugin, slint_overlay::SlintOverlayPlugin));
+            app.add_plugins((
+                commander::CommanderPlugin,
+                slint_overlay::SlintOverlayPlugin,
+                slice_plane::SlicePlanePlugin,
+            ));
         }
         #[cfg(not(target_arch = "wasm32"))]
         app.add_systems(Update, config::configure_native_antialiasing);

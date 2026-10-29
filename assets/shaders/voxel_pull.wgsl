@@ -184,10 +184,13 @@ fn vertex(
     // In the home region, a quad whose lowest corner (its record position:
     // extents only add) lies above the cut is collapsed to one point outside
     // the clip volume in x and y as well as z (depth clipping can be off in
-    // shadow views) — a zero-area triangle pair the rasterizer drops.
+    // shadow views) — a zero-area triangle pair the rasterizer drops. So is
+    // a top face lying ON the cut: its block is solid at the working level,
+    // where the slice plane (slice_plane.wgsl) is drawn coplanar with it.
     let cut_here = cut_applies(quad_owner(world_from_local, record_pos, face, w1));
     let lowest = world_from_local * vec4<f32>(vec3<f32>(record_pos), 1.0);
-    if (cut_here && lowest.y > fortress.cut.x + CUT_EPSILON) {
+    let top_on_cut = face == 2u && lowest.y > fortress.cut.x - CUT_EPSILON;
+    if (cut_here && (lowest.y > fortress.cut.x + CUT_EPSILON || top_on_cut)) {
         out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;
     }
