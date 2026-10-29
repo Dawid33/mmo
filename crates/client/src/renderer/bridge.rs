@@ -159,34 +159,32 @@ impl VoxelData {
         Self(runs, None)
     }
 
-    /// Encode a chunk straight from its 8 blocks — identical to
-    /// `VoxelData::new(game::derive_voxels(blocks, chisel))` without building
-    /// the dense 32³ array. Each 32-voxel x-row is two 16-voxel halves, one per
-    /// block: an unchiselled block adds one 16-run, a chiselled one its row of
-    /// materials. Derivation was ~65 µs/chunk of the join's worker time.
-    pub fn from_blocks(
-        blocks: &[game::Block],
-        chisel: &std::collections::BTreeMap<game::BlockIndex, game::ChiselData>,
-    ) -> Self {
-        use game::{BlockIndex, BLOCK_VOXELS, CHUNK_BLOCKS};
-        debug_assert_eq!(blocks.len(), game::CHUNK_BLOCK_COUNT);
+    /// Encode a chunk straight from its blocks — identical to
+    /// `VoxelData::new(game::derive_voxels(chunk))` without building the
+    /// dense 32³ array. Each `BRICK_VOXELS` x-row is `BRICK_BLOCKS` 16-voxel
+    /// segments, one per block: an unchiselled block adds one 16-run, a
+    /// chiselled one its row of materials. Derivation was ~65 µs/chunk of the
+    /// join's worker time. Reads one brick (the chunk's first) — at 2-block
+    /// chunks that is the whole chunk; per-brick input arrives with 16³ chunks.
+    pub fn from_blocks(chunk: &game::Chunk) -> Self {
+        use game::{BLOCK_VOXELS, BRICK_BLOCKS, BRICK_VOXELS};
         fn push(runs: &mut Vec<(u16, game::BlockId)>, len: u16, id: game::BlockId) {
             match runs.last_mut() {
                 Some((run, last)) if *last == id => *run += len,
                 _ => runs.push((len, id)),
             }
         }
-        let materials: Vec<Option<Vec<game::BlockId>>> = (0..game::CHUNK_BLOCK_COUNT)
-            .map(|i| chisel.get(&BlockIndex(i as u8)).map(game::ChiselData::materials))
-            .collect();
-        let edge = BLOCK_VOXELS * CHUNK_BLOCKS;
+        // Decoded once per chiselled block.
+        let materials: std::collections::BTreeMap<game::BlockIndex, Vec<game::BlockId>> =
+            chunk.chisel.iter().map(|(bi, c)| (*bi, c.materials())).collect();
+        let edge = BRICK_VOXELS;
         let mut runs: Vec<(u16, game::BlockId)> = Vec::new();
         for z in 0..edge {
             for y in 0..edge {
-                for bx in 0..CHUNK_BLOCKS {
-                    let bi = BlockIndex::from_xyz(bx, y / BLOCK_VOXELS, z / BLOCK_VOXELS);
-                    match &materials[bi.0 as usize] {
-                        None => push(&mut runs, BLOCK_VOXELS as u16, blocks[bi.0 as usize].id),
+                let (by, bz) = (y / BLOCK_VOXELS, z / BLOCK_VOXELS);
+                for bx in 0..BRICK_BLOCKS {
+                    match materials.get(&game::BlockIndex::from_xyz(bx, by, bz)) {
+                        None => push(&mut runs, BLOCK_VOXELS as u16, chunk.block_at(bx, by, bz).id),
                         Some(m) => {
                             let (ly, lz) = (y % BLOCK_VOXELS, z % BLOCK_VOXELS);
                             let row = (ly + lz * BLOCK_VOXELS) * BLOCK_VOXELS;
@@ -425,7 +423,7 @@ pub fn apply_snapshot_voxels(
         };
         let task = pool.spawn(async move {
             let voxels = |chunk: &game::Chunk| {
-                VoxelData::from_blocks(&chunk.blocks, &chunk.chisel).with_boundary_zones()
+                VoxelData::from_blocks(chunk).with_boundary_zones()
             };
             match chunks {
                 BatchChunks::Snapshot(data, items) => items
@@ -1242,7 +1240,7 @@ mod tests {
         let mut rb = Rollback::new(None);
         rb.new_transaction();
         let chunk = game::Chunk::flat_floor(8);
-        let expected = VoxelData::new(game::derive_voxels(&chunk.blocks, &chunk.chisel));
+        let expected = VoxelData::new(game::derive_voxels(&chunk));
         let key = rb.create_mesh(game::ChunkCoords::new(0, 0, 0), chunk);
         ((*rb.data).clone(), key, expected)
     }
@@ -1818,13 +1816,14 @@ mod voxel_data_tests {
                     let min: [usize; 3] = std::array::from_fn(|_| next(16) as usize);
                     let max: [usize; 3] = std::array::from_fn(|a| min[a] + 1 + next((16 - min[a]) as u64) as usize);
                     chisel.insert(
-                        game::BlockIndex(i as u8),
+                        game::BlockIndex::from_linear(i),
                         game::ChiselData::cuboid(BlockId(next(3) as u16), min, max),
                     );
                 }
             }
-            let dense = VoxelData::new(game::derive_voxels(&blocks, &chisel));
-            let direct = VoxelData::from_blocks(&blocks, &chisel);
+            let chunk = game::Chunk { blocks: game::ChunkBlocks::from_vec(blocks), chisel };
+            let dense = VoxelData::new(game::derive_voxels(&chunk));
+            let direct = VoxelData::from_blocks(&chunk);
             assert_eq!(direct.0, dense.0, "round {round}: runs must match exactly");
         }
     }

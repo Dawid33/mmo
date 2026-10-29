@@ -8,18 +8,30 @@ use crate::registry::BlockId;
 /// Blocks of rock below a column's surface before bedrock takes over.
 pub const UNDERGROUND_DEPTH: i32 = 60;
 
-const FOOTPRINT: usize = CHUNK_BLOCKS * CHUNK_BLOCKS;
+/// Block columns in one column footprint (`CHUNK_BLOCKS²`): the length of
+/// [`ColumnGround::surface`] and [`ColumnGround::geo`].
+pub const COLUMN_FOOTPRINT: usize = CHUNK_BLOCKS * CHUNK_BLOCKS;
+const FOOTPRINT: usize = COLUMN_FOOTPRINT;
 
-/// Ground recipe for one column footprint. Per-footprint arrays are indexed
-/// `lx * CHUNK_BLOCKS + lz`.
-#[derive(
-    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash,
-)]
+/// Deserialize a per-footprint array, refusing any length but `FOOTPRINT`.
+fn footprint<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Box<[i16]>, D::Error> {
+    let v: Vec<i16> = serde::Deserialize::deserialize(d)?;
+    if v.len() != FOOTPRINT {
+        return Err(serde::de::Error::invalid_length(v.len(), &"one entry per block column of the footprint"));
+    }
+    Ok(v.into_boxed_slice())
+}
+
+/// Ground recipe for one column footprint. Per-footprint arrays hold
+/// `FOOTPRINT` entries indexed `lx * CHUNK_BLOCKS + lz`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, state_hash::StateHash)]
 pub struct ColumnGround {
     /// Surface block Y per block column.
-    pub surface: [i16; FOOTPRINT],
+    #[serde(deserialize_with = "footprint")]
+    pub surface: Box<[i16]>,
     /// Stratigraphic offset per block column: `s = y - geo`.
-    pub geo: [i16; FOOTPRINT],
+    #[serde(deserialize_with = "footprint")]
+    pub geo: Box<[i16]>,
     /// Formations top-down by `top` (in `s`); the last entry extends downward.
     pub strata: Vec<(i16, BlockId)>,
     pub bedrock: BlockId,
@@ -27,17 +39,27 @@ pub struct ColumnGround {
     pub band_base_sub_y: i32,
 }
 
+impl Default for ColumnGround {
+    /// A zero surface and offset over every block column, no strata.
+    fn default() -> Self {
+        Self {
+            surface: vec![0; FOOTPRINT].into_boxed_slice(),
+            geo: vec![0; FOOTPRINT].into_boxed_slice(),
+            strata: Vec::new(),
+            bedrock: BlockId::default(),
+            band_base_sub_y: 0,
+        }
+    }
+}
+
 impl ColumnGround {
     /// One stone formation everywhere, bedrock `UNDERGROUND_DEPTH` below the surface.
-    pub fn plain(
-        surface: [i16; FOOTPRINT],
-        band_base_sub_y: i32,
-        stone: BlockId,
-        bedrock: BlockId,
-    ) -> Self {
+    /// `surface` holds `COLUMN_FOOTPRINT` entries.
+    pub fn plain(surface: Box<[i16]>, band_base_sub_y: i32, stone: BlockId, bedrock: BlockId) -> Self {
+        assert_eq!(surface.len(), FOOTPRINT, "one surface per block column of the footprint");
         Self {
             surface,
-            geo: [0; FOOTPRINT],
+            geo: vec![0; FOOTPRINT].into_boxed_slice(),
             strata: vec![(0, stone)],
             bedrock,
             band_base_sub_y,

@@ -22,9 +22,11 @@ pub mod material;
 // Re-run the scan if terrain shaping changes.
 pub const WORLD_SEED: u64 = 0x00D5_C0DE_007B;
 
+use std::collections::BTreeMap;
+
 use game::{
-    Block, BlockId, BlockIndex, ChiselData, Chunk, Column, ColumnCoords, RegionCoords, SubChunk,
-    BLOCK_VOXELS, HALF_BLOCK_VOXELS, CHUNK_BLOCKS, BRICK_VOXEL_COUNT, REGION_CHUNKS,
+    Block, BlockId, BlockIndex, ChiselData, Chunk, ChunkBlocks, Column, ColumnCoords, RegionCoords, SubChunk,
+    BLOCK_VOXELS, HALF_BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BRICK_VOXEL_COUNT, REGION_CHUNKS,
 };
 
 use crate::material::Materials;
@@ -265,10 +267,13 @@ fn columns_from_patch(
             let base_sub_y = lo.div_euclid(cb);
             let top_sub_y = hi.div_euclid(cb);
             let n_sub = (top_sub_y - base_sub_y + 1) as usize;
-            let mut chunks: Vec<Chunk> = (0..n_sub).map(|_| Chunk::default()).collect();
+            // Linear block grids + chisel maps per sub-chunk, made canonical
+            // `Chunk`s once filled.
+            let mut chunks: Vec<(Vec<Block>, BTreeMap<BlockIndex, ChiselData>)> =
+                (0..n_sub).map(|_| (vec![Block::default(); CHUNK_BLOCK_COUNT], BTreeMap::new())).collect();
 
-            let mut surface = [0i16; CHUNK_BLOCKS * CHUNK_BLOCKS];
-            let mut geo = [0i16; CHUNK_BLOCKS * CHUNK_BLOCKS];
+            let mut surface = vec![0i16; game::COLUMN_FOOTPRINT].into_boxed_slice();
+            let mut geo = vec![0i16; game::COLUMN_FOOTPRINT].into_boxed_slice();
             for lx in 0..CHUNK_BLOCKS {
                 for lz in 0..CHUNK_BLOCKS {
                     let (bx, bz) = (fx + lx as i32, fz + lz as i32);
@@ -297,29 +302,34 @@ fn columns_from_patch(
                         let sub_i = (by.div_euclid(cb) - base_sub_y) as usize;
                         let local_by = by.rem_euclid(cb) as usize;
                         let bi = BlockIndex::from_xyz(lx, local_by, lz);
-                        let chunk = &mut chunks[sub_i];
+                        let (blocks, chisel) = &mut chunks[sub_i];
                         let depth = surface - by;
                         if depth > MAX_SOIL_DEPTH {
                             // Below the soil: the recipe's rock (or bedrock).
-                            chunk.blocks[bi.0 as usize] = ground.block_at(lx, lz, by);
+                            blocks[bi.linear()] = ground.block_at(lx, lz, by);
                         } else if by <= surface {
                             // Solid: whole blocks, topped by a whole or half block.
                             let mat = solid_material(&mats, depth, by, surface, water_top);
-                            chunk.blocks[bi.0 as usize] = Block::new(mat);
+                            blocks[bi.linear()] = Block::new(mat);
                             if by == surface && !full {
                                 let top = [BLOCK_VOXELS, HALF_BLOCK_VOXELS, BLOCK_VOXELS];
-                                chunk.chisel.insert(bi, ChiselData::cuboid(mat, [0, 0, 0], top));
+                                chisel.insert(bi, ChiselData::cuboid(mat, [0, 0, 0], top));
                             }
                         } else if by <= water_top {
                             // Above ground, below the water surface -> water.
-                            chunk.blocks[bi.0 as usize] = Block::new(mats.water);
+                            blocks[bi.linear()] = Block::new(mats.water);
                         }
-                        // else: air (Chunk::default leaves it air).
+                        // else: air (the grid starts all air).
                     }
                 }
             }
 
-            let subs: Vec<SubChunk> = chunks.into_iter().map(|c| SubChunk::Dense(Box::new(c))).collect();
+            let subs: Vec<SubChunk> = chunks
+                .into_iter()
+                .map(|(blocks, chisel)| {
+                    SubChunk::Dense(Box::new(Chunk { blocks: ChunkBlocks::from_vec(blocks), chisel }))
+                })
+                .collect();
             // `above = air` trims air tops; the bottom is kept (`grounded`).
             let column = Column::grounded(base_sub_y, stone, air, subs, ground);
             columns.push((ColumnCoords::new(cx, cz), column));

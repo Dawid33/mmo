@@ -28,7 +28,7 @@ fn column() -> Column {
     let band = game::SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, STONE)));
     // `below` must differ from the band, or normalising collapses it away.
     Column::new(0, Block::new(BlockId(1)), air(), vec![band])
-        .with_ground(ColumnGround::plain([SURFACE; CHUNK_BLOCKS * CHUNK_BLOCKS], 0, STONE, BEDROCK))
+        .with_ground(ColumnGround::plain(vec![SURFACE; game::COLUMN_FOOTPRINT].into_boxed_slice(), 0, STONE, BEDROCK))
 }
 
 /// A region over chunk columns `xs` x `zs`, with a render-update channel (as
@@ -324,7 +324,7 @@ fn cell_mode_digs_keep_band_semantics() {
         }))
         .unwrap();
     region.forget_last_event();
-    let ground = ColumnGround::plain([SURFACE; CHUNK_BLOCKS * CHUNK_BLOCKS], 0, STONE, BEDROCK);
+    let ground = ColumnGround::plain(vec![SURFACE; game::COLUMN_FOOTPRINT].into_boxed_slice(), 0, STONE, BEDROCK);
     region.with_data(|r| r.seed_ground_genesis(vec![(ColumnCoords::new(0, 0), ground)]));
     assert!(dig(&mut region, [0, 1, 0]));
     assert!(dig(&mut region, [0, 0, 0]));

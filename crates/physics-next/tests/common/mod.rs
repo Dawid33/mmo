@@ -68,7 +68,7 @@ pub fn spawn_z_walk(ahead: f32) -> Range<f32> {
 pub fn add_chunk(w: &mut PhysicsWorld, (x, y, z): (i32, i32, i32), chunk: &Chunk) {
     let origin = Vector::new(x as f32, y as f32, z as f32) * CHUNK;
     let body = w.bodies.insert(RigidBodyBuilder::fixed().translation(origin));
-    let cells = game::collider_cells(&chunk.blocks, &chunk.chisel);
+    let cells = game::collider_cells(chunk);
     if cells.is_full_cube() {
         let half = 0.5 * CHUNK;
         let cuboid = ColliderBuilder::cuboid(half, half, half).translation(Vector::splat(half));

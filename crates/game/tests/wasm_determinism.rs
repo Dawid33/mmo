@@ -35,19 +35,21 @@ use slotmapd::Key as _;
 /// on every target. Re-recorded for the rapier 0.36 / parry 0.31 switch,
 /// then for `dt` = `TICK_DT` and the kinematic `can_sleep(false)` fix,
 /// then for the new `GameData.ground` field (serialized bytes + state hash),
-/// then for the `designations` / `constructed` order fields.
-const WASM_SCENE_DIGEST: u32 = 0xB718_D194;
+/// then for the `designations` / `constructed` order fields, then for the
+/// `ChunkBlocks` uniform/dense grid, `u16` `BlockIndex` and boxed
+/// `ColumnGround` footprints (serialization + state hash; geometry unchanged).
+const WASM_SCENE_DIGEST: u32 = 0x9ADD_3052;
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = 0x85AA_E9A0;
+const SCENE_STATE_HASH: u32 = 0x1D38_127B;
 const SCENE_TICKS: usize = 120;
 /// `cell_hash` of [`cell_scene`]'s activated cell, on every target.
-const CELL_HASH: u32 = 0xC528_58CB;
+const CELL_HASH: u32 = 0xD09E_C93A;
 /// `game::state_hash` of [`cell_scene`]'s region, on every target.
-const CELL_STATE_HASH: u32 = 0xB4D5_9478;
+const CELL_STATE_HASH: u32 = 0x86BE_A569;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = 0x379E_9D47;
+const UNDERGROUND_DIGEST: u32 = 0xD4C1_DE27;
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = 0x0B76_9E49;
+const UNDERGROUND_STATE_HASH: u32 = 0xBA1F_2E0E;
 
 /// Runs the scene; returns `(portable digest, state_hash)`.
 fn scene() -> (u32, u32) {
@@ -181,8 +183,8 @@ fn underground_scene() -> (u32, u32) {
     let column = || {
         // `below` differs from the band, or normalising trims the band chunk.
         let band = SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, stone)));
-        let mut ground = ColumnGround::plain([1; 4], 0, stone, bedrock);
-        ground.geo = std::array::from_fn(|i| (i % 3) as i16);
+        let mut ground = ColumnGround::plain(vec![1; game::COLUMN_FOOTPRINT].into_boxed_slice(), 0, stone, bedrock);
+        ground.geo = (0..game::COLUMN_FOOTPRINT).map(|i| (i % 3) as i16).collect();
         ground.strata = vec![(0, stone), (-20, BlockId(4)), (-40, BlockId(5))];
         Column::new(0, Block::new(BlockId(1)), Block::new(BlockId::AIR), vec![band]).with_ground(ground)
     };

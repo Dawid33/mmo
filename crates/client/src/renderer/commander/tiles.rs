@@ -295,7 +295,7 @@ mod tests {
         let mut m = TileMirror::default();
         m.set_home(Some(home()));
         let band_base = SURFACE.div_euclid(CHUNK_BLOCKS as i32) - 1;
-        let ground = ColumnGround::plain([SURFACE as i16; CHUNK_BLOCKS * CHUNK_BLOCKS], band_base, STONE, BEDROCK);
+        let ground = ColumnGround::plain(vec![SURFACE as i16; game::COLUMN_FOOTPRINT].into_boxed_slice(), band_base, STONE, BEDROCK);
         m.apply(TileMirrorMsg::Reset {
             region: home(),
             ground: BTreeMap::from([(ColumnCoords::new(0, 0), ground)]),

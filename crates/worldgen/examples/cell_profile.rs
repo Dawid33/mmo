@@ -50,17 +50,17 @@ impl Composition {
 fn classify(chunks: &[(game::ChunkCoords, Chunk)]) -> Composition {
     let mut c = Composition { chunks: chunks.len(), ..Default::default() };
     for (_, chunk) in chunks {
-        let cells = game::collider_cells(&chunk.blocks, &chunk.chisel);
+        let cells = game::collider_cells(chunk);
         if chunk.is_uniform(game::Block::new(WATER)) {
             c.all_water += 1;
-        } else if chunk.chisel.is_empty() && chunk.blocks.iter().all(|b| *b == chunk.blocks[0]) {
+        } else if chunk.chisel.is_empty() && chunk.blocks.uniform().is_some() {
             c.uniform_solid += 1;
         } else if cells.is_empty() {
             c.empty += 1;
         } else {
             c.partial += 1;
         }
-        if chunk.blocks.iter().any(|b| b.id == WATER) {
+        if chunk.blocks.iter().any(|(_, b)| b.id == WATER) {
             c.has_water += 1;
         }
         if cells.is_full_cube() {

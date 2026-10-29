@@ -627,7 +627,7 @@ impl Rollback {
         // Multi-scale decomposition: whole solid blocks at block scale, solid
         // 8³ chisel octants at half-block scale, other chisel detail at voxel scale. Covers exactly
         // derive_voxels' solid cells.
-        let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
+        let cells = crate::collider_cells(&chunk);
         self.ecs.chunk.set_safe(e, Some(chunk));
         self.chunk_index.insert(chunk_index_key(coords), e);
         let position = Pose::from_translation(Vector::new((coords.x * CHUNK_UNITS) as f32, (coords.y * CHUNK_UNITS as i32) as f32, (coords.z * CHUNK_UNITS) as f32));
@@ -671,7 +671,7 @@ impl Rollback {
     pub fn seed_terrain_genesis(&mut self, chunks: Vec<(ChunkCoords, Chunk)>) {
         for (coords, chunk) in chunks {
             let e = self.ecs.create_chunk_entity_raw();
-            let cells = crate::collider_cells(&chunk.blocks, &chunk.chisel);
+            let cells = crate::collider_cells(&chunk);
             self.ecs.chunk.raw_mut().insert(e, Some(chunk));
             self.chunk_index.insert_raw(chunk_index_key(coords), e);
             let position = Pose::from_translation(Vector::new((coords.x * CHUNK_UNITS) as f32, (coords.y * CHUNK_UNITS as i32) as f32, (coords.z * CHUNK_UNITS) as f32));

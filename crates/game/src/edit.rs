@@ -309,13 +309,13 @@ impl Rollback {
         }
         let mut new = old.clone();
         new.set_block(bx, by, bz, block);
-        let cells = crate::collider_cells(&new.blocks, &new.chisel);
-        let new_voxels = crate::derive_voxels(&new.blocks, &new.chisel);
+        let cells = crate::collider_cells(&new);
+        let new_voxels = crate::derive_voxels(&new);
         // LIFO: registered before set_safe, so the old voxels are re-sent
         // after the chunk value is restored.
         self.data.ecs.chunk.emit_on_undo(GameDataUpdate::new(
             GameDataTransactionKind::Undo,
-            GameDataUpdateKind::SetVoxelComponent(e, Some(crate::derive_voxels(&old.blocks, &old.chisel))),
+            GameDataUpdateKind::SetVoxelComponent(e, Some(crate::derive_voxels(&old))),
         ));
         self.data.ecs.chunk.set_safe(e, Some(new));
         self.data.send(GameDataUpdate::new(

@@ -175,11 +175,9 @@ pub fn build_far_lod_cells(chunks: Vec<(ChunkCoords, Chunk)>) -> Vec<LodCell> {
 /// is overwritten, air included, so a later chunk at the same coordinates
 /// replaces an earlier one just as the old octant table did.
 fn write_chunk_at_half_scale(grid: &mut [Voxel], octant: [usize; 3], chunk: &Chunk) {
-    use crate::{BlockIndex, BLOCK_VOXELS};
-    debug_assert_eq!(chunk.blocks.len(), crate::CHUNK_BLOCK_COUNT);
+    use crate::BLOCK_VOXELS;
     let half = BLOCK_VOXELS / 2; // coarse cells per block axis (8)
-    for (idx, block) in chunk.blocks.iter().enumerate() {
-        let bi = BlockIndex(idx as u8);
+    for (bi, block) in chunk.blocks.iter() {
         let (bx, by, bz) = bi.xyz();
         let base = [
             octant[0] * 16 + bx * half,
@@ -645,8 +643,7 @@ mod tests {
                 for by in 0..2 {
                     for bx in 0..2 {
                         let top = cy == 1 && by == 1;
-                        c.blocks[crate::BlockIndex::from_xyz(bx, by, bz).0 as usize] =
-                            Block::new(BlockId(if top { 3 } else { 1 }));
+                        c.set_block(bx, by, bz, Block::new(BlockId(if top { 3 } else { 1 })));
                     }
                 }
             }
@@ -705,7 +702,7 @@ mod tests {
             let octant =
                 (cx.rem_euclid(2) + 2 * coords.y.rem_euclid(2) + 4 * cz.rem_euclid(2)) as usize;
             let entry = groups.entry(group).or_insert_with(|| std::array::from_fn(|_| None));
-            entry[octant] = Some(derive_voxels(&chunk.blocks, &chunk.chisel));
+            entry[octant] = Some(derive_voxels(&chunk));
         }
         groups
             .into_iter()
@@ -734,7 +731,7 @@ mod tests {
                 let coords = ChunkCoords::new(next(4) as usize, next(5) as i32 - 2, next(4) as usize);
                 let mut chunk = Chunk::default();
                 for b in 0..crate::CHUNK_BLOCK_COUNT {
-                    let bi = BlockIndex(b as u8);
+                    let bi = BlockIndex::from_linear(b);
                     let (bx, by, bz) = bi.xyz();
                     chunk.set_block(bx, by, bz, Block::new(BlockId(next(4) as u16)));
                     // ~1/3 of the blocks carry chisel detail, some with an AIR

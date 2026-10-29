@@ -96,8 +96,8 @@ fn run(region: &mut Region, events: &[GameEventKind]) {
 fn blocks(region: &Region) -> Vec<((usize, i32, usize), usize, BlockId)> {
     let mut out = Vec::new();
     for (c, chunk) in region.terrain_snapshot().chunks {
-        for (i, b) in chunk.blocks.iter().enumerate() {
-            out.push(((c.x, c.y, c.z), i, b.id));
+        for (i, b) in chunk.blocks.iter() {
+            out.push(((c.x, c.y, c.z), i.linear(), b.id));
         }
     }
     out

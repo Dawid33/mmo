@@ -157,6 +157,10 @@ fn cache_key_for(seed: u64, block_manifest: &str, region_chunks: usize, island_c
     h.update(&seed.to_le_bytes());
     h.update(block_manifest.as_bytes());
     h.update(&(region_chunks as u64).to_le_bytes());
+    // The sim chunk edge and region edge in blocks shape every cached chunk
+    // (and its serialized grid): builds with other dials never share files.
+    h.update(&(game::CHUNK_BLOCKS as u64).to_le_bytes());
+    h.update(&(game::REGION_BLOCKS as u64).to_le_bytes());
     // The spawn island's size is a build dial (`VOXEL_ISLAND_CELLS`), not
     // source: it must key the cache itself.
     h.update(&island_cells.to_le_bytes());

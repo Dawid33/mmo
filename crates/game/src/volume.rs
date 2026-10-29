@@ -51,7 +51,8 @@ impl SubChunk {
     }
 
     /// Collapsed form of a uniform block: `Air` for the air block, else a
-    /// `Dense` chunk filled with `block`.
+    /// chunk whose grid is `ChunkBlocks::Uniform(block)` (one block stored,
+    /// not a dense box).
     pub fn uniform(block: Block) -> Self {
         if block == Block::new(BlockId::AIR) {
             SubChunk::Air
@@ -335,7 +336,7 @@ mod column_tests {
 
     #[test]
     fn grounded_columns_keep_their_stone_bottom() {
-        let ground = crate::ground::ColumnGround::plain([4; 4], -1, BlockId(2), BlockId(6));
+        let ground = crate::ground::ColumnGround::plain(vec![4; crate::COLUMN_FOOTPRINT].into_boxed_slice(), -1, BlockId(2), BlockId(6));
         let col = Column::grounded(-1, stone(), air(), vec![dense_stone(), dense_stone(), SubChunk::Air], ground);
         assert_eq!(col.base_sub_y(), -1, "uniform stone at the bottom stays materialised");
         assert_eq!(col.sub_chunks.len(), 2, "the air top still trims");

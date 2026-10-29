@@ -26,8 +26,11 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// / parry 0.31 switch (with the continuous-surfaces tie-break, `dt` =
 /// `TICK_DT` and the kinematic `can_sleep(false)` fix), then for the lazy
 /// underground: columns carry `ColumnGround` recipes, keep their stone band
-/// bottoms, fill the band's bottom sub-chunk, and reach down cliff faces.
-const SCENE_HASH: u32 = 0xBCD4_E673;
+/// bottoms, fill the band's bottom sub-chunk, and reach down cliff faces;
+/// then (already stale at 0xB42B_F7B3 after an earlier worldgen change) for
+/// the `ChunkBlocks` uniform/dense grid, `u16` `BlockIndex` and boxed
+/// `ColumnGround` footprints — hashed layout only, geometry unchanged.
+const SCENE_HASH: u32 = 0xDB24_FC10;
 /// Ticks of scripted input.
 const SCENE_TICKS: usize = 60;
 

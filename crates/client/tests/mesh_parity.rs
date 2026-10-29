@@ -125,11 +125,11 @@ fn parity_on_structured_chunks() {
         vec![Voxel::new(BlockId(1)); BRICK_VOXEL_COUNT], // full
         {
             let c = game::Chunk::flat_floor(24);
-            game::derive_voxels(&c.blocks, &c.chisel)
+            game::derive_voxels(&c)
         },
         {
             let c = game::Chunk::flat_floor(8);
-            game::derive_voxels(&c.blocks, &c.chisel)
+            game::derive_voxels(&c)
         },
     ] {
         let padded = PaddedVoxels::from_interior(&chunk);

@@ -45,7 +45,7 @@ fn region_load_cost() {
     let mut total_voxels = 0usize;
     let mut derived = Vec::with_capacity(chunks.len());
     for (_, c) in &chunks {
-        let v = game::derive_voxels(&c.blocks, &c.chisel);
+        let v = game::derive_voxels(c);
         total_voxels += v.len();
         derived.push(v);
     }

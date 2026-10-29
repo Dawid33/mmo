@@ -115,7 +115,7 @@ fn stone_column() -> Column {
     let band = SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, STONE)));
     // `below` must differ from the band, or normalising collapses it away.
     Column::new(0, Block::new(BlockId(1)), Block::new(BlockId::AIR), vec![band])
-        .with_ground(ColumnGround::plain([SURFACE as i16; CHUNK_BLOCKS * CHUNK_BLOCKS], 0, STONE, BEDROCK))
+        .with_ground(ColumnGround::plain(vec![SURFACE as i16; game::COLUMN_FOOTPRINT].into_boxed_slice(), 0, STONE, BEDROCK))
 }
 
 /// Extent of the test region in blocks along x and z: every order here stays

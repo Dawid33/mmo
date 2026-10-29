@@ -98,8 +98,8 @@ fn main() {
     for (key, chunk) in &chunks {
         if chunk.chisel.is_empty() {
             unchiselled += 1;
-            let first = chunk.blocks[0].id;
-            if chunk.blocks.iter().all(|b| b.id == first) {
+            let first = chunk.blocks.get(game::BlockIndex::from_linear(0)).id;
+            if chunk.blocks.iter().all(|(_, b)| b.id == first) {
                 if first == BlockId::AIR {
                     uniform_air += 1;
                 } else {
@@ -107,7 +107,7 @@ fn main() {
                 }
             }
         }
-        let voxels = game::derive_voxels(&chunk.blocks, &chunk.chisel);
+        let voxels = game::derive_voxels(chunk);
         grid.insert(*key, VoxelData::new(voxels));
     }
     stage.derive = t.elapsed();

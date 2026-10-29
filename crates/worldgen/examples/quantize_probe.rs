@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use game::{
-    BlockId, BlockIndex, Chunk, ChunkCoords, Region, RegionCoords, BLOCK_VOXELS, CHUNK_BLOCKS,
+    BlockId, Chunk, ChunkCoords, Region, RegionCoords, BLOCK_VOXELS, CHUNK_BLOCKS,
 };
 
 macro_rules! size {
@@ -27,8 +27,7 @@ fn ground_heights(chunks: &[(ChunkCoords, Chunk)]) -> BTreeMap<(i32, i32), i32> 
     let mut out = BTreeMap::new();
     let mid = BLOCK_VOXELS / 2;
     for (cc, chunk) in chunks {
-        for (idx, block) in chunk.blocks.iter().enumerate() {
-            let bi = BlockIndex(idx as u8);
+        for (bi, block) in chunk.blocks.iter() {
             let (bx, by, bz) = bi.xyz();
             if block.id == BlockId::AIR || block.id == WATER {
                 continue;
@@ -81,7 +80,7 @@ fn main() {
         let chisel_mib: f64 = chunks.iter().map(|(_, c)| size!(&c.chisel)).sum();
         let (mut block_cells, mut half_cells, mut voxel_cells) = (0usize, 0usize, 0usize);
         for (_, c) in &chunks {
-            let cells = game::collider_cells(&c.blocks, &c.chisel);
+            let cells = game::collider_cells(c);
             block_cells += cells.blocks.len();
             half_cells += cells.halves.len();
             voxel_cells += cells.voxels.len();
