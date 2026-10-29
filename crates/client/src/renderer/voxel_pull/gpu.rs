@@ -215,7 +215,8 @@ struct GpuNearCullView {
     viewport_and_capacity: [u32; 4],
     /// Eye position; w = 1 lets the cull drop back-facing face ranges
     /// (perspective views), w = 0 keeps every face (orthographic shadow
-    /// cascades, whose casters must not depend on the camera).
+    /// cascades, whose casters must not depend on the camera; and every view
+    /// while the z-level cut is on, whose cap is drawn from back faces).
     camera: [f32; 4],
 }
 
@@ -242,7 +243,7 @@ fn resolve_clip_from_world(
 }
 
 impl GpuNearCullView {
-    fn new(view: &ExtractedView, chunk_capacity: u32, hzb_mip_count: u32) -> Self {
+    fn new(view: &ExtractedView, chunk_capacity: u32, hzb_mip_count: u32, cutaway: bool) -> Self {
         let clip_from_world = resolve_clip_from_world(
             view.clip_from_world,
             view.clip_from_view,
@@ -260,7 +261,7 @@ impl GpuNearCullView {
                 let eye = view.world_from_view.translation();
                 // Perspective projections have w_axis.w == 0.
                 let perspective = view.clip_from_view.w_axis.w == 0.0;
-                let cull = perspective && face_culling_enabled();
+                let cull = perspective && face_culling_enabled() && !cutaway;
                 [eye.x, eye.y, eye.z, if cull { 1.0 } else { 0.0 }]
             },
         }
@@ -469,6 +470,7 @@ pub fn prepare_gpu_near_view_buffers(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     arena: Res<super::arena::GpuQuadArena>,
+    fortress_view: Option<Res<crate::renderer::fortress_view::FortressViewUniform>>,
     mut views: Query<(
         Entity,
         &ExtractedView,
@@ -487,11 +489,15 @@ pub fn prepare_gpu_near_view_buffers(
         return;
     }
     let capacity = geometric_gpu_capacity(slot_count);
+    let cutaway = fortress_view
+        .as_deref()
+        .is_some_and(crate::renderer::fortress_view::cutaway_active);
     for (entity, view, depth_pyramid, existing) in &mut views {
         let uniform = GpuNearCullView::new(
             view,
             slot_count,
             depth_pyramid.map_or(0, |pyramid| pyramid.mip_count),
+            cutaway,
         );
         if let Some(mut existing) = existing {
             if existing.capacity == capacity

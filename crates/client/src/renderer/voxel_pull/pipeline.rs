@@ -15,6 +15,7 @@ use bevy::{
 };
 
 use crate::renderer::boundaries::BoundaryUniform;
+use crate::renderer::fortress_view::FortressViewUniform;
 
 #[derive(Resource)]
 pub struct VoxelPullPipeline {
@@ -34,7 +35,9 @@ impl FromWorld for VoxelPullPipeline {
         //   0 storage quads, 1 storage transforms, 2 texture_2d_array, 3 sampler,
         //   4 storage top_layers (fragment only — keeps the vertex stage at two
         //   storage buffers), 5 uniform TerrainBoundaries (fragment only; the
-        //   region boundary overlay, `renderer/boundaries.rs`).
+        //   region boundary overlay, `renderer/boundaries.rs`), 6 uniform
+        //   FortressView (vertex + fragment; the z-level cutaway,
+        //   `renderer/fortress_view.rs`).
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
             (
@@ -44,6 +47,7 @@ impl FromWorld for VoxelPullPipeline {
                 bt::sampler(SamplerBindingType::Filtering),
                 bt::storage_buffer_read_only::<u32>(false).visibility(ShaderStages::FRAGMENT),
                 bt::uniform_buffer::<BoundaryUniform>(false).visibility(ShaderStages::FRAGMENT),
+                bt::uniform_buffer::<FortressViewUniform>(false),
             ),
         );
         let chunk_layout = device.create_bind_group_layout("voxel_pull_chunk_layout", &entries);
@@ -72,6 +76,9 @@ pub struct VoxelPullPipelineKey {
     /// omitting it — as the first cut did — only worked because the pull-smoke
     /// probe had no prepass, reducing the key to bare MSAA.
     pub view_layout_key: MeshPipelineViewLayoutKey,
+    /// The z-level cut is on (`fortress_view::cutaway_active`): `CUTAWAY`
+    /// shader def and no back-face culling (the cut's cap is back faces).
+    pub cutaway: bool,
 }
 
 /// `shadows.wgsl`'s `sample_shadow_map` (bevy_pbr-0.18.1/src/render/shadow_sampling.wgsl)
@@ -86,7 +93,8 @@ fn shadow_filter_shader_defs() -> Vec<ShaderDefVal> {
 }
 
 /// Forward-pass defs: the shadow filter plus `DISTANCE_FOG` when the view
-/// binds a fog uniform (Bevy 0.19 only binds it for views with `DistanceFog`).
+/// binds a fog uniform (Bevy 0.19 only binds it for views with `DistanceFog`),
+/// and `CUTAWAY` while the z-level cut is on.
 fn forward_shader_defs(key: VoxelPullPipelineKey) -> Vec<ShaderDefVal> {
     let mut defs = shadow_filter_shader_defs();
     if key
@@ -95,7 +103,16 @@ fn forward_shader_defs(key: VoxelPullPipelineKey) -> Vec<ShaderDefVal> {
     {
         defs.push("DISTANCE_FOG".into());
     }
+    if key.cutaway {
+        defs.push("CUTAWAY".into());
+    }
     defs
+}
+
+/// Back faces are culled except under the cutaway, whose cap is drawn from
+/// the back faces showing through the cut.
+fn cull_mode(cutaway: bool) -> Option<Face> {
+    (!cutaway).then_some(Face::Back)
 }
 
 impl SpecializedRenderPipeline for VoxelPullPipeline {
@@ -133,7 +150,7 @@ impl SpecializedRenderPipeline for VoxelPullPipeline {
                 ..default()
             }),
             primitive: PrimitiveState {
-                cull_mode: Some(Face::Back),
+                cull_mode: cull_mode(key.cutaway),
                 ..default()
             },
             depth_stencil: Some(DepthStencilState {
@@ -212,6 +229,9 @@ pub struct VoxelPullDepthPipelineKey {
     /// light and the cascade near plane are not clipped away. Always `false` for
     /// the camera depth prepass.
     pub unclipped_depth_ortho: bool,
+    /// The z-level cut is on: `CUTAWAY` (vertex collapse + fragment discard
+    /// above the cut) and no back-face culling, as in the forward pass.
+    pub cutaway: bool,
 }
 
 impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
@@ -233,11 +253,15 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
         if emulate_unclipped_depth {
             shader_defs.push(ShaderDefVal::from("UNCLIPPED_DEPTH_ORTHO_EMULATION"));
         }
+        if key.cutaway {
+            shader_defs.push(ShaderDefVal::from("CUTAWAY"));
+        }
 
-        // Emulation needs a fragment stage to write `frag_depth`; otherwise the
-        // pass stays depth-only with no color targets — matching
-        // `PrepassPipeline::specialize` when all prepass targets are absent.
-        let fragment = emulate_unclipped_depth.then(|| FragmentState {
+        // Emulation needs a fragment stage to write `frag_depth`, the cutaway
+        // one to discard above the cut; otherwise the pass stays depth-only
+        // with no color targets — matching `PrepassPipeline::specialize` when
+        // all prepass targets are absent.
+        let fragment = (emulate_unclipped_depth || key.cutaway).then(|| FragmentState {
             shader: self.depth_shader.clone(),
             entry_point: Some("fragment".into()),
             shader_defs: shader_defs.clone(),
@@ -260,7 +284,7 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
             },
             fragment,
             primitive: PrimitiveState {
-                cull_mode: Some(Face::Back),
+                cull_mode: cull_mode(key.cutaway),
                 unclipped_depth,
                 ..default()
             },
@@ -387,6 +411,41 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(positi
         .expect("voxel_pull_depth.wgsl");
         validate_shader(source, &[], &IMPORTS)
             .expect("voxel_pull_depth.wgsl must compose and validate");
+    }
+
+    /// The z-level cutaway variant (`CUTAWAY`, `renderer/fortress_view.rs`).
+    #[test]
+    fn forward_shader_is_valid_wgsl_with_cutaway() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/voxel_pull.wgsl"
+        ))
+        .expect("voxel_pull.wgsl");
+        for defs in [vec!["CUTAWAY"], vec!["CUTAWAY", "DISTANCE_FOG"]] {
+            let defs: Vec<bevy::shader::ShaderDefVal> =
+                defs.into_iter().map(Into::into).collect();
+            validate_shader(source.clone(), &defs, &IMPORTS)
+                .unwrap_or_else(|e| panic!("voxel_pull.wgsl with {defs:?}: {e:?}"));
+        }
+        assert!(source.contains("#ifdef CUTAWAY"), "the forward shader implements CUTAWAY");
+    }
+
+    /// The depth/shadow pipelines with the cutaway, with and without the
+    /// unclipped-depth emulation's fragment stage.
+    #[test]
+    fn depth_shader_is_valid_wgsl_with_cutaway() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/voxel_pull_depth.wgsl"
+        ))
+        .expect("voxel_pull_depth.wgsl");
+        for defs in [vec!["CUTAWAY"], vec!["CUTAWAY", "UNCLIPPED_DEPTH_ORTHO_EMULATION"]] {
+            let defs: Vec<bevy::shader::ShaderDefVal> =
+                defs.into_iter().map(Into::into).collect();
+            validate_shader(source.clone(), &defs, &IMPORTS)
+                .unwrap_or_else(|e| panic!("voxel_pull_depth.wgsl with {defs:?}: {e:?}"));
+        }
+        assert!(source.contains("#ifdef CUTAWAY"), "the depth shader implements CUTAWAY");
     }
 
     /// Every def combination the four cull pipelines compile with.

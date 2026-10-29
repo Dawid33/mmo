@@ -335,6 +335,12 @@ impl Plugin for CommanderPlugin {
                 )
                     .chain()
                     .after(super::interpolate::interpolate_transforms),
+            )
+            .add_systems(
+                Update,
+                super::fortress_view::update_fortress_view
+                    .after(level::step_level_input)
+                    .after(tiles::update_tile_mirror),
             );
     }
 }

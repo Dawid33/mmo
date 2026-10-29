@@ -27,12 +27,16 @@ use bevy::{
             BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem, RenderCommand,
             RenderCommandResult, SetItemPipeline, TrackedRenderPass, ViewBinnedRenderPhases,
         },
-        render_resource::{IndexFormat, PipelineCache, SpecializedRenderPipelines},
+        render_resource::{
+            CachedRenderPipelineId, IndexFormat, PipelineCache, SpecializedRenderPipeline,
+            SpecializedRenderPipelines,
+        },
         sync_world::MainEntity,
         view::ExtractedView,
     },
 };
 
+use super::super::fortress_view::{cutaway_active, FortressViewUniform};
 use super::arena::GpuQuadArena;
 use super::gpu::{ActiveNearMode, GpuNearViewBuffers, FACES_PER_SLOT};
 use super::pipeline::{
@@ -162,12 +166,41 @@ impl<P: PhaseItem> RenderCommand<P> for DrawChunkQuads {
     }
 }
 
+/// Whether the z-level cut is on in the extracted fortress view uniform.
+fn cutaway_wanted(view: Option<&FortressViewUniform>) -> bool {
+    view.is_some_and(cutaway_active)
+}
+
+/// Specialize `key` with the cutaway bit set to `cutaway`, but keep drawing
+/// with the other variant while the wanted one is still compiling — a
+/// not-yet-ready pipeline skips its phase item, which would blank the terrain
+/// for the frames after the cut is first toggled.
+fn specialize_cutaway<P: SpecializedRenderPipeline>(
+    cache: &PipelineCache,
+    pipelines: &mut SpecializedRenderPipelines<P>,
+    pipeline: &P,
+    cutaway: bool,
+    key: impl Fn(bool) -> P::Key,
+) -> CachedRenderPipelineId {
+    let wanted = pipelines.specialize(cache, pipeline, key(cutaway));
+    if cache.get_render_pipeline(wanted).is_some() {
+        return wanted;
+    }
+    let other = pipelines.specialize(cache, pipeline, key(!cutaway));
+    if cache.get_render_pipeline(other).is_some() {
+        other
+    } else {
+        wanted
+    }
+}
+
 pub fn queue_voxel_pull(
     mode: Res<ActiveNearMode>,
     pipeline: Res<VoxelPullPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<VoxelPullPipeline>>,
     cache: Res<PipelineCache>,
     view_key_cache: Res<ViewKeyCache>,
+    fortress_view: Option<Res<FortressViewUniform>>,
     draw_functions: Res<DrawFunctions<Opaque3d>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     views: Query<(
@@ -180,6 +213,7 @@ pub fn queue_voxel_pull(
         return;
     }
     let draw = draw_functions.read().id::<DrawVoxelPull>();
+    let cutaway = cutaway_wanted(fortress_view.as_deref());
     for (view_entity, view, msaa) in &views
     {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
@@ -193,15 +227,15 @@ pub fn queue_voxel_pull(
             continue;
         };
         let view_layout_key = MeshPipelineViewLayoutKey::from(*view_key);
-        let pipeline_id = pipelines.specialize(
-            &cache,
-            &pipeline,
-            VoxelPullPipelineKey {
-                msaa_samples: msaa.samples(),
-                target_format: view.target_format,
-                view_layout_key,
-            },
-        );
+        let pipeline_id =
+            specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, |cutaway| {
+                VoxelPullPipelineKey {
+                    msaa_samples: msaa.samples(),
+                    target_format: view.target_format,
+                    view_layout_key,
+                    cutaway,
+                }
+            });
         // One representative NonMesh item per view. Its render command loops
         // `ViewChunkDrawList`, so chunk count no longer inflates phase bins.
         phase.add(
@@ -237,6 +271,7 @@ pub fn queue_voxel_pull_prepass(
     pipeline: Res<VoxelPullDepthPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<VoxelPullDepthPipeline>>,
     cache: Res<PipelineCache>,
+    fortress_view: Option<Res<FortressViewUniform>>,
     draw_functions: Res<DrawFunctions<Opaque3dPrepass>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3dPrepass>>,
     views: Query<(Entity, &ExtractedView, &Msaa)>,
@@ -245,20 +280,21 @@ pub fn queue_voxel_pull_prepass(
         return;
     }
     let draw = draw_functions.read().id::<DrawVoxelPullDepth>();
+    let cutaway = cutaway_wanted(fortress_view.as_deref());
     for (view_entity, view, msaa) in &views {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
             continue; // this view runs no prepass
         };
-        let pipeline_id = pipelines.specialize(
-            &cache,
-            &pipeline,
-            VoxelPullDepthPipelineKey {
-                msaa_samples: msaa.samples(),
-                // The camera depth prepass uses a perspective projection — never
-                // unclipped. Only directional shadow cascades set this.
-                unclipped_depth_ortho: false,
-            },
-        );
+        let pipeline_id =
+            specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, |cutaway| {
+                VoxelPullDepthPipelineKey {
+                    msaa_samples: msaa.samples(),
+                    // The camera depth prepass uses a perspective projection —
+                    // never unclipped. Only directional shadow cascades set this.
+                    unclipped_depth_ortho: false,
+                    cutaway,
+                }
+            });
         phase.add(
             OpaqueNoLightmap3dBatchSetKey {
                 pipeline: pipeline_id,
@@ -293,6 +329,7 @@ pub fn queue_voxel_pull_shadows(
     pipeline: Res<VoxelPullDepthPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<VoxelPullDepthPipeline>>,
     cache: Res<PipelineCache>,
+    fortress_view: Option<Res<FortressViewUniform>>,
     draw_functions: Res<DrawFunctions<Shadow>>,
     mut shadow_phases: ResMut<ViewBinnedRenderPhases<Shadow>>,
     view_lights: Query<&ViewLightEntities, With<ExtractedView>>,
@@ -305,6 +342,7 @@ pub fn queue_voxel_pull_shadows(
         return;
     }
     let draw = draw_functions.read().id::<DrawVoxelPullDepth>();
+    let cutaway = cutaway_wanted(fortress_view.as_deref());
     for view_lights in &view_lights {
         for light_view_entity in view_lights.lights.iter().copied() {
             let Ok((light_entity, light_view)) = light_views.get(light_view_entity) else {
@@ -315,14 +353,14 @@ pub fn queue_voxel_pull_shadows(
             };
             let is_directional = matches!(light_entity, LightEntity::Directional { .. });
             // Shadow maps are single-sampled (light.rs allocates them at sample_count 1).
-            let pipeline_id = pipelines.specialize(
-                &cache,
-                &pipeline,
-                VoxelPullDepthPipelineKey {
-                    msaa_samples: 1,
-                    unclipped_depth_ortho: is_directional,
-                },
-            );
+            let pipeline_id =
+                specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, |cutaway| {
+                    VoxelPullDepthPipelineKey {
+                        msaa_samples: 1,
+                        unclipped_depth_ortho: is_directional,
+                        cutaway,
+                    }
+                });
             phase.add(
                 ShadowBatchSetKey {
                     pipeline: pipeline_id,

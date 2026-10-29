@@ -20,6 +20,7 @@ pub(crate) mod cursor;
 #[cfg(feature = "dev_ui")]
 pub mod dev_ui;
 pub(crate) mod boundaries;
+pub(crate) mod fortress_view;
 pub mod config;
 pub mod convert;
 pub(crate) mod diag;
@@ -99,6 +100,7 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<hud::HudStatus>()
         .init_resource::<boundaries::BoundaryOverlay>()
         .init_resource::<boundaries::BoundaryUniform>()
+        .init_resource::<fortress_view::FortressViewUniform>()
         .init_resource::<avatar::AvatarAssets>()
         .init_resource::<ui_bridge::UiUpdates>()
         .init_resource::<ui_bridge::UiWidgetMap>()

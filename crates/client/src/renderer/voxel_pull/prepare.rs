@@ -20,6 +20,7 @@ use super::gpu::{
     NearRendererMetrics,
 };
 use super::super::boundaries::BoundaryUniform;
+use super::super::fortress_view::FortressViewUniform;
 use super::pipeline::VoxelPullPipeline;
 use super::queue::{grouped_draw_list, ViewChunkDrawList};
 use super::{BlockArrayTexture, BlockTopLayers, ExtractedChunkQuads, RemovedChunkQuads};
@@ -226,6 +227,7 @@ pub fn prepare_chunk_quads(
     block_texture: Res<BlockArrayTexture>,
     top_layers: Option<Res<BlockTopLayers>>,
     boundaries: Option<Res<BoundaryUniform>>,
+    fortress_view: Option<Res<FortressViewUniform>>,
     mut arena: ResMut<GpuQuadArena>,
     removed: Res<RemovedChunkQuads>,
 ) {
@@ -258,10 +260,27 @@ pub fn prepare_chunk_quads(
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
-        write_boundaries(&queue, &arena, &boundaries.as_deref().copied().unwrap_or_default());
+        let value = boundaries.as_deref().copied().unwrap_or_default();
+        write_uniform(&queue, arena.boundaries.as_ref(), &value);
         rebuild_bind_group = true;
     } else if let Some(value) = boundaries.as_ref().filter(|b| b.is_changed()) {
-        write_boundaries(&queue, &arena, value);
+        write_uniform(&queue, arena.boundaries.as_ref(), value.as_ref());
+    }
+    // The fortress view uniform (z-level cut), the same way; the default is
+    // the cut off. The queue systems pick the `CUTAWAY` pipelines from the
+    // same extracted value.
+    if arena.fortress_view.is_none() {
+        arena.fortress_view = Some(device.create_buffer(&BufferDescriptor {
+            label: Some("voxel_pull_fortress_view"),
+            size: FortressViewUniform::min_size().get(),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        let value = fortress_view.as_deref().copied().unwrap_or_default();
+        write_uniform(&queue, arena.fortress_view.as_ref(), &value);
+        rebuild_bind_group = true;
+    } else if let Some(value) = fortress_view.as_ref().filter(|v| v.is_changed()) {
+        write_uniform(&queue, arena.fortress_view.as_ref(), value.as_ref());
     }
     // The shared quad index buffer must cover the largest single chunk.
     let largest = chunks
@@ -360,11 +379,18 @@ pub fn prepare_chunk_quads(
         let Some(texture) = texture else {
             return;
         };
-        let (Some(records), Some(transforms), Some((top_layers, _)), Some(boundaries)) = (
+        let (
+            Some(records),
+            Some(transforms),
+            Some((top_layers, _)),
+            Some(boundaries),
+            Some(fortress_view),
+        ) = (
             arena.records.binding(),
             arena.transforms.binding(),
             arena.top_layers.as_ref(),
             arena.boundaries.as_ref(),
+            arena.fortress_view.as_ref(),
         ) else {
             return;
         };
@@ -378,17 +404,24 @@ pub fn prepare_chunk_quads(
                 &texture.sampler,
                 top_layers.as_entire_binding(),
                 boundaries.as_entire_binding(),
+                fortress_view.as_entire_binding(),
             )),
         ));
     }
 }
 
-fn write_boundaries(queue: &RenderQueue, arena: &GpuQuadArena, value: &BoundaryUniform) {
-    let Some(buffer) = arena.boundaries.as_ref() else {
+/// Encode one small uniform (`BoundaryUniform`, `FortressViewUniform`) into
+/// its buffer.
+fn write_uniform<T: ShaderType + encase::internal::WriteInto>(
+    queue: &RenderQueue,
+    buffer: Option<&Buffer>,
+    value: &T,
+) {
+    let Some(buffer) = buffer else {
         return;
     };
     let mut bytes = encase::UniformBuffer::new(Vec::<u8>::new());
-    bytes.write(value).expect("BoundaryUniform encodes");
+    bytes.write(value).expect("overlay uniform encodes");
     queue.write_buffer(buffer, 0, bytes.as_ref());
 }
 

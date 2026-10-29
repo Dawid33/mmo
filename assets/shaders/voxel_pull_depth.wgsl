@@ -19,6 +19,19 @@
 @group(1) @binding(0) var<storage, read> quads: array<vec2<u32>>;
 @group(1) @binding(1) var<storage, read> chunk_transforms: array<mat4x4<f32>>;
 
+// The z-level cutaway, as in voxel_pull.wgsl (mirrored from
+// FortressViewUniform in crates/client/src/renderer/fortress_view.rs, the
+// source of truth): geometry above the cut casts no shadow and writes no
+// prepass depth either.
+struct FortressView {
+    cut: vec4<f32>,
+    origin: vec4<f32>,
+    overlay_dims: vec4<u32>,
+}
+@group(1) @binding(6) var<uniform> fortress: FortressView;
+// Same slack as voxel_pull.wgsl's CUT_EPSILON.
+const CUT_EPSILON: f32 = 0.01;
+
 // Locked to Face::index() order (PosX, NegX, PosY, NegY, PosZ, NegZ).
 // Per-face (U,V) axis ids from binary::cross_axes: X faces→(1,2), Y→(0,2), Z→(0,1).
 const FACE_UA = array<u32, 6>(1u, 1u, 0u, 0u, 0u, 0u);
@@ -44,6 +57,9 @@ struct VertexOutput {
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
     @location(0) unclipped_depth: f32,
 #endif // UNCLIPPED_DEPTH_ORTHO_EMULATION
+#ifdef CUTAWAY
+    @location(1) world_y: f32,
+#endif // CUTAWAY
 }
 
 @vertex
@@ -65,13 +81,24 @@ fn vertex(
     let cu = corner & 1u;
     let cv = corner >> 1u;
 
-    var pos = vec3<u32>(w0 & 63u, (w0 >> 6u) & 63u, (w0 >> 12u) & 63u);
+    let record_pos = vec3<u32>(w0 & 63u, (w0 >> 6u) & 63u, (w0 >> 12u) & 63u);
+    var pos = record_pos;
     pos[FACE_UA[face]] += cu * (w1 & 63u);
     pos[FACE_VA[face]] += cv * ((w1 >> 6u) & 63u);
     let local_pos = vec3<f32>(pos);
 
-    let world_position = chunk_transforms[chunk_index] * vec4<f32>(local_pos, 1.0);
+    let world_from_local = chunk_transforms[chunk_index];
+    let world_position = world_from_local * vec4<f32>(local_pos, 1.0);
     var out: VertexOutput;
+#ifdef CUTAWAY
+    // Collapse a quad wholly above the cut (see voxel_pull.wgsl).
+    let lowest = world_from_local * vec4<f32>(vec3<f32>(record_pos), 1.0);
+    if (lowest.y > fortress.cut.x + CUT_EPSILON) {
+        out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
+    }
+    out.world_y = world_position.y;
+#endif // CUTAWAY
     out.position = position_world_to_clip(world_position.xyz);
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
     out.unclipped_depth = out.position.z;
@@ -83,6 +110,21 @@ fn vertex(
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
 @fragment
 fn fragment(in: VertexOutput) -> @builtin(frag_depth) f32 {
+#ifdef CUTAWAY
+    if (in.world_y > fortress.cut.x + CUT_EPSILON) {
+        discard;
+    }
+#endif // CUTAWAY
     return in.unclipped_depth;
 }
+#else // UNCLIPPED_DEPTH_ORTHO_EMULATION
+#ifdef CUTAWAY
+// No depth to write: only the discard above the cut.
+@fragment
+fn fragment(in: VertexOutput) {
+    if (in.world_y > fortress.cut.x + CUT_EPSILON) {
+        discard;
+    }
+}
+#endif // CUTAWAY
 #endif // UNCLIPPED_DEPTH_ORTHO_EMULATION

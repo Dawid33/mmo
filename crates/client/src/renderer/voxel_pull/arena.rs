@@ -164,6 +164,9 @@ pub struct GpuQuadArena {
     /// The region boundary overlay uniform (`BoundaryUniform`), rewritten
     /// whenever the main world changes it.
     pub boundaries: Option<Buffer>,
+    /// The fortress view uniform (`FortressViewUniform`: the z-level cut),
+    /// rewritten whenever the main world changes it.
+    pub fortress_view: Option<Buffer>,
 }
 
 /// The shared quad index buffer's size for a chunk of `quads` quads: at least
@@ -200,6 +203,7 @@ impl Default for GpuQuadArena {
             top_layers: None,
             quad_indices: None,
             boundaries: None,
+            fortress_view: None,
         }
     }
 }

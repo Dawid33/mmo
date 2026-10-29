@@ -27,6 +27,26 @@ struct TerrainBoundaries {
 }
 @group(1) @binding(5) var<uniform> boundaries: TerrainBoundaries;
 
+// Fortress view (the z-level cutaway; later the designation overlay),
+// mirrored from FortressViewUniform in
+// crates/client/src/renderer/fortress_view.rs (the source of truth, incl. the
+// meaning of every field). Read only under the CUTAWAY def, which the
+// pipelines set exactly while cut.x < f32::MAX.
+struct FortressView {
+    cut: vec4<f32>,
+    origin: vec4<f32>,
+    overlay_dims: vec4<u32>,
+}
+@group(1) @binding(6) var<uniform> fortress: FortressView;
+
+// Mirrored from fortress_view.rs (the source of truth). The cap's darkening
+// arrives as fortress.cut.y (CAP_DARKEN there).
+const DEPTH_DARKEN_PER_LEVEL: f32 = 0.12;
+const DEPTH_DARKEN_FLOOR: f32 = 0.35;
+// Slack (world units) above the cut plane before geometry is clipped: a top
+// face lying exactly on the plane must not flicker with interpolation error.
+const CUT_EPSILON: f32 = 0.01;
+
 // Locked to Face::index() order (PosX, NegX, PosY, NegY, PosZ, NegZ) — same
 // tables as voxel_texture.wgsl (copied: WGSL has no cross-file consts here).
 const FACE_NORMALS = array<vec3<f32>, 6>(
@@ -109,7 +129,8 @@ fn vertex(
     let cu = corner & 1u;
     let cv = corner >> 1u;
 
-    var pos = vec3<u32>(w0 & 63u, (w0 >> 6u) & 63u, (w0 >> 12u) & 63u);
+    let record_pos = vec3<u32>(w0 & 63u, (w0 >> 6u) & 63u, (w0 >> 12u) & 63u);
+    var pos = record_pos;
     pos[FACE_UA[face]] += cu * (w1 & 63u);
     pos[FACE_VA[face]] += cv * ((w1 >> 6u) & 63u);
     let local_pos = vec3<f32>(pos);
@@ -130,6 +151,17 @@ fn vertex(
     let tex_pos = local_pos * scale + (origin - BLOCK_VOXELS * floor(origin / BLOCK_VOXELS));
 
     var out: PullVertexOutput;
+#ifdef CUTAWAY
+    // A quad whose lowest corner (its record position: extents only add)
+    // lies above the cut is collapsed to one point outside the clip volume
+    // in x and y as well as z (depth clipping can be off in shadow views) —
+    // a zero-area triangle pair the rasterizer drops.
+    let lowest = world_from_local * vec4<f32>(vec3<f32>(record_pos), 1.0);
+    if (lowest.y > fortress.cut.x + CUT_EPSILON) {
+        out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
+    }
+#endif
     out.world_position = world_from_local * vec4<f32>(local_pos, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
     // Axis-aligned faces under an axis-aligned scale: the normal needs no
@@ -211,34 +243,80 @@ fn apply_boundaries(color: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
     return mix(c, b.home_color.rgb, line * b.home_color.a);
 }
 
+// Side-face layer -> its block's top-face layer (identity for other layers).
+fn top_layer(layer: u32) -> u32 {
+    if (layer < arrayLength(&top_layers)) {
+        return top_layers[layer];
+    }
+    return layer;
+}
+
+// Where the eye ray to `p` crosses the cut plane `cut`, when the eye is above
+// it and `p` below; else `p` itself.
+fn cut_crossing(p: vec3<f32>, cut: f32) -> vec3<f32> {
+    let eye = view.world_position;
+    let dy = p.y - eye.y;
+    if (eye.y > cut && dy < 0.0) {
+        return eye + (p - eye) * ((cut - eye.y) / dy);
+    }
+    return p;
+}
+
+// Brightness of a front face at world height `y` under the cut `cut`: full
+// on the working level (its floor, the top faces at cut - one block,
+// included), then DEPTH_DARKEN_PER_LEVEL less per level down to
+// DEPTH_DARKEN_FLOOR.
+fn depth_darkening(y: f32, cut: f32) -> f32 {
+    let levels_below = max(0.0, ceil((cut - y) / BLOCK_VOXELS - 1.0 - 1e-3));
+    return max(DEPTH_DARKEN_FLOOR, 1.0 - DEPTH_DARKEN_PER_LEVEL * levels_below);
+}
+
 @fragment
-fn fragment(in: PullVertexOutput) -> @location(0) vec4<f32> {
+fn fragment(
+    in: PullVertexOutput,
+    @builtin(front_facing) front_facing: bool,
+) -> @location(0) vec4<f32> {
+    // The surface being shaded: the fragment itself, or under the cutaway a
+    // back face's cap — every visible back face is one the eye ray reaches
+    // after crossing the cut plane inside solid (what lies above the cut is
+    // gone), so it is shaded where the ray crosses the plane: its block's top
+    // texture, facing up, no AO. Depth stays the back face's: no frag_depth.
+    var world_position = in.world_position;
+    var face_uv = in.uv;
+    var layer = in.layer;
+    var shade = in.shade;
+    var n = normalize(in.world_normal);
+#ifdef CUTAWAY
+    let cut = fortress.cut.x;
+    let cap = !front_facing;
+    let cap_position = cut_crossing(in.world_position.xyz, cut);
+    world_position = select(in.world_position, vec4<f32>(cap_position, 1.0), cap);
+    face_uv = select(in.uv, cap_position.xz / BLOCK_VOXELS, cap);
+    layer = select(in.layer, top_layer(in.layer), cap);
+    shade = select(in.shade, 1.0, cap);
+    n = select(n, vec3<f32>(0.0, 1.0, 0.0), cap);
+#endif
     // Derivatives first, in uniform control flow.
     let texels = vec2<f32>(textureDimensions(mat_array_texture).xy);
-    let uv = crisp_uv(in.uv, texels);
-    let ddx = dpdx(in.uv);
-    let ddy = dpdy(in.uv);
-    var tex = textureSampleGrad(mat_array_texture, mat_array_texture_sampler, uv, in.layer, ddx, ddy);
-    let n = normalize(in.world_normal);
+    let uv = crisp_uv(face_uv, texels);
+    let ddx = dpdx(face_uv);
+    let ddy = dpdy(face_uv);
+    var tex = textureSampleGrad(mat_array_texture, mat_array_texture_sampler, uv, layer, ddx, ddy);
 
     // One block's height in pixels at this distance (perspective:
     // clip_from_view[1][1] = 1 / tan(fov_y / 2), viewport.w = height).
-    let distance = length(in.world_position.xyz - view.world_position);
+    let distance = length(world_position.xyz - view.world_position);
     let block_px = BLOCK_VOXELS * view.clip_from_view[1][1] * view.viewport.w
         / (2.0 * max(distance, 1e-3));
     let riser_fade = (1.0 - abs(n.y))
         * (1.0 - smoothstep(RISER_FADE_END_PX, RISER_FADE_START_PX, block_px));
     var light_n = n;
     if (riser_fade > 0.0) {
-        var top = in.layer;
-        if (in.layer < arrayLength(&top_layers)) {
-            top = top_layers[in.layer];
-        }
-        let top_tex = textureSampleGrad(mat_array_texture, mat_array_texture_sampler, uv, top, ddx, ddy);
+        let top_tex = textureSampleGrad(mat_array_texture, mat_array_texture_sampler, uv, top_layer(layer), ddx, ddy);
         tex = mix(tex, top_tex, riser_fade);
         light_n = normalize(mix(n, vec3<f32>(0.0, 1.0, 0.0), riser_fade));
     }
-    let base = tex.rgb * in.shade;
+    let base = tex.rgb * shade;
 
     // Cascade selection z, view-space depth of the fragment. Copied verbatim
     // from the real caller (bevy_pbr-0.18.1/src/render/pbr_functions.wgsl,
@@ -248,7 +326,7 @@ fn fragment(in: PullVertexOutput) -> @location(0) vec4<f32> {
         view.view_from_world[1].z,
         view.view_from_world[2].z,
         view.view_from_world[3].z,
-    ), in.world_position);
+    ), world_position);
 
     var lit = lights.ambient_color.rgb * (SKY_SIDE + (1.0 - SKY_SIDE) * light_n.y);
     for (var i = 0u; i < lights.n_directional_lights; i += 1u) {
@@ -257,7 +335,7 @@ fn fragment(in: PullVertexOutput) -> @location(0) vec4<f32> {
         var shadow = 1.0;
         if (ndotl > 0.0 && (light.flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
             // The real face normal: it sets the shadow lookup's normal bias.
-            shadow = fetch_directional_shadow(i, in.world_position, n, view_z, in.position.xy);
+            shadow = fetch_directional_shadow(i, world_position, n, view_z, in.position.xy);
         }
         // 1/PI: the Lambertian diffuse normalization real PBR bakes into
         // Fd_Burley (pbr_lighting.wgsl) — dropping it overexposes by ~PI.
@@ -269,6 +347,20 @@ fn fragment(in: PullVertexOutput) -> @location(0) vec4<f32> {
     // `view.exposure * (transmitted_light + direct_light + indirect_light)`
     // line) — without it every pixel saturates to white.
     lit *= view.exposure;
-    let overlaid = apply_boundaries(base * lit, in.world_position.xz);
-    return vec4<f32>(apply_distance_fog(overlaid, in.world_position.xyz), 1.0);
+    var color = base * lit;
+#ifdef CUTAWAY
+    // The cap is darkened by cut.y; front faces below the cut by depth.
+    color *= select(depth_darkening(in.world_position.y, cut), 1.0 - fortress.cut.y, cap);
+#endif
+    let overlaid = apply_boundaries(color, world_position.xz);
+#ifdef CUTAWAY
+    // Clip above the cut. Last, after every derivative (apply_boundaries'
+    // fwidth included): a discard compiled to SPIR-V OpKill leaves the
+    // quad's derivatives undefined for the rest of the shader. Only quads
+    // straddling the plane reach here — those wholly above collapsed.
+    if (in.world_position.y > cut + CUT_EPSILON) {
+        discard;
+    }
+#endif
+    return vec4<f32>(apply_distance_fog(overlaid, world_position.xyz), 1.0);
 }

@@ -149,7 +149,12 @@ pub fn step_level_input(
 
 /// The cut plane the camera follows, when the cut is on and the level known.
 pub fn camera_cut(level: &WorkingLevel, tiles: &TileMirror) -> Option<f32> {
-    let (at, region) = (level.level?, tiles.region()?);
+    cut_y(level, tiles.region())
+}
+
+/// The cut plane in `home`, when the cut is on and the level known.
+pub fn cut_y(level: &WorkingLevel, home: Option<RegionId>) -> Option<f32> {
+    let (at, region) = (level.level?, home?);
     level.cut.then(|| cut_plane_world_y(at, region))
 }
 
