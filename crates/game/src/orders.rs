@@ -9,7 +9,10 @@
 use std::collections::BTreeMap;
 
 use crate::edit::BlockPos;
-use crate::{BlockId, ClientId, CHUNK_BLOCKS, REGION_CHUNKS};
+use crate::{
+    Block, BlockId, ClientId, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback,
+    CHUNK_BLOCKS, REGION_CHUNKS,
+};
 use state_hash::StateHash;
 
 /// Region-local block coordinates `[x, y, z]`.
@@ -29,15 +32,17 @@ pub const REGION_BLOCKS: i32 = (REGION_CHUNKS * CHUNK_BLOCKS) as i32;
 
 /// Identifies one order: the issuing client and its running sequence number.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize, StateHash,
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize, StateHash,
 )]
 pub struct OpId {
     pub client: ClientId,
     pub seq: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
+// `Default` only because the rollback map wrapper requires it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
 pub enum DesignationKind {
+    #[default]
     Dig,
     Deconstruct,
     Build(BlockId),
@@ -53,7 +58,7 @@ impl DesignationKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, StateHash)]
 pub struct Designation {
     pub kind: DesignationKind,
     pub op: OpId,
@@ -76,8 +81,17 @@ impl TileBox {
         }
     }
 
+    /// Saturating: an inverted axis counts 0 tiles, a huge box `u64::MAX`.
     pub fn tile_count(&self) -> u64 {
-        (0..3).map(|i| (i64::from(self.max[i]) - i64::from(self.min[i]) + 1) as u64).product()
+        (0..3)
+            .map(|i| (i64::from(self.max[i]) - i64::from(self.min[i]) + 1).max(0) as u64)
+            .fold(1, u64::saturating_mul)
+    }
+
+    /// Whether `min > max` on any axis (only a box built without
+    /// [`TileBox::new`], e.g. off the wire).
+    pub fn is_inverted(&self) -> bool {
+        (0..3).any(|i| self.min[i] > self.max[i])
     }
 
     pub fn contains(&self, p: TilePos) -> bool {
@@ -205,4 +219,178 @@ pub fn resolve_drag(shape: DragShape, anchor: TilePos, corner: TilePos) -> TileB
         }
     }
     b
+}
+
+/// The part of an order's `area` it acts on: clipped to the region, `None`
+/// (reject) when inverted, empty after clipping, or over [`MAX_ORDER_TILES`].
+fn order_area(area: TileBox) -> Option<TileBox> {
+    if area.is_inverted() {
+        return None;
+    }
+    area.clip_to_region().filter(|a| a.tile_count() <= MAX_ORDER_TILES)
+}
+
+impl TileSource for Rollback {
+    fn block(&self, p: TilePos) -> BlockId {
+        crate::edit::locate(p)
+            .and_then(|(coords, local)| self.current_block(coords, local))
+            .map_or(BlockId::AIR, |b| b.id)
+    }
+
+    fn is_bedrock(&self, p: TilePos) -> bool {
+        let Some((coords, local)) = crate::edit::locate(p) else { return false };
+        self.data.cells.cell_chunks == 0
+            && self.current_block(coords, local).is_some_and(|b| {
+                crate::edit::is_bedrock_at(
+                    self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)),
+                    b,
+                )
+            })
+    }
+
+    fn edge_locked(&self, p: TilePos) -> bool {
+        let Some((coords, _)) = crate::edit::locate(p) else { return false };
+        self.data.cells.cell_chunks == 0
+            && crate::edit::edge_ring_locked(
+                p,
+                self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)),
+            )
+    }
+
+    fn is_constructed(&self, p: TilePos) -> bool {
+        self.data.constructed.contains_key(&p)
+    }
+}
+
+impl Rollback {
+    /// Applies one client's order, undo-safely. `false` = rejected, nothing
+    /// changed: an op not issued by `client`, a priority outside
+    /// `1..=MAX_PRIORITY`, or an area that is inverted, misses the region or
+    /// clips to more than [`MAX_ORDER_TILES`]. A designation goes only on
+    /// tiles that [`validate`], replacing what was there.
+    pub fn apply_order_safe(&mut self, client: ClientId, order: Order) -> bool {
+        match order {
+            Order::Designate { op, kind, priority, area } => {
+                if op.client != client || !(1..=MAX_PRIORITY).contains(&priority) {
+                    return false;
+                }
+                let Some(area) = order_area(area) else { return false };
+                let d = Designation { kind, op, priority };
+                let changes: Vec<_> = area
+                    .tiles()
+                    .filter(|&p| validate(self, kind, p).is_ok())
+                    .filter(|p| self.data.designations.get(p) != Some(&d))
+                    .map(|p| (p, Some(d)))
+                    .collect();
+                self.set_designations_safe(changes);
+            }
+            Order::Erase { area, only } => {
+                let Some(area) = order_area(area) else { return false };
+                let changes: Vec<_> = self
+                    .data
+                    .designations
+                    .iter()
+                    .filter(|(p, d)| area.contains(**p) && only.is_none_or(|k| k.same_tool(d.kind)))
+                    .map(|(p, _)| (*p, None))
+                    .collect();
+                self.set_designations_safe(changes);
+            }
+            Order::CancelOp(op) => {
+                if op.client != client {
+                    return false;
+                }
+                let changes: Vec<_> = self
+                    .data
+                    .designations
+                    .iter()
+                    .filter(|(_, d)| d.op == op)
+                    .map(|(p, _)| (*p, None))
+                    .collect();
+                self.set_designations_safe(changes);
+            }
+            Order::DevCompleteAll => self.dev_complete_all_safe(),
+        }
+        true
+    }
+
+    /// Dev shortcut: carries out every designation at once — builds bottom
+    /// up, then digs and deconstructions top down — skipping tiles that no
+    /// longer validate, and clears them all.
+    fn dev_complete_all_safe(&mut self) {
+        let all: Vec<(TilePos, Designation)> =
+            self.data.designations.iter().map(|(p, d)| (*p, *d)).collect();
+        let is_build = |d: &Designation| matches!(d.kind, DesignationKind::Build(_));
+        let mut builds: Vec<_> = all.iter().copied().filter(|(_, d)| is_build(d)).collect();
+        builds.sort_by_key(|(p, _)| p[1]);
+        let mut removals: Vec<_> = all.iter().copied().filter(|(_, d)| !is_build(d)).collect();
+        removals.sort_by_key(|(p, _)| std::cmp::Reverse(p[1]));
+        let mut constructed = Vec::new();
+        for (p, d) in builds.into_iter().chain(removals) {
+            if validate(self, d.kind, p).is_err() {
+                continue;
+            }
+            match d.kind {
+                DesignationKind::Build(id) => {
+                    if self.set_block_safe(p, Block::new(id)) {
+                        constructed.push((p, true));
+                    }
+                }
+                DesignationKind::Dig | DesignationKind::Deconstruct => {
+                    self.set_block_safe(p, Block::new(BlockId::AIR));
+                    if self.data.constructed.contains_key(&p) {
+                        constructed.push((p, false));
+                    }
+                }
+            }
+        }
+        self.set_constructed_safe(constructed);
+        self.set_designations_safe(all.into_iter().map(|(p, _)| (p, None)).collect());
+    }
+
+    /// Writes designation changes and tells the renderer, both ways.
+    fn set_designations_safe(&mut self, changes: Vec<(TilePos, Option<Designation>)>) {
+        if changes.is_empty() {
+            return;
+        }
+        let prior = changes.iter().map(|(p, _)| (*p, self.data.designations.get(p).copied())).collect();
+        // LIFO: registered first, so the prior values are re-sent after the
+        // map is restored.
+        self.data.emit_on_undo(GameDataUpdate::new(
+            GameDataTransactionKind::Undo,
+            GameDataUpdateKind::SetDesignations(prior),
+        ));
+        for (p, d) in &changes {
+            match d {
+                Some(d) => self.data.designations.insert(*p, *d),
+                None => self.data.designations.remove(p),
+            };
+        }
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetDesignations(changes),
+        ));
+    }
+
+    /// As [`Self::set_designations_safe`], for the constructed-tile set.
+    fn set_constructed_safe(&mut self, changes: Vec<(TilePos, bool)>) {
+        if changes.is_empty() {
+            return;
+        }
+        let prior = changes.iter().map(|(p, _)| (*p, self.data.constructed.contains_key(p))).collect();
+        self.data.emit_on_undo(GameDataUpdate::new(
+            GameDataTransactionKind::Undo,
+            GameDataUpdateKind::SetConstructed(prior),
+        ));
+        for (p, built) in &changes {
+            if *built {
+                self.data.constructed.insert(*p, ());
+            } else {
+                self.data.constructed.remove(p);
+            }
+        }
+        self.data.send(GameDataUpdate::new(
+            GameDataTransactionKind::Do,
+            GameDataUpdateKind::SetConstructed(changes),
+        ));
+    }
 }

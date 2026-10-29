@@ -892,6 +892,8 @@ pub fn drain_region_updates(
                         None => { commands.entity(e).remove::<GhostSource>(); }
                     }
                 }
+                // Task 4 mirrors these into the fortress overlay.
+                GameDataUpdateKind::SetDesignations(_) | GameDataUpdateKind::SetConstructed(_) => {}
                 GameDataUpdateKind::SetFreeCam(client_id, enabled) => {
                     // Only the local player's toggle may grab this window's cursor.
                     if local_player.0 != Some(client_id) {

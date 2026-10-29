@@ -467,3 +467,25 @@ fn a_client_cannot_inject_cell_changes() {
     });
     assert!(!relayed, "client-sent CellChanges must be dropped by the manager");
 }
+
+#[test]
+fn order_event_routes_to_the_home_region() {
+    let mut h = harness();
+    h.event(ServerEvent::ClientConnected(0), 0);
+    h.drain_packets();
+    // Air above the floor takes a Build designation.
+    let order = game::Order::Designate {
+        op: game::OpId { client: 0, seq: 1 },
+        kind: game::DesignationKind::Build(game::edit::PLACE_BLOCK),
+        priority: game::DEFAULT_PRIORITY,
+        area: game::TileBox::new([0, 5, 0], [1, 5, 1]),
+    };
+    // Stamped with a region it is not in: the manager routes by home.
+    let ev = GameEvent::new(GameEventKind::Order(0, order), 0, RegionCoords::new(7, 7));
+    h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 0);
+    h.manager.spawner_mut().tick_all();
+    h.settle(0);
+    let mut designations = 0;
+    h.manager.spawner_mut().with_region(SPAWN_REGION, |r| designations = r.data().designations().len());
+    assert_eq!(designations, 4);
+}

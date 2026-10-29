@@ -99,7 +99,7 @@ impl ReconcileStats {
     pub fn kind_slot(kind: &GameEventKind) -> usize {
         match kind {
             GameEventKind::Tick => 0,
-            GameEventKind::PlayerInput(..) | GameEventKind::UiAction(..) => 1,
+            GameEventKind::PlayerInput(..) | GameEventKind::UiAction(..) | GameEventKind::Order(..) => 1,
             _ => 2,
         }
     }
@@ -144,6 +144,7 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::Tick => "Tick".to_string(),
         GameEventKind::PlayerInput(c, ie) => format!("PlayerInput(c={c:?}, {ie:?})"),
         GameEventKind::UiAction(c, a) => format!("UiAction(c={c:?}, {a:?})"),
+        GameEventKind::Order(c, o) => format!("Order(c={c:?}, {o:?})"),
         GameEventKind::CreateClient(c) => format!("CreateClient(c={c:?})"),
         GameEventKind::Quit => "Quit".to_string(),
         GameEventKind::EntityArrived(b) => {
@@ -627,6 +628,9 @@ impl Region {
                         }
                     }
                 }
+            }
+            GameEventKind::Order(client_id, order) => {
+                self.data.apply_order_safe(client_id, order);
             }
         }
         self.event_log.push_back(event.clone());

@@ -665,14 +665,14 @@ impl GameInstanceManager {
             GameEventKind::EntityArrived(_)
             | GameEventKind::GhostUpdate(_)
             | GameEventKind::CellChanges(_) => {}
-            GameEventKind::UiAction(_, _) if !self.is_caught_up => {
+            GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) if !self.is_caught_up => {
                 // Same admission rule as PlayerInput: drop until the sim has
                 // caught up with the server (join/replay window).
             }
-            e @ GameEventKind::UiAction(_, _) => {
+            e @ (GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _)) => {
                 if let Some(home) = self.home_region {
                     if !self.world.as_ref().unwrap().region_exists(&home) {
-                        warn!("dropping UiAction: home region {:?} not loaded", home);
+                        warn!("dropping {:?}: home region {:?} not loaded", e, home);
                         return Ok(true);
                     }
                     let after_tick = self.world.as_ref().unwrap().current_tick(&home) as u64;

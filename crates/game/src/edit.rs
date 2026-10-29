@@ -70,7 +70,7 @@ pub struct BlockHit {
 
 /// The chunk holding `pos` and the block's index inside it, or `None` if the
 /// block is outside this region's chunk columns.
-fn locate(pos: BlockPos) -> Option<(ChunkCoords, (usize, usize, usize))> {
+pub(crate) fn locate(pos: BlockPos) -> Option<(ChunkCoords, (usize, usize, usize))> {
     let cb = CHUNK_BLOCKS as i32;
     let (cx, cz) = (pos[0].div_euclid(cb), pos[2].div_euclid(cb));
     let columns = REGION_CHUNKS as i32;
@@ -125,7 +125,7 @@ impl Rollback {
 
     /// The block at `local` of chunk `coords` as the sim sees it: the chunk
     /// entity's, else the implied ground's. `None` for an empty slot.
-    fn current_block(&self, coords: ChunkCoords, (bx, by, bz): (usize, usize, usize)) -> Option<Block> {
+    pub(crate) fn current_block(&self, coords: ChunkCoords, (bx, by, bz): (usize, usize, usize)) -> Option<Block> {
         match self.chunk_key_at(coords) {
             Some(e) => self.data.ecs.chunk.try_get(e).as_ref().map(|c| c.block_at(bx, by, bz)),
             None => self.implied_block(coords, (bx, by, bz)),

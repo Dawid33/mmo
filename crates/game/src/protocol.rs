@@ -419,6 +419,8 @@ pub enum GameEventKind {
     GhostUpdate(GhostData),
     /// A logical-space UI action from a client (inventory move, toggle, ...).
     UiAction(ClientId, crate::UiAction),
+    /// A fortress order from a client (designate, erase, cancel, ...).
+    Order(ClientId, crate::Order),
     /// Server-authored cell loading (cell-mode regions only): applied at the
     /// confirmed head by every replica, never predicted.
     CellChanges(crate::CellChanges),
@@ -431,7 +433,8 @@ impl GameEventKind {
         match self {
             GameEventKind::PlayerInput(id, _)
             | GameEventKind::CreateClient(id)
-            | GameEventKind::UiAction(id, _) => Some(*id),
+            | GameEventKind::UiAction(id, _)
+            | GameEventKind::Order(id, _) => Some(*id),
             GameEventKind::Tick
             | GameEventKind::Quit
             | GameEventKind::EntityArrived(_)

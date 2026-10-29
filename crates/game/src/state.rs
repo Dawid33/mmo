@@ -61,6 +61,10 @@ pub enum GameDataUpdateKind {
     /// clears the mark on upgrade/expiry. The bridge uses it to hide ghosts
     /// whose source region is also loaded locally.
     SetGhostSource(EntityKey, Option<crate::protocol::RegionCoords>),
+    /// Designations set (`Some`) or cleared (`None`) per tile.
+    SetDesignations(Vec<(crate::TilePos, Option<crate::Designation>)>),
+    /// Tiles that became (`true`) or stopped being (`false`) constructions.
+    SetConstructed(Vec<(crate::TilePos, bool)>),
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +208,13 @@ mod game_data {
         /// must not be used.
         #[undo(map)]
         ground: BTreeMap<crate::ColumnCoords, crate::ColumnGround>,
+        /// Fortress orders waiting on tiles (`orders.rs`).
+        #[undo(map)]
+        designations: BTreeMap<crate::TilePos, crate::Designation>,
+        /// Tiles whose block was built by an order (what `Deconstruct` may
+        /// take down).
+        #[undo(map)]
+        constructed: BTreeMap<crate::TilePos, ()>,
     }
 
     pub struct Ecs {
@@ -283,6 +294,19 @@ pub fn chunk_coords_of_index_key((x, z, y): ChunkIndexKey) -> ChunkCoords {
 
 impl GameData {
     pub fn into_game_update_iter(self) {}
+
+    pub fn designations(&self) -> &std::collections::BTreeMap<crate::TilePos, crate::Designation> {
+        &self.designations
+    }
+
+    pub fn constructed(&self) -> &std::collections::BTreeMap<crate::TilePos, ()> {
+        &self.constructed
+    }
+
+    /// The per-column ground recipes (for the client's tile mirror).
+    pub fn ground_recipes(&self) -> &std::collections::BTreeMap<crate::ColumnCoords, crate::ColumnGround> {
+        &self.ground
+    }
 }
 
 impl Undo<Ecs> {
