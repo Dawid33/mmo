@@ -4,3 +4,36 @@ name = "bark scorpion man"
 animal_person_of = "bark_scorpion"
 status = "draft"
 size = 35001
+
+# The scorpion's eye row scales up to cover the whole face: paint the face
+# back and put small eyes at its corners and a dark mouth on it.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+w = 9
+h = 9
+colour = "head"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 5
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 3
+w = 3
+colour = "stinger"

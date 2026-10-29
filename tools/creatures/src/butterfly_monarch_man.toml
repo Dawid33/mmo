@@ -4,3 +4,48 @@ name = "monarch butterfly man"
 animal_person_of = "butterfly_monarch"
 status = "draft"
 size = 35000
+
+# The wings are not carried over to the person, so their orange goes on the
+# torso and arms instead (black veins and white dots), or the whole figure
+# reads as a black silhouette.
+[palette]
+torso = "#e07a1e"
+arms = "#e07a1e"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 3
+y = 0
+h = 9
+colour = "tip"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 0
+y = 8
+w = 7
+colour = "tip"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 1
+y = 2
+colour = "dot"
+
+[[decals]]
+cube = "torso"
+face = "north"
+x = 5
+y = 2
+colour = "dot"
+
+[[decals]]
+cube = "torso"
+face = "south"
+x = 3
+y = 0
+h = 9
+colour = "tip"

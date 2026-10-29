@@ -4,3 +4,53 @@ name = "brown recluse spider man"
 animal_person_of = "spider_brown_recluse"
 status = "draft"
 size = 35000
+
+# The spider's eye row scales up to cover the whole face: paint the face back
+# and put a spider's eyes (two pairs and a small middle pair) and fangs on it.
+[[decals]]
+cube = "head"
+face = "north"
+x = 0
+y = 0
+w = 9
+h = 9
+colour = "head"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 1
+y = 2
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 2
+w = 2
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 3
+y = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 2
+y = 5
+h = 2
+colour = "mark"
+
+[[decals]]
+cube = "head"
+face = "north"
+x = 4
+y = 5
+h = 2
+colour = "mark"

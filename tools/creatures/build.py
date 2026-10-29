@@ -310,7 +310,9 @@ def animal_person(src):
     elif heads:
         model["cubes"] = [c for c in model["cubes"] if c[0] != "head"]
     if heads:
-        model["cubes"] += graft(base, heads, "head", anchor, k)
+        # A bird's neck cube would run down through the torso: the person has a neck.
+        neckless = {"bones": base["bones"], "cubes": [c for c in base["cubes"] if c[0] != "neck"]}
+        model["cubes"] += graft(neckless, heads, "head", anchor, k)
 
     tail_cubes = [c for c in base["cubes"] if c[1] in subtree_of(base, "tail")] if "tail" in base_bones else []
     if tail_cubes and not legless:
@@ -369,6 +371,15 @@ def animal_person(src):
             if b["stride"]:
                 c["stride"] = b["stride"] * s_low
     if "tail" in pivots:
+        # Lying on its back, a drooping tail would point into the ground: swing it
+        # down along the legs (the body's -y) for lie and death.
+        droop = next(r for n, _, _, r in model["bones"] if n == "tail")[0]
+        along = [90 - droop, 0, 0]
+        if not legless:
+            lie = model["clips"]["lie"]
+            lie["tracks"]["tail"] = {"rotation": hold(along, lie["length"])}
+            death = model["clips"]["death"]
+            death["tracks"]["tail"] = {"rotation": at(death["length"], (0, [0, 0, 0]), (0.5, along), (1, along))}
         for name in ("idle", "walk", "run", "carry"):
             c = model["clips"][name]
             T = c["length"]

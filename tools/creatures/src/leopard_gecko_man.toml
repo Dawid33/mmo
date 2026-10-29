@@ -4,3 +4,32 @@ name = "leopard gecko man"
 animal_person_of = "gecko_leopard"
 status = "draft"
 size = 35025
+
+# The base's eye decals, scaled up with the head, cover a whole side face (west)
+# or miss it (east): repaint the sides and put one eye near the front of each.
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+w = 4
+h = 3
+colour = "head"
+
+[[decals]]
+cube = "head"
+face = "west"
+x = 0
+y = 0
+w = 2
+h = 1
+colour = "eye"
+
+[[decals]]
+cube = "head"
+face = "east"
+x = 2
+y = 0
+w = 2
+h = 1
+colour = "eye"
