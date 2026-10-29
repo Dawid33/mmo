@@ -31,12 +31,16 @@ pub const LOD_CACHE_MAX_ENTRIES: usize = 8192;
 /// evicted — they are the only copy of edited terrain outside the region.
 /// A snapshot grows with region AREA, so the entry count shrinks with it and
 /// the memory ceiling (~2.7 GB) stays where it was: 64 entries at the default
-/// `REGION_CHUNKS`, 16 at 64.
-pub const PRISTINE_TERRAIN_CACHE_MAX: usize = {
-    // Never 0 (it was from 512 chunks up: every insert evicted at once).
-    let n = 64 * (32 * 32) / (crate::REGION_CHUNKS * crate::REGION_CHUNKS);
+/// `REGION_BLOCKS`, 16 at 128.
+pub const PRISTINE_TERRAIN_CACHE_MAX: usize = pristine_cache_max(crate::REGION_BLOCKS);
+
+/// 64 entries at 64 blocks, shrinking with region area; never 0 (it was from
+/// 512 chunks up: every insert evicted at once). Written in blocks so it does
+/// not change meaning with `CHUNK_BLOCKS`.
+pub const fn pristine_cache_max(region_blocks: usize) -> usize {
+    let n = 64 * (64 * 64) / (region_blocks * region_blocks);
     if n == 0 { 1 } else { n }
-};
+}
 
 /// Internal event handled by the world manager. (Moved from
 /// crates/server/src/main.rs; ServerTickTimer is gone — regions self-tick.)

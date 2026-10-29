@@ -150,7 +150,7 @@ impl Default for CullingConfig {
 /// their chunks end Hidden, so this must cover the largest loaded view
 /// window: a camera on the edge of its home region is `radius + 1` whole
 /// regions from the far side of the near window, hence
-/// `(MAX_NEAR_RADIUS + 1) * REGION_CHUNKS` (128 chunks at the default region
+/// `(MAX_NEAR_RADIUS + 1) * REGION_BRICKS` (128 bricks at the 256 m play region
 /// size — exactly enough for `VOXEL_NEAR_RADIUS=3`, not a margin). The flood
 /// box is also clipped to the loaded grid's bounding box, so a smaller window
 /// pays only for what it loaded. (`ChunkGrid`, keyed by `ChunkKey`, holds only
@@ -159,7 +159,7 @@ impl Default for CullingConfig {
 /// keyless to this BFS: `cull_chunks` queries `With<ChunkKey>` and never
 /// reaches or hides them, at any view distance.
 pub const CULL_BFS_MAX_CHEBYSHEV: i32 =
-    (crate::world_scale::MAX_NEAR_RADIUS + 1) * game::REGION_CHUNKS as i32;
+    (crate::world_scale::MAX_NEAR_RADIUS + 1) * game::REGION_BRICKS as i32;
 
 /// Entry-face sentinel for the BFS start cell: no entry face, all exits
 /// allowed regardless of the cell's connectivity mask.
@@ -512,7 +512,7 @@ impl CullingScratch {
             return;
         };
         // Box dimensions never exceed 2 * CULL_BFS_MAX_CHEBYSHEV + 1 (257, or
-        // 1025 with `REGION_CHUNKS = 128` — past u8, inside u16).
+        // 1025 with `REGION_BLOCKS = 256` — past u8, inside u16).
         let start_pos = [
             (camera_cell[0] - box_lo[0]) as u16,
             (camera_cell[1] - box_lo[1]) as u16,

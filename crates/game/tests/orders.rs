@@ -41,8 +41,8 @@ fn tile_count_and_clip() {
     assert_eq!(c, TileBox { min: [0, 0, 0], max: [3, 2, 3] });
     assert_eq!(c.tile_count(), 4 * 3 * 4);
     assert!(TileBox::new([-9, 0, 0], [-1, 2, 3]).clip_to_region().is_none());
-    let far = TileBox::new([0, 0, 0], [REGION_BLOCKS + 5, 1, 2]).clip_to_region().unwrap();
-    assert_eq!(far.max[0], REGION_BLOCKS - 1);
+    let far = TileBox::new([0, 0, 0], [REGION_BLOCKS as i32 + 5, 1, 2]).clip_to_region().unwrap();
+    assert_eq!(far.max[0], REGION_BLOCKS as i32 - 1);
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn designate_dig_marks_only_valid_tiles_and_rolls_back() {
 fn order_over_cap_is_rejected_whole() {
     let mut region = order_region();
     // 64 x 64 columns at most, so the y extent makes it one tile over.
-    let side = REGION_BLOCKS.min(64);
+    let side = (REGION_BLOCKS as i32).min(64);
     let levels = (MAX_ORDER_TILES / (side as u64 * side as u64)) as i32;
     let area = TileBox::new([0, SURFACE, 0], [side - 1, SURFACE + levels - 1, side - 1]);
     assert_eq!(area.tile_count(), MAX_ORDER_TILES);

@@ -2,8 +2,8 @@
 //! what the cells around the cell-mode spawn are made of, and — with
 //! `--time` — what materializing them costs on the region thread.
 //!
-//!   VOXEL_REGION_CHUNKS=1024 cargo run --release -p worldgen --example cell_profile -- \
-//!       [--cells 16] [--radius 2] [--centre X Z] [--time]
+//!   VOXEL_REGION_BLOCKS=2048 cargo run --release -p worldgen --example cell_profile -- \
+//!       [--cells 32] [--radius 2] [--centre X Z] [--time]
 //!
 //! Composition (always): per cell, chunk count by class — all-water,
 //! uniform solid (one cuboid collider), partial (voxels colliders), empty —
@@ -85,7 +85,8 @@ fn arg<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> T {
 fn main() {
     game::set_hash_mode_from_env();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cell_chunks: usize = arg(&args, "--cells", 16);
+    // `--cells` is in BLOCKS (like VOXEL_CELL_BLOCKS); the game API takes chunks.
+    let cell_chunks: usize = arg::<usize>(&args, "--cells", 32) / game::CHUNK_BLOCKS;
     let radius: u32 = arg(&args, "--radius", 2);
     let time = args.iter().any(|a| a == "--time");
     let rc = RegionCoords::new(0, 0);
@@ -108,8 +109,8 @@ fn main() {
         .unwrap_or(spawn_cell);
     let cells = game::cells_within(centre, radius, cell_chunks);
     println!(
-        "REGION_CHUNKS {} cell_chunks {cell_chunks} radius {radius}: {} cells around {centre:?}",
-        game::REGION_CHUNKS,
+        "REGION_BLOCKS {} cell_chunks {cell_chunks} radius {radius}: {} cells around {centre:?}",
+        game::REGION_BLOCKS,
         cells.len()
     );
 

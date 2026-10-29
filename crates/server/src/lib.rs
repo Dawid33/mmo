@@ -349,9 +349,9 @@ pub fn run() {
         std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials));
     info!(
         "[server] cell mode: {}",
-        match game::CELL_CHUNKS {
+        match game::CELL_BLOCKS {
             0 => "off".to_string(),
-            cc => format!("{cc}-chunk cells (VOXEL_CELL_CHUNKS)"),
+            cb => format!("{cb}-block cells (VOXEL_CELL_BLOCKS)"),
         }
     );
     let mut manager = game::WorldManager::new(

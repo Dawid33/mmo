@@ -245,7 +245,7 @@ pub fn downsample_cells(cells: Vec<LodCell>) -> Vec<LodCell> {
 /// grid's full 512-unit span) and 32 cells of height cover one 16-sub-chunk
 /// band (512 units). Mapping: chunk `(cx, sub_y, cz)`, block `(bx, by, bz)` →
 /// cell `(cx.rem_euclid(16)*2 + bx, sub_y.rem_euclid(16)*2 + by,
-/// cz.rem_euclid(16)*2 + bz)`. With `REGION_CHUNKS = 32` a region spans 2×2
+/// cz.rem_euclid(16)*2 + bz)`. With `REGION_BLOCKS = 64` a region spans 2×2
 /// tiles per band (4×4 at 64); a region smaller than one tile leaves the grid's excess
 /// x/z volume as air (the corner-packing trade the plan documents for
 /// `downsample_blocks`) — over-draw from the shared LOD `Aabb`, never
@@ -300,12 +300,12 @@ pub const LOD_MAX_CELL_PX: f32 = 2.5;
 pub const LOD_REFERENCE_FOCAL_PX: f32 = 935.0;
 
 /// Home-region LOD factor for large cell-mode regions: a factor-`f` LOD cell
-/// is `f` chunks wide, so `f <= CELL_CHUNKS` keeps every home LOD cell inside
+/// is `f` bricks (32 voxels) wide, so `f <= CELL_BLOCKS / BRICK_BLOCKS` keeps every home LOD cell inside
 /// one game cell — the renderer can then hide exactly the ones under active
 /// cells (a coarser factor spans several cells and draws over full-detail
 /// terrain: overlapping rendering, live 2026-09-25).
 pub const LARGE_HOME_FACTOR: u32 = {
-    let c = crate::CELL_CHUNKS as u32;
+    let c = (crate::CELL_BLOCKS / crate::BRICK_BLOCKS) as u32;
     if c >= 16 { 16 } else if c >= 8 { 8 } else if c >= 4 { 4 } else { 2 }
 };
 
@@ -319,18 +319,18 @@ pub const LARGE_HOME_FACTOR: u32 = {
 /// cells in its outer rings.)
 ///
 /// Bounds are in REGIONS, so the table belongs to a region size: the pixel
-/// budget is about world distance. Each doubling of `REGION_CHUNKS` starts
+/// budget is about world distance. Each doubling of `REGION_BLOCKS` starts
 /// every ring twice as far out, so the same bounds carry twice the factor —
 /// the near window already covers what the finest ring used to — and the
 /// horizon halves in regions to keep the same [`LOD_HORIZON_UNITS`] (16
 /// regions of 1024, 8 of 2048, 4 of 4096). `ring_table_keeps_cells_within_the_pixel_budget`
 /// checks whichever table the build ships, `ring_table_ends_at_the_horizon`
 /// that it stops at the horizon.
-pub const LOD_RING_TABLE: &[(i32, u32)] = match crate::REGION_CHUNKS {
-    32 => &[(2, 2), (3, 4), (6, 8), (13, 16), (16, 32)],
-    64 => &[(2, 4), (3, 8), (6, 16), (8, 32)],
-    128 => &[(2, 8), (3, 16), (4, 32)],
-    // Cell-mode regions above 128 chunks (up to 65.5 km): ONLY the viewer's
+pub const LOD_RING_TABLE: &[(i32, u32)] = match crate::REGION_BLOCKS {
+    64 => &[(2, 2), (3, 4), (6, 8), (13, 16), (16, 32)],
+    128 => &[(2, 4), (3, 8), (6, 16), (8, 32)],
+    256 => &[(2, 8), (3, 16), (4, 32)],
+    // Cell-mode regions above 256 blocks (up to 65.5 km): ONLY the viewer's
     // own region, at LARGE_HOME_FACTOR — no neighbouring regions load in any
     // world preset (user, 2026-09-25: the region is the whole world now).
     // The pixel budget and 1 km horizon do not hold here.
@@ -350,7 +350,7 @@ pub const LOD_HORIZON_UNITS: f32 = 16_384.0;
 // exactly (region-keyed, several grids per key). With `LOD_FACTORS` all
 // powers of two that is "REGION_SIZE is a power of two"; `>= 32` keeps the
 // factor-2 grid (64 units) inside a chunk pair the way the mesher expects.
-const _: () = assert!(crate::REGION_CHUNKS.is_power_of_two() && crate::REGION_CHUNKS >= 32);
+const _: () = assert!(crate::REGION_BLOCKS.is_power_of_two() && crate::REGION_BLOCKS >= 64);
 
 /// Hysteresis band for `ring_factor_in` (see that function).
 pub const LOD_STICKY_BAND: i32 = 1;
@@ -360,7 +360,7 @@ pub const LOD_STICKY_BAND: i32 = 1;
 /// truncates to 0 and `max(1)` says "one region, several grids"); coarser
 /// ones key per-tile so one key is exactly one grid footprint
 /// (32 * factor == span * REGION_SIZE). At the default size that is 64/256
-/// per-tile; at `REGION_CHUNKS = 128` factor 64 is per-region too.
+/// per-tile; at `REGION_BLOCKS = 256` factor 64 is per-region too.
 pub fn tile_regions(factor: u32) -> i32 {
     ((32 * factor) as i32 / REGION_SIZE as i32).max(1)
 }
@@ -910,7 +910,7 @@ mod tests {
     #[test]
     fn lod_key_regions_and_world_offset() {
         use crate::{RegionCoords, REGION_SIZE};
-        // `span` is 2 at the default region size (1 at REGION_CHUNKS = 64).
+        // `span` is 2 at the default region size (1 at 128 blocks).
         let span = tile_regions(64);
         let key = LodKey { factor: 64, coords: [-1, 1] };
         assert_eq!(key.origin_region(), RegionCoords::new(-span, span));
@@ -922,7 +922,7 @@ mod tests {
         assert_eq!(key.world_offset(), [-edge, 0.0, edge]);
         // A tile grid spans exactly 32 cells * factor world units = span
         // regions — or, once a grid is smaller than a region (factor 64 at
-        // REGION_CHUNKS = 128), the key is one region of several grids.
+        // 256 blocks), the key is one region of several grids.
         for factor in [64, 256] {
             let grid = 32 * factor;
             let span = tile_regions(factor as u32);
@@ -952,7 +952,7 @@ mod tests {
 
     /// Fixture for the `ring_factor_in` tests: they pin the assignment and
     /// hysteresis ALGORITHM, so they must not move with `LOD_RING_TABLE`, which
-    /// is re-cut per `REGION_CHUNKS`. (This is the default-size table.)
+    /// is re-cut per `REGION_BLOCKS`. (This is the default-size table.)
     const RING_FIXTURE: &[(i32, u32)] = &[(2, 2), (3, 4), (6, 8), (13, 16), (27, 32), (32, 64)];
 
     #[test]
@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn ring_table_keeps_cells_within_the_pixel_budget() {
-        if crate::REGION_CHUNKS > 128 {
+        if crate::REGION_BLOCKS > 256 {
             return; // placeholder table for large cell-mode regions
         }
         // Worst case for a ring: the viewer stands on the edge of their own
@@ -1040,17 +1040,21 @@ mod tests {
 
     #[test]
     fn a_large_cell_region_s_home_lod_fits_inside_a_cell() {
-        if crate::REGION_CHUNKS <= 128 || crate::CELL_CHUNKS == 0 {
+        if crate::REGION_BLOCKS <= 256 || crate::CELL_BLOCKS == 0 {
             return;
         }
         let home = ring_factor_in(LOD_RING_TABLE, 0, 0, None).expect("home ring");
-        assert!(home as usize <= crate::CELL_CHUNKS.max(2), "home factor {home} > cell {}", crate::CELL_CHUNKS);
+        assert!(
+            home as usize <= (crate::CELL_BLOCKS / crate::BRICK_BLOCKS).max(2),
+            "home factor {home} > cell {} bricks",
+            crate::CELL_BLOCKS / crate::BRICK_BLOCKS
+        );
         assert_eq!(ring_factor_in(LOD_RING_TABLE, 0, 1, None), None, "no neighbouring regions");
     }
 
     #[test]
     fn ring_table_ends_at_the_horizon() {
-        if crate::REGION_CHUNKS > 128 {
+        if crate::REGION_BLOCKS > 256 {
             return; // placeholder table for large cell-mode regions
         }
         let &(last, _) = LOD_RING_TABLE.last().unwrap();
@@ -1121,12 +1125,12 @@ mod tests {
         // chunk's far block lands in the last of them.
         let far = crate::REGION_CHUNKS - 1;
         let per = cells_per_region(64);
-        assert_eq!(per, crate::REGION_CHUNKS / 2);
-        assert_eq!(cells_per_region(256), crate::REGION_CHUNKS / 8);
+        assert_eq!(per, crate::REGION_BRICKS / 2);
+        assert_eq!(cells_per_region(256), crate::REGION_BRICKS / 8);
         let chunks = vec![(ChunkCoords::new(far, 0, far), chunk_with_block([1, 0, 1], 9))];
         let cells = downsample_chunks(chunks, 64);
         assert_eq!(cells.len(), 1);
-        // `per` may exceed one grid (64 at REGION_CHUNKS = 128): then the last
+        // `per` may exceed one grid (64 at 256 blocks): then the last
         // cell sits in the last grid of the region's own group lattice.
         let (grp, local) = (((per - 1) / 32) as i32, (per - 1) % 32);
         assert_eq!(cells[0].group, [grp, 0, grp]);
@@ -1138,7 +1142,7 @@ mod tests {
     fn copy_region_cells_overlays_and_clears() {
         use crate::RegionCoords;
         // A key whose tile spans several regions: factor 64 (2x2) at the
-        // default size; at REGION_CHUNKS = 64 that tile is ONE region, so 256
+        // default size; at 128 blocks that tile is ONE region, so 256
         // (2x2 at 128 as well).
         let factor = if tile_regions(64) > 1 { 64 } else { 256 };
         if tile_regions(factor) <= 1 {

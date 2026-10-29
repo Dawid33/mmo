@@ -397,7 +397,7 @@ pub fn follow_corner(corner: TilePos, hover: Option<TilePos>, level: Option<i32>
 }
 
 fn clamp_to_region(p: TilePos) -> TilePos {
-    [p[0].clamp(0, REGION_BLOCKS - 1), p[1], p[2].clamp(0, REGION_BLOCKS - 1)]
+    [p[0].clamp(0, REGION_BLOCKS as i32 - 1), p[1], p[2].clamp(0, REGION_BLOCKS as i32 - 1)]
 }
 
 fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {

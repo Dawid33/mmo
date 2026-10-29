@@ -9,13 +9,13 @@
 use std::fmt;
 
 /// Production near-window radius: 2 = the 5x5 block of simulated regions at
-/// 64 m regions; 0 = one region at 256 m regions (`REGION_CHUNKS` 128, what the
+/// 64 m regions; 0 = one region at 256 m regions (`REGION_BLOCKS` 256, what the
 /// play recipes build), which is already ~16x the area.
 /// The LOD ring table is NOT widened with it: `desired_lod` subtracts the
 /// near window, so the factor-2 ring (bound 2) is simply absorbed into
 /// simulated terrain and the rings from factor 4 out — and the horizon —
 /// stay where they were.
-pub const DEFAULT_NEAR_RADIUS: i32 = if game::REGION_CHUNKS >= 128 { 0 } else { 2 };
+pub const DEFAULT_NEAR_RADIUS: i32 = if game::REGION_BLOCKS >= 256 { 0 } else { 2 };
 /// Upper bound on `VOXEL_NEAR_RADIUS`. Every near region is a full sim +
 /// collider genesis on the server and a predicted copy on the client, so a
 /// typo like `10` (441 regions) should fail loudly instead of thrashing.

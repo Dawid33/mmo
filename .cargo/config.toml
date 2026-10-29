@@ -8,15 +8,16 @@ rustflags = ["--cfg", "web_sys_unstable_apis"]
 [build]
 jobs = -4
 
-# Region edge in chunks, read at BUILD time by `game::REGION_CHUNKS`
+# Region edge in BLOCKS, read at BUILD time by `game::REGION_BLOCKS`
 # (crates/game/src/protocol.rs; legal values there). It lives here so raw
 # `cargo`, rust-analyzer and `just` all compile with the SAME value — cargo
 # fingerprints the variable, and "unset" vs "32" would rebuild `game` and
 # everything downstream each time you alternated. A value already in the
-# environment wins, which is how `just region_chunks=64 …` overrides it.
+# environment wins, which is how `just region_blocks=128 …` overrides it.
+# (The old VOXEL_REGION_CHUNKS / VOXEL_CELL_CHUNKS fail the build on purpose.)
 [env]
-VOXEL_REGION_CHUNKS = "32"
-VOXEL_CELL_CHUNKS = "0"
+VOXEL_REGION_BLOCKS = "64"
+VOXEL_CELL_BLOCKS = "0"
 # Spawn island diameter in 64 m cells (`worldgen::islands::SPAWN_ISLAND_CELLS`,
 # 0 = its default); `just island=64 …`.
 VOXEL_ISLAND_CELLS = "0"

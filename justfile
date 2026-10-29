@@ -40,48 +40,52 @@ export VOXEL_WORLD := world
 world_file := env_var_or_default("VOXEL_WORLD_FILE", "")
 export VOXEL_WORLD_FILE := world_file
 
-# Region edge in chunks — a BUILD-time constant (`game::REGION_CHUNKS`), unlike
-# `world`: 32 = 1024-unit / 64 m regions (default), 64 = 2048-unit, 128 =
-# 4096-unit regions, each with the ring table re-cut to the same pixel budget
-# and horizon. In cell mode (`cells=`) it goes on up to 32768 (65.5 km, powers of
-# two; cells generate lazily), e.g. `just region_chunks=1024 cells=16 run`; above
-# 128 without `cells=` the build fails. Nothing else is legal (see crates/game/src/protocol.rs); 128 is
-# the practical ceiling (~7 GB of server state for one 3x3 window).
-#   just region_chunks=64 run
+# Region edge in BLOCKS (1 block = 1 m) — a BUILD-time constant
+# (`game::REGION_BLOCKS`), unlike `world`: 64 = 1024-unit / 64 m regions
+# (default), 128 = 2048-unit, 256 = 4096-unit regions, each with the ring table
+# re-cut to the same pixel budget and horizon. In cell mode (`cells=`) it goes
+# on up to 65536 (65.5 km, powers of two; cells generate lazily), e.g.
+# `just region_blocks=2048 cells=32 run`; above 256 without `cells=` the build
+# fails. Nothing else is legal (see crates/game/src/protocol.rs); 256 is the
+# practical ceiling (~7 GB of server state for one 3x3 window). The dial is in
+# blocks so it keeps its meaning when the sim chunk (CHUNK_BLOCKS) changes size;
+# the old chunk-denominated VOXEL_REGION_CHUNKS / VOXEL_CELL_CHUNKS fail the build.
+#   just region_blocks=128 run
 # Switching recompiles `game` and everything downstream (not Bevy or the forks),
 # and server + client MUST come from the same value — nothing refuses a
 # mismatched pair. The default mirrors `[env]` in .cargo/config.toml so `just`
 # and raw `cargo` share one build fingerprint. Per-region costs scale with
-# AREA (x4 at 64, ~x15 at 128): compare perf numbers only within one region size.
+# AREA (x4 at 128, ~x15 at 256): compare perf numbers only within one region size.
 #
 # Two defaults: recipes that PLAY the game (server, client, run, *-release,
 # web*, diag, perf-capture, fly-probe, shuttle-probe, play-test, the profilers
 # trace-chrome / trace-join / perf / perf-client / perf-server / profile-* /
 # tracy-client, and cross-section) build with
-# `play_chunks` = 128 (256 m regions, one-region near window — see
+# `play_blocks` = 256 (256 m regions, one-region near window — see
 # `DEFAULT_NEAR_RADIUS` in crates/client/src/world_scale.rs); everything else —
-# tests, check, clippy, render-bench, raw cargo — stays at `test_chunks` = 32.
-# An explicit `just region_chunks=N <recipe>` (or $VOXEL_REGION_CHUNKS) wins for
+# tests, check, clippy, render-bench, raw cargo — stays at `test_blocks` = 64.
+# An explicit `just region_blocks=N <recipe>` (or $VOXEL_REGION_BLOCKS) wins for
 # every recipe.
-region_chunks := env_var_or_default("VOXEL_REGION_CHUNKS", "")
-test_chunks := if region_chunks == "" { "32" } else { region_chunks }
-play_chunks := if region_chunks == "" { "128" } else { region_chunks }
-export VOXEL_REGION_CHUNKS := test_chunks
+region_blocks := env_var_or_default("VOXEL_REGION_BLOCKS", "")
+test_blocks := if region_blocks == "" { "64" } else { region_blocks }
+play_blocks := if region_blocks == "" { "256" } else { region_blocks }
+export VOXEL_REGION_BLOCKS := test_blocks
 
 # Cell loading (phase 1b of docs/superpowers/specs/2026-09-25-island-regions-cell-loading-design.md):
-# a BUILD-time constant (`game::CELL_CHUNKS`), 0 = off. Every region then loads
-# terrain in `cells`×`cells`-chunk cells around players; must be a power of two
-# dividing `region_chunks`. The client forces near radius 0 in cell mode.
-#   just region_chunks=128 cells=16 world=tiny run
-cells := env_var_or_default("VOXEL_CELL_CHUNKS", "0")
-export VOXEL_CELL_CHUNKS := cells
+# a BUILD-time constant (`game::CELL_BLOCKS`), 0 = off. Every region then loads
+# terrain in `cells`×`cells`-block cells around players; must be a power of two,
+# a multiple of the chunk edge, dividing `region_blocks`. The client forces near
+# radius 0 in cell mode.
+#   just region_blocks=256 cells=32 world=tiny run
+cells := env_var_or_default("VOXEL_CELL_BLOCKS", "0")
+export VOXEL_CELL_BLOCKS := cells
 
 # Spawn island size (phase 3 of the island spec): the island centred on the home
 # region, as a diameter in 64 m cells — a BUILD-time constant
 # (`worldgen::islands::SPAWN_ISLAND_CELLS`), 0 = the default 16 (1 km), at most
 # `SPAWN_ISLAND_CELLS_MAX`. The rest of the world is quadtree-placed islands in
 # open sea. Keep the island inside the region for cell mode, e.g.
-#   just region_chunks=1024 cells=16 island=16 run     (1 km island, 2 km region)
+#   just region_blocks=2048 cells=32 island=16 run     (1 km island, 2 km region)
 island := env_var_or_default("VOXEL_ISLAND_CELLS", "0")
 export VOXEL_ISLAND_CELLS := island
 
@@ -141,7 +145,7 @@ check:
 
 # Run the QUIC server (listens on 127.0.0.1:6466, WebTransport ingress on :6467).
 server:
-    VOXEL_REGION_CHUNKS={{play_chunks}} RUST_BACKTRACE=1 {{cargo}} run --bin server
+    VOXEL_REGION_BLOCKS={{play_blocks}} RUST_BACKTRACE=1 {{cargo}} run --bin server
 
 # Wipe the dev worldgen disk cache (target/worldgen-cache). The cache
 # self-invalidates when crates/worldgen or the block manifest change; use this
@@ -154,7 +158,7 @@ worldgen-cache-clear:
 client:
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client
 
@@ -164,7 +168,7 @@ client:
 run:
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/server &
@@ -179,13 +183,13 @@ run:
 
 # Run the QUIC server in release mode.
 server-release:
-    VOXEL_REGION_CHUNKS={{play_chunks}} RUST_BACKTRACE=1 {{cargo}} run --release --bin server
+    VOXEL_REGION_BLOCKS={{play_blocks}} RUST_BACKTRACE=1 {{cargo}} run --release --bin server
 
 # Run the Bevy client in release mode.
 client-release:
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --release --bin client
 
@@ -193,7 +197,7 @@ client-release:
 run-release:
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --release --bin client --bin server
     RUST_BACKTRACE=1 ./target/release/server &
@@ -217,7 +221,7 @@ probe_features := ""
 fly-probe seconds="45":
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     out="target/fly-probe"; mkdir -p "$out"
     {{cap}} {{cargo}} build --release --bin server
@@ -246,7 +250,7 @@ fly-probe seconds="45":
 shuttle-probe boundary="region" seconds="45" overshoot="":
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{overshoot}}" ]; then export VOXEL_AUTOPILOT_OVERSHOOT_M="{{overshoot}}"; fi
     out="target/shuttle-probe"; mkdir -p "$out"
@@ -268,7 +272,7 @@ shuttle-probe boundary="region" seconds="45" overshoot="":
 play-test:
     #!/usr/bin/env bash
     set -uo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     log_dir="target/play-test"
     mkdir -p "$log_dir"
@@ -406,9 +410,9 @@ world-map *args:
 # PNG in target/cross-section/, read through the engine's own Column/ColumnGround.
 # Flags: --world <file> --region X,Z --axis x|z --at <block> --out <png>; without
 # --world it uses worlds/default.world if present, else procedural. Built with
-# `play_chunks`, so --region / --at address the same grid as `just run`.
+# `play_blocks`, so --region / --at address the same grid as `just run`.
 cross-section *args:
-    VOXEL_REGION_CHUNKS={{play_chunks}} {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
 
 # Feature census of Blockbench/Bedrock model files (.bbmodel, .geo.json,
 # .animation.json): which format features each file uses, so a model loader
@@ -533,13 +537,13 @@ render-bench backend="direct+raster" adapter="" repetitions="3" threads="4":
 # Needs: rustup target add wasm32-unknown-unknown; cargo install wasm-server-runner.
 # Serve the wasm client via wasm-server-runner (open http://127.0.0.1:1334/).
 web:
-    VOXEL_REGION_CHUNKS={{play_chunks}} WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
+    VOXEL_REGION_BLOCKS={{play_blocks}} WASM_SERVER_RUNNER_CUSTOM_INDEX_HTML=crates/client/index.html \
         {{cargo}} run -p client --target wasm32-unknown-unknown
 
 # Needs: wasm-bindgen-cli and wasm-opt (binaryen) on PATH.
 # Build the optimized wasm release bundle into public/ (see scripts/web_release.rs).
 web-release:
-    VOXEL_REGION_CHUNKS={{play_chunks}} {{cap}} {{cargo}} build -p client --profile wasm-release --target wasm32-unknown-unknown
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build -p client --profile wasm-release --target wasm32-unknown-unknown
     wasm-bindgen --out-name client --out-dir public --target web \
         target/wasm32-unknown-unknown/wasm-release/client.wasm
     wasm-opt -O -ol 100 -s 100 -o public/client_bg.wasm public/client_bg.wasm
@@ -825,7 +829,7 @@ clippy:
 diag:
     #!/usr/bin/env bash
     set -uo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/diag
     log=target/diag/client.log
@@ -859,8 +863,8 @@ diag:
 #
 # One-directory release perf capture (logs + manifest + RSS + verdict) -> target/perf-capture/.
 perf-capture:
-    VOXEL_REGION_CHUNKS={{play_chunks}} {{cap}} {{cargo}} build --release --bin client --bin server
-    VOXEL_REGION_CHUNKS={{play_chunks}} scripts/perf_capture.sh "{{adapter}}" "{{world}}"
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release --bin client --bin server
+    VOXEL_REGION_BLOCKS={{play_blocks}} scripts/perf_capture.sh "{{adapter}}" "{{world}}"
 
 # The independent check on `just diag`'s GPU numbers, measured from outside the process,
 # and it needs no rebuild. Sustained Graphics-Pipe ~100% => GPU-bound; low while a core is
@@ -888,7 +892,7 @@ gpu-log:
 trace-chrome:
     #!/usr/bin/env bash
     set -uo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/trace
     json=target/trace/client.json
@@ -920,7 +924,7 @@ join_ms := "30000"
 trace-join:
     #!/usr/bin/env bash
     set -uo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/trace
     json=target/trace/client.json
@@ -948,7 +952,7 @@ profile-down:
 profile-client:
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin server &
     server_pid=$!
@@ -959,7 +963,7 @@ profile-client:
 profile-server:
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client &
     client_pid=$!
@@ -979,7 +983,7 @@ profile-server:
 tracy-client detailed="":
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     feat="tracy"
     if [ -n "{{detailed}}" ]; then feat="tracy-detailed"; fi
@@ -993,7 +997,7 @@ tracy-client detailed="":
 # Uses the `profiling` cargo profile (release + debug info): dev's opt-level 1
 # distorts hot loops ~2.5x, so debug captures don't represent production.
 perf:
-    VOXEL_REGION_CHUNKS={{play_chunks}} {{cap}} {{cargo}} build --bin client --profile profiling
+    VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --bin client --profile profiling
     sudo perf script record -F9997 --call-graph dwarf,16384 -e cpu-clock ./target/profiling/client
     sudo chmod +r perf.data
     hotspot
@@ -1014,7 +1018,7 @@ perf:
 perf-client:
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server --profile profiling
     RUST_BACKTRACE=1 ./target/profiling/server &
@@ -1031,7 +1035,7 @@ perf-client:
 perf-server:
     #!/usr/bin/env bash
     set -euo pipefail
-    export VOXEL_REGION_CHUNKS={{play_chunks}}
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server --profile profiling
     RUST_BACKTRACE=1 ./target/profiling/client &

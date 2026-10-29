@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::input::InputEvent;
 use crate::lod::LodKey;
 use crate::{
-    Chunk, ChunkCoords, Client, ClientId, Column, ColumnCoords, EntityKey, EntityKind,
+    BLOCK_VOXELS, BRICK_BLOCKS, CHUNK_BLOCKS, Chunk, ChunkCoords, Client, ClientId, Column, ColumnCoords, EntityKey, EntityKind,
     Pose, Rollback,
 };
 use derive_more::Debug;
@@ -25,14 +25,17 @@ impl From<usize> for Usize {
 pub type Tick = usize;
 pub type EventId = usize;
 pub type EntityId = usize;
-/// Regions tile the horizontal plane in fixed squares of `REGION_CHUNKS`²
-/// chunks of 32 voxels — 1024 units (64 m) at the default 32. Signed and
+/// Regions tile the horizontal plane in fixed squares of `REGION_BLOCKS`²
+/// blocks — 64 blocks (1024 units, 64 m) at the test default. Signed and
 /// unbounded: the world grows in every direction. Sims stay region-local; the
 /// world offset exists only at the render boundary (region root Transform)
 /// and, later, in handoff rebasing.
 ///
-/// A BUILD-time dial for experiments: `VOXEL_REGION_CHUNKS=64` (or 128) in
-/// the environment of the build (`just region_chunks=64 …`) compiles every
+/// The dial is in BLOCKS, not chunks, so it keeps its meaning when the sim
+/// chunk (`CHUNK_BLOCKS`) changes size; [`REGION_CHUNKS`] is derived from it.
+///
+/// A BUILD-time dial for experiments: `VOXEL_REGION_BLOCKS=128` (or 256) in
+/// the environment of the build (`just region_blocks=128 …`) compiles every
 /// crate for 2048-unit (4096-unit) regions. It is a constant rather than a runtime setting
 /// because client, server and the wasm `LocalServer` must agree on it
 /// bit-exactly (region-local coordinates, handoff rebasing, `LodKey` tiling
@@ -42,77 +45,98 @@ pub type EntityId = usize;
 /// build server and client in one `just` invocation, as the recipes do.
 ///
 /// Legal values are the ones `lod.rs`'s tiling holds for — see
-/// [`REGION_CHUNKS_CHOICES`].
-pub const REGION_CHUNKS: usize = parse_region_chunks(option_env!("VOXEL_REGION_CHUNKS"));
-pub const REGION_SIZE: f32 = (REGION_CHUNKS * 32) as f32; // power of two: exact in f32
+/// [`REGION_BLOCKS_CHOICES`].
+pub const REGION_BLOCKS: usize = parse_region_blocks(option_env!("VOXEL_REGION_BLOCKS"));
+/// Region edge in sim chunks (derived: the sim-chunk columns of a region).
+pub const REGION_CHUNKS: usize = REGION_BLOCKS / CHUNK_BLOCKS;
+/// Region edge in 32-voxel bricks (the LOD / render-brick grid unit).
+pub const REGION_BRICKS: usize = REGION_BLOCKS / BRICK_BLOCKS;
+/// Region edge in world units; a power of two, so exact in f32.
+pub const REGION_SIZE: f32 = (REGION_BLOCKS * BLOCK_VOXELS) as f32;
 
 /// Region edges this build has been made to work at. The LOD tiling contract
 /// (`lod.rs`) only needs a power of two, but each size also needs its own
 /// `LOD_RING_TABLE`, and the fixtures and budgets below were checked at
-/// exactly these. 128 is the practical ceiling: a region snapshot is ~640 MiB
+/// exactly these. 256 blocks is the practical ceiling: a region snapshot is ~640 MiB
 /// raw there (see `MAX_DECOMPRESSED_PACKET_BYTES`) and a 3×3 window is ~95k
 /// chunks per client.
 ///
-/// Above 128 only cell mode is legal (`VOXEL_CELL_CHUNKS`, see [`CELL_CHUNKS`]):
-/// cells generate lazily, so the region is never built whole. Up to 32768
-/// chunks = 1 048 576 units ≈ 65.5 km (f32 region-local positions keep ~8 mm
+/// Above 256 only cell mode is legal (`VOXEL_CELL_BLOCKS`, see [`CELL_BLOCKS`]):
+/// cells generate lazily, so the region is never built whole. Up to 65536
+/// blocks = 1 048 576 units ≈ 65.5 km (f32 region-local positions keep ~8 mm
 /// steps at the far edge). Those sizes get a minimal LOD table (`lod.rs`).
-pub const REGION_CHUNKS_CHOICES: [usize; 11] =
-    [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+pub const REGION_BLOCKS_CHOICES: [usize; 11] =
+    [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
+
+/// The old chunk-denominated env vars changed meaning when the chunk stopped
+/// being a fixed size; refuse them at BUILD time rather than silently ignore.
+const _: () = {
+    assert!(
+        option_env!("VOXEL_REGION_CHUNKS").is_none(),
+        "VOXEL_REGION_CHUNKS is gone: use VOXEL_REGION_BLOCKS (blocks, 64..=65536); just region_blocks=N"
+    );
+    assert!(
+        option_env!("VOXEL_CELL_CHUNKS").is_none(),
+        "VOXEL_CELL_CHUNKS is gone: use VOXEL_CELL_BLOCKS (blocks, power of two, 0 = off); just cells=N"
+    );
+};
 
 /// `option_env!` hands over a string; unset or empty means the default.
-/// Anything outside [`REGION_CHUNKS_CHOICES`] fails the BUILD, not the run.
-const fn parse_region_chunks(var: Option<&str>) -> usize {
-    let Some(text) = var else { return 32 };
+/// Anything outside [`REGION_BLOCKS_CHOICES`] fails the BUILD, not the run.
+const fn parse_region_blocks(var: Option<&str>) -> usize {
+    let Some(text) = var else { return 64 };
     let bytes = text.as_bytes();
     if bytes.is_empty() {
-        return 32;
+        return 64;
     }
     let mut value = 0usize;
     let mut i = 0;
     while i < bytes.len() {
-        assert!(bytes[i].is_ascii_digit(), "VOXEL_REGION_CHUNKS must be a number");
+        assert!(bytes[i].is_ascii_digit(), "VOXEL_REGION_BLOCKS must be a number");
         value = value * 10 + (bytes[i] - b'0') as usize;
         i += 1;
     }
     let mut i = 0;
-    while i < REGION_CHUNKS_CHOICES.len() {
-        if REGION_CHUNKS_CHOICES[i] == value {
+    while i < REGION_BLOCKS_CHOICES.len() {
+        if REGION_BLOCKS_CHOICES[i] == value {
             return value;
         }
         i += 1;
     }
-    panic!("VOXEL_REGION_CHUNKS must be one of REGION_CHUNKS_CHOICES (a power of two, 32..=32768)")
+    panic!("VOXEL_REGION_BLOCKS must be one of REGION_BLOCKS_CHOICES (a power of two, 64..=65536)")
 }
 
 /// Cell loading (spec 2026-09-25-island-regions-cell-loading-design): every
-/// region runs in cell mode with `CELL_CHUNKS`-chunk cells when non-zero. A
-/// BUILD-time dial like `REGION_CHUNKS`, for the same reason: server, client
-/// and the wasm LocalServer must agree. `just cells=16 …`; 0/unset = off.
-pub const CELL_CHUNKS: usize = parse_cell_chunks(option_env!("VOXEL_CELL_CHUNKS"));
+/// region runs in cell mode with `CELL_BLOCKS`-block cells when non-zero. A
+/// BUILD-time dial like `REGION_BLOCKS`, for the same reason: server, client
+/// and the wasm LocalServer must agree. `just cells=32 …`; 0/unset = off.
+pub const CELL_BLOCKS: usize = parse_cell_blocks(option_env!("VOXEL_CELL_BLOCKS"));
+/// Cell edge in sim chunks (derived; `CellState.cell_chunks` stays in chunks).
+pub const CELL_CHUNKS: usize = CELL_BLOCKS / CHUNK_BLOCKS;
 
-/// Unset/empty/0 = off; otherwise a power of two dividing `REGION_CHUNKS`
-/// (checked at BUILD time).
-// Regions above 128 chunks exist only in cell mode: building one whole is
+// Regions above 256 blocks exist only in cell mode: building one whole is
 // minutes and gigabytes.
 const _: () = assert!(
-    REGION_CHUNKS <= 128 || CELL_CHUNKS != 0,
-    "VOXEL_REGION_CHUNKS above 128 requires cell mode (VOXEL_CELL_CHUNKS)"
+    REGION_BLOCKS <= 256 || CELL_BLOCKS != 0,
+    "VOXEL_REGION_BLOCKS above 256 requires cell mode (VOXEL_CELL_BLOCKS)"
 );
 
-pub(crate) const fn parse_cell_chunks(var: Option<&str>) -> usize {
+/// Unset/empty/0 = off; otherwise a power of two, a multiple of
+/// `CHUNK_BLOCKS`, dividing `REGION_BLOCKS` (checked at BUILD time).
+pub(crate) const fn parse_cell_blocks(var: Option<&str>) -> usize {
     let Some(text) = var else { return 0 };
     let bytes = text.as_bytes();
     let mut value = 0usize;
     let mut i = 0;
     while i < bytes.len() {
-        assert!(bytes[i].is_ascii_digit(), "VOXEL_CELL_CHUNKS must be a number");
+        assert!(bytes[i].is_ascii_digit(), "VOXEL_CELL_BLOCKS must be a number");
         value = value * 10 + (bytes[i] - b'0') as usize;
         i += 1;
     }
     assert!(
-        value == 0 || (value.is_power_of_two() && REGION_CHUNKS % value == 0),
-        "VOXEL_CELL_CHUNKS must be 0 or a power of two dividing REGION_CHUNKS"
+        value == 0
+            || (value.is_power_of_two() && value % CHUNK_BLOCKS == 0 && REGION_BLOCKS % value == 0),
+        "VOXEL_CELL_BLOCKS must be 0 or a power of two, a multiple of CHUNK_BLOCKS, dividing REGION_BLOCKS"
     );
     value
 }
@@ -466,24 +490,24 @@ impl GameEventKind {
 mod tests {
     #[test]
     fn large_region_sizes_parse() {
-        assert_eq!(parse_region_chunks(Some("1024")), 1024);
-        assert_eq!(parse_region_chunks(Some("32768")), 32768);
+        assert_eq!(parse_region_blocks(Some("2048")), 2048);
+        assert_eq!(parse_region_blocks(Some("65536")), 65536);
     }
 
     #[test]
     fn the_packet_cap_never_overflows() {
-        assert_eq!(max_decompressed_packet_bytes(32), 256 * 1024 * 1024);
-        assert_eq!(max_decompressed_packet_bytes(32768), 2 * 1024 * 1024 * 1024);
+        assert_eq!(max_decompressed_packet_bytes(64), 256 * 1024 * 1024);
+        assert_eq!(max_decompressed_packet_bytes(65536), 2 * 1024 * 1024 * 1024);
     }
 
     #[test]
-    fn cell_chunks_parse() {
-        assert_eq!(parse_cell_chunks(None), 0);
-        assert_eq!(parse_cell_chunks(Some("")), 0);
-        assert_eq!(parse_cell_chunks(Some("0")), 0);
-        assert_eq!(parse_cell_chunks(Some("8")), 8);
-        assert_eq!(parse_cell_chunks(Some("32")), 32);
-        assert_eq!(CELL_CHUNKS, parse_cell_chunks(option_env!("VOXEL_CELL_CHUNKS")));
+    fn cell_blocks_parse() {
+        assert_eq!(parse_cell_blocks(None), 0);
+        assert_eq!(parse_cell_blocks(Some("")), 0);
+        assert_eq!(parse_cell_blocks(Some("0")), 0);
+        assert_eq!(parse_cell_blocks(Some("8")), 8);
+        assert_eq!(parse_cell_blocks(Some("32")), 32);
+        assert_eq!(CELL_BLOCKS, parse_cell_blocks(option_env!("VOXEL_CELL_BLOCKS")));
     }
 
     use super::*;
@@ -542,15 +566,15 @@ pub const PACKET_COMPRESS_THRESHOLD: usize = 4096;
 /// Cap on the decompressed size a frame may claim. The length prefix is
 /// untrusted wire data and is what sizes the decode buffer, so it is checked
 /// before anything is allocated. A region snapshot is ~40 MiB at the default
-/// `REGION_CHUNKS` and scales with region AREA (~160 MiB at 64, ~640 MiB at
-/// 128), so the cap scales with it: 256 MiB × (REGION_CHUNKS / 32)², held
+/// 64 blocks and scales with region AREA (~160 MiB at 128, ~640 MiB at
+/// 256), so the cap scales with it: 256 MiB × (REGION_BLOCKS / 64)², held
 /// under the u32 length prefix (and wasm32's address space) at 2 GiB.
-pub const MAX_DECOMPRESSED_PACKET_BYTES: usize = max_decompressed_packet_bytes(REGION_CHUNKS);
+pub const MAX_DECOMPRESSED_PACKET_BYTES: usize = max_decompressed_packet_bytes(REGION_BLOCKS);
 
 /// Computed in u64: at large region sizes the unclamped product overflows
 /// wasm32's usize (it did at compile time from 256 up).
-pub(crate) const fn max_decompressed_packet_bytes(region_chunks: usize) -> usize {
-    let r = (region_chunks / 32) as u64;
+pub const fn max_decompressed_packet_bytes(region_blocks: usize) -> usize {
+    let r = (region_blocks / 64) as u64;
     let scaled = 256 * 1024 * 1024 * r * r;
     let cap: u64 = 2 * 1024 * 1024 * 1024;
     let v = if scaled > cap { cap } else { scaled };

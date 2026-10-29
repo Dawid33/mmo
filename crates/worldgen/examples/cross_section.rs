@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use game::{Block, BlockId, BlockPos, Column, ReadVol, RegionCoords, CHUNK_BLOCKS, REGION_CHUNKS};
+use game::{Block, BlockId, BlockPos, Column, ReadVol, RegionCoords, CHUNK_BLOCKS, REGION_BLOCKS};
 use image::{ImageBuffer, Rgb};
 use worldgen::forge::geology::ROCKS;
 use worldgen::material::Materials;
@@ -78,10 +78,10 @@ fn main() {
     };
     let by_coords: BTreeMap<(usize, usize), &Column> = columns.iter().map(|(c, col)| ((c.x, c.z), col)).collect();
 
-    let n = REGION_CHUNKS * CHUNK_BLOCKS; // blocks along an edge
+    let n = REGION_BLOCKS; // blocks along an edge
     let at = at.unwrap_or(n / 2);
     if at >= n {
-        eprintln!("--at {at} is outside the region: blocks run 0..{n} (REGION_CHUNKS = {REGION_CHUNKS})");
+        eprintln!("--at {at} is outside the region: blocks run 0..{n} (REGION_BLOCKS = {REGION_BLOCKS})");
         std::process::exit(2);
     }
     // Block (u, v) of the region -> (x, z) by axis.

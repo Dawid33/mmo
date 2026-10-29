@@ -476,7 +476,7 @@ mod tests {
         assert_eq!(grid.index([3, 19, 5]), None, "below the bottom layer");
         assert_eq!(grid.index([3, 20 + OVERLAY_LEVELS as i32, 5]), None, "above the working level");
         assert_eq!(grid.index([-1, 22, 5]), None);
-        assert_eq!(grid.index([REGION_BLOCKS, 22, 5]), None);
+        assert_eq!(grid.index([REGION_BLOCKS as i32, 22, 5]), None);
     }
 
     #[test]

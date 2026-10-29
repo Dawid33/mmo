@@ -58,9 +58,9 @@ use super::voxel_pull::BlockArrayTexture;
 /// block open to the level above, whose own top face (full or half block)
 /// then shows at its true height, undarkened.
 pub fn slice_ids(src: &impl TileSource, level: i32) -> Vec<u16> {
-    (0..REGION_BLOCKS)
+    (0..REGION_BLOCKS as i32)
         .flat_map(|z| {
-            (0..REGION_BLOCKS).map(move |x| {
+            (0..REGION_BLOCKS as i32).map(move |x| {
                 let below = src.block([x, level, z]);
                 let above = src.block([x, level + 1, z]);
                 if below != BlockId::AIR && above != BlockId::AIR { below.0 } else { 0 }
@@ -302,7 +302,7 @@ mod tests {
             }),
             L,
         );
-        assert_eq!(ids.len(), (REGION_BLOCKS * REGION_BLOCKS) as usize);
+        assert_eq!(ids.len(), REGION_BLOCKS * REGION_BLOCKS);
         assert_eq!(ids[0], 0, "L solid, L+1 air: the top face shows");
         assert_eq!(ids[1], STONE.0, "L and L+1 solid: capped with L's block");
         assert_eq!(ids[2], 0, "L air: open to look down into");
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn slice_ids_index_is_x_plus_z_times_width() {
         let ids = slice_ids(&Stub(|x, y, z| if x == 3 && z == 5 && (y == L || y == L + 1) { STONE } else { BlockId::AIR }), L);
-        let at = (3 + 5 * REGION_BLOCKS) as usize;
+        let at = 3 + 5 * REGION_BLOCKS;
         assert_eq!(ids[at], STONE.0);
         assert_eq!(ids.iter().filter(|&&id| id != 0).count(), 1);
     }

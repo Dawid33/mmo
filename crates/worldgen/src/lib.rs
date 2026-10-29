@@ -30,8 +30,8 @@ use game::{
 use crate::material::Materials;
 use crate::pipeline::{ProfileGrid, TerrainPipeline, PROFILE_LATTICE_BLOCKS, SEA_TOP_BLOCK};
 
-// Region span in blocks: REGION_CHUNKS chunks * CHUNK_BLOCKS blocks/chunk.
-const REGION_BLOCKS: i32 = (REGION_CHUNKS * CHUNK_BLOCKS) as i32; // 64
+// Region span in blocks (the game's dial, as i32 for coordinate math).
+const REGION_BLOCKS: i32 = game::REGION_BLOCKS as i32; // 64 at the test default
 // Coarse vertical scan bounds (blocks). Terrain lives well inside this band.
 // They bound surfaces only: the ground below a surface is the column's
 // `ColumnGround` recipe, which has no lower bound.
@@ -534,7 +534,7 @@ mod tests {
     fn coarse_tile_is_deterministic_and_key_local() {
         let key = game::lod::LodKey { factor: 64, coords: [0, 0] };
         // One grid per band when the factor-64 grid covers the whole key;
-        // several (2x2 at REGION_CHUNKS = 128) when a region is bigger than it.
+        // several (2x2 at 256 blocks) when a region is bigger than it.
         let grids_per_axis = ((game::REGION_SIZE as i32) / (32 * 64)).max(1);
         let a = coarse_tile(&key, WORLD_SEED, mats());
         let b = coarse_tile(&key, WORLD_SEED, mats());

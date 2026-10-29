@@ -112,7 +112,7 @@ pub struct IslandField {
 
 /// Centre of the home region (0, 0) in world meters (1 block = 1 m).
 pub fn home_centre_m() -> [f64; 2] {
-    let half = (game::REGION_CHUNKS * game::CHUNK_BLOCKS) as f64 / 2.0;
+    let half = game::REGION_BLOCKS as f64 / 2.0;
     [half, half]
 }
 
@@ -227,7 +227,7 @@ pub fn spawn_point(p: &crate::pipeline::TerrainPipeline, island: &Island) -> [f6
 /// coast lies outside the region).
 /// The server's `game::IslandDirectory`.
 pub fn island_info(seed: u64, rc: game::RegionCoords) -> Option<game::IslandInfo> {
-    let blocks = (game::REGION_CHUNKS * game::CHUNK_BLOCKS) as f64;
+    let blocks = game::REGION_BLOCKS as f64;
     let origin = [rc.x as f64 * blocks, rc.z as f64 * blocks];
     let field = IslandField::new(seed);
     let island = field.island_at(origin[0] + blocks / 2.0, origin[1] + blocks / 2.0)?;

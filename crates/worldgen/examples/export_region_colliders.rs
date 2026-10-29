@@ -129,7 +129,7 @@ fn main() {
     let path = dir.join(format!("region_{x}_{z}.bin"));
     let bytes = bincode::serialize(&export).unwrap();
     std::fs::write(&path, &bytes).unwrap();
-    println!("region ({x}, {z}), REGION_CHUNKS {}", game::REGION_CHUNKS);
+    println!("region ({x}, {z}), REGION_BLOCKS {}", game::REGION_BLOCKS);
     println!("bodies (one per chunk): {}", export.chunks.len());
     println!("cuboid collapses:       {cuboids}");
     for (i, size) in [16, 8, 1].iter().enumerate() {

@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use crate::edit::{raycast_blocks, BlockPos};
 use crate::{
     Block, BlockId, ClientId, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback,
-    BLOCK_VOXELS, CHUNK_BLOCKS, REGION_CHUNKS, UNDERGROUND_DEPTH,
+    BLOCK_VOXELS, REGION_BLOCKS, UNDERGROUND_DEPTH,
 };
 use rapier3d::math::Vector;
 use state_hash::StateHash;
@@ -32,8 +32,6 @@ pub const MAX_ORDER_TILES: u64 = 65_536;
 /// times the chunk edge in voxels) far from `i32` overflow.
 pub const MIN_ORDER_LEVEL: i32 = i16::MIN as i32;
 pub const MAX_ORDER_LEVEL: i32 = i16::MAX as i32;
-/// A region's edge in blocks.
-pub const REGION_BLOCKS: i32 = (REGION_CHUNKS * CHUNK_BLOCKS) as i32;
 
 /// Identifies one order: the issuing client and its running sequence number.
 #[derive(
@@ -114,8 +112,8 @@ impl TileBox {
     /// The part inside the region's columns (`x`, `z` in `0..REGION_BLOCKS`);
     /// `y` is left alone. `None` when nothing is left.
     pub fn clip_to_region(&self) -> Option<TileBox> {
-        let (min_x, max_x) = (self.min[0].max(0), self.max[0].min(REGION_BLOCKS - 1));
-        let (min_z, max_z) = (self.min[2].max(0), self.max[2].min(REGION_BLOCKS - 1));
+        let (min_x, max_x) = (self.min[0].max(0), self.max[0].min(REGION_BLOCKS as i32 - 1));
+        let (min_z, max_z) = (self.min[2].max(0), self.max[2].min(REGION_BLOCKS as i32 - 1));
         (min_x <= max_x && min_z <= max_z).then_some(TileBox {
             min: [min_x, self.min[1], min_z],
             max: [max_x, self.max[1], max_z],
