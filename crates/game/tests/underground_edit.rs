@@ -28,7 +28,7 @@ fn column() -> Column {
     let band = game::SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, STONE)));
     // `below` must differ from the band, or normalising collapses it away.
     Column::new(0, Block::new(BlockId(1)), air(), vec![band])
-        .with_ground(ColumnGround::plain([SURFACE; 4], 0, STONE, BEDROCK))
+        .with_ground(ColumnGround::plain([SURFACE; CHUNK_BLOCKS * CHUNK_BLOCKS], 0, STONE, BEDROCK))
 }
 
 /// A region over chunk columns `xs` x `zs`, with a render-update channel (as
@@ -44,6 +44,14 @@ fn region(xs: std::ops::RangeInclusive<usize>, zs: std::ops::RangeInclusive<usiz
     let (send, recv) = crossbeam::channel::unbounded();
     std::mem::forget(recv);
     Region::new(built.data().clone(), Some(send), r0(), None)
+}
+
+/// [`region`] over the chunk columns holding the block ranges `xs` x `zs`
+/// (half-open, in blocks), so fixtures state their extent in blocks.
+fn region_blocks(xs: std::ops::Range<i32>, zs: std::ops::Range<i32>) -> Region {
+    let cb = CHUNK_BLOCKS as i32;
+    let cols = |r: std::ops::Range<i32>| (r.start / cb) as usize..=((r.end - 1) / cb) as usize;
+    region(cols(xs), cols(zs))
 }
 
 /// The chunk holding block `pos` and its block index, if inside the region.
@@ -103,8 +111,10 @@ fn exposed_implied(r: &Rollback) -> Vec<([i32; 3], ChunkCoords)> {
 
 #[test]
 fn breaking_the_band_floor_materialises_the_chunk_below() {
-    let mut region = region(1..=2, 1..=2);
-    let below = ChunkCoords::new(1, -1, 1);
+    let mut region = region_blocks(2..6, 2..6);
+    // The chunk under the one holding block (2, 0, 2): the band floor sits on
+    // its bottom face.
+    let below = locate([2, -1, 2]).unwrap().0;
     assert!(!has_chunk(region.data(), below));
     assert!(dig(&mut region, [2, 1, 2]), "the band top breaks");
     assert!(!has_chunk(region.data(), below), "a block still covers the chunk below");
@@ -112,10 +122,13 @@ fn breaking_the_band_floor_materialises_the_chunk_below() {
     let r = region.data();
     let e = r.chunk_key_at(below).expect("the chunk below is materialised");
     let chunk = r.ecs.chunk.try_get(e).clone().unwrap();
-    for (bx, bz) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-        assert_eq!(chunk.block_at(bx, 1, bz).id, STONE);
+    let top = CHUNK_BLOCKS - 1;
+    for bx in 0..CHUNK_BLOCKS {
+        for bz in 0..CHUNK_BLOCKS {
+            assert_eq!(chunk.block_at(bx, top, bz).id, STONE);
+        }
     }
-    assert!(r.implied_block(below, (0, 1, 0)).is_none(), "materialised, so no longer implied");
+    assert!(r.implied_block(below, (0, top, 0)).is_none(), "materialised, so no longer implied");
     // The neighbour exists as a real, solid chunk: a ray finds it.
     let hit = r
         .raycast_block(
@@ -129,10 +142,10 @@ fn breaking_the_band_floor_materialises_the_chunk_below() {
 
 #[test]
 fn implied_ground_is_solid_to_a_ray() {
-    let region = region(0..=1, 0..=1);
+    let region = region_blocks(0..4, 0..4);
     // Straight down from inside the band top: block 0 is band, below it implied.
     let r = region.data();
-    assert!(!has_chunk(r, ChunkCoords::new(0, -1, 0)));
+    assert!(!has_chunk(r, locate([0, -1, 0]).unwrap().0));
     let hit = r.raycast_block(
         game::rapier3d::math::Vector::new(8.0, -8.0, 8.0),
         game::rapier3d::math::Vector::new(0.0, -1.0, 0.0),
@@ -143,17 +156,19 @@ fn implied_ground_is_solid_to_a_ray() {
 
 #[test]
 fn exposure_invariant_after_random_digs() {
-    // Shaft area: blocks 2..6 x 2..6 (chunk columns 1 and 2); columns 0 and
-    // 3 are an untouched band ring around it (column 0 holds the region's
-    // edge ring, which can't be dug below the surface).
-    let mut region = region(0..=3, 0..=3);
+    // Shaft area: a 4x4 block square straddling the chunk faces at block
+    // 2 * CHUNK_BLOCKS (blocks 2..6 at 2-block chunks, in chunk columns 1 and
+    // 2); columns 0 and 3 are an untouched band ring around it (column 0 holds
+    // the region's edge ring, which can't be dug below the surface).
+    let at = 2 * CHUNK_BLOCKS as i32 - 2;
+    let mut region = region_blocks(0..4 * CHUNK_BLOCKS as i32, 0..4 * CHUNK_BLOCKS as i32);
     let mut depth = [[SURFACE as i32; 4]; 4];
     let mut seed: u64 = 0x5EED_D16;
     let mut refused = 0;
     for i in 0..200 {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let (x, z) = (((seed >> 33) % 4) as usize, ((seed >> 41) % 4) as usize);
-        let pos = [x as i32 + 2, depth[x][z], z as i32 + 2];
+        let pos = [x as i32 + at, depth[x][z], z as i32 + at];
         if dig(&mut region, pos) {
             depth[x][z] -= 1;
         } else {
@@ -167,7 +182,7 @@ fn exposure_invariant_after_random_digs() {
 
 #[test]
 fn bedrock_cannot_be_broken() {
-    let mut region = region(1..=2, 1..=2);
+    let mut region = region_blocks(2..6, 2..6);
     let floor = SURFACE as i32 - UNDERGROUND_DEPTH; // first bedrock block
     for y in (floor + 1..=SURFACE as i32).rev() {
         assert!(dig(&mut region, [2, y, 2]), "stone at y={y} breaks");
@@ -190,15 +205,18 @@ fn bedrock_cannot_be_broken() {
 
 #[test]
 fn placing_into_implied_ground_keeps_the_siblings() {
-    let mut region = region(0..=1, 0..=1);
+    let cb = CHUNK_BLOCKS as i32;
+    let mut region = region_blocks(0..2 * cb, 0..2 * cb);
+    // The implied chunk below chunk (0, 0, 0); the block placed is its bottom
+    // corner block (0, -CHUNK_BLOCKS, 0).
     let c = ChunkCoords::new(0, -1, 0);
-    let expected: Vec<_> = (0..8)
-        .map(|i| (i & 1, (i >> 1) & 1, (i >> 2) & 1))
+    let expected: Vec<_> = (0..CHUNK_BLOCKS.pow(3))
+        .map(|i| (i % CHUNK_BLOCKS, (i / CHUNK_BLOCKS) % CHUNK_BLOCKS, i / (CHUNK_BLOCKS * CHUNK_BLOCKS)))
         .map(|l| (l, region.data().implied_block(c, l).unwrap()))
         .collect();
     let dirt = Block::new(BlockId(1));
     let mut placed = false;
-    region.with_data(|r| placed = r.set_block_safe([0, -2, 0], dirt));
+    region.with_data(|r| placed = r.set_block_safe([0, -cb, 0], dirt));
     assert!(placed);
     let r = region.data();
     let e = r.chunk_key_at(c).expect("the chunk materialised");
@@ -211,7 +229,7 @@ fn placing_into_implied_ground_keeps_the_siblings() {
     // Writing an implied slot's own block changes nothing and reports so.
     let before = state_hash(region.data());
     let mut same = true;
-    region.with_data(|r| same = r.set_block_safe([3, -2, 3], Block::new(STONE)));
+    region.with_data(|r| same = r.set_block_safe([cb + 1, -cb, cb + 1], Block::new(STONE)));
     assert!(!same);
     assert!(!has_chunk(region.data(), ChunkCoords::new(1, -1, 1)));
     assert_eq!(before, state_hash(region.data()));
@@ -219,7 +237,7 @@ fn placing_into_implied_ground_keeps_the_siblings() {
 
 #[test]
 fn bedrock_cannot_be_replaced() {
-    let mut region = region(1..=2, 1..=2);
+    let mut region = region_blocks(2..6, 2..6);
     let floor = SURFACE as i32 - UNDERGROUND_DEPTH;
     let before = state_hash(region.data());
     for pos in [[2, floor, 2], [3, floor - 3, 3]] {
@@ -241,14 +259,16 @@ fn bedrock_cannot_be_replaced() {
 
 #[test]
 fn undo_of_a_materialising_dig_restores_the_hash() {
-    let mut region = region(1..=2, 1..=2);
-    // Block (2, -2, 2) is the bottom of implied chunk sub-Y -1: the dig
-    // materialises that chunk and the one below it (sub-Y -2).
-    let (own, below) = (ChunkCoords::new(1, -1, 1), ChunkCoords::new(1, -2, 1));
+    let mut region = region_blocks(2..6, 2..6);
+    // Block (2, -CHUNK_BLOCKS, 2) is the bottom of implied chunk sub-Y -1: the
+    // dig materialises that chunk and the one below it (sub-Y -2).
+    let pos = [2, -(CHUNK_BLOCKS as i32), 2];
+    let own = locate(pos).unwrap().0;
+    let below = ChunkCoords::new(own.x, own.y - 1, own.z);
     region.with_data(|r| {
         let before = state_hash(r);
         r.new_transaction();
-        assert!(r.set_block_safe([2, -2, 2], air()));
+        assert!(r.set_block_safe(pos, air()));
         assert!(has_chunk(r, own) && has_chunk(r, below), "both chunks materialise");
         // The default hash mode verifies every undo entry as it is rolled back.
         r.rollback();
@@ -289,7 +309,8 @@ fn digging_at_the_region_edge_does_not_reach_outside() {
 
 #[test]
 fn cell_mode_digs_keep_band_semantics() {
-    const CC: usize = 8;
+    // 16-block cells.
+    const CC: usize = 16 / CHUNK_BLOCKS;
     let mut region = Region::new_cells(r0(), CC, None, None);
     let cell = CellCoords::new(0, 0);
     let content = DormantCell {
@@ -303,7 +324,7 @@ fn cell_mode_digs_keep_band_semantics() {
         }))
         .unwrap();
     region.forget_last_event();
-    let ground = ColumnGround::plain([SURFACE; 4], 0, STONE, BEDROCK);
+    let ground = ColumnGround::plain([SURFACE; CHUNK_BLOCKS * CHUNK_BLOCKS], 0, STONE, BEDROCK);
     region.with_data(|r| r.seed_ground_genesis(vec![(ColumnCoords::new(0, 0), ground)]));
     assert!(dig(&mut region, [0, 1, 0]));
     assert!(dig(&mut region, [0, 0, 0]));
@@ -342,8 +363,8 @@ fn click_down() -> Vec<GameEventKind> {
 
 #[test]
 fn a_player_digging_down_lands_on_materialised_ground() {
-    // Chunk columns 3..=5 around the (128, 128) spawn.
-    let mut region = region(3..=5, 3..=5);
+    // The chunk columns around the (128, 128) spawn: blocks 6..12.
+    let mut region = region_blocks(6..12, 6..12);
     forget(&mut region, GameEventKind::CreateClient(0));
     forget(&mut region, input(InputEvent::Key { key: Key::KeyE, pressed: true }));
     forget(&mut region, input(InputEvent::Key { key: Key::KeyE, pressed: false }));
@@ -370,7 +391,7 @@ fn a_player_digging_down_lands_on_materialised_ground() {
             region.handle_event(GameEventKind::Tick).unwrap();
         }
     }
-    assert!(has_chunk(region.data(), ChunkCoords::new(4, -1, 4)), "the chunk below materialised");
+    assert!(has_chunk(region.data(), locate([8, -1, 8]).unwrap().0), "the chunk below materialised");
     let (y, grounded) = player(&region);
     assert!(grounded, "the player stands on the materialised stone");
     assert!(y > 0.0 && y < 25.0, "standing on block -1 (top at y=0), got {y}");

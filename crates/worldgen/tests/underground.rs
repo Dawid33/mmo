@@ -128,8 +128,10 @@ fn band_and_ground_agree() {
 
 /// Step height (m) of the synthetic cliff. The forged ground is latticed at
 /// 4 m (`PROFILE_LATTICE_BLOCKS`), so a step spreads over a lattice cell: a
-/// 40 m step leaves ~10 blocks between neighbouring block columns.
-const STEP_M: f32 = 40.0;
+/// 40 m step leaves ~10 blocks between neighbouring block columns. The step
+/// must exceed `SOIL_DEPTH + 2 * CB` blocks (the cliff test's bar), so it
+/// scales with the chunk height: 40 m at 2-block chunks.
+const STEP_M: f32 = (4 * (SOIL_DEPTH + 2 * CB) + 12) as f32;
 const N: usize = 64;
 const CELL_M: f64 = 4.0;
 const STEP_IX: usize = 32;

@@ -22,7 +22,7 @@ mod common;
 use std::fmt::Write as _;
 
 use common::{
-    body, entity_body, floor_chunks, key, r0, seam_row, seam_x, spawn_slime,
+    approach_seam, body, entity_body, floor_chunks, key, r0, seam_row, seam_x, spawn_slime,
     teleport, ticks, world_of, Body,
 };
 use game::movement::{CHARACTER_SKIN, PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS, UNITS_PER_METER};
@@ -85,7 +85,9 @@ fn walk_flat_across_chunk_seam() -> Vec<Row> {
 /// chunks): a scale seam and a half-block autostep. Floor: x 96..160,
 /// z 96..576 units.
 fn walk_scale_seam() -> Vec<Row> {
-    let world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(if z >= seam_row() { 24 } else { 16 }));
+    let mut world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(if z >= seam_row() { 24 } else { 16 }));
+    // Start 32 units short of the border (the spawn itself at 2-block chunks).
+    approach_seam(&mut world, 32.0);
     run_player(world, |w, t| {
         if t == 0 {
             key(w, Key::KeyS, true);
@@ -98,7 +100,9 @@ fn walk_scale_seam() -> Vec<Row> {
 /// than the step height, so it takes a jump, as in Minecraft. Floor: x 96..160,
 /// z 96..576 units.
 fn step_up_one_block() -> Vec<Row> {
-    let world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(if z >= seam_row() { 32 } else { 16 }));
+    let mut world = world_of(96.0..160.0, 96.0..576.0, |_, z| Chunk::flat_floor(if z >= seam_row() { 32 } else { 16 }));
+    // Start 32 units short of the border (the spawn itself at 2-block chunks).
+    approach_seam(&mut world, 32.0);
     run_player(world, |w, t| {
         if t == 0 {
             key(w, Key::KeyS, true);

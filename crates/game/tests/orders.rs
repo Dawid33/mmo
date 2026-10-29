@@ -115,7 +115,7 @@ fn stone_column() -> Column {
     let band = SubChunk::Dense(Box::new(Chunk::flat_floor_with(32, STONE)));
     // `below` must differ from the band, or normalising collapses it away.
     Column::new(0, Block::new(BlockId(1)), Block::new(BlockId::AIR), vec![band])
-        .with_ground(ColumnGround::plain([SURFACE as i16; 4], 0, STONE, BEDROCK))
+        .with_ground(ColumnGround::plain([SURFACE as i16; CHUNK_BLOCKS * CHUNK_BLOCKS], 0, STONE, BEDROCK))
 }
 
 /// Extent of the test region in blocks along x and z: every order here stays
@@ -448,8 +448,9 @@ fn dev_complete_drops_stale_designations() {
     apply_checked(&mut region, designate(op(1), DesignationKind::Dig, area));
     let stale = [2, SURFACE, 2];
     region.with_data(|r| assert!(r.set_block_safe(stale, Block::new(BlockId::AIR))));
-    let snapshot: Vec<_> = (0..8)
-        .flat_map(|x| (SURFACE - 2..=SURFACE + 1).flat_map(move |y| (0..8).map(move |z| [x, y, z])))
+    let n = ORDER_REGION_BLOCKS as i32;
+    let snapshot: Vec<_> = (0..n)
+        .flat_map(|x| (SURFACE - 2..=SURFACE + 1).flat_map(move |y| (0..n).map(move |z| [x, y, z])))
         .map(|p| (p, block_at(&region, p)))
         .collect();
     apply_checked(&mut region, Order::DevCompleteAll);

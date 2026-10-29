@@ -38,14 +38,14 @@ use game::{
     GameEventKind,
 };
 
-/// Two flat-floor chunks at the corner of a cell.
+/// Two flat-floor chunks at the corner of a cell: its first two columns along
+/// x, or — when the cell is a single chunk wide (16-block chunks) — the corner
+/// chunk and the one above it. Either way both lie inside the cell.
 pub fn cell_content(cell: CellCoords) -> DormantCell {
     let (x, z) = (cell.x as usize * CC, cell.z as usize * CC);
+    let second = if CC > 1 { ChunkCoords::new(x + 1, 0, z) } else { ChunkCoords::new(x, 1, z) };
     DormantCell {
-        chunks: vec![
-            (ChunkCoords::new(x, 0, z), Chunk::flat_floor(8)),
-            (ChunkCoords::new(x + 1, 0, z), Chunk::flat_floor(4)),
-        ],
+        chunks: vec![(ChunkCoords::new(x, 0, z), Chunk::flat_floor(8)), (second, Chunk::flat_floor(4))],
         entities: vec![],
     }
 }
@@ -547,14 +547,22 @@ fn a_legacy_region_ignores_cell_changes() {
     assert_eq!(r.data().ecs.chunk.iter().filter(|(_, c)| c.is_some()).count(), 0);
 }
 
-/// 1-chunk (2-block) cells. The player stands in cell (4,5) looking −Z
+/// 1-chunk cells, so cell (x, z) is exactly chunk column (x, z) at any chunk
+/// size and the cell/chunk pairing below always holds.
+///
+/// TODO(chunk flip): the geometry itself is in blocks at 2-block chunks
+/// (player 2 blocks from the wall, `REACH` = 5); at 16-block cells the player
+/// would be 16+ blocks from the wall, so the scenario needs a cell edge below
+/// the chunk size to keep its intent.
+///
+/// (2-block cells at 2-block chunks.) The player stands in cell (4,5) looking −Z
 /// (yaw 0) across cell (4,4) at a two-chunk-tall wall in cell (4,3); a
 /// right click places against the wall's +Z face, i.e. at block z = 8, which
 /// is inside cell (4,4). `middle_active` controls whether (4,4) is active.
 fn place_across_a_cell(middle_active: bool) -> Region {
     use game::{InputEvent, Pose, Key, MouseButton};
     let cell = |x, z| CellCoords::new(x, z);
-    let solid = || Chunk::flat_floor(32);
+    let solid = || Chunk::flat_floor(game::CHUNK_UNITS as u32);
     let payload = |c: CellCoords, chunks: Vec<(ChunkCoords, Chunk)>| CellPayload {
         cell: c,
         version: 1,
