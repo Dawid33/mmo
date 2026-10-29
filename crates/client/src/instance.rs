@@ -655,9 +655,12 @@ impl GameInstanceManager {
                         .unwrap();
                 }
             }
-            GameEventKind::CreateClient(_) => {
-                // Players are created by the server on connection.
-                warn!("ignoring locally-originated CreateClient");
+            kind @ (GameEventKind::CreateClient(_)
+            | GameEventKind::CreateClientAt(..)
+            | GameEventKind::ClientLeft(_)) => {
+                // Players are created (and moved) by the server: on
+                // connection, and when Play moves a session.
+                warn!("ignoring locally-originated {kind:?}");
             }
             // Transfer events are relayed into regions directly (server) or
             // client-predicted (later task); never locally-originated here.

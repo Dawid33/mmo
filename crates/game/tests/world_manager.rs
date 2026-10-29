@@ -89,21 +89,28 @@ fn subscribe_spawns_region_and_delivers_snapshot() {
 }
 
 #[test]
-fn events_route_only_to_subscribed_regions() {
+fn client_sent_session_events_are_dropped() {
     let mut h = harness();
     h.event(ServerEvent::ClientConnected(0), 0);
     let rc = RegionCoords::new(1, 0);
     h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 0);
     h.drain_packets();
 
-    // Subscribed: a generic (non-input) event comes back as an authoritative
-    // GameEvent. (PlayerInput is now home-routed, so it can't probe the
-    // subscription path — use CreateClient, which flows through it.)
-    let ev = GameEvent::new(GameEventKind::CreateClient(0), 0, rc);
-    h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 0);
-    assert!(h.drain_packets().iter().any(|(_, p)| matches!(p, ServerPacket::GameEvent(_))));
+    // Sessions are created and moved by the manager only: a client-sent
+    // CreateClient / CreateClientAt / ClientLeft never reaches a region,
+    // even a subscribed one.
+    for kind in [
+        GameEventKind::CreateClient(0),
+        GameEventKind::CreateClientAt(0, [1, 1]),
+        GameEventKind::ClientLeft(0),
+    ] {
+        let ev = GameEvent::new(kind, 0, rc);
+        h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 0);
+        h.settle(0);
+        assert!(!h.drain_packets().iter().any(|(_, p)| matches!(p, ServerPacket::GameEvent(_))));
+    }
 
-    // Not subscribed: dropped silently.
+    // Unsubscribed region: dropped, and not woken.
     let far = RegionCoords::new(9, 9);
     let ev = GameEvent::new(GameEventKind::CreateClient(0), 0, far);
     h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 0);
@@ -186,10 +193,10 @@ fn dead_region_respawns_and_resnapshots_subscribers() {
     // the input channel's receiver is dropped, so the next send fails).
     h.manager.spawner_mut().kill(rc);
 
-    // Next routed event detects the death, respawns, resnapshots. (A
-    // subscription-routed event, not PlayerInput, which is now home-routed.)
-    let ev = GameEvent::new(GameEventKind::CreateClient(0), 0, rc);
-    h.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), 0), 500);
+    // Next send to the region detects the death, respawns, resnapshots. (A
+    // repeated subscribe, whose snapshot request is routed to `rc` itself;
+    // PlayerInput is home-routed and client-sent session events are dropped.)
+    h.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), 0), 500);
     assert!(h.manager.running_regions().contains(&rc));
     assert!(h.drain_packets().iter().any(|(target, p)| {
         *target == Some(0) && matches!(p, ServerPacket::Region(id, _) if *id == rc)

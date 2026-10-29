@@ -146,6 +146,8 @@ fn ev_desc(e: &GameEvent) -> String {
         GameEventKind::UiAction(c, a) => format!("UiAction(c={c:?}, {a:?})"),
         GameEventKind::Order(c, o) => format!("Order(c={c:?}, {o:?})"),
         GameEventKind::CreateClient(c) => format!("CreateClient(c={c:?})"),
+        GameEventKind::CreateClientAt(c, col) => format!("CreateClientAt(c={c:?}, col={col:?})"),
+        GameEventKind::ClientLeft(c) => format!("ClientLeft(c={c:?})"),
         GameEventKind::Quit => "Quit".to_string(),
         GameEventKind::EntityArrived(b) => {
             format!("EntityArrived(c={:?})", b.client.as_ref().map(|(c, _)| *c))
@@ -567,6 +569,25 @@ impl Region {
                     Client { inventory: crate::Inventory::seeded(), ..Client::default() },
                 );
                 self.data.create_player_safe(client_id);
+            }
+            GameEventKind::CreateClientAt(client_id, column) => {
+                info!("{:?}", event);
+                self.data.clients.insert(
+                    client_id,
+                    Client { inventory: crate::Inventory::seeded(), ..Client::default() },
+                );
+                self.data.create_player_at_safe(client_id, crate::block_column_xz(column));
+            }
+            GameEventKind::ClientLeft(client_id) => {
+                info!("{:?}", event);
+                match self.data.player_entites.get(&client_id).copied() {
+                    // The bundle is for handoffs; a leaving session drops it.
+                    Some(key) => drop(self.data.extract_entity_safe(key, self.id)),
+                    None => log::warn!(
+                        "[region r={:?}] ClientLeft({client_id}): no player body here",
+                        self.id
+                    ),
+                }
             }
             GameEventKind::CellChanges(mut changes) => 'cells: {
                 if !self.data.cells.enabled() {

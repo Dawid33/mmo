@@ -518,29 +518,19 @@ impl<S: RegionSpawner> WorldManager<S> {
                             ),
                         }
                     }
-                    // Manager-internal event kinds: a client must never inject
-                    // these directly. Drop rather than forward to a region.
+                    // Manager-internal / server-authored event kinds: a client
+                    // must never inject these directly (sessions are created
+                    // and moved by the manager). Drop rather than forward.
                     GameEventKind::EntityArrived(_)
                     | GameEventKind::GhostUpdate(_)
-                    | GameEventKind::CellChanges(_) => {
+                    | GameEventKind::CellChanges(_)
+                    | GameEventKind::CreateClient(_)
+                    | GameEventKind::CreateClientAt(..)
+                    | GameEventKind::ClientLeft(_) => {
                         log::debug!(
                             "dropping internal event kind sent by client {id} for {:?}",
                             event.region_id
                         );
-                    }
-                    kind => {
-                        let subscribed = self
-                            .sessions
-                            .get(&id)
-                            .map_or(false, |s| s.subscribed.contains(&event.region_id));
-                        if subscribed && self.regions.contains_key(&event.region_id) {
-                            self.send_to_region(event.region_id, RegionInput::Event(kind));
-                        } else {
-                            log::debug!(
-                                "dropping event from client {id} for unsubscribed region {:?}",
-                                event.region_id
-                            );
-                        }
                     }
                     }
                 }

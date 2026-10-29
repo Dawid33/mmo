@@ -456,6 +456,12 @@ pub enum GameEventKind {
     /// Server-authored cell loading (cell-mode regions only): applied at the
     /// confirmed head by every replica, never predicted.
     CellChanges(crate::CellChanges),
+    /// Server-authored: the client's session left this region (Play moved
+    /// it elsewhere). Removes its player body and `clients` entry, undoably.
+    ClientLeft(ClientId),
+    /// Server-authored: like `CreateClient`, but the body lands over the
+    /// region-local block column `[bx, bz]` instead of the spawn column.
+    CreateClientAt(ClientId, [u32; 2]),
 }
 
 impl GameEventKind {
@@ -465,13 +471,15 @@ impl GameEventKind {
         match self {
             GameEventKind::PlayerInput(id, _)
             | GameEventKind::CreateClient(id)
+            | GameEventKind::CreateClientAt(id, _)
             | GameEventKind::UiAction(id, _)
             | GameEventKind::Order(id, _) => Some(*id),
             GameEventKind::Tick
             | GameEventKind::Quit
             | GameEventKind::EntityArrived(_)
             | GameEventKind::GhostUpdate(_)
-            | GameEventKind::CellChanges(_) => None,
+            | GameEventKind::CellChanges(_)
+            | GameEventKind::ClientLeft(_) => None,
         }
     }
 

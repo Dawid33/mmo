@@ -427,6 +427,9 @@ impl RegionRunner {
                         GameEventKind::CreateClient(_) => {
                             self.ensure_required(self.region.data().spawn_xz())
                         }
+                        GameEventKind::CreateClientAt(_, column) => {
+                            self.ensure_required(crate::block_column_xz(*column))
+                        }
                         GameEventKind::EntityArrived(b) => {
                             let t = b.isometry.translation;
                             self.ensure_required((t.x, t.z));

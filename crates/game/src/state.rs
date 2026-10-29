@@ -682,6 +682,12 @@ pub fn player_spawn_xz(cell_mode: bool) -> (f32, f32) {
     }
 }
 
+/// Region-local voxel (x, z) of the centre of block column `[bx, bz]`.
+pub fn block_column_xz([bx, bz]: [u32; 2]) -> (f32, f32) {
+    let bv = crate::BLOCK_VOXELS as f32;
+    ((bx as f32 + 0.5) * bv, (bz as f32 + 0.5) * bv)
+}
+
 pub const PLAYER_SPAWN_X: f32 = 128.0;
 pub const PLAYER_SPAWN_Z: f32 = 128.0;
 /// Spawn height used only when the spawn column has no terrain (all air).
@@ -932,8 +938,13 @@ impl Rollback {
     }
 
     pub fn create_player_safe(&mut self, client_id: ClientId) {
-        let (spawn_x, spawn_z) = self.spawn_xz();
-        // Spawn on the terrain surface at the region-local spawn column, clear
+        self.create_player_at_safe(client_id, self.spawn_xz());
+    }
+
+    /// [`Self::create_player_safe`] over region-local `xz` (voxel units).
+    pub fn create_player_at_safe(&mut self, client_id: ClientId, xz: (f32, f32)) {
+        let (spawn_x, spawn_z) = xz;
+        // Spawn on the terrain surface at the given region-local column, clear
         // of the capsule — real terrain has real elevation, so the old
         // hardcoded flat-floor height would bury the player. `surface + 1` is
         // the surface voxel's top face; capsule half-extent + clearance sits
