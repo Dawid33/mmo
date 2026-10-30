@@ -319,7 +319,7 @@ fn mass_properties_are_diagonal_and_positive() {
 }
 
 #[test]
-fn leaves_have_no_collider_but_mass() {
+fn falling_leaves_collide_but_add_no_collider_mass() {
     let reg = registry();
     let log = Block::new(reg.id_of("oak_log").unwrap());
     let leaves = Block::new(reg.id_of("oak_leaves").unwrap());
@@ -335,10 +335,9 @@ fn leaves_have_no_collider_but_mass() {
     let collider = r.physics.colliders.get(body.colliders()[0]).unwrap();
     assert_eq!(collider.mass(), 0.0, "colliders carry no mass");
     let aabb = collider.compute_aabb();
-    // Only the log block's cube: one block wide and tall.
+    // The log and both leaf blocks (whole blocks): two wide, two tall.
     let size = aabb.maxs - aabb.mins;
-    assert!((size.x - B).abs() < 1e-3 && (size.y - B).abs() < 1e-3 && (size.z - B).abs() < 1e-3, "{aabb:?}");
-
+    assert!((size.x - 2.0 * B).abs() < 1e-3 && (size.y - 2.0 * B).abs() < 1e-3 && (size.z - B).abs() < 1e-3, "{aabb:?}");
 }
 
 /// A thin branch: a 3×3-voxel rod along x through the block's middle. Every
@@ -403,20 +402,23 @@ fn thin_chiseled_branch_collides_and_rests_on_the_floor() {
 }
 
 #[test]
-fn leaves_only_detach_clears_and_spawns_no_body() {
+fn leaves_only_detach_falls_and_rests() {
     let reg = registry();
     let leaves = Block::new(reg.id_of("oak_leaves").unwrap());
     let (mut region, _recv) = region_over(0..32);
-    let set = [[5, 1, 5], [5, 2, 5], [6, 2, 5]];
+    let set = [[5, 3, 5], [5, 4, 5], [6, 4, 5]];
     build(&mut region, &set, leaves);
-    let mut out = Some(EntityKey::default());
-    region.with_data(|r| out = r.detach_blocks_safe(&set, SettlePolicy::Despawn, Vector::ZERO));
-    assert_eq!(out, None, "nothing solid: no body");
+    let e = detach(&mut region, &set, Vector::ZERO);
     let r = region.data();
     for p in set {
         assert_eq!(block_at(r, p).id, BlockId::AIR, "{p:?} cleared");
     }
-    assert!(r.ecs.voxel_body.iter().all(|(_, v)| v.is_none()), "no voxel body");
+    let start_y = body_pose(r, e).translation.y;
+    let (ticks, min_y, _, _) =
+        run_until_gone(&mut region, e, SETTLE_TIMEOUT_TICKS + 5, |_| {}).expect("the leaves despawn");
+    assert!(ticks < SETTLE_TIMEOUT_TICKS, "they came to rest ({ticks} ticks), not timed out");
+    // Lowest leaf block from y 3 down onto the floor top (y 1): two blocks.
+    assert!((start_y - min_y - 2.0 * B).abs() < 2.0, "fell two blocks onto the floor: {start_y} -> {min_y}");
 }
 
 #[test]
@@ -442,8 +444,8 @@ fn rollback_of_thin_branch_and_leaves_only_detach_is_bit_exact() {
         r.rollback();
         assert_eq!(before, state_hash(&r), "thin branch detach rolls back bit-exact ({mode:?})");
         r.new_transaction();
-        assert!(r.detach_blocks_safe(&leaf_set, SettlePolicy::Despawn, Vector::ZERO).is_none());
-        assert_ne!(before, state_hash(&r), "the leaves were cleared");
+        assert!(r.detach_blocks_safe(&leaf_set, SettlePolicy::Despawn, Vector::ZERO).is_some());
+        assert_ne!(before, state_hash(&r), "the leaves were detached");
         r.rollback();
         assert_eq!(before, state_hash(&r), "leaves-only detach rolls back bit-exact ({mode:?})");
     }
@@ -505,4 +507,37 @@ fn clear_blocks_refuses_bedrock_and_materialises_ground() {
     assert_eq!(cleared, 1);
     assert!(region.data().chunk_key_at(coords).is_some(), "the implied chunk became real");
     assert_eq!(block_at(region.data(), deep).id, BlockId::AIR);
+}
+
+/// A falling body's leaves collide (standing leaves do not): a log with two
+/// leaf blocks hanging under it, detached above the floor, comes to rest on
+/// its LEAVES — their bottom on the floor, not the log's.
+#[test]
+fn falling_leaves_collide_and_rest_on_the_floor() {
+    let reg = registry();
+    let log = Block::new(reg.id_of("oak_log").unwrap());
+    let leaves = Block::new(reg.id_of("oak_leaves").unwrap());
+    let (mut region, _recv) = region_over(0..32);
+    build(&mut region, &[[16, 5, 16]], log);
+    build(&mut region, &[[16, 3, 16], [16, 4, 16]], leaves);
+    let e = detach(&mut region, &[[16, 3, 16], [16, 4, 16], [16, 5, 16]], Vector::ZERO);
+    let model = region.data().ecs.voxel_body.get(e).model.clone();
+    let com = model_mass_properties(&model).local_com;
+    let floor_y = B;
+    let mut leaf_bottom = f32::INFINITY;
+    let (ticks, _, _, _) = run_until_gone(&mut region, e, SETTLE_TIMEOUT_TICKS + 5, |reg| {
+        let r = reg.data();
+        if alive(r, e) {
+            let pose = body_pose(r, e);
+            // The leaf block at model offset [0, 0, 0]: its four bottom corners.
+            leaf_bottom = [[0.0, 0.0], [B, 0.0], [0.0, B], [B, B]]
+                .into_iter()
+                .map(|[x, z]| (pose.translation + pose.rotation * (Vector::new(x, 0.0, z) - com)).y)
+                .fold(f32::INFINITY, f32::min);
+        }
+    })
+    .expect("the body despawns");
+    assert!(ticks < SETTLE_TIMEOUT_TICKS, "it came to rest ({ticks} ticks), not timed out");
+    assert!(leaf_bottom >= floor_y - 1.0, "the leaves rest on the floor: leaf bottom {leaf_bottom}, floor {floor_y}");
+    assert!(leaf_bottom < floor_y + 1.0, "it fell onto the floor: leaf bottom {leaf_bottom}");
 }

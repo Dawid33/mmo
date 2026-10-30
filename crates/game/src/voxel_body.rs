@@ -107,6 +107,13 @@ pub fn density_of(id: BlockId) -> f32 {
     }
 }
 
+/// Whether `id` is foliage (leaves): a non-solid cutout block. Standing, it
+/// has no collider; in a voxel body it collides as a whole block.
+pub fn is_foliage(id: BlockId) -> bool {
+    let props = block_props();
+    id != BlockId::AIR && !props.is_solid(id) && props.is_cutout(id)
+}
+
 /// Model-unit origin of block offset `o`.
 fn block_base(o: [i16; 3]) -> [f64; 3] {
     o.map(|v| f64::from(v) * BLOCK_VOXELS as f64)
@@ -180,31 +187,42 @@ pub fn model_mass_properties(model: &VoxelModel) -> MassProperties {
 
 /// The model's collision volume as integer model-unit boxes `(min, max)`:
 /// each solid block's collider cells (the rule a terrain chunk applies:
-/// non-solid blocks none, tree wood on the half-block grid, so a falling log
-/// is as solid as it stood) on the half-block grid, greedy-merged; a
-/// chiseled block's remaining voxel-grid cells contribute their bounding
-/// box. A solid chiseled block that yields no cell at all (thin wood that
-/// fills no half-grid octant) contributes its solid voxels' bounding box, so
-/// every model with a solid block has a box. Deterministic order.
+/// tree wood on the half-block grid, so a falling log is as solid as it
+/// stood) and each leaf block ([`is_foliage`]) as a whole block — unlike
+/// standing leaves, a falling crown collides — on the half-block grid,
+/// greedy-merged; a chiseled block's remaining voxel-grid cells contribute
+/// their bounding box. A solid chiseled block that yields no cell at all
+/// (thin wood that fills no half-grid octant) contributes its solid voxels'
+/// bounding box, so every model with a solid or leaf block has a box. Other
+/// non-solid blocks contribute nothing. Deterministic order.
 pub fn model_collider_boxes(model: &VoxelModel) -> Vec<([i32; 3], [i32; 3])> {
     let h = HALF_BLOCK_VOXELS as i32;
     let mut halves: BTreeSet<[i32; 3]> = BTreeSet::new();
     let mut out = Vec::new();
     for (&o, (block, chisel)) in &model.blocks {
+        let o2 = o.map(|v| i32::from(v) * 2);
+        if is_foliage(block.id) {
+            // Leaves: non-solid while they stand, but a falling crown lands
+            // on them (a body whose leaves passed through the ground would
+            // sink its crown into it). Whole block, chisel or not.
+            for (dx, dy, dz) in (0..8).map(|i| (i % 2, (i / 2) % 2, i / 4)) {
+                halves.insert([o2[0] + dx, o2[1] + dy, o2[2] + dz]);
+            }
+            continue;
+        }
         let cells = block_collider_cells(*block, chisel.as_ref());
         if cells.blocks.is_empty() && cells.halves.is_empty() && cells.voxels.is_empty() {
             // Thin chiseled wood (a pine or birch limb, a few voxels across)
             // fills no half-grid octant, and a falling piece made only of it
             // would have nothing to land on. In a body (terrain keeps the
             // half grid) such a block collides as its solid voxels' bounding
-            // box. Non-solid blocks (leaves) still contribute nothing.
+            // box. Other non-solid blocks still contribute nothing.
             if let Some((lo, hi)) = chisel.as_ref().and_then(|c| solid_voxel_bounds(*block, c)) {
                 let base = o.map(|v| i32::from(v) * BLOCK_VOXELS as i32);
                 out.push(([0, 1, 2].map(|a| base[a] + lo[a]), [0, 1, 2].map(|a| base[a] + hi[a])));
             }
             continue;
         }
-        let o2 = o.map(|v| i32::from(v) * 2);
         for _ in &cells.blocks {
             for (dx, dy, dz) in (0..8).map(|i| (i % 2, (i / 2) % 2, i / 4)) {
                 halves.insert([o2[0] + dx, o2[1] + dy, o2[2] + dz]);
@@ -281,8 +299,10 @@ impl Rollback {
     /// model's centre of mass, spinning at `angvel` (rad/s, world axes).
     /// Refused positions (bedrock, the edge ring, outside the region) and
     /// air are skipped; `None`, with nothing changed, when nothing is left.
-    /// A set with no solid block (leaves only) is cleared but spawns no
-    /// body (it would have no collider to land on; `None` too).
+    /// A set with nothing that collides (no solid or leaf block — e.g.
+    /// water only) is cleared but spawns no body (it would fall through the
+    /// ground until the timeout; `None` too). A leaves-only set falls like
+    /// any other.
     pub fn detach_blocks_safe(&mut self, positions: &[BlockPos], policy: SettlePolicy, angvel: Vector) -> Option<EntityKey> {
         let mut taken: BTreeMap<BlockPos, (Block, Option<ChiselData>)> = BTreeMap::new();
         for &pos in positions {
@@ -311,7 +331,7 @@ impl Rollback {
             .collect();
         self.clear_blocks_safe(&positions);
 
-        // Nothing solid (leaves only): with no collider the body would fall
+        // Nothing that collides: with no collider the body would fall
         // through the ground until the timeout, so it settles at once — and
         // as settling is a despawn, it is simply never spawned. The terrain
         // is still cleared (one undoable `clear_blocks_safe`, nothing else
