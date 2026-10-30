@@ -309,7 +309,7 @@ fn tree_blocks(
                     mask[vx + BLOCK_VOXELS * (vy + BLOCK_VOXELS * vz)].then_some(0)
                 })
             });
-            let placed = PlacedTreeBlock { block: Block::with_tree_id(id, tree.id), chisel, wood };
+            let placed = PlacedTreeBlock { block: Block::with_tree(id, tree.id, b.limb), chisel, wood };
             match out.entry(p) {
                 std::collections::btree_map::Entry::Vacant(e) => {
                     e.insert(placed);

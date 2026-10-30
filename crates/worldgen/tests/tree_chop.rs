@@ -34,6 +34,9 @@ impl TileSource for Tree {
     fn tree_id(&self, p: TilePos) -> u32 {
         self.blocks.get(&p).map_or(0, |(_, b)| b.tree_id())
     }
+    fn tree_limb(&self, p: TilePos) -> u8 {
+        self.blocks.get(&p).map_or(0, |(_, b)| b.limb())
+    }
 }
 
 impl Tree {
@@ -50,7 +53,7 @@ impl Tree {
                     TreePart::Branch => branch,
                     TreePart::Leaves => leaves,
                 };
-                (b.offset, (b.part, Block::with_tree_id(block, TREE)))
+                (b.offset, (b.part, Block::with_tree(block, TREE, b.limb)))
             })
             .collect();
         Tree { blocks }
@@ -91,58 +94,135 @@ fn each_tree(mut check: impl FnMut(&Species, u64, u16, &Tree)) {
     }
 }
 
+impl Tree {
+    /// Lowest wood level of each limb (lowest leaf level for a limb with no
+    /// wood).
+    fn limb_floors(&self) -> BTreeMap<u8, i32> {
+        let mut out: BTreeMap<u8, (bool, i32)> = BTreeMap::new();
+        for (p, (part, b)) in &self.blocks {
+            if b.limb() != 0 {
+                let key = (*part == TreePart::Leaves, p[1]);
+                let f = out.entry(b.limb()).or_insert(key);
+                *f = (*f).min(key);
+            }
+        }
+        out.into_iter().map(|(l, (_, y))| (l, y)).collect()
+    }
+}
+
+/// Share of the blocks above `y` that `f` fells.
+fn share_above(tree: &Tree, f: &Felling, y: i32) -> f64 {
+    let down = felled(f);
+    let above: Vec<_> = tree.blocks.keys().filter(|p| p[1] > y).collect();
+    above.iter().filter(|p| down.contains(**p)).count() as f64 / above.len() as f64
+}
+
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn trunk_cut_at_a_third_fells_what_is_above() {
-    let mut worst = f64::INFINITY;
+fn trunk_cut_at_a_third_fells_the_trunk_above_and_the_limbs_rooted_there() {
+    let mut shares: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
     each_tree(|sp, seed, age, tree| {
         let y = tree.top_log() / 3;
         let cut = tree.trunk_at(y).unwrap_or_else(|| panic!("{} {seed}/{age}: no log at {y}", sp.name));
         let f = fell(tree, cut).unwrap();
         let down = felled(&f);
-        let above: Vec<_> = tree.blocks.keys().filter(|p| p[1] > y).collect();
-        let share = above.iter().filter(|p| down.contains(**p)).count() as f64 / above.len() as f64;
-        worst = worst.min(share);
-        assert!(share >= 0.9, "{} seed {seed} age {age}: cut at y {y} fells {:.0} % of the {} blocks above", sp.name, share * 100.0, above.len());
+        let floors = tree.limb_floors();
+        for (p, (_, b)) in &tree.blocks {
+            let falls = match b.limb() {
+                0 => p[1] > y,
+                l => floors.get(&l).is_some_and(|&fl| fl >= y),
+            };
+            if !f.cut.contains(p) {
+                assert_eq!(down.contains(p), falls, "{} seed {seed} age {age}: {p:?} limb {}", sp.name, b.limb());
+            }
+        }
         for a in tree.anchors() {
             assert!(!down.contains(&a) && !f.cut.contains(&a), "{} seed {seed} age {age}: anchor {a:?} must stand", sp.name);
         }
+        let share = share_above(tree, &f, y);
+        // A pine's whorls start low: the ones rooted below a 1/3 cut stay on
+        // the stump (measured 71-80 % felled), the rest falls.
+        let min_share = if sp.name == "pine" { 0.6 } else { 0.9 };
+        assert!(share >= min_share, "{} seed {seed} age {age}: cut at y {y} fells {:.1} % above", sp.name, share * 100.0);
+        shares.entry(sp.name).or_default().push(share);
     });
-    println!("worst share felled above a 1/3 trunk cut: {:.1} %", worst * 100.0);
+    for (name, v) in shares {
+        let (min, mean) = (v.iter().copied().fold(1.0, f64::min), v.iter().sum::<f64>() / v.len() as f64);
+        println!("{name}: share above a 1/3 trunk cut felled: min {:.1} %, mean {:.1} %", min * 100.0, mean * 100.0);
+    }
 }
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn oak_branch_cut_never_fells_trunk_wood() {
+fn trunk_cut_below_every_limb_fells_what_is_above() {
+    let mut worst = f64::INFINITY;
+    each_tree(|sp, seed, age, tree| {
+        let y = tree.limb_floors().values().copied().min().unwrap_or(1).max(1);
+        let Some(cut) = tree.trunk_at(y) else { return };
+        let f = fell(tree, cut).unwrap();
+        let share = share_above(tree, &f, y);
+        worst = worst.min(share);
+        assert!(share >= 0.9, "{} seed {seed} age {age}: cut at y {y} fells {:.1} % of the blocks above", sp.name, share * 100.0);
+    });
+    println!("worst share felled above a trunk cut below every limb: {:.1} %", worst * 100.0);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn oak_branch_cut_fells_only_its_limb() {
     let oak = SPECIES.iter().find(|s| s.name == "oak").unwrap();
-    let (mut cuts, mut felling) = (0, 0);
+    let mut cuts = 0;
     for seed in SEEDS {
         for age in AGES {
             let tree = Tree::new(oak, seed, age);
-            let logs: BTreeSet<_> = tree.of(TreePart::Log).collect();
             let anchors = tree.anchors();
             for cut in tree.of(TreePart::Branch) {
+                let limb = tree.blocks[&cut].1.limb();
+                assert!(limb > 0, "seed {seed} age {age}: branch {cut:?} is on a limb");
                 let f = fell(&tree, cut).unwrap();
                 assert_eq!(f.cut, vec![cut], "a branch cut takes one block");
                 let down = felled(&f);
-                assert!(down.iter().all(|p| !logs.contains(p)), "seed {seed} age {age}: branch cut {cut:?} felled trunk");
+                assert!(!down.is_empty(), "seed {seed} age {age}: branch cut {cut:?} fells nothing");
+                for p in &down {
+                    let (part, b) = tree.blocks[p];
+                    assert_eq!(b.limb(), limb, "seed {seed} age {age}: {p:?} is not limb {limb}");
+                    assert!(!(part == TreePart::Log && b.limb() == 0), "trunk log {p:?} fell");
+                }
                 assert!(anchors.iter().all(|a| !down.contains(a)));
                 cuts += 1;
-                if !down.is_empty() {
-                    felling += 1;
-                    let leaves = down.iter().filter(|p| tree.blocks[*p].0 == TreePart::Leaves).count();
-                    let wood = down.len() - leaves;
-                    // A felled limb tip with no wood beyond it may hold no leaves.
-                    assert!(wood > 0, "seed {seed} age {age}: {cut:?} felled only leaves");
-                }
             }
         }
     }
-    // Generated oak twigs are thin 26-connected lines that touch each other
-    // and the limbs, so one cut block rarely separates anything (measured
-    // 1/586 on these seeds): only the invariants are pinned here.
-    println!("oak branch cuts felling something: {felling}/{cuts}");
+    println!("oak branch cuts, every one felling only its limb: {cuts}");
     assert!(cuts > 0);
+}
+
+#[test]
+fn neighbouring_tree_is_untouched() {
+    // Two mature oaks 6 blocks apart, crowns overlapping (the first keeps a
+    // shared block): every cut on the first fells only its own blocks.
+    let oak = SPECIES.iter().find(|s| s.name == "oak").unwrap();
+    let mut both = Tree::new(oak, 1, MAX_AGE);
+    let other = Tree::new(oak, 2, MAX_AGE);
+    let mut overlap = 0;
+    for (p, (part, b)) in other.blocks {
+        let q = [p[0] + 6, p[1], p[2]];
+        if both.blocks.contains_key(&q) {
+            overlap += 1;
+        } else {
+            both.blocks.insert(q, (part, Block::with_tree(b.id, TREE + 1, b.limb())));
+        }
+    }
+    let first: Vec<TilePos> = both.blocks.iter().filter(|(_, (_, b))| b.tree_id() == TREE).map(|(p, _)| *p).collect();
+    let touching = first.iter().any(|p| {
+        (-1..=1).any(|d| both.blocks.get(&[p[0] + d, p[1], p[2]]).is_some_and(|(_, b)| b.tree_id() == TREE + 1))
+    });
+    assert!(touching, "the crowns touch ({overlap} shared blocks)");
+    let cuts = [both.trunk_at(both.top_log() / 3).unwrap(), both.of(TreePart::Branch).find(|p| both.blocks[p].1.tree_id() == TREE).unwrap()];
+    for cut in cuts {
+        let f = fell(&both, cut).unwrap();
+        assert!(felled(&f).iter().all(|p| both.blocks[p].1.tree_id() == TREE), "cut {cut:?} felled the neighbour");
+    }
 }
 
 #[test]

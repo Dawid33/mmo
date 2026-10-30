@@ -160,6 +160,9 @@ pub trait TileSource {
     /// The tree id of the block at `p` (`Block::tree_id`); 0 when none or
     /// unknown.
     fn tree_id(&self, p: TilePos) -> u32;
+    /// The tree limb of the block at `p` (`Block::limb`; 0 = the trunk, or
+    /// none).
+    fn tree_limb(&self, p: TilePos) -> u8;
 }
 
 /// Whether `kind` may be designated on tile `p`.
@@ -249,6 +252,12 @@ impl TileSource for Rollback {
         crate::edit::locate(p)
             .and_then(|(coords, local)| self.current_block(coords, local))
             .map_or(0, |b| b.tree_id())
+    }
+
+    fn tree_limb(&self, p: TilePos) -> u8 {
+        crate::edit::locate(p)
+            .and_then(|(coords, local)| self.current_block(coords, local))
+            .map_or(0, |b| b.limb())
     }
 }
 

@@ -276,6 +276,9 @@ mod tests {
         fn tree_id(&self, _: TilePos) -> u32 {
             0
         }
+        fn tree_limb(&self, _: TilePos) -> u8 {
+            0
+        }
     }
 
     /// R20: the cap is drawn only where the cut slices through material —

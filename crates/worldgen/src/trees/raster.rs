@@ -49,12 +49,17 @@ pub struct TreeBlock {
     /// Solid voxels of a partial wood block, `BLOCK_MASK_LEN` entries, x fastest,
     /// then y, then z (`ChiselData::from_fn`'s order); `None` = the whole block.
     pub chisel: Option<Vec<bool>>,
+    /// The limb it belongs to (`TreeSkeleton::limbs`; 0 = the trunk): wood
+    /// takes the lowest limb of the segments filling it (the trunk wins at a
+    /// junction), leaves the lowest limb of the clusters covering them.
+    pub limb: u8,
 }
 
 struct Wood {
     /// One bit per voxel: `rows[vy + vz·16]` bit `vx`.
     rows: [u16; BLOCK_VOXELS * BLOCK_VOXELS],
     log: bool,
+    limb: u8,
 }
 
 impl Wood {
@@ -106,6 +111,8 @@ struct Grid {
     wood: Vec<u32>,
     woods: Vec<Wood>,
     leaf: Vec<bool>,
+    /// Per cell, the lowest limb of the leaf clusters covering it.
+    leaf_limb: Vec<u8>,
 }
 
 impl Grid {
@@ -114,7 +121,7 @@ impl Grid {
         let lo = [lo[0].div_euclid(BV), lo[1].max(0).div_euclid(BV), lo[2].div_euclid(BV)];
         let dim = [0, 1, 2].map(|i| (hi[i].max(0).div_euclid(BV) - lo[i] + 1).max(1));
         let n = (dim[0] * dim[1] * dim[2]) as usize;
-        Grid { lo, dim, wood: vec![0; n], woods: Vec::new(), leaf: vec![false; n] }
+        Grid { lo, dim, wood: vec![0; n], woods: Vec::new(), leaf: vec![false; n], leaf_limb: vec![u8::MAX; n] }
     }
 
     /// Cell of block `b`, ordered (y, z, x) so cell order is output order.
@@ -138,7 +145,7 @@ impl Grid {
     }
 
     /// Mark voxels `x0..=x1` of voxel row (y, z) solid.
-    fn fill_row(&mut self, x0: i32, x1: i32, y: i32, z: i32, log: bool) {
+    fn fill_row(&mut self, x0: i32, x1: i32, y: i32, z: i32, log: bool, limb: u8) {
         let (by, bz, vy, vz) = (y.div_euclid(BV), z.div_euclid(BV), y.rem_euclid(BV), z.rem_euclid(BV));
         let mut x = x0;
         while x <= x1 {
@@ -146,11 +153,12 @@ impl Grid {
             let end = x1.min(bx * BV + BV - 1);
             let cell = self.cell([bx, by, bz]).expect("wood inside the tree's bounds");
             if self.wood[cell] == 0 {
-                self.woods.push(Wood { rows: [0; BLOCK_VOXELS * BLOCK_VOXELS], log: false });
+                self.woods.push(Wood { rows: [0; BLOCK_VOXELS * BLOCK_VOXELS], log: false, limb });
                 self.wood[cell] = self.woods.len() as u32;
             }
             let w = &mut self.woods[self.wood[cell] as usize - 1];
             w.log |= log;
+            w.limb = w.limb.min(limb);
             let (a, b) = (x - bx * BV, end - bx * BV);
             w.rows[(vy + vz * BV) as usize] |= ((1u32 << (b + 1)) - (1u32 << a)) as u16;
             x = end + 1;
@@ -163,7 +171,7 @@ impl Grid {
 /// sampled every `SWEEP_STEP_FRAC` of the thinner radius (at least 1 voxel).
 /// Filled a row at a time: the shape is convex, so each x-row crosses it in one
 /// span, the hull of the spheres' spans.
-fn wood_segment(grid: &mut Grid, a: [i32; 3], b: [i32; 3], ra: i32, rb: i32, level: u8) {
+fn wood_segment(grid: &mut Grid, a: [i32; 3], b: [i32; 3], ra: i32, rb: i32, level: u8, limb: u8) {
     if ra.min(rb) < MIN_WOOD_RADIUS {
         return;
     }
@@ -207,7 +215,7 @@ fn wood_segment(grid: &mut Grid, a: [i32; 3], b: [i32; 3], ra: i32, rb: i32, lev
         if x0 <= x1 {
             let (vx0, vx1) = ((x0 - 0.5).ceil() as i32, (x1 - 0.5).floor() as i32);
             if vx0 <= vx1 {
-                grid.fill_row(vx0, vx1, y0 + (k % ny) as i32, z0 + (k / ny) as i32, log);
+                grid.fill_row(vx0, vx1, y0 + (k % ny) as i32, z0 + (k / ny) as i32, log, limb);
             }
         }
     }
@@ -233,15 +241,17 @@ pub fn rasterize(sk: &TreeSkeleton) -> Vec<TreeBlock> {
         return Vec::new();
     }
     let mut grid = Grid::new(lo, hi);
-    for n in &sk.nodes {
+    let limbs = sk.limbs();
+    for (i, n) in sk.nodes.iter().enumerate() {
         if let Some(p) = n.parent {
             let p = &sk.nodes[p as usize];
-            wood_segment(&mut grid, p.pos, n.pos, p.radius, n.radius, n.level);
+            wood_segment(&mut grid, p.pos, n.pos, p.radius, n.radius, n.level, limbs[i]);
         }
     }
     let rim = LEAF_DITHER_VOXELS as f64;
     let mut leaves = vec![false; grid.leaf.len()];
-    for &(c, r) in &sk.leaves {
+    for (&(c, r), &node) in sk.leaves.iter().zip(&sk.leaf_nodes) {
+        let limb = limbs[node as usize];
         let (cf, rf) = (f3(c), r as f64);
         let reach = r + LEAF_DITHER_VOXELS;
         let own = [c[0].div_euclid(BV), c[1].div_euclid(BV), c[2].div_euclid(BV)];
@@ -256,6 +266,7 @@ pub fn rasterize(sk: &TreeSkeleton) -> Vec<TreeBlock> {
                         || (dist <= rf + rim && dither01([bx, by, bz], c) < (rf + rim - dist) / (2.0 * rim));
                     if inside && let Some(cell) = grid.cell([bx, by, bz]) {
                         leaves[cell] = grid.wood[cell] == 0;
+                        grid.leaf_limb[cell] = grid.leaf_limb[cell].min(limb);
                     }
                 }
             }
@@ -290,9 +301,9 @@ pub fn rasterize(sk: &TreeSkeleton) -> Vec<TreeBlock> {
             let w = &grid.woods[grid.wood[cell] as usize - 1];
             let part = if w.log { TreePart::Log } else { TreePart::Branch };
             let chisel = if w.solid() == BLOCK_MASK_LEN { None } else { Some(w.mask()) };
-            out.push(TreeBlock { offset, part, chisel });
+            out.push(TreeBlock { offset, part, chisel, limb: w.limb });
         } else if grid.leaf[cell] {
-            out.push(TreeBlock { offset, part: TreePart::Leaves, chisel: None });
+            out.push(TreeBlock { offset, part: TreePart::Leaves, chisel: None, limb: grid.leaf_limb[cell] });
         }
     }
     out
@@ -404,6 +415,19 @@ mod tests {
     }
 
     #[test]
+    fn blocks_carry_their_limb() {
+        for (s, seed, age, blocks) in trees() {
+            let name = SPECIES[s].name;
+            assert!(blocks.iter().all(|b| b.limb <= game::MAX_TREE_LIMB), "{name} seed {seed} age {age}");
+            assert_eq!(blocks.iter().find(|b| b.offset == [0, 0, 0]).map(|b| b.limb), Some(0), "{name}: the base is trunk");
+            if age == MAX_AGE {
+                assert!(blocks.iter().any(|b| b.limb > 0 && b.part != TreePart::Leaves), "{name} seed {seed}: limb wood");
+                assert!(blocks.iter().any(|b| b.limb > 0 && b.part == TreePart::Leaves), "{name} seed {seed}: limb leaves");
+            }
+        }
+    }
+
+    #[test]
     fn wood_wins_over_leaves() {
         let sk = TreeSkeleton {
             nodes: vec![
@@ -411,6 +435,7 @@ mod tests {
                 super::super::skeleton::Node { parent: Some(0), pos: [8, 64, 8], radius: 8, level: 0 },
             ],
             leaves: vec![([8, 40, 8], 40)],
+            leaf_nodes: vec![1],
         };
         let blocks = rasterize(&sk);
         let at = |o: [i32; 3]| blocks.iter().find(|b| b.offset == o).map(|b| b.part);

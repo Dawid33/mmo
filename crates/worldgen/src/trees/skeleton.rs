@@ -156,6 +156,32 @@ pub struct TreeSkeleton {
     pub nodes: Vec<Node>,
     /// Leaf cluster centre and radius, voxels.
     pub leaves: Vec<([i32; 3], i32)>,
+    /// Per leaf cluster, the index in `nodes` of the node it grows on.
+    pub leaf_nodes: Vec<u16>,
+}
+
+impl TreeSkeleton {
+    /// Per node, its limb: 0 for the trunk; for a level-1 node (a limb) and
+    /// everything descending from it, `(ordinal % MAX_TREE_LIMB) + 1`, its
+    /// ordinal among the level-1 nodes in node (birth) order — so a limb keeps
+    /// its index as the tree grows (a younger skeleton is a prefix).
+    pub fn limbs(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::with_capacity(self.nodes.len());
+        let mut ordinal = 0u32;
+        for n in &self.nodes {
+            let limb = match (n.level, n.parent) {
+                (0, _) | (_, None) => 0,
+                (1, _) => {
+                    let l = (ordinal % u32::from(game::MAX_TREE_LIMB)) as u8 + 1;
+                    ordinal += 1;
+                    l
+                }
+                (_, Some(p)) => out[p as usize],
+            };
+            out.push(limb);
+        }
+        out
+    }
 }
 
 const SALT_SHAPE: u64 = 0x7EE5_5EED;
@@ -501,6 +527,7 @@ pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
             Node { parent: n.parent.map(|p| rank[p] as u16), pos: place(n.pos), radius, level: n.level }
         })
         .collect();
+    let leaf_nodes = b.leaves.iter().filter(|l| rank[l.node] < alive).map(|l| rank[l.node] as u16).collect();
     let leaves = b
         .leaves
         .iter()
@@ -513,7 +540,7 @@ pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
             ([c[0] + shift(0), c[1] + shift(1), c[2] + shift(2)], r)
         })
         .collect();
-    TreeSkeleton { nodes, leaves }
+    TreeSkeleton { nodes, leaves, leaf_nodes }
 }
 
 #[cfg(test)]
@@ -537,6 +564,26 @@ mod tests {
             assert!((1..=3).contains(&p.branch_levels), "{}", sp.name);
             assert!(p.trunk_height_blocks.0 <= p.trunk_height_blocks.1 && p.limbs.0 <= p.limbs.1);
             assert!(p.trunk_height_blocks.1 < sp.max_height_blocks, "{}", sp.name);
+        }
+    }
+
+    #[test]
+    fn limbs_keep_their_index_as_the_tree_grows() {
+        for sp in &SPECIES {
+            let old = skeleton(sp, 7, MAX_AGE);
+            let limbs = old.limbs();
+            assert!(limbs.iter().any(|&l| l > 0), "{}: has limbs", sp.name);
+            for (i, n) in old.nodes.iter().enumerate() {
+                assert_eq!(limbs[i] == 0, n.level == 0, "{}: node {i} level {}", sp.name, n.level);
+                if let Some(p) = n.parent.filter(|_| n.level > 1) {
+                    assert_eq!(limbs[i], limbs[p as usize]);
+                }
+            }
+            for age in [20, 50, 80] {
+                let young = skeleton(sp, 7, age);
+                assert_eq!(young.limbs()[..], limbs[..young.nodes.len()], "{} age {age}", sp.name);
+                assert_eq!(young.leaf_nodes.len(), young.leaves.len());
+            }
         }
     }
 

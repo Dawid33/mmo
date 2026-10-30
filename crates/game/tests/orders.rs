@@ -30,6 +30,9 @@ impl TileSource for Src {
     fn tree_id(&self, p: TilePos) -> u32 {
         self.trees.get(&p).copied().unwrap_or(0)
     }
+    fn tree_limb(&self, _: TilePos) -> u8 {
+        0
+    }
 }
 
 #[test]

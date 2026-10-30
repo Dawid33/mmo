@@ -90,9 +90,16 @@ impl BlockIndex {
     }
 }
 
+/// Bits of `Block.data` holding a tree id.
+pub const TREE_ID_BITS: u32 = 18;
+pub const TREE_ID_MASK: u32 = (1 << TREE_ID_BITS) - 1;
+/// Largest limb index (the 6 bits above the tree id).
+pub const MAX_TREE_LIMB: u8 = 63;
+
 /// The authoritative per-cell gameplay value. Compact; `data` is block state:
-/// a tree block's tree id (24 bits, little-endian; 0 = not a tree), else
-/// zero. Hashes trivially.
+/// for a tree block, its tree id in bits 0..18 (0 = not a tree) and its limb
+/// in bits 18..24 (0 = the trunk; little-endian), else zero. Hashes
+/// trivially.
 #[derive(
     Copy, Clone, Default, PartialEq, Eq, Hash, state_hash::StateHash, serde::Serialize, serde::Deserialize, Debug,
 )]
@@ -106,18 +113,34 @@ impl Block {
         Self { id, data: [0; 3] }
     }
 
-    /// A block of tree `tree` (non-zero, at most 24 bits) — log, branch or
-    /// leaves — carrying the id in `data`.
+    /// A trunk block (limb 0) of tree `tree`: [`Block::with_tree`].
     pub fn with_tree_id(id: BlockId, tree: u32) -> Self {
-        debug_assert!(tree <= 0x00FF_FFFF, "tree id {tree:#X} wider than 24 bits");
-        let [a, b, c, _] = tree.to_le_bytes();
+        Self::with_tree(id, tree, 0)
+    }
+
+    /// A block of tree `tree` (non-zero, at most [`TREE_ID_BITS`]) — log,
+    /// branch or leaves — on limb `limb` (0 = the trunk, at most
+    /// [`MAX_TREE_LIMB`]), both in `data`.
+    pub fn with_tree(id: BlockId, tree: u32, limb: u8) -> Self {
+        debug_assert!(tree <= TREE_ID_MASK, "tree id {tree:#X} wider than {TREE_ID_BITS} bits");
+        debug_assert!(limb <= MAX_TREE_LIMB, "limb {limb} over {MAX_TREE_LIMB}");
+        let [a, b, c, _] = ((tree & TREE_ID_MASK) | u32::from(limb & MAX_TREE_LIMB) << TREE_ID_BITS).to_le_bytes();
         Self { id, data: [a, b, c] }
+    }
+
+    fn data_u32(&self) -> u32 {
+        let [a, b, c] = self.data;
+        u32::from_le_bytes([a, b, c, 0])
     }
 
     /// The tree this block belongs to, 0 if none.
     pub fn tree_id(&self) -> u32 {
-        let [a, b, c] = self.data;
-        u32::from_le_bytes([a, b, c, 0])
+        self.data_u32() & TREE_ID_MASK
+    }
+
+    /// The tree limb this block belongs to (0 = the trunk, or not a tree).
+    pub fn limb(&self) -> u8 {
+        (self.data_u32() >> TREE_ID_BITS) as u8 & MAX_TREE_LIMB
     }
 }
 
@@ -510,13 +533,17 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn tree_id_round_trips_in_24_bits() {
-        assert_eq!(Block::new(BlockId(3)).tree_id(), 0);
-        for id in [1, 0x1234, 0x00AB_CDEF, 0x00FF_FFFF] {
-            let b = Block::with_tree_id(BlockId(13), id);
-            assert_eq!((b.id, b.tree_id()), (BlockId(13), id));
+    fn tree_id_and_limb_round_trip() {
+        assert_eq!((Block::new(BlockId(3)).tree_id(), Block::new(BlockId(3)).limb()), (0, 0));
+        for id in [1, 0x1234, 0x2_ABCD, TREE_ID_MASK] {
+            for limb in [0, 1, 17, MAX_TREE_LIMB] {
+                let b = Block::with_tree(BlockId(13), id, limb);
+                assert_eq!((b.id, b.tree_id(), b.limb()), (BlockId(13), id, limb));
+            }
         }
         assert_eq!(Block::with_tree_id(BlockId(13), 0x0003_0201).data, [1, 2, 3]);
+        assert_eq!(Block::with_tree(BlockId(13), 0x0003_0201, 1).data, [1, 2, 7]);
+        assert_eq!(Block::with_tree_id(BlockId(13), 5).limb(), 0);
     }
 
     #[test]

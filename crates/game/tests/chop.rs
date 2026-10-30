@@ -37,6 +37,8 @@ fn x0() -> i32 {
 const Z0: i32 = 8;
 /// Top trunk block.
 const TRUNK_TOP: i32 = 8;
+/// The limb of the hand-built tree's branch.
+const BRANCH_LIMB: u8 = 1;
 
 /// A region floored one block deep over its whole area, no players. Its
 /// render updates go to a forgotten receiver (rollback needs a sender).
@@ -49,13 +51,17 @@ fn region() -> Region {
     region
 }
 
-/// Tree `TREE`: a log trunk at (x0, 1..=8, Z0) under a 3×3 leaf cap at y 9,
-/// and a branch off the trunk at y 5 running +x to two leaves. Tree
-/// `NEIGHBOUR` stands 3 blocks −x with its leaves touching the cap.
+/// Tree `TREE`: a log trunk at (x0, 1..=8, Z0) under a 3×3 leaf cap at y 9
+/// (limb 0), and a branch off the trunk at y 5 running +x to two leaves
+/// (limb [`BRANCH_LIMB`]). Tree `NEIGHBOUR` stands 3 blocks −x with its
+/// leaves touching the cap.
 fn tree_blocks(ids: &Ids) -> Vec<(TilePos, Block)> {
     let x0 = x0();
     let mut out = Vec::new();
-    let mut put = |p: TilePos, id: BlockId, tree: u32| out.push((p, Block::with_tree_id(id, tree)));
+    let mut put = |p: TilePos, id: BlockId, tree: u32| {
+        let limb = if tree == TREE && p[0] > x0 && p[1] < TRUNK_TOP { BRANCH_LIMB } else { 0 };
+        out.push((p, Block::with_tree(id, tree, limb)))
+    };
     for y in 1..=TRUNK_TOP {
         put([x0, y, Z0], ids.log, TREE);
     }
@@ -103,6 +109,32 @@ fn trunk_cut_drops_everything_above() {
     assert_eq!(sets[0], above, "everything above the cut, branch and crown included");
     // The stump (y 1, 2) is not in it.
     assert!(!sets[0].iter().any(|p| p[1] < 3));
+}
+
+#[test]
+fn trunk_cut_above_a_limb_leaves_the_limb() {
+    let ids = ids();
+    let region = forested_region(&ids);
+    let x0 = x0();
+    // The branch's lowest wood is at y 5: a cut at y 6 leaves it on the stump.
+    let sets = falling_sets(region.data(), [x0, 6, Z0]);
+    assert_eq!(sets.len(), 1);
+    assert!(sets[0].iter().all(|p| p[0] <= x0 + 1 && p[1] > 6), "only the trunk above and the cap: {sets:?}");
+    // At y 5, the limb's own level, it falls with the trunk.
+    let sets = falling_sets(region.data(), [x0, 5, Z0]);
+    assert!(sets[0].contains(&[x0 + 4, 7, Z0]) && sets[0].contains(&[x0 + 2, 6, Z0]));
+}
+
+#[test]
+fn limb_log_cut_takes_one_block_and_fells_the_limb() {
+    let ids = ids();
+    let mut region = forested_region(&ids);
+    let x0 = x0();
+    // Make the branch's first block a limb log (as generated limbs are).
+    region.with_data(|r| assert!(r.set_block_safe([x0 + 1, 5, Z0], Block::with_tree(ids.log, TREE, BRANCH_LIMB))));
+    let f = fell(region.data(), [x0 + 1, 5, Z0]).unwrap();
+    assert_eq!(f.cut, vec![[x0 + 1, 5, Z0]], "not the trunk's cross-section");
+    assert_eq!(f.falling, vec![vec![[x0 + 2, 6, Z0], [x0 + 3, 6, Z0], [x0 + 4, 6, Z0], [x0 + 4, 7, Z0]]]);
 }
 
 #[test]

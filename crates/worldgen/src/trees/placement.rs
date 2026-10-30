@@ -28,9 +28,11 @@ const SALT_EXISTS: u64 = 3;
 const SALT_PRIORITY: u64 = 4;
 const SALT_AGE: u64 = 5;
 const SALT_SEED: u64 = 6;
+/// Lattice bits per axis of a tree id (`game::TREE_ID_BITS` = 2 × 9).
+const ID_AXIS_BITS: u32 = game::TREE_ID_BITS / 2;
 /// Cells a tree id repeats after.
-const ID_CELL_SPAN: i32 = 4096;
-const ZERO_CELL_ID: u32 = (ID_CELL_SPAN as u32 / 2) | (ID_CELL_SPAN as u32 / 2) << 12;
+const ID_CELL_SPAN: i32 = 1 << ID_AXIS_BITS;
+const ZERO_CELL_ID: u32 = (ID_CELL_SPAN as u32 / 2) | (ID_CELL_SPAN as u32 / 2) << ID_AXIS_BITS;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TreeSeed {
@@ -41,7 +43,8 @@ pub struct TreeSeed {
     /// Seeds this tree's shape.
     pub seed: u64,
     pub age: u16,
-    /// Non-zero, fits 24 bits; unique within `ID_CELL_SPAN` cells.
+    /// Non-zero, fits `game::TREE_ID_BITS`; unique within any
+    /// `ID_CELL_SPAN / 2`-cell neighbourhood.
     pub id: u32,
 }
 
@@ -59,12 +62,13 @@ fn hash01(seed: u64, lx: i32, lz: i32, salt: u64) -> f64 {
         / (1u64 << 53) as f64
 }
 
-/// Tree id of lattice cell `(lx, lz)`. Cell (0, 0) would give 0, which means
-/// "not a tree", so it takes `ZERO_CELL_ID`, the id of the antipodal cell
-/// (2048, 2048): the id is shared by two cells 2048 cells apart, however the
-/// 4096 wrap is crossed (`ID_MASK` would be adjacent to (0, 0) across the wrap).
+/// Tree id of lattice cell `(lx, lz)`: `lx mod 512 | (lz mod 512) << 9`. Cell
+/// (0, 0) would give 0, which means "not a tree", so it takes `ZERO_CELL_ID`,
+/// the id of the antipodal cell (256, 256): the id is shared by two cells 256
+/// cells apart, however the 512 wrap is crossed (the all-ones id would be
+/// adjacent to (0, 0) across the wrap).
 pub fn tree_id(lx: i32, lz: i32) -> u32 {
-    let id = (lx.rem_euclid(ID_CELL_SPAN) as u32) | (lz.rem_euclid(ID_CELL_SPAN) as u32) << 12;
+    let id = (lx.rem_euclid(ID_CELL_SPAN) as u32) | (lz.rem_euclid(ID_CELL_SPAN) as u32) << ID_AXIS_BITS;
     if id == 0 { ZERO_CELL_ID } else { id }
 }
 
@@ -269,10 +273,12 @@ mod tests {
 
     #[test]
     fn tree_ids_are_distinct_around_the_origin_and_the_wrap_point() {
-        for (cx, cz) in [(0, 0), (ID_CELL_SPAN / 2, ID_CELL_SPAN / 2), (ID_CELL_SPAN - 1, ID_CELL_SPAN - 1), (-1, -1)] {
+        // Any window narrower than ID_CELL_SPAN / 2 cells holds distinct ids.
+        let h = ID_CELL_SPAN / 4 - 1;
+        for (cx, cz) in [(0, 0), (ID_CELL_SPAN / 2, ID_CELL_SPAN / 2), (ID_CELL_SPAN - 1, ID_CELL_SPAN - 1), (-1, -1), (h, h)] {
             let mut seen = std::collections::HashSet::new();
-            for lz in cz - 4..=cz + 4 {
-                for lx in cx - 4..=cx + 4 {
+            for lz in cz - h..=cz + h {
+                for lx in cx - h..=cx + h {
                     assert!(seen.insert(tree_id(lx, lz)), "({lx}, {lz})");
                 }
             }
@@ -283,7 +289,7 @@ mod tests {
     #[ignore = "slow: >100ms — run via just test-full"]
     fn tree_ids_are_unique_over_a_full_period() {
         // Every id is held by one cell per period, except ZERO_CELL_ID, shared by
-        // (0, 0) and (2048, 2048).
+        // (0, 0) and (256, 256).
         let mut seen = std::collections::HashMap::new();
         for lz in 0..ID_CELL_SPAN {
             for lx in 0..ID_CELL_SPAN {
@@ -300,9 +306,10 @@ mod tests {
         assert_eq!(tree_id(ID_CELL_SPAN / 2, ID_CELL_SPAN / 2), ZERO_CELL_ID);
         assert_eq!(tree_id(1, 0), 1);
         assert_eq!(tree_id(3, 0), 3);
-        assert_eq!(tree_id(0, 1), 4096);
-        assert_eq!(tree_id(-1, 0), 4095);
-        assert_eq!(tree_id(4096, 4096), ZERO_CELL_ID);
-        assert!((0..50).all(|i| tree_id(i * 977, i * 1313) != 0 && tree_id(i, -i) <= 0x00FF_FFFF));
+        assert_eq!(tree_id(0, 1), 512);
+        assert_eq!(tree_id(-1, 0), 511);
+        assert_eq!(tree_id(512, 512), ZERO_CELL_ID);
+        assert_eq!(ZERO_CELL_ID, 256 | 256 << 9);
+        assert!((0..50).all(|i| tree_id(i * 977, i * 1313) != 0 && tree_id(i, -i) <= game::TREE_ID_MASK));
     }
 }

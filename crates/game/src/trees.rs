@@ -4,11 +4,12 @@
 //! and the client's previews agree; the `Chop` order (`orders.rs`) carries
 //! them out with `clear_blocks_safe` + `detach_blocks_safe`.
 //!
-//! A tree is its blocks with one tree id (`Block::tree_id`, 0 = not a tree).
-//! Its wood (the solid blocks: logs and branches) is what holds it up; its
-//! leaves (non-solid) hang on whichever wood reaches them first.
+//! A tree is its blocks with one tree id (`Block::tree_id`, 0 = not a tree);
+//! each block also carries the limb it grows on (`Block::limb`, 0 = the
+//! trunk), recorded by worldgen, since touching twigs make geometry useless
+//! for deciding what hangs on what.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use rapier3d::math::Vector;
 
@@ -54,8 +55,7 @@ fn neighbours(p: TilePos) -> impl Iterator<Item = TilePos> {
 pub struct Felling {
     /// Cleared by the chop, sorted.
     pub cut: Vec<TilePos>,
-    /// Each falling piece (wood + the leaves it holds), sorted; pieces in
-    /// order of their first block.
+    /// Each falling piece, sorted (at most one).
     pub falling: Vec<Vec<TilePos>>,
 }
 
@@ -64,19 +64,19 @@ fn is_wood(src: &impl TileSource, p: TilePos, tree: u32) -> bool {
     src.tree_id(p) == tree && block_props().is_solid(src.block(p))
 }
 
-/// The blocks a chop at `cut` clears, sorted: on a trunk log
-/// (`BlockProps::is_trunk`), every trunk log of the same tree in its layer at
-/// most [`TRUNK_CUT_RADIUS_BLOCKS`] from it per axis — connected or not, since
-/// wood links 26-connected, so any log of the layer left standing (a limb
-/// beside the trunk, a diagonal neighbour) would bridge the cut; on a branch,
-/// just `cut`. Empty when `cut` is not solid tree wood.
+/// The blocks a chop at `cut` clears, sorted: on trunk wood (a log,
+/// `BlockProps::is_trunk`, of limb 0), every log of the same tree in its
+/// layer at most [`TRUNK_CUT_RADIUS_BLOCKS`] from it per axis, connected or
+/// not (the trunk's cross-section, with any limb log beside it); on anything
+/// else (a branch, a limb's log), just `cut`. Empty when `cut` is not solid
+/// tree wood.
 pub fn cut_blocks(src: &impl TileSource, cut: TilePos) -> Vec<TilePos> {
     let tree = src.tree_id(cut);
     if tree == 0 || !is_wood(src, cut, tree) {
         return Vec::new();
     }
     let trunk = |p: TilePos| src.tree_id(p) == tree && block_props().is_trunk(src.block(p));
-    if !trunk(cut) {
+    if !trunk(cut) || src.tree_limb(cut) != 0 {
         return vec![cut];
     }
     let r = TRUNK_CUT_RADIUS_BLOCKS;
@@ -88,15 +88,20 @@ pub fn cut_blocks(src: &impl TileSource, cut: TilePos) -> Vec<TilePos> {
         .collect()
 }
 
-/// What chopping `cut` does. The tree (`cut`'s 26-connected same-id blocks,
-/// at most [`MAX_TREE_BLOCKS`]) stands on its anchors: every wood block on
-/// its lowest wood level, taken before the cut. With the [`cut_blocks`]
-/// removed, each 26-connected piece of the remaining wood holding no anchor
-/// falls (cutting the anchor level itself fells it all). Leaves go to the
-/// piece whose wood reaches them first through the tree's leaves (a BFS from
-/// all wood, standing pieces seeded first, so a tie stands); leaves no wood
-/// reaches stay. `None` when `cut` is not tree wood or the tree overflows the
-/// bound.
+/// What chopping `cut` does, from the structure worldgen recorded in each
+/// block (`Block::limb`: 0 = the trunk, `L ≥ 1` = one limb with everything
+/// growing on it). The tree is `cut`'s 26-connected same-id blocks (at most
+/// [`MAX_TREE_BLOCKS`]).
+/// - A trunk cut (a trunk log of limb 0) clears the [`cut_blocks`]
+///   cross-section; the trunk above it falls (limb-0 blocks with a higher
+///   `y`) with every limb whose lowest wood (lowest leaf, for a limb with
+///   no wood) is at or above the cut. Limbs rooted below stay. Cutting the tree's lowest wood level fells it all.
+/// - A cut on a block of limb `L ≥ 1` clears that block and fells the rest
+///   of limb `L`, wood and leaves.
+///
+/// Everything falls as one piece. `None` when `cut` is not tree wood or the
+/// tree overflows the bound; a limb-0 block that is not trunk wood is cut
+/// alone and fells nothing.
 pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
     let cuts = cut_blocks(src, cut);
     if cuts.is_empty() {
@@ -116,65 +121,43 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
             }
         }
     }
-    let (mut wood, leaves): (BTreeSet<TilePos>, BTreeSet<TilePos>) =
-        blocks.into_iter().partition(|&p| block_props().is_solid(src.block(p)));
-    let floor = wood.iter().map(|p| p[1]).min().expect("the cut is wood");
-    let anchors: BTreeSet<TilePos> = wood.iter().copied().filter(|p| p[1] == floor).collect();
-    for c in &cuts {
-        wood.remove(c);
-    }
-
-    // Wood pieces, in order of their first block (`pop_first` takes the
-    // lowest block left, which starts a new piece).
-    let mut pieces: Vec<(bool, Vec<TilePos>)> = Vec::new();
-    while let Some(start) = wood.pop_first() {
-        let mut piece = vec![start];
-        let mut stack = vec![start];
-        while let Some(p) = stack.pop() {
-            for q in neighbours(p) {
-                if wood.remove(&q) {
-                    piece.push(q);
-                    stack.push(q);
+    let limb = src.tree_limb(cut);
+    let is_trunk_cut = limb == 0 && block_props().is_trunk(src.block(cut));
+    let wood = |p: &TilePos| block_props().is_solid(src.block(*p));
+    let falls: Vec<TilePos> = if is_trunk_cut {
+        let floor = blocks.iter().filter(|p| wood(p)).map(|p| p[1]).min().expect("the cut is wood");
+        // Lowest wood level of each limb; a limb with no wood (all of it
+        // thinner than the rasteriser's wood) by its lowest leaf.
+        let mut limb_floor: BTreeMap<u8, (bool, i32)> = BTreeMap::new();
+        for p in &blocks {
+            let l = src.tree_limb(*p);
+            if l != 0 {
+                let key = (!wood(p), p[1]);
+                let f = limb_floor.entry(l).or_insert(key);
+                *f = (*f).min(key);
+            }
+        }
+        let y = cut[1];
+        blocks
+            .iter()
+            .copied()
+            .filter(|p| !cuts.contains(p))
+            .filter(|&p| {
+                if y == floor {
+                    return true;
                 }
-            }
-        }
-        piece.sort_unstable();
-        let stands = piece.iter().any(|p| anchors.contains(p));
-        pieces.push((stands, piece));
-    }
-
-    // Leaves: multi-source BFS, standing pieces' wood first.
-    let mut owner: BTreeMap<TilePos, usize> = BTreeMap::new();
-    let mut queue = VecDeque::new();
-    let seeding = (0..pieces.len()).filter(|&i| pieces[i].0).chain((0..pieces.len()).filter(|&i| !pieces[i].0));
-    for i in seeding {
-        queue.extend(pieces[i].1.iter().map(|&p| (p, i)));
-    }
-    while let Some((p, i)) = queue.pop_front() {
-        for q in neighbours(p) {
-            if leaves.contains(&q) && !owner.contains_key(&q) {
-                owner.insert(q, i);
-                queue.push_back((q, i));
-            }
-        }
-    }
-    let mut falling: Vec<Vec<TilePos>> = Vec::new();
-    let mut index = BTreeMap::new();
-    for (i, (stands, piece)) in pieces.iter().enumerate() {
-        if !stands {
-            index.insert(i, falling.len());
-            falling.push(piece.clone());
-        }
-    }
-    for (leaf, i) in owner {
-        if let Some(&f) = index.get(&i) {
-            falling[f].push(leaf);
-        }
-    }
-    for set in &mut falling {
-        set.sort_unstable();
-    }
-    falling.sort_unstable_by_key(|s| s[0]);
+                match src.tree_limb(p) {
+                    0 => p[1] > y,
+                    l => limb_floor.get(&l).is_some_and(|&(_, f)| f >= y),
+                }
+            })
+            .collect()
+    } else if limb != 0 {
+        blocks.iter().copied().filter(|&p| p != cut && src.tree_limb(p) == limb).collect()
+    } else {
+        Vec::new()
+    };
+    let falling = if falls.is_empty() { Vec::new() } else { vec![falls] };
     Some(Felling { cut: cuts, falling })
 }
 

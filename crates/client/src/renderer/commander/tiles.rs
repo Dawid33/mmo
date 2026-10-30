@@ -212,6 +212,13 @@ impl TileMirror {
         }
     }
 
+    /// The block at `p` from a mirrored chunk (`None` in implied ground).
+    fn mirrored_block(&self, p: TilePos) -> Option<Block> {
+        let (coords, local) = game::edit::locate(p)?;
+        let key = [coords.x as i32, coords.y, coords.z as i32];
+        self.chunks.get(&key).map(|(_, blocks)| blocks[BlockIndex::from_xyz(local.0, local.1, local.2).linear()])
+    }
+
     fn ground_at(&self, x: usize, z: usize) -> Option<&ColumnGround> {
         self.home_tiles()?.ground.get(&ColumnCoords::new(x, z))
     }
@@ -245,11 +252,11 @@ impl TileSource for TileMirror {
 
     /// From the mirrored chunk blocks; implied ground holds no trees.
     fn tree_id(&self, p: TilePos) -> u32 {
-        let Some((coords, local)) = game::edit::locate(p) else { return 0 };
-        let key = [coords.x as i32, coords.y, coords.z as i32];
-        self.chunks
-            .get(&key)
-            .map_or(0, |(_, blocks)| blocks[BlockIndex::from_xyz(local.0, local.1, local.2).linear()].tree_id())
+        self.mirrored_block(p).map_or(0, |b| b.tree_id())
+    }
+
+    fn tree_limb(&self, p: TilePos) -> u8 {
+        self.mirrored_block(p).map_or(0, |b| b.limb())
     }
 }
 
@@ -379,11 +386,11 @@ mod tests {
     fn tree_id_comes_from_the_mirrored_blocks() {
         let mut m = mirror();
         let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
-        chunk.set_block(2, 1, 3, Block::with_tree_id(BlockId(13), 77));
+        chunk.set_block(2, 1, 3, Block::with_tree(BlockId(13), 77, 5));
         let key = [0, band_base() + 1, 0];
         m.set_chunk(key, chunk_blocks(&chunk));
         let y = key[1] * CHUNK_BLOCKS as i32 + 1;
-        assert_eq!(m.tree_id([2, y, 3]), 77);
+        assert_eq!((m.tree_id([2, y, 3]), m.tree_limb([2, y, 3])), (77, 5));
         assert_eq!(m.tree_id([1, y, 3]), 0);
         assert_eq!(m.tree_id([0, implied_y(), 0]), 0, "implied ground");
         // An edit that only rewrites the data (a new tree id) still updates.
