@@ -7,10 +7,7 @@
 //! Orientation: north (−z) up, like the camera; image row 0 is the region's
 //! minimum z. Nothing shows until the home region is known.
 
-use bevy::asset::RenderAssetUsages;
-use bevy::image::ImageSampler;
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
 use game::EntityKind;
 
@@ -68,57 +65,26 @@ pub struct MinimapPointer {
     pub dragging: bool,
 }
 
+/// The minimap's pixels (RGBA, row 0 = the region's minimum z), drawn by the
+/// HUD layer (`HudUi`): the terrain base and the dots/footprint overlay. A
+/// buffer is uploaded to Slint when its `*_dirty` flag is set.
 #[derive(Resource)]
-pub struct MinimapImages {
-    base: Handle<Image>,
-    overlay: Handle<Image>,
+pub struct MinimapPixels {
+    pub base: Vec<[u8; 4]>,
+    pub overlay: Vec<[u8; 4]>,
+    pub base_dirty: bool,
+    pub overlay_dirty: bool,
 }
 
-fn blank(edge: u32, images: &mut Assets<Image>) -> Handle<Image> {
-    let mut image = Image::new_fill(
-        Extent3d { width: edge, height: edge, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        &[0, 0, 0, 0],
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    );
-    image.sampler = ImageSampler::nearest();
-    images.add(image)
-}
-
-pub fn setup_minimap(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let base = blank(BASE_PX, &mut images);
-    let overlay = blank(OVERLAY_PX, &mut images);
-    commands
-        .spawn((
-            Name::new("minimap"),
-            Pickable::IGNORE,
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(MINIMAP_MARGIN_PX),
-                bottom: Val::Px(MINIMAP_MARGIN_PX),
-                width: Val::Px(MINIMAP_SIZE_PX),
-                height: Val::Px(MINIMAP_SIZE_PX),
-                ..default()
-            },
-            BackgroundColor(Color::srgb(0.02, 0.05, 0.1)),
-            Outline::new(Val::Px(2.0), Val::ZERO, Color::srgba(0.0, 0.0, 0.0, 0.8)),
-        ))
-        .with_children(|p| {
-            for image in [base.clone(), overlay.clone()] {
-                p.spawn((
-                    Pickable::IGNORE,
-                    ImageNode::new(image),
-                    Node {
-                        position_type: PositionType::Absolute,
-                        width: Val::Percent(100.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                ));
-            }
-        });
-    commands.insert_resource(MinimapImages { base, overlay });
+impl Default for MinimapPixels {
+    fn default() -> Self {
+        Self {
+            base: vec![[0; 4]; (BASE_PX * BASE_PX) as usize],
+            overlay: vec![[0; 4]; (OVERLAY_PX * OVERLAY_PX) as usize],
+            base_dirty: false,
+            overlay_dirty: false,
+        }
+    }
 }
 
 /// Left press / drag on the minimap → move the camera focus there.
@@ -203,33 +169,31 @@ fn ramp(stops: &[(f32, [f32; 3])], v: f32) -> [f32; 3] {
 pub fn rebuild_minimap_base(
     grid: Res<HeightGrid>,
     cam: Res<CommanderCamera>,
-    handles: Option<Res<MinimapImages>>,
-    mut images: ResMut<Assets<Image>>,
+    mut pixels: ResMut<MinimapPixels>,
     time: Res<Time>,
     mut built: Local<Option<(u64, Option<Rect>)>>,
     mut since: Local<f32>,
 ) {
     *since += time.delta_secs();
-    let Some(handles) = handles else { return };
     let key = (grid.version, cam.bounds);
     if *built == Some(key) || *since < BASE_REBUILD_S {
         return;
     }
-    let Some(mut image) = images.get_mut(&handles.base) else { return };
-    let Some(data) = image.data.as_mut() else { return };
+    let data = &mut pixels.base;
     let unit = game::movement::UNITS_PER_METER;
     let px = BASE_PX as usize;
     for py in 0..px {
         for pxx in 0..px {
-            let i = 4 * (pxx + px * py);
+            let i = pxx + px * py;
             let color = cam.bounds.and_then(|b| {
                 let at = b.min + (Vec2::new(pxx as f32, py as f32) + 0.5) / px as f32 * b.size();
                 grid.column_at(at.x, at.y)
             });
             let color = color.map_or([0; 4], |(surface, ground)| column_color(surface / unit, ground / unit));
-            data[i..i + 4].copy_from_slice(&color);
+            data[i] = color;
         }
     }
+    pixels.base_dirty = true;
     *built = Some(key);
     *since = 0.0;
 }
@@ -256,8 +220,7 @@ pub fn footprint(rays: [Ray3d; 4], plane_y: f32) -> [Vec2; 4] {
 /// Redraw dots and the footprint at [`OVERLAY_HZ`].
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn draw_minimap_overlay(
-    handles: Option<Res<MinimapImages>>,
-    mut images: ResMut<Assets<Image>>,
+    mut pixels: ResMut<MinimapPixels>,
     time: Res<Time>,
     mut since: Local<f32>,
     entities: Query<(&SimEntity, &SimKind, &GlobalTransform)>,
@@ -270,16 +233,14 @@ pub fn draw_minimap_overlay(
         return;
     }
     *since = 0.0;
-    let Some(handles) = handles else { return };
-    let Some(mut image) = images.get_mut(&handles.overlay) else { return };
-    let Some(data) = image.data.as_mut() else { return };
-    data.fill(0);
+    pixels.overlay_dirty = true;
+    let data = &mut pixels.overlay;
+    data.fill([0; 4]);
     let Some(map) = cam.bounds else { return };
     let px = OVERLAY_PX;
     let mut put = |x: i32, y: i32, c: [u8; 4]| {
         if x >= 0 && y >= 0 && (x as u32) < px && (y as u32) < px {
-            let i = 4 * (x as usize + px as usize * y as usize);
-            data[i..i + 4].copy_from_slice(&c);
+            data[x as usize + px as usize * y as usize] = c;
         }
     };
     for (sim, kind, gt) in &entities {
@@ -319,6 +280,28 @@ pub fn draw_minimap_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drawing_marks_the_overlay_dirty() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(2.0 / OVERLAY_HZ),
+            ))
+            .init_resource::<MinimapPixels>()
+            .init_resource::<Selection>()
+            .insert_resource(CommanderCamera {
+                bounds: Some(Rect::new(0.0, 0.0, 1024.0, 1024.0)),
+                ..default()
+            })
+            .add_systems(Update, draw_minimap_overlay);
+        app.update();
+        app.update();
+        let px = app.world().resource::<MinimapPixels>();
+        assert!(px.overlay_dirty);
+        assert_eq!(px.overlay.len(), (OVERLAY_PX * OVERLAY_PX) as usize);
+        assert_eq!(px.base.len(), (BASE_PX * BASE_PX) as usize);
+    }
 
     #[test]
     fn screen_rect_sits_in_the_bottom_left_corner() {

@@ -313,6 +313,7 @@ impl Plugin for CommanderPlugin {
                 crate::blocks::load_registry().id_of("water").unwrap_or(game::BlockId::AIR),
             ))
             .init_resource::<minimap::MinimapPointer>()
+            .init_resource::<minimap::MinimapPixels>()
             .init_resource::<selection::Selection>()
             .init_resource::<selection::GroundPick>()
             .init_resource::<selection::SelectionBand>()
@@ -326,7 +327,6 @@ impl Plugin for CommanderPlugin {
                 Startup,
                 (
                     spawn_commander_camera,
-                    minimap::setup_minimap,
                     designate::setup_designate_gizmos,
                 ),
             )

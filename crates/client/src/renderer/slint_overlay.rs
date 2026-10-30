@@ -299,9 +299,28 @@ fn push_hud_state(
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     policy: Option<Res<CursorPolicy>>,
     band: Option<Res<SelectionBand>>,
+    minimap_pixels: Option<ResMut<minimap::MinimapPixels>>,
 ) {
     let Some(hud) = hud else { return };
     let ui = hud.overlay.ui();
+
+    // The minimap exists in commander mode only.
+    if ui.get_minimap_visible() != minimap_pixels.is_some() {
+        ui.set_minimap_visible(minimap_pixels.is_some());
+    }
+    if let Some(mut pixels) = minimap_pixels {
+        let image = |data: &[[u8; 4]], edge: u32| {
+            SlintImage::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(data.as_flattened(), edge, edge))
+        };
+        if pixels.base_dirty {
+            ui.set_minimap_base(image(&pixels.base, minimap::BASE_PX));
+            pixels.base_dirty = false;
+        }
+        if pixels.overlay_dirty {
+            ui.set_minimap_overlay(image(&pixels.overlay, minimap::OVERLAY_PX));
+            pixels.overlay_dirty = false;
+        }
+    }
 
     let grab = cursor.iter().next().map_or(CursorGrabMode::None, |c| c.grab_mode);
     let crosshair = crosshair_visible(grab, policy.is_some_and(|p| p.orbit));
