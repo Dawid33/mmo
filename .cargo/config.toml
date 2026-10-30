@@ -14,10 +14,10 @@ jobs = -4
 # fingerprints the variable, and "unset" vs "32" would rebuild `game` and
 # everything downstream each time you alternated. A value already in the
 # environment wins, which is how `just region_blocks=128 …` overrides it.
-# (The old VOXEL_REGION_CHUNKS / VOXEL_CELL_CHUNKS fail the build on purpose.)
+# (The old VOXEL_REGION_CHUNKS / VOXEL_CELL_CHUNKS and the removed cell mode's
+# VOXEL_CELL_BLOCKS fail the build on purpose.)
 [env]
 VOXEL_REGION_BLOCKS = "64"
-VOXEL_CELL_BLOCKS = "0"
 # Sim-chunk edge in BLOCKS (`game::CHUNK_BLOCKS`, crates/game/src/block.rs;
 # powers of two 2..=32): the unit owning one entity / body / collider set.
 # `just chunk_blocks=2 …` overrides it, like the region dial above.

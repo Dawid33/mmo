@@ -83,10 +83,8 @@ pub fn build_lod_job(
         LodBuildJob::Tile { key, overlays } if key.region_span() == 1 => {
             // One region, possibly several grids per band (factor 16). The
             // overlay is authoritative for every grid COLUMN it has chunks in;
-            // columns it lacks keep the pristine coarse terrain. A legacy
-            // region covers every column (same as replacing the key); a
-            // cell-mode region only holds its generated cells, and its LOD
-            // must not go empty everywhere else.
+            // columns it lacks keep the pristine coarse terrain. A region
+            // covers every column (same as replacing the key).
             let cells = match overlays.into_iter().next() {
                 Some((_, chunks)) => {
                     let authoritative = downsample_chunks(chunks, key.factor);

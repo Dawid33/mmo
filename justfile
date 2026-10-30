@@ -43,13 +43,12 @@ export VOXEL_WORLD_FILE := world_file
 # Region edge in BLOCKS (1 block = 1 m) — a BUILD-time constant
 # (`game::REGION_BLOCKS`), unlike `world`: 64 = 1024-unit / 64 m regions
 # (default), 128 = 2048-unit, 256 = 4096-unit regions, each with the ring table
-# re-cut to the same pixel budget and horizon. In cell mode (`cells=`) it goes
-# on up to 65536 (65.5 km, powers of two; cells generate lazily), e.g.
-# `just region_blocks=2048 cells=32 run`; above 256 without `cells=` the build
-# fails. Nothing else is legal (see crates/game/src/protocol.rs); 256 is the
-# practical ceiling (~7 GB of server state for one 3x3 window). The dial is in
-# blocks so it keeps its meaning when the sim chunk (CHUNK_BLOCKS) changes size;
-# the old chunk-denominated VOXEL_REGION_CHUNKS / VOXEL_CELL_CHUNKS fail the build.
+# re-cut to the same pixel budget and horizon. Nothing else is legal (see
+# crates/game/src/protocol.rs); 256 is the practical ceiling (~7 GB of server
+# state for one 3x3 window, measured at 2-block chunks). The dial is in blocks
+# so it keeps its meaning when the sim chunk (CHUNK_BLOCKS) changes size; the
+# old chunk-denominated VOXEL_REGION_CHUNKS / VOXEL_CELL_CHUNKS and the removed
+# cell mode's VOXEL_CELL_BLOCKS fail the build.
 #   just region_blocks=128 run
 # Switching recompiles `game` and everything downstream (not Bevy or the forks),
 # and server + client MUST come from the same value — nothing refuses a
@@ -82,21 +81,12 @@ export VOXEL_REGION_BLOCKS := test_blocks
 chunk_blocks := env_var_or_default("VOXEL_CHUNK_BLOCKS", "16")
 export VOXEL_CHUNK_BLOCKS := chunk_blocks
 
-# Cell loading (phase 1b of docs/superpowers/specs/2026-09-25-island-regions-cell-loading-design.md):
-# a BUILD-time constant (`game::CELL_BLOCKS`), 0 = off. Every region then loads
-# terrain in `cells`×`cells`-block cells around players; must be a power of two,
-# a multiple of the chunk edge, dividing `region_blocks`. The client forces near
-# radius 0 in cell mode.
-#   just region_blocks=256 cells=32 world=tiny run
-cells := env_var_or_default("VOXEL_CELL_BLOCKS", "0")
-export VOXEL_CELL_BLOCKS := cells
-
 # Spawn island size (phase 3 of the island spec): the island centred on the home
 # region, as a diameter in 64 m cells — a BUILD-time constant
 # (`worldgen::islands::SPAWN_ISLAND_CELLS`), 0 = the default 16 (1 km), at most
 # `SPAWN_ISLAND_CELLS_MAX`. The rest of the world is quadtree-placed islands in
-# open sea. Keep the island inside the region for cell mode, e.g.
-#   just region_blocks=2048 cells=32 island=16 run     (1 km island, 2 km region)
+# open sea.
+#   just island=8 run     (a 512 m island)
 island := env_var_or_default("VOXEL_ISLAND_CELLS", "0")
 export VOXEL_ISLAND_CELLS := island
 
@@ -630,7 +620,7 @@ test-threads:
 
 # Cross-target determinism: the same physics scene must end in the same state
 # on native and on wasm32 (node via wasm-bindgen-test-runner) —
-# crates/game/tests/wasm_determinism.rs (plus a cell-mode cell_hash) and the
+# crates/game/tests/wasm_determinism.rs (a region scene and an underground dig) and the
 # rapier/parry forks' StateHash over every journaled structure,
 # crates/physics-next/tests/state_hash_wasm.rs. The runner must match Cargo.lock's
 # wasm-bindgen exactly, so the first run installs that version under

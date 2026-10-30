@@ -60,25 +60,23 @@ pub const REGION_SIZE: f32 = (REGION_BLOCKS * BLOCK_VOXELS) as f32;
 /// `LOD_RING_TABLE`, and the fixtures and budgets below were checked at
 /// exactly these. 256 blocks is the practical ceiling: a region snapshot is ~640 MiB
 /// raw there (see `MAX_DECOMPRESSED_PACKET_BYTES`) and a 3×3 window is ~95k
-/// chunks per client.
-///
-/// Above 256 only cell mode is legal (`VOXEL_CELL_BLOCKS`, see [`CELL_BLOCKS`]):
-/// cells generate lazily, so the region is never built whole. Up to 65536
-/// blocks = 1 048 576 units ≈ 65.5 km (f32 region-local positions keep ~8 mm
-/// steps at the far edge). Those sizes get a minimal LOD table (`lod.rs`).
-pub const REGION_BLOCKS_CHOICES: [usize; 11] =
-    [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
+/// chunks per client. (Measured at 2-block chunks; re-measure before quoting.)
+pub const REGION_BLOCKS_CHOICES: [usize; 3] = [64, 128, 256];
 
 /// The old chunk-denominated env vars changed meaning when the chunk stopped
 /// being a fixed size; refuse them at BUILD time rather than silently ignore.
 const _: () = {
     assert!(
         option_env!("VOXEL_REGION_CHUNKS").is_none(),
-        "VOXEL_REGION_CHUNKS is gone: use VOXEL_REGION_BLOCKS (blocks, 64..=65536); just region_blocks=N"
+        "VOXEL_REGION_CHUNKS is gone: use VOXEL_REGION_BLOCKS (blocks: 64, 128 or 256); just region_blocks=N"
     );
     assert!(
         option_env!("VOXEL_CELL_CHUNKS").is_none(),
-        "VOXEL_CELL_CHUNKS is gone: use VOXEL_CELL_BLOCKS (blocks, power of two, 0 = off); just cells=N"
+        "VOXEL_CELL_CHUNKS is gone: cell mode was removed 2026-10-30 (see docs/superpowers/plans/2026-10-30-remove-cell-mode.md)"
+    );
+    assert!(
+        option_env!("VOXEL_CELL_BLOCKS").is_none(),
+        "VOXEL_CELL_BLOCKS is gone: cell mode was removed 2026-10-30 (regions are whole; see docs/superpowers/plans/2026-10-30-remove-cell-mode.md)"
     );
 };
 
@@ -104,42 +102,7 @@ const fn parse_region_blocks(var: Option<&str>) -> usize {
         }
         i += 1;
     }
-    panic!("VOXEL_REGION_BLOCKS must be one of REGION_BLOCKS_CHOICES (a power of two, 64..=65536)")
-}
-
-/// Cell loading (spec 2026-09-25-island-regions-cell-loading-design): every
-/// region runs in cell mode with `CELL_BLOCKS`-block cells when non-zero. A
-/// BUILD-time dial like `REGION_BLOCKS`, for the same reason: server, client
-/// and the wasm LocalServer must agree. `just cells=32 …`; 0/unset = off.
-pub const CELL_BLOCKS: usize = parse_cell_blocks(option_env!("VOXEL_CELL_BLOCKS"));
-/// Cell edge in sim chunks (derived; `CellState.cell_chunks` stays in chunks).
-pub const CELL_CHUNKS: usize = CELL_BLOCKS / CHUNK_BLOCKS;
-
-// Regions above 256 blocks exist only in cell mode: building one whole is
-// minutes and gigabytes.
-const _: () = assert!(
-    REGION_BLOCKS <= 256 || CELL_BLOCKS != 0,
-    "VOXEL_REGION_BLOCKS above 256 requires cell mode (VOXEL_CELL_BLOCKS)"
-);
-
-/// Unset/empty/0 = off; otherwise a power of two, a multiple of
-/// `CHUNK_BLOCKS`, dividing `REGION_BLOCKS` (checked at BUILD time).
-pub(crate) const fn parse_cell_blocks(var: Option<&str>) -> usize {
-    let Some(text) = var else { return 0 };
-    let bytes = text.as_bytes();
-    let mut value = 0usize;
-    let mut i = 0;
-    while i < bytes.len() {
-        assert!(bytes[i].is_ascii_digit(), "VOXEL_CELL_BLOCKS must be a number");
-        value = value * 10 + (bytes[i] - b'0') as usize;
-        i += 1;
-    }
-    assert!(
-        value == 0
-            || (value.is_power_of_two() && value % CHUNK_BLOCKS == 0 && REGION_BLOCKS % value == 0),
-        "VOXEL_CELL_BLOCKS must be 0 or a power of two, a multiple of CHUNK_BLOCKS, dividing REGION_BLOCKS"
-    );
-    value
+    panic!("VOXEL_REGION_BLOCKS must be one of REGION_BLOCKS_CHOICES (64, 128, 256)")
 }
 
 /// A running region checks its terrain hash this often and pushes a
@@ -499,26 +462,21 @@ impl GameEventKind {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn large_region_sizes_parse() {
-        assert_eq!(parse_region_blocks(Some("2048")), 2048);
-        assert_eq!(parse_region_blocks(Some("65536")), 65536);
+    fn legal_region_sizes_parse() {
+        assert_eq!(parse_region_blocks(None), 64);
+        assert_eq!(parse_region_blocks(Some("256")), 256);
+    }
+
+    #[test]
+    #[should_panic(expected = "REGION_BLOCKS_CHOICES")]
+    fn region_sizes_above_256_are_refused() {
+        parse_region_blocks(Some("512"));
     }
 
     #[test]
     fn the_packet_cap_never_overflows() {
         assert_eq!(max_decompressed_packet_bytes(64), 256 * 1024 * 1024);
         assert_eq!(max_decompressed_packet_bytes(65536), 2 * 1024 * 1024 * 1024);
-    }
-
-    #[test]
-    fn cell_blocks_parse() {
-        assert_eq!(parse_cell_blocks(None), 0);
-        assert_eq!(parse_cell_blocks(Some("")), 0);
-        assert_eq!(parse_cell_blocks(Some("0")), 0);
-        // Legal cells are multiples of CHUNK_BLOCKS (up to 32) dividing the region.
-        assert_eq!(parse_cell_blocks(Some("32")), 32);
-        assert_eq!(parse_cell_blocks(Some("64")), 64);
-        assert_eq!(CELL_BLOCKS, parse_cell_blocks(option_env!("VOXEL_CELL_BLOCKS")));
     }
 
     use super::*;

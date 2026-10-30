@@ -1,6 +1,9 @@
 # Island regions with deterministic cell loading — design
 
-Status: design approved section-by-section 2026-09-25; nothing implemented.
+Status: SUPERSEDED 2026-10-30 — cell mode was implemented (phases 1–3) and then removed:
+every client simulated every active cell of its region, which does not fit the game. See
+`docs/superpowers/plans/2026-10-30-remove-cell-mode.md`. (Originally: design approved
+section-by-section 2026-09-25.)
 Supersedes the "5×5 near window of 64 m regions" world model for islands. Folds in
 `docs/superpowers/plans/2026-09-22-durable-world-persistence.md` (re-keyed from
 regions to cells) and replaces the super-region claim unit of

@@ -22,9 +22,7 @@ fn unit_constants_hold_at_every_legal_region_size() {
     };
     for &b in &REGION_BLOCKS_CHOICES {
         assert!(max_decompressed_packet_bytes(b) > 0, "packet cap is 0 at {b} blocks");
-        if b <= 256 {
-            assert!(max_decompressed_packet_bytes(b) >= 256 << 20, "cap below the 64-block cap at {b}");
-        }
+        assert!(max_decompressed_packet_bytes(b) >= 256 << 20, "cap below the 64-block cap at {b}");
         assert!(pristine_cache_max(b) >= 1, "pristine cache disabled at {b} blocks");
     }
     assert_eq!(REGION_SIZE, (REGION_BLOCKS * BLOCK_VOXELS) as f32);

@@ -305,16 +305,6 @@ pub const LOD_MAX_CELL_PX: f32 = 2.5;
 /// frame at the camera's 60° vertical FOV (`540 / tan 30°`).
 pub const LOD_REFERENCE_FOCAL_PX: f32 = 935.0;
 
-/// Home-region LOD factor for large cell-mode regions: a factor-`f` LOD cell
-/// is `f` bricks (32 voxels) wide, so `f <= CELL_BLOCKS / BRICK_BLOCKS` keeps every home LOD cell inside
-/// one game cell — the renderer can then hide exactly the ones under active
-/// cells (a coarser factor spans several cells and draws over full-detail
-/// terrain: overlapping rendering, live 2026-09-25).
-pub const LARGE_HOME_FACTOR: u32 = {
-    let c = (crate::CELL_BLOCKS / crate::BRICK_BLOCKS) as u32;
-    if c >= 16 { 16 } else if c >= 8 { 8 } else if c >= 4 { 4 } else { 2 }
-};
-
 /// Ring table: `(chebyshev_bound, lod_factor)` with ascending bounds. A
 /// region at Chebyshev distance `d` from the viewer region renders at the
 /// factor of the first entry with `d <= bound`; None past the last bound.
@@ -336,11 +326,7 @@ pub const LOD_RING_TABLE: &[(i32, u32)] = match crate::REGION_BLOCKS {
     64 => &[(2, 2), (3, 4), (6, 8), (13, 16), (16, 32)],
     128 => &[(2, 4), (3, 8), (6, 16), (8, 32)],
     256 => &[(2, 8), (3, 16), (4, 32)],
-    // Cell-mode regions above 256 blocks (up to 65.5 km): ONLY the viewer's
-    // own region, at LARGE_HOME_FACTOR — no neighbouring regions load in any
-    // world preset (user, 2026-09-25: the region is the whole world now).
-    // The pixel budget and 1 km horizon do not hold here.
-    _ => &[(0, LARGE_HOME_FACTOR)],
+    _ => panic!("no LOD_RING_TABLE for this REGION_BLOCKS"),
 };
 
 /// How far the LOD rings reach, in world units: the last ring's Chebyshev
@@ -954,8 +940,7 @@ mod tests {
 
     #[test]
     fn ring_table_is_ascending_and_factors_valid() {
-        // A first bound of 0 is the home-region ring of large cell-mode
-        // regions; every later bound must strictly ascend.
+        // Every bound must strictly ascend.
         let mut prev = -1;
         for &(bound, factor) in LOD_RING_TABLE {
             assert!(bound > prev, "bounds ascend");
@@ -1032,9 +1017,6 @@ mod tests {
 
     #[test]
     fn ring_table_keeps_cells_within_the_pixel_budget() {
-        if crate::REGION_BLOCKS > 256 {
-            return; // placeholder table for large cell-mode regions
-        }
         // Worst case for a ring: the viewer stands on the edge of their own
         // region, so a ring whose inner neighbour ends at `prev` regions
         // starts `prev` whole regions away.
@@ -1053,24 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn a_large_cell_region_s_home_lod_fits_inside_a_cell() {
-        if crate::REGION_BLOCKS <= 256 || crate::CELL_BLOCKS == 0 {
-            return;
-        }
-        let home = ring_factor_in(LOD_RING_TABLE, 0, 0, None).expect("home ring");
-        assert!(
-            home as usize <= (crate::CELL_BLOCKS / crate::BRICK_BLOCKS).max(2),
-            "home factor {home} > cell {} bricks",
-            crate::CELL_BLOCKS / crate::BRICK_BLOCKS
-        );
-        assert_eq!(ring_factor_in(LOD_RING_TABLE, 0, 1, None), None, "no neighbouring regions");
-    }
-
-    #[test]
     fn ring_table_ends_at_the_horizon() {
-        if crate::REGION_BLOCKS > 256 {
-            return; // placeholder table for large cell-mode regions
-        }
         let &(last, _) = LOD_RING_TABLE.last().unwrap();
         assert_eq!(last as f32 * REGION_SIZE, LOD_HORIZON_UNITS);
     }
@@ -1211,9 +1176,6 @@ mod tests {
         // default size; at 128 blocks that tile is ONE region, so 256
         // (2x2 at 128 as well).
         let factor = if tile_regions(64) > 1 { 64 } else { 256 };
-        if tile_regions(factor) <= 1 {
-            return; // large cell-mode regions: no tile spans several regions
-        }
         let per = cells_per_region(factor); // 16 by default
         let key = LodKey { factor, coords: [0, 0] };
         // Coarse tile band 0: fully solid everywhere.
