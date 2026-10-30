@@ -6,8 +6,8 @@ use crate::{
     bounds::assert_in_bounds, OrientedBlockFace, QuadBuffer, UnorientedQuad, Voxel, VoxelVisibility,
 };
 
-use ilattice::glam::UVec3;
-use ilattice::prelude::Extent;
+use crate::extent::Extent;
+use glam::UVec3;
 use ndcopy::fill3;
 use ndshape::Shape;
 
@@ -98,9 +98,6 @@ pub fn greedy_quads_with_merge_strategy<T, S, Merger>(
 {
     assert_in_bounds(voxels, voxels_shape, min, max);
 
-    let min = UVec3::from(min).as_ivec3();
-    let max = UVec3::from(max).as_ivec3();
-    let extent = Extent::from_min_and_max(min, max);
 
     output.reset(voxels.len());
     let GreedyQuadsBuffer {
@@ -108,9 +105,7 @@ pub fn greedy_quads_with_merge_strategy<T, S, Merger>(
         quads: QuadBuffer { groups },
     } = output;
 
-    let interior = extent.padded(-1); // Avoid accessing out of bounds with a 3x3x3 kernel.
-    let interior =
-        Extent::from_min_and_shape(interior.minimum.as_uvec3(), interior.shape.as_uvec3());
+    let interior = Extent::interior(min, max); // Avoid accessing out of bounds with a 3x3x3 kernel.
 
     for (group, face) in groups.iter_mut().zip(faces.iter()) {
         greedy_quads_for_face::<_, _, Merger>(voxels, voxels_shape, interior, face, visited, group);
@@ -120,7 +115,7 @@ pub fn greedy_quads_with_merge_strategy<T, S, Merger>(
 fn greedy_quads_for_face<T, S, Merger>(
     voxels: &[T],
     voxels_shape: &S,
-    interior: Extent<UVec3>,
+    interior: Extent,
     face: &OrientedBlockFace,
     visited: &mut [bool],
     quads: &mut Vec<UnorientedQuad>,
@@ -293,6 +288,51 @@ mod tests {
     }
 
     type SampleShape = ConstShape3u32<34, 34, 34>;
+
+    /// Deterministic 34³ volume: ~40% solid, from a fixed LCG.
+    fn sample_volume() -> Vec<BoolVoxel> {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..SampleShape::SIZE)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                BoolVoxel((state >> 33) % 10 < 4)
+            })
+            .collect()
+    }
+
+    /// FNV-1a over a stream of u32 words.
+    fn fnv(words: impl IntoIterator<Item = u32>) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for w in words {
+            for b in w.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        h
+    }
+
+    /// Pins the exact quads (group, order, minimum, size, corner positions)
+    /// `greedy_quads` emits, so internal rewrites can't change a mesh.
+    #[test]
+    fn greedy_output_is_pinned() {
+        let samples = sample_volume();
+        let mut buffer = GreedyQuadsBuffer::new(samples.len());
+        let faces = &RIGHT_HANDED_Y_UP_CONFIG.faces;
+        greedy_quads(&samples, &SampleShape {}, [0; 3], [33; 3], faces, &mut buffer);
+        let mut words = Vec::new();
+        for (g, (group, face)) in buffer.quads.groups.iter().zip(faces.iter()).enumerate() {
+            words.push(g as u32);
+            words.push(group.len() as u32);
+            for q in group {
+                words.extend(q.minimum.iter().copied());
+                words.extend([q.width, q.height]);
+                words.extend(face.quad_mesh_positions(q, 1.0).iter().flatten().map(|f| f.to_bits()));
+            }
+        }
+        assert_eq!(fnv(words), GREEDY_GOLDEN);
+    }
+    const GREEDY_GOLDEN: u64 = 14285480718048824643;
 
     /// Basic voxel type with one byte of texture layers
     #[derive(Default, Clone, Copy, Eq, PartialEq)]

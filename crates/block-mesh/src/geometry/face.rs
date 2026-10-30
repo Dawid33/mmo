@@ -1,6 +1,6 @@
 use crate::{Axis, AxisPermutation, SignedAxis, UnorientedQuad};
 
-use ilattice::glam::{IVec3, UVec3};
+use glam::{IVec3, UVec3};
 
 /// Metadata that's used to aid in the geometric calculations for one of the 6 possible cube faces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

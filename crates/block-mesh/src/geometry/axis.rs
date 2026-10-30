@@ -1,4 +1,4 @@
-use ilattice::glam::{IVec3, UVec3};
+use glam::{IVec3, UVec3};
 
 /// Either the X, Y, or Z axis.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

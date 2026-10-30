@@ -1,5 +1,5 @@
-use ilattice::glam::UVec3;
-use ilattice::prelude::Extent;
+use crate::extent::Extent;
+use glam::UVec3;
 use ndshape::Shape;
 
 pub fn assert_in_bounds<T, S>(voxels: &[T], voxels_shape: &S, min: [u32; 3], max: [u32; 3])
