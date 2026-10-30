@@ -22,8 +22,11 @@ pub fn manifest_src() -> String {
     EMBEDDED_MANIFEST.to_string()
 }
 
-/// Parse the block registry, panicking on a malformed manifest (a fatal
+/// Parse the block registry (and install its block properties), panicking on a malformed manifest (a fatal
 /// startup misconfiguration).
 pub fn load_registry() -> BlockRegistry {
-    BlockRegistry::from_ron(&manifest_src()).expect("invalid block manifest")
+    let registry = BlockRegistry::from_ron(&manifest_src()).expect("invalid block manifest");
+    // The sim's colliders read the same properties as the renderer.
+    game::install_block_props(registry.props());
+    registry
 }

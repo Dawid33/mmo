@@ -4,6 +4,7 @@
 //! [`ChiselData`], a canonical cuboid list. This module is Bevy-free and
 //! deterministic.
 
+use crate::block_props;
 use block_mesh::ndshape::ConstShape;
 use parry3d::math::IVector;
 
@@ -355,7 +356,7 @@ pub fn collider_cells(chunk: &Chunk) -> ColliderCells {
     let chisel = &chunk.chisel;
     // A uniform unchiseled chunk: one block key per block, or none for air.
     if let (Some(block), true) = (chunk.blocks.uniform(), chisel.is_empty()) {
-        if block.id != BlockId::AIR {
+        if block_props().is_solid(block.id) && block.id != BlockId::AIR {
             out.blocks = (0..CHUNK_BLOCK_COUNT)
                 .map(|i| {
                     let (bx, by, bz) = BlockIndex::from_linear(i).xyz();
@@ -387,12 +388,14 @@ fn push_block_cells(out: &mut ColliderCells, bi: BlockIndex, block: Block, chise
     let h = HALF_BLOCK_VOXELS;
     let (bx, by, bz) = bi.xyz();
     let Some(c) = chisel else {
-        if block.id != BlockId::AIR {
+        if block.id != BlockId::AIR && block_props().is_solid(block.id) {
             out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
         }
         return;
     };
-    let solid: Vec<bool> = c.materials().into_iter().map(|m| m != BlockId::AIR).collect();
+    let props = block_props();
+    let solid: Vec<bool> =
+        c.materials().into_iter().map(|m| m != BlockId::AIR && props.is_solid(m)).collect();
     if solid.iter().all(|&s| s) {
         out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
         return;

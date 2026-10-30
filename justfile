@@ -400,6 +400,12 @@ creature-check:
 assets *args:
     python3 tools/assets/generate.py {{args}}
 
+# Regenerate the tree block textures (oak/pine/birch bark, rings, branch,
+# leaves) into assets/blocks/ with Pillow; deterministic. If you add PNGs,
+# also add them to EMBEDDED_BLOCK_TEXTURES in crates/client/src/renderer/mod.rs.
+tree-textures:
+    python3 tools/textures/tree_textures.py
+
 # Top-down PNG map of the generated world: colour relief + 16-bit heightmap +
 # terrain stats, into target/world-map/. Flags: --span <m> --size <px>
 # --center <x,z> --out <path stem> --seed <hex> --relief <factor>, e.g.

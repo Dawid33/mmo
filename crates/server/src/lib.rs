@@ -300,6 +300,7 @@ pub fn run() {
     )
     .unwrap_or_else(|_| include_str!("../../../assets/blocks/blocks.ron").to_string());
     let registry = game::BlockRegistry::from_ron(&manifest).expect("invalid block manifest");
+    game::install_block_props(registry.props());
     let resolve = |name: &str| {
         registry
             .id_of(name)

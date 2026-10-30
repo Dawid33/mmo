@@ -33,6 +33,16 @@ pub struct BlockDef {
     pub id: u16,
     pub name: String,
     pub textures: TextureSpec,
+    /// Whether the block collides. Default true.
+    #[serde(default = "default_solid")]
+    pub solid: bool,
+    /// How the block is drawn. Default opaque.
+    #[serde(default)]
+    pub render: crate::RenderMode,
+}
+
+fn default_solid() -> bool {
+    true
 }
 
 /// Top-level RON document shape: `( blocks: [ ... ] )`.
@@ -99,6 +109,21 @@ impl BlockRegistry {
 
     pub fn id_of(&self, name: &str) -> Option<BlockId> {
         self.by_name.get(name).copied()
+    }
+
+    /// The collision / render properties of every block, for
+    /// [`crate::install_block_props`].
+    pub fn props(&self) -> crate::BlockProps {
+        let mut p = crate::BlockProps::default();
+        for (id, def) in self.iter() {
+            if !def.solid {
+                p.non_solid.insert(id.0);
+            }
+            if def.render == crate::RenderMode::Cutout {
+                p.cutout.insert(id.0);
+            }
+        }
+        p
     }
 
     pub fn def(&self, id: BlockId) -> Option<&BlockDef> {

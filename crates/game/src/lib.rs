@@ -14,6 +14,7 @@ extern crate std;
 use std::collections::BTreeMap;
 
 pub mod block;
+pub mod block_props;
 pub mod camera;
 pub mod debug_render;
 pub mod edit;
@@ -50,6 +51,7 @@ pub use state_hash::StateHash;
 // The #[rollback] macro expansion in `state` and the borrow::Partial derives
 // rely on these items being reachable at the crate root (`crate::...`).
 pub use block::*;
+pub use block_props::*;
 pub use camera::*;
 pub use ground::*;
 pub use debug_render::{ColliderDebug, DebugFlags, DebugLine, DEBUG_COLLIDER_RADIUS};
