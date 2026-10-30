@@ -95,7 +95,7 @@ fn cell_solid(chunk: &Chunk, (bx, by, bz): (usize, usize, usize)) -> bool {
 }
 
 /// Whether `block` is the bedrock of the column `ground` (no ground: never).
-/// Pure core of `Rollback::is_bedrock`; the caller handles cell mode.
+/// Pure core of `Rollback::is_bedrock`.
 pub fn is_bedrock_at(ground: Option<&crate::ColumnGround>, block: Block) -> bool {
     ground.is_some_and(|g| block.id == g.bedrock)
 }
@@ -103,7 +103,7 @@ pub fn is_bedrock_at(ground: Option<&crate::ColumnGround>, block: Block) -> bool
 /// Whether breaking `pos` would open a face into a neighbour region's
 /// unmaterialised ground: strictly below its block column's surface with a
 /// face neighbour outside this region's columns. Pure core of
-/// `Rollback::breaks_into_neighbour_ground`; the caller handles cell mode.
+/// `Rollback::breaks_into_neighbour_ground`.
 pub fn edge_ring_locked(pos: BlockPos, ground: Option<&crate::ColumnGround>) -> bool {
     let Some(ground) = ground else { return false };
     let cb = CHUNK_BLOCKS as i32;
@@ -148,31 +148,23 @@ impl Rollback {
     }
 
     /// Whether `block` is the bedrock of the ground under chunk `coords`.
-    /// Cell mode has no ground semantics (as `implied_block`).
     fn is_bedrock(&self, coords: ChunkCoords, block: Block) -> bool {
-        self.data.cells.cell_chunks == 0
-            && is_bedrock_at(
-                self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)),
-                block,
-            )
+        is_bedrock_at(self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), block)
     }
 
     /// Whether breaking `pos` (in chunk `coords`) would open a face
     /// into a neighbour region's unmaterialised ground: the block lies
     /// strictly below its own block column's surface and a face neighbour is
-    /// outside this region's columns. Only columns with ground (never cell
-    /// mode) qualify. See the module docs' known limit.
+    /// outside this region's columns. Only columns with ground qualify. See
+    /// the module docs' known limit.
     fn breaks_into_neighbour_ground(&self, pos: BlockPos, coords: ChunkCoords) -> bool {
-        if self.data.cells.cell_chunks != 0 {
-            return false;
-        }
         edge_ring_locked(pos, self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)))
     }
 
     /// Turns implied chunk `coords` into a real chunk entity built from the
     /// column's ground recipe, undo-safely (`RemoveEntity` on undo). `None`
-    /// when the chunk is not implied (it exists, cell mode, no ground, or
-    /// inside the band).
+    /// when the chunk is not implied (it exists, no ground, or inside the
+    /// band).
     pub fn materialize_ground_safe(&mut self, coords: ChunkCoords) -> Option<EntityKey> {
         // One canonicalising build: per-block `set_block` into a uniform
         // chunk re-scans the grid on every write (O(N^2) at 16³).
@@ -244,25 +236,8 @@ impl Rollback {
         self.set_block_in(pos, block)
     }
 
+    /// The one funnel of both `set_block_safe` and `player_edit_safe`.
     fn set_block_in(&mut self, pos: BlockPos, block: Block) -> bool {
-        let changed = self.set_block_uncounted(pos, block);
-        if changed {
-            let cc = self.data.cells.cell_chunks;
-            if let Some(cell) = (cc != 0).then(|| crate::cell_of_block(pos, cc)).flatten() {
-                let n = self.data.cell_edits.get(&cell).copied().unwrap_or(0);
-                self.data.cell_edits.insert(cell, n.wrapping_add(1));
-            }
-        }
-        changed
-    }
-
-    fn set_block_uncounted(&mut self, pos: BlockPos, block: Block) -> bool {
-        // Cell mode: a dormant cell's terrain lives in the server store; an
-        // edit here would create a chunk the store never sees. Gated here, the
-        // one funnel of both set_block_safe and player_edit_safe.
-        if !self.block_in_active_cell(pos) {
-            return false;
-        }
         let Some((coords, (bx, by, bz))) = locate(pos) else { return false };
         let breaking = block.id == BlockId::AIR;
         if breaking && self.breaks_into_neighbour_ground(pos, coords) {
@@ -304,8 +279,8 @@ impl Rollback {
                 return false;
             }
             // An all-air new chunk: only reachable where the slot is not
-            // implied ground (cell mode, a column without ground, or a slot
-            // in or above the band) — `set_block_uncounted` materialises an
+            // implied ground (a column without ground, or a slot in or
+            // above the band) — `set_block_in` materialises an
             // implied chunk before writing into it.
             debug_assert!(
                 self.implied_block(coords, (bx, by, bz)).is_none(),

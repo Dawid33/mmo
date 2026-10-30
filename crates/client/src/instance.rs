@@ -689,10 +689,7 @@ impl GameInstanceManager {
             }
             // Transfer events are relayed into regions directly (server) or
             // client-predicted (later task); never locally-originated here.
-            // Task 3 removes CellChanges with cell mode.
-            GameEventKind::EntityArrived(_)
-            | GameEventKind::GhostUpdate(_)
-            | GameEventKind::CellChanges(_) => {}
+            GameEventKind::EntityArrived(_) | GameEventKind::GhostUpdate(_) => {}
             GameEventKind::UiAction(_, _) | GameEventKind::Order(_, _) if !self.is_caught_up => {
                 // Same admission rule as PlayerInput: drop until the sim has
                 // caught up with the server (join/replay window).

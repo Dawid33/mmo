@@ -4,8 +4,8 @@
 //! the same undoable edit, so reachable air is always bordered by real chunks;
 //! bedrock cannot be broken.
 use game::{
-    state_hash, Block, BlockId, CellChanges, CellCoords, CellPayload, Chunk, ChunkCoords, Column,
-    ColumnCoords, ColumnGround, DormantCell, GameEventKind, InputEvent, Key, MouseButton, Pose,
+    state_hash, Block, BlockId, Chunk, ChunkCoords, Column, ColumnCoords, ColumnGround,
+    GameEventKind, InputEvent, Key, MouseButton, Pose,
     Region, RegionCoords, Rollback, CHUNK_BLOCKS, REGION_CHUNKS, UNDERGROUND_DEPTH,
 };
 
@@ -308,30 +308,6 @@ fn digging_at_the_region_edge_does_not_reach_outside() {
     assert!(!dig(&mut low, [0, 0, 0]), "the low edge ring is refused below the surface");
     assert!(!dig(&mut low, [1, 0, 0]), "z = 0 is still the edge ring");
     assert!(low.data().terrain_snapshot().chunks.iter().all(|(c, _)| c.x == 0 && c.z == 0));
-}
-
-#[test]
-fn cell_mode_digs_keep_band_semantics() {
-    // 16-block cells.
-    const CC: usize = 16 / CHUNK_BLOCKS;
-    let mut region = Region::new_cells(r0(), CC, None, None);
-    let cell = CellCoords::new(0, 0);
-    let content = DormantCell {
-        chunks: vec![(ChunkCoords::new(0, 0, 0), Chunk::flat_floor_with(32, STONE))],
-        entities: vec![],
-    };
-    region
-        .handle_event(GameEventKind::CellChanges(CellChanges {
-            deactivate: vec![],
-            activate: vec![CellPayload { cell, version: 1, materialized_hash: 0, content }],
-        }))
-        .unwrap();
-    region.forget_last_event();
-    let ground = ColumnGround::plain(vec![SURFACE; game::COLUMN_FOOTPRINT].into_boxed_slice(), 0, STONE, BEDROCK);
-    region.with_data(|r| r.seed_ground_genesis(vec![(ColumnCoords::new(0, 0), ground)]));
-    assert!(dig(&mut region, [0, 1, 0]));
-    assert!(dig(&mut region, [0, 0, 0]));
-    assert!(!has_chunk(region.data(), ChunkCoords::new(0, -1, 0)), "cell mode materialises nothing");
 }
 
 // --- one raycast case through the player's click, as tests/block_edit.rs ---

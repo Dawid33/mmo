@@ -5,13 +5,12 @@
 //! walking and jumping over 8×8 chunks of hand-built `Voxels` floor (block
 //! scale, plus one row of half blocks for chisel scale), one slime, and a
 //! kinematic compound of two rotated cuboids whose mass properties go through
-//! the eigen solve (std `acos`/`cos` in glamx). A second, cell-mode scene
-//! pins `cell_hash`, which clients hard-check against the server's.
+//! the eigen solve (std `acos`/`cos` in glamx).
 //!
 //! Every constant holds on every target: [`WASM_SCENE_DIGEST`] is crc32 of
 //! the region's canonical bincode bytes (`SerializedRegion`, the parking and
-//! wire format: bincode writes `usize` as u64), and `game::state_hash` /
-//! `cell_hash` walk `StateHash`, which also hashes `usize` as u64.
+//! wire format: bincode writes `usize` as u64), and `game::state_hash` walks
+//! `StateHash`, which also hashes `usize` as u64.
 //!
 //! Run both sides with `just determinism-wasm`. The constants change only in
 //! a commit whose message says why; print them with
@@ -26,8 +25,8 @@ use game::rapier3d::math::Vector;
 use glamx::Quat;
 use game::rapier3d::prelude::{ColliderBuilder, RigidBodyBuilder, RigidBodyHandle};
 use game::{
-    state_hash, Block, BlockId, CellChanges, CellCoords, CellPayload, Chunk, ChunkCoords, Column, ColumnCoords,
-    ColumnGround, DormantCell, GameEventKind, Key, Pose, Region, SubChunk,
+    state_hash, Block, BlockId, Chunk, ChunkCoords, Column, ColumnCoords, ColumnGround,
+    Key, Pose, Region, SubChunk,
 };
 use slotmapd::Key as _;
 
@@ -47,10 +46,6 @@ const WASM_SCENE_DIGEST: u32 = pinned(0x9ADD_3052, 0xB5B3_D519);
 /// `game::state_hash` of the same state, on every target.
 const SCENE_STATE_HASH: u32 = pinned(0x1D38_127B, 0xADE4_9129);
 const SCENE_TICKS: usize = 120;
-/// `cell_hash` of [`cell_scene`]'s activated cell, on every target.
-const CELL_HASH: u32 = pinned(0xD09E_C93A, 0xB70D_476F);
-/// `game::state_hash` of [`cell_scene`]'s region, on every target.
-const CELL_STATE_HASH: u32 = pinned(0x86BE_A569, 0x138E_6E4F);
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
 const UNDERGROUND_DIGEST: u32 = pinned(0xD4C1_DE27, 0x24CC_65C7);
 /// `game::state_hash` of the same state, on every target.
@@ -182,48 +177,6 @@ fn add_compound_body(world: &mut game::World) -> RigidBodyHandle {
     handle.unwrap()
 }
 
-/// A cell-mode region activating one cell server-side (the server fills
-/// `materialized_hash` with `cell_hash`, and clients hard-fail on a
-/// mismatch, so it must agree across targets); returns
-/// `(cell_hash, state_hash)`.
-fn cell_scene() -> (u32, u32) {
-    let cell = CellCoords::new(1, 2);
-    // 16-block cells: 8 chunks at 2-block chunks, one chunk column at 16.
-    let cell_chunks = 16 / game::CHUNK_BLOCKS;
-    let (x, z) = (cell.x as usize * cell_chunks, cell.z as usize * cell_chunks);
-    // Three chunks inside the cell: along x and z when it is wider than a
-    // chunk, else stacked up its one column.
-    let (second, third) = if cell_chunks > 1 {
-        (ChunkCoords::new(x + 1, 0, z), ChunkCoords::new(x, 0, z + 1))
-    } else {
-        (ChunkCoords::new(x, 1, z), ChunkCoords::new(x, 2, z))
-    };
-    let content = DormantCell {
-        chunks: vec![
-            (ChunkCoords::new(x, 0, z), Chunk::flat_floor(8)),
-            (second, Chunk::flat_floor(24)),
-            (third, Chunk::flat_floor(4)),
-        ],
-        entities: vec![],
-    };
-    let mut region = Region::new_cells(r0(), cell_chunks, None, None);
-    let event = region
-        .handle_event(GameEventKind::CellChanges(CellChanges {
-            deactivate: vec![],
-            activate: vec![CellPayload { cell, version: 1, materialized_hash: 0, content }],
-        }))
-        .unwrap();
-    region.forget_last_event();
-    let GameEventKind::CellChanges(changes) = event.kind else { panic!("{event:?}") };
-    let hash = region.data().cell_hash(cell);
-    assert_eq!(changes.activate[0].materialized_hash, hash, "the server fills the materialized hash");
-    let state = state_hash(region.data());
-    if print_hash() {
-        log(&format!("CELL_HASH = 0x{hash:08X}, CELL_STATE_HASH = 0x{state:08X}"));
-    }
-    (hash, state)
-}
-
 /// A 2x2-column region of implied ground (three strata over bedrock) dug
 /// down a shaft that wanders across all four columns: each dig materialises chunks from the recipe, the last
 /// lands on bedrock and is refused. Returns `(digest, state_hash)`.
@@ -326,28 +279,6 @@ fn scene_hash_wasm() {
     }
     assert_eq!(digest, WASM_SCENE_DIGEST, "wasm32 scene digest 0x{digest:08X} != golden 0x{WASM_SCENE_DIGEST:08X}");
     assert_eq!(hash, SCENE_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{SCENE_STATE_HASH:08X}");
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn cell_hash_native() {
-    let (hash, state) = cell_scene();
-    if !pinned_size() {
-        return;
-    }
-    assert_eq!(hash, CELL_HASH, "native cell_hash 0x{hash:08X} != golden 0x{CELL_HASH:08X}");
-    assert_eq!(state, CELL_STATE_HASH, "native state_hash 0x{state:08X} != golden 0x{CELL_STATE_HASH:08X}");
-}
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen_test::wasm_bindgen_test]
-fn cell_hash_wasm() {
-    let (hash, state) = cell_scene();
-    if !pinned_size() {
-        return;
-    }
-    assert_eq!(hash, CELL_HASH, "wasm32 cell_hash 0x{hash:08X} != golden 0x{CELL_HASH:08X}");
-    assert_eq!(state, CELL_STATE_HASH, "wasm32 state_hash 0x{state:08X} != golden 0x{CELL_STATE_HASH:08X}");
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -1199,8 +1199,8 @@ pub fn rollback(args: TokenStream, input: TokenStream) -> TokenStream {
                     }
                     self.data.remove(k)
                 }
-                /// Unlogged insert, for raw paths only (genesis, the
-                /// confirmed-head `CellChanges` arm) — never rolled back.
+                /// Unlogged insert, for raw paths only (genesis) — never
+                /// rolled back.
                 pub fn insert_raw(&mut self, k: K, v: V) -> ::std::option::Option<V> {
                     self.data.insert(k, v)
                 }

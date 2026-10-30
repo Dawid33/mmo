@@ -35,8 +35,6 @@ pub const SLIME_SPAWN_CHANCE_PERCENT: u64 = 50;
 /// A region stops spawning once it holds this many slimes. With the defaults
 /// an empty region fills in about 80 s; one slime per ~500 m² at 64 m regions.
 pub const SLIME_CAP_PER_REGION: usize = 8;
-/// Cell-mode regions: a cell stops spawning once it holds this many slimes.
-pub const SLIME_CAP_PER_CELL: usize = 8;
 /// Relative odds of each size at spawn: (size, weight). Minecraft sizes.
 pub const SLIME_SIZE_WEIGHTS: [(u8, u64); 3] = [(1, 60), (2, 30), (4, 10)];
 /// Slimes never spawn on this block (water, id 5 in `assets/blocks/blocks.ron`;
@@ -236,36 +234,11 @@ impl Rollback {
         }
     }
 
-    /// Spawn gate at region-local voxel column `(vx, vz)`. Legacy regions:
-    /// always allowed (the per-region cap applies instead). Cell mode: the
-    /// column's cell must be active and hold fewer than SLIME_CAP_PER_CELL.
-    pub fn slime_spawn_allowed(&self, vx: i32, vz: i32) -> bool {
-        let cc = self.data.cells.cell_chunks;
-        if cc == 0 {
-            return true;
-        }
-        let Some(cell) = crate::cell_of_pos(vx as f32, vz as f32, cc) else { return false };
-        if !self.data.cells.active.contains(&cell) {
-            return false;
-        }
-        let in_cell = self
-            .cell_entity_keys(cell)
-            .into_iter()
-            .filter(|k| self.data.ecs.slime.try_get(*k).is_some())
-            .count();
-        in_cell < SLIME_CAP_PER_CELL
-    }
-
     fn maybe_spawn_slime_safe(&mut self, region: RegionCoords, tick: u64) {
         let Some(plan) = slime_spawn_plan(region, tick) else { return };
-        if !self.slime_spawn_allowed(plan.vx, plan.vz) {
+        let count = self.data.ecs.slime.iter().filter(|(_, s)| s.is_some()).count();
+        if count >= SLIME_CAP_PER_REGION {
             return;
-        }
-        if self.data.cells.cell_chunks == 0 {
-            let count = self.data.ecs.slime.iter().filter(|(_, s)| s.is_some()).count();
-            if count >= SLIME_CAP_PER_REGION {
-                return;
-            }
         }
         let Some((surface, top)) = self.surface_voxel(plan.vx, plan.vz) else { return };
         if top == SLIME_NO_SPAWN_BLOCK {

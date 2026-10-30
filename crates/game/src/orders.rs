@@ -216,22 +216,14 @@ impl TileSource for Rollback {
 
     fn is_bedrock(&self, p: TilePos) -> bool {
         let Some((coords, local)) = crate::edit::locate(p) else { return false };
-        self.data.cells.cell_chunks == 0
-            && self.current_block(coords, local).is_some_and(|b| {
-                crate::edit::is_bedrock_at(
-                    self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)),
-                    b,
-                )
-            })
+        self.current_block(coords, local).is_some_and(|b| {
+            crate::edit::is_bedrock_at(self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), b)
+        })
     }
 
     fn edge_locked(&self, p: TilePos) -> bool {
         let Some((coords, _)) = crate::edit::locate(p) else { return false };
-        self.data.cells.cell_chunks == 0
-            && crate::edit::edge_ring_locked(
-                p,
-                self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)),
-            )
+        crate::edit::edge_ring_locked(p, self.data.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)))
     }
 
     fn is_constructed(&self, p: TilePos) -> bool {

@@ -15,9 +15,6 @@ use std::collections::BTreeMap;
 
 pub mod block;
 pub mod camera;
-pub mod cell_store;
-pub mod cell_tickets;
-pub mod cells;
 pub mod debug_render;
 pub mod edit;
 pub mod ground;
@@ -54,9 +51,6 @@ pub use state_hash::StateHash;
 // rely on these items being reachable at the crate root (`crate::...`).
 pub use block::*;
 pub use camera::*;
-pub use cell_store::*;
-pub use cell_tickets::*;
-pub use cells::*;
 pub use ground::*;
 pub use debug_render::{ColliderDebug, DebugFlags, DebugLine, DEBUG_COLLIDER_RADIUS};
 pub use input::*;
@@ -190,11 +184,6 @@ pub enum ClientUpdateEvent {
     RemoveLod { key: LodKey, near_takeover: bool },
     GameCrash(GameError),
     SetPlayer(ClientId),
-    /// Cell mode: the home region's active cells with their terrain chunk
-    /// counts (edge-triggered on the set). The renderer hides home-region
-    /// LOD cells under a cell once that many of its chunks have meshed —
-    /// until then the LOD stays, so activation never opens a hole.
-    ActiveCells(RegionId, std::collections::BTreeMap<crate::CellCoords, u32>),
     /// Region + connection status for the debug HUD. Edge-triggered by the
     /// manager (only sent on change); consumed by the render bridge.
     HudStatus {

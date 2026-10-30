@@ -14,7 +14,6 @@ use slotmapd::{new_key_type, SlotMap, SparseSecondaryMap};
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use crate::camera::{Camera, Perspective3};
-use crate::cells::CellState;
 use crate::input::InputState;
 use crate::protocol::{ColliderSpec, EntityBundle, GhostData, GHOST_TTL_TICKS};
 use crate::registry::BlockId;
@@ -58,9 +57,9 @@ pub enum GameDataUpdateKind {
     /// Blocks of a terrain chunk that changed, each as its full new state.
     /// An edit sends the new states on Do and the old ones on Undo.
     SetBlocks(EntityKey, Vec<BlockDelta>),
-    /// A terrain chunk loaded with a cell (cell mode): the renderer spawns it
-    /// at its pose and derives its voxels off-thread, budgeted — the sim
-    /// thread never builds voxels for activated cells.
+    /// A terrain chunk added after the snapshot (implied ground an edit
+    /// materialised): the renderer spawns it at its pose and derives its
+    /// voxels off-thread, budgeted.
     AddTerrainChunk(EntityKey, Pose, Box<Chunk>),
     SetEntityPosition(EntityKey, Pose),
     AddCameraComponent(EntityKey, ClientId, Perspective3, Pose),
@@ -179,7 +178,7 @@ mod game_data {
     };
 
     use super::{
-        Camera, CellState, Chunk, ChunkIndexKey, Client, ClientId, Component, EntityKey,
+        Camera, Chunk, ChunkIndexKey, Client, ClientId, Component, EntityKey,
         PhysicsParams,
         EntityKind, GhostEntry, Pose, RigidBodyHandle, RollbackInfo, SlotMap,
     };
@@ -203,18 +202,10 @@ mod game_data {
         /// arrived under — makes replayed arrivals idempotent.
         #[undo(map)]
         arrivals: BTreeMap<(crate::RegionCoords, EntityKey), EntityKey>,
-        /// Cell loading (cell-mode regions); default = legacy region.
-        cells: CellState,
-        /// Terrain chunk entity by [`ChunkIndexKey`]. Column-major, so one
-        /// cell is `cell_chunks` contiguous ranges. Replaces the scans that
-        /// recovered chunk coordinates from body translations.
+        /// Terrain chunk entity by [`ChunkIndexKey`]. Replaces the scans
+        /// that recovered chunk coordinates from body translations.
         #[undo(map)]
         chunk_index: BTreeMap<ChunkIndexKey, EntityKey>,
-        /// Cell mode: successful block edits per cell, ever (wrapping). The
-        /// server's terrain fingerprint recomputes a cell's term only when
-        /// its count moved.
-        #[undo(map)]
-        cell_edits: BTreeMap<crate::CellCoords, u32>,
         /// Per-column ground recipes from worldgen: what lies below each
         /// column's materialised band. Written only at genesis
         /// (`seed_ground_genesis`), never mutated, so it never needs undo; the
@@ -666,34 +657,38 @@ where
 use crate::movement::{PLAYER_CAPSULE_HALF_HEIGHT, PLAYER_CAPSULE_RADIUS};
 /// Vertical gap left between the capsule bottom and the terrain surface at spawn.
 const PLAYER_SPAWN_CLEARANCE: f32 = 3.6;
-/// Region-local voxel column the player spawns over. Not tied to the region
-/// center: the world seed was scanned (examples/seed_scan.rs) for dry land at
-/// exactly this column, so it stays fixed even though REGION_SIZE grew.
-/// Region-local spawn column. Legacy regions: `(PLAYER_SPAWN_X, PLAYER_SPAWN_Z)`,
-/// near the region corner. Cell mode: the middle of the region (centred in a
-/// block), so the loaded cells are not clipped by the region edge and the
-/// player can walk half a region in any direction before a crossing.
-pub fn player_spawn_xz(cell_mode: bool) -> (f32, f32) {
-    if cell_mode {
-        let c = crate::REGION_SIZE / 2.0 + (crate::BLOCK_VOXELS / 2) as f32;
-        (c, c)
-    } else {
-        (PLAYER_SPAWN_X, PLAYER_SPAWN_Z)
-    }
-}
-
 /// Region-local voxel (x, z) of the centre of block column `[bx, bz]`.
 pub fn block_column_xz([bx, bz]: [u32; 2]) -> (f32, f32) {
     let bv = crate::BLOCK_VOXELS as f32;
     ((bx as f32 + 0.5) * bv, (bz as f32 + 0.5) * bv)
 }
 
+/// Region-local voxel column the player spawns over. Not tied to the region
+/// center: the world seed was scanned (examples/seed_scan.rs) for dry land at
+/// exactly this column, so it stays fixed even though REGION_SIZE grew.
 pub const PLAYER_SPAWN_X: f32 = 128.0;
 pub const PLAYER_SPAWN_Z: f32 = 128.0;
 /// Spawn height used only when the spawn column has no terrain (all air).
 const PLAYER_SPAWN_FALLBACK_Y: f32 = 26.0;
 
 impl Rollback {
+    /// Where this region spawns players (region-local units).
+    pub fn spawn_xz(&self) -> (f32, f32) {
+        (PLAYER_SPAWN_X, PLAYER_SPAWN_Z)
+    }
+
+    pub(crate) fn chunk_coords_of(&self, key: EntityKey) -> Option<ChunkCoords> {
+        let handle = (*self.data.ecs.rigidbody.try_get(key))?;
+        let t = self.data.physics.bodies.get(handle)?.translation();
+        // Chunk bodies sit at exact multiples of CHUNK_UNITS (seed_terrain_genesis / create_mesh).
+        Some(crate::chunk_coords_from_translation(t))
+    }
+
+    /// The terrain chunk entity at `coords`, if any.
+    pub fn chunk_key_at(&self, coords: ChunkCoords) -> Option<EntityKey> {
+        self.data.chunk_index.get(&chunk_index_key(coords)).copied()
+    }
+
     /// Runtime chunk insertion (undo-safe): multi-scale decomposition only,
     /// unlike `seed_terrain_genesis`. Deliberately never collapses a
     /// fully-solid chunk to a single cuboid, so the same chunk content can
@@ -806,10 +801,10 @@ impl Rollback {
     }
 
     /// The block the ground recipe implies at `local` of chunk `coords`,
-    /// when that chunk is not materialised. `None` for a chunk entity, cell
-    /// mode, a column without ground, or a sub-chunk inside the band.
+    /// when that chunk is not materialised. `None` for a chunk entity, a
+    /// column without ground, or a sub-chunk inside the band.
     pub fn implied_block(&self, coords: ChunkCoords, local: (usize, usize, usize)) -> Option<crate::Block> {
-        if self.cells.cell_chunks != 0 || self.chunk_index.contains_key(&chunk_index_key(coords)) {
+        if self.chunk_index.contains_key(&chunk_index_key(coords)) {
             return None;
         }
         crate::ground::implied_block(self.ground.get(&crate::ColumnCoords::new(coords.x, coords.z)), coords, local)

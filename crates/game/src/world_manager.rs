@@ -73,12 +73,6 @@ pub trait RegionSpawner {
     fn generates_columns(&self) -> bool {
         false
     }
-
-    /// Whether spawned regions run in cell mode (never parked: their dormant
-    /// store is runner-private until persistence lands).
-    fn cell_mode(&self) -> bool {
-        false
-    }
 }
 
 /// Chance (per mille, per region per round) that [`InlineSchedule::jittery`]
@@ -163,31 +157,9 @@ pub struct InlineSpawner {
     /// Regions whose input queue stays untouched until after their next tick
     /// (see [`InlineSchedule`]). Always empty without a schedule.
     late: BTreeSet<RegionCoords>,
-    /// Non-zero: spawn cell-mode runners with this cell size.
-    cell_chunks: usize,
-    /// Lazy cell mode: per-cell generation (the manager then never builds a
-    /// whole region for this spawner).
-    cell_generator: Option<crate::CellGeneratorFactory>,
-    /// Cell mode: each new region's island (its spawn column).
-    islands: Option<crate::IslandDirectory>,
 }
 
 impl InlineSpawner {
-    pub fn with_cells(cell_chunks: usize) -> Self {
-        Self { cell_chunks, ..Self::default() }
-    }
-
-    /// Cell mode with lazy per-cell generation.
-    pub fn with_cell_generator(cell_chunks: usize, factory: crate::CellGeneratorFactory) -> Self {
-        Self { cell_chunks, cell_generator: Some(factory), ..Self::default() }
-    }
-
-    /// Give new cell-mode regions their island's spawn.
-    pub fn with_islands(mut self, islands: crate::IslandDirectory) -> Self {
-        self.islands = Some(islands);
-        self
-    }
-
     pub fn with_schedule(schedule: InlineSchedule) -> Self {
         Self { schedule: Some(schedule), ..Self::default() }
     }
@@ -273,22 +245,9 @@ impl RegionSpawner for InlineSpawner {
             id,
             out,
             &|rc| unreachable!("InlineSpawner never generates columns ({rc:?})"),
-            self.cell_chunks,
-            self.cell_generator.as_ref(),
-            self.islands.as_ref(),
         );
         self.runners.insert(id, (recv, runner));
         send
-    }
-
-    fn cell_mode(&self) -> bool {
-        self.cell_chunks != 0
-    }
-
-    /// A lazy cell spawner builds its own cells, so the manager must hand it
-    /// deferred seeds rather than generating whole regions.
-    fn generates_columns(&self) -> bool {
-        self.cell_generator.is_some()
     }
 }
 
@@ -591,7 +550,6 @@ impl<S: RegionSpawner> WorldManager<S> {
                     // and moved by the manager). Drop rather than forward.
                     GameEventKind::EntityArrived(_)
                     | GameEventKind::GhostUpdate(_)
-                    | GameEventKind::CellChanges(_)
                     | GameEventKind::CreateClient(_)
                     | GameEventKind::CreateClientAt(..)
                     | GameEventKind::ClientLeft(_) => {
@@ -712,9 +670,6 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Grace-period unloads: a region with no subscribers and no connected
     /// client's player entity parks after UNLOAD_GRACE_MS.
     pub fn maintain(&mut self, now_ms: u64) {
-        if self.spawner.cell_mode() {
-            return;
-        }
         let connected_homes: BTreeSet<RegionCoords> = self
             .sessions
             .keys()

@@ -58,9 +58,6 @@ impl RegionSpawner for ThreadRegionSpawner {
                         generate_time.set(started.elapsed());
                         columns
                     },
-                    0,
-                    None,
-                    None,
                 );
                 let generate_time = generate_time.get();
                 let hash_time = runner.baseline_hash_time();

@@ -314,8 +314,6 @@ pub type LastGameEventId = usize;
 pub enum GameError {
     CrashedOnServerEvent,
     QuitRequested,
-    /// A client materialized a cell differently from the server (spec §1).
-    CellHashMismatch(crate::CellCoords),
 }
 
 pub enum WorldId {
@@ -453,9 +451,6 @@ pub enum GameEventKind {
     UiAction(ClientId, crate::UiAction),
     /// A fortress order from a client (designate, erase, cancel, ...).
     Order(ClientId, crate::Order),
-    /// Server-authored cell loading (cell-mode regions only): applied at the
-    /// confirmed head by every replica, never predicted.
-    CellChanges(crate::CellChanges),
     /// Server-authored: the client's session left this region (Play moved
     /// it elsewhere). Removes its player body and `clients` entry, undoably.
     ClientLeft(ClientId),
@@ -478,7 +473,6 @@ impl GameEventKind {
             | GameEventKind::Quit
             | GameEventKind::EntityArrived(_)
             | GameEventKind::GhostUpdate(_)
-            | GameEventKind::CellChanges(_)
             | GameEventKind::ClientLeft(_) => None,
         }
     }

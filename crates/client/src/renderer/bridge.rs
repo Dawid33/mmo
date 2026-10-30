@@ -630,8 +630,6 @@ pub fn drain_client_updates(
                     .pending
                     .push(lod_rings::LodEventMsg::Remove { key, near_takeover });
             }
-            // Task 3 removes this event with cell mode.
-            ClientUpdateEvent::ActiveCells(..) => {}
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
             ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {
                 hud_status.home_region = Some(home_region);

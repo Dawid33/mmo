@@ -6,8 +6,7 @@
 //! wasm build LocalServer pumps runners inline (crates/client).
 
 use crate::{
-    required_cells, CellChanges, CellConfig, CellCoords, CellStore, CellTickets, ClientId, Column,
-    ColumnCoords, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, GhostData, Region,
+    ClientId, Column, ColumnCoords, EntityBundle, TerrainSnapshot, GameEvent, GameEventKind, GhostData, Region,
     RegionCoords, RegionId, Rollback, Tick,
     TERRAIN_HASH_INTERVAL_TICKS, TICK_RATE,
 };
@@ -119,80 +118,15 @@ impl RegionSeed {
 }
 
 impl RegionSeed {
-    /// Build this seed's runner: legacy (fully materialized) when
-    /// `cell_chunks == 0`, else a cell-mode runner whose store holds the
-    /// generated columns. Cell regions never park, so a parked seed in cell
-    /// mode is unexpected and restores legacy.
+    /// Build this seed's runner.
     pub fn into_runner(
         self,
         id: RegionId,
         out: Sender<(RegionCoords, RegionOutput)>,
         generate: &dyn Fn(RegionCoords) -> Vec<(ColumnCoords, Column)>,
-        cell_chunks: usize,
-        cells: Option<&crate::CellGeneratorFactory>,
-        islands: Option<&crate::IslandDirectory>,
     ) -> RegionRunner {
-        let new_cells = || {
-            let mut region = Region::new_cells(id, cell_chunks, None, None);
-            if let Some(island) = islands.and_then(|d| d(id)) {
-                region.with_data(|rb| rb.set_spawn_raw(island.spawn));
-            }
-            region
-        };
-        if cell_chunks == 0 {
-            return RegionRunner::new(id, self.into_region_with(id, generate), out);
-        }
-        if let (Some(factory), RegionSeed::Fresh(_) | RegionSeed::Deferred(None)) = (cells, &self) {
-            // Lazy: cells generate on first activation; the region is never
-            // built whole (large regions).
-            return RegionRunner::new_with_cells(
-                id,
-                new_cells(),
-                out,
-                CellStore::lazy(cell_chunks, factory(id)),
-                CellConfig::new(cell_chunks),
-            );
-        }
-        let columns = match self {
-            RegionSeed::Fresh(columns) => columns,
-            RegionSeed::Deferred(None) => generate(id),
-            parked => {
-                log::error!("cell-mode region {id:?} got a parked seed; restoring legacy");
-                return RegionRunner::new(id, parked.into_region_with(id, generate), out);
-            }
-        };
-        RegionRunner::new_with_cells(
-            id,
-            new_cells(),
-            out,
-            CellStore::from_columns(columns, cell_chunks),
-            CellConfig::new(cell_chunks),
-        )
+        RegionRunner::new(id, self.into_region_with(id, generate), out)
     }
-}
-
-/// Cell-mode state of a runner (spec §1, §3): tickets + the dormant store.
-pub struct CellMode {
-    store: CellStore,
-    tickets: CellTickets,
-    config: CellConfig,
-    /// Per cell ever materialized: its terrain terms. See
-    /// [`RegionRunner::terrain_fingerprint`].
-    terms: std::collections::HashMap<CellCoords, CellTerms>,
-}
-
-/// A cell's share of the terrain fingerprint (`Rollback::cell_terrain_term`).
-#[derive(Clone, Copy)]
-struct CellTerms {
-    /// As generated.
-    pristine: u32,
-    /// As last released.
-    dormant: u32,
-    /// While active: as of `edits` below — recomputed only when the cell's
-    /// `GameData::cell_edits` count moves, so a check costs nothing for
-    /// unedited cells.
-    live: u32,
-    edits: u32,
 }
 
 pub struct RegionRunner {
@@ -209,8 +143,6 @@ pub struct RegionRunner {
     /// Client events waiting for the tick they were predicted after, in
     /// arrival order.
     held: std::collections::VecDeque<(GameEventKind, u64)>,
-    /// `Some` for a cell-mode region (`RegionRunner::new_with_cells`).
-    cells: Option<CellMode>,
     /// See [`RegionRunner::baseline_hash_time`].
     baseline_hash_time: std::time::Duration,
 }
@@ -236,33 +168,8 @@ impl RegionRunner {
             last_terrain_hash,
             terrain_hash_cost: Default::default(),
             held: Default::default(),
-            cells: None,
             baseline_hash_time,
         }
-    }
-
-    /// A cell-mode runner: `region` must come from `Region::new_cells` with
-    /// the same cell size as `config`. Terrain loads through tickets.
-    pub fn new_with_cells(
-        id: RegionCoords,
-        region: Region,
-        out: Sender<(RegionCoords, RegionOutput)>,
-        store: CellStore,
-        config: CellConfig,
-    ) -> Self {
-        assert_eq!(
-            region.data().cells.cell_chunks,
-            config.cell_chunks,
-            "region/config cell size mismatch"
-        );
-        let mut runner = Self::new(id, region, out);
-        runner.cells = Some(CellMode {
-            store,
-            tickets: CellTickets::default(),
-            config,
-            terms: Default::default(),
-        });
-        runner
     }
 
     /// Wall time of the baseline `terrain_fingerprint` taken in `new`
@@ -271,139 +178,9 @@ impl RegionRunner {
         self.baseline_hash_time
     }
 
-    /// The region's whole terrain, for LOD: the sim's chunks, plus — in cell
-    /// mode — every dormant cell's stored chunks. Without the dormant part a
-    /// released cell would become a hole in the LOD rings.
+    /// The region's whole terrain, for LOD.
     fn terrain(&self) -> TerrainSnapshot {
-        let mut snap = self.region.terrain_snapshot();
-        if let Some(mode) = self.cells.as_ref() {
-            snap.chunks.extend(mode.store.dormant_chunks(&self.region.data().cells.active));
-            snap.chunks.sort_by_key(|(c, _)| (c.x, c.y, c.z));
-        }
-        snap
-    }
-
-    pub fn cell_store(&self) -> Option<&CellStore> {
-        self.cells.as_ref().map(|c| &c.store)
-    }
-
-    /// Emit one CellChanges (if non-empty) for `deactivate` + `activate`,
-    /// then file dematerialized cells back into the store.
-    fn apply_cell_changes(&mut self, deactivate: Vec<CellCoords>, activate: Vec<CellCoords>) {
-        let Some(mode) = self.cells.as_mut() else { return };
-        let watch = crate::perf::Stopwatch::start();
-        let mut changes = CellChanges { deactivate, activate: Vec::new() };
-        for cell in activate {
-            match mode.store.payload(cell) {
-                Some(p) => changes.activate.push(p),
-                None => log::error!("[cells r={:?}] no store entry for {cell:?}; skipped", self.id),
-            }
-        }
-        if changes.is_empty() {
-            return;
-        }
-        let released: Vec<(CellCoords, u32)> = changes
-            .deactivate
-            .iter()
-            .map(|&c| (c, self.region.data().cell_terrain_term(c)))
-            .collect();
-        let activated: Vec<CellCoords> = changes.activate.iter().map(|p| p.cell).collect();
-        let chunks: usize = changes.activate.iter().map(|p| p.content.chunks.len()).sum();
-        let (n_act, n_deact) = (changes.activate.len(), changes.deactivate.len());
-        let payload_ms = watch.elapsed().as_secs_f64() * 1000.0;
-        self.apply(GameEventKind::CellChanges(changes));
-        // One line per CellChanges (at most one per tick): what activation
-        // costs the region thread — payload cut from the store, then the
-        // event (materialize + cell_hash, dematerialize).
-        crate::perf_event!(
-            "cell_changes",
-            "side=server region={},{} tick={} activate={n_act} deactivate={n_deact} chunks={chunks} payload_ms={payload_ms:.1} ms={:.1}",
-            self.id.x,
-            self.id.z,
-            self.region.current_tick(),
-            watch.elapsed().as_secs_f64() * 1000.0
-        );
-        let dormant = self.region.take_dormant();
-        let Some(mode) = self.cells.as_mut() else { return };
-        for (cell, content) in dormant {
-            mode.store.put(cell, content);
-        }
-        for (cell, term) in released {
-            if let Some(t) = mode.terms.get_mut(&cell) {
-                t.dormant = term;
-            }
-        }
-        for cell in activated {
-            let edits = self.region.data().data.cell_edits.get(&cell).copied().unwrap_or(0);
-            match mode.terms.get_mut(&cell) {
-                // Re-activation materializes exactly what was released.
-                Some(t) => {
-                    t.live = t.dormant;
-                    t.edits = edits;
-                }
-                None => {
-                    // First materialization: straight from worldgen, pristine.
-                    let term = self.region.data().cell_terrain_term(cell);
-                    mode.terms.insert(cell, CellTerms { pristine: term, dormant: term, live: term, edits });
-                }
-            }
-        }
-    }
-
-    /// What the LOD shows of this region, as a fingerprint. Legacy regions:
-    /// every chunk. Cell mode: only the difference from pristine worldgen —
-    /// materializing or releasing an unedited cell moves no terrain the LOD
-    /// shows (dormant cells are part of `terrain()`), so it must not push a
-    /// `TerrainChanged`: each push rebuilds and re-sends the region's whole
-    /// LOD key, which at large region sizes is thousands of cells.
-    ///
-    /// Cell mode never walks the region's chunks: the sum is kept per cell,
-    /// and only cells edited since the last check are re-hashed. (Their
-    /// terms are the same `chunk_terrain_term`s the legacy sum adds up, so
-    /// the value equals the old whole-region formula.)
-    fn terrain_fingerprint(&mut self) -> u32 {
-        let Some(mode) = self.cells.as_mut() else {
-            return self.region.terrain_fingerprint();
-        };
-        let data = self.region.data();
-        let mut sum = 0u32;
-        for (cell, t) in mode.terms.iter_mut() {
-            let term = if data.cells.active.contains(cell) {
-                let edits = data.data.cell_edits.get(cell).copied().unwrap_or(0);
-                if edits != t.edits {
-                    t.live = data.cell_terrain_term(*cell);
-                    t.edits = edits;
-                }
-                t.live
-            } else {
-                t.dormant
-            };
-            sum = sum.wrapping_add(term).wrapping_sub(t.pristine);
-        }
-        sum
-    }
-
-    /// Required cells around `pos` that are not active yet, activated now,
-    /// outside the budget (joins and arrivals).
-    fn ensure_required(&mut self, pos: (f32, f32)) {
-        let Some(mode) = self.cells.as_ref() else { return };
-        let active = &self.region.data().cells.active;
-        let missing: Vec<CellCoords> = required_cells(pos, mode.config.cell_chunks)
-            .into_iter()
-            .filter(|c| !active.contains(c))
-            .collect();
-        self.apply_cell_changes(Vec::new(), missing);
-    }
-
-    /// The per-tick ticket pass (before the Tick event).
-    fn run_tickets(&mut self) {
-        let Some(mode) = self.cells.as_mut() else { return };
-        let players = self.region.data().player_positions();
-        // Worldgen ahead of the wanted ring runs on the store's worker thread.
-        mode.store.poll_prefetch();
-        mode.store.prefetch(&crate::prefetch_cells(&players, &mode.config));
-        let plan = mode.tickets.plan(&self.region.data().cells.active, &players, &mode.config);
-        self.apply_cell_changes(plan.deactivate, plan.activate);
+        self.region.terrain_snapshot()
     }
 
     /// `(checks, total, slowest)` of the every-`TERRAIN_HASH_INTERVAL_TICKS`
@@ -420,24 +197,7 @@ impl RegionRunner {
                 // The manager filters these; drop defensively rather than
                 // double-ticking or stopping on a stray packet.
                 GameEventKind::Tick | GameEventKind::Quit => {}
-                kind => {
-                    // Cell mode: a joining or arriving body needs its cells
-                    // under it before it lands.
-                    match &kind {
-                        GameEventKind::CreateClient(_) => {
-                            self.ensure_required(self.region.data().spawn_xz())
-                        }
-                        GameEventKind::CreateClientAt(_, column) => {
-                            self.ensure_required(crate::block_column_xz(*column))
-                        }
-                        GameEventKind::EntityArrived(b) => {
-                            let t = b.isometry.translation;
-                            self.ensure_required((t.x, t.z));
-                        }
-                        _ => {}
-                    }
-                    self.apply(kind)
-                }
+                kind => self.apply(kind),
             },
             RegionInput::EventAfterTick(kind, after_tick) => {
                 let now = self.region.current_tick() as u64;
@@ -488,7 +248,6 @@ impl RegionRunner {
     /// One sim tick + the every-10-ticks SyncClock self-report. The caller
     /// owns pacing (thread timer on the server, frame accumulator on wasm).
     pub fn tick(&mut self) {
-        self.run_tickets();
         let event = self
             .region
             .handle_event(GameEventKind::Tick)
@@ -507,12 +266,6 @@ impl RegionRunner {
             }
         }
         let (departures, ghosts) = self.region.take_transfers();
-        let frozen = self.region.take_frozen();
-        if let Some(mode) = self.cells.as_mut() {
-            for (cell, bundle) in frozen {
-                mode.store.add_entity(cell, bundle);
-            }
-        }
         if !departures.is_empty() {
             let _ = self.out.send((self.id, RegionOutput::Departures(departures)));
         }
@@ -535,7 +288,7 @@ impl RegionRunner {
             let watch = crate::perf::Stopwatch::start();
             // In-place fingerprint: the (large) snapshot is only built below,
             // once something actually changed.
-            let hash = self.terrain_fingerprint();
+            let hash = self.region.terrain_fingerprint();
             let took = watch.elapsed();
             self.terrain_hash_cost.0 += 1;
             self.terrain_hash_cost.1 += took;
