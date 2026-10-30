@@ -42,10 +42,9 @@ export VOXEL_WORLD_FILE := world_file
 
 # Region edge in BLOCKS (1 block = 1 m) — a BUILD-time constant
 # (`game::REGION_BLOCKS`), unlike `world`: 64 = 1024-unit / 64 m regions
-# (default), 128 = 2048-unit, 256 = 4096-unit regions, each with the ring table
-# re-cut to the same pixel budget and horizon. Nothing else is legal (see
-# crates/game/src/protocol.rs); 256 is the practical ceiling (~7 GB of server
-# state for one 3x3 window, measured at 2-block chunks). The dial is in blocks
+# (default), 128 = 2048-unit, 256 = 4096-unit, 512 = 8192-unit regions, each
+# with the ring table re-cut to the same pixel budget and horizon. Nothing else
+# is legal (see crates/game/src/protocol.rs). The dial is in blocks
 # so it keeps its meaning when the sim chunk (CHUNK_BLOCKS) changes size; the
 # old chunk-denominated VOXEL_REGION_CHUNKS / VOXEL_CELL_CHUNKS and the removed
 # cell mode's VOXEL_CELL_BLOCKS fail the build.
@@ -54,20 +53,20 @@ export VOXEL_WORLD_FILE := world_file
 # and server + client MUST come from the same value — nothing refuses a
 # mismatched pair. The default mirrors `[env]` in .cargo/config.toml so `just`
 # and raw `cargo` share one build fingerprint. Per-region costs scale with
-# AREA (x4 at 128, ~x15 at 256): compare perf numbers only within one region size.
+# AREA (x4 per doubling): compare perf numbers only within one region size.
 #
 # Two defaults: recipes that PLAY the game (server, client, run, *-release,
 # web*, diag, perf-capture, fly-probe, shuttle-probe, play-test, the profilers
 # trace-chrome / trace-join / perf / perf-client / perf-server / profile-* /
 # tracy-client, and cross-section) build with
-# `play_blocks` = 256 (256 m regions, one-region near window — see
+# `play_blocks` = 512 (512 m regions, one-region near window — see
 # `DEFAULT_NEAR_RADIUS` in crates/client/src/world_scale.rs); everything else —
 # tests, check, clippy, render-bench, raw cargo — stays at `test_blocks` = 64.
 # An explicit `just region_blocks=N <recipe>` (or $VOXEL_REGION_BLOCKS) wins for
 # every recipe.
 region_blocks := env_var_or_default("VOXEL_REGION_BLOCKS", "")
 test_blocks := if region_blocks == "" { "64" } else { region_blocks }
-play_blocks := if region_blocks == "" { "256" } else { region_blocks }
+play_blocks := if region_blocks == "" { "512" } else { region_blocks }
 export VOXEL_REGION_BLOCKS := test_blocks
 
 # Sim-chunk edge in BLOCKS — a BUILD-time constant (`game::CHUNK_BLOCKS`,

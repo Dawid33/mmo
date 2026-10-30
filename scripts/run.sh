@@ -5,9 +5,9 @@
 
 
 # export PYROSCOPE=true
-# Play builds use 256 m regions, as the justfile's play recipes (`play_blocks`);
+# Play builds use 512 m regions, as the justfile's play recipes (`play_blocks`);
 # an exported VOXEL_REGION_BLOCKS wins.
-export VOXEL_REGION_BLOCKS="${VOXEL_REGION_BLOCKS:-256}"
+export VOXEL_REGION_BLOCKS="${VOXEL_REGION_BLOCKS:-512}"
 # Pin the client to the RX 6700 XT eGPU (unpinned, wgpu picks the ~30x slower
 # NVK T600). An exported WGPU_ADAPTER_NAME or VOXEL_ADAPTER wins.
 export WGPU_ADAPTER_NAME="${WGPU_ADAPTER_NAME:-${VOXEL_ADAPTER:-6700}}"

@@ -9,8 +9,8 @@
 use std::fmt;
 
 /// Production near-window radius: 2 = the 5x5 block of simulated regions at
-/// 64 m regions; 0 = one region at 256 m regions (`REGION_BLOCKS` 256, what the
-/// play recipes build), which is already ~16x the area.
+/// 64 m regions; 0 = one region from 256 m regions up (the play recipes build
+/// 512 m regions), which is already 16x (64x at 512) the area.
 /// The LOD ring table is NOT widened with it: `desired_lod` subtracts the
 /// near window, so the factor-2 ring (bound 2) is simply absorbed into
 /// simulated terrain and the rings from factor 4 out — and the horizon —

@@ -9,7 +9,7 @@ designations (dwarves pathing to and digging/building them, replacing the F3 "Co
 orders" stand-in, incl. top-down deconstruction scheduling); then stockpiles and zones.
 
 Multi-region world follow-ups (milestone landed; spec 2026-07-05-multi-region-world):
-- Cell mode removed 2026-10-30 (plans/2026-10-30-remove-cell-mode.md): whole regions + seams; a client never simulates more than its own window. Region size is 64/128/256 again; a 512 m size needs its LOD_RING_TABLE row.
+- Cell mode removed 2026-10-30 (plans/2026-10-30-remove-cell-mode.md): whole regions + seams; a client never simulates more than its own window. Play regions are 512 m since 2026-10-30 (one-region window, single factor-16 LOD ring); live run at 512 pending.
 
 - World map + Play follow-ups: embark (choosing a site/party, not just a tile); adventure-mode walking between tiles (the player's body crossing into the next tile's region); real biomes on the map tiles (today a summary of height/water/geology); `just clippy` is red on toolchain 1.99.1 in macros / bbmodel / slotmapd / block-mesh; the live check of the world map (Esc menu, M, tile panel, Play, camera landing, old region parking) is still pending.
 - Chunk-16 follow-up (needs Dawid's go-ahead to measure): client brick landing per frame (a whole chunk is ~200-300 bricks/frame vs the cap of 160), client replay churn when a predicted break materialises ground (RemoveEntity + AddTerrainChunk re-spawns bricks per replay), and a solid chunk's first-edit full collider rebuild; then fix what the numbers show.

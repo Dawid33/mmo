@@ -58,17 +58,16 @@ pub const REGION_SIZE: f32 = (REGION_BLOCKS * BLOCK_VOXELS) as f32;
 /// Region edges this build has been made to work at. The LOD tiling contract
 /// (`lod.rs`) only needs a power of two, but each size also needs its own
 /// `LOD_RING_TABLE`, and the fixtures and budgets below were checked at
-/// exactly these. 256 blocks is the practical ceiling: a region snapshot is ~640 MiB
-/// raw there (see `MAX_DECOMPRESSED_PACKET_BYTES`) and a 3×3 window is ~95k
-/// chunks per client. (Measured at 2-block chunks; re-measure before quoting.)
-pub const REGION_BLOCKS_CHOICES: [usize; 3] = [64, 128, 256];
+/// exactly these. 512 blocks (the play size) is played as a one-region
+/// window; its ring table is a single ring.
+pub const REGION_BLOCKS_CHOICES: [usize; 4] = [64, 128, 256, 512];
 
 /// The old chunk-denominated env vars changed meaning when the chunk stopped
 /// being a fixed size; refuse them at BUILD time rather than silently ignore.
 const _: () = {
     assert!(
         option_env!("VOXEL_REGION_CHUNKS").is_none(),
-        "VOXEL_REGION_CHUNKS is gone: use VOXEL_REGION_BLOCKS (blocks: 64, 128 or 256); just region_blocks=N"
+        "VOXEL_REGION_CHUNKS is gone: use VOXEL_REGION_BLOCKS (blocks: 64, 128, 256 or 512); just region_blocks=N"
     );
     assert!(
         option_env!("VOXEL_CELL_CHUNKS").is_none(),
@@ -102,7 +101,7 @@ const fn parse_region_blocks(var: Option<&str>) -> usize {
         }
         i += 1;
     }
-    panic!("VOXEL_REGION_BLOCKS must be one of REGION_BLOCKS_CHOICES (64, 128, 256)")
+    panic!("VOXEL_REGION_BLOCKS must be one of REGION_BLOCKS_CHOICES (64, 128, 256, 512)")
 }
 
 /// A running region checks its terrain hash this often and pushes a
@@ -464,13 +463,13 @@ mod tests {
     #[test]
     fn legal_region_sizes_parse() {
         assert_eq!(parse_region_blocks(None), 64);
-        assert_eq!(parse_region_blocks(Some("256")), 256);
+        assert_eq!(parse_region_blocks(Some("512")), 512);
     }
 
     #[test]
     #[should_panic(expected = "REGION_BLOCKS_CHOICES")]
-    fn region_sizes_above_256_are_refused() {
-        parse_region_blocks(Some("512"));
+    fn region_sizes_above_512_are_refused() {
+        parse_region_blocks(Some("1024"));
     }
 
     #[test]

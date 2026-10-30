@@ -319,13 +319,15 @@ pub const LOD_REFERENCE_FOCAL_PX: f32 = 935.0;
 /// every ring twice as far out, so the same bounds carry twice the factor —
 /// the near window already covers what the finest ring used to — and the
 /// horizon halves in regions to keep the same [`LOD_HORIZON_UNITS`] (16
-/// regions of 1024, 8 of 2048, 4 of 4096). `ring_table_keeps_cells_within_the_pixel_budget`
+/// regions of 1024, 8 of 2048, 4 of 4096, 2 of 8192). `ring_table_keeps_cells_within_the_pixel_budget`
 /// checks whichever table the build ships, `ring_table_ends_at_the_horizon`
 /// that it stops at the horizon.
 pub const LOD_RING_TABLE: &[(i32, u32)] = match crate::REGION_BLOCKS {
     64 => &[(2, 2), (3, 4), (6, 8), (13, 16), (16, 32)],
     128 => &[(2, 4), (3, 8), (6, 16), (8, 32)],
     256 => &[(2, 8), (3, 16), (4, 32)],
+    // One ring: factor 32 a region out would be 3.7 px per cell.
+    512 => &[(2, 16)],
     _ => panic!("no LOD_RING_TABLE for this REGION_BLOCKS"),
 };
 
@@ -1176,6 +1178,9 @@ mod tests {
         // default size; at 128 blocks that tile is ONE region, so 256
         // (2x2 at 128 as well).
         let factor = if tile_regions(64) > 1 { 64 } else { 256 };
+        if tile_regions(factor) <= 1 {
+            return; // 512-block regions: no tile spans several regions
+        }
         let per = cells_per_region(factor); // 16 by default
         let key = LodKey { factor, coords: [0, 0] };
         // Coarse tile band 0: fully solid everywhere.
