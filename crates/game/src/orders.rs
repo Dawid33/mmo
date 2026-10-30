@@ -49,6 +49,9 @@ pub enum DesignationKind {
     Dig,
     Deconstruct,
     Build(BlockId),
+    /// Fell the part of a tree beyond this log or branch block
+    /// (`trees::falling_sets`).
+    Chop,
 }
 
 impl DesignationKind {
@@ -56,7 +59,10 @@ impl DesignationKind {
     pub fn same_tool(self, other: Self) -> bool {
         matches!(
             (self, other),
-            (Self::Dig, Self::Dig) | (Self::Deconstruct, Self::Deconstruct) | (Self::Build(_), Self::Build(_))
+            (Self::Dig, Self::Dig)
+                | (Self::Deconstruct, Self::Deconstruct)
+                | (Self::Build(_), Self::Build(_))
+                | (Self::Chop, Self::Chop)
         )
     }
 }
@@ -139,6 +145,8 @@ pub enum Invalid {
     RegionEdge,
     Occupied,
     NotBuilt,
+    /// Chop on anything but a solid block of a tree (a log or branch).
+    NotTree,
 }
 
 /// What `validate` needs to know about the world.
@@ -149,6 +157,9 @@ pub trait TileSource {
     /// The outer ring below the surface that cannot be dug (see `edit.rs`).
     fn edge_locked(&self, p: TilePos) -> bool;
     fn is_constructed(&self, p: TilePos) -> bool;
+    /// The tree id of the block at `p` (`Block::tree_id`); 0 when none or
+    /// unknown.
+    fn tree_id(&self, p: TilePos) -> u32;
 }
 
 /// Whether `kind` may be designated on tile `p`.
@@ -174,6 +185,10 @@ pub fn validate(src: &impl TileSource, kind: DesignationKind, p: TilePos) -> Res
             } else {
                 Err(Invalid::Occupied)
             }
+        }
+        DesignationKind::Chop => {
+            let is_wood = crate::block_props().is_solid(src.block(p)) && src.tree_id(p) != 0;
+            is_wood.then_some(()).ok_or(Invalid::NotTree)
         }
     }
 }
@@ -228,6 +243,12 @@ impl TileSource for Rollback {
 
     fn is_constructed(&self, p: TilePos) -> bool {
         self.data.constructed.contains_key(&p)
+    }
+
+    fn tree_id(&self, p: TilePos) -> u32 {
+        crate::edit::locate(p)
+            .and_then(|(coords, local)| self.current_block(coords, local))
+            .map_or(0, |b| b.tree_id())
     }
 }
 
@@ -288,8 +309,10 @@ impl Rollback {
     }
 
     /// Dev shortcut: carries out every designation at once — builds bottom
-    /// up, then digs and deconstructions top down — skipping tiles that no
-    /// longer validate, and clears them all.
+    /// up, then digs, deconstructions and chops top down — skipping tiles
+    /// that no longer validate, and clears them all. A chop clears its block
+    /// and detaches each falling part of the tree into a voxel body that
+    /// despawns at rest.
     fn dev_complete_all_safe(&mut self) {
         let all: Vec<(TilePos, Designation)> =
             self.data.designations.iter().map(|(p, d)| (*p, *d)).collect();
@@ -316,10 +339,26 @@ impl Rollback {
                         constructed.push((p, false));
                     }
                 }
+                DesignationKind::Chop => self.chop_safe(p),
             }
         }
         self.set_constructed_safe(constructed);
         self.set_designations_safe(all.into_iter().map(|(p, _)| (p, None)).collect());
+    }
+
+    /// Fells the tree at `p`: clears the block and detaches every falling
+    /// set (`trees::falling_sets`, computed first) with its tip spin.
+    fn chop_safe(&mut self, p: TilePos) {
+        let tree = TileSource::tree_id(self, p);
+        let sets = crate::trees::falling_sets(self, p);
+        if !self.set_block_safe(p, Block::new(BlockId::AIR)) {
+            return;
+        }
+        let tick = *self.data.tick as u64;
+        for set in sets {
+            let spin = crate::trees::tip_angvel(tree, p, &set, tick);
+            self.detach_blocks_safe(&set, crate::SettlePolicy::Despawn, spin);
+        }
     }
 
     /// Writes designation changes and tells the renderer, both ways.

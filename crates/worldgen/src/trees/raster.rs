@@ -356,6 +356,22 @@ mod tests {
         }
     }
 
+    /// Every block of a mature tree is reachable by the sim's chop flood
+    /// (`game::MAX_TREE_BLOCKS`), with margin, and so is the whole box a
+    /// species may fill.
+    #[test]
+    fn mature_trees_fit_the_flood_bound() {
+        for sp in &SPECIES {
+            let r = sp.crown_radius_blocks + crate::trees::LEAF_REACH_PAST_CROWN_BLOCKS;
+            let bound = ((2 * r + 1) * (2 * r + 1) * sp.max_height_blocks) as usize;
+            assert!(bound < game::MAX_TREE_BLOCKS, "{}: box of {bound} blocks", sp.name);
+            for seed in 0..12 {
+                let n = rasterize(&skeleton(sp, seed, MAX_AGE)).len();
+                assert!(n * 2 <= game::MAX_TREE_BLOCKS, "{} seed {seed}: {n} blocks", sp.name);
+            }
+        }
+    }
+
     #[test]
     fn pine_is_taller_than_wide() {
         let pine = SPECIES.iter().find(|s| s.name == "pine").unwrap();

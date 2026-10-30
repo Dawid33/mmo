@@ -1,6 +1,6 @@
 # Trees — investigation
 
-**Date:** 2026-10-29 · **Status:** investigation, nothing built · **Ask:** trees that grow only
+**Date:** 2026-10-29 · **Status:** implemented 2026-10-30 except growth · **Ask:** trees that grow only
 where they could survive, deterministic and realistic-looking generation, and chopping that
 makes the part of the tree above the cut fall, like Dwarf Fortress. **Trees only**: shrubs,
 grass and other plants are out of scope.

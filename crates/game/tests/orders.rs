@@ -11,6 +11,7 @@ struct Src {
     bedrock: BTreeSet<TilePos>,
     edge: BTreeSet<TilePos>,
     built: BTreeSet<TilePos>,
+    trees: BTreeMap<TilePos, u32>,
 }
 
 impl TileSource for Src {
@@ -25,6 +26,9 @@ impl TileSource for Src {
     }
     fn is_constructed(&self, p: TilePos) -> bool {
         self.built.contains(&p)
+    }
+    fn tree_id(&self, p: TilePos) -> u32 {
+        self.trees.get(&p).copied().unwrap_or(0)
     }
 }
 
@@ -85,6 +89,28 @@ fn build_needs_air() {
     assert_eq!(validate(&s, k, [2, 0, 0]), Ok(()));
     assert!(k.same_tool(DesignationKind::Build(STONE)));
     assert!(!k.same_tool(DesignationKind::Dig));
+}
+
+#[test]
+fn chop_needs_a_solid_tree_block() {
+    let reg = BlockRegistry::from_ron(include_str!("../../../assets/blocks/blocks.ron")).unwrap();
+    install_block_props(reg.props());
+    let (log, leaves) = (reg.id_of("oak_log").unwrap(), reg.id_of("oak_leaves").unwrap());
+    let mut s = Src::default();
+    s.blocks.insert([0, 0, 0], log);
+    s.trees.insert([0, 0, 0], 7);
+    s.blocks.insert([1, 0, 0], leaves);
+    s.trees.insert([1, 0, 0], 7);
+    s.blocks.insert([2, 0, 0], STONE);
+    s.blocks.insert([3, 0, 0], log); // a log with no tree id (e.g. built)
+    let k = DesignationKind::Chop;
+    assert_eq!(validate(&s, k, [0, 0, 0]), Ok(()));
+    for x in 1..=4 {
+        assert_eq!(validate(&s, k, [x, 0, 0]), Err(Invalid::NotTree), "x = {x}");
+    }
+    assert!(k.same_tool(DesignationKind::Chop));
+    assert!(!k.same_tool(DesignationKind::Dig));
+    assert!(!DesignationKind::Dig.same_tool(k));
 }
 
 #[test]

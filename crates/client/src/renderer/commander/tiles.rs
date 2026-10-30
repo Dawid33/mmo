@@ -1,4 +1,4 @@
-//! The tile mirror: the home region's tiles on the main thread — block ids
+//! The tile mirror: the home region's tiles on the main thread — blocks
 //! per chunk, the underground ground recipes, designations and constructed
 //! tiles — behind `game::TileSource`, so the fortress tools (hover pick,
 //! validity preview, overlay) answer synchronously with the sim's own rules.
@@ -56,10 +56,10 @@ pub struct TileMirror {
     home: Option<RegionId>,
     /// Every loaded region's state; only `home`'s is read.
     regions: BTreeMap<RegionId, RegionTiles>,
-    /// Home region chunks (region-local chunk coords) → block ids by
-    /// `BlockIndex`, with the bridge entity that supplied them
+    /// Home region chunks (region-local chunk coords) → blocks (id + data,
+    /// for the tree id) by `BlockIndex`, with the bridge entity that supplied them
     /// (`Entity::PLACEHOLDER` for [`TileMirror::set_chunk`]).
-    chunks: HashMap<[i32; 3], (Entity, Box<[BlockId]>)>,
+    chunks: HashMap<[i32; 3], (Entity, Box<[Block]>)>,
     chunk_of: HashMap<Entity, [i32; 3]>,
     version: u64,
     /// Tiles (blocks) rewritten by incremental updates, for tests/diagnostics.
@@ -95,13 +95,13 @@ impl TileMirror {
     /// `SetBlocks` edit): no full-chunk rescan. `false` when the chunk is not
     /// mirrored (the caller then files it whole).
     pub fn update_blocks(&mut self, key: [i32; 3], chunk: &Chunk, indices: impl IntoIterator<Item = BlockIndex>) -> bool {
-        let Some((_, ids)) = self.chunks.get_mut(&key) else { return false };
+        let Some((_, blocks)) = self.chunks.get_mut(&key) else { return false };
         let mut changed = false;
         for i in indices {
             let (x, y, z) = i.xyz();
-            let id = chunk.block_at(x, y, z).id;
-            if ids[i.linear()] != id {
-                ids[i.linear()] = id;
+            let block = chunk.block_at(x, y, z);
+            if blocks[i.linear()] != block {
+                blocks[i.linear()] = block;
                 self.tiles_touched += 1;
                 changed = true;
             }
@@ -112,7 +112,7 @@ impl TileMirror {
         true
     }
 
-    pub fn set_chunk(&mut self, chunk: [i32; 3], blocks: Box<[BlockId]>) {
+    pub fn set_chunk(&mut self, chunk: [i32; 3], blocks: Box<[Block]>) {
         self.insert_chunk(Entity::PLACEHOLDER, chunk, blocks);
     }
 
@@ -123,7 +123,7 @@ impl TileMirror {
         }
     }
 
-    fn insert_chunk(&mut self, entity: Entity, chunk: [i32; 3], blocks: Box<[BlockId]>) {
+    fn insert_chunk(&mut self, entity: Entity, chunk: [i32; 3], blocks: Box<[Block]>) {
         if entity != Entity::PLACEHOLDER {
             self.chunk_of.insert(entity, chunk);
         }
@@ -223,7 +223,7 @@ impl TileSource for TileMirror {
         let Some((coords, local)) = game::edit::locate(p) else { return BlockId::AIR };
         let key = [coords.x as i32, coords.y, coords.z as i32];
         match self.chunks.get(&key) {
-            Some((_, ids)) => ids[BlockIndex::from_xyz(local.0, local.1, local.2).linear()],
+            Some((_, blocks)) => blocks[BlockIndex::from_xyz(local.0, local.1, local.2).linear()].id,
             None => game::ground::implied_block(self.ground_at(coords.x, coords.z), coords, local)
                 .map_or(BlockId::AIR, |b| b.id),
         }
@@ -242,14 +242,23 @@ impl TileSource for TileMirror {
     fn is_constructed(&self, p: TilePos) -> bool {
         self.home_tiles().is_some_and(|t| t.constructed.contains(&p))
     }
+
+    /// From the mirrored chunk blocks; implied ground holds no trees.
+    fn tree_id(&self, p: TilePos) -> u32 {
+        let Some((coords, local)) = game::edit::locate(p) else { return 0 };
+        let key = [coords.x as i32, coords.y, coords.z as i32];
+        self.chunks
+            .get(&key)
+            .map_or(0, |(_, blocks)| blocks[BlockIndex::from_xyz(local.0, local.1, local.2).linear()].tree_id())
+    }
 }
 
-/// Each block's id, straight from the sim chunk's blocks.
-pub fn chunk_block_ids(chunk: &Chunk) -> Box<[BlockId]> {
+/// Each block (id + data), straight from the sim chunk's blocks.
+pub fn chunk_blocks(chunk: &Chunk) -> Box<[Block]> {
     (0..CHUNK_BLOCK_COUNT)
         .map(|i| {
             let (x, y, z) = BlockIndex::from_linear(i).xyz();
-            chunk.block_at(x, y, z).id
+            chunk.block_at(x, y, z)
         })
         .collect()
 }
@@ -285,7 +294,7 @@ pub fn update_tile_mirror(
     if mirror.set_home(Some(home)) {
         for (entity, chunk, tf, sim) in &all {
             if sim.region == home {
-                mirror.insert_chunk(entity, chunk_key(tf), chunk_block_ids(&chunk.0));
+                mirror.insert_chunk(entity, chunk_key(tf), chunk_blocks(&chunk.0));
             }
         }
         // Everything was just read whole: pending edit lists are moot.
@@ -309,7 +318,7 @@ pub fn update_tile_mirror(
         }
         let key = chunk_key(tf);
         if full || !mirror.update_blocks(key, &chunk.0, blocks) {
-            mirror.insert_chunk(entity, key, chunk_block_ids(&chunk.0));
+            mirror.insert_chunk(entity, key, chunk_blocks(&chunk.0));
         }
     }
 }
@@ -357,13 +366,30 @@ mod tests {
     }
 
     #[test]
-    fn chunk_block_ids_read_the_sim_blocks() {
+    fn chunk_blocks_read_the_sim_blocks() {
         let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
         chunk.set_block(1, 0, 1, Block::new(STONE));
-        let ids = chunk_block_ids(&chunk);
-        assert_eq!(ids.len(), CHUNK_BLOCK_COUNT);
-        assert_eq!(ids[BlockIndex::from_xyz(1, 0, 1).linear()], STONE);
-        assert_eq!(ids.iter().filter(|&&b| b != BlockId::AIR).count(), 1);
+        let blocks = chunk_blocks(&chunk);
+        assert_eq!(blocks.len(), CHUNK_BLOCK_COUNT);
+        assert_eq!(blocks[BlockIndex::from_xyz(1, 0, 1).linear()].id, STONE);
+        assert_eq!(blocks.iter().filter(|b| b.id != BlockId::AIR).count(), 1);
+    }
+
+    #[test]
+    fn tree_id_comes_from_the_mirrored_blocks() {
+        let mut m = mirror();
+        let mut chunk = Chunk::uniform(Block::new(BlockId::AIR));
+        chunk.set_block(2, 1, 3, Block::with_tree_id(BlockId(13), 77));
+        let key = [0, band_base() + 1, 0];
+        m.set_chunk(key, chunk_blocks(&chunk));
+        let y = key[1] * CHUNK_BLOCKS as i32 + 1;
+        assert_eq!(m.tree_id([2, y, 3]), 77);
+        assert_eq!(m.tree_id([1, y, 3]), 0);
+        assert_eq!(m.tree_id([0, implied_y(), 0]), 0, "implied ground");
+        // An edit that only rewrites the data (a new tree id) still updates.
+        chunk.set_block(2, 1, 3, Block::with_tree_id(BlockId(13), 78));
+        assert!(m.update_blocks(key, &chunk, [BlockIndex::from_xyz(2, 1, 3)]));
+        assert_eq!(m.tree_id([2, y, 3]), 78);
     }
 
     #[test]
@@ -371,7 +397,7 @@ mod tests {
         let mut m = mirror();
         let key = [0, 0, 0];
         let mut chunk = Chunk::uniform(Block::new(STONE));
-        m.set_chunk(key, chunk_block_ids(&chunk));
+        m.set_chunk(key, chunk_blocks(&chunk));
         let (v, touched) = (m.version(), m.tiles_touched());
         // One SetBlocks delta: block (1, 0, 1) becomes air.
         let at = BlockIndex::from_xyz(1, 0, 1);
@@ -409,9 +435,9 @@ mod tests {
         let mut m = mirror();
         let p = [0, implied_y(), 0];
         let v = m.version();
-        let mut ids = vec![BlockId::AIR; CHUNK_BLOCK_COUNT].into_boxed_slice();
-        ids[BlockIndex::from_xyz(1, p[1].rem_euclid(CHUNK_BLOCKS as i32) as usize, 0).linear()] = BlockId(9);
-        m.set_chunk([0, p[1].div_euclid(CHUNK_BLOCKS as i32), 0], ids);
+        let mut blocks = vec![Block::new(BlockId::AIR); CHUNK_BLOCK_COUNT].into_boxed_slice();
+        blocks[BlockIndex::from_xyz(1, p[1].rem_euclid(CHUNK_BLOCKS as i32) as usize, 0).linear()] = Block::new(BlockId(9));
+        m.set_chunk([0, p[1].div_euclid(CHUNK_BLOCKS as i32), 0], blocks);
         assert_eq!(m.block(p), BlockId::AIR);
         assert_eq!(m.block([1, p[1], 0]), BlockId(9));
         assert!(m.version() > v);
@@ -467,7 +493,7 @@ mod tests {
             designations: vec![([1, 1, 1], d)],
             constructed: Vec::new(),
         });
-        m.set_chunk([0, 0, 0], vec![STONE; CHUNK_BLOCK_COUNT].into_boxed_slice());
+        m.set_chunk([0, 0, 0], vec![Block::new(STONE); CHUNK_BLOCK_COUNT].into_boxed_slice());
         assert!(m.designations().is_empty());
         assert!(m.set_home(Some(other)));
         assert_eq!(m.region(), Some(other));

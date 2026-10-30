@@ -273,6 +273,9 @@ mod tests {
         fn is_constructed(&self, _: TilePos) -> bool {
             false
         }
+        fn tree_id(&self, _: TilePos) -> u32 {
+            0
+        }
     }
 
     /// R20: the cap is drawn only where the cut slices through material —

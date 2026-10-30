@@ -51,15 +51,18 @@ pub enum Tool {
     /// Fills exactly the picked box with [`game::edit::PLACE_BLOCK`]; a wall
     /// or a tower is a box whose corners sit on different levels.
     Build,
+    /// Fells the part of a tree beyond each picked log or branch block.
+    Chop,
     Erase,
 }
 
 /// Tool hotkeys (bare, no Ctrl — Ctrl+Z is undo). Kept off the camera's
 /// WASD / arrows and the level keys Space / Shift.
-pub const TOOL_KEYS: [(KeyCode, Tool); 4] = [
+pub const TOOL_KEYS: [(KeyCode, Tool); 5] = [
     (KeyCode::KeyG, Tool::Dig),
     (KeyCode::KeyX, Tool::Deconstruct),
     (KeyCode::KeyB, Tool::Build),
+    (KeyCode::KeyT, Tool::Chop),
     (KeyCode::KeyZ, Tool::Erase),
 ];
 
@@ -89,6 +92,7 @@ const HOVER_INFLATE: f32 = 0.25;
 const DIG_COLOR: Color = Color::srgb(1.0, 0.72, 0.2);
 const DECONSTRUCT_COLOR: Color = Color::srgb(1.0, 0.3, 0.25);
 const BUILD_COLOR: Color = Color::srgb(0.6, 0.8, 1.0);
+const CHOP_COLOR: Color = Color::srgb(0.55, 0.9, 0.35);
 const ERASE_COLOR: Color = Color::srgb(0.9, 0.9, 0.9);
 const TOO_LARGE_COLOR: Color = Color::srgb(1.0, 0.1, 0.1);
 const HOVER_COLOR: Color = Color::srgba(1.0, 1.0, 1.0, 0.8);
@@ -102,6 +106,7 @@ impl Tool {
             Tool::Dig => Some(DesignationKind::Dig),
             Tool::Deconstruct => Some(DesignationKind::Deconstruct),
             Tool::Build => Some(DesignationKind::Build(game::edit::PLACE_BLOCK)),
+            Tool::Chop => Some(DesignationKind::Chop),
             Tool::Erase => None,
         }
     }
@@ -111,6 +116,7 @@ impl Tool {
             Tool::Dig => "Dig",
             Tool::Deconstruct => "Deconstruct",
             Tool::Build => "Build",
+            Tool::Chop => "Chop",
             Tool::Erase => "Erase",
         }
     }
@@ -121,6 +127,7 @@ impl Tool {
             Tool::Dig => "G",
             Tool::Deconstruct => "X",
             Tool::Build => "B",
+            Tool::Chop => "T",
             Tool::Erase => "Z",
         }
     }
@@ -333,6 +340,7 @@ fn verb(kind: Option<DesignationKind>) -> &'static str {
         Some(DesignationKind::Dig) => "to dig",
         Some(DesignationKind::Deconstruct) => "to deconstruct",
         Some(DesignationKind::Build(_)) => "to build",
+        Some(DesignationKind::Chop) => "to chop",
         None => "to erase",
     }
 }
@@ -345,6 +353,7 @@ fn reason(why: Invalid) -> &'static str {
         Invalid::RegionEdge => "region edge",
         Invalid::Occupied => "occupied",
         Invalid::NotBuilt => "not built",
+        Invalid::NotTree => "not a tree",
     }
 }
 
@@ -632,6 +641,7 @@ fn kind_color(kind: Option<DesignationKind>) -> Color {
         Some(DesignationKind::Dig) => DIG_COLOR,
         Some(DesignationKind::Deconstruct) => DECONSTRUCT_COLOR,
         Some(DesignationKind::Build(_)) => BUILD_COLOR,
+        Some(DesignationKind::Chop) => CHOP_COLOR,
         None => ERASE_COLOR,
     }
 }
@@ -716,6 +726,16 @@ mod tests {
         assert_eq!(follow_corner([1, 5, 2], None, Some(6)), [1, 6, 2], "level lands with no hover");
         assert_eq!(follow_corner([1, 5, 2], Some([7, 9, 8]), None), [7, 5, 8]);
         assert_eq!(follow_corner([1, 5, 2], None, None), [1, 5, 2]);
+    }
+
+    #[test]
+    fn chop_tool_on_t() {
+        assert_eq!(Tool::Chop.kind(), Some(DesignationKind::Chop));
+        assert_eq!(tool_for_key(KeyCode::KeyT, false), Some(Tool::Chop));
+        assert_eq!(tool_for_key(KeyCode::KeyT, true), None, "Ctrl+T is not a tool");
+        assert_eq!(format!("[{}] {}", Tool::Chop.key_label(), Tool::Chop.label()), "[T] Chop");
+        assert_eq!(verb(Tool::Chop.kind()), "to chop");
+        assert_eq!(reason(Invalid::NotTree), "not a tree");
     }
 
     #[test]

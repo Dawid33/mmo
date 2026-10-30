@@ -170,6 +170,7 @@ fn cut_collapses(face: u32, lowest_y: f32) -> bool {
 const OVERLAY_KIND_MASK: u32 = 7u;
 const OVERLAY_DIG: u32 = 1u;
 const OVERLAY_DECONSTRUCT: u32 = 2u;
+const OVERLAY_CHOP: u32 = 3u;
 const OVERLAY_PREVIEW: u32 = 16u;
 const OVERLAY_INVALID: u32 = 32u;
 // Pattern repeats per block (one metre): a 0.25 m period.
@@ -180,6 +181,9 @@ const OVERLAY_DIG_WIDTH: f32 = 0.5;
 // Deconstruct: a red cross-hatch of thinner lines.
 const OVERLAY_DECONSTRUCT_COLOR = vec3<f32>(0.9, 0.1, 0.06);
 const OVERLAY_HATCH_WIDTH: f32 = 0.22;
+// Chop: green stripes on the other diagonal, thinner than dig's.
+const OVERLAY_CHOP_COLOR = vec3<f32>(0.3, 0.85, 0.15);
+const OVERLAY_CHOP_WIDTH: f32 = 0.35;
 // How strongly a pattern line replaces the surface colour.
 const OVERLAY_PATTERN_ALPHA: f32 = 0.75;
 // Preview: 35 % toward white; invalid: 50 % toward red.
@@ -205,10 +209,12 @@ fn overlay_tint(color: vec3<f32>, uv: vec2<f32>, bits: u32) -> vec3<f32> {
     let p = uv * OVERLAY_PATTERN_PER_BLOCK;
     let stripes = overlay_lines(p.x + p.y, OVERLAY_DIG_WIDTH);
     let hatch = max(overlay_lines(p.x + p.y, OVERLAY_HATCH_WIDTH), overlay_lines(p.x - p.y, OVERLAY_HATCH_WIDTH));
+    let chop = overlay_lines(p.x - p.y, OVERLAY_CHOP_WIDTH);
     let kind = bits & OVERLAY_KIND_MASK;
     var c = color;
     c = mix(c, OVERLAY_DIG_COLOR, OVERLAY_PATTERN_ALPHA * stripes * f32(kind == OVERLAY_DIG));
     c = mix(c, OVERLAY_DECONSTRUCT_COLOR, OVERLAY_PATTERN_ALPHA * hatch * f32(kind == OVERLAY_DECONSTRUCT));
+    c = mix(c, OVERLAY_CHOP_COLOR, OVERLAY_PATTERN_ALPHA * chop * f32(kind == OVERLAY_CHOP));
     c = mix(c, vec3<f32>(1.0), OVERLAY_PREVIEW_WHITEN * f32((bits & OVERLAY_PREVIEW) != 0u));
     c = mix(c, OVERLAY_INVALID_COLOR, OVERLAY_INVALID_MIX * f32((bits & OVERLAY_INVALID) != 0u));
     return c;

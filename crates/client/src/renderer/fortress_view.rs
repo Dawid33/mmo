@@ -69,6 +69,7 @@ pub const OVERLAY_LEVELS: u32 = 16;
 pub const OVERLAY_KIND_MASK: u8 = 0b111;
 pub const OVERLAY_DIG: u8 = 1;
 pub const OVERLAY_DECONSTRUCT: u8 = 2;
+pub const OVERLAY_CHOP: u8 = 3;
 /// The cell is in the drag preview.
 pub const OVERLAY_PREVIEW: u8 = 1 << 4;
 /// ... and the preview's order would be invalid there.
@@ -79,6 +80,7 @@ pub fn overlay_byte(d: Option<&Designation>, preview: Option<Result<(), Invalid>
     let kind = match d.map(|d| d.kind) {
         Some(DesignationKind::Dig) => OVERLAY_DIG,
         Some(DesignationKind::Deconstruct) => OVERLAY_DECONSTRUCT,
+        Some(DesignationKind::Chop) => OVERLAY_CHOP,
         Some(DesignationKind::Build(_)) | None => 0,
     };
     let preview = match preview {
@@ -164,11 +166,11 @@ impl OverlayGrid {
                 next[i] = overlay_byte(Some(d), None);
             }
         }
-        // A dig or deconstruct drag previews its own kind; an erase (or a
-        // build, which has no face tint) keeps each tile's designation.
+        // A dig, deconstruct or chop drag previews its own kind; an erase (or
+        // a build, which has no face tint) keeps each tile's designation.
         let drag_kind = preview
             .kind
-            .filter(|k| matches!(k, DesignationKind::Dig | DesignationKind::Deconstruct))
+            .filter(|k| matches!(k, DesignationKind::Dig | DesignationKind::Deconstruct | DesignationKind::Chop))
             .map(|kind| Designation { kind, op: game::OpId::default(), priority: game::DEFAULT_PRIORITY });
         for (p, result) in &preview.cells {
             if let Some(i) = Self::index_at(self.dims, base_level, *p) {
@@ -451,6 +453,7 @@ mod tests {
         assert_eq!(overlay_byte(Some(&deconstruct), Some(Ok(()))), 2 | 16);
         assert_eq!(overlay_byte(None, Some(Err(Invalid::Bedrock))), 16 | 32);
         assert_eq!(overlay_byte(Some(&build), None), 0);
+        assert_eq!(overlay_byte(Some(&designation(DesignationKind::Chop)), None), 3);
         assert_eq!(overlay_byte(None, None), 0);
     }
 
@@ -537,6 +540,7 @@ mod tests {
             ("OVERLAY_KIND_MASK", OVERLAY_KIND_MASK),
             ("OVERLAY_DIG", OVERLAY_DIG),
             ("OVERLAY_DECONSTRUCT", OVERLAY_DECONSTRUCT),
+            ("OVERLAY_CHOP", OVERLAY_CHOP),
             ("OVERLAY_PREVIEW", OVERLAY_PREVIEW),
             ("OVERLAY_INVALID", OVERLAY_INVALID),
         ] {
