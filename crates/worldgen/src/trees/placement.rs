@@ -26,7 +26,7 @@ const SALT_AGE: u64 = 5;
 const SALT_SEED: u64 = 6;
 /// Cells a tree id repeats after.
 const ID_CELL_SPAN: i32 = 4096;
-const ID_MASK: u32 = 0x00FF_FFFF;
+const ZERO_CELL_ID: u32 = (ID_CELL_SPAN as u32 / 2) | (ID_CELL_SPAN as u32 / 2) << 12;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TreeSeed {
@@ -55,10 +55,12 @@ fn hash01(seed: u64, lx: i32, lz: i32, salt: u64) -> f64 {
 }
 
 /// Tree id of lattice cell `(lx, lz)`. Cell (0, 0) would give 0, which means
-/// "not a tree", so it is given 1 (shared with cell (1, 0)).
+/// "not a tree", so it takes `ZERO_CELL_ID`, the id of the antipodal cell
+/// (2048, 2048): the id is shared by two cells 2048 cells apart, however the
+/// 4096 wrap is crossed (`ID_MASK` would be adjacent to (0, 0) across the wrap).
 pub fn tree_id(lx: i32, lz: i32) -> u32 {
     let id = (lx.rem_euclid(ID_CELL_SPAN) as u32) | (lz.rem_euclid(ID_CELL_SPAN) as u32) << 12;
-    if id == 0 { 1 } else { id & ID_MASK }
+    if id == 0 { ZERO_CELL_ID } else { id }
 }
 
 struct Candidate {
@@ -260,13 +262,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
-    fn tree_ids_are_unique_within_4096_cells() {
-        // One full period of cells, minus cell (0, 0), which is remapped onto cell (1, 0)'s id.
-        let mut seen = std::collections::HashSet::new();
-        for lz in 0..ID_CELL_SPAN {
-            for lx in 0..ID_CELL_SPAN {
-                if (lx, lz) != (0, 0) {
+    fn tree_ids_are_distinct_around_the_origin_and_the_wrap_point() {
+        for (cx, cz) in [(0, 0), (ID_CELL_SPAN / 2, ID_CELL_SPAN / 2), (ID_CELL_SPAN - 1, ID_CELL_SPAN - 1), (-1, -1)] {
+            let mut seen = std::collections::HashSet::new();
+            for lz in cz - 4..=cz + 4 {
+                for lx in cx - 4..=cx + 4 {
                     assert!(seen.insert(tree_id(lx, lz)), "({lx}, {lz})");
                 }
             }
@@ -274,12 +274,29 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn tree_ids_are_unique_over_a_full_period() {
+        // Every id is held by one cell per period, except ZERO_CELL_ID, shared by
+        // (0, 0) and (2048, 2048).
+        let mut seen = std::collections::HashMap::new();
+        for lz in 0..ID_CELL_SPAN {
+            for lx in 0..ID_CELL_SPAN {
+                *seen.entry(tree_id(lx, lz)).or_insert(0u32) += 1;
+            }
+        }
+        assert!(!seen.contains_key(&0));
+        assert!(seen.iter().all(|(&id, &n)| n == if id == ZERO_CELL_ID { 2 } else { 1 }));
+    }
+
+    #[test]
     fn tree_id_rule() {
-        assert_eq!(tree_id(0, 0), 1);
+        assert_eq!(tree_id(0, 0), ZERO_CELL_ID);
+        assert_eq!(tree_id(ID_CELL_SPAN / 2, ID_CELL_SPAN / 2), ZERO_CELL_ID);
+        assert_eq!(tree_id(1, 0), 1);
         assert_eq!(tree_id(3, 0), 3);
         assert_eq!(tree_id(0, 1), 4096);
         assert_eq!(tree_id(-1, 0), 4095);
-        assert_eq!(tree_id(4096, 4096), 1);
-        assert!((0..50).all(|i| tree_id(i * 977, i * 1313) != 0 && tree_id(i, -i) <= ID_MASK));
+        assert_eq!(tree_id(4096, 4096), ZERO_CELL_ID);
+        assert!((0..50).all(|i| tree_id(i * 977, i * 1313) != 0 && tree_id(i, -i) <= 0x00FF_FFFF));
     }
 }
