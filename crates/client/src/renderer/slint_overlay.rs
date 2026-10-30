@@ -30,14 +30,14 @@ use bevy::input::mouse::{MouseButtonInput, MouseScrollUnit, MouseWheel};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::window::PrimaryWindow;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use game::{PlayRefusal, RegionCoords, WorldMap};
 use slint_ui::slint::platform::{Key as SlintKey, PointerEventButton, WindowEvent};
 use slint_ui::slint::{
     ComponentHandle, Image as SlintImage, LogicalPosition, ModelRc, Rgba8Pixel, SharedPixelBuffer,
     SharedString, VecModel,
 };
-use slint_ui::{GameUi, Overlay, WorldMapConfig};
+use slint_ui::{GameUi, HudConfig, HudUi, Overlay, WorldMapConfig};
 use worldgen::tile_map::{play_blocker, rasterize, tile_info_lines};
 
 use super::bridge::{SimEntity, SimKind};
@@ -45,12 +45,12 @@ use super::commander::designate::{DesignateState, DragReadout, Tool, TOOL_KEYS};
 use super::commander::height::HeightGrid;
 use super::commander::level::{focus_surface, surface_level, WorkingLevel};
 use super::commander::minimap;
-use super::commander::selection::Selection;
+use super::commander::selection::{Selection, SelectionBand};
 use super::commander::tiles::TileMirror;
 use super::commander::CommanderCamera;
 use super::cursor::CursorPolicy;
 use super::slint_composite::{SlintCompositePlugin, SlintLayerTextures};
-use super::hud::HudStatus;
+use super::hud::{crosshair_visible, HudStatus};
 use super::world_map::WorldMapState;
 use super::ClientRequests;
 use crate::instance::ClientRequest;
@@ -270,6 +270,63 @@ impl Plugin for SlintOverlayPlugin {
                 )
                     .chain(),
             );
+    }
+}
+
+/// The pass-through HUD (`HudUi`: crosshair, selection band, minimap,
+/// hotbar), in both camera modes, under the game UI. It never takes the
+/// pointer, so commander selection and minimap drags work over its pixels.
+pub struct HudLayerPlugin;
+
+impl Plugin for HudLayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(
+            SlintLayerPlugin::new(HudUi::new).order(HUD_LAYER_ORDER).passthrough().with_init(check_hud_config),
+        )
+        .add_systems(Update, push_hud_state);
+    }
+}
+
+fn check_hud_config(ui: &HudUi, _: &mut World) {
+    let config = ui.global::<HudConfig>();
+    debug_assert_eq!(config.get_minimap_size(), minimap::MINIMAP_SIZE_PX, "HudConfig.minimap-size");
+    debug_assert_eq!(config.get_minimap_margin(), minimap::MINIMAP_MARGIN_PX, "HudConfig.minimap-margin");
+}
+
+/// Client state → HUD properties, only where it changed.
+fn push_hud_state(
+    hud: Option<NonSend<SlintLayer<HudUi>>>,
+    cursor: Query<&CursorOptions, With<PrimaryWindow>>,
+    policy: Option<Res<CursorPolicy>>,
+    band: Option<Res<SelectionBand>>,
+) {
+    let Some(hud) = hud else { return };
+    let ui = hud.overlay.ui();
+
+    let grab = cursor.iter().next().map_or(CursorGrabMode::None, |c| c.grab_mode);
+    let crosshair = crosshair_visible(grab, policy.is_some_and(|p| p.orbit));
+    if ui.get_crosshair_visible() != crosshair {
+        ui.set_crosshair_visible(crosshair);
+    }
+
+    // Window logical → UI logical pixels.
+    match band.and_then(|b| b.0) {
+        Some(r) => {
+            let (min, size) = (r.min / hud.ui_scale, r.size() / hud.ui_scale);
+            if ui.get_band_x() != min.x || ui.get_band_y() != min.y {
+                ui.set_band_x(min.x);
+                ui.set_band_y(min.y);
+            }
+            if ui.get_band_width() != size.x || ui.get_band_height() != size.y {
+                ui.set_band_width(size.x);
+                ui.set_band_height(size.y);
+            }
+            if !ui.get_band_visible() {
+                ui.set_band_visible(true);
+            }
+        }
+        None if ui.get_band_visible() => ui.set_band_visible(false),
+        None => {}
     }
 }
 

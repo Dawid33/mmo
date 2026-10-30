@@ -315,6 +315,7 @@ impl Plugin for CommanderPlugin {
             .init_resource::<minimap::MinimapPointer>()
             .init_resource::<selection::Selection>()
             .init_resource::<selection::GroundPick>()
+            .init_resource::<selection::SelectionBand>()
             .init_resource::<tiles::TileMirror>()
             .init_resource::<level::WorkingLevel>()
             .init_resource::<designate::DesignateState>()
@@ -326,7 +327,6 @@ impl Plugin for CommanderPlugin {
                 (
                     spawn_commander_camera,
                     minimap::setup_minimap,
-                    selection::setup_selection_box,
                     designate::setup_designate_gizmos,
                 ),
             )

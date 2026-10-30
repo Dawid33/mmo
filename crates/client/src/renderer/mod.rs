@@ -164,7 +164,7 @@ impl Plugin for SimBridgePlugin {
                 .chain(),
         )
         .add_plugins(meshing::visibility::cull_plugin)
-        .add_systems(Startup, (setup_scene, hud::setup_hud, skybox::setup_skybox))
+        .add_systems(Startup, (setup_scene, skybox::setup_skybox))
         .add_systems(
             Update,
             (
@@ -218,13 +218,13 @@ impl Plugin for SimBridgePlugin {
                 grid_debug::toggle_grid_debug,
                 grid_debug::draw_grid_debug.after(grid_debug::toggle_grid_debug),
                 (grid_debug::toggle_terrain_debug, grid_debug::apply_terrain_debug).chain(),
-                hud::update_crosshair_visibility,
             ),
         );
         app.add_systems(
             Update,
             motion_probe::probe_region_crossing.after(interpolate::interpolate_transforms),
         );
+        app.add_plugins(slint_overlay::HudLayerPlugin);
         if self.camera_mode == commander::CameraMode::Commander {
             app.add_plugins((
                 commander::CommanderPlugin,

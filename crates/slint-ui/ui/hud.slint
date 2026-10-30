@@ -1,0 +1,133 @@
+// The pass-through HUD: drawn over the 3D view below the interactive game UI
+// and never fed input (crates/client/src/renderer/slint_overlay.rs
+// `HudLayerPlugin`), so the view underneath keeps the pointer even over
+// these pixels. Sizes the client also uses are in `HudConfig`; the client
+// asserts they match its constants.
+
+export global HudConfig {
+    out property <length> crosshair-arm: 16px;
+    out property <length> crosshair-width: 2px;
+    // `MINIMAP_SIZE_PX` / `MINIMAP_MARGIN_PX` in commander/minimap.rs.
+    out property <length> minimap-size: 220px;
+    out property <length> minimap-margin: 12px;
+    out property <length> minimap-outline: 2px;
+    out property <length> slot-size: 48px;
+    out property <length> hotbar-gap: 4px;
+    out property <length> hotbar-padding: 6px;
+}
+
+// One hotbar slot (`game::ui::HotbarView`): filled slots are tinted until
+// item icons exist.
+export struct HotbarSlot {
+    filled: bool,
+    count: string,
+}
+
+export component HudUi inherits Window {
+    background: transparent;
+
+    // First person, while the cursor is locked for mouse look.
+    in property <bool> crosshair-visible;
+
+    // Commander box selection, window logical pixels.
+    in property <bool> band-visible;
+    in property <length> band-x;
+    in property <length> band-y;
+    in property <length> band-width;
+    in property <length> band-height;
+
+    // Commander minimap: terrain base + entity/footprint overlay.
+    in property <bool> minimap-visible;
+    in property <image> minimap-base;
+    in property <image> minimap-overlay;
+
+    in property <[HotbarSlot]> hotbar;
+
+    if root.minimap-visible: Rectangle {
+        // The outline, outside the map.
+        x: HudConfig.minimap-margin - HudConfig.minimap-outline;
+        y: root.height - HudConfig.minimap-margin - HudConfig.minimap-size - HudConfig.minimap-outline;
+        width: HudConfig.minimap-size + 2 * HudConfig.minimap-outline;
+        height: self.width;
+        background: rgba(0, 0, 0, 0.8);
+
+        Rectangle {
+            x: HudConfig.minimap-outline;
+            y: HudConfig.minimap-outline;
+            width: HudConfig.minimap-size;
+            height: HudConfig.minimap-size;
+            background: rgb(5, 13, 26);
+
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.minimap-base;
+                image-fit: fill;
+                image-rendering: pixelated;
+            }
+
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.minimap-overlay;
+                image-fit: fill;
+                image-rendering: pixelated;
+            }
+        }
+    }
+
+    if root.hotbar.length > 0: Rectangle {
+        width: root.hotbar.length * HudConfig.slot-size + (root.hotbar.length - 1) * HudConfig.hotbar-gap + 2 * HudConfig.hotbar-padding;
+        height: HudConfig.slot-size + 2 * HudConfig.hotbar-padding;
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height;
+        background: rgba(0, 0, 0, 0.4);
+
+        HorizontalLayout {
+            padding: HudConfig.hotbar-padding;
+            spacing: HudConfig.hotbar-gap;
+
+            for slot in root.hotbar: Rectangle {
+                width: HudConfig.slot-size;
+                height: HudConfig.slot-size;
+                background: slot.filled ? rgb(102, 77, 51) : rgba(25, 25, 25, 0.6);
+
+                Text {
+                    x: parent.width - self.width - 2px;
+                    y: parent.height - self.height;
+                    text: slot.count;
+                    color: white;
+                }
+            }
+        }
+    }
+
+    if root.band-visible: Rectangle {
+        x: root.band-x;
+        y: root.band-y;
+        width: root.band-width;
+        height: root.band-height;
+        background: rgba(102, 255, 102, 0.12);
+        border-width: 1px;
+        border-color: rgba(102, 255, 102, 0.9);
+    }
+
+    if root.crosshair-visible: Rectangle {
+        x: (root.width - HudConfig.crosshair-arm) / 2;
+        y: (root.height - HudConfig.crosshair-arm) / 2;
+        width: HudConfig.crosshair-arm;
+        height: HudConfig.crosshair-arm;
+
+        Rectangle {
+            y: (parent.height - HudConfig.crosshair-width) / 2;
+            height: HudConfig.crosshair-width;
+            background: white;
+        }
+
+        Rectangle {
+            x: (parent.width - HudConfig.crosshair-width) / 2;
+            width: HudConfig.crosshair-width;
+            background: white;
+        }
+    }
+}

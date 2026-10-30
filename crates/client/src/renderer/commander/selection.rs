@@ -30,9 +30,6 @@ pub const PICK_REFINE_STEPS: u32 = 8;
 /// Selection ring radius as a share of the entity's footprint edge.
 pub const RING_RADIUS_FACTOR: f32 = 0.8;
 
-const BOX_FILL: Color = Color::srgba(0.4, 1.0, 0.4, 0.12);
-const BOX_BORDER: Color = Color::srgba(0.4, 1.0, 0.4, 0.9);
-
 /// The selected entities, as stable sim keys.
 #[derive(Resource, Default, Debug)]
 pub struct Selection(pub BTreeSet<(RegionId, EntityKey)>);
@@ -49,9 +46,22 @@ impl Selection {
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct GroundPick(pub Option<(RegionId, Vec3)>);
 
-/// Marker: the rubber-band box node.
-#[derive(Component)]
-pub struct SelectionBox;
+/// The rubber-band box while a box drag is under way, window logical
+/// pixels; drawn by the HUD layer (`HudUi`, green fill + border).
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+pub struct SelectionBand(pub Option<Rect>);
+
+/// The band for a left press at `press` (`None` when it didn't start on the
+/// ground) with the pointer now at `cursor`: shown only while the button is
+/// held and the drag has passed [`DRAG_THRESHOLD_PX`].
+pub fn band_rect(press: Option<Vec2>, cursor: Option<Vec2>, held: bool) -> Option<Rect> {
+    match (press, cursor) {
+        (Some(start), Some(now)) if held && start.distance(now) > DRAG_THRESHOLD_PX => {
+            Some(Rect::from_corners(start, now))
+        }
+        _ => None,
+    }
+}
 
 /// What can be selected: everything but players (commanders have no body).
 pub fn is_selectable(kind: EntityKind) -> bool {
@@ -118,21 +128,6 @@ pub fn march_height(
     None
 }
 
-pub fn setup_selection_box(mut commands: Commands) {
-    commands.spawn((
-        SelectionBox,
-        Pickable::IGNORE,
-        Node {
-            position_type: PositionType::Absolute,
-            border: UiRect::all(Val::Px(1.0)),
-            ..default()
-        },
-        BackgroundColor(BOX_FILL),
-        BorderColor::all(BOX_BORDER),
-        Visibility::Hidden,
-    ));
-}
-
 /// Cursor ray → terrain point.
 pub fn update_ground_pick(
     window: Query<&Window, With<PrimaryWindow>>,
@@ -187,7 +182,7 @@ pub fn select_input(
     minimap_pointer: Res<MinimapPointer>,
     mut selection: ResMut<Selection>,
     mut press: Local<Option<Vec2>>,
-    mut band: Query<(&mut Node, &mut Visibility), With<SelectionBox>>,
+    mut band: ResMut<SelectionBand>,
 ) {
     let Ok(window) = window.single() else { return };
     let cursor = window.cursor_position();
@@ -203,21 +198,7 @@ pub fn select_input(
     }
     let dragging = |start: Vec2, now: Vec2| start.distance(now) > DRAG_THRESHOLD_PX;
 
-    if let Ok((mut node, mut vis)) = band.single_mut() {
-        match (*press, cursor) {
-            (Some(start), Some(now)) if buttons.pressed(MouseButton::Left) && dragging(start, now) => {
-                let r = Rect::from_corners(start, now);
-                node.left = Val::Px(r.min.x);
-                node.top = Val::Px(r.min.y);
-                node.width = Val::Px(r.width());
-                node.height = Val::Px(r.height());
-                vis.set_if_neq(Visibility::Visible);
-            }
-            _ => {
-                vis.set_if_neq(Visibility::Hidden);
-            }
-        }
-    }
+    band.set_if_neq(SelectionBand(band_rect(*press, cursor, buttons.pressed(MouseButton::Left))));
 
     if !buttons.just_released(MouseButton::Left) {
         return;
@@ -277,6 +258,18 @@ pub fn draw_selection_rings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn band_appears_only_past_the_drag_threshold() {
+        let at = |x: f32, y: f32| Some(Vec2::new(x, y));
+        assert_eq!(band_rect(at(10.0, 10.0), at(12.0, 12.0), true), None);
+        assert_eq!(
+            band_rect(at(10.0, 10.0), at(40.0, 30.0), true),
+            Some(Rect::from_corners(Vec2::new(10.0, 10.0), Vec2::new(40.0, 30.0)))
+        );
+        assert_eq!(band_rect(at(10.0, 10.0), at(40.0, 30.0), false), None, "released");
+        assert_eq!(band_rect(None, at(40.0, 30.0), true), None, "press not on the ground");
+    }
 
     #[test]
     fn click_takes_the_nearest_within_the_radius() {
