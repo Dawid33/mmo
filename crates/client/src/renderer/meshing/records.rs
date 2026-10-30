@@ -1,10 +1,13 @@
 //! Per-quad 8-byte records for the pulled (mesh-free) render path.
 //! Layout (LOCKED, mirrored by assets/shaders/voxel_pull.wgsl — the shader
 //! only decodes; this file is the source of truth):
-//!   w0: x:6 | y:6 | z:6 | face:3 | ao0:2 | ao1:2 | ao2:2 | ao3:2 | flip:1  (bits 30-31 zero)
-//!   w1: w:6 | h:6 | layer:16                                               (bits 28-31 zero)
+//!   w0: x:6 | y:6 | z:6 | face:3 | ao0:2 | ao1:2 | ao2:2 | ao3:2 | flip:1 | cutout:1  (bit 31 zero)
+//!   w1: w:6 | h:6 | layer:16                                                          (bits 28-31 zero)
 //! x/y/z/face sit at the same bit positions as pack.rs word0, and w1 equals
 //! pack.rs word1 exactly, so the two formats stay diffable while both live.
+//! `cutout` (bit 30) marks an alpha-tested quad (`Quad::cutout`, leaves); a
+//! chunk's records put every opaque quad first, then the cutout ones, and
+//! `face_ends` entry 7 stores where the cutout range starts.
 
 use super::super::block_textures::BlockTextureLayers;
 use super::ao::ao_flips_quad;
@@ -60,14 +63,19 @@ pub fn pack_record(q: &Quad, layer: u32) -> QuadRecord {
         | (q.ao[1] as u32) << 23
         | (q.ao[2] as u32) << 25
         | (q.ao[3] as u32) << 27
-        | flip << 29;
+        | flip << 29
+        | (q.cutout as u32) << CUTOUT_BIT;
     let w1 = q.w | q.h << 6 | layer << 12;
     QuadRecord([w0, w1])
 }
 
-/// Records come out grouped by face id (`Face::index()` order, stable within a
-/// face), so the GPU cull can draw each face direction as its own range and
-/// skip the ones facing away from the camera — see `face_ends`.
+/// w0 bit of the cutout flag.
+pub const CUTOUT_BIT: u32 = 30;
+
+/// Records come out opaque first, then cutout (drawn by their own pipeline),
+/// each part grouped by face id (`Face::index()` order, stable within a
+/// face), so the GPU cull can draw each opaque face direction as its own
+/// range and skip the ones facing away from the camera — see `face_ends`.
 pub fn quads_to_records(quads: &[Quad], layers: &BlockTextureLayers) -> Vec<QuadRecord> {
     let mut records: Vec<QuadRecord> = quads
         .iter()
@@ -76,8 +84,18 @@ pub fn quads_to_records(quads: &[Quad], layers: &BlockTextureLayers) -> Vec<Quad
             pack_record(q, pack::layer_for_face(faces, q.face))
         })
         .collect();
-    records.sort_by_key(|r| record_face(*r));
+    records.sort_by_key(|r| record_order(*r));
     records
+}
+
+/// Whether a record is drawn alpha-tested (w0 bit `CUTOUT_BIT`).
+pub fn record_is_cutout(rec: QuadRecord) -> bool {
+    rec.0[0] >> CUTOUT_BIT & 1 == 1
+}
+
+/// Sort key of `quads_to_records`: cutout after opaque, then face.
+fn record_order(rec: QuadRecord) -> u32 {
+    (record_is_cutout(rec) as u32) << 3 | record_face(rec)
 }
 
 /// The face id (`Face::index()`) packed into a record's w0 bits 18..21.
@@ -85,19 +103,20 @@ pub fn record_face(rec: QuadRecord) -> u32 {
     (rec.0[0] >> 18) & 7
 }
 
-/// Cumulative end of each face's range in face-grouped records: face `f`
-/// occupies `ends[f-1]..ends[f]` (with `ends[-1]` = 0). Entry 6 is a flag:
-/// records NOT grouped by face (a producer that skipped `quads_to_records`)
-/// set it, and the cull then draws the chunk whole with no face culling.
-/// Entry 7 pads the GPU struct.
+/// Cumulative end of each OPAQUE face's range in `quads_to_records` order:
+/// face `f` occupies `ends[f-1]..ends[f]` (with `ends[-1]` = 0). Entry 6 is a
+/// flag: records NOT in that order (a producer that skipped
+/// `quads_to_records`) set it, and are then drawn whole, all opaque, with no
+/// face culling. Entry 7 is where the cutout range starts (it runs to the
+/// end; `len` when there is none) — equal to `ends[5]` when ordered.
 pub fn face_ends(records: &[QuadRecord]) -> [u32; 8] {
     let len = records.len() as u32;
-    let grouped = records.windows(2).all(|w| record_face(w[0]) <= record_face(w[1]));
-    if !grouped {
-        return [len, len, len, len, len, len, 1, 0];
+    let ordered = records.windows(2).all(|w| record_order(w[0]) <= record_order(w[1]));
+    if !ordered {
+        return [len, len, len, len, len, len, 1, len];
     }
     let mut ends = [0u32; 8];
-    for rec in records {
+    for rec in records.iter().filter(|r| !record_is_cutout(**r)) {
         let face = record_face(*rec) as usize;
         if face < 6 {
             ends[face] += 1;
@@ -107,8 +126,13 @@ pub fn face_ends(records: &[QuadRecord]) -> [u32; 8] {
         ends[f] += ends[f - 1];
     }
     ends[6] = 0;
-    ends[7] = 0;
+    ends[7] = ends[5];
     ends
+}
+
+/// Where a chunk's cutout records start (`face_ends` entry 7).
+pub fn cutout_start(records: &[QuadRecord]) -> u32 {
+    face_ends(records)[7]
 }
 
 /// Decoded corner — the Rust mirror of the WGSL reconstruction, used by tests
@@ -159,6 +183,7 @@ mod tests {
             face,
             block: BlockId(1),
             ao,
+            cutout: false,
         }
     }
 
@@ -213,8 +238,8 @@ mod tests {
         let records = quads_to_records(&quads, &layers);
         let faces: Vec<u32> = records.iter().map(|r| record_face(*r)).collect();
         assert_eq!(faces, vec![0, 0, 2, 5, 5]);
-        // PosX 0..2, NegX empty, PosY 2..3, NegY/PosZ empty, NegZ 3..5.
-        assert_eq!(face_ends(&records), [2, 2, 3, 3, 3, 5, 0, 0]);
+        // PosX 0..2, NegX empty, PosY 2..3, NegY/PosZ empty, NegZ 3..5; no cutout.
+        assert_eq!(face_ends(&records), [2, 2, 3, 3, 3, 5, 0, 5]);
     }
 
     #[test]
@@ -222,7 +247,7 @@ mod tests {
         let layers = BlockTextureLayers::default();
         let a = quads_to_records(&[sample_quad(Face::NegZ, [3, 3, 3, 3])], &layers)[0];
         let b = quads_to_records(&[sample_quad(Face::PosX, [3, 3, 3, 3])], &layers)[0];
-        assert_eq!(face_ends(&[a, b]), [2, 2, 2, 2, 2, 2, 1, 0], "flagged: draw whole");
+        assert_eq!(face_ends(&[a, b]), [2, 2, 2, 2, 2, 2, 1, 2], "flagged: draw whole, opaque");
     }
 
     #[test]
@@ -254,10 +279,48 @@ mod tests {
 
     #[test]
     fn reserved_bits_stay_zero() {
-        let q = sample_quad(Face::NegZ, [3, 0, 0, 3]);
-        let rec = quads_to_records(&[q], &BlockTextureLayers::default())[0];
-        assert_eq!(rec.0[0] >> 30, 0, "w0 bits 30-31 reserved");
-        assert_eq!(rec.0[1] >> 28, 0, "w1 bits 28-31 reserved");
+        for cutout in [false, true] {
+            let q = Quad { cutout, ..sample_quad(Face::NegZ, [3, 0, 0, 3]) };
+            let rec = quads_to_records(&[q], &BlockTextureLayers::default())[0];
+            assert_eq!(rec.0[0] >> 31, 0, "w0 bit 31 reserved");
+            assert_eq!(rec.0[1] >> 28, 0, "w1 bits 28-31 reserved");
+        }
+    }
+
+    #[test]
+    fn cutout_flag_round_trips() {
+        let mut layers = BlockTextureLayers::default();
+        layers.0.insert(BlockId(1), [10, 20, 30]);
+        for face in [Face::PosX, Face::NegY, Face::NegZ] {
+            for ao in [[3u8, 3, 3, 3], [3, 0, 0, 3]] {
+                let opaque = sample_quad(face, ao);
+                let cut = Quad { cutout: true, ..opaque.clone() };
+                let a = quads_to_records(&[opaque], &layers)[0];
+                let b = quads_to_records(&[cut], &layers)[0];
+                assert!(!record_is_cutout(a) && record_is_cutout(b), "{face:?}");
+                assert_eq!(a.0[0] | 1 << CUTOUT_BIT, b.0[0], "only the flag bit differs");
+                assert_eq!(a.0[1], b.0[1], "w1 (pack.rs word1 parity) is untouched");
+                for slot in 0..6 {
+                    let (da, db) = (decode_corner(a, slot), decode_corner(b, slot));
+                    assert_eq!((da.pos, da.face, da.ao, da.layer), (db.pos, db.face, db.ao, db.layer));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cutout_records_follow_the_opaque_ones() {
+        let layers = BlockTextureLayers::default();
+        let q = |face, cutout| Quad { cutout, ..sample_quad(face, [3, 3, 3, 3]) };
+        let records = quads_to_records(
+            &[q(Face::NegZ, true), q(Face::PosY, false), q(Face::PosX, true), q(Face::NegZ, false)],
+            &layers,
+        );
+        let order: Vec<(bool, u32)> = records.iter().map(|r| (record_is_cutout(*r), record_face(*r))).collect();
+        assert_eq!(order, vec![(false, 2), (false, 5), (true, 0), (true, 5)]);
+        // Opaque PosY 0..1, NegZ 1..2; the cutout range starts at 2.
+        assert_eq!(face_ends(&records), [0, 0, 1, 1, 1, 2, 0, 2]);
+        assert_eq!(cutout_start(&records), 2);
     }
 
     #[test]

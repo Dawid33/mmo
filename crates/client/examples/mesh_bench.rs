@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use client::renderer::bridge::VoxelData;
-use client::renderer::meshing::binary::mesh_quads;
+use client::renderer::meshing::binary::{mesh_quads, CutoutTable};
 use client::renderer::meshing::neighbors::{gather_padded_rle, zone_offsets};
 use client::renderer::meshing::visibility::face_connectivity;
 use game::{BlockId, Chunk, RegionCoords, REGION_CHUNKS};
@@ -67,9 +67,11 @@ fn mesh_one(key: Key, grid: &HashMap<Key, VoxelData>, stage: Option<&mut Stage>)
     }
     let padded = gather_padded_rle(center, &neighbors);
     let t1 = Instant::now();
-    let quads = mesh_quads(&padded);
+    // Built per task, as `meshing::mesh_chunk` does (from the installed props).
+    let cutout = CutoutTable::installed();
+    let quads = mesh_quads(&padded, &cutout);
     let t2 = Instant::now();
-    let conn = face_connectivity(&padded);
+    let conn = face_connectivity(&padded, &cutout);
     let t3 = Instant::now();
     std::hint::black_box(conn);
     if let Some(s) = stage {

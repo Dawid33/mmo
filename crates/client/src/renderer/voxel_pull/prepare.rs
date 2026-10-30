@@ -25,12 +25,27 @@ use super::pipeline::VoxelPullPipeline;
 use super::queue::{grouped_draw_list, ViewChunkDrawList};
 use super::{BlockArrayTexture, BlockTopLayers, ExtractedChunkQuads, RemovedChunkQuads};
 
-/// Per-entity draw metadata into the shared arena.
+/// Per-entity draw metadata into the shared arena. The chunk's records are
+/// opaque in `0..cutout_start` and cutout (alpha-tested, own pipeline) in
+/// `cutout_start..quad_count`, both relative to `record_start`.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuChunkQuads {
     pub record_start: u32,
     pub quad_count: u32,
     pub chunk_slot: u32,
+    pub cutout_start: u32,
+}
+
+impl GpuChunkQuads {
+    /// The (first record, quad count) the opaque or the cutout pass draws.
+    pub fn range(&self, cutout: bool) -> (u32, u32) {
+        let split = self.cutout_start.min(self.quad_count);
+        if cutout {
+            (self.record_start + split, self.quad_count - split)
+        } else {
+            (self.record_start, split)
+        }
+    }
 }
 
 pub fn frustum_metric_contribution(visible_chunks: usize, is_shadow_view: bool) -> u32 {
@@ -169,6 +184,11 @@ pub fn prepare_view_chunk_draws(
                     record_start: allocation.record_start,
                     quad_count: allocation.quad_count,
                     chunk_slot: allocation.chunk_slot,
+                    cutout_start: arena
+                        .metadata
+                        .values()
+                        .get(allocation.chunk_slot as usize)
+                        .map_or(allocation.quad_count, |meta| meta.face_ends[7]),
                 },
                 chunk.center,
                 chunk.half_extents,
@@ -307,12 +327,13 @@ pub fn prepare_chunk_quads(
         }
 
         let allocation = arena.ensure_allocation(main_entity.id(), quad_count);
+        let ends = face_ends(&extracted.records);
         arena.update_metadata(
             main_entity.id(),
             extracted.center,
             extracted.half_extents,
             extracted.cave_active,
-            face_ends(&extracted.records),
+            ends,
         );
 
         let record_end = allocation.record_start as usize + quad_count as usize;
@@ -354,6 +375,7 @@ pub fn prepare_chunk_quads(
             record_start: allocation.record_start,
             quad_count,
             chunk_slot: allocation.chunk_slot,
+            cutout_start: ends[7],
         });
     }
 
@@ -442,11 +464,13 @@ mod tests {
                 record_start: 0,
                 quad_count: 4,
                 chunk_slot: 0,
+                cutout_start: 4,
             },
             GpuChunkQuads {
                 record_start: 4,
                 quad_count: 7,
                 chunk_slot: 1,
+                cutout_start: 5,
             },
         ]);
         assert_eq!(draw_list_workload(&draws), (11, 66));

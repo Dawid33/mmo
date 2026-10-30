@@ -1,6 +1,9 @@
 // Pulled voxel forward shader. Record layout mirrored from
 // crates/client/src/renderer/meshing/records.rs (the source of truth):
-//   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1   w1: w:6|h:6|layer:16
+//   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1|cutout:1   w1: w:6|h:6|layer:16
+// The cutout bit needs no decoding: cutout records sit in their own range,
+// drawn by the CUTOUT pipeline (alpha test, double-sided); the opaque
+// pipeline never discards for alpha.
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::mesh_view_types
 #import bevy_pbr::fog::{linear_fog, exponential_fog, exponential_squared_fog, atmospheric_fog}
@@ -91,6 +94,23 @@ const SKY_SIDE: f32 = 0.75;
 // START 24 px ≈ 36 m, END 6 px ≈ 145 m at a 45° fov, 720 px tall view.
 const RISER_FADE_START_PX: f32 = 24.0;
 const RISER_FADE_END_PX: f32 = 6.0;
+
+// BEGIN cutout alpha test — identical in voxel_pull.wgsl and
+// voxel_pull_depth.wgsl (test-pinned: voxel_pull/pipeline.rs). Cutout texels
+// (leaves) have alpha 0 or 1; the mip chain averages it into coverage, so far
+// away every texel would fall under the cutoff and leaves would thin to
+// nothing. The tested alpha is scaled up by CUTOUT_MIP_ALPHA_SCALE per mip
+// level the footprint spans (from the UV gradients), which keeps a crown's
+// coverage roughly constant with distance.
+const CUTOUT_ALPHA_CUTOFF: f32 = 0.5;
+const CUTOUT_MIP_ALPHA_SCALE: f32 = 0.25;
+fn cutout_alpha(alpha: f32, uv_dx: vec2<f32>, uv_dy: vec2<f32>, texels: vec2<f32>) -> f32 {
+    let dx = uv_dx * texels;
+    let dy = uv_dy * texels;
+    let mip = max(0.0, 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1e-8)));
+    return alpha * (1.0 + mip * CUTOUT_MIP_ALPHA_SCALE);
+}
+// END cutout alpha test
 
 // CORNER_PERM from records.rs, flattened: variant*4 + local vertex. Drawn
 // indexed: 4 vertices per quad (vertex_index = quad*4 + local, base_vertex =
@@ -399,10 +419,20 @@ fn fragment(
     // The block cell the overlay is read for: half a voxel back along the
     // normal from a face lands inside its solid block.
     var overlay_point = in.world_position.xyz - 0.5 * n;
+#ifdef CUTOUT
+    // Double-sided: a back face (the inside of a leaf, seen through the
+    // front's holes) is lit from its own side.
+    n = select(n, -n, !front_facing);
+#endif
 #ifdef CUTAWAY
     let cut = fortress.cut.x;
     let inside = in.cut_here != 0u;
+#ifdef CUTOUT
+    // A cutout back face is a leaf's far side, never the cut's cap.
+    let cap = false;
+#else
     let cap = inside && !front_facing;
+#endif
     let cap_position = cut_crossing(in.world_position.xyz, cut);
     world_position = select(in.world_position, vec4<f32>(cap_position, 1.0), cap);
     face_uv = select(in.uv, cap_position.xz / BLOCK_VOXELS, cap);
@@ -418,6 +448,10 @@ fn fragment(
     let ddx = dpdx(face_uv);
     let ddy = dpdy(face_uv);
     var tex = textureSampleGrad(mat_array_texture, mat_array_texture_sampler, uv, layer, ddx, ddy);
+#ifdef CUTOUT
+    // Tested at the very end, after every derivative use.
+    let coverage = cutout_alpha(tex.a, ddx, ddy, texels);
+#endif
 
     // One block's height in pixels at this distance (perspective:
     // clip_from_view[1][1] = 1 / tan(fov_y / 2), viewport.w = height).
@@ -480,7 +514,20 @@ fn fragment(
     // OpKill leaves the quad's derivatives undefined for the rest of the
     // shader. Only quads straddling the plane are clipped here — those wholly
     // above collapsed.
+#ifdef CUTOUT
+    // Double-sided: only the clip above the cut.
+    if (inside && in.world_position.y > cut + CUT_EPSILON) {
+        discard;
+    }
+#else
     if ((inside && in.world_position.y > cut + CUT_EPSILON) || (!inside && !front_facing)) {
+        discard;
+    }
+#endif
+#endif
+#ifdef CUTOUT
+    // The alpha test, likewise last (after apply_boundaries' fwidth).
+    if (coverage < CUTOUT_ALPHA_CUTOFF) {
         discard;
     }
 #endif

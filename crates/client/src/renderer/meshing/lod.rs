@@ -65,7 +65,8 @@ fn skirt_extend(q: &mut Quad) {
 /// z-fight. A seam can only open where that row is NOT an exposed wall.
 fn lod_quads(grid: &[Voxel], neighbors: &BTreeMap<[i32; 3], &[Voxel]>) -> Vec<Quad> {
     let padded = gather_padded(grid, neighbors);
-    let mut quads = binary::mesh_quads(&padded);
+    // LOD stays opaque: coarse cells of leaves are solid foliage.
+    let mut quads = binary::mesh_quads(&padded, &binary::CutoutTable::NONE);
     for q in &mut quads {
         if q.face.axis() != 1 && is_border_side_quad(q) && !wall_below(&padded, q) {
             q.min[1] += 1;
@@ -492,6 +493,7 @@ mod tests {
             face,
             block: BlockId(1),
             ao: [3; 4],
+            cutout: false,
         }
     }
 

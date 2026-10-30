@@ -22,8 +22,8 @@ pub struct GpuNearChunkMeta {
     pub transform_slot: u32,
     pub cave_active: u32,
     /// `records::face_ends` of the chunk's records (relative to
-    /// `record_start`): per-face range ends, then the unsorted flag + pad.
-    /// Two `vec4<u32>` in WGSL.
+    /// `record_start`): per-face opaque range ends, the unsorted flag, then
+    /// where the cutout range starts. Two `vec4<u32>` in WGSL.
     pub face_ends: [u32; 8],
 }
 

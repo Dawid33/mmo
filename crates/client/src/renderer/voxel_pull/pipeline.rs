@@ -82,6 +82,10 @@ pub struct VoxelPullPipelineKey {
     /// The z-level cut is on (`fortress_view::cutaway_active`): `CUTAWAY`
     /// shader def and no back-face culling (the cut's cap is back faces).
     pub cutaway: bool,
+    /// The cutout pass (`AlphaMask3d`): draws the chunks' cutout record
+    /// ranges with the `CUTOUT` def (alpha test, double-sided). The opaque
+    /// pipeline never discards for alpha.
+    pub cutout: bool,
 }
 
 /// `shadows.wgsl`'s `sample_shadow_map` (bevy_pbr-0.18.1/src/render/shadow_sampling.wgsl)
@@ -109,13 +113,17 @@ fn forward_shader_defs(key: VoxelPullPipelineKey) -> Vec<ShaderDefVal> {
     if key.cutaway {
         defs.push("CUTAWAY".into());
     }
+    if key.cutout {
+        defs.push("CUTOUT".into());
+    }
     defs
 }
 
 /// Back faces are culled except under the cutaway, whose cap is drawn from
-/// the back faces showing through the cut.
-fn cull_mode(cutaway: bool) -> Option<Face> {
-    (!cutaway).then_some(Face::Back)
+/// the back faces showing through the cut, and for cutout quads, which are
+/// double-sided: through a leaf's holes the far side of the crown shows.
+fn cull_mode(cutaway: bool, cutout: bool) -> Option<Face> {
+    (!cutaway && !cutout).then_some(Face::Back)
 }
 
 impl SpecializedRenderPipeline for VoxelPullPipeline {
@@ -132,7 +140,7 @@ impl SpecializedRenderPipeline for VoxelPullPipeline {
             .main_layout
             .clone();
         RenderPipelineDescriptor {
-            label: Some("voxel_pull_forward".into()),
+            label: Some(if key.cutout { "voxel_pull_forward_cutout" } else { "voxel_pull_forward" }.into()),
             layout: vec![view_layout, self.chunk_layout_desc.clone()],
             vertex: VertexState {
                 shader: self.forward_shader.clone(),
@@ -153,7 +161,7 @@ impl SpecializedRenderPipeline for VoxelPullPipeline {
                 ..default()
             }),
             primitive: PrimitiveState {
-                cull_mode: cull_mode(key.cutaway),
+                cull_mode: cull_mode(key.cutaway, key.cutout),
                 ..default()
             },
             depth_stencil: Some(DepthStencilState {
@@ -235,6 +243,10 @@ pub struct VoxelPullDepthPipelineKey {
     /// The z-level cut is on: `CUTAWAY` (vertex collapse + fragment discard
     /// above the cut) and no back-face culling, as in the forward pass.
     pub cutaway: bool,
+    /// The cutout ranges (`AlphaMask3dPrepass` / the cutout `Shadow` item):
+    /// `CUTOUT`, a fragment stage that samples the block texture (group(1)
+    /// bindings 2/3) and discards the transparent texels; double-sided.
+    pub cutout: bool,
 }
 
 impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
@@ -259,12 +271,16 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
         if key.cutaway {
             shader_defs.push(ShaderDefVal::from("CUTAWAY"));
         }
+        if key.cutout {
+            shader_defs.push(ShaderDefVal::from("CUTOUT"));
+        }
 
         // Emulation needs a fragment stage to write `frag_depth`, the cutaway
-        // one to discard above the cut; otherwise the pass stays depth-only
-        // with no color targets — matching `PrepassPipeline::specialize` when
-        // all prepass targets are absent.
-        let fragment = (emulate_unclipped_depth || key.cutaway).then(|| FragmentState {
+        // one to discard above the cut, the cutout one to discard transparent
+        // texels; otherwise the pass stays depth-only with no color targets —
+        // matching `PrepassPipeline::specialize` when all prepass targets are
+        // absent.
+        let fragment = (emulate_unclipped_depth || key.cutaway || key.cutout).then(|| FragmentState {
             shader: self.depth_shader.clone(),
             entry_point: Some("fragment".into()),
             shader_defs: shader_defs.clone(),
@@ -273,7 +289,7 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
         });
 
         RenderPipelineDescriptor {
-            label: Some("voxel_pull_depth".into()),
+            label: Some(if key.cutout { "voxel_pull_depth_cutout" } else { "voxel_pull_depth" }.into()),
             layout: vec![
                 self.prepass_view_layout.clone(),
                 self.chunk_layout_desc.clone(),
@@ -287,7 +303,7 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
             },
             fragment,
             primitive: PrimitiveState {
-                cull_mode: cull_mode(key.cutaway),
+                cull_mode: cull_mode(key.cutaway, key.cutout),
                 unclipped_depth,
                 ..default()
             },
@@ -320,6 +336,8 @@ impl SpecializedRenderPipeline for VoxelPullDepthPipeline {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use bevy::render::render_resource::Face;
+
     use crate::renderer::far_voxel::pipeline::tests::validate_shader;
 
     /// Minimal stand-ins for the Bevy modules `voxel_pull.wgsl` imports:
@@ -481,6 +499,77 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(positi
             !source.contains("(face == 2u || face == 3u) && on_cut"),
             "the depth shader keeps top faces on the cut"
         );
+    }
+
+    fn shader_source(name: &str) -> String {
+        std::fs::read_to_string(format!("{}/../../assets/shaders/{name}", env!("CARGO_MANIFEST_DIR")))
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    fn validate_variants(name: &str, variants: &[&[&str]]) {
+        let source = shader_source(name);
+        for defs in variants {
+            let defs: Vec<bevy::shader::ShaderDefVal> = defs.iter().map(|d| (*d).into()).collect();
+            validate_shader(source.clone(), &defs, &IMPORTS)
+                .unwrap_or_else(|e| panic!("{name} with {defs:?}: {e:?}"));
+        }
+    }
+
+    /// The cutout pass (leaves): alpha test, double-sided, with and without
+    /// the cutaway and fog.
+    #[test]
+    fn forward_shader_is_valid_wgsl_with_cutout() {
+        validate_variants(
+            "voxel_pull.wgsl",
+            &[&["CUTOUT"], &["CUTOUT", "DISTANCE_FOG"], &["CUTOUT", "CUTAWAY"], &["CUTOUT", "CUTAWAY", "DISTANCE_FOG"]],
+        );
+        let source = shader_source("voxel_pull.wgsl");
+        assert!(source.contains("#ifdef CUTOUT"), "the forward shader implements CUTOUT");
+        // The alpha test is the shader's last discard, after every derivative use.
+        let test = source.find("coverage < CUTOUT_ALPHA_CUTOFF").expect("the alpha test");
+        let boundaries = source.find("let overlaid = apply_boundaries(").expect("apply_boundaries call");
+        assert!(test > boundaries, "the alpha discard must follow apply_boundaries' fwidth");
+    }
+
+    /// The cutout depth prepass / shadow variants: a fragment stage that
+    /// samples the texture (bindings 2/3 of the shared layout) — alone, with
+    /// the cutaway, and with the unclipped-depth emulation.
+    #[test]
+    fn depth_shader_is_valid_wgsl_with_cutout() {
+        validate_variants(
+            "voxel_pull_depth.wgsl",
+            &[
+                &["CUTOUT"],
+                &["CUTOUT", "CUTAWAY"],
+                &["CUTOUT", "UNCLIPPED_DEPTH_ORTHO_EMULATION"],
+                &["CUTOUT", "CUTAWAY", "UNCLIPPED_DEPTH_ORTHO_EMULATION"],
+            ],
+        );
+        let source = shader_source("voxel_pull_depth.wgsl");
+        assert!(source.contains("@group(1) @binding(2) var mat_array_texture: texture_2d_array<f32>;"));
+        assert!(source.contains("@group(1) @binding(3) var mat_array_texture_sampler: sampler;"));
+    }
+
+    /// The colour and depth passes must agree on which texels a leaf drops,
+    /// or shadows and prepass depth show holes the colour pass fills.
+    #[test]
+    fn cutout_alpha_test_is_identical_in_both_shaders() {
+        fn block(source: &str) -> &str {
+            let start = source.find("// BEGIN cutout alpha test").expect("BEGIN marker");
+            let end = source.find("// END cutout alpha test").expect("END marker");
+            &source[start..end]
+        }
+        let (forward, depth) = (shader_source("voxel_pull.wgsl"), shader_source("voxel_pull_depth.wgsl"));
+        assert_eq!(block(&forward), block(&depth));
+    }
+
+    /// The opaque pipeline gains no alpha discard, and only cutout draws
+    /// double-sided.
+    #[test]
+    fn only_the_cutout_variant_is_double_sided() {
+        assert_eq!(super::cull_mode(false, false), Some(Face::Back));
+        assert_eq!(super::cull_mode(false, true), None);
+        assert_eq!(super::cull_mode(true, false), None);
     }
 
     /// Every def combination the four cull pipelines compile with.

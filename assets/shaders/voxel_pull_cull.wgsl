@@ -5,8 +5,9 @@ struct ChunkMeta {
     quad_count: u32,
     transform_slot: u32,
     cave_active: u32,
-    // records::face_ends: cumulative per-face range ends (PosX, NegX, PosY,
-    // NegY, PosZ, NegZ) relative to record_start, then the unsorted flag.
+    // records::face_ends: cumulative per-face OPAQUE range ends (PosX, NegX,
+    // PosY, NegY, PosZ, NegZ) relative to record_start, the unsorted flag,
+    // then where the cutout range starts (it runs to quad_count).
     face_ends_lo: vec4<u32>,
     face_ends_hi: vec4<u32>,
 };
@@ -30,16 +31,20 @@ struct CullView {
     camera: vec4<f32>,
 };
 
-// `commands` first: indirect-count draws read the command count at offset 0.
+// `commands` first: indirect-count draws read the opaque command count at
+// offset 0, the cutout one at offset 12 (gpu.rs CUTOUT_COUNT_OFFSET).
 struct DrawCount {
     commands: atomic<u32>,
     visible_quads: atomic<u32>,
     visible_chunks: atomic<u32>,
-    pad: u32,
+    cutout_commands: atomic<u32>,
 };
 
 // Up to one command per face direction per chunk slot.
 const FACES_PER_SLOT: u32 = 6u;
+// Then, after every slot's opaque commands, one cutout command per slot
+// (gpu.rs CUTOUT_COMMANDS_PER_SLOT): its whole cutout range, not
+// face-culled (the cutout pass is double-sided).
 
 @group(0) @binding(0) var<storage, read> chunks: array<ChunkMeta>;
 @group(0) @binding(1) var<storage, read_write> commands: array<DrawIndexedIndirectArgs>;
@@ -82,6 +87,11 @@ fn frustum_visible(chunk: ChunkMeta) -> bool {
     return !(all_left || all_right || all_bottom || all_top || all_near);
 }
 
+// Where the chunk's cutout records start (the opaque ones end).
+fn cutout_start(chunk: ChunkMeta) -> u32 {
+    return min(chunk.face_ends_hi.w, chunk.quad_count);
+}
+
 fn face_end(chunk: ChunkMeta, face: u32) -> u32 {
     var end = 0u;
     if face < 4u {
@@ -89,7 +99,7 @@ fn face_end(chunk: ChunkMeta, face: u32) -> u32 {
     } else {
         end = chunk.face_ends_hi[face - 4u];
     }
-    return min(end, chunk.quad_count);
+    return min(end, cutout_start(chunk));
 }
 
 // Whether any quad of `face` in this chunk can face the camera. Every face
@@ -129,7 +139,7 @@ fn emit_command(slot: u32, chunk: ChunkMeta, visible: bool) {
     for (var face = 0u; face < FACES_PER_SLOT; face += 1u) {
         var end = face_end(chunk, face);
         if unsorted {
-            end = select(0u, chunk.quad_count, face == 0u);
+            end = select(0u, cutout_start(chunk), face == 0u);
             start = 0u;
         }
         let count = end - min(start, end);
@@ -151,6 +161,25 @@ fn emit_command(slot: u32, chunk: ChunkMeta, visible: bool) {
         if !unsorted {
             start = end;
         }
+    }
+    // The cutout range: one command per slot, after all opaque commands.
+    let cutout_first = cutout_start(chunk);
+    let cutout_count = chunk.quad_count - cutout_first;
+    let cutout_keep = visible && cutout_count > 0u;
+    let cutout_base = view.viewport_and_capacity.z * FACES_PER_SLOT;
+#ifdef INDIRECT_COUNT
+    if cutout_keep {
+        let output = atomicAdd(&draw_count.cutout_commands, 1u);
+        write_command(cutout_base + output, chunk, cutout_first, cutout_count);
+    }
+#else
+    write_command(cutout_base + slot, chunk, cutout_first, select(0u, cutout_count, cutout_keep));
+    if cutout_keep {
+        atomicAdd(&draw_count.cutout_commands, 1u);
+    }
+#endif
+    if cutout_keep {
+        emitted_quads += cutout_count;
     }
     if visible {
         atomicAdd(&draw_count.visible_chunks, 1u);

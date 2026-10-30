@@ -19,7 +19,7 @@ pub mod visibility;
 
 /// Mesh a padded chunk snapshot. `None` = no visible faces (don't render).
 pub fn build_chunk_mesh(padded: &PaddedVoxels, layers: &BlockTextureLayers) -> Option<Mesh> {
-    emit::quads_to_mesh(&binary::mesh_quads(padded), layers)
+    emit::quads_to_mesh(&binary::mesh_quads(padded, &binary::CutoutTable::installed()), layers)
 }
 
 /// Everything the async mesh task produces for one chunk. Exactly one of
@@ -46,8 +46,10 @@ impl MeshOutput {
 }
 
 /// Mesh OR records (per `pull`) + connectivity in one pass over the padded snapshot.
+/// Cutout blocks (leaves) come from the installed `game::block_props`.
 pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers, pull: bool) -> MeshOutput {
-    let quads = binary::mesh_quads(padded);
+    let cutout = binary::CutoutTable::installed();
+    let quads = binary::mesh_quads(padded, &cutout);
     let quad_count = u32::try_from(quads.len()).expect("terrain quad count fits u32");
     let (mesh, records) = if pull {
         let r = records::quads_to_records(&quads, layers);
@@ -58,7 +60,7 @@ pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers, pull: bool
     MeshOutput {
         mesh,
         records,
-        connectivity: visibility::face_connectivity(padded),
+        connectivity: visibility::face_connectivity(padded, &cutout),
         quad_count,
     }
 }

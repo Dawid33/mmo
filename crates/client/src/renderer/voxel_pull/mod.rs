@@ -1,5 +1,6 @@
 //! The pulled (mesh-free) chunk render path: per-quad records in storage
-//! buffers, drawn by custom Opaque3d phase items. Main-world components
+//! buffers, drawn by custom Opaque3d phase items (and AlphaMask3d ones for
+//! the cutout ranges — leaves). Main-world components
 //! live here; the render-world half (pipeline/prepare/queue) is split into
 //! submodules. Modeled on bevy-0.18.1/examples/shader_advanced/custom_phase_item.rs.
 
@@ -8,9 +9,9 @@ use std::sync::Arc;
 use bevy::{
     camera::primitives::Aabb,
     core_pipeline::{
-        core_3d::Opaque3d,
+        core_3d::{AlphaMask3d, Opaque3d},
         Core3d,
-        prepass::Opaque3dPrepass,
+        prepass::{AlphaMask3dPrepass, Opaque3dPrepass},
     },
     pbr::{init_prepass_pipeline, Shadow},
     prelude::*,
@@ -35,7 +36,7 @@ use pipeline::{init_voxel_pull_depth_pipeline, VoxelPullDepthPipeline, VoxelPull
 use prepare::{prepare_chunk_quads, prepare_view_chunk_draws};
 use queue::{
     queue_voxel_pull, queue_voxel_pull_prepass, queue_voxel_pull_shadows, DrawVoxelPull,
-    DrawVoxelPullDepth,
+    DrawVoxelPullCutout, DrawVoxelPullDepth, DrawVoxelPullDepthCutout,
 };
 
 /// The pull-path replacement for `Mesh3d`: every visible greedy quad of one
@@ -214,6 +215,9 @@ impl Plugin for VoxelPullPlugin {
             .add_render_command::<Opaque3d, DrawVoxelPull>()
             .add_render_command::<Opaque3dPrepass, DrawVoxelPullDepth>()
             .add_render_command::<Shadow, DrawVoxelPullDepth>()
+            .add_render_command::<AlphaMask3d, DrawVoxelPullCutout>()
+            .add_render_command::<AlphaMask3dPrepass, DrawVoxelPullDepthCutout>()
+            .add_render_command::<Shadow, DrawVoxelPullDepthCutout>()
             // The depth pipeline clones `PrepassPipeline`'s view layout, which
             // only exists after `init_prepass_pipeline` runs in `RenderStartup`.
             .add_systems(

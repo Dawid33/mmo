@@ -2,7 +2,7 @@
 //! mesh time. Render-derived data only — never part of rollback state.
 //! Reference: https://0fps.net/2013/07/03/ambient-occlusion-for-minecraft-like-worlds/
 
-use super::binary::{cross_axes, PaddedVoxels};
+use super::binary::{cross_axes, CutoutTable, PaddedVoxels};
 
 /// Vertex color multiplier per AO level (0 = fully occluded corner). Tunable.
 pub const AO_CURVE: [f32; 4] = [0.55, 0.70, 0.85, 1.0];
@@ -24,7 +24,14 @@ pub(crate) const VERTEX_AO_LUT: [u8; 8] = [3, 2, 2, 1, 2, 1, 0, 0];
 /// AO for the 4 corners of the (`axis`, `positive`) face of the voxel at
 /// padded coords `pos`. Corner order (cu, cv) = (0,0), (1,0), (0,1), (1,1)
 /// over `cross_axes(axis)` — the same order emission (task 4) writes vertices.
-pub fn face_ao(p: &PaddedVoxels, axis: usize, positive: bool, pos: [usize; 3]) -> [u8; 4] {
+/// Only opaque voxels occlude: a cutout block (`cutout`) darkens no corner.
+pub fn face_ao(
+    p: &PaddedVoxels,
+    cutout: &CutoutTable,
+    axis: usize,
+    positive: bool,
+    pos: [usize; 3],
+) -> [u8; 4] {
     let (ua, va) = cross_axes(axis);
     // The occlusion samples live in the voxel layer the face looks into.
     let mut layer = [pos[0] as i32, pos[1] as i32, pos[2] as i32];
@@ -43,7 +50,7 @@ pub fn face_ao(p: &PaddedVoxels, axis: usize, positive: bool, pos: [usize; 3]) -
         {
             return false;
         }
-        p.is_solid(c[0] as usize, c[1] as usize, c[2] as usize)
+        p.is_opaque(c[0] as usize, c[1] as usize, c[2] as usize, cutout)
     };
 
     let mut ao = [0u8; 4];
@@ -104,7 +111,7 @@ mod tests {
         let mut v = vec![Voxel::default(); BRICK_VOXEL_COUNT];
         v[5 + 32 * 5 + 32 * 32 * 5] = Voxel::new(BlockId(1));
         let p = PaddedVoxels::from_interior(&v);
-        assert_eq!(face_ao(&p, 1, true, [6, 6, 6]), [3, 3, 3, 3]);
+        assert_eq!(face_ao(&p, &CutoutTable::NONE, 1, true, [6, 6, 6]), [3, 3, 3, 3]);
     }
 
     #[test]
@@ -118,7 +125,7 @@ mod tests {
         // +Y face cross axes are (U=X, V=Z). The occluder at padded (5,7,6)
         // is the side1 (U-direction) sample for both cu=0 corners, so
         // corners (0,0) and (0,1) darken to 2 while (1,0) and (1,1) stay 3.
-        assert_eq!(face_ao(&p, 1, true, [6, 6, 6]), [2, 3, 2, 3]);
+        assert_eq!(face_ao(&p, &CutoutTable::NONE, 1, true, [6, 6, 6]), [2, 3, 2, 3]);
     }
 
     #[test]

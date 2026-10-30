@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use block_mesh::ndshape::ConstShape3u32;
 use block_mesh::{greedy_quads, GreedyQuadsBuffer, RIGHT_HANDED_Y_UP_CONFIG};
-use client::renderer::meshing::binary::{mesh_quads, PaddedVoxels};
+use client::renderer::meshing::binary::{mesh_quads, CutoutTable, PaddedVoxels};
 use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
 
 type OracleShape = ConstShape3u32<34, 34, 34>;
@@ -31,7 +31,7 @@ fn random_chunk(seed: u64) -> Vec<Voxel> {
 /// Decompose our quads into (axis, positive, unit cell) faces.
 fn ours(padded: &PaddedVoxels) -> BTreeSet<(usize, bool, [u32; 3])> {
     let mut set = BTreeSet::new();
-    for q in mesh_quads(padded) {
+    for q in mesh_quads(padded, &CutoutTable::NONE) {
         let axis = q.face.axis();
         let (ua, va) = client::renderer::meshing::binary::cross_axes(axis);
         for du in 0..q.w {
@@ -151,7 +151,7 @@ fn binary_mesher_beats_the_oracle_on_the_join_burst() {
     let mut quads = 0usize;
     for _ in 0..17 {
         for p in &padded {
-            quads += mesh_quads(p).len();
+            quads += mesh_quads(p, &CutoutTable::NONE).len();
         }
     }
     let ours_t = t0.elapsed();

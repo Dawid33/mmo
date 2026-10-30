@@ -1,12 +1,17 @@
 //! Opaque3d queue + custom draw command for the pulled render path. Structure
 //! mirrors bevy-0.18.1/examples/shader_advanced/custom_phase_item.rs.
+//!
+//! Each view queues two items: the chunks' opaque record ranges (`Opaque3d`,
+//! `Opaque3dPrepass`, `Shadow`) and their cutout ranges (`AlphaMask3d`,
+//! `AlphaMask3dPrepass`, and a second `Shadow` item), the latter with the
+//! `cutout` pipeline variants (alpha-tested leaves, `records::CUTOUT_BIT`).
 
 use bevy::{
     camera::primitives::{Aabb, Frustum},
     core_pipeline::{
-        core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey},
+        core_3d::{AlphaMask3d, Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey},
         prepass::{
-            Opaque3dPrepass,
+            AlphaMask3dPrepass, Opaque3dPrepass,
             OpaqueNoLightmap3dBatchSetKey, OpaqueNoLightmap3dBinKey,
         },
     },
@@ -39,7 +44,9 @@ use bevy::{
 
 use super::super::fortress_view::{cutaway_active, FortressViewUniform};
 use super::arena::GpuQuadArena;
-use super::gpu::{ActiveNearMode, GpuNearViewBuffers, FACES_PER_SLOT};
+use super::gpu::{
+    ActiveNearMode, GpuNearViewBuffers, CUTOUT_COMMANDS_PER_SLOT, CUTOUT_COUNT_OFFSET, FACES_PER_SLOT,
+};
 use super::pipeline::{
     VoxelPullDepthPipeline, VoxelPullDepthPipelineKey, VoxelPullPipeline, VoxelPullPipelineKey,
 };
@@ -91,7 +98,10 @@ pub fn grouped_draw_list(
 
 /// The grouped draw chain: bind the pipeline and view once, then loop the
 /// view's CPU-visible chunks while the arena bind group stays bound.
-pub type DrawVoxelPull = (SetItemPipeline, SetMeshViewBindGroup<0>, DrawChunkQuads);
+pub type DrawVoxelPull = (SetItemPipeline, SetMeshViewBindGroup<0>, DrawChunkQuads<false>);
+
+/// [`DrawVoxelPull`] for the chunks' cutout ranges (`AlphaMask3d`).
+pub type DrawVoxelPullCutout = (SetItemPipeline, SetMeshViewBindGroup<0>, DrawChunkQuads<true>);
 
 /// The per-view frustum test for one extracted chunk, mirroring bevy's own
 /// mesh culling (`bevy_camera visibility/mod.rs:672`): test the near plane but
@@ -110,9 +120,10 @@ pub fn chunk_in_view(frustum: &Frustum, chunk_center: Vec3, chunk_half_extents: 
     frustum.intersects_obb(&aabb, &bevy::math::Affine3A::IDENTITY, true, false)
 }
 
-pub struct DrawChunkQuads;
+/// Draws every chunk's opaque record range, or (`CUTOUT`) its cutout range.
+pub struct DrawChunkQuads<const CUTOUT: bool>;
 
-impl<P: PhaseItem> RenderCommand<P> for DrawChunkQuads {
+impl<P: PhaseItem, const CUTOUT: bool> RenderCommand<P> for DrawChunkQuads<CUTOUT> {
     type Param = (SRes<GpuQuadArena>, SRes<ActiveNearMode>);
     type ViewQuery = (Read<ViewChunkDrawList>, Option<Read<GpuNearViewBuffers>>);
     type ItemQuery = ();
@@ -138,28 +149,38 @@ impl<P: PhaseItem> RenderCommand<P> for DrawChunkQuads {
         // shared buffer, `base_vertex` = record_start * 4 per draw.
         pass.set_index_buffer(quad_indices.slice(..), IndexFormat::Uint32);
         if let (ActiveNearMode::GpuDriven { indirect_count }, Some(gpu_view)) = (*mode, gpu_view) {
+            // The cull wrote the opaque commands first, then the cutout ones.
+            let (offset, max_commands, count_offset) = if CUTOUT {
+                (
+                    gpu_view.cutout_command_offset(),
+                    gpu_view.slot_count * CUTOUT_COMMANDS_PER_SLOT,
+                    CUTOUT_COUNT_OFFSET,
+                )
+            } else {
+                (0, gpu_view.slot_count * FACES_PER_SLOT, 0)
+            };
             if indirect_count {
                 pass.multi_draw_indexed_indirect_count(
                     &gpu_view.indirect,
-                    0,
+                    offset,
                     &gpu_view.count,
-                    0,
-                    gpu_view.slot_count * FACES_PER_SLOT,
+                    count_offset,
+                    max_commands,
                 );
             } else {
-                pass.multi_draw_indexed_indirect(
-                    &gpu_view.indirect,
-                    0,
-                    gpu_view.slot_count * FACES_PER_SLOT,
-                );
+                pass.multi_draw_indexed_indirect(&gpu_view.indirect, offset, max_commands);
             }
             return RenderCommandResult::Success;
         }
         for gpu in &draws.0 {
+            let (first, quads) = gpu.range(CUTOUT);
+            if quads == 0 {
+                continue;
+            }
             // The vertex shader pulls geometry from group 1.
             pass.draw_indexed(
-                0..gpu.quad_count * 6,
-                (gpu.record_start * 4) as i32,
+                0..quads * 6,
+                (first * 4) as i32,
                 gpu.chunk_slot..gpu.chunk_slot + 1,
             );
         }
@@ -210,7 +231,29 @@ fn bin_view_item<BPI: BinnedPhaseItem>(
     bin_key: BPI::BinKey,
     view_entity: Entity,
 ) {
-    let main_entity = MainEntity::from(view_entity);
+    bin_view_item_as(phase, batch_set_key, bin_key, view_entity, MainEntity::from(view_entity));
+}
+
+/// The key a view's SECOND item in one phase is binned under (its cutout
+/// item in `Shadow`, which holds both): the bin is keyed by `MainEntity`, so
+/// the two items need distinct ones or re-binning one would remove the
+/// other. The view's own id with its generation pushed half the range on —
+/// like the first item's key (a render entity used as a main entity), a
+/// stand-in no real main-world entity takes.
+fn second_item_key(view_entity: Entity) -> MainEntity {
+    MainEntity::from(Entity::from_index_and_generation(
+        view_entity.index(),
+        view_entity.generation().after_versions(1 << 31),
+    ))
+}
+
+fn bin_view_item_as<BPI: BinnedPhaseItem>(
+    phase: &mut BinnedRenderPhase<BPI>,
+    batch_set_key: BPI::BatchSetKey,
+    bin_key: BPI::BinKey,
+    view_entity: Entity,
+    main_entity: MainEntity,
+) {
     phase.remove(main_entity);
     phase.add(
         batch_set_key,
@@ -229,7 +272,9 @@ pub fn queue_voxel_pull(
     view_key_cache: Res<ViewKeyCache>,
     fortress_view: Option<Res<FortressViewUniform>>,
     draw_functions: Res<DrawFunctions<Opaque3d>>,
+    cutout_draw_functions: Res<DrawFunctions<AlphaMask3d>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
+    mut cutout_phases: ResMut<ViewBinnedRenderPhases<AlphaMask3d>>,
     views: Query<(
         Entity,
         &ExtractedView,
@@ -240,6 +285,7 @@ pub fn queue_voxel_pull(
         return;
     }
     let draw = draw_functions.read().id::<DrawVoxelPull>();
+    let cutout_draw = cutout_draw_functions.read().id::<DrawVoxelPullCutout>();
     let cutaway = cutaway_wanted(fortress_view.as_deref());
     for (view_entity, view, msaa) in &views
     {
@@ -254,15 +300,16 @@ pub fn queue_voxel_pull(
             continue;
         };
         let view_layout_key = MeshPipelineViewLayoutKey::from(*view_key);
-        let pipeline_id =
-            specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, |cutaway| {
-                VoxelPullPipelineKey {
-                    msaa_samples: msaa.samples(),
-                    target_format: view.target_format,
-                    view_layout_key,
-                    cutaway,
-                }
-            });
+        let key = |cutout: bool| {
+            move |cutaway| VoxelPullPipelineKey {
+                msaa_samples: msaa.samples(),
+                target_format: view.target_format,
+                view_layout_key,
+                cutaway,
+                cutout,
+            }
+        };
+        let pipeline_id = specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, key(false));
         // One representative NonMesh item per view. Its render command loops
         // `ViewChunkDrawList`, so chunk count no longer inflates phase bins.
         bin_view_item(
@@ -279,6 +326,23 @@ pub fn queue_voxel_pull(
             },
             view_entity,
         );
+        // The cutout ranges, alpha-tested, after the opaque ones.
+        if let Some(cutout_phase) = cutout_phases.get_mut(&view.retained_view_entity) {
+            let pipeline_id = specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, key(true));
+            bin_view_item(
+                cutout_phase,
+                OpaqueNoLightmap3dBatchSetKey {
+                    pipeline: pipeline_id,
+                    draw_function: cutout_draw,
+                    material_bind_group_index: None,
+                    slabs: default(),
+                },
+                OpaqueNoLightmap3dBinKey {
+                    asset_id: AssetId::<Mesh>::invalid().untyped(),
+                },
+                view_entity,
+            );
+        }
     }
 }
 
@@ -287,7 +351,11 @@ pub fn queue_voxel_pull(
 /// pass's mesh view bind group), then reuse `DrawChunkQuads` to bind group 1 and
 /// issue the `quad_count * 6` vertex draw. The vertex-only shader writes depth
 /// but no color.
-pub type DrawVoxelPullDepth = (SetItemPipeline, SetPrepassViewBindGroup<0>, DrawChunkQuads);
+pub type DrawVoxelPullDepth = (SetItemPipeline, SetPrepassViewBindGroup<0>, DrawChunkQuads<false>);
+
+/// [`DrawVoxelPullDepth`] for the chunks' cutout ranges (`AlphaMask3dPrepass`
+/// and the cutout `Shadow` item), with the alpha-testing depth pipeline.
+pub type DrawVoxelPullDepthCutout = (SetItemPipeline, SetPrepassViewBindGroup<0>, DrawChunkQuads<true>);
 
 /// Queue pulled chunks into the depth prepass so the camera's HZB sees terrain.
 /// Mirrors `queue_voxel_pull` (same per-view frustum cull, same `NonMesh` bin),
@@ -299,28 +367,32 @@ pub fn queue_voxel_pull_prepass(
     cache: Res<PipelineCache>,
     fortress_view: Option<Res<FortressViewUniform>>,
     draw_functions: Res<DrawFunctions<Opaque3dPrepass>>,
+    cutout_draw_functions: Res<DrawFunctions<AlphaMask3dPrepass>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3dPrepass>>,
+    mut cutout_phases: ResMut<ViewBinnedRenderPhases<AlphaMask3dPrepass>>,
     views: Query<(Entity, &ExtractedView, &Msaa)>,
 ) {
     if *mode == ActiveNearMode::Disabled {
         return;
     }
     let draw = draw_functions.read().id::<DrawVoxelPullDepth>();
+    let cutout_draw = cutout_draw_functions.read().id::<DrawVoxelPullDepthCutout>();
     let cutaway = cutaway_wanted(fortress_view.as_deref());
     for (view_entity, view, msaa) in &views {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
             continue; // this view runs no prepass
         };
-        let pipeline_id =
-            specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, |cutaway| {
-                VoxelPullDepthPipelineKey {
-                    msaa_samples: msaa.samples(),
-                    // The camera depth prepass uses a perspective projection —
-                    // never unclipped. Only directional shadow cascades set this.
-                    unclipped_depth_ortho: false,
-                    cutaway,
-                }
-            });
+        let key = |cutout: bool| {
+            move |cutaway| VoxelPullDepthPipelineKey {
+                msaa_samples: msaa.samples(),
+                // The camera depth prepass uses a perspective projection —
+                // never unclipped. Only directional shadow cascades set this.
+                unclipped_depth_ortho: false,
+                cutaway,
+                cutout,
+            }
+        };
+        let pipeline_id = specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, key(false));
         bin_view_item(
             phase,
             OpaqueNoLightmap3dBatchSetKey {
@@ -334,6 +406,22 @@ pub fn queue_voxel_pull_prepass(
             },
             view_entity,
         );
+        if let Some(cutout_phase) = cutout_phases.get_mut(&view.retained_view_entity) {
+            let pipeline_id = specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, key(true));
+            bin_view_item(
+                cutout_phase,
+                OpaqueNoLightmap3dBatchSetKey {
+                    pipeline: pipeline_id,
+                    draw_function: cutout_draw,
+                    material_bind_group_index: None,
+                    slabs: default(),
+                },
+                OpaqueNoLightmap3dBinKey {
+                    asset_id: AssetId::<Mesh>::invalid().untyped(),
+                },
+                view_entity,
+            );
+        }
     }
 }
 
@@ -367,6 +455,7 @@ pub fn queue_voxel_pull_shadows(
         return;
     }
     let draw = draw_functions.read().id::<DrawVoxelPullDepth>();
+    let cutout_draw = draw_functions.read().id::<DrawVoxelPullDepthCutout>();
     let cutaway = cutaway_wanted(fortress_view.as_deref());
     for view_lights in &view_lights {
         for light_view_entity in view_lights.lights.iter().copied() {
@@ -378,14 +467,15 @@ pub fn queue_voxel_pull_shadows(
             };
             let is_directional = matches!(light_entity, LightEntity::Directional { .. });
             // Shadow maps are single-sampled (light.rs allocates them at sample_count 1).
-            let pipeline_id =
-                specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, |cutaway| {
-                    VoxelPullDepthPipelineKey {
-                        msaa_samples: 1,
-                        unclipped_depth_ortho: is_directional,
-                        cutaway,
-                    }
-                });
+            let key = |cutout: bool| {
+                move |cutaway| VoxelPullDepthPipelineKey {
+                    msaa_samples: 1,
+                    unclipped_depth_ortho: is_directional,
+                    cutaway,
+                    cutout,
+                }
+            };
+            let pipeline_id = specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, key(false));
             bin_view_item(
                 phase,
                 ShadowBatchSetKey {
@@ -398,6 +488,23 @@ pub fn queue_voxel_pull_shadows(
                     asset_id: AssetId::<Mesh>::invalid().untyped(),
                 },
                 light_view_entity,
+            );
+            // Leaves cast dappled shadows: the cutout ranges, alpha-tested,
+            // as a second item of the same phase.
+            let pipeline_id = specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, key(true));
+            bin_view_item_as(
+                phase,
+                ShadowBatchSetKey {
+                    pipeline: pipeline_id,
+                    draw_function: cutout_draw,
+                    material_bind_group_index: None,
+                    slabs: default(),
+                },
+                ShadowBinKey {
+                    asset_id: AssetId::<Mesh>::invalid().untyped(),
+                },
+                light_view_entity,
+                second_item_key(light_view_entity),
             );
         }
     }
@@ -441,6 +548,46 @@ mod tests {
         }
     }
 
+    /// A view's opaque and cutout `Shadow` items live in one phase: re-binning
+    /// either (every frame) must keep the other.
+    #[test]
+    fn a_views_two_shadow_items_keep_each_other() {
+        use bevy::render::{
+            batching::gpu_preprocessing::GpuPreprocessingMode, render_phase::DrawFunctionId,
+            view::RetainedViewEntity,
+        };
+        let view = Entity::from_raw_u32(7).unwrap();
+        assert_ne!(second_item_key(view), MainEntity::from(view));
+        let retained = RetainedViewEntity::new(MainEntity::from(view), None, 0);
+        let mut phases = ViewBinnedRenderPhases::<Shadow>::default();
+        let key = |pipeline: usize| ShadowBatchSetKey {
+            pipeline: CachedRenderPipelineId::new(pipeline),
+            draw_function: DrawFunctionId(0),
+            material_bind_group_index: None,
+            slabs: default(),
+        };
+        let bin = || ShadowBinKey { asset_id: AssetId::<Mesh>::invalid().untyped() };
+        for _frame in 0..3 {
+            phases.prepare_for_new_frame(retained, GpuPreprocessingMode::None);
+            let phase = phases.get_mut(&retained).expect("phase");
+            bin_view_item(phase, key(1), bin(), view);
+            bin_view_item_as(phase, key(2), bin(), view, second_item_key(view));
+            let mut bins: Vec<usize> =
+                phase.non_mesh_items.keys().map(|(k, _)| k.pipeline.id()).collect();
+            bins.sort();
+            assert_eq!(bins, [1, 2], "both the opaque and the cutout item stay binned");
+        }
+    }
+
+    #[test]
+    fn direct_draws_split_opaque_and_cutout_ranges() {
+        let chunk = GpuChunkQuads { record_start: 100, quad_count: 10, chunk_slot: 3, cutout_start: 7 };
+        assert_eq!(chunk.range(false), (100, 7));
+        assert_eq!(chunk.range(true), (107, 3));
+        let opaque_only = GpuChunkQuads { cutout_start: 10, ..chunk };
+        assert_eq!(opaque_only.range(true), (110, 0));
+    }
+
     #[test]
     fn grouped_plan_has_one_phase_item_per_view_not_per_chunk() {
         let plan = GroupedPhasePlan::new(3, 257);
@@ -456,11 +603,13 @@ mod tests {
             record_start: 10,
             quad_count: 4,
             chunk_slot: 2,
+            cutout_start: 4,
         };
         let behind = GpuChunkQuads {
             record_start: 30,
             quad_count: 8,
             chunk_slot: 5,
+            cutout_start: 8,
         };
 
         let list = grouped_draw_list(

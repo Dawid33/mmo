@@ -21,7 +21,7 @@ pub(crate) mod cursor;
 #[cfg(feature = "dev_ui")]
 pub mod dev_ui;
 pub(crate) mod boundaries;
-pub(crate) mod fortress_view;
+pub mod fortress_view;
 pub(crate) mod slice_plane;
 pub mod config;
 pub mod convert;
@@ -467,6 +467,11 @@ fn setup_scene(
         ExtendedMaterial {
             base: StandardMaterial {
                 perceptual_roughness: 0.9,
+                // Cutout blocks (leaves) drop their alpha-0 texels in
+                // voxel_texture.wgsl's `alpha_discard`. One material serves
+                // every chunk, which is fine: every other block texture is
+                // fully opaque (alpha 255), so only leaves lose texels.
+                alpha_mode: AlphaMode::Mask(0.5),
                 ..Default::default()
             },
             extension: StandardVoxelMaterial {

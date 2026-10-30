@@ -143,7 +143,7 @@ pub fn gather_padded_rle(
 
 #[cfg(test)]
 mod tests {
-    use super::super::binary::{mesh_quads, Face};
+    use super::super::binary::{mesh_quads, CutoutTable, Face};
     use super::*;
     use crate::renderer::bridge::VoxelData;
     use game::{BlockId, BRICK_VOXEL_COUNT};
@@ -202,12 +202,12 @@ mod tests {
         // zero +X faces; isolated it emits the whole 32×32 wall.
         let center = full_chunk(BlockId(1));
         let neighbor = full_chunk(BlockId(1));
-        let isolated = mesh_quads(&gather_padded(&center, &BTreeMap::new()));
+        let isolated = mesh_quads(&gather_padded(&center, &BTreeMap::new()), &CutoutTable::NONE);
         assert!(isolated.iter().any(|q| q.face == Face::PosX));
 
         let mut neighbors: BTreeMap<[i32; 3], &[Voxel]> = BTreeMap::new();
         neighbors.insert([1, 0, 0], neighbor.as_slice());
-        let meshed = mesh_quads(&gather_padded(&center, &neighbors));
+        let meshed = mesh_quads(&gather_padded(&center, &neighbors), &CutoutTable::NONE);
         assert!(
             meshed.iter().all(|q| q.face != Face::PosX),
             "faces against a solid neighbor must be culled"

@@ -3,7 +3,9 @@
 // depth. Keeps the camera's HZB fed with pulled terrain so mesh entities behind
 // terrain stay occlusion-culled. Record layout mirrored from
 // crates/client/src/renderer/meshing/records.rs (the source of truth):
-//   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1   w1: w:6|h:6|layer:16
+//   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1|cutout:1   w1: w:6|h:6|layer:16
+// The CUTOUT variant (the cutout record ranges: leaves) adds a fragment
+// stage that alpha-tests the block texture, so leaves cast dappled shadows.
 //
 // Bound against the PREPASS view layout (SetPrepassViewBindGroup<0>), whose
 // binding 0 is the same `View` uniform mesh_view_bindings exposes — so importing
@@ -13,11 +15,46 @@
 #import bevy_pbr::view_transformations::position_world_to_clip
 
 // group(1) is the same shared arena bind group used by the forward path. The
-// depth pipeline reuses that exact layout and simply leaves bindings 2/3
-// (texture/sampler) undeclared — a shader may reference fewer bindings than its
-// layout provides.
+// depth pipeline reuses that exact layout and leaves bindings 2/3
+// (texture/sampler) undeclared outside CUTOUT — a shader may reference fewer
+// bindings than its layout provides.
 @group(1) @binding(0) var<storage, read> quads: array<vec2<u32>>;
 @group(1) @binding(1) var<storage, read> chunk_transforms: array<mat4x4<f32>>;
+#ifdef CUTOUT
+@group(1) @binding(2) var mat_array_texture: texture_2d_array<f32>;
+@group(1) @binding(3) var mat_array_texture_sampler: sampler;
+
+// The forward shader's texture mapping (voxel_pull.wgsl, the source of
+// truth), so the alpha test reads the texel the colour pass shows.
+const FACE_U_MASK = array<vec3<f32>, 6>(
+    vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, 1.0),
+    vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0),
+    vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 0.0, 0.0),
+);
+const FACE_V_MASK = array<vec3<f32>, 6>(
+    vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, -1.0, 0.0),
+    vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, 1.0),
+    vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, -1.0, 0.0),
+);
+const BLOCK_VOXELS: f32 = 16.0;
+
+// BEGIN cutout alpha test — identical in voxel_pull.wgsl and
+// voxel_pull_depth.wgsl (test-pinned: voxel_pull/pipeline.rs). Cutout texels
+// (leaves) have alpha 0 or 1; the mip chain averages it into coverage, so far
+// away every texel would fall under the cutoff and leaves would thin to
+// nothing. The tested alpha is scaled up by CUTOUT_MIP_ALPHA_SCALE per mip
+// level the footprint spans (from the UV gradients), which keeps a crown's
+// coverage roughly constant with distance.
+const CUTOUT_ALPHA_CUTOFF: f32 = 0.5;
+const CUTOUT_MIP_ALPHA_SCALE: f32 = 0.25;
+fn cutout_alpha(alpha: f32, uv_dx: vec2<f32>, uv_dy: vec2<f32>, texels: vec2<f32>) -> f32 {
+    let dx = uv_dx * texels;
+    let dy = uv_dy * texels;
+    let mip = max(0.0, 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1e-8)));
+    return alpha * (1.0 + mip * CUTOUT_MIP_ALPHA_SCALE);
+}
+// END cutout alpha test
+#endif // CUTOUT
 
 // The z-level cutaway, as in voxel_pull.wgsl (mirrored from
 // FortressViewUniform in crates/client/src/renderer/fortress_view.rs, the
@@ -102,6 +139,10 @@ struct VertexOutput {
     @location(1) world_y: f32,
     @location(2) @interpolate(flat) cut_here: u32,
 #endif // CUTAWAY
+#ifdef CUTOUT
+    @location(3) uv: vec2<f32>,
+    @location(4) @interpolate(flat) layer: u32,
+#endif // CUTOUT
 }
 
 @vertex
@@ -147,6 +188,21 @@ fn vertex(
     out.cut_here = select(0u, 1u, cut_here);
 #endif // CUTAWAY
     out.position = position_world_to_clip(world_position.xyz);
+#ifdef CUTOUT
+    // UVs in world voxels, exactly as voxel_pull.wgsl's vertex computes them.
+    let scale = vec3<f32>(
+        length(world_from_local[0].xyz),
+        length(world_from_local[1].xyz),
+        length(world_from_local[2].xyz),
+    );
+    let origin = world_from_local[3].xyz;
+    let tex_pos = local_pos * scale + (origin - BLOCK_VOXELS * floor(origin / BLOCK_VOXELS));
+    out.uv = vec2<f32>(
+        dot(tex_pos, FACE_U_MASK[face]),
+        dot(tex_pos, FACE_V_MASK[face]),
+    ) / BLOCK_VOXELS;
+    out.layer = (w1 >> 12u) & 65535u;
+#endif // CUTOUT
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
     out.unclipped_depth = out.position.z;
     out.position.z = min(out.position.z, 1.0); // Clamp depth to avoid clipping
@@ -156,31 +212,61 @@ fn vertex(
 
 #ifdef CUTAWAY
 // In the home region: clipped above the cut. Outside it: back faces dropped,
-// as the Back cull mode the CUTAWAY pipeline gives up would.
+// as the Back cull mode the CUTAWAY pipeline gives up would — except for
+// cutout quads, which are double-sided anyway.
 fn cut_discards(in: VertexOutput, front_facing: bool) -> bool {
     let inside = in.cut_here != 0u;
-    return (inside && in.world_y > fortress.cut.x + CUT_EPSILON) || (!inside && !front_facing);
+#ifdef CUTOUT
+    let drop_back = false;
+#else
+    let drop_back = !front_facing;
+#endif // CUTOUT
+    return (inside && in.world_y > fortress.cut.x + CUT_EPSILON) || (!inside && drop_back);
 }
 #endif // CUTAWAY
+
+// Whether the fragment writes no depth: a transparent cutout texel
+// (sampled first, in uniform control flow) or the cutaway's clip.
+fn depth_discards(in: VertexOutput, front_facing: bool) -> bool {
+    var discards = false;
+#ifdef CUTOUT
+    let texels = vec2<f32>(textureDimensions(mat_array_texture).xy);
+    let ddx = dpdx(in.uv);
+    let ddy = dpdy(in.uv);
+    let alpha = textureSampleGrad(mat_array_texture, mat_array_texture_sampler, in.uv, in.layer, ddx, ddy).a;
+    discards = cutout_alpha(alpha, ddx, ddy, texels) < CUTOUT_ALPHA_CUTOFF;
+#endif // CUTOUT
+#ifdef CUTAWAY
+    discards = discards || cut_discards(in, front_facing);
+#endif // CUTAWAY
+    return discards;
+}
 
 #ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @builtin(frag_depth) f32 {
-#ifdef CUTAWAY
-    if (cut_discards(in, front_facing)) {
+    if (depth_discards(in, front_facing)) {
         discard;
     }
-#endif // CUTAWAY
     return in.unclipped_depth;
 }
 #else // UNCLIPPED_DEPTH_ORTHO_EMULATION
 #ifdef CUTAWAY
-// No depth to write: only the cutaway's discard.
+// No depth to write: only the discards.
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) front_facing: bool) {
-    if (cut_discards(in, front_facing)) {
+    if (depth_discards(in, front_facing)) {
         discard;
     }
 }
+#else // CUTAWAY
+#ifdef CUTOUT
+@fragment
+fn fragment(in: VertexOutput, @builtin(front_facing) front_facing: bool) {
+    if (depth_discards(in, front_facing)) {
+        discard;
+    }
+}
+#endif // CUTOUT
 #endif // CUTAWAY
 #endif // UNCLIPPED_DEPTH_ORTHO_EMULATION

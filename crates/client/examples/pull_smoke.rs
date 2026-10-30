@@ -5,7 +5,8 @@
 //! end to end: `VoxelPullPlugin` + a `BlockArrayTexture` + a `ChunkQuads` entity
 //! whose records come from the real `records::pack_record` encoder, viewed by a
 //! fixed camera. It then screenshots and asserts a non-trivial fraction of
-//! pixels read as textured geometry rather than the clear color.
+//! pixels read as textured geometry rather than the clear color, and that
+//! the alpha-tested cutout quad (the leaves' pipelines) drew too.
 //!
 //! Modeled on `examples/gizmo_smoke.rs` (self-screenshot + exit). The records
 //! encoder is the same one the meshing/LOD pipelines feed into `ChunkQuads`, so
@@ -49,6 +50,13 @@ const LAYER_COLORS: [[u8; 4]; 3] = [
     [135, 100, 70, 255],
     [140, 132, 120, 255],
 ];
+/// The cutout layer (index 3, after `LAYER_COLORS`): a magenta checkerboard
+/// whose odd texels are alpha 0, like a leaf texture's holes. Its quad is
+/// drawn by the cutout pipelines (forward, depth prepass, shadow).
+const CUTOUT_COLOR: [u8; 4] = [210, 30, 170, 255];
+/// Minimum fraction of cutout-magenta pixels that counts as "the cutout
+/// pass drew".
+const MIN_CUTOUT_FRACTION: f32 = 0.005;
 const TEX_SIZE: u32 = 16;
 
 #[derive(Resource, Default)]
@@ -95,6 +103,9 @@ fn main() {
     })
     .insert_resource(indirect.clone())
     .add_plugins(VoxelPullPlugin)
+    // The arena bind group also binds the designation overlay texture
+    // (group(1) binding 7); without it nothing is drawn.
+    .add_plugins(client::renderer::fortress_view::FortressOverlayPlugin)
     .init_resource::<ProbeResult>()
     .add_systems(Startup, setup)
     .add_systems(Update, probe);
@@ -114,15 +125,21 @@ fn main() {
     }
 }
 
-/// A small 3-layer 2d-array texture of solid warm colors. Mirrors the
-/// D2Array-view fixup `renderer/mod.rs` applies so the binding stays an array
-/// even with few layers.
+/// A small 2d-array texture: the solid warm `LAYER_COLORS`, then the cutout
+/// checkerboard. Mirrors the D2Array-view fixup `renderer/mod.rs` applies so
+/// the binding stays an array even with few layers.
 fn array_texture(images: &mut Assets<Image>) -> Handle<Image> {
-    let layers = LAYER_COLORS.len() as u32;
+    let layers = LAYER_COLORS.len() as u32 + 1;
     let mut data = Vec::with_capacity((TEX_SIZE * TEX_SIZE * layers * 4) as usize);
     for color in LAYER_COLORS {
         for _ in 0..(TEX_SIZE * TEX_SIZE) {
             data.extend_from_slice(&color);
+        }
+    }
+    for y in 0..TEX_SIZE {
+        for x in 0..TEX_SIZE {
+            let [r, g, b, _] = CUTOUT_COLOR;
+            data.extend_from_slice(&[r, g, b, if (x + y) % 2 == 0 { 255 } else { 0 }]);
         }
     }
     let mut image = Image::new(
@@ -140,6 +157,12 @@ fn array_texture(images: &mut Assets<Image>) -> Handle<Image> {
         dimension: Some(TextureViewDimension::D2Array),
         ..default()
     });
+    // Repeat, like the real block texture (`renderer/mod.rs`): UVs run in
+    // blocks, past 0..1 (the cutout checkerboard would clamp to one row).
+    let mut sampler = bevy::image::ImageSamplerDescriptor::linear();
+    sampler.address_mode_u = bevy::image::ImageAddressMode::Repeat;
+    sampler.address_mode_v = bevy::image::ImageAddressMode::Repeat;
+    image.sampler = bevy::image::ImageSampler::Descriptor(sampler);
     images.add(image)
 }
 
@@ -156,6 +179,7 @@ fn scene_records() -> Vec<QuadRecord> {
                 face: Face::PosY,
                 block: BlockId(1),
                 ao: [3, 3, 3, 3],
+                cutout: false,
             },
             0,
         ),
@@ -168,6 +192,7 @@ fn scene_records() -> Vec<QuadRecord> {
                 face: Face::PosY,
                 block: BlockId(2),
                 ao: [3, 2, 1, 0],
+                cutout: false,
             },
             1,
         ),
@@ -180,8 +205,23 @@ fn scene_records() -> Vec<QuadRecord> {
                 face: Face::PosZ,
                 block: BlockId(3),
                 ao: [2, 3, 1, 2],
+                cutout: false,
             },
             2,
+        ),
+        // A see-through (cutout) wall in front of the back wall, facing the
+        // camera: records keep the opaque-then-cutout order. Layer 3.
+        (
+            Quad {
+                min: [4, 0, 20],
+                w: 24,
+                h: 12,
+                face: Face::PosZ,
+                block: BlockId(4),
+                ao: [3, 3, 3, 3],
+                cutout: true,
+            },
+            3,
         ),
     ];
     quads
@@ -285,20 +325,30 @@ fn analyze_screenshot(
 
     let total = (rgb.width() * rgb.height()) as f32;
     let mut terrain = 0u32;
+    let mut cutout = 0u32;
     for p in rgb.pixels() {
         let [r, g, b] = p.0;
         // Warm/neutral geometry: blue is not clearly the largest channel.
         if (b as i32) <= (r as i32).max(g as i32) {
             terrain += 1;
         }
+        // The cutout wall's magenta: red and blue both well above green.
+        if (r as i32) > 2 * (g as i32) + 20 && (b as i32) > 2 * (g as i32) + 20 {
+            cutout += 1;
+        }
     }
     let fraction = terrain as f32 / total;
+    let cutout_fraction = cutout as f32 / total;
     info!(
-        "pull_smoke: {:.0} px, terrain fraction {:.3} (threshold {:.2})",
-        total, fraction, MIN_TERRAIN_FRACTION
+        "pull_smoke: {:.0} px, terrain fraction {:.3} (threshold {:.2}), cutout fraction {:.4} (threshold {:.3})",
+        total, fraction, MIN_TERRAIN_FRACTION, cutout_fraction, MIN_CUTOUT_FRACTION
     );
     let encoded_indirect_count = indirect.0.load(Ordering::Acquire);
     let indirect_count = encoded_indirect_count.saturating_sub(1);
     info!("pull_smoke: maximum observed GPU indirect count {indirect_count}");
-    result.0 = Some(fraction >= MIN_TERRAIN_FRACTION && encoded_indirect_count > 1);
+    result.0 = Some(
+        fraction >= MIN_TERRAIN_FRACTION
+            && cutout_fraction >= MIN_CUTOUT_FRACTION
+            && encoded_indirect_count > 1,
+    );
 }

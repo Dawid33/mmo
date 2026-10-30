@@ -2,10 +2,57 @@
 //! the padded 34³ space; face culling via bitshifts; greedy merging (task 3)
 //! over per-slice bitplanes with a flat merge-key grid. Pure functions — no
 //! Bevy types here.
+//!
+//! Cutout blocks (`game::RenderMode::Cutout`, leaves) are see-through: they
+//! hide no face of a neighbour, darken no AO corner, and are open space for
+//! burial and cave connectivity. A [`CutoutTable`] says which ids they are;
+//! [`CutoutTable::NONE`] meshes everything opaque (the LOD rings).
 
-use game::{BlockId, Voxel, BRICK_VOXEL_COUNT};
+use game::{BlockId, BlockProps, Voxel, BRICK_VOXEL_COUNT};
 
 use super::ao::VERTEX_AO_LUT;
+
+/// Whether a cutout face against a neighbour of the SAME cutout block is
+/// culled (Minecraft's "fast" leaves: a crown is drawn as its outer shell).
+/// `false` draws every leaf/leaf face ("fancy"), at many more quads.
+pub const CULL_SAME_CUTOUT_FACES: bool = true;
+
+/// Which block ids are cutout, as a bitset over every `u16` id (8 KiB): one
+/// lookup per voxel in the mesher's hot loops, built once per mesh task.
+pub struct CutoutTable([u64; 1024]);
+
+impl CutoutTable {
+    /// No cutout blocks: everything non-air is opaque.
+    pub const NONE: CutoutTable = CutoutTable([0; 1024]);
+
+    pub fn from_ids(ids: impl IntoIterator<Item = BlockId>) -> Self {
+        let mut t = [0u64; 1024];
+        for id in ids {
+            t[id.0 as usize >> 6] |= 1 << (id.0 & 63);
+        }
+        Self(t)
+    }
+
+    pub fn from_props(props: &BlockProps) -> Self {
+        Self::from_ids(props.cutout_ids())
+    }
+
+    /// From the process-global props (`game::block_props`).
+    pub fn installed() -> Self {
+        Self::from_props(game::block_props())
+    }
+
+    #[inline]
+    pub fn is_cutout(&self, id: BlockId) -> bool {
+        self.0[id.0 as usize >> 6] >> (id.0 & 63) & 1 == 1
+    }
+
+    /// Non-air and not cutout: hides faces, occludes AO, buries.
+    #[inline]
+    pub fn is_opaque(&self, v: Voxel) -> bool {
+        !v.is_air() && !self.is_cutout(v.block)
+    }
+}
 
 /// Padded chunk edge: 32 interior + 1 shell cell each side.
 pub const PADDED: usize = 34;
@@ -27,6 +74,11 @@ impl PaddedVoxels {
 
     pub fn is_solid(&self, x: usize, y: usize, z: usize) -> bool {
         !self.get(x, y, z).is_air()
+    }
+
+    /// Non-air and not cutout (see [`CutoutTable::is_opaque`]).
+    pub fn is_opaque(&self, x: usize, y: usize, z: usize, cutout: &CutoutTable) -> bool {
+        cutout.is_opaque(self.get(x, y, z))
     }
 
     /// Interior from a chunk's 32³ voxels, shell all-air (isolated chunk).
@@ -122,7 +174,8 @@ impl Face {
 /// A greedy-merged rectangle of identical (block, AO) faces. `min` is the
 /// chunk-local voxel coord of the rectangle's minimum cell; `w` extends along
 /// `cross_axes(axis).0`, `h` along `.1`. `ao` corner order (cu, cv) =
-/// (0,0), (1,0), (0,1), (1,1) over (U, V).
+/// (0,0), (1,0), (0,1), (1,1) over (U, V). `cutout`: the block is drawn
+/// alpha-tested (`CutoutTable`), in the pulled path's cutout pipeline.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Quad {
     pub min: [u32; 3],
@@ -131,15 +184,17 @@ pub struct Quad {
     pub face: Face,
     pub block: BlockId,
     pub ao: [u8; 4],
+    pub cutout: bool,
 }
 
 /// Greedy-mesh a padded chunk. Each visibility column is computed once and
 /// transposed into per-slice row bitplanes; per slice, visible cells get a
 /// packed (block, ao) merge key in a flat grid, then rectangles are grown
 /// with bit scans — width along U within a row, height along V across rows —
-/// splitting wherever the key changes.
-pub fn mesh_quads(p: &PaddedVoxels) -> Vec<Quad> {
-    let occ = Occupancy::new(p);
+/// splitting wherever the key changes. `cutout` names the see-through blocks
+/// (`CutoutTable::NONE`: all opaque).
+pub fn mesh_quads(p: &PaddedVoxels, cutout: &CutoutTable) -> Vec<Quad> {
+    let occ = Occupancy::new(p, cutout);
     let mut quads = Vec::new();
 
     // Merge-key scratch reused across all six directions: `keys[v][u]` is a
@@ -150,7 +205,8 @@ pub fn mesh_quads(p: &PaddedVoxels) -> Vec<Quad> {
 
     for axis in 0..3 {
         let (ua, va) = cross_axes(axis);
-        let cols = &occ.cols[axis];
+        // AO samples the opaque columns: a cutout neighbour darkens nothing.
+        let cols = &occ.opaque[axis];
         for positive in [true, false] {
             let face = Face::from_axis(axis, positive);
             // Transpose: one face_bits call per column, scattered to
@@ -169,7 +225,7 @@ pub fn mesh_quads(p: &PaddedVoxels) -> Vec<Quad> {
             for a in 1..=32usize {
                 // Merge keys for this slice's visible cells. AO samples live
                 // in the layer the face looks into (bit `b` of the eight
-                // neighboring occupancy columns) — same rule as ao::face_ao,
+                // neighboring opaque columns) — same rule as ao::face_ao,
                 // which stays the reference implementation.
                 let b = if positive { a + 1 } else { a - 1 };
                 let mut any = false;
@@ -227,13 +283,15 @@ pub fn mesh_quads(p: &PaddedVoxels) -> Vec<Quad> {
                         min[axis] = a as u32 - 1;
                         min[ua] = u0 as u32 - 1;
                         min[va] = v as u32 - 1;
+                        let block = BlockId((key >> 32) as u16);
                         quads.push(Quad {
                             min,
                             w: w as u32,
                             h: h as u32,
                             face,
-                            block: BlockId((key >> 32) as u16),
+                            block,
                             ao: (key as u32).to_le_bytes(),
+                            cutout: cutout.is_cutout(block),
                         });
                     }
                 }
@@ -243,42 +301,73 @@ pub fn mesh_quads(p: &PaddedVoxels) -> Vec<Quad> {
     quads
 }
 
-/// Solidity packed as u64 columns along each axis: `cols[axis][u][v]` has bit
+type Columns = Box<[[[u64; PADDED]; PADDED]; 3]>;
+
+fn zero_columns() -> Columns {
+    vec![[[0u64; PADDED]; PADDED]; 3].try_into().unwrap()
+}
+
+/// Occupancy packed as u64 columns along each axis: `cols[axis][u][v]` has bit
 /// `a` set iff the voxel at position `a` along `axis` (cross coords `(u, v)`
-/// per `cross_axes`) is solid. 34 ≤ 64, so one word per column.
+/// per `cross_axes`) is non-air; `opaque` the same for non-air, non-cutout
+/// voxels; `same_cutout` bit `a` iff voxels `a` and `a + 1` are the same
+/// cutout block (only with `CULL_SAME_CUTOUT_FACES`). 34 ≤ 64, so one word
+/// per column.
 pub(crate) struct Occupancy {
-    cols: Box<[[[u64; PADDED]; PADDED]; 3]>,
+    cols: Columns,
+    opaque: Columns,
+    same_cutout: Columns,
 }
 
 impl Occupancy {
-    pub fn new(p: &PaddedVoxels) -> Self {
-        let mut cols: Box<[[[u64; PADDED]; PADDED]; 3]> =
-            vec![[[0u64; PADDED]; PADDED]; 3].try_into().unwrap();
+    pub fn new(p: &PaddedVoxels, cutout: &CutoutTable) -> Self {
+        const STRIDE: [usize; 3] = [1, PADDED, PADDED * PADDED];
+        let mut cols = zero_columns();
+        let mut opaque = zero_columns();
+        let mut same_cutout = zero_columns();
         let mut i = 0;
         for z in 0..PADDED {
             for y in 0..PADDED {
                 for x in 0..PADDED {
-                    if !p.0[i].is_air() {
+                    let v = p.0[i];
+                    if !v.is_air() {
                         cols[0][y][z] |= 1 << x;
                         cols[1][x][z] |= 1 << y;
                         cols[2][x][y] |= 1 << z;
+                        if !cutout.is_cutout(v.block) {
+                            opaque[0][y][z] |= 1 << x;
+                            opaque[1][x][z] |= 1 << y;
+                            opaque[2][x][y] |= 1 << z;
+                        } else if CULL_SAME_CUTOUT_FACES {
+                            let pos = [x, y, z];
+                            for axis in 0..3 {
+                                if pos[axis] + 1 < PADDED && p.0[i + STRIDE[axis]].block == v.block {
+                                    let (ua, va) = cross_axes(axis);
+                                    same_cutout[axis][pos[ua]][pos[va]] |= 1 << pos[axis];
+                                }
+                            }
+                        }
                     }
                     i += 1;
                 }
             }
         }
-        Self { cols }
+        Self { cols, opaque, same_cutout }
     }
 
     /// Visible-face bits along `axis` at cross coords `(u, v)`: bit `a` set
-    /// iff the voxel at `a` is solid and its `positive`/negative neighbor
-    /// along `axis` is air. Shell positions are masked out.
+    /// iff the voxel at `a` is non-air and its `positive`/negative neighbor
+    /// along `axis` is not opaque — air, or a cutout block other than its
+    /// own (a cutout face against the same cutout block is culled, see
+    /// `CULL_SAME_CUTOUT_FACES`). Shell positions are masked out.
     pub fn face_bits(&self, axis: usize, positive: bool, u: usize, v: usize) -> u64 {
         let col = self.cols[axis][u][v];
+        let opq = self.opaque[axis][u][v];
+        let same = self.same_cutout[axis][u][v];
         let vis = if positive {
-            col & !(col >> 1)
+            col & !(opq >> 1) & !same
         } else {
-            col & !(col << 1)
+            col & !(opq << 1) & !(same << 1)
         };
         vis & INTERIOR_MASK
     }
@@ -311,7 +400,7 @@ mod tests {
     #[test]
     fn lone_voxel_has_six_visible_faces() {
         let p = PaddedVoxels::from_interior(&interior_with(&[([5, 6, 7], BlockId(1))]));
-        let occ = Occupancy::new(&p);
+        let occ = Occupancy::new(&p, &CutoutTable::NONE);
         // padded coords (6, 7, 8)
         assert_eq!(
             occ.face_bits(0, true, 7, 8) & (1 << 6),
@@ -352,7 +441,7 @@ mod tests {
             ([5, 6, 7], BlockId(1)),
             ([6, 6, 7], BlockId(1)),
         ]));
-        let occ = Occupancy::new(&p);
+        let occ = Occupancy::new(&p, &CutoutTable::NONE);
         // +X of the left voxel (padded x=6) faces the right voxel: culled.
         assert_eq!(occ.face_bits(0, true, 7, 8) & (1 << 6), 0);
         // -X of the right voxel (padded x=7): culled.
@@ -368,7 +457,7 @@ mod tests {
         // padded x=33 (neighbor data) must cull its +X face.
         let mut p = PaddedVoxels::from_interior(&interior_with(&[([31, 5, 5], BlockId(1))]));
         p.0[PaddedVoxels::index(33, 6, 6)] = Voxel::new(BlockId(1));
-        let occ = Occupancy::new(&p);
+        let occ = Occupancy::new(&p, &CutoutTable::NONE);
         assert_eq!(
             occ.face_bits(0, true, 6, 6) & (1 << 32),
             0,
@@ -387,7 +476,7 @@ mod tests {
         // visible faces — only interior bits 1..=32 may emit.
         let mut p = PaddedVoxels::from_interior(&vec![Voxel::default(); BRICK_VOXEL_COUNT]);
         p.0[PaddedVoxels::index(33, 6, 6)] = Voxel::new(BlockId(1));
-        let occ = Occupancy::new(&p);
+        let occ = Occupancy::new(&p, &CutoutTable::NONE);
         for u in 0..PADDED {
             for v in 0..PADDED {
                 assert_eq!(occ.face_bits(0, true, u, v), 0);
@@ -399,7 +488,7 @@ mod tests {
     #[test]
     fn lone_voxel_yields_six_unit_quads() {
         let p = PaddedVoxels::from_interior(&interior_with(&[([5, 6, 7], BlockId(1))]));
-        let quads = mesh_quads(&p);
+        let quads = mesh_quads(&p, &CutoutTable::NONE);
         assert_eq!(quads.len(), 6);
         for q in &quads {
             assert_eq!((q.w, q.h), (1, 1));
@@ -423,7 +512,7 @@ mod tests {
             }
         }
         let p = PaddedVoxels::from_interior(&interior_with(&cells));
-        let quads = mesh_quads(&p);
+        let quads = mesh_quads(&p, &CutoutTable::NONE);
         let top: Vec<&Quad> = quads.iter().filter(|q| q.face == Face::PosY).collect();
         assert_eq!(top.len(), 1, "uniform top face merges fully");
         assert_eq!((top[0].w, top[0].h), (32, 32));
@@ -438,7 +527,7 @@ mod tests {
             ([5, 5, 5], BlockId(1)),
             ([6, 5, 5], BlockId(2)),
         ]));
-        let quads = mesh_quads(&p);
+        let quads = mesh_quads(&p, &CutoutTable::NONE);
         let tops: Vec<&Quad> = quads.iter().filter(|q| q.face == Face::PosY).collect();
         assert_eq!(tops.len(), 2, "different blocks stay separate quads");
         let at = |min: [u32; 3]| tops.iter().find(|q| q.min == min).expect("quad at min");
@@ -455,7 +544,7 @@ mod tests {
             ([6, 5, 5], BlockId(1)),
             ([4, 6, 5], BlockId(1)), // occluder for (5,5,5)'s top face
         ]));
-        let quads = mesh_quads(&p);
+        let quads = mesh_quads(&p, &CutoutTable::NONE);
         let tops: Vec<&Quad> = quads
             .iter()
             .filter(|q| q.face == Face::PosY && q.min[1] == 5)
@@ -481,8 +570,10 @@ mod tests {
             }
         }
         let p = PaddedVoxels::from_interior(&v);
-        let occ = Occupancy::new(&p);
-        let quads = mesh_quads(&p);
+        // Block 3 is cutout, so the cutout culling rules are covered too.
+        let cutout = CutoutTable::from_ids([BlockId(3)]);
+        let occ = Occupancy::new(&p, &cutout);
+        let quads = mesh_quads(&p, &cutout);
 
         let mut covered = std::collections::BTreeSet::new();
         for q in &quads {
@@ -539,7 +630,9 @@ mod tests {
             }
         }
         let p = PaddedVoxels::from_interior(&v);
-        for q in mesh_quads(&p) {
+        // Block 3 is cutout: it must occlude in neither implementation.
+        let cutout = CutoutTable::from_ids([BlockId(3)]);
+        for q in mesh_quads(&p, &cutout) {
             let axis = q.face.axis();
             let (ua, va) = cross_axes(axis);
             for du in 0..q.w {
@@ -554,13 +647,79 @@ mod tests {
                     ];
                     assert_eq!(
                         q.ao,
-                        super::super::ao::face_ao(&p, axis, q.face.positive(), pos),
+                        super::super::ao::face_ao(&p, &cutout, axis, q.face.positive(), pos),
                         "face {:?} cell {cell:?}",
                         q.face
                     );
                 }
             }
         }
+    }
+
+    /// The shipped manifest's props as a table, with its stone and a leaf id.
+    fn shipped_blocks() -> (CutoutTable, BlockId, BlockId, BlockId) {
+        let reg = game::BlockRegistry::from_ron(include_str!("../../../../../assets/blocks/blocks.ron"))
+            .expect("shipped manifest");
+        let id = |n: &str| reg.id_of(n).expect(n);
+        (CutoutTable::from_props(&reg.props()), id("stone"), id("oak_leaves"), id("pine_leaves"))
+    }
+
+    fn quad_at(quads: &[Quad], face: Face, min: [u32; 3]) -> Option<&Quad> {
+        quads.iter().find(|q| q.face == face && q.min == min)
+    }
+
+    #[test]
+    fn opaque_face_behind_leaf_is_emitted() {
+        let (cutout, stone, leaf, _) = shipped_blocks();
+        let p = PaddedVoxels::from_interior(&interior_with(&[([5, 5, 5], stone), ([6, 5, 5], leaf)]));
+        let quads = mesh_quads(&p, &cutout);
+        let behind = quad_at(&quads, Face::PosX, [5, 5, 5]).expect("stone face behind the leaf");
+        assert!(!behind.cutout && behind.block == stone);
+        assert!(quad_at(&quads, Face::NegX, [6, 5, 5]).is_none(), "the leaf face against stone is hidden");
+        let leaf_top = quad_at(&quads, Face::PosY, [6, 5, 5]).expect("leaf top");
+        assert!(leaf_top.cutout, "leaf quads are flagged cutout");
+        // The same pair under the all-opaque table (the LOD rings) culls both.
+        let opaque = mesh_quads(&p, &CutoutTable::NONE);
+        assert!(quad_at(&opaque, Face::PosX, [5, 5, 5]).is_none());
+        assert!(opaque.iter().all(|q| !q.cutout));
+    }
+
+    #[test]
+    fn leaf_leaf_faces_are_culled() {
+        let (cutout, _, oak, pine) = shipped_blocks();
+        let p = PaddedVoxels::from_interior(&interior_with(&[([5, 5, 5], oak), ([6, 5, 5], oak)]));
+        let quads = mesh_quads(&p, &cutout);
+        assert_eq!(CULL_SAME_CUTOUT_FACES, true, "the fast default");
+        assert!(quad_at(&quads, Face::PosX, [5, 5, 5]).is_none(), "same-leaf face culled");
+        assert!(quad_at(&quads, Face::NegX, [6, 5, 5]).is_none(), "same-leaf face culled");
+        assert!(quad_at(&quads, Face::NegX, [5, 5, 5]).is_some(), "outer faces stay");
+        assert!(quad_at(&quads, Face::PosX, [6, 5, 5]).is_some(), "outer faces stay");
+        // Two different leaves see each other.
+        let p = PaddedVoxels::from_interior(&interior_with(&[([5, 5, 5], oak), ([6, 5, 5], pine)]));
+        let quads = mesh_quads(&p, &cutout);
+        assert!(quad_at(&quads, Face::PosX, [5, 5, 5]).is_some_and(|q| q.block == oak));
+        assert!(quad_at(&quads, Face::NegX, [6, 5, 5]).is_some_and(|q| q.block == pine));
+        // Across the padded shell too: a same-leaf neighbour chunk culls.
+        let mut p = PaddedVoxels::from_interior(&interior_with(&[([31, 5, 5], oak)]));
+        p.0[PaddedVoxels::index(33, 6, 6)] = Voxel::new(oak);
+        assert!(quad_at(&mesh_quads(&p, &cutout), Face::PosX, [31, 5, 5]).is_none());
+    }
+
+    #[test]
+    fn leaf_does_not_darken_ao() {
+        let (cutout, stone, leaf, _) = shipped_blocks();
+        // Same layout as `differing_ao_does_not_merge`, the occluder a leaf.
+        let p = PaddedVoxels::from_interior(&interior_with(&[
+            ([5, 5, 5], stone),
+            ([6, 5, 5], stone),
+            ([4, 6, 5], leaf),
+        ]));
+        let quads = mesh_quads(&p, &cutout);
+        let top = quad_at(&quads, Face::PosY, [5, 5, 5]).expect("stone top");
+        assert_eq!(top.ao, [3, 3, 3, 3], "a leaf occludes no corner");
+        assert_eq!(top.w, 2, "so the floor pair still merges");
+        assert_eq!(super::super::ao::face_ao(&p, &cutout, 1, true, [6, 6, 6]), [3, 3, 3, 3]);
+        assert_eq!(super::super::ao::face_ao(&p, &CutoutTable::NONE, 1, true, [6, 6, 6]), [2, 3, 2, 3]);
     }
 
     #[test]

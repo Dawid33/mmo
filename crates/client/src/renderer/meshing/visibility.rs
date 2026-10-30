@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use bevy::camera::primitives::{Frustum, Sphere};
 use bevy::prelude::*;
 
-use super::binary::PaddedVoxels;
+use super::binary::{CutoutTable, PaddedVoxels};
 use super::queue::{ChunkGrid, ChunkKey};
 
 /// All 15 face pairs connected — the mask of an all-air (or absent) chunk.
@@ -61,12 +61,13 @@ fn touched_faces(x: usize, y: usize, z: usize) -> u8 {
     f
 }
 
-/// Flood-fill the chunk's own 32³ non-solid space (padded interior 1..=32;
-/// the 0/33 neighbor shell is deliberately excluded) and record, for each
-/// connected air component, which chunk faces it touches; every pair of
-/// touched faces is connected. O(32³) worst case, a few hundred µs — runs
-/// inside the async mesh task, never on the main thread.
-pub fn face_connectivity(p: &PaddedVoxels) -> u16 {
+/// Flood-fill the chunk's own 32³ open space — air and cutout blocks, which
+/// can be seen through — (padded interior 1..=32; the 0/33 neighbor shell is
+/// deliberately excluded) and record, for each connected open component,
+/// which chunk faces it touches; every pair of touched faces is connected.
+/// O(32³) worst case, a few hundred µs — runs inside the async mesh task,
+/// never on the main thread.
+pub fn face_connectivity(p: &PaddedVoxels, cutout: &CutoutTable) -> u16 {
     const N: usize = 32;
     let idx = |x: usize, y: usize, z: usize| x + N * (y + N * z);
     let mut visited = vec![false; N * N * N];
@@ -76,7 +77,7 @@ pub fn face_connectivity(p: &PaddedVoxels) -> u16 {
     for sz in 0..N {
         for sy in 0..N {
             for sx in 0..N {
-                if visited[idx(sx, sy, sz)] || p.is_solid(sx + 1, sy + 1, sz + 1) {
+                if visited[idx(sx, sy, sz)] || p.is_opaque(sx + 1, sy + 1, sz + 1, cutout) {
                     continue;
                 }
                 // New air component: flood it, accumulate touched faces.
@@ -86,7 +87,7 @@ pub fn face_connectivity(p: &PaddedVoxels) -> u16 {
                 while let Some((x, y, z)) = stack.pop() {
                     faces |= touched_faces(x, y, z);
                     let mut push = |nx: usize, ny: usize, nz: usize| {
-                        if !visited[idx(nx, ny, nz)] && !p.is_solid(nx + 1, ny + 1, nz + 1) {
+                        if !visited[idx(nx, ny, nz)] && !p.is_opaque(nx + 1, ny + 1, nz + 1, cutout) {
                             visited[idx(nx, ny, nz)] = true;
                             stack.push((nx, ny, nz));
                         }
@@ -905,19 +906,19 @@ mod tests {
 
     #[test]
     fn empty_chunk_connects_everything() {
-        assert_eq!(face_connectivity(&interior(&[])), ALL_CONNECTED);
+        assert_eq!(face_connectivity(&interior(&[]), &CutoutTable::NONE), ALL_CONNECTED);
     }
 
     #[test]
     fn solid_chunk_connects_nothing() {
-        assert_eq!(face_connectivity(&solid_except(&[])), 0);
+        assert_eq!(face_connectivity(&solid_except(&[]), &CutoutTable::NONE), 0);
     }
 
     #[test]
     fn straight_tunnel_connects_exactly_its_two_faces() {
         // 1-voxel tunnel along X at y=5, z=5 through an otherwise solid chunk.
         let air: Vec<[usize; 3]> = (0..32).map(|x| [x, 5, 5]).collect();
-        let mask = face_connectivity(&solid_except(&air));
+        let mask = face_connectivity(&solid_except(&air), &CutoutTable::NONE);
         assert_eq!(mask, pair_bit(Face::PosX.index(), Face::NegX.index()));
     }
 
@@ -926,14 +927,14 @@ mod tests {
         // Air along -X to center, then down to -Y: connects NegX <-> NegY only.
         let mut air: Vec<[usize; 3]> = (0..=16).map(|x| [x, 16, 16]).collect();
         air.extend((0..=16).map(|y| [16, y, 16]));
-        let mask = face_connectivity(&solid_except(&air));
+        let mask = face_connectivity(&solid_except(&air), &CutoutTable::NONE);
         assert_eq!(mask, pair_bit(Face::NegX.index(), Face::NegY.index()));
     }
 
     #[test]
     fn open_column_connects_vertical_pair() {
         let air: Vec<[usize; 3]> = (0..32).map(|y| [7, y, 9]).collect();
-        let mask = face_connectivity(&solid_except(&air));
+        let mask = face_connectivity(&solid_except(&air), &CutoutTable::NONE);
         assert_eq!(mask, pair_bit(Face::PosY.index(), Face::NegY.index()));
     }
 
@@ -943,17 +944,30 @@ mod tests {
         // far apart, no shared air. Mask = both pairs, and NOT e.g. PosX<->PosZ.
         let mut air: Vec<[usize; 3]> = (0..32).map(|x| [x, 3, 3]).collect();
         air.extend((0..32).map(|z| [28, 28, z]));
-        let mask = face_connectivity(&solid_except(&air));
+        let mask = face_connectivity(&solid_except(&air), &CutoutTable::NONE);
         let expect = pair_bit(Face::PosX.index(), Face::NegX.index())
             | pair_bit(Face::PosZ.index(), Face::NegZ.index());
         assert_eq!(mask, expect);
     }
 
     #[test]
+    fn leaf_tunnel_connects_like_air() {
+        // The X tunnel filled with a cutout block: still open for cave culling.
+        let leaf = BlockId(7);
+        let mut p = solid_except(&[]);
+        for x in 0..32 {
+            p.0[PaddedVoxels::index(x + 1, 6, 6)] = Voxel::new(leaf);
+        }
+        let mask = face_connectivity(&p, &CutoutTable::from_ids([leaf]));
+        assert_eq!(mask, pair_bit(Face::PosX.index(), Face::NegX.index()));
+        assert_eq!(face_connectivity(&p, &CutoutTable::NONE), 0, "opaque, it seals");
+    }
+
+    #[test]
     fn interior_pocket_touching_no_face_adds_nothing() {
         // A sealed air pocket in the middle: connects no faces.
         let air: Vec<[usize; 3]> = vec![[15, 15, 15], [16, 15, 15]];
-        assert_eq!(face_connectivity(&solid_except(&air)), 0);
+        assert_eq!(face_connectivity(&solid_except(&air), &CutoutTable::NONE), 0);
     }
 
     // --- Camera BFS culling (headless pipeline scenes) -------------------

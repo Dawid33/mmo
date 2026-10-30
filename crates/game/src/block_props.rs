@@ -55,6 +55,11 @@ impl BlockProps {
         self.cutout.contains(&id.0)
     }
 
+    /// Every cutout block id, ascending (renderers build lookup tables from it).
+    pub fn cutout_ids(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.cutout.iter().map(|&id| BlockId(id))
+    }
+
     /// The grid the block's chisel collides on.
     pub fn collider_scale(&self, id: BlockId) -> ColliderScale {
         if self.half_collider.contains(&id.0) { ColliderScale::Half } else { ColliderScale::Voxel }

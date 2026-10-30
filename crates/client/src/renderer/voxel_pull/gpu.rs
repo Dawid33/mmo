@@ -234,6 +234,16 @@ fn face_culling_enabled() -> bool {
 /// (`records::face_ends`), so ranges facing away from the camera are skipped.
 pub const FACES_PER_SLOT: u32 = 6;
 
+/// Command slots per chunk slot for its cutout range (`records::cutout_start`
+/// onward): one undivided draw, never face-culled (the cutout pass is
+/// double-sided). They follow all `slot_count * FACES_PER_SLOT` opaque
+/// commands in the same indirect buffer, drawn by the cutout pipeline.
+pub const CUTOUT_COMMANDS_PER_SLOT: u32 = 1;
+
+/// Byte offset in the count buffer of the cutout command count (the cull
+/// shader's `DrawCount.cutout_commands`, after commands/quads/chunks).
+pub const CUTOUT_COUNT_OFFSET: u64 = 12;
+
 fn resolve_clip_from_world(
     explicit: Option<Mat4>,
     clip_from_view: Mat4,
@@ -280,6 +290,17 @@ pub struct GpuNearViewBuffers {
     /// Geometrically grown command-buffer capacity.
     pub capacity: u32,
     metadata_generation: u64,
+}
+
+impl GpuNearViewBuffers {
+    /// Byte offset of the first cutout command in `indirect`: right after the
+    /// opaque commands of this frame's `slot_count` slots (the cull shader
+    /// places them from the same `slot_count`, its `viewport_and_capacity.z`).
+    pub fn cutout_command_offset(&self) -> u64 {
+        u64::from(self.slot_count)
+            * u64::from(FACES_PER_SLOT)
+            * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64
+    }
 }
 
 #[derive(Resource)]
@@ -397,7 +418,7 @@ fn create_view_buffers(
 ) -> GpuNearViewBuffers {
     let command_bytes =
         u64::from(sizes.capacity.max(1))
-            * u64::from(FACES_PER_SLOT)
+            * u64::from(FACES_PER_SLOT + CUTOUT_COMMANDS_PER_SLOT)
             * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
     let indirect = device.create_buffer(&BufferDescriptor {
         label: Some("voxel_pull_indirect_commands"),
@@ -407,8 +428,9 @@ fn create_view_buffers(
     });
     let count = device.create_buffer(&BufferDescriptor {
         label: Some("voxel_pull_indirect_count"),
-        // [commands, visible_quads, visible_chunks, pad]; the indirect-count
-        // draw reads the command count at offset 0.
+        // [commands, visible_quads, visible_chunks, cutout_commands]; the
+        // indirect-count draws read the command counts at offset 0 (opaque)
+        // and `CUTOUT_COUNT_OFFSET` (cutout).
         size: std::mem::size_of::<[u32; 4]>() as u64,
         usage: BufferUsages::STORAGE
             | BufferUsages::INDIRECT
@@ -658,7 +680,8 @@ pub fn near_frustum_cull(
 /// Indirect-count draws read their draw count from `count`, so zeroing it
 /// alone empties the late passes. Only fixed-slot mode (the count is ignored,
 /// every command slot is drawn) must zero the commands themselves — a buffer
-/// of `capacity * FACES_PER_SLOT` commands per view, ~8 MB each at `full`
+/// of `capacity * (FACES_PER_SLOT + CUTOUT_COMMANDS_PER_SLOT)` commands per
+/// view, ~8 MB each at `full`
 /// (~39 MB a frame over five views).
 fn clear_cull_arguments(
     render_context: &mut RenderContext<'_, '_>,
@@ -1244,7 +1267,7 @@ mod tests {
             quad_count,
             transform_slot,
             cave_active: 1,
-            face_ends: [quad_count, quad_count, quad_count, quad_count, quad_count, quad_count, 0, 0],
+            face_ends: [quad_count, quad_count, quad_count, quad_count, quad_count, quad_count, 0, quad_count],
         }
     }
 

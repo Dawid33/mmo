@@ -22,6 +22,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task};
 use game::{BlockDelta, BlockId, BlockIndex, Chunk, Voxel, BRICKS_PER_CHUNK_EDGE, BRICK_BLOCKS, BRICK_VOXELS};
 
 use super::bridge::{PendingBlockDeltas, PendingSnapshotVoxels, VoxelData};
+use super::meshing::binary::CutoutTable;
 use super::meshing::queue::is_buried_by;
 
 /// The render bricks of a sim chunk entity. Present (maybe empty) on every
@@ -117,11 +118,14 @@ pub fn spawn_chunk_bricks(chunk: &Chunk) -> Vec<([u8; 3], VoxelData)> {
 pub fn derive_chunk_bricks(chunk: &Chunk) -> DerivedBricks {
     let n = BRICKS_PER_CHUNK_EDGE;
     let mut out = DerivedBricks::default();
+    let cutout = CutoutTable::installed();
     if let (Some(block), true) = (chunk.blocks.uniform(), chunk.chisel.is_empty()) {
         if block.id == BlockId::AIR {
             return out;
         }
-        let on_face = |b: [usize; 3]| b.iter().any(|&v| v == 0 || v == n - 1);
+        // A see-through (cutout) chunk buries nothing.
+        let see_through = cutout.is_cutout(block.id);
+        let on_face = |b: [usize; 3]| see_through || b.iter().any(|&v| v == 0 || v == n - 1);
         for (b, _) in chunk.bricks() {
             let list = if on_face(b) { &mut out.spawn } else { &mut out.buried };
             list.push((to_local(b), VoxelData::uniform(block.id)));
@@ -147,7 +151,7 @@ pub fn derive_chunk_bricks(chunk: &Chunk) -> DerivedBricks {
             let voxels = &all[brick_linear(b)];
             if voxels.is_all_air() {
                 0
-            } else if is_buried_by(voxels, |off| at(b, off)) {
+            } else if is_buried_by(voxels, &cutout, |off| at(b, off)) {
                 2
             } else {
                 1
@@ -548,6 +552,41 @@ mod tests {
             assert!(on_face(*local), "{local:?} is buried");
             assert_eq!(voxels.runs(), 1, "a uniform brick is one run");
             assert_eq!(voxels.decode(), vec![Voxel::new(stone); BRICK_VOXEL_COUNT]);
+        }
+    }
+
+    /// Leaves are seen through: a stone brick under (or made of) them shows
+    /// faces, so it is never buried.
+    #[test]
+    fn brick_under_leaves_is_not_buried() {
+        let registry = crate::blocks::load_registry(); // installs the shipped props
+        let (stone, leaves) = (registry.id_of("stone").unwrap(), registry.id_of("oak_leaves").unwrap());
+        let n = BRICKS_PER_CHUNK_EDGE;
+        let all_leaves = derive_chunk_bricks(&Chunk::uniform(Block::new(leaves)));
+        assert!(all_leaves.buried.is_empty(), "a leaf chunk buries nothing");
+        assert_eq!(all_leaves.spawn.len(), n.pow(3));
+        if n < 3 {
+            return; // no interior brick to bury at this chunk size
+        }
+        // An interior brick of solid stone with an all-leaf brick above it.
+        let mut chunk = Chunk::uniform(Block::new(stone));
+        let (c, above) = (n / 2, [n / 2, n / 2 + 1, n / 2]);
+        for z in 0..BRICK_BLOCKS {
+            for y in 0..BRICK_BLOCKS {
+                for x in 0..BRICK_BLOCKS {
+                    let at = |a: usize, d: usize| above[a] * BRICK_BLOCKS + d;
+                    chunk.set_block(at(0, x), at(1, y), at(2, z), Block::new(leaves));
+                }
+            }
+        }
+        let derived = derive_chunk_bricks(&chunk);
+        let local = |b: [usize; 3]| b.map(|v| v as u8);
+        assert!(derived.spawn.iter().any(|(l, _)| *l == local([c, c, c])), "the brick under the leaves shows");
+        assert!(derived.spawn.iter().any(|(l, _)| *l == local(above)), "the leaf brick shows");
+        assert!(derived.buried.iter().all(|(l, _)| *l != local([c, c, c])));
+        // Its stone neighbour two bricks down, away from the leaves, still buries.
+        if c >= 2 {
+            assert!(derived.buried.iter().any(|(l, _)| *l == local([c, c - 2, c])));
         }
     }
 

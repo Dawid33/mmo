@@ -10,6 +10,7 @@ use bevy::tasks::AsyncComputeTaskPool;
 
 use super::super::block_textures::BlockTextureLayers;
 use super::super::bridge::VoxelData;
+use super::binary::CutoutTable;
 use super::neighbors::{gather_padded_rle, zone_index, zone_indices, zone_offsets};
 use super::{mesh_chunk, MeshingTask};
 
@@ -229,7 +230,7 @@ pub fn spawn_mesh_tasks(
         }
         let layers = layers.0.clone();
         let task = pool.spawn(async move {
-            if is_buried(&center, &owned_neighbors) {
+            if is_buried(&center, &owned_neighbors, &CutoutTable::installed()) {
                 return buried_mesh_output();
             }
             let neighbors = owned_neighbors
@@ -246,29 +247,34 @@ pub fn spawn_mesh_tasks(
 /// A chunk with no air whose 6 face neighbours all exist and present no air
 /// on the shared plane: the mesher would emit no face (faces only border air)
 /// and find no air to connect, so `mesh_chunk` is known without running it.
+/// Cutout blocks (`cutout`, leaves) count as air: they are seen through.
 /// ~30% of a join's chunks (2026-09-22 findings); skipping the padded gather,
 /// mesher and connectivity flood saves ~160 µs of worker time each. Edges and
 /// corners are irrelevant: they only feed AO, which needs a face. Checked in
 /// the task, not the main thread: the plane scans are ~6k voxel visits.
-pub fn is_buried(center: &VoxelData, neighbors: &[([i32; 3], VoxelData)]) -> bool {
-    is_buried_by(center, |off| neighbors.iter().find(|(o, _)| *o == off).map(|(_, v)| v))
+pub fn is_buried(center: &VoxelData, neighbors: &[([i32; 3], VoxelData)], cutout: &CutoutTable) -> bool {
+    is_buried_by(center, cutout, |off| neighbors.iter().find(|(o, _)| *o == off).map(|(_, v)| v))
 }
 
 /// [`is_buried`] over any neighbour lookup (`off` is the face offset; `None`
 /// is a missing neighbour, which never buries).
-pub fn is_buried_by<'a>(center: &VoxelData, neighbor: impl Fn([i32; 3]) -> Option<&'a VoxelData>) -> bool {
-    if !center.has_no_air() {
+pub fn is_buried_by<'a>(
+    center: &VoxelData,
+    cutout: &CutoutTable,
+    neighbor: impl Fn([i32; 3]) -> Option<&'a VoxelData>,
+) -> bool {
+    if !center.is_opaque_throughout(cutout) {
         return false;
     }
     let faces = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
     faces.into_iter().all(|off| {
         neighbor(off).is_some_and(|neighbor| {
-            if neighbor.has_no_air() {
+            if neighbor.is_opaque_throughout(cutout) {
                 return true;
             }
             let mut solid = true;
             neighbor.for_each_index_sorted(zone_indices([-off[0], -off[1], -off[2]]), |_, voxel| {
-                solid &= !voxel.is_air();
+                solid &= cutout.is_opaque(voxel);
             });
             solid
         })
@@ -459,7 +465,7 @@ pub(crate) mod tests {
                     k => neighbors.push((off, chunk(&mut next, k % 2))),
                 }
             }
-            let buried = is_buried(&center, &neighbors);
+            let buried = is_buried(&center, &neighbors, &CutoutTable::installed());
             let refs: BTreeMap<[i32; 3], &VoxelData> = neighbors.iter().map(|(o, v)| (*o, v)).collect();
             let padded = gather_padded_rle(&center, &refs);
             for pull in [true, false] {

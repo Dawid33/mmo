@@ -89,6 +89,7 @@ mod tests {
             face,
             block: BlockId(1),
             ao,
+            cutout: false,
         }
     }
 

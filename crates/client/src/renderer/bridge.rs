@@ -228,10 +228,12 @@ impl VoxelData {
         self.0.iter().all(|&(_, id)| id == game::BlockId::AIR)
     }
 
-    /// No air voxel anywhere in the chunk (the mesher treats every non-air
-    /// voxel as solid, water included).
-    pub fn has_no_air(&self) -> bool {
-        self.0.iter().all(|&(_, id)| id != game::BlockId::AIR)
+    /// Every voxel hides what is behind it: no air and no cutout block
+    /// (`cutout`) anywhere in the chunk (water counts as opaque).
+    pub fn is_opaque_throughout(&self, cutout: &super::meshing::binary::CutoutTable) -> bool {
+        self.0
+            .iter()
+            .all(|&(_, id)| id != game::BlockId::AIR && !cutout.is_cutout(id))
     }
 
     /// The cached boundary-zone hashes, if `with_boundary_zones` ran.
