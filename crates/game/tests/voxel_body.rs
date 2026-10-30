@@ -339,15 +339,114 @@ fn leaves_have_no_collider_but_mass() {
     let size = aabb.maxs - aabb.mins;
     assert!((size.x - B).abs() < 1e-3 && (size.y - B).abs() < 1e-3 && (size.z - B).abs() < 1e-3, "{aabb:?}");
 
-    // Leaves alone: a body with mass and no collider at all.
+}
+
+/// A thin branch: a 3×3-voxel rod along x through the block's middle. Every
+/// half-grid octant holds at most 8 × 2 × 2 = 32 < `HALF_CELL_FILL_MIN`
+/// voxels, so on the half grid it collides nowhere.
+fn thin_branch(id: BlockId) -> game::ChiselData {
+    game::ChiselData::cuboid(id, [0, 6, 6], [BLOCK_VOXELS, 9, 9])
+}
+
+/// Floor chunks over block columns 0..32 × 0..32 (one block deep) with
+/// `extra` blocks (and their chisel) written in before genesis.
+fn floor_with(extra: &[([i32; 3], Block, Option<game::ChiselData>)]) -> Vec<(game::ChunkCoords, game::Chunk)> {
+    let mut chunks = floor_chunks(0.0..32.0 * B, 0.0..32.0 * B, BLOCK_VOXELS as u32);
+    for (pos, block, chisel) in extra {
+        let (coords, (x, y, z)) = game::edit::locate(*pos).unwrap();
+        let (_, chunk) = chunks.iter_mut().find(|(c, _)| *c == coords).expect("inside the floored area");
+        chunk.set_block(x, y, z, *block);
+        if let Some(c) = chisel {
+            chunk.chisel.insert(game::BlockIndex::from_xyz(x, y, z), c.clone());
+        }
+    }
+    chunks
+}
+
+/// The branch block at [16, 1, 16] (lowest voxel 6 voxels above the floor).
+fn branch_setup() -> (BlockRegistry, [i32; 3], Vec<(game::ChunkCoords, game::Chunk)>) {
+    let reg = registry();
+    let branch = reg.id_of("pine_branch").unwrap();
+    let pos = [16, 1, 16];
+    let chunks = floor_with(&[(pos, Block::new(branch), Some(thin_branch(branch)))]);
+    (reg, pos, chunks)
+}
+
+#[test]
+fn thin_chiseled_branch_collides_and_rests_on_the_floor() {
+    let (reg, pos, chunks) = branch_setup();
+    let branch = reg.id_of("pine_branch").unwrap();
+    let cells = game::block_collider_cells(Block::new(branch), Some(&thin_branch(branch)));
+    assert!(cells.blocks.is_empty() && cells.halves.is_empty() && cells.voxels.is_empty(), "no half-grid cell");
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), r0(), None);
+    region.with_data(|r| r.seed_terrain_genesis(chunks));
+    let e = detach(&mut region, &[pos], Vector::ZERO);
+    assert_eq!(block_at(region.data(), pos).id, BlockId::AIR);
+    let floor_y = B; // the floor is one block deep
+    let lowest = |r: &Rollback| {
+        let body = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap();
+        assert_eq!(body.colliders().len(), 1, "the thin branch has a collider");
+        r.physics.colliders.get(body.colliders()[0]).unwrap().compute_aabb().mins.y
+    };
+    assert!((lowest(region.data()) - (floor_y + 6.0)).abs() < 1e-3, "its box is the rod's bounds");
+    let mut rest_low = f32::INFINITY;
+    let (ticks, _, _, _) = run_until_gone(&mut region, e, SETTLE_TIMEOUT_TICKS + 5, |reg| {
+        if alive(reg.data(), e) {
+            rest_low = lowest(reg.data());
+        }
+    })
+    .expect("the branch despawns");
+    assert!(ticks < SETTLE_TIMEOUT_TICKS, "it came to rest ({ticks} ticks), not timed out");
+    assert!(rest_low >= floor_y - 1.0, "at rest on the floor: lowest point {rest_low}, floor {floor_y}");
+    assert!(rest_low < floor_y + 1.0, "it fell onto the floor: lowest point {rest_low}");
+}
+
+#[test]
+fn leaves_only_detach_clears_and_spawns_no_body() {
+    let reg = registry();
+    let leaves = Block::new(reg.id_of("oak_leaves").unwrap());
     let (mut region, _recv) = region_over(0..32);
-    build(&mut region, &[[5, 1, 5]], leaves);
-    let e = detach(&mut region, &[[5, 1, 5]], Vector::ZERO);
-    tick(&mut region);
+    let set = [[5, 1, 5], [5, 2, 5], [6, 2, 5]];
+    build(&mut region, &set, leaves);
+    let mut out = Some(EntityKey::default());
+    region.with_data(|r| out = r.detach_blocks_safe(&set, SettlePolicy::Despawn, Vector::ZERO));
+    assert_eq!(out, None, "nothing solid: no body");
     let r = region.data();
-    let body = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap();
-    assert!(body.colliders().is_empty());
-    assert!((body.mass() - LEAF_DENSITY).abs() < 1e-3);
+    for p in set {
+        assert_eq!(block_at(r, p).id, BlockId::AIR, "{p:?} cleared");
+    }
+    assert!(r.ecs.voxel_body.iter().all(|(_, v)| v.is_none()), "no voxel body");
+}
+
+#[test]
+fn rollback_of_thin_branch_and_leaves_only_detach_is_bit_exact() {
+    let _mode = Mode::set(game::HashMode::Full);
+    let (reg, pos, chunks) = branch_setup();
+    let leaves = Block::new(reg.id_of("oak_leaves").unwrap());
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut r = Rollback::new(Some(send));
+    r.seed_terrain_genesis(chunks);
+    let leaf_set = [[5, 1, 5], [5, 2, 5]];
+    r.new_transaction();
+    for &p in &leaf_set {
+        assert!(r.set_block_safe(p, leaves));
+    }
+    r.forget();
+    let before = state_hash(&r);
+    for mode in [game::HashMode::Full, game::HashMode::Delta] {
+        game::set_hash_mode(mode);
+        r.new_transaction();
+        assert!(r.detach_blocks_safe(&[pos], SettlePolicy::Despawn, Vector::ZERO).is_some());
+        assert_ne!(before, state_hash(&r));
+        r.rollback();
+        assert_eq!(before, state_hash(&r), "thin branch detach rolls back bit-exact ({mode:?})");
+        r.new_transaction();
+        assert!(r.detach_blocks_safe(&leaf_set, SettlePolicy::Despawn, Vector::ZERO).is_none());
+        assert_ne!(before, state_hash(&r), "the leaves were cleared");
+        r.rollback();
+        assert_eq!(before, state_hash(&r), "leaves-only detach rolls back bit-exact ({mode:?})");
+    }
 }
 
 #[test]

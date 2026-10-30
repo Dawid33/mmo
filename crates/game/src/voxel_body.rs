@@ -183,13 +183,27 @@ pub fn model_mass_properties(model: &VoxelModel) -> MassProperties {
 /// non-solid blocks none, tree wood on the half-block grid, so a falling log
 /// is as solid as it stood) on the half-block grid, greedy-merged; a
 /// chiseled block's remaining voxel-grid cells contribute their bounding
-/// box. Deterministic order.
+/// box. A solid chiseled block that yields no cell at all (thin wood that
+/// fills no half-grid octant) contributes its solid voxels' bounding box, so
+/// every model with a solid block has a box. Deterministic order.
 pub fn model_collider_boxes(model: &VoxelModel) -> Vec<([i32; 3], [i32; 3])> {
     let h = HALF_BLOCK_VOXELS as i32;
     let mut halves: BTreeSet<[i32; 3]> = BTreeSet::new();
     let mut out = Vec::new();
     for (&o, (block, chisel)) in &model.blocks {
         let cells = block_collider_cells(*block, chisel.as_ref());
+        if cells.blocks.is_empty() && cells.halves.is_empty() && cells.voxels.is_empty() {
+            // Thin chiseled wood (a pine or birch limb, a few voxels across)
+            // fills no half-grid octant, and a falling piece made only of it
+            // would have nothing to land on. In a body (terrain keeps the
+            // half grid) such a block collides as its solid voxels' bounding
+            // box. Non-solid blocks (leaves) still contribute nothing.
+            if let Some((lo, hi)) = chisel.as_ref().and_then(|c| solid_voxel_bounds(*block, c)) {
+                let base = o.map(|v| i32::from(v) * BLOCK_VOXELS as i32);
+                out.push(([0, 1, 2].map(|a| base[a] + lo[a]), [0, 1, 2].map(|a| base[a] + hi[a])));
+            }
+            continue;
+        }
         let o2 = o.map(|v| i32::from(v) * 2);
         for _ in &cells.blocks {
             for (dx, dy, dz) in (0..8).map(|i| (i % 2, (i / 2) % 2, i / 4)) {
@@ -237,6 +251,29 @@ pub fn model_collider_boxes(model: &VoxelModel) -> Vec<([i32; 3], [i32; 3])> {
     out
 }
 
+/// The bounding box `(min, max)` (block-local voxel units, max exclusive) of
+/// a chiseled block's solid voxels — voxels of a material that is solid
+/// (`BlockProps::is_solid`) — or `None` when it has none, or `block` itself
+/// is not solid.
+fn solid_voxel_bounds(block: Block, chisel: &ChiselData) -> Option<([i32; 3], [i32; 3])> {
+    let props = block_props();
+    if !props.is_solid(block.id) {
+        return None;
+    }
+    let mut bounds: Option<([i32; 3], [i32; 3])> = None;
+    for (min, max, material) in chisel.cuboids() {
+        if material == BlockId::AIR || !props.is_solid(material) {
+            continue;
+        }
+        let (min, max) = (min.map(|v| v as i32), max.map(|v| v as i32));
+        bounds = Some(match bounds {
+            None => (min, max),
+            Some((lo, hi)) => ([0, 1, 2].map(|a| lo[a].min(min[a])), [0, 1, 2].map(|a| hi[a].max(max[a]))),
+        });
+    }
+    bounds
+}
+
 impl Rollback {
     /// Detaches the blocks at `positions` into one dynamic voxel body,
     /// undo-safely: the blocks are cleared from the terrain
@@ -244,6 +281,8 @@ impl Rollback {
     /// model's centre of mass, spinning at `angvel` (rad/s, world axes).
     /// Refused positions (bedrock, the edge ring, outside the region) and
     /// air are skipped; `None`, with nothing changed, when nothing is left.
+    /// A set with no solid block (leaves only) is cleared but spawns no
+    /// body (it would have no collider to land on; `None` too).
     pub fn detach_blocks_safe(&mut self, positions: &[BlockPos], policy: SettlePolicy, angvel: Vector) -> Option<EntityKey> {
         let mut taken: BTreeMap<BlockPos, (Block, Option<ChiselData>)> = BTreeMap::new();
         for &pos in positions {
@@ -272,6 +311,16 @@ impl Rollback {
             .collect();
         self.clear_blocks_safe(&positions);
 
+        // Nothing solid (leaves only): with no collider the body would fall
+        // through the ground until the timeout, so it settles at once — and
+        // as settling is a despawn, it is simply never spawned. The terrain
+        // is still cleared (one undoable `clear_blocks_safe`, nothing else
+        // to invert).
+        let boxes = model_collider_boxes(&model);
+        if boxes.is_empty() {
+            return None;
+        }
+
         let mprops = model_mass_properties(&model);
         let com = mprops.local_com;
         let origin_units = Vector::new(
@@ -297,7 +346,7 @@ impl Rollback {
         let handle = self.insert_body_safe(body);
         self.data.ecs.rigidbody.set_safe(e, Some(handle));
 
-        let parts: Vec<(Pose, SharedShape)> = model_collider_boxes(&model)
+        let parts: Vec<(Pose, SharedShape)> = boxes
             .into_iter()
             .map(|(lo, hi)| {
                 let half = [0, 1, 2].map(|a| (hi[a] - lo[a]) as f32 * 0.5);
@@ -305,13 +354,19 @@ impl Rollback {
                 (Pose::from_translation(centre - com), SharedShape::cuboid(half[0], half[1], half[2]))
             })
             .collect();
-        if !parts.is_empty() {
-            let collider = ColliderBuilder::new(SharedShape::compound(parts))
-                .mass_properties(MassProperties::default())
-                .user_data(user_data)
-                .build();
-            self.attach_collider_safe(handle, collider);
-        }
+        let collider = ColliderBuilder::new(SharedShape::compound(parts))
+            .mass_properties(MassProperties::default())
+            .user_data(user_data)
+            .build();
+        // The eigen-solve hazard (module docs): the body's mass must come only
+        // from `body_mprops` (identity principal frame, no `SymmetricEigen3`).
+        // That holds while every collider adds exactly zero mass — adding a
+        // zero `MassProperties` returns the other side untouched — and the
+        // compound sits at the identity offset, so rapier never transforms
+        // or re-diagonalises a collider's inertia into the body frame.
+        debug_assert_eq!(collider.mass_properties(), MassProperties::default(), "a voxel body collider adds no mass");
+        debug_assert_eq!(*collider.position(), Pose::IDENTITY, "a voxel body's compound sits at the identity offset");
+        self.attach_collider_safe(handle, collider);
 
         let spawned_tick = *self.data.tick as u64;
         self.data.send(GameDataUpdate::new(
