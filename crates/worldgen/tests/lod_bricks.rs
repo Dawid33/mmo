@@ -15,6 +15,7 @@ fn mats() -> worldgen::material::Materials {
         water: BlockId(5),
         bedrock: BlockId(6),
         rocks: [7, 8, 9, 10, 11, 12].map(BlockId),
+        trees: worldgen::material::TreeBlocks::NONE,
     }
 }
 

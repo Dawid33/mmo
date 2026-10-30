@@ -23,6 +23,7 @@ fn main() {
         water: BlockId(5),
         bedrock: game::BlockId(6),
         rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
+        trees: worldgen::material::TreeBlocks::NONE,
     };
     let regions: Vec<RegionCoords> = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| RegionCoords::new(x, z)))

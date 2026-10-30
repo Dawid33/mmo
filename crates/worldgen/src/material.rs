@@ -14,6 +14,44 @@ pub struct Materials {
     pub bedrock: BlockId,
     /// Indexed like `forge::geology::ROCKS`.
     pub rocks: [BlockId; 6],
+    /// Tree blocks; `TreeBlocks::NONE` generates no trees.
+    pub trees: TreeBlocks,
+}
+
+/// One species' blocks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SpeciesBlocks {
+    pub log: BlockId,
+    pub branch: BlockId,
+    pub leaves: BlockId,
+}
+
+/// Tree blocks per species, indexed like `trees::SPECIES`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TreeBlocks {
+    pub species: [SpeciesBlocks; 3],
+}
+
+impl TreeBlocks {
+    /// Trees disabled (every block air).
+    pub const NONE: TreeBlocks = TreeBlocks {
+        species: [SpeciesBlocks { log: BlockId::AIR, branch: BlockId::AIR, leaves: BlockId::AIR }; 3],
+    };
+
+    pub fn enabled(&self) -> bool {
+        *self != TreeBlocks::NONE
+    }
+
+    /// Resolve `<species>_log` / `_branch` / `_leaves` for every species.
+    pub fn from_names(resolve: impl Fn(&str) -> BlockId) -> TreeBlocks {
+        TreeBlocks {
+            species: crate::trees::SPECIES.map(|s| SpeciesBlocks {
+                log: resolve(&format!("{}_log", s.name)),
+                branch: resolve(&format!("{}_branch", s.name)),
+                leaves: resolve(&format!("{}_leaves", s.name)),
+            }),
+        }
+    }
 }
 
 impl Materials {
@@ -28,6 +66,7 @@ impl Materials {
             water: resolve("water"),
             bedrock: resolve("bedrock"),
             rocks: crate::forge::geology::ROCKS.map(|r| resolve(r.name)),
+            trees: TreeBlocks::from_names(&resolve),
         }
     }
 
@@ -69,6 +108,7 @@ mod tests {
             water: BlockId(5),
             bedrock: game::BlockId(6),
             rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
+            trees: crate::material::TreeBlocks::NONE,
         }
     }
 
@@ -106,5 +146,8 @@ mod tests {
         let m = Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing {n}")));
         assert_eq!(m.bedrock, BlockId(6));
         assert_eq!(m.rocks, [7, 8, 9, 10, 11, 12].map(BlockId));
+        assert!(m.trees.enabled());
+        assert_eq!(m.trees.species[0], SpeciesBlocks { log: BlockId(13), branch: BlockId(14), leaves: BlockId(15) });
+        assert_eq!(m.trees.species[2].leaves, BlockId(21));
     }
 }

@@ -47,6 +47,19 @@ const SCAN_BOTTOM: i32 = -64;
 /// lattice step keeps the window on the world-aligned profile lattice, so the
 /// surfaces inside are bit-identical to a window without the margin.
 const PATCH_MARGIN: i32 = PROFILE_LATTICE_BLOCKS as i32;
+/// How far (blocks) a tree's blocks reach past its base column: the widest
+/// crown plus the one block of leaf dither past it (`trees::raster`).
+const TREE_REACH_BLOCKS: i32 = trees::MAX_CROWN_RADIUS_BLOCKS + 1;
+/// Surfaces (blocks) a tree query reads past its window: the trees whose
+/// crowns reach in, and their placement neighbours — a candidate sits
+/// anywhere in its lattice cell, one cell out from a query cell that may
+/// itself start up to a cell before the query.
+const TREE_RING_BLOCKS: i32 = TREE_REACH_BLOCKS + 2 * trees::TREE_LATTICE_BLOCKS;
+/// Patch margin (blocks) with trees on: the tree ring, rounded up to the
+/// profile lattice (so surfaces stay bit-identical), plus `PATCH_MARGIN`.
+const TREE_PATCH_MARGIN: i32 = PATCH_MARGIN
+    + (TREE_RING_BLOCKS + PROFILE_LATTICE_BLOCKS as i32 - 1) / PROFILE_LATTICE_BLOCKS as i32
+        * PROFILE_LATTICE_BLOCKS as i32;
 // Deepest non-stone material_at depth (dirt/sand band). Keep in sync with
 // material.rs's `depth_below_surface <= 3` bands.
 const MAX_SOIL_DEPTH: i32 = 3;
@@ -83,6 +96,78 @@ fn surface_from_profile(prof: &crate::pipeline::ColumnProfile) -> i32 {
 /// Whether the surface block `surface` is whole rather than a half block.
 fn surface_is_full(prof: &crate::pipeline::ColumnProfile, surface: i32) -> bool {
     prof.density_at(surface as f64 + FULL_TEST_M) > 0.0
+}
+
+/// World block column `(bx, bz)` of `patch`: its surface block, whether that
+/// block is whole (else a half block) and its water top.
+fn column_sample(patch: &dyn Patch, bx: i32, bz: i32) -> (i32, bool, i32) {
+    let (prof, water_top) = patch.sample(block_center_m(bx), block_center_m(bz));
+    let s = surface_from_profile(&prof);
+    debug_assert!(s >= SCAN_BOTTOM, "surface below the scan at block ({bx}, {bz})");
+    // Under water the surface block is always whole: a half block's empty
+    // upper half would be an air pocket.
+    let full = surface_is_full(&prof, s) || s <= water_top;
+    (s, full, water_top)
+}
+
+/// The surface a tree may stand on, from a `column_sample`: dry and whole
+/// (a trunk on a half block would hang half a block above it). `None` = no
+/// tree.
+fn tree_ground((s, full, water_top): (i32, bool, i32)) -> Option<i32> {
+    (full && s >= water_top).then_some(s)
+}
+
+/// Where trees come from: the habitat and the placement seed.
+#[derive(Clone, Copy)]
+struct TreeSource<'a> {
+    habitat: &'a dyn habitat::HabitatSource,
+    seed: u64,
+}
+
+/// A `HabitatSource` that remembers its answers: placement asks again for
+/// every candidate's neighbours.
+struct MemoHabitat<'a> {
+    inner: &'a dyn habitat::HabitatSource,
+    memo: std::cell::RefCell<std::collections::HashMap<(u64, u64, i32), habitat::Habitat>>,
+}
+
+impl habitat::HabitatSource for MemoHabitat<'_> {
+    fn habitat(&self, x_m: f64, z_m: f64, surface_block: i32) -> habitat::Habitat {
+        let key = (x_m.to_bits(), z_m.to_bits(), surface_block);
+        if let Some(h) = self.memo.borrow().get(&key) {
+            return *h;
+        }
+        let h = self.inner.habitat(x_m, z_m, surface_block);
+        self.memo.borrow_mut().insert(key, h);
+        h
+    }
+}
+
+/// Trees of region `coords` that can put a block into the world block window
+/// `[x0, x1) x [z0, z1)`, sorted by id. A tree belongs to the region of its
+/// base and never writes outside it, so the query stays inside the region.
+fn trees_for_window(
+    coords: RegionCoords,
+    [x0, z0, x1, z1]: [i32; 4],
+    trees_from: TreeSource,
+    surface: &dyn Fn(i32, i32) -> Option<i32>,
+) -> Vec<trees::TreeSeed> {
+    let (rx, rz) = (coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS);
+    let memo = MemoHabitat { inner: trees_from.habitat, memo: Default::default() };
+    trees::trees_in(
+        (x0 - TREE_REACH_BLOCKS).max(rx),
+        (z0 - TREE_REACH_BLOCKS).max(rz),
+        (x1 + TREE_REACH_BLOCKS).min(rx + REGION_BLOCKS),
+        (z1 + TREE_REACH_BLOCKS).min(rz + REGION_BLOCKS),
+        trees_from.seed,
+        &memo,
+        surface,
+    )
+}
+
+/// Whether world block `(x, z)` lies in region `coords`.
+fn in_region(coords: RegionCoords, x: i32, z: i32) -> bool {
+    x.div_euclid(REGION_BLOCKS) == coords.x && z.div_euclid(REGION_BLOCKS) == coords.z
 }
 
 /// The terrain of one region- or LOD-tile-sized window, whatever it comes
@@ -127,18 +212,42 @@ impl Patch for ProceduralPatch {
 /// deterministic. With `VOXEL_WORLD_FILE` set the region comes from that
 /// forged world and `seed` is ignored (see `forged.rs`).
 pub fn generate_region(coords: RegionCoords, seed: u64, mats: Materials) -> Vec<(ColumnCoords, Column)> {
+    generate_columns(coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, seed, mats)
+}
+
+/// The columns `xs × zs` (region-local chunk columns) of region `coords`:
+/// exactly the same columns `generate_region` makes, however the region is
+/// split into windows.
+pub fn generate_columns(
+    coords: RegionCoords,
+    xs: std::ops::Range<usize>,
+    zs: std::ops::Range<usize>,
+    seed: u64,
+    mats: Materials,
+) -> Vec<(ColumnCoords, Column)> {
+    let cb = CHUNK_BLOCKS as i32;
+    let (x, z) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
+    let (ox, oz, span) = patch_window(x, z, xs.len().max(zs.len()) as i32 * cb, &mats);
     if let Some(world) = forged::active() {
-        return generate_region_forged(world, coords, mats);
+        let trees_from = TreeSource { habitat: world, seed: world.artifact().seed };
+        return columns_from_patch(&world.patch(ox, oz, span), coords, xs, zs, mats, trees_from);
     }
-    let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS);
     let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
-    region_from_patch(&ProceduralPatch(grid), coords, mats)
+    let habitat = habitat::ProceduralHabitat::new(seed);
+    columns_from_patch(&ProceduralPatch(grid), coords, xs, zs, mats, TreeSource { habitat: &habitat, seed })
+}
+
+/// Patch margin (blocks) past a window: wider when trees are on, which read
+/// surfaces further out (`TREE_RING_BLOCKS`).
+fn patch_margin(mats: &Materials) -> i32 {
+    if mats.trees.enabled() { TREE_PATCH_MARGIN } else { PATCH_MARGIN }
 }
 
 /// Patch origin and span (meters) for the window of `span` blocks at world
 /// block `(x, z)`, margin included.
-fn patch_window(x: i32, z: i32, span: i32) -> (f64, f64, f64) {
-    ((x - PATCH_MARGIN) as f64, (z - PATCH_MARGIN) as f64, (span + 2 * PATCH_MARGIN) as f64)
+fn patch_window(x: i32, z: i32, span: i32, mats: &Materials) -> (f64, f64, f64) {
+    let m = patch_margin(mats);
+    ((x - m) as f64, (z - m) as f64, (span + 2 * m) as f64)
 }
 
 /// `generate_region` for an explicit forged world (tests, tools).
@@ -147,8 +256,9 @@ pub fn generate_region_forged(
     coords: RegionCoords,
     mats: Materials,
 ) -> Vec<(ColumnCoords, Column)> {
-    let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS);
-    region_from_patch(&world.patch(ox, oz, span), coords, mats)
+    let (ox, oz, span) = patch_window(coords.x * REGION_BLOCKS, coords.z * REGION_BLOCKS, REGION_BLOCKS, &mats);
+    let trees_from = TreeSource { habitat: world, seed: world.artifact().seed };
+    columns_from_patch(&world.patch(ox, oz, span), coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, mats, trees_from)
 }
 
 /// Material of a solid block: sand under standing water (lake and river
@@ -161,13 +271,63 @@ fn solid_material(mats: &Materials, depth: i32, by: i32, surface: i32, water_top
     }
 }
 
-fn region_from_patch(patch: &dyn Patch, coords: RegionCoords, mats: Materials) -> Vec<(ColumnCoords, Column)> {
-    columns_from_patch(patch, coords, 0..REGION_CHUNKS, 0..REGION_CHUNKS, mats)
+/// One generated tree block: its block, and its voxel mask if partial.
+struct PlacedTreeBlock {
+    block: Block,
+    chisel: Option<ChiselData>,
+    wood: bool,
+}
+
+/// The tree blocks of the window `[x0, x1) x [z0, z1)` (world blocks), keyed
+/// by world `(x, y, z)`. Where trees overlap, wood wins over leaves, else the
+/// lower tree id: a block's covering trees are the same in every window, so
+/// the result is too.
+fn tree_blocks(
+    coords: RegionCoords,
+    window: [i32; 4],
+    mats: &Materials,
+    trees_from: TreeSource,
+    surface: &dyn Fn(i32, i32) -> Option<i32>,
+) -> BTreeMap<[i32; 3], PlacedTreeBlock> {
+    let [x0, z0, x1, z1] = window;
+    let mut out: BTreeMap<[i32; 3], PlacedTreeBlock> = BTreeMap::new();
+    for tree in trees_for_window(coords, window, trees_from, surface) {
+        let blocks = mats.trees.species[tree.species as usize];
+        let sk = trees::skeleton(&trees::SPECIES[tree.species as usize], tree.seed, tree.age);
+        for b in trees::rasterize(&sk) {
+            let p = [tree.base[0] + b.offset[0], tree.base[1] + b.offset[1], tree.base[2] + b.offset[2]];
+            if p[0] < x0 || p[0] >= x1 || p[2] < z0 || p[2] >= z1 || !in_region(coords, p[0], p[2]) {
+                continue;
+            }
+            let (id, wood) = match b.part {
+                trees::TreePart::Log => (blocks.log, true),
+                trees::TreePart::Branch => (blocks.branch, true),
+                trees::TreePart::Leaves => (blocks.leaves, false),
+            };
+            let chisel = b.chisel.map(|mask| {
+                ChiselData::from_fn(vec![id], |vx, vy, vz| {
+                    mask[vx + BLOCK_VOXELS * (vy + BLOCK_VOXELS * vz)].then_some(0)
+                })
+            });
+            let placed = PlacedTreeBlock { block: Block::with_tree_id(id, tree.id), chisel, wood };
+            match out.entry(p) {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(placed);
+                }
+                std::collections::btree_map::Entry::Occupied(mut e) => {
+                    if wood && !e.get().wood {
+                        e.insert(placed);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The columns `xs × zs` (region-local chunk columns) of region `coords`,
-/// sampled from `patch` — which must cover them plus `PATCH_MARGIN`.
-/// `region_from_patch` is the whole range.
+/// sampled from `patch` — which must cover them plus `patch_margin(&mats)`.
+/// Trees (when `mats.trees` is on) come from `trees_from`.
 ///
 /// Every column carries a `ColumnGround` recipe for the ground below its band
 /// (the sim reads missing chunks under the band from it), and the band's
@@ -182,31 +342,49 @@ fn columns_from_patch(
     xs: std::ops::Range<usize>,
     zs: std::ops::Range<usize>,
     mats: Materials,
+    trees_from: TreeSource,
 ) -> Vec<(ColumnCoords, Column)> {
     let cb = CHUNK_BLOCKS as i32;
     let air = Block::new(BlockId::AIR);
     let stone = Block::new(mats.stone);
     let strata = patch.strata(&mats);
+    let with_trees = mats.trees.enabled();
 
-    // Per-block-column surface block, whether it is whole (else a half block)
-    // and water top, over the window plus one block on every side (the
-    // cliff rule's neighbours). Index `[bx + 1][bz + 1]`, window-local blocks.
+    // Per-block-column `column_sample` over the window plus a ring on every
+    // side: one block (the cliff rule's neighbours), or `TREE_RING_BLOCKS`
+    // with trees on (placement's surfaces). Index `[bx + ring][bz + ring]`,
+    // window-local blocks.
+    let ring = if with_trees { TREE_RING_BLOCKS } else { 1 };
     let (wx, wz) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
-    let (nx, nz) = (xs.len() * CHUNK_BLOCKS + 2, zs.len() * CHUNK_BLOCKS + 2);
+    let (ww, wd) = (xs.len() as i32 * cb, zs.len() as i32 * cb);
+    let (nx, nz) = ((ww + 2 * ring) as usize, (wd + 2 * ring) as usize);
     let mut samples = vec![(0i32, true, 0i32); nx * nz];
     for i in 0..nx {
         for j in 0..nz {
-            let (bx, bz) = (wx + i as i32 - 1, wz + j as i32 - 1);
-            let (prof, water_top) = patch.sample(block_center_m(bx), block_center_m(bz));
-            let s = surface_from_profile(&prof);
-            debug_assert!(s >= SCAN_BOTTOM, "surface below the scan at block ({bx}, {bz})");
-            // Under water the surface block is always whole: a half block's
-            // empty upper half would be an air pocket.
-            let full = surface_is_full(&prof, s) || s <= water_top;
-            samples[i * nz + j] = (s, full, water_top);
+            samples[i * nz + j] = column_sample(patch, wx + i as i32 - ring, wz + j as i32 - ring);
         }
     }
-    let at = |bx: i32, bz: i32| samples[(bx + 1) as usize * nz + (bz + 1) as usize];
+    let at = |bx: i32, bz: i32| samples[(bx + ring) as usize * nz + (bz + ring) as usize];
+
+    // Tree blocks, bucketed per chunk column of the window.
+    // `(lx, lz, block y, block)`, footprint-local.
+    let mut tree_cols: Vec<Vec<(usize, usize, i32, PlacedTreeBlock)>> =
+        (0..xs.len() * zs.len()).map(|_| Vec::new()).collect();
+    if with_trees {
+        let surface = |x: i32, z: i32| {
+            let (bx, bz) = (x - wx, z - wz);
+            assert!(
+                (-ring..ww + ring).contains(&bx) && (-ring..wd + ring).contains(&bz),
+                "tree placement read the surface at ({x}, {z}), outside the sampled ring"
+            );
+            tree_ground(at(bx, bz))
+        };
+        for ([x, y, z], placed) in tree_blocks(coords, [wx, wz, wx + ww, wz + wd], &mats, trees_from, &surface) {
+            let (bx, bz) = (x - wx, z - wz);
+            let col = (bx / cb) as usize * zs.len() + (bz / cb) as usize;
+            tree_cols[col].push(((bx % cb) as usize, (bz % cb) as usize, y, placed));
+        }
+    }
 
     let mut columns = Vec::with_capacity(xs.len() * zs.len());
     for cx in xs.clone() {
@@ -215,6 +393,7 @@ fn columns_from_patch(
             // window-local block (fx, fz).
             let fx = (cx - xs.start) as i32 * cb;
             let fz = (cz - zs.start) as i32 * cb;
+            let col_trees = std::mem::take(&mut tree_cols[(cx - xs.start) * zs.len() + (cz - zs.start)]);
 
             let mut lo = SCAN_TOP;
             let mut hi = SCAN_BOTTOM - 1;
@@ -232,6 +411,8 @@ fn columns_from_patch(
                     }
                 }
             }
+            // The band reaches the highest tree block too.
+            hi = col_trees.iter().fold(hi, |hi, t| hi.max(t.2));
             // Extend the band bottom past the shallowest surface in the footprint
             // so the deepest soil (dirt/sand) of the lowest column is still
             // materialized, and down to every open neighbour block.
@@ -299,6 +480,19 @@ fn columns_from_patch(
                     }
                 }
             }
+            // Trees, into the air above the ground and any water only.
+            for (lx, lz, by, placed) in col_trees {
+                let (surface, _, water_top) = at(fx + lx as i32, fz + lz as i32);
+                if by <= surface || by <= water_top {
+                    continue;
+                }
+                let bi = BlockIndex::from_xyz(lx, by.rem_euclid(cb) as usize, lz);
+                let (blocks, chisel) = &mut chunks[(by.div_euclid(cb) - base_sub_y) as usize];
+                blocks[bi.linear()] = placed.block;
+                if let Some(c) = placed.chisel {
+                    chisel.insert(bi, c);
+                }
+            }
 
             let subs: Vec<SubChunk> = chunks
                 .into_iter()
@@ -332,9 +526,10 @@ pub fn coarse_tile(
     if let Some(world) = forged::active() {
         return coarse_tile_forged(world, key, mats);
     }
-    let (ox, oz, span_blocks) = coarse_window(key);
-    let grid = TerrainPipeline::new(seed).profile_grid(ox as f64, oz as f64, span_blocks as f64);
-    coarse_from_patch(&ProceduralPatch(grid), key, mats)
+    let (ox, oz, span) = coarse_patch_window(key, &mats);
+    let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
+    let habitat = habitat::ProceduralHabitat::new(seed);
+    coarse_from_patch(&ProceduralPatch(grid), key, mats, TreeSource { habitat: &habitat, seed })
 }
 
 /// `coarse_tile` for an explicit forged world (tests, tools). A coarse cell is
@@ -345,8 +540,9 @@ pub fn coarse_tile_forged(
     key: &game::lod::LodKey,
     mats: Materials,
 ) -> Vec<game::lod::LodCell> {
-    let (ox, oz, span_blocks) = coarse_window(key);
-    coarse_from_patch(&world.patch(ox as f64, oz as f64, span_blocks as f64), key, mats)
+    let (ox, oz, span) = coarse_patch_window(key, &mats);
+    let trees_from = TreeSource { habitat: world, seed: world.artifact().seed };
+    coarse_from_patch(&world.patch(ox, oz, span), key, mats, trees_from)
 }
 
 /// World block origin and span of a coarse key.
@@ -355,7 +551,38 @@ fn coarse_window(key: &game::lod::LodKey) -> (i32, i32, i32) {
     (origin.x * REGION_BLOCKS, origin.z * REGION_BLOCKS, key.region_span() * REGION_BLOCKS)
 }
 
-fn coarse_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: Materials) -> Vec<game::lod::LodCell> {
+/// The patch a coarse key samples: its window, plus the trees' margin.
+fn coarse_patch_window(key: &game::lod::LodKey, mats: &Materials) -> (f64, f64, f64) {
+    let (ox, oz, span) = coarse_window(key);
+    let m = if mats.trees.enabled() { TREE_PATCH_MARGIN } else { 0 };
+    ((ox - m) as f64, (oz - m) as f64, (span + 2 * m) as f64)
+}
+
+/// A tree's crown as coarse LOD shows it: block offsets from its base of the
+/// crown's lowest and highest leaf block, and the crown disc's radius in
+/// blocks; `None` for a tree with no leaves.
+fn crown_extent(tree: &trees::TreeSeed) -> Option<(i32, i32, i32)> {
+    let species = &trees::SPECIES[tree.species as usize];
+    let sk = trees::skeleton(species, tree.seed, tree.age);
+    let bv = BLOCK_VOXELS as i32;
+    let axis = (bv / 2) as f64;
+    let (mut lo, mut hi, mut reach) = (i32::MAX, i32::MIN, 0.0f64);
+    for &(c, r) in &sk.leaves {
+        lo = lo.min((c[1] - r).max(0).div_euclid(bv));
+        hi = hi.max((c[1] + r).div_euclid(bv));
+        let (dx, dz) = (c[0] as f64 - axis, c[2] as f64 - axis);
+        reach = reach.max((dx * dx + dz * dz).sqrt() + r as f64);
+    }
+    let radius = ((reach / bv as f64).ceil() as i32).min(species.crown_radius_blocks);
+    (lo <= hi).then_some((lo, hi, radius))
+}
+
+fn coarse_from_patch(
+    patch: &dyn Patch,
+    key: &game::lod::LodKey,
+    mats: Materials,
+    trees_from: TreeSource,
+) -> Vec<game::lod::LodCell> {
     use game::lod::LodCell;
     use game::Voxel;
 
@@ -404,6 +631,52 @@ fn coarse_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: Materials
             }
         }
     }
+
+    // Trees: each a leaves column from its crown's base to its top over its
+    // crown disc (and always over its trunk), into air cells only.
+    if mats.trees.enabled() {
+        let memo = std::cell::RefCell::new(std::collections::HashMap::new());
+        let surface = |x: i32, z: i32| {
+            let m = TREE_PATCH_MARGIN - PATCH_MARGIN;
+            assert!(
+                (ox - m..ox + span_blocks + m).contains(&x) && (oz - m..oz + span_blocks + m).contains(&z),
+                "tree placement read the surface at ({x}, {z}), outside the coarse patch"
+            );
+            *memo.borrow_mut().entry((x, z)).or_insert_with(|| tree_ground(column_sample(patch, x, z)))
+        };
+        let memo_habitat = MemoHabitat { inner: trees_from.habitat, memo: Default::default() };
+        let (x1, z1) = (ox + span_blocks, oz + span_blocks);
+        for tree in trees::trees_in(ox, oz, x1, z1, trees_from.seed, &memo_habitat, &surface) {
+            let Some((lo, hi, radius)) = crown_extent(&tree) else { continue };
+            let leaves = Voxel::new(mats.trees.species[tree.species as usize].leaves);
+            let [bx, by, bz] = tree.base;
+            let (cy0, cy1) = ((by + lo).div_euclid(cb), (by + hi).div_euclid(cb));
+            let cells_of = |a: i32, o: i32| ((a - radius).max(o) - o) / cb..=((a + radius).min(o + span_blocks - 1) - o) / cb;
+            for cx in cells_of(bx, ox) {
+                for cz in cells_of(bz, oz) {
+                    // Cell centre to trunk axis, blocks.
+                    let (dx, dz) = (
+                        (ox + cx * cb) as f64 + cb as f64 * 0.5 - (bx as f64 + 0.5),
+                        (oz + cz * cb) as f64 + cb as f64 * 0.5 - (bz as f64 + 0.5),
+                    );
+                    let trunk = (ox + cx * cb..ox + cx * cb + cb).contains(&bx)
+                        && (oz + cz * cb..oz + cz * cb + cb).contains(&bz);
+                    if !trunk && dx * dx + dz * dz > (radius as f64 + 0.5) * (radius as f64 + 0.5) {
+                        continue;
+                    }
+                    for cy in cy0..=cy1 {
+                        let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
+                        let (lx, ly, lz) = ((cx % G) as usize, cy.rem_euclid(G) as usize, (cz % G) as usize);
+                        let g = grids.entry(group).or_insert_with(|| vec![Voxel::default(); BRICK_VOXEL_COUNT]);
+                        let v = &mut g[lx + BRICK_VOXELS * ly + BRICK_VOXELS * BRICK_VOXELS * lz];
+                        if v.is_air() {
+                            *v = leaves;
+                        }
+                    }
+                }
+            }
+        }
+    }
     grids
         .into_iter()
         .map(|(group, grid)| LodCell { group, grid })
@@ -424,6 +697,7 @@ mod tests {
             water: BlockId(5),
             bedrock: game::BlockId(6),
             rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
+            trees: crate::material::TreeBlocks::NONE,
         }
     }
 
@@ -453,7 +727,7 @@ mod tests {
         assert_ne!(crc(&a), crc(&b));
     }
 
-    /// Worldgen emits whole blocks and half blocks only: every chisel is the
+    /// Worldgen terrain is whole blocks and half blocks only: every non-tree chisel is the
     /// one lower-half cuboid of its block's own material, there are some (so
     /// the half-block rounding actually ran and wrote real terrain, not just
     /// the `below = stone` sentinel), and none is under water, where its
@@ -469,6 +743,9 @@ mod tests {
                 let SubChunk::Dense(chunk) = sub else { continue };
                 for (bi, chisel) in &chunk.chisel {
                     let (bx, by, bz) = bi.xyz();
+                    if chunk.block_at(bx, by, bz).tree_id() != 0 {
+                        continue; // tree wood, not terrain
+                    }
                     let mat = chunk.block_at(bx, by, bz).id;
                     let cuboids: Vec<_> = chisel.cuboids().collect();
                     assert_eq!(cuboids, vec![([0, 0, 0], [16, 8, 16], mat)], "not a half block");

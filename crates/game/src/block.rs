@@ -90,8 +90,9 @@ impl BlockIndex {
     }
 }
 
-/// The authoritative per-cell gameplay value. Compact; `data` reserved for
-/// future block-state (zeroed for now). Hashes trivially.
+/// The authoritative per-cell gameplay value. Compact; `data` is block state:
+/// a tree block's tree id (24 bits, little-endian; 0 = not a tree), else
+/// zero. Hashes trivially.
 #[derive(
     Copy, Clone, Default, PartialEq, Eq, Hash, state_hash::StateHash, serde::Serialize, serde::Deserialize, Debug,
 )]
@@ -103,6 +104,20 @@ pub struct Block {
 impl Block {
     pub fn new(id: BlockId) -> Self {
         Self { id, data: [0; 3] }
+    }
+
+    /// A block of tree `tree` (non-zero, at most 24 bits) — log, branch or
+    /// leaves — carrying the id in `data`.
+    pub fn with_tree_id(id: BlockId, tree: u32) -> Self {
+        debug_assert!(tree <= 0x00FF_FFFF, "tree id {tree:#X} wider than 24 bits");
+        let [a, b, c, _] = tree.to_le_bytes();
+        Self { id, data: [a, b, c] }
+    }
+
+    /// The tree this block belongs to, 0 if none.
+    pub fn tree_id(&self) -> u32 {
+        let [a, b, c] = self.data;
+        u32::from_le_bytes([a, b, c, 0])
     }
 }
 
@@ -476,6 +491,16 @@ mod tests {
     use super::*;
     use crate::registry::BlockId;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn tree_id_round_trips_in_24_bits() {
+        assert_eq!(Block::new(BlockId(3)).tree_id(), 0);
+        for id in [1, 0x1234, 0x00AB_CDEF, 0x00FF_FFFF] {
+            let b = Block::with_tree_id(BlockId(13), id);
+            assert_eq!((b.id, b.tree_id()), (BlockId(13), id));
+        }
+        assert_eq!(Block::with_tree_id(BlockId(13), 0x0003_0201).data, [1, 2, 3]);
+    }
 
     #[test]
     fn chunk_block_dial_parses() {
