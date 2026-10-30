@@ -12,10 +12,13 @@ use game::{BlockId, BlockProps, Voxel, BRICK_VOXEL_COUNT};
 
 use super::ao::VERTEX_AO_LUT;
 
-/// Whether a cutout face against a neighbour of the SAME cutout block is
-/// culled (Minecraft's "fast" leaves: a crown is drawn as its outer shell).
-/// `false` draws every leaf/leaf face ("fancy"), at many more quads.
-pub const CULL_SAME_CUTOUT_FACES: bool = true;
+/// Whether a cutout face against ANY cutout neighbour is culled (Minecraft's
+/// "fast" leaves: a crown is drawn as its outer shell). Any, not only the
+/// same block: where two species' leaves touch, both double-sided faces
+/// would otherwise be coplanar and z-fight; leaves are alpha-tested with
+/// holes, so one face between them is too many already. `false` draws every
+/// leaf/leaf face ("fancy"), at many more quads.
+pub const CULL_CUTOUT_CUTOUT_FACES: bool = true;
 
 /// Which block ids are cutout, as a bitset over every `u16` id (8 KiB): one
 /// lookup per voxel in the mesher's hot loops, built once per mesh task.
@@ -310,13 +313,13 @@ fn zero_columns() -> Columns {
 /// Occupancy packed as u64 columns along each axis: `cols[axis][u][v]` has bit
 /// `a` set iff the voxel at position `a` along `axis` (cross coords `(u, v)`
 /// per `cross_axes`) is non-air; `opaque` the same for non-air, non-cutout
-/// voxels; `same_cutout` bit `a` iff voxels `a` and `a + 1` are the same
-/// cutout block (only with `CULL_SAME_CUTOUT_FACES`). 34 ≤ 64, so one word
+/// voxels; `cutout_pair` bit `a` iff voxels `a` and `a + 1` are both
+/// cutout blocks (only with `CULL_CUTOUT_CUTOUT_FACES`). 34 ≤ 64, so one word
 /// per column.
 pub(crate) struct Occupancy {
     cols: Columns,
     opaque: Columns,
-    same_cutout: Columns,
+    cutout_pair: Columns,
 }
 
 impl Occupancy {
@@ -324,7 +327,7 @@ impl Occupancy {
         const STRIDE: [usize; 3] = [1, PADDED, PADDED * PADDED];
         let mut cols = zero_columns();
         let mut opaque = zero_columns();
-        let mut same_cutout = zero_columns();
+        let mut cutout_pair = zero_columns();
         let mut i = 0;
         for z in 0..PADDED {
             for y in 0..PADDED {
@@ -338,12 +341,16 @@ impl Occupancy {
                             opaque[0][y][z] |= 1 << x;
                             opaque[1][x][z] |= 1 << y;
                             opaque[2][x][y] |= 1 << z;
-                        } else if CULL_SAME_CUTOUT_FACES {
+                        } else if CULL_CUTOUT_CUTOUT_FACES {
                             let pos = [x, y, z];
                             for axis in 0..3 {
-                                if pos[axis] + 1 < PADDED && p.0[i + STRIDE[axis]].block == v.block {
+                                if pos[axis] + 1 < PADDED {
+                                    let n = p.0[i + STRIDE[axis]];
+                                    if n.is_air() || !cutout.is_cutout(n.block) {
+                                        continue;
+                                    }
                                     let (ua, va) = cross_axes(axis);
-                                    same_cutout[axis][pos[ua]][pos[va]] |= 1 << pos[axis];
+                                    cutout_pair[axis][pos[ua]][pos[va]] |= 1 << pos[axis];
                                 }
                             }
                         }
@@ -352,22 +359,22 @@ impl Occupancy {
                 }
             }
         }
-        Self { cols, opaque, same_cutout }
+        Self { cols, opaque, cutout_pair }
     }
 
     /// Visible-face bits along `axis` at cross coords `(u, v)`: bit `a` set
     /// iff the voxel at `a` is non-air and its `positive`/negative neighbor
-    /// along `axis` is not opaque — air, or a cutout block other than its
-    /// own (a cutout face against the same cutout block is culled, see
-    /// `CULL_SAME_CUTOUT_FACES`). Shell positions are masked out.
+    /// along `axis` is not opaque — air, or (for an opaque voxel) a cutout
+    /// block; a cutout face against another cutout block is culled, see
+    /// `CULL_CUTOUT_CUTOUT_FACES`. Shell positions are masked out.
     pub fn face_bits(&self, axis: usize, positive: bool, u: usize, v: usize) -> u64 {
         let col = self.cols[axis][u][v];
         let opq = self.opaque[axis][u][v];
-        let same = self.same_cutout[axis][u][v];
+        let pair = self.cutout_pair[axis][u][v];
         let vis = if positive {
-            col & !(opq >> 1) & !same
+            col & !(opq >> 1) & !pair
         } else {
-            col & !(opq << 1) & !(same << 1)
+            col & !(opq << 1) & !(pair << 1)
         };
         vis & INTERIOR_MASK
     }
@@ -689,16 +696,19 @@ mod tests {
         let (cutout, _, oak, pine) = shipped_blocks();
         let p = PaddedVoxels::from_interior(&interior_with(&[([5, 5, 5], oak), ([6, 5, 5], oak)]));
         let quads = mesh_quads(&p, &cutout);
-        assert_eq!(CULL_SAME_CUTOUT_FACES, true, "the fast default");
+        assert_eq!(CULL_CUTOUT_CUTOUT_FACES, true, "the fast default");
         assert!(quad_at(&quads, Face::PosX, [5, 5, 5]).is_none(), "same-leaf face culled");
         assert!(quad_at(&quads, Face::NegX, [6, 5, 5]).is_none(), "same-leaf face culled");
         assert!(quad_at(&quads, Face::NegX, [5, 5, 5]).is_some(), "outer faces stay");
         assert!(quad_at(&quads, Face::PosX, [6, 5, 5]).is_some(), "outer faces stay");
-        // Two different leaves see each other.
+        // Two different leaves cull too (else coplanar double-sided faces
+        // z-fight where two species' crowns touch).
         let p = PaddedVoxels::from_interior(&interior_with(&[([5, 5, 5], oak), ([6, 5, 5], pine)]));
         let quads = mesh_quads(&p, &cutout);
-        assert!(quad_at(&quads, Face::PosX, [5, 5, 5]).is_some_and(|q| q.block == oak));
-        assert!(quad_at(&quads, Face::NegX, [6, 5, 5]).is_some_and(|q| q.block == pine));
+        assert!(quad_at(&quads, Face::PosX, [5, 5, 5]).is_none(), "oak/pine face culled");
+        assert!(quad_at(&quads, Face::NegX, [6, 5, 5]).is_none(), "pine/oak face culled");
+        assert!(quad_at(&quads, Face::NegX, [5, 5, 5]).is_some_and(|q| q.block == oak), "outer faces stay");
+        assert!(quad_at(&quads, Face::PosX, [6, 5, 5]).is_some_and(|q| q.block == pine), "outer faces stay");
         // Across the padded shell too: a same-leaf neighbour chunk culls.
         let mut p = PaddedVoxels::from_interior(&interior_with(&[([31, 5, 5], oak)]));
         p.0[PaddedVoxels::index(33, 6, 6)] = Voxel::new(oak);
