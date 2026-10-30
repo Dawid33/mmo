@@ -75,6 +75,8 @@ pub const WHEEL_LINE_PX: f32 = 40.0;
 pub const GAME_LAYER_ORDER: i32 = 1_000;
 /// The pass-through HUD (crosshair, selection band, minimap, hotbar).
 pub const HUD_LAYER_ORDER: i32 = 0;
+/// The F3 dev panel, above everything (`dev_ui`).
+pub const DEV_LAYER_ORDER: i32 = 2_000;
 
 fn ui_scale() -> f32 {
     std::env::var("VOXEL_UI_SCALE")

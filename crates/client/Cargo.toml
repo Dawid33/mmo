@@ -28,7 +28,6 @@ bytemuck = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 # F3 developer panel (`renderer/dev_ui.rs`). Dev tooling only — player-facing
 # UI is bevy_ui. The clipboard/open_url defaults are left out (extra deps).
-bevy_egui = { version = "0.42", default-features = false, features = ["render", "default_fonts", "picking"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 quinn = { workspace = true }
@@ -42,8 +41,9 @@ wgpu-hal = { version = "29.0.4", optional = true }
 
 [features]
 default = ["dev_ui"]
-# egui developer panel (F3). `--no-default-features` builds without egui.
-dev_ui = ["dep:bevy_egui"]
+# F3 developer panel (a Slint layer, renderer/dev_ui.rs).
+# `--no-default-features` builds without it.
+dev_ui = []
 # Hot reload: Bevy watches the asset files and reloads what changed. Off for
 # the game; the model viewers (`just model-view`, `just asset-viewer`) turn
 # it on so a .bbmodel saved in Blockbench shows at once.
