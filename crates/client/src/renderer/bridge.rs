@@ -749,6 +749,7 @@ fn spawn_region_snapshot(
                             tf,
                             target,
                             bevy::ui::IsDefaultUiCamera,
+                            super::UiCamera,
                         ));
                     }
                 }
@@ -944,6 +945,7 @@ pub fn drain_region_updates(
                             tf,
                             target,
                             bevy::ui::IsDefaultUiCamera,
+                            super::UiCamera,
                         ));
                     } else {
                         // Another player's camera: track its pose so the
@@ -1066,7 +1068,7 @@ pub fn dedupe_ghosts(
 ///
 /// Rather than remove `Camera3d` (which would need fragile re-add logic when
 /// the player crosses back into a still-loaded region), this toggles
-/// `Camera::is_active` and moves the single `IsDefaultUiCamera` marker so only
+/// `Camera::is_active` and moves the single `UiCamera` (and `IsDefaultUiCamera`) marker so only
 /// the home camera renders. All `Camera3d` entities here are the local player's
 /// (the bridge never gives another player a `Camera3d`), so no ownership filter
 /// is needed. Falls back to a deterministic keeper if no camera sits in the
@@ -1074,7 +1076,7 @@ pub fn dedupe_ghosts(
 pub fn enforce_single_active_camera(
     mut commands: Commands,
     hud_status: Res<HudStatus>,
-    mut cams: Query<(Entity, &SimEntity, &mut Camera, Has<bevy::ui::IsDefaultUiCamera>), With<Camera3d>>,
+    mut cams: Query<(Entity, &SimEntity, &mut Camera, Has<super::UiCamera>), With<Camera3d>>,
 ) {
     let home = hud_status.home_region;
     // Choose the single keeper: the home-region camera if one exists, else a
@@ -1099,10 +1101,10 @@ pub fn enforce_single_active_camera(
         }
         match (active, has_marker) {
             (true, false) => {
-                commands.entity(e).insert(bevy::ui::IsDefaultUiCamera);
+                commands.entity(e).insert((bevy::ui::IsDefaultUiCamera, super::UiCamera));
             }
             (false, true) => {
-                commands.entity(e).remove::<bevy::ui::IsDefaultUiCamera>();
+                commands.entity(e).remove::<(bevy::ui::IsDefaultUiCamera, super::UiCamera)>();
             }
             _ => {}
         }
@@ -1229,7 +1231,7 @@ mod tests {
         let e = *app.world().resource::<SimEntityMap>().0.get(&(region_id, k)).unwrap();
         assert!(app.world().entity(e).contains::<Camera3d>());
         assert!(
-            app.world().entity(e).contains::<bevy::ui::IsDefaultUiCamera>(),
+            app.world().entity(e).contains::<crate::renderer::UiCamera>(),
             "local player's camera must be the default UI camera"
         );
         let Projection::Perspective(p) = app.world().entity(e).get::<Projection>().unwrap() else {
@@ -1990,11 +1992,11 @@ mod tests {
             "non-home-region camera must be inactive"
         );
         assert!(
-            app.world().entity(ea).contains::<bevy::ui::IsDefaultUiCamera>(),
+            app.world().entity(ea).contains::<crate::renderer::UiCamera>(),
             "home-region camera must be the default UI camera"
         );
         assert!(
-            !app.world().entity(eb).contains::<bevy::ui::IsDefaultUiCamera>(),
+            !app.world().entity(eb).contains::<crate::renderer::UiCamera>(),
             "non-home-region camera must not keep the default UI camera marker"
         );
     }
@@ -2059,8 +2061,8 @@ mod tests {
             app.world().entity(eb).get::<Camera>().unwrap().is_active,
             "new home camera reactivates after the flip"
         );
-        assert!(app.world().entity(eb).contains::<bevy::ui::IsDefaultUiCamera>());
-        assert!(!app.world().entity(ea).contains::<bevy::ui::IsDefaultUiCamera>());
+        assert!(app.world().entity(eb).contains::<crate::renderer::UiCamera>());
+        assert!(!app.world().entity(ea).contains::<crate::renderer::UiCamera>());
     }
 
     #[test]

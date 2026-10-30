@@ -3,7 +3,7 @@
 //! see docs/superpowers/specs/2026-07-10-chunk-region-debug-wireframe-design.md.
 use bevy::color::palettes::css::{AQUA, PURPLE, RED, YELLOW};
 use bevy::prelude::*;
-use bevy::ui::IsDefaultUiCamera;
+use super::UiCamera;
 use game::{RegionCoords, REGION_SIZE};
 
 use super::bridge::RegionRoots;
@@ -165,7 +165,7 @@ pub fn region_wall_lines(coords: RegionCoords, camera_y: f32) -> Vec<(Vec3, Vec3
 /// the region world offset, so everything here is true world space.
 pub fn draw_grid_debug(
     state: Res<GridDebug>,
-    camera: Query<&GlobalTransform, With<IsDefaultUiCamera>>,
+    camera: Query<&GlobalTransform, With<UiCamera>>,
     near: Res<RegionRoots>,
     lod: Res<LodRings>,
     mut gizmos: Gizmos,
@@ -177,7 +177,7 @@ pub fn draw_grid_debug(
         // One-shot diagnostic on the toggle frame: enabled but nothing to
         // anchor the grid to — the local camera hasn't spawned/been marked.
         if state.is_changed() {
-            info!("grid debug: enabled but no IsDefaultUiCamera camera found");
+            info!("grid debug: enabled but no UiCamera found");
         }
         return;
     };

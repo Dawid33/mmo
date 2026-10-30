@@ -40,7 +40,9 @@ pub mod model;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod render_bench;
 mod skybox;
+pub mod slint_composite;
 pub mod slint_overlay;
+pub use slint_composite::UiCamera;
 pub(crate) mod ui_bridge;
 pub(crate) mod ui_input;
 mod voxel_material;

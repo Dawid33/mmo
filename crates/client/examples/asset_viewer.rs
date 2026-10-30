@@ -240,7 +240,7 @@ fn setup(
         Transform::default().looking_at(Vec3::new(-0.4, -1.0, -0.6), Vec3::Y),
     ));
     commands.insert_resource(GlobalAmbientLight { brightness: 500.0, ..default() });
-    commands.spawn((Camera3d::default(), Transform::default()));
+    commands.spawn((Camera3d::default(), Transform::default(), client::renderer::UiCamera));
 }
 
 fn scan_at_start(args: Res<Args>, mut viewer: ResMut<Viewer>, actions: NonSend<Actions>) {

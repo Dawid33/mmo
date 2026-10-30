@@ -8,7 +8,7 @@
 //! is open.
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
-use bevy::ui::IsDefaultUiCamera;
+use super::UiCamera;
 use bevy_egui::{
     egui, EguiContext, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass,
     EguiSchedule, PrimaryEguiContext,
@@ -45,12 +45,12 @@ impl Plugin for DevUiPlugin {
     }
 }
 
-/// Keep the egui primary context on the camera marked `IsDefaultUiCamera`.
+/// Keep the egui primary context on the camera marked `UiCamera`.
 /// The bridge moves that marker when the active player camera changes (a
 /// region flip spawns a new one), so the context moves with it.
 fn follow_ui_camera(
     mut commands: Commands,
-    ui_camera: Query<Entity, (With<IsDefaultUiCamera>, Without<PrimaryEguiContext>)>,
+    ui_camera: Query<Entity, (With<UiCamera>, Without<PrimaryEguiContext>)>,
     current: Query<Entity, With<PrimaryEguiContext>>,
 ) {
     let Some(camera) = ui_camera.iter().next() else {
@@ -83,7 +83,7 @@ fn draw_dev_ui(
     open: Res<DevUiOpen>,
     diagnostics: Res<DiagnosticsStore>,
     status: Res<HudStatus>,
-    camera: Query<&GlobalTransform, With<IsDefaultUiCamera>>,
+    camera: Query<&GlobalTransform, With<UiCamera>>,
     terrain: Res<TerrainRenderConfig>,
     mut grid: ResMut<GridDebug>,
     mut boundaries: ResMut<super::boundaries::BoundaryOverlay>,
