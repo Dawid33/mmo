@@ -223,11 +223,23 @@ pub fn spawn_point(p: &crate::pipeline::TerrainPipeline, island: &Island) -> [f6
     island.centre
 }
 
+/// What worldgen knows about the island a region hosts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IslandInfo {
+    /// Quadtree slot `(level, x, z)`.
+    pub id: (u8, i64, i64),
+    /// World-meter corner of the island's power-of-two square of 64 m
+    /// cells, and its edge in those cells.
+    pub origin_m: [f64; 2],
+    pub size_cells: u32,
+    /// Region-local spawn column, voxel units: a dry, flat coastal point.
+    pub spawn: [u32; 2],
+}
+
 /// The island whose centre lies in region `rc`, with its spawn converted to
 /// region-local voxel units (centred in a block; the island centre when the
 /// coast lies outside the region).
-/// The server's `game::IslandDirectory`.
-pub fn island_info(seed: u64, rc: game::RegionCoords) -> Option<game::IslandInfo> {
+pub fn island_info(seed: u64, rc: game::RegionCoords) -> Option<IslandInfo> {
     let blocks = game::REGION_BLOCKS as f64;
     let origin = [rc.x as f64 * blocks, rc.z as f64 * blocks];
     let field = IslandField::new(seed);
@@ -248,7 +260,7 @@ pub fn island_info(seed: u64, rc: game::RegionCoords) -> Option<game::IslandInfo
     let local = |v: f64, o: f64| ((v - o).floor() * bv + bv / 2.0) as u32;
     let size_cells = ((2.0 * island.reach() / ISLAND_CELL_M).ceil() as u32).next_power_of_two();
     let half = size_cells as f64 * ISLAND_CELL_M / 2.0;
-    Some(game::IslandInfo {
+    Some(IslandInfo {
         id: (island.id.level, island.id.x, island.id.z),
         origin_m: [island.centre[0] - half, island.centre[1] - half],
         size_cells,

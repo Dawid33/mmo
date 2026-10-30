@@ -30,7 +30,7 @@ fn mats() -> worldgen::material::Materials {
 }
 
 fn default_dials() -> bool {
-    game::CELL_CHUNKS == 0 && std::env::var_os(worldgen::forged::WORLD_FILE_ENV).is_none_or(|v| v.is_empty())
+    std::env::var_os(worldgen::forged::WORLD_FILE_ENV).is_none_or(|v| v.is_empty())
 }
 
 /// Every block of the materialised band of `col`: `(block x, y, z within the

@@ -139,33 +139,6 @@ fn patch_window(x: i32, z: i32, span: i32) -> (f64, f64, f64) {
     ((x - PATCH_MARGIN) as f64, (z - PATCH_MARGIN) as f64, (span + 2 * PATCH_MARGIN) as f64)
 }
 
-/// One cell of `generate_region`: the `cell_chunks²` columns of `cell`
-/// (region-local `ColumnCoords`, same order), bit-identical to that slice of
-/// the whole-region build — the lattice is world-aligned and the cell edge is
-/// a multiple of it. Cell-mode regions generate lazily, one cell at a time
-/// (docs/superpowers/specs/2026-09-25-island-regions-cell-loading-design.md §3).
-pub fn generate_cell(
-    coords: RegionCoords,
-    cell: game::CellCoords,
-    cell_chunks: usize,
-    seed: u64,
-    mats: Materials,
-) -> Vec<(ColumnCoords, Column)> {
-    let (x0, z0) = (cell.x as usize * cell_chunks, cell.z as usize * cell_chunks);
-    let (ox, oz, span) = patch_window(
-        coords.x * REGION_BLOCKS + (x0 * CHUNK_BLOCKS) as i32,
-        coords.z * REGION_BLOCKS + (z0 * CHUNK_BLOCKS) as i32,
-        (cell_chunks * CHUNK_BLOCKS) as i32,
-    );
-    let xs = x0..x0 + cell_chunks;
-    let zs = z0..z0 + cell_chunks;
-    if let Some(world) = forged::active() {
-        return columns_from_patch(&world.patch(ox, oz, span), coords, xs, zs, mats);
-    }
-    let grid = TerrainPipeline::new(seed).profile_grid(ox, oz, span);
-    columns_from_patch(&ProceduralPatch(grid), coords, xs, zs, mats)
-}
-
 /// `generate_region` for an explicit forged world (tests, tools).
 pub fn generate_region_forged(
     world: &forged::ForgedWorld,
@@ -192,7 +165,7 @@ fn region_from_patch(patch: &dyn Patch, coords: RegionCoords, mats: Materials) -
 
 /// The columns `xs × zs` (region-local chunk columns) of region `coords`,
 /// sampled from `patch` — which must cover them plus `PATCH_MARGIN`.
-/// `region_from_patch` is the whole range; `generate_cell` one cell's.
+/// `region_from_patch` is the whole range.
 ///
 /// Every column carries a `ColumnGround` recipe for the ground below its band
 /// (the sim reads missing chunks under the band from it), and the band's
@@ -439,31 +412,6 @@ fn coarse_from_patch(patch: &dyn Patch, key: &game::lod::LodKey, mats: Materials
 mod tests {
     use super::*;
     use game::{BlockId, Column, ColumnCoords, ReadVol, BlockPos, SubChunk, REGION_CHUNKS};
-
-    #[test]
-    #[ignore = "slow: >100ms — run via just test-full"]
-    fn a_cell_generated_alone_matches_the_whole_region_build() {
-        let rc = RegionCoords::new(1, -2);
-        let cc = (REGION_CHUNKS / 4).max(1); // 8 at 64 blocks / 2-block chunks
-        let whole = generate_region(rc, WORLD_SEED, mats());
-        let n = (REGION_CHUNKS / cc) as u32;
-        for x in 0..n {
-            for z in 0..n {
-                let cell = game::CellCoords::new(x, z);
-                let alone = generate_cell(rc, cell, cc, WORLD_SEED, mats());
-                let slice: Vec<_> = whole
-                    .iter()
-                    .filter(|(c, _)| game::cell_of_chunk(game::ChunkCoords::new(c.x, 0, c.z), cc) == cell)
-                    .collect();
-                assert_eq!(alone.len(), cc * cc, "cell {cell:?} column count");
-                assert_eq!(
-                    bincode::serialize(&alone).unwrap(),
-                    bincode::serialize(&slice).unwrap(),
-                    "cell {cell:?} must be bit-identical to the region build"
-                );
-            }
-        }
-    }
 
     fn mats() -> crate::material::Materials {
         crate::material::Materials {

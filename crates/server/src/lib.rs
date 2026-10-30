@@ -347,22 +347,8 @@ pub fn run() {
     let region_gen_cache = gen_cache.clone();
     let region_generator: region_threads::SharedRegionGenerator =
         std::sync::Arc::new(move |rc| region_gen_cache.generate_cached(rc, world_seed, materials));
-    info!(
-        "[server] cell mode: {}",
-        match game::CELL_BLOCKS {
-            0 => "off".to_string(),
-            cb => format!("{cb}-block cells (VOXEL_CELL_BLOCKS)"),
-        }
-    );
     let mut manager = game::WorldManager::new(
-        region_threads::ThreadRegionSpawner::with_generator(region_generator)
-            .with_cells(game::CELL_CHUNKS)
-            .with_cell_generator(std::sync::Arc::new(move |rc| -> game::CellGenerator {
-                Box::new(move |cell| {
-                    worldgen::generate_cell(rc, cell, game::CELL_CHUNKS, world_seed, materials)
-                })
-            }))
-            .with_islands(std::sync::Arc::new(move |rc| worldgen::islands::island_info(world_seed, rc))),
+        region_threads::ThreadRegionSpawner::with_generator(region_generator),
         Box::new(move |rc| gen_cache.generate_cached(rc, world_seed, materials)),
         server_send,
         region_out_send,

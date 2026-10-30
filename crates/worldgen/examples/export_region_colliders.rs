@@ -59,9 +59,6 @@ pub enum ExportedCollider {
 fn main() {
     let mut args = std::env::args().skip(1).map(|a| a.parse::<i32>().expect("region coords are integers"));
     let (x, z) = (args.next().unwrap_or(0), args.next().unwrap_or(0));
-    if game::CELL_CHUNKS != 0 {
-        panic!("export_region_colliders measures the legacy region path: build with cells off");
-    }
     let mats = Materials {
         stone: game::BlockId(2),
         dirt: game::BlockId(1),
