@@ -9,8 +9,9 @@
 //! - **State:** client state → Slint properties, only when it changed;
 //!   Slint callbacks → [`UiAction`]s applied to the client in `Update`.
 //! - **Pixels:** `Overlay::render` redraws what changed; that rect is
-//!   un-premultiplied into a window-sized `Image` shown by an `ImageNode`
-//!   over everything else, one texel per physical pixel.
+//!   un-premultiplied into a window-sized `Image`, one texel per physical
+//!   pixel, which `slint_composite` draws over the [`UiCamera`](super::UiCamera)'s
+//!   view in layer order ([`HUD_LAYER_ORDER`] < [`GAME_LAYER_ORDER`]).
 //!
 //! The component-agnostic part — sizing, input, pointer ownership, upload —
 //! is [`SlintLayerPlugin`], generic over the Slint component, so other apps
@@ -48,6 +49,7 @@ use super::commander::selection::Selection;
 use super::commander::tiles::TileMirror;
 use super::commander::CommanderCamera;
 use super::cursor::CursorPolicy;
+use super::slint_composite::{SlintCompositePlugin, SlintLayerTextures};
 use super::hud::HudStatus;
 use super::world_map::WorldMapState;
 use super::ClientRequests;
@@ -68,8 +70,11 @@ pub const LOADING_TEXT: &str = "Loading region\u{2026}";
 pub const UI_SCALE: f32 = 1.0;
 /// Logical pixels one wheel notch scrolls.
 pub const WHEEL_LINE_PX: f32 = 40.0;
-/// Above the HUD, the minimap and bevy_ui widgets.
-const OVERLAY_Z: i32 = 1_000;
+/// Draw order of the Slint layers (higher on top). The interactive game UI
+/// (tool bar, menu, map) sits above the pass-through HUD.
+pub const GAME_LAYER_ORDER: i32 = 1_000;
+/// The pass-through HUD (crosshair, selection band, minimap, hotbar).
+pub const HUD_LAYER_ORDER: i32 = 0;
 
 fn ui_scale() -> f32 {
     std::env::var("VOXEL_UI_SCALE")
@@ -150,12 +155,27 @@ pub struct SlintLayerPlugin<C> {
     /// Runs once on the new component, before it is inserted: connect its
     /// callbacks here.
     init: fn(&C, &mut World),
+    order: i32,
+    passthrough: bool,
 }
 
 impl<C> SlintLayerPlugin<C> {
     /// `make` is the component's generated `new` (e.g. `GameUi::new`).
     pub fn new(make: fn() -> Result<C, slint_ui::slint::PlatformError>) -> Self {
-        Self { make, init: |_, _| {} }
+        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false }
+    }
+
+    /// Draw order among the layers (higher on top); [`GAME_LAYER_ORDER`] by default.
+    pub fn order(mut self, order: i32) -> Self {
+        self.order = order;
+        self
+    }
+
+    /// Drawn and sized, never fed input: the view underneath keeps the pointer
+    /// even over its pixels.
+    pub fn passthrough(mut self) -> Self {
+        self.passthrough = true;
+        self
     }
 
     pub fn with_init(mut self, init: fn(&C, &mut World)) -> Self {
@@ -166,8 +186,14 @@ impl<C> SlintLayerPlugin<C> {
 
 impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
     fn build(&self, app: &mut App) {
-        let (make, init) = (self.make, self.init);
-        app.add_systems(Startup, move |world: &mut World| setup_slint_layer(world, make, init))
+        let (make, init, order, passthrough) = (self.make, self.init, self.order, self.passthrough);
+        if !app.is_plugin_added::<SlintCompositePlugin>() {
+            app.add_plugins(SlintCompositePlugin);
+        }
+        app.init_resource::<SlintPointer>()
+            .add_systems(Startup, move |world: &mut World| {
+                setup_slint_layer(world, make, init, order, passthrough)
+            })
             .add_systems(PreUpdate, slint_input::<C>.after(bevy::input::InputSystems))
             .add_systems(PostUpdate, render_slint_layer::<C>);
     }
@@ -182,6 +208,37 @@ pub struct SlintLayer<C: 'static> {
     /// The pointer is over a pixel the UI drew, or a press that started
     /// there is still held: the view underneath should leave it alone.
     pub owns_pointer: bool,
+    order: i32,
+    passthrough: bool,
+}
+
+/// Whether a layer takes the pointer from the view underneath.
+pub fn layer_owns_pointer(passthrough: bool, over_ui: bool, captured: bool) -> bool {
+    !passthrough && (over_ui || captured)
+}
+
+/// Every layer's pointer state, by order, so stacked layers agree: the
+/// topmost layer under the pointer takes presses and the wheel, and the view
+/// underneath has the pointer only while no layer owns it.
+#[derive(Resource, Default)]
+pub struct SlintPointer {
+    /// order → (over one of its pixels, owns the pointer)
+    layers: BTreeMap<i32, (bool, bool)>,
+}
+
+impl SlintPointer {
+    pub fn set(&mut self, order: i32, over: bool, owns: bool) {
+        self.layers.insert(order, (over, owns));
+    }
+
+    /// A higher layer is under the pointer.
+    pub fn blocked_above(&self, order: i32) -> bool {
+        self.layers.range(order + 1..).any(|(_, (over, _))| *over)
+    }
+
+    pub fn any_owner(&self) -> bool {
+        self.layers.values().any(|(_, owns)| *owns)
+    }
 }
 
 /// Pointer bookkeeping between frames.
@@ -247,6 +304,8 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
     world: &mut World,
     make: fn() -> Result<C, slint_ui::slint::PlatformError>,
     init: fn(&C, &mut World),
+    order: i32,
+    passthrough: bool,
 ) {
     let overlay = match Overlay::with(make) {
         Ok(overlay) => overlay,
@@ -266,19 +325,15 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
     );
     image.sampler = ImageSampler::nearest();
     let target = world.resource_mut::<Assets<Image>>().add(image);
-    world.spawn((
-        Name::new("slint overlay"),
-        Pickable::IGNORE,
-        ImageNode::new(target.clone()),
-        Node {
-            position_type: PositionType::Absolute,
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            ..default()
-        },
-        GlobalZIndex(OVERLAY_Z),
-    ));
-    world.insert_non_send(SlintLayer { overlay, ui_scale: ui_scale(), target, owns_pointer: false });
+    world.get_resource_or_init::<SlintLayerTextures>().0.push((order, target.clone()));
+    world.insert_non_send(SlintLayer {
+        overlay,
+        ui_scale: ui_scale(),
+        target,
+        owns_pointer: false,
+        order,
+        passthrough,
+    });
 }
 
 fn pointer_button(button: MouseButton) -> PointerEventButton {
@@ -330,12 +385,22 @@ fn slint_input<C: ComponentHandle + 'static>(
     mut keys: MessageReader<KeyboardInput>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut pointer: Local<PointerState>,
+    mut shared: ResMut<SlintPointer>,
     policy: Option<ResMut<CursorPolicy>>,
 ) {
     let Some(mut slint) = slint else { return };
     let Ok(window) = window.single() else { return };
     let scale = window.scale_factor() * slint.ui_scale;
     slint.overlay.resize(window.physical_width(), window.physical_height(), scale);
+    if slint.passthrough {
+        shared.set(slint.order, false, false);
+        let owned = shared.any_owner();
+        if let Some(mut policy) = policy.filter(|p| p.ui_pointer != owned) {
+            policy.ui_pointer = owned;
+        }
+        return;
+    }
+    let blocked = shared.blocked_above(slint.order);
     let overlay = &slint.overlay;
 
     // Window logical → UI logical pixels; physical for the hit test.
@@ -348,10 +413,12 @@ fn slint_input<C: ComponentHandle + 'static>(
         });
         pointer.last = ui_pos;
     }
-    let over_ui = cursor.is_some_and(|c| {
+    let drawn_here = cursor.is_some_and(|c| {
         let p = c * window.scale_factor();
         overlay.opaque_at(p.x as u32, p.y as u32)
     });
+    // A higher layer under the pointer takes the press and the wheel.
+    let over_ui = drawn_here && !blocked;
 
     for event in buttons.read() {
         let Some(p) = ui_pos else { continue };
@@ -359,6 +426,9 @@ fn slint_input<C: ComponentHandle + 'static>(
         let button = pointer_button(event.button);
         match event.state {
             ButtonState::Pressed => {
+                if blocked {
+                    continue;
+                }
                 if over_ui {
                     pointer.captured = true;
                 }
@@ -393,10 +463,13 @@ fn slint_input<C: ComponentHandle + 'static>(
         });
     }
 
-    let owns = over_ui || pointer.captured;
+    let owns = layer_owns_pointer(false, over_ui, pointer.captured);
+    let order = slint.order;
     slint.owns_pointer = owns;
-    if let Some(mut policy) = policy.filter(|p| p.ui_pointer != owns) {
-        policy.ui_pointer = owns;
+    shared.set(order, drawn_here, owns);
+    let owned = shared.any_owner();
+    if let Some(mut policy) = policy.filter(|p| p.ui_pointer != owned) {
+        policy.ui_pointer = owned;
     }
 }
 
@@ -849,7 +922,7 @@ fn push_ui_state(
 }
 
 /// Redraw what changed and copy that rect into the texture, un-premultiplied
-/// (`ImageNode` blends straight alpha). The texture follows the window size.
+/// (the composite pass blends straight alpha, as `bevy_ui` did). The texture follows the window size.
 fn render_slint_layer<C: ComponentHandle + 'static>(
     slint: Option<NonSendMut<SlintLayer<C>>>,
     mut images: ResMut<Assets<Image>>,
@@ -885,6 +958,32 @@ fn unpremultiply(p: slint_ui::slint::platform::software_renderer::PremultipliedR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passthrough_layer_never_owns_the_pointer() {
+        assert!(!layer_owns_pointer(true, true, true));
+        assert!(layer_owns_pointer(false, true, false));
+        assert!(layer_owns_pointer(false, false, true)); // a press that started on the UI
+        assert!(!layer_owns_pointer(false, false, false));
+    }
+
+    #[test]
+    fn layer_orders_stack_hud_game_dev() {
+        assert!(HUD_LAYER_ORDER < GAME_LAYER_ORDER);
+    }
+
+    #[test]
+    fn a_higher_layer_under_the_pointer_takes_the_press() {
+        let mut p = SlintPointer::default();
+        p.set(GAME_LAYER_ORDER, true, true);
+        p.set(HUD_LAYER_ORDER, true, false);
+        assert!(p.blocked_above(HUD_LAYER_ORDER));
+        assert!(!p.blocked_above(GAME_LAYER_ORDER));
+        assert!(p.any_owner());
+        p.set(GAME_LAYER_ORDER, false, false);
+        assert!(!p.blocked_above(HUD_LAYER_ORDER));
+        assert!(!p.any_owner(), "a pass-through layer never owns the pointer");
+    }
     use crate::renderer::world_map::REFUSAL_SHOW_SECS;
     use slint_ui::slint::platform::software_renderer::PremultipliedRgbaColor;
 
