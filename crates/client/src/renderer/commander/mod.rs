@@ -391,7 +391,6 @@ fn spawn_commander_camera(mut commands: Commands, cam: Res<CommanderCamera>) {
             ..default()
         }),
         camera_transform(focus, cam.distance, cam.yaw, cam.pitch),
-        bevy::ui::IsDefaultUiCamera,
         crate::renderer::UiCamera,
         Name::new("commander camera"),
     ));

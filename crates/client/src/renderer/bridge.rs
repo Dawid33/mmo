@@ -748,7 +748,6 @@ fn spawn_region_snapshot(
                             Projection::Perspective(perspective_to_projection(&cam.proj_matrix)),
                             tf,
                             target,
-                            bevy::ui::IsDefaultUiCamera,
                             super::UiCamera,
                         ));
                     }
@@ -944,7 +943,6 @@ pub fn drain_region_updates(
                             Projection::Perspective(perspective_to_projection(&proj)),
                             tf,
                             target,
-                            bevy::ui::IsDefaultUiCamera,
                             super::UiCamera,
                         ));
                     } else {
@@ -1063,12 +1061,12 @@ pub fn dedupe_ghosts(
 /// Enforce exactly one active render camera: the local player's camera in the
 /// *home* region. During a boundary handoff the player is briefly owned by both
 /// the outgoing and incoming region, so both spawn a local `Camera3d` +
-/// `IsDefaultUiCamera`. Two active cameras with equal priority make Bevy pick
+/// `UiCamera`. Two active cameras with equal priority make Bevy pick
 /// ambiguously per frame (view flickers; mouse-look/HUD bind to the wrong one).
 ///
 /// Rather than remove `Camera3d` (which would need fragile re-add logic when
 /// the player crosses back into a still-loaded region), this toggles
-/// `Camera::is_active` and moves the single `UiCamera` (and `IsDefaultUiCamera`) marker so only
+/// `Camera::is_active` and moves the single `UiCamera` marker so only
 /// the home camera renders. All `Camera3d` entities here are the local player's
 /// (the bridge never gives another player a `Camera3d`), so no ownership filter
 /// is needed. Falls back to a deterministic keeper if no camera sits in the
@@ -1101,10 +1099,10 @@ pub fn enforce_single_active_camera(
         }
         match (active, has_marker) {
             (true, false) => {
-                commands.entity(e).insert((bevy::ui::IsDefaultUiCamera, super::UiCamera));
+                commands.entity(e).insert(super::UiCamera);
             }
             (false, true) => {
-                commands.entity(e).remove::<(bevy::ui::IsDefaultUiCamera, super::UiCamera)>();
+                commands.entity(e).remove::<super::UiCamera>();
             }
             _ => {}
         }
