@@ -159,12 +159,13 @@ pub struct SlintLayerPlugin<C> {
     init: fn(&C, &mut World),
     order: i32,
     passthrough: bool,
+    follows_ui_scale: bool,
 }
 
 impl<C> SlintLayerPlugin<C> {
     /// `make` is the component's generated `new` (e.g. `GameUi::new`).
     pub fn new(make: fn() -> Result<C, slint_ui::slint::PlatformError>) -> Self {
-        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false }
+        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false, follows_ui_scale: true }
     }
 
     /// Draw order among the layers (higher on top); [`GAME_LAYER_ORDER`] by default.
@@ -180,6 +181,13 @@ impl<C> SlintLayerPlugin<C> {
         self
     }
 
+    /// Ignore `VOXEL_UI_SCALE` (window scale factor only): for a layer whose
+    /// sizes Bevy-side code shares in window pixels (the HUD's minimap).
+    pub fn window_scale_only(mut self) -> Self {
+        self.follows_ui_scale = false;
+        self
+    }
+
     pub fn with_init(mut self, init: fn(&C, &mut World)) -> Self {
         self.init = init;
         self
@@ -189,6 +197,7 @@ impl<C> SlintLayerPlugin<C> {
 impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
     fn build(&self, app: &mut App) {
         let (make, init, order, passthrough) = (self.make, self.init, self.order, self.passthrough);
+        let ui_scale = if self.follows_ui_scale { ui_scale() } else { 1.0 };
         if !app.is_plugin_added::<SlintCompositePlugin>() {
             app.add_plugins(SlintCompositePlugin);
         }
@@ -196,7 +205,7 @@ impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
             // PreStartup: an app's Startup systems may use the layer and
             // whatever `init` inserted.
             .add_systems(PreStartup, move |world: &mut World| {
-                setup_slint_layer(world, make, init, order, passthrough)
+                setup_slint_layer(world, make, init, order, passthrough, ui_scale)
             })
             .add_systems(PreUpdate, slint_input::<C>.after(bevy::input::InputSystems))
             .add_systems(PostUpdate, render_slint_layer::<C>);
@@ -306,7 +315,11 @@ pub struct HudLayerPlugin;
 impl Plugin for HudLayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(
-            SlintLayerPlugin::new(HudUi::new).order(HUD_LAYER_ORDER).passthrough().with_init(check_hud_config),
+            SlintLayerPlugin::new(HudUi::new)
+                .order(HUD_LAYER_ORDER)
+                .passthrough()
+                .window_scale_only()
+                .with_init(check_hud_config),
         )
         .add_systems(Update, push_hud_state);
     }
@@ -421,6 +434,7 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
     init: fn(&C, &mut World),
     order: i32,
     passthrough: bool,
+    ui_scale: f32,
 ) {
     let overlay = match Overlay::with(make) {
         Ok(overlay) => overlay,
@@ -443,7 +457,7 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
     world.get_resource_or_init::<SlintLayerTextures>().0.push((order, target.clone()));
     world.insert_non_send(SlintLayer {
         overlay,
-        ui_scale: ui_scale(),
+        ui_scale,
         target,
         owns_pointer: false,
         order,
@@ -1087,6 +1101,20 @@ mod tests {
         app.add_systems(Startup, |_marker: NonSend<Marker>| {});
         app.update();
         assert!(app.world().get_non_send::<SlintLayer<HudUi>>().is_some());
+    }
+
+    /// The HUD's sizes are shared with Bevy-side hit rects in window pixels
+    /// (the minimap), so it ignores `VOXEL_UI_SCALE`.
+    #[test]
+    fn hud_layer_ignores_the_ui_scale_knob() {
+        std::env::set_var("VOXEL_UI_SCALE", "2");
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default(), bevy::input::InputPlugin))
+            .init_asset::<Image>()
+            .add_plugins(HudLayerPlugin);
+        app.update();
+        std::env::remove_var("VOXEL_UI_SCALE");
+        assert_eq!(app.world().get_non_send::<SlintLayer<HudUi>>().expect("hud layer").ui_scale, 1.0);
     }
 
     #[test]

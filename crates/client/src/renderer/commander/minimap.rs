@@ -223,6 +223,7 @@ pub fn draw_minimap_overlay(
     mut pixels: ResMut<MinimapPixels>,
     time: Res<Time>,
     mut since: Local<f32>,
+    mut scratch: Local<Vec<[u8; 4]>>,
     entities: Query<(&SimEntity, &SimKind, &GlobalTransform)>,
     selection: Res<Selection>,
     cam: Res<CommanderCamera>,
@@ -233,9 +234,25 @@ pub fn draw_minimap_overlay(
         return;
     }
     *since = 0.0;
-    pixels.overlay_dirty = true;
-    let data = &mut pixels.overlay;
-    data.fill([0; 4]);
+    // Drawn into a scratch buffer and kept only if it differs: the HUD
+    // re-uploads its whole window-sized texture for any change.
+    let data = &mut *scratch;
+    data.clear();
+    data.resize((OVERLAY_PX * OVERLAY_PX) as usize, [0; 4]);
+    draw_overlay(data, &entities, &selection, &cam, &view);
+    if *data != pixels.overlay {
+        std::mem::swap(data, &mut pixels.overlay);
+        pixels.overlay_dirty = true;
+    }
+}
+
+fn draw_overlay(
+    data: &mut [[u8; 4]],
+    entities: &Query<(&SimEntity, &SimKind, &GlobalTransform)>,
+    selection: &Selection,
+    cam: &CommanderCamera,
+    view: &Query<(&Camera, &Transform), With<CommanderView>>,
+) {
     let Some(map) = cam.bounds else { return };
     let px = OVERLAY_PX;
     let mut put = |x: i32, y: i32, c: [u8; 4]| {
@@ -243,7 +260,7 @@ pub fn draw_minimap_overlay(
             data[x as usize + px as usize * y as usize] = c;
         }
     };
-    for (sim, kind, gt) in &entities {
+    for (sim, kind, gt) in entities {
         if matches!(kind.0, EntityKind::Player) {
             continue; // commanders have no body to show
         }
@@ -295,12 +312,38 @@ mod tests {
                 ..default()
             })
             .add_systems(Update, draw_minimap_overlay);
+        // A stale pixel from an earlier frame: the redraw changes the buffer.
+        app.world_mut().resource_mut::<MinimapPixels>().overlay[0] = [1, 2, 3, 4];
         app.update();
         app.update();
         let px = app.world().resource::<MinimapPixels>();
         assert!(px.overlay_dirty);
+        assert_eq!(px.overlay[0], [0; 4]);
         assert_eq!(px.overlay.len(), (OVERLAY_PX * OVERLAY_PX) as usize);
         assert_eq!(px.base.len(), (BASE_PX * BASE_PX) as usize);
+    }
+
+    /// An overlay redrawn with nothing changed is not uploaded again (the HUD
+    /// re-uploads its whole window-sized texture for any change).
+    #[test]
+    fn redrawing_an_unchanged_overlay_is_not_dirty() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(2.0 / OVERLAY_HZ),
+            ))
+            .init_resource::<MinimapPixels>()
+            .init_resource::<Selection>()
+            .insert_resource(CommanderCamera {
+                bounds: Some(Rect::new(0.0, 0.0, 1024.0, 1024.0)),
+                ..default()
+            })
+            .add_systems(Update, draw_minimap_overlay);
+        app.update();
+        app.update();
+        app.world_mut().resource_mut::<MinimapPixels>().overlay_dirty = false; // uploaded
+        app.update();
+        assert!(!app.world().resource::<MinimapPixels>().overlay_dirty);
     }
 
     #[test]
