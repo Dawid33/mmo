@@ -103,7 +103,8 @@ pub fn cut_blocks(src: &impl TileSource, cut: TilePos) -> Vec<TilePos> {
 ///   too, so nothing floats. Cutting
 ///   the tree's lowest wood level fells it all.
 /// - A cut on a block of limb `L ≥ 1` clears that block and fells the rest
-///   of its limb piece, wood and leaves.
+///   of its limb piece, wood and leaves, plus — by the same support rule —
+///   anything left that the felled piece alone joined to the standing tree.
 ///
 /// Everything falls as one piece. `None` when `cut` is not tree wood or the
 /// tree overflows the bound; a limb-0 block that is not trunk wood is cut
@@ -130,11 +131,12 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
     let limb = src.tree_limb(cut);
     let is_trunk_cut = limb == 0 && block_props().is_trunk(src.block(cut));
     let limbs: BTreeMap<TilePos, u8> = blocks.iter().map(|&p| (p, src.tree_limb(p))).collect();
-    let falls: Vec<TilePos> = if is_trunk_cut {
-        let wood = |p: &TilePos| block_props().is_solid(src.block(*p));
-        let floor = blocks.iter().filter(|p| wood(p)).map(|p| p[1]).min().expect("the cut is wood");
+    let wood = |p: &TilePos| block_props().is_solid(src.block(*p));
+    let floor = blocks.iter().filter(|p| wood(p)).map(|p| p[1]).min();
+    let mut falls: Vec<TilePos> = if is_trunk_cut {
+        let floor = floor.expect("the cut is wood");
         let y = cut[1];
-        let mut falls: Vec<TilePos> = if y == floor {
+        if y == floor {
             blocks.iter().copied().collect()
         } else {
             let mut v: Vec<TilePos> = limbs.iter().filter(|&(p, &l)| l == 0 && p[1] > y).map(|(p, _)| *p).collect();
@@ -150,11 +152,21 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
                 }
             }
             v
-        };
+        }
+    } else if limb != 0 {
+        let piece = limb_components(&limbs).into_iter().find(|c| c.contains(&cut)).expect("the cut is in a piece");
+        piece.into_iter().filter(|&p| p != cut).collect()
+    } else {
+        Vec::new()
+    };
+    if is_trunk_cut || limb != 0 {
         falls.retain(|p| !cuts.contains(p));
-        // Support: whatever is left that no longer joins (26-connected,
-        // through any standing block of the tree) the standing wood of the
-        // lowest level falls too, so nothing is left floating.
+        // Support (trunk and branch cuts alike): whatever is left that no
+        // longer joins (26-connected, through any standing block of the
+        // tree) the standing wood of the lowest level falls too, so nothing
+        // is left floating — e.g. another limb's leaves held only by the
+        // felled limb.
+        let floor = floor.expect("the cut is wood");
         let gone: BTreeSet<TilePos> = falls.iter().chain(&cuts).copied().collect();
         let standing: BTreeSet<TilePos> = blocks.iter().copied().filter(|p| !gone.contains(p)).collect();
         let mut held: BTreeSet<TilePos> = standing.iter().copied().filter(|p| p[1] == floor && wood(p)).collect();
@@ -168,13 +180,7 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
         }
         falls.extend(standing.into_iter().filter(|p| !held.contains(p)));
         falls.sort_unstable();
-        falls
-    } else if limb != 0 {
-        let piece = limb_components(&limbs).into_iter().find(|c| c.contains(&cut)).expect("the cut is in a piece");
-        piece.into_iter().filter(|&p| p != cut).collect()
-    } else {
-        Vec::new()
-    };
+    }
     let falling = if falls.is_empty() { Vec::new() } else { vec![falls] };
     Some(Felling { cut: cuts, falling })
 }

@@ -160,6 +160,11 @@ fn unsupported(tree: &Tree, f: &Felling) -> BTreeSet<TilePos> {
     standing.into_iter().filter(|p| !reached.contains(p)).collect()
 }
 
+/// What the limb rule alone fells for a branch cut: the rest of its piece.
+fn piece_rest(piece: &BTreeSet<TilePos>, cut: TilePos) -> BTreeSet<TilePos> {
+    piece.iter().copied().filter(|&p| p != cut).collect()
+}
+
 /// [`unsupported`] blocks above `y`.
 fn floating_above(tree: &Tree, f: &Felling, y: i32) -> usize {
     unsupported(tree, f).iter().filter(|p| p[1] > y).count()
@@ -254,10 +259,17 @@ fn oak_branch_cut_fells_only_its_limb() {
                 let down = felled(&f);
                 assert!(!down.is_empty(), "seed {seed} age {age}: branch cut {cut:?} fells nothing");
                 let piece = pieces.iter().find(|p| p.contains(&cut)).unwrap();
-                assert!(down.iter().all(|p| piece.contains(p)) && down.len() == piece.len() - 1, "the rest of the cut's piece");
+                let rule = piece_rest(piece, cut);
+                assert!(rule.iter().all(|p| down.contains(p)), "the rest of the cut's piece falls");
+                let orphans = unsupported(&tree, &Felling { cut: f.cut.clone(), falling: vec![rule.iter().copied().collect()] });
                 for p in &down {
                     let (part, b) = tree.blocks[p];
-                    assert_eq!(b.limb(), limb, "seed {seed} age {age}: {p:?} is not limb {limb}");
+                    if rule.contains(p) {
+                        assert_eq!(b.limb(), limb, "seed {seed} age {age}: {p:?} is not limb {limb}");
+                    } else {
+                        // Beyond its piece only what the piece alone held up.
+                        assert!(orphans.contains(p), "seed {seed} age {age}: {p:?} fell though supported");
+                    }
                     assert!(!(part == TreePart::Log && b.limb() == 0), "trunk log {p:?} fell");
                 }
                 assert!(anchors.iter().all(|a| !down.contains(a)));
@@ -368,12 +380,48 @@ fn pine_limb_cut_stays_within_its_piece() {
                 let piece = pieces.iter().find(|p| p.contains(&cut)).unwrap();
                 let lo = |a: usize| piece.iter().map(|p| p[a]).min().unwrap() - 1;
                 let hi = |a: usize| piece.iter().map(|p| p[a]).max().unwrap() + 1;
-                for p in felled(&fell(&tree, cut).unwrap()) {
-                    assert!((0..3).all(|a| (lo(a)..=hi(a)).contains(&p[a])), "seed {seed} age {age}: cut {cut:?} felled {p:?} outside its piece");
+                let f = fell(&tree, cut).unwrap();
+                let orphans = unsupported(&tree, &Felling { cut: f.cut.clone(), falling: vec![piece_rest(piece, cut).into_iter().collect()] });
+                for p in felled(&f) {
+                    // Outside its piece only what the piece alone held up.
+                    assert!(
+                        (0..3).all(|a| (lo(a)..=hi(a)).contains(&p[a])) || orphans.contains(&p),
+                        "seed {seed} age {age}: cut {cut:?} felled {p:?} outside its piece"
+                    );
                 }
                 cuts += 1;
             }
         }
     }
     assert!(cuts > 0);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn branch_cut_leaves_nothing_floating() {
+    // (cuts, blocks the piece rule alone left floating, blocks floating now)
+    let mut counts: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
+    each_tree(|sp, seed, age, tree| {
+        let pieces: Vec<_> = tree.limb_pieces().into_iter().map(|(_, p)| p).collect();
+        let limb_wood: Vec<TilePos> = tree
+            .blocks
+            .iter()
+            .filter(|(_, (part, b))| *part != TreePart::Leaves && b.limb() != 0)
+            .map(|(p, _)| *p)
+            .collect();
+        for &cut in &limb_wood {
+            let f = fell(tree, cut).unwrap();
+            let piece = pieces.iter().find(|p| p.contains(&cut)).unwrap();
+            let before =
+                unsupported(tree, &Felling { cut: f.cut.clone(), falling: vec![piece_rest(piece, cut).into_iter().collect()] }).len();
+            let after = unsupported(tree, &f).len();
+            let c = counts.entry(sp.name).or_default();
+            c.0 += 1;
+            c.1 += before;
+            c.2 += after;
+            assert_eq!(after, 0, "{} seed {seed} age {age}: branch cut {cut:?} leaves {after} blocks floating", sp.name);
+        }
+    });
+    println!("floating blocks after branch cuts (cuts, piece rule alone, with support): {counts:?}");
+    assert!(counts.values().all(|c| c.0 > 0));
 }
