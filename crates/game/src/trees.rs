@@ -15,7 +15,7 @@ use rapier3d::math::Vector;
 
 use crate::orders::{TilePos, TileSource};
 use crate::slime::roll;
-use crate::{block_props, REGION_BLOCKS};
+use crate::{block_props, BLOCK_VOXELS, REGION_BLOCKS};
 
 /// Most blocks one tree flood visits. The widest species box (oak: crown
 /// radius 8 blocks + 1 block of leaf reach, 20 blocks tall) is 19 × 20 × 19 =
@@ -27,7 +27,9 @@ pub const MAX_TREE_BLOCKS: usize = 8192;
 /// A trunk cut takes the trunk logs of the cut block's layer out to this
 /// many blocks (in x and in z) from it.
 pub const TRUNK_CUT_RADIUS_BLOCKS: i32 = 4;
-/// Spin a felled part starts with, rad/s, about a horizontal axis.
+/// Spin a felled part starts with, rad/s, about a horizontal axis through
+/// its pivot ([`tip_pivot`]). Only enough to start the topple: gravity does
+/// the rest.
 pub const TIP_ANGVEL: f32 = 0.6;
 /// A felled part's landing reach must stay this many blocks inside the region
 /// (interim seam rule, spec §5.7: bodies cannot cross seams yet).
@@ -267,4 +269,13 @@ pub fn tip_angvel(tree: u32, cut: TilePos, set: &[TilePos], tick: u64) -> Vector
     let (x, z) = unit(DIRECTIONS[pick]);
     // Spinning about up × d moves the top along d.
     Vector::new(z, 0.0, -x) * TIP_ANGVEL
+}
+
+/// The point a part felled at `cut` starts turning about (region-local
+/// units): the middle of the cut block's top face — the butt of the trunk
+/// above a trunk cut — so the part topples about its base, its butt still,
+/// rather than spinning about its centre of mass with the butt swinging up.
+pub fn tip_pivot(cut: TilePos) -> Vector {
+    let b = BLOCK_VOXELS as f32;
+    Vector::new((cut[0] as f32 + 0.5) * b, (cut[1] + 1) as f32 * b, (cut[2] as f32 + 0.5) * b)
 }

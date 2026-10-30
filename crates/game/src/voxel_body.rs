@@ -21,8 +21,17 @@
 //!
 //! **Gravity.** The physics world's own gravity is zero (players and slimes
 //! integrate their own, kinematically), so a voxel body carries a constant
-//! user force of `mass × VOXEL_BODY_GRAVITY` downward, set once before
-//! insertion (rapier keeps user forces across steps).
+//! user force of `mass × VOXEL_BODY_GRAVITY` (the world's
+//! `movement::GRAVITY`) downward, set once before insertion (rapier keeps
+//! user forces across steps).
+//!
+//! **Toppling.** A felled tree part (`detach_blocks_pivoting_safe`) starts
+//! in the rigid motion of a turn about its butt, not a spin about its centre
+//! of mass (which swings the butt up and over), spun hard enough to go over
+//! its base; its lowest branches do not collide (they would snap); and once
+//! it lands its turning is damped hard, as a rigid crown cannot crush.
+//! Leaves collide in a body (not standing). Colliders grip (high friction)
+//! and never bounce, and soft CCD stops a fast landing at the surface.
 //!
 //! **No `EntityKind`.** A voxel body is never a seam-crossing entity:
 //! `scan_boundaries` walks `ecs.kind` (and would rebuild it on the other
@@ -50,8 +59,57 @@ pub const WOOD_DENSITY: f32 = 700.0;
 pub const LEAF_DENSITY: f32 = 60.0;
 /// Density of every other block (stone, soil), kg/m³.
 pub const STONE_DENSITY: f32 = 2600.0;
-/// Downward acceleration of a voxel body, m/s² (real gravity).
-pub const VOXEL_BODY_GRAVITY: f32 = 9.81;
+/// Downward acceleration of a voxel body, m/s²: the world's gravity
+/// (`movement::GRAVITY`, what players and slimes fall with), so a felled
+/// tree falls like everything else rather than floating down at a real-world
+/// 9.81 in a world whose bodies fall at 45.
+pub const VOXEL_BODY_GRAVITY: f32 = crate::movement::GRAVITY;
+/// Friction coefficient of a voxel body's colliders: high, so a toppling
+/// tree's butt grips the ground and the body pivots about it rather than
+/// skating out from under its crown.
+pub const VOXEL_BODY_FRICTION: f32 = 0.9;
+/// Restitution of a voxel body's colliders: none — a felled trunk lands, it
+/// does not bounce.
+pub const VOXEL_BODY_RESTITUTION: f32 = 0.0;
+/// Angular damping of a voxel body (1/s): a little, so a landed crown
+/// settles instead of rocking on its leaves.
+pub const VOXEL_BODY_ANGULAR_DAMPING: f32 = 0.5;
+/// Angular damping of a voxel body once it has landed (1/s): heavy. A
+/// toppling tree whose crown hits the ground keeps turning about the crown
+/// contact, and as a rigid body (its crown cannot crush) that would lever
+/// the butt up off the ground; damped, the turn dies and gravity sets the
+/// butt back down, the tree lying sloped on its crown.
+pub const VOXEL_BODY_LANDED_ANGULAR_DAMPING: f32 = 8.0;
+/// A body counts as landed ([`VoxelBody::landed`]) once its up axis is
+/// tilted from the vertical past the angle with this cosine (30°) and its
+/// centre of mass has stopped falling (slower than one tick of gravity): a
+/// felled tree's butt landing on the stump comes before any such tilt, its
+/// crown landing after it.
+pub const LANDED_TILT_COS: f32 = 0.866_025_4;
+/// Soft-CCD prediction distance of a voxel body (units): one block. At the
+/// world's gravity a body is moving a block per tick after about half a
+/// second of fall, and a contact rapier only finds once the shapes overlap
+/// lets it sink that far into the ground on impact before it is pushed back
+/// out (or, for a thin collider, through). Soft CCD finds the contact up to
+/// this far ahead, so the landing is stopped at the surface.
+pub const VOXEL_BODY_SOFT_CCD: f32 = BLOCK_VOXELS as f32;
+/// How much more spin than just enough a toppling body starts with (see
+/// `topple_angvel`): enough to clear its base's edge after losing some to
+/// the landing on its stump.
+pub const TOPPLE_MARGIN: f32 = 1.3;
+/// Most spin (rad/s) `topple_angvel` raises a toppling body to: a small
+/// sapling on a crown as wide as it is tall would need a violent flip to go
+/// over, and simply sits down instead.
+pub const TOPPLE_MAX_ANGVEL: f32 = 1.2;
+/// Block layers at the bottom of a toppling tree part whose crown blocks
+/// have no collider (see [`collision_model`]).
+pub const SKIRT_SNAP_LAYERS: i16 = 2;
+/// A toppling part at least this many blocks tall is a tree (rather than a
+/// sapling): it snaps its skirt ([`collision_model`]) and is spun hard
+/// enough to go over its base (`topple_angvel`). A sapling's crown is most
+/// of it and has no trunk weight to snap it, and spun over a crown as wide
+/// as it is tall it would roll away; it just sits down.
+pub const TALL_PART_BLOCKS: i16 = 8;
 /// A body moving slower than this (units/s; 0.5 m/s) counts as still.
 pub const REST_LINVEL: f32 = 8.0;
 /// A body turning slower than this (rad/s) counts as still.
@@ -92,6 +150,10 @@ pub struct VoxelBody {
     pub spawned_tick: u64,
     /// Consecutive ticks under both rest thresholds.
     pub still_ticks: u16,
+    /// Whether it has landed: tilted past [`LANDED_TILT_COS`] with its centre
+    /// of mass no longer falling — a felled tree's crown on the ground. From
+    /// then on it turns under [`VOXEL_BODY_LANDED_ANGULAR_DAMPING`].
+    pub landed: bool,
 }
 
 /// Density class of a block (kg/m³): non-solid → leaf, half-block collider
@@ -292,6 +354,91 @@ fn solid_voxel_bounds(block: Block, chisel: &ChiselData) -> Option<([i32; 3], [i
     bounds
 }
 
+/// The blocks of `model` that collide. All of them, unless `toppling` (a
+/// felled tree part turning about its butt): then not its skirt — the crown
+/// blocks (leaves and limb wood, `Block::limb` ≠ 0) of its lowest
+/// [`SKIRT_SNAP_LAYERS`] layers — when it has trunk wood to land on and is at
+/// least [`TALL_PART_BLOCKS`] tall. Those branches would snap under the
+/// falling trunk; rigid, a pine's lowest whorls land flat on the stump and
+/// the tree stands on them. A part with no trunk (a cut-off limb) or a
+/// sapling keeps everything.
+pub fn collision_model(model: &VoxelModel, toppling: bool) -> VoxelModel {
+    if !toppling {
+        return model.clone();
+    }
+    let props = block_props();
+    let crown = |b: &Block| b.tree_id() != 0 && (is_foliage(b.id) || b.limb() != 0);
+    let has_trunk = model.blocks.values().any(|(b, _)| b.tree_id() != 0 && b.limb() == 0 && props.is_solid(b.id));
+    if !has_trunk || !is_tall(model) {
+        return model.clone();
+    }
+    let floor = model.blocks.keys().map(|o| o[1]).min().unwrap_or(0);
+    let blocks = model
+        .blocks
+        .iter()
+        .filter(|(o, (b, _))| !(crown(b) && o[1] < floor + SKIRT_SNAP_LAYERS))
+        .map(|(o, v)| (*o, v.clone()))
+        .collect();
+    VoxelModel { blocks }
+}
+
+/// Whether the model spans at least [`TALL_PART_BLOCKS`] block layers.
+fn is_tall(model: &VoxelModel) -> bool {
+    let (lo, hi) = model.blocks.keys().fold((i16::MAX, i16::MIN), |(lo, hi), o| (lo.min(o[1]), hi.max(o[1])));
+    hi >= lo && hi - lo + 1 >= TALL_PART_BLOCKS
+}
+
+/// `angvel` for a body toppling about `pivot` (region-local units) — when
+/// it is tall ([`TALL_PART_BLOCKS`]) — raised to at least [`TOPPLE_MARGIN`] ×
+/// the spin that carries its centre of mass over the hardest of the supports
+/// it can tip onto: the leading bottom edge (along the direction the spin
+/// moves its top) of each colliding block (`colliding`, the
+/// [`collision_model`]) in its lowest third. Tipping over such an edge `p`
+/// raises the centre of mass by `√(e² + h²) − h` (`e`, `h` its horizontal
+/// and vertical distance from `p`), which the spin's energy about `p`,
+/// `½ (I_axis + m (e² + h²)) ω²`, must cover. A part resting on wide lower
+/// limbs (a pine's whorls) would otherwise land on them and stand, or teeter.
+/// Capped at [`TOPPLE_MAX_ANGVEL`]. `I_axis` is the model-axis inertia about
+/// the spin axis (diagonal, as everywhere here). `+ - * /` and `sqrt` only
+/// (IEEE-exact): bit-identical on every target.
+fn topple_angvel(
+    model: &VoxelModel,
+    colliding: &VoxelModel,
+    origin_units: Vector,
+    mprops: &MassProperties,
+    angvel: Vector,
+) -> Vector {
+    let w = angvel.length();
+    let m = mprops.mass();
+    if w <= 0.0 || m <= 0.0 || !is_tall(model) {
+        return angvel;
+    }
+    let axis = angvel / w;
+    // Spinning about `axis` moves a point above the pivot along `axis × Y`.
+    let d = axis.cross(Vector::Y);
+    let b = BLOCK_VOXELS as f32;
+    let (floor, top) = model.blocks.keys().fold((i16::MAX, i16::MIN), |(lo, hi), o| (lo.min(o[1]), hi.max(o[1])));
+    let third = floor + (top - floor + 1) / 3;
+    let reach = b * 0.5 * (d.x.abs() + d.z.abs());
+    let com = origin_units + mprops.local_com;
+    let inv = mprops.inv_principal_inertia;
+    let inertia = |i: f32| if i > 0.0 { 1.0 / i } else { 0.0 };
+    let i_axis = axis.x * axis.x * inertia(inv.x) + axis.y * axis.y * inertia(inv.y) + axis.z * axis.z * inertia(inv.z);
+    let g = VOXEL_BODY_GRAVITY * UNITS_PER_METER;
+    let mut needed = 0.0f32;
+    for o in colliding.blocks.keys().filter(|o| o[1] <= third) {
+        let bottom = origin_units + Vector::new(f32::from(o[0]) + 0.5, f32::from(o[1]), f32::from(o[2]) + 0.5) * b;
+        let (e, h) = ((bottom - com).dot(d) + reach, com.y - bottom.y);
+        if e <= 0.0 || h <= 0.0 {
+            continue;
+        }
+        let lever2 = e * e + h * h;
+        let rise = lever2.sqrt() - h;
+        needed = needed.max((2.0 * m * g * rise / (i_axis + m * lever2)).sqrt());
+    }
+    axis * w.max((TOPPLE_MARGIN * needed).min(TOPPLE_MAX_ANGVEL))
+}
+
 impl Rollback {
     /// Detaches the blocks at `positions` into one dynamic voxel body,
     /// undo-safely: the blocks are cleared from the terrain
@@ -304,6 +451,23 @@ impl Rollback {
     /// ground until the timeout; `None` too). A leaves-only set falls like
     /// any other.
     pub fn detach_blocks_safe(&mut self, positions: &[BlockPos], policy: SettlePolicy, angvel: Vector) -> Option<EntityKey> {
+        self.detach_blocks_pivoting_safe(positions, policy, angvel, None)
+    }
+
+    /// As [`Self::detach_blocks_safe`], with the body starting in the rigid
+    /// motion of a spin at `angvel` about `pivot` (region-local units) — a
+    /// felled tree turning about its butt: the centre of mass moves at
+    /// `angvel × (com − pivot)`, so the pivot itself starts still — the spin
+    /// raised to what topples the body over the edge of its base
+    /// (`topple_angvel`). `None` spins about the centre of mass at `angvel`
+    /// (no linear velocity).
+    pub fn detach_blocks_pivoting_safe(
+        &mut self,
+        positions: &[BlockPos],
+        policy: SettlePolicy,
+        angvel: Vector,
+        pivot: Option<Vector>,
+    ) -> Option<EntityKey> {
         let mut taken: BTreeMap<BlockPos, (Block, Option<ChiselData>)> = BTreeMap::new();
         for &pos in positions {
             if let Some(state) = self.clearable_block(pos) {
@@ -336,7 +500,8 @@ impl Rollback {
         // as settling is a despawn, it is simply never spawned. The terrain
         // is still cleared (one undoable `clear_blocks_safe`, nothing else
         // to invert).
-        let boxes = model_collider_boxes(&model);
+        let colliding = collision_model(&model, pivot.is_some());
+        let boxes = model_collider_boxes(&colliding);
         if boxes.is_empty() {
             return None;
         }
@@ -349,6 +514,11 @@ impl Rollback {
             origin[2] as f32 * BLOCK_VOXELS as f32,
         );
         let pose = Pose::from_translation(origin_units + com);
+        let angvel = match pivot {
+            Some(_) => topple_angvel(&model, &colliding, origin_units, &mprops, angvel),
+            None => angvel,
+        };
+        let linvel = pivot.map_or(Vector::ZERO, |p| angvel.cross(pose.translation - p));
 
         let e = self.data.ecs.create_entity_safe();
         let user_data = e.data().as_ffi() as u128;
@@ -357,6 +527,9 @@ impl Rollback {
         let mut body = RigidBodyBuilder::dynamic()
             .pose(pose)
             .angvel(angvel)
+            .linvel(linvel)
+            .angular_damping(VOXEL_BODY_ANGULAR_DAMPING)
+            .soft_ccd_prediction(VOXEL_BODY_SOFT_CCD)
             .can_sleep(true)
             .additional_mass_properties(body_mprops)
             .user_data(user_data)
@@ -376,6 +549,8 @@ impl Rollback {
             .collect();
         let collider = ColliderBuilder::new(SharedShape::compound(parts))
             .mass_properties(MassProperties::default())
+            .friction(VOXEL_BODY_FRICTION)
+            .restitution(VOXEL_BODY_RESTITUTION)
             .user_data(user_data)
             .build();
         // The eigen-solve hazard (module docs): the body's mass must come only
@@ -396,7 +571,7 @@ impl Rollback {
         self.data
             .ecs
             .voxel_body
-            .set_safe(e, Some(VoxelBody { model, origin, policy, spawned_tick, still_ticks: 0 }));
+            .set_safe(e, Some(VoxelBody { model, origin, policy, spawned_tick, still_ticks: 0, landed: false }));
         Some(e)
     }
 
@@ -404,7 +579,8 @@ impl Rollback {
     /// body's consecutive still ticks (under both `REST_LINVEL` and
     /// `REST_ANGVEL`, or asleep), and settle it — apply its policy — at
     /// `REST_TICKS` of them, at `SETTLE_TIMEOUT_TICKS` of age, or once its
-    /// centre of mass leaves the region's `0..REGION_SIZE` in x or z.
+    /// centre of mass leaves the region's `0..REGION_SIZE` in x or z; and
+    /// mark it landed (heavier angular damping) when it is.
     /// Entities in key order.
     pub fn tick_voxel_bodies_safe(&mut self, tick: u64) {
         let keys: Vec<EntityKey> = self
@@ -419,6 +595,12 @@ impl Rollback {
             let Some(handle) = *self.data.ecs.rigidbody.try_get(e) else { continue };
             let Some(body) = self.data.physics.bodies.get(handle) else { continue };
             let (v, w) = (body.linvel(), body.angvel());
+            // Bodies start upright (identity rotation): the tilt of the up
+            // axis is `(rotation · Y).y`, a quaternion rotation (+ - *).
+            // "Not falling": slower than one tick of gravity (a body resting
+            // on the ground reads about a third of that downward here).
+            let falling = -v.y > VOXEL_BODY_GRAVITY * UNITS_PER_METER * crate::movement::TICK_DT;
+            let land = !vb.landed && (body.rotation() * Vector::Y).y < LANDED_TILT_COS && !falling;
             let still = body.is_sleeping()
                 || (v.dot(v) < REST_LINVEL * REST_LINVEL && w.dot(w) < REST_ANGVEL * REST_ANGVEL);
             let t = body.translation();
@@ -431,8 +613,17 @@ impl Rollback {
                 match vb.policy {
                     SettlePolicy::Despawn => self.remove_entity_safe(e, None),
                 }
-            } else if still_ticks != vb.still_ticks {
-                self.data.ecs.voxel_body.set_safe(e, Some(VoxelBody { still_ticks, ..vb }));
+                continue;
+            }
+            if land {
+                self.data
+                    .physics
+                    .bodies
+                    .mutate_body_safe(handle, |b| b.set_angular_damping(VOXEL_BODY_LANDED_ANGULAR_DAMPING));
+            }
+            if still_ticks != vb.still_ticks || land {
+                let landed = vb.landed || land;
+                self.data.ecs.voxel_body.set_safe(e, Some(VoxelBody { still_ticks, landed, ..vb }));
             }
         }
     }

@@ -59,9 +59,9 @@ const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0xBABE_5BB0);
 const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0xC044_7478);
 
 /// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
-const VOXEL_BODY_DIGEST: u32 = pinned(0xF35F_5267, 0x74B3_3C70);
+const VOXEL_BODY_DIGEST: u32 = pinned(0x5697_8017, 0x1535_1282);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0xD50B_606D, 0x7404_8658);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x4151_916A, 0x279D_F1CB);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;
@@ -252,14 +252,16 @@ fn underground_scene() -> (u32, u32) {
 }
 
 /// A stone column with an arm, detached into a voxel body (`game::voxel_body`)
-/// and tipped over onto a block floor: a dynamic body whose explicit mass
-/// properties, rotation integration and compound-vs-voxels contacts all land
-/// in the state. Returns `(digest, state_hash)`.
+/// toppling about its base (`detach_blocks_pivoting_safe`: tall enough that
+/// its spin is raised to go over, with `sqrt`) onto a block floor: a dynamic
+/// body whose explicit mass properties, rotation integration, landing and
+/// compound-vs-voxels contacts all land in the state. Returns
+/// `(digest, state_hash)`.
 fn voxel_body_scene() -> (u32, u32) {
     let chunks = common::floor_chunks(0.0..512.0, 0.0..512.0, game::BLOCK_VOXELS as u32);
     let mut region = Region::from_chunks(r0(), chunks);
-    let mut blocks: Vec<[i32; 3]> = (1..=6).map(|y| [16, y, 16]).collect();
-    blocks.extend([[17, 6, 16], [18, 6, 16]]);
+    let mut blocks: Vec<[i32; 3]> = (1..=8).map(|y| [16, y, 16]).collect();
+    blocks.extend([[17, 8, 16], [18, 8, 16]]);
     let mut body = None;
     region.with_data(|d| {
         for &p in &blocks {
@@ -267,7 +269,9 @@ fn voxel_body_scene() -> (u32, u32) {
         }
     });
     region.with_data(|d| {
-        body = d.detach_blocks_safe(&blocks, game::SettlePolicy::Despawn, Vector::new(0.2, 0.0, -1.2));
+        let b = game::BLOCK_VOXELS as f32;
+        let pivot = Vector::new(16.5 * b, b, 16.5 * b);
+        body = d.detach_blocks_pivoting_safe(&blocks, game::SettlePolicy::Despawn, Vector::new(0.1, 0.0, -0.6), Some(pivot));
     });
     let body = body.expect("the column detaches");
     let start = *region.data().physics.bodies.get(*region.data().ecs.rigidbody.get(body)).unwrap().position();

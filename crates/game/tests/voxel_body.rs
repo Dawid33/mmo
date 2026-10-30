@@ -155,12 +155,23 @@ fn column_topples_and_despawns() {
     let (mut region, _recv) = region_over(0..32);
     let col = column(16, 16, 6);
     build(&mut region, &col, Block::new(STONE));
-    let e = detach(&mut region, &col, Vector::new(0.0, 0.0, 1.5));
+    // Toppling about the middle of its base (a spin about its centre of
+    // mass alone grinds its foot into the floor and stops).
+    let pivot = Vector::new(16.5 * B, B, 16.5 * B);
+    let mut e = None;
+    region.with_data(|r| e = r.detach_blocks_pivoting_safe(&col, SettlePolicy::Despawn, Vector::new(0.0, 0.0, 1.5), Some(pivot)));
+    let e = e.expect("a body");
+    let v = region.data().physics.bodies.get(*region.data().ecs.rigidbody.get(e)).unwrap().linvel();
+    // The rigid motion about the pivot: the centre of mass (3 blocks up)
+    // moves at ω × r = 1.5 × 3 blocks, toward −x.
+    assert!((v.x + 1.5 * 3.0 * B).abs() < 1e-3 && v.y.abs() < 1e-3 && v.z.abs() < 1e-3, "{v:?}");
     let start_y = body_pose(region.data(), e).translation.y;
     let (ticks, min_y, _, _) =
         run_until_gone(&mut region, e, SETTLE_TIMEOUT_TICKS + 5, |_| {}).expect("the column despawns");
     assert!(ticks < SETTLE_TIMEOUT_TICKS, "it came to rest ({ticks} ticks), not timed out");
-    assert!(ticks > u64::from(REST_TICKS) + 5, "a fall takes time: {ticks} ticks");
+    // It falls, then rests REST_TICKS (at the world's gravity a 6-block
+    // column is down in a few ticks).
+    assert!(ticks > u64::from(REST_TICKS) + 2, "a fall takes time: {ticks} ticks");
     assert!(start_y - min_y > 2.0 * B, "it fell: {start_y} -> {min_y}");
     assert!(region.data().ecs.voxel_body.iter().all(|(_, v)| v.is_none()));
 }
@@ -219,11 +230,12 @@ fn rollback_mid_fall_is_bit_exact() {
     let col = column(16, 16, 6);
     build(&mut region, &col, Block::new(STONE));
     let e = detach(&mut region, &col, Vector::new(0.0, 0.0, 1.5));
-    for _ in 0..5 {
+    for _ in 0..2 {
         tick(&mut region);
     }
     let before = state_hash(region.data());
-    const N: usize = 20;
+    // Short of the column's despawn (about 14 ticks at the world's gravity).
+    const N: usize = 6;
     for _ in 0..N {
         region.handle_event(GameEventKind::Tick).unwrap();
     }
@@ -237,6 +249,7 @@ fn rollback_mid_fall_is_bit_exact() {
         region.handle_event(GameEventKind::Tick).unwrap();
     }
     assert_eq!(after, state_hash(region.data()), "replaying the fall reproduces it");
+    assert!(alive(region.data(), e), "still falling");
     // And through the despawn: roll back the tick that removed the body.
     loop {
         let pre = state_hash(region.data());
@@ -540,4 +553,21 @@ fn falling_leaves_collide_and_rest_on_the_floor() {
     assert!(ticks < SETTLE_TIMEOUT_TICKS, "it came to rest ({ticks} ticks), not timed out");
     assert!(leaf_bottom >= floor_y - 1.0, "the leaves rest on the floor: leaf bottom {leaf_bottom}, floor {floor_y}");
     assert!(leaf_bottom < floor_y + 1.0, "it fell onto the floor: leaf bottom {leaf_bottom}");
+}
+
+/// A voxel body falls at the world's gravity (`movement::GRAVITY`, what
+/// players fall with), not a real-world 9.81 m/s².
+#[test]
+fn bodies_fall_at_world_gravity() {
+    let (mut region, _recv) = region_over(0..32);
+    let col = [[16, 12, 16]];
+    build(&mut region, &col, Block::new(STONE));
+    let e = detach(&mut region, &col, Vector::ZERO);
+    let vy = |r: &Rollback| r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap().linvel().y;
+    tick(&mut region);
+    let v1 = vy(region.data());
+    tick(&mut region);
+    let dv = v1 - vy(region.data());
+    let want = game::movement::GRAVITY * game::movement::UNITS_PER_METER * game::movement::TICK_DT;
+    assert!((dv - want).abs() < 1e-2, "falls {dv} units/s faster per tick, want {want}");
 }

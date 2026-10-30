@@ -356,7 +356,8 @@ impl Rollback {
     }
 
     /// Fells the tree at `p` (`trees::fell`, computed first): clears the cut
-    /// blocks and detaches every falling piece with its tip spin. A tree
+    /// blocks and detaches every falling piece with its tip spin, turning
+    /// about the cut (`trees::tip_pivot`). A tree
     /// `fell` refuses (over `MAX_TREE_BLOCKS`) is left whole.
     fn chop_safe(&mut self, p: TilePos) {
         let tree = TileSource::tree_id(self, p);
@@ -367,7 +368,8 @@ impl Rollback {
         let tick = *self.data.tick as u64;
         for set in felling.falling {
             let spin = crate::trees::tip_angvel(tree, p, &set, tick);
-            self.detach_blocks_safe(&set, crate::SettlePolicy::Despawn, spin);
+            let pivot = crate::trees::tip_pivot(p);
+            self.detach_blocks_pivoting_safe(&set, crate::SettlePolicy::Despawn, spin, Some(pivot));
         }
     }
 
