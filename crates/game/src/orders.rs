@@ -346,16 +346,17 @@ impl Rollback {
         self.set_designations_safe(all.into_iter().map(|(p, _)| (p, None)).collect());
     }
 
-    /// Fells the tree at `p`: clears the block and detaches every falling
-    /// set (`trees::falling_sets`, computed first) with its tip spin.
+    /// Fells the tree at `p` (`trees::fell`, computed first): clears the cut
+    /// blocks and detaches every falling piece with its tip spin. A tree
+    /// `fell` refuses (over `MAX_TREE_BLOCKS`) is left whole.
     fn chop_safe(&mut self, p: TilePos) {
         let tree = TileSource::tree_id(self, p);
-        let sets = crate::trees::falling_sets(self, p);
-        if !self.set_block_safe(p, Block::new(BlockId::AIR)) {
+        let Some(felling) = crate::trees::fell(self, p) else { return };
+        if self.clear_blocks_safe(&felling.cut) == 0 {
             return;
         }
         let tick = *self.data.tick as u64;
-        for set in sets {
+        for set in felling.falling {
             let spin = crate::trees::tip_angvel(tree, p, &set, tick);
             self.detach_blocks_safe(&set, crate::SettlePolicy::Despawn, spin);
         }

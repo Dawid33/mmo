@@ -7,7 +7,7 @@ use common::{floor_chunks, r0};
 use game::rapier3d::math::Vector;
 use game::voxel_body::SETTLE_TIMEOUT_TICKS;
 use game::{
-    falling_sets, install_block_props, state_hash, tip_angvel, Block, BlockId, BlockRegistry, DesignationKind,
+    falling_sets, fell, install_block_props, state_hash, tip_angvel, Block, BlockId, BlockRegistry, DesignationKind,
     GameEventKind, OpId, Order, Region, Rollback, TileBox, TilePos, TileSource, BLOCK_VOXELS, DEFAULT_PRIORITY,
     REGION_BLOCKS, REGION_SIZE, TIP_ANGVEL, TIP_EDGE_MARGIN_BLOCKS,
 };
@@ -137,6 +137,70 @@ fn touching_neighbour_crown_is_untouched() {
     let sets = falling_sets(region.data(), [x0() - 3, 2, Z0]);
     let above: Vec<_> = neighbour.into_iter().filter(|p| p[1] > 2).collect();
     assert_eq!(sets, vec![above]);
+}
+
+#[test]
+fn leaves_beside_the_cut_do_not_hold_the_part_up() {
+    let ids = ids();
+    let mut region = forested_region(&ids);
+    let x0 = x0();
+    // A leaf strip along the trunk's −z side, y 2..=5: it touches both sides
+    // of a cut at y 3.
+    let strip: Vec<TilePos> = (2..=5).map(|y| [x0, y, Z0 - 1]).collect();
+    region.with_data(|r| {
+        for &p in &strip {
+            assert!(r.set_block_safe(p, Block::with_tree_id(ids.leaves, TREE)));
+        }
+    });
+    let sets = falling_sets(region.data(), [x0, 3, Z0]);
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    // y 2 and 3 are as near the stump as the fallen trunk (a tie stands);
+    // y 4 and 5 are nearer the fallen trunk.
+    assert!(!sets[0].contains(&strip[0]) && !sets[0].contains(&strip[1]));
+    assert!(sets[0].contains(&strip[2]) && sets[0].contains(&strip[3]));
+    assert!(sets[0].contains(&[x0, TRUNK_TOP, Z0]));
+}
+
+/// Tree 9: a 2×2 log trunk at (x0..=x0+1, 1..=6, 20..=21), wood only.
+fn wide_trunk(ids: &Ids) -> (Region, Vec<TilePos>) {
+    let mut region = region();
+    let x0 = x0();
+    let mut logs = Vec::new();
+    for y in 1..=6 {
+        for z in 20..=21 {
+            for x in x0..=x0 + 1 {
+                logs.push([x, y, z]);
+            }
+        }
+    }
+    region.with_data(|r| {
+        for &p in &logs {
+            assert!(r.set_block_safe(p, Block::with_tree_id(ids.log, 9)));
+        }
+    });
+    logs.sort_unstable();
+    (region, logs)
+}
+
+#[test]
+fn trunk_cut_takes_the_whole_layer() {
+    let ids = ids();
+    let (region, logs) = wide_trunk(&ids);
+    let f = fell(region.data(), [x0(), 3, 20]).unwrap();
+    let layer: Vec<_> = logs.iter().copied().filter(|p| p[1] == 3).collect();
+    assert_eq!(f.cut, layer, "the 2×2 cross-section");
+    let above: Vec<_> = logs.iter().copied().filter(|p| p[1] > 3).collect();
+    assert_eq!(f.falling, vec![above]);
+}
+
+#[test]
+fn anchor_layer_cut_fells_everything() {
+    let ids = ids();
+    let (region, logs) = wide_trunk(&ids);
+    let f = fell(region.data(), [x0() + 1, 1, 21]).unwrap();
+    assert_eq!(f.cut.len(), 4);
+    let rest: Vec<_> = logs.iter().copied().filter(|p| p[1] > 1).collect();
+    assert_eq!(f.falling, vec![rest]);
 }
 
 #[test]

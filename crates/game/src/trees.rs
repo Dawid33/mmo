@@ -1,26 +1,31 @@
 //! Felling standing trees (spec `2026-10-29-trees-investigation.md` §6): the
-//! blocks a chop at one log or branch block brings down, and the spin that
-//! tips them over. Pure functions over a [`TileSource`], so the sim and the
-//! client's previews agree; the `Chop` order (`orders.rs`) carries them out
-//! with `detach_blocks_safe`.
+//! blocks a chop at one log or branch block cuts and brings down, and the
+//! spin that tips them over. Pure functions over a [`TileSource`], so the sim
+//! and the client's previews agree; the `Chop` order (`orders.rs`) carries
+//! them out with `clear_blocks_safe` + `detach_blocks_safe`.
 //!
-//! A tree is its blocks with one tree id (`Block::tree_id`, 0 = not a tree):
-//! logs, branches and leaves, 26-connected.
+//! A tree is its blocks with one tree id (`Block::tree_id`, 0 = not a tree).
+//! Its wood (the solid blocks: logs and branches) is what holds it up; its
+//! leaves (non-solid) hang on whichever wood reaches them first.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rapier3d::math::Vector;
 
 use crate::orders::{TilePos, TileSource};
 use crate::slime::roll;
-use crate::REGION_BLOCKS;
+use crate::{block_props, REGION_BLOCKS};
 
-/// Most blocks one tree flood visits. The largest species (oak: crown radius
-/// 8 blocks + 1 block of leaf reach, 20 blocks tall) fits in a 19 × 20 × 19 =
-/// 7220-block box, so this bounds any generated tree with room to spare
-/// (pinned by worldgen's `mature_trees_fit_the_flood_bound`). A flood that
-/// hits it fells nothing.
+/// Most blocks one tree flood visits. The widest species box (oak: crown
+/// radius 8 blocks + 1 block of leaf reach, 20 blocks tall) is 19 × 20 × 19 =
+/// 7220 blocks (pine, the tallest at 24, is 11 × 24 × 11), so this bounds any
+/// generated tree with room to spare (pinned by worldgen's
+/// `mature_trees_fit_the_flood_bound`). A tree that overflows it cannot be
+/// chopped.
 pub const MAX_TREE_BLOCKS: usize = 8192;
+/// A trunk cut takes the trunk logs of the cut block's layer out to this
+/// many blocks (in x and in z) from it.
+pub const TRUNK_CUT_RADIUS_BLOCKS: i32 = 4;
 /// Spin a felled part starts with, rad/s, about a horizontal axis.
 pub const TIP_ANGVEL: f32 = 0.6;
 /// A felled part's landing reach must stay this many blocks inside the region
@@ -35,6 +40,7 @@ pub const TIP_MIN_LEAN_BLOCKS: f32 = 0.5;
 /// The eight horizontal tip directions `[x, z]`, in order of angle.
 const DIRECTIONS: [[i32; 2]; 8] = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
 
+/// The 26 neighbours, in a fixed order.
 fn neighbours(p: TilePos) -> impl Iterator<Item = TilePos> {
     (-1..=1).flat_map(move |dy| {
         (-1..=1).flat_map(move |dz| {
@@ -43,58 +49,139 @@ fn neighbours(p: TilePos) -> impl Iterator<Item = TilePos> {
     })
 }
 
-/// Lowest `y`, then `x`, then `z`.
-fn base_key(p: TilePos) -> (i32, i32, i32) {
-    (p[1], p[0], p[2])
+/// What one chop does: the blocks it clears and the pieces that then fall.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Felling {
+    /// Cleared by the chop, sorted.
+    pub cut: Vec<TilePos>,
+    /// Each falling piece (wood + the leaves it holds), sorted; pieces in
+    /// order of their first block.
+    pub falling: Vec<Vec<TilePos>>,
 }
 
-/// The parts of the tree at `cut` that fall when `cut` is chopped: flood the
-/// 26-connected blocks with `cut`'s tree id (at most [`MAX_TREE_BLOCKS`]),
-/// take `cut` out, and return every connected piece that does not hold the
-/// tree's base (the lowest block, ties by lowest `x`, then `z`), each sorted.
-/// Pieces are ordered by their first block. Empty when `cut` is not a tree
-/// block or the flood overflows; when `cut` is the base, everything else
-/// falls.
-pub fn falling_sets(src: &impl TileSource, cut: TilePos) -> Vec<Vec<TilePos>> {
+/// Whether `p` is solid wood of tree `tree`.
+fn is_wood(src: &impl TileSource, p: TilePos, tree: u32) -> bool {
+    src.tree_id(p) == tree && block_props().is_solid(src.block(p))
+}
+
+/// The blocks a chop at `cut` clears, sorted: on a trunk log
+/// (`BlockProps::is_trunk`), every trunk log of the same tree in its layer at
+/// most [`TRUNK_CUT_RADIUS_BLOCKS`] from it per axis — connected or not, since
+/// wood links 26-connected, so any log of the layer left standing (a limb
+/// beside the trunk, a diagonal neighbour) would bridge the cut; on a branch,
+/// just `cut`. Empty when `cut` is not solid tree wood.
+pub fn cut_blocks(src: &impl TileSource, cut: TilePos) -> Vec<TilePos> {
     let tree = src.tree_id(cut);
-    if tree == 0 {
+    if tree == 0 || !is_wood(src, cut, tree) {
         return Vec::new();
     }
-    let mut tree_blocks = BTreeSet::from([cut]);
+    let trunk = |p: TilePos| src.tree_id(p) == tree && block_props().is_trunk(src.block(p));
+    if !trunk(cut) {
+        return vec![cut];
+    }
+    let r = TRUNK_CUT_RADIUS_BLOCKS;
+    (-r..=r)
+        .flat_map(|dx| (-r..=r).map(move |dz| [cut[0] + dx, cut[1], cut[2] + dz]))
+        .filter(|&q| trunk(q))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// What chopping `cut` does. The tree (`cut`'s 26-connected same-id blocks,
+/// at most [`MAX_TREE_BLOCKS`]) stands on its anchors: every wood block on
+/// its lowest wood level, taken before the cut. With the [`cut_blocks`]
+/// removed, each 26-connected piece of the remaining wood holding no anchor
+/// falls (cutting the anchor level itself fells it all). Leaves go to the
+/// piece whose wood reaches them first through the tree's leaves (a BFS from
+/// all wood, standing pieces seeded first, so a tie stands); leaves no wood
+/// reaches stay. `None` when `cut` is not tree wood or the tree overflows the
+/// bound.
+pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
+    let cuts = cut_blocks(src, cut);
+    if cuts.is_empty() {
+        return None;
+    }
+    let tree = src.tree_id(cut);
+    let mut blocks = BTreeSet::from([cut]);
     let mut stack = vec![cut];
     while let Some(p) = stack.pop() {
         for q in neighbours(p) {
-            if !tree_blocks.contains(&q) && src.tree_id(q) == tree {
-                if tree_blocks.len() == MAX_TREE_BLOCKS {
-                    return Vec::new();
+            if !blocks.contains(&q) && src.tree_id(q) == tree {
+                if blocks.len() == MAX_TREE_BLOCKS {
+                    return None;
                 }
-                tree_blocks.insert(q);
+                blocks.insert(q);
                 stack.push(q);
             }
         }
     }
-    let base = *tree_blocks.iter().min_by_key(|p| base_key(**p)).expect("holds the cut");
-    tree_blocks.remove(&cut);
-    let mut sets = Vec::new();
-    let mut unseen = tree_blocks;
-    while let Some(start) = unseen.pop_first() {
+    let (mut wood, leaves): (BTreeSet<TilePos>, BTreeSet<TilePos>) =
+        blocks.into_iter().partition(|&p| block_props().is_solid(src.block(p)));
+    let floor = wood.iter().map(|p| p[1]).min().expect("the cut is wood");
+    let anchors: BTreeSet<TilePos> = wood.iter().copied().filter(|p| p[1] == floor).collect();
+    for c in &cuts {
+        wood.remove(c);
+    }
+
+    // Wood pieces, in order of their first block (`pop_first` takes the
+    // lowest block left, which starts a new piece).
+    let mut pieces: Vec<(bool, Vec<TilePos>)> = Vec::new();
+    while let Some(start) = wood.pop_first() {
         let mut piece = vec![start];
         let mut stack = vec![start];
         while let Some(p) = stack.pop() {
             for q in neighbours(p) {
-                if unseen.remove(&q) {
+                if wood.remove(&q) {
                     piece.push(q);
                     stack.push(q);
                 }
             }
         }
-        if !piece.contains(&base) {
-            piece.sort_unstable();
-            sets.push(piece);
+        piece.sort_unstable();
+        let stands = piece.iter().any(|p| anchors.contains(p));
+        pieces.push((stands, piece));
+    }
+
+    // Leaves: multi-source BFS, standing pieces' wood first.
+    let mut owner: BTreeMap<TilePos, usize> = BTreeMap::new();
+    let mut queue = VecDeque::new();
+    let seeding = (0..pieces.len()).filter(|&i| pieces[i].0).chain((0..pieces.len()).filter(|&i| !pieces[i].0));
+    for i in seeding {
+        queue.extend(pieces[i].1.iter().map(|&p| (p, i)));
+    }
+    while let Some((p, i)) = queue.pop_front() {
+        for q in neighbours(p) {
+            if leaves.contains(&q) && !owner.contains_key(&q) {
+                owner.insert(q, i);
+                queue.push_back((q, i));
+            }
         }
     }
-    sets.sort_unstable_by_key(|s| s[0]);
-    sets
+    let mut falling: Vec<Vec<TilePos>> = Vec::new();
+    let mut index = BTreeMap::new();
+    for (i, (stands, piece)) in pieces.iter().enumerate() {
+        if !stands {
+            index.insert(i, falling.len());
+            falling.push(piece.clone());
+        }
+    }
+    for (leaf, i) in owner {
+        if let Some(&f) = index.get(&i) {
+            falling[f].push(leaf);
+        }
+    }
+    for set in &mut falling {
+        set.sort_unstable();
+    }
+    falling.sort_unstable_by_key(|s| s[0]);
+    Some(Felling { cut: cuts, falling })
+}
+
+/// The pieces that fall when `cut` is chopped ([`fell`]); empty when none do
+/// or `cut` cannot be chopped.
+pub fn falling_sets(src: &impl TileSource, cut: TilePos) -> Vec<Vec<TilePos>> {
+    fell(src, cut).map_or_else(Vec::new, |f| f.falling)
 }
 
 /// Spin for the part `set` felled at `cut` of tree `tree` on region tick
@@ -105,7 +192,8 @@ pub fn falling_sets(src: &impl TileSource, cut: TilePos) -> Vec<Vec<TilePos>> {
 /// it is the first of it and the other seven, nearest angle first, whose
 /// landing reach (cut + direction × the part's height) stays inside the
 /// region with [`TIP_EDGE_MARGIN_BLOCKS`] to spare — the first choice when
-/// none does. Zero for an empty set.
+/// none does (the part may then leave the region and vanish, as any voxel
+/// body does). Zero for an empty set.
 pub fn tip_angvel(tree: u32, cut: TilePos, set: &[TilePos], tick: u64) -> Vector {
     if set.is_empty() {
         return Vector::ZERO;

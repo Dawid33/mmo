@@ -128,6 +128,10 @@ impl BlockRegistry {
             if def.collider == crate::ColliderScale::Half {
                 p.half_collider.insert(id.0);
             }
+            // Tree trunks are named `<species>_log` (worldgen's `TreeBlocks`).
+            if def.name.ends_with("_log") {
+                p.trunk.insert(id.0);
+            }
         }
         p
     }
