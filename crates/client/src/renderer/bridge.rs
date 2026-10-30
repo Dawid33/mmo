@@ -533,7 +533,7 @@ pub fn drain_client_updates(
     mut roots: ResMut<RegionRoots>,
     mut map: ResMut<SimEntityMap>,
     mut hud_status: ResMut<HudStatus>,
-    mut ui_updates: ResMut<crate::renderer::ui_bridge::UiUpdates>,
+    mut ui_updates: ResMut<crate::renderer::slint_overlay::UiUpdates>,
     mut debug_lines: ResMut<crate::renderer::collider_debug::DebugColliderLines>,
     mut lod_rings: ResMut<lod_rings::LodRings>,
     mut snapshot_voxels: ResMut<SnapshotVoxelQueue>,
@@ -1131,7 +1131,7 @@ mod tests {
             .init_resource::<RegionRoots>()
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
-            .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
+            .init_resource::<crate::renderer::slint_overlay::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<lod_rings::LodRings>()
             .init_resource::<lod_rings::HomeCellMask>()
@@ -2079,7 +2079,7 @@ mod tests {
             .init_resource::<RetiredRegionRoots>()
             .init_resource::<SimEntityMap>()
             .init_resource::<HudStatus>()
-            .init_resource::<crate::renderer::ui_bridge::UiUpdates>()
+            .init_resource::<crate::renderer::slint_overlay::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<lod_rings::LodRings>()
             .init_resource::<lod_rings::HomeCellMask>()

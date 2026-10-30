@@ -97,8 +97,8 @@ pub struct GameInstanceManager {
     last_active_cells: Option<(RegionCoords, std::collections::BTreeSet<game::CellCoords>)>,
     /// Sender half of the client-side UI projection channel (widget deltas).
     ui_update_send: Sender<game::UiUpdate>,
-    /// Last widget tree emitted, for diffing the next projection.
-    prev_ui_tree: game::WidgetTree,
+    /// Last hotbar emitted; the next projection is sent only if it differs.
+    prev_hotbar: game::HotbarView,
     /// Last-emitted cursor-grab intent, for edge-triggered SetCursorGrab.
     last_cursor_grab: bool,
     /// Shared debug toggles; the render thread's F3 dev panel flips them.
@@ -507,7 +507,7 @@ impl GameInstanceManager {
             last_hud_status: None,
             last_active_cells: None,
             ui_update_send,
-            prev_ui_tree: game::WidgetTree::empty(),
+            prev_hotbar: game::HotbarView::default(),
             last_cursor_grab: true,
             debug_flags,
             collider_debug: game::ColliderDebug::default(),
@@ -1002,17 +1002,18 @@ impl GameInstanceManager {
         let (Some(home), Some(client_id)) = (self.home_region, self.client_id) else {
             return;
         };
-        let tree = {
+        let hotbar = {
             let Some(world) = self.world.as_ref() else {
                 return;
             };
             if !world.region_exists(&home) {
                 return;
             }
-            game::build_player_ui(world.data(&home), client_id)
+            game::build_hotbar(world.data(&home), client_id)
         };
-        for update in game::diff_ui(&self.prev_ui_tree, &tree) {
-            let _ = self.ui_update_send.send(update);
+        if hotbar != self.prev_hotbar {
+            let _ = self.ui_update_send.send(game::UiUpdate::Hotbar(hotbar.clone()));
+            self.prev_hotbar = hotbar;
         }
 
         // Cursor grab follows inventory-open: released while a menu is open.
@@ -1032,8 +1033,6 @@ impl GameInstanceManager {
                 .send(game::UiUpdate::SetCursorGrab(want_grab));
             self.last_cursor_grab = want_grab;
         }
-
-        self.prev_ui_tree = tree;
     }
 
     /// Diff the desired window against current subscriptions; request
@@ -2793,7 +2792,7 @@ mod manager_tests {
     /// After a tick with a seeded local player, the manager must announce a UI
     /// channel and emit widget updates onto it (the projection ran).
     #[test]
-    fn projection_emits_widget_updates_after_tick() {
+    fn projection_emits_the_hotbar_after_tick() {
         let (game_send, game_recv) = crossbeam::channel::unbounded();
         let (client_send, client_recv) = crossbeam::channel::unbounded::<ClientUpdateEvent>();
         let (server_send, server_recv) = crossbeam::channel::unbounded();
@@ -2838,16 +2837,24 @@ mod manager_tests {
             found.expect("UiChannel announced")
         };
 
-        // Tick once → projection runs → widget updates appear.
+        // Tick once → projection runs → the hotbar appears.
         manager.is_caught_up = true;
         manager.send_tick();
         assert!(manager.pump(&server_recv).unwrap());
 
         let ups: Vec<game::UiUpdate> = ui_recv.try_iter().collect();
         assert!(
-            ups.iter()
-                .any(|u| matches!(u, game::UiUpdate::CreateWidget(_))),
-            "projection must emit widget creates, got {ups:?}"
+            ups.iter().any(|u| matches!(u, game::UiUpdate::Hotbar(_))),
+            "projection must emit the hotbar, got {ups:?}"
+        );
+
+        // Another tick with nothing changed: the hotbar is not re-sent.
+        manager.send_tick();
+        assert!(manager.pump(&server_recv).unwrap());
+        let again: Vec<game::UiUpdate> = ui_recv.try_iter().collect();
+        assert!(
+            !again.iter().any(|u| matches!(u, game::UiUpdate::Hotbar(_))),
+            "unchanged hotbar re-sent: {again:?}"
         );
     }
 

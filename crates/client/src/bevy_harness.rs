@@ -19,7 +19,7 @@ use crate::renderer::bridge::{
 };
 use crate::renderer::hud::HudStatus;
 use crate::renderer::input::forward_input;
-use crate::renderer::ui_bridge::UiUpdates;
+use crate::renderer::slint_overlay::UiUpdates;
 use crate::renderer::{ClientUpdates, GameEvents, LocalPlayer};
 use crate::{GameInstanceManager, LocalServer};
 

@@ -37,7 +37,7 @@ use slint_ui::slint::{
     ComponentHandle, Image as SlintImage, LogicalPosition, ModelRc, Rgba8Pixel, SharedPixelBuffer,
     SharedString, VecModel,
 };
-use slint_ui::{GameUi, HudConfig, HudUi, Overlay, WorldMapConfig};
+use slint_ui::{GameUi, HotbarSlot, HudConfig, HudUi, Overlay, WorldMapConfig};
 use worldgen::tile_map::{play_blocker, rasterize, tile_info_lines};
 
 use super::bridge::{SimEntity, SimKind};
@@ -273,6 +273,27 @@ impl Plugin for SlintOverlayPlugin {
     }
 }
 
+/// Receiver half of the sim's UI projection channel (`game::UiUpdate`), once
+/// the instance announces it (`ClientUpdateEvent::UiChannel`).
+#[derive(Resource, Default)]
+pub struct UiUpdates(pub Option<crossbeam::channel::Receiver<game::UiUpdate>>);
+
+/// The local player's hotbar as last projected by the sim.
+#[derive(Resource, Default, Debug, PartialEq)]
+pub struct Hotbar(pub game::HotbarView);
+
+/// Apply the sim's UI projection: the hotbar (drawn by the HUD) and the
+/// cursor grab it asks for.
+pub fn drain_ui_updates(updates: Res<UiUpdates>, mut hotbar: ResMut<Hotbar>, mut cursor_policy: ResMut<CursorPolicy>) {
+    let Some(receiver) = updates.0.as_ref() else { return };
+    while let Ok(update) = receiver.try_recv() {
+        match update {
+            game::UiUpdate::Hotbar(view) => hotbar.0 = view,
+            game::UiUpdate::SetCursorGrab(grab) => cursor_policy.sim_grab = grab,
+        }
+    }
+}
+
 /// The pass-through HUD (`HudUi`: crosshair, selection band, minimap,
 /// hotbar), in both camera modes, under the game UI. It never takes the
 /// pointer, so commander selection and minimap drags work over its pixels.
@@ -300,9 +321,23 @@ fn push_hud_state(
     policy: Option<Res<CursorPolicy>>,
     band: Option<Res<SelectionBand>>,
     minimap_pixels: Option<ResMut<minimap::MinimapPixels>>,
+    hotbar: Option<Res<Hotbar>>,
 ) {
     let Some(hud) = hud else { return };
     let ui = hud.overlay.ui();
+
+    if let Some(hotbar) = hotbar.filter(|h| h.is_changed()) {
+        let slots: Vec<HotbarSlot> = hotbar
+            .0
+            .slots
+            .iter()
+            .map(|slot| HotbarSlot {
+                filled: slot.is_some(),
+                count: slot.map_or(String::new(), |s| s.count.to_string()).into(),
+            })
+            .collect();
+        ui.set_hotbar(ModelRc::new(VecModel::from(slots)));
+    }
 
     // The minimap exists in commander mode only.
     if ui.get_minimap_visible() != minimap_pixels.is_some() {

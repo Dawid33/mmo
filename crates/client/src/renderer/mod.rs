@@ -43,8 +43,6 @@ mod skybox;
 pub mod slint_composite;
 pub mod slint_overlay;
 pub use slint_composite::UiCamera;
-pub(crate) mod ui_bridge;
-pub(crate) mod ui_input;
 mod voxel_material;
 pub mod voxel_pull;
 pub mod world_map;
@@ -117,14 +115,12 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<boundaries::BoundaryUniform>()
         .init_resource::<fortress_view::FortressViewUniform>()
         .init_resource::<avatar::AvatarAssets>()
-        .init_resource::<ui_bridge::UiUpdates>()
-        .init_resource::<ui_bridge::UiWidgetMap>()
-        .init_resource::<ui_bridge::UiRoot>()
+        .init_resource::<slint_overlay::UiUpdates>()
+        .init_resource::<slint_overlay::Hotbar>()
         .insert_resource(collider_debug::DebugFlagsRes(self.debug_flags.clone()))
         .init_resource::<collider_debug::DebugColliderLines>()
         .init_resource::<grid_debug::GridDebug>()
         .init_resource::<cursor::CursorPolicy>()
-        .add_observer(ui_input::on_widget_click)
         .init_resource::<meshing::queue::ChunkGrid>()
         .init_resource::<meshing::queue::RemeshQueue>()
         .init_resource::<meshing::queue::MeshBudgets>()
@@ -156,7 +152,7 @@ impl Plugin for SimBridgePlugin {
                     bridge::apply_snapshot_voxels,
                     bridge::dedupe_ghosts,
                     bridge::enforce_single_active_camera,
-                    ui_bridge::drain_ui_updates,
+                    slint_overlay::drain_ui_updates,
                     cursor::apply_cursor_policy,
                 )
                     .chain(),
