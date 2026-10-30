@@ -327,7 +327,7 @@ pub fn prepare_chunk_quads(
         }
 
         let allocation = arena.ensure_allocation(main_entity.id(), quad_count);
-        let ends = face_ends(&extracted.records);
+        let ends = chunk_face_ends(&extracted.records, &extracted.world_from_local);
         arena.update_metadata(
             main_entity.id(),
             extracted.center,
@@ -438,6 +438,37 @@ pub fn prepare_chunk_quads(
     }
 }
 
+/// `records::face_ends` for a chunk drawn through `world_from_local`, with
+/// the "unsorted, never face-culled" flag (entry 6) set unless the transform
+/// keeps every local face direction on the same world direction (a positive
+/// diagonal upper 3×3: translation and per-axis scale — terrain and LOD).
+/// The cull shader skips a face direction's range by comparing the eye with
+/// the chunk's world AABB along that WORLD axis (`face_may_be_visible`), so
+/// for a rotated chunk — a falling voxel body's brick, whose local −Y faces
+/// may point up — it would drop faces that face the camera. Entry 7 (where
+/// the cutout range starts) is kept, so the cutout pass still draws.
+pub(crate) fn chunk_face_ends(records: &[super::super::meshing::records::QuadRecord], world_from_local: &Mat4) -> [u32; 8] {
+    let mut ends = face_ends(records);
+    if !keeps_face_axes(world_from_local) {
+        ends[6] = 1;
+    }
+    ends
+}
+
+/// Whether the upper 3×3 of `m` is diagonal (off-diagonal entries below a
+/// relative [`AXIS_ALIGNED_EPSILON`]) with positive entries.
+fn keeps_face_axes(m: &Mat4) -> bool {
+    let cols = [m.x_axis, m.y_axis, m.z_axis];
+    let scale = (0..3).map(|i| cols[i][i].abs()).fold(0.0f32, f32::max);
+    (0..3).all(|c| {
+        (0..3).all(|r| if r == c { cols[c][r] > 0.0 } else { cols[c][r].abs() <= AXIS_ALIGNED_EPSILON * scale })
+    })
+}
+
+/// Relative size of an off-diagonal transform entry still treated as zero
+/// by [`keeps_face_axes`] (float noise on an axis-aligned transform).
+const AXIS_ALIGNED_EPSILON: f32 = 1e-5;
+
 /// Encode one small uniform (`BoundaryUniform`, `FortressViewUniform`) into
 /// its buffer.
 fn write_uniform<T: ShaderType + encase::internal::WriteInto>(
@@ -496,6 +527,51 @@ mod tests {
         assert_eq!(metrics.hzb_visible_chunks, Some(7));
         assert_eq!(metrics.indirect_draw_count, Some(3));
         assert_eq!(metrics.direct_draw_count, Some(0));
+    }
+
+    /// Face-sorted records: one opaque quad per face direction, then one
+    /// cutout quad.
+    fn sorted_records() -> Vec<super::super::super::meshing::records::QuadRecord> {
+        use super::super::super::meshing::binary::{Face, Quad};
+        use super::super::super::meshing::records::quads_to_records;
+        let quad = |face, cutout| Quad { min: [1, 2, 3], w: 1, h: 1, face, block: game::BlockId(1), ao: [3; 4], cutout };
+        let mut quads: Vec<Quad> = [Face::PosX, Face::NegX, Face::PosY, Face::NegY, Face::PosZ, Face::NegZ]
+            .into_iter()
+            .map(|f| quad(f, false))
+            .collect();
+        quads.push(quad(Face::PosY, true));
+        quads_to_records(&quads, &Default::default())
+    }
+
+    #[test]
+    fn terrain_chunks_stay_face_culled() {
+        let records = sorted_records();
+        let want = face_ends(&records);
+        assert_eq!(want[6], 0, "sorted records are face-culled");
+        // Terrain: translation and uniform scale (LOD) only.
+        for m in [Mat4::IDENTITY, Mat4::from_translation(Vec3::new(1024.0, -16.0, 7.5)), Mat4::from_scale(Vec3::splat(4.0))] {
+            assert_eq!(chunk_face_ends(&records, &m), want, "{m:?}");
+        }
+    }
+
+    #[test]
+    fn rotated_chunks_are_never_face_culled() {
+        // A falling voxel body's brick: its local −Y faces may point up, so
+        // the cull shader's world-axis face test would drop them.
+        let records = sorted_records();
+        let cutout = face_ends(&records)[7];
+        for m in [
+            Mat4::from_rotation_z(2.5),
+            Mat4::from_rotation_x(0.01) * Mat4::from_translation(Vec3::splat(5.0)),
+            // A quarter turn permutes the face axes: still not world-aligned.
+            Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            // A mirror flips them.
+            Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)),
+        ] {
+            let ends = chunk_face_ends(&records, &m);
+            assert_ne!(ends[6], 0, "unsorted flag for {m:?}");
+            assert_eq!(ends[7], cutout, "the cutout range still starts after the opaque one");
+        }
     }
 
     #[test]
