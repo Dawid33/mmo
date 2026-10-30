@@ -70,9 +70,11 @@ impl Tree {
         wood.into_iter().filter(|p| p[1] == floor).collect()
     }
 
-    /// The trunk log at level `y` nearest the trunk axis.
+    /// The trunk log (limb 0) at level `y` nearest the trunk axis.
     fn trunk_at(&self, y: i32) -> Option<TilePos> {
-        self.of(TreePart::Log).filter(|p| p[1] == y).min_by_key(|p| (p[0] * p[0] + p[2] * p[2], *p))
+        self.of(TreePart::Log)
+            .filter(|p| p[1] == y && self.blocks[p].1.limb() == 0)
+            .min_by_key(|p| (p[0] * p[0] + p[2] * p[2], *p))
     }
 
     fn top_log(&self) -> i32 {
@@ -95,19 +97,85 @@ fn each_tree(mut check: impl FnMut(&Species, u64, u16, &Tree)) {
 }
 
 impl Tree {
-    /// Lowest wood level of each limb (lowest leaf level for a limb with no
-    /// wood).
-    fn limb_floors(&self) -> BTreeMap<u8, i32> {
-        let mut out: BTreeMap<u8, (bool, i32)> = BTreeMap::new();
-        for (p, (part, b)) in &self.blocks {
+    /// The limb pieces: per limb index ≥ 1, the 26-connected components of
+    /// its blocks, each with its root level (lowest wood, or lowest leaf for a
+    /// piece with no wood). Indices wrap, so one index may be several pieces.
+    fn limb_pieces(&self) -> Vec<(i32, BTreeSet<TilePos>)> {
+        let mut by_limb: BTreeMap<u8, BTreeSet<TilePos>> = BTreeMap::new();
+        for (p, (_, b)) in &self.blocks {
             if b.limb() != 0 {
-                let key = (*part == TreePart::Leaves, p[1]);
-                let f = out.entry(b.limb()).or_insert(key);
-                *f = (*f).min(key);
+                by_limb.entry(b.limb()).or_default().insert(*p);
             }
         }
-        out.into_iter().map(|(l, (_, y))| (l, y)).collect()
+        let mut out = Vec::new();
+        for (_, mut unseen) in by_limb {
+            while let Some(start) = unseen.pop_first() {
+                let piece = flood(start, |q| unseen.remove(&q));
+                let root = piece.iter().map(|p| (self.blocks[p].0 == TreePart::Leaves, p[1])).min().unwrap().1;
+                out.push((root, piece));
+            }
+        }
+        out
     }
+
+    /// Root level of the limb piece holding each limb block.
+    fn piece_roots(&self) -> BTreeMap<TilePos, i32> {
+        self.limb_pieces().into_iter().flat_map(|(root, piece)| piece.into_iter().map(move |p| (p, root))).collect()
+    }
+}
+
+/// 26-connected flood from `start`; `take(q)` claims a neighbour.
+fn flood(start: TilePos, mut take: impl FnMut(TilePos) -> bool) -> BTreeSet<TilePos> {
+    let mut seen = BTreeSet::from([start]);
+    let mut stack = vec![start];
+    while let Some(p) = stack.pop() {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let q = [p[0] + dx, p[1] + dy, p[2] + dz];
+                    if !seen.contains(&q) && take(q) {
+                        seen.insert(q);
+                        stack.push(q);
+                    }
+                }
+            }
+        }
+    }
+    seen
+}
+
+/// Blocks still standing after `f` that no longer join (26-connected,
+/// through any remaining block of the tree) the stump's lowest wood level.
+fn unsupported(tree: &Tree, f: &Felling) -> BTreeSet<TilePos> {
+    let down = felled(f);
+    let standing: BTreeSet<TilePos> =
+        tree.blocks.keys().copied().filter(|p| !down.contains(p) && !f.cut.contains(p)).collect();
+    let anchors: Vec<TilePos> = tree.anchors().into_iter().filter(|a| standing.contains(a)).collect();
+    let mut reached = BTreeSet::new();
+    for a in anchors {
+        if !reached.contains(&a) {
+            reached.extend(flood(a, |q| standing.contains(&q) && !reached.contains(&q)));
+        }
+    }
+    standing.into_iter().filter(|p| !reached.contains(p)).collect()
+}
+
+/// [`unsupported`] blocks above `y`.
+fn floating_above(tree: &Tree, f: &Felling, y: i32) -> usize {
+    unsupported(tree, f).iter().filter(|p| p[1] > y).count()
+}
+
+/// What the limb rule alone fells for a trunk cut at level `y`: limb-0
+/// blocks above it, and every limb piece (of the tree without the cut
+/// blocks) rooted at or above it.
+fn rule_falls(tree: &Tree, f: &Felling, y: i32) -> BTreeSet<TilePos> {
+    let left = Tree { blocks: tree.blocks.iter().filter(|(p, _)| !f.cut.contains(p)).map(|(p, v)| (*p, *v)).collect() };
+    let roots = left.piece_roots();
+    left.blocks
+        .iter()
+        .filter(|(p, (_, b))| if b.limb() == 0 { p[1] > y } else { roots[*p] >= y })
+        .map(|(p, _)| *p)
+        .collect()
 }
 
 /// Share of the blocks above `y` that `f` fells.
@@ -126,15 +194,16 @@ fn trunk_cut_at_a_third_fells_the_trunk_above_and_the_limbs_rooted_there() {
         let cut = tree.trunk_at(y).unwrap_or_else(|| panic!("{} {seed}/{age}: no log at {y}", sp.name));
         let f = fell(tree, cut).unwrap();
         let down = felled(&f);
-        let floors = tree.limb_floors();
-        for (p, (_, b)) in &tree.blocks {
-            let falls = match b.limb() {
-                0 => p[1] > y,
-                l => floors.get(&l).is_some_and(|&fl| fl >= y),
-            };
-            if !f.cut.contains(p) {
-                assert_eq!(down.contains(p), falls, "{} seed {seed} age {age}: {p:?} limb {}", sp.name, b.limb());
-            }
+        // The limb rule's falls (pieces taken with the cut removed) all fall;
+        // anything more is only what the rule leaves unsupported.
+        let rule = rule_falls(tree, &f, y);
+        for p in &rule {
+            assert!(down.contains(p), "{} seed {seed} age {age}: {p:?} must fall", sp.name);
+        }
+        let kept = Felling { cut: f.cut.clone(), falling: vec![rule.iter().copied().collect()] };
+        let unsupported = unsupported(tree, &kept);
+        for p in down.difference(&rule) {
+            assert!(unsupported.contains(p), "{} seed {seed} age {age}: {p:?} fell though supported", sp.name);
         }
         for a in tree.anchors() {
             assert!(!down.contains(&a) && !f.cut.contains(&a), "{} seed {seed} age {age}: anchor {a:?} must stand", sp.name);
@@ -157,7 +226,7 @@ fn trunk_cut_at_a_third_fells_the_trunk_above_and_the_limbs_rooted_there() {
 fn trunk_cut_below_every_limb_fells_what_is_above() {
     let mut worst = f64::INFINITY;
     each_tree(|sp, seed, age, tree| {
-        let y = tree.limb_floors().values().copied().min().unwrap_or(1).max(1);
+        let y = tree.limb_pieces().iter().map(|(root, _)| *root).min().unwrap_or(1).max(1);
         let Some(cut) = tree.trunk_at(y) else { return };
         let f = fell(tree, cut).unwrap();
         let share = share_above(tree, &f, y);
@@ -176,6 +245,7 @@ fn oak_branch_cut_fells_only_its_limb() {
         for age in AGES {
             let tree = Tree::new(oak, seed, age);
             let anchors = tree.anchors();
+            let pieces: Vec<_> = tree.limb_pieces().into_iter().map(|(_, p)| p).collect();
             for cut in tree.of(TreePart::Branch) {
                 let limb = tree.blocks[&cut].1.limb();
                 assert!(limb > 0, "seed {seed} age {age}: branch {cut:?} is on a limb");
@@ -183,6 +253,8 @@ fn oak_branch_cut_fells_only_its_limb() {
                 assert_eq!(f.cut, vec![cut], "a branch cut takes one block");
                 let down = felled(&f);
                 assert!(!down.is_empty(), "seed {seed} age {age}: branch cut {cut:?} fells nothing");
+                let piece = pieces.iter().find(|p| p.contains(&cut)).unwrap();
+                assert!(down.iter().all(|p| piece.contains(p)) && down.len() == piece.len() - 1, "the rest of the cut's piece");
                 for p in &down {
                     let (part, b) = tree.blocks[p];
                     assert_eq!(b.limb(), limb, "seed {seed} age {age}: {p:?} is not limb {limb}");
@@ -257,4 +329,51 @@ fn anchor_layer_cut_fells_everything() {
             }
         }
     });
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn trunk_cut_leaves_nothing_floating() {
+    let mut counts: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    each_tree(|sp, seed, age, tree| {
+        for y in 1..tree.top_log() {
+            let Some(cut) = tree.trunk_at(y) else { continue };
+            let f = fell(tree, cut).unwrap();
+            let floating = floating_above(tree, &f, y);
+            let c = counts.entry(sp.name).or_default();
+            c.0 += 1;
+            c.1 += floating;
+            assert_eq!(floating, 0, "{} seed {seed} age {age}: a cut at y {y} leaves {floating} blocks floating", sp.name);
+        }
+    });
+    println!("floating blocks after trunk cuts (cuts, blocks): {counts:?}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn pine_limb_cut_stays_within_its_piece() {
+    let pine = SPECIES.iter().find(|s| s.name == "pine").unwrap();
+    let mut cuts = 0;
+    for seed in SEEDS {
+        for age in AGES {
+            let tree = Tree::new(pine, seed, age);
+            let pieces: Vec<_> = tree.limb_pieces().into_iter().map(|(_, p)| p).collect();
+            let limb_wood: Vec<TilePos> = tree
+                .blocks
+                .iter()
+                .filter(|(_, (part, b))| *part != TreePart::Leaves && b.limb() != 0)
+                .map(|(p, _)| *p)
+                .collect();
+            for &cut in limb_wood.iter().step_by(3) {
+                let piece = pieces.iter().find(|p| p.contains(&cut)).unwrap();
+                let lo = |a: usize| piece.iter().map(|p| p[a]).min().unwrap() - 1;
+                let hi = |a: usize| piece.iter().map(|p| p[a]).max().unwrap() + 1;
+                for p in felled(&fell(&tree, cut).unwrap()) {
+                    assert!((0..3).all(|a| (lo(a)..=hi(a)).contains(&p[a])), "seed {seed} age {age}: cut {cut:?} felled {p:?} outside its piece");
+                }
+                cuts += 1;
+            }
+        }
+    }
+    assert!(cuts > 0);
 }

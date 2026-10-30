@@ -89,15 +89,21 @@ pub fn cut_blocks(src: &impl TileSource, cut: TilePos) -> Vec<TilePos> {
 }
 
 /// What chopping `cut` does, from the structure worldgen recorded in each
-/// block (`Block::limb`: 0 = the trunk, `L ≥ 1` = one limb with everything
+/// block (`Block::limb`: 0 = the trunk, `L ≥ 1` = a limb with everything
 /// growing on it). The tree is `cut`'s 26-connected same-id blocks (at most
-/// [`MAX_TREE_BLOCKS`]).
+/// [`MAX_TREE_BLOCKS`]); a limb piece is a 26-connected component of one limb
+/// index's blocks (indices wrap, so one index may name several limbs).
 /// - A trunk cut (a trunk log of limb 0) clears the [`cut_blocks`]
 ///   cross-section; the trunk above it falls (limb-0 blocks with a higher
-///   `y`) with every limb whose lowest wood (lowest leaf, for a limb with
-///   no wood) is at or above the cut. Limbs rooted below stay. Cutting the tree's lowest wood level fells it all.
+///   `y`) with every limb piece (taken with the cut blocks removed, so a limb
+///   crossing the cut layer splits there) whose lowest wood (lowest leaf, for
+///   a piece with no wood) is at or above the cut. Pieces rooted below stay,
+///   unless what is left of the tree no longer joins them (26-connected,
+///   through any of its blocks) to its standing lowest-level wood: those fall
+///   too, so nothing floats. Cutting
+///   the tree's lowest wood level fells it all.
 /// - A cut on a block of limb `L ≥ 1` clears that block and fells the rest
-///   of limb `L`, wood and leaves.
+///   of its limb piece, wood and leaves.
 ///
 /// Everything falls as one piece. `None` when `cut` is not tree wood or the
 /// tree overflows the bound; a limb-0 block that is not trunk wood is cut
@@ -123,42 +129,86 @@ pub fn fell(src: &impl TileSource, cut: TilePos) -> Option<Felling> {
     }
     let limb = src.tree_limb(cut);
     let is_trunk_cut = limb == 0 && block_props().is_trunk(src.block(cut));
-    let wood = |p: &TilePos| block_props().is_solid(src.block(*p));
+    let limbs: BTreeMap<TilePos, u8> = blocks.iter().map(|&p| (p, src.tree_limb(p))).collect();
     let falls: Vec<TilePos> = if is_trunk_cut {
+        let wood = |p: &TilePos| block_props().is_solid(src.block(*p));
         let floor = blocks.iter().filter(|p| wood(p)).map(|p| p[1]).min().expect("the cut is wood");
-        // Lowest wood level of each limb; a limb with no wood (all of it
-        // thinner than the rasteriser's wood) by its lowest leaf.
-        let mut limb_floor: BTreeMap<u8, (bool, i32)> = BTreeMap::new();
-        for p in &blocks {
-            let l = src.tree_limb(*p);
-            if l != 0 {
-                let key = (!wood(p), p[1]);
-                let f = limb_floor.entry(l).or_insert(key);
-                *f = (*f).min(key);
+        let y = cut[1];
+        let mut falls: Vec<TilePos> = if y == floor {
+            blocks.iter().copied().collect()
+        } else {
+            let mut v: Vec<TilePos> = limbs.iter().filter(|&(p, &l)| l == 0 && p[1] > y).map(|(p, _)| *p).collect();
+            // Pieces of what is left once the cut is out: a limb rooted below
+            // the cut whose wood crosses the cut layer splits there.
+            let mut left = limbs.clone();
+            left.retain(|p, _| !cuts.contains(p));
+            for piece in limb_components(&left) {
+                // Lowest wood, or lowest leaf for a piece with no wood.
+                let root = piece.iter().map(|p| (!wood(p), p[1])).min().expect("non-empty").1;
+                if root >= y {
+                    v.extend(piece);
+                }
+            }
+            v
+        };
+        falls.retain(|p| !cuts.contains(p));
+        // Support: whatever is left that no longer joins (26-connected,
+        // through any standing block of the tree) the standing wood of the
+        // lowest level falls too, so nothing is left floating.
+        let gone: BTreeSet<TilePos> = falls.iter().chain(&cuts).copied().collect();
+        let standing: BTreeSet<TilePos> = blocks.iter().copied().filter(|p| !gone.contains(p)).collect();
+        let mut held: BTreeSet<TilePos> = standing.iter().copied().filter(|p| p[1] == floor && wood(p)).collect();
+        let mut stack: Vec<TilePos> = held.iter().copied().collect();
+        while let Some(p) = stack.pop() {
+            for q in neighbours(p) {
+                if standing.contains(&q) && held.insert(q) {
+                    stack.push(q);
+                }
             }
         }
-        let y = cut[1];
-        blocks
-            .iter()
-            .copied()
-            .filter(|p| !cuts.contains(p))
-            .filter(|&p| {
-                if y == floor {
-                    return true;
-                }
-                match src.tree_limb(p) {
-                    0 => p[1] > y,
-                    l => limb_floor.get(&l).is_some_and(|&(_, f)| f >= y),
-                }
-            })
-            .collect()
+        falls.extend(standing.into_iter().filter(|p| !held.contains(p)));
+        falls.sort_unstable();
+        falls
     } else if limb != 0 {
-        blocks.iter().copied().filter(|&p| p != cut && src.tree_limb(p) == limb).collect()
+        let piece = limb_components(&limbs).into_iter().find(|c| c.contains(&cut)).expect("the cut is in a piece");
+        piece.into_iter().filter(|&p| p != cut).collect()
     } else {
         Vec::new()
     };
     let falling = if falls.is_empty() { Vec::new() } else { vec![falls] };
     Some(Felling { cut: cuts, falling })
+}
+
+/// The limb pieces of a tree: for each limb index `L ≥ 1`, the 26-connected
+/// components of its blocks (connected only through blocks of `L`), each
+/// sorted, in order of (limb, first block). Limb indices wrap
+/// (`MAX_TREE_LIMB`), so one index can name several far-apart limbs: the
+/// component, not the index, is what hangs together.
+fn limb_components(limbs: &BTreeMap<TilePos, u8>) -> Vec<Vec<TilePos>> {
+    let mut by_limb: BTreeMap<u8, BTreeSet<TilePos>> = BTreeMap::new();
+    for (&p, &l) in limbs {
+        if l != 0 {
+            by_limb.entry(l).or_default().insert(p);
+        }
+    }
+    let mut out = Vec::new();
+    for (_, mut unseen) in by_limb {
+        while let Some(start) = unseen.pop_first() {
+            let mut piece = vec![start];
+            let mut stack = vec![start];
+            while let Some(p) = stack.pop() {
+                for q in neighbours(p) {
+                    if unseen.remove(&q) {
+                        piece.push(q);
+                        stack.push(q);
+                    }
+                }
+            }
+            piece.sort_unstable();
+            out.push(piece);
+        }
+    }
+    out
 }
 
 /// The pieces that fall when `cut` is chopped ([`fell`]); empty when none do
