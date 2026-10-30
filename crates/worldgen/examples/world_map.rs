@@ -13,7 +13,7 @@
 //! linearly onto 0..=65535). +x is right, +z is down; one pixel is
 //! `span / size` meters, point-sampled at its center.
 //!
-//! `--layer rain|temperature|moisture|salinity` also writes `<out>-<layer>.png`
+//! `--layer rain|temperature|moisture|salinity|trees` also writes `<out>-<layer>.png`
 //! (greyscale ramp over the layer's fixed range, `worldgen::habitat`).
 //!
 //! Heights come straight from `TerrainPipeline::column` (the exact field, not
@@ -85,6 +85,8 @@ enum Layer {
     Temperature,
     Moisture,
     Salinity,
+    /// Tree count per pixel from `worldgen::trees::trees_in` (not a habitat field).
+    Trees,
 }
 
 impl Layer {
@@ -94,7 +96,8 @@ impl Layer {
             "temperature" => Layer::Temperature,
             "moisture" => Layer::Moisture,
             "salinity" => Layer::Salinity,
-            other => panic!("unknown --layer {other}; one of rain, temperature, moisture, salinity"),
+            "trees" => Layer::Trees,
+            other => panic!("unknown --layer {other}; one of rain, temperature, moisture, salinity, trees"),
         }
     }
 
@@ -104,6 +107,7 @@ impl Layer {
             Layer::Temperature => "temperature",
             Layer::Moisture => "moisture",
             Layer::Salinity => "salinity",
+            Layer::Trees => "trees",
         }
     }
 
@@ -114,6 +118,7 @@ impl Layer {
             Layer::Temperature => (h.temperature_c, -10.0, 20.0),
             Layer::Moisture => (h.moisture, 0.0, 3.0),
             Layer::Salinity => (h.salinity, 0.0, 1.0),
+            Layer::Trees => unreachable!("the trees layer is drawn by write_trees"),
         }
     }
 }
@@ -316,6 +321,9 @@ fn write_layer(a: &Args, layer: Layer, heights: &[f32]) -> ImageBuffer<Luma<u8>,
         Some(world) => world,
         None => &procedural,
     };
+    if matches!(layer, Layer::Trees) {
+        return write_trees(a, source, heights);
+    }
     let n = a.size;
     let step = a.span_m / n as f64;
     let (x0, z0) = (a.center.0 - a.span_m * 0.5, a.center.1 - a.span_m * 0.5);
@@ -338,5 +346,37 @@ fn write_layer(a: &Args, layer: Layer, heights: &[f32]) -> ImageBuffer<Luma<u8>,
             });
         }
     });
+    ImageBuffer::from_raw(n as u32, n as u32, pixels).expect("pixel buffer matches the image size")
+}
+
+/// Trees per pixel (white at `TREES_PER_PIXEL_FULL`), placed exactly as the
+/// generator will: `trees_in` over the map window, surface from the map's own
+/// heights (lakes are not modelled here; open sea columns count as water).
+fn write_trees(a: &Args, source: &(dyn HabitatSource + Sync), heights: &[f32]) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    const TREES_PER_PIXEL_FULL: f64 = 4.0;
+    let n = a.size;
+    let step = a.span_m / n as f64;
+    let (x0, z0) = (a.center.0 - a.span_m * 0.5, a.center.1 - a.span_m * 0.5);
+    let pixel = |v: i32, origin: f64| (((v as f64 + 0.5 - origin) / step).floor().clamp(0.0, n as f64 - 1.0)) as usize;
+    let surface = |x: i32, z: i32| {
+        let block = surface_block(heights[pixel(z, z0) * n + pixel(x, x0)] as f64);
+        (block >= SEA_TOP_BLOCK).then_some(block)
+    };
+    let trees = worldgen::trees::trees_in(
+        x0.floor() as i32,
+        z0.floor() as i32,
+        (x0 + a.span_m).ceil() as i32,
+        (z0 + a.span_m).ceil() as i32,
+        a.seed,
+        source,
+        &surface,
+    );
+    let mut counts = vec![0u32; n * n];
+    for t in &trees {
+        let (c, r) = (pixel(t.base[0], x0), pixel(t.base[2], z0));
+        counts[r * n + c] += 1;
+    }
+    println!("{} trees", trees.len());
+    let pixels = counts.iter().map(|&c| ((c as f64 / TREES_PER_PIXEL_FULL).min(1.0) * 255.0) as u8).collect();
     ImageBuffer::from_raw(n as u32, n as u32, pixels).expect("pixel buffer matches the image size")
 }
