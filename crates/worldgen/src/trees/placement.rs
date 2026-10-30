@@ -41,7 +41,8 @@ pub struct TreeSeed {
     pub id: u32,
 }
 
-fn hash64(seed: u64, a: u64, b: u64) -> u64 {
+/// Splitmix-style mix of `(seed, a, b)`; also seeds tree shapes (`skeleton.rs`).
+pub(super) fn hash64(seed: u64, a: u64, b: u64) -> u64 {
     let mut z = seed ^ a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);

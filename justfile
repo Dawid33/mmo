@@ -436,6 +436,13 @@ world-map *args:
 cross-section *args:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} run --release -p worldgen --example cross_section -- {{args}}
 
+# Front / side / top orthographic PNGs of one generated tree (one pixel per
+# voxel, coloured by part) into target/tree-view/. Flags: --species
+# oak|pine|birch --seed N --age N (0..=100) --out <path stem> --scale N; --grid
+# writes a 3×3 sheet of front views of seeds N..N+8 instead.
+tree-view *args:
+    {{cap}} {{cargo}} run --release -p worldgen --example tree_view -- {{args}}
+
 # Feature census of Blockbench/Bedrock model files (.bbmodel, .geo.json,
 # .animation.json): which format features each file uses, so a model loader
 # knows what it must handle. Defaults to the local test corpus in
