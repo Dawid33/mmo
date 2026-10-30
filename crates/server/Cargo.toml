@@ -14,17 +14,13 @@ path = "src/main.rs"
 [dependencies]
 game = { workspace = true }
 worldgen = { workspace = true }
-slotmapd = { workspace = true }
 crossbeam = { workspace = true }
 simplelog = { workspace = true }
 log = { workspace = true }
-bincode = { workspace = true }
-crc32fast = { workspace = true }
 quinn = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 rcgen = { workspace = true }
 dashmap = { workspace = true }
-papaya = { workspace = true }
 wtransport = { workspace = true }
 pyroscope = { workspace = true, optional = true }
 pyroscope_pprofrs = { workspace = true, optional = true }

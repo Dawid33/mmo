@@ -522,7 +522,6 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "image",
- "log",
  "serde",
  "serde_json",
 ]
@@ -2266,7 +2265,6 @@ dependencies = [
  "bbmodel",
  "bevy",
  "bevy_egui",
- "bincode 1.3.3",
  "block-mesh",
  "bytemuck",
  "console_error_panic_hook",
@@ -3381,41 +3379,29 @@ dependencies = [
 name = "game"
 version = "0.1.0"
 dependencies = [
- "arrayvec",
  "assert-json-diff",
  "bincode 1.3.3",
  "block-mesh",
  "borrow",
- "bytemuck",
  "crc32fast",
  "crossbeam",
  "derive_more",
- "either",
- "ena",
- "foldhash 0.2.0",
  "glamx",
  "grid",
- "hashbrown 0.16.1",
  "libm",
  "log",
  "lz4_flex",
  "macros",
  "num-traits",
- "obj",
  "oorandom",
- "ordermap",
  "parry3d",
  "rapier3d",
  "ron",
  "serde",
  "serde_json",
- "slab",
  "slotmapd",
- "spade",
  "state-hash",
- "vec_map",
  "wasm-bindgen-test",
- "web-time",
 ]
 
 [[package]]
@@ -5043,13 +5029,6 @@ checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 name = "macros"
 version = "0.1.0"
 dependencies = [
- "assert-json-diff",
- "bincode 1.3.3",
- "borrow",
- "crc32fast",
- "crossbeam",
- "derive_more",
- "log",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -6009,17 +5988,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ordermap"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed637741ced8fb240855d22a2b4f208dab7a06bcce73380162e5253000c16758"
-dependencies = [
- "indexmap",
- "serde",
- "serde_core",
-]
-
-[[package]]
 name = "os_pipe"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6036,16 +6004,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
-]
-
-[[package]]
-name = "papaya"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f92dd0b07c53a0a0c764db2ace8c541dc47320dad97c2200c2a637ab9dd2328f"
-dependencies = [
- "equivalent",
- "seize",
 ]
 
 [[package]]
@@ -6827,18 +6785,6 @@ dependencies = [
 
 [[package]]
 name = "rcgen"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
-dependencies = [
- "ring",
- "rustls-pki-types",
- "time",
- "yasna 0.5.2",
-]
-
-[[package]]
-name = "rcgen"
 version = "0.14.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57f6d249aad744e274e682777a50283a225a32705394ee6d5fcc01efa25e4055"
@@ -6847,7 +6793,7 @@ dependencies = [
  "rustls-pki-types",
  "time",
  "x509-parser",
- "yasna 0.6.0",
+ "yasna",
 ]
 
 [[package]]
@@ -7331,16 +7277,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "seize"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4b8d813387d566f627f3ea1b914c068aac94c40ae27ec43f5f33bde65abefe7"
-dependencies = [
- "libc",
- "windows-sys 0.52.0",
-]
-
-[[package]]
 name = "self_cell"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7457,18 +7393,15 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "bincode 1.3.3",
- "crc32fast",
  "crossbeam",
  "dashmap",
  "game",
  "log",
- "papaya",
  "pyroscope",
  "pyroscope_pprofrs",
  "quinn",
- "rcgen 0.13.2",
+ "rcgen",
  "simplelog",
- "slotmapd",
  "tokio",
  "worldgen",
  "wtransport",
@@ -8780,12 +8713,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vec_map"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1bddf1187be692e79c5ffeab891132dfb0f236ed36a43c7ed39f1165ee20191"
-
-[[package]]
 name = "vello_common"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10073,7 +10000,7 @@ dependencies = [
  "bytes",
  "pem",
  "quinn",
- "rcgen 0.14.8",
+ "rcgen",
  "rustls",
  "rustls-native-certs",
  "rustls-pki-types",
@@ -10207,15 +10134,6 @@ name = "xmlwriter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
-
-[[package]]
-name = "yasna"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
-dependencies = [
- "time",
-]
 
 [[package]]
 name = "yasna"

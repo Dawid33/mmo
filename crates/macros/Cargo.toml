@@ -6,14 +6,7 @@ edition = "2024"
 [dependencies]
 syn = { workspace = true }
 quote = { workspace = true }
-derive_more = { workspace = true }
 proc-macro2 = { workspace = true }
-borrow = { workspace = true }
-bincode = { workspace = true }
-crc32fast = { workspace = true }
-crossbeam = { workspace = true }
-log = { workspace = true }
-assert-json-diff = { workspace = true }
 
 [lib]
 proc-macro = true
