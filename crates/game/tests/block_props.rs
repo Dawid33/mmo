@@ -1,9 +1,9 @@
 //! Block properties: the manifest's tree blocks, and non-solid blocks
 //! (leaves) having no colliders, being walked through, yet breakable.
 use game::{
-    collider_cells, install_block_props, Block, BlockId, BlockRegistry, Chunk, ChunkCoords,
-    GameEventKind, InputEvent, Key, MouseButton, Pose, Region, RegionCoords, BLOCK_VOXELS,
-    CHUNK_UNITS,
+    collider_cells, install_block_props, Block, BlockId, BlockIndex, BlockRegistry, ChiselData, Chunk,
+    ChunkCoords, ColliderScale, GameEventKind, InputEvent, Key, MouseButton, Pose, Region, RegionCoords,
+    Rollback, BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_UNITS, HALF_BLOCK_VOXELS, HALF_CELL_FILL_MIN,
 };
 
 const MANIFEST: &str = include_str!("../../../assets/blocks/blocks.ron");
@@ -58,6 +58,117 @@ fn leaf_blocks_get_no_collider_cells() {
     assert_eq!(cells.blocks.len(), 1);
     assert!(cells.halves.is_empty() && cells.voxels.is_empty());
     assert_eq!(cells.blocks[0].to_array(), [3, 1, 1]);
+}
+
+/// A chisel of `id` whose octant (0, 0, 0) holds `HALF_CELL_FILL_MIN - 1`
+/// solid voxels, octant (1, 0, 0) exactly `HALF_CELL_FILL_MIN`, octant
+/// (0, 1, 0) all 512, the rest none.
+fn threshold_chisel(id: BlockId) -> ChiselData {
+    let h = HALF_BLOCK_VOXELS;
+    ChiselData::from_fn(vec![id], |x, y, z| {
+        // Rank of the voxel inside its octant, filled x, then z, then y.
+        let (o, rank) = ((x / h, y / h, z / h), (x % h + h * (z % h + h * (y % h))) as u32);
+        let fill = match o {
+            (0, 0, 0) => HALF_CELL_FILL_MIN - 1,
+            (1, 0, 0) => HALF_CELL_FILL_MIN,
+            (0, 1, 0) => (h * h * h) as u32,
+            _ => 0,
+        };
+        (rank < fill).then_some(0)
+    })
+}
+
+#[test]
+fn chiseled_wood_collides_on_the_half_grid() {
+    let reg = registry();
+    let props = reg.props();
+    for sp in ["oak", "pine", "birch"] {
+        for part in ["log", "branch"] {
+            assert_eq!(props.collider_scale(reg.id_of(&format!("{sp}_{part}")).unwrap()), ColliderScale::Half);
+        }
+        assert_eq!(props.collider_scale(reg.id_of(&format!("{sp}_leaves")).unwrap()), ColliderScale::Voxel);
+    }
+    assert_eq!(props.collider_scale(reg.id_of("stone").unwrap()), ColliderScale::Voxel);
+
+    let log = reg.id_of("oak_log").unwrap();
+    let mut chunk = Chunk::default();
+    chunk.set_block(3, 1, 2, Block::new(log));
+    chunk.chisel.insert(BlockIndex::from_xyz(3, 1, 2), threshold_chisel(log));
+    let cells = collider_cells(&chunk);
+    let halves: Vec<_> = cells.halves.iter().map(|v| v.to_array()).collect();
+    // 127 voxels: open; 128 and 512: one half cell each; no voxel cells.
+    assert_eq!(halves, vec![[7, 2, 4], [6, 3, 4]]);
+    assert!(cells.blocks.is_empty() && cells.voxels.is_empty());
+
+    // Unchanged for other chisel: the same shape in stone keeps its voxels.
+    let stone = reg.id_of("stone").unwrap();
+    let mut chunk = Chunk::default();
+    chunk.set_block(3, 1, 2, Block::new(stone));
+    chunk.chisel.insert(BlockIndex::from_xyz(3, 1, 2), threshold_chisel(stone));
+    let cells = collider_cells(&chunk);
+    assert_eq!(cells.halves.iter().map(|v| v.to_array()).collect::<Vec<_>>(), vec![[6, 3, 4]]);
+    assert_eq!(cells.voxels.len(), 2 * HALF_CELL_FILL_MIN as usize - 1);
+}
+
+/// `StateHash` of each enabled collider shape on chunk `e`'s body, in order,
+/// with its pose relative to the body.
+fn collider_shapes(r: &Rollback, e: game::EntityKey) -> Vec<(u32, Option<Pose>)> {
+    use game::StateHash;
+    let body = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap();
+    body.colliders()
+        .iter()
+        .map(|&ch| r.physics.colliders.get(ch).unwrap())
+        .filter(|c| c.is_enabled())
+        .map(|c| {
+            let mut h = game::StateHasher::new();
+            c.shared_shape().state_hash(&mut h);
+            (h.finalize(), c.position_wrt_parent().copied())
+        })
+        .collect()
+}
+
+/// Block edits next to and of chiseled wood patch the colliders to exactly
+/// what genesis (`create_mesh`) builds for the same chunk.
+#[test]
+fn incremental_edits_of_chiseled_wood_match_genesis() {
+    let reg = registry();
+    let (log, stone) = (reg.id_of("pine_log").unwrap(), reg.id_of("stone").unwrap());
+    let target = ChunkCoords::new(1, 0, 1);
+    let mut start = Chunk::flat_floor(BLOCK_VOXELS as u32);
+    for (x, z) in [(4, 4), (5, 4), (4, 5), (9, 9)] {
+        start.set_block(x, 1, z, Block::new(log));
+        start.chisel.insert(BlockIndex::from_xyz(x, 1, z), threshold_chisel(log));
+    }
+    let mut r = Rollback::new(None);
+    let mut chunks = Vec::new();
+    for x in 0..=2 {
+        for z in 0..=2 {
+            let c = ChunkCoords::new(x, 0, z);
+            chunks.push((c, if c == target { start.clone() } else { Chunk::flat_floor(BLOCK_VOXELS as u32) }));
+        }
+    }
+    r.seed_terrain_genesis(chunks);
+    let e = r.chunk_key_at(target).unwrap();
+    let genesis = |r: &Rollback| {
+        let mut fresh = Rollback::new(None);
+        fresh.new_transaction();
+        let fe = fresh.create_mesh(target, r.ecs.chunk.get(e).clone());
+        collider_shapes(&fresh, fe)
+    };
+    assert_eq!(collider_shapes(&r, e), genesis(&r), "seeded");
+    let cb = CHUNK_BLOCKS as i32;
+    let world = |x: i32, y: i32, z: i32| [cb + x, y, cb + z];
+    r.new_transaction();
+    for (p, block) in [
+        (world(6, 1, 4), Block::new(stone)), // beside the wood
+        (world(5, 1, 4), Block::new(BlockId::AIR)), // breaks a chiseled log
+        (world(4, 2, 4), Block::new(log)), // a whole log on top
+        (world(4, 1, 4), Block::new(BlockId::AIR)),
+    ] {
+        assert!(r.set_block_safe(p, block), "{p:?}");
+        assert_eq!(collider_shapes(&r, e), genesis(&r), "after {p:?} -> {block:?}");
+    }
+    assert!(collider_cells(r.ecs.chunk.get(e)).voxels.is_empty(), "wood left no voxel cells");
 }
 
 fn ev(r: &mut Region, e: GameEventKind) {

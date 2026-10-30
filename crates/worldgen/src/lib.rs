@@ -49,7 +49,7 @@ const SCAN_BOTTOM: i32 = -64;
 const PATCH_MARGIN: i32 = PROFILE_LATTICE_BLOCKS as i32;
 /// How far (blocks) a tree's blocks reach past its base column: the widest
 /// crown plus the one block of leaf dither past it (`trees::raster`).
-const TREE_REACH_BLOCKS: i32 = trees::MAX_CROWN_RADIUS_BLOCKS + 1;
+const TREE_REACH_BLOCKS: i32 = trees::MAX_CROWN_RADIUS_BLOCKS + trees::LEAF_REACH_PAST_CROWN_BLOCKS;
 /// Surfaces (blocks) a tree query reads past its window: the trees whose
 /// crowns reach in, and their placement neighbours — a candidate sits
 /// anywhere in its lattice cell, one cell out from a query cell that may

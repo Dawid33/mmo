@@ -398,7 +398,9 @@ pub fn collider_cells_of_block(chunk: &Chunk, i: BlockIndex) -> ColliderCells {
 
 /// Appends block `bi`'s cells to `out`: one block key for a solid block,
 /// half keys for a partial chisel's solid octants and voxel keys for its
-/// other solid voxels, or nothing for air.
+/// other solid voxels, or nothing for air. A `ColliderScale::Half` block
+/// (tree wood) has no voxel keys: an octant is one half key when at least
+/// `HALF_CELL_FILL_MIN` of its voxels are solid, else open.
 fn push_block_cells(out: &mut ColliderCells, bi: BlockIndex, block: Block, chisel: Option<&ChiselData>) {
     let h = HALF_BLOCK_VOXELS;
     let (bx, by, bz) = bi.xyz();
@@ -415,6 +417,7 @@ fn push_block_cells(out: &mut ColliderCells, bi: BlockIndex, block: Block, chise
         out.blocks.push(IVector::new(bx as i32, by as i32, bz as i32));
         return;
     }
+    let half_grid = props.collider_scale(block.id) == crate::ColliderScale::Half;
     for (ox, oy, oz) in (0..8).map(|o| (o % 2, (o / 2) % 2, o / 4)) {
         let (x0, y0, z0) = (ox * h, oy * h, oz * h);
         let octant = |f: &mut dyn FnMut(usize, usize, usize)| {
@@ -426,15 +429,19 @@ fn push_block_cells(out: &mut ColliderCells, bi: BlockIndex, block: Block, chise
                 }
             }
         };
-        let mut full = true;
-        octant(&mut |x, y, z| full &= solid[local_index(x, y, z)]);
-        if full {
+        let mut filled = 0u32;
+        octant(&mut |x, y, z| filled += solid[local_index(x, y, z)] as u32);
+        let cell_min = if half_grid { crate::HALF_CELL_FILL_MIN } else { (h * h * h) as u32 };
+        if filled >= cell_min {
             out.halves.push(IVector::new(
                 (bx * 2 + ox) as i32,
                 (by * 2 + oy) as i32,
                 (bz * 2 + oz) as i32,
             ));
             continue;
+        }
+        if half_grid {
+            continue; // an octant under the threshold is open
         }
         octant(&mut |x, y, z| {
             if solid[local_index(x, y, z)] {

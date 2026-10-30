@@ -18,6 +18,10 @@ pub const MAX_CROWN_RADIUS_BLOCKS: i32 = 8;
 /// Tallest tree over all species (checked against the table in a test).
 pub const MAX_TREE_HEIGHT_BLOCKS: i32 = 24;
 
+/// Blocks a tree's leaves may reach past its crown radius (raster's leaf
+/// dither); the seam rule keeps those inside the region too.
+pub const LEAF_REACH_PAST_CROWN_BLOCKS: i32 = 1;
+
 const SALT_X: u64 = 1;
 const SALT_Z: u64 = 2;
 const SALT_EXISTS: u64 = 3;
@@ -99,8 +103,9 @@ fn candidate(
         pick -= p;
     }
     let species = chosen?;
-    let radius = SPECIES[species as usize].crown_radius_blocks;
     // A crown must not cross a region seam: regions generate independently.
+    // Leaf dither reaches one block past the crown radius (`raster.rs`).
+    let radius = SPECIES[species as usize].crown_radius_blocks + LEAF_REACH_PAST_CROWN_BLOCKS;
     let (rx, rz) = (x.rem_euclid(REGION_BLOCKS), z.rem_euclid(REGION_BLOCKS));
     if rx - radius < 0 || rx + radius >= REGION_BLOCKS || rz - radius < 0 || rz + radius >= REGION_BLOCKS {
         return None;
@@ -254,7 +259,7 @@ mod tests {
         let t = trees_in(-REGION_BLOCKS, -REGION_BLOCKS, 2 * REGION_BLOCKS, 2 * REGION_BLOCKS, 9, &Stub(GOOD), &land);
         assert!(!t.is_empty());
         for tr in t {
-            let r = SPECIES[tr.species as usize].crown_radius_blocks;
+            let r = SPECIES[tr.species as usize].crown_radius_blocks + LEAF_REACH_PAST_CROWN_BLOCKS;
             for c in [tr.base[0], tr.base[2]] {
                 assert_eq!((c - r).div_euclid(REGION_BLOCKS), c.div_euclid(REGION_BLOCKS));
                 assert_eq!((c + r).div_euclid(REGION_BLOCKS), c.div_euclid(REGION_BLOCKS));

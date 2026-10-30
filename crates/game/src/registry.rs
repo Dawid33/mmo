@@ -39,6 +39,9 @@ pub struct BlockDef {
     /// How the block is drawn. Default opaque.
     #[serde(default)]
     pub render: crate::RenderMode,
+    /// The grid a chiseled block collides on. Default voxel.
+    #[serde(default)]
+    pub collider: crate::ColliderScale,
 }
 
 fn default_solid() -> bool {
@@ -121,6 +124,9 @@ impl BlockRegistry {
             }
             if def.render == crate::RenderMode::Cutout {
                 p.cutout.insert(id.0);
+            }
+            if def.collider == crate::ColliderScale::Half {
+                p.half_collider.insert(id.0);
             }
         }
         p

@@ -134,6 +134,8 @@ fn window_independent_generation() {
     let (rc, seed, m) = (forest(), worldgen::WORLD_SEED, mats());
     let half = REGION_CHUNKS / 2;
     let whole = worldgen::generate_columns(rc, 0..REGION_CHUNKS, 0..REGION_CHUNKS, seed, m);
+    let trees = trees_by_id(&blocks(rc, &whole));
+    let mut straddling = 0;
     for (xs, zs) in [(0..half, 0..REGION_CHUNKS), (0..REGION_CHUNKS, half..REGION_CHUNKS), (half..half + 1, 1..2)] {
         for (cc, col) in worldgen::generate_columns(rc, xs.clone(), zs.clone(), seed, m) {
             let want = &whole.iter().find(|(c, _)| *c == cc).unwrap().1;
@@ -142,14 +144,16 @@ fn window_independent_generation() {
                 "column {cc:?} differs in window {xs:?} x {zs:?}"
             );
         }
+        // Trees with blocks both inside and outside this window.
+        let inside = |p: &[i32; 3]| {
+            let (cx, cz) = ((p[0] - rc.x * RB) / CB, (p[2] - rc.z * RB) / CB);
+            xs.contains(&(cx as usize)) && zs.contains(&(cz as usize))
+        };
+        straddling += trees.values().filter(|t| t.keys().any(inside) && !t.keys().all(inside)).count();
     }
-    // Some tree straddles the split, so a window really did place a tree whose
-    // base is outside it.
-    let split = rc.x * RB + half as i32 * CB;
-    let straddles = trees_by_id(&blocks(rc, &whole))
-        .values()
-        .any(|t| t.keys().any(|p| p[0] < split) && t.keys().any(|p| p[0] >= split));
-    assert!(straddles, "no tree crosses the half-window split");
+    // So some window really did place a tree from outside it, or clip one of
+    // its own at the edge.
+    assert!(straddling > 0, "no tree crosses a window edge");
 }
 
 /// All blocks of one tree id are one 26-connected set standing on the ground

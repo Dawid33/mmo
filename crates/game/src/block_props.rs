@@ -19,12 +19,28 @@ pub enum RenderMode {
     Cutout,
 }
 
+/// Which grid a chiseled block's partial voxels collide on. `Voxel` (the
+/// default) keeps every solid voxel; `Half` (tree wood) rounds each 8³
+/// octant to one half-block cell, solid when at least `HALF_CELL_FILL_MIN`
+/// of its voxels are — far fewer collider cells for a rounder shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ColliderScale {
+    #[default]
+    Voxel,
+    Half,
+}
+
+/// Solid voxels (of an octant's 512) that make a `ColliderScale::Half`
+/// block's octant one solid half-block cell.
+pub const HALF_CELL_FILL_MIN: u32 = 128;
+
 /// The non-default properties of the registry's blocks (sets keep it small
 /// and comparable: two equal manifests give equal props).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BlockProps {
     pub(crate) non_solid: BTreeSet<u16>,
     pub(crate) cutout: BTreeSet<u16>,
+    pub(crate) half_collider: BTreeSet<u16>,
 }
 
 impl BlockProps {
@@ -37,6 +53,11 @@ impl BlockProps {
     /// Whether the block renders with alpha-tested (cutout) texels.
     pub fn is_cutout(&self, id: BlockId) -> bool {
         self.cutout.contains(&id.0)
+    }
+
+    /// The grid the block's chisel collides on.
+    pub fn collider_scale(&self, id: BlockId) -> ColliderScale {
+        if self.half_collider.contains(&id.0) { ColliderScale::Half } else { ColliderScale::Voxel }
     }
 }
 
@@ -51,6 +72,6 @@ pub fn install_block_props(p: BlockProps) {
 
 /// The installed props, or the all-solid, all-opaque default when none were.
 pub fn block_props() -> &'static BlockProps {
-    static DEFAULT: BlockProps = BlockProps { non_solid: BTreeSet::new(), cutout: BTreeSet::new() };
+    static DEFAULT: BlockProps = BlockProps { non_solid: BTreeSet::new(), cutout: BTreeSet::new(), half_collider: BTreeSet::new() };
     PROPS.get().unwrap_or(&DEFAULT)
 }
