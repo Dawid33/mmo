@@ -9,6 +9,7 @@ mod density;
 pub mod cache;
 pub mod forge;
 pub mod forged;
+pub mod habitat;
 pub mod islands;
 pub mod pipeline;
 pub mod material;

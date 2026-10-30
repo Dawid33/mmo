@@ -71,6 +71,8 @@ pub fn synthetic() -> WorldArtifact {
         lake_level,
         uplifted: vec![0.0; N * N],
         bedding: vec![0.0; N * N],
+        rain: vec![1.0; N * N],
+        coast_dist_m: vec![0.0; N * N],
         column: vec![(-5.0, SANDSTONE), (-25.0, SHALE)],
         rock_names: worldgen::forge::geology::ROCKS.iter().map(|r| r.name.to_string()).collect(),
         rivers: vec![RiverReach { order: 1, discharge_m2: 2.0e6, width_m: RIVER_WIDTH_M, points }],

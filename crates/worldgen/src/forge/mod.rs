@@ -76,6 +76,8 @@ impl Forged {
             lake_level,
             uplifted: w.uplifted.iter().map(|&u| u as f32).collect(),
             bedding: self.geology.bedding.iter().map(|&b| b as f32).collect(),
+            rain: self.rain.iter().map(|&r| r as f32).collect(),
+            coast_dist_m: crate::habitat::coast_distance_m(&w.h, w.n, w.dx),
             column: self.geology.column().iter().map(|&(top, rock)| (top as f32, rock)).collect(),
             rock_names: geology::ROCKS.iter().map(|r| r.name.to_string()).collect(),
             rivers: a

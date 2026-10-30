@@ -30,7 +30,7 @@ use crate::pipeline::{ColumnProfile, ProfileGrid, SEA_LEVEL, SEA_TOP_BLOCK};
 
 /// Environment variable naming the world file to serve.
 pub const WORLD_FILE_ENV: &str = "VOXEL_WORLD_FILE";
-pub const ARTIFACT_VERSION: u32 = 1;
+pub const ARTIFACT_VERSION: u32 = 2;
 const MAGIC: &[u8; 4] = b"VXWF";
 
 /// Engine column the artifact's spawn point lands on: block (8, 8) of region
@@ -115,6 +115,12 @@ pub struct WorldArtifact {
     /// carry it in their ground recipes (`geo_offset_blocks`, `strata_blocks`).
     pub uplifted: Vec<f32>,
     pub bedding: Vec<f32>,
+    /// Rain per cell relative to the land mean (1.0 = average), as
+    /// `forge::climate::rainfall` returns it.
+    pub rain: Vec<f32>,
+    /// Distance (m) from the nearest sea cell (height <= 0); 0 at sea
+    /// (`habitat::coast_distance_m`).
+    pub coast_dist_m: Vec<f32>,
     /// Formations from the top down: (top s, index into `rock_names`).
     pub column: Vec<(f32, u8)>,
     /// Names from `forge::geology::ROCKS`; an unknown one fails the load.
@@ -175,7 +181,14 @@ impl WorldArtifact {
     pub fn validate(&self) -> Result<(), ArtifactError> {
         let artifact = self;
         let cells = artifact.n as usize * artifact.n as usize;
-        if [&artifact.height, &artifact.lake_level, &artifact.uplifted, &artifact.bedding]
+        if [
+            &artifact.height,
+            &artifact.lake_level,
+            &artifact.uplifted,
+            &artifact.bedding,
+            &artifact.rain,
+            &artifact.coast_dist_m,
+        ]
             .iter()
             .any(|raster| raster.len() != cells)
         {
@@ -341,6 +354,30 @@ impl ForgedWorld {
         let (iu, iv) = (iu as i64, iv as i64);
         let row = |iz: i64| at(iu, iz) + tu * (at(iu + 1, iz) - at(iu, iz));
         row(iv) + tv * (row(iv + 1) - row(iv))
+    }
+
+    pub(crate) fn to_artifact_m(&self, x: f64, z: f64) -> (f64, f64) {
+        self.to_artifact(x, z)
+    }
+
+    /// Bilinear interpolation of one of the artifact's `n * n` rasters at
+    /// artifact meters (same lattice as `geo_offset_m`, edge-clamped).
+    pub(crate) fn bilinear(&self, raster: &[f32], ax: f64, az: f64) -> f64 {
+        let a = &self.artifact;
+        let at = |ix: i64, iz: i64| Self::raster_cell(raster, a.n, ix, iz);
+        let (u, v) = (ax / a.cell_m - 0.5, az / a.cell_m - 0.5);
+        let (iu, iv) = (u.floor(), v.floor());
+        let (tu, tv) = (u - iu, v - iv);
+        let (iu, iv) = (iu as i64, iv as i64);
+        let row = |iz: i64| at(iu, iz) + tu * (at(iu + 1, iz) - at(iu, iz));
+        row(iv) + tv * (row(iv + 1) - row(iv))
+    }
+
+    /// Ground height (m relative to sea) at engine meters, as `sample` sees it
+    /// before river carving; used by habitat slope.
+    pub(crate) fn ground_engine_m(&self, x_m: f64, z_m: f64) -> f64 {
+        let (ax, az) = self.to_artifact(x_m, z_m);
+        self.ground(ax, az)
     }
 
     /// Stratigraphic offset (blocks) of the engine column at world meters

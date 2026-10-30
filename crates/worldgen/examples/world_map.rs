@@ -13,6 +13,9 @@
 //! linearly onto 0..=65535). +x is right, +z is down; one pixel is
 //! `span / size` meters, point-sampled at its center.
 //!
+//! `--layer rain|temperature|moisture|salinity` also writes `<out>-<layer>.png`
+//! (greyscale ramp over the layer's fixed range, `worldgen::habitat`).
+//!
 //! Heights come straight from `TerrainPipeline::column` (the exact field, not
 //! the 4 m `ProfileGrid` lattice `generate_region` interpolates — the two agree
 //! to well under a block), so a map costs one profile per pixel and never
@@ -22,6 +25,7 @@ use std::path::PathBuf;
 
 use image::{ImageBuffer, Luma, Rgb};
 use worldgen::forged::PointSample;
+use worldgen::habitat::{Habitat, HabitatSource, ProceduralHabitat};
 use worldgen::pipeline::{ColumnProfile, SEA_LEVEL, SEA_TOP_BLOCK, TerrainPipeline};
 // Topmost solid block / "dry" — the same rules the world map's landing search uses.
 use worldgen::tile_map::{is_dry, lake_color, land_color, sea_color, sun_dir, surface_block};
@@ -71,6 +75,47 @@ struct Args {
     relief: f64,
     /// Render this forged world file instead of the procedural pipeline.
     world: Option<PathBuf>,
+    /// Also write one habitat field as a greyscale PNG.
+    layer: Option<Layer>,
+}
+
+#[derive(Clone, Copy)]
+enum Layer {
+    Rain,
+    Temperature,
+    Moisture,
+    Salinity,
+}
+
+impl Layer {
+    fn parse(name: &str) -> Layer {
+        match name {
+            "rain" => Layer::Rain,
+            "temperature" => Layer::Temperature,
+            "moisture" => Layer::Moisture,
+            "salinity" => Layer::Salinity,
+            other => panic!("unknown --layer {other}; one of rain, temperature, moisture, salinity"),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Layer::Rain => "rain",
+            Layer::Temperature => "temperature",
+            Layer::Moisture => "moisture",
+            Layer::Salinity => "salinity",
+        }
+    }
+
+    /// The field's value and the range mapped onto black..white.
+    fn value(self, h: &Habitat) -> (f32, f32, f32) {
+        match self {
+            Layer::Rain => (h.rain, 0.0, 2.0),
+            Layer::Temperature => (h.temperature_c, -10.0, 20.0),
+            Layer::Moisture => (h.moisture, 0.0, 3.0),
+            Layer::Salinity => (h.salinity, 0.0, 1.0),
+        }
+    }
 }
 
 fn parse_args() -> Args {
@@ -82,6 +127,7 @@ fn parse_args() -> Args {
         seed: worldgen::WORLD_SEED,
         relief: DEFAULT_RELIEF,
         world: None,
+        layer: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -102,8 +148,9 @@ fn parse_args() -> Args {
             }
             "--relief" => a.relief = value().parse().expect("--relief <factor>"),
             "--world" => a.world = Some(PathBuf::from(value())),
+            "--layer" => a.layer = Some(Layer::parse(&value())),
             other => panic!(
-                "unknown argument {other}; flags: --span --size --center --out --seed --relief --world"
+                "unknown argument {other}; flags: --span --size --center --out --seed --relief --world --layer"
             ),
         }
     }
@@ -229,6 +276,12 @@ fn main() {
     gray.save(&height_path).expect("write heightmap");
     println!("wrote {color_path}\nwrote {height_path}");
 
+    if let Some(layer) = a.layer {
+        let path = format!("{stem}-{}.png", layer.name());
+        write_layer(&a, layer, &heights).save(&path).expect("write habitat layer");
+        println!("wrote {path}");
+    }
+
     // Terrain stats — the numbers behind "is it flat / is it all ocean".
     let mut sorted = heights.clone();
     sorted.sort_by(f32::total_cmp);
@@ -250,4 +303,40 @@ fn main() {
         }
         println!();
     }
+}
+
+/// One habitat field per pixel as a greyscale ramp, sampled the way the
+/// generator will ask: the pixel's surface block from the map's own heights.
+fn write_layer(a: &Args, layer: Layer, heights: &[f32]) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    let forged = a.world.as_ref().map(|path| {
+        worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    });
+    let procedural = ProceduralHabitat::new(a.seed);
+    let source: &(dyn HabitatSource + Sync) = match &forged {
+        Some(world) => world,
+        None => &procedural,
+    };
+    let n = a.size;
+    let step = a.span_m / n as f64;
+    let (x0, z0) = (a.center.0 - a.span_m * 0.5, a.center.1 - a.span_m * 0.5);
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let rows_per = n.div_ceil(((cores as f64 * CORE_SHARE) as usize).max(1));
+    let mut pixels = vec![0u8; n * n];
+    std::thread::scope(|s| {
+        for (band, rows) in pixels.chunks_mut(rows_per * n).enumerate() {
+            s.spawn(move || {
+                for (r, row) in rows.chunks_mut(n).enumerate() {
+                    let iz = band * rows_per + r;
+                    let z = z0 + (iz as f64 + 0.5) * step;
+                    for (c, px) in row.iter_mut().enumerate() {
+                        let x = x0 + (c as f64 + 0.5) * step;
+                        let block = surface_block(heights[iz * n + c] as f64);
+                        let (v, lo, hi) = layer.value(&source.habitat(x, z, block));
+                        *px = (((v - lo) / (hi - lo)).clamp(0.0, 1.0) * 255.0) as u8;
+                    }
+                }
+            });
+        }
+    });
+    ImageBuffer::from_raw(n as u32, n as u32, pixels).expect("pixel buffer matches the image size")
 }

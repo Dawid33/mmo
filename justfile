@@ -346,19 +346,30 @@ bench-column:
 # screenshots and exits. e.g.
 #   just model-view assets/models/soldier.bbmodel
 model-view path *args:
-    {{cap}} {{cargo}} build --example model_view -p client --features file_watcher
-    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi; {{cargo}} run -q --example model_view -p client --features file_watcher -- {{path}} {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    {{cap}} {{cargo}} build --bin client --bin server --example model_view
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    ./target/debug/examples/model_view {{path}} {{args}}
 
 # Browse every Blockbench model (crates/client/examples/asset_viewer.rs): all
 # .bbmodel files listed on the left, the picked one's animations on the right
-# (play, scrub, pause, speed); drag orbits, wheel zooms, saves hot-reload.
+# (play, scrub, pause, speed); drag orbits, wheel zooms, saves hot-reload
+# (polled). The viewers build exactly what `just run` builds (dev profile, play
+# region size, client + server selected so features unify the same) plus the
+# example, so they reuse its artifacts instead of a second copy in target/.
 # Roots default to assets/ + the bbmodel fixtures. `--model <part of path>
 # [--anim NAME] [--time S] --shot out.png` screenshots and exits. e.g.
 #   just asset-viewer
 #   just asset-viewer assets/models
 asset-viewer *args:
-    {{cap}} {{cargo}} build --example asset_viewer -p client --features file_watcher
-    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi; {{cargo}} run -q --example asset_viewer -p client --features file_watcher -- {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    {{cap}} {{cargo}} build --bin client --bin server --example asset_viewer
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    ./target/debug/examples/asset_viewer {{args}}
 
 # Creature models (docs/superpowers/specs/2026-10-29-creature-asset-pipeline.md):
 # tools/creatures/src/<df_id>.toml → assets/models/creatures/<df_id>.bbmodel +
@@ -380,8 +391,12 @@ creature-brief id:
 # A creature's review contact sheet: every clip, top-down and side views, in
 # target/creature-sheets/<id>.png (builds the viewer first).
 creature-sheet id:
-    {{cap}} {{cargo}} build --example asset_viewer -p client --features file_watcher
-    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi; python3 tools/creatures/sheet.py {{id}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    {{cap}} {{cargo}} build --bin client --bin server --example asset_viewer
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    python3 tools/creatures/sheet.py {{id}}
 
 # Creature models done (approved / draft / todo per category) and the next to build.
 creature-progress *args:
@@ -408,7 +423,8 @@ tree-textures:
 
 # Top-down PNG map of the generated world: colour relief + 16-bit heightmap +
 # terrain stats, into target/world-map/. Flags: --span <m> --size <px>
-# --center <x,z> --out <path stem> --seed <hex> --relief <factor>, e.g.
+# --center <x,z> --out <path stem> --seed <hex> --relief <factor> --world <file>
+# --layer rain|temperature|moisture|salinity (extra habitat PNG), e.g.
 # `just world-map --span 65536 --size 2048`.
 world-map *args:
     {{cap}} {{cargo}} run --release -p worldgen --example world_map -- {{args}}

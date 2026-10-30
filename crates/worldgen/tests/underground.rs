@@ -154,6 +154,8 @@ fn cliff_world() -> ForgedWorld {
         lake_level: vec![f32::NAN; N * N],
         uplifted: vec![0.0; N * N],
         bedding: vec![0.0; N * N],
+        rain: vec![1.0; N * N],
+        coast_dist_m: vec![0.0; N * N],
         column: vec![(700.0, 0)],
         rock_names: vec!["sandstone".into()],
         rivers: vec![],
