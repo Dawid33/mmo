@@ -193,7 +193,9 @@ impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
             app.add_plugins(SlintCompositePlugin);
         }
         app.init_resource::<SlintPointer>()
-            .add_systems(Startup, move |world: &mut World| {
+            // PreStartup: an app's Startup systems may use the layer and
+            // whatever `init` inserted.
+            .add_systems(PreStartup, move |world: &mut World| {
                 setup_slint_layer(world, make, init, order, passthrough)
             })
             .add_systems(PreUpdate, slint_input::<C>.after(bevy::input::InputSystems))
@@ -1071,6 +1073,21 @@ fn unpremultiply(p: slint_ui::slint::platform::software_renderer::PremultipliedR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Startup systems may use what a layer's `with_init` inserted (the asset
+    /// viewer's `scan_at_start` reads its `Actions`): layers are set up first.
+    #[test]
+    fn layer_init_runs_before_startup_systems() {
+        struct Marker;
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default(), bevy::input::InputPlugin))
+            .init_asset::<Image>()
+            .add_plugins(SlintLayerPlugin::new(HudUi::new).with_init(|_, world| world.insert_non_send(Marker)));
+        // Registered after the plugin, as an app's own Startup systems are.
+        app.add_systems(Startup, |_marker: NonSend<Marker>| {});
+        app.update();
+        assert!(app.world().get_non_send::<SlintLayer<HudUi>>().is_some());
+    }
 
     #[test]
     fn passthrough_layer_never_owns_the_pointer() {
