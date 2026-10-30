@@ -44,9 +44,10 @@ default = ["dev_ui"]
 # F3 developer panel (a Slint layer, renderer/dev_ui.rs).
 # `--no-default-features` builds without it.
 dev_ui = []
-# Hot reload: Bevy watches the asset files and reloads what changed. Off for
-# the game; the model viewers (`just model-view`, `just asset-viewer`) turn
-# it on so a .bbmodel saved in Blockbench shows at once.
+# Hot reload: Bevy watches the asset files and reloads what changed. Not used
+# by any recipe: it changes Bevy's feature set, so a build with it is a second
+# copy of Bevy in target/. The model viewers poll the shown file instead, which
+# keeps them the same build as `just run`.
 file_watcher = ["bevy/file_watcher"]
 # Continuous profiling (native only): the deps live in the non-wasm target
 # table, so enabling this on a wasm build is a harmless no-op.

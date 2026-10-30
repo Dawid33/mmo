@@ -47,7 +47,7 @@ fn main() {
     App::new()
         .add_plugins(
             DefaultPlugins
-                .set(AssetPlugin { file_path: "../..".into(), watch_for_changes_override: Some(true), ..default() })
+                .set(AssetPlugin { file_path: "../..".into(), ..default() })
                 .set(WindowPlugin {
                     primary_window: Some(Window { title: format!("model_view: {path}"), ..default() }),
                     ..default()
@@ -58,8 +58,34 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.82)))
         .insert_resource(Args { path, shot, anim, time })
         .add_systems(Startup, setup)
-        .add_systems(Update, (frame_camera, turn, shoot, animation_keys))
+        .add_systems(Update, (reload_on_save, frame_camera, turn, shoot, animation_keys))
         .run();
+}
+
+/// How often the model's file is checked for a new save.
+const RELOAD_POLL_SECS: f32 = 0.5;
+
+/// Hot reload without Bevy's `file_watcher` feature, which would make the viewer
+/// a different build of the client from `just run`: the file is polled, and a
+/// newer save reloads it.
+fn reload_on_save(
+    time: Res<Time>,
+    args: Res<Args>,
+    assets: Res<AssetServer>,
+    mut seen: Local<Option<std::time::SystemTime>>,
+    mut since: Local<f32>,
+) {
+    *since += time.delta_secs();
+    if *since < RELOAD_POLL_SECS {
+        return;
+    }
+    *since = 0.0;
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(&args.path);
+    let modified = std::fs::metadata(file).and_then(|m| m.modified()).ok();
+    if seen.is_some() && modified != *seen {
+        assets.reload(args.path.clone());
+    }
+    *seen = modified;
 }
 
 fn setup(

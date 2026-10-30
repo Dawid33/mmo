@@ -97,6 +97,7 @@ fn bundle(src: RegionCoords, key: game::EntityKey, client: game::ClientId, x: f3
         pitch: 0.0,
         motion: Some(game::Motion::default()),
         slime: None,
+        animator: None,
         client: Some((client, Client::default())),
         source_region: src,
         source_key: key,

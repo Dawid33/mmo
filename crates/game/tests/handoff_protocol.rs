@@ -61,6 +61,7 @@ fn matches_prediction_is_identity_based_for_transfers() {
         pitch: 0.0.into(),
         motion: None,
         slime: None,
+        animator: None,
         client: Some((7, Client::default())),
         source_region: RegionCoords::new(0, 0),
         source_key: Default::default(),

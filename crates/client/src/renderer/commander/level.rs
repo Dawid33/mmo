@@ -3,19 +3,25 @@
 //! (nothing in the sim depends on it). The cutaway shader and the designation
 //! tools read [`WorkingLevel`] and [`cut_plane_world_y`].
 
-use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 
 use game::{RegionId, BLOCK_VOXELS, UNDERGROUND_DEPTH};
 
 use super::height::HeightGrid;
 use super::tiles::TileMirror;
-use super::{minimap, CommanderCamera};
+use super::CommanderCamera;
 use crate::renderer::cursor::CursorPolicy;
 
-/// Levels per wheel notch with Shift held.
+/// Levels per key step with Ctrl held.
 pub const LEVEL_STEP_FAST: i32 = 10;
+/// Holding a level key (Space / Shift / PgUp / PgDn) steps again every this
+/// many seconds, with no longer pause after the first step.
+pub const LEVEL_KEY_REPEAT_INTERVAL_S: f32 = 0.08;
+/// Keys that step the working level up / down.
+pub const LEVEL_UP_KEYS: [KeyCode; 2] = [KeyCode::Space, KeyCode::PageUp];
+pub const LEVEL_DOWN_KEYS: [KeyCode; 3] = [KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::PageDown];
+/// The fast (×[`LEVEL_STEP_FAST`]) modifier for the level keys.
+pub const LEVEL_FAST_KEYS: [KeyCode; 2] = [KeyCode::ControlLeft, KeyCode::ControlRight];
 /// How far above the highest loaded surface the level may climb.
 pub const LEVELS_ABOVE_SURFACE: i32 = 8;
 
@@ -33,38 +39,31 @@ impl Default for WorkingLevel {
     }
 }
 
-/// Alt + wheel steps the level; the plain wheel stays zoom.
-pub fn wheel_routes_to_level(alt: bool, focused: bool) -> bool {
-    alt && focused
-}
-
-/// The level after `notches` wheel notches (±1 each, ±[`LEVEL_STEP_FAST`]
-/// when `fast`), clamped to `range`.
-pub fn step_level(level: i32, notches: f32, fast: bool, range: (i32, i32)) -> i32 {
-    let whole = notches.round() as i32;
-    // A small touchpad scroll still moves one level.
-    let whole = if whole == 0 && notches != 0.0 { notches.signum() as i32 } else { whole };
+/// The level after `steps` steps (±1 each, ±[`LEVEL_STEP_FAST`] when
+/// `fast`), clamped to `range`.
+pub fn step_level(level: i32, steps: i32, fast: bool, range: (i32, i32)) -> i32 {
     let step = if fast { LEVEL_STEP_FAST } else { 1 };
-    (level + whole * step).clamp(range.0, range.1.max(range.0))
+    (level + steps * step).clamp(range.0, range.1.max(range.0))
 }
 
-/// Touchpad scroll pixels per wheel notch.
-pub const PIXELS_PER_NOTCH: f32 = 40.0;
-
-/// Whole level notches from one frame's scroll. A wheel (`pixel` false)
-/// passes its notches through — `step_level` moves at least one level per
-/// nonzero scroll. A touchpad (`pixel`) sends a trickle of pixels every
-/// frame, so its notches add up in `acc` and only whole ones come out (the
-/// remainder stays, sign kept), else every frame would step a level.
-pub fn scroll_notches(pixel: bool, delta: f32, acc: &mut f32) -> f32 {
-    if !pixel {
-        *acc = 0.0;
-        return delta;
+/// How many steps a level key has fired once it has been held `t` seconds
+/// (`t < 0`: not held): one on the press, then one every interval.
+pub fn repeat_fired(t: f32) -> u32 {
+    if t < 0.0 {
+        0
+    } else {
+        1 + (t / LEVEL_KEY_REPEAT_INTERVAL_S) as u32
     }
-    *acc += delta / PIXELS_PER_NOTCH;
-    let whole = acc.trunc();
-    *acc -= whole;
-    whole
+}
+
+/// A level key's hold time after this frame (`held_for < 0`: was not held)
+/// and the steps it fires this frame.
+pub fn repeat_step(held_for: f32, pressed: bool, dt: f32) -> (f32, u32) {
+    if !pressed {
+        return (-1.0, 0);
+    }
+    let next = if held_for < 0.0 { 0.0 } else { held_for + dt };
+    (next, repeat_fired(next) - repeat_fired(held_for))
 }
 
 /// The reachable levels for loaded surfaces spanning `surface` (sim units).
@@ -114,22 +113,23 @@ pub fn init_level(grid: Res<HeightGrid>, cam: Res<CommanderCamera>, mut level: R
     }
 }
 
-/// Alt+wheel (Alt+Shift: fast), PgUp / PgDn, Home (back to the surface at the
-/// focus) and C (toggle the cut).
+/// Space / PgUp up and Shift / PgDn down (repeating while held), Ctrl with
+/// any of them for ×[`LEVEL_STEP_FAST`], Home (back to the surface
+/// at the focus) and C (toggle the cut). The camera rides the level's floor,
+/// so this is also how the commander rises and sinks.
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn step_level_input(
     keys: Res<ButtonInput<KeyCode>>,
-    scroll: Res<AccumulatedMouseScroll>,
-    window: Query<&Window, With<PrimaryWindow>>,
     policy: Res<CursorPolicy>,
-    minimap_ptr: Res<minimap::MinimapPointer>,
     grid: Res<HeightGrid>,
     cam: Res<CommanderCamera>,
+    time: Res<Time>,
     mut level: ResMut<WorkingLevel>,
-    mut pixel_acc: Local<f32>,
+    mut held: Local<Option<[f32; 2]>>,
 ) {
-    let Ok(window) = window.single() else { return };
+    let held = held.get_or_insert([-1.0; 2]);
     if policy.blocks_game() {
+        *held = [-1.0; 2];
         return;
     }
     if keys.just_pressed(KeyCode::KeyC) {
@@ -137,33 +137,20 @@ pub fn step_level_input(
     }
     let Some(current) = level.level else { return };
     let range = grid.surface_range().map_or((current, current), level_range);
-    let fast = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let fast = keys.any_pressed(LEVEL_FAST_KEYS);
     let mut next = current;
-    if keys.just_pressed(KeyCode::PageUp) {
-        next = step_level(next, 1.0, fast, range);
-    }
-    if keys.just_pressed(KeyCode::PageDown) {
-        next = step_level(next, -1.0, fast, range);
+    let dt = time.delta_secs();
+    let (up_t, up) = repeat_step(held[0], keys.any_pressed(LEVEL_UP_KEYS), dt);
+    let (down_t, down) = repeat_step(held[1], keys.any_pressed(LEVEL_DOWN_KEYS), dt);
+    *held = [up_t, down_t];
+    let steps = up as i32 - down as i32;
+    if steps != 0 {
+        next = step_level(next, steps, fast, range);
     }
     if keys.just_pressed(KeyCode::Home) {
         if let Some(y) = focus_surface(&grid, cam.focus) {
             next = surface_level(y);
         }
-    }
-    let over_minimap = window
-        .cursor_position()
-        .is_some_and(|c| minimap::screen_rect(window.size()).contains(c));
-    let alt = keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]);
-    if wheel_routes_to_level(alt, window.focused) && !over_minimap && !minimap_ptr.dragging && !policy.ui_pointer
-    {
-        // Some desktops turn Alt+wheel into horizontal scroll.
-        let delta = if scroll.delta.y == 0.0 { scroll.delta.x } else { scroll.delta.y };
-        let notches = scroll_notches(scroll.unit == MouseScrollUnit::Pixel, delta, &mut pixel_acc);
-        if notches != 0.0 {
-            next = step_level(next, notches, fast, range);
-        }
-    } else {
-        *pixel_acc = 0.0;
     }
     if next != current {
         level.level = Some(next);
@@ -186,45 +173,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wheel_needs_focus_and_alt() {
-        assert!(wheel_routes_to_level(true, true));
-        assert!(!wheel_routes_to_level(true, false));
-        assert!(!wheel_routes_to_level(false, true));
+    fn a_held_level_key_steps_once_then_repeats() {
+        let dt = 1.0 / 60.0;
+        let (mut t, mut total) = (-1.0, 0);
+        let mut fired_at = Vec::new();
+        for frame in 0..60 {
+            let (next, n) = repeat_step(t, true, dt);
+            if n > 0 {
+                fired_at.push(frame);
+            }
+            (t, total) = (next, total + n);
+        }
+        assert_eq!(fired_at[0], 0, "the press steps at once");
+        let gap = (fired_at[1] - fired_at[0]) as f32 * dt;
+        assert!((gap - LEVEL_KEY_REPEAT_INTERVAL_S).abs() <= dt, "the first repeat comes one interval later: {gap}");
+        // ~1 s held: the press, then one every 0.08 s.
+        assert_eq!(total, repeat_fired(59.0 * dt));
+        assert_eq!(repeat_step(t, false, dt), (-1.0, 0), "release resets");
     }
 
     #[test]
-    fn alt_wheel_steps_one_or_ten() {
-        assert_eq!(step_level(50, 1.0, false, (0, 100)), 51);
-        assert_eq!(step_level(50, -2.0, true, (0, 100)), 30);
+    fn level_keys_avoid_the_pan_keys() {
+        for key in LEVEL_UP_KEYS.iter().chain(&LEVEL_DOWN_KEYS).chain(&LEVEL_FAST_KEYS) {
+            assert!(!matches!(key, KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD), "{key:?}");
+        }
     }
 
     #[test]
-    fn touchpad_pixels_add_up_to_whole_notches() {
-        let mut acc = 0.0;
-        // 10 px a frame: nothing for three frames, one level on the fourth.
-        let steps: Vec<f32> = (0..8).map(|_| scroll_notches(true, 10.0, &mut acc)).collect();
-        assert_eq!(steps, [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
-        // Reversing first cancels what has built up.
-        assert_eq!(scroll_notches(true, 30.0, &mut acc), 0.0);
-        assert_eq!(scroll_notches(true, -50.0, &mut acc), 0.0);
-        assert_eq!(scroll_notches(true, -30.0, &mut acc), -1.0);
-        // A big flick still steps several at once.
-        let mut acc = 0.0;
-        assert_eq!(scroll_notches(true, 130.0, &mut acc), 3.0);
-    }
-
-    #[test]
-    fn wheel_lines_pass_through_and_keep_the_min_one_rule() {
-        let mut acc = 0.5;
-        assert_eq!(scroll_notches(false, 0.2, &mut acc), 0.2);
-        assert_eq!(acc, 0.0, "a wheel clears the touchpad remainder");
-        assert_eq!(step_level(5, 0.2, false, (0, 100)), 6);
+    fn steps_one_or_ten() {
+        assert_eq!(step_level(50, 1, false, (0, 100)), 51);
+        assert_eq!(step_level(50, -2, true, (0, 100)), 30);
     }
 
     #[test]
     fn level_clamps_to_ground_range() {
-        assert_eq!(step_level(5, -10.0, true, (0, 100)), 0);
-        assert_eq!(step_level(95, 10.0, true, (0, 100)), 100);
+        assert_eq!(step_level(5, -10, true, (0, 100)), 0);
+        assert_eq!(step_level(95, 10, true, (0, 100)), 100);
     }
 
     #[test]

@@ -253,6 +253,9 @@ pub struct EntityBundle {
     pub motion: Option<crate::Motion>,
     /// Slime behaviour state — `None` for every other kind.
     pub slime: Option<crate::slime::Slime>,
+    /// Animation state of a rigged entity; the receiver rebuilds its bone
+    /// colliders from it (`None`: no rig).
+    pub animator: Option<crate::anim::Animator>,
     pub client: Option<(ClientId, Client)>,
     pub source_region: RegionCoords,
     pub source_key: EntityKey,

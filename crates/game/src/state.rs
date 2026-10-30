@@ -74,6 +74,16 @@ pub enum GameDataUpdateKind {
     /// clears the mark on upgrade/expiry. The bridge uses it to hide ghosts
     /// whose source region is also loaded locally.
     SetGhostSource(EntityKey, Option<crate::protocol::RegionCoords>),
+    /// The entity's animation state (`anim.rs`), set (`Some`) or gone. The
+    /// renderer poses the entity's model from it with `anim::sample`.
+    SetAnimator(EntityKey, Option<crate::anim::Animator>),
+    /// A voxel body (`voxel_body.rs`) spawned: terrain blocks detached into
+    /// one dynamic body. `Pose` is the body's, at the model's centre of
+    /// mass: model block `o` occupies body-local units
+    /// `o * BLOCK_VOXELS - com .. + BLOCK_VOXELS`, `com` being
+    /// `voxel_body::model_mass_properties(model).local_com`. Sent on Do
+    /// only; the entity's `RemoveEntity` covers undo and the despawn.
+    AddVoxelBody(EntityKey, Pose, Box<crate::voxel_body::VoxelModel>),
     /// Designations set (`Some`) or cleared (`None`) per tile.
     SetDesignations(Vec<(crate::TilePos, Option<crate::Designation>)>),
     /// Tiles that became (`true`) or stopped being (`false`) constructions.
@@ -233,6 +243,12 @@ mod game_data {
         kind: Component<EntityKind>,
         motion: Component<crate::Motion>,
         slime: Component<crate::slime::Slime>,
+        /// Sim-owned animation state (`anim.rs`).
+        animator: Component<crate::anim::Animator>,
+        /// Collider per rig bone, re-posed from the animator every tick.
+        bones: Component<crate::anim::BoneColliders>,
+        /// Terrain detached into a falling body (`voxel_body.rs`).
+        voxel_body: Component<crate::voxel_body::VoxelBody>,
     }
 
     pub struct PhysicsState {
@@ -333,6 +349,9 @@ impl Undo<Ecs> {
         self.kind.insert_safe(key);
         self.motion.insert_safe(key);
         self.slime.insert_safe(key);
+        self.animator.insert_safe(key);
+        self.bones.insert_safe(key);
+        self.voxel_body.insert_safe(key);
         key
     }
 
@@ -613,6 +632,40 @@ impl Undo<Component<Chunk>> {
             .expect("set_chunk_block_safe: no chunk at key");
         write_chunk_block(chunk, index, block, chisel);
     }
+
+    /// [`Self::set_chunk_block_safe`] for many blocks of one chunk in one
+    /// undo entry: the inverse writes back each old block and chisel entry
+    /// (exact for the same reason — canonical grid, entry-for-entry chisel).
+    /// `writes` must not repeat an index.
+    pub fn set_chunk_blocks_safe(&mut self, key: EntityKey, writes: Vec<(BlockIndex, Block, Option<ChiselData>)>) {
+        let chunk = self
+            .list
+            .get(key)
+            .and_then(Option::as_ref)
+            .expect("set_chunk_blocks_safe: no chunk at key");
+        let olds: Vec<(BlockIndex, Block, Option<ChiselData>)> = writes
+            .iter()
+            .map(|&(index, _, _)| (index, chunk.blocks.get(index), chunk.chisel.get(&index).cloned()))
+            .collect();
+        let delta = crate::hash_mode() == crate::HashMode::Delta;
+        let pre = if delta { component_slot_digest(key, self.list.get(key)) } else { 0 };
+        self.undo_digest(pre, move |d, _| {
+            let chunk = d.list.get_mut(key).and_then(Option::as_mut).expect("set_chunk_blocks_safe undo: chunk gone");
+            for (index, block, chisel) in olds.iter().rev() {
+                write_chunk_block(chunk, *index, *block, chisel.clone());
+            }
+            if delta { component_slot_digest(key, d.list.get(key)) } else { 0 }
+        });
+        let chunk = self
+            .raw_mut()
+            .list
+            .get_mut(key)
+            .and_then(Option::as_mut)
+            .expect("set_chunk_blocks_safe: no chunk at key");
+        for (index, block, chisel) in writes {
+            write_chunk_block(chunk, index, block, chisel);
+        }
+    }
 }
 
 impl<T> Component<T>
@@ -860,7 +913,7 @@ impl Rollback {
         &mut self,
         body: RigidBodyHandle,
         collider: rapier3d::prelude::Collider,
-    ) {
+    ) -> rapier3d::prelude::ColliderHandle {
         let pre_parent = self
             .data
             .physics
@@ -899,7 +952,7 @@ impl Rollback {
                 p.bodies.get(body),
                 p.bodies.is_marked_modified(body),
             )
-        });
+        });        handle
     }
 
     /// Highest solid voxel Y at region-local voxel column `(vx, vz)`, scanning
@@ -1000,6 +1053,13 @@ impl Rollback {
         ));
         self.data.ecs.kind.set_safe(e, Some(EntityKind::Player));
         self.data.ecs.motion.set_safe(e, Some(crate::Motion::default()));
+        // Drawn as a dwarf whose bones collide (`anim.rs`); feet at the
+        // bottom of the capsule.
+        self.attach_rig_safe(
+            e,
+            crate::anim::Animator::idle(crate::anim::RigId::Dwarf),
+            -(PLAYER_CAPSULE_HALF_HEIGHT + PLAYER_CAPSULE_RADIUS),
+        );
         self.data.player_entites.insert(client_id, e);
     }
 
@@ -1045,6 +1105,28 @@ impl Rollback {
                 GameDataUpdateKind::SetEntityKind(key, Some(kind)),
             ));
         }
+        // Animator: on undo, re-advertise it (the renderer draws the model).
+        if let Some(animator) = *self.data.ecs.animator.try_get(key) {
+            self.data.ecs.animator.emit_on_undo(GameDataUpdate::new(
+                GameDataTransactionKind::Undo,
+                GameDataUpdateKind::SetAnimator(key, Some(animator)),
+            ));
+        }
+        // Voxel body: on undo, re-advertise its model (the entity's
+        // CreateEntity alone would come back empty).
+        if let Some(vb) = self.data.ecs.voxel_body.try_get(key).clone() {
+            let pose = self
+                .data
+                .ecs
+                .rigidbody
+                .try_get(key)
+                .and_then(|h| self.data.physics.bodies.get(h).map(|b| *b.position()))
+                .unwrap_or_else(Pose::identity);
+            self.data.ecs.voxel_body.emit_on_undo(GameDataUpdate::new(
+                GameDataTransactionKind::Undo,
+                GameDataUpdateKind::AddVoxelBody(key, pose, Box::new(vb.model)),
+            ));
+        }
         // A terrain chunk leaves the index (before its body goes: the body
         // is where its coordinates come from).
         if self.data.ecs.chunk.try_get(key).is_some() {
@@ -1082,6 +1164,9 @@ impl Rollback {
         self.data.ecs.kind.remove_safe(key);
         self.data.ecs.motion.remove_safe(key);
         self.data.ecs.slime.remove_safe(key);
+        self.data.ecs.animator.remove_safe(key);
+        self.data.ecs.bones.remove_safe(key);
+        self.data.ecs.voxel_body.remove_safe(key);
         // ECS slot last: the slotmap #[emit] fires RemoveEntity on the delta
         // (and CreateEntity again on undo).
         self.data.ecs.entities.remove(key);
@@ -1100,6 +1185,24 @@ impl Rollback {
             GameDataTransactionKind::Do,
             GameDataUpdateKind::SetEntityPosition(key, pose),
         ));
+    }
+
+    /// Insert `body` into the body set, undo-safely: the true fork inverse
+    /// (`revert_insert` restores the arena allocator exactly) with a delta
+    /// digest of just this slot + the allocator state — the insert every
+    /// body builder here uses.
+    pub(crate) fn insert_body_safe(&mut self, body: rapier3d::prelude::RigidBody) -> RigidBodyHandle {
+        let (prev_head, prev_len) = self.data.physics.bodies.alloc_state();
+        let mut scope = self.data.physics.bodies.undo_scope_digest();
+        let handle = scope.insert(body);
+        scope.register(
+            body_slot_digest((prev_head, prev_len), None),
+            move |bodies, _| {
+                bodies.revert_insert(handle, prev_head, prev_len);
+                body_slot_digest(bodies.alloc_state(), bodies.get(handle))
+            },
+        );
+        handle
     }
 
     /// Insert a kinematic character body + its collider for entity `e`,
@@ -1208,6 +1311,11 @@ impl Rollback {
         self.data.ecs.motion.set_safe(e, bundle.motion);
         // So does a mob's behaviour state.
         self.data.ecs.slime.set_safe(e, bundle.slime);
+        // A rig: animator + bone colliders, unless the entity already has
+        // them (a replayed arrival).
+        if let (Some(animator), None) = (bundle.animator, self.data.ecs.bones.try_get(e)) {
+            self.attach_rig_safe(e, animator, animator.foot_y);
+        }
 
         // Camera + client attachment (players).
         if let Some((client_id, client)) = bundle.client.clone() {
@@ -1374,6 +1482,7 @@ impl Rollback {
             pitch,
             motion: *self.data.ecs.motion.try_get(key),
             slime: *self.data.ecs.slime.try_get(key),
+            animator: *self.data.ecs.animator.try_get(key),
             client,
             source_region: region,
             source_key: key,

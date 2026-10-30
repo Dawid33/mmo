@@ -1,8 +1,8 @@
-import { Button, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, Styles, VerticalFlow } from "@widgets";
+import { Button, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, RadialItem, RadialMenu, Styles, VerticalFlow } from "@widgets";
 import { GameMenu } from "menu.slint";
 import { WorldMap, WorldMapConfig } from "world-map.slint";
 
-export { WorldMapConfig }
+export { RadialItem, WorldMapConfig }
 
 // The whole in-game UI: one transparent window-sized layer that the client
 // draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
@@ -20,10 +20,10 @@ export component GameUi inherits Window {
     callback clear-selection();
 
     // Fortress tools (crates/client/src/renderer/commander/designate.rs).
-    // False with no home region (cell mode, or not joined yet).
+    // False with no home region (not joined yet).
     in property <bool> tools-available: true;
     // The active tool's index in `TOOL_KEYS` order (Dig, Deconstruct, Build,
-    // Erase); -1 = none.
+    // Erase); -1 = none. Its wedge shows selected.
     in property <int> active-tool: -1;
     in property <int> priority: 4;
     // "Level 64 · 6 below surface"; "" until the level is known.
@@ -33,16 +33,17 @@ export component GameUi inherits Window {
     // The cursor, which the drag readout sits next to.
     in property <length> drag-x;
     in property <length> drag-y;
-    // One button per tool in `TOOL_KEYS` order, with its hotkey: "[G] Dig".
-    in property <[string]> tool-labels;
-    // The cutaway hides everything above the working level (`C` toggles it).
-    in property <bool> cut-above: true;
 
-    // A tool button clicked: its index, or -1 to put the active tool down.
-    callback tool-clicked(int);
-    callback priority-clicked(int);
-    // The "Hide above" button clicked: flip the cutaway.
-    callback cut-clicked();
+    // The tool wheel (hold Q), which replaced the tool bar: one
+    // wedge per tool in `TOOL_KEYS` order, then the cut. The client
+    // opens and closes it (crates/slint-ui/src/wheel.rs) and reads
+    // `wheel-hovered` to pick.
+    in property <[RadialItem]> wheel-items;
+    in property <bool> wheel-open;
+    // Its centre: where it was opened.
+    in property <length> wheel-x;
+    in property <length> wheel-y;
+    out property <int> wheel-hovered: root.wheel-open ? wheel.hovered : -1;
 
     // The Esc menu and the world map (M). Neither pauses anything; the
     // client keeps them exclusive (opening the map closes the menu).
@@ -112,6 +113,11 @@ export component GameUi inherits Window {
 
             LabelFace { text: "Region " + root.home-region; }
             LabelFace { text: root.connection; }
+            if root.level-text != "": LabelFace { text: root.level-text; }
+            if root.active-tool >= 0: LabelFace {
+                style: Styles.caption-label;
+                text: "Priority " + root.priority + "  [1–7]";
+            }
             LabelFace {
                 style: Styles.caption-label;
                 text: root.selected-count == 0 ? "Nothing selected" : "Selected: " + root.selected-count;
@@ -122,48 +128,6 @@ export component GameUi inherits Window {
                     text: "Clear selection";
                     enabled: root.selected-count > 0;
                     clicked => { root.clear-selection(); }
-                }
-            }
-        }
-    }
-
-    // Bottom centre: the level readout over the tool bar and, while a tool
-    // is active, its priority.
-    if root.tools-available: toolbar := FrameFace {
-        width: self.content-x + bar.preferred-width + Styles.frame.box.padding.right
-            + GraphicalSets.inset(Styles.frame.graphics).right;
-        height: self.content-y + bar.preferred-height + Styles.frame.box.padding.bottom
-            + GraphicalSets.inset(Styles.frame.graphics).bottom;
-        x: (root.width - self.width) / 2;
-        y: root.height - self.height - 12px;
-
-        bar := VerticalFlow {
-            x: toolbar.content-x;
-            y: toolbar.content-y;
-
-            if root.level-text != "": LabelFace { text: root.level-text; }
-            HorizontalFlow {
-                for label[i] in root.tool-labels: Button {
-                    text: label;
-                    toggled: root.active-tool == i;
-                    clicked => { root.tool-clicked(root.active-tool == i ? -1 : i); }
-                }
-                Button {
-                    text: "[C] Hide above";
-                    toggled: root.cut-above;
-                    clicked => { root.cut-clicked(); }
-                }
-            }
-            if root.active-tool >= 0: HorizontalFlow {
-                LabelFace {
-                    style: Styles.caption-label;
-                    text: "Priority";
-                }
-                for p in [1, 2, 3, 4, 5, 6, 7]: Button {
-                    style: Styles.tool-button;
-                    text: p;
-                    toggled: root.priority == p;
-                    clicked => { root.priority-clicked(p); }
                 }
             }
         }
@@ -202,6 +166,19 @@ export component GameUi inherits Window {
             y: status.content-y;
             text: root.game-status;
         }
+    }
+
+    // Centred where it was opened, and large enough to cover the window
+    // from there, so the pointer aims anywhere on screen.
+    wheel := RadialMenu {
+        property <length> side: 2 * (root.width + root.height);
+        visible: root.wheel-open;
+        width: self.side;
+        height: self.side;
+        x: root.wheel-x - self.side / 2;
+        y: root.wheel-y - self.side / 2;
+        items: root.wheel-items;
+        toggled: root.active-tool;
     }
 
     if root.menu-open: GameMenu {

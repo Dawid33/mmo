@@ -24,13 +24,18 @@ struct SlimeAssets {
 /// inside the capsule, so the local player gets no mesh.
 pub fn attach_avatars(
     mut commands: Commands,
-    added: Query<(Entity, &SimKind), (Added<SimKind>, Without<Camera3d>, Without<SlimeAvatar>)>,
+    added: Query<
+        (Entity, &SimKind, Has<super::rigs::SimAnimator>),
+        (Added<SimKind>, Without<Camera3d>, Without<SlimeAvatar>),
+    >,
     mut assets: ResMut<AvatarAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (e, kind) in &added {
+    for (e, kind, rigged) in &added {
         match kind.0 {
+            // A rigged player is drawn by `rigs` (its model), not a capsule.
+            EntityKind::Player if rigged => {}
             EntityKind::Player => {
                 let (mesh, material) = assets
                     .player

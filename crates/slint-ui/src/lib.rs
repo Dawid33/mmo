@@ -22,6 +22,8 @@ use slint::platform::software_renderer::{
 use slint::platform::{Platform, WindowAdapter, WindowEvent, WindowEventDispatchResult};
 use slint::{ComponentHandle, PhysicalSize};
 
+pub mod wheel;
+
 slint::include_modules!();
 
 thread_local! {

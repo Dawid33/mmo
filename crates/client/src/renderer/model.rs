@@ -360,7 +360,7 @@ pub fn animate_bbmodels(
             if w >= 1.0 {
                 player.fade = None;
             } else {
-                poses = blend(&sample(&from, from_elapsed), &poses, w);
+                poses = bbmodel::animation::blend(&sample(&from, from_elapsed), &poses, w);
             }
         }
         for (i, (t, r, s)) in skeleton.local_pose(&poses).into_iter().enumerate() {
@@ -372,31 +372,6 @@ pub fn animate_bbmodels(
             }
         }
     }
-}
-
-/// Per-component blend of two bone pose sets (`w` = 0 is `a`, 1 is `b`);
-/// a bone missing from one side blends against its rest offsets.
-fn blend(
-    a: &[(usize, bbmodel::BonePose)],
-    b: &[(usize, bbmodel::BonePose)],
-    w: f32,
-) -> Vec<(usize, bbmodel::BonePose)> {
-    let mut nodes: Vec<usize> = a.iter().chain(b).map(|(n, _)| *n).collect();
-    nodes.sort_unstable();
-    nodes.dedup();
-    let get = |set: &[(usize, bbmodel::BonePose)], n| set.iter().find(|(m, _)| *m == n).map(|(_, p)| *p).unwrap_or_default();
-    let lerp = |x: [f32; 3], y: [f32; 3]| [0, 1, 2].map(|i| x[i] + (y[i] - x[i]) * w);
-    nodes
-        .into_iter()
-        .map(|n| {
-            let (p, q) = (get(a, n), get(b, n));
-            (n, bbmodel::BonePose {
-                rotation: lerp(p.rotation, q.rotation),
-                position: lerp(p.position, q.position),
-                scale: lerp(p.scale, q.scale),
-            })
-        })
-        .collect()
 }
 
 /// A model file changed on disk (hot reload): drop its spawned parts so

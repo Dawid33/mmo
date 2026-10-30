@@ -37,19 +37,34 @@ use slotmapd::Key as _;
 /// then for the `designations` / `constructed` order fields, then for the
 /// `ChunkBlocks` uniform/dense grid, `u16` `BlockIndex` and boxed
 /// `ColumnGround` footprints (serialization + state hash; geometry unchanged).
+/// Then for the `Ecs` `animator` / `bones` component slots (sim-owned
+/// animation, `game::anim`), and again for players being rigged dwarves
+/// (an animator + one collider per bone; the scene's player walks). Then
+/// for cell mode's removal (`GameData` lost `cells` / `cell_edits`; the
+/// 16-block values only — the 2-block ones still need a re-record). Then
+/// for the `Ecs` `voxel_body` component slot (`game::voxel_body`; layout
+/// only — no body in this scene; 16-block values only).
 ///
 /// Every value is pinned per sim-chunk size (`game::CHUNK_BLOCKS`, a build
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0x9ADD_3052, 0xB5B3_D519);
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0xDFB0_E43F);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x1D38_127B, 0xADE4_9129);
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0x246F_5AA5);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = pinned(0xD4C1_DE27, 0x24CC_65C7);
+const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0xBABE_5BB0);
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = pinned(0xBA1F_2E0E, 0x8A5A_428D);
+const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0xC044_7478);
+
+/// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
+const VOXEL_BODY_DIGEST: u32 = pinned(0xF35F_5267, 0x74B3_3C70);
+/// `game::state_hash` of the same state, on every target.
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0xD50B_606D, 0x7404_8658);
+/// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
+/// despawns at ~50).
+const VOXEL_BODY_TICKS: usize = 30;
 
 /// The value pinned for this build's chunk size: `at2` at 2-block chunks,
 /// `at16` at 16 (0 elsewhere; see [`pinned_size`]).
@@ -236,6 +251,41 @@ fn underground_scene() -> (u32, u32) {
     (digest, hash)
 }
 
+/// A stone column with an arm, detached into a voxel body (`game::voxel_body`)
+/// and tipped over onto a block floor: a dynamic body whose explicit mass
+/// properties, rotation integration and compound-vs-voxels contacts all land
+/// in the state. Returns `(digest, state_hash)`.
+fn voxel_body_scene() -> (u32, u32) {
+    let chunks = common::floor_chunks(0.0..512.0, 0.0..512.0, game::BLOCK_VOXELS as u32);
+    let mut region = Region::from_chunks(r0(), chunks);
+    let mut blocks: Vec<[i32; 3]> = (1..=6).map(|y| [16, y, 16]).collect();
+    blocks.extend([[17, 6, 16], [18, 6, 16]]);
+    let mut body = None;
+    region.with_data(|d| {
+        for &p in &blocks {
+            assert!(d.set_block_safe(p, Block::new(BlockId(2))));
+        }
+    });
+    region.with_data(|d| {
+        body = d.detach_blocks_safe(&blocks, game::SettlePolicy::Despawn, Vector::new(0.2, 0.0, -1.2));
+    });
+    let body = body.expect("the column detaches");
+    let start = *region.data().physics.bodies.get(*region.data().ecs.rigidbody.get(body)).unwrap().position();
+    for _ in 0..VOXEL_BODY_TICKS {
+        region.handle_event(game::GameEventKind::Tick).unwrap();
+        region.forget_last_event();
+    }
+    let data = region.data();
+    let end = *data.physics.bodies.get(*data.ecs.rigidbody.get(body)).unwrap().position();
+    assert!(start.translation.y - end.translation.y > 16.0, "the body must fall: {start:?} -> {end:?}");
+    let digest = crc32fast::hash(&game::SerializedRegion::from_rollback(data).0);
+    let hash = state_hash(data);
+    if print_hash() {
+        log(&format!("VOXEL_BODY_DIGEST = 0x{digest:08X}, VOXEL_BODY_STATE_HASH = 0x{hash:08X}"));
+    }
+    (digest, hash)
+}
+
 /// Native prints on request; wasm32 always prints (node has no env to ask).
 #[cfg(not(target_arch = "wasm32"))]
 fn print_hash() -> bool {
@@ -301,4 +351,26 @@ fn underground_hash_wasm() {
     }
     assert_eq!(digest, UNDERGROUND_DIGEST, "wasm32 digest 0x{digest:08X} != golden 0x{UNDERGROUND_DIGEST:08X}");
     assert_eq!(hash, UNDERGROUND_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{UNDERGROUND_STATE_HASH:08X}");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn voxel_body_hash_native() {
+    let (digest, hash) = voxel_body_scene();
+    if !pinned_size() {
+        return;
+    }
+    assert_eq!(digest, VOXEL_BODY_DIGEST, "native digest 0x{digest:08X} != golden 0x{VOXEL_BODY_DIGEST:08X}");
+    assert_eq!(hash, VOXEL_BODY_STATE_HASH, "native state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}");
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen_test::wasm_bindgen_test]
+fn voxel_body_hash_wasm() {
+    let (digest, hash) = voxel_body_scene();
+    if !pinned_size() {
+        return;
+    }
+    assert_eq!(digest, VOXEL_BODY_DIGEST, "wasm32 digest 0x{digest:08X} != golden 0x{VOXEL_BODY_DIGEST:08X}");
+    assert_eq!(hash, VOXEL_BODY_STATE_HASH, "wasm32 state_hash 0x{hash:08X} != golden 0x{VOXEL_BODY_STATE_HASH:08X}");
 }

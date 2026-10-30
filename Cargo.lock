@@ -522,6 +522,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "image",
+ "libm",
  "serde",
  "serde_json",
 ]
@@ -3242,6 +3243,7 @@ name = "game"
 version = "0.1.0"
 dependencies = [
  "assert-json-diff",
+ "bbmodel",
  "bincode 1.3.3",
  "block-mesh",
  "borrow",

@@ -11,16 +11,6 @@ export global HudConfig {
     out property <length> minimap-size: 220px;
     out property <length> minimap-margin: 12px;
     out property <length> minimap-outline: 2px;
-    out property <length> slot-size: 48px;
-    out property <length> hotbar-gap: 4px;
-    out property <length> hotbar-padding: 6px;
-}
-
-// One hotbar slot (`game::ui::HotbarView`): filled slots are tinted until
-// item icons exist.
-export struct HotbarSlot {
-    filled: bool,
-    count: string,
 }
 
 export component HudUi inherits Window {
@@ -40,8 +30,6 @@ export component HudUi inherits Window {
     in property <bool> minimap-visible;
     in property <image> minimap-base;
     in property <image> minimap-overlay;
-
-    in property <[HotbarSlot]> hotbar;
 
     if root.minimap-visible: Rectangle {
         // The outline, outside the map.
@@ -72,32 +60,6 @@ export component HudUi inherits Window {
                 source: root.minimap-overlay;
                 image-fit: fill;
                 image-rendering: pixelated;
-            }
-        }
-    }
-
-    if root.hotbar.length > 0: Rectangle {
-        width: root.hotbar.length * HudConfig.slot-size + (root.hotbar.length - 1) * HudConfig.hotbar-gap + 2 * HudConfig.hotbar-padding;
-        height: HudConfig.slot-size + 2 * HudConfig.hotbar-padding;
-        x: (root.width - self.width) / 2;
-        y: root.height - self.height;
-        background: rgba(0, 0, 0, 0.4);
-
-        HorizontalLayout {
-            padding: HudConfig.hotbar-padding;
-            spacing: HudConfig.hotbar-gap;
-
-            for slot in root.hotbar: Rectangle {
-                width: HudConfig.slot-size;
-                height: HudConfig.slot-size;
-                background: slot.filled ? rgb(102, 77, 51) : rgba(25, 25, 25, 0.6);
-
-                Text {
-                    x: parent.width - self.width - 2px;
-                    y: parent.height - self.height;
-                    text: slot.count;
-                    color: white;
-                }
             }
         }
     }

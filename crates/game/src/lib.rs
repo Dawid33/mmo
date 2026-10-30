@@ -13,6 +13,7 @@ extern crate std;
 
 use std::collections::BTreeMap;
 
+pub mod anim;
 pub mod block;
 pub mod block_props;
 pub mod camera;
@@ -35,6 +36,7 @@ pub mod state;
 pub mod ui;
 pub mod volume;
 pub mod voxel;
+pub mod voxel_body;
 pub mod world_manager;
 pub mod world_map;
 pub use parry3d as parry;
@@ -67,6 +69,7 @@ pub use state::*;
 pub use ui::*;
 pub use volume::*;
 pub use voxel::*;
+pub use voxel_body::*;
 pub use world_manager::*;
 pub use world_map::*;
 

@@ -39,6 +39,7 @@ pub mod meshing;
 pub mod model;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod render_bench;
+pub mod rigs;
 mod skybox;
 pub mod slint_composite;
 pub mod slint_overlay;
@@ -116,7 +117,6 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<fortress_view::FortressViewUniform>()
         .init_resource::<avatar::AvatarAssets>()
         .init_resource::<slint_overlay::UiUpdates>()
-        .init_resource::<slint_overlay::Hotbar>()
         .insert_resource(collider_debug::DebugFlagsRes(self.debug_flags.clone()))
         .init_resource::<collider_debug::DebugColliderLines>()
         .init_resource::<grid_debug::GridDebug>()
@@ -216,6 +216,19 @@ impl Plugin for SimBridgePlugin {
         app.add_systems(
             Update,
             motion_probe::probe_region_crossing.after(interpolate::interpolate_transforms),
+        );
+        // Sim-animated entities (`game::anim`): model child, then the pose
+        // from the sim state over the interpolated body.
+        app.add_systems(
+            Update,
+            (
+                rigs::attach_rig_models.after(avatar::attach_avatars),
+                rigs::detach_rig_models,
+                rigs::pose_rig_models
+                    .after(interpolate::interpolate_transforms)
+                    .after(model::spawn_bbmodels),
+            )
+                .chain(),
         );
         app.add_plugins(slint_overlay::HudLayerPlugin);
         if self.camera_mode == commander::CameraMode::Commander {

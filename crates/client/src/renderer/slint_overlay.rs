@@ -37,7 +37,8 @@ use slint_ui::slint::{
     ComponentHandle, Image as SlintImage, LogicalPosition, ModelRc, Rgba8Pixel, SharedPixelBuffer,
     SharedString, VecModel,
 };
-use slint_ui::{GameUi, HotbarSlot, HudConfig, HudUi, Overlay, WorldMapConfig};
+use slint_ui::wheel::{self, WheelInput, WheelPhase};
+use slint_ui::{GameUi, HudConfig, HudUi, Overlay, WorldMapConfig};
 use worldgen::tile_map::{play_blocker, rasterize, tile_info_lines};
 
 use super::bridge::{SimEntity, SimKind};
@@ -62,6 +63,8 @@ pub const SLINT_PANEL_KEY: KeyCode = KeyCode::F9;
 pub const MENU_KEY: KeyCode = KeyCode::Escape;
 /// Opens / closes the world map (opening it closes the menu).
 pub const MAP_KEY: KeyCode = KeyCode::KeyM;
+/// Held, opens the tool wheel at the pointer ([`tool_wheel`]).
+pub const WHEEL_KEY: KeyCode = KeyCode::KeyQ;
 /// The map's status line from Play until the new region has loaded.
 pub const LOADING_TEXT: &str = "Loading region\u{2026}";
 /// UI pixels per window logical pixel. The widgets are pixel-exact at a
@@ -73,7 +76,7 @@ pub const WHEEL_LINE_PX: f32 = 40.0;
 /// Draw order of the Slint layers (higher on top). The interactive game UI
 /// (tool bar, menu, map) sits above the pass-through HUD.
 pub const GAME_LAYER_ORDER: i32 = 1_000;
-/// The pass-through HUD (crosshair, selection band, minimap, hotbar).
+/// The pass-through HUD (crosshair, selection band, minimap).
 pub const HUD_LAYER_ORDER: i32 = 0;
 /// The F3 dev panel, above everything (`dev_ui`).
 pub const DEV_LAYER_ORDER: i32 = 2_000;
@@ -110,20 +113,26 @@ pub struct PlayPending(pub Option<RegionCoords>);
 pub struct Screens {
     pub menu: bool,
     pub map: bool,
+    /// The tool wheel ([`tool_wheel`]): modal while open, so the commander
+    /// leaves the right button and the world alone.
+    pub wheel: bool,
 }
 
 impl Screens {
     fn of(ui: &GameUi) -> Self {
-        Self { menu: ui.get_menu_open(), map: ui.get_map_open() }
+        Self { menu: ui.get_menu_open(), map: ui.get_map_open(), wheel: ui.get_wheel_open() }
     }
 
     pub fn any(self) -> bool {
-        self.menu || self.map
+        self.menu || self.map || self.wheel
     }
 
-    /// [`MENU_KEY`] (with no designation to cancel): the map closes first.
+    /// [`MENU_KEY`] (with no designation to cancel): the wheel closes first,
+    /// then the map.
     pub fn escape(self) -> Self {
-        if self.map {
+        if self.wheel {
+            Self { wheel: false, ..self }
+        } else if self.map {
             Self { map: false, ..self }
         } else {
             Self { menu: !self.menu, ..self }
@@ -133,14 +142,14 @@ impl Screens {
     /// [`MAP_KEY`].
     pub fn toggle_map(self) -> Self {
         if self.map {
-            Self { map: false, ..self }
+            Self { map: false, wheel: false, ..self }
         } else {
             Self::open_map()
         }
     }
 
     pub fn open_map() -> Self {
-        Self { menu: false, map: true }
+        Self { map: true, ..Self::default() }
     }
 }
 
@@ -279,6 +288,9 @@ impl Plugin for SlintOverlayPlugin {
                     // press does one thing.
                     menu_keys.before(minimap::minimap_pointer),
                     apply_ui_actions.before(minimap::minimap_pointer),
+                    // Also before the commander: the clicks the open wheel
+                    // takes must not reach the world.
+                    tool_wheel.before(minimap::minimap_pointer),
                     push_ui_state,
                 )
                     .chain(),
@@ -291,24 +303,21 @@ impl Plugin for SlintOverlayPlugin {
 #[derive(Resource, Default)]
 pub struct UiUpdates(pub Option<crossbeam::channel::Receiver<game::UiUpdate>>);
 
-/// The local player's hotbar as last projected by the sim.
-#[derive(Resource, Default, Debug, PartialEq)]
-pub struct Hotbar(pub game::HotbarView);
-
-/// Apply the sim's UI projection: the hotbar (drawn by the HUD) and the
-/// cursor grab it asks for.
-pub fn drain_ui_updates(updates: Res<UiUpdates>, mut hotbar: ResMut<Hotbar>, mut cursor_policy: ResMut<CursorPolicy>) {
+/// Apply the sim's UI projection: the cursor grab it asks for. Its hotbar
+/// is not drawn (the HUD's hotbar strip was removed; the fortress tools are
+/// on the tool wheel).
+pub fn drain_ui_updates(updates: Res<UiUpdates>, mut cursor_policy: ResMut<CursorPolicy>) {
     let Some(receiver) = updates.0.as_ref() else { return };
     while let Ok(update) = receiver.try_recv() {
         match update {
-            game::UiUpdate::Hotbar(view) => hotbar.0 = view,
+            game::UiUpdate::Hotbar(_) => {}
             game::UiUpdate::SetCursorGrab(grab) => cursor_policy.sim_grab = grab,
         }
     }
 }
 
-/// The pass-through HUD (`HudUi`: crosshair, selection band, minimap,
-/// hotbar), in both camera modes, under the game UI. It never takes the
+/// The pass-through HUD (`HudUi`: crosshair, selection band, minimap), in
+/// both camera modes, under the game UI. It never takes the
 /// pointer, so commander selection and minimap drags work over its pixels.
 pub struct HudLayerPlugin;
 
@@ -338,23 +347,9 @@ fn push_hud_state(
     policy: Option<Res<CursorPolicy>>,
     band: Option<Res<SelectionBand>>,
     minimap_pixels: Option<ResMut<minimap::MinimapPixels>>,
-    hotbar: Option<Res<Hotbar>>,
 ) {
     let Some(hud) = hud else { return };
     let ui = hud.overlay.ui();
-
-    if let Some(hotbar) = hotbar.filter(|h| h.is_changed()) {
-        let slots: Vec<HotbarSlot> = hotbar
-            .0
-            .slots
-            .iter()
-            .map(|slot| HotbarSlot {
-                filled: slot.is_some(),
-                count: slot.map_or(String::new(), |s| s.count.to_string()).into(),
-            })
-            .collect();
-        ui.set_hotbar(ModelRc::new(VecModel::from(slots)));
-    }
 
     // The minimap exists in commander mode only.
     if ui.get_minimap_visible() != minimap_pixels.is_some() {
@@ -687,6 +682,9 @@ fn set_screens(
     if from.map != to.map {
         ui.set_map_open(to.map);
     }
+    if from.wheel != to.wheel {
+        ui.set_wheel_open(to.wheel);
+    }
     if let Some(policy) = policy.filter(|p| p.ui_modal != to.any()) {
         policy.ui_modal = to.any();
     }
@@ -791,30 +789,41 @@ fn selection_lines(kinds: impl IntoIterator<Item = game::EntityKind>) -> Vec<Str
     counts.into_iter().map(|(label, n)| format!("{label} ×{n}")).collect()
 }
 
-/// What a tool bar click asked for. Queued apart from [`UiAction`] and
-/// applied by [`sync_toolbar`], which also connects the callbacks.
+/// What a tool wheel wedge asked for, applied by [`apply_toolbar_action`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
     SelectTool(Option<Tool>),
-    SetPriority(u8),
-    /// The "Hide above" button: flip the cutaway, as `C` does.
+    /// The "Hide above" wedge: flip the cutaway, as `C` does.
     ToggleCut,
 }
 
-thread_local! {
-    /// Filled by the tool bar's callbacks during event dispatch (main
-    /// thread), drained by [`sync_toolbar`].
-    static TOOLBAR_ACTIONS: RefCell<Vec<ToolbarAction>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Tool bar button `index` (in [`TOOL_KEYS`] order) clicked; -1 (or any
-/// index without a tool) puts the tool down.
+/// Index `index` in [`TOOL_KEYS`] order; -1 (or any index without a tool)
+/// puts the tool down.
 pub fn tool_action(index: i32) -> ToolbarAction {
     let tool = usize::try_from(index).ok().and_then(|i| TOOL_KEYS.get(i)).map(|(_, tool)| *tool);
     ToolbarAction::SelectTool(tool)
 }
 
-/// Apply one tool bar click. Tools are picked only with a home region
+/// The tool wheel's wedge `index`: the tools in [`TOOL_KEYS`] order (the
+/// active one's wedge puts it down), then "Hide above".
+pub fn wheel_action(index: usize, active: Option<Tool>) -> Option<ToolbarAction> {
+    match TOOL_KEYS.get(index) {
+        Some((_, tool)) if active == Some(*tool) => Some(ToolbarAction::SelectTool(None)),
+        Some((_, tool)) => Some(ToolbarAction::SelectTool(Some(*tool))),
+        None if index == TOOL_KEYS.len() => Some(ToolbarAction::ToggleCut),
+        None => None,
+    }
+}
+
+/// The wheel's wedge captions, in [`wheel_action`] order; the cut's wedge
+/// says what picking it does. Hotkeys are left off: the wedges are narrow,
+/// and the keys still work.
+pub fn wheel_labels(cut: bool) -> Vec<String> {
+    let cut = if cut { "Show above" } else { "Hide above" }.to_string();
+    TOOL_KEYS.iter().map(|(_, tool)| tool.label().to_string()).chain([cut]).collect()
+}
+
+/// Apply one wedge pick. Tools are picked only with a home region
 /// (`available`), as with the hotkeys; putting the tool down always works.
 pub fn apply_toolbar_action(
     action: ToolbarAction,
@@ -825,7 +834,6 @@ pub fn apply_toolbar_action(
     match action {
         ToolbarAction::SelectTool(tool) if available || tool.is_none() => state.set_tool(tool),
         ToolbarAction::SelectTool(_) => {}
-        ToolbarAction::SetPriority(priority) => state.priority = priority,
         ToolbarAction::ToggleCut => {
             if let Some(level) = level {
                 level.cut = !level.cut;
@@ -834,14 +842,77 @@ pub fn apply_toolbar_action(
     }
 }
 
-/// A tool bar button's text: the tool and its hotkey, "[G] Dig".
-fn tool_button_text(tool: Tool) -> String {
-    format!("[{}] {}", tool.key_label(), tool.label())
-}
-
-/// The tool bar index of `tool`, -1 for none.
+/// The wheel index of `tool`, -1 for none.
 fn tool_index(tool: Option<Tool>) -> i32 {
     tool.and_then(|t| TOOL_KEYS.iter().position(|(_, k)| *k == t)).map_or(-1, |i| i as i32)
+}
+
+/// [`WHEEL_KEY`] held: the tool wheel, which replaced the bottom tool bar.
+/// [`slint_ui::wheel::step`] decides when it opens, picks and closes; this
+/// feeds it the key and mouse, puts the wheel where it opened, applies the
+/// pick, and keeps it a modal [`Screens`] entry. The clicks it uses are
+/// consumed, so the commander never sees them.
+#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
+fn tool_wheel(
+    mut buttons: ResMut<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    slint: Option<NonSend<SlintLayer<GameUi>>>,
+    mut designate: Option<ResMut<DesignateState>>,
+    mut level: Option<ResMut<WorkingLevel>>,
+    mirror: Option<Res<TileMirror>>,
+    mut policy: Option<ResMut<CursorPolicy>>,
+    mut world_map: ResMut<WorldMapState>,
+    status: Res<HudStatus>,
+    mut phase: Local<WheelPhase>,
+) {
+    let Some(slint) = slint else { return };
+    let ui = slint.overlay.ui();
+    // Esc or the map closed it.
+    if !ui.get_wheel_open() {
+        *phase = WheelPhase::Closed;
+    }
+    let Ok(window) = window.single() else { return };
+    // Commander mode with a home region, as for the tool hotkeys.
+    let available = designate.is_some() && mirror.as_ref().is_some_and(|m| m.region().is_some());
+    let free = policy.as_ref().is_none_or(|p| !p.blocks_game() && !p.ui_pointer);
+    let cursor = window.cursor_position();
+    let input = WheelInput {
+        open_press: keys.just_pressed(WHEEL_KEY) && available && free && window.focused && cursor.is_some(),
+        hold_press: keys.just_pressed(WHEEL_KEY),
+        // A release lost with the focus counts as one.
+        hold_release: keys.just_released(WHEEL_KEY) || (*phase == WheelPhase::Held && !keys.pressed(WHEEL_KEY)),
+        cancel_press: buttons.just_pressed(MouseButton::Right),
+        left_release: buttons.just_released(MouseButton::Left),
+        hovered: ui.get_wheel_hovered(),
+    };
+    let (next, picked) = wheel::step(*phase, input);
+    if next == *phase && !next.is_open() {
+        return;
+    }
+    if *phase == WheelPhase::Closed {
+        if let Some(at) = cursor.map(|c| c / slint.ui_scale) {
+            ui.set_wheel_x(at.x);
+            ui.set_wheel_y(at.y);
+        }
+    }
+    // The clicks the open wheel took stay out of the commander.
+    if phase.is_open() {
+        if input.cancel_press {
+            buttons.clear_just_pressed(MouseButton::Right);
+        }
+        if input.left_release {
+            buttons.clear_just_released(MouseButton::Left);
+        }
+    }
+    if let (Some(i), Some(state)) = (picked, designate.as_mut()) {
+        if let Some(action) = wheel_action(i, state.tool) {
+            apply_toolbar_action(action, available, state, level.as_deref_mut());
+        }
+    }
+    *phase = next;
+    let to = Screens { wheel: next.is_open(), ..Screens::of(ui) };
+    set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut());
 }
 
 /// The level readout: the working level and how far it is from the surface
@@ -855,7 +926,7 @@ pub fn level_text(level: i32, surface_level: Option<i32>) -> String {
     }
 }
 
-/// What the tool bar and its readouts read and drive. All optional: the
+/// What the tool wheel's state and the readouts read. All optional: the
 /// commander resources exist only in commander mode.
 #[derive(SystemParam)]
 struct ToolbarParams<'w, 's> {
@@ -866,47 +937,36 @@ struct ToolbarParams<'w, 's> {
     cam: Option<Res<'w, CommanderCamera>>,
     mirror: Option<Res<'w, TileMirror>>,
     window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
-    /// The callbacks are connected.
-    connected: Local<'s, bool>,
+    /// The cut the wheel's items were last captioned for; `None` before
+    /// the first set.
+    wheel_cut: Local<'s, Option<bool>>,
 }
 
-/// Tool bar clicks → [`DesignateState`] / [`WorkingLevel`] (as the hotkeys
-/// set them), then the tool, priority, cut, level and drag readout → the
-/// UI, each only when changed.
+/// The tool, priority, cut (the wheel's captions), level and drag readout
+/// → the UI, each only when changed.
 fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
-    if !*p.connected {
-        ui.on_tool_clicked(|i| TOOLBAR_ACTIONS.with(|q| q.borrow_mut().push(tool_action(i))));
-        ui.on_priority_clicked(|priority| {
-            let priority = priority.clamp(1, game::MAX_PRIORITY as i32) as u8;
-            TOOLBAR_ACTIONS.with(|q| q.borrow_mut().push(ToolbarAction::SetPriority(priority)));
-        });
-        ui.on_cut_clicked(|| TOOLBAR_ACTIONS.with(|q| q.borrow_mut().push(ToolbarAction::ToggleCut)));
-        let labels: Vec<SharedString> = TOOL_KEYS.iter().map(|(_, t)| tool_button_text(*t).into()).collect();
-        ui.set_tool_labels(ModelRc::new(VecModel::from(labels)));
-        *p.connected = true;
-    }
-    let actions = TOOLBAR_ACTIONS.with(|q| std::mem::take(&mut *q.borrow_mut()));
-    // No home region (cell mode, or not joined yet): no tools, as with the hotkeys.
+    // No home region (not joined yet): no tools, as with the hotkeys.
     let available = p.mirror.as_ref().is_some_and(|m| m.region().is_some());
     if ui.get_tools_available() != available {
         ui.set_tools_available(available);
     }
-    let Some(state) = p.designate.as_mut() else { return };
-    for action in actions {
-        apply_toolbar_action(action, available, state, p.level.as_deref_mut());
+    // The cut is on by default; without a working level it shows as on.
+    let cut = p.level.as_ref().is_none_or(|l| l.cut);
+    if *p.wheel_cut != Some(cut) {
+        let items: Vec<slint_ui::RadialItem> = wheel_labels(cut)
+            .into_iter()
+            .map(|text| slint_ui::RadialItem { text: text.into(), enabled: true, ..Default::default() })
+            .collect();
+        ui.set_wheel_items(ModelRc::new(VecModel::from(items)));
+        *p.wheel_cut = Some(cut);
     }
+    let Some(state) = p.designate.as_mut() else { return };
     let active = tool_index(state.tool);
     if ui.get_active_tool() != active {
         ui.set_active_tool(active);
     }
     if ui.get_priority() != state.priority as i32 {
         ui.set_priority(state.priority as i32);
-    }
-
-    // The cut is on by default; without a working level it shows as on.
-    let cut = p.level.as_ref().is_none_or(|l| l.cut);
-    if ui.get_cut_above() != cut {
-        ui.set_cut_above(cut);
     }
 
     let surface = match (&p.grid, &p.cam) {
@@ -1148,14 +1208,23 @@ mod tests {
     #[test]
     fn escape_closes_the_map_first_then_toggles_the_menu() {
         let none = Screens::default();
-        let menu = Screens { menu: true, map: false };
-        let map = Screens { menu: false, map: true };
+        let menu = Screens { menu: true, ..Default::default() };
+        let map = Screens { map: true, ..Default::default() };
         assert_eq!(none.escape(), menu);
         assert_eq!(menu.escape(), none);
         assert_eq!(map.escape(), none);
         assert_eq!(none.toggle_map(), map);
         assert_eq!(menu.toggle_map(), map, "opening the map closes the menu");
         assert_eq!(map.toggle_map(), none);
+    }
+
+    #[test]
+    fn escape_and_the_map_close_the_tool_wheel_first() {
+        let wheel = Screens { wheel: true, ..Default::default() };
+        assert!(wheel.any(), "an open wheel holds the game like a screen");
+        assert_eq!(wheel.escape(), Screens::default(), "Esc only closes the wheel");
+        assert_eq!(wheel.toggle_map(), Screens::open_map());
+        assert!(!Screens::open_map().wheel);
     }
 
     #[test]
@@ -1264,8 +1333,21 @@ mod tests {
             assert_eq!(tool_index(Some(*tool)), i as i32);
         }
         assert_eq!(tool_index(None), -1);
-        assert_eq!(tool_button_text(Tool::Dig), "[G] Dig");
-        assert_eq!(tool_button_text(Tool::Build), "[B] Build");
+    }
+
+    #[test]
+    fn wheel_wedges_pick_tools_then_the_cut() {
+        assert_eq!(wheel_action(2, None), Some(ToolbarAction::SelectTool(Some(Tool::Build))));
+        // The active tool's wedge puts it down, as its toggled button did.
+        assert_eq!(wheel_action(2, Some(Tool::Build)), Some(ToolbarAction::SelectTool(None)));
+        assert_eq!(wheel_action(TOOL_KEYS.len(), None), Some(ToolbarAction::ToggleCut));
+        assert_eq!(wheel_action(TOOL_KEYS.len() + 1, None), None);
+        let labels = wheel_labels(true);
+        assert_eq!(labels.len(), TOOL_KEYS.len() + 1);
+        assert_eq!(labels[0], "Dig");
+        // The cut's wedge names what clicking it does.
+        assert_eq!(labels[TOOL_KEYS.len()], "Show above");
+        assert_eq!(wheel_labels(false)[TOOL_KEYS.len()], "Hide above");
     }
 
     #[test]

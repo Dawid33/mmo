@@ -150,11 +150,7 @@ fn main() {
         .add_plugins(
             DefaultPlugins
                 // Absolute, so a directly launched binary finds them too.
-                .set(AssetPlugin {
-                    file_path: repo_root().to_string_lossy().into_owned(),
-                    watch_for_changes_override: Some(true),
-                    ..default()
-                })
+                .set(AssetPlugin { file_path: repo_root().to_string_lossy().into_owned(), ..default() })
                 .set(WindowPlugin { primary_window: Some(window), ..default() })
                 .set(client::renderer::render_plugin()),
         )
@@ -165,8 +161,34 @@ fn main() {
         .insert_resource(start_view)
         .init_resource::<Viewer>()
         .add_systems(Startup, (setup, scan_at_start))
-        .add_systems(Update, (apply_actions, on_loaded, orbit, turn, push_state, shoot).chain())
+        .add_systems(Update, (apply_actions, reload_on_save, on_loaded, orbit, turn, push_state, shoot).chain())
         .run();
+}
+
+/// How often the shown model's file is checked for a new save.
+const RELOAD_POLL_SECS: f32 = 0.5;
+
+/// Hot reload without Bevy's `file_watcher` feature, which would make the viewer
+/// a different build of the client from `just run` (a second copy of Bevy in
+/// `target/`): the shown model's file is polled, and a newer save reloads it.
+fn reload_on_save(
+    time: Res<Time>,
+    assets: Res<AssetServer>,
+    viewer: Res<Viewer>,
+    mut seen: Local<(Option<String>, Option<std::time::SystemTime>)>,
+    mut since: Local<f32>,
+) {
+    *since += time.delta_secs();
+    if *since < RELOAD_POLL_SECS {
+        return;
+    }
+    *since = 0.0;
+    let Some(path) = viewer.selected.and_then(|i| viewer.models.get(i)) else { return };
+    let modified = std::fs::metadata(repo_root().join(path)).and_then(|m| m.modified()).ok();
+    if seen.0.as_deref() == Some(path.as_str()) && modified != seen.1 {
+        assets.reload(path.clone());
+    }
+    *seen = (Some(path.clone()), modified);
 }
 
 fn connect(ui: &AssetViewerUi, world: &mut World) {

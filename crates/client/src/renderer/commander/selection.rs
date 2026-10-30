@@ -2,7 +2,7 @@
 //!
 //! Left click selects the entity nearest the cursor (within
 //! [`CLICK_SELECT_RADIUS_PX`]), left-drag selects everything whose projected
-//! position falls in the box, Shift adds to the selection, and a click on
+//! position falls in the box, Ctrl adds to the selection (Shift is the level-down key), and a click on
 //! empty ground clears it. Nothing here reaches the sim: orders (a right
 //! click, designations) will be sim events aimed at [`GroundPick`].
 
@@ -170,7 +170,7 @@ fn projected(
         .collect()
 }
 
-/// Left click / drag / Shift → the selection, and the rubber-band box.
+/// Left click / drag / Ctrl → the selection, and the rubber-band box.
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn select_input(
     buttons: Res<ButtonInput<MouseButton>>,
@@ -213,8 +213,8 @@ pub fn select_input(
     } else {
         click_pick(end, candidates, CLICK_SELECT_RADIUS_PX).into_iter().collect()
     };
-    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-    if !shift {
+    let add = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
+    if !add {
         selection.0.clear();
     }
     selection.0.extend(picked);

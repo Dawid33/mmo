@@ -4,11 +4,20 @@ version = "0.1.0"
 edition = "2024"
 description = "Blockbench .bbmodel reader: groups, cubes and mesh elements to textured triangles. Engine-free."
 
+[features]
+default = ["textures"]
+# Decode embedded/external PNG textures. Off for the simulation, which reads
+# rigs only (`parse_rig`) and must not pull in image decoding.
+textures = ["dep:base64", "dep:image"]
+
 [dependencies]
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
-base64 = "0.22"
-image = { workspace = true }
+base64 = { version = "0.22", optional = true }
+image = { workspace = true, optional = true }
+# Rig evaluation runs in the deterministic sim: trig must be libm, which
+# agrees on native and wasm32.
+libm = "0.2"
 
 [dev-dependencies]
 serde_json = { workspace = true }

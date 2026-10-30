@@ -396,6 +396,16 @@ pub fn collider_cells_of_block(chunk: &Chunk, i: BlockIndex) -> ColliderCells {
     out
 }
 
+/// The collider cells of one block on its own, keyed as block (0, 0, 0) of a
+/// chunk — the same rule a chunk applies to it (non-solid blocks none, tree
+/// wood on the half-block grid). For shapes built outside a chunk
+/// (`voxel_body`).
+pub fn block_collider_cells(block: Block, chisel: Option<&ChiselData>) -> ColliderCells {
+    let mut out = ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
+    push_block_cells(&mut out, BlockIndex::from_xyz(0, 0, 0), block, chisel);
+    out
+}
+
 /// Appends block `bi`'s cells to `out`: one block key for a solid block,
 /// half keys for a partial chisel's solid octants and voxel keys for its
 /// other solid voxels, or nothing for air. A `ColliderScale::Half` block

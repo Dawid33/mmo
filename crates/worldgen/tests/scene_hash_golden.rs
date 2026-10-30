@@ -30,11 +30,16 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// then (already stale at 0xB42B_F7B3 after an earlier worldgen change) for
 /// the `ChunkBlocks` uniform/dense grid, `u16` `BlockIndex` and boxed
 /// `ColumnGround` footprints — hashed layout only, geometry unchanged.
+/// Then for the `Ecs` `animator` / `bones` component slots (sim-owned
+/// animation, `game::anim`), and again for players being rigged dwarves.
+/// Then for cell mode's removal (16 only; 2 still needs a re-record).
+/// Then for the `Ecs` `voxel_body` component slot (`game::voxel_body`;
+/// hashed layout only, no body in the scene) — both sizes.
 /// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
-    2 => 0xDB24_FC10,
-    16 => 0x8A57_7DEA,
+    2 => 0x380C_FBC3,
+    16 => 0x9D34_97F1,
     _ => 0,
 };
 /// Ticks of scripted input.

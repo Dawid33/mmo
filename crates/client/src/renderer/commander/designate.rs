@@ -6,7 +6,7 @@
 //! two corners ([`step_corners`]), either way: click a tile (press and
 //! release without moving) to anchor the first corner, then click again for
 //! the second; or press, drag and release. The moving corner is the hovered
-//! column at the CURRENT working level — Alt+wheel / PgUp / PgDn step the
+//! column at the CURRENT working level — Space / Shift / PgUp / PgDn step the
 //! level between the clicks or mid-drag, and the camera may move, so one box
 //! covers several levels — and the commit sends exactly that box as a sim
 //! [`Order`] (Ctrl held at the commit: an erase of the tool's kind). While a
@@ -55,7 +55,7 @@ pub enum Tool {
 }
 
 /// Tool hotkeys (bare, no Ctrl — Ctrl+Z is undo). Kept off the camera's
-/// WASD / arrows / Space / Shift.
+/// WASD / arrows and the level keys Space / Shift.
 pub const TOOL_KEYS: [(KeyCode, Tool); 4] = [
     (KeyCode::KeyG, Tool::Dig),
     (KeyCode::KeyX, Tool::Deconstruct),
@@ -764,7 +764,7 @@ mod tests {
         let px = Vec2::new(50.0, 50.0);
         press(&mut phase, [2, 10, 2], px);
         release(&mut phase, [2, 10, 2], px);
-        // Alt+wheel to level 12 (and the camera may move) before the second click.
+        // Space to level 12 (and the camera may move) before the second click.
         let px = Vec2::new(400.0, 80.0);
         press(&mut phase, [4, 12, 2], px);
         let CornerOutcome::Commit { a, b } = release(&mut phase, [4, 12, 2], px) else {

@@ -41,6 +41,7 @@ pub mod molang;
 
 pub use animation::{Animation, BonePose, Interpolation, LoopMode};
 
+#[cfg(feature = "textures")]
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::Value;
@@ -154,7 +155,16 @@ pub fn parse(bytes: &[u8]) -> Result<Model, Error> {
 /// return `None` (then the texture is an error).
 pub fn parse_with(bytes: &[u8], resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<Model, Error> {
     let file: File = serde_json::from_slice(bytes).map_err(Error::Json)?;
-    Reader::new(file, resolve)?.read()
+    Reader::new(file, Some(resolve))?.read()
+}
+
+/// Parse only the rig: bones, geometry and animations, with every texture a
+/// pixel-less placeholder (`width` = `height` = 0, no `rgba`) in its slot, so
+/// faces, parts and node order are exactly those [`parse`] returns. Never
+/// decodes an image; what the deterministic simulation loads.
+pub fn parse_rig(bytes: &[u8]) -> Result<Model, Error> {
+    let file: File = serde_json::from_slice(bytes).map_err(Error::Json)?;
+    Reader::new(file, None)?.read()
 }
 
 // --- File schema (only what is read) -----------------------------------------
@@ -305,13 +315,17 @@ struct Reader {
 }
 
 impl Reader {
-    fn new(file: File, resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<Self, Error> {
+    /// `resolve` `None` reads the rig only (placeholder textures).
+    fn new(file: File, mut resolve: Option<&mut dyn FnMut(&str) -> Option<Vec<u8>>>) -> Result<Self, Error> {
         let res = file.resolution.unwrap_or(Resolution { width: 16.0, height: 16.0 });
         let default_uv_space = [res.width, res.height];
         let mut textures = Vec::new();
         let mut uv_space = Vec::new();
         for t in &file.textures {
-            textures.push(decode_texture(t, resolve)?);
+            textures.push(match resolve.as_deref_mut() {
+                Some(resolve) => decode_texture(t, resolve)?,
+                None => placeholder_texture(t),
+            });
             uv_space.push([t.uv_width.unwrap_or(res.width), t.uv_height.unwrap_or(res.height)]);
         }
         let key = |v: &Value| v.get("uuid").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -633,6 +647,19 @@ fn sorted_quad(p: &[[f32; 3]]) -> Vec<usize> {
     }
 }
 
+fn placeholder_texture(t: &TextureEntry) -> Texture {
+    Texture { name: t.name.clone(), width: 0, height: 0, rgba: Vec::new(), alpha: AlphaKind::Opaque }
+}
+
+#[cfg(not(feature = "textures"))]
+fn decode_texture(t: &TextureEntry, _resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<Texture, Error> {
+    Err(Error::Texture {
+        name: t.name.clone(),
+        reason: "built without the `textures` feature (use parse_rig)".into(),
+    })
+}
+
+#[cfg(feature = "textures")]
 fn decode_texture(t: &TextureEntry, resolve: &mut dyn FnMut(&str) -> Option<Vec<u8>>) -> Result<Texture, Error> {
     let err = |reason: String| Error::Texture { name: t.name.clone(), reason };
     let bytes = match t.source.as_deref().and_then(|s| s.strip_prefix("data:")) {
@@ -692,9 +719,11 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
 /// `[x, y, z, w]` of `Rz * Ry * Rx` (three.js Euler order `ZYX`), degrees in.
 pub fn euler_zyx_quat(deg: [f32; 3]) -> [f32; 4] {
     let axis = |i: usize| {
+        // libm, not std: the simulation evaluates rigs, and std's sin/cos
+        // differ between native and wasm32.
         let h = deg[i].to_radians() / 2.0;
-        let mut q = [0.0, 0.0, 0.0, h.cos()];
-        q[i] = h.sin();
+        let mut q = [0.0, 0.0, 0.0, libm::cosf(h)];
+        q[i] = libm::sinf(h);
         q
     };
     quat_mul(quat_mul(axis(2), axis(1)), axis(0))

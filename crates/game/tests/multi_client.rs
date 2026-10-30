@@ -239,12 +239,15 @@ fn create_player_attaches_capsule_collider() {
     let e = *data.player_entites.get(&0).unwrap();
     let handle = *data.ecs.rigidbody.get(e);
     let body = data.physics.bodies.get(handle).unwrap();
+    // The movement capsule first, then one collider per dwarf-rig bone
+    // (`game::anim`).
     assert_eq!(
         body.colliders().len(),
-        1,
-        "player body carries exactly one collider"
+        1 + game::anim::rig(game::anim::RigId::Dwarf).hitboxes.len(),
+        "player body carries its capsule plus its bone colliders"
     );
     let collider = data.physics.colliders.get(body.colliders()[0]).unwrap();
+    assert!(collider.shape().as_capsule().is_some(), "the capsule comes first");
     assert_eq!(collider.parent(), Some(handle));
 }
 

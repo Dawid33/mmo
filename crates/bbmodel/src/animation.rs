@@ -96,6 +96,25 @@ impl Default for BonePose {
     }
 }
 
+/// Per-component blend of two bone pose sets (`w` = 0 is `a`, 1 is `b`), as
+/// a crossfade plays it; a bone missing from one side blends against its rest
+/// offsets. Plain arithmetic in node order, so the simulation and the
+/// renderer get the same pose.
+pub fn blend(a: &[(usize, BonePose)], b: &[(usize, BonePose)], w: f32) -> Vec<(usize, BonePose)> {
+    let mut nodes: Vec<usize> = a.iter().chain(b).map(|(n, _)| *n).collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    let get = |set: &[(usize, BonePose)], n| set.iter().find(|(m, _)| *m == n).map(|(_, p)| *p).unwrap_or_default();
+    let lerp = |x: [f32; 3], y: [f32; 3]| [0, 1, 2].map(|i| x[i] + (y[i] - x[i]) * w);
+    nodes
+        .into_iter()
+        .map(|n| {
+            let (p, q) = (get(a, n), get(b, n));
+            (n, BonePose { rotation: lerp(p.rotation, q.rotation), position: lerp(p.position, q.position), scale: lerp(p.scale, q.scale) })
+        })
+        .collect()
+}
+
 const EPSILON: f32 = 1.0 / 1200.0;
 
 impl Animation {

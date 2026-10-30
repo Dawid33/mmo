@@ -451,6 +451,103 @@ impl Rollback {
         }
     }
 
+    /// The state of the block at `pos` if clearing it to air would change
+    /// anything and is allowed: `None` outside the region, for air (an empty
+    /// slot, implied air or an unchiseled air block), for bedrock and for the
+    /// edge-ring blocks `breaks_into_neighbour_ground` refuses — the same
+    /// refusals as a break through `set_block_safe`. Implied ground reads as
+    /// its recipe block, with no chisel.
+    pub(crate) fn clearable_block(&self, pos: BlockPos) -> Option<(Block, Option<crate::ChiselData>)> {
+        let (coords, local) = locate(pos)?;
+        if self.breaks_into_neighbour_ground(pos, coords) {
+            return None;
+        }
+        let state = match self.chunk_key_at(coords) {
+            Some(e) => {
+                let chunk = self.data.ecs.chunk.try_get(e).as_ref()?;
+                let index = BlockIndex::from_xyz(local.0, local.1, local.2);
+                (chunk.blocks.get(index), chunk.chisel.get(&index).cloned())
+            }
+            None => (self.implied_block(coords, local)?, None),
+        };
+        if (state.0.id == BlockId::AIR && state.1.is_none()) || self.is_bedrock(coords, state.0) {
+            return None;
+        }
+        Some(state)
+    }
+
+    /// Clears every position to air, undo-safely, with the same refusals
+    /// as a `set_block_safe` break (bedrock, the edge ring; air is skipped).
+    /// Batched per chunk: one block write, one `SetBlocks` with every block
+    /// of the chunk, and one incremental collider patch. An implied chunk is
+    /// materialised before its blocks are cleared, and afterwards every
+    /// implied face-neighbour chunk of a cleared block, so the new air never
+    /// borders implied ground. Returns how many blocks were cleared.
+    pub fn clear_blocks_safe(&mut self, positions: &[BlockPos]) -> usize {
+        use std::collections::{BTreeMap, BTreeSet};
+        // Chunk (index-key order) → its clearable blocks, deduplicated.
+        let mut by_chunk: BTreeMap<crate::ChunkIndexKey, BTreeMap<BlockIndex, BlockPos>> = BTreeMap::new();
+        for &pos in positions {
+            if self.clearable_block(pos).is_none() {
+                continue;
+            }
+            let (coords, (bx, by, bz)) = locate(pos).expect("clearable blocks are in the region");
+            by_chunk
+                .entry(crate::chunk_index_key(coords))
+                .or_default()
+                .insert(BlockIndex::from_xyz(bx, by, bz), pos);
+        }
+        let air = Block::new(BlockId::AIR);
+        let mut cleared = Vec::new();
+        for (&key, blocks) in &by_chunk {
+            let coords = crate::chunk_coords_of_index_key(key);
+            self.materialize_ground_safe(coords);
+            let Some(e) = self.chunk_key_at(coords) else { continue };
+            let Some(chunk) = self.data.ecs.chunk.try_get(e).as_ref() else { continue };
+            let mut olds = Vec::with_capacity(blocks.len());
+            let mut old_cells = crate::ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
+            for &index in blocks.keys() {
+                let cells = crate::collider_cells_of_block(chunk, index);
+                old_cells.blocks.extend(cells.blocks);
+                old_cells.halves.extend(cells.halves);
+                old_cells.voxels.extend(cells.voxels);
+                olds.push(BlockDelta { index, block: chunk.blocks.get(index), chisel: chunk.chisel.get(&index).cloned() });
+            }
+            let news: Vec<BlockDelta> = blocks.keys().map(|&index| BlockDelta { index, block: air, chisel: None }).collect();
+            // LIFO: registered before the write, so the old blocks are
+            // re-sent after the chunk value is restored.
+            self.data.ecs.chunk.emit_on_undo(GameDataUpdate::new(
+                GameDataTransactionKind::Undo,
+                GameDataUpdateKind::SetBlocks(e, olds),
+            ));
+            self.data
+                .ecs
+                .chunk
+                .set_chunk_blocks_safe(e, blocks.keys().map(|&index| (index, air, None)).collect());
+            self.data.send(GameDataUpdate::new(
+                GameDataTransactionKind::Do,
+                GameDataUpdateKind::SetBlocks(e, news),
+            ));
+            let no_cells = crate::ColliderCells { blocks: Vec::new(), halves: Vec::new(), voxels: Vec::new() };
+            self.edit_block_colliders_safe(e, &old_cells, &no_cells);
+            cleared.extend(blocks.values().map(|&pos| (coords, pos)));
+        }
+        // Every implied face neighbour in another chunk becomes real.
+        let mut neighbours = BTreeSet::new();
+        for &(coords, pos) in &cleared {
+            for d in [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] {
+                let n = [pos[0] + d[0], pos[1] + d[1], pos[2] + d[2]];
+                if let Some((nc, _)) = locate(n).filter(|(nc, _)| *nc != coords) {
+                    neighbours.insert(crate::chunk_index_key(nc));
+                }
+            }
+        }
+        for key in neighbours {
+            self.materialize_ground_safe(crate::chunk_coords_of_index_key(key));
+        }
+        cleared.len()
+    }
+
     /// Runs one break or place for `client`'s player from its eye along its
     /// look. Returns whether a block changed. Invalid edits (nothing in reach,
     /// the target cell occupied, a body in the way) change nothing.

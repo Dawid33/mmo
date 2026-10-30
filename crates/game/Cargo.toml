@@ -27,6 +27,9 @@ glamx = { workspace = true }
 # keeps the camera's trig identical on native and wasm32.
 libm = "0.2"
 oorandom = { workspace = true }
+# Sim-owned animation (`anim.rs`): rigs parsed without textures. A path dep,
+# not `workspace = true`, so default features (PNG decoding) stay off here.
+bbmodel = { path = "../bbmodel", default-features = false }
 parry3d = { workspace = true }
 rapier3d = { workspace = true }
 

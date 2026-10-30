@@ -483,6 +483,12 @@ impl Region {
                     let data = self.data.as_refs_mut();
                     c.on_tick(data.data);
                 }
+                // After the step: clips follow how bodies moved, and bone
+                // colliders take the new pose for the next step.
+                self.data.tick_animators_safe();
+                // Voxel bodies that came to rest (or left) are settled.
+                let tick = *self.data.tick as u64;
+                self.data.tick_voxel_bodies_safe(tick);
                 #[cfg(not(target_arch = "wasm32"))]
                 let controllers_done = Instant::now();
                 // Block edits: a click this tick breaks or places, from the

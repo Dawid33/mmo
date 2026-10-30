@@ -1,7 +1,7 @@
 //! The pass-through HUD (`HudUi`), headless: each element draws where the
 //! client expects it and nothing draws by default.
-use slint_ui::slint::{ComponentHandle, ModelRc, VecModel};
-use slint_ui::{HotbarSlot, HudConfig, HudUi, Overlay};
+use slint_ui::slint::ComponentHandle;
+use slint_ui::{HudConfig, HudUi, Overlay};
 
 const WIDTH: u32 = 800;
 const HEIGHT: u32 = 600;
@@ -17,7 +17,8 @@ fn hud() -> Overlay<HudUi> {
 fn nothing_drawn_by_default() {
     let mut hud = hud();
     hud.render();
-    for (x, y) in [(400, 300), (5, 595), (100, 100), (122, 478)] {
+    // (400, 570): bottom centre, where the old hotbar was.
+    for (x, y) in [(400, 300), (5, 595), (100, 100), (122, 478), (400, 570)] {
         assert!(!hud.opaque_at(x, y), "({x}, {y}) drawn");
     }
 }
@@ -64,17 +65,4 @@ fn minimap_drawn_bottom_left_when_visible() {
     hud.ui().set_minimap_visible(false);
     hud.render();
     assert!(!hud.opaque_at(x, y));
-}
-
-#[test]
-#[ignore = "slow: >100ms — run via just test-full"]
-fn hotbar_slots_drawn_bottom_centre() {
-    let mut hud = hud();
-    let slot = |filled: bool| HotbarSlot { filled, count: if filled { "3".into() } else { "".into() } };
-    hud.ui().set_hotbar(ModelRc::new(VecModel::from(vec![slot(false), slot(true), slot(false)])));
-    hud.render();
-    let config = hud.ui().global::<HudConfig>();
-    let y = HEIGHT as f32 - config.get_hotbar_padding() - config.get_slot_size() / 2.0;
-    assert!(hud.opaque_at(WIDTH / 2, y as u32), "middle slot");
-    assert!(!hud.opaque_at(10, y as u32), "nothing at the left edge");
 }

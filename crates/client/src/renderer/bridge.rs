@@ -1009,6 +1009,20 @@ pub fn drain_region_updates(
                     // writes the window on a real change.
                     cursor_policy.sim_grab = enabled;
                 }
+                // Sim-owned animation (`game::anim`), drawn by `rigs`.
+                GameDataUpdateKind::SetAnimator(key, animator) => {
+                    let Some(&e) = map.0.get(&(region, key)) else {
+                        warn!("bridge: SetAnimator for unmapped {:?}", key);
+                        continue;
+                    };
+                    match animator {
+                        Some(a) => { commands.entity(e).insert(super::rigs::SimAnimator(a)); }
+                        None => { commands.entity(e).remove::<super::rigs::SimAnimator>(); }
+                    }
+                }
+                // Detached terrain (`game::voxel_body`): not drawn yet. Its
+                // entity's CreateEntity / RemoveEntity still map it.
+                GameDataUpdateKind::AddVoxelBody(..) => {}
             }
         }
         if !new_terrain.is_empty() {
