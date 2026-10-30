@@ -6,6 +6,10 @@
 //! of the body (wood AND leaves) stays out of the ground, the body comes to
 //! rest on it, and it falls like a tree — pivoting about its base onto its
 //! side, with the butt staying on the ground.
+//!
+//! Debugging: `TREE_FALL_SPECIES=<name>`, `TREE_FALL_SEED=<n>` and
+//! `TREE_FALL_AGE=<n>` narrow the sweep; `TREE_FALL_TRACE=1` prints every
+//! tick (tilt, butt, centre of mass, depth, velocities) with `--nocapture`.
 
 use std::collections::BTreeMap;
 
