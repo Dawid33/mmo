@@ -235,6 +235,11 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
         worldgen::tile_map::MAP_TILE_PX as i32,
         "the map image's pixels per tile and the map window's must agree"
     );
+    debug_assert_eq!(
+        ui.global::<WorldMapConfig>().get_grid_px(),
+        worldgen::tile_map::MAP_GRID_PX as i32,
+        "the map image's grid line and the map window's must agree"
+    );
     world.insert_non_send(GameUiActions(actions));
 }
 
@@ -418,7 +423,8 @@ pub fn tile_region(map: &WorldMap, col: i32, row: i32) -> Option<RegionCoords> {
 /// The pan (view-relative position of the map's top-left) that puts the
 /// centre of tile `index` at the centre of a view `view_len` long.
 pub fn centred_pan(view_len: f32, index: i32, tile_len: f32) -> f32 {
-    view_len / 2.0 - (index as f32 + 0.5) * tile_len
+    // Whole pixels, like every pan the map window sets itself.
+    (view_len / 2.0 - (index as f32 + 0.5) * tile_len).round()
 }
 
 /// What the player reads when the server refuses Play.

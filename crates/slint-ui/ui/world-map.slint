@@ -6,10 +6,16 @@ export global WorldMapConfig {
     // Logical pixels per tile at zoom 1: the map image has this many pixels
     // per tile. Must match `worldgen::tile_map::MAP_TILE_PX`.
     out property <int> tile-px: 8;
+    // Grid-line width in map pixels, drawn on each tile's right and bottom
+    // edge. Must match `worldgen::tile_map::MAP_GRID_PX`.
+    out property <int> grid-px: 1;
+    // Zoom doubles / halves per wheel notch: ½, 1, 2, 4, 8. Powers of two
+    // only: the software renderer steps through a scaled image in fixed
+    // point, so any other factor (×1.25, even ×3) drifts the image off the
+    // markers by up to a few pixels across the map; whole factors also keep
+    // the grid lines even.
     out property <float> zoom-min: 0.5;
     out property <float> zoom-max: 8;
-    // Zoom multiplies by this per wheel notch (`wheel-notch` of scroll).
-    out property <float> zoom-step: 1.25;
     // Matches the client's `WHEEL_LINE_PX`.
     out property <length> wheel-notch: 40px;
     // A press that moves further than this is a drag (pan), not a click.
@@ -63,6 +69,9 @@ export component WorldMap {
     out property <length> play-button-y: play-button.absolute-position.y + play-button.height / 2;
 
     property <length> tile-len: WorldMapConfig.tile-px * 1px * root.map-zoom;
+    // A tile's visible cell: the tile minus its grid line (right and bottom),
+    // which is what the markers frame.
+    property <length> cell-len: (WorldMapConfig.tile-px - WorldMapConfig.grid-px) * 1px * root.map-zoom;
     // The tile under the pointer, -1 when off the map.
     property <int> hover-col: touch.has-hover ? root.tile-at(touch.mouse-x - root.map-pan-x, root.map-cols) : -1;
     property <int> hover-row: touch.has-hover ? root.tile-at(touch.mouse-y - root.map-pan-y, root.map-rows) : -1;
@@ -70,6 +79,20 @@ export component WorldMap {
     property <length> drag-start-x;
     property <length> drag-start-y;
     property <bool> dragged;
+
+    // Scroll not yet worth a notch (touchpads scroll in small steps).
+    property <length> wheel-acc;
+
+    pure function zoom-in(z: float) -> float {
+        min(z * 2, WorldMapConfig.zoom-max)
+    }
+    pure function zoom-out(z: float) -> float {
+        max(z / 2, WorldMapConfig.zoom-min)
+    }
+    // Pans stay on whole pixels, so the image's pixels land on the screen's.
+    pure function snap(v: length) -> length {
+        round(v / 1px) * 1px
+    }
 
     pure function tile-at(offset: length, count: int) -> int {
         offset < 0 || offset >= count * root.tile-len ? -1 : floor(offset / root.tile-len)
@@ -105,8 +128,8 @@ export component WorldMap {
             if root.map-available && root.home-col >= 0 && root.home-row >= 0: Rectangle {
                 x: root.map-pan-x + root.home-col * root.tile-len;
                 y: root.map-pan-y + root.home-row * root.tile-len;
-                width: root.tile-len;
-                height: root.tile-len;
+                width: root.cell-len;
+                height: root.cell-len;
                 border-width: 2px;
                 border-color: WorldMapConfig.home-color;
             }
@@ -114,16 +137,16 @@ export component WorldMap {
                 // Inside the home marker when both are on one tile.
                 x: root.map-pan-x + root.selected-col * root.tile-len + 2px;
                 y: root.map-pan-y + root.selected-row * root.tile-len + 2px;
-                width: max(0px, root.tile-len - 4px);
-                height: max(0px, root.tile-len - 4px);
+                width: max(0px, root.cell-len - 4px);
+                height: max(0px, root.cell-len - 4px);
                 border-width: 2px;
                 border-color: WorldMapConfig.selected-color;
             }
             if root.map-available && !root.dragged && root.hover-col >= 0 && root.hover-row >= 0: Rectangle {
                 x: root.map-pan-x + root.hover-col * root.tile-len;
                 y: root.map-pan-y + root.hover-row * root.tile-len;
-                width: root.tile-len;
-                height: root.tile-len;
+                width: root.cell-len;
+                height: root.cell-len;
                 border-width: 1px;
                 border-color: WorldMapConfig.hover-color;
             }
@@ -158,8 +181,8 @@ export component WorldMap {
                             root.dragged = true;
                         }
                         if root.dragged {
-                            root.map-pan-x = root.drag-start-x + self.mouse-x - self.pressed-x;
-                            root.map-pan-y = root.drag-start-y + self.mouse-y - self.pressed-y;
+                            root.map-pan-x = root.snap(root.drag-start-x + self.mouse-x - self.pressed-x);
+                            root.map-pan-y = root.snap(root.drag-start-y + self.mouse-y - self.pressed-y);
                         }
                     }
                 }
@@ -180,10 +203,14 @@ export component WorldMap {
                     if event.delta-y == 0 {
                         return reject;
                     }
-                    let zoom = clamp(root.map-zoom * pow(WorldMapConfig.zoom-step, event.delta-y / WorldMapConfig.wheel-notch),
-                        WorldMapConfig.zoom-min, WorldMapConfig.zoom-max);
-                    root.map-pan-x = self.mouse-x - (self.mouse-x - root.map-pan-x) * zoom / root.map-zoom;
-                    root.map-pan-y = self.mouse-y - (self.mouse-y - root.map-pan-y) * zoom / root.map-zoom;
+                    root.wheel-acc += event.delta-y;
+                    if abs(root.wheel-acc) < WorldMapConfig.wheel-notch {
+                        return accept;
+                    }
+                    let zoom = root.wheel-acc > 0 ? root.zoom-in(root.map-zoom) : root.zoom-out(root.map-zoom);
+                    root.wheel-acc = 0;
+                    root.map-pan-x = root.snap(self.mouse-x - (self.mouse-x - root.map-pan-x) * zoom / root.map-zoom);
+                    root.map-pan-y = root.snap(self.mouse-y - (self.mouse-y - root.map-pan-y) * zoom / root.map-zoom);
                     root.map-zoom = zoom;
                     accept
                 }

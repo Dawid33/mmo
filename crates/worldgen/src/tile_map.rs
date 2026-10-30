@@ -336,10 +336,13 @@ fn hillshade(slope: [f64; 2]) -> f64 {
 pub const LAKE_RGB: [f64; 3] = [60.0, 130.0, 205.0];
 /// River mark colour on the map.
 pub const RIVER_RGB: [u8; 3] = [70, 140, 230];
-/// Multiplier for the last pixel row/column of a tile (grid lines).
+/// Multiplier for the grid-line pixels of a tile.
 pub const GRID_DARKEN: f64 = 0.75;
 /// Map pixels per tile edge.
 pub const MAP_TILE_PX: u32 = 8;
+/// Grid-line width in map pixels: the last rows/columns of each tile. The map
+/// window frames the cell inside them (Slint `WorldMapConfig.grid-px`).
+pub const MAP_GRID_PX: u32 = 1;
 
 /// The colour of a tile on the map: sea by depth for ocean, else land by mean
 /// height, blended toward lake blue by lake share, shaded by slope (sea is flat).
@@ -356,12 +359,12 @@ pub fn tile_color(t: &TileSummary) -> [u8; 3] {
 }
 
 /// The map as an RGBA picture: `(width_px, height_px, row-major pixels)`,
-/// [`MAP_TILE_PX`] per tile, grid-darkened last row/column, a 2x2 river mark
+/// [`MAP_TILE_PX`] per tile, the last [`MAP_GRID_PX`] rows/columns grid-darkened, a 2x2 river mark
 /// at the centre of tiles with rivers. Opaque.
 pub fn rasterize(map: &WorldMap) -> (u32, u32, Vec<[u8; 4]>) {
     let (w, h) = (map.width * MAP_TILE_PX, map.height * MAP_TILE_PX);
     let mut out = vec![[0, 0, 0, 255]; (w * h) as usize];
-    let edge = MAP_TILE_PX - 1;
+    let edge = MAP_TILE_PX - MAP_GRID_PX;
     let mid = MAP_TILE_PX / 2;
     for (i, t) in map.tiles.iter().enumerate() {
         let (tx, tz) = (i as u32 % map.width * MAP_TILE_PX, i as u32 / map.width * MAP_TILE_PX);
@@ -369,7 +372,7 @@ pub fn rasterize(map: &WorldMap) -> (u32, u32, Vec<[u8; 4]>) {
         for dz in 0..MAP_TILE_PX {
             for dx in 0..MAP_TILE_PX {
                 let mut rgb = c;
-                if dx == edge || dz == edge {
+                if dx >= edge || dz >= edge {
                     rgb = rgb.map(|v| (f64::from(v) * GRID_DARKEN) as u8);
                 }
                 if t.rivers > 0 && (mid - 1..=mid).contains(&dx) && (mid - 1..=mid).contains(&dz) {
