@@ -11,6 +11,8 @@
 //! brick child of a ROTATED parent — the shape `renderer::voxel_bodies`
 //! spawns — so the screenshot shows rotated quads with per-face shading
 //! (transformed normals) and the rotation-aware cull bounds keeping it drawn.
+//! It is upside down, its bottom faces up: rotated chunks are never
+//! face-culled (the cull shader's per-direction test is in world axes).
 //!
 //! Modeled on `examples/gizmo_smoke.rs` (self-screenshot + exit). The records
 //! encoder is the same one the meshing/LOD pipelines feed into `ChunkQuads`, so
@@ -67,8 +69,10 @@ const TEX_SIZE: u32 = 16;
 const BODY_COLOR: [u8; 4] = [225, 200, 30, 255];
 const BODY_LAYER: u32 = LAYER_COLORS.len() as u32 + 1;
 /// Minimum fraction of body-yellow pixels that counts as "the rotated body
-/// drew".
-const MIN_BODY_FRACTION: f32 = 0.005;
+/// drew". The body is turned upside down, so its local −Y faces point up at
+/// the camera: with them face-culled by world axis (the bug fixed by
+/// `prepare::chunk_face_ends`) it measured 0.050, drawn 0.124 (Intel Iris Xe).
+const MIN_BODY_FRACTION: f32 = 0.08;
 
 #[derive(Resource, Default)]
 struct ProbeResult(Option<bool>);
@@ -278,11 +282,12 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     ));
 
     // The voxel body: a parent posed at the box's centre (its "centre of
-    // mass"), turned about all three axes, with the brick child at minus the
-    // centre — `voxel_bodies::brick_translation`.
+    // mass"), turned about all three axes — upside down (pitch 2.6 rad), so
+    // its −Y faces point up — with the brick child at minus the centre —
+    // `voxel_bodies::brick_translation`.
     let body = commands
         .spawn((
-            Transform::from_xyz(42.0, 10.0, -6.0).with_rotation(Quat::from_euler(EulerRot::YXZ, 0.6, 0.5, 0.35)),
+            Transform::from_xyz(42.0, 10.0, -6.0).with_rotation(Quat::from_euler(EulerRot::YXZ, 0.6, 2.6, 0.35)),
             Visibility::Visible,
         ))
         .id();
