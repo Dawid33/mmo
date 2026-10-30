@@ -271,11 +271,6 @@ pub fn update_tile_mirror(
     all: Query<(Entity, &SimChunk, &Transform, &SimEntity)>,
     mut removed: RemovedComponents<SimChunk>,
 ) {
-    if game::CELL_CHUNKS != 0 {
-        msgs.clear();
-        removed.clear();
-        return;
-    }
     for msg in msgs.read() {
         mirror.apply(msg.clone());
     }

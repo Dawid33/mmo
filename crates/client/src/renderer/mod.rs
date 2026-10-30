@@ -136,7 +136,6 @@ impl Plugin for SimBridgePlugin {
         .init_resource::<input::MouseCoalesceWindow>()
         .init_resource::<look::LocalLook>()
         .init_resource::<lod_rings::LodRings>()
-        .init_resource::<lod_rings::HomeCellMask>()
         .init_resource::<grid_debug::TerrainDebug>()
         .init_resource::<join_timeline::WorldReady>()
         .insert_resource(self.camera_mode)
@@ -191,8 +190,6 @@ impl Plugin for SimBridgePlugin {
                 // the LOD mesh systems pick up on later frames.
                 (
                     lod_rings::apply_lod_events,
-                    lod_rings::reveal_meshed_cells,
-                    lod_rings::mask_home_lod,
                     lod_rings::retire_lod_roots,
                 )
                     .chain(),

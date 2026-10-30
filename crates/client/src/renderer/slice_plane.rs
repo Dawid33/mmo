@@ -174,13 +174,6 @@ fn u16_image(width: u32, height: u32, texels: &[u16]) -> Image {
     )
 }
 
-/// The ids texture's side for a build with `cell_chunks`
-/// ([`game::CELL_CHUNKS`]): the region's width in blocks, or 1 in cell mode,
-/// where the fortress view is off (see `fortress_view::overlay_dims_for`).
-pub fn slice_side_for(cell_chunks: usize) -> u32 {
-    if cell_chunks != 0 { 1 } else { REGION_BLOCKS as u32 }
-}
-
 /// Spawn the (hidden) plane once the block textures exist.
 fn spawn_slice_plane(
     mut commands: Commands,
@@ -196,7 +189,7 @@ fn spawn_slice_plane(
     if !existing.is_empty() {
         return;
     }
-    let side = slice_side_for(game::CELL_CHUNKS);
+    let side = REGION_BLOCKS as u32;
     let ids = images.add(u16_image(side, side, &vec![0; (side * side) as usize]));
     let lut = top_layer_lut(&layers);
     let top_layers = images.add(u16_image(lut.len() as u32, 1, &lut));
@@ -229,9 +222,8 @@ fn update_slice_plane(
     mut materials: ResMut<Assets<SlicePlaneMaterial>>,
 ) {
     let Ok((plane, mut tf, mut visibility)) = plane.single_mut() else { return };
-    // The per-chunk Mesh fallback (WebGL2) has no cutaway to cap; cell mode
-    // has no fortress view (and a 1×1 ids texture).
-    let pulled = config.near.uses_quad_records() && game::CELL_CHUNKS == 0;
+    // The per-chunk Mesh fallback (WebGL2) has no cutaway to cap.
+    let pulled = config.near.uses_quad_records();
     let (true, Some(cut), Some(home), Some(level)) =
         (pulled, camera_cut(&working, &tiles), tiles.region(), working.level)
     else {
@@ -316,12 +308,6 @@ mod tests {
         let at = 3 + 5 * REGION_BLOCKS;
         assert_eq!(ids[at], STONE.0);
         assert_eq!(ids.iter().filter(|&&id| id != 0).count(), 1);
-    }
-
-    #[test]
-    fn slice_side_collapses_in_cell_mode() {
-        assert_eq!(slice_side_for(16), 1);
-        assert_eq!(slice_side_for(0), REGION_BLOCKS as u32);
     }
 
     #[test]

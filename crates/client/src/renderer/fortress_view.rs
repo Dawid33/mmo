@@ -106,21 +106,9 @@ pub fn overlay_base_level(level: i32) -> i32 {
     level - (OVERLAY_LEVELS as i32 - 1)
 }
 
-/// The overlay texture's extent for a build with `cell_chunks`
-/// ([`game::CELL_CHUNKS`]): `W × D × OVERLAY_LEVELS` over a legacy region,
-/// and 1×1×1 in cell mode — the fortress view is off there, but the
-/// bindings still need a valid texture, and a region-sized one could reach
-/// gigabytes (or exceed wgpu's 2048 3D-texture limit) at large region sizes.
-pub fn overlay_dims_for(cell_chunks: usize) -> UVec3 {
-    if cell_chunks != 0 {
-        return UVec3::ONE;
-    }
-    UVec3::new(REGION_BLOCKS as u32, REGION_BLOCKS as u32, OVERLAY_LEVELS)
-}
-
-/// [`overlay_dims_for`] this build.
+/// The overlay texture's extent: `W × D × OVERLAY_LEVELS` over the region.
 pub fn overlay_dims() -> UVec3 {
-    overlay_dims_for(game::CELL_CHUNKS)
+    UVec3::new(REGION_BLOCKS as u32, REGION_BLOCKS as u32, OVERLAY_LEVELS)
 }
 
 /// The CPU side of the overlay texture: one [`overlay_byte`] per cell of the
@@ -444,9 +432,8 @@ mod tests {
     }
 
     #[test]
-    fn overlay_dims_collapse_in_cell_mode() {
-        assert_eq!(overlay_dims_for(16), UVec3::ONE);
-        assert_eq!(overlay_dims_for(0), UVec3::new(REGION_BLOCKS as u32, REGION_BLOCKS as u32, OVERLAY_LEVELS));
+    fn overlay_grid_covers_the_region() {
+        assert_eq!(overlay_dims(), UVec3::new(REGION_BLOCKS as u32, REGION_BLOCKS as u32, OVERLAY_LEVELS));
         assert_eq!(OverlayGrid::default().dims, overlay_dims());
         assert_eq!(OverlayGrid::default().bytes.len(), overlay_dims().element_product() as usize);
     }

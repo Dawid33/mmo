@@ -93,8 +93,6 @@ pub struct GameInstanceManager {
     results_buffer: BTreeMap<RegionId, Result<GameEvent, GameError>>,
     /// Last HUD status sent, for edge-triggered emission (avoid channel spam).
     last_hud_status: Option<(RegionCoords, RegionCoords, game::ConnectionState)>,
-    /// Last home active-cell set pushed to the renderer (cell mode).
-    last_active_cells: Option<(RegionCoords, std::collections::BTreeSet<game::CellCoords>)>,
     /// Sender half of the client-side UI projection channel (widget deltas).
     ui_update_send: Sender<game::UiUpdate>,
     /// Last hotbar emitted; the next projection is sent only if it differs.
@@ -505,7 +503,6 @@ impl GameInstanceManager {
             pending_events: BTreeMap::new(),
             results_buffer: BTreeMap::new(),
             last_hud_status: None,
-            last_active_cells: None,
             ui_update_send,
             prev_hotbar: game::HotbarView::default(),
             last_cursor_grab: true,
@@ -692,7 +689,7 @@ impl GameInstanceManager {
             }
             // Transfer events are relayed into regions directly (server) or
             // client-predicted (later task); never locally-originated here.
-            // CellChanges are server-authored and arrive only via reconcile.
+            // Task 3 removes CellChanges with cell mode.
             GameEventKind::EntityArrived(_)
             | GameEventKind::GhostUpdate(_)
             | GameEventKind::CellChanges(_) => {}
@@ -769,7 +766,6 @@ impl GameInstanceManager {
         while let Ok(request) = self.request_recv.try_recv() {
             self.handle_request(request);
         }
-        self.emit_active_cells();
         self.emit_hud_status();
         // Surface the metrics/budget lines from pump()-driven harnesses too
         // (soak test); on wasm there is no Instant, so no reporting.
@@ -951,27 +947,6 @@ impl GameInstanceManager {
     /// Push region + connection status to the render bridge, but only when it
     /// changed since the last push (edge-triggered). No-op until we know our
     /// home region and can resolve the viewer region.
-    /// Cell mode: push the home region's active cells to the renderer when
-    /// they (or the home region) changed. Edge-triggered like `emit_hud_status`.
-    fn emit_active_cells(&mut self) {
-        if game::CELL_CHUNKS == 0 {
-            return;
-        }
-        let Some(home) = self.home_region else { return };
-        let Some(world) = self.world.as_ref() else { return };
-        if !world.region_exists(&home) {
-            return;
-        }
-        let active = world.data(&home).cells.active.clone();
-        if self.last_active_cells.as_ref() == Some(&(home, active.clone())) {
-            return;
-        }
-        let data = world.data(&home);
-        let counts = active.iter().map(|&c| (c, data.cell_chunk_keys(c).len() as u32)).collect();
-        self.last_active_cells = Some((home, active));
-        let _ = self.client_event_send.send(ClientUpdateEvent::ActiveCells(home, counts));
-    }
-
     fn emit_hud_status(&mut self) {
         let (Some(home), Some(viewer)) = (self.home_region, self.viewer_region()) else {
             return;
@@ -1081,15 +1056,7 @@ impl GameInstanceManager {
         let Some(center) = self.window_center.or_else(|| self.viewer_region()) else {
             return;
         };
-        let mut excluded = desired_window(center, self.home_region, self.near_radius);
-        if game::CELL_CHUNKS != 0 {
-            // Cell mode: the home region's dormant terrain renders as LOD,
-            // with holes where active cells render from the sim
-            // (renderer/lod_rings.rs `mask_home_lod`).
-            if let Some(home) = self.home_region {
-                excluded.remove(&home);
-            }
-        }
+        let excluded = desired_window(center, self.home_region, self.near_radius);
         let (assigned, desired) = desired_lod(
             center,
             &excluded,
@@ -1300,31 +1267,10 @@ impl GameInstanceManager {
                 for event in self.buffer.drain(..).collect::<Vec<_>>() {
                     self.route_server_game_event(event)?;
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                let cells = match &game_event.kind {
-                    game::GameEventKind::CellChanges(c) => Some((
-                        c.activate.len(),
-                        c.deactivate.len(),
-                        c.activate.iter().map(|p| p.content.chunks.len()).sum::<usize>(),
-                    )),
-                    _ => None,
-                };
-                #[cfg(not(target_arch = "wasm32"))]
-                let event_start = Instant::now();
                 self.route_server_game_event(game_event)?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     self.perf.reconcile_total += recon_start.elapsed();
-                    // Per CellChanges (≤ one per server tick): the sim
-                    // thread's cost of an activation — rollback, raw
-                    // materialize + hash check, replay of the prediction lead.
-                    if let Some((act, deact, chunks)) = cells {
-                        game::perf_event!(
-                            "cell_changes",
-                            "side=client activate={act} deactivate={deact} chunks={chunks} ms={:.1}",
-                            event_start.elapsed().as_secs_f64() * 1000.0
-                        );
-                    }
                 }
                 self.is_caught_up = true;
             }
@@ -1421,9 +1367,6 @@ impl GameInstanceManager {
                                     acc.max_replay_depth =
                                         acc.max_replay_depth.max(stats.max_replay_depth);
                                 }
-                                // A cell built differently from the server is
-                                // a desync: fail hard, as the live path does.
-                                Err(e @ GameError::CellHashMismatch(_)) => return Err(e),
                                 Err(e) => warn!("replayed event failed to reconcile: {e:?}"),
                             }
                         }
@@ -1554,8 +1497,7 @@ impl GameInstanceManager {
                     }
                 }
             }
-            self.emit_active_cells();
-            self.emit_hud_status();
+                self.emit_hud_status();
             self.maybe_report_metrics();
             self.crossing.maybe_report();
         }

@@ -538,7 +538,6 @@ pub fn drain_client_updates(
     mut lod_rings: ResMut<lod_rings::LodRings>,
     mut snapshot_voxels: ResMut<SnapshotVoxelQueue>,
     mut retired_roots: ResMut<RetiredRegionRoots>,
-    mut home_cells: ResMut<lod_rings::HomeCellMask>,
     camera_mode: Option<Res<super::commander::CameraMode>>,
     mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
     mut world_map_msgs: Option<ResMut<Messages<super::world_map::WorldMapMsg>>>,
@@ -577,9 +576,8 @@ pub fn drain_client_updates(
                     .id();
                 roots.0.insert(id, root);
                 regions.0.insert(id, receiver);
-                // The fortress tools' tile mirror (commander only; no ground
-                // semantics in cell mode).
-                if let Some(msgs) = tile_msgs.as_mut().filter(|_| game::CELL_CHUNKS == 0) {
+                // The fortress tools' tile mirror (commander only).
+                if let Some(msgs) = tile_msgs.as_mut() {
                     msgs.write(TileMirrorMsg::Reset {
                         region: id,
                         ground: data.ground_recipes().clone(),
@@ -632,18 +630,8 @@ pub fn drain_client_updates(
                     .pending
                     .push(lod_rings::LodEventMsg::Remove { key, near_takeover });
             }
-            ClientUpdateEvent::ActiveCells(region, counts) => {
-                if home_cells.region != Some(region) {
-                    home_cells.region = Some(region);
-                    home_cells.cells.clear();
-                }
-                // Released cells unmask at once (their LOD returns while the
-                // near chunks go); new ones wait for `reveal_meshed_cells`.
-                if home_cells.cells.iter().any(|c| !counts.contains_key(c)) {
-                    home_cells.cells.retain(|c| counts.contains_key(c));
-                }
-                home_cells.active = counts;
-            }
+            // Task 3 removes this event with cell mode.
+            ClientUpdateEvent::ActiveCells(..) => {}
             ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
             ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {
                 hud_status.home_region = Some(home_region);
@@ -1132,7 +1120,6 @@ mod tests {
             .init_resource::<crate::renderer::slint_overlay::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<lod_rings::LodRings>()
-            .init_resource::<lod_rings::HomeCellMask>()
             .init_resource::<SnapshotVoxelQueue>()
             .init_resource::<crate::renderer::cursor::CursorPolicy>()
             .init_resource::<RetiredRegionRoots>()
@@ -2080,7 +2067,6 @@ mod tests {
             .init_resource::<crate::renderer::slint_overlay::UiUpdates>()
             .init_resource::<crate::renderer::collider_debug::DebugColliderLines>()
             .init_resource::<lod_rings::LodRings>()
-            .init_resource::<lod_rings::HomeCellMask>()
             .init_resource::<SnapshotVoxelQueue>()
             .add_systems(Update, drain_client_updates);
 
