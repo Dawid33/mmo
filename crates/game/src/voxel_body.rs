@@ -81,11 +81,14 @@ pub const VOXEL_BODY_ANGULAR_DAMPING: f32 = 0.5;
 /// butt back down, the tree lying sloped on its crown.
 pub const VOXEL_BODY_LANDED_ANGULAR_DAMPING: f32 = 8.0;
 /// A body counts as landed ([`VoxelBody::landed`]) once its up axis is
-/// tilted from the vertical past the angle with this cosine (30°) and its
-/// centre of mass has stopped falling (slower than one tick of gravity): a
-/// felled tree's butt landing on the stump comes before any such tilt, its
-/// crown landing after it.
+/// tilted from the vertical past the angle with this cosine (30°) on a tick
+/// that an impact stopped its fall ([`LANDING_IMPACT_TICKS`]): a felled
+/// tree's butt landing on the stump comes before any such tilt, its crown
+/// landing after it.
 pub const LANDED_TILT_COS: f32 = 0.866_025_4;
+/// An impact: the centre of mass's downward speed dropped in one tick by
+/// more than this many ticks of gravity.
+pub const LANDING_IMPACT_TICKS: f32 = 2.0;
 /// Soft-CCD prediction distance of a voxel body (units): one block. At the
 /// world's gravity a body is moving a block per tick after about half a
 /// second of fall, and a contact rapier only finds once the shapes overlap
@@ -150,10 +153,13 @@ pub struct VoxelBody {
     pub spawned_tick: u64,
     /// Consecutive ticks under both rest thresholds.
     pub still_ticks: u16,
-    /// Whether it has landed: tilted past [`LANDED_TILT_COS`] with its centre
-    /// of mass no longer falling — a felled tree's crown on the ground. From
-    /// then on it turns under [`VOXEL_BODY_LANDED_ANGULAR_DAMPING`].
+    /// Whether it has landed: tilted past [`LANDED_TILT_COS`] when an impact
+    /// stopped its fall — a felled tree's crown on the ground. From then on
+    /// it turns under [`VOXEL_BODY_LANDED_ANGULAR_DAMPING`].
     pub landed: bool,
+    /// Its centre of mass's downward speed (units/s) after the last tick,
+    /// for telling an impact ([`LANDING_IMPACT_TICKS`]).
+    pub fall_speed: f32,
 }
 
 /// Density class of a block (kg/m³): non-solid → leaf, half-block collider
@@ -571,7 +577,7 @@ impl Rollback {
         self.data
             .ecs
             .voxel_body
-            .set_safe(e, Some(VoxelBody { model, origin, policy, spawned_tick, still_ticks: 0, landed: false }));
+            .set_safe(e, Some(VoxelBody { model, origin, policy, spawned_tick, still_ticks: 0, landed: false, fall_speed: 0.0 }));
         Some(e)
     }
 
@@ -597,10 +603,10 @@ impl Rollback {
             let (v, w) = (body.linvel(), body.angvel());
             // Bodies start upright (identity rotation): the tilt of the up
             // axis is `(rotation · Y).y`, a quaternion rotation (+ - *).
-            // "Not falling": slower than one tick of gravity (a body resting
-            // on the ground reads about a third of that downward here).
-            let falling = -v.y > VOXEL_BODY_GRAVITY * UNITS_PER_METER * crate::movement::TICK_DT;
-            let land = !vb.landed && (body.rotation() * Vector::Y).y < LANDED_TILT_COS && !falling;
+            let fall_speed = -v.y;
+            let impact = vb.fall_speed - fall_speed
+                > LANDING_IMPACT_TICKS * VOXEL_BODY_GRAVITY * UNITS_PER_METER * crate::movement::TICK_DT;
+            let land = !vb.landed && (body.rotation() * Vector::Y).y < LANDED_TILT_COS && impact;
             let still = body.is_sleeping()
                 || (v.dot(v) < REST_LINVEL * REST_LINVEL && w.dot(w) < REST_ANGVEL * REST_ANGVEL);
             let t = body.translation();
@@ -621,9 +627,9 @@ impl Rollback {
                     .bodies
                     .mutate_body_safe(handle, |b| b.set_angular_damping(VOXEL_BODY_LANDED_ANGULAR_DAMPING));
             }
-            if still_ticks != vb.still_ticks || land {
+            if still_ticks != vb.still_ticks || land || fall_speed.to_bits() != vb.fall_speed.to_bits() {
                 let landed = vb.landed || land;
-                self.data.ecs.voxel_body.set_safe(e, Some(VoxelBody { still_ticks, landed, ..vb }));
+                self.data.ecs.voxel_body.set_safe(e, Some(VoxelBody { still_ticks, landed, fall_speed, ..vb }));
             }
         }
     }

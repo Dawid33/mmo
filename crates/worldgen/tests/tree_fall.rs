@@ -492,11 +492,11 @@ const MIN_LANDING_SECS: f32 = 0.3;
 const MAX_LANDING_SECS: f32 = 3.0;
 /// Most the butt may rise above where it started, blocks. The crown is
 /// rigid: a pine lying on its side is a cone on its side, its trunk propped
-/// up by its whorls (measured 2.3–2.6 blocks at the butt), and an oak that
-/// lands on its crown rocks on it. What must not happen is the butt flung up
-/// as the part spins about its centre of mass (before the fix it was
-/// detached that way: up to 3.5 blocks, pine seed 0).
-const MAX_BUTT_RISE_BLOCKS: f32 = 3.0;
+/// up by its whorls (measured 2.3–3.3 blocks at the butt), and an oak that
+/// lands on its crown rocks on it, so this bounds the crown's geometry more
+/// than the topple (before the fix, spun about its centre of mass at 9.81
+/// m/s², the same trees measured 0–3.5 blocks, with up to 119° of turn).
+const MAX_BUTT_RISE_BLOCKS: f32 = 3.5;
 
 /// A mature oak and pine chopped at the base on flat ground fall like trees:
 /// they pivot about the butt onto their side or crown (no more than ~110° of

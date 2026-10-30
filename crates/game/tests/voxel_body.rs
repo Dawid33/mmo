@@ -571,3 +571,68 @@ fn bodies_fall_at_world_gravity() {
     let want = game::movement::GRAVITY * game::movement::UNITS_PER_METER * game::movement::TICK_DT;
     assert!((dv - want).abs() < 1e-2, "falls {dv} units/s faster per tick, want {want}");
 }
+
+/// The tick a toppling body lands (its damping raised, `VoxelBody::landed`
+/// set) rolls back bit-exact.
+#[test]
+fn rollback_of_landing_is_bit_exact() {
+    let _mode = Mode::set(game::HashMode::Full);
+    let (mut region, _recv) = region_over(0..32);
+    let col = column(16, 16, 6);
+    build(&mut region, &col, Block::new(STONE));
+    let pivot = Vector::new(16.5 * B, B, 16.5 * B);
+    let mut e = None;
+    region.with_data(|r| e = r.detach_blocks_pivoting_safe(&col, SettlePolicy::Despawn, Vector::new(0.0, 0.0, 1.5), Some(pivot)));
+    let e = e.expect("a body");
+    for _ in 0..SETTLE_TIMEOUT_TICKS {
+        let pre = state_hash(region.data());
+        region.handle_event(GameEventKind::Tick).unwrap();
+        let r = region.data();
+        assert!(alive(r, e), "despawned before landing");
+        if r.ecs.voxel_body.get(e).landed {
+            let damping = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap().angular_damping();
+            assert_eq!(damping, game::voxel_body::VOXEL_BODY_LANDED_ANGULAR_DAMPING);
+            region.rollback_last_event();
+            assert_eq!(pre, state_hash(region.data()), "the landing rolls back bit-exact");
+            assert!(!region.data().ecs.voxel_body.get(e).landed);
+            return;
+        }
+        region.forget_last_event();
+    }
+    panic!("never landed");
+}
+
+/// A column toppling about its base onto a one-block floor lies down on
+/// it: it never stops mid-topple, and never ends up under the floor. When
+/// the landing damping fired on "tilted and no longer falling" (true
+/// mid-topple, while the foot grips the floor), rapier's own CCD (on for
+/// every fast dynamic body) froze the heavily damped, still-turning body at
+/// ~34° of tilt while its velocity grew to -200 units/s, then it dropped
+/// through the floor upside down; landing now needs an impact.
+#[test]
+fn toppling_column_lies_down_on_the_floor() {
+    let (mut region, _recv) = region_over(0..32);
+    let col = column(16, 16, 6);
+    build(&mut region, &col, Block::new(STONE));
+    let pivot = Vector::new(16.5 * B, B, 16.5 * B);
+    let mut e = None;
+    region.with_data(|r| e = r.detach_blocks_pivoting_safe(&col, SettlePolicy::Despawn, Vector::new(0.0, 0.0, 1.5), Some(pivot)));
+    let e = e.expect("a body");
+    let floor_y = B;
+    let mut last = None;
+    for _ in 0..SETTLE_TIMEOUT_TICKS {
+        tick(&mut region);
+        let r = region.data();
+        if !alive(r, e) {
+            break;
+        }
+        let body = r.physics.bodies.get(*r.ecs.rigidbody.get(e)).unwrap();
+        let low = r.physics.colliders.get(body.colliders()[0]).unwrap().compute_aabb().mins.y;
+        assert!(low >= floor_y - 2.0, "under the floor: lowest point {low}, speed {:?}", body.linvel());
+        last = Some(((body.rotation() * Vector::Y).y, low));
+    }
+    let (up, low) = last.expect("it fell for a while");
+    assert!(up.abs() < 0.2, "lying down: up axis {up}");
+    assert!(low < floor_y + 1.0, "on the floor: lowest point {low}");
+}
+

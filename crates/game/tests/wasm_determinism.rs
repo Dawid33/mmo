@@ -59,9 +59,9 @@ const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0xBABE_5BB0);
 const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0xC044_7478);
 
 /// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
-const VOXEL_BODY_DIGEST: u32 = pinned(0x5697_8017, 0x1535_1282);
+const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0xB83E_05A8);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0x4151_916A, 0x279D_F1CB);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x5B51_B35B);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;
