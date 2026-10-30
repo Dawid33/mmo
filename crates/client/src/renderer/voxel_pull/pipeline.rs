@@ -563,6 +563,27 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(positi
         assert_eq!(block(&forward), block(&depth));
     }
 
+    /// Both passes texture a quad from the same position (or the cutout
+    /// depth pass drops other texels than the colour pass draws), and that
+    /// position follows the chunk's own axes so a rotated voxel body's
+    /// texture turns with it; the forward pass rotates the face normal too.
+    #[test]
+    fn texture_position_is_identical_in_both_shaders_and_normals_follow_the_transform() {
+        fn block(source: &str) -> &str {
+            let start = source.find("// BEGIN texture_position").expect("BEGIN marker");
+            let end = source.find("// END texture_position").expect("END marker");
+            &source[start..end]
+        }
+        let (forward, depth) = (shader_source("voxel_pull.wgsl"), shader_source("voxel_pull_depth.wgsl"));
+        assert_eq!(block(&forward), block(&depth));
+        for source in [&forward, &depth] {
+            assert!(source.contains("let tex_pos = texture_position(world_from_local, local_pos, scale);"));
+        }
+        assert!(forward.contains(
+            "out.world_normal = normalize((world_from_local * vec4<f32>(FACE_NORMALS[face], 0.0)).xyz);"
+        ));
+    }
+
     /// The opaque pipeline gains no alpha discard, and only cutout draws
     /// double-sided.
     #[test]

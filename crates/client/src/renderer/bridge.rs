@@ -747,6 +747,9 @@ fn spawn_region_snapshot(
         if let Some(kind) = *data.ecs.kind.try_get(key) {
             e.insert(SimKind(kind));
         }
+        if let Some(body) = data.ecs.voxel_body.try_get(key) {
+            e.insert(super::voxel_bodies::PendingVoxelBody(Arc::new(body.model.clone())));
+        }
         map.0.insert((region, key), e.id());
     }
 
@@ -1020,9 +1023,26 @@ pub fn drain_region_updates(
                         None => { commands.entity(e).remove::<super::rigs::SimAnimator>(); }
                     }
                 }
-                // Detached terrain (`game::voxel_body`): not drawn yet. Its
-                // entity's CreateEntity / RemoveEntity still map it.
-                GameDataUpdateKind::AddVoxelBody(..) => {}
+                // Detached terrain (`game::voxel_body`): its model is meshed
+                // into brick children by `voxel_bodies`, which ride the
+                // entity's interpolated pose; `RemoveEntity` despawns them
+                // with it. Starts at the pose rather than gliding in.
+                GameDataUpdateKind::AddVoxelBody(key, iso, model) => {
+                    let tf = iso_to_transform(&iso);
+                    let bundle = (
+                        tf,
+                        SimTarget::body(tf.translation, tf.rotation),
+                        super::voxel_bodies::PendingVoxelBody(Arc::new(*model)),
+                    );
+                    if let Some(&e) = map.0.get(&(region, key)) {
+                        commands.entity(e).insert(bundle);
+                    } else {
+                        let e = commands
+                            .spawn((SimEntity { region, key }, Visibility::default(), ChildOf(root), bundle))
+                            .id();
+                        map.0.insert((region, key), e);
+                    }
+                }
             }
         }
         if !new_terrain.is_empty() {

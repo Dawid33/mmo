@@ -125,6 +125,25 @@ const CORNER_PERM = array<u32, 16>(
     0u, 2u, 1u, 3u,
 );
 
+#ifdef CUTOUT
+// BEGIN texture_position — identical in voxel_pull.wgsl and
+// voxel_pull_depth.wgsl (test-pinned: voxel_pull/pipeline.rs).
+// Texture coordinates in voxels along the chunk's OWN axes (scaled), so one
+// repeat is one block at every LOD factor and a voxel body's texture turns
+// with it. Full-res bricks sit at whole multiples of BRICK_VOXELS and a
+// body's bricks at whole blocks of its model, so their local position is
+// already block-aligned. A LOD cell (scale > 1) is not — its skirt bias moves
+// it -factor on y — so it adds back its origin's offset within its block
+// (only that offset: the full world position would cost the interpolated UVs
+// their precision far out).
+fn texture_position(world_from_local: mat4x4<f32>, local_pos: vec3<f32>, scale: vec3<f32>) -> vec3<f32> {
+    let origin = world_from_local[3].xyz;
+    let phase = origin - BLOCK_VOXELS * floor(origin / BLOCK_VOXELS);
+    return local_pos * scale + select(vec3<f32>(0.0), phase, scale.x > 1.0);
+}
+// END texture_position
+#endif // CUTOUT
+
 // Directional-light cascade shadow views on GPUs without DEPTH_CLIP_CONTROL render
 // with unclipped depth emulated in the fragment stage (mirrors bevy's prepass_io.wgsl
 // / pbr_prepass.wgsl): the vertex clamps clip-space z so the near plane doesn't clip
@@ -195,8 +214,7 @@ fn vertex(
         length(world_from_local[1].xyz),
         length(world_from_local[2].xyz),
     );
-    let origin = world_from_local[3].xyz;
-    let tex_pos = local_pos * scale + (origin - BLOCK_VOXELS * floor(origin / BLOCK_VOXELS));
+    let tex_pos = texture_position(world_from_local, local_pos, scale);
     out.uv = vec2<f32>(
         dot(tex_pos, FACE_U_MASK[face]),
         dot(tex_pos, FACE_V_MASK[face]),

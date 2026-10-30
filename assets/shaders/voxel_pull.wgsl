@@ -226,6 +226,23 @@ fn overlay_bits(p: vec3<f32>) -> u32 {
     return select(0u, textureLoad(overlay, texel, 0).r, inside);
 }
 
+// BEGIN texture_position — identical in voxel_pull.wgsl and
+// voxel_pull_depth.wgsl (test-pinned: voxel_pull/pipeline.rs).
+// Texture coordinates in voxels along the chunk's OWN axes (scaled), so one
+// repeat is one block at every LOD factor and a voxel body's texture turns
+// with it. Full-res bricks sit at whole multiples of BRICK_VOXELS and a
+// body's bricks at whole blocks of its model, so their local position is
+// already block-aligned. A LOD cell (scale > 1) is not — its skirt bias moves
+// it -factor on y — so it adds back its origin's offset within its block
+// (only that offset: the full world position would cost the interpolated UVs
+// their precision far out).
+fn texture_position(world_from_local: mat4x4<f32>, local_pos: vec3<f32>, scale: vec3<f32>) -> vec3<f32> {
+    let origin = world_from_local[3].xyz;
+    let phase = origin - BLOCK_VOXELS * floor(origin / BLOCK_VOXELS);
+    return local_pos * scale + select(vec3<f32>(0.0), phase, scale.x > 1.0);
+}
+// END texture_position
+
 struct PullVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
@@ -262,20 +279,16 @@ fn vertex(
     pos[FACE_VA[face]] += cv * ((w1 >> 6u) & 63u);
     let local_pos = vec3<f32>(pos);
 
-    // Chunk transforms are translation + axis-aligned scale only: full-res
-    // chunks scale 1, LOD chunks scale by their ring factor.
+    // Chunk transforms: terrain is translation + axis-aligned scale (full-res
+    // bricks scale 1, LOD chunks their ring factor); a voxel body's bricks
+    // are rotated too (scale 1).
     let world_from_local = chunk_transforms[chunk_index];
     let scale = vec3<f32>(
         length(world_from_local[0].xyz),
         length(world_from_local[1].xyz),
         length(world_from_local[2].xyz),
     );
-    // Texture coordinates in WORLD voxels, so one repeat is one block at every
-    // LOD factor (local cells would magnify the texture by the factor). Only
-    // the origin's offset within its block is added back — the full world
-    // position would cost the interpolated UVs their precision far out.
-    let origin = world_from_local[3].xyz;
-    let tex_pos = local_pos * scale + (origin - BLOCK_VOXELS * floor(origin / BLOCK_VOXELS));
+    let tex_pos = texture_position(world_from_local, local_pos, scale);
 
     var out: PullVertexOutput;
 #ifdef CUTAWAY
@@ -294,9 +307,9 @@ fn vertex(
 #endif
     out.world_position = world_from_local * vec4<f32>(local_pos, 1.0);
     out.position = position_world_to_clip(out.world_position.xyz);
-    // Axis-aligned faces under an axis-aligned scale: the normal needs no
-    // inverse-transpose.
-    out.world_normal = FACE_NORMALS[face];
+    // Rotation + uniform scale: the transformed normal needs no
+    // inverse-transpose, only renormalizing.
+    out.world_normal = normalize((world_from_local * vec4<f32>(FACE_NORMALS[face], 0.0)).xyz);
     out.uv = vec2<f32>(
         dot(tex_pos, FACE_U_MASK[face]),
         dot(tex_pos, FACE_V_MASK[face]),

@@ -6,7 +6,11 @@
 //! whose records come from the real `records::pack_record` encoder, viewed by a
 //! fixed camera. It then screenshots and asserts a non-trivial fraction of
 //! pixels read as textured geometry rather than the clear color, and that
-//! the alpha-tested cutout quad (the leaves' pipelines) drew too.
+//! the alpha-tested cutout quad (the leaves' pipelines) drew too. A tumbling
+//! voxel body is stood in for by a yellow box meshed by the real mesher, as a
+//! brick child of a ROTATED parent — the shape `renderer::voxel_bodies`
+//! spawns — so the screenshot shows rotated quads with per-face shading
+//! (transformed normals) and the rotation-aware cull bounds keeping it drawn.
 //!
 //! Modeled on `examples/gizmo_smoke.rs` (self-screenshot + exit). The records
 //! encoder is the same one the meshing/LOD pipelines feed into `ChunkQuads`, so
@@ -25,13 +29,13 @@ use bevy::render::render_resource::{
 };
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use client::renderer::config::{FarRenderBackend, NearRenderBackend, TerrainRenderConfig};
-use client::renderer::meshing::binary::{Face, Quad};
+use client::renderer::meshing::binary::{mesh_quads, CutoutTable, Face, PaddedVoxels, Quad, PADDED};
 use client::renderer::meshing::records::{pack_record, QuadRecord};
 use client::renderer::voxel_pull::gpu::{
     drain_near_telemetry_results, NearRendererMetrics, NearTelemetryEnabled,
 };
 use client::renderer::voxel_pull::{BlockArrayTexture, ChunkQuads, VoxelPullPlugin};
-use game::BlockId;
+use game::{BlockId, Voxel};
 
 const SCREENSHOT_PATH: &str = "/tmp/pull_smoke.png";
 /// Frames to run before screenshotting — enough for the pipeline to compile
@@ -58,6 +62,13 @@ const CUTOUT_COLOR: [u8; 4] = [210, 30, 170, 255];
 /// pass drew".
 const MIN_CUTOUT_FRACTION: f32 = 0.005;
 const TEX_SIZE: u32 = 16;
+/// The voxel body's layer (index 4, after the cutout layer): a yellow no
+/// terrain layer shares, so its pixels are counted on their own.
+const BODY_COLOR: [u8; 4] = [225, 200, 30, 255];
+const BODY_LAYER: u32 = LAYER_COLORS.len() as u32 + 1;
+/// Minimum fraction of body-yellow pixels that counts as "the rotated body
+/// drew".
+const MIN_BODY_FRACTION: f32 = 0.005;
 
 #[derive(Resource, Default)]
 struct ProbeResult(Option<bool>);
@@ -129,7 +140,7 @@ fn main() {
 /// checkerboard. Mirrors the D2Array-view fixup `renderer/mod.rs` applies so
 /// the binding stays an array even with few layers.
 fn array_texture(images: &mut Assets<Image>) -> Handle<Image> {
-    let layers = LAYER_COLORS.len() as u32 + 1;
+    let layers = BODY_LAYER + 1;
     let mut data = Vec::with_capacity((TEX_SIZE * TEX_SIZE * layers * 4) as usize);
     for color in LAYER_COLORS {
         for _ in 0..(TEX_SIZE * TEX_SIZE) {
@@ -140,6 +151,15 @@ fn array_texture(images: &mut Assets<Image>) -> Handle<Image> {
         for x in 0..TEX_SIZE {
             let [r, g, b, _] = CUTOUT_COLOR;
             data.extend_from_slice(&[r, g, b, if (x + y) % 2 == 0 { 255 } else { 0 }]);
+        }
+    }
+    // The body: yellow with a darker one-texel border, so the texture's
+    // block grid shows which way it is laid on each rotated face.
+    for y in 0..TEX_SIZE {
+        for x in 0..TEX_SIZE {
+            let edge = x == 0 || y == 0 || x == TEX_SIZE - 1 || y == TEX_SIZE - 1;
+            let [r, g, b, a] = BODY_COLOR;
+            data.extend_from_slice(&if edge { [r / 2, g / 2, b / 2, a] } else { [r, g, b, a] });
         }
     }
     let mut image = Image::new(
@@ -230,6 +250,20 @@ fn scene_records() -> Vec<QuadRecord> {
         .collect()
 }
 
+/// The body's one brick: a 2 × 1 × 1 block box (32 × 16 × 16 voxels) meshed
+/// by the production mesher from an air-padded brick.
+fn body_records() -> Vec<QuadRecord> {
+    let mut padded = PaddedVoxels(vec![Voxel::default(); PADDED * PADDED * PADDED]);
+    for z in 0..16 {
+        for y in 0..16 {
+            for x in 0..32 {
+                padded.0[PaddedVoxels::index(x + 1, y + 1, z + 1)] = Voxel::new(BlockId(5));
+            }
+        }
+    }
+    mesh_quads(&padded, &CutoutTable::NONE).iter().map(|q| pack_record(q, BODY_LAYER)).collect()
+}
+
 fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(BlockArrayTexture(array_texture(&mut images)));
 
@@ -241,6 +275,26 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             center: bevy::math::Vec3A::splat(16.0),
             half_extents: bevy::math::Vec3A::splat(16.0),
         },
+    ));
+
+    // The voxel body: a parent posed at the box's centre (its "centre of
+    // mass"), turned about all three axes, with the brick child at minus the
+    // centre — `voxel_bodies::brick_translation`.
+    let body = commands
+        .spawn((
+            Transform::from_xyz(42.0, 10.0, -6.0).with_rotation(Quat::from_euler(EulerRot::YXZ, 0.6, 0.5, 0.35)),
+            Visibility::Visible,
+        ))
+        .id();
+    commands.spawn((
+        ChunkQuads(Arc::new(body_records())),
+        Transform::from_translation(-Vec3::new(16.0, 8.0, 8.0)),
+        bevy::camera::primitives::Aabb {
+            center: bevy::math::Vec3A::splat(16.0),
+            half_extents: bevy::math::Vec3A::splat(16.0),
+        },
+        bevy::camera::visibility::NoAutoAabb,
+        ChildOf(body),
     ));
 
     // Fixed camera looking down the scene from above/behind +Z. DepthPrepass +
@@ -326,6 +380,7 @@ fn analyze_screenshot(
     let total = (rgb.width() * rgb.height()) as f32;
     let mut terrain = 0u32;
     let mut cutout = 0u32;
+    let mut body = 0u32;
     for p in rgb.pixels() {
         let [r, g, b] = p.0;
         // Warm/neutral geometry: blue is not clearly the largest channel.
@@ -336,9 +391,15 @@ fn analyze_screenshot(
         if (r as i32) > 2 * (g as i32) + 20 && (b as i32) > 2 * (g as i32) + 20 {
             cutout += 1;
         }
+        // The body's yellow: red and green both well above blue, and close.
+        let (r, g, b) = (r as i32, g as i32, b as i32);
+        if r > 2 * b + 20 && g > 2 * b + 20 && (r - g).abs() * 4 < r {
+            body += 1;
+        }
     }
     let fraction = terrain as f32 / total;
     let cutout_fraction = cutout as f32 / total;
+    let body_fraction = body as f32 / total;
     info!(
         "pull_smoke: {:.0} px, terrain fraction {:.3} (threshold {:.2}), cutout fraction {:.4} (threshold {:.3})",
         total, fraction, MIN_TERRAIN_FRACTION, cutout_fraction, MIN_CUTOUT_FRACTION
@@ -346,9 +407,11 @@ fn analyze_screenshot(
     let encoded_indirect_count = indirect.0.load(Ordering::Acquire);
     let indirect_count = encoded_indirect_count.saturating_sub(1);
     info!("pull_smoke: maximum observed GPU indirect count {indirect_count}");
+    info!("pull_smoke: rotated body fraction {body_fraction:.4} (threshold {MIN_BODY_FRACTION:.3})");
     result.0 = Some(
         fraction >= MIN_TERRAIN_FRACTION
             && cutout_fraction >= MIN_CUTOUT_FRACTION
+            && body_fraction >= MIN_BODY_FRACTION
             && encoded_indirect_count > 1,
     );
 }

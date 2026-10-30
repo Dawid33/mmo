@@ -124,6 +124,20 @@ pub fn extract_removed_chunk_quads(
     }
 }
 
+/// World-space bounds (centre, half extents) of a local `aabb` under
+/// `transform`: the axis-aligned box around its 8 transformed corners (each
+/// world half extent sums the local ones weighted by the absolute rotated,
+/// scaled axes). Terrain is only translated and scaled, which reduces this
+/// exactly to `scale * half`; a voxel body's bricks are rotated too.
+pub fn world_aabb(transform: &GlobalTransform, aabb: &Aabb) -> (Vec3, Vec3) {
+    let affine = transform.affine();
+    let center = affine.transform_point3(Vec3::from(aabb.center));
+    let half = Vec3::from(aabb.half_extents);
+    let m = affine.matrix3;
+    let half = m.x_axis.abs() * half.x + m.y_axis.abs() * half.y + m.z_axis.abs() * half.z;
+    (center, Vec3::from(half))
+}
+
 #[allow(clippy::type_complexity)] // Bevy system: params are DI, not an API
 pub fn extract_chunk_quads(
     mut commands: Commands,
@@ -143,8 +157,7 @@ pub fn extract_chunk_quads(
         // Cave-culling hides via Visibility -> InheritedVisibility=false.
         let cave_active = vis.get();
         let world_from_local = transform.to_matrix();
-        let center = transform.transform_point(Vec3::from(aabb.center));
-        let half = transform.scale() * Vec3::from(aabb.half_extents);
+        let (center, half) = world_aabb(transform, aabb);
         ec.insert(ExtractedChunkQuads {
             records: quads.0.clone(),
             world_from_local,

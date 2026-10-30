@@ -44,6 +44,7 @@ mod skybox;
 pub mod slint_composite;
 pub mod slint_overlay;
 pub use slint_composite::UiCamera;
+pub mod voxel_bodies;
 mod voxel_material;
 pub mod voxel_pull;
 pub mod world_map;
@@ -194,6 +195,7 @@ impl Plugin for SimBridgePlugin {
                 )
                     .chain(),
                 interpolate::interpolate_transforms,
+                (voxel_bodies::spawn_voxel_body_meshes, voxel_bodies::apply_voxel_body_meshes).chain(),
                 world_map::apply_world_map_msgs,
                 // Per-frame mouse look replaces the per-tick sim look that
                 // interpolate_transforms just snapped the camera to.
