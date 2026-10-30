@@ -1,9 +1,10 @@
 //! Orthographic PNGs of one generated tree: front (looking along +z), side
 //! (looking along −x) and top, one pixel per voxel, coloured by part and shaded
-//! by depth. `--grid` instead writes a 3×3 sheet of front views of nine seeds.
+//! by depth. `--grid` instead writes 3×3 sheets (front and top) of nine seeds;
+//! `--time N` prints the generation cost per tree over N seeds.
 //!
-//! `just tree-view --species oak|pine|birch --seed N --age N [--out <stem>] [--scale N] [--grid]`
-//! Output: `target/tree-view/<species>-s<seed>-a<age>-{front,side,top}.png` (or `-grid.png`).
+//! `just tree-view --species oak|pine|birch --seed N --age N [--out <stem>] [--scale N] [--grid] [--time N]`
+//! Output: `target/tree-view/<species>-s<seed>-a<age>-{front,side,top}.png` (or `-grid.png`, `-grid-top.png`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -149,7 +150,7 @@ fn render(blocks: &[TreeBlock], view: View, pal: &Palette, scale: u32) -> RgbIma
 fn main() {
     let mut species = "oak".to_string();
     let (mut seed, mut age, mut scale) = (1u64, 60u16, 1u32);
-    let (mut out, mut grid) = (None::<PathBuf>, false);
+    let (mut out, mut grid, mut time) = (None::<PathBuf>, false, None::<u64>);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || args.next().unwrap_or_else(|| panic!("{a} needs a value"));
@@ -160,8 +161,9 @@ fn main() {
             "--scale" => scale = val().parse().expect("--scale N"),
             "--out" => out = Some(PathBuf::from(val())),
             "--grid" => grid = true,
+            "--time" => time = Some(val().parse::<u64>().expect("--time N").max(1)),
             _ => panic!(
-                "unknown flag {a}; flags: --species oak|pine|birch --seed N --age N --out <stem> --scale N --grid"
+                "unknown flag {a}; flags: --species oak|pine|birch --seed N --age N --out <stem> --scale N --grid --time N"
             ),
         }
     }
@@ -177,19 +179,36 @@ fn main() {
         PathBuf::from(p)
     };
     if grid {
-        let views: Vec<RgbImage> =
-            (0..9).map(|i| render(&rasterize(&skeleton(sp, seed + i, age)), View::Front, &pal, scale)).collect();
-        let cw = views.iter().map(|v| v.width()).max().unwrap();
-        let ch = views.iter().map(|v| v.height()).max().unwrap();
-        let mut sheet = RgbImage::from_pixel(cw * 3, ch * 3, Rgb([255, 255, 255]));
-        for (i, v) in views.iter().enumerate() {
-            // Bottom-centre each tree in its cell.
-            let (ox, oy) = ((i as u32 % 3) * cw + (cw - v.width()) / 2, (i as u32 / 3) * ch + ch - v.height());
-            image::imageops::replace(&mut sheet, v, ox as i64, oy as i64);
+        let trees: Vec<Vec<TreeBlock>> = (0..9).map(|i| rasterize(&skeleton(sp, seed + i, age))).collect();
+        for (view, name) in [(View::Front, "grid"), (View::Top, "grid-top")] {
+            let views: Vec<RgbImage> = trees.iter().map(|t| render(t, view, &pal, scale)).collect();
+            let cw = views.iter().map(|v| v.width()).max().unwrap();
+            let ch = views.iter().map(|v| v.height()).max().unwrap();
+            let mut sheet = RgbImage::from_pixel(cw * 3, ch * 3, Rgb([255, 255, 255]));
+            for (i, v) in views.iter().enumerate() {
+                // Bottom-centre each tree in its cell.
+                let (ox, oy) = ((i as u32 % 3) * cw + (cw - v.width()) / 2, (i as u32 / 3) * ch + ch - v.height());
+                image::imageops::replace(&mut sheet, v, ox as i64, oy as i64);
+            }
+            let p = path(name);
+            sheet.save(&p).expect("save grid");
+            println!("{} seeds {seed}..{} age {age}: {}", sp.name, seed + 8, p.display());
         }
-        let p = path("grid");
-        sheet.save(&p).expect("save grid");
-        println!("{} seeds {seed}..{} age {age}: {}", sp.name, seed + 8, p.display());
+        return;
+    }
+    if let Some(n) = time {
+        // Cost of generating one tree: skeleton + rasterise, `n` seeds from `seed`.
+        let t0 = std::time::Instant::now();
+        let mut blocks = 0;
+        for i in 0..n {
+            blocks += rasterize(&skeleton(sp, seed + i, age)).len();
+        }
+        let per = t0.elapsed().as_secs_f64() * 1e3 / n as f64;
+        let t1 = std::time::Instant::now();
+        let nodes: usize = (0..n).map(|i| skeleton(sp, seed + i, age).nodes.len()).sum();
+        let skel = t1.elapsed().as_secs_f64() * 1e3 / n as f64;
+        println!("{} age {age}: {per:.3} ms per tree ({n} trees, {} blocks avg)", sp.name, blocks as u64 / n);
+        println!("  of which skeleton {skel:.3} ms ({} nodes avg)", nodes as u64 / n);
         return;
     }
     let sk = skeleton(sp, seed, age);

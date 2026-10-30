@@ -45,6 +45,9 @@ pub const SEGMENT_VOXELS: f64 = 20.0;
 pub const MAX_SEGMENTS: usize = 16;
 /// A branch's tip radius as a fraction of its base radius.
 pub const TIP_RADIUS_FRAC: f64 = 0.35;
+/// A branch thick enough to be wood at its base stays wood to its tip (at
+/// least this radius, voxels), so the clumps at its end are attached.
+pub const MIN_BRANCH_TIP_RADIUS: f64 = 2.0;
 /// Spacing of sub-branches along their parent, voxels.
 pub const CHILD_SPACING_VOXELS: f64 = 18.0;
 /// Most sub-branches on one branch.
@@ -56,6 +59,8 @@ pub const CHILD_RADIUS_FRAC: f64 = 0.6;
 /// A tip cluster sits this fraction of its radius (at least `MIN_LEAF_RADIUS`)
 /// beyond the branch end.
 pub const TIP_LEAF_OFFSET: f64 = 0.5;
+/// Size of a `trunk_leaves` clump around the trunk, × `cluster_radius`.
+pub const TRUNK_CLUMP_FRAC: f64 = 1.3;
 /// Golden angle in `SIN_TABLE` units (137.5°): spiral limb phyllotaxis.
 pub const GOLDEN_ANGLE: i32 = 98;
 /// Ages at which limbs (level 1) appear, and the extra delay per deeper level.
@@ -118,8 +123,21 @@ pub struct ShapeParams {
     pub child_length_pct: i32,
     /// Leaf cluster radius of a full-grown tree.
     pub cluster_radius: i32,
-    /// Leaf clusters along the trunk inside the crown too (dense conifer core).
+    /// Leaf clumps around the trunk at every limb height too (conifer tiers).
     pub trunk_leaves: bool,
+    /// Spheres in one leaf clump (min, max): a clump is several overlapping
+    /// spheres, which gives a ragged outline.
+    pub clump: (i32, i32),
+    /// How far a clump's spheres scatter from its centre, % of `cluster_radius`.
+    pub clump_spread_pct: i32,
+    /// A clump hangs this many voxels below its branch end (drooping foliage).
+    pub clump_droop: i32,
+    /// Chance (%) that an inner node of an outermost branch carries a clump too;
+    /// lower leaves gaps between clumps.
+    pub leaves_along_pct: i32,
+    /// Limbs facing a random side of the tree are up to this % longer (and the
+    /// opposite side shorter): a lopsided, one-sided crown.
+    pub asymmetry_pct: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,11 +283,23 @@ impl Builder<'_> {
         self.leaf_at(node, p, radius_frac, out);
     }
 
-    /// A cluster at `p`, alive with `node`.
+    /// A clump of `sp.clump` spheres around `p`, alive with `node`.
     fn leaf_at(&mut self, node: usize, p: [f64; 3], radius_frac: f64, out: [f64; 3]) {
-        let radius = self.sp.cluster_radius as f64 * radius_frac * self.rng.scale(0.2);
-        let centre = [p[0] + self.rng.jitter(3.0), p[1] + self.rng.jitter(2.0), p[2] + self.rng.jitter(3.0)];
-        self.leaves.push(ProtoLeaf { node, centre, radius, out });
+        let sp = self.sp;
+        let r = sp.cluster_radius as f64 * radius_frac * self.rng.scale(0.2);
+        let spread = r * sp.clump_spread_pct as f64 / 100.0;
+        let count = self.rng.range(sp.clump.0, sp.clump.1);
+        for k in 0..count {
+            // The first sphere sits on the branch end so the clump stays attached.
+            let s = if k == 0 { 0.3 } else { 1.0 };
+            let centre = [
+                p[0] + self.rng.jitter(spread * s),
+                p[1] + self.rng.jitter(spread * s * 0.5) - sp.clump_droop as f64,
+                p[2] + self.rng.jitter(spread * s),
+            ];
+            let radius = if count == 1 { r } else { r * (0.6 + 0.25 * self.rng.unit()) };
+            self.leaves.push(ProtoLeaf { node, centre, radius, out });
+        }
     }
 
     /// One branch of `level` from `start` (on `parent`'s segment), then its
@@ -289,7 +319,7 @@ impl Builder<'_> {
         let sp = self.sp;
         let n = ((len / SEGMENT_VOXELS).ceil() as usize).clamp(1, MAX_SEGMENTS);
         let step = len / n as f64;
-        let r_tip = r0 * TIP_RADIUS_FRAC;
+        let r_tip = (r0 * TIP_RADIUS_FRAC).max(r0.min(MIN_BRANCH_TIP_RADIUS));
         let mut chain = vec![self.push(Some(parent), start, r0, level, birth)];
         let mut heads = Vec::with_capacity(n);
         let (mut az, mut el) = (az, el);
@@ -309,7 +339,9 @@ impl Builder<'_> {
         self.tip_leaf(*chain.last().unwrap(), leaf_scale);
         if last_level {
             for &node in &chain[1..chain.len() - 1] {
-                self.leaf(node, 0.8 * leaf_scale);
+                if self.rng.range(0, 99) < sp.leaves_along_pct {
+                    self.leaf(node, 0.8 * leaf_scale);
+                }
             }
             return;
         }
@@ -360,17 +392,9 @@ impl Builder<'_> {
         }
         self.tip_leaf(*trunk.last().unwrap(), 0.4 + 0.7 * crown_ratio(sp.crown, 1.0));
         let start = sp.limb_start_pct as f64 / 100.0;
-        if sp.trunk_leaves {
-            // Every half segment, so the core has no gaps up to the tip.
-            for i in 2..2 * n {
-                let t = i as f64 / (2 * n) as f64;
-                if t >= start {
-                    let (a, b) = (trunk[i / 2], trunk[(i / 2 + 1).min(n)]);
-                    let p = lerp3(self.nodes[a].pos, self.nodes[b].pos, (i % 2) as f64 / 2.0);
-                    self.leaf_at(a, p, 0.3 + 0.7 * crown_ratio(sp.crown, (t - start) / (1.0 - start)), [0.0; 3]);
-                }
-            }
-        }
+        // Lopsidedness: limbs towards `bias_az` grow longer.
+        let bias_az = self.rng.range(0, ANGLE_TURN - 1);
+        let bias = sp.asymmetry_pct as f64 / 100.0 * self.rng.unit();
 
         // Limb attachment heights (fractions of the trunk) and their azimuths.
         let mut limbs: Vec<(f64, i32)> = Vec::new();
@@ -393,6 +417,7 @@ impl Builder<'_> {
                 limbs.push((t, az0 + k * GOLDEN_ANGLE + self.rng.range(-10, 10)));
             }
         }
+        let mut seen_heights: Vec<f64> = Vec::new();
         for (t, az) in limbs {
             let at = t * n as f64;
             let seg = (at.floor() as usize).min(n - 1);
@@ -401,11 +426,19 @@ impl Builder<'_> {
             let p = lerp3(self.nodes[a].pos, self.nodes[b].pos, u);
             let r_at = self.nodes[a].radius + (self.nodes[b].radius - self.nodes[a].radius) * u;
             let tc = (t - start) / (1.0 - start);
-            let len = h * sp.limb_length_pct as f64 / 100.0 * crown_ratio(sp.crown, tc) * self.rng.scale(0.15);
+            let side = 1.0 + bias * cos(az - bias_az);
+            let len = h * sp.limb_length_pct as f64 / 100.0 * crown_ratio(sp.crown, tc) * side * self.rng.scale(0.15);
             let r0 = r_at * sp.limb_radius_pct as f64 / 100.0;
             let el = sp.limb_angle.0 + ((sp.limb_angle.1 - sp.limb_angle.0) as f64 * tc) as i32 + self.rng.range(-6, 6);
             let birth = self.rng.range(LIMB_BIRTH.0, LIMB_BIRTH.1);
             let leaf_scale = 0.4 + 0.6 * crown_ratio(sp.crown, tc);
+            if sp.trunk_leaves && seen_heights.last() != Some(&t) {
+                // One clump around the trunk per limb height (a whorl's core).
+                seen_heights.push(t);
+                // Full size even near the top, so it reaches past the trunk's
+                // own (wood) blocks.
+                self.leaf_at(a, p, TRUNK_CLUMP_FRAC, [0.0; 3]);
+            }
             self.branch(a, p, (az, el), len, r0, 1, birth, leaf_scale);
         }
     }

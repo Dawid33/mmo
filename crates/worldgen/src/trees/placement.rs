@@ -14,7 +14,7 @@ pub const TREE_LATTICE_BLOCKS: i32 = 8;
 /// Oldest tree age (the age is a growth stage in `0..=MAX_AGE`).
 pub const MAX_AGE: u16 = 100;
 /// Widest crown over all species (checked against the table in a test).
-pub const MAX_CROWN_RADIUS_BLOCKS: i32 = 5;
+pub const MAX_CROWN_RADIUS_BLOCKS: i32 = 8;
 /// Tallest tree over all species (checked against the table in a test).
 pub const MAX_TREE_HEIGHT_BLOCKS: i32 = 24;
 
