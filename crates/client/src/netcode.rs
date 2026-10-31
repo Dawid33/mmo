@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossbeam::channel::{Receiver, Sender};
+use crossbeam::channel::{Receiver, RecvTimeoutError, Sender};
 use game::{ClientPacket, ServerPacket};
 use log::{error, info, warn};
 use quinn::{
@@ -140,7 +140,13 @@ impl ServerConnection {
         tokio::spawn(async move {
             while let Ok(mut recv) = recv_conn.accept_uni().await {
                 let read_started = Instant::now();
-                let bytes = recv.read_to_end(usize::MAX).await.unwrap();
+                let bytes = match recv.read_to_end(usize::MAX).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        warn!("[client] dropping a server stream: {e}");
+                        continue;
+                    }
+                };
                 let read = read_started.elapsed();
                 let decode_started = Instant::now();
                 // Unframe (+ lz4-decompress large packets) and deserialize;
@@ -179,27 +185,56 @@ impl ServerConnection {
                     p => p,
                 };
 
-                sender.send(packet).unwrap();
-                recv.received_reset().await.unwrap();
+                if sender.send(packet).is_err() {
+                    // The game thread ended the session.
+                    break;
+                }
+                let _ = recv.received_reset().await;
             }
         });
 
-        while let Ok(e) = self.recv.recv() {
+        // Forward the game thread's packets until it ends the session (its
+        // sender drops: `Ok`) or the connection goes away (`Err`, whose
+        // message is the session's end reason). Polled, so a lost server is
+        // noticed even while the game sends nothing.
+        loop {
             if let Some(close_reason) = connection.close_reason() {
                 error!("Server connection closed: {:?}", close_reason);
-                break;
+                return Err(connection_lost(close_reason));
             }
-            connection.handshake_data().unwrap();
-            let mut send = connection.open_uni().await.unwrap();
-            let payload = game::encode_packet(&e).unwrap();
-            send.write_all(&payload).await.unwrap();
-            send.finish().unwrap();
+            let packet = match self.recv.recv_timeout(CLOSE_POLL_INTERVAL) {
+                Ok(packet) => packet,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            };
+            let payload = match game::encode_packet(&packet) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    error!("[client] failed to encode {packet:?}: {e}");
+                    continue;
+                }
+            };
+            let mut send = connection.open_uni().await.map_err(connection_lost)?;
+            send.write_all(&payload)
+                .await
+                .map_err(|e| connection_lost(e))?;
+            send.finish().map_err(|e| connection_lost(e))?;
             tokio::spawn(async move {
-                send.stopped().await.unwrap();
+                let _ = send.stopped().await;
             });
         }
-        Ok(())
     }
+}
+
+/// How often the send loop checks for a closed connection while the game
+/// thread has nothing to send.
+const CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+fn connection_lost(reason: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::ConnectionAborted,
+        format!("connection to server lost: {reason}"),
+    )
 }
 
 /// Dummy certificate verifier that treats any certificate as valid.

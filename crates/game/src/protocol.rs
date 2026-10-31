@@ -283,6 +283,9 @@ pub type LastGameEventId = usize;
 pub enum GameError {
     CrashedOnServerEvent,
     QuitRequested,
+    /// The session ended without a requested Quit: the connect gave up, the
+    /// connection was lost, or the server closed it. The string says which.
+    Disconnected(String),
 }
 
 pub enum WorldId {

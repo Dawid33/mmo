@@ -1,7 +1,7 @@
 //! `GameInstanceManager`: coordinates networking / rollback for the game.
 //! Moved out of `main.rs` so it's reachable from lib consumers (headless
 //! tests, the harness) without pulling in Bevy/windowing.
-use crossbeam::channel::{Receiver, RecvError, Sender};
+use crossbeam::channel::{Receiver, Sender};
 #[cfg(not(target_arch = "wasm32"))]
 use crossbeam::select;
 use game::{ClientId, ReconcileStats, RegionCoords, RegionId, Rollback, ServerPacket};
@@ -42,6 +42,85 @@ pub enum ClientRequest {
     PlayRegion(RegionCoords),
 }
 
+/// Command sent from the client (Bevy app) to the game thread.
+#[cfg(not(target_arch = "wasm32"))]
+pub enum Command {
+    /// Connect to a server, sync and start running game sim.
+    ConnectToServerAndScene(
+        Sender<GameEventKind>,
+        Receiver<GameEventKind>,
+        Sender<ClientUpdateEvent>,
+        Receiver<ClientRequest>,
+        SocketAddr,
+        game::DebugFlags,
+        crate::world_scale::WorldScale,
+        crate::netcode::ConnectPolicy,
+    ),
+    /// Quit the game thread. Should only be send when quitting the application.
+    Quit,
+}
+
+/// Spawn the game thread: it runs one session per `ConnectToServerAndScene`
+/// and waits for the next command when a session ends.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_game_thread() -> Sender<Command> {
+    let (command_send, command_recv) = crossbeam::channel::unbounded();
+    std::thread::spawn(move || loop {
+        match command_recv.recv() {
+            Ok(Command::ConnectToServerAndScene(
+                sender,
+                receiver,
+                client_sender,
+                request_recv,
+                server,
+                debug_flags,
+                world_scale,
+                connect_policy,
+            )) => {
+                let mut manager =
+                    GameInstanceManager::new(sender, receiver, client_sender, server, debug_flags);
+                manager.set_world_scale(world_scale);
+                manager.set_request_recv(request_recv);
+                manager.set_connect_policy(connect_policy);
+                // The manager owns `client_sender`; keep a handle to report
+                // how the session ended. Exactly one report per session,
+                // then wait for the next command: a lost server must not
+                // take the thread down (the menu starts the next session).
+                let report = manager.client_event_send.clone();
+                match manager.connect_and_run() {
+                    Ok(()) | Err(GameError::QuitRequested) => {}
+                    Err(e) => {
+                        warn!("Game session ended: {:?}", e);
+                        let _ = report.send(ClientUpdateEvent::GameCrash(e));
+                    }
+                }
+            }
+            Ok(Command::Quit) => {
+                log::trace!("Game thread recieved quit command.");
+                break;
+            }
+            Err(_e) => {
+                warn!(
+                    "Game thread stoped receiving command events, stopping game thread. Client probably crashed or was closed incorrectly."
+                );
+                break;
+            }
+        }
+    });
+    command_send
+}
+
+/// Why the netcode thread ended, once its packet channel has closed.
+#[cfg(not(target_arch = "wasm32"))]
+fn netcode_ended(handle: Option<std::thread::JoinHandle<Result<(), String>>>) -> GameError {
+    let reason = match handle.map(|h| h.join()) {
+        Some(Ok(Err(reason))) => reason,
+        Some(Ok(Ok(()))) | None => "server connection closed".to_string(),
+        Some(Err(_)) => "netcode thread panicked".to_string(),
+    };
+    GameError::Disconnected(reason)
+}
+
 /// Wrapper struct for coordinating networking / rollback for the game.
 pub struct GameInstanceManager {
     game_event_send: Sender<GameEventKind>,
@@ -54,6 +133,9 @@ pub struct GameInstanceManager {
     /// so `new()` has one signature on both targets.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     server: SocketAddr,
+    /// How `connect_and_run` retries the initial connect (tests shorten it).
+    #[cfg(not(target_arch = "wasm32"))]
+    connect_policy: crate::netcode::ConnectPolicy,
 
     server_game_send: Sender<ClientPacket>,
     server_game_recv: Receiver<ClientPacket>,
@@ -484,6 +566,8 @@ impl GameInstanceManager {
             request_recv: crossbeam::channel::never(),
             client_event_send,
             server,
+            #[cfg(not(target_arch = "wasm32"))]
+            connect_policy: crate::netcode::ConnectPolicy::default(),
             world: None,
             buffer: Vec::new(),
             tick_rate: Arc::new(AtomicU64::new(game::TICK_RATE)),
@@ -525,6 +609,12 @@ impl GameInstanceManager {
         self.server_game_send
             .send(ClientPacket::RequestPlayerRegion)
             .unwrap();
+    }
+
+    /// Override how the initial connect is retried (default in production).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_connect_policy(&mut self, policy: crate::netcode::ConnectPolicy) {
+        self.connect_policy = policy;
     }
 
     /// Take UI requests (`ClientRequest`) from this channel.
@@ -755,7 +845,7 @@ impl GameInstanceManager {
     /// without blocking. Returns Ok(false) once Quit has been consumed.
     pub fn pump(&mut self, server_recv: &Receiver<ServerPacket>) -> Result<bool, GameError> {
         while let Ok(msg) = server_recv.try_recv() {
-            self.handle_server(Ok(msg))?;
+            self.handle_server(msg)?;
         }
         while let Ok(event) = self.game_event_recv.try_recv() {
             if !self.handle_game_event(event)? {
@@ -1184,11 +1274,8 @@ impl GameInstanceManager {
         }
     }
 
-    pub fn handle_server(
-        &mut self,
-        server_msg: Result<ServerPacket, RecvError>,
-    ) -> Result<(), GameError> {
-        match server_msg.unwrap() {
+    pub fn handle_server(&mut self, server_msg: ServerPacket) -> Result<(), GameError> {
+        match server_msg {
             game::ServerPacket::SyncClock(region_id, server_tick_rate, server_tick, rtt) => {
                 // (lead error in ms, whole ticks to step) when out of band.
                 let mut step = None;
@@ -1463,14 +1550,18 @@ impl GameInstanceManager {
             server_send,
             self.server_game_recv.clone(),
             self.server,
-        );
-        std::thread::spawn(move || {
+        )
+        .with_connect_policy(self.connect_policy);
+        // The netcode thread's result says why the connection ended; it is
+        // read once `server_recv` closes (the thread dropped its sender).
+        let netcode = std::thread::spawn(move || -> Result<(), String> {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
-                .unwrap();
-            rt.block_on(async { conn.connect_and_handle().await.unwrap() });
+                .map_err(|e| format!("netcode runtime failed to start: {e}"))?;
+            rt.block_on(conn.connect_and_handle()).map_err(|e| e.to_string())
         });
+        let mut netcode = Some(netcode);
 
         self.start();
 
@@ -1480,7 +1571,10 @@ impl GameInstanceManager {
                 // Recieve and handle server packets.
                 recv(server_recv) -> server_msg => {
                     self.perf.idle_total += wait_start.elapsed();
-                    self.handle_server(server_msg)?;
+                    match server_msg {
+                        Ok(packet) => self.handle_server(packet)?,
+                        Err(_) => return Err(netcode_ended(netcode.take())),
+                    }
                 },
                 // Recieve client game events from either the player or from
                 // client-side game tick timer.
@@ -1492,7 +1586,11 @@ impl GameInstanceManager {
                                 return Ok(());
                             }
                         }
-                        Err(e) => panic!("{}", e),
+                        Err(e) => {
+                            return Err(GameError::Disconnected(format!(
+                                "game event channel closed: {e}"
+                            )))
+                        }
                     }
                 }
                 // UI requests for the server (Play). A disconnected channel
@@ -2945,5 +3043,68 @@ mod lod_window_tests {
             4,
             "held by the sticky band"
         );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::netcode::ConnectPolicy;
+
+    /// Send one connect to a port nothing listens on and wait for the
+    /// session's `Disconnected` report.
+    fn connect_to_dead_port(commands: &Sender<Command>) -> GameError {
+        let dead = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, client_recv) = crossbeam::channel::unbounded();
+        let (_request_send, request_recv) = crossbeam::channel::unbounded();
+        let scale = crate::world_scale::WorldScale::default();
+        commands
+            .send(Command::ConnectToServerAndScene(
+                game_send,
+                game_recv,
+                client_send,
+                request_recv,
+                dead,
+                game::DebugFlags::default(),
+                scale,
+                ConnectPolicy {
+                    attempt_timeout: Duration::from_millis(50),
+                    retry_interval: Duration::from_millis(10),
+                    deadline: Duration::from_millis(150),
+                },
+            ))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match client_recv.recv_timeout(left) {
+                Ok(ClientUpdateEvent::GameCrash(error)) => return error,
+                Ok(_) => continue,
+                Err(e) => panic!("no session-ended report within 2 s: {e:?}"),
+            }
+        }
+    }
+
+    /// A connect that gives up must end the session with one
+    /// `Disconnected` report, and the game thread must take the next
+    /// connect (the main menu starts sessions on the same thread).
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn connect_failure_reports_disconnected_and_thread_survives() {
+        let commands = start_game_thread();
+        for session in 0..2 {
+            match connect_to_dead_port(&commands) {
+                GameError::Disconnected(reason) => assert!(
+                    reason.contains("could not connect"),
+                    "session {session}: unexpected reason {reason:?}"
+                ),
+                other => panic!("session {session}: expected Disconnected, got {other:?}"),
+            }
+        }
+        let _ = commands.send(Command::Quit);
     }
 }

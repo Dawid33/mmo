@@ -1,15 +1,7 @@
 //! Game client
 // #![deny(missing_docs)]
 use bevy::prelude::*;
-#[cfg(not(target_arch = "wasm32"))]
-use crossbeam::channel::{Receiver, Sender};
-#[cfg(not(target_arch = "wasm32"))]
-use game::ClientUpdateEvent;
 use game::GameEventKind;
-#[cfg(not(target_arch = "wasm32"))]
-use log::trace;
-#[cfg(not(target_arch = "wasm32"))]
-use log::warn;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
@@ -18,7 +10,9 @@ use client::renderer;
 use client::sim_driver;
 use client::world_scale::WorldScale;
 #[cfg(not(target_arch = "wasm32"))]
-use client::GameInstanceManager;
+use client::instance::{start_game_thread, Command};
+#[cfg(not(target_arch = "wasm32"))]
+use client::netcode::ConnectPolicy;
 
 /// Share of total cores given to the AsyncCompute task pool, which runs the
 /// background chunk-meshing jobs (`renderer/meshing.rs`). Normal clients take
@@ -82,67 +76,6 @@ fn task_pool_options(worker_cap: Option<usize>) -> bevy::app::TaskPoolOptions {
         options.async_compute.max_threads = cap;
     }
     options
-}
-
-/// Event sent from client to game thread.
-#[cfg(not(target_arch = "wasm32"))]
-pub enum Command {
-    /// Connect to a server, sync and start running game sim.
-    ConnectToServerAndScene(
-        Sender<GameEventKind>,
-        Receiver<GameEventKind>,
-        Sender<ClientUpdateEvent>,
-        Receiver<client::instance::ClientRequest>,
-        SocketAddr,
-        game::DebugFlags,
-        WorldScale,
-    ),
-    /// Quit the game thread. Should only be send when quitting the application.
-    Quit,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn start_game_thread() -> Sender<Command> {
-    let (command_send, command_recv) = crossbeam::channel::unbounded();
-    std::thread::spawn(move || loop {
-        match command_recv.recv() {
-            Ok(command) => match command {
-                Command::ConnectToServerAndScene(
-                    sender,
-                    receiver,
-                    client_sender,
-                    request_recv,
-                    server,
-                    debug_flags,
-                    world_scale,
-                ) => {
-                    let mut manager = GameInstanceManager::new(
-                        sender,
-                        receiver,
-                        client_sender,
-                        server,
-                        debug_flags,
-                    );
-                    manager.set_world_scale(world_scale);
-                    manager.set_request_recv(request_recv);
-                    if let Err(e) = manager.connect_and_run() {
-                        warn!("Game Crashed: {:?}", e);
-                    };
-                }
-                Command::Quit => {
-                    trace!("Game thread recieved quit command.");
-                    break;
-                }
-            },
-            Err(_e) => {
-                warn!(
-                    "Game thread stoped receiving command events, stopping game thread. Client probably crashed or was closed incorrectly."
-                );
-                break;
-            }
-        }
-    });
-    return command_send;
 }
 
 /// `LogPlugin` filter. `RUST_LOG`, when set, replaces it wholesale (Bevy's
@@ -221,6 +154,7 @@ fn main() {
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466)),
                 debug_flags.clone(),
                 world_scale,
+                ConnectPolicy::default(),
             ))
             .unwrap();
         (command_send, game_send, client_recv, request_send)
