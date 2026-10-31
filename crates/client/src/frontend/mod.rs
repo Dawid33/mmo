@@ -33,7 +33,7 @@ struct FrontendActions(Rc<RefCell<Vec<FrontendAction>>>);
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanLoad(pub bool);
 
-/// The `FrontendUi.screen` an [`AppState`] shows (`None`: the world).
+/// The `FrontendUi.screen` an [`AppState`] shows (`InWorld` shows the menu screen: it is only visible while not embarked, and the layer is hidden otherwise).
 pub fn screen_index(state: AppState) -> i32 {
     match state {
         AppState::MainMenu | AppState::InWorld => 0,
@@ -43,7 +43,7 @@ pub fn screen_index(state: AppState) -> i32 {
     }
 }
 
-/// The state an action leads to from `state` (`None`: no state change).
+/// The state an action leads to (`None`: no state change, `Exit` quits the app).
 pub fn action_target(action: FrontendAction) -> Option<AppState> {
     match action {
         FrontendAction::NewWorld => Some(AppState::MapGenerator),

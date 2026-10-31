@@ -223,11 +223,11 @@ fn main() {
     // everything else starts straight in the world as before.
     let skip_menu = client::session::skip_menu();
     app.add_plugins(client::session::SessionPlugin { skip_menu });
-    // The menu screens (never on wasm, which keeps today's flow).
+    // The menu screens: on every native build, since a bypass session can
+    // still end up in the menu (leave, lost server). `skip_menu` only picks the
+    // initial state; wasm keeps today's flow.
     #[cfg(not(target_arch = "wasm32"))]
-    if !skip_menu {
-        app.add_plugins(client::frontend::FrontendPlugin);
-    }
+    app.add_plugins(client::frontend::FrontendPlugin);
     // The logger exists from here on: announce the perf timeline and flush the
     // events the game/netcode threads emitted while Bevy was still starting.
     game::perf::init("client");

@@ -76,28 +76,14 @@ fn load_disabled_without_worlds() {
 #[ignore = "slow: >100ms — run via just test-full"]
 fn menu_error_is_shown() {
     let mut overlay = overlay();
-    let (x, y) = (overlay.ui().get_exit_button_x(), overlay.ui().get_exit_button_y());
-    let count = |overlay: &Overlay<FrontendUi>| {
-        // Opaque pixels in a band below the Exit button, where the error line sits.
-        let mut n = 0;
-        for py in (y as u32 + 20)..(y as u32 + 60) {
-            for px in (x as u32 - 100)..(x as u32 + 100) {
-                n += overlay.opaque_at(px, py) as u32;
-            }
-        }
-        n
-    };
-    let before = count(&overlay);
     overlay.ui().set_menu_error("The server stopped responding".into());
     overlay.render();
-    // The frame grows around the new line, so the band now holds text pixels
-    // that differ from the empty-menu band: compare the whole-frame pixels.
-    let after_total: usize = overlay.pixels().iter().filter(|p| p.alpha > 0).count();
+    let drawn = |overlay: &Overlay<FrontendUi>| overlay.pixels().iter().filter(|p| p.alpha > 0).count();
+    let after_total = drawn(&overlay);
     overlay.ui().set_menu_error("".into());
     overlay.render();
-    let cleared_total: usize = overlay.pixels().iter().filter(|p| p.alpha > 0).count();
+    let cleared_total = drawn(&overlay);
     assert!(after_total > cleared_total, "error text drawn ({after_total} vs {cleared_total})");
-    let _ = before;
 }
 
 #[test]
