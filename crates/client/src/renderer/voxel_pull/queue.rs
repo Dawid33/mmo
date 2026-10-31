@@ -51,6 +51,7 @@ use super::pipeline::{
     VoxelPullDepthPipeline, VoxelPullDepthPipelineKey, VoxelPullPipeline, VoxelPullPipelineKey,
 };
 use super::prepare::GpuChunkQuads;
+use super::xray::{view_allows_xray, xray_wanted, InteriorChunks, SetXrayBindGroup, XraySettings};
 
 /// View-owned CPU-visible draws used by the grouped-direct fallback. A single
 /// NonMesh phase item reads this component and emits the contained direct draws.
@@ -98,10 +99,11 @@ pub fn grouped_draw_list(
 
 /// The grouped draw chain: bind the pipeline and view once, then loop the
 /// view's CPU-visible chunks while the arena bind group stays bound.
-pub type DrawVoxelPull = (SetItemPipeline, SetMeshViewBindGroup<0>, DrawChunkQuads<false>);
+/// group(2) is the x-ray's interior depth (or its stand-in).
+pub type DrawVoxelPull = (SetItemPipeline, SetMeshViewBindGroup<0>, SetXrayBindGroup<2>, DrawChunkQuads<false>);
 
 /// [`DrawVoxelPull`] for the chunks' cutout ranges (`AlphaMask3d`).
-pub type DrawVoxelPullCutout = (SetItemPipeline, SetMeshViewBindGroup<0>, DrawChunkQuads<true>);
+pub type DrawVoxelPullCutout = (SetItemPipeline, SetMeshViewBindGroup<0>, SetXrayBindGroup<2>, DrawChunkQuads<true>);
 
 /// The per-view frustum test for one extracted chunk, mirroring bevy's own
 /// mesh culling (`bevy_camera visibility/mod.rs:672`): test the near plane but
@@ -271,6 +273,8 @@ pub fn queue_voxel_pull(
     cache: Res<PipelineCache>,
     view_key_cache: Res<ViewKeyCache>,
     fortress_view: Option<Res<FortressViewUniform>>,
+    xray_settings: Option<Res<XraySettings>>,
+    interior_chunks: Res<InteriorChunks>,
     draw_functions: Res<DrawFunctions<Opaque3d>>,
     cutout_draw_functions: Res<DrawFunctions<AlphaMask3d>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
@@ -287,6 +291,7 @@ pub fn queue_voxel_pull(
     let draw = draw_functions.read().id::<DrawVoxelPull>();
     let cutout_draw = cutout_draw_functions.read().id::<DrawVoxelPullCutout>();
     let cutaway = cutaway_wanted(fortress_view.as_deref());
+    let xray_any = xray_wanted(xray_settings.as_deref(), fortress_view.as_deref(), &interior_chunks);
     for (view_entity, view, msaa) in &views
     {
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
@@ -300,16 +305,22 @@ pub fn queue_voxel_pull(
             continue;
         };
         let view_layout_key = MeshPipelineViewLayoutKey::from(*view_key);
+        let xray = xray_any && view_allows_xray(view_layout_key);
+        // `special`: the wanted variant (CUTAWAY or XRAY, never both); the
+        // plain one stands in while it compiles (`specialize_cutaway`).
         let key = |cutout: bool| {
-            move |cutaway| VoxelPullPipelineKey {
+            move |special: bool| VoxelPullPipelineKey {
                 msaa_samples: msaa.samples(),
                 target_format: view.target_format,
                 view_layout_key,
-                cutaway,
+                cutaway: special && cutaway,
                 cutout,
+                xray: special && xray,
+                interior_pass: false,
             }
         };
-        let pipeline_id = specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, key(false));
+        let special = cutaway || xray;
+        let pipeline_id = specialize_cutaway(&cache, &mut pipelines, &pipeline, special, key(false));
         // One representative NonMesh item per view. Its render command loops
         // `ViewChunkDrawList`, so chunk count no longer inflates phase bins.
         bin_view_item(
@@ -328,7 +339,7 @@ pub fn queue_voxel_pull(
         );
         // The cutout ranges, alpha-tested, after the opaque ones.
         if let Some(cutout_phase) = cutout_phases.get_mut(&view.retained_view_entity) {
-            let pipeline_id = specialize_cutaway(&cache, &mut pipelines, &pipeline, cutaway, key(true));
+            let pipeline_id = specialize_cutaway(&cache, &mut pipelines, &pipeline, special, key(true));
             bin_view_item(
                 cutout_phase,
                 OpaqueNoLightmap3dBatchSetKey {

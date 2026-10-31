@@ -558,3 +558,69 @@ fn pick_ignores_blocks_above_the_cut() {
         Some([3, 10, 3])
     );
 }
+
+#[test]
+fn visible_pick_hits_blocks_above_the_level() {
+    use rapier3d::math::Vector;
+    let s = BLOCK_VOXELS as f32;
+    let c = std::f32::consts::FRAC_1_SQRT_2;
+    let d = Vector::new(c, -c, 0.0);
+    // The same ray as `pick_ignores_blocks_above_the_cut`: with nothing cut
+    // away it stops on the block above the level.
+    let o = Vector::new(3.5 * s - 10.0 * s, 21.0 * s, 3.5 * s);
+    let solid = || pick_solid(&[[3, 11, 3], [3, 10, 3]]);
+    assert_eq!(pick_visible_cell(o, d, 64.0, false, solid()), Some([3, 11, 3]));
+}
+
+#[test]
+fn visible_pick_any_depth_and_the_face_cell_for_builds() {
+    let (o, d) = straight_down();
+    let solid = || pick_solid(&[[3, 2, 3]]);
+    assert_eq!(pick_visible_cell(o, d, 64.0, false, solid()), Some([3, 2, 3]), "deep below any level");
+    assert_eq!(pick_visible_cell(o, d, 64.0, true, solid()), Some([3, 3, 3]), "the air on its top face");
+    assert_eq!(pick_visible_cell(o, d, 20.0, false, solid()), None, "beyond reach");
+    assert_eq!(pick_visible_cell(o, d, 64.0, false, pick_solid(&[])), None, "nothing to hit");
+}
+
+/// Dug air under a 10-block-thick roof at block column (3, 3): the surface is
+/// y 30 everywhere, the room is air y 5..=7, its floor solid at y 4.
+fn xray_world() -> (impl Fn(TilePos) -> bool, impl Fn(TilePos) -> bool) {
+    let room = |p: TilePos| (p[0], p[2]) == (3, 3) && (5..=7).contains(&p[1]);
+    let solid = move |p: TilePos| p[1] < 30 && !room(p);
+    let dug = |p: TilePos| is_dug_air(p[1], 30);
+    (solid, dug)
+}
+
+#[test]
+fn dug_air_is_strictly_below_the_surface() {
+    assert!(is_dug_air(29, 30));
+    assert!(!is_dug_air(30, 30), "air inside the surface block (a half block's top) is not dug");
+    assert!(!is_dug_air(31, 30));
+}
+
+#[test]
+fn xray_sees_the_floor_of_a_room_through_its_roof() {
+    let (o, d) = straight_down();
+    let (solid, dug) = xray_world();
+    assert_eq!(pick_visible_cell(o, d, 64.0, false, &solid), Some([3, 29, 3]), "plain: the roof's top");
+    assert_eq!(pick_xray_cell(o, d, 64.0, false, &solid, &dug), Some([3, 4, 3]), "x-ray: the room's floor");
+    assert_eq!(pick_xray_cell(o, d, 64.0, true, &solid, &dug), Some([3, 5, 3]), "a build: the air on the floor");
+}
+
+#[test]
+fn xray_without_a_dug_space_on_the_ray_is_the_plain_pick() {
+    let s = BLOCK_VOXELS as f32;
+    let (solid, dug) = xray_world();
+    let o = rapier3d::math::Vector::new(9.5 * s, 40.0 * s, 9.5 * s);
+    let d = rapier3d::math::Vector::new(0.0, -1.0, 0.0);
+    assert_eq!(pick_xray_cell(o, d, 64.0, false, &solid, &dug), Some([9, 29, 9]));
+    // Air above the surface is not dug: a ray through the open sky hits ground.
+    assert_eq!(pick_xray_cell(o, d, 64.0, false, &solid, |_| true), Some([9, 29, 9]));
+}
+
+#[test]
+fn xray_ignores_a_room_beyond_reach() {
+    let (o, d) = straight_down();
+    let (solid, dug) = xray_world();
+    assert_eq!(pick_xray_cell(o, d, 20.0, false, &solid, &dug), Some([3, 29, 3]), "the room lies 33 blocks down");
+}

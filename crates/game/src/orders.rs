@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::edit::{raycast_blocks, BlockPos};
+use crate::edit::{raycast_blocks, BlockHit, BlockPos};
 use crate::{
     Block, BlockId, ClientId, GameDataTransactionKind, GameDataUpdate, GameDataUpdateKind, Rollback,
     BLOCK_VOXELS, REGION_BLOCKS, UNDERGROUND_DEPTH,
@@ -455,6 +455,90 @@ pub fn pick_level_cell(
     }
     let start = Vector::new(origin.x + dir.x * t, cut_y, origin.z + dir.z * t);
     pick_from(start, dir, level, solid)
+}
+
+/// The tile under the cursor with nothing cut away: the first block `solid`
+/// accepts along the ray (region-local sim units, `dir` normalised) within
+/// `reach` blocks, on whatever level it lies. With `face` the cell in front
+/// of the face the ray entered through instead — the air a build fills
+/// (the hit block itself when the ray starts inside one). `None` when
+/// nothing is hit.
+pub fn pick_visible_cell(
+    origin: Vector,
+    dir: Vector,
+    reach: f32,
+    face: bool,
+    solid: impl Fn(TilePos) -> bool,
+) -> Option<TilePos> {
+    let hit = raycast_blocks(origin, dir, reach, solid)?;
+    let [x, y, z] = hit.block;
+    let n = if face { hit.normal } else { [0; 3] };
+    Some([x + n[0], y + n[1], z + n[2]])
+}
+
+/// Whether air at block y `y` is part of a DUG space: strictly below its
+/// column's original worldgen surface block `surface` (`ColumnGround`'s, which
+/// digging never changes). Strictly: a half block's empty upper half is air
+/// inside the surface block, not a dug space. The cut-off x-ray view opens
+/// exactly these spaces (client `meshing/interior.rs` marks the faces that
+/// border them; [`xray_hit`] is the picking side of the same rule).
+pub fn is_dug_air(y: i32, surface: i32) -> bool {
+    y < surface
+}
+
+/// What a ray SEES with nothing cut away and the dug-space x-ray on: terrain
+/// in front of a dug space is not drawn, so once the ray (region-local sim
+/// units, `dir` normalised) enters a cell `dug` accepts within `reach` blocks
+/// (only asked of cells `solid` refuses), the hit is the first solid block
+/// AFTER it — the floor or far wall seen through the opening. With no dug
+/// air on the ray, the first solid block, as [`pick_visible_cell`].
+pub fn xray_hit(
+    origin: Vector,
+    dir: Vector,
+    reach: f32,
+    solid: impl Fn(TilePos) -> bool,
+    dug: impl Fn(TilePos) -> bool,
+) -> Option<BlockHit> {
+    match xray_through(origin, dir, reach, &solid, dug) {
+        Some(hit) => Some(hit),
+        None => raycast_blocks(origin, dir, reach, solid),
+    }
+}
+
+/// The half of [`xray_hit`] that differs from a plain pick: the first solid
+/// block past the first dug cell on the ray, `None` when the ray meets no
+/// dug cell (or nothing solid after it) within `reach`.
+pub fn xray_through(
+    origin: Vector,
+    dir: Vector,
+    reach: f32,
+    solid: impl Fn(TilePos) -> bool,
+    dug: impl Fn(TilePos) -> bool,
+) -> Option<BlockHit> {
+    let opening = raycast_blocks(origin, dir, reach, |p| !solid(p) && dug(p))?;
+    // The same walk again, accepting solids only once past the opening.
+    let past = std::cell::Cell::new(false);
+    raycast_blocks(origin, dir, reach, |p| {
+        if p == opening.block {
+            past.set(true);
+        }
+        past.get() && solid(p)
+    })
+}
+
+/// [`pick_visible_cell`] under the dug-space x-ray ([`xray_hit`]).
+pub fn pick_xray_cell(
+    origin: Vector,
+    dir: Vector,
+    reach: f32,
+    face: bool,
+    solid: impl Fn(TilePos) -> bool,
+    dug: impl Fn(TilePos) -> bool,
+) -> Option<TilePos> {
+    let hit = xray_hit(origin, dir, reach, solid, dug)?;
+    let [x, y, z] = hit.block;
+    let n = if face { hit.normal } else { [0; 3] };
+    Some([x + n[0], y + n[1], z + n[2]])
 }
 
 fn pick_from(

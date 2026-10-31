@@ -2,6 +2,21 @@
 //! designating on, plus whether everything above it is cut away. Client-local
 //! (nothing in the sim depends on it). The cutaway shader and the designation
 //! tools read [`WorkingLevel`] and [`cut_plane_world_y`].
+//!
+//! Two modes, switched by the cut (C, or the tool wheel's "Hide above"):
+//!
+//! - Cut on ("Hide above", the default): everything above the level is cut
+//!   away, the camera rides the level's floor (zooming with the wheel), and
+//!   Space / Shift (or PgUp / PgDn) step the level, repeating while held,
+//!   Ctrl ×[`LEVEL_STEP_FAST`]; Home goes back to the surface level.
+//! - Cut off: the free camera. The level follows it ([`derive_level`]): the
+//!   surface under the focus above ground, the focus's level underground
+//!   (the camera sank through the surface, see `super::vertical_move`).
+//!   Space / Shift move it straight up / down (in `super::pan_and_zoom`),
+//!   PgUp / PgDn by one level; Home brings it back above the surface.
+//!
+//! Turning the cut off leaves the camera at the level it was on (underground
+//! when that is below the surface); turning it on starts at the camera's.
 
 use bevy::prelude::*;
 
@@ -14,19 +29,30 @@ use crate::renderer::cursor::CursorPolicy;
 
 /// Levels per key step with Ctrl held.
 pub const LEVEL_STEP_FAST: i32 = 10;
-/// Holding a level key (Space / Shift / PgUp / PgDn) steps again every this
-/// many seconds, with no longer pause after the first step.
+/// Holding a level key (PgUp / PgDn) steps again every this many seconds,
+/// with no longer pause after the first step.
 pub const LEVEL_KEY_REPEAT_INTERVAL_S: f32 = 0.08;
-/// Keys that step the working level up / down.
-pub const LEVEL_UP_KEYS: [KeyCode; 2] = [KeyCode::Space, KeyCode::PageUp];
-pub const LEVEL_DOWN_KEYS: [KeyCode; 3] = [KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::PageDown];
+/// Keys that step the level (cut on) / move the camera one level (cut off).
+pub const LEVEL_UP_KEYS: [KeyCode; 1] = [KeyCode::PageUp];
+pub const LEVEL_DOWN_KEYS: [KeyCode; 1] = [KeyCode::PageDown];
+/// With the cut on these step the level too (with it off they move the
+/// camera, `super::RISE_KEYS` / `super::SINK_KEYS`).
+pub const CUT_LEVEL_UP_KEYS: [KeyCode; 2] = [KeyCode::Space, KeyCode::PageUp];
+pub const CUT_LEVEL_DOWN_KEYS: [KeyCode; 3] = [KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::PageDown];
+/// How far above the highest loaded surface the level may climb (cut on).
+pub const LEVELS_ABOVE_SURFACE: i32 = 8;
 /// The fast (×[`LEVEL_STEP_FAST`]) modifier for the level keys.
 pub const LEVEL_FAST_KEYS: [KeyCode; 2] = [KeyCode::ControlLeft, KeyCode::ControlRight];
-/// How far above the highest loaded surface the level may climb.
-pub const LEVELS_ABOVE_SURFACE: i32 = 8;
+/// The key that toggles the cut.
+pub const CUT_KEY: KeyCode = KeyCode::KeyC;
+/// The key that brings the camera back above the surface.
+pub const SURFACE_KEY: KeyCode = KeyCode::Home;
+/// How far below the lowest loaded surface the camera may sink, in blocks
+/// beyond the underground depth (bedrock).
+pub const LEVELS_BELOW_BEDROCK: i32 = 8;
 
 /// The block `y` being worked on (`None` until the focus column is loaded)
-/// and whether the world above it is cut away.
+/// and whether the world above it is cut away (on by default).
 #[derive(Resource)]
 pub struct WorkingLevel {
     pub level: Option<i32>,
@@ -44,6 +70,23 @@ impl Default for WorkingLevel {
 pub fn step_level(level: i32, steps: i32, fast: bool, range: (i32, i32)) -> i32 {
     let step = if fast { LEVEL_STEP_FAST } else { 1 };
     (level + steps * step).clamp(range.0, range.1.max(range.0))
+}
+
+/// The reachable levels for loaded surfaces spanning `surface` (sim units).
+pub fn level_range(surface: (f32, f32)) -> (i32, i32) {
+    let b = BLOCK_VOXELS as f32;
+    (
+        (surface.0 / b).floor() as i32 - UNDERGROUND_DEPTH as i32,
+        (surface.1 / b).floor() as i32 + LEVELS_ABOVE_SURFACE,
+    )
+}
+
+/// The working level for a camera: the level its focus is at when it is
+/// underground (`ground_y`, world sim units), else the surface under the
+/// focus (`surface`; `None` while that column is not loaded).
+pub fn derive_level(underground: bool, ground_y: f32, surface: Option<f32>) -> Option<i32> {
+    let baseline = if underground { Some(ground_y) } else { surface };
+    baseline.map(surface_level)
 }
 
 /// How many steps a level key has fired once it has been held `t` seconds
@@ -66,13 +109,10 @@ pub fn repeat_step(held_for: f32, pressed: bool, dt: f32) -> (f32, u32) {
     (next, repeat_fired(next) - repeat_fired(held_for))
 }
 
-/// The reachable levels for loaded surfaces spanning `surface` (sim units).
-pub fn level_range(surface: (f32, f32)) -> (i32, i32) {
-    let b = BLOCK_VOXELS as f32;
-    (
-        (surface.0 / b).floor() as i32 - UNDERGROUND_DEPTH as i32,
-        (surface.1 / b).floor() as i32 + LEVELS_ABOVE_SURFACE,
-    )
+/// The lowest the camera's focus may sink (world sim units) for loaded
+/// surfaces spanning `surface`: a little below bedrock under the lowest.
+pub fn sink_floor(surface: (f32, f32)) -> f32 {
+    surface.0 - ((UNDERGROUND_DEPTH as i32 + LEVELS_BELOW_BEDROCK) * BLOCK_VOXELS as i32) as f32
 }
 
 /// The air level above a column whose ground tops out at `surface_y`.
@@ -84,12 +124,6 @@ pub fn surface_level(surface_y: f32) -> i32 {
 /// the cutaway clips at.
 pub fn cut_plane_world_y(level: i32, region: RegionId) -> f32 {
     ((level + 1) * BLOCK_VOXELS as i32) as f32 + region.world_offset()[1]
-}
-
-/// The height the camera rides: the working level's floor when there is one
-/// (whatever the terrain or the cut toggle says), else the terrain.
-pub fn camera_baseline(terrain: Option<f32>, level_floor: Option<f32>) -> Option<f32> {
-    level_floor.or(terrain)
 }
 
 /// World y of the floor of the working level in `home`, independent of the cut.
@@ -113,17 +147,54 @@ pub fn init_level(grid: Res<HeightGrid>, cam: Res<CommanderCamera>, mut level: R
     }
 }
 
-/// Space / PgUp up and Shift / PgDn down (repeating while held), Ctrl with
-/// any of them for ×[`LEVEL_STEP_FAST`], Home (back to the surface
-/// at the focus) and C (toggle the cut). The camera rides the level's floor,
-/// so this is also how the commander rises and sinks.
+/// Where the free camera's focus goes when the cut is turned off on `level`:
+/// that level's floor, underground when it is below `surface` (the terrain
+/// under the focus). `None` without a level.
+pub fn uncut_camera(level: Option<i32>, home: Option<RegionId>, surface: Option<f32>) -> Option<(f32, bool)> {
+    let floor = level_floor_y(&WorkingLevel { level, cut: true }, home)?;
+    Some((floor, surface.is_some_and(|s| floor < s)))
+}
+
+/// With the cut off, keep the working level on the camera ([`derive_level`]);
+/// on turning the cut off, leave the camera at the level it was on
+/// ([`uncut_camera`]). The cut is toggled by C and the tool wheel alike, so
+/// the toggle is seen as a change, not a key.
+pub fn track_camera_level(
+    grid: Res<HeightGrid>,
+    tiles: Res<TileMirror>,
+    mut cam: ResMut<CommanderCamera>,
+    mut level: ResMut<WorkingLevel>,
+    mut was_cut: Local<Option<bool>>,
+) {
+    let surface = super::focus_ground_target(&grid, cam.focus);
+    if was_cut.replace(level.cut) == Some(true) && !level.cut {
+        if let Some((floor, underground)) = uncut_camera(level.level, tiles.region(), surface) {
+            cam.underground = underground;
+            if underground {
+                cam.ground_y = floor;
+            }
+        }
+    }
+    if level.cut {
+        return;
+    }
+    let derived = derive_level(cam.underground, cam.ground_y, focus_surface(&grid, cam.focus));
+    if derived.is_some() && derived != level.level {
+        level.level = derived;
+    }
+}
+
+/// C toggles the cut. Cut on: Space / Shift / PgUp / PgDn step the level
+/// (Ctrl: ten), repeating while held, and Home goes to the surface level.
+/// Cut off: PgUp / PgDn move the camera one level (Ctrl: ten), Home brings
+/// it back above the surface (Space / Shift are `super::pan_and_zoom`'s).
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
-pub fn step_level_input(
+pub fn level_input(
     keys: Res<ButtonInput<KeyCode>>,
     policy: Res<CursorPolicy>,
     grid: Res<HeightGrid>,
-    cam: Res<CommanderCamera>,
     time: Res<Time>,
+    mut cam: ResMut<CommanderCamera>,
     mut level: ResMut<WorkingLevel>,
     mut held: Local<Option<[f32; 2]>>,
 ) {
@@ -132,28 +203,41 @@ pub fn step_level_input(
         *held = [-1.0; 2];
         return;
     }
-    if keys.just_pressed(KeyCode::KeyC) {
+    if keys.just_pressed(CUT_KEY) {
         level.cut = !level.cut;
     }
-    let Some(current) = level.level else { return };
-    let range = grid.surface_range().map_or((current, current), level_range);
-    let fast = keys.any_pressed(LEVEL_FAST_KEYS);
-    let mut next = current;
     let dt = time.delta_secs();
-    let (up_t, up) = repeat_step(held[0], keys.any_pressed(LEVEL_UP_KEYS), dt);
-    let (down_t, down) = repeat_step(held[1], keys.any_pressed(LEVEL_DOWN_KEYS), dt);
+    let (up_keys, down_keys): (&[KeyCode], &[KeyCode]) =
+        if level.cut { (&CUT_LEVEL_UP_KEYS, &CUT_LEVEL_DOWN_KEYS) } else { (&LEVEL_UP_KEYS, &LEVEL_DOWN_KEYS) };
+    let (up_t, up) = repeat_step(held[0], keys.any_pressed(up_keys.iter().copied()), dt);
+    let (down_t, down) = repeat_step(held[1], keys.any_pressed(down_keys.iter().copied()), dt);
     *held = [up_t, down_t];
+    let fast = keys.any_pressed(LEVEL_FAST_KEYS);
+    if level.cut {
+        let Some(current) = level.level else { return };
+        let range = grid.surface_range().map_or((current, current), level_range);
+        let steps = up as i32 - down as i32;
+        let mut next = if steps != 0 { step_level(current, steps, fast, range) } else { current };
+        if keys.just_pressed(SURFACE_KEY) {
+            if let Some(y) = focus_surface(&grid, cam.focus) {
+                next = surface_level(y);
+            }
+        }
+        if next != current {
+            level.level = Some(next);
+        }
+        return;
+    }
+    let surface = super::focus_ground_target(&grid, cam.focus);
+    let floor = grid.surface_range().map(sink_floor);
     let steps = up as i32 - down as i32;
     if steps != 0 {
-        next = step_level(next, steps, fast, range);
+        let per = if fast { LEVEL_STEP_FAST } else { 1 };
+        let dy = (steps * per * BLOCK_VOXELS as i32) as f32;
+        super::move_vertically(&mut cam, dy, surface, floor);
     }
-    if keys.just_pressed(KeyCode::Home) {
-        if let Some(y) = focus_surface(&grid, cam.focus) {
-            next = surface_level(y);
-        }
-    }
-    if next != current {
-        level.level = Some(next);
+    if keys.just_pressed(SURFACE_KEY) {
+        super::surface_camera(&mut cam, surface);
     }
 }
 
@@ -194,59 +278,58 @@ mod tests {
 
     #[test]
     fn level_keys_avoid_the_pan_keys() {
-        for key in LEVEL_UP_KEYS.iter().chain(&LEVEL_DOWN_KEYS).chain(&LEVEL_FAST_KEYS) {
+        let all = LEVEL_UP_KEYS.iter().chain(&LEVEL_DOWN_KEYS).chain(&CUT_LEVEL_UP_KEYS).chain(&CUT_LEVEL_DOWN_KEYS);
+        for key in all.chain(&LEVEL_FAST_KEYS).chain([&CUT_KEY, &SURFACE_KEY]) {
             assert!(!matches!(key, KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD), "{key:?}");
+        }
+        for key in LEVEL_UP_KEYS.iter().chain(&LEVEL_DOWN_KEYS) {
+            assert!(!super::super::RISE_KEYS.contains(key) && !super::super::SINK_KEYS.contains(key), "{key:?}");
         }
     }
 
     #[test]
-    fn steps_one_or_ten() {
+    fn cut_on_steps_one_or_ten_within_the_ground_range() {
         assert_eq!(step_level(50, 1, false, (0, 100)), 51);
         assert_eq!(step_level(50, -2, true, (0, 100)), 30);
-    }
-
-    #[test]
-    fn level_clamps_to_ground_range() {
         assert_eq!(step_level(5, -10, true, (0, 100)), 0);
-        assert_eq!(step_level(95, 10, true, (0, 100)), 100);
+        assert_eq!(level_range((1024.0, 1600.0)), (64 - 60, 100 + 8));
     }
 
     #[test]
-    fn level_range_spans_underground_depth() {
-        assert_eq!(level_range((1024.0, 1600.0)), (64 - 60, 100 + 8));
+    fn turning_the_cut_off_leaves_the_camera_on_its_level() {
+        let b = BLOCK_VOXELS as f32;
+        let home = Some(home0());
+        assert_eq!(uncut_camera(Some(40), home, Some(64.0 * b)), Some((40.0 * b, true)), "dug down: underground");
+        assert_eq!(uncut_camera(Some(70), home, Some(64.0 * b)), Some((70.0 * b, false)), "above the ground");
+        assert_eq!(uncut_camera(None, home, Some(64.0 * b)), None);
+    }
+
+    #[test]
+    fn the_level_follows_the_surface_above_ground_and_the_focus_below() {
+        let b = BLOCK_VOXELS as f32;
+        assert_eq!(derive_level(false, 10.0 * b, Some(64.0 * b)), Some(64), "above ground: the surface");
+        assert_eq!(derive_level(false, 10.0 * b, None), None, "the surface column not loaded yet");
+        assert_eq!(derive_level(true, 40.5 * b, Some(64.0 * b)), Some(40), "underground: where the focus is");
+    }
+
+    #[test]
+    fn the_camera_may_sink_to_just_below_bedrock() {
+        let b = BLOCK_VOXELS as f32;
+        let floor = sink_floor((100.0 * b, 300.0 * b));
+        assert_eq!(floor, (100 - UNDERGROUND_DEPTH as i32 - LEVELS_BELOW_BEDROCK) as f32 * b);
     }
 
     fn home0() -> RegionId {
         game::RegionCoords::new(0, 0).into()
     }
 
-    fn wl(cut: bool) -> WorkingLevel {
-        WorkingLevel { level: Some(10), cut }
-    }
-
     #[test]
-    fn baseline_is_the_level_floor_with_cut_on_or_off() {
-        let home = Some(home0());
-        for cut in [true, false] {
-            let floor = level_floor_y(&wl(cut), home);
-            assert_eq!(floor, Some(160.0));
-            assert_eq!(camera_baseline(Some(500.0), floor), Some(160.0));
-        }
-    }
-
-    #[test]
-    fn baseline_falls_back_to_terrain_without_a_level() {
-        let none = WorkingLevel { level: None, cut: true };
-        assert_eq!(level_floor_y(&none, Some(home0())), None);
-        assert_eq!(level_floor_y(&wl(true), None), None);
-        assert_eq!(camera_baseline(Some(200.0), None), Some(200.0));
-        assert_eq!(camera_baseline(None, None), None);
-    }
-
-    #[test]
-    fn baseline_ignores_terrain_when_a_level_exists() {
-        assert_eq!(camera_baseline(Some(500.0), Some(160.0)), Some(160.0));
-        assert_eq!(camera_baseline(Some(100.0), Some(160.0)), Some(160.0));
-        assert_eq!(camera_baseline(None, Some(160.0)), Some(160.0));
+    fn the_cut_is_on_by_default_and_clips_at_the_level() {
+        assert!(WorkingLevel::default().cut);
+        let off = WorkingLevel { level: Some(10), cut: false };
+        assert_eq!(cut_y(&off, Some(home0())), None);
+        let on = WorkingLevel { level: Some(10), cut: true };
+        assert_eq!(cut_y(&on, Some(home0())), Some(11.0 * BLOCK_VOXELS as f32));
+        assert_eq!(level_floor_y(&on, Some(home0())), Some(10.0 * BLOCK_VOXELS as f32));
     }
 }

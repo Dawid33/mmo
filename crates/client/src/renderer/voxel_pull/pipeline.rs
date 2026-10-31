@@ -24,6 +24,12 @@ pub struct VoxelPullPipeline {
     /// Descriptor form of the same layout, for the pipeline's `layout` vec
     /// (0.18 pipelines describe layouts, the cache realizes them).
     pub chunk_layout_desc: BindGroupLayoutDescriptor,
+    /// group(2) of the forward pipelines: the x-ray's interior depth
+    /// (`voxel_pull.wgsl` `xray_depth`, read under `XRAY` only; bound for
+    /// every forward draw — a 1×1 stand-in when the view has none —
+    /// `xray::SetXrayBindGroup`).
+    pub xray_layout: BindGroupLayout,
+    pub xray_layout_desc: BindGroupLayoutDescriptor,
     pub forward_shader: Handle<Shader>,
     pub view_layouts: MeshPipelineViewLayouts,
 }
@@ -55,9 +61,14 @@ impl FromWorld for VoxelPullPipeline {
         );
         let chunk_layout = device.create_bind_group_layout("voxel_pull_chunk_layout", &entries);
         let chunk_layout_desc = BindGroupLayoutDescriptor::new("voxel_pull_chunk_layout", &entries);
+        let xray_entries = BindGroupLayoutEntries::single(ShaderStages::FRAGMENT, bt::texture_depth_2d());
+        let xray_layout = device.create_bind_group_layout("voxel_pull_xray_layout", &xray_entries);
+        let xray_layout_desc = BindGroupLayoutDescriptor::new("voxel_pull_xray_layout", &xray_entries);
         Self {
             chunk_layout,
             chunk_layout_desc,
+            xray_layout,
+            xray_layout_desc,
             forward_shader: world.load_asset("shaders/voxel_pull.wgsl"),
             view_layouts: world.resource::<MeshPipelineViewLayouts>().clone(),
         }
@@ -86,6 +97,15 @@ pub struct VoxelPullPipelineKey {
     /// ranges with the `CUTOUT` def (alpha test, double-sided). The opaque
     /// pipeline never discards for alpha.
     pub cutout: bool,
+    /// The dug-space x-ray (cut off, `xray.rs`): `XRAY` — terrain in front
+    /// of the view's interior depth is discarded (dithered), interior faces
+    /// lit as `xray::INTERIOR_AMBIENT_GAIN` says. Never with `cutaway`.
+    pub xray: bool,
+    /// The x-ray's interior depth pass itself (`INTERIOR_PASS`): only quads
+    /// with `records::INTERIOR_BIT`, depth only, single-sampled into the
+    /// view's own interior depth texture (`xray::ViewXray`); `msaa_samples`
+    /// is 1 and `target_format` unused.
+    pub interior_pass: bool,
 }
 
 /// `shadows.wgsl`'s `sample_shadow_map` (bevy_pbr-0.18.1/src/render/shadow_sampling.wgsl)
@@ -116,6 +136,12 @@ fn forward_shader_defs(key: VoxelPullPipelineKey) -> Vec<ShaderDefVal> {
     if key.cutout {
         defs.push("CUTOUT".into());
     }
+    if key.xray {
+        defs.push("XRAY".into());
+    }
+    if key.interior_pass {
+        defs.push("INTERIOR_PASS".into());
+    }
     defs
 }
 
@@ -139,9 +165,12 @@ impl SpecializedRenderPipeline for VoxelPullPipeline {
             .get_view_layout(key.view_layout_key)
             .main_layout
             .clone();
+        if key.interior_pass {
+            return self.interior_pass_descriptor(view_layout, key);
+        }
         RenderPipelineDescriptor {
             label: Some(if key.cutout { "voxel_pull_forward_cutout" } else { "voxel_pull_forward" }.into()),
-            layout: vec![view_layout, self.chunk_layout_desc.clone()],
+            layout: vec![view_layout, self.chunk_layout_desc.clone(), self.xray_layout_desc.clone()],
             vertex: VertexState {
                 shader: self.forward_shader.clone(),
                 entry_point: Some("vertex".into()),
@@ -175,6 +204,40 @@ impl SpecializedRenderPipeline for VoxelPullPipeline {
                 count: key.msaa_samples,
                 ..default()
             },
+            ..default()
+        }
+    }
+}
+
+impl VoxelPullPipeline {
+    /// The x-ray's interior depth pass: the forward shader's vertex stage
+    /// (collapsing every non-interior quad), no fragment stage, back faces
+    /// culled, into a single-sampled `CORE_3D_DEPTH_FORMAT` target. Its layout
+    /// stops at group(1): group(2) samples the very texture it renders into.
+    fn interior_pass_descriptor(&self, view_layout: BindGroupLayoutDescriptor, key: VoxelPullPipelineKey) -> RenderPipelineDescriptor {
+        RenderPipelineDescriptor {
+            label: Some("voxel_pull_xray_interior".into()),
+            layout: vec![view_layout, self.chunk_layout_desc.clone()],
+            vertex: VertexState {
+                shader: self.forward_shader.clone(),
+                entry_point: Some("vertex".into()),
+                shader_defs: forward_shader_defs(key),
+                buffers: vec![],
+                ..default()
+            },
+            fragment: None,
+            primitive: PrimitiveState {
+                cull_mode: Some(Face::Back),
+                ..default()
+            },
+            depth_stencil: Some(DepthStencilState {
+                format: CORE_3D_DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(CompareFunction::GreaterEqual), // Bevy reverse-Z
+                stencil: default(),
+                bias: default(),
+            }),
+            multisample: MultisampleState { count: 1, ..default() },
             ..default()
         }
     }
@@ -529,6 +592,37 @@ fn position_world_to_clip(position: vec3<f32>) -> vec4<f32> { return vec4(positi
         let test = source.find("coverage < CUTOUT_ALPHA_CUTOFF").expect("the alpha test");
         let boundaries = source.find("let overlaid = apply_boundaries(").expect("apply_boundaries call");
         assert!(test > boundaries, "the alpha discard must follow apply_boundaries' fwidth");
+    }
+
+    /// The dug-space x-ray: the forward variants that read the interior depth
+    /// (opaque and cutout, with fog) and the interior pass's vertex stage.
+    #[test]
+    fn forward_shader_is_valid_wgsl_with_xray_and_interior_pass() {
+        validate_variants(
+            "voxel_pull.wgsl",
+            &[
+                &["XRAY"],
+                &["XRAY", "DISTANCE_FOG"],
+                &["XRAY", "CUTOUT"],
+                &["XRAY", "CUTOUT", "DISTANCE_FOG"],
+                &["INTERIOR_PASS"],
+            ],
+        );
+        let source = shader_source("voxel_pull.wgsl");
+        // Its discard follows every derivative use, like the cut's.
+        let discard = source.find("if (xray_hides(in.position, in.interior))").expect("the x-ray discard");
+        let boundaries = source.find("let overlaid = apply_boundaries(").expect("apply_boundaries call");
+        assert!(discard > boundaries, "the x-ray discard must follow apply_boundaries' fwidth");
+        assert!(source.contains("out.interior = (w0 >> 31u) & 1u;"), "INTERIOR_BIT is w0 bit 31");
+        assert_eq!(crate::renderer::meshing::records::INTERIOR_BIT, 31);
+    }
+
+    /// The interior pass culls back faces (the near side of a space is its
+    /// interior faces seen from behind) and the x-ray forward variant culls
+    /// like the plain one.
+    #[test]
+    fn xray_variants_cull_back_faces() {
+        assert_eq!(super::cull_mode(false, false), Some(Face::Back));
     }
 
     /// The cutout depth prepass / shadow variants: a fragment stage that

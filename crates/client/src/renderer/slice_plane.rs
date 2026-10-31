@@ -157,7 +157,7 @@ impl Plugin for SlicePlanePlugin {
                 Update,
                 (spawn_slice_plane, update_slice_plane)
                     .chain()
-                    .after(super::commander::level::step_level_input)
+                    .after(super::commander::level::track_camera_level)
                     .after(super::commander::tiles::update_tile_mirror),
             );
     }

@@ -179,6 +179,9 @@ impl Face {
 /// `cross_axes(axis).0`, `h` along `.1`. `ao` corner order (cu, cv) =
 /// (0,0), (1,0), (0,1), (1,1) over (U, V). `cutout`: the block is drawn
 /// alpha-tested (`CutoutTable`), in the pulled path's cutout pipeline.
+/// `interior`: every cell of the quad faces into a dug space
+/// (`interior::InteriorGround`; the x-ray view opens what lies in front of
+/// those faces) — part of the merge key, so a quad never mixes the two.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Quad {
     pub min: [u32; 3],
@@ -188,6 +191,7 @@ pub struct Quad {
     pub block: BlockId,
     pub ao: [u8; 4],
     pub cutout: bool,
+    pub interior: bool,
 }
 
 /// Greedy-mesh a padded chunk. Each visibility column is computed once and
@@ -197,6 +201,19 @@ pub struct Quad {
 /// splitting wherever the key changes. `cutout` names the see-through blocks
 /// (`CutoutTable::NONE`: all opaque).
 pub fn mesh_quads(p: &PaddedVoxels, cutout: &CutoutTable) -> Vec<Quad> {
+    mesh_quads_classified(p, cutout, None)
+}
+
+/// Merge-key bit of [`Quad::interior`] (block ids take bits 32..48).
+const INTERIOR_KEY_BIT: u64 = 1 << 48;
+
+/// [`mesh_quads`], marking the faces whose air side is dug space per
+/// `interior` (`None`: no face is interior).
+pub fn mesh_quads_classified(
+    p: &PaddedVoxels,
+    cutout: &CutoutTable,
+    interior: Option<&super::interior::InteriorGround>,
+) -> Vec<Quad> {
     let occ = Occupancy::new(p, cutout);
     let mut quads = Vec::new();
 
@@ -251,7 +268,18 @@ pub fn mesh_quads(p: &PaddedVoxels, cutout: &CutoutTable) -> Vec<Quad> {
                             VERTEX_AO_LUT[s(u - 1, v) << 2 | s(u, v + 1) << 1 | s(u - 1, v + 1)],
                             VERTEX_AO_LUT[s(u + 1, v) << 2 | s(u, v + 1) << 1 | s(u + 1, v + 1)],
                         ];
-                        keys[v][u] = (block.0 as u64) << 32 | u32::from_le_bytes(ao) as u64;
+                        // The air cell the face looks into, chunk-local
+                        // voxels (padded index - 1).
+                        let dug = interior.is_some_and(|g| {
+                            let mut air = [0i32; 3];
+                            air[axis] = b as i32 - 1;
+                            air[ua] = u as i32 - 1;
+                            air[va] = v as i32 - 1;
+                            g.is_dug_voxel(air)
+                        });
+                        keys[v][u] = (block.0 as u64) << 32
+                            | u32::from_le_bytes(ao) as u64
+                            | if dug { INTERIOR_KEY_BIT } else { 0 };
                     }
                 }
                 if !any {
@@ -287,6 +315,7 @@ pub fn mesh_quads(p: &PaddedVoxels, cutout: &CutoutTable) -> Vec<Quad> {
                         min[ua] = u0 as u32 - 1;
                         min[va] = v as u32 - 1;
                         let block = BlockId((key >> 32) as u16);
+                        let interior = key & INTERIOR_KEY_BIT != 0;
                         quads.push(Quad {
                             min,
                             w: w as u32,
@@ -295,6 +324,7 @@ pub fn mesh_quads(p: &PaddedVoxels, cutout: &CutoutTable) -> Vec<Quad> {
                             block,
                             ao: (key as u32).to_le_bytes(),
                             cutout: cutout.is_cutout(block),
+                            interior,
                         });
                     }
                 }

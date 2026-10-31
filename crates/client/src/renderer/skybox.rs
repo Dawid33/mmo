@@ -24,9 +24,28 @@ pub const HORIZON: [u8; 3] = [165, 200, 235];
 /// Color below the horizon (fog-like, seen from cliffs/underwater edges).
 pub const GROUND: [u8; 3] = [95, 110, 135];
 
+/// The underground backdrop (the eye inside a solid block, see
+/// `commander::underground_view`): dark rock instead of sky, a little lighter
+/// overhead than underfoot so up still reads as up. Same luminance scale as
+/// the sky (`BRIGHTNESS`).
+pub const UNDERGROUND_UP: [u8; 3] = [46, 40, 35];
+pub const UNDERGROUND_DOWN: [u8; 3] = [20, 17, 15];
+
 /// The generated cubemap, shared by every camera's `Skybox` component.
 #[derive(Resource)]
 pub struct SkyboxCubemap(pub Handle<Image>);
+
+/// The underground backdrop's cubemap, swapped in for [`SkyboxCubemap`]
+/// while the commander camera's eye is inside a block.
+#[derive(Resource)]
+pub struct UndergroundCubemap(pub Handle<Image>);
+
+/// The backdrop colour for a view direction with normalized world-space Y
+/// component `y`: [`UNDERGROUND_DOWN`] straight down to [`UNDERGROUND_UP`]
+/// straight up.
+pub fn underground_color(y: f32) -> [u8; 3] {
+    lerp3(UNDERGROUND_DOWN, UNDERGROUND_UP, 0.5 * (y + 1.0))
+}
 
 fn lerp3(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
     let t = t.clamp(0.0, 1.0);
@@ -50,6 +69,11 @@ fn sky_color(y: f32) -> [u8; 3] {
 /// color (the gradient is rotationally symmetric about the vertical axis),
 /// but each face's full direction is computed for clarity.
 pub fn build_cubemap_data(size: u32) -> Vec<u8> {
+    build_cubemap_data_with(size, sky_color)
+}
+
+/// [`build_cubemap_data`] for any colour-by-direction-y function.
+pub fn build_cubemap_data_with(size: u32, color: impl Fn(f32) -> [u8; 3]) -> Vec<u8> {
     let mut data = Vec::with_capacity((size * size * 6 * 4) as usize);
     for face in 0..6u32 {
         for row in 0..size {
@@ -66,7 +90,7 @@ pub fn build_cubemap_data(size: u32) -> Vec<u8> {
                     _ => [-s, -t, -1.0], // -Z
                 };
                 let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
-                let [r, g, b] = sky_color(dir[1] / len);
+                let [r, g, b] = color(dir[1] / len);
                 data.extend_from_slice(&[r, g, b, 255]);
             }
         }
@@ -74,12 +98,11 @@ pub fn build_cubemap_data(size: u32) -> Vec<u8> {
     data
 }
 
-/// Build the cubemap image and stash its handle; runs once at startup.
-pub fn setup_skybox(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn cubemap_image(data: Vec<u8>) -> Image {
     let mut image = Image::new(
         Extent3d { width: FACE_SIZE, height: FACE_SIZE, depth_or_array_layers: 6 },
         TextureDimension::D2,
-        build_cubemap_data(FACE_SIZE),
+        data,
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
@@ -88,7 +111,16 @@ pub fn setup_skybox(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         dimension: Some(TextureViewDimension::Cube),
         ..Default::default()
     });
-    commands.insert_resource(SkyboxCubemap(images.add(image)));
+    image
+}
+
+/// Build the sky and underground cubemaps and stash their handles; runs once
+/// at startup.
+pub fn setup_skybox(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let sky = images.add(cubemap_image(build_cubemap_data(FACE_SIZE)));
+    let underground = images.add(cubemap_image(build_cubemap_data_with(FACE_SIZE, underground_color)));
+    commands.insert_resource(SkyboxCubemap(sky));
+    commands.insert_resource(UndergroundCubemap(underground));
 }
 
 /// Attach the skybox to any camera that doesn't have one yet. `Option`al

@@ -12,7 +12,8 @@ use super::super::block_textures::BlockTextureLayers;
 use super::super::bridge::VoxelData;
 use super::binary::CutoutTable;
 use super::neighbors::{gather_padded_rle, zone_index, zone_indices, zone_offsets};
-use super::{mesh_chunk, MeshingTask};
+use super::interior::InteriorGround;
+use super::{mesh_chunk_classified, MeshingTask};
 
 /// World-space brick grid: key = world position / `BRICK_VOXELS`. Render-side
 /// spatial index for neighbor lookups; rebuilt from entities, never persisted.
@@ -168,6 +169,85 @@ fn chunk_rank(key: [i32; 3], cam: Option<(&GlobalTransform, Option<&Frustum>)>) 
     ((out as u64) << 62) | dist2.min((1 << 62) - 1)
 }
 
+/// Queues at most this long are ranked afresh every frame (edits, steady
+/// state): exact nearest-first, no latency. Longer ones (a region join queues
+/// ~200k bricks at 512 m) use [`RankCache`]: ranking, frustum-testing and
+/// sorting the whole queue every frame cost ~13 ms/frame there (2026-10-31
+/// trace), throttling the join itself. Tunable.
+pub const RANK_CACHE_MIN_QUEUE: usize = 4096;
+/// Frames a cached nearest-first order is used before it is re-ranked against
+/// the moved camera (and stale entries are purged). Bricks queued meanwhile
+/// wait at most this long. Tunable.
+pub const RANK_CACHE_FRAMES: u32 = 8;
+
+/// The nearest slice of a long [`RemeshQueue`], ranked once and consumed over
+/// up to [`RANK_CACHE_FRAMES`] frames.
+#[derive(Default)]
+pub struct RankCache {
+    /// `(rank, entity)`, nearest first.
+    order: Vec<(u64, Entity)>,
+    next: usize,
+    frames_left: u32,
+}
+
+impl RankCache {
+    fn clear(&mut self) {
+        self.order.clear();
+        self.next = 0;
+        self.frames_left = 0;
+    }
+}
+
+/// Up to `capacity` queued entries, nearest first (`rank`, ties by entity).
+/// Does not remove them from the queue. Entries failing `alive` are stale and
+/// purged — every frame for a short queue, on each re-rank for a long one
+/// (a stale entry picked in between is skipped by the caller's lookup).
+fn pick_nearest(
+    queue: &mut RemeshQueue,
+    cache: &mut RankCache,
+    capacity: usize,
+    alive: impl Fn(Entity) -> bool,
+    rank: impl Fn([i32; 3]) -> u64,
+) -> Vec<(Entity, Option<[i32; 3]>)> {
+    let rank_of = |key: Option<[i32; 3]>| key.map_or(0, &rank);
+    if queue.dirty.len() <= RANK_CACHE_MIN_QUEUE {
+        cache.clear();
+        queue.dirty.retain(|e, _| alive(*e));
+        let mut ranked: Vec<(u64, Entity, Option<[i32; 3]>)> =
+            queue.dirty.iter().map(|(&e, &key)| (rank_of(key), e, key)).collect();
+        if ranked.len() > capacity {
+            ranked.select_nth_unstable_by_key(capacity, |(r, e, _)| (*r, *e));
+            ranked.truncate(capacity);
+        }
+        ranked.sort_unstable_by_key(|(r, e, _)| (*r, *e));
+        return ranked.into_iter().map(|(_, e, key)| (e, key)).collect();
+    }
+    if cache.frames_left == 0 || cache.next >= cache.order.len() {
+        queue.dirty.retain(|e, _| alive(*e));
+        let keep = capacity.saturating_mul(RANK_CACHE_FRAMES as usize * 2).max(1);
+        let mut ranked: Vec<(u64, Entity)> = queue.dirty.iter().map(|(&e, &key)| (rank_of(key), e)).collect();
+        if ranked.len() > keep {
+            ranked.select_nth_unstable(keep);
+            ranked.truncate(keep);
+        }
+        ranked.sort_unstable();
+        cache.order = ranked;
+        cache.next = 0;
+        cache.frames_left = RANK_CACHE_FRAMES;
+    }
+    cache.frames_left -= 1;
+    let mut picked = Vec::with_capacity(capacity);
+    while picked.len() < capacity && cache.next < cache.order.len() {
+        let (_, e) = cache.order[cache.next];
+        cache.next += 1;
+        // Taken already, or dropped: the cache is a snapshot of the queue.
+        if let Some(&key) = queue.dirty.get(&e) {
+            picked.push((e, key));
+        }
+    }
+    picked
+}
+
 /// Drain the dirty queue into meshing tasks, nearest-first, up to the
 /// in-flight budget. Re-inserting `MeshingTask` supersedes (cancels) any
 /// prior in-flight task for that entity — same rule as the old pipeline.
@@ -183,15 +263,17 @@ pub fn spawn_mesh_tasks(
     layers: Res<BlockTextureLayers>,
     render_config: Option<Res<super::super::config::TerrainRenderConfig>>,
     skipped: Option<Res<super::super::bricks::SkippedBricks>>,
+    loaded: Option<Res<super::super::commander::height::HeightGrid>>,
+    ground: Option<Res<super::super::commander::tiles::TileMirror>>,
+    mut rank_cache: Local<RankCache>,
 ) {
     if queue.dirty.is_empty() {
+        rank_cache.clear();
         return;
     }
     let pull = render_config
         .as_deref()
         .is_none_or(|config| config.near.uses_quad_records());
-    // Entities that lost VoxelData while queued are stale — drop them.
-    queue.dirty.retain(|e, _| chunks.contains(*e));
     let capacity = budgets
         .max_in_flight
         .saturating_sub(in_flight.iter().count());
@@ -199,15 +281,12 @@ pub fn spawn_mesh_tasks(
         return;
     }
     let cam = camera.iter().next();
-    let mut ranked: Vec<(u64, Entity, Option<[i32; 3]>)> = queue
-        .dirty
-        .iter()
-        .map(|(&e, &key)| (key.map_or(0, |k| chunk_rank(k, cam)), e, key))
-        .collect();
-    ranked.sort_unstable_by_key(|(rank, e, _)| (*rank, *e));
+    let picked = pick_nearest(&mut queue, &mut rank_cache, capacity, |e| chunks.contains(e), |key| {
+        chunk_rank(key, cam)
+    });
 
     let pool = AsyncComputeTaskPool::get();
-    for (_, e, key) in ranked.into_iter().take(capacity) {
+    for (e, key) in picked {
         queue.dirty.remove(&e);
         let Ok(voxels) = chunks.get(e) else { continue };
         // Clone only compact RLE components while ECS access is available.
@@ -225,7 +304,23 @@ pub fn spawn_mesh_tasks(
                 } else if let Some((_, nv)) = skipped.as_ref().and_then(|s| s.0.get(&nk)) {
                     // A buried brick its chunk never spawned: solid, not air.
                     owned_neighbors.push((off, nv.clone()));
+                } else if let Some(id) = implied_neighbor(nk, loaded.as_deref(), ground.as_deref()) {
+                    // Unmaterialised ground under the column's band: solid
+                    // rock, so a dug space shows no wall where its chunk
+                    // meets it (and a camera inside the rock sees through).
+                    owned_neighbors.push((off, VoxelData::uniform(id)));
                 }
+            }
+        }
+        // Dug-space faces (the x-ray view): pulled bricks in the home region,
+        // classified against its original surfaces. Meshed before that ground
+        // arrived, the brick is re-meshed once it does.
+        let mut interior = None;
+        if let (true, Some(k), Some(g)) = (pull, key, ground.as_deref()) {
+            if g.has_home_ground() {
+                interior = InteriorGround::around(k, |x, z| g.home_surface(x, z));
+            } else {
+                commands.entity(e).insert(AwaitingGround(k));
             }
         }
         let layers = layers.0.clone();
@@ -238,10 +333,62 @@ pub fn spawn_mesh_tasks(
                 .map(|(off, data)| (*off, data))
                 .collect();
             let padded = gather_padded_rle(&center, &neighbors);
-            mesh_chunk(&padded, &BlockTextureLayers(layers), pull)
+            mesh_chunk_classified(&padded, &BlockTextureLayers(layers), pull, interior.as_ref())
         });
         commands.entity(e).insert(MeshingTask(task));
     }
+}
+
+/// On a brick meshed while the home region's ground was not mirrored yet,
+/// so its dug-space faces were not classified; holds its grid key.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct AwaitingGround(pub [i32; 3]);
+
+/// Once the home ground arrives (the mirror's ground epoch moves and it has
+/// some), re-queue the bricks meshed without it. Only those carry
+/// [`AwaitingGround`] — the bricks of the frames between a join's chunks and
+/// its ground — so this never walks the world.
+pub fn remesh_awaiting_ground(
+    mut commands: Commands,
+    mirror: Option<Res<super::super::commander::tiles::TileMirror>>,
+    waiting: Query<(Entity, &AwaitingGround)>,
+    mut queue: ResMut<RemeshQueue>,
+    mut seen: Local<u64>,
+) {
+    let Some(mirror) = mirror else { return };
+    if mirror.ground_epoch() == *seen || !mirror.has_home_ground() {
+        return;
+    }
+    *seen = mirror.ground_epoch();
+    for (e, waiting) in &waiting {
+        queue.dirty.insert(e, Some(waiting.0));
+        commands.entity(e).remove::<AwaitingGround>();
+    }
+}
+
+/// The block a missing neighbour brick `brick` (grid key) stands for when
+/// its whole sim chunk was never materialised and lies under its column's
+/// band — implied ground ([`TileMirror::implied_chunk_block`]); `None`
+/// (air) otherwise, or without the commander's mirrors.
+///
+/// [`TileMirror::implied_chunk_block`]: super::super::commander::tiles::TileMirror::implied_chunk_block
+pub fn implied_neighbor(
+    brick: [i32; 3],
+    loaded: Option<&super::super::commander::height::HeightGrid>,
+    ground: Option<&super::super::commander::tiles::TileMirror>,
+) -> Option<game::BlockId> {
+    let (loaded, ground) = (loaded?, ground?);
+    let chunk = implied_chunk_key(brick);
+    if loaded.has_chunk(chunk) {
+        return None;
+    }
+    ground.implied_chunk_block(chunk)
+}
+
+/// The world sim-chunk key holding grid brick `brick`.
+pub fn implied_chunk_key(brick: [i32; 3]) -> [i32; 3] {
+    let per = game::BRICKS_PER_CHUNK_EDGE as i32;
+    brick.map(|b| b.div_euclid(per))
 }
 
 /// A chunk with no air whose 6 face neighbours all exist and present no air
@@ -283,7 +430,7 @@ pub fn is_buried_by<'a>(
 
 /// What `mesh_chunk` returns for a buried chunk, in either render mode.
 pub fn buried_mesh_output() -> super::MeshOutput {
-    super::MeshOutput { mesh: None, records: None, connectivity: 0, quad_count: 0 }
+    super::MeshOutput { mesh: None, records: None, connectivity: 0, quad_count: 0, has_interior: false }
 }
 
 /// Hash the 26 boundary zones of a 32³ chunk. Zones overlap on purpose: a
@@ -419,6 +566,86 @@ pub fn prune_chunk_grid(
 pub(crate) mod tests {
     use super::*;
 
+    fn queue_of(n: u32) -> RemeshQueue {
+        let mut queue = RemeshQueue::default();
+        for i in 0..n {
+            queue.dirty.insert(Entity::from_raw_u32(i + 1).unwrap(), Some([i as i32, 0, 0]));
+        }
+        queue
+    }
+
+    /// Rank = distance from x = `from` along the row of keys.
+    fn rank_from(from: i32) -> impl Fn([i32; 3]) -> u64 {
+        move |k| (k[0] - from).unsigned_abs() as u64
+    }
+
+    fn xs(picked: &[(Entity, Option<[i32; 3]>)]) -> Vec<i32> {
+        picked.iter().map(|(_, k)| k.unwrap()[0]).collect()
+    }
+
+    #[test]
+    fn a_short_queue_is_ranked_exactly_every_frame() {
+        let mut queue = queue_of(10);
+        let mut cache = RankCache::default();
+        let picked = pick_nearest(&mut queue, &mut cache, 3, |_| true, rank_from(0));
+        assert_eq!(xs(&picked), vec![0, 1, 2], "nearest first");
+        let picked = pick_nearest(&mut queue, &mut cache, 2, |_| true, rank_from(9));
+        assert_eq!(xs(&picked), vec![9, 8], "a moved camera re-ranks at once");
+    }
+
+    #[test]
+    fn a_short_queue_drops_stale_entries() {
+        let mut queue = queue_of(4);
+        let mut cache = RankCache::default();
+        let dead = Entity::from_raw_u32(1).unwrap();
+        let picked = pick_nearest(&mut queue, &mut cache, 4, |e| e != dead, rank_from(0));
+        assert_eq!(xs(&picked), vec![1, 2, 3]);
+        assert!(!queue.dirty.contains_key(&dead));
+    }
+
+    #[test]
+    fn a_long_queue_drains_nearest_first_from_the_cache() {
+        let n = RANK_CACHE_MIN_QUEUE as u32 + 100;
+        let mut queue = queue_of(n);
+        let mut cache = RankCache::default();
+        let mut taken = Vec::new();
+        for _ in 0..RANK_CACHE_FRAMES {
+            let picked = pick_nearest(&mut queue, &mut cache, 4, |_| true, rank_from(0));
+            for (e, _) in &picked {
+                queue.dirty.remove(e);
+            }
+            taken.extend(xs(&picked));
+        }
+        let expected: Vec<i32> = (0..(4 * RANK_CACHE_FRAMES) as i32).collect();
+        assert_eq!(taken, expected, "one ranking serves RANK_CACHE_FRAMES frames, in order");
+        // The cache expired: the next pick re-ranks against the moved camera.
+        let far = n as i32 - 1;
+        let picked = pick_nearest(&mut queue, &mut cache, 2, |_| true, rank_from(far));
+        assert_eq!(xs(&picked), vec![far, far - 1]);
+    }
+
+    #[test]
+    fn a_long_queue_skips_entries_taken_since_the_ranking() {
+        let mut queue = queue_of(RANK_CACHE_MIN_QUEUE as u32 + 100);
+        let mut cache = RankCache::default();
+        let first = pick_nearest(&mut queue, &mut cache, 2, |_| true, rank_from(0));
+        // Not removed by the caller (e.g. still queued): taken from the cache
+        // once anyway, so the next frame moves on.
+        assert_eq!(xs(&first), vec![0, 1]);
+        queue.dirty.remove(&Entity::from_raw_u32(3).unwrap()); // x = 2, gone meanwhile
+        let next = pick_nearest(&mut queue, &mut cache, 2, |_| true, rank_from(0));
+        assert_eq!(xs(&next), vec![3, 4]);
+    }
+
+    #[test]
+    fn a_brick_belongs_to_the_sim_chunk_that_contains_it() {
+        let per = game::BRICKS_PER_CHUNK_EDGE as i32;
+        assert_eq!(implied_chunk_key([0, 0, 0]), [0, 0, 0]);
+        assert_eq!(implied_chunk_key([per - 1, per, 2 * per + 1]), [0, 1, 2]);
+        assert_eq!(implied_chunk_key([-1, -per, -per - 1]), [-1, -1, -2], "floor, not truncation");
+        assert_eq!(implied_neighbor([0, 0, 0], None, None), None, "no commander mirrors: air");
+    }
+
     /// `is_buried` must only claim chunks the full mesher agrees are empty:
     /// no quads, no connectivity, in both render modes.
     #[test]
@@ -469,7 +696,7 @@ pub(crate) mod tests {
             let refs: BTreeMap<[i32; 3], &VoxelData> = neighbors.iter().map(|(o, v)| (*o, v)).collect();
             let padded = gather_padded_rle(&center, &refs);
             for pull in [true, false] {
-                let full = mesh_chunk(&padded, &layers, pull);
+                let full = super::super::mesh_chunk(&padded, &layers, pull);
                 if buried {
                     assert_eq!(full.quad_count, 0, "round {round} pull={pull}: buried chunk has faces");
                     assert_eq!(full.connectivity, 0, "round {round}: buried chunk connects");

@@ -2,7 +2,9 @@
 //! painted onto the home region's tiles at the working level.
 //!
 //! A tool key ([`TOOL_KEYS`]) picks a tool; the tile under the cursor at the
-//! working level is the hover ([`pick_level_cell`]). A box is picked by its
+//! working level is the hover ([`pick_level_cell`]) — or, with the cut off
+//! ("Show above"), the block the cursor is on at any level
+//! ([`pick_visible_cell`]), and then corners take their level from it. A box is picked by its
 //! two corners ([`step_corners`]), either way: click a tile (press and
 //! release without moving) to anchor the first corner, then click again for
 //! the second; or press, drag and release. The moving corner is the hovered
@@ -30,7 +32,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::rapier3d::math::Vector;
 use game::{
-    pick_level_cell, validate, BlockId, Designation, DesignationKind, Invalid, OpId, Order, OrderSummary,
+    pick_level_cell, pick_visible_cell, validate, BlockId, Designation, DesignationKind, Invalid, OpId, Order, OrderSummary,
     RegionId, TileBox, TilePos, TileSource, BLOCK_VOXELS, DEFAULT_PRIORITY, MAX_ORDER_TILES, MAX_PRIORITY,
     REGION_BLOCKS,
 };
@@ -462,37 +464,71 @@ pub fn designate_keys(
     }
 }
 
-/// Cursor ray → the tile at the working level (region-local).
+/// How far (blocks) the cursor ray looks for a block with the cut off: far
+/// enough to cross the home region from a camera outside it.
+pub const VISIBLE_PICK_REACH_BLOCKS: f32 = 2.0 * REGION_BLOCKS as f32;
+
+/// Cursor ray → the hovered tile (region-local). With the cut on it is the
+/// tile at the working level ([`pick_level_cell`]); with it off, everything is
+/// drawn, so it is the block the cursor is on, at whatever level
+/// ([`pick_visible_cell`]; for a build, the air in front of the face), falling
+/// back to the working level where the ray hits nothing.
 pub fn update_hover(
     window: Query<&Window, With<PrimaryWindow>>,
     view: Query<(&Camera, &Transform), With<CommanderView>>,
     policy: Res<CursorPolicy>,
     mirror: Res<TileMirror>,
     working: Res<WorkingLevel>,
+    xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     mut state: ResMut<DesignateState>,
 ) {
+    let xray = crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut);
     let hover = (|| {
-        state.tool?;
+        let tool = state.tool?;
         if policy.blocks_game() || policy.ui_pointer {
             return None;
         }
-        let (region, level) = (mirror.region()?, working.level?);
-        let cursor = window.single().ok()?.cursor_position()?;
-        let (camera, tf) = view.single().ok()?;
-        let ray = camera.viewport_to_world(&GlobalTransform::from(*tf), cursor).ok()?;
-        let origin = ray.origin - Vec3::from_array(region.world_offset());
-        let dir = *ray.direction;
-        let p = pick_level_cell(
-            Vector::new(origin.x, origin.y, origin.z),
-            Vector::new(dir.x, dir.y, dir.z),
-            level,
-            |p| mirror.block(p) != BlockId::AIR,
-        )?;
+        let ray = cursor_ray(window.single().ok()?, view.single().ok()?, mirror.region()?)?;
+        let visible = (!working.cut).then(|| pick_visible_xray(ray, tool == Tool::Build, &mirror, xray)).flatten();
+        let p = visible.or_else(|| pick_level_cell(ray.0, ray.1, working.level?, |p| mirror.block(p) != BlockId::AIR))?;
         Some(clamp_to_region(p))
     })();
     if state.hover != hover {
         state.hover = hover;
     }
+}
+
+/// The cursor's ray as (origin, normalised direction) in `region`'s local
+/// sim units; `None` off the window.
+pub fn cursor_ray(window: &Window, (camera, tf): (&Camera, &Transform), region: RegionId) -> Option<(Vector, Vector)> {
+    let ray = camera.viewport_to_world(&GlobalTransform::from(*tf), window.cursor_position()?).ok()?;
+    let origin = ray.origin - Vec3::from_array(region.world_offset());
+    let dir = *ray.direction;
+    Some((Vector::new(origin.x, origin.y, origin.z), Vector::new(dir.x, dir.y, dir.z)))
+}
+
+/// The block the cursor ray meets first in the mirrored region, at whatever
+/// level ([`pick_visible_cell`]); with `face` the air cell in front of the
+/// face it entered through.
+pub fn pick_visible(ray: (Vector, Vector), face: bool, mirror: &TileMirror) -> Option<TilePos> {
+    pick_visible_cell(ray.0, ray.1, VISIBLE_PICK_REACH_BLOCKS, face, |p| mirror.block(p) != BlockId::AIR)
+}
+
+/// [`pick_visible`] under the dug-space x-ray (`xray`, cut off): through
+/// the terrain in front of a dug space, onto the floor or wall seen there
+/// ([`game::pick_xray_cell`]).
+pub fn pick_visible_xray(ray: (Vector, Vector), face: bool, mirror: &TileMirror, xray: bool) -> Option<TilePos> {
+    if !xray {
+        return pick_visible(ray, face, mirror);
+    }
+    game::pick_xray_cell(
+        ray.0,
+        ray.1,
+        VISIBLE_PICK_REACH_BLOCKS,
+        face,
+        |p| mirror.block(p) != BlockId::AIR,
+        |p| mirror.is_dug(p),
+    )
 }
 
 /// Left presses and releases → corners ([`step_corners`]) and orders; a
@@ -541,7 +577,10 @@ pub fn drag_input(
     let Some(start) = state.corners.start() else { return };
     // The moving corner follows the hover and the working level, whether
     // the button is held (a drag) or not (anchored, waiting for the click).
-    let corner = follow_corner(state.drag.map_or(start, |d| d.corner), state.hover, working.level);
+    // With the cut off the hover is on whatever level the cursor is on, so
+    // the corner takes its level from the hover instead.
+    let level = if working.cut { working.level } else { state.hover.map(|h| h[1]) };
+    let corner = follow_corner(state.drag.map_or(start, |d| d.corner), state.hover, level);
     let drag = Drag { anchor: start, corner, erase: ctrl };
     if state.drag != Some(drag) {
         state.drag = Some(drag);

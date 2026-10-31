@@ -90,6 +90,7 @@ mod tests {
             block: BlockId(1),
             ao,
             cutout: false,
+            interior: false,
         }
     }
 

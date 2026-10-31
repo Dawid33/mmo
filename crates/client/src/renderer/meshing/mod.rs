@@ -10,6 +10,7 @@ use binary::PaddedVoxels;
 pub mod ao;
 pub mod binary;
 pub mod emit;
+pub mod interior;
 pub mod lod;
 pub mod neighbors;
 pub mod pack;
@@ -31,10 +32,20 @@ pub struct MeshOutput {
     pub records: Option<Vec<records::QuadRecord>>,
     pub connectivity: u16,
     pub quad_count: u32,
+    /// Some quad faces into a dug space (`Quad::interior`): the x-ray view's
+    /// interior pass draws this chunk (`InteriorFaces`).
+    pub has_interior: bool,
 }
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerrainQuadCount(pub u32);
+
+/// On a pulled brick whose records hold interior quads (`records::INTERIOR_BIT`),
+/// so the x-ray's interior depth pass draws only these bricks — the cost
+/// scales with the fortress, not the world. Kept in step with `ChunkQuads`
+/// by `apply_meshed_chunks`.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct InteriorFaces;
 
 impl MeshOutput {
     /// Whether applying this output creates or replaces GPU-backed terrain data.
@@ -48,8 +59,20 @@ impl MeshOutput {
 /// Mesh OR records (per `pull`) + connectivity in one pass over the padded snapshot.
 /// Cutout blocks (leaves) come from the installed `game::block_props`.
 pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers, pull: bool) -> MeshOutput {
+    mesh_chunk_classified(padded, layers, pull, None)
+}
+
+/// [`mesh_chunk`], marking the quads that face into dug space per `interior`
+/// (pulled records only: the mesh path has no x-ray).
+pub fn mesh_chunk_classified(
+    padded: &PaddedVoxels,
+    layers: &BlockTextureLayers,
+    pull: bool,
+    interior: Option<&interior::InteriorGround>,
+) -> MeshOutput {
     let cutout = binary::CutoutTable::installed();
-    let quads = binary::mesh_quads(padded, &cutout);
+    let quads = binary::mesh_quads_classified(padded, &cutout, interior.filter(|_| pull));
+    let has_interior = quads.iter().any(|q| q.interior);
     let quad_count = u32::try_from(quads.len()).expect("terrain quad count fits u32");
     let (mesh, records) = if pull {
         let r = records::quads_to_records(&quads, layers);
@@ -62,6 +85,7 @@ pub fn mesh_chunk(padded: &PaddedVoxels, layers: &BlockTextureLayers, pull: bool
         records,
         connectivity: visibility::face_connectivity(padded, &cutout),
         quad_count,
+        has_interior,
     }
 }
 
@@ -119,6 +143,7 @@ pub fn apply_meshed_chunks(
             records,
             connectivity,
             quad_count,
+            has_interior,
         } = output;
         if let Some(records) = records {
             if let Some(stats) = pull_mem.as_deref_mut() {
@@ -151,6 +176,11 @@ pub fn apply_meshed_chunks(
                 visibility::ChunkConnectivity(connectivity),
                 TerrainQuadCount(quad_count),
             ));
+            if has_interior {
+                ec.insert(InteriorFaces);
+            } else {
+                ec.remove::<InteriorFaces>();
+            }
             ec.remove::<MeshingTask>();
             continue;
         }
@@ -186,6 +216,7 @@ pub fn apply_meshed_chunks(
                     MeshingTask,
                     super::voxel_pull::ChunkQuads,
                     TerrainQuadCount,
+                    InteriorFaces,
                 )>();
             }
         }
@@ -248,6 +279,7 @@ mod tests {
             records: None,
             connectivity: 0,
             quad_count: 0,
+            has_interior: false,
         };
         assert!(!output.requires_upload());
     }
@@ -263,6 +295,7 @@ mod tests {
             records: None,
             connectivity: 0,
             quad_count: 0,
+            has_interior: false,
         }
         .requires_upload());
         assert!(MeshOutput {
@@ -270,6 +303,7 @@ mod tests {
             records: Some(vec![records::QuadRecord([0, 0])]),
             connectivity: 0,
             quad_count: 1,
+            has_interior: false,
         }
         .requires_upload());
     }

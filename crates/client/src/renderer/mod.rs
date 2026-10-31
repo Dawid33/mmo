@@ -171,6 +171,7 @@ impl Plugin for SimBridgePlugin {
                     meshing::queue::scale_mesh_budgets,
                     meshing::queue::mark_remesh_dirty,
                     meshing::queue::prune_chunk_grid,
+                    meshing::queue::remesh_awaiting_ground,
                     meshing::queue::spawn_mesh_tasks,
                     meshing::apply_meshed_chunks,
                     // LOD meshes land in the same chain; culling moved to

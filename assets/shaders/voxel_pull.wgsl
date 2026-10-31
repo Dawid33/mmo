@@ -1,9 +1,12 @@
 // Pulled voxel forward shader. Record layout mirrored from
 // crates/client/src/renderer/meshing/records.rs (the source of truth):
-//   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1|cutout:1   w1: w:6|h:6|layer:16
+//   w0: x:6|y:6|z:6|face:3|ao0:2|ao1:2|ao2:2|ao3:2|flip:1|cutout:1|interior:1   w1: w:6|h:6|layer:16
 // The cutout bit needs no decoding: cutout records sit in their own range,
 // drawn by the CUTOUT pipeline (alpha test, double-sided); the opaque
-// pipeline never discards for alpha.
+// pipeline never discards for alpha. The interior bit (the quad faces a dug
+// space) drives the dug-space x-ray: the INTERIOR_PASS variant draws only
+// interior quads into the view's interior depth, and the XRAY variant
+// discards terrain in front of it (voxel_pull/xray.rs).
 #import bevy_pbr::mesh_view_bindings::{view, lights}
 #import bevy_pbr::mesh_view_types
 #import bevy_pbr::fog::{linear_fog, exponential_fog, exponential_squared_fog, atmospheric_fog}
@@ -46,6 +49,23 @@ struct FortressView {
 // The designation overlay: one byte per home-region block cell, texel
 // (x, z, y - base level) — fortress_view.rs OverlayGrid. Fragment stage only.
 @group(1) @binding(7) var overlay: texture_3d<u32>;
+
+#ifdef XRAY
+// The view's interior depth (voxel_pull/xray.rs ViewXray; a never-written
+// 1x1 stand-in reads 0 = nothing interior). Fragment stage only.
+@group(2) @binding(0) var xray_depth: texture_depth_2d;
+#endif
+// Mirrored from voxel_pull/xray.rs (the source of truth, incl. meanings).
+const XRAY_CEILING_GHOST: f32 = 0.1;
+const XRAY_DEPTH_EPSILON: f32 = 2.0;
+const XRAY_INTERIOR_AMBIENT_GAIN: f32 = 2.0;
+// 4x4 ordered-dither thresholds (Bayer, 0..15) for the CEILING_GHOST fraction.
+const XRAY_BAYER = array<f32, 16>(
+    0.0, 8.0, 2.0, 10.0,
+    12.0, 4.0, 14.0, 6.0,
+    3.0, 11.0, 1.0, 9.0,
+    15.0, 7.0, 13.0, 5.0,
+);
 
 // Mirrored from fortress_view.rs (the source of truth). The cap's darkening
 // arrives as fortress.cut.y (CAP_DARKEN there).
@@ -258,6 +278,8 @@ struct PullVertexOutput {
     @location(4) @interpolate(flat) layer: u32,
     // 1 when the z-level cut applies to this quad (CUTAWAY only; 0 otherwise).
     @location(5) @interpolate(flat) cut_here: u32,
+    // 1 when the quad faces a dug space (records.rs INTERIOR_BIT).
+    @location(6) @interpolate(flat) interior: u32,
 }
 
 @vertex
@@ -297,6 +319,15 @@ fn vertex(
     let tex_pos = texture_position(world_from_local, local_pos, scale);
 
     var out: PullVertexOutput;
+    out.interior = (w0 >> 31u) & 1u;
+#ifdef INTERIOR_PASS
+    // The x-ray's interior depth holds only interior quads: collapse the
+    // rest outside the clip volume, as the cut does.
+    if (out.interior == 0u) {
+        out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
+    }
+#endif
 #ifdef CUTAWAY
     // In the home region, a quad whose lowest corner (its record position:
     // extents only add) lies above the cut is collapsed to one point outside
@@ -391,6 +422,29 @@ fn apply_boundaries(color: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
     let line = smoothstep(0.0, 1.0, sd_px) * (1.0 - smoothstep(w, w + 1.0, sd_px));
     return mix(c, b.home_color.rgb, line * b.home_color.a);
 }
+
+#ifdef XRAY
+// Whether the x-ray drops this fragment (at framebuffer position `frag`): it
+// is not an interior face and lies more than XRAY_DEPTH_EPSILON in front of
+// the nearest interior surface at its pixel — terrain between the eye and a
+// dug space — except a XRAY_CEILING_GHOST dither of such pixels.
+fn xray_hides(frag: vec4<f32>, interior: u32) -> bool {
+    if (interior != 0u) {
+        return false;
+    }
+    let size = vec2<i32>(textureDimensions(xray_depth));
+    let px = clamp(vec2<i32>(frag.xy), vec2<i32>(0), size - vec2<i32>(1));
+    let interior_depth = textureLoad(xray_depth, px, 0);
+    if (interior_depth <= 0.0) {
+        return false;
+    }
+    // Infinite reverse-Z perspective: depth = near / view distance.
+    let near = view.clip_from_view[3][2];
+    let in_front = near / max(frag.z, 1e-12) < near / interior_depth - XRAY_DEPTH_EPSILON;
+    let ghost = (XRAY_BAYER[(px.y & 3) * 4 + (px.x & 3)] + 0.5) / 16.0 < XRAY_CEILING_GHOST;
+    return in_front && !ghost;
+}
+#endif
 
 // Side-face layer -> its block's top-face layer (identity for other layers).
 fn top_layer(layer: u32) -> u32 {
@@ -499,12 +553,19 @@ fn fragment(
         view.view_from_world[3].z,
     ), world_position);
 
-    var lit = lights.ambient_color.rgb * (SKY_SIDE + (1.0 - SKY_SIDE) * light_n.y);
+    // Under the x-ray an interior face is lit as a room open to the sky: no
+    // sun shadow (the ground above it still casts one), more ambient.
+    var xray_lit = false;
+#ifdef XRAY
+    xray_lit = in.interior != 0u;
+#endif
+    var lit = lights.ambient_color.rgb * (SKY_SIDE + (1.0 - SKY_SIDE) * light_n.y)
+        * select(1.0, XRAY_INTERIOR_AMBIENT_GAIN, xray_lit);
     for (var i = 0u; i < lights.n_directional_lights; i += 1u) {
         let light = lights.directional_lights[i];
         let ndotl = max(dot(light_n, light.direction_to_light), 0.0);
         var shadow = 1.0;
-        if (ndotl > 0.0 && (light.flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
+        if (ndotl > 0.0 && !xray_lit && (light.flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u) {
             // The real face normal: it sets the shadow lookup's normal bias.
             shadow = fetch_directional_shadow(i, world_position, n, view_z, in.position.xy);
         }
@@ -543,6 +604,12 @@ fn fragment(
         discard;
     }
 #endif
+#endif
+#ifdef XRAY
+    // Likewise after every derivative use.
+    if (xray_hides(in.position, in.interior)) {
+        discard;
+    }
 #endif
 #ifdef CUTOUT
     // The alpha test, likewise last (after apply_boundaries' fwidth).

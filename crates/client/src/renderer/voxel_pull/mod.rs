@@ -31,6 +31,7 @@ pub mod gpu;
 pub mod pipeline;
 pub mod prepare;
 pub mod queue;
+pub mod xray;
 
 use pipeline::{init_voxel_pull_depth_pipeline, VoxelPullDepthPipeline, VoxelPullPipeline};
 use prepare::{prepare_chunk_quads, prepare_view_chunk_draws};
@@ -80,6 +81,9 @@ pub struct ExtractedChunkQuads {
     /// Main-world cave-connectivity result. Hidden chunks keep their stable
     /// metadata slot but are marked inactive for both CPU and GPU culling.
     pub cave_active: bool,
+    /// The brick holds interior quads (`meshing::InteriorFaces`): the x-ray's
+    /// interior pass draws it (`xray::InteriorChunks`).
+    pub interior: bool,
 }
 
 #[derive(Resource, Default)]
@@ -143,7 +147,14 @@ pub fn extract_chunk_quads(
     mut commands: Commands,
     chunks: Extract<
         Query<
-            (RenderEntity, &ChunkQuads, &GlobalTransform, &Aabb, &InheritedVisibility),
+            (
+                RenderEntity,
+                &ChunkQuads,
+                &GlobalTransform,
+                &Aabb,
+                &InheritedVisibility,
+                Has<super::meshing::InteriorFaces>,
+            ),
             Or<(Changed<ChunkQuads>, Changed<GlobalTransform>, Changed<InheritedVisibility>)>,
         >,
     >,
@@ -151,7 +162,7 @@ pub fn extract_chunk_quads(
     mut debug_frame: Local<u32>,
 ) {
     let mut extracted = 0u32;
-    for (entity, quads, transform, aabb, vis) in &chunks {
+    for (entity, quads, transform, aabb, vis, interior) in &chunks {
         extracted += 1;
         let mut ec = commands.entity(entity);
         // Cave-culling hides via Visibility -> InheritedVisibility=false.
@@ -164,6 +175,7 @@ pub fn extract_chunk_quads(
             center,
             half_extents: half,
             cave_active,
+            interior,
         });
     }
     // VOXEL_PULL_DEBUG=1: once a second, where do chunks disappear — here
@@ -210,7 +222,9 @@ impl Plugin for VoxelPullPlugin {
             ExtractResourcePlugin::<BlockTopLayers>::default(),
             ExtractResourcePlugin::<super::boundaries::BoundaryUniform>::default(),
             ExtractResourcePlugin::<super::fortress_view::FortressViewUniform>::default(),
+            ExtractResourcePlugin::<xray::XraySettings>::default(),
         ));
+        app.init_resource::<xray::XraySettings>();
         // Main-world tally driving the `[pull-mem]` headline log in
         // `apply_meshed_chunks`. Registered here (not in `renderer/mod.rs`) so
         // the pull path owns its own accounting resource.
@@ -223,6 +237,7 @@ impl Plugin for VoxelPullPlugin {
             .init_resource::<gpu::ActiveNearMode>()
             .init_resource::<gpu::NearRendererMetrics>()
             .init_resource::<RemovedChunkQuads>()
+            .init_resource::<xray::InteriorChunks>()
             .init_resource::<SpecializedRenderPipelines<VoxelPullPipeline>>()
             .init_resource::<SpecializedRenderPipelines<VoxelPullDepthPipeline>>()
             .add_render_command::<Opaque3d, DrawVoxelPull>()
@@ -258,6 +273,11 @@ impl Plugin for VoxelPullPlugin {
                         .in_set(RenderSystems::PrepareBindGroups)
                         .after(prepare_chunk_quads),
                     gpu::prepare_active_near_mode.in_set(RenderSystems::PrepareResources),
+                    // Before `Queue`, which picks the XRAY variants from it.
+                    xray::track_interior_chunks.in_set(RenderSystems::PrepareAssets),
+                    xray::prepare_xray_views
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .run_if(resource_exists::<VoxelPullPipeline>),
                     log_arena_stats
                         .after(prepare_chunk_quads)
                         .run_if(|| game::perf::budget_lines_requested()),
@@ -313,9 +333,19 @@ impl Plugin for VoxelPullPlugin {
         // too — ahead of the depth pipeline, which reads it.
         render_app.add_systems(
             RenderStartup,
-            init_voxel_pull_pipeline
-                .after(bevy::pbr::init_mesh_pipeline_view_layouts)
-                .before(init_voxel_pull_depth_pipeline),
+            (
+                init_voxel_pull_pipeline
+                    .after(bevy::pbr::init_mesh_pipeline_view_layouts)
+                    .before(init_voxel_pull_depth_pipeline),
+                xray::init_xray_stand_in.after(init_voxel_pull_pipeline),
+            ),
+        );
+        // The x-ray's interior depth, ahead of the opaque pass that reads it.
+        render_app.add_systems(
+            Core3d,
+            xray::xray_interior_pass
+                .in_set(bevy::core_pipeline::Core3dSystems::MainPass)
+                .before(bevy::core_pipeline::core_3d::main_opaque_pass_3d),
         );
         let telemetry_enabled = render_app
             .world()

@@ -2,7 +2,11 @@
 //! there, and the hover shows the path it would take first.
 //!
 //! Active only in Adventure, with the local body selected and the pointer
-//! not on the UI. The hover's tile ([`goal_from_hover`]) is pathed from the
+//! not on the UI. The hover's tile is the one block selection picks: with
+//! the cut off the air in front of the block face under the cursor, at
+//! whatever level (`designate::pick_visible`), with it on the working
+//! level's cell; off the home region's blocks, the ground pick's column
+//! ([`goal_from_hover`]). It is pathed from the
 //! body's tile over the home region's [`TileMirror`] with the sim's own rules
 //! (`game::find_path`, `game::nearest_standable`, and `game::edge_toward` for
 //! a hover in a neighbouring region — the path then runs to the facing edge
@@ -29,7 +33,10 @@ use game::rapier3d::math::Vector;
 use game::{Goal, Order, RegionCoords, RegionId, TilePos, TileSource, BLOCK_VOXELS, REGION_BLOCKS};
 
 use super::adventure::ClientPlayMode;
-use super::designate::HiddenEdgeGizmos;
+use super::designate::{self, HiddenEdgeGizmos};
+use super::level::WorkingLevel;
+use super::CommanderView;
+use bevy::window::PrimaryWindow;
 use super::selection::{self, GroundPick, Selection};
 use super::tiles::TileMirror;
 use super::RightPress;
@@ -73,6 +80,27 @@ pub fn is_click(accumulated_motion_px: f32) -> bool {
 pub fn goal_from_hover(region: RegionId, local: Vec3, exact: bool, home: RegionId) -> Goal {
     let t = game::feet_tile(Vector::new(local.x, local.y, local.z));
     Goal { region, column: [t[0], t[2]], y: (exact && region == home).then_some(t[1]) }
+}
+
+/// The `MoveTo` goal for a picked block-selection tile in `home`: that
+/// tile's column, at its level.
+pub fn goal_from_tile(tile: TilePos, home: RegionId) -> Goal {
+    Goal { region: home, column: [tile[0], tile[2]], y: Some(tile[1]) }
+}
+
+/// The tile block selection picks under the cursor ray in the mirrored
+/// home region: with the cut off the air in front of the first block face
+/// the ray meets, at any level; with it on the working level's cell. `None`
+/// when the ray meets none of the region's blocks. `xray`: the cut-off view
+/// looks through to dug spaces (`designate::pick_visible_xray`).
+pub fn pick_move_tile(ray: (Vector, Vector), working: &WorkingLevel, mirror: &TileMirror, xray: bool) -> Option<TilePos> {
+    let p = if working.cut {
+        game::pick_level_cell(ray.0, ray.1, working.level?, |p| mirror.block(p) != game::BlockId::AIR)?
+    } else {
+        designate::pick_visible_xray(ray, true, mirror, xray)?
+    };
+    let n = REGION_BLOCKS as i32;
+    ((0..n).contains(&p[0]) && (0..n).contains(&p[2])).then_some(p)
 }
 
 /// The hovered tile in `home`'s block coordinates (outside `0..REGION_BLOCKS`
@@ -198,7 +226,11 @@ pub fn update_path_preview(
     policy: Res<CursorPolicy>,
     pick: Res<GroundPick>,
     mirror: Res<TileMirror>,
+    working: Res<WorkingLevel>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    view: Query<(&Camera, &Transform), With<CommanderView>>,
     bodies: Query<(&SimEntity, &GlobalTransform), With<LocalBody>>,
+    xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     mut preview: ResMut<PathPreview>,
     mut sent: ResMut<SentPath>,
 ) {
@@ -229,6 +261,12 @@ pub fn update_path_preview(
         }
         return;
     };
+    // Block selection's tile first; the ground pick only off the region's blocks.
+    let ray = window.single().ok().zip(view.single().ok()).and_then(|(w, v)| designate::cursor_ray(w, v, home));
+    if let Some(tile) = ray.and_then(|ray| pick_move_tile(ray, &working, &mirror, crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut))) {
+        preview.update(&*mirror, from, tile, goal_from_tile(tile, home), home, tile_point(tile, home));
+        return;
+    }
     let goal = goal_from_hover(region, local, pick.1, home);
     let world = local + Vec3::from_array(region.world_offset());
     preview.update(&*mirror, from, hover_tile(region, local, home), goal, home, world);

@@ -144,6 +144,12 @@ impl HeightGrid {
     }
 
     /// File a chunk's tops under its key (chunk coordinates, world / `CHUNK_UNITS`).
+    /// Whether the sim chunk at world chunk `key` is loaded (materialised),
+    /// all-air chunks included.
+    pub fn has_chunk(&self, key: [i32; 3]) -> bool {
+        self.stacks.get(&(key[0], key[2])).is_some_and(|s| s.contains_key(&key[1]))
+    }
+
     pub fn insert_chunk(&mut self, entity: Entity, key: [i32; 3], tops: ChunkTops) {
         if let Some(old) = self.by_entity.insert(entity, key) {
             if old != key {

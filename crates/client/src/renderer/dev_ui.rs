@@ -3,9 +3,12 @@
 //! above the game UI, in both camera modes. Stats, the debug toggles (the
 //! same flags as F4–F8) and stand-ins for systems that don't exist yet.
 //!
-//! The panel frees the cursor through `CursorPolicy::overlay_open`, which also
-//! stops `forward_input` sending clicks and mouse motion to the sim while it
-//! is open.
+//! The panel does not pause the game: in the commander view the pointer is
+//! free anyway, so the panel only takes it where it drew (`ui_pointer`, like
+//! any Slint layer) and panning, zoom, tools and selection keep working. Only
+//! when the sim holds the cursor (first person) does it set
+//! `CursorPolicy::overlay_open` ([`panel_claims_cursor`]), which frees the
+//! cursor and stops `forward_input` sending clicks and mouse motion to the sim.
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -22,6 +25,7 @@ use super::grid_debug::{GridDebug, TerrainDebug};
 use super::hud::HudStatus;
 use super::meshing::visibility::CullingConfig;
 use super::slint_overlay::{SlintLayer, SlintLayerPlugin, DEV_LAYER_ORDER};
+use super::voxel_pull::xray::XraySettings;
 use super::{GameEvents, LocalPlayer, UiCamera};
 
 /// Opens and closes the panel.
@@ -41,16 +45,19 @@ pub enum DevToggle {
     HideLod,
     HideNear,
     Colliders,
+    /// The cut-off view's dug-space x-ray (`voxel_pull::xray`), for comparison.
+    Xray,
 }
 
 impl DevToggle {
-    pub const ALL: [DevToggle; 6] = [
+    pub const ALL: [DevToggle; 7] = [
         DevToggle::Boundaries,
         DevToggle::ChunkGrid,
         DevToggle::CaveCulling,
         DevToggle::HideLod,
         DevToggle::HideNear,
         DevToggle::Colliders,
+        DevToggle::Xray,
     ];
 
     pub fn label(self) -> &'static str {
@@ -61,6 +68,7 @@ impl DevToggle {
             DevToggle::HideLod => "Hide LOD (F6)",
             DevToggle::HideNear => "Hide near terrain (F7)",
             DevToggle::Colliders => "Collider wireframes",
+            DevToggle::Xray => "Dug-space x-ray (cut off)",
         }
     }
 }
@@ -100,12 +108,19 @@ fn connect_dev_panel(ui: &DevPanelUi, world: &mut World) {
     world.insert_non_send(DevActions(actions));
 }
 
+/// Whether the open panel must claim the cursor (and with it the game's
+/// input): only to free a cursor the sim has grabbed.
+pub fn panel_claims_cursor(open: bool, sim_grab: bool) -> bool {
+    open && sim_grab
+}
+
 fn toggle_dev_ui(keys: Res<ButtonInput<KeyCode>>, mut open: ResMut<DevUiOpen>, mut cursor: ResMut<CursorPolicy>) {
     if keys.just_pressed(DEV_UI_KEY) {
         open.0 = !open.0;
     }
-    if cursor.overlay_open != open.0 {
-        cursor.overlay_open = open.0;
+    let claim = panel_claims_cursor(open.0, cursor.sim_grab);
+    if cursor.overlay_open != claim {
+        cursor.overlay_open = claim;
     }
 }
 
@@ -119,6 +134,7 @@ pub fn toggle_checked(toggle: DevToggle, world: &World) -> bool {
         DevToggle::HideNear => world.resource::<TerrainDebug>().hide_near,
         // Shared with the game thread, which only builds lines while on.
         DevToggle::Colliders => world.resource::<DebugFlagsRes>().0.collider_wireframes(),
+        DevToggle::Xray => world.get_resource::<XraySettings>().is_some_and(|x| x.enabled),
     }
 }
 
@@ -131,6 +147,7 @@ pub fn apply_dev_action(action: DevAction, world: &mut World) {
             DevToggle::HideLod => world.resource_mut::<TerrainDebug>().hide_lod = on,
             DevToggle::HideNear => world.resource_mut::<TerrainDebug>().hide_near = on,
             DevToggle::Colliders => world.resource::<DebugFlagsRes>().0.set_collider_wireframes(on),
+            DevToggle::Xray => world.insert_resource(XraySettings { enabled: on }),
         },
         DevAction::CompleteOrders => {
             if let Some(client) = world.resource::<LocalPlayer>().0 {
@@ -221,6 +238,13 @@ mod tests {
     use super::*;
     use crate::renderer::slint_overlay::{GAME_LAYER_ORDER, HUD_LAYER_ORDER};
 
+    #[test]
+    fn the_panel_blocks_the_game_only_to_free_a_grabbed_cursor() {
+        assert!(!panel_claims_cursor(true, false), "commander view: the game keeps running its input");
+        assert!(panel_claims_cursor(true, true), "first person: the panel frees the cursor");
+        assert!(!panel_claims_cursor(false, true), "closed");
+    }
+
     fn row<'a>(rows: &'a [(String, String)], label: &str) -> &'a str {
         &rows.iter().find(|(l, _)| l == label).expect(label).1
     }
@@ -258,6 +282,7 @@ mod tests {
                 "Hide LOD (F6)",
                 "Hide near terrain (F7)",
                 "Collider wireframes",
+                "Dug-space x-ray (cut off)",
             ]
         );
     }

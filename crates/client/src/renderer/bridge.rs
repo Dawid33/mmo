@@ -16,8 +16,65 @@ use super::{ClientUpdates, LocalPlayer};
 #[derive(Resource, Default)]
 pub struct Regions(pub BTreeMap<RegionId, Receiver<GameDataUpdate>>);
 
+/// Each region's terrain root: the parent of its chunks, their bricks and
+/// its other static render entities, at the region's fixed world offset. Its
+/// moving entities (players, slimes, voxel bodies, …) hang off a separate
+/// BODIES root at the same offset ([`RegionRoots::bodies`]): Bevy's static
+/// transform optimisation re-walks a whole tree when any node in it changes
+/// (a dirty root's `GlobalTransform` is rewritten, which flags every direct
+/// child), so one hopping slime under the terrain root cost a ~345k-brick
+/// walk every frame — ~15 ms/frame at a 512 m region (2026-10-31 trace).
+/// The bodies root is despawned with its region root ([`BodiesOf`]).
 #[derive(Resource, Default)]
-pub struct RegionRoots(pub BTreeMap<RegionId, Entity>);
+pub struct RegionRoots(pub BTreeMap<RegionId, Entity>, BodyRoots);
+
+/// The bodies roots behind [`RegionRoots::bodies`].
+#[derive(Default)]
+pub struct BodyRoots(BTreeMap<RegionId, Entity>);
+
+impl RegionRoots {
+    /// The parent of `region`'s non-terrain entities: its bodies root, or
+    /// the region root itself for a root mapped without one (tests that
+    /// insert into `.0` directly).
+    pub fn bodies(&self, region: RegionId) -> Option<Entity> {
+        self.1 .0.get(&region).or_else(|| self.0.get(&region)).copied()
+    }
+
+    fn insert(&mut self, region: RegionId, root: Entity, bodies: Entity) {
+        self.0.insert(region, root);
+        self.1 .0.insert(region, bodies);
+    }
+
+    fn remove(&mut self, region: &RegionId) -> Option<Entity> {
+        self.1 .0.remove(region);
+        self.0.remove(region)
+    }
+}
+
+/// On a region's bodies root: the terrain root it belongs to. Despawning the
+/// region root despawns its bodies root and everything under it.
+#[derive(Component)]
+#[relationship(relationship_target = RegionBodies)]
+pub struct BodiesOf(pub Entity);
+
+/// On a region root: its bodies root (see [`BodiesOf`]).
+#[derive(Component, Default)]
+#[relationship_target(relationship = BodiesOf, linked_spawn)]
+pub struct RegionBodies(Vec<Entity>);
+
+/// The region root and bodies root of a newly received region, both at its
+/// fixed world offset (they never move).
+fn spawn_region_roots(commands: &mut Commands, id: RegionId) -> (Entity, Entity) {
+    let offset = id.world_offset();
+    let at = Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2]));
+    let root = commands
+        .spawn((at, Visibility::default(), Name::new(format!("region {:?}", id))))
+        .id();
+    let bodies = commands
+        .spawn((at, Visibility::default(), Name::new(format!("region {:?} bodies", id)), BodiesOf(root)))
+        .id();
+    (root, bodies)
+}
 
 /// Region roots released from the window but not yet despawned, oldest first.
 /// A window shift releases a whole row at once — five regions of ~20k chunk
@@ -568,15 +625,8 @@ pub fn drain_client_updates(
                     // Replace-on-re-receipt: resubscribe/crash-respawn resync.
                     remove_region(&mut commands, &mut regions, &mut roots, &mut map, id);
                 }
-                let offset = id.world_offset();
-                let root = commands
-                    .spawn((
-                        Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2])),
-                        Visibility::default(),
-                        Name::new(format!("region {:?}", id)),
-                    ))
-                    .id();
-                roots.0.insert(id, root);
+                let (root, bodies) = spawn_region_roots(&mut commands, id);
+                roots.insert(id, root, bodies);
                 regions.0.insert(id, receiver);
                 // The fortress tools' tile mirror (commander only).
                 if let Some(msgs) = tile_msgs.as_mut() {
@@ -592,6 +642,7 @@ pub fn drain_client_updates(
                 spawn_region_snapshot(
                     &mut commands,
                     root,
+                    bodies,
                     id,
                     &data,
                     &mut map,
@@ -685,13 +736,14 @@ fn unmap_region(
 ) -> Option<Entity> {
     regions.0.remove(&id);
     map.0.retain(|(region, _), _| *region != id);
-    roots.0.remove(&id)
+    roots.remove(&id)
 }
 
 /// Port of the old `TrueWorld::new` snapshot walk.
 fn spawn_region_snapshot(
     commands: &mut Commands,
     root: Entity,
+    bodies: Entity,
     region: RegionId,
     data: &Arc<GameData>,
     map: &mut SimEntityMap,
@@ -704,11 +756,14 @@ fn spawn_region_snapshot(
     // player's may become this window's active Camera3d.
     let local_camera_key = local_player.and_then(|id| data.player_entites.get(&id).copied());
     for (key, _) in data.ecs.entities.iter() {
+        // Terrain under the static region root, everything else under the
+        // bodies root (see `RegionRoots`).
+        let is_chunk = data.ecs.chunk.try_get(key).is_some();
         let mut e = commands.spawn((
             SimEntity { region, key },
             Transform::IDENTITY,
             Visibility::default(),
-            ChildOf(root),
+            ChildOf(if is_chunk { root } else { bodies }),
         ));
         let mut local_position = Vec3::ZERO;
         if let Some(handle) = data.ecs.rigidbody.try_get(key) {
@@ -718,7 +773,7 @@ fn spawn_region_snapshot(
                 e.insert((tf, SimTarget::body(tf.translation, tf.rotation)));
             }
         }
-        if data.ecs.chunk.try_get(key).is_some() {
+        if is_chunk {
             e.insert((PendingSnapshotVoxels, super::bricks::ChunkBricks::default()));
             chunk_entities.push((e.id(), key, local_position));
         }
@@ -797,6 +852,7 @@ pub fn drain_region_updates(
     let mut new_cameras: Vec<Entity> = Vec::new();
     for (&region, receiver) in regions.0.iter() {
         let root = *roots.0.get(&region).expect("RegionRoots co-populated with Regions");
+        let bodies = roots.bodies(region).expect("RegionRoots co-populated with Regions");
         // Cell terrain loaded this drain: voxels are derived off-thread in the
         // snapshot queue's batches (nearest first, budgeted per frame).
         let mut new_terrain: Vec<(Entity, game::Chunk, Vec3)> = Vec::new();
@@ -839,7 +895,7 @@ pub fn drain_region_updates(
                             Transform::IDENTITY,
                             Visibility::default(),
                             SimTarget::body(Vec3::ZERO, Quat::IDENTITY),
-                            ChildOf(root),
+                            ChildOf(bodies),
                         ))
                         .id();
                     map.0.insert((region, key), e);
@@ -1038,7 +1094,7 @@ pub fn drain_region_updates(
                         commands.entity(e).insert(bundle);
                     } else {
                         let e = commands
-                            .spawn((SimEntity { region, key }, Visibility::default(), ChildOf(root), bundle))
+                            .spawn((SimEntity { region, key }, Visibility::default(), ChildOf(bodies), bundle))
                             .id();
                         map.0.insert((region, key), e);
                     }

@@ -1,13 +1,16 @@
 //! Per-quad 8-byte records for the pulled (mesh-free) render path.
 //! Layout (LOCKED, mirrored by assets/shaders/voxel_pull.wgsl — the shader
 //! only decodes; this file is the source of truth):
-//!   w0: x:6 | y:6 | z:6 | face:3 | ao0:2 | ao1:2 | ao2:2 | ao3:2 | flip:1 | cutout:1  (bit 31 zero)
+//!   w0: x:6 | y:6 | z:6 | face:3 | ao0:2 | ao1:2 | ao2:2 | ao3:2 | flip:1 | cutout:1 | interior:1
 //!   w1: w:6 | h:6 | layer:16                                                          (bits 28-31 zero)
 //! x/y/z/face sit at the same bit positions as pack.rs word0, and w1 equals
 //! pack.rs word1 exactly, so the two formats stay diffable while both live.
 //! `cutout` (bit 30) marks an alpha-tested quad (`Quad::cutout`, leaves); a
 //! chunk's records put every opaque quad first, then the cutout ones, and
-//! `face_ends` entry 7 stores where the cutout range starts.
+//! `face_ends` entry 7 stores where the cutout range starts. `interior`
+//! (bit 31) marks a quad facing into a dug space (`Quad::interior`): the
+//! cut-off x-ray view draws those into its interior depth pass and opens the
+//! terrain in front of them (`voxel_pull/xray.rs`). It is not a sort key.
 
 use super::super::block_textures::BlockTextureLayers;
 use super::ao::ao_flips_quad;
@@ -64,13 +67,21 @@ pub fn pack_record(q: &Quad, layer: u32) -> QuadRecord {
         | (q.ao[2] as u32) << 25
         | (q.ao[3] as u32) << 27
         | flip << 29
-        | (q.cutout as u32) << CUTOUT_BIT;
+        | (q.cutout as u32) << CUTOUT_BIT
+        | (q.interior as u32) << INTERIOR_BIT;
     let w1 = q.w | q.h << 6 | layer << 12;
     QuadRecord([w0, w1])
 }
 
 /// w0 bit of the cutout flag.
 pub const CUTOUT_BIT: u32 = 30;
+/// w0 bit of the interior (faces dug space) flag.
+pub const INTERIOR_BIT: u32 = 31;
+
+/// Whether a record faces into a dug space (w0 bit `INTERIOR_BIT`).
+pub fn record_is_interior(rec: QuadRecord) -> bool {
+    rec.0[0] >> INTERIOR_BIT & 1 == 1
+}
 
 /// Records come out opaque first, then cutout (drawn by their own pipeline),
 /// each part grouped by face id (`Face::index()` order, stable within a
@@ -184,6 +195,7 @@ mod tests {
             block: BlockId(1),
             ao,
             cutout: false,
+            interior: false,
         }
     }
 
@@ -280,11 +292,40 @@ mod tests {
     #[test]
     fn reserved_bits_stay_zero() {
         for cutout in [false, true] {
-            let q = Quad { cutout, ..sample_quad(Face::NegZ, [3, 0, 0, 3]) };
-            let rec = quads_to_records(&[q], &BlockTextureLayers::default())[0];
-            assert_eq!(rec.0[0] >> 31, 0, "w0 bit 31 reserved");
-            assert_eq!(rec.0[1] >> 28, 0, "w1 bits 28-31 reserved");
+            for interior in [false, true] {
+                let q = Quad { cutout, interior, ..sample_quad(Face::NegZ, [3, 0, 0, 3]) };
+                let rec = quads_to_records(&[q], &BlockTextureLayers::default())[0];
+                assert_eq!(rec.0[0] >> 31, interior as u32, "w0 bit 31 is the interior flag only");
+                assert_eq!(rec.0[1] >> 28, 0, "w1 bits 28-31 reserved");
+            }
         }
+    }
+
+    #[test]
+    fn interior_flag_round_trips_without_touching_geometry_or_order() {
+        let mut layers = BlockTextureLayers::default();
+        layers.0.insert(BlockId(1), [10, 20, 30]);
+        for face in [Face::PosY, Face::NegX, Face::PosZ] {
+            for cutout in [false, true] {
+                let plain = Quad { cutout, ..sample_quad(face, [3, 0, 0, 3]) };
+                let dug = Quad { interior: true, ..plain.clone() };
+                let a = quads_to_records(&[plain], &layers)[0];
+                let b = quads_to_records(&[dug], &layers)[0];
+                assert!(!record_is_interior(a) && record_is_interior(b), "{face:?}");
+                assert_eq!(a.0[0] | 1 << INTERIOR_BIT, b.0[0], "only the flag bit differs");
+                assert_eq!(a.0[1], b.0[1]);
+                assert_eq!(record_is_cutout(a), record_is_cutout(b));
+                assert_eq!(record_face(a), record_face(b));
+                for slot in 0..6 {
+                    let (da, db) = (decode_corner(a, slot), decode_corner(b, slot));
+                    assert_eq!((da.pos, da.face, da.ao, da.layer), (db.pos, db.face, db.ao, db.layer));
+                }
+            }
+        }
+        // Not a sort key: interior and plain quads of one face share its range.
+        let q = |face, interior| Quad { interior, ..sample_quad(face, [3, 3, 3, 3]) };
+        let records = quads_to_records(&[q(Face::PosY, true), q(Face::PosX, false), q(Face::PosY, false)], &layers);
+        assert_eq!(face_ends(&records), [1, 1, 3, 3, 3, 3, 0, 3]);
     }
 
     #[test]

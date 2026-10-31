@@ -131,6 +131,7 @@ fn mesh_lod_output(
         records,
         connectivity: 0,
         quad_count,
+        has_interior: false,
     }
 }
 
@@ -494,6 +495,7 @@ mod tests {
             block: BlockId(1),
             ao: [3; 4],
             cutout: false,
+            interior: false,
         }
     }
 
@@ -913,6 +915,7 @@ mod tests {
                 records: None,
                 connectivity: 0,
                 quad_count: 0,
+                has_interior: false,
             }
         });
         let lod = app.world_mut().spawn(LodMeshTask(task)).id();

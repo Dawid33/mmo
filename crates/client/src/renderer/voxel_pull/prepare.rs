@@ -534,7 +534,7 @@ mod tests {
     fn sorted_records() -> Vec<super::super::super::meshing::records::QuadRecord> {
         use super::super::super::meshing::binary::{Face, Quad};
         use super::super::super::meshing::records::quads_to_records;
-        let quad = |face, cutout| Quad { min: [1, 2, 3], w: 1, h: 1, face, block: game::BlockId(1), ao: [3; 4], cutout };
+        let quad = |face, cutout| Quad { min: [1, 2, 3], w: 1, h: 1, face, block: game::BlockId(1), ao: [3; 4], cutout, interior: false };
         let mut quads: Vec<Quad> = [Face::PosX, Face::NegX, Face::PosY, Face::NegY, Face::PosZ, Face::NegZ]
             .into_iter()
             .map(|f| quad(f, false))

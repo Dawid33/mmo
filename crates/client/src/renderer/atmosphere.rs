@@ -10,6 +10,7 @@
 //! duplicating the numbers; the per-chunk fallback gets them through PBR.
 
 use bevy::camera::Exposure;
+use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
 
@@ -25,6 +26,32 @@ pub const SUN_COLOR: Color = Color::srgb(0.98, 0.95, 0.82);
 /// horizon: low enough to model the terrain, high enough that most slopes
 /// facing away from the sun still see some of it.
 pub const SUN_DIRECTION: Vec3 = Vec3::new(-0.15, -0.18, 0.15);
+
+/// How far from the camera (view depth, metres) the sun casts shadows.
+/// Bevy's default cascades (10 / 150) assume 1 unit = 1 m; at
+/// `UNITS_PER_METER` = 16 they ended 9.4 m out, so the commander camera —
+/// 45 m from its focus at the start zoom, up to `ZOOM_FAR_M` (80 m) — saw
+/// shadows only when zoomed right in. This covers the whole view at full
+/// zoom-out except the far ground of a shallow pitch.
+pub const SHADOW_MAX_DISTANCE_M: f32 = 300.0;
+/// Far bound of the first (sharpest) cascade, metres.
+pub const SHADOW_FIRST_CASCADE_M: f32 = 20.0;
+/// Number of shadow cascades (WebGL2 supports only one; Bevy clamps there).
+pub const SHADOW_CASCADES: usize = 4;
+
+/// The sun's cascade layout, in world units.
+pub fn sun_cascades() -> CascadeShadowConfig {
+    let m = game::movement::UNITS_PER_METER;
+    let defaults = CascadeShadowConfigBuilder::default();
+    CascadeShadowConfigBuilder {
+        num_cascades: SHADOW_CASCADES.min(defaults.num_cascades),
+        minimum_distance: defaults.minimum_distance * m,
+        maximum_distance: SHADOW_MAX_DISTANCE_M * m,
+        first_cascade_far_bound: SHADOW_FIRST_CASCADE_M * m,
+        overlap_proportion: defaults.overlap_proportion,
+    }
+    .build()
+}
 
 /// Sky fill light. Blue-tinted, as open shade under a clear sky is; bright
 /// enough that a face in full shadow keeps ~30–40 % of a sunlit top instead
@@ -67,6 +94,28 @@ pub fn distance_fog() -> DistanceFog {
     }
 }
 
+/// Underground (the eye inside a solid block) the fog closes in on the
+/// rock backdrop (`skybox::UNDERGROUND_*`): dug spaces seen through the rock
+/// stay clear up to START metres away and dissolve into the dark by END, so
+/// the far hollow geometry never shows against nothing.
+pub const UNDERGROUND_FOG_START_M: f32 = 24.0;
+pub const UNDERGROUND_FOG_END_M: f32 = 120.0;
+
+/// The fog while the eye is inside a block: the backdrop's mid colour, in
+/// the skybox's post-exposure units like [`distance_fog`], over the
+/// underground range.
+pub fn underground_fog() -> DistanceFog {
+    let mid = skybox::underground_color(0.0);
+    let backdrop = LinearRgba::from(Color::srgb_u8(mid[0], mid[1], mid[2]));
+    let scale = skybox::BRIGHTNESS * Exposure::default().exposure();
+    let unit = game::movement::UNITS_PER_METER;
+    DistanceFog {
+        color: Color::LinearRgba(LinearRgba::rgb(backdrop.red * scale, backdrop.green * scale, backdrop.blue * scale)),
+        falloff: FogFalloff::Linear { start: UNDERGROUND_FOG_START_M * unit, end: UNDERGROUND_FOG_END_M * unit },
+        ..Default::default()
+    }
+}
+
 /// Spawn the sun and set the ambient fill. Called from `setup_scene`.
 pub fn spawn_lights(commands: &mut Commands) {
     commands.spawn((
@@ -76,6 +125,7 @@ pub fn spawn_lights(commands: &mut Commands) {
             shadow_maps_enabled: true,
             ..Default::default()
         },
+        sun_cascades(),
         Transform::default().looking_at(SUN_DIRECTION, Vec3::Y),
     ));
     commands.insert_resource(GlobalAmbientLight {
@@ -118,6 +168,13 @@ mod tests {
         let lit = ambient + SUN_ILLUMINANCE * up.dot(to_sun).max(0.0) / std::f32::consts::PI;
         let ratio = ambient / lit;
         assert!((0.3..0.5).contains(&ratio), "shadow/lit ratio {ratio}");
+    }
+
+    #[test]
+    fn shadows_reach_past_the_farthest_commander_zoom() {
+        let m = game::movement::UNITS_PER_METER;
+        let far = sun_cascades().bounds.last().copied().unwrap();
+        assert!(far >= 2.0 * crate::renderer::commander::ZOOM_FAR_M * m, "shadow far bound {far}");
     }
 
     #[test]

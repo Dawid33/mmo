@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use bevy::prelude::*;
 use game::{
     Block, BlockId, BlockIndex, Chunk, ColumnCoords, ColumnGround, Designation, RegionId, TilePos, TileSource,
-    CHUNK_BLOCK_COUNT,
+    CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, REGION_BLOCKS,
 };
 
 use crate::renderer::bricks::{ChunkEdits, SimChunk};
@@ -62,6 +62,10 @@ pub struct TileMirror {
     chunks: HashMap<[i32; 3], (Entity, Box<[Block]>)>,
     chunk_of: HashMap<Entity, [i32; 3]>,
     version: u64,
+    /// Bumped whenever the home region's ground recipe may have appeared
+    /// (its `Reset`, a home switch): bricks meshed without it re-mesh then
+    /// (`meshing::queue::remesh_awaiting_ground`).
+    ground_epoch: u64,
     /// Tiles (blocks) rewritten by incremental updates, for tests/diagnostics.
     tiles_touched: u64,
 }
@@ -79,6 +83,51 @@ impl TileMirror {
     /// Bumped on any change to what the mirror answers.
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// See the field: changes when the home ground may have arrived.
+    pub fn ground_epoch(&self) -> u64 {
+        self.ground_epoch
+    }
+
+    /// Whether the home region's ground recipe is mirrored.
+    pub fn has_home_ground(&self) -> bool {
+        self.home_tiles().is_some_and(|t| !t.ground.is_empty())
+    }
+
+    /// Whether world block column `(x, z)` lies in the home region.
+    pub fn in_home(&self, x: i32, z: i32) -> bool {
+        let n = REGION_BLOCKS as i32;
+        self.home == Some(game::RegionCoords::new(x.div_euclid(n), z.div_euclid(n)))
+    }
+
+    /// The ORIGINAL worldgen surface block y of world block column `(x, z)`
+    /// — home region only (the x-ray opens dug spaces there), `None`
+    /// elsewhere or before its ground arrived.
+    pub fn home_surface(&self, x: i32, z: i32) -> Option<i16> {
+        if !self.in_home(x, z) {
+            return None;
+        }
+        let n = REGION_BLOCKS as i32;
+        self.surface_local(x.rem_euclid(n), z.rem_euclid(n))
+    }
+
+    /// [`TileMirror::home_surface`] by region-local block column.
+    fn surface_local(&self, x: i32, z: i32) -> Option<i16> {
+        let cb = CHUNK_BLOCKS as i32;
+        if x < 0 || z < 0 {
+            return None;
+        }
+        let ground = self.ground_at((x / cb) as usize, (z / cb) as usize)?;
+        ground.surface.get((x % cb * cb + z % cb) as usize).copied()
+    }
+
+    /// Whether region-local tile `p` is DUG air: air strictly below its
+    /// column's original surface ([`game::is_dug_air`]) — what the x-ray
+    /// pick looks through.
+    pub fn is_dug(&self, p: TilePos) -> bool {
+        self.block(p) == BlockId::AIR
+            && self.surface_local(p[0], p[2]).is_some_and(|s| game::is_dug_air(p[1], i32::from(s)))
     }
 
     /// Tiles rewritten by [`TileMirror::update_blocks`] so far.
@@ -154,6 +203,7 @@ impl TileMirror {
         self.chunks.clear();
         self.chunk_of.clear();
         self.version += 1;
+        self.ground_epoch += 1;
         true
     }
 
@@ -175,6 +225,7 @@ impl TileMirror {
     /// Apply one bridge message. Updates for a region without a `Reset`
     /// yet are dropped (its snapshot will carry them).
     pub fn apply(&mut self, msg: TileMirrorMsg) {
+        let is_reset = matches!(msg, TileMirrorMsg::Reset { .. });
         let region = match msg {
             TileMirrorMsg::Reset { region, ground, designations, constructed } => {
                 let tiles = RegionTiles {
@@ -209,6 +260,9 @@ impl TileMirror {
         };
         if self.home == Some(region) {
             self.version += 1;
+            if is_reset {
+                self.ground_epoch += 1;
+            }
         }
     }
 
@@ -217,6 +271,20 @@ impl TileMirror {
         let (coords, local) = game::edit::locate(p)?;
         let key = [coords.x as i32, coords.y, coords.z as i32];
         self.chunks.get(&key).map(|(_, blocks)| blocks[BlockIndex::from_xyz(local.0, local.1, local.2).linear()])
+    }
+
+    /// What an unloaded sim chunk at world chunk `key` stands for when it lies
+    /// below its column's materialised band in a loaded region: implied
+    /// ground, answered with an opaque block of it (its bedrock — any opaque
+    /// block will do for meshing, which only asks "solid?"). `None` inside or
+    /// above the band, or without a recipe (the chunk is then air). The caller
+    /// checks the chunk is not loaded: a dug-out chunk is real air.
+    pub fn implied_chunk_block(&self, key: [i32; 3]) -> Option<BlockId> {
+        let n = game::REGION_CHUNKS as i32;
+        let region: RegionId = game::RegionCoords::new(key[0].div_euclid(n), key[2].div_euclid(n));
+        let column = ColumnCoords::new(key[0].rem_euclid(n) as usize, key[2].rem_euclid(n) as usize);
+        let ground = self.regions.get(&region)?.ground.get(&column)?;
+        ground.is_implied(key[1]).then_some(ground.bedrock)
     }
 
     fn ground_at(&self, x: usize, z: usize) -> Option<&ColumnGround> {
@@ -370,6 +438,48 @@ mod tests {
             constructed: Vec::new(),
         });
         m
+    }
+
+    #[test]
+    fn home_surface_and_dug_air_follow_the_original_surface() {
+        let mut m = TileMirror::default();
+        let epoch = m.ground_epoch();
+        m.set_home(Some(home()));
+        assert!(m.ground_epoch() > epoch, "a home switch may bring ground");
+        assert!(!m.has_home_ground());
+        let epoch = m.ground_epoch();
+        m.apply(TileMirrorMsg::Reset {
+            region: home(),
+            ground: BTreeMap::new(),
+            designations: Vec::new(),
+            constructed: Vec::new(),
+        });
+        assert!(m.ground_epoch() > epoch, "the home's Reset may bring ground");
+        let mut m = mirror();
+        m.set_chunk([0, band_base(), 0], chunk_blocks(&Chunk::uniform(Block::new(BlockId::AIR))));
+        assert!(m.has_home_ground());
+        let n = REGION_BLOCKS as i32;
+        let (wx, wz) = (home().x * n, home().z * n);
+        assert_eq!(m.home_surface(wx + 3, wz + 5), Some(SURFACE as i16));
+        assert_eq!(m.home_surface(wx - 1, wz), None, "outside home");
+        assert_eq!(m.home_surface(wx + CHUNK_BLOCKS as i32, wz), None, "a column without ground");
+        // The band's bottom chunk is mirrored as air: dug below the surface.
+        let y = band_base() * CHUNK_BLOCKS as i32;
+        assert!(m.is_dug([3, y, 5]));
+        assert!(!m.is_dug([3, SURFACE, 5]), "the surface block itself");
+        assert!(!m.is_dug([3, implied_y(), 5]), "implied rock is not air");
+    }
+
+    #[test]
+    fn a_missing_chunk_under_the_band_is_implied_rock_in_any_loaded_region() {
+        let m = mirror();
+        let n = game::REGION_CHUNKS as i32;
+        // World chunk keys of home() = (1, -2), column (0, 0).
+        let at = |y: i32| [n, y, -2 * n];
+        assert_eq!(m.implied_chunk_block(at(band_base() - 1)), Some(BEDROCK), "below the band: rock");
+        assert_eq!(m.implied_chunk_block(at(band_base())), None, "the band itself is real chunks");
+        assert_eq!(m.implied_chunk_block([n + 1, band_base() - 1, -2 * n]), None, "a column without a recipe");
+        assert_eq!(m.implied_chunk_block([0, band_base() - 1, 0]), None, "a region not loaded");
     }
 
     #[test]

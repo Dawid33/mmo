@@ -13,8 +13,11 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use game::{EntityKey, EntityKind, RegionId};
 
+use super::cut_entities::CutHidden;
 use super::height::HeightGrid;
+use super::level::WorkingLevel;
 use super::minimap::{self, MinimapPointer};
+use super::tiles::TileMirror;
 use super::CommanderView;
 use super::adventure::ClientPlayMode;
 use crate::renderer::bridge::{LocalBody, SimEntity, SimEntityMap, SimKind};
@@ -43,7 +46,8 @@ impl Selection {
 
 /// The terrain point under the cursor: the region it lies in and the point in
 /// that region's local frame (sim units, as sim events use) — `None` off the
-/// loaded terrain. Orders and designations aim at it.
+/// loaded terrain. Cut-away rock is not in the way
+/// ([`super::visible::visible_ground`]). Orders and designations aim at it.
 ///
 /// The flag is `true` for an exact hit on the loaded terrain. Where the ray
 /// meets none, [`fallback_ground_pick`] puts the pick on the plane `y =
@@ -141,6 +145,9 @@ pub fn update_ground_pick(
     window: Query<&Window, With<PrimaryWindow>>,
     view: Query<(&Camera, &Transform), With<CommanderView>>,
     grid: Res<HeightGrid>,
+    working: Res<WorkingLevel>,
+    tiles: Res<TileMirror>,
+    xray: Option<Res<crate::renderer::voxel_pull::xray::XraySettings>>,
     mut pick: ResMut<GroundPick>,
 ) {
     pick.0 = (|| {
@@ -149,13 +156,14 @@ pub fn update_ground_pick(
         // The camera has no parent, so its Transform is its global pose —
         // this frame's, not last frame's propagated one.
         let ray = camera.viewport_to_world(&GlobalTransform::from(*tf), cursor).ok()?;
-        let unit = game::movement::UNITS_PER_METER;
-        let hit = march_height(
+        let hit = super::visible::visible_ground(
             ray.origin,
             *ray.direction,
-            |x, z| grid.surface_at(x, z),
-            PICK_STEP_M * unit,
             game::lod::LOD_HORIZON_UNITS,
+            &grid,
+            &working,
+            &tiles,
+            crate::renderer::voxel_pull::xray::xray_on(xray.as_deref(), working.cut),
         )?;
         let region = RegionId::from_world(hit.x, hit.z);
         Some((region, hit - Vec3::from_array(region.world_offset())))
@@ -194,11 +202,12 @@ pub fn fallback_ground_pick(
     })();
 }
 
-/// The selectables' screen positions this frame.
+/// The selectables' screen positions this frame (units hidden by the cut
+/// are not selectable).
 fn projected(
     camera: &Camera,
     gt: &GlobalTransform,
-    entities: &Query<(&SimEntity, &SimKind, &GlobalTransform, Has<LocalBody>)>,
+    entities: &Query<(&SimEntity, &SimKind, &GlobalTransform, Has<LocalBody>), Without<CutHidden>>,
     adventure: bool,
 ) -> Vec<((RegionId, EntityKey), Vec2)> {
     entities
@@ -218,7 +227,7 @@ pub fn select_input(
     keys: Res<ButtonInput<KeyCode>>,
     window: Query<&Window, With<PrimaryWindow>>,
     view: Query<(&Camera, &Transform), With<CommanderView>>,
-    entities: Query<(&SimEntity, &SimKind, &GlobalTransform, Has<LocalBody>)>,
+    entities: Query<(&SimEntity, &SimKind, &GlobalTransform, Has<LocalBody>), Without<CutHidden>>,
     mode: Res<ClientPlayMode>,
     policy: Res<CursorPolicy>,
     minimap_pointer: Res<MinimapPointer>,
@@ -274,7 +283,7 @@ pub fn prune_selection(map: Res<SimEntityMap>, mut selection: ResMut<Selection>)
 pub fn draw_selection_rings(
     selection: Res<Selection>,
     map: Res<SimEntityMap>,
-    entities: Query<(&SimKind, &GlobalTransform)>,
+    entities: Query<(&SimKind, &GlobalTransform), Without<CutHidden>>,
     mut gizmos: Gizmos,
 ) {
     for key in &selection.0 {
