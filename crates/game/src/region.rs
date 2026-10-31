@@ -479,6 +479,9 @@ impl Region {
                 // Mobs set kinematic targets, like the camera controller;
                 // the physics controller's step consumes them.
                 self.data.tick_slimes_safe(self.id);
+                // Adventurers' walks advance before the camera controller
+                // steers their bodies from them.
+                self.data.tick_walkers_safe(self.id);
                 for c in self.controllers.iter_mut() {
                     let data = self.data.as_refs_mut();
                     c.on_tick(data.data);
@@ -604,6 +607,10 @@ impl Region {
                         }
                     }
                 }
+            }
+            // A walk is planned against this region's identity.
+            GameEventKind::Order(client_id, crate::Order::MoveTo(goal)) => {
+                self.data.move_to_safe(client_id, goal, self.id);
             }
             GameEventKind::Order(client_id, order) => {
                 self.data.apply_order_safe(client_id, order);

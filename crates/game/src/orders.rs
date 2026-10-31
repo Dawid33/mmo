@@ -319,7 +319,8 @@ impl Rollback {
             }
             Order::DevCompleteAll => self.dev_complete_all_safe(),
             Order::SetMode { mode, at } => return self.set_play_mode_safe(client, mode, at),
-            // Not walked yet (Task 3).
+            // Needs the region's coordinates: `Region::handle_event` routes
+            // it to `move_to_safe`.
             Order::MoveTo(_) => return false,
         }
         true

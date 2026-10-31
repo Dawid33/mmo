@@ -252,6 +252,8 @@ mod game_data {
         bones: Component<crate::anim::BoneColliders>,
         /// Terrain detached into a falling body (`voxel_body.rs`).
         voxel_body: Component<crate::voxel_body::VoxelBody>,
+        /// An adventurer's walk toward a `MoveTo` goal (`adventure.rs`).
+        walker: Component<crate::Walker>,
     }
 
     pub struct PhysicsState {
@@ -355,6 +357,7 @@ impl Undo<Ecs> {
         self.animator.insert_safe(key);
         self.bones.insert_safe(key);
         self.voxel_body.insert_safe(key);
+        self.walker.insert_safe(key);
         key
     }
 
@@ -1175,6 +1178,7 @@ impl Rollback {
         self.data.ecs.animator.remove_safe(key);
         self.data.ecs.bones.remove_safe(key);
         self.data.ecs.voxel_body.remove_safe(key);
+        self.data.ecs.walker.remove_safe(key);
         // ECS slot last: the slotmap #[emit] fires RemoveEntity on the delta
         // (and CreateEntity again on undo).
         self.data.ecs.entities.remove(key);

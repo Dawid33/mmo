@@ -36,11 +36,13 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// Then for the `Ecs` `voxel_body` component slot (`game::voxel_body`;
 /// hashed layout only, no body in the scene) — both sizes.
 /// Then for `Client.mode` (`game::adventure`; 16 only).
+/// Then for the `Ecs` `walker` component slot (`game::adventure`; hashed
+/// layout only, nobody walks in the scene; 16 only).
 /// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
     2 => 0x380C_FBC3,
-    16 => 0x0525_7A65,
+    16 => 0xBE41_FAD8,
     _ => 0,
 };
 /// Ticks of scripted input.

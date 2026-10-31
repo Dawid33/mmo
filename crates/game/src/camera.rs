@@ -257,18 +257,31 @@ impl Controller for CameraController {
 
             let motion0 = (*ecs.motion.try_get(e_id)).unwrap_or_default();
             let mut motion = motion0;
-            let held = |key: Key| active && client.input.key_held(&key);
-            let keys = MoveKeys {
-                forward: held(Key::KeyW),
-                back: held(Key::KeyS),
-                left: held(Key::KeyA),
-                right: held(Key::KeyD),
-                jump_pressed: active && client.input.key_pressed(&Key::Space),
-                jump_held: held(Key::Space),
-                descend: held(Key::ShiftLeft),
-                sprint: held(Key::ControlLeft),
+            // An adventurer on a walk is steered by it, not the keyboard.
+            let walk = match ecs.walker.try_get(e_id) {
+                Some(w) if client.mode == crate::PlayMode::Adventure => {
+                    Some(crate::steer(w, crate::feet_of(b.translation()), motion0.grounded))
+                }
+                _ => None,
             };
-            let desired = movement::plan(&mut motion, &keys, yaw0, **data.tick as u64);
+            let (keys, yaw) = match walk {
+                Some((keys, yaw)) => (keys, yaw),
+                None => {
+                    let held = |key: Key| active && client.input.key_held(&key);
+                    let keys = MoveKeys {
+                        forward: held(Key::KeyW),
+                        back: held(Key::KeyS),
+                        left: held(Key::KeyA),
+                        right: held(Key::KeyD),
+                        jump_pressed: active && client.input.key_pressed(&Key::Space),
+                        jump_held: held(Key::Space),
+                        descend: held(Key::ShiftLeft),
+                        sprint: held(Key::ControlLeft),
+                    };
+                    (keys, yaw0)
+                }
+            };
+            let desired = movement::plan(&mut motion, &keys, yaw, **data.tick as u64);
             let t = b.translation().clone();
             // Collision-corrected movement: slide along / stop at terrain
             // instead of teleporting through it. Queries are read-only; the
@@ -296,6 +309,26 @@ impl Controller for CameraController {
                 data.physics.bodies.mutate_body_safe(handle, move |b| {
                     b.set_next_kinematic_translation(t + corrected)
                 });
+            }
+            if walk.is_some() {
+                // Face the way the walk heads, level — the same undo-tracked
+                // look scalars and body rotation as mouse look below.
+                if yaw != yaw0 || pitch0 != 0.0 {
+                    let mut scope = ecs.camera.undo_scope();
+                    {
+                        let c = scope.get_mut(e_id);
+                        c.yaw = yaw;
+                        c.pitch = 0.0;
+                    }
+                    scope.register(move |d, _| {
+                        let c = d.get_mut(e_id);
+                        c.yaw = yaw0;
+                        c.pitch = pitch0;
+                    });
+                    let r = crate::look_quat(yaw, 0.0);
+                    data.physics.bodies.mutate_body_safe(handle, move |b| b.set_next_kinematic_rotation(r));
+                }
+                continue;
             }
             if !active {
                 continue;

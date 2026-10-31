@@ -45,25 +45,26 @@ use slotmapd::Key as _;
 /// for the `Ecs` `voxel_body` component slot (`game::voxel_body`; layout
 /// only — no body in this scene; 16-block values only).
 /// Then for `Client.mode` (`game::adventure`; the scene's player is a
-/// client; 16-block values only).
+/// client; 16-block values only). Then for the `Ecs` `walker` component
+/// slot (`game::adventure`; layout only — nobody walks; 16-block values only).
 ///
 /// Every value is pinned per sim-chunk size (`game::CHUNK_BLOCKS`, a build
 /// dial): the same physical scene splits into different chunk entities,
 /// bodies and colliders at 2 and 16 blocks, so its bytes and hashes differ.
 /// Other sizes are not pinned and skip the comparison.
-const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0x4282_0549);
+const WASM_SCENE_DIGEST: u32 = pinned(0xFA8E_102F, 0xDA8E_ABFC);
 /// `game::state_hash` of the same state, on every target.
-const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xDAC9_9F97);
+const SCENE_STATE_HASH: u32 = pinned(0x5233_40BE, 0xA449_6339);
 const SCENE_TICKS: usize = 120;
 /// crc32 of [`underground_scene`]'s region bytes, on every target.
-const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0xBABE_5BB0);
+const UNDERGROUND_DIGEST: u32 = pinned(0x5448_586C, 0x7D03_082E);
 /// `game::state_hash` of the same state, on every target.
-const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0xC044_7478);
+const UNDERGROUND_STATE_HASH: u32 = pinned(0x4080_B196, 0xFCBE_4B35);
 
 /// crc32 of [`voxel_body_scene`]'s region bytes, on every target.
-const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0xB83E_05A8);
+const VOXEL_BODY_DIGEST: u32 = pinned(0x0F43_FFD4, 0xDEB8_3198);
 /// `game::state_hash` of the same state, on every target.
-const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x5B51_B35B);
+const VOXEL_BODY_STATE_HASH: u32 = pinned(0x8D9E_A328, 0x6BE3_489F);
 /// Ticks of [`voxel_body_scene`] after the detach: mid-fall (it rests and
 /// despawns at ~50).
 const VOXEL_BODY_TICKS: usize = 30;
