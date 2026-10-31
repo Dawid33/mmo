@@ -5,9 +5,12 @@
 //! The child is the binary next to the client executable, or
 //! `VOXEL_SERVER_BIN`. It runs with `VOXEL_WORLD_FILE=<terrain>` and
 //! `VOXEL_SINGLE_PLAYER=1` (it exits once its last client leaves) and writes
-//! stdout + stderr to the world's server log. The port stays 6466 for now
-//! (the server hard-codes it, and binds WebTransport 6467 next to it); a port
-//! that is already taken is reported instead of guessed around.
+//! stdout + stderr to the world's server log. It binds a free UDP port the
+//! client picks ([`free_udp_port`], passed as `VOXEL_SERVER_PORT`), so a menu
+//! world runs alongside a dev server on 6466; a single-player server starts
+//! no WebTransport ingress. If another process grabs the port between the
+//! pick and the child's bind, the child exits and the session's exit watch
+//! reports it with the server log's tail.
 //!
 //! The child's stdin is a pipe whose write end only the client holds: a
 //! single-player server exits when it closes, so the OS stops the child
@@ -24,9 +27,6 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::Resource;
 
-/// The QUIC port the server binds (hard-coded in `crates/server/src/lib.rs`).
-pub const SERVER_PORT: u16 = 6466;
-
 /// How long [`LocalHost::stop`] waits for the server to exit on its own (it
 /// does once its last client has left) before killing it.
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
@@ -41,8 +41,8 @@ pub const SERVER_BIN_ENV: &str = "VOXEL_SERVER_BIN";
 /// does not depend on the server crate).
 pub const SINGLE_PLAYER_ENV: &str = "VOXEL_SINGLE_PLAYER";
 
-/// The error message when [`SERVER_PORT`] is taken.
-pub const PORT_IN_USE: &str = "port 6466 is already in use (is a dev server running?)";
+/// The server's QUIC port override (`server::SERVER_PORT_ENV`).
+pub const SERVER_PORT_ENV: &str = "VOXEL_SERVER_PORT";
 
 /// How much of the server log's end [`LocalHost::log_tail`] reads.
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
@@ -105,8 +105,11 @@ fn tail_lines(path: &Path, lines: usize, max_bytes: u64) -> String {
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
-fn server_addr() -> SocketAddr {
-    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, SERVER_PORT))
+/// A UDP port on 127.0.0.1 that is free right now: bind port 0, read what the
+/// OS assigned, release it. QUIC is UDP, so this is the port the child binds.
+pub fn free_udp_port() -> io::Result<u16> {
+    let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
+    Ok(socket.local_addr()?.port())
 }
 
 impl LocalHost {
@@ -117,10 +120,7 @@ impl LocalHost {
 
     /// [`start`](Self::start) with an explicit binary.
     pub fn start_with(binary: &Path, terrain: &Path, log: &Path) -> io::Result<LocalHost> {
-        // QUIC is UDP: if we can't bind the port, neither can the child.
-        if UdpSocket::bind(server_addr()).is_err() {
-            return Err(io::Error::new(io::ErrorKind::AddrInUse, PORT_IN_USE));
-        }
+        let port = free_udp_port()?;
         if let Some(dir) = log.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -129,13 +129,14 @@ impl LocalHost {
         let mut child = Command::new(binary)
             .env("VOXEL_WORLD_FILE", terrain)
             .env(SINGLE_PLAYER_ENV, "1")
+            .env(SERVER_PORT_ENV, port.to_string())
             .stdin(Stdio::piped())
             .stdout(out)
             .stderr(err)
             .spawn()
             .map_err(|e| io::Error::new(e.kind(), format!("could not start {}: {e}", binary.display())))?;
         let stdin = child.stdin.take();
-        Ok(LocalHost { child, stdin, log: log.to_path_buf(), addr: server_addr() })
+        Ok(LocalHost { child, stdin, log: log.to_path_buf(), addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)) })
     }
 
     /// Close the child's stdin: a single-player server takes it as its
@@ -189,10 +190,6 @@ impl LocalHost {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Mutex;
-
-    /// The tests all need port 6466: one at a time.
-    static PORT: Mutex<()> = Mutex::new(());
 
     fn scratch(name: &str) -> PathBuf {
         let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/local-host-tests").join(name);
@@ -239,12 +236,11 @@ mod tests {
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
     fn start_passes_world_and_single_player_env() {
-        let _port = PORT.lock().unwrap_or_else(|e| e.into_inner());
         let dir = scratch("env");
         let bin = script(&dir, "env; echo done");
         let log = dir.join("logs/server.log");
         let mut host = LocalHost::start_with(&bin, Path::new("/worlds/x/terrain.world"), &log).unwrap();
-        assert_eq!(host.addr, server_addr());
+        assert_eq!(host.addr.ip(), std::net::IpAddr::from(Ipv4Addr::LOCALHOST));
         wait_for(|| host.try_exited().is_some());
         let text = std::fs::read_to_string(&log).unwrap();
         assert!(text.contains("VOXEL_WORLD_FILE=/worlds/x/terrain.world"), "{text}");
@@ -255,7 +251,6 @@ mod tests {
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
     fn stop_kills_after_grace() {
-        let _port = PORT.lock().unwrap_or_else(|e| e.into_inner());
         let dir = scratch("stop");
         let bin = script(&dir, "trap '' TERM\nexec sleep 60");
         let mut host = LocalHost::start_with(&bin, Path::new("t.world"), &dir.join("server.log")).unwrap();
@@ -271,7 +266,6 @@ mod tests {
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
     fn stop_returns_early_when_the_server_exits() {
-        let _port = PORT.lock().unwrap_or_else(|e| e.into_inner());
         let dir = scratch("early");
         let bin = script(&dir, "exit 0");
         let host = LocalHost::start_with(&bin, Path::new("t.world"), &dir.join("server.log")).unwrap();
@@ -284,7 +278,6 @@ mod tests {
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
     fn closing_stdin_ends_the_child() {
-        let _port = PORT.lock().unwrap_or_else(|e| e.into_inner());
         let dir = scratch("stdin");
         let bin = script(&dir, "cat >/dev/null; echo gone");
         let mut host = LocalHost::start_with(&bin, Path::new("t.world"), &dir.join("server.log")).unwrap();
@@ -311,16 +304,29 @@ mod tests {
 
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
-    fn port_in_use_is_reported() {
-        let _port = PORT.lock().unwrap_or_else(|e| e.into_inner());
-        let _taken = UdpSocket::bind(server_addr()).expect("6466 already taken — is a dev server running?");
+    fn start_passes_a_free_port_to_the_child() {
         let dir = scratch("port");
-        let marker = dir.join("spawned");
-        let bin = script(&dir, &format!("touch {}", marker.display()));
-        let err = LocalHost::start_with(&bin, Path::new("t.world"), &dir.join("server.log")).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
-        assert_eq!(err.to_string(), PORT_IN_USE);
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(!marker.exists(), "spawned despite the taken port");
+        let bin = script(&dir, "echo \"port=$VOXEL_SERVER_PORT\"");
+        let log = dir.join("server.log");
+        let mut host = LocalHost::start_with(&bin, Path::new("t.world"), &log).unwrap();
+        wait_for(|| host.try_exited().is_some());
+        let port = host.addr.port();
+        assert_ne!(port, 0);
+        assert_ne!(port, 6466, "a menu world must not take the dev server's port");
+        assert_eq!(host.addr.ip(), std::net::IpAddr::from(Ipv4Addr::LOCALHOST));
+        assert_eq!(host.log_tail(1), format!("port={port}"));
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn start_works_while_6466_is_taken() {
+        // Holding 6466 may fail if a dev server already has it — either way
+        // something holds it, which is the case under test.
+        let _taken = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 6466));
+        let dir = scratch("taken");
+        let bin = script(&dir, "echo started");
+        let mut host = LocalHost::start_with(&bin, Path::new("t.world"), &dir.join("server.log")).unwrap();
+        wait_for(|| host.try_exited().is_some());
+        assert_eq!(host.log_tail(1), "started");
     }
 }

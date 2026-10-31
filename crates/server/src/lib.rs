@@ -23,6 +23,36 @@ use quinn::{
 /// don't start one with stdin at `/dev/null`.
 pub const SINGLE_PLAYER_ENV: &str = "VOXEL_SINGLE_PLAYER";
 
+/// The QUIC port to bind on 127.0.0.1 (unset or empty = [`DEFAULT_SERVER_PORT`]).
+/// A client starting a menu world picks a free port and passes it here, so a
+/// menu world never collides with a dev server on 6466.
+pub const SERVER_PORT_ENV: &str = "VOXEL_SERVER_PORT";
+
+/// The dev server's QUIC port (`just run` / `just server`).
+pub const DEFAULT_SERVER_PORT: u16 = 6466;
+
+/// The dev server's WebTransport ingress port (browser clients).
+pub const WEBTRANSPORT_PORT: u16 = 6467;
+
+/// The QUIC port from the value of [`SERVER_PORT_ENV`].
+fn server_port_from(value: Option<&str>) -> Result<u16, String> {
+    let value = value.map(str::trim).unwrap_or("");
+    if value.is_empty() {
+        return Ok(DEFAULT_SERVER_PORT);
+    }
+    match value.parse::<u16>() {
+        Ok(port) if port != 0 => Ok(port),
+        _ => Err(format!("invalid {SERVER_PORT_ENV} value `{value}` (expected a port 1-65535)")),
+    }
+}
+
+/// Whether to serve browsers over WebTransport (and write the cert-hash file
+/// the page reads). A single-player world is never reached from a browser, and
+/// its ingress would take the dev server's 6467 and overwrite its cert hash.
+fn webtransport_enabled(single_player: bool) -> bool {
+    !single_player
+}
+
 /// Why a single-player server should exit now, if it should.
 fn single_player_exit(
     enabled: bool,
@@ -150,11 +180,16 @@ impl ClientSink {
 ///   if so.
 /// - Execute game tick.
 /// - If the loop didn't take a full TICK_TIME, wait until full TICK_TIME has passed.
-pub struct WorldIngress {}
+pub struct WorldIngress {
+    /// The QUIC port bound on 127.0.0.1.
+    port: u16,
+    /// Whether the WebTransport ingress (127.0.0.1:[`WEBTRANSPORT_PORT`]) runs.
+    webtransport: bool,
+}
 
 impl WorldIngress {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(port: u16, webtransport: bool) -> Self {
+        Self { port, webtransport }
     }
 
     /// ## Network Loop
@@ -181,7 +216,9 @@ impl WorldIngress {
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto).unwrap()));
         let t_config = TransportConfig::default();
         config.transport_config(Arc::new(t_config));
-        let endpoint = Endpoint::server(config, "127.0.0.1:6466".parse().unwrap()).unwrap();
+        let endpoint = Endpoint::server(config, std::net::SocketAddr::from(([127, 0, 0, 1], self.port)))
+            .unwrap_or_else(|e| panic!("could not bind QUIC on 127.0.0.1:{}: {e}", self.port));
+        info!("listening on 127.0.0.1:{} (QUIC)", self.port);
 
         let sinks: Arc<DashMap<ClientId, ClientSink>> = Arc::new(DashMap::new());
         let writer_sinks = sinks.clone();
@@ -245,21 +282,25 @@ impl WorldIngress {
 
         let next_client_id = Arc::new(AtomicUsize::new(0));
 
-        let wt_send = send.clone();
-        let wt_sinks = sinks.clone();
-        let wt_next = next_client_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = crate::webtransport::serve(
-                "127.0.0.1:6467".parse().unwrap(),
-                wt_send,
-                wt_sinks,
-                wt_next,
-            )
-            .await
-            {
-                log::error!("webtransport ingress died: {e:?}");
-            }
-        });
+        if self.webtransport {
+            let wt_send = send.clone();
+            let wt_sinks = sinks.clone();
+            let wt_next = next_client_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::webtransport::serve(
+                    std::net::SocketAddr::from(([127, 0, 0, 1], WEBTRANSPORT_PORT)),
+                    wt_send,
+                    wt_sinks,
+                    wt_next,
+                )
+                .await
+                {
+                    log::error!("webtransport ingress died: {e:?}");
+                }
+            });
+        } else {
+            info!("single-player: no WebTransport ingress");
+        }
 
         while let Some(conn) = endpoint.accept().await {
             let send = send.clone();
@@ -322,7 +363,10 @@ pub fn run() {
     let (client_packet_send, client_packet_recv) = crossbeam::channel::unbounded();
     let (server_send, server_recv) = crossbeam::channel::unbounded();
 
-    let mut rgi = WorldIngress::new();
+    let single_player = std::env::var(SINGLE_PLAYER_ENV).is_ok_and(|v| v == "1");
+    let configured_port = std::env::var(SERVER_PORT_ENV).ok();
+    let port = server_port_from(configured_port.as_deref()).unwrap_or_else(|message| panic!("{message}"));
+    let mut rgi = WorldIngress::new(port, webtransport_enabled(single_player));
     let configured_worker_threads = std::env::var("TOKIO_WORKER_THREADS").ok();
     let worker_threads = server_worker_threads(configured_worker_threads.as_deref())
         .unwrap_or_else(|message| panic!("{message}"));
@@ -411,7 +455,6 @@ pub fn run() {
 
     let start = std::time::Instant::now();
     let mut report = perf::ServerReport::new();
-    let single_player = std::env::var(SINGLE_PLAYER_ENV).is_ok_and(|v| v == "1");
     let mut ever_connected = false;
     let parent_gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if single_player {
@@ -537,6 +580,34 @@ mod tests {
         let gone = std::sync::atomic::AtomicBool::new(false);
         watch_parent(&b"anything"[..], &gone);
         assert!(gone.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn server_port_defaults_to_6466() {
+        assert_eq!(server_port_from(None), Ok(DEFAULT_SERVER_PORT));
+        assert_eq!(server_port_from(Some("")), Ok(DEFAULT_SERVER_PORT));
+        assert_eq!(DEFAULT_SERVER_PORT, 6466);
+    }
+
+    #[test]
+    fn server_port_accepts_an_override() {
+        assert_eq!(server_port_from(Some("40123")), Ok(40123));
+        assert_eq!(server_port_from(Some(" 7000 ")), Ok(7000));
+    }
+
+    #[test]
+    fn server_port_rejects_invalid_values() {
+        for bad in ["0", "65536", "port", "-1"] {
+            let err = server_port_from(Some(bad)).unwrap_err();
+            assert!(err.contains(SERVER_PORT_ENV), "{err}");
+            assert!(err.contains(bad), "{err}");
+        }
+    }
+
+    #[test]
+    fn single_player_has_no_webtransport_ingress() {
+        assert!(webtransport_enabled(false));
+        assert!(!webtransport_enabled(true));
     }
 
     #[test]

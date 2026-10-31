@@ -498,8 +498,8 @@ mod flow {
         SERVER_STOPS.lock().unwrap_or_else(|e| e.into_inner()).push(stop);
     }
 
-    /// Wait for every background server stop (the next server needs the
-    /// port; the process must not exit with a child still running).
+    /// Wait for every background server stop (the process must not exit
+    /// with a child still running).
     pub fn join_server_stops() {
         let stops = std::mem::take(&mut *SERVER_STOPS.lock().unwrap_or_else(|e| e.into_inner()));
         for stop in stops {
@@ -549,8 +549,9 @@ mod flow {
         SERVER_STOPS.lock().unwrap_or_else(|e| e.into_inner()).iter().all(|stop| stop.is_finished())
     }
 
-    /// In `Starting`, once no previous server is still stopping (it may hold
-    /// the port): start the pending world's server and connect to it. Until
+    /// In `Starting`, once no previous server is still stopping (it may still
+    /// be saving the world): start the pending world's server, on a free port
+    /// ([`LocalHost`]), and connect to it. Until
     /// then the starting screen says what it waits for; the frame never does.
     pub(super) fn launch_when_ready(world: &mut World) {
         if !world.contains_resource::<PendingWorld>() {

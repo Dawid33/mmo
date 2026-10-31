@@ -112,8 +112,12 @@ worlds. Alternatives weighed:
 
 The child is found next to the client executable (`current_exe().parent()/server`), with
 `VOXEL_SERVER_BIN` as an override **[my call]**. Its stdout/stderr go to
-`<world dir>/server.log`. The port stays 6466 for now; if it's taken, the menu shows an error
-rather than guessing **[my call]** (a free-port handshake can come later).
+`<world dir>/server.log`. Menu worlds run their server on a free UDP port chosen by the client
+(bind 127.0.0.1:0, read the port, release it) and passed as `VOXEL_SERVER_PORT`; the client
+connects to that port. A single-player server starts no WebTransport ingress and writes no
+cert-hash file. Dev servers (`just run` / `just server`) keep 6466 (QUIC) and 6467
+(WebTransport). (Revised 2026-10-31: the fixed 6466 made a menu world fail whenever a dev
+server was running.)
 
 ### Session lifecycle (in-process exit to the menu — Dawid's decision 2)
 
