@@ -131,6 +131,20 @@ pub struct WorldArtifact {
     pub spawn: [f64; 2],
 }
 
+/// The format version in a world file's 8-byte header, without loading the
+/// body (the main menu lists worlds with this).
+pub fn read_artifact_version(path: &Path) -> Result<u32, ArtifactError> {
+    use std::io::Read;
+    let mut header = [0u8; 8];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut header))
+        .map_err(ArtifactError::Io)?;
+    if &header[..4] != MAGIC {
+        return Err(ArtifactError::Format("missing VXWF header".into()));
+    }
+    Ok(u32::from_le_bytes([header[4], header[5], header[6], header[7]]))
+}
+
 #[derive(Debug)]
 pub enum ArtifactError {
     Io(std::io::Error),
