@@ -5,12 +5,28 @@
 // TWO-WAY (`value <=> root.x`); then user changes and later outside sets both
 // flow through the same property. Never use `value: expr` on these.
 
-import { Button, ButtonFace, DropdownFace, FrameFace, ScrollPaneFace, SliderFace, Styles, TabbedPaneFace } from "@widgets";
+import { Button, ButtonFace, DropdownFace, FrameFace, LabelFace, ScrollPaneFace, SliderFace, Styles, TabbedPaneFace } from "@widgets";
+
+// One saved world, for `PickList.rows` and the Load world screen.
+export struct WorldRow {
+    name: string,
+    // "seed 0x…, 16 km, 2026-10-30"
+    detail: string,
+    thumb: image,
+    loadable: bool,
+    // Why it cannot be loaded; "" when it can.
+    reason: string,
+    // The legacy default.world: loadable, never deletable.
+    legacy: bool,
+}
 
 // A list box you can use: the widgets' `ListBoxFace` look (list-box items
 // down a list-box scroll pane), with clickable items and wheel scrolling.
 export component PickList inherits TouchArea {
     in property <[string]> items;
+    // World rows instead of text items: a thumbnail, the name, the detail
+    // line and, dimmed, the reason a world cannot be loaded. Used when non-empty.
+    in property <[WorldRow]> rows;
     in property <int> selected: -1;
     callback picked(int);
     // A second click on the same item within `double-click-ms`.
@@ -24,7 +40,7 @@ export component PickList inherits TouchArea {
     // children their preferred size.
     // Show at most this many items' worth in `natural-height`.
     in property <int> max-visible: 100000;
-    out property <length> natural-height: min(items.length, max-visible) * item-height + Styles.list-box.scroll-pane.box.padding.top
+    out property <length> natural-height: min(root.count, max-visible) * item-height + Styles.list-box.scroll-pane.box.padding.top
         + Styles.list-box.scroll-pane.box.padding.bottom + Styles.list-box.scroll-pane.vertical-flow.box.padding.top
         + Styles.list-box.scroll-pane.vertical-flow.box.padding.bottom;
 
@@ -35,8 +51,9 @@ export component PickList inherits TouchArea {
         running: root.pending-click >= 0;
         triggered => { root.pending-click = -1; }
     }
-    property <length> item-height: probe.preferred-height;
-    property <length> content-height: items.length * item-height;
+    property <int> count: root.rows.length > 0 ? root.rows.length : root.items.length;
+    property <length> item-height: root.rows.length > 0 ? 56px : probe.preferred-height;
+    property <length> content-height: root.count * item-height;
     property <length> max-offset: max(0px, content-height - (pane.content-bottom - pane.content-y));
 
     // The children get a scroll first; the items don't take it, so it ends here.
@@ -72,6 +89,54 @@ export component PickList inherits TouchArea {
                 } else {
                     root.pending-click = i;
                 }
+            }
+        }
+        for row[i] in root.rows: Button {
+            x: 0;
+            y: i * root.item-height;
+            width: pane.content-width - pane.style.vertical-flow.box.padding.left - pane.style.vertical-flow.box.padding.right;
+            height: root.item-height;
+            style: Styles.list-box.item;
+            text: "";
+            toggled: i == root.selected;
+            clicked => {
+                root.picked(i);
+                if root.pending-click == i {
+                    root.pending-click = -1;
+                    root.activated(i);
+                } else {
+                    root.pending-click = i;
+                }
+            }
+        }
+        // An unloadable world is drawn dimmed, with its reason (no touch area: clicks reach the button).
+        for row[i] in root.rows: Rectangle {
+            x: 0;
+            y: i * root.item-height;
+            width: pane.content-width - pane.style.vertical-flow.box.padding.left - pane.style.vertical-flow.box.padding.right;
+            height: root.item-height;
+            opacity: row.loadable ? 1.0 : 0.4;
+            Image {
+                x: 4px;
+                y: 4px;
+                width: parent.height - 8px;
+                height: parent.height - 8px;
+                source: row.thumb;
+                image-fit: contain;
+            }
+            LabelFace {
+                x: parent.height + 4px;
+                y: 4px;
+                width: parent.width - self.x - 4px;
+                height: 24px;
+                text: row.name;
+            }
+            LabelFace {
+                x: parent.height + 4px;
+                y: 28px;
+                width: parent.width - self.x - 4px;
+                height: 22px;
+                text: row.loadable ? row.detail : row.reason;
             }
         }
     }

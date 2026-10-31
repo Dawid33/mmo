@@ -3,24 +3,12 @@
 // reports what the player did. `selected` is bound TWO-WAY (controls.slint).
 
 import { Button, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
-import { PickList } from "controls.slint";
+import { PickList, WorldRow } from "controls.slint";
 
-export struct WorldRow {
-    name: string,
-    // "seed 0x…, 16 km, 2026-10-30"
-    detail: string,
-    thumb: image,
-    loadable: bool,
-    // Why it cannot be loaded; "" when it can.
-    reason: string,
-    // The legacy default.world: loadable, never deletable.
-    legacy: bool,
-}
+export { WorldRow }
 
 export component LoadWorld {
     in property <[WorldRow]> worlds;
-    // One line per row for the list ("name — detail").
-    in property <[string]> labels;
     in-out property <int> selected: -1;
     in property <image> big-preview;
     in property <[string]> settings-lines;
@@ -36,6 +24,7 @@ export component LoadWorld {
     property <bool> has-selection: root.selected >= 0 && root.selected < root.worlds.length;
     property <WorldRow> current: root.has-selection ? root.worlds[root.selected] : { name: "", detail: "", loadable: false, reason: "", legacy: false };
     property <bool> can-load: root.has-selection && root.current.loadable;
+    // Delete stays enabled on unloadable rows: a world from an old build must be removable.
     property <bool> can-delete: root.has-selection && !root.current.legacy;
 
     property <length> margin: 24px;
@@ -79,7 +68,7 @@ export component LoadWorld {
             y: frame.top;
             width: frame.split - frame.left;
             height: frame.body-bottom - frame.top;
-            items: root.labels;
+            rows: root.worlds;
             selected <=> root.selected;
             picked(i) => {
                 root.selected = i;

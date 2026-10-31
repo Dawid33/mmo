@@ -64,7 +64,6 @@ export component FrontendUi inherits Window {
     // The world list (screen 2, load-world.slint), forwarded with a `load-`
     // prefix; its Back is `back` above.
     in property <[WorldRow]> load-worlds <=> loader.worlds;
-    in property <[string]> load-labels <=> loader.labels;
     in-out property <int> load-selected <=> loader.selected;
     in property <image> load-big-preview <=> loader.big-preview;
     in property <[string]> load-settings-lines <=> loader.settings-lines;

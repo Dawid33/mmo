@@ -255,9 +255,7 @@ fn loader(rows: &[(&str, bool, bool)]) -> Overlay<FrontendUi> {
     let mut overlay = overlay();
     overlay.ui().set_screen(2);
     let worlds: Vec<WorldRow> = rows.iter().map(|r| world_row(r.0, r.1, r.2)).collect();
-    let labels: Vec<SharedString> = rows.iter().map(|r| SharedString::from(r.0)).collect();
     overlay.ui().set_load_worlds(ModelRc::new(VecModel::from(worlds)));
-    overlay.ui().set_load_labels(ModelRc::new(VecModel::from(labels)));
     overlay.ui().set_load_selected(0);
     overlay.render();
     overlay
@@ -271,7 +269,7 @@ fn click_row(overlay: &mut Overlay<FrontendUi>, i: usize) {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn unloadable_row_disables_load() {
+fn unloadable_row_disables_load_but_not_delete() {
     let mut overlay = loader(&[("Broken", false, false), ("Fine", true, false)]);
     let (load, delete) = (counter(), counter());
     let (l, d) = (load.clone(), delete.clone());
@@ -376,4 +374,51 @@ fn confirm_modal_blocks_the_list() {
     overlay.render();
     click_row(&mut overlay, 1);
     assert_eq!(overlay.ui().get_load_selected(), 0, "the modal swallows the click");
+}
+
+fn white_thumb() -> slint_ui::slint::Image {
+    let mut buffer = slint_ui::slint::SharedPixelBuffer::<slint_ui::slint::Rgba8Pixel>::new(8, 8);
+    buffer.make_mut_slice().fill(slint_ui::slint::Rgba8Pixel { r: 255, g: 255, b: 255, a: 255 });
+    slint_ui::slint::Image::from_rgba8(buffer)
+}
+
+/// Summed brightness over row `i`'s band, the left half of the screen.
+fn row_light(overlay: &Overlay<FrontendUi>, i: usize) -> u64 {
+    let ui = overlay.ui();
+    let pitch = ui.get_load_row_pitch();
+    let centre = ui.get_load_row0_y() + i as f32 * pitch;
+    let (y0, y1) = ((centre - pitch / 3.0) as usize, (centre + pitch / 3.0) as usize);
+    let pixels = overlay.pixels();
+    let mut sum = 0u64;
+    for y in y0..y1 {
+        for x in 0..(WIDTH / 2) as usize {
+            let p = pixels[y * WIDTH as usize + x];
+            sum += p.red as u64 + p.green as u64 + p.blue as u64;
+        }
+    }
+    sum
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn unloadable_row_is_dimmer_and_thumb_draws() {
+    let mut overlay = loader(&[("A", true, false), ("B", true, false), ("C", false, false), ("D", false, false)]);
+    let rows: Vec<WorldRow> = [(true, true), (true, false), (false, true), (false, false)]
+        .iter()
+        .map(|&(loadable, thumb)| WorldRow {
+            name: "World".into(),
+            detail: "seed 0x1, 16 km, 2026-10-30".into(),
+            thumb: if thumb { white_thumb() } else { Default::default() },
+            loadable,
+            reason: "".into(),
+            legacy: false,
+        })
+        .collect();
+    overlay.ui().set_load_worlds(ModelRc::new(VecModel::from(rows)));
+    overlay.ui().set_load_selected(-1);
+    overlay.render();
+    let light: Vec<u64> = (0..4).map(|i| row_light(&overlay, i)).collect();
+    assert!(light[0] > light[1], "a thumb draws image pixels: {light:?}");
+    assert!(light[1] > light[3], "unloadable text is dimmer: {light:?}");
+    assert!(light[0] > light[2], "unloadable thumb is dimmer: {light:?}");
 }

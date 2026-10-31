@@ -3,11 +3,10 @@
 //! Delete (asks first) / Back.
 //!
 //! The list is read on entering the screen and after a delete — never per
-//! frame — and the selected world's `preview.png` is decoded when the
-//! selection changes. Load sets [`PendingWorld`] and goes to
-//! [`AppState::Starting`]. The list shows one text line per world (the
-//! shared `PickList` has no image cells), so the small `thumb` of a row is
-//! left empty; the selected world's preview is the big image.
+//! frame. Each row's thumbnail (`preview.png` downscaled to [`THUMB_PX`]) is
+//! decoded once per refresh; the selected world's full preview is decoded when
+//! the selection changes. Load sets [`PendingWorld`] and goes to
+//! [`AppState::Starting`].
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -24,6 +23,9 @@ use worldgen::forged;
 use super::generator::format_seed;
 use crate::renderer::slint_overlay::SlintLayer;
 use crate::session::{AppState, PendingWorld};
+
+/// Edge of a row's square thumbnail, in pixels.
+pub const THUMB_PX: u32 = 48;
 
 /// Settings lines shown under the preview (the rest is "+N more").
 const MAX_SETTINGS_LINES: usize = 10;
@@ -101,13 +103,14 @@ pub fn row_parts(entry: &WorldEntry) -> (String, String, bool, String, bool) {
     (name, detail, loadable, reason, entry.legacy)
 }
 
-fn label_of(entry: &WorldEntry) -> String {
-    let (name, detail, loadable, ..) = row_parts(entry);
-    if loadable { format!("{name}  -  {detail}") } else { format!("{name}  (cannot load)") }
-}
 
 fn decode_preview(path: &Path) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
     let image = image::open(path).ok()?.to_rgba8();
+    Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(image.as_raw(), image.width(), image.height()))
+}
+
+fn decode_thumb(path: &Path) -> Option<SharedPixelBuffer<Rgba8Pixel>> {
+    let image = image::open(path).ok()?.thumbnail(THUMB_PX, THUMB_PX).to_rgba8();
     Some(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(image.as_raw(), image.width(), image.height()))
 }
 
@@ -121,6 +124,8 @@ pub struct LoadState {
     /// The list or selection changed since the last push.
     pub dirty: bool,
     pub big: Option<SharedPixelBuffer<Rgba8Pixel>>,
+    /// One per entry, decoded in `refresh`.
+    pub thumbs: Vec<Option<SharedPixelBuffer<Rgba8Pixel>>>,
     /// Why the last Delete failed.
     pub error: Option<String>,
 }
@@ -134,6 +139,7 @@ impl Default for LoadState {
             confirm_delete: false,
             dirty: true,
             big: None,
+            thumbs: Vec::new(),
             error: None,
         }
     }
@@ -143,6 +149,7 @@ impl LoadState {
     /// Re-read `worlds/`, keeping the selection at the same index (clamped).
     pub fn refresh(&mut self) {
         self.entries = world_store::list(&self.root);
+        self.thumbs = self.entries.iter().map(|e| e.preview.as_deref().and_then(decode_thumb)).collect();
         self.selected = match (self.selected, self.entries.len()) {
             (_, 0) => None,
             (Some(i), n) => Some(i.min(n - 1)),
@@ -217,15 +224,12 @@ impl LoadState {
 struct LoadUi {
     actions: Rc<RefCell<Vec<LoadAction>>>,
     worlds: Rc<VecModel<WorldRow>>,
-    labels: Rc<VecModel<SharedString>>,
 }
 
 pub fn connect(ui: &FrontendUi, world: &mut World) {
     let actions = Rc::new(RefCell::new(Vec::new()));
     let worlds = Rc::new(VecModel::<WorldRow>::default());
-    let labels = Rc::new(VecModel::<SharedString>::default());
     ui.set_load_worlds(ModelRc::from(worlds.clone()));
-    ui.set_load_labels(ModelRc::from(labels.clone()));
     let queue = |action: fn() -> LoadAction| {
         let queue = actions.clone();
         move || queue.borrow_mut().push(action())
@@ -236,7 +240,7 @@ pub fn connect(ui: &FrontendUi, world: &mut World) {
     ui.on_load_confirm_delete_no(queue(|| LoadAction::ConfirmNo));
     let select = actions.clone();
     ui.on_load_select(move |i| select.borrow_mut().push(LoadAction::Select(i.max(0) as usize)));
-    world.insert_non_send(LoadUi { actions, worlds, labels });
+    world.insert_non_send(LoadUi { actions, worlds });
 }
 
 pub struct LoadWorldPlugin;
@@ -286,13 +290,14 @@ fn push_load_state(
         let rows: Vec<WorldRow> = state
             .entries
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(i, e)| {
                 let (name, detail, loadable, reason, legacy) = row_parts(e);
-                WorldRow { name: name.into(), detail: detail.into(), thumb: SlintImage::default(), loadable, reason: reason.into(), legacy }
+                let thumb = state.thumbs.get(i).cloned().flatten().map(SlintImage::from_rgba8).unwrap_or_default();
+                WorldRow { name: name.into(), detail: detail.into(), thumb, loadable, reason: reason.into(), legacy }
             })
             .collect();
         models.worlds.set_vec(rows);
-        models.labels.set_vec(state.entries.iter().map(|e| SharedString::from(label_of(e))).collect::<Vec<_>>());
         let selected = state.selected.map_or(-1, |i| i as i32);
         if ui.get_load_selected() != selected {
             ui.set_load_selected(selected);
@@ -394,7 +399,6 @@ mod tests {
         assert_eq!(name, "Island 2F1A");
         assert!(detail.starts_with("seed 0x"), "{detail}");
         assert!(!loadable && !reason.is_empty() && !legacy);
-        assert!(label_of(&entries[0]).contains("cannot load"));
     }
 
     fn state_for(root: &Path) -> LoadState {
@@ -465,6 +469,20 @@ mod tests {
         // Not while the delete question is open.
         state.confirm_delete = true;
         assert!(state.apply(LoadAction::Load).is_none());
+    }
+
+    #[test]
+    fn thumbnails_are_decoded_once_per_refresh_and_small() {
+        let root = scratch("thumbs");
+        make_world(&root, "a", &meta("Default", BTreeMap::new()));
+        make_world(&root, "b", &meta("Default", BTreeMap::new()));
+        let big = image::RgbaImage::from_pixel(300, 200, image::Rgba([200, 10, 10, 255]));
+        big.save(root.join("a").join(world_store::PREVIEW_FILE)).unwrap();
+        let state = state_for(&root);
+        let a = state.entries.iter().position(|e| e.dir == root.join("a")).unwrap();
+        let thumb = state.thumbs[a].as_ref().expect("a has a thumb");
+        assert!(thumb.width() <= THUMB_PX && thumb.height() <= THUMB_PX, "{}x{}", thumb.width(), thumb.height());
+        assert!(state.thumbs[1 - a].is_none());
     }
 
     #[test]
