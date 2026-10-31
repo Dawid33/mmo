@@ -178,14 +178,16 @@ pub fn prepare_xray_views(
     settings: Option<Res<XraySettings>>,
     fortress: Option<Res<FortressViewUniform>>,
     chunks: Res<InteriorChunks>,
-    views: Query<(Entity, &ExtractedView, &ViewDepthTexture, Has<ViewXray>)>,
+    views: Query<(Entity, &ExtractedView, &ViewDepthTexture, Has<ViewXray>, Has<crate::session::FrontendCamera>)>,
     mut warned_prepass: Local<bool>,
 ) {
     let wanted = xray_wanted(settings.as_deref(), fortress.as_deref(), &chunks);
-    for (entity, view, depth, had) in &views {
+    for (entity, view, depth, had, frontend) in &views {
         let layout_key = view_key_cache
             .get(&view.retained_view_entity)
-            .map(|key| MeshPipelineViewLayoutKey::from(*key));
+            .map(|key| MeshPipelineViewLayoutKey::from(*key))
+            // The frontend camera's view draws no terrain, so no x-ray.
+            .filter(|_| crate::session::view_draws_world(frontend));
         let Some(layout_key) = layout_key.filter(|k| wanted && view_allows_xray(*k)) else {
             if wanted && layout_key.is_some() && !*warned_prepass {
                 *warned_prepass = true;

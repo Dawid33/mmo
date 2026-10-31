@@ -498,6 +498,7 @@ pub fn prepare_gpu_near_view_buffers(
         &ExtractedView,
         Option<&ViewDepthPyramid>,
         Option<&mut GpuNearViewBuffers>,
+        Has<crate::session::FrontendCamera>,
     )>,
 ) {
     if !matches!(*mode, ActiveNearMode::GpuDriven { .. }) {
@@ -514,7 +515,14 @@ pub fn prepare_gpu_near_view_buffers(
     let cutaway = fortress_view
         .as_deref()
         .is_some_and(crate::renderer::fortress_view::cutaway_active);
-    for (entity, view, depth_pyramid, existing) in &mut views {
+    for (entity, view, depth_pyramid, existing, frontend) in &mut views {
+        // No near-terrain cull or draw for the frontend camera's view.
+        if !crate::session::view_draws_world(frontend) {
+            if existing.is_some() {
+                commands.entity(entity).remove::<GpuNearViewBuffers>();
+            }
+            continue;
+        }
         let uniform = GpuNearCullView::new(
             view,
             slot_count,

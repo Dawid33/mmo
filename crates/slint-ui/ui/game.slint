@@ -97,8 +97,8 @@ export component GameUi inherits Window {
     // Whether the menu offers Main menu (false on wasm, which has no menu).
     in property <bool> can-leave: true;
     // Not embarked yet: the world map is the embark step. Its Close is gone,
-    // the Esc menu offers only Main menu, and the panel's mode and follow
-    // buttons are hidden.
+    // the Esc menu offers only Main menu, and neither the F9 panel nor the
+    // status line is drawn.
     in property <bool> map-modal;
     out property <length> close-button-x: map.close-button-x;
     out property <length> close-button-y: map.close-button-y;
@@ -121,7 +121,8 @@ export component GameUi inherits Window {
     property <length> drag-offset: 16px;
 
     // Top-right, clear of the minimap (bottom-left).
-    if root.panel-open: panel := FrameFace {
+    // Not over the arrival map (nor beside its Esc menu).
+    if root.panel-open && !root.map-modal: panel := FrameFace {
         title: "Fortress";
         // Wide enough for the selection row ("Stop following" is its
         // widest state).
@@ -146,7 +147,7 @@ export component GameUi inherits Window {
             }
             // A flow never wraps, and the panel is pinned to the window's
             // right edge: a row wider than the panel runs off screen.
-            if !root.map-modal: Button {
+            Button {
                 text: root.adventure ? "Fortress mode" : "Adventure mode";
                 clicked => { root.toggle-mode(); }
             }
@@ -161,7 +162,7 @@ export component GameUi inherits Window {
                     enabled: root.selected-count > 0;
                     clicked => { root.clear-selection(); }
                 }
-                if !root.map-modal: Button {
+                Button {
                     text: root.following ? "Stop following" : "Follow";
                     enabled: root.selected-count == 1 || root.following;
                     clicked => { root.follow-clicked(); }
@@ -190,7 +191,7 @@ export component GameUi inherits Window {
 
     // Top centre, apart from the F9 panel and the map window; only while
     // there is something to say, so it takes no pixels or clicks otherwise.
-    if root.game-status != "" && !root.map-open: status := FrameFace {
+    if root.game-status != "" && !root.map-open && !root.map-modal: status := FrameFace {
         width: self.content-x + status-label.preferred-width + Styles.frame.box.padding.right
             + GraphicalSets.inset(Styles.frame.graphics).right;
         height: self.content-y + status-label.preferred-height + Styles.frame.box.padding.bottom

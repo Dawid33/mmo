@@ -6,6 +6,7 @@
 //! `AlphaMask3dPrepass`, and a second `Shadow` item), the latter with the
 //! `cutout` pipeline variants (alpha-tested leaves, `records::CUTOUT_BIT`).
 
+use crate::session::{view_draws_world, FrontendCamera};
 use bevy::{
     camera::primitives::{Aabb, Frustum},
     core_pipeline::{
@@ -283,6 +284,7 @@ pub fn queue_voxel_pull(
         Entity,
         &ExtractedView,
         &Msaa,
+        Has<FrontendCamera>,
     )>,
 ) {
     if *mode == ActiveNearMode::Disabled {
@@ -292,8 +294,11 @@ pub fn queue_voxel_pull(
     let cutout_draw = cutout_draw_functions.read().id::<DrawVoxelPullCutout>();
     let cutaway = cutaway_wanted(fortress_view.as_deref());
     let xray_any = xray_wanted(xray_settings.as_deref(), fortress_view.as_deref(), &interior_chunks);
-    for (view_entity, view, msaa) in &views
+    for (view_entity, view, msaa, frontend) in &views
     {
+        if !view_draws_world(frontend) {
+            continue;
+        }
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
             continue;
         };
@@ -381,7 +386,7 @@ pub fn queue_voxel_pull_prepass(
     cutout_draw_functions: Res<DrawFunctions<AlphaMask3dPrepass>>,
     mut phases: ResMut<ViewBinnedRenderPhases<Opaque3dPrepass>>,
     mut cutout_phases: ResMut<ViewBinnedRenderPhases<AlphaMask3dPrepass>>,
-    views: Query<(Entity, &ExtractedView, &Msaa)>,
+    views: Query<(Entity, &ExtractedView, &Msaa, Has<FrontendCamera>)>,
 ) {
     if *mode == ActiveNearMode::Disabled {
         return;
@@ -389,7 +394,10 @@ pub fn queue_voxel_pull_prepass(
     let draw = draw_functions.read().id::<DrawVoxelPullDepth>();
     let cutout_draw = cutout_draw_functions.read().id::<DrawVoxelPullDepthCutout>();
     let cutaway = cutaway_wanted(fortress_view.as_deref());
-    for (view_entity, view, msaa) in &views {
+    for (view_entity, view, msaa, frontend) in &views {
+        if !view_draws_world(frontend) {
+            continue;
+        }
         let Some(phase) = phases.get_mut(&view.retained_view_entity) else {
             continue; // this view runs no prepass
         };
@@ -456,7 +464,8 @@ pub fn queue_voxel_pull_shadows(
     fortress_view: Option<Res<FortressViewUniform>>,
     draw_functions: Res<DrawFunctions<Shadow>>,
     mut shadow_phases: ResMut<ViewBinnedRenderPhases<Shadow>>,
-    view_lights: Query<&ViewLightEntities, With<ExtractedView>>,
+    // Not the frontend camera's cascades: it draws no terrain.
+    view_lights: Query<&ViewLightEntities, (With<ExtractedView>, Without<FrontendCamera>)>,
     // Each light view carries its LightEntity kind, ExtractedView (for the retained
     // id keying the shadow phase), and Frustum (for culling), inserted together in
     // `prepare_lights`.

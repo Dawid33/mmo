@@ -209,11 +209,11 @@ impl Screens {
         }
     }
 
-    /// [`MAP_KEY`] with the arrival map `modal`: it opens the map, never
-    /// closes it.
+    /// [`MAP_KEY`] with the arrival map `modal`: nothing (the map is up
+    /// whenever the Esc menu is not).
     pub fn toggle_map_in(self, modal: bool) -> Self {
         if modal {
-            Self::open_map()
+            self
         } else {
             self.toggle_map()
         }
@@ -936,7 +936,14 @@ fn menu_keys(
         return;
     }
     let ui = slint.overlay.ui();
+    let not_embarked = embarked.as_deref().is_some_and(|e| !e.0);
     let modal = map_modal(embarked.as_deref(), &world_map);
+    if not_embarked && !modal {
+        // Before the world map arrives the game UI is hidden (the frontend's
+        // starting screen, with its Back, has the screen): a menu opened now
+        // could not be seen, and would later stand in for the arrival map.
+        return;
+    }
     let mut to = Screens::of(ui);
     if keys.just_pressed(MENU_KEY) {
         let designating = designate.as_ref().is_some_and(|d| d.in_progress());
@@ -971,6 +978,9 @@ fn arrival_map(
     let modal = map_modal(embarked.as_deref(), &world_map);
     let was_modal = was_modal.get();
     let mut to = Screens::of(ui).held(modal);
+    if !*was_modal && modal {
+        to = Screens::open_map(); // the map arrived: it opens, nothing else
+    }
     if *was_modal && !modal && !not_embarked {
         to.map = false; // embarked: the world takes the screen
     }
@@ -1588,9 +1598,9 @@ mod tests {
         // Esc swaps the map for the (Main menu only) Esc menu and back.
         assert_eq!(map.escape_in(true), menu);
         assert_eq!(menu.escape_in(true), map);
-        // M never closes it.
+        // M does nothing.
         assert_eq!(map.toggle_map_in(true), map);
-        assert_eq!(menu.toggle_map_in(true), map);
+        assert_eq!(menu.toggle_map_in(true), menu);
         // Close (or Play until it lands) leaves it up.
         assert_eq!(Screens::default().held(true), map);
         assert_eq!(menu.held(true), menu);

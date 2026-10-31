@@ -242,6 +242,7 @@ type FarVoxelViewQuery = (
     &'static Frustum,
     &'static Msaa,
     Option<&'static mut FarVoxelViewResources>,
+    Has<crate::session::FrontendCamera>,
 );
 
 fn extract_far_pass_inputs(
@@ -336,8 +337,16 @@ fn prepare_far_voxel_views(
         frustum,
         msaa,
         existing,
+        frontend,
     ) in &mut views
     {
+        // The frontend camera's view draws no terrain.
+        if !crate::session::view_draws_world(frontend) {
+            if existing.is_some() {
+                commands.entity(entity).remove::<FarVoxelViewResources>();
+            }
+            continue;
+        }
         // The group(0) layout must be the one `prepare_mesh_view_bind_groups` built
         // for this view. Bevy 0.19 keys it on many view features (distance fog,
         // tonemapping, environment maps, prepasses, …); `ViewKeyCache` holds the

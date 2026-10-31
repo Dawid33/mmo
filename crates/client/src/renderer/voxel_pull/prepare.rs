@@ -120,6 +120,7 @@ pub fn prepare_view_chunk_draws(
         &bevy::camera::primitives::Frustum,
         Has<bevy::pbr::ShadowView>,
         Has<ViewChunkDrawList>,
+        Has<crate::session::FrontendCamera>,
     )>,
     chunks: Query<(&MainEntity, &ExtractedChunkQuads)>,
     arena: Res<GpuQuadArena>,
@@ -147,7 +148,7 @@ pub fn prepare_view_chunk_draws(
     // occlusion culling buys). Views still need the (empty) component
     // `DrawChunkQuads` queries.
     if matches!(*mode, ActiveNearMode::GpuDriven { .. }) && !frustum_metric_wanted() {
-        for (view_entity, _, _, has_list) in &views {
+        for (view_entity, _, _, has_list, _) in &views {
             if !has_list {
                 commands.entity(view_entity).insert(ViewChunkDrawList::default());
             }
@@ -196,7 +197,11 @@ pub fn prepare_view_chunk_draws(
             ))
         })
         .collect();
-    for (view_entity, frustum, is_shadow_view, _) in &views {
+    for (view_entity, frustum, is_shadow_view, _, frontend) in &views {
+        if !crate::session::view_draws_world(frontend) {
+            commands.entity(view_entity).insert(ViewChunkDrawList::default());
+            continue;
+        }
         let list = grouped_draw_list(frustum, resolved.iter().copied());
         frustum_visible_chunks = frustum_visible_chunks
             .saturating_add(frustum_metric_contribution(list.0.len(), is_shadow_view));
