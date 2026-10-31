@@ -115,15 +115,58 @@ impl Forged {
     }
 }
 
+/// Which phase of the forge is running (for a progress bar).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForgeStage {
+    Setup,
+    Eroding,
+    Shaping,
+    Hydrology,
+}
+
+impl ForgeStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            ForgeStage::Setup => "Preparing",
+            ForgeStage::Eroding => "Eroding",
+            ForgeStage::Shaping => "Shaping valleys",
+            ForgeStage::Hydrology => "Rivers and lakes",
+        }
+    }
+}
+
+/// One progress report: `iter` of `iters` erosion iterations are done
+/// (0 outside `Eroding`, except `iters` which is always the total).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForgeProgress {
+    pub stage: ForgeStage,
+    pub iter: usize,
+    pub iters: usize,
+}
+
 /// Forge one world: initial condition -> evolution -> shaping -> analysis.
 pub fn forge(p: &ForgeParams) -> Forged {
+    forge_with(p, &mut |_| std::ops::ControlFlow::Continue(())).expect("callback never breaks")
+}
+
+/// `forge` with a progress callback, called at each stage boundary and after
+/// every erosion iteration. Returning `Break` abandons the forge (`None`).
+pub fn forge_with(
+    p: &ForgeParams,
+    on_progress: &mut dyn FnMut(ForgeProgress) -> std::ops::ControlFlow<()>,
+) -> Option<Forged> {
+    let iters = p.knobs.iterations();
+    let mut report = |stage, iter| on_progress(ForgeProgress { stage, iter, iters }).is_break();
+    if report(ForgeStage::Setup, 0) {
+        return None;
+    }
     let mut w = World::new(p);
     let initial = World { h: w.h.clone(), ocean: w.ocean.clone(), uplift: Vec::new(), uplifted: Vec::new(), ..w };
     let geo = Geology::new(p, &w);
     let started = std::time::Instant::now();
     let mut scratch = Vec::new();
     let mut rain = climate::rainfall(&w, p);
-    let (k, iters) = (&p.knobs, p.knobs.iterations());
+    let k = &p.knobs;
     for iter in 1..=iters {
         if iter % RAIN_REFRESH_ITERS == 0 {
             rain = climate::rainfall(&w, p);
@@ -136,6 +179,12 @@ pub fn forge(p: &ForgeParams) -> Forged {
                 started.elapsed()
             );
         }
+        if report(ForgeStage::Eroding, iter) {
+            return None;
+        }
+    }
+    if report(ForgeStage::Shaping, 0) {
+        return None;
     }
     let simulated_peak_m = w.h.iter().copied().fold(f64::MIN, f64::max);
     let height_fit = post::fit_height_band(&mut w, k);
@@ -148,7 +197,56 @@ pub fn forge(p: &ForgeParams) -> Forged {
     if !p.quiet {
         println!("planed valley floors; excavated {basins} lake basins");
     }
+    if report(ForgeStage::Hydrology, 0) {
+        return None;
+    }
     let analysis = hydrology::analyze(&w, &geo, &rain, k);
-    Forged { world: w, initial, geology: geo, rain, analysis, simulated_peak_m, height_fit }
+    Some(Forged { world: w, initial, geology: geo, rain, analysis, simulated_peak_m, height_fit })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ops::ControlFlow;
+
+    fn tiny() -> ForgeParams {
+        let mut p = ForgeParams { size_m: 4_096.0, cell_m: 128.0, quiet: true, ..Default::default() };
+        p.knobs.iters = 20.0;
+        p
+    }
+
+    #[test]
+    fn forge_with_reports_every_erosion_iteration() {
+        let mut seen = Vec::new();
+        forge_with(&tiny(), &mut |pr| {
+            seen.push(pr);
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        let eroding: Vec<usize> = seen.iter().filter(|e| e.stage == ForgeStage::Eroding).map(|e| e.iter).collect();
+        assert_eq!(eroding, (1..=20).collect::<Vec<_>>());
+        assert!(seen.iter().all(|e| e.iters == 20));
+        assert_eq!(seen.last().unwrap().stage, ForgeStage::Hydrology);
+    }
+
+    #[test]
+    fn forge_with_cancels_between_iterations() {
+        let mut seen = Vec::new();
+        let r = forge_with(&tiny(), &mut |pr| {
+            seen.push(pr);
+            if pr.stage == ForgeStage::Eroding && pr.iter == 3 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+        });
+        assert!(r.is_none());
+        let last = seen.last().unwrap();
+        assert_eq!((last.stage, last.iter), (ForgeStage::Eroding, 3));
+    }
+
+    #[test]
+    fn forge_matches_forge_with() {
+        let p = tiny();
+        let a = forge(&p);
+        let b = forge_with(&p, &mut |_| ControlFlow::Continue(())).unwrap();
+        assert_eq!(a.world.h, b.world.h);
+    }
 }
 
