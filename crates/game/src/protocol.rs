@@ -256,6 +256,10 @@ pub struct EntityBundle {
     /// Animation state of a rigged entity; the receiver rebuilds its bone
     /// colliders from it (`None`: no rig).
     pub animator: Option<crate::anim::Animator>,
+    /// An adventurer's walk in progress (`None`: not walking). Its path is
+    /// region-local to the sender, so the receiver re-plans it
+    /// (`Rollback::resume_walker_safe`).
+    pub walker: Option<crate::Walker>,
     pub client: Option<(ClientId, Client)>,
     pub source_region: RegionCoords,
     pub source_key: EntityKey,

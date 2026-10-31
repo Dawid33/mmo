@@ -369,3 +369,55 @@ fn edge_toward_picks_facing_edge() {
     assert_eq!(edge_toward(&flat, from, &Goal { region: here, ..east }, here), None);
     assert_eq!(edge_toward(&flat, from, &Goal { region: RegionCoords::new(2, 0), ..east }, here), None);
 }
+
+// --- Seam handoff -----------------------------------------------------------
+
+/// A walking adventurer extracted as its handoff bundle (`EntityKey` freed).
+fn walking_bundle(goal: Goal) -> game::EntityBundle {
+    let (mut src, e) = adventure_at([4, 1, 4]);
+    move_to(&mut src, goal);
+    for _ in 0..5 {
+        tick(&mut src);
+    }
+    let mut bundle = None;
+    src.with_data(|d| bundle = Some(d.extract_entity_safe(e, RegionCoords::new(0, 0))));
+    bundle.unwrap()
+}
+
+/// An empty region at `at` with the same floor as `region_with_player`.
+fn floored_region(at: RegionCoords) -> Region {
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), at, None);
+    let (x, z) = region.data().spawn_xz();
+    let edge = common::CHUNK_EDGE;
+    region.with_data(|r| r.seed_terrain_genesis(floor_chunks(x - edge..x + edge, z - edge..z + edge, 16)));
+    region
+}
+
+#[test]
+fn walker_survives_bundle_roundtrip() {
+    let goal = here_goal([20, 20], None);
+    let bundle = walking_bundle(goal);
+    assert_eq!(bundle.walker.as_ref().map(|w| w.goal), Some(goal), "the bundle carries the walk");
+
+    let mut dst = floored_region(RegionCoords::new(0, 0));
+    let before = state_hash(dst.data());
+    dst.handle_event(GameEventKind::EntityArrived(bundle)).unwrap();
+    let e = *dst.data().player_entites.get(&CLIENT).expect("arrived");
+    let w = walker(&dst, e).expect("the walk survives the handoff");
+    assert_eq!(w.goal, goal);
+    assert_eq!(w.exit, None, "the goal is in the receiving region");
+    assert_eq!(w.path.first(), Some(&body_tile(&dst, e)), "re-planned from where the body stands");
+    dst.rollback_last_event();
+    assert_eq!(before, state_hash(dst.data()), "arrival + re-plan must roll back bit-exact");
+}
+
+#[test]
+fn arrived_walker_with_out_of_reach_goal_is_dropped() {
+    let bundle = walking_bundle(here_goal([20, 20], None));
+    // Received two regions away from its goal's region: too far to resume.
+    let mut dst = floored_region(RegionCoords::new(2, 0));
+    dst.handle_event(GameEventKind::EntityArrived(bundle)).unwrap();
+    let e = *dst.data().player_entites.get(&CLIENT).expect("arrived");
+    assert!(walker(&dst, e).is_none(), "an out-of-reach walk is dropped on arrival");
+}

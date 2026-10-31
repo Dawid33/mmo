@@ -1266,14 +1266,15 @@ impl Rollback {
     /// Ownership transfer INTO this region. Three paths:
     /// replayed identity → pose correction; ghost present → upgrade in
     /// place (same EntityKey — visual continuity); else → fresh create.
-    pub fn apply_arrival(&mut self, bundle: EntityBundle) {
+    /// Returns the arrived entity, `None` for a replay (only a pose fix).
+    pub fn apply_arrival(&mut self, bundle: EntityBundle) -> Option<EntityKey> {
         let identity = (bundle.source_region, bundle.source_key);
 
         // Idempotency: a respawn-resnapshot replay must not duplicate.
         if let Some(&e) = self.data.arrivals.get(&identity) {
             if self.data.ecs.entities.contains_key(e) {
                 self.set_body_pose_safe(e, bundle.isometry);
-                return;
+                return None;
             }
         }
 
@@ -1328,6 +1329,11 @@ impl Rollback {
         if let (Some(animator), None) = (bundle.animator, self.data.ecs.bones.try_get(e)) {
             self.attach_rig_safe(e, animator, animator.foot_y);
         }
+        // An adventurer's walk; its sender-local path is re-planned by
+        // `resume_walker_safe` once the arrival is in.
+        if bundle.walker.is_some() {
+            self.data.ecs.walker.set_safe(e, bundle.walker.clone());
+        }
 
         // Camera + client attachment (players).
         if let Some((client_id, client)) = bundle.client.clone() {
@@ -1353,6 +1359,7 @@ impl Rollback {
         }
 
         self.data.arrivals.insert(identity, e);
+        Some(e)
     }
 
     /// Margin mirror upsert. Stage 2: the ghost carries a kinematic body +
@@ -1495,6 +1502,7 @@ impl Rollback {
             motion: *self.data.ecs.motion.try_get(key),
             slime: *self.data.ecs.slime.try_get(key),
             animator: *self.data.ecs.animator.try_get(key),
+            walker: self.data.ecs.walker.try_get(key).clone(),
             client,
             source_region: region,
             source_key: key,

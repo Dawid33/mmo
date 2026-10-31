@@ -190,6 +190,21 @@ impl Rollback {
         }
     }
 
+    /// Re-plans the walk of an adventurer that just arrived across a seam
+    /// into `here`, undo-safely. The carried path is local to the region it
+    /// left, so it is always planned afresh from the body's tile: to the goal
+    /// when it lies in `here`, else to the edge facing it. The walk is dropped
+    /// when the goal is now too far, or unreachable. No walker: no change.
+    pub fn resume_walker_safe(&mut self, e: crate::EntityKey, here: RegionCoords) {
+        let Some(old) = self.data.ecs.walker.try_get(e).clone() else { return };
+        let plan = self
+            .body_feet(e)
+            .and_then(|feet| current_tile(self, feet))
+            .and_then(|from| plan_walk(self, from, &old.goal, here));
+        let new = plan.map(|(path, exit)| Walker::new(old.goal, path, exit));
+        self.data.ecs.walker.set_safe(e, new);
+    }
+
     /// Region-local feet position (voxel units) of entity `key`'s body.
     fn body_feet(&self, key: crate::EntityKey) -> Option<Vector> {
         let handle = (*self.data.ecs.rigidbody.try_get(key))?;

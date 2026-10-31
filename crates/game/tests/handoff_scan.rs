@@ -264,6 +264,7 @@ fn reconcile_replaces_a_diverged_predicted_arrival_without_sticking() {
         motion: None,
         slime: None,
         animator: None,
+        walker: None,
         client: Some((9, game::Client::default())),
         source_region: src,
         source_key: src_key,

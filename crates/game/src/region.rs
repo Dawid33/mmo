@@ -588,7 +588,10 @@ impl Region {
                 }
             }
             GameEventKind::EntityArrived(bundle) => {
-                self.data.apply_arrival(bundle);
+                // A walk in progress carries over, re-planned in this region.
+                if let Some(e) = self.data.apply_arrival(bundle) {
+                    self.data.resume_walker_safe(e, self.id);
+                }
             }
             GameEventKind::GhostUpdate(data) => {
                 self.data.apply_ghost(data);

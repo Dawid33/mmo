@@ -10,9 +10,9 @@
 use crossbeam::channel::{unbounded, Receiver};
 use game::{
     Block, BlockId, Chunk, ClientId, ClientPacket, Column, ColumnCoords, GameEvent, GameEventKind,
-    InlineLodBuilder, InlineSchedule, InlineSpawner, InputEvent, Key, LodBuilder, RegionCoords,
-    RegionOutput, ServerEvent, ServerPacket, SubChunk, WorldManager, REGION_SIZE, SPAWN_REGION,
-    TICK_RATE,
+    Goal, InlineLodBuilder, InlineSchedule, InlineSpawner, InputEvent, Key, LodBuilder, Order, PlayMode,
+    RegionCoords, RegionOutput, ServerEvent, ServerPacket, SubChunk, TilePos, Walker, WorldManager,
+    REGION_BLOCKS, REGION_SIZE, SPAWN_REGION, TICK_RATE,
 };
 
 mod common;
@@ -105,6 +105,10 @@ struct Rig {
 
 impl Rig {
     fn new(schedule: Option<InlineSchedule>) -> Self {
+        Self::with_floor(schedule, seam_floor_columns)
+    }
+
+    fn with_floor(schedule: Option<InlineSchedule>, floor: fn(RegionCoords) -> Vec<(ColumnCoords, Column)>) -> Self {
         let (out_send, packets) = unbounded();
         let (region_out_send, region_out) = unbounded();
         let (lod_result_send, lod_result_recv) = unbounded();
@@ -116,7 +120,7 @@ impl Rig {
         Rig {
             manager: WorldManager::new(
                 spawner,
-                Box::new(seam_floor_columns),
+                Box::new(floor),
                 out_send,
                 region_out_send,
                 lod_builder,
@@ -167,6 +171,24 @@ impl Rig {
             SPAWN_REGION,
         );
         self.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), CLIENT));
+    }
+
+    fn order(&mut self, order: Order) {
+        let ev = GameEvent::new(GameEventKind::Order(CLIENT, order), 0, SPAWN_REGION);
+        self.event(ServerEvent::ClientPacket(ClientPacket::GameEvent(ev), CLIENT));
+    }
+
+    /// The player's walk (if any) and feet tile in `rc`, which owns it.
+    fn walk_state(&mut self, rc: RegionCoords) -> (Option<Walker>, TilePos) {
+        let mut out = None;
+        self.manager.spawner_mut().with_region(rc, |region| {
+            let data = region.data();
+            let e = *data.player_entites.get(&CLIENT).expect("player owned here");
+            let handle = *data.ecs.rigidbody.get(e);
+            let t = data.physics.bodies.get(handle).unwrap().translation();
+            out = Some((data.ecs.walker.try_get(e).clone(), game::feet_tile(game::feet_of(t))));
+        });
+        out.expect("region is running")
     }
 
     /// Regions that currently own the player entity.
@@ -327,4 +349,89 @@ fn handoff_survives_late_inputs() {
 fn handoff_survives_missed_ticks() {
     let perturbed = sweep("jittery", InlineSchedule::jittery);
     assert!(perturbed > 0, "missed ticks never changed the outcome — schedule is a no-op");
+}
+
+// --- Adventure walks across a seam ------------------------------------------
+
+/// The neighbour an adventurer walks into.
+const EAST: RegionCoords = RegionCoords { x: 1, z: 0 };
+/// Blocks between the adventurer's start and the +x seam, and between the
+/// seam and the goal column.
+const SEAM_GAP_BLOCKS: i32 = 6;
+/// Block z of the walk (the spawn column's).
+const WALK_Z_BLOCK: i32 = 8;
+/// Round budget for the whole walk (~12 m at walk speed is ~60 lockstep
+/// rounds; missed ticks and late inputs stretch it).
+const ADVENTURE_ROUNDS: usize = 400;
+
+/// A one-block floor over the spawn region's strip `z < 320` units, and the
+/// first chunk column of the east neighbour beside it; far regions get the
+/// chunk under the spawn column.
+fn adventure_floor_columns(rc: RegionCoords) -> Vec<(ColumnCoords, Column)> {
+    let floor = |(x, z): (usize, usize)| {
+        let air = Block::new(BlockId::AIR);
+        let sub = SubChunk::Dense(Box::new(Chunk::flat_floor(game::BLOCK_VOXELS as u32)));
+        (ColumnCoords::new(x, z), Column::new(0, air, air, vec![sub]))
+    };
+    let zs = 0.0..320.0;
+    let xs = if rc == SPAWN_REGION {
+        0.0..REGION_SIZE
+    } else if rc == EAST {
+        0.0..REGION_SIZE / 4.0
+    } else {
+        128.0..160.0
+    };
+    let zs = if rc == SPAWN_REGION || rc == EAST { zs } else { 128.0..160.0 };
+    common::chunks_over(xs, zs).into_iter().map(floor).collect()
+}
+
+/// An adventurer `SEAM_GAP_BLOCKS` short of the +x seam is sent to a column
+/// as far into the east neighbour: it must hand off, re-plan there, and
+/// arrive. Panics with the seed on failure.
+fn walk_into_east(seed: u64, schedule: InlineSchedule) {
+    let mut rig = Rig::with_floor(Some(schedule), adventure_floor_columns);
+    rig.event(ServerEvent::ClientConnected(CLIENT));
+    for rc in SPAWN_REGION.window_3x3() {
+        rig.event(ServerEvent::ClientPacket(ClientPacket::RequestRegionConnection(rc), CLIENT));
+    }
+    rig.walk_until_owned_by(SPAWN_REGION, "spawn");
+    let n = REGION_BLOCKS as i32;
+    rig.order(Order::SetMode { mode: PlayMode::Adventure, at: Some([n - SEAM_GAP_BLOCKS, 1, WALK_Z_BLOCK]) });
+    for _ in 0..PAST_SEAM_ROUNDS {
+        rig.round();
+    }
+    let column = [SEAM_GAP_BLOCKS, WALK_Z_BLOCK];
+    rig.order(Order::MoveTo(Goal { region: EAST, column, y: None }));
+    for _ in 0..ADVENTURE_ROUNDS {
+        rig.round();
+        if rig.owners() == [EAST] {
+            let (walker, tile) = rig.walk_state(EAST);
+            // Re-planned on arrival: a path local to EAST, straight to the
+            // goal — not the carried edge path, nor a stuck re-plan.
+            if let Some(w) = &walker {
+                assert!(w.exit.is_none() && !w.replanned, "seed {seed}: walk not re-planned on arrival: {w:?}");
+            }
+            if walker.is_none() {
+                assert_eq!([tile[0], tile[2]], column, "seed {seed}: walk ended off the goal column");
+                assert_eq!(rig.pushed_home, Some(EAST), "seed {seed}: client told about its new home");
+                return;
+            }
+        }
+    }
+    let owners = rig.owners();
+    let state = owners.first().map(|&rc| rig.walk_state(rc));
+    panic!("seed {seed}: walk never arrived; owners {owners:?}, walk state {state:?}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn walk_into_neighbour_region() {
+    let modes: [fn(u64) -> InlineSchedule; 3] =
+        [InlineSchedule::shuffled, InlineSchedule::late, InlineSchedule::jittery];
+    for seed in 0..8u64 {
+        let schedule = modes[seed as usize % modes.len()](seed);
+        if std::panic::catch_unwind(|| walk_into_east(seed, schedule)).is_err() {
+            panic!("adventure walk into {EAST:?} broke under seed {seed}");
+        }
+    }
 }
