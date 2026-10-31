@@ -13,6 +13,13 @@ export component PickList inherits TouchArea {
     in property <[string]> items;
     in property <int> selected: -1;
     callback picked(int);
+    // A second click on the same item within `double-click-ms`.
+    callback activated(int);
+    in property <duration> double-click-window: 400ms;
+    // Where item `i` is: its top is `first-item-y + i * item-height - offset`
+    // (headless tests click rows with these).
+    out property <length> first-item-y: pane.content-y;
+    out property <length> row-height: item-height;
     // Tall enough for every item: a height to cap, since flows give their
     // children their preferred size.
     // Show at most this many items' worth in `natural-height`.
@@ -22,6 +29,12 @@ export component PickList inherits TouchArea {
         + Styles.list-box.scroll-pane.vertical-flow.box.padding.bottom;
 
     property <length> offset;
+    property <int> pending-click: -1;
+    Timer {
+        interval: root.double-click-window;
+        running: root.pending-click >= 0;
+        triggered => { root.pending-click = -1; }
+    }
     property <length> item-height: probe.preferred-height;
     property <length> content-height: items.length * item-height;
     property <length> max-offset: max(0px, content-height - (pane.content-bottom - pane.content-y));
@@ -51,7 +64,15 @@ export component PickList inherits TouchArea {
             style: Styles.list-box.item;
             text: item;
             toggled: i == root.selected;
-            clicked => { root.picked(i); }
+            clicked => {
+                root.picked(i);
+                if root.pending-click == i {
+                    root.pending-click = -1;
+                    root.activated(i);
+                } else {
+                    root.pending-click = i;
+                }
+            }
         }
     }
 }

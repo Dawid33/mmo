@@ -1,0 +1,203 @@
+// The world list (Load world). The client (crates/client/src/frontend/
+// load_world.rs) reads worlds/ and owns every piece of state; this screen
+// reports what the player did. `selected` is bound TWO-WAY (controls.slint).
+
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
+import { PickList } from "controls.slint";
+
+export struct WorldRow {
+    name: string,
+    // "seed 0x…, 16 km, 2026-10-30"
+    detail: string,
+    thumb: image,
+    loadable: bool,
+    // Why it cannot be loaded; "" when it can.
+    reason: string,
+    // The legacy default.world: loadable, never deletable.
+    legacy: bool,
+}
+
+export component LoadWorld {
+    in property <[WorldRow]> worlds;
+    // One line per row for the list ("name — detail").
+    in property <[string]> labels;
+    in-out property <int> selected: -1;
+    in property <image> big-preview;
+    in property <[string]> settings-lines;
+    in-out property <bool> confirm-delete;
+
+    callback select(int);
+    callback load();
+    callback delete();
+    callback confirm-delete-yes();
+    callback confirm-delete-no();
+    callback back();
+
+    property <bool> has-selection: root.selected >= 0 && root.selected < root.worlds.length;
+    property <WorldRow> current: root.has-selection ? root.worlds[root.selected] : { name: "", detail: "", loadable: false, reason: "", legacy: false };
+    property <bool> can-load: root.has-selection && root.current.loadable;
+    property <bool> can-delete: root.has-selection && !root.current.legacy;
+
+    property <length> margin: 24px;
+    property <length> gap: 12px;
+    property <length> bar-height: 32px;
+
+    // Where things are, for the headless tests (absolute, logical px).
+    out property <length> row-x: list.absolute-position.x + list.width / 2;
+    out property <length> row0-y: list.absolute-position.y + list.first-item-y + list.row-height / 2;
+    out property <length> row-pitch: list.row-height;
+    out property <length> load-x: load-btn.absolute-position.x + load-btn.width / 2;
+    out property <length> load-y: load-btn.absolute-position.y + load-btn.height / 2;
+    out property <length> delete-x: delete-btn.absolute-position.x + delete-btn.width / 2;
+    out property <length> delete-y: delete-btn.absolute-position.y + delete-btn.height / 2;
+    out property <length> back-x: back-btn.absolute-position.x + back-btn.width / 2;
+    out property <length> back-y: back-btn.absolute-position.y + back-btn.height / 2;
+    out property <length> yes-x: yes-btn.absolute-position.x + yes-btn.width / 2;
+    out property <length> yes-y: yes-btn.absolute-position.y + yes-btn.height / 2;
+    out property <length> no-x: no-btn.absolute-position.x + no-btn.width / 2;
+    out property <length> no-y: no-btn.absolute-position.y + no-btn.height / 2;
+
+    frame := FrameFace {
+        title: "Load world";
+        x: root.margin;
+        y: root.margin;
+        width: root.width - 2 * root.margin;
+        height: root.height - 2 * root.margin;
+
+        property <length> left: self.content-x;
+        property <length> right: self.content-right;
+        property <length> top: self.content-y;
+        property <length> bottom: self.height - Styles.frame.box.padding.bottom - GraphicalSets.inset(Styles.frame.graphics).bottom;
+        property <length> body-bottom: bottom - root.bar-height - root.gap;
+        property <length> split: left + (right - left) * 0.42;
+        property <length> pane-x: split + root.gap;
+        property <length> pane-width: right - pane-x;
+        property <length> image-size: max(0px, min(pane-width, (body-bottom - top) * 0.55));
+
+        list := PickList {
+            x: frame.left;
+            y: frame.top;
+            width: frame.split - frame.left;
+            height: frame.body-bottom - frame.top;
+            items: root.labels;
+            selected <=> root.selected;
+            picked(i) => {
+                root.selected = i;
+                root.select(i);
+            }
+            activated(i) => {
+                root.select(i);
+                if root.worlds[i].loadable { root.load(); }
+            }
+        }
+
+        Rectangle {
+            x: frame.pane-x + (frame.pane-width - frame.image-size) / 2;
+            y: frame.top;
+            width: frame.image-size;
+            height: frame.image-size;
+            background: #1a1a1a;
+            Image {
+                width: 100%;
+                height: 100%;
+                source: root.big-preview;
+                image-fit: contain;
+            }
+        }
+        LabelFace {
+            x: frame.pane-x;
+            y: frame.top + frame.image-size + 6px;
+            width: frame.pane-width;
+            height: 24px;
+            text: root.current.detail;
+        }
+        LabelFace {
+            x: frame.pane-x;
+            y: frame.top + frame.image-size + 30px;
+            width: frame.pane-width;
+            height: 24px;
+            style: Styles.bold-red-label;
+            text: root.current.reason;
+        }
+        for line[i] in root.settings-lines: LabelFace {
+            x: frame.pane-x;
+            y: frame.top + frame.image-size + 58px + i * 20px;
+            width: frame.pane-width;
+            height: 20px;
+            style: Styles.caption-label;
+            text: line;
+        }
+
+        back-btn := Button {
+            x: frame.left;
+            y: frame.bottom - root.bar-height;
+            width: 140px;
+            height: root.bar-height;
+            style: Styles.back-button;
+            text: "Back";
+            clicked => { root.back(); }
+        }
+        delete-btn := Button {
+            x: frame.right - 260px - root.gap - 140px;
+            y: frame.bottom - root.bar-height;
+            width: 140px;
+            height: root.bar-height;
+            text: "Delete";
+            enabled: root.can-delete;
+            clicked => { root.delete(); }
+        }
+        load-btn := Button {
+            x: frame.right - 260px;
+            y: frame.bottom - root.bar-height;
+            width: 260px;
+            height: root.bar-height;
+            style: Styles.confirm-button;
+            text: "Load";
+            enabled: root.can-load;
+            clicked => { root.load(); }
+        }
+    }
+
+    // Delete asks first: everything else is under a modal.
+    Rectangle {
+        visible: root.confirm-delete;
+        width: root.width;
+        height: root.height;
+        background: #00000080;
+        TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+        modal := FrameFace {
+            title: "Delete world";
+            width: 440px;
+            height: self.content-y + 28px + 16px + 28px + Styles.frame.box.padding.bottom
+                + GraphicalSets.inset(Styles.frame.graphics).bottom;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            LabelFace {
+                x: modal.content-x;
+                y: modal.content-y;
+                width: modal.content-right - modal.content-x;
+                height: 28px;
+                text: "Delete \"" + root.current.name + "\" for good?";
+            }
+            yes-btn := Button {
+                x: modal.content-right - 120px;
+                y: modal.content-y + 44px;
+                width: 120px;
+                height: 28px;
+                text: "Delete";
+                clicked => { root.confirm-delete-yes(); }
+            }
+            no-btn := Button {
+                x: modal.content-right - 250px;
+                y: modal.content-y + 44px;
+                width: 120px;
+                height: 28px;
+                text: "Cancel";
+                clicked => { root.confirm-delete-no(); }
+            }
+        }
+    }
+}

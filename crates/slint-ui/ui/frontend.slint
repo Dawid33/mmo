@@ -1,8 +1,9 @@
 import { Button, FrameFace, GraphicalSets, Styles, VerticalFlow } from "@widgets";
 import { MainMenu } from "main-menu.slint";
 import { KnobRow, MapGenerator } from "map-generator.slint";
+import { LoadWorld, WorldRow } from "load-world.slint";
 
-export { KnobRow }
+export { KnobRow, WorldRow }
 
 // A screen that a later task fills in: a titled frame with a Back button.
 component PlaceholderScreen {
@@ -57,8 +58,33 @@ export component FrontendUi inherits Window {
     out property <length> exit-button-x: menu.exit-button-x;
     out property <length> exit-button-y: menu.exit-button-y;
     // The shown screen's Back.
-    out property <length> back-button-x: root.screen == 1 ? generator.back-x : placeholder.back-button-x;
-    out property <length> back-button-y: root.screen == 1 ? generator.back-y : placeholder.back-button-y;
+    out property <length> back-button-x: root.screen == 1 ? generator.back-x : root.screen == 2 ? loader.back-x : placeholder.back-button-x;
+    out property <length> back-button-y: root.screen == 1 ? generator.back-y : root.screen == 2 ? loader.back-y : placeholder.back-button-y;
+
+    // The world list (screen 2, load-world.slint), forwarded with a `load-`
+    // prefix; its Back is `back` above.
+    in property <[WorldRow]> load-worlds <=> loader.worlds;
+    in property <[string]> load-labels <=> loader.labels;
+    in-out property <int> load-selected <=> loader.selected;
+    in property <image> load-big-preview <=> loader.big-preview;
+    in property <[string]> load-settings-lines <=> loader.settings-lines;
+    in-out property <bool> load-confirm-delete <=> loader.confirm-delete;
+    callback load-select <=> loader.select;
+    callback load-load <=> loader.load;
+    callback load-delete <=> loader.delete;
+    callback load-confirm-delete-yes <=> loader.confirm-delete-yes;
+    callback load-confirm-delete-no <=> loader.confirm-delete-no;
+    out property <length> load-row-x: loader.row-x;
+    out property <length> load-row0-y: loader.row0-y;
+    out property <length> load-row-pitch: loader.row-pitch;
+    out property <length> load-load-x: loader.load-x;
+    out property <length> load-load-y: loader.load-y;
+    out property <length> load-delete-x: loader.delete-x;
+    out property <length> load-delete-y: loader.delete-y;
+    out property <length> load-yes-x: loader.yes-x;
+    out property <length> load-yes-y: loader.yes-y;
+    out property <length> load-no-x: loader.no-x;
+    out property <length> load-no-y: loader.no-y;
 
     // The map generator (screen 1, map-generator.slint), forwarded with a
     // `gen-` prefix; its Back is `back` above.
@@ -120,11 +146,17 @@ export component FrontendUi inherits Window {
         height: root.height;
         back => { root.back(); }
     }
-    placeholder := PlaceholderScreen {
-        visible: root.shown && root.screen >= 2;
+    loader := LoadWorld {
+        visible: root.shown && root.screen == 2;
         width: root.width;
         height: root.height;
-        title: root.screen == 2 ? "Load world" : "Starting";
+        back => { root.back(); }
+    }
+    placeholder := PlaceholderScreen {
+        visible: root.shown && root.screen >= 3;
+        width: root.width;
+        height: root.height;
+        title: "Starting";
         back => { root.back(); }
     }
 }

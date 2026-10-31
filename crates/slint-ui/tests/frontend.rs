@@ -233,3 +233,147 @@ fn forging_is_modal_and_cancel_fires() {
     click(&mut overlay, cx, cy);
     assert_eq!(cancel.get(), 1);
 }
+
+// --- The world list (screen 2) ---
+
+use slint_ui::slint::ComponentHandle;
+use slint_ui::WorldRow;
+
+fn world_row(name: &str, loadable: bool, legacy: bool) -> WorldRow {
+    WorldRow {
+        name: name.into(),
+        detail: "seed 0x2F1A, 16 km, 2026-10-30".into(),
+        thumb: Default::default(),
+        loadable,
+        reason: if loadable { "".into() } else { "world file version 1, this build reads 2 — re-forge it".into() },
+        legacy,
+    }
+}
+
+/// The list screen with `(name, loadable, legacy)` rows; the first selected.
+fn loader(rows: &[(&str, bool, bool)]) -> Overlay<FrontendUi> {
+    let mut overlay = overlay();
+    overlay.ui().set_screen(2);
+    let worlds: Vec<WorldRow> = rows.iter().map(|r| world_row(r.0, r.1, r.2)).collect();
+    let labels: Vec<SharedString> = rows.iter().map(|r| SharedString::from(r.0)).collect();
+    overlay.ui().set_load_worlds(ModelRc::new(VecModel::from(worlds)));
+    overlay.ui().set_load_labels(ModelRc::new(VecModel::from(labels)));
+    overlay.ui().set_load_selected(0);
+    overlay.render();
+    overlay
+}
+
+fn click_row(overlay: &mut Overlay<FrontendUi>, i: usize) {
+    let ui = overlay.ui();
+    let (x, y) = (ui.get_load_row_x(), ui.get_load_row0_y() + i as f32 * ui.get_load_row_pitch());
+    click(overlay, x, y);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn unloadable_row_disables_load() {
+    let mut overlay = loader(&[("Broken", false, false), ("Fine", true, false)]);
+    let (load, delete) = (counter(), counter());
+    let (l, d) = (load.clone(), delete.clone());
+    overlay.ui().on_load_load(move || l.set(l.get() + 1));
+    overlay.ui().on_load_delete(move || d.set(d.get() + 1));
+    let (lx, ly) = (overlay.ui().get_load_load_x(), overlay.ui().get_load_load_y());
+    click(&mut overlay, lx, ly);
+    assert_eq!(load.get(), 0, "Load is disabled on the unloadable row");
+    // Delete still works on it (it is the way to get rid of a stale world).
+    let (dx, dy) = (overlay.ui().get_load_delete_x(), overlay.ui().get_load_delete_y());
+    click(&mut overlay, dx, dy);
+    assert_eq!(delete.get(), 1);
+    overlay.ui().set_load_confirm_delete(false);
+    overlay.ui().set_load_selected(1);
+    overlay.render();
+    click(&mut overlay, lx, ly);
+    assert_eq!(load.get(), 1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn legacy_row_cannot_be_deleted() {
+    let mut overlay = loader(&[("Legacy", true, true)]);
+    let delete = counter();
+    let d = delete.clone();
+    overlay.ui().on_load_delete(move || d.set(d.get() + 1));
+    let (dx, dy) = (overlay.ui().get_load_delete_x(), overlay.ui().get_load_delete_y());
+    click(&mut overlay, dx, dy);
+    assert_eq!(delete.get(), 0);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn clicking_a_row_selects_it() {
+    let mut overlay = loader(&[("A", true, false), ("B", true, false)]);
+    let picked = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let p = picked.clone();
+    overlay.ui().on_load_select(move |i| p.borrow_mut().push(i));
+    click_row(&mut overlay, 1);
+    assert_eq!(*picked.borrow(), [1]);
+    assert_eq!(overlay.ui().get_load_selected(), 1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn double_click_loads() {
+    let mut overlay = loader(&[("A", true, false), ("B", true, false)]);
+    let load = counter();
+    let l = load.clone();
+    overlay.ui().on_load_load(move || l.set(l.get() + 1));
+    click_row(&mut overlay, 1);
+    assert_eq!(load.get(), 0, "one click only selects");
+    click_row(&mut overlay, 1);
+    assert_eq!(load.get(), 1);
+    assert_eq!(overlay.ui().get_load_selected(), 1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn double_click_on_unloadable_row_does_not_load() {
+    let mut overlay = loader(&[("Broken", false, false)]);
+    let load = counter();
+    let l = load.clone();
+    overlay.ui().on_load_load(move || l.set(l.get() + 1));
+    click_row(&mut overlay, 0);
+    click_row(&mut overlay, 0);
+    assert_eq!(load.get(), 0);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn delete_asks_first() {
+    let mut overlay = loader(&[("A", true, false)]);
+    let (delete, yes, no) = (counter(), counter(), counter());
+    let (d, y, n) = (delete.clone(), yes.clone(), no.clone());
+    overlay.ui().on_load_delete(move || d.set(d.get() + 1));
+    overlay.ui().on_load_confirm_delete_yes(move || y.set(y.get() + 1));
+    overlay.ui().on_load_confirm_delete_no(move || n.set(n.get() + 1));
+    // The client turns `delete` into the confirm modal; do the same here.
+    let ui = overlay.ui();
+    let weak = ui.as_weak();
+    ui.on_load_delete(move || weak.unwrap().set_load_confirm_delete(true));
+    let (dx, dy) = (ui.get_load_delete_x(), ui.get_load_delete_y());
+    click(&mut overlay, dx, dy);
+    assert!(overlay.ui().get_load_confirm_delete());
+    assert_eq!(yes.get(), 0, "nothing deleted until yes");
+    let (nx, ny) = (overlay.ui().get_load_no_x(), overlay.ui().get_load_no_y());
+    click(&mut overlay, nx, ny);
+    assert_eq!((yes.get(), no.get()), (0, 1));
+    overlay.ui().set_load_confirm_delete(true);
+    overlay.render();
+    let (yx, yy) = (overlay.ui().get_load_yes_x(), overlay.ui().get_load_yes_y());
+    click(&mut overlay, yx, yy);
+    assert_eq!(yes.get(), 1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn confirm_modal_blocks_the_list() {
+    let mut overlay = loader(&[("A", true, false), ("B", true, false)]);
+    overlay.ui().set_load_confirm_delete(true);
+    overlay.render();
+    click_row(&mut overlay, 1);
+    assert_eq!(overlay.ui().get_load_selected(), 0, "the modal swallows the click");
+}
