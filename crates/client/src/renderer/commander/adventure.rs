@@ -13,9 +13,10 @@
 
 use bevy::prelude::*;
 use game::rapier3d::math::Vector;
-use game::{Order, PlayMode, RegionId, TilePos};
+use game::{Order, PlayMode, RegionId, TilePos, REGION_BLOCKS};
 
 use super::designate::DesignateState;
+use super::follow::{Follow, FollowTarget};
 use super::selection::Selection;
 use super::tiles::TileMirror;
 use super::CommanderCamera;
@@ -57,7 +58,15 @@ pub fn focus_tile(focus: Vec2, ground_y: f32, home: RegionId) -> TilePos {
 pub fn toggle_order(mode: PlayMode, cam: &CommanderCamera, home: Option<RegionId>) -> Order {
     let next = toggled(mode);
     let at = match next {
-        PlayMode::Adventure => home.map(|home| focus_tile(cam.focus, cam.ground_y, home)),
+        PlayMode::Adventure => home.map(|home| {
+            // A focus outside the home region (panned away) puts the body at
+            // the nearest home tile, not at an out-of-region one.
+            let mut t = focus_tile(cam.focus, cam.ground_y, home);
+            let last = REGION_BLOCKS as i32 - 1;
+            t[0] = t[0].clamp(0, last);
+            t[2] = t[2].clamp(0, last);
+            t
+        }),
         PlayMode::Fortress => None,
     };
     Order::SetMode { mode: next, at }
@@ -109,6 +118,7 @@ pub fn on_mode_change(
     mode: Res<ClientPlayMode>,
     mut designate: ResMut<DesignateState>,
     mut selection: ResMut<Selection>,
+    mut follow: ResMut<Follow>,
     bodies: Query<&SimEntity, With<LocalBody>>,
 ) {
     if !mode.is_changed() {
@@ -121,6 +131,10 @@ pub fn on_mode_change(
             }
         }
         PlayMode::Fortress => {
+            // The body is hidden in Fortress: don't stay pinned to it.
+            if follow.0 == Some(FollowTarget::LocalPlayer) {
+                follow.0 = None;
+            }
             for body in &bodies {
                 selection.0.remove(&(body.region, body.key));
             }

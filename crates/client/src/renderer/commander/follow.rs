@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use game::{EntityKey, RegionId};
 
 use super::selection::Selection;
+use super::tiles::TileMirror;
 use super::{smooth, CommanderCamera, HEIGHT_SMOOTHING_S};
 use crate::renderer::bridge::{LocalBody, SimEntity, SimEntityMap};
 
@@ -45,13 +46,19 @@ pub fn follow_camera(
     mut follow: ResMut<Follow>,
     map: Res<SimEntityMap>,
     transforms: Query<&GlobalTransform>,
-    body: Query<&GlobalTransform, With<LocalBody>>,
+    body: Query<(&SimEntity, &GlobalTransform), With<LocalBody>>,
+    mirror: Res<TileMirror>,
     time: Res<Time>,
     mut cam: ResMut<CommanderCamera>,
 ) {
     let Some(target) = follow.0 else { return };
     let at = match target {
-        FollowTarget::LocalPlayer => body.iter().map(|gt| gt.translation()).find(|p| *p != Vec3::ZERO),
+        // The body in the home region: during a handoff overlap the
+        // outgoing body still exists, and must not be tracked.
+        FollowTarget::LocalPlayer => {
+            let home = mirror.region();
+            body.iter().filter(|(s, _)| Some(s.region) == home).map(|(_, gt)| gt.translation()).find(|p| *p != Vec3::ZERO)
+        }
         FollowTarget::Entity(region, key) => match map.0.get(&(region, key)).and_then(|e| transforms.get(*e).ok()) {
             Some(gt) => Some(gt.translation()),
             None => {
@@ -62,8 +69,8 @@ pub fn follow_camera(
     };
     let Some(at) = at else { return };
     let dt = time.delta_secs();
-    // Not clamped to the home bounds: panning is not either (Adventure's
-    // pan clamp is a later task).
+    // Not clamped here: in Adventure `bounds::clamp_to_window` keeps the
+    // focus inside the window afterwards.
     cam.focus = follow_step(cam.focus, Vec2::new(at.x, at.z), dt);
     cam.ground_y = smooth(cam.ground_y, at.y, dt, HEIGHT_SMOOTHING_S);
 }

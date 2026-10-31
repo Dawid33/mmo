@@ -576,7 +576,10 @@ fn hold_pointer_while_orbiting(
     }
     if !held {
         *anchor = None;
-        *press = RightPress { at: None, motion_px: 0.0, released: Some(press.motion_px) };
+        // Only a real release of the button (window focused, game not
+        // blocked by a menu) is a click; focus loss or Esc just ends the drag.
+        let clicked = buttons.just_released(MouseButton::Right) && window.focused && !policy.blocks_game();
+        *press = RightPress { at: None, motion_px: 0.0, released: clicked.then_some(press.motion_px) };
     }
     if policy.orbit != held {
         policy.orbit = held;
