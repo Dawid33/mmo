@@ -10,8 +10,11 @@
 //! thread, only when the (body tile, hover tile) pair changes
 //! ([`PathPreview::update`]), and under [`PREVIEW_MAX_PATH_NODES`] rather
 //! than the sim's `MAX_PATH_NODES`, so a hover never costs a frame more than
-//! a few ms; a hover that is out of the preview's reach shows as "no path"
-//! (a red cross) and a click on it sends nothing.
+//! a few ms. A capped search that fails cannot tell "unreachable" from "out
+//! of budget", so it shows as "not previewed" (an amber cross); a click there
+//! runs one search at the sim's full budget ([`click_path`]) and sends the
+//! order if it finds a path — else the hover turns to "no path" (a red
+//! cross: the sim, with the same inputs and budget, would refuse it too).
 //!
 //! A right press starts an orbit drag (`hold_pointer_while_orbiting`); a
 //! press released with less than [`selection::DRAG_THRESHOLD_PX`] of mouse
@@ -40,8 +43,11 @@ use crate::renderer::{GameEvents, LocalPlayer};
 pub const PREVIEW_MAX_PATH_NODES: u32 = 2048;
 /// The previewed path.
 pub const PATH_COLOR_OK: Color = Color::srgb(0.35, 0.95, 0.45);
-/// The cross at a hover with no path.
+/// The cross at a hover with no path (none within the sim's budget either).
 pub const PATH_COLOR_NONE: Color = Color::srgb(0.95, 0.25, 0.2);
+/// The cross at a hover the capped preview search could not reach: a click
+/// still tries at the sim's budget.
+pub const PATH_COLOR_UNKNOWN: Color = Color::srgb(1.0, 0.7, 0.15);
 /// Alpha of the last sent path (dimmed under the live preview).
 pub const SENT_PATH_ALPHA: f32 = 0.35;
 /// Alpha of the path's part hidden behind terrain (drawn in front of it).
@@ -78,15 +84,40 @@ pub fn hover_tile(region: RegionId, local: Vec3, home: RegionId) -> TilePos {
 }
 
 /// The path the sim would plan from `from` toward `goal` (`here` is the
-/// home region), searched under [`PREVIEW_MAX_PATH_NODES`]: to the goal's
-/// tile in `here`, else to `game::edge_toward`'s edge tile.
-pub fn preview_path(src: &impl TileSource, from: TilePos, goal: &Goal, here: RegionCoords) -> Option<Vec<TilePos>> {
+/// home region), searched under `max_nodes`: to the goal's tile in `here`,
+/// else to `game::edge_toward`'s edge tile.
+pub fn plan_path(
+    src: &impl TileSource,
+    from: TilePos,
+    goal: &Goal,
+    here: RegionCoords,
+    max_nodes: u32,
+) -> Option<Vec<TilePos>> {
     let to = if goal.region == here {
         game::nearest_standable(src, goal.column, goal.y)?
     } else {
         game::edge_toward(src, from, goal, here)?
     };
-    game::find_path(src, from, to, PREVIEW_MAX_PATH_NODES)
+    game::find_path(src, from, to, max_nodes)
+}
+
+/// [`plan_path`] under [`PREVIEW_MAX_PATH_NODES`].
+pub fn preview_path(src: &impl TileSource, from: TilePos, goal: &Goal, here: RegionCoords) -> Option<Vec<TilePos>> {
+    plan_path(src, from, goal, here, PREVIEW_MAX_PATH_NODES)
+}
+
+/// The path a click sends: the preview's (`previewed`, searched under the
+/// capped budget) when it found one, else one search at the sim's
+/// `game::MAX_PATH_NODES` with the same inputs. `None` = the sim would find
+/// no path either: send nothing.
+pub fn click_path(
+    src: &impl TileSource,
+    from: TilePos,
+    goal: &Goal,
+    here: RegionCoords,
+    previewed: Option<Vec<TilePos>>,
+) -> Option<Vec<TilePos>> {
+    previewed.or_else(|| plan_path(src, from, goal, here, game::MAX_PATH_NODES))
 }
 
 /// The live path preview.
@@ -94,8 +125,11 @@ pub fn preview_path(src: &impl TileSource, from: TilePos, goal: &Goal, here: Reg
 pub struct PathPreview {
     /// (body tile, hovered tile) the preview was computed for.
     pub key: Option<(TilePos, TilePos)>,
-    /// The path, home-local tiles; `None` = no path.
+    /// The path, home-local tiles; `None` = no path within the preview's
+    /// budget (see `unreachable`).
     pub path: Option<Vec<TilePos>>,
+    /// With no `path`: a full-budget search (a click) found none either.
+    pub unreachable: bool,
     /// The hover's world point when it lies in another region (the path
     /// then ends at the facing edge).
     pub beyond: Option<Vec3>,
@@ -124,6 +158,7 @@ impl PathPreview {
         self.key = Some((from, hover));
         self.goal = Some(goal);
         self.path = preview_path(src, from, &goal, here);
+        self.unreachable = false;
         self.beyond = (goal.region != here).then_some(world);
         true
     }
@@ -199,32 +234,57 @@ pub fn update_path_preview(
     preview.update(&*mirror, from, hover_tile(region, local, home), goal, home, world);
 }
 
+/// The hover a right press was made on, kept until its release.
+#[derive(Debug, Clone)]
+pub struct PressedHover {
+    pub key: (TilePos, TilePos),
+    pub goal: Goal,
+    pub path: Option<Vec<TilePos>>,
+    pub beyond: Option<Vec3>,
+}
+
 /// A right click (a press released as [`is_click`]) sends `Order::MoveTo`
-/// for the tile hovered at the press, when the preview found a path there.
+/// for the tile hovered at the press, along the preview's path or, when the
+/// capped preview found none, one found at the sim's budget
+/// ([`click_path`]). With none at all nothing is sent and the hover shows
+/// "no path".
+#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 pub fn send_move_order(
     buttons: Res<ButtonInput<MouseButton>>,
     press: Res<RightPress>,
-    preview: Res<PathPreview>,
+    mut preview: ResMut<PathPreview>,
     mirror: Res<TileMirror>,
     events: Res<GameEvents>,
     local: Res<LocalPlayer>,
-    mut pending: Local<Option<(Goal, Vec<TilePos>, Option<Vec3>)>>,
+    mut pending: Local<Option<PressedHover>>,
     mut sent: ResMut<SentPath>,
 ) {
     if buttons.just_pressed(MouseButton::Right) && press.at.is_some() {
-        *pending = match (preview.goal, &preview.path) {
-            (Some(goal), Some(path)) => Some((goal, path.clone(), preview.beyond)),
+        *pending = match (preview.key, preview.goal) {
+            (Some(key), Some(goal)) if !preview.unreachable => {
+                Some(PressedHover { key, goal, path: preview.path.clone(), beyond: preview.beyond })
+            }
             _ => None,
         };
     }
     let Some(motion) = press.released else { return };
-    let Some((goal, path, beyond)) = pending.take() else { return };
-    let Some(client) = local.0 else { return };
+    let Some(hover) = pending.take() else { return };
+    let (Some(client), Some(here)) = (local.0, mirror.region()) else { return };
     if !is_click(motion) {
         return;
     }
-    let _ = events.0.send(game::GameEventKind::Order(client, Order::MoveTo(goal)));
-    *sent = SentPath { region: mirror.region(), path, beyond };
+    let Some(path) = click_path(&*mirror, hover.key.0, &hover.goal, here, hover.path) else {
+        // Truly unreachable: show it, for as long as the hover stays.
+        if preview.key == Some(hover.key) && preview.path.is_none() {
+            preview.unreachable = true;
+        }
+        return;
+    };
+    if preview.key == Some(hover.key) && preview.path.is_none() {
+        preview.path = Some(path.clone());
+    }
+    let _ = events.0.send(game::GameEventKind::Order(client, Order::MoveTo(hover.goal)));
+    *sent = SentPath { region: Some(here), path, beyond: hover.beyond };
 }
 
 /// World point of tile `p`'s floor centre in `home`, lifted
@@ -267,7 +327,8 @@ fn draw_path(
 }
 
 /// Draw the last sent path (dimmed), then the live preview: the path, or a
-/// red cross at the hover when there is none.
+/// cross at the hover when there is none — amber while only the capped
+/// preview search failed, red once a full-budget search did too.
 pub fn draw_paths(
     preview: Res<PathPreview>,
     sent: Res<SentPath>,
@@ -283,11 +344,12 @@ pub fn draw_paths(
     match (&preview.path, preview.hover) {
         (Some(path), _) => draw_path(&mut gizmos, &mut hidden, path, preview.beyond, home, PATH_COLOR_OK),
         (None, Some(at)) => {
+            let color = if preview.unreachable { PATH_COLOR_NONE } else { PATH_COLOR_UNKNOWN };
             let r = NO_PATH_CROSS_M * UNITS_PER_METER;
             let at = at + Vec3::Y * PATH_LIFT_M * UNITS_PER_METER;
             for d in [Vec3::new(r, 0.0, r), Vec3::new(r, 0.0, -r)] {
-                gizmos.line(at - d, at + d, PATH_COLOR_NONE);
-                hidden.line(at - d, at + d, PATH_COLOR_NONE.with_alpha(HIDDEN_PATH_ALPHA));
+                gizmos.line(at - d, at + d, color);
+                hidden.line(at - d, at + d, color.with_alpha(HIDDEN_PATH_ALPHA));
             }
         }
         (None, None) => {}
@@ -352,6 +414,58 @@ mod tests {
         // The body stepped: re-planned.
         assert!(preview.update(&src, [3, 1, 2], [8, 1, 6], goal, home, Vec3::ONE));
         assert!(src.reads.get() > reads);
+    }
+
+    /// A flat floor at y = 0 split by a wall along x = `WALL_X` (z < `gap`),
+    /// so a walk from one side to the other detours around its end.
+    struct WalledFloor {
+        gap: i32,
+    }
+
+    const WALL_X: i32 = 40;
+
+    impl TileSource for WalledFloor {
+        fn block(&self, p: TilePos) -> BlockId {
+            let wall = p[0] == WALL_X && p[2] < self.gap && (1..4).contains(&p[1]);
+            if p[1] == 0 || wall { BlockId(1) } else { BlockId::AIR }
+        }
+        fn is_bedrock(&self, _: TilePos) -> bool {
+            false
+        }
+        fn edge_locked(&self, _: TilePos) -> bool {
+            false
+        }
+        fn is_constructed(&self, _: TilePos) -> bool {
+            false
+        }
+        fn tree_id(&self, _: TilePos) -> u32 {
+            0
+        }
+        fn tree_limb(&self, _: TilePos) -> u8 {
+            0
+        }
+    }
+
+    #[test]
+    fn click_falls_back_to_full_budget_search() {
+        let n = REGION_BLOCKS as i32;
+        assert!(n > WALL_X + 2, "the test region is at least 64 blocks");
+        let home = RegionCoords { x: 0, z: 0 };
+        // The wall leaves one gap at the far edge: the detour floods more
+        // than the preview's budget but well under the sim's.
+        let src = WalledFloor { gap: n - 1 };
+        let (from, to) = ([WALL_X - 1, 1, 0], [WALL_X + 1, 1, 0]);
+        let goal = Goal { region: home, column: [to[0], to[2]], y: Some(1) };
+        let previewed = preview_path(&src, from, &goal, home);
+        assert_eq!(previewed, None, "the capped preview runs out of budget");
+        let path = click_path(&src, from, &goal, home, previewed).expect("the full budget finds the detour");
+        assert_eq!((path.first(), path.last()), (Some(&from), Some(&to)));
+        // A preview path is used as is.
+        let short = vec![from];
+        assert_eq!(click_path(&src, from, &goal, home, Some(short.clone())), Some(short));
+        // Closed wall: unreachable at any budget.
+        let closed = WalledFloor { gap: n };
+        assert_eq!(click_path(&closed, from, &goal, home, None), None);
     }
 
     #[test]
