@@ -53,6 +53,9 @@ export component WorldMap {
     // Where the map's top-left corner sits in the view.
     in-out property <length> map-pan-x;
     in-out property <length> map-pan-y;
+    // The arrival map (not embarked yet): Play is the only way out, so there
+    // is no Close button. (Esc / M are the client's, which honours it too.)
+    in property <bool> map-modal;
 
     callback select-tile(int, int);
     callback play();
@@ -67,6 +70,9 @@ export component WorldMap {
     out property <length> view-height: view.height;
     out property <length> play-button-x: play-button.absolute-position.x + play-button.width / 2;
     out property <length> play-button-y: play-button.absolute-position.y + play-button.height / 2;
+    // Close sits under Play, in a slot that is empty while `map-modal`.
+    out property <length> close-button-x: root.play-button-x;
+    out property <length> close-button-y: close-slot.absolute-position.y + close-slot.height / 2;
 
     property <length> tile-len: WorldMapConfig.tile-px * 1px * root.map-zoom;
     // A tile's visible cell: the tile minus its grid line (right and bottom),
@@ -236,9 +242,11 @@ export component WorldMap {
                 enabled: root.play-enabled;
                 clicked => { root.play(); }
             }
-            Button {
-                text: "Close";
-                clicked => { root.close-map(); }
+            close-slot := VerticalLayout {
+                if !root.map-modal: Button {
+                    text: "Close";
+                    clicked => { root.close-map(); }
+                }
             }
             if root.map-status != "": LabelFace {
                 style: Styles.caption-label;

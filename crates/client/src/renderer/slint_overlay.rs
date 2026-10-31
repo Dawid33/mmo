@@ -57,7 +57,7 @@ use super::hud::{crosshair_visible, HudStatus};
 use super::world_map::WorldMapState;
 use super::ClientRequests;
 use crate::instance::ClientRequest;
-use crate::session::{frontend_owns, world_systems_enabled, AppState, Embarked, SessionResetExt};
+use crate::session::{arrival_map_shown, frontend_owns, world_systems_enabled, AppState, Embarked, SessionResetExt};
 
 /// Shows and hides the panel.
 pub const SLINT_PANEL_KEY: KeyCode = KeyCode::F9;
@@ -87,11 +87,38 @@ pub const DEV_LAYER_ORDER: i32 = 2_000;
 /// panel stays on top.
 pub const FRONTEND_LAYER_ORDER: i32 = 1_500;
 
-/// Whether the frontend owns the screen right now: a layer built with
-/// [`SlintLayerPlugin::hidden_by_frontend`] draws nothing and takes no input
-/// then. Without the session state (headless tests, examples) it never does.
-fn frontend_hides(state: Option<&State<AppState>>, embarked: Option<&Embarked>) -> bool {
-    state.is_some_and(|s| frontend_owns(*s.get(), embarked.is_some_and(|e| e.0)))
+/// When a layer gives way to the frontend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrontendHide {
+    /// Always drawn (the dev panel, the frontend itself).
+    #[default]
+    Never,
+    /// Hidden while the frontend owns the screen (the HUD).
+    Always,
+    /// Hidden while the frontend owns the screen, except over the arrival map
+    /// ([`arrival_map_shown`]): the game UI, whose world map is the embark step.
+    ExceptArrivalMap,
+}
+
+/// Whether a layer with `mode` draws nothing and takes no input right now.
+/// Without the session state (headless tests, examples) the frontend never
+/// owns the screen.
+fn frontend_hides(
+    mode: FrontendHide,
+    state: Option<&State<AppState>>,
+    embarked: Option<&Embarked>,
+    world_map: Option<&WorldMapState>,
+) -> bool {
+    let Some(state) = state.map(|s| *s.get()) else { return false };
+    let embarked = embarked.is_some_and(|e| e.0);
+    let map_arrived = world_map.is_some_and(|m| m.map.is_some());
+    match mode {
+        FrontendHide::Never => false,
+        FrontendHide::Always => frontend_owns(state, embarked),
+        FrontendHide::ExceptArrivalMap => {
+            frontend_owns(state, embarked) && !arrival_map_shown(state, embarked, map_arrived)
+        }
+    }
 }
 
 fn ui_scale() -> f32 {
@@ -171,6 +198,69 @@ impl Screens {
     pub fn open_map() -> Self {
         Self { map: true, ..Self::default() }
     }
+
+    /// [`MENU_KEY`] with the arrival map `modal` (not embarked yet): Esc
+    /// only swaps the map for the Esc menu (Main menu only) and back.
+    pub fn escape_in(self, modal: bool) -> Self {
+        if modal {
+            Self { menu: !self.menu, map: self.menu, wheel: false }
+        } else {
+            self.escape()
+        }
+    }
+
+    /// [`MAP_KEY`] with the arrival map `modal`: it opens the map, never
+    /// closes it.
+    pub fn toggle_map_in(self, modal: bool) -> Self {
+        if modal {
+            Self::open_map()
+        } else {
+            self.toggle_map()
+        }
+    }
+
+    /// The arrival map stays up while `modal` unless the Esc menu is over it:
+    /// Close, Play (until it lands) and the rest leave it open.
+    pub fn held(self, modal: bool) -> Self {
+        if modal && !self.menu {
+            Self { map: true, wheel: false, ..self }
+        } else {
+            self
+        }
+    }
+}
+
+/// What the map's Play does with the selected tile `rc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayAction {
+    /// Not embarked and `rc` is where we already are (the spawn region loads
+    /// behind the arrival map): embark here, no packet.
+    EmbarkHere,
+    /// Ask the server to move us (`ClientRequest::PlayRegion`).
+    SendPlay,
+    /// Embarked and already here.
+    Refuse,
+}
+
+/// The Play decision, before `play_blocker`'s map checks (which, while not
+/// embarked, run without a home so the home tile is playable).
+pub fn play_action(embarked: bool, home: Option<RegionCoords>, rc: RegionCoords) -> PlayAction {
+    match (embarked, home == Some(rc)) {
+        (false, true) => PlayAction::EmbarkHere,
+        (true, true) => PlayAction::Refuse,
+        (_, false) => PlayAction::SendPlay,
+    }
+}
+
+/// The home `play_blocker` checks against: none before embarking, so the
+/// spawn tile is not refused as "You are here".
+fn blocker_home(embarked: bool, home: Option<RegionCoords>) -> Option<RegionCoords> {
+    if embarked { home } else { None }
+}
+
+/// Whether the arrival map is modal now (not embarked, the map received).
+fn map_modal(embarked: Option<&Embarked>, world_map: &WorldMapState) -> bool {
+    !embarked.is_none_or(|e| e.0) && world_map.map.is_some()
 }
 
 /// Filled by the game UI's callbacks during event dispatch (`!Send`, a
@@ -189,14 +279,14 @@ pub struct SlintLayerPlugin<C> {
     order: i32,
     passthrough: bool,
     follows_ui_scale: bool,
-    hidden_by_frontend: bool,
+    hidden_by_frontend: FrontendHide,
     session_scoped: bool,
 }
 
 impl<C> SlintLayerPlugin<C> {
     /// `make` is the component's generated `new` (e.g. `GameUi::new`).
     pub fn new(make: fn() -> Result<C, slint_ui::slint::PlatformError>) -> Self {
-        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false, follows_ui_scale: true, hidden_by_frontend: false, session_scoped: false }
+        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false, follows_ui_scale: true, hidden_by_frontend: FrontendHide::Never, session_scoped: false }
     }
 
     /// Draw order among the layers (higher on top); [`GAME_LAYER_ORDER`] by default.
@@ -222,7 +312,15 @@ impl<C> SlintLayerPlugin<C> {
     /// Draw nothing and take no input while the frontend owns the screen
     /// (every state but an embarked `InWorld`): the in-world layers.
     pub fn hidden_by_frontend(mut self) -> Self {
-        self.hidden_by_frontend = true;
+        self.hidden_by_frontend = FrontendHide::Always;
+        self
+    }
+
+    /// Like [`Self::hidden_by_frontend`], but drawn and fed input over the
+    /// arrival map (in the world, not embarked, the map received): the game
+    /// UI, whose world map is the embark step, in the frontend's place.
+    pub fn shown_on_arrival_map(mut self) -> Self {
+        self.hidden_by_frontend = FrontendHide::ExceptArrivalMap;
         self
     }
 
@@ -300,7 +398,7 @@ pub struct SlintLayer<C: 'static> {
     pub owns_pointer: bool,
     order: i32,
     passthrough: bool,
-    hidden_by_frontend: bool,
+    hidden_by_frontend: FrontendHide,
     /// The texture was blanked for the frontend and has not been redrawn.
     blanked: bool,
 }
@@ -355,7 +453,7 @@ pub struct SlintOverlayPlugin;
 impl Plugin for SlintOverlayPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(
-            SlintLayerPlugin::new(GameUi::new).hidden_by_frontend().session_scoped().with_init(connect_game_ui),
+            SlintLayerPlugin::new(GameUi::new).shown_on_arrival_map().session_scoped().with_init(connect_game_ui),
         )
             .add_session_reset::<PlayPending>()
             .add_systems(
@@ -368,6 +466,7 @@ impl Plugin for SlintOverlayPlugin {
                     // press does one thing.
                     menu_keys.before(minimap::minimap_pointer),
                     apply_ui_actions.before(minimap::minimap_pointer),
+                    arrival_map.before(minimap::minimap_pointer),
                     // Also before the commander: the clicks the open wheel
                     // takes must not reach the world.
                     tool_wheel.before(minimap::minimap_pointer),
@@ -526,7 +625,7 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
     init: fn(&C, &mut World),
     order: i32,
     passthrough: bool,
-    hidden_by_frontend: bool,
+    hidden_by_frontend: FrontendHide,
     ui_scale: f32,
 ) {
     let overlay = match Overlay::with(make) {
@@ -615,13 +714,14 @@ fn slint_input<C: ComponentHandle + 'static>(
     policy: Option<ResMut<CursorPolicy>>,
     state: Option<Res<State<AppState>>>,
     embarked: Option<Res<Embarked>>,
+    world_map: Option<Res<WorldMapState>>,
 ) {
     let pointer = pointer.get();
     let Some(mut slint) = slint else { return };
     let Ok(window) = window.single() else { return };
     let scale = window.scale_factor() * slint.ui_scale;
     slint.overlay.resize(window.physical_width(), window.physical_height(), scale);
-    if slint.hidden_by_frontend && frontend_hides(state.as_deref(), embarked.as_deref()) {
+    if frontend_hides(slint.hidden_by_frontend, state.as_deref(), embarked.as_deref(), world_map.as_deref()) {
         // The frontend has the screen: nothing of ours is under the pointer.
         buttons.clear();
         wheel.clear();
@@ -776,7 +876,8 @@ pub fn map_status_text(pending: Option<RegionCoords>, refused: Option<PlayRefusa
 }
 
 /// Show `to`; on opening the map, drop a stale refusal and centre the view
-/// on the home tile. Keeps `CursorPolicy::ui_modal` in step (its only writer).
+/// on the home tile. Keeps `CursorPolicy::ui_modal` in step (its only writer):
+/// any screen open, or not `embarked`.
 /// Takes the `ResMut`s themselves and writes through them only on a real
 /// change, so an idle frame does not mark either resource changed (that
 /// would make `sync_world_map` compare the whole map every frame).
@@ -786,6 +887,7 @@ fn set_screens(
     world_map: &mut ResMut<WorldMapState>,
     home: Option<RegionCoords>,
     policy: Option<&mut ResMut<CursorPolicy>>,
+    embarked: bool,
 ) {
     let from = Screens::of(ui);
     if to.map && !from.map {
@@ -808,8 +910,11 @@ fn set_screens(
     if from.wheel != to.wheel {
         ui.set_wheel_open(to.wheel);
     }
-    if let Some(policy) = policy.filter(|p| p.ui_modal != to.any()) {
-        policy.ui_modal = to.any();
+    // Not embarked, the world behind is not ours to touch even with no
+    // screen open (before the map arrives).
+    let modal = to.any() || !embarked;
+    if let Some(policy) = policy.filter(|p| p.ui_modal != modal) {
+        policy.ui_modal = modal;
     }
 }
 
@@ -823,6 +928,7 @@ fn menu_keys(
     mut policy: Option<ResMut<CursorPolicy>>,
     mut world_map: ResMut<WorldMapState>,
     status: Res<HudStatus>,
+    embarked: Option<Res<Embarked>>,
 ) {
     let Some(slint) = slint else { return };
     // The dev panel holds the keyboard.
@@ -830,18 +936,46 @@ fn menu_keys(
         return;
     }
     let ui = slint.overlay.ui();
+    let modal = map_modal(embarked.as_deref(), &world_map);
     let mut to = Screens::of(ui);
     if keys.just_pressed(MENU_KEY) {
         let designating = designate.as_ref().is_some_and(|d| d.in_progress());
         if to.any() || !designating {
-            to = to.escape();
+            to = to.escape_in(modal);
             keys.clear_just_pressed(MENU_KEY);
         }
     }
     if keys.just_pressed(MAP_KEY) {
-        to = to.toggle_map();
+        to = to.toggle_map_in(modal);
     }
-    set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut());
+    let embarked = embarked.is_none_or(|e| e.0);
+    set_screens(ui, to.held(modal), &mut world_map, status.home_region, policy.as_mut(), embarked);
+}
+
+/// The arrival map: while not embarked it is modal (`map-modal`) and opened
+/// as soon as the world map arrives; embarking closes it.
+fn arrival_map(
+    slint: Option<NonSend<SlintLayer<GameUi>>>,
+    embarked: Option<Res<Embarked>>,
+    mut world_map: ResMut<WorldMapState>,
+    status: Res<HudStatus>,
+    mut policy: Option<ResMut<CursorPolicy>>,
+    mut was_modal: crate::session::SessionLocal<bool>,
+) {
+    let Some(slint) = slint else { return };
+    let ui = slint.overlay.ui();
+    let not_embarked = embarked.as_deref().is_some_and(|e| !e.0);
+    if ui.get_map_modal() != not_embarked {
+        ui.set_map_modal(not_embarked);
+    }
+    let modal = map_modal(embarked.as_deref(), &world_map);
+    let was_modal = was_modal.get();
+    let mut to = Screens::of(ui).held(modal);
+    if *was_modal && !modal && !not_embarked {
+        to.map = false; // embarked: the world takes the screen
+    }
+    *was_modal = modal;
+    set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), !not_embarked);
 }
 
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
@@ -859,10 +993,13 @@ fn apply_ui_actions(
     mut follow: Option<ResMut<Follow>>,
     local_body: Query<&SimEntity, With<LocalBody>>,
     mut session_ended: Option<ResMut<Messages<crate::session::SessionEnded>>>,
+    mut embarked: Option<ResMut<Embarked>>,
+    mut cam: Option<ResMut<CommanderCamera>>,
 ) {
     let (Some(actions), Some(slint)) = (actions, slint) else { return };
     let ui = slint.overlay.ui();
     for action in actions.0.borrow_mut().drain(..) {
+        let is_embarked = embarked.as_ref().is_none_or(|e| e.0);
         let mut to = Screens::of(ui);
         match action {
             UiAction::ClearSelection => {
@@ -903,9 +1040,27 @@ fn apply_ui_actions(
                 let home = status.home_region;
                 let target = world_map.map.as_ref().and_then(|map| {
                     let rc = tile_region(map, ui.get_selected_col(), ui.get_selected_row())?;
-                    play_blocker(map, rc, home).is_none().then_some(rc)
+                    play_blocker(map, rc, blocker_home(is_embarked, home)).is_none().then_some(rc)
                 });
                 let Some(rc) = target else { continue };
+                match play_action(is_embarked, home, rc) {
+                    PlayAction::Refuse => continue,
+                    PlayAction::EmbarkHere => {
+                        if let Some(embarked) = embarked.as_mut() {
+                            embarked.0 = true;
+                        }
+                        // Put the camera over the body again, as a Play's
+                        // home change would (`commander::place_on_body`).
+                        if let Some(cam) = cam.as_mut() {
+                            cam.placed = false;
+                        }
+                        world_map.refused = None;
+                        to.map = false;
+                        set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), true);
+                        continue;
+                    }
+                    PlayAction::SendPlay => {}
+                }
                 let sent = requests.as_ref().is_some_and(|r| r.0.send(ClientRequest::PlayRegion(rc)).is_ok());
                 if !sent {
                     warn!("[world-map] Play request for ({}, {}) not sent: no game thread", rc.x, rc.z);
@@ -917,7 +1072,8 @@ fn apply_ui_actions(
                 to.map = false;
             }
         }
-        set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut());
+        let modal = !is_embarked && world_map.map.is_some();
+        set_screens(ui, to.held(modal), &mut world_map, status.home_region, policy.as_mut(), is_embarked);
     }
 }
 
@@ -1015,6 +1171,7 @@ fn tool_wheel(
     mut world_map: ResMut<WorldMapState>,
     status: Res<HudStatus>,
     mut phase: crate::session::SessionLocal<WheelPhase>,
+    embarked: Option<Res<Embarked>>,
 ) {
     let phase = phase.get();
     let Some(slint) = slint else { return };
@@ -1066,7 +1223,8 @@ fn tool_wheel(
     }
     *phase = next;
     let to = Screens { wheel: next.is_open(), ..Screens::of(ui) };
-    set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut());
+    let embarked = embarked.is_none_or(|e| e.0);
+    set_screens(ui, to, &mut world_map, status.home_region, policy.as_mut(), embarked);
 }
 
 /// The level readout: the working level and how far it is from the surface
@@ -1165,9 +1323,9 @@ struct MapShown {
     map: Option<WorldMap>,
     /// Bumped whenever `map` is replaced.
     generation: u64,
-    /// (generation, selected column, selected row, home, Play pending) the
-    /// tile info was last computed for.
-    info_for: Option<(u64, i32, i32, Option<RegionCoords>, bool)>,
+    /// (generation, selected column, selected row, home, Play pending,
+    /// embarked) the tile info was last computed for.
+    info_for: Option<(u64, i32, i32, Option<RegionCoords>, bool, bool)>,
 }
 
 /// What the world map window reads.
@@ -1177,6 +1335,7 @@ struct MapParams<'w, 's> {
     time: Res<'w, Time>,
     pending: ResMut<'w, PlayPending>,
     cam: Option<Res<'w, CommanderCamera>>,
+    embarked: Option<ResMut<'w, Embarked>>,
     shown: crate::session::SessionLocal<'w, 's, MapShown>,
 }
 
@@ -1215,12 +1374,17 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
         let arrived_in = |rc| cam.map_or(home == Some(rc), |cam| cam.placed_in(rc));
         if play_settled(target, arrived_in, refused) {
             p.pending.0 = None;
+            // The first Play landed: embarked (the arrival map closes).
+            if let Some(embarked) = p.embarked.as_mut().filter(|e| !refused && !e.0) {
+                embarked.0 = true;
+            }
         }
     }
+    let embarked = p.embarked.as_ref().is_none_or(|e| e.0);
 
     let (col, row) = (ui.get_selected_col(), ui.get_selected_row());
     let pending = p.pending.0.is_some();
-    let info_for = Some((shown.generation, col, row, home, pending));
+    let info_for = Some((shown.generation, col, row, home, pending, embarked));
     if shown.info_for != info_for {
         shown.info_for = info_for;
         let picked = map.and_then(|map| Some((map, tile_region(map, col, row)?)));
@@ -1230,7 +1394,7 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
             .map(Into::into)
             .collect();
         ui.set_tile_lines(ModelRc::new(VecModel::from(lines)));
-        let blocker = picked.map(|(map, rc)| play_blocker(map, rc, home));
+        let blocker = picked.map(|(map, rc)| play_blocker(map, rc, blocker_home(embarked, home)));
         ui.set_play_enabled(!pending && matches!(blocker, Some(None)));
         ui.set_play_reason(blocker.flatten().unwrap_or("").into());
     }
@@ -1283,9 +1447,10 @@ fn render_slint_layer<C: ComponentHandle + 'static>(
     mut images: ResMut<Assets<Image>>,
     state: Option<Res<State<AppState>>>,
     embarked: Option<Res<Embarked>>,
+    world_map: Option<Res<WorldMapState>>,
 ) {
     let Some(mut slint) = slint else { return };
-    let hidden = slint.hidden_by_frontend && frontend_hides(state.as_deref(), embarked.as_deref());
+    let hidden = frontend_hides(slint.hidden_by_frontend, state.as_deref(), embarked.as_deref(), world_map.as_deref());
     if hidden {
         if !slint.blanked {
             if let Some(mut image) = images.get_mut(&slint.target) {
@@ -1403,6 +1568,66 @@ mod tests {
         assert_eq!(none.toggle_map(), map);
         assert_eq!(menu.toggle_map(), map, "opening the map closes the menu");
         assert_eq!(map.toggle_map(), none);
+    }
+
+    #[test]
+    fn play_on_home_tile_embarks_without_packet() {
+        let (a, b) = (RegionCoords::new(0, 0), RegionCoords::new(1, 0));
+        assert_eq!(play_action(false, Some(a), a), PlayAction::EmbarkHere);
+        assert_eq!(play_action(true, Some(a), a), PlayAction::Refuse);
+        assert_eq!(play_action(false, Some(a), b), PlayAction::SendPlay);
+        assert_eq!(play_action(true, Some(a), b), PlayAction::SendPlay);
+        assert_eq!(blocker_home(false, Some(a)), None, "the home tile is playable before embarking");
+        assert_eq!(blocker_home(true, Some(a)), Some(a));
+    }
+
+    #[test]
+    fn esc_and_m_do_not_close_the_map_while_not_embarked() {
+        let map = Screens::open_map();
+        let menu = Screens { menu: true, ..Default::default() };
+        // Esc swaps the map for the (Main menu only) Esc menu and back.
+        assert_eq!(map.escape_in(true), menu);
+        assert_eq!(menu.escape_in(true), map);
+        // M never closes it.
+        assert_eq!(map.toggle_map_in(true), map);
+        assert_eq!(menu.toggle_map_in(true), map);
+        // Close (or Play until it lands) leaves it up.
+        assert_eq!(Screens::default().held(true), map);
+        assert_eq!(menu.held(true), menu);
+        let wheel = Screens { wheel: true, ..Default::default() };
+        assert_eq!(wheel.held(true), map, "no tool wheel over the arrival map");
+        // Embarked: as before.
+        assert_eq!(map.escape_in(false), Screens::default());
+        assert_eq!(map.toggle_map_in(false), Screens::default());
+        assert_eq!(Screens::default().held(false), Screens::default());
+    }
+
+    #[test]
+    fn game_ui_shows_only_over_the_arrival_map_while_not_embarked() {
+        use bevy::state::app::StatesPlugin;
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin));
+        app.insert_state(AppState::InWorld);
+        app.update();
+        let state = app.world().resource::<State<AppState>>();
+        let mut world_map = WorldMapState::default();
+        let not = Embarked(false);
+        let hides = |mode, embarked: &Embarked, map: &WorldMapState| {
+            frontend_hides(mode, Some(state), Some(embarked), Some(map))
+        };
+        assert!(hides(FrontendHide::ExceptArrivalMap, &not, &world_map), "no map yet: the starting screen");
+        world_map.map = Some(game::WorldMap {
+            origin: RegionCoords::new(0, 0),
+            width: 0,
+            height: 0,
+            tiles: Vec::new(),
+            rock_names: Vec::new(),
+        });
+        assert!(!hides(FrontendHide::ExceptArrivalMap, &not, &world_map), "the arrival map");
+        assert!(hides(FrontendHide::Always, &not, &world_map), "no HUD before embarking");
+        assert!(!hides(FrontendHide::Always, &Embarked(true), &world_map));
+        assert!(!hides(FrontendHide::Never, &not, &world_map));
+        assert!(!frontend_hides(FrontendHide::Always, None, None, None), "headless: never");
     }
 
     #[test]

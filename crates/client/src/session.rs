@@ -65,9 +65,11 @@ pub struct SessionEnded {
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SkipMenu(pub bool);
 
-/// The player has arrived in the world (Task 14 sets it once the arrival map
-/// is dismissed). Until then the frontend owns the screen even in `InWorld`.
-/// Reset with the session.
+/// The player has embarked: pressed Play on the arrival map (the world map,
+/// modal until then) and arrived. Until then the frontend owns the screen even
+/// in `InWorld` — the spawn region loading behind the map is never shown. False
+/// after a menu start, true from the first frame with [`SkipMenu`]. Reset with
+/// the session.
 #[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Embarked(pub bool);
 
@@ -76,10 +78,15 @@ pub struct Embarked(pub bool);
 #[derive(Resource, Default, Clone, Debug, PartialEq, Eq)]
 pub struct LastSessionError(pub Option<String>);
 
-/// The starting screen's status line ("" = nothing to say). Reset with the
-/// session.
+/// The starting screen's extra status line ("" = nothing to say), e.g. while
+/// the previous server is still stopping. Reset with the session.
 #[derive(Resource, Default, Clone, Debug, PartialEq, Eq)]
 pub struct StartingStatus(pub String);
+
+/// The server log's tail under a failed start's [`LastSessionError`] on the
+/// starting screen ("" = none). Cleared when a start begins and on Back.
+#[derive(Resource, Default, Clone, Debug, PartialEq, Eq)]
+pub struct StartingLog(pub String);
 
 /// The world the next session plays, set by the map generator's Play (and
 /// the Load screen) before `AppState::Starting`; Task 9 starts its server.
@@ -228,6 +235,21 @@ pub fn frontend_owns(state: AppState, embarked: bool) -> bool {
     state != AppState::InWorld || !embarked
 }
 
+/// Whether the arrival map is up: in the world, not embarked, and the world
+/// map has arrived. Then the game UI (the map only) is drawn and takes input in
+/// the frontend's place, while the frontend camera still owns the screen;
+/// before the map arrives the frontend's starting screen shows.
+pub fn arrival_map_shown(state: AppState, embarked: bool, map_arrived: bool) -> bool {
+    state == AppState::InWorld && !embarked && map_arrived
+}
+
+/// Whether the frontend's own screens (`FrontendUi`) are drawn: the frontend
+/// owns the screen and the arrival map is not up. Exactly one interactive
+/// layer has the screen at any time: this, or the game UI.
+pub fn frontend_ui_shown(state: AppState, embarked: bool, map_arrived: bool) -> bool {
+    frontend_owns(state, embarked) && !arrival_map_shown(state, embarked, map_arrived)
+}
+
 /// [`frontend_owns`] as a run condition.
 pub fn frontend_owns_screen()
 -> impl FnMut(Option<Res<State<AppState>>>, Option<Res<Embarked>>) -> bool + Clone {
@@ -293,6 +315,7 @@ impl Plugin for SessionPlugin {
             .add_session_reset::<Embarked>()
             .init_resource::<LastSessionError>()
             .add_session_reset::<StartingStatus>()
+            .init_resource::<StartingLog>()
             .add_message::<SessionEnded>()
             .add_systems(Update, sync_frontend_camera);
     }
@@ -365,7 +388,7 @@ mod flow {
     use crossbeam::channel::{unbounded, Receiver, Sender};
     use game::{ClientUpdateEvent, GameEventKind};
 
-    use super::{end_session, AppState, Embarked, LastSessionError, PendingWorld, SessionEnded, StartingStatus};
+    use super::{end_session, AppState, LastSessionError, PendingWorld, SessionEnded, StartingLog, StartingStatus};
     use crate::instance::{ClientRequest, Command};
     use crate::local_host::{server_log_path, LocalHost, STOP_GRACE};
     use crate::renderer::collider_debug::DebugFlagsRes;
@@ -499,10 +522,10 @@ mod flow {
         }
     }
 
-    /// `OnEnter(Starting)`: start the pending world's server and connect to it.
     /// `OnEnter(Starting)`: a session needs a chosen world.
     pub(super) fn begin_starting(world: &mut World) {
         world.resource_mut::<LastSessionError>().0 = None;
+        world.get_resource_or_init::<StartingLog>().0.clear();
         if !world.contains_resource::<PendingWorld>() {
             fail_start(world, "no world was chosen to play".into());
         }
@@ -550,8 +573,7 @@ mod flow {
         let scale = *world.resource::<WorldScale>();
         let command = channels.connect(addr, debug_flags, scale);
         if world.resource::<GameThread>().0.send(command).is_err() {
-            world.resource_mut::<LastSessionError>().0 = Some("the game thread is gone".into());
-            world.resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+            fail_start(world, "the game thread is gone".into());
         }
     }
 
@@ -562,23 +584,22 @@ mod flow {
         }
     }
 
+    /// A start that failed stays on the starting screen, which shows why
+    /// (and the server log's tail, if a server ran) until Back. The session
+    /// is torn down at once: a failed start leaves nothing running behind it.
     fn fail_start(world: &mut World, why: String) {
         error!("[session] {why}");
+        let tail = world.get_resource::<LocalHost>().map(|h| h.log_tail(SERVER_LOG_TAIL_LINES)).unwrap_or_default();
+        leave_session(world);
         world.resource_mut::<LastSessionError>().0 = Some(why);
-        world.resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+        world.get_resource_or_init::<StartingLog>().0 = tail;
     }
 
-    /// The first `SetPlayer` of a session: we are in.
-    fn enter_world_on_player(
-        player: Res<LocalPlayer>,
-        mut next: ResMut<NextState<AppState>>,
-        mut embarked: ResMut<Embarked>,
-    ) {
+    /// The first `SetPlayer` of a session: we are in. Not embarked yet — the
+    /// arrival map is the embark step (`slint_overlay`).
+    fn enter_world_on_player(player: Res<LocalPlayer>, mut next: ResMut<NextState<AppState>>) {
         if player.0.is_some() {
             next.set(AppState::InWorld);
-            // TODO(Task 14): the arrival map sets Embarked once dismissed;
-            // until it exists the world takes the screen at once.
-            embarked.0 = true;
         }
     }
 
@@ -591,20 +612,30 @@ mod flow {
     }
 
     /// [`SessionEnded`] while a session runs: record why, go to the menu (the
-    /// transition runs [`leave_session`]).
+    /// transition runs [`leave_session`]) — except a start that was lost
+    /// (`Starting` with a reason), which stays on the starting screen to show
+    /// why ([`fail_start`]).
     fn end_on_session_ended(
         mut ended: MessageReader<SessionEnded>,
         state: Res<State<AppState>>,
         mut next: ResMut<NextState<AppState>>,
         mut error: ResMut<LastSessionError>,
+        mut commands: Commands,
     ) {
         let Some(last) = ended.read().last() else { return };
         if !matches!(state.get(), AppState::Starting | AppState::InWorld) {
             return;
         }
         info!("[session] session ended: {}", last.reason.as_deref().unwrap_or("left by the player"));
-        error.0 = last.reason.clone();
-        next.set(AppState::MainMenu);
+        match (state.get(), last.reason.clone()) {
+            (AppState::Starting, Some(reason)) => {
+                commands.queue(move |world: &mut World| fail_start(world, reason));
+            }
+            (_, reason) => {
+                error.0 = reason;
+                next.set(AppState::MainMenu);
+            }
+        }
     }
 
     /// The app is exiting: leave the session first (stops the child server).
@@ -880,7 +911,8 @@ mod tests {
         assert_eq!(app.world().resource::<StartingStatus>().0, WAITING_FOR_PREVIOUS_SERVER);
 
         // The old server is gone: the launch goes ahead (and fails here, with
-        // no server binary next to the test executable → back to the menu).
+        // no server binary next to the test executable → the starting screen
+        // shows why until Back).
         release.send(()).unwrap();
         while !server_stops_finished() {
             std::thread::yield_now();
@@ -891,7 +923,60 @@ mod tests {
         assert_eq!(app.world().resource::<StartingStatus>().0, "");
         let error = app.world().resource::<LastSessionError>().0.clone().unwrap_or_default();
         assert!(error.starts_with("Could not start the server"), "{error}");
-        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::MainMenu);
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Starting);
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn menu_start_enters_the_world_not_embarked() {
+        let mut app = app(false);
+        app.init_resource::<crate::renderer::LocalPlayer>().add_plugins(SessionFlowPlugin);
+        SessionChannels::new().install(app.world_mut());
+        app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Starting);
+        app.update();
+        app.world_mut().resource_mut::<crate::renderer::LocalPlayer>().0 = Some(1);
+        app.update();
+        app.update();
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::InWorld);
+        assert_eq!(*app.world().resource::<Embarked>(), Embarked(false), "the arrival map embarks");
+        assert_eq!(frontend_cameras(&mut app).len(), 1, "the frontend camera keeps the screen");
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_start_lost_with_a_reason_stays_on_the_starting_screen() {
+        let mut app = app(false);
+        app.init_resource::<crate::renderer::LocalPlayer>().add_plugins(SessionFlowPlugin);
+        SessionChannels::new().install(app.world_mut());
+        app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Starting);
+        app.update();
+        app.world_mut().write_message(SessionEnded { reason: Some("The server exited (exit status: 1).".into()) });
+        app.update();
+        app.update();
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Starting);
+        assert_eq!(
+            app.world().resource::<LastSessionError>().0.as_deref(),
+            Some("The server exited (exit status: 1).")
+        );
+    }
+
+    #[test]
+    fn exactly_one_layer_has_the_screen() {
+        use AppState::*;
+        // (state, embarked, map arrived) → frontend screens shown, arrival map shown
+        let cases = [
+            (MainMenu, false, false, true, false),
+            (Starting, false, true, true, false),
+            (InWorld, false, false, true, false), // receiving the world map
+            (InWorld, false, true, false, true),
+            (InWorld, true, true, false, false),
+        ];
+        for (state, embarked, map, frontend, arrival) in cases {
+            assert_eq!(frontend_ui_shown(state, embarked, map), frontend, "{state:?} {embarked} {map}");
+            assert_eq!(arrival_map_shown(state, embarked, map), arrival, "{state:?} {embarked} {map}");
+        }
     }
 
     #[test]

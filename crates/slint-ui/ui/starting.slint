@@ -1,0 +1,57 @@
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
+
+// The starting screen: a world session is on its way (server starting,
+// connecting, receiving the world map), or it failed to start — then the
+// reason and the server log's tail, and Back to the main menu.
+export component Starting {
+    // Progress so far, one line each ("Starting server…", "Connecting…", …).
+    in property <[string]> lines;
+    // Why the start failed; "" while it is going.
+    in property <string> error;
+    // The server log's tail under the error; "" for none.
+    in property <string> log;
+    callback back();
+    out property <length> back-x: back-btn.absolute-position.x + back-btn.width / 2;
+    out property <length> back-y: back-btn.absolute-position.y + back-btn.height / 2;
+
+    frame := FrameFace {
+        title: root.error != "" ? "Could not start" : "Starting";
+        width: root.log != "" ? min(root.width - 48px, 760px) : 420px;
+        height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+
+        body := VerticalFlow {
+            x: frame.content-x;
+            y: frame.content-y;
+            width: frame.content-right - frame.content-x;
+
+            for line in root.lines: LabelFace { text: line; }
+            if root.error != "": Text {
+                text: root.error;
+                wrap: word-wrap;
+                color: #ff8a70;
+                font-size: 14px;
+            }
+            if root.log != "": Rectangle {
+                height: min(log-text.preferred-height, 320px);
+                clip: true;
+                background: #00000060;
+                log-text := Text {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    text: root.log;
+                    wrap: word-wrap;
+                    color: #c8c8c8;
+                    font-size: 11px;
+                }
+            }
+            back-btn := Button {
+                text: "Back";
+                clicked => { root.back(); }
+            }
+        }
+    }
+}

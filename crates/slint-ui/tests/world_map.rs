@@ -247,3 +247,67 @@ fn markers_frame_the_tile_cell_at_every_zoom() {
         }
     }
 }
+
+fn open_map_counting_closes(overlay: &mut Overlay<GameUi>) -> Rc<RefCell<u32>> {
+    let closed = Rc::new(RefCell::new(0));
+    let c = closed.clone();
+    overlay.ui().on_close_map(move || *c.borrow_mut() += 1);
+    overlay.ui().set_panel_open(false);
+    overlay.ui().set_map_open(true);
+    overlay.ui().set_map_available(true);
+    overlay.ui().set_map_cols(4);
+    overlay.ui().set_map_rows(4);
+    overlay.render();
+    closed
+}
+
+/// Regression: today's map closes with its Close button.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn non_modal_map_closes() {
+    let mut overlay = overlay();
+    let closed = open_map_counting_closes(&mut overlay);
+    let (x, y) = (overlay.ui().get_close_button_x(), overlay.ui().get_close_button_y());
+    assert!(overlay.opaque_at(x as u32, y as u32), "Close button drawn at ({x}, {y})");
+    click(&mut overlay, x, y);
+    assert_eq!(*closed.borrow(), 1);
+}
+
+/// Before the first Play (the arrival map, `map-modal`) there is no Close:
+/// the map is the embark step. (Esc / M are Bevy-side, in the client.)
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn modal_map_cannot_be_closed() {
+    let mut overlay = overlay();
+    let closed = open_map_counting_closes(&mut overlay);
+    // Where the button is while the map is not modal.
+    let (x, y) = (overlay.ui().get_close_button_x(), overlay.ui().get_close_button_y());
+    overlay.ui().set_map_modal(true);
+    overlay.render();
+    click(&mut overlay, x, y);
+    assert_eq!(*closed.borrow(), 0, "a modal map has no Close button");
+    let (px, py) = (overlay.ui().get_play_button_x(), overlay.ui().get_play_button_y());
+    assert!(overlay.opaque_at(px as u32, py as u32), "Play is still there");
+}
+
+/// The Esc menu over the arrival map offers only Main menu.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn modal_menu_offers_only_main_menu() {
+    let mut overlay = overlay();
+    overlay.ui().set_panel_open(false);
+    overlay.ui().set_menu_open(true);
+    overlay.render();
+    let drawn = |overlay: &Overlay<GameUi>| overlay.pixels().iter().filter(|p| p.alpha > 0).count();
+    let full = drawn(&overlay);
+    overlay.ui().set_map_modal(true);
+    overlay.render();
+    let modal = drawn(&overlay);
+    assert!(modal < full, "fewer buttons ({modal} vs {full} pixels)");
+    let left = Rc::new(RefCell::new(0));
+    let l = left.clone();
+    overlay.ui().on_main_menu(move || *l.borrow_mut() += 1);
+    let (x, y) = (overlay.ui().get_main_menu_button_x(), overlay.ui().get_main_menu_button_y());
+    click(&mut overlay, x, y);
+    assert_eq!(*left.borrow(), 1, "Main menu fires");
+}

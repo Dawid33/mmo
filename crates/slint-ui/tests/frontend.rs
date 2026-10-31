@@ -104,7 +104,7 @@ fn hidden_frontend_draws_nothing_and_takes_no_input() {
 
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
-fn placeholder_screens_go_back() {
+fn secondary_screens_go_back() {
     let mut overlay = overlay();
     let back = counter();
     let b = back.clone();
@@ -421,4 +421,56 @@ fn unloadable_row_is_dimmer_and_thumb_draws() {
     assert!(light[0] > light[1], "a thumb draws image pixels: {light:?}");
     assert!(light[1] > light[3], "unloadable text is dimmer: {light:?}");
     assert!(light[0] > light[2], "unloadable thumb is dimmer: {light:?}");
+}
+
+// --- The starting screen (screen 3) ---
+
+fn starting() -> Overlay<FrontendUi> {
+    let mut overlay = overlay();
+    overlay.ui().set_screen(3);
+    overlay.render();
+    overlay
+}
+
+fn lines(items: &[&str]) -> ModelRc<SharedString> {
+    let items: Vec<SharedString> = items.iter().map(|s| (*s).into()).collect();
+    ModelRc::new(VecModel::from(items))
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn starting_lines_error_and_log_are_drawn() {
+    let mut overlay = starting();
+    let drawn = |overlay: &Overlay<FrontendUi>| overlay.pixels().iter().filter(|p| p.alpha > 0).count();
+    overlay.ui().set_start_lines(lines(&["Starting server\u{2026}"]));
+    overlay.render();
+    let one = drawn(&overlay);
+    overlay.ui().set_start_lines(lines(&["Starting server\u{2026}", "Connecting\u{2026}"]));
+    overlay.render();
+    let two = drawn(&overlay);
+    assert!(two > one, "the second line drawn ({two} vs {one})");
+    overlay.ui().set_start_error("The server exited (exit status: 1).".into());
+    overlay.render();
+    let error = drawn(&overlay);
+    assert!(error > two, "the error drawn ({error} vs {two})");
+    overlay.ui().set_start_log("thread 'main' panicked\nat src/main.rs:1".into());
+    overlay.render();
+    let log = drawn(&overlay);
+    assert!(log > error, "the log drawn ({log} vs {error})");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn starting_back_fires_with_an_error_shown() {
+    let mut overlay = starting();
+    let back = counter();
+    let b = back.clone();
+    overlay.ui().on_back(move || b.set(b.get() + 1));
+    overlay.ui().set_start_error("Could not start the server".into());
+    overlay.ui().set_start_log("line 1\nline 2\nline 3".into());
+    overlay.render();
+    let (x, y) = (overlay.ui().get_back_button_x(), overlay.ui().get_back_button_y());
+    assert!(overlay.opaque_at(x as u32, y as u32), "Back drawn at ({x}, {y})");
+    click(&mut overlay, x, y);
+    assert_eq!(back.get(), 1);
 }

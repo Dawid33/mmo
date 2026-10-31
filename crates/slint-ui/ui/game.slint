@@ -96,6 +96,14 @@ export component GameUi inherits Window {
     callback main-menu();
     // Whether the menu offers Main menu (false on wasm, which has no menu).
     in property <bool> can-leave: true;
+    // Not embarked yet: the world map is the embark step. Its Close is gone,
+    // the Esc menu offers only Main menu, and the panel's mode and follow
+    // buttons are hidden.
+    in property <bool> map-modal;
+    out property <length> close-button-x: map.close-button-x;
+    out property <length> close-button-y: map.close-button-y;
+    out property <length> main-menu-button-x: menu.main-menu-button-x;
+    out property <length> main-menu-button-y: menu.main-menu-button-y;
     callback close-map();
     // A tile clicked on the map (it is now `selected-col/row`).
     callback select-tile(int, int);
@@ -138,7 +146,7 @@ export component GameUi inherits Window {
             }
             // A flow never wraps, and the panel is pinned to the window's
             // right edge: a row wider than the panel runs off screen.
-            Button {
+            if !root.map-modal: Button {
                 text: root.adventure ? "Fortress mode" : "Adventure mode";
                 clicked => { root.toggle-mode(); }
             }
@@ -153,7 +161,7 @@ export component GameUi inherits Window {
                     enabled: root.selected-count > 0;
                     clicked => { root.clear-selection(); }
                 }
-                Button {
+                if !root.map-modal: Button {
                     text: root.following ? "Stop following" : "Follow";
                     enabled: root.selected-count == 1 || root.following;
                     clicked => { root.follow-clicked(); }
@@ -210,10 +218,13 @@ export component GameUi inherits Window {
         toggled: root.active-tool;
     }
 
-    if root.menu-open: GameMenu {
+    // `visible` rather than `if`, so its hit-test positions stay readable.
+    menu := GameMenu {
+        visible: root.menu-open;
         width: 100%;
         height: 100%;
         can-leave: root.can-leave;
+        leave-only: root.map-modal;
         open-map => { root.open-map(); }
         close-menu => { root.close-menu(); }
         main-menu => { root.main-menu(); }
@@ -240,6 +251,7 @@ export component GameUi inherits Window {
         map-zoom <=> root.map-zoom;
         map-pan-x <=> root.map-pan-x;
         map-pan-y <=> root.map-pan-y;
+        map-modal: root.map-modal;
         select-tile(col, row) => { root.select-tile(col, row); }
         play => { root.play(); }
         close-map => { root.close-map(); }

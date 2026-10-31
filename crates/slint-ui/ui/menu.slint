@@ -8,6 +8,10 @@ export component GameMenu {
     callback main-menu();
     // Whether this client can leave to a main menu (not on wasm).
     in property <bool> can-leave: true;
+    // Before the first Play (the arrival map is modal): only Main menu.
+    in property <bool> leave-only;
+    out property <length> main-menu-button-x: main-slot.absolute-position.x + main-slot.width / 2;
+    out property <length> main-menu-button-y: main-slot.absolute-position.y + main-slot.height / 2;
 
     menu := FrameFace {
         title: "Menu";
@@ -23,15 +27,17 @@ export component GameMenu {
             y: menu.content-y;
             width: menu.content-right - menu.content-x;
 
-            Button {
+            if !root.leave-only: Button {
                 text: "World Map";
                 clicked => { root.open-map(); }
             }
-            if root.can-leave: Button {
-                text: "Main menu";
-                clicked => { root.main-menu(); }
+            main-slot := VerticalLayout {
+                if root.can-leave: Button {
+                    text: "Main menu";
+                    clicked => { root.main-menu(); }
+                }
             }
-            Button {
+            if !root.leave-only: Button {
                 text: "Close";
                 clicked => { root.close-menu(); }
             }
