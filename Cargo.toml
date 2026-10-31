@@ -53,6 +53,9 @@ bevy = { version = "0.19.1", default-features = false, features = [
   "bevy_gizmos_render",
   "bevy_asset",
   "bevy_log",
+  # States (`AppState`, the main menu → world session machine in
+  # crates/client/src/session.rs): DefaultPlugins adds StatesPlugin only with it.
+  "bevy_state",
   "multi_threaded",
   "tonemapping_luts",
   "ktx2",

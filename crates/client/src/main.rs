@@ -218,6 +218,10 @@ fn main() {
             .set(renderer::render_plugin()),
     )
     .insert_resource(world_scale);
+    // App states + the session reset registry + the frontend camera. Until the
+    // menu is the default (Task 15), the menu is opt-in (`VOXEL_MENU=1`) and
+    // everything else starts straight in the world as before.
+    app.add_plugins(client::session::SessionPlugin { skip_menu: client::session::skip_menu() });
     // The logger exists from here on: announce the perf timeline and flush the
     // events the game/netcode threads emitted while Bevy was still starting.
     game::perf::init("client");
