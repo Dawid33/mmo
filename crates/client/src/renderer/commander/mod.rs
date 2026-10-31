@@ -34,6 +34,7 @@ pub mod follow;
 pub mod height;
 pub mod level;
 pub mod minimap;
+pub mod move_order;
 pub mod selection;
 pub mod tiles;
 
@@ -366,6 +367,9 @@ impl Plugin for CommanderPlugin {
             .init_resource::<designate::DragReadout>()
             .init_resource::<adventure::ClientPlayMode>()
             .init_resource::<follow::Follow>()
+            .init_resource::<RightPress>()
+            .init_resource::<move_order::PathPreview>()
+            .init_resource::<move_order::SentPath>()
             .add_message::<adventure::ToggleModeRequest>()
             .init_gizmo_group::<designate::HiddenEdgeGizmos>()
             .add_message::<tiles::TileMirrorMsg>()
@@ -400,13 +404,19 @@ impl Plugin for CommanderPlugin {
                         designate::draw_designate_gizmos,
                     )
                         .chain(),
-                    selection::update_ground_pick,
+                    (
+                        selection::update_ground_pick,
+                        selection::fallback_ground_pick,
+                        move_order::update_path_preview,
+                        move_order::send_move_order,
+                        move_order::draw_paths,
+                    )
+                        .chain(),
                     selection::select_input.run_if(designate::no_tool_active),
                     follow::rekey_local_player,
                     selection::prune_selection,
                     selection::draw_selection_rings,
-                    minimap::rebuild_minimap_base,
-                    minimap::draw_minimap_overlay,
+                    (minimap::rebuild_minimap_base, minimap::draw_minimap_overlay).chain(),
                 )
                     .chain()
                     .after(super::interpolate::interpolate_transforms),
@@ -514,18 +524,37 @@ fn place_on_body(
     cam.placed = true;
 }
 
+/// The right press that started an orbit drag, for telling a click (a move
+/// order, `move_order`) from a turn. Written by
+/// [`hold_pointer_while_orbiting`].
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+pub struct RightPress {
+    /// Window position of the press while it is held.
+    pub at: Option<Vec2>,
+    /// Raw mouse motion since the press, pixels (summed lengths).
+    pub motion_px: f32,
+    /// On the frame the press ended only: its accumulated motion.
+    pub released: Option<f32>,
+}
+
 /// A right press inside the window (not on the game UI or an overlay) starts
 /// an orbit drag: the pointer is locked hidden ([`CursorPolicy::orbit`]) and
 /// kept where the press was, and stays there when the button is released.
 /// The turn itself reads raw mouse motion, which a warp does not produce.
 /// The warp is what holds it on X11 and Windows, where `Locked` falls back to
-/// `Confined` and the hidden pointer would otherwise wander.
+/// `Confined` and the hidden pointer would otherwise wander. The press and
+/// its motion are recorded in [`RightPress`].
 fn hold_pointer_while_orbiting(
     buttons: Res<ButtonInput<MouseButton>>,
+    motion: Res<AccumulatedMouseMotion>,
     mut window: Query<&mut Window, With<PrimaryWindow>>,
     mut policy: ResMut<CursorPolicy>,
+    mut press: ResMut<RightPress>,
     mut anchor: Local<Option<Vec2>>,
 ) {
+    if press.released.is_some() {
+        press.released = None;
+    }
     let Ok(mut window) = window.single_mut() else { return };
     if buttons.just_pressed(MouseButton::Right)
         && window.focused
@@ -533,9 +562,13 @@ fn hold_pointer_while_orbiting(
         && !policy.ui_pointer
     {
         *anchor = window.cursor_position();
+        *press = RightPress { at: *anchor, motion_px: 0.0, released: None };
     }
     let held = buttons.pressed(MouseButton::Right) && window.focused && !policy.blocks_game();
     let Some(at) = *anchor else { return };
+    if held && !buttons.just_pressed(MouseButton::Right) {
+        press.motion_px += motion.delta.length();
+    }
     // Only a real displacement is written: a `Window` change re-syncs the
     // whole window to winit.
     if window.cursor_position().is_none_or(|c| c.distance(at) > 0.5) {
@@ -543,6 +576,7 @@ fn hold_pointer_while_orbiting(
     }
     if !held {
         *anchor = None;
+        *press = RightPress { at: None, motion_px: 0.0, released: Some(press.motion_px) };
     }
     if policy.orbit != held {
         policy.orbit = held;

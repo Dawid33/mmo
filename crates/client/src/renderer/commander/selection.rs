@@ -44,8 +44,13 @@ impl Selection {
 /// The terrain point under the cursor: the region it lies in and the point in
 /// that region's local frame (sim units, as sim events use) — `None` off the
 /// loaded terrain. Orders and designations aim at it.
+///
+/// The flag is `true` for an exact hit on the loaded terrain. Where the ray
+/// meets none, [`fallback_ground_pick`] puts the pick on the plane `y =
+/// cam.ground_y` and marks it inexact (`false`): good for aiming a move order
+/// at unloaded ground, never for a designation.
 #[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct GroundPick(pub Option<(RegionId, Vec3)>);
+pub struct GroundPick(pub Option<(RegionId, Vec3)>, pub bool);
 
 /// The rubber-band box while a box drag is under way, window logical
 /// pixels; drawn by the HUD layer (`HudUi`, green fill + border).
@@ -152,6 +157,38 @@ pub fn update_ground_pick(
             PICK_STEP_M * unit,
             game::lod::LOD_HORIZON_UNITS,
         )?;
+        let region = RegionId::from_world(hit.x, hit.z);
+        Some((region, hit - Vec3::from_array(region.world_offset())))
+    })();
+}
+
+/// Where a ray from `origin` along `dir` crosses the plane at height `y`,
+/// in front of the origin.
+pub fn plane_hit(origin: Vec3, dir: Vec3, y: f32) -> Option<Vec3> {
+    let t = (y - origin.y) / dir.y;
+    (dir.y != 0.0 && t.is_finite() && t > 0.0).then(|| origin + dir * t)
+}
+
+/// After [`update_ground_pick`]: an exact pick is marked so; a miss falls
+/// back to the cursor ray's crossing of the camera's ground plane, inexact.
+pub fn fallback_ground_pick(
+    window: Query<&Window, With<PrimaryWindow>>,
+    view: Query<(&Camera, &Transform), With<CommanderView>>,
+    cam: Res<super::CommanderCamera>,
+    mut pick: ResMut<GroundPick>,
+) {
+    if pick.0.is_some() {
+        if !pick.1 {
+            pick.1 = true;
+        }
+        return;
+    }
+    pick.1 = false;
+    pick.0 = (|| {
+        let cursor = window.single().ok()?.cursor_position()?;
+        let (camera, tf) = view.single().ok()?;
+        let ray = camera.viewport_to_world(&GlobalTransform::from(*tf), cursor).ok()?;
+        let hit = plane_hit(ray.origin, *ray.direction, cam.ground_y)?;
         let region = RegionId::from_world(hit.x, hit.z);
         Some((region, hit - Vec3::from_array(region.world_offset())))
     })();

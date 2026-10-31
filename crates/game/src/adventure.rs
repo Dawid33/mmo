@@ -276,8 +276,9 @@ pub fn feet_tile(feet: Vector) -> TilePos {
 }
 
 /// The standable tile a body with feet at `feet` walks from: its own tile,
-/// else the nearest standable one in its column.
-fn current_tile(src: &impl TileSource, feet: Vector) -> Option<TilePos> {
+/// else the nearest standable one in its column. The client's path preview
+/// starts from the same tile.
+pub fn current_tile(src: &impl TileSource, feet: Vector) -> Option<TilePos> {
     let t = feet_tile(feet);
     if standable(src, t) {
         Some(t)

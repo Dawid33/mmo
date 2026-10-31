@@ -421,3 +421,41 @@ fn arrived_walker_with_out_of_reach_goal_is_dropped() {
     let e = *dst.data().player_entites.get(&CLIENT).expect("arrived");
     assert!(walker(&dst, e).is_none(), "an out-of-reach walk is dropped on arrival");
 }
+
+#[test]
+fn edge_toward_matches_move_to_plan() {
+    // A floor over the whole region, so every edge column is standable.
+    let here = RegionCoords::new(0, 0);
+    let (send, _recv) = crossbeam::channel::unbounded();
+    let mut region = Region::new(Rollback::new(Some(send.clone())), Some(send), here, None);
+    let size = game::REGION_SIZE;
+    region.with_data(|r| r.seed_terrain_genesis(floor_chunks(0.0..size, 0.0..size, 16)));
+    region.handle_event(GameEventKind::CreateClient(CLIENT)).unwrap();
+    let e = *region.data().player_entites.get(&CLIENT).unwrap();
+    region.forget_last_event();
+    region
+        .handle_event(GameEventKind::Order(CLIENT, Order::SetMode { mode: PlayMode::Adventure, at: Some(TILE) }))
+        .unwrap();
+    region.forget_last_event();
+    for _ in 0..5 {
+        tick(&mut region);
+    }
+    let from = game::current_tile(region.data(), feet_of_body(&region, e)).expect("standing");
+    for goal in [
+        Goal { region: RegionCoords::new(1, 0), column: [5, 30], y: None },
+        Goal { region: RegionCoords::new(0, -1), column: [40, 20], y: None },
+        Goal { region: RegionCoords::new(-1, 1), column: [60, 3], y: None },
+    ] {
+        let edge = edge_toward(region.data(), from, &goal, here).expect("an edge tile");
+        move_to(&mut region, goal);
+        let w = walker(&region, e).expect("MoveTo must start a walk");
+        assert_eq!(w.path.first(), Some(&from), "{goal:?}");
+        assert_eq!(w.path.last(), Some(&edge), "the sim walks to edge_toward's tile for {goal:?}");
+    }
+}
+
+fn feet_of_body(region: &Region, e: EntityKey) -> Vector {
+    let data = region.data();
+    let handle = data.ecs.rigidbody.try_get(e).unwrap();
+    feet_of(data.physics.bodies.get(handle).unwrap().translation())
+}
