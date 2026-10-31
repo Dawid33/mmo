@@ -1,0 +1,114 @@
+//! Following: the commander camera tracks the selected entity until the
+//! player pans away.
+//!
+//! The panel's Follow button (`slint_overlay`) sets [`Follow`] for the one
+//! selected entity — [`FollowTarget::LocalPlayer`] for the local body (whose
+//! sim key changes when a seam handoff re-creates it), otherwise
+//! [`FollowTarget::Entity`]. Any pan (WASD, arrows, screen edge, middle-drag,
+//! minimap) clears it; zoom and orbit do not.
+
+use bevy::prelude::*;
+use game::{EntityKey, RegionId};
+
+use super::selection::Selection;
+use super::{smooth, CommanderCamera, HEIGHT_SMOOTHING_S};
+use crate::renderer::bridge::{LocalBody, SimEntity, SimEntityMap};
+
+/// What the camera follows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FollowTarget {
+    /// The local body, by identity (its key changes across a handoff).
+    LocalPlayer,
+    /// Any other sim entity.
+    Entity(RegionId, EntityKey),
+}
+
+/// The current follow target, if any.
+#[derive(Resource, Default, Debug)]
+pub struct Follow(pub Option<FollowTarget>);
+
+/// Time constant of the focus easing onto the target, in seconds.
+pub const FOLLOW_SMOOTHING_S: f32 = 0.1;
+
+/// One frame of the focus easing from `focus` toward `target`
+/// (frame-rate independent, like the zoom's [`smooth`]).
+pub fn follow_step(focus: Vec2, target: Vec2, dt: f32) -> Vec2 {
+    Vec2::new(
+        smooth(focus.x, target.x, dt, FOLLOW_SMOOTHING_S),
+        smooth(focus.y, target.y, dt, FOLLOW_SMOOTHING_S),
+    )
+}
+
+/// Ease the focus (and the ground height) onto the followed entity. A
+/// missing `Entity` target ends following.
+pub fn follow_camera(
+    mut follow: ResMut<Follow>,
+    map: Res<SimEntityMap>,
+    transforms: Query<&GlobalTransform>,
+    body: Query<&GlobalTransform, With<LocalBody>>,
+    time: Res<Time>,
+    mut cam: ResMut<CommanderCamera>,
+) {
+    let Some(target) = follow.0 else { return };
+    let at = match target {
+        FollowTarget::LocalPlayer => body.iter().map(|gt| gt.translation()).find(|p| *p != Vec3::ZERO),
+        FollowTarget::Entity(region, key) => match map.0.get(&(region, key)).and_then(|e| transforms.get(*e).ok()) {
+            Some(gt) => Some(gt.translation()),
+            None => {
+                follow.0 = None;
+                return;
+            }
+        },
+    };
+    let Some(at) = at else { return };
+    let dt = time.delta_secs();
+    // Not clamped to the home bounds: panning is not either (Adventure's
+    // pan clamp is a later task).
+    cam.focus = follow_step(cam.focus, Vec2::new(at.x, at.z), dt);
+    cam.ground_y = smooth(cam.ground_y, at.y, dt, HEIGHT_SMOOTHING_S);
+}
+
+/// The local body's sim key changes on a seam handoff: carry the selection
+/// over so the player stays selected. Runs before `prune_selection`.
+pub fn rekey_local_player(
+    body: Query<&SimEntity, With<LocalBody>>,
+    mut selection: ResMut<Selection>,
+    mut last: Local<Option<(RegionId, EntityKey)>>,
+) {
+    let Some(now) = body.iter().next().map(|s| (s.region, s.key)) else { return };
+    if let Some(old) = last.replace(now) {
+        if old != now && selection.0.remove(&old) {
+            selection.0.insert(now);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn follow_step_converges() {
+        let mut focus = Vec2::ZERO;
+        for _ in 0..60 {
+            focus = follow_step(focus, Vec2::splat(100.0), 1.0 / 60.0);
+        }
+        assert!(focus.distance(Vec2::splat(100.0)) < 0.1, "{focus}");
+    }
+
+    #[test]
+    fn rekey_local_player() {
+        let a = (RegionId::from_world(0.0, 0.0), EntityKey::default());
+        let b = (RegionId::from_world(1.0e6, 0.0), EntityKey::default());
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Selection>()
+            .add_systems(Update, super::rekey_local_player);
+        let body = app.world_mut().spawn((LocalBody, SimEntity { region: a.0, key: a.1 })).id();
+        app.world_mut().resource_mut::<Selection>().0.insert(a);
+        app.update();
+        app.world_mut().entity_mut(body).insert(SimEntity { region: b.0, key: b.1 });
+        app.update();
+        assert_eq!(app.world().resource::<Selection>().0, [b].into_iter().collect());
+    }
+}

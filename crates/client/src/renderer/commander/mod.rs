@@ -29,6 +29,7 @@
 pub mod adventure;
 pub mod cut_entities;
 pub mod designate;
+pub mod follow;
 pub mod height;
 pub mod level;
 pub mod minimap;
@@ -363,6 +364,7 @@ impl Plugin for CommanderPlugin {
             .init_resource::<designate::DesignateState>()
             .init_resource::<designate::DragReadout>()
             .init_resource::<adventure::ClientPlayMode>()
+            .init_resource::<follow::Follow>()
             .add_message::<adventure::ToggleModeRequest>()
             .init_gizmo_group::<designate::HiddenEdgeGizmos>()
             .add_message::<tiles::TileMirrorMsg>()
@@ -386,7 +388,7 @@ impl Plugin for CommanderPlugin {
                     level::init_level,
                     level::step_level_input,
                     pan_and_zoom,
-                    follow_terrain,
+                    (follow_terrain, follow::follow_camera).chain(),
                     apply_camera_transform,
                     draw_orbit_pivot,
                     (
@@ -399,6 +401,7 @@ impl Plugin for CommanderPlugin {
                         .chain(),
                     selection::update_ground_pick,
                     selection::select_input.run_if(designate::no_tool_active),
+                    follow::rekey_local_player,
                     selection::prune_selection,
                     selection::draw_selection_rings,
                     minimap::rebuild_minimap_base,
@@ -581,6 +584,7 @@ fn draw_orbit_pivot(cam: Res<CommanderCamera>, mut gizmos: Gizmos<designate::Hid
 /// pitch and zoom.
 #[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 fn pan_and_zoom(
+    mut follow: ResMut<follow::Follow>,
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
@@ -630,6 +634,10 @@ fn pan_and_zoom(
     if buttons.pressed(MouseButton::Middle) && window.focused {
         step += drag_pan(motion.delta, cam.distance, FOV_Y_DEG.to_radians(), size.y, cam.pitch);
     }
+    // Any pan ends following; zoom and orbit do not.
+    if step != Vec2::ZERO && follow.0.is_some() {
+        follow.0 = None;
+    }
     let pan = ground_dir(step, cam.yaw);
     cam.focus += pan;
     // The turning point pans with the view, so it stays at the centre.
@@ -669,12 +677,17 @@ fn pan_and_zoom(
 /// Ease the focus height toward its baseline: the working level's floor when
 /// there is one, else the terrain.
 fn follow_terrain(
+    follow: Res<follow::Follow>,
     grid: Res<HeightGrid>,
     time: Res<Time>,
     working: Res<level::WorkingLevel>,
     tiles: Res<tiles::TileMirror>,
     mut cam: ResMut<CommanderCamera>,
 ) {
+    // `follow::follow_camera` owns the height while following.
+    if follow.0.is_some() {
+        return;
+    }
     let terrain = focus_ground_target(&grid, cam.focus);
     if let Some(target) = level::camera_baseline(terrain, level::level_floor_y(&working, tiles.region())) {
         cam.ground_y = smooth(cam.ground_y, target, time.delta_secs(), HEIGHT_SMOOTHING_S);

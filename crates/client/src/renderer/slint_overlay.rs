@@ -41,7 +41,7 @@ use slint_ui::wheel::{self, WheelInput, WheelPhase};
 use slint_ui::{GameUi, HudConfig, HudUi, Overlay, WorldMapConfig};
 use worldgen::tile_map::{play_blocker, rasterize, tile_info_lines};
 
-use super::bridge::{SimEntity, SimKind};
+use super::bridge::{LocalBody, SimEntity, SimKind};
 use super::commander::designate::{DesignateState, DragReadout, Tool, TOOL_KEYS};
 use super::commander::height::HeightGrid;
 use super::commander::level::{focus_surface, surface_level, WorkingLevel};
@@ -49,6 +49,7 @@ use super::commander::minimap;
 use super::commander::selection::{Selection, SelectionBand};
 use super::commander::tiles::TileMirror;
 use super::commander::adventure::{ClientPlayMode, ToggleModeRequest};
+use super::commander::follow::{Follow, FollowTarget};
 use super::commander::CommanderCamera;
 use super::cursor::CursorPolicy;
 use super::slint_composite::{SlintCompositePlugin, SlintLayerTextures};
@@ -105,6 +106,8 @@ pub enum UiAction {
     /// The panel's mode button: Fortress ↔ Adventure
     /// (`commander::adventure`).
     ToggleMode,
+    /// Follow the selected entity, or stop following.
+    ToggleFollow,
 }
 
 /// The region a Play request was sent for, until we are there with its region
@@ -422,6 +425,7 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_close_menu(push(UiAction::CloseMenu));
     ui.on_play(push(UiAction::Play));
     ui.on_toggle_mode(push(UiAction::ToggleMode));
+    ui.on_follow_clicked(push(UiAction::ToggleFollow));
     let queue = actions.clone();
     ui.on_select_tile(move |col, row| queue.borrow_mut().push(UiAction::SelectTile(col, row)));
     debug_assert_eq!(
@@ -746,6 +750,8 @@ fn apply_ui_actions(
     requests: Option<Res<ClientRequests>>,
     status: Res<HudStatus>,
     mut mode_toggles: Option<ResMut<Messages<ToggleModeRequest>>>,
+    mut follow: Option<ResMut<Follow>>,
+    local_body: Query<&SimEntity, With<LocalBody>>,
 ) {
     let (Some(actions), Some(slint)) = (actions, slint) else { return };
     let ui = slint.overlay.ui();
@@ -760,6 +766,15 @@ fn apply_ui_actions(
             UiAction::ToggleMode => {
                 if let Some(toggles) = mode_toggles.as_mut() {
                     toggles.write(ToggleModeRequest);
+                }
+            }
+            UiAction::ToggleFollow => {
+                let (Some(follow), Some(selection)) = (follow.as_mut(), selection.as_ref()) else { continue };
+                if follow.0.is_some() {
+                    follow.0 = None;
+                } else if let (1, Some(&(region, key))) = (selection.0.len(), selection.0.iter().next()) {
+                    let is_local = local_body.iter().any(|s| s.region == region && s.key == key);
+                    follow.0 = Some(if is_local { FollowTarget::LocalPlayer } else { FollowTarget::Entity(region, key) });
                 }
             }
             UiAction::OpenMap => to = Screens::open_map(),
@@ -961,6 +976,7 @@ struct ToolbarParams<'w, 's> {
     cam: Option<Res<'w, CommanderCamera>>,
     mirror: Option<Res<'w, TileMirror>>,
     mode: Option<Res<'w, ClientPlayMode>>,
+    follow: Option<Res<'w, Follow>>,
     window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     /// The cut the wheel's items were last captioned for; `None` before
     /// the first set.
@@ -975,6 +991,10 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     let adventure = p.mode.as_ref().is_some_and(|m| m.adventure());
     if ui.get_adventure() != adventure {
         ui.set_adventure(adventure);
+    }
+    let following = p.follow.as_ref().is_some_and(|f| f.0.is_some());
+    if ui.get_following() != following {
+        ui.set_following(following);
     }
     let available = p.mirror.as_ref().is_some_and(|m| m.region().is_some()) && !adventure;
     if ui.get_tools_available() != available {

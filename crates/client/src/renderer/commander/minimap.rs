@@ -89,6 +89,7 @@ impl Default for MinimapPixels {
 
 /// Left press / drag on the minimap → move the camera focus there.
 pub fn minimap_pointer(
+    mut follow: ResMut<super::follow::Follow>,
     buttons: Res<ButtonInput<MouseButton>>,
     window: Query<&Window, With<PrimaryWindow>>,
     policy: Res<CursorPolicy>,
@@ -110,6 +111,7 @@ pub fn minimap_pointer(
     }
     if let (true, Some(bounds)) = (pointer.dragging, cam.bounds) {
         cam.focus = screen_to_map(cursor, rect, bounds);
+        follow.0 = None;
     }
 }
 

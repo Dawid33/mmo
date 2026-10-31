@@ -25,6 +25,11 @@ export component GameUi inherits Window {
     in property <bool> adventure;
     callback toggle-mode();
 
+    // Follow: the camera tracks the one selected entity
+    // (commander/follow.rs).
+    in property <bool> following;
+    callback follow-clicked();
+
     // Fortress tools (crates/client/src/renderer/commander/designate.rs).
     // False with no home region (not joined yet).
     in property <bool> tools-available: true;
@@ -134,6 +139,11 @@ export component GameUi inherits Window {
                     text: "Clear selection";
                     enabled: root.selected-count > 0;
                     clicked => { root.clear-selection(); }
+                }
+                Button {
+                    text: root.following ? "Stop following" : "Follow";
+                    enabled: root.selected-count == 1 || root.following;
+                    clicked => { root.follow-clicked(); }
                 }
                 Button {
                     text: root.adventure ? "Fortress mode" : "Adventure mode";
