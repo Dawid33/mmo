@@ -111,7 +111,10 @@ export component GameUi inherits Window {
     // Top-right, clear of the minimap (bottom-left).
     if root.panel-open: panel := FrameFace {
         title: "Fortress";
-        width: 240px;
+        // Wide enough for the selection row ("Stop following" is its
+        // widest state).
+        width: max(240px, self.content-x + selection-row.preferred-width + Styles.frame.box.padding.right
+            + GraphicalSets.inset(Styles.frame.graphics).right);
         height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
             + GraphicalSets.inset(Styles.frame.graphics).bottom;
         x: root.width - self.width - 12px;
@@ -129,12 +132,18 @@ export component GameUi inherits Window {
                 style: Styles.caption-label;
                 text: "Priority " + root.priority + "  [1–7]";
             }
+            // A flow never wraps, and the panel is pinned to the window's
+            // right edge: a row wider than the panel runs off screen.
+            Button {
+                text: root.adventure ? "Fortress mode" : "Adventure mode";
+                clicked => { root.toggle-mode(); }
+            }
             LabelFace {
                 style: Styles.caption-label;
                 text: root.selected-count == 0 ? "Nothing selected" : "Selected: " + root.selected-count;
             }
             for line in root.selection-lines: LabelFace { text: line; }
-            HorizontalFlow {
+            selection-row := HorizontalFlow {
                 Button {
                     text: "Clear selection";
                     enabled: root.selected-count > 0;
@@ -144,10 +153,6 @@ export component GameUi inherits Window {
                     text: root.following ? "Stop following" : "Follow";
                     enabled: root.selected-count == 1 || root.following;
                     clicked => { root.follow-clicked(); }
-                }
-                Button {
-                    text: root.adventure ? "Fortress mode" : "Adventure mode";
-                    clicked => { root.toggle-mode(); }
                 }
             }
         }
