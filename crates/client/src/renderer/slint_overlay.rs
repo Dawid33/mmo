@@ -310,7 +310,7 @@ pub fn drain_ui_updates(updates: Res<UiUpdates>, mut cursor_policy: ResMut<Curso
     let Some(receiver) = updates.0.as_ref() else { return };
     while let Ok(update) = receiver.try_recv() {
         match update {
-            game::UiUpdate::Hotbar(_) => {}
+            game::UiUpdate::Hotbar(_) | game::UiUpdate::PlayMode(_) => {}
             game::UiUpdate::SetCursorGrab(grab) => cursor_policy.sim_grab = grab,
         }
     }

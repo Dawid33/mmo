@@ -49,6 +49,24 @@ pub enum UiUpdate {
     /// The sim asks for the cursor to be grabbed (or released, while a menu
     /// such as the inventory is open).
     SetCursorGrab(bool),
+    /// The local client's play mode; sent only when it changes.
+    PlayMode(crate::PlayMode),
+}
+
+/// The local client's play mode as `UiUpdate::PlayMode`, only when it
+/// differs from `*prev` (which it then updates). `*prev` starts at the
+/// default (Fortress), so nothing is sent until the mode first changes.
+/// Unknown client → Fortress.
+pub fn play_mode_update(
+    prev: &mut crate::PlayMode,
+    data: &crate::GameData,
+    client: crate::ClientId,
+) -> Option<UiUpdate> {
+    let mode = data.clients.get(&client).map(|c| c.mode).unwrap_or_default();
+    (mode != *prev).then(|| {
+        *prev = mode;
+        UiUpdate::PlayMode(mode)
+    })
 }
 
 /// Project the local player's authoritative data into its hotbar. Pure and

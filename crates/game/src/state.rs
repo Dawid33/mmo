@@ -154,6 +154,9 @@ impl Inventory {
 pub struct Client {
     pub input: InputState,
     pub fps_cam_mode: bool,
+    /// Fortress (commander camera) or Adventure (one body walked by
+    /// orders); `adventure.rs`.
+    pub mode: crate::PlayMode,
     pub inventory: Inventory,
     pub inventory_open: bool,
 }
@@ -989,15 +992,14 @@ impl Rollback {
         self.create_player_at_safe(client_id, self.spawn_xz());
     }
 
-    /// [`Self::create_player_safe`] over region-local `xz` (voxel units).
-    pub fn create_player_at_safe(&mut self, client_id: ClientId, xz: (f32, f32)) {
-        let (spawn_x, spawn_z) = xz;
-        // Spawn on the terrain surface at the given region-local column, clear
-        // of the capsule — real terrain has real elevation, so the old
-        // hardcoded flat-floor height would bury the player. `surface + 1` is
-        // the surface voxel's top face; capsule half-extent + clearance sits
-        // the body above it. Falls back only if the column is all air.
-        let spawn_y = match self.surface_voxel_y(spawn_x as i32, spawn_z as i32) {
+    /// Body-centre height a player spawns at over region-local `xz` (voxel
+    /// units): on the terrain surface, clear of the capsule — real terrain
+    /// has real elevation, so a hardcoded flat-floor height would bury the
+    /// player. `surface + 1` is the surface voxel's top face; capsule
+    /// half-extent + clearance sits the body above it. Falls back only if
+    /// the column is all air.
+    pub fn player_spawn_y(&self, (x, z): (f32, f32)) -> f32 {
+        match self.surface_voxel_y(x as i32, z as i32) {
             Some(surface) => {
                 (surface + 1) as f32
                     + PLAYER_CAPSULE_HALF_HEIGHT
@@ -1005,7 +1007,13 @@ impl Rollback {
                     + PLAYER_SPAWN_CLEARANCE
             }
             None => PLAYER_SPAWN_FALLBACK_Y,
-        };
+        }
+    }
+
+    /// [`Self::create_player_safe`] over region-local `xz` (voxel units).
+    pub fn create_player_at_safe(&mut self, client_id: ClientId, xz: (f32, f32)) {
+        let (spawn_x, spawn_z) = xz;
+        let spawn_y = self.player_spawn_y(xz);
         let e = self.ecs.create_entity_safe();
         let position = Pose::from_translation(Vector::new(spawn_x as f32, spawn_y as f32, spawn_z as f32));
         let body = RigidBodyBuilder::kinematic_position_based()

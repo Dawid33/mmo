@@ -134,6 +134,11 @@ pub enum Order {
     Erase { area: TileBox, only: Option<DesignationKind> },
     CancelOp(OpId),
     DevCompleteAll,
+    /// Switch the issuing client's play mode; `at` is read only when
+    /// entering Adventure (the tile to put the body on).
+    SetMode { mode: crate::PlayMode, at: Option<TilePos> },
+    /// Walk the issuing client's adventurer to a goal.
+    MoveTo(crate::Goal),
 }
 
 /// Why a tile refuses a designation.
@@ -313,6 +318,9 @@ impl Rollback {
                 self.set_designations_safe(changes);
             }
             Order::DevCompleteAll => self.dev_complete_all_safe(),
+            Order::SetMode { mode, at } => return self.set_play_mode_safe(client, mode, at),
+            // Not walked yet (Task 3).
+            Order::MoveTo(_) => return false,
         }
         true
     }

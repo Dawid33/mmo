@@ -97,6 +97,7 @@ pub struct GameInstanceManager {
     ui_update_send: Sender<game::UiUpdate>,
     /// Last hotbar emitted; the next projection is sent only if it differs.
     prev_hotbar: game::HotbarView,
+    prev_play_mode: game::PlayMode,
     /// Last-emitted cursor-grab intent, for edge-triggered SetCursorGrab.
     last_cursor_grab: bool,
     /// Shared debug toggles; the render thread's F3 dev panel flips them.
@@ -505,6 +506,7 @@ impl GameInstanceManager {
             last_hud_status: None,
             ui_update_send,
             prev_hotbar: game::HotbarView::default(),
+            prev_play_mode: game::PlayMode::default(),
             last_cursor_grab: true,
             debug_flags,
             collider_debug: game::ColliderDebug::default(),
@@ -986,6 +988,11 @@ impl GameInstanceManager {
         if hotbar != self.prev_hotbar {
             let _ = self.ui_update_send.send(game::UiUpdate::Hotbar(hotbar.clone()));
             self.prev_hotbar = hotbar;
+        }
+        if let Some(update) =
+            game::play_mode_update(&mut self.prev_play_mode, self.world.as_ref().unwrap().data(&home), client_id)
+        {
+            let _ = self.ui_update_send.send(update);
         }
 
         // Cursor grab follows inventory-open: released while a menu is open.

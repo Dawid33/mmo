@@ -35,11 +35,12 @@ use game::{state_hash, GameEventKind, InputEvent, Key, Region, RegionCoords};
 /// Then for cell mode's removal (16 only; 2 still needs a re-record).
 /// Then for the `Ecs` `voxel_body` component slot (`game::voxel_body`;
 /// hashed layout only, no body in the scene) — both sizes.
+/// Then for `Client.mode` (`game::adventure`; 16 only).
 /// Pinned per sim-chunk size (`game::CHUNK_BLOCKS`): the same world splits
 /// into other chunk entities, bodies and colliders at 2 and 16 blocks.
 const SCENE_HASH: u32 = match game::CHUNK_BLOCKS {
     2 => 0x380C_FBC3,
-    16 => 0x9D34_97F1,
+    16 => 0x0525_7A65,
     _ => 0,
 };
 /// Ticks of scripted input.
