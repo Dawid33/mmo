@@ -1,5 +1,8 @@
 import { Button, FrameFace, GraphicalSets, Styles, VerticalFlow } from "@widgets";
 import { MainMenu } from "main-menu.slint";
+import { KnobRow, MapGenerator } from "map-generator.slint";
+
+export { KnobRow }
 
 // A screen that a later task fills in: a titled frame with a Back button.
 component PlaceholderScreen {
@@ -53,8 +56,52 @@ export component FrontendUi inherits Window {
     out property <length> load-button-y: menu.load-button-y;
     out property <length> exit-button-x: menu.exit-button-x;
     out property <length> exit-button-y: menu.exit-button-y;
-    out property <length> back-button-x: placeholder.back-button-x;
-    out property <length> back-button-y: placeholder.back-button-y;
+    // The shown screen's Back.
+    out property <length> back-button-x: root.screen == 1 ? generator.back-x : placeholder.back-button-x;
+    out property <length> back-button-y: root.screen == 1 ? generator.back-y : placeholder.back-button-y;
+
+    // The map generator (screen 1, map-generator.slint), forwarded with a
+    // `gen-` prefix; its Back is `back` above.
+    in property <[string]> gen-presets <=> generator.presets;
+    in-out property <int> gen-preset <=> generator.preset;
+    in property <string> gen-preset-description <=> generator.preset-description;
+    in-out property <string> gen-seed-text <=> generator.seed-text;
+    in property <bool> gen-seed-invalid <=> generator.seed-invalid;
+    in-out property <string> gen-name-text <=> generator.name-text;
+    in property <[string]> gen-tabs <=> generator.tabs;
+    in-out property <int> gen-tab <=> generator.tab;
+    in property <[KnobRow]> gen-rows <=> generator.rows;
+    in property <image> gen-preview <=> generator.preview;
+    in property <bool> gen-preview-busy <=> generator.preview-busy;
+    in property <[string]> gen-stats-lines <=> generator.stats-lines;
+    in property <[string]> gen-layers <=> generator.layers;
+    in-out property <int> gen-layer <=> generator.layer;
+    in-out property <bool> gen-auto-refresh <=> generator.auto-refresh;
+    in property <bool> gen-forging <=> generator.forging;
+    in property <float> gen-forge-progress <=> generator.forge-progress;
+    in property <string> gen-forge-label <=> generator.forge-label;
+    in property <string> gen-play-error <=> generator.play-error;
+    callback gen-preset-chosen <=> generator.preset-chosen;
+    callback gen-seed-edited <=> generator.seed-edited;
+    callback gen-shuffle-seed <=> generator.shuffle-seed;
+    callback gen-knob-edited <=> generator.knob-edited;
+    callback gen-knob-reset <=> generator.knob-reset;
+    callback gen-tab-changed <=> generator.tab-changed;
+    callback gen-layer-chosen <=> generator.layer-chosen;
+    callback gen-refresh <=> generator.refresh;
+    callback gen-play <=> generator.play;
+    callback gen-cancel-forge <=> generator.cancel-forge;
+    out property <length> gen-preset-x: generator.preset-x;
+    out property <length> gen-preset-top: generator.preset-top;
+    out property <length> gen-preset-height: generator.preset-height;
+    out property <length> gen-rows-y: generator.rows-y;
+    out property <length> gen-row-height: generator.row-height;
+    out property <length> gen-slider-x: generator.slider-x;
+    out property <length> gen-slider-width: generator.slider-width;
+    out property <length> gen-play-x: generator.play-x;
+    out property <length> gen-play-y: generator.play-y;
+    out property <length> gen-cancel-x: generator.cancel-x;
+    out property <length> gen-cancel-y: generator.cancel-y;
 
     menu := MainMenu {
         visible: root.shown && root.screen == 0;
@@ -67,11 +114,17 @@ export component FrontendUi inherits Window {
         load-world => { root.load-world(); }
         exit => { root.exit(); }
     }
-    placeholder := PlaceholderScreen {
-        visible: root.shown && root.screen != 0;
+    generator := MapGenerator {
+        visible: root.shown && root.screen == 1;
         width: root.width;
         height: root.height;
-        title: root.screen == 1 ? "New world" : root.screen == 2 ? "Load world" : "Starting";
+        back => { root.back(); }
+    }
+    placeholder := PlaceholderScreen {
+        visible: root.shown && root.screen >= 2;
+        width: root.width;
+        height: root.height;
+        title: root.screen == 2 ? "Load world" : "Starting";
         back => { root.back(); }
     }
 }

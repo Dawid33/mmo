@@ -4,8 +4,11 @@
 //!
 //! The screen shown follows [`AppState`] (menu 0, generator 1, load 2,
 //! starting 3); the layer draws only while [`frontend_owns`] says the frontend
-//! owns the screen. Generator, load and starting are placeholders (title +
-//! Back) until Tasks 12-14.
+//! owns the screen. The generator lives in [`generator`] (native only); load
+//! and starting are placeholders (title + Back) until Tasks 13-14.
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod generator;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -64,6 +67,8 @@ impl Plugin for FrontendPlugin {
         .init_resource::<LastSessionError>()
         .add_systems(OnEnter(AppState::MainMenu), refresh_can_load)
         .add_systems(Update, (apply_frontend_actions, push_frontend_state).chain());
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(generator::GeneratorPlugin);
     }
 }
 
@@ -78,6 +83,8 @@ fn connect_frontend(ui: &FrontendUi, world: &mut World) {
     ui.on_exit(push(FrontendAction::Exit));
     ui.on_back(push(FrontendAction::Back));
     world.insert_non_send(FrontendActions(actions));
+    #[cfg(not(target_arch = "wasm32"))]
+    generator::connect(ui, world);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

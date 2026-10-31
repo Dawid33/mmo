@@ -76,6 +76,17 @@ pub struct Embarked(pub bool);
 #[derive(Resource, Default, Clone, Debug, PartialEq, Eq)]
 pub struct LastSessionError(pub Option<String>);
 
+/// The world the next session plays, set by the map generator's Play (and
+/// the Load screen) before `AppState::Starting`; Task 9 starts its server.
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+pub struct PendingWorld {
+    /// `worlds/<slug>/`.
+    pub entry_dir: std::path::PathBuf,
+    /// Its `terrain.world`.
+    pub terrain: std::path::PathBuf,
+    pub name: String,
+}
+
 /// The menu screens' camera; see the module docs for when it exists.
 #[derive(Component, Clone, Copy, Default, Debug)]
 pub struct FrontendCamera;

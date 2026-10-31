@@ -1,0 +1,417 @@
+// The map generator (New world), laid out like Factorio's: preset, seed and
+// name along the top, the preset's description under them, the knob tabs on
+// the left, the preview on the right, Back and a wide green Play along the
+// bottom. The client (crates/client/src/frontend/generator.rs) builds every
+// list from the forge's knob table and owns all state; this screen only
+// reports what the player did.
+//
+// Binding rule (controls.slint): the Slider/Dropdown/Tabs/TextField values
+// the player edits are bound TWO-WAY.
+
+import { Button, Checkbox, FrameFace, GraphicalSets, LabelFace, ProgressbarFace, Styles, TextField } from "@widgets";
+import { Dropdown, Slider, Tabs } from "controls.slint";
+
+// One row of the current tab: a forge knob, or one of the generator's own
+// settings (preview / world cell size).
+export struct KnobRow {
+    key: string,
+    label: string,
+    help: string,
+    min: float,
+    max: float,
+    value: float,
+    default: float,
+    // Slider step; 0 = continuous.
+    step: float,
+    is-choice: bool,
+    choices: [string],
+}
+
+component KnobRowView inherits TouchArea {
+    in property <KnobRow> knob;
+    in property <length> label-width;
+    in property <length> value-width;
+    in property <length> reset-width;
+    callback edited(string, float);
+    callback reset(string);
+
+    // A knob's value as a short number: whole above 1000, else 3 significant digits.
+    pure function short-number(v: float) -> string {
+        abs(v) >= 1000 ? round(v) : v == 0 ? "0" : v.to-precision(3)
+    }
+
+    // The control's own copies, kept in step with `row.value` (a model row
+    // can't be two-way bound to a control without writing it back).
+    property <float> slider-value: root.knob.value;
+    property <int> choice: round(root.knob.value);
+    changed knob => {
+        slider-value = root.knob.value;
+        choice = round(root.knob.value);
+    }
+
+    LabelFace {
+        x: 0;
+        y: 0;
+        width: root.label-width - 8px;
+        height: root.height;
+        text: root.knob.label;
+    }
+    if !root.knob.is-choice: Slider {
+        x: root.label-width;
+        y: (root.height - self.preferred-height) / 2;
+        width: root.width - root.label-width - root.value-width - root.reset-width - 16px;
+        height: self.preferred-height;
+        minimum: root.knob.min;
+        maximum: root.knob.max;
+        step: root.knob.step;
+        value <=> root.slider-value;
+        edited(v) => { root.edited(root.knob.key, v); }
+    }
+    if !root.knob.is-choice: LabelFace {
+        x: root.width - root.value-width - root.reset-width - 8px;
+        y: 0;
+        width: root.value-width;
+        height: root.height;
+        text: root.short-number(root.slider-value);
+    }
+    if root.knob.is-choice: Dropdown {
+        x: root.label-width;
+        y: (root.height - self.preferred-height) / 2;
+        width: root.width - root.label-width - root.reset-width - 8px;
+        height: self.preferred-height;
+        items: root.knob.choices;
+        selected <=> root.choice;
+        chosen(i) => { root.edited(root.knob.key, i); }
+    }
+    Button {
+        x: root.width - root.reset-width;
+        y: (root.height - 28px) / 2;
+        width: root.reset-width;
+        height: 28px;
+        text: "Reset";
+        visible: root.knob.value != root.knob.default;
+        clicked => { root.reset(root.knob.key); }
+    }
+}
+
+export component MapGenerator {
+    in property <[string]> presets;
+    in-out property <int> preset;
+    in property <string> preset-description;
+    in-out property <string> seed-text;
+    // The seed box's text is not a seed: the box is tinted red.
+    in property <bool> seed-invalid;
+    in-out property <string> name-text;
+    in property <[string]> tabs;
+    in-out property <int> tab;
+    in property <[KnobRow]> rows;
+    in property <image> preview;
+    in property <bool> preview-busy;
+    in property <[string]> stats-lines;
+    in property <[string]> layers;
+    in-out property <int> layer;
+    in-out property <bool> auto-refresh: true;
+    in property <bool> forging;
+    in property <float> forge-progress;
+    in property <string> forge-label;
+    // Why the last Play failed; "" when it did not.
+    in property <string> play-error;
+
+    callback preset-chosen(int);
+    callback seed-edited(string);
+    callback shuffle-seed();
+    callback knob-edited(string, float);
+    callback knob-reset(string);
+    callback tab-changed(int);
+    callback layer-chosen(int);
+    callback refresh();
+    callback back();
+    callback play();
+    callback cancel-forge();
+
+    // Where things are, for the headless tests (absolute, logical px).
+    out property <length> preset-x: preset-box.absolute-position.x + preset-box.width / 2;
+    out property <length> preset-top: preset-box.absolute-position.y;
+    out property <length> preset-height: preset-box.height;
+    out property <length> rows-y: rows-anchor.absolute-position.y;
+    out property <length> row-height: 32px;
+    out property <length> slider-x: rows-anchor.absolute-position.x + label-width;
+    out property <length> slider-width: rows-anchor.width - label-width - value-width - reset-width - 16px;
+    out property <length> play-x: play-btn.absolute-position.x + play-btn.width / 2;
+    out property <length> play-y: play-btn.absolute-position.y + play-btn.height / 2;
+    out property <length> back-x: back-btn.absolute-position.x + back-btn.width / 2;
+    out property <length> back-y: back-btn.absolute-position.y + back-btn.height / 2;
+    out property <length> cancel-x: cancel-btn.absolute-position.x + cancel-btn.width / 2;
+    out property <length> cancel-y: cancel-btn.absolute-position.y + cancel-btn.height / 2;
+
+    property <length> margin: 24px;
+    property <length> gap: 12px;
+    property <length> bar-height: 32px;
+    property <length> label-width: 210px;
+    property <length> value-width: 70px;
+    property <length> reset-width: 60px;
+    property <string> hover-help;
+
+    changed seed-text => { root.seed-edited(root.seed-text); }
+
+    frame := FrameFace {
+        title: "New world";
+        x: root.margin;
+        y: root.margin;
+        width: root.width - 2 * root.margin;
+        height: root.height - 2 * root.margin;
+
+        property <length> left: self.content-x;
+        property <length> right: self.content-right;
+        property <length> top: self.content-y;
+        property <length> bottom: self.height - Styles.frame.box.padding.bottom - GraphicalSets.inset(Styles.frame.graphics).bottom;
+        property <length> body-top: top + root.bar-height + 6px + 24px + 6px;
+        property <length> body-bottom: bottom - root.bar-height - root.gap;
+        property <length> split: left + (right - left) * 0.52;
+
+        // Top bar: preset, seed (+ shuffle), name.
+        LabelFace {
+            x: frame.left;
+            y: frame.top;
+            width: 52px;
+            height: root.bar-height;
+            text: "Preset";
+        }
+        preset-box := Dropdown {
+            x: frame.left + 56px;
+            y: frame.top + (root.bar-height - self.preferred-height) / 2;
+            width: 180px;
+            height: self.preferred-height;
+            items: root.presets;
+            selected <=> root.preset;
+            chosen(i) => { root.preset-chosen(i); }
+        }
+        LabelFace {
+            x: frame.left + 256px;
+            y: frame.top;
+            width: 40px;
+            height: root.bar-height;
+            text: "Seed";
+        }
+        TextField {
+            x: frame.left + 298px;
+            y: frame.top + (root.bar-height - self.preferred-height) / 2;
+            width: 190px;
+            height: self.preferred-height;
+            style: root.seed-invalid ? Styles.invalid-value-textfield : Styles.textbox;
+            text <=> root.seed-text;
+        }
+        Button {
+            x: frame.left + 494px;
+            y: frame.top + (root.bar-height - 28px) / 2;
+            width: 84px;
+            height: 28px;
+            text: "Shuffle";
+            clicked => { root.shuffle-seed(); }
+        }
+        LabelFace {
+            x: frame.left + 598px;
+            y: frame.top;
+            width: 46px;
+            height: root.bar-height;
+            text: "Name";
+        }
+        TextField {
+            x: frame.left + 646px;
+            y: frame.top + (root.bar-height - self.preferred-height) / 2;
+            width: min(240px, frame.right - self.x);
+            height: self.preferred-height;
+            text <=> root.name-text;
+        }
+        LabelFace {
+            x: frame.left;
+            y: frame.top + root.bar-height + 6px;
+            width: frame.right - frame.left;
+            height: 24px;
+            text: root.preset-description;
+        }
+
+        // Left: the knob tabs, and the hovered row's help under them.
+        Tabs {
+            x: frame.left;
+            y: frame.body-top;
+            width: frame.split - frame.left - root.gap;
+            height: frame.body-bottom - frame.body-top;
+            tabs: root.tabs;
+            selected <=> root.tab;
+            changed(i) => { root.tab-changed(i); }
+
+            rows-anchor := Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height - 28px;
+                clip: true;
+                for row[i] in root.rows: KnobRowView {
+                    x: 0;
+                    y: i * root.row-height;
+                    width: parent.width;
+                    height: root.row-height;
+                    knob: row;
+                    label-width: root.label-width;
+                    value-width: root.value-width;
+                    reset-width: root.reset-width;
+                    edited(key, v) => { root.knob-edited(key, v); }
+                    reset(key) => { root.knob-reset(key); }
+                    changed has-hover => {
+                        if self.has-hover { root.hover-help = row.help; }
+                    }
+                }
+            }
+            LabelFace {
+                x: 0;
+                y: parent.height - 26px;
+                width: parent.width;
+                height: 24px;
+                text: root.hover-help;
+            }
+        }
+
+        // Right: layer, auto-refresh, refresh; the preview; its numbers.
+        property <length> pane-x: frame.split;
+        property <length> pane-width: frame.right - frame.split;
+        property <length> stats-height: 4 * 22px;
+        property <length> image-top: frame.body-top + root.bar-height + 6px;
+        property <length> image-size: max(0px, min(pane-width, frame.body-bottom - image-top - stats-height - 6px));
+
+        LabelFace {
+            x: frame.pane-x;
+            y: frame.body-top;
+            width: 48px;
+            height: root.bar-height;
+            text: "Layer";
+        }
+        Dropdown {
+            x: frame.pane-x + 50px;
+            y: frame.body-top + (root.bar-height - self.preferred-height) / 2;
+            width: 170px;
+            height: self.preferred-height;
+            items: root.layers;
+            selected <=> root.layer;
+            chosen(i) => { root.layer-chosen(i); }
+        }
+        Checkbox {
+            x: frame.pane-x + 236px;
+            y: frame.body-top + (root.bar-height - self.preferred-height) / 2;
+            width: self.preferred-width;
+            height: self.preferred-height;
+            text: "Auto-refresh";
+            checked <=> root.auto-refresh;
+        }
+        Button {
+            x: frame.right - 96px;
+            y: frame.body-top + (root.bar-height - 28px) / 2;
+            width: 96px;
+            height: 28px;
+            text: "Refresh";
+            clicked => { root.refresh(); }
+        }
+        Rectangle {
+            x: frame.pane-x + (frame.pane-width - frame.image-size) / 2;
+            y: frame.image-top;
+            width: frame.image-size;
+            height: frame.image-size;
+            background: #1a1a1a;
+            Image {
+                width: 100%;
+                height: 100%;
+                source: root.preview;
+                image-fit: contain;
+            }
+            if root.preview-busy: Rectangle {
+                width: 100%;
+                height: 100%;
+                background: #00000060;
+                LabelFace {
+                    x: (parent.width - self.preferred-width) / 2;
+                    y: (parent.height - self.preferred-height) / 2;
+                    width: self.preferred-width;
+                    height: self.preferred-height;
+                    text: "Generating…";
+                }
+            }
+        }
+        for line[i] in root.stats-lines: LabelFace {
+            x: frame.pane-x;
+            y: frame.image-top + frame.image-size + 6px + i * 22px;
+            width: frame.pane-width;
+            height: 22px;
+            text: line;
+        }
+
+        // Bottom: Back, the last Play error, Play.
+        back-btn := Button {
+            x: frame.left;
+            y: frame.bottom - root.bar-height;
+            width: 140px;
+            height: root.bar-height;
+            style: Styles.back-button;
+            text: "Back";
+            clicked => { root.back(); }
+        }
+        LabelFace {
+            x: frame.left + 160px;
+            y: frame.bottom - root.bar-height;
+            width: max(0px, frame.right - frame.left - 160px - 260px - root.gap);
+            height: root.bar-height;
+            style: Styles.bold-red-label;
+            text: root.play-error;
+        }
+        play-btn := Button {
+            x: frame.right - 260px;
+            y: frame.bottom - root.bar-height;
+            width: 260px;
+            height: root.bar-height;
+            style: Styles.confirm-button;
+            text: "Play";
+            clicked => { root.play(); }
+        }
+    }
+
+    // While the world is forged: everything else is under a modal.
+    Rectangle {
+        visible: root.forging;
+        width: root.width;
+        height: root.height;
+        background: #00000080;
+        TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+        modal := FrameFace {
+            title: "Creating world";
+            width: 440px;
+            height: self.content-y + 28px + 8px + 24px + 12px + 28px + Styles.frame.box.padding.bottom
+                + GraphicalSets.inset(Styles.frame.graphics).bottom;
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            LabelFace {
+                x: modal.content-x;
+                y: modal.content-y;
+                width: modal.content-right - modal.content-x;
+                height: 28px;
+                text: root.forge-label;
+            }
+            ProgressbarFace {
+                x: modal.content-x;
+                y: modal.content-y + 36px;
+                width: modal.content-right - modal.content-x;
+                height: 24px;
+                value: root.forge-progress;
+            }
+            cancel-btn := Button {
+                x: modal.content-right - 120px;
+                y: modal.content-y + 72px;
+                width: 120px;
+                height: 28px;
+                text: "Cancel";
+                clicked => { root.cancel-forge(); }
+            }
+        }
+    }
+}

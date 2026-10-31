@@ -117,3 +117,119 @@ fn placeholder_screens_go_back() {
         assert_eq!(back.get(), screen as u32, "screen {screen}");
     }
 }
+
+// --- The map generator (screen 1) ---
+
+use slint_ui::slint::{ModelRc, SharedString, VecModel};
+use slint_ui::KnobRow;
+
+fn generator() -> Overlay<FrontendUi> {
+    let mut overlay = overlay();
+    overlay.ui().set_screen(1);
+    let strings = |items: &[&str]| -> ModelRc<SharedString> {
+        ModelRc::new(VecModel::from(items.iter().map(|s| SharedString::from(*s)).collect::<Vec<_>>()))
+    };
+    overlay.ui().set_gen_presets(strings(&["Default", "Archipelago", "Island arc", "Custom"]));
+    overlay.ui().set_gen_preset(0);
+    overlay.ui().set_gen_tabs(strings(&["Land", "Mountains", "Water", "Geology", "Advanced"]));
+    overlay.ui().set_gen_layers(strings(&["Relief", "Rivers"]));
+    let row = KnobRow {
+        key: "uplift".into(),
+        label: "Uplift rate".into(),
+        help: "Peak rock uplift.".into(),
+        min: 0.0,
+        max: 1.0,
+        value: 0.5,
+        default: 0.5,
+        step: 0.0,
+        is_choice: false,
+        choices: strings(&[]),
+    };
+    overlay.ui().set_gen_rows(ModelRc::new(VecModel::from(vec![row])));
+    overlay.render();
+    overlay
+}
+
+fn drag(overlay: &mut Overlay<FrontendUi>, from: (f32, f32), to: (f32, f32)) {
+    let start = LogicalPosition::new(from.0, from.1);
+    let end = LogicalPosition::new(to.0, to.1);
+    overlay.dispatch(WindowEvent::PointerMoved { position: start });
+    overlay.dispatch(WindowEvent::PointerPressed { position: start, button: PointerEventButton::Left });
+    overlay.render();
+    overlay.dispatch(WindowEvent::PointerMoved { position: end });
+    overlay.render();
+    overlay.dispatch(WindowEvent::PointerReleased { position: end, button: PointerEventButton::Left });
+    overlay.render();
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn knob_row_drag_fires_knob_edited() {
+    let mut overlay = generator();
+    let edits = Rc::new(std::cell::RefCell::new(Vec::<(String, f32)>::new()));
+    let e = edits.clone();
+    overlay.ui().on_gen_knob_edited(move |key, v| e.borrow_mut().push((key.to_string(), v)));
+    let ui = overlay.ui();
+    let (x, w) = (ui.get_gen_slider_x(), ui.get_gen_slider_width());
+    let y = ui.get_gen_rows_y() + ui.get_gen_row_height() / 2.0;
+    assert!(w > 50.0, "slider width {w}");
+    drag(&mut overlay, (x + 0.25 * w, y), (x + 0.75 * w, y));
+    let edits = edits.borrow();
+    assert!(edits.len() >= 2, "edits {edits:?}");
+    assert!(edits.iter().all(|(k, _)| k == "uplift"));
+    let last = edits.last().unwrap().1;
+    assert!((last - 0.75).abs() < 0.02, "last value {last}");
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn preset_dropdown_fires_preset_chosen() {
+    let mut overlay = generator();
+    let chosen = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let c = chosen.clone();
+    overlay.ui().on_gen_preset_chosen(move |i| c.borrow_mut().push(i));
+    let ui = overlay.ui();
+    let (x, top, h) = (ui.get_gen_preset_x(), ui.get_gen_preset_top(), ui.get_gen_preset_height());
+    click(&mut overlay, x, top + h / 2.0);
+    assert!(chosen.borrow().is_empty());
+    // Items are 28 px under the button: the second one.
+    click(&mut overlay, x, top + h + 4.0 + 1.5 * 28.0);
+    assert_eq!(*chosen.borrow(), [1]);
+    assert_eq!(overlay.ui().get_gen_preset(), 1);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn play_and_back_fire() {
+    let mut overlay = generator();
+    let (play, back) = (counter(), counter());
+    let (p, b) = (play.clone(), back.clone());
+    overlay.ui().on_gen_play(move || p.set(p.get() + 1));
+    overlay.ui().on_back(move || b.set(b.get() + 1));
+    let (px, py) = (overlay.ui().get_gen_play_x(), overlay.ui().get_gen_play_y());
+    let (bx, by) = (overlay.ui().get_back_button_x(), overlay.ui().get_back_button_y());
+    click(&mut overlay, px, py);
+    assert_eq!((play.get(), back.get()), (1, 0));
+    click(&mut overlay, bx, by);
+    assert_eq!((play.get(), back.get()), (1, 1));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn forging_is_modal_and_cancel_fires() {
+    let mut overlay = generator();
+    let (play, cancel) = (counter(), counter());
+    let (p, c) = (play.clone(), cancel.clone());
+    overlay.ui().on_gen_play(move || p.set(p.get() + 1));
+    overlay.ui().on_gen_cancel_forge(move || c.set(c.get() + 1));
+    overlay.ui().set_gen_forging(true);
+    overlay.ui().set_gen_forge_progress(0.3);
+    overlay.ui().set_gen_forge_label("Eroding 150 / 500".into());
+    overlay.render();
+    let (px, py) = (overlay.ui().get_gen_play_x(), overlay.ui().get_gen_play_y());
+    click(&mut overlay, px, py);
+    assert_eq!(play.get(), 0, "Play is under the modal");
+    let (cx, cy) = (overlay.ui().get_gen_cancel_x(), overlay.ui().get_gen_cancel_y());
+    click(&mut overlay, cx, cy);
+    assert_eq!(cancel.get(), 1);
+}
