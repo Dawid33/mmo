@@ -128,7 +128,7 @@ pub fn forward_input(
     };
 
     if !commander {
-        forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, &send);
+        forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, send);
     }
     if let Ok((w, _)) = window.single() {
         let size = (w.physical_width(), w.physical_height());

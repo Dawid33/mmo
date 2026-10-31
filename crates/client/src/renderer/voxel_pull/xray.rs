@@ -163,6 +163,16 @@ pub fn init_xray_stand_in(world: &mut World) {
     world.insert_resource(XrayStandIn { bind_group, _texture: texture });
 }
 
+/// A camera view `prepare_xray_views` decides for: whether it has the x-ray
+/// now and whether it is the frontend's (which draws no terrain).
+type XrayView = (
+    Entity,
+    &'static ExtractedView,
+    &'static ViewDepthTexture,
+    Has<ViewXray>,
+    Has<crate::session::FrontendCamera>,
+);
+
 /// Give each camera view that gets the x-ray its interior depth texture
 /// (the size of its depth target, single-sampled), bind group and pipeline;
 /// take them from the rest. Same decision as `queue_voxel_pull`.
@@ -178,7 +188,7 @@ pub fn prepare_xray_views(
     settings: Option<Res<XraySettings>>,
     fortress: Option<Res<FortressViewUniform>>,
     chunks: Res<InteriorChunks>,
-    views: Query<(Entity, &ExtractedView, &ViewDepthTexture, Has<ViewXray>, Has<crate::session::FrontendCamera>)>,
+    views: Query<XrayView>,
     mut warned_prepass: Local<bool>,
 ) {
     let wanted = xray_wanted(settings.as_deref(), fortress.as_deref(), &chunks);

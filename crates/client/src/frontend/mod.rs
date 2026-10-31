@@ -132,6 +132,7 @@ fn refresh_can_load(mut can_load: ResMut<CanLoad>) {
 #[cfg(target_arch = "wasm32")]
 fn refresh_can_load() {}
 
+#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 fn apply_frontend_actions(
     actions: Option<NonSend<FrontendActions>>,
     state: Res<State<AppState>>,
@@ -164,6 +165,7 @@ fn apply_frontend_actions(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Bevy system: params are DI, not an API
 fn push_frontend_state(
     layer: Option<NonSend<SlintLayer<FrontendUi>>>,
     state: Res<State<AppState>>,

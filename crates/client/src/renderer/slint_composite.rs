@@ -94,13 +94,23 @@ fn extract_slint_layers(
     extracted.0 = sorted_layers(&pairs);
 }
 
+/// A view the composite may draw onto: its target, whether it carries
+/// `UiCamera`, its current composite, and its camera (for the order).
+type CompositeView = (
+    Entity,
+    &'static ViewTarget,
+    Has<UiCamera>,
+    Option<&'static ViewSlintComposite>,
+    Option<&'static ExtractedCamera>,
+);
+
 fn prepare_slint_composite(
     mut commands: Commands,
     pipeline_cache: Res<PipelineCache>,
     mut pipelines: ResMut<SpecializedRenderPipelines<BlitPipeline>>,
     blit_pipeline: Res<BlitPipeline>,
     layers: Res<ExtractedSlintLayers>,
-    views: Query<(Entity, &ViewTarget, Has<UiCamera>, Option<&ViewSlintComposite>, Option<&ExtractedCamera>)>,
+    views: Query<CompositeView>,
 ) {
     let ui_view = pick_ui_view(
         views.iter().filter(|v| v.2).map(|(e, _, _, _, camera)| (e, camera.map_or(0, |c| c.order))),

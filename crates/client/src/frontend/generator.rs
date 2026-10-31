@@ -483,8 +483,12 @@ impl Drop for PreviewWorker {
     }
 }
 
+/// What the preview's last forge was keyed on (the inputs that change its
+/// terrain) and its result, reused when only the layer or view changes.
+type LastForge = ((u64, u64, u64, Vec<u64>), worldgen::forge::Forged);
+
 fn preview_loop(inbox: Receiver<PreviewRequest>, latest: Arc<AtomicU64>, outbox: Sender<(u64, Rgba, PreviewStats)>) {
-    let mut last: Option<((u64, u64, u64, Vec<u64>), worldgen::forge::Forged)> = None;
+    let mut last: Option<LastForge> = None;
     while let Ok(mut request) = inbox.recv() {
         loop {
             match inbox.recv_timeout(PREVIEW_DEBOUNCE) {
