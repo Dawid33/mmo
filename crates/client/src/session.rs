@@ -19,8 +19,8 @@
 //! [`frontend_owns`] is true — every [`AppState`] except `InWorld`, and `InWorld`
 //! before the player has [`Embarked`] — the [`FrontendCamera`] carries
 //! `UiCamera` and **no other system may claim `UiCamera`** or keep a world
-//! camera active over it (`bridge::enforce_single_active_camera` is taught to
-//! honour this in Task 8). Outside that window the world's cameras own
+//! camera active over it (`bridge::enforce_single_active_camera` stands
+//! aside while it does). Outside that window the world's cameras own
 //! `UiCamera` exactly as before, and the frontend camera does not exist.
 //!
 //! The frontend camera is spawned when the frontend takes the screen and
@@ -74,7 +74,8 @@ pub struct SkipMenu(pub bool);
 pub struct Embarked(pub bool);
 
 /// Why the last session ended without the player's say (server died, connect
-/// failed, …), shown on the main menu. Task 9 fills it.
+/// failed, …), shown on the main menu. Set by the session flow when a start
+/// fails or a session ends; cleared when the next start begins.
 #[derive(Resource, Default, Clone, Debug, PartialEq, Eq)]
 pub struct LastSessionError(pub Option<String>);
 
@@ -89,7 +90,8 @@ pub struct StartingStatus(pub String);
 pub struct StartingLog(pub String);
 
 /// The world the next session plays, set by the map generator's Play (and
-/// the Load screen) before `AppState::Starting`; Task 9 starts its server.
+/// the Load screen) before `AppState::Starting`; the session flow starts its
+/// server and removes it.
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
 pub struct PendingWorld {
     /// `worlds/<slug>/`.
@@ -298,9 +300,9 @@ pub fn skip_menu() -> bool {
 
 /// The state the app starts in.
 pub fn initial_state(skip_menu: bool) -> AppState {
-    // Until the session-start flow exists (Task 9 moves Starting → InWorld),
-    // the bypass goes straight to InWorld with the player already embarked,
-    // so today's game runs unchanged.
+    // The dev bypass (`VOXEL_SKIP_MENU`, a set `VOXEL_WORLD_FILE`, the probes)
+    // goes straight to InWorld with the player already embarked (`Embarked`
+    // starts as `skip_menu`), connecting to an already running server.
     if skip_menu { AppState::InWorld } else { AppState::MainMenu }
 }
 

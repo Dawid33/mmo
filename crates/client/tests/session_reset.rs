@@ -156,8 +156,8 @@ fn leave(app: &mut App) {
     app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
 }
 
-/// Back into a world (what Task 9's Starting → InWorld and Task 14's
-/// arrival will do).
+/// Back into a world: what the session flow's Starting → InWorld plus the
+/// arrival map's embark do.
 fn enter_world(app: &mut App) {
     app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InWorld);
     app.update();
