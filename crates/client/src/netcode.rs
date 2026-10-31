@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossbeam::channel::{Receiver, RecvTimeoutError, Sender};
+use crossbeam::channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use game::{ClientPacket, ServerPacket};
 use log::{error, info, warn};
 use quinn::{
@@ -45,11 +45,29 @@ impl Default for ConnectPolicy {
     }
 }
 
+/// How often a pending connect attempt or retry pause checks whether the
+/// session was abandoned.
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// Longest the netcode waits, once the game thread ends the session, for the
+/// last packet (the `Leave`) to be read by the server, and again for the
+/// connection close to be acknowledged.
+const LEAVE_FLUSH_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// What `race_cancel` saw first.
+enum Raced<T> {
+    Done(T),
+    TimedOut,
+    Cancelled,
+}
+
 pub struct ServerConnection {
     send: Sender<ServerPacket>,
     recv: Receiver<ClientPacket>,
     server: SocketAddr,
     connect_policy: ConnectPolicy,
+    /// Disconnects (its sender drops) when the game thread abandons the
+    /// session; `never()` when nobody can cancel.
+    cancel: Receiver<()>,
 }
 
 impl ServerConnection {
@@ -63,6 +81,45 @@ impl ServerConnection {
             recv,
             server,
             connect_policy: ConnectPolicy::default(),
+            cancel: crossbeam::channel::never(),
+        }
+    }
+
+    /// Abandon the connect once every sender of `cancel` has dropped: the
+    /// game thread holds one for the session, so leaving before the server
+    /// answers stops the retries at once instead of letting a stale attempt
+    /// reach whatever server binds the port next.
+    pub fn with_cancel(mut self, cancel: Receiver<()>) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    fn cancelled(&self) -> bool {
+        matches!(self.cancel.try_recv(), Err(TryRecvError::Disconnected))
+    }
+
+    /// Drive `fut` until it completes, `limit` has passed, or the session is
+    /// cancelled, whichever comes first.
+    async fn race_cancel<F: std::future::Future>(
+        &self,
+        fut: F,
+        limit: Duration,
+    ) -> Raced<F::Output> {
+        let mut fut = std::pin::pin!(fut);
+        let started = Instant::now();
+        loop {
+            if self.cancelled() {
+                return Raced::Cancelled;
+            }
+            let left = limit.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return Raced::TimedOut;
+            }
+            if let Ok(out) =
+                tokio::time::timeout(left.min(CANCEL_POLL_INTERVAL), fut.as_mut()).await
+            {
+                return Raced::Done(out);
+            }
         }
     }
 
@@ -73,27 +130,39 @@ impl ServerConnection {
     }
 
     /// Connect, retrying until the policy's deadline: the server may still be
-    /// starting (or not started yet) when the client comes up.
+    /// starting (or not started yet) when the client comes up. `Ok(None)`
+    /// when the session was cancelled first (an in-flight attempt is
+    /// abandoned, and no further one is made).
     async fn connect_with_retry(
         &self,
         endpoint: &Endpoint,
-    ) -> Result<quinn::Connection, std::io::Error> {
+    ) -> Result<Option<quinn::Connection>, std::io::Error> {
         let policy = self.connect_policy;
         let started = Instant::now();
         let mut attempt = 1u32;
         loop {
+            if self.cancelled() {
+                return Ok(None);
+            }
             let connecting = endpoint.connect(self.server, "localhost").unwrap();
-            let failure = match tokio::time::timeout(policy.attempt_timeout, connecting).await {
-                Ok(Ok(connection)) => {
+            let failure = match self.race_cancel(connecting, policy.attempt_timeout).await {
+                Raced::Cancelled => {
+                    info!(
+                        "[client] connect to {} abandoned: session left",
+                        self.server
+                    );
+                    return Ok(None);
+                }
+                Raced::Done(Ok(connection)) => {
                     game::perf_event!(
                         "connected",
                         "attempts={attempt} connect_ms={}",
                         game::perf::ms(started.elapsed())
                     );
-                    return Ok(connection);
+                    return Ok(Some(connection));
                 }
-                Ok(Err(error)) => error.to_string(),
-                Err(_) => format!("no answer within {:?}", policy.attempt_timeout),
+                Raced::Done(Err(error)) => error.to_string(),
+                Raced::TimedOut => format!("no answer within {:?}", policy.attempt_timeout),
             };
             if started.elapsed() >= policy.deadline {
                 error!(
@@ -111,7 +180,16 @@ impl ServerConnection {
                 self.server
             );
             attempt += 1;
-            tokio::time::sleep(policy.retry_interval).await;
+            if let Raced::Cancelled = self
+                .race_cancel(std::future::pending::<()>(), policy.retry_interval)
+                .await
+            {
+                info!(
+                    "[client] connect to {} abandoned: session left",
+                    self.server
+                );
+                return Ok(None);
+            }
         }
     }
 
@@ -132,7 +210,9 @@ impl ServerConnection {
         info!("connecting to server...");
         game::perf_event!("endpoint_up");
         // Receive events over the wire and send them to the instance manager.
-        let connection = self.connect_with_retry(&endpoint).await?;
+        let Some(connection) = self.connect_with_retry(&endpoint).await? else {
+            return Ok(());
+        };
         info!("[client] connected: addr={}", connection.remote_address());
         let sender = self.send.clone();
         let recv_conn = connection.clone();
@@ -197,6 +277,7 @@ impl ServerConnection {
         // sender drops: `Ok`) or the connection goes away (`Err`, whose
         // message is the session's end reason). Polled, so a lost server is
         // noticed even while the game sends nothing.
+        let mut last_sent: Option<tokio::task::JoinHandle<()>> = None;
         loop {
             if let Some(close_reason) = connection.close_reason() {
                 error!("Server connection closed: {:?}", close_reason);
@@ -205,7 +286,10 @@ impl ServerConnection {
             let packet = match self.recv.recv_timeout(CLOSE_POLL_INTERVAL) {
                 Ok(packet) => packet,
                 Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                Err(RecvTimeoutError::Disconnected) => {
+                    close_gracefully(&endpoint, &connection, last_sent.take()).await;
+                    return Ok(());
+                }
             };
             let payload = match game::encode_packet(&packet) {
                 Ok(payload) => payload,
@@ -215,13 +299,11 @@ impl ServerConnection {
                 }
             };
             let mut send = connection.open_uni().await.map_err(connection_lost)?;
-            send.write_all(&payload)
-                .await
-                .map_err(|e| connection_lost(e))?;
-            send.finish().map_err(|e| connection_lost(e))?;
-            tokio::spawn(async move {
+            send.write_all(&payload).await.map_err(connection_lost)?;
+            send.finish().map_err(connection_lost)?;
+            last_sent = Some(tokio::spawn(async move {
                 let _ = send.stopped().await;
-            });
+            }));
         }
     }
 }
@@ -229,6 +311,23 @@ impl ServerConnection {
 /// How often the send loop checks for a closed connection while the game
 /// thread has nothing to send.
 const CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The game thread ended the session (usually after queueing `Leave`): let
+/// the server read the last stream, then close the connection and wait for
+/// the close to go out, each bounded by `LEAVE_FLUSH_TIMEOUT`. Without this
+/// the runtime is dropped before quinn flushes anything, and the server only
+/// notices at the idle timeout.
+async fn close_gracefully(
+    endpoint: &Endpoint,
+    connection: &quinn::Connection,
+    last_sent: Option<tokio::task::JoinHandle<()>>,
+) {
+    if let Some(last_sent) = last_sent {
+        let _ = tokio::time::timeout(LEAVE_FLUSH_TIMEOUT, last_sent).await;
+    }
+    connection.close(0u32.into(), b"leave");
+    let _ = tokio::time::timeout(LEAVE_FLUSH_TIMEOUT, endpoint.wait_idle()).await;
+}
 
 fn connection_lost(reason: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::new(
@@ -294,7 +393,7 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// No server listening: the connect must retry, then return a `TimedOut`
@@ -324,5 +423,67 @@ mod tests {
             .expect_err("nothing is listening");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(error.to_string().contains(&dead.to_string()));
+    }
+
+    /// Datagrams `socket` receives within `window`.
+    pub(crate) fn datagrams_within(socket: &std::net::UdpSocket, window: Duration) -> usize {
+        let end = Instant::now() + window;
+        let mut count = 0;
+        let mut buf = [0u8; 2048];
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return count;
+            }
+            socket.set_read_timeout(Some(left)).unwrap();
+            if socket.recv_from(&mut buf).is_ok() {
+                count += 1;
+            }
+        }
+    }
+
+    /// Leaving the session while the connect is still retrying must end the
+    /// netcode at once and stop sending: a stale retry loop would otherwise
+    /// reach the next world's server when it binds the same port.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn cancel_during_connect_retry_stops_attempts() {
+        // A UDP socket that never answers: it sees every QUIC Initial.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = silent.local_addr().unwrap();
+        let (send, _server_packets) = crossbeam::channel::unbounded();
+        let (_client_packets, recv) = crossbeam::channel::unbounded();
+        let (cancel, cancel_recv) = crossbeam::channel::bounded::<()>(0);
+        let mut connection = ServerConnection::new(send, recv, addr)
+            .with_connect_policy(ConnectPolicy {
+                attempt_timeout: Duration::from_millis(50),
+                retry_interval: Duration::from_millis(10),
+                deadline: Duration::from_secs(60),
+            })
+            .with_cancel(cancel_recv);
+        let (done_send, done) = crossbeam::channel::bounded(1);
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(connection.connect_and_handle());
+            let _ = done_send.send(result.map_err(|e| e.to_string()));
+        });
+        assert!(
+            datagrams_within(&silent, Duration::from_millis(300)) > 0,
+            "the client never tried to connect"
+        );
+
+        drop(cancel);
+        let cancelled_at = Instant::now();
+        let result = done
+            .recv_timeout(Duration::from_secs(1))
+            .expect("netcode still running 1 s after the cancel");
+        assert_eq!(result, Ok(()));
+        assert!(cancelled_at.elapsed() < Duration::from_millis(500));
+        // Let anything already in flight land, then nothing more may come.
+        let _ = datagrams_within(&silent, Duration::from_millis(100));
+        assert_eq!(datagrams_within(&silent, Duration::from_millis(400)), 0);
     }
 }

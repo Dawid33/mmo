@@ -1566,12 +1566,17 @@ impl GameInstanceManager {
         });
 
         let (server_send, server_recv) = crossbeam::channel::unbounded();
+        // Held for as long as this session runs: dropping it on any return
+        // (Quit, a lost server) tells a netcode thread still retrying its
+        // connect to give up, so it cannot reach the next world's server.
+        let (_netcode_cancel, cancel_recv) = crossbeam::channel::bounded::<()>(0);
         let mut conn = crate::netcode::ServerConnection::new(
             server_send,
             self.server_game_recv.clone(),
             self.server,
         )
-        .with_connect_policy(self.connect_policy);
+        .with_connect_policy(self.connect_policy)
+        .with_cancel(cancel_recv);
         // The netcode thread's result says why the connection ended; it is
         // read once `server_recv` closes (the thread dropped its sender).
         let netcode = std::thread::spawn(move || -> Result<(), String> {
@@ -3125,6 +3130,55 @@ mod tests {
                 other => panic!("session {session}: expected Disconnected, got {other:?}"),
             }
         }
+        let _ = commands.send(Command::Quit);
+    }
+
+    /// Quit while the connect is still retrying (Back on "Connecting…"):
+    /// the netcode must stop at once instead of retrying until its deadline,
+    /// or it could attach to the next world's server on the same port.
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn quit_during_connect_retry_stops_connect_attempts() {
+        use crate::netcode::tests::datagrams_within;
+        // Never answers, so the client keeps retrying; counts its Initials.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let commands = start_game_thread();
+        let (game_send, game_recv) = crossbeam::channel::unbounded();
+        let (client_send, client_recv) = crossbeam::channel::unbounded();
+        let (_request_send, request_recv) = crossbeam::channel::unbounded();
+        commands
+            .send(Command::ConnectToServerAndScene(
+                game_send.clone(),
+                game_recv,
+                client_send,
+                request_recv,
+                silent.local_addr().unwrap(),
+                game::DebugFlags::default(),
+                crate::world_scale::WorldScale::default(),
+                ConnectPolicy {
+                    attempt_timeout: Duration::from_millis(50),
+                    retry_interval: Duration::from_millis(10),
+                    deadline: Duration::from_secs(60),
+                },
+            ))
+            .unwrap();
+        assert!(
+            datagrams_within(&silent, Duration::from_millis(500)) > 0,
+            "the client never tried to connect"
+        );
+
+        game_send.send(GameEventKind::Quit).unwrap();
+        // Let the session end and anything in flight land; then silence.
+        let _ = datagrams_within(&silent, Duration::from_millis(250));
+        assert_eq!(
+            datagrams_within(&silent, Duration::from_millis(400)),
+            0,
+            "connect attempts continued after Quit"
+        );
+        // A Quit is not a crash: no session-ended report.
+        assert!(!client_recv
+            .try_iter()
+            .any(|e| matches!(e, ClientUpdateEvent::GameCrash(_))));
         let _ = commands.send(Command::Quit);
     }
 }
