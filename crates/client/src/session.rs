@@ -76,6 +76,11 @@ pub struct Embarked(pub bool);
 #[derive(Resource, Default, Clone, Debug, PartialEq, Eq)]
 pub struct LastSessionError(pub Option<String>);
 
+/// The starting screen's status line ("" = nothing to say). Reset with the
+/// session.
+#[derive(Resource, Default, Clone, Debug, PartialEq, Eq)]
+pub struct StartingStatus(pub String);
+
 /// The world the next session plays, set by the map generator's Play (and
 /// the Load screen) before `AppState::Starting`; Task 9 starts its server.
 #[derive(Resource, Clone, Debug, PartialEq, Eq)]
@@ -287,6 +292,7 @@ impl Plugin for SessionPlugin {
             .insert_resource(Embarked(self.skip_menu))
             .add_session_reset::<Embarked>()
             .init_resource::<LastSessionError>()
+            .add_session_reset::<StartingStatus>()
             .add_message::<SessionEnded>()
             .add_systems(Update, sync_frontend_camera);
     }
@@ -333,15 +339,15 @@ fn frontend_camera_bundle() -> impl Bundle {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use flow::{
-    install_dead_channels, join_server_stops, leave_session, GameThread, SessionChannels, SessionFlowPlugin,
-    SERVER_LOG_TAIL_LINES,
+    install_dead_channels, join_server_stops, leave_session, server_stops_finished, GameThread, SessionChannels,
+    SessionFlowPlugin, SERVER_LOG_TAIL_LINES, WAITING_FOR_PREVIOUS_SERVER,
 };
 
 /// Starting and leaving a world session (native only; wasm keeps today's
 /// single in-process session).
 ///
-/// - `OnEnter(Starting)` ([`start_session`](flow::start_session)): start the
-///   [`PendingWorld`]'s server ([`LocalHost`](crate::local_host::LocalHost)),
+/// - In `Starting` ([`launch_when_ready`](flow::launch_when_ready)): start the
+///   [`PendingWorld`]'s server once no previous server is still stopping ([`LocalHost`](crate::local_host::LocalHost)),
 ///   swap in a fresh set of [`SessionChannels`], send the game thread its
 ///   connect. The first `SetPlayer` moves on to `InWorld`.
 /// - [`SessionEnded`] while `Starting` / `InWorld` (the Esc menu's Main menu,
@@ -359,12 +365,15 @@ mod flow {
     use crossbeam::channel::{unbounded, Receiver, Sender};
     use game::{ClientUpdateEvent, GameEventKind};
 
-    use super::{end_session, AppState, Embarked, LastSessionError, PendingWorld, SessionEnded};
+    use super::{end_session, AppState, Embarked, LastSessionError, PendingWorld, SessionEnded, StartingStatus};
     use crate::instance::{ClientRequest, Command};
     use crate::local_host::{server_log_path, LocalHost, STOP_GRACE};
     use crate::renderer::collider_debug::DebugFlagsRes;
     use crate::renderer::{ClientRequests, ClientUpdates, GameEvents, LocalPlayer};
     use crate::world_scale::WorldScale;
+
+    /// The starting screen's line while a previous server is still stopping.
+    pub const WAITING_FOR_PREVIOUS_SERVER: &str = "Waiting for the previous server…";
 
     /// Lines of the server log shown under a lost session's reason.
     pub const SERVER_LOG_TAIL_LINES: usize = 20;
@@ -447,6 +456,12 @@ mod flow {
         SERVER_STOPS.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
     }
 
+    /// Register a background stop (tests stand in for a slow server).
+    #[cfg(test)]
+    pub(super) fn push_server_stop(stop: JoinHandle<()>) {
+        SERVER_STOPS.lock().unwrap_or_else(|e| e.into_inner()).push(stop);
+    }
+
     /// Wait for every background server stop (the next server needs the
     /// port; the process must not exit with a child still running).
     pub fn join_server_stops() {
@@ -470,6 +485,7 @@ mod flow {
         }
         install_dead_channels(world);
         end_session(world);
+        world.remove_resource::<PendingWorld>(); // a start abandoned while waiting
         if let Some(host) = world.remove_resource::<LocalHost>() {
             let tail = host.log_tail(SERVER_LOG_TAIL_LINES);
             if let Some(mut error) = world.get_resource_mut::<LastSessionError>() {
@@ -484,14 +500,33 @@ mod flow {
     }
 
     /// `OnEnter(Starting)`: start the pending world's server and connect to it.
-    pub(super) fn start_session(world: &mut World) {
+    /// `OnEnter(Starting)`: a session needs a chosen world.
+    pub(super) fn begin_starting(world: &mut World) {
         world.resource_mut::<LastSessionError>().0 = None;
-        let Some(pending) = world.remove_resource::<PendingWorld>() else {
+        if !world.contains_resource::<PendingWorld>() {
             fail_start(world, "no world was chosen to play".into());
+        }
+    }
+
+    /// Whether every background server stop has finished (never blocks).
+    pub fn server_stops_finished() -> bool {
+        SERVER_STOPS.lock().unwrap_or_else(|e| e.into_inner()).iter().all(|stop| stop.is_finished())
+    }
+
+    /// In `Starting`, once no previous server is still stopping (it may hold
+    /// the port): start the pending world's server and connect to it. Until
+    /// then the starting screen says what it waits for; the frame never does.
+    pub(super) fn launch_when_ready(world: &mut World) {
+        if !world.contains_resource::<PendingWorld>() {
+            return; // launched (or failed) already
+        }
+        if !server_stops_finished() {
+            set_status(world, WAITING_FOR_PREVIOUS_SERVER);
             return;
-        };
-        // A previous server may still be on its way out, holding the port.
-        join_server_stops();
+        }
+        join_server_stops(); // all finished: reaps without waiting
+        set_status(world, "");
+        let pending = world.remove_resource::<PendingWorld>().expect("checked above");
         let log = server_log_path(&pending.entry_dir, &pending.terrain);
         let host = match LocalHost::start(&pending.terrain, &log) {
             Ok(host) => host,
@@ -517,6 +552,13 @@ mod flow {
         if world.resource::<GameThread>().0.send(command).is_err() {
             world.resource_mut::<LastSessionError>().0 = Some("the game thread is gone".into());
             world.resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+        }
+    }
+
+    fn set_status(world: &mut World, text: &str) {
+        let mut status = world.get_resource_or_init::<StartingStatus>();
+        if status.0 != text {
+            status.0 = text.into();
         }
     }
 
@@ -578,7 +620,7 @@ mod flow {
 
     impl Plugin for SessionFlowPlugin {
         fn build(&self, app: &mut App) {
-            app.add_systems(OnEnter(AppState::Starting), start_session)
+            app.add_systems(OnEnter(AppState::Starting), begin_starting)
                 .add_systems(
                     OnTransition { exited: AppState::Starting, entered: AppState::MainMenu },
                     leave_session,
@@ -590,6 +632,7 @@ mod flow {
                 .add_systems(
                     Update,
                     (
+                        launch_when_ready.run_if(in_state(AppState::Starting)),
                         enter_world_on_player.run_if(in_state(AppState::Starting)),
                         watch_local_host,
                         end_on_session_ended,
@@ -804,6 +847,51 @@ mod tests {
         app.update();
         app.update();
         assert_eq!(scoped(&mut app), 0, "the old receiver is still read");
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn starting_waits_for_the_previous_server_without_blocking() {
+        let mut app = app(false);
+        let (command_send, _command_recv) = crossbeam::channel::unbounded();
+        app.init_resource::<crate::renderer::LocalPlayer>()
+            .insert_resource(GameThread(command_send))
+            .add_plugins(SessionFlowPlugin);
+        install_dead_channels(app.world_mut());
+        let (release, wait) = crossbeam::channel::bounded::<()>(0);
+        flow::push_server_stop(std::thread::spawn(move || {
+            let _ = wait.recv();
+        }));
+        app.insert_resource(PendingWorld {
+            entry_dir: "/nonexistent/world".into(),
+            terrain: "/nonexistent/world/terrain.world".into(),
+            name: "w".into(),
+        });
+        app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::Starting);
+        for _ in 0..3 {
+            let frame = std::time::Instant::now();
+            app.update();
+            assert!(frame.elapsed() < std::time::Duration::from_secs(1), "a frame waited on the old server");
+        }
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::Starting);
+        assert!(app.world().contains_resource::<PendingWorld>(), "launched while the old server was stopping");
+        assert!(!app.world().contains_resource::<crate::local_host::LocalHost>());
+        assert_eq!(app.world().resource::<StartingStatus>().0, WAITING_FOR_PREVIOUS_SERVER);
+
+        // The old server is gone: the launch goes ahead (and fails here, with
+        // no server binary next to the test executable → back to the menu).
+        release.send(()).unwrap();
+        while !server_stops_finished() {
+            std::thread::yield_now();
+        }
+        app.update();
+        app.update();
+        assert!(!app.world().contains_resource::<PendingWorld>());
+        assert_eq!(app.world().resource::<StartingStatus>().0, "");
+        let error = app.world().resource::<LastSessionError>().0.clone().unwrap_or_default();
+        assert!(error.starts_with("Could not start the server"), "{error}");
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::MainMenu);
     }
 
     #[test]

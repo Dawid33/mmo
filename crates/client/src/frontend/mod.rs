@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use slint_ui::FrontendUi;
 
 use crate::renderer::slint_overlay::{SlintLayer, SlintLayerPlugin, FRONTEND_LAYER_ORDER};
-use crate::session::{frontend_owns, AppState, Embarked, LastSessionError};
+use crate::session::{frontend_owns, AppState, Embarked, LastSessionError, StartingStatus};
 
 /// What a frontend button asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +130,7 @@ fn push_frontend_state(
     embarked: Res<Embarked>,
     can_load: Res<CanLoad>,
     error: Res<LastSessionError>,
+    starting: Option<Res<StartingStatus>>,
 ) {
     let Some(layer) = layer else { return };
     let ui = layer.overlay.ui();
@@ -147,6 +148,10 @@ fn push_frontend_state(
     let text = error.0.as_deref().unwrap_or("");
     if ui.get_menu_error() != text {
         ui.set_menu_error(text.into());
+    }
+    let status = starting.as_ref().map_or("", |s| s.0.as_str());
+    if ui.get_starting_status() != status {
+        ui.set_starting_status(status.into());
     }
 }
 

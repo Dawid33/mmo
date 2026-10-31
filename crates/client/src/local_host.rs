@@ -8,13 +8,18 @@
 //! stdout + stderr to the world's server log. The port stays 6466 for now
 //! (the server hard-codes it, and binds WebTransport 6467 next to it); a port
 //! that is already taken is reported instead of guessed around.
+//!
+//! The child's stdin is a pipe whose write end only the client holds: a
+//! single-player server exits when it closes, so the OS stops the child
+//! however the client dies — even before the server ever saw a connection.
 
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::io::{Read, Seek, SeekFrom};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use bevy::prelude::Resource;
@@ -39,10 +44,16 @@ pub const SINGLE_PLAYER_ENV: &str = "VOXEL_SINGLE_PLAYER";
 /// The error message when [`SERVER_PORT`] is taken.
 pub const PORT_IN_USE: &str = "port 6466 is already in use (is a dev server running?)";
 
+/// How much of the server log's end [`LocalHost::log_tail`] reads.
+const LOG_TAIL_BYTES: u64 = 64 * 1024;
+
 /// A running child server.
 #[derive(Resource, Debug)]
 pub struct LocalHost {
     child: Child,
+    /// The write end of the child's stdin; closing it tells a single-player
+    /// server its parent is gone.
+    stdin: Option<ChildStdin>,
     log: PathBuf,
     pub addr: SocketAddr,
 }
@@ -74,6 +85,26 @@ pub fn server_log_path(entry_dir: &Path, terrain: &Path) -> PathBuf {
     }
 }
 
+/// The last `lines` lines within the last `max_bytes` of the file at `path`.
+fn tail_lines(path: &Path, lines: usize, max_bytes: u64) -> String {
+    let Ok(mut file) = File::open(path) else { return String::new() };
+    let len = file.metadata().map_or(0, |m| m.len());
+    let start = len.saturating_sub(max_bytes);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut all: Vec<&str> = text.lines().collect();
+    if start > 0 && !all.is_empty() {
+        all.remove(0); // a partial line cut by the seek
+    }
+    all[all.len().saturating_sub(lines)..].join("\n")
+}
+
 fn server_addr() -> SocketAddr {
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, SERVER_PORT))
 }
@@ -95,15 +126,22 @@ impl LocalHost {
         }
         let out = File::create(log)?;
         let err = out.try_clone()?;
-        let child = Command::new(binary)
+        let mut child = Command::new(binary)
             .env("VOXEL_WORLD_FILE", terrain)
             .env(SINGLE_PLAYER_ENV, "1")
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(out)
             .stderr(err)
             .spawn()
             .map_err(|e| io::Error::new(e.kind(), format!("could not start {}: {e}", binary.display())))?;
-        Ok(LocalHost { child, log: log.to_path_buf(), addr: server_addr() })
+        let stdin = child.stdin.take();
+        Ok(LocalHost { child, stdin, log: log.to_path_buf(), addr: server_addr() })
+    }
+
+    /// Close the child's stdin: a single-player server takes it as its
+    /// parent being gone and exits.
+    pub fn close_stdin(&mut self) {
+        self.stdin = None;
     }
 
     /// The child's exit status, if it has exited.
@@ -114,6 +152,7 @@ impl LocalHost {
     /// Wait up to `grace` for the server to exit by itself, then kill it.
     /// Returns its exit status (`None` if it could not be reaped).
     pub fn stop(mut self, grace: Duration) -> Option<ExitStatus> {
+        self.close_stdin();
         let deadline = Instant::now() + grace;
         loop {
             if let Some(status) = self.try_exited() {
@@ -130,10 +169,9 @@ impl LocalHost {
     }
 
     /// The last `lines` lines of the server log ("" if it can't be read).
+    /// Reads only the log's last [`LOG_TAIL_BYTES`].
     pub fn log_tail(&self, lines: usize) -> String {
-        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
-        let all: Vec<&str> = text.lines().collect();
-        all[all.len().saturating_sub(lines)..].join("\n")
+        tail_lines(&self.log, lines, LOG_TAIL_BYTES)
     }
 
     /// The child's process id.
@@ -241,6 +279,34 @@ mod tests {
         let status = host.stop(STOP_GRACE);
         assert!(started.elapsed() < Duration::from_secs(2), "stop took {:?}", started.elapsed());
         assert!(status.is_some_and(|s| s.success()), "{status:?}");
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn closing_stdin_ends_the_child() {
+        let _port = PORT.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("stdin");
+        let bin = script(&dir, "cat >/dev/null; echo gone");
+        let mut host = LocalHost::start_with(&bin, Path::new("t.world"), &dir.join("server.log")).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(host.try_exited().is_none(), "exited while its stdin was open");
+        host.close_stdin();
+        wait_for(|| host.try_exited().is_some());
+        assert_eq!(host.log_tail(1), "gone");
+    }
+
+    #[test]
+    fn log_tail_reads_only_the_end() {
+        let dir = scratch("tail");
+        let log = dir.join("server.log");
+        let body: String = (0..2000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&log, body).unwrap();
+        assert_eq!(tail_lines(&log, 2, 64 * 1024), "line 1998\nline 1999");
+        // A 30-byte window starts mid-line: the cut line is dropped.
+        let tail = tail_lines(&log, 100, 30);
+        assert!(tail.lines().all(|l| l.starts_with("line ")), "{tail}");
+        assert!(tail.ends_with("line 1999"), "{tail}");
+        assert_eq!(tail_lines(&dir.join("missing.log"), 3, 1024), "");
     }
 
     #[test]

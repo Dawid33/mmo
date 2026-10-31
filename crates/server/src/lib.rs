@@ -16,12 +16,41 @@ use quinn::{
 };
 
 /// Set to `1` by the client that launched this server for one world: once a
-/// client has connected and the last one has left, the server exits.
+/// client has connected and the last one has left, the server exits. It also
+/// exits when its stdin closes: the launching client holds the pipe's write
+/// end, which the OS closes however the client dies (even before it ever
+/// connected). So a single-player server needs its stdin to stay open —
+/// don't start one with stdin at `/dev/null`.
 pub const SINGLE_PLAYER_ENV: &str = "VOXEL_SINGLE_PLAYER";
 
-/// Whether a single-player server should exit now.
+/// Why a single-player server should exit now, if it should.
+fn single_player_exit(
+    enabled: bool,
+    ever_connected: bool,
+    sessions: usize,
+    parent_gone: bool,
+) -> Option<&'static str> {
+    if !enabled {
+        None
+    } else if parent_gone {
+        Some("parent gone")
+    } else if ever_connected && sessions == 0 {
+        Some("last client left")
+    } else {
+        None
+    }
+}
+
+/// Whether a single-player server should exit now (parent still there).
+#[cfg(test)]
 fn should_exit_single_player(enabled: bool, ever_connected: bool, sessions: usize) -> bool {
-    enabled && ever_connected && sessions == 0
+    single_player_exit(enabled, ever_connected, sessions, false).is_some()
+}
+
+/// Read `input` to its end (EOF or an error), then raise `gone`.
+fn watch_parent(mut input: impl std::io::Read, gone: &std::sync::atomic::AtomicBool) {
+    let _ = std::io::copy(&mut input, &mut std::io::sink());
+    gone.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 const DEFAULT_SERVER_WORKER_THREADS: usize = 4;
@@ -384,6 +413,14 @@ pub fn run() {
     let mut report = perf::ServerReport::new();
     let single_player = std::env::var(SINGLE_PLAYER_ENV).is_ok_and(|v| v == "1");
     let mut ever_connected = false;
+    let parent_gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if single_player {
+        let gone = parent_gone.clone();
+        std::thread::Builder::new()
+            .name("parent-watch".into())
+            .spawn(move || watch_parent(std::io::stdin(), &gone))
+            .expect("spawn the parent watch thread");
+    }
     'main: loop {
         let now_ms = start.elapsed().as_millis() as u64;
         crossbeam::channel::select! {
@@ -404,8 +441,9 @@ pub fn run() {
         }
         let sessions = manager.depths().sessions;
         ever_connected |= sessions > 0;
-        if should_exit_single_player(single_player, ever_connected, sessions) {
-            info!("[server] single-player: last client left, exiting");
+        let gone = parent_gone.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some(why) = single_player_exit(single_player, ever_connected, sessions, gone) {
+            info!("[server] single-player: {why}, exiting");
             break 'main;
         }
         manager.maintain(now_ms);
@@ -483,6 +521,22 @@ mod tests {
         assert!(!should_exit_single_player(true, false, 0));
         assert!(!should_exit_single_player(true, true, 1));
         assert!(should_exit_single_player(true, true, 0));
+    }
+
+    #[test]
+    fn single_player_exits_when_the_parent_is_gone() {
+        assert_eq!(single_player_exit(true, false, 0, true), Some("parent gone"), "before any connect");
+        assert_eq!(single_player_exit(true, true, 1, true), Some("parent gone"), "with a client");
+        assert_eq!(single_player_exit(false, false, 0, true), None, "not single-player");
+        assert_eq!(single_player_exit(true, true, 0, false), Some("last client left"));
+        assert_eq!(single_player_exit(true, false, 0, false), None);
+    }
+
+    #[test]
+    fn single_player_parent_watch_fires_on_eof() {
+        let gone = std::sync::atomic::AtomicBool::new(false);
+        watch_parent(&b"anything"[..], &gone);
+        assert!(gone.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { Button, FrameFace, GraphicalSets, Styles, VerticalFlow } from "@widgets";
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
 import { MainMenu } from "main-menu.slint";
 import { KnobRow, MapGenerator } from "map-generator.slint";
 import { LoadWorld, WorldRow } from "load-world.slint";
@@ -8,6 +8,8 @@ export { KnobRow, WorldRow }
 // A screen that a later task fills in: a titled frame with a Back button.
 component PlaceholderScreen {
     in property <string> title;
+    // A status line above Back ("" draws nothing).
+    in property <string> status;
     callback back();
     out property <length> back-button-x: back-btn.absolute-position.x + back-btn.width / 2;
     out property <length> back-button-y: back-btn.absolute-position.y + back-btn.height / 2;
@@ -25,6 +27,9 @@ component PlaceholderScreen {
             y: frame.content-y;
             width: frame.content-right - frame.content-x;
 
+            if root.status != "": LabelFace {
+                text: root.status;
+            }
             back-btn := Button {
                 text: "Back";
                 clicked => { root.back(); }
@@ -45,6 +50,8 @@ export component FrontendUi inherits Window {
     in property <string> game-title: "Labour of Love";
     in property <bool> can-load;
     in property <string> menu-error;
+    // The starting screen's status line (e.g. waiting for the previous server).
+    in property <string> starting-status;
 
     callback new-world();
     callback load-world();
@@ -156,6 +163,7 @@ export component FrontendUi inherits Window {
         width: root.width;
         height: root.height;
         title: "Starting";
+        status: root.starting-status;
         back => { root.back(); }
     }
 }
