@@ -1,0 +1,77 @@
+import { Button, FrameFace, GraphicalSets, Styles, VerticalFlow } from "@widgets";
+import { MainMenu } from "main-menu.slint";
+
+// A screen that a later task fills in: a titled frame with a Back button.
+component PlaceholderScreen {
+    in property <string> title;
+    callback back();
+    out property <length> back-button-x: back-btn.absolute-position.x + back-btn.width / 2;
+    out property <length> back-button-y: back-btn.absolute-position.y + back-btn.height / 2;
+
+    frame := FrameFace {
+        title: root.title;
+        width: 360px;
+        height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+
+        body := VerticalFlow {
+            x: frame.content-x;
+            y: frame.content-y;
+            width: frame.content-right - frame.content-x;
+
+            back-btn := Button {
+                text: "Back";
+                clicked => { root.back(); }
+            }
+        }
+    }
+}
+
+// Every screen outside the world: the main menu, the map generator, the world
+// list and the starting screen. Drawn at FRONTEND_LAYER_ORDER over the
+// frontend camera's plain backdrop; `shown: false` draws nothing at all.
+export component FrontendUi inherits Window {
+    background: transparent;
+
+    // 0 menu, 1 generator, 2 load, 3 starting.
+    in property <int> screen;
+    in property <bool> shown: true;
+    in property <string> game-title: "Labour of Love";
+    in property <bool> can-load;
+    in property <string> menu-error;
+
+    callback new-world();
+    callback load-world();
+    callback exit();
+    callback back();
+
+    out property <length> new-button-x: menu.new-button-x;
+    out property <length> new-button-y: menu.new-button-y;
+    out property <length> load-button-x: menu.load-button-x;
+    out property <length> load-button-y: menu.load-button-y;
+    out property <length> exit-button-x: menu.exit-button-x;
+    out property <length> exit-button-y: menu.exit-button-y;
+    out property <length> back-button-x: placeholder.back-button-x;
+    out property <length> back-button-y: placeholder.back-button-y;
+
+    menu := MainMenu {
+        visible: root.shown && root.screen == 0;
+        width: root.width;
+        height: root.height;
+        title: root.game-title;
+        can-load: root.can-load;
+        menu-error: root.menu-error;
+        new-world => { root.new-world(); }
+        load-world => { root.load-world(); }
+        exit => { root.exit(); }
+    }
+    placeholder := PlaceholderScreen {
+        visible: root.shown && root.screen != 0;
+        width: root.width;
+        height: root.height;
+        title: root.screen == 1 ? "New world" : root.screen == 2 ? "Load world" : "Starting";
+        back => { root.back(); }
+    }
+}

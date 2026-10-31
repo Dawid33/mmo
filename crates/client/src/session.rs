@@ -71,6 +71,11 @@ pub struct SkipMenu(pub bool);
 #[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Embarked(pub bool);
 
+/// Why the last session ended without the player's say (server died, connect
+/// failed, …), shown on the main menu. Task 9 fills it.
+#[derive(Resource, Default, Clone, Debug, PartialEq, Eq)]
+pub struct LastSessionError(pub Option<String>);
+
 /// The menu screens' camera; see the module docs for when it exists.
 #[derive(Component, Clone, Copy, Default, Debug)]
 pub struct FrontendCamera;
@@ -229,6 +234,7 @@ impl Plugin for SessionPlugin {
             .init_resource::<SessionMessageClears>()
             .insert_resource(Embarked(self.skip_menu))
             .add_session_reset::<Embarked>()
+            .init_resource::<LastSessionError>()
             .add_message::<SessionEnded>()
             .add_systems(Update, sync_frontend_camera);
     }

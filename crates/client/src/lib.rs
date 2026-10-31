@@ -14,6 +14,7 @@ pub mod sim_driver;
 pub mod renderer;
 pub mod blocks; // block registry loader (assets/blocks/blocks.ron)
 pub mod instance; // GameInstanceManager (moved out of main.rs)
+pub mod frontend; // FrontendUi layer: main menu + placeholder screens
 pub mod session; // AppState, SessionScoped, session reset registry, FrontendCamera
 pub mod world_scale; // near window + LOD ring table knobs (VOXEL_WORLD & co.)
 pub mod harness; // SimHarness — added in Task 3 (empty stub file for now)

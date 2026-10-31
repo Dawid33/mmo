@@ -221,7 +221,13 @@ fn main() {
     // App states + the session reset registry + the frontend camera. Until the
     // menu is the default (Task 15), the menu is opt-in (`VOXEL_MENU=1`) and
     // everything else starts straight in the world as before.
-    app.add_plugins(client::session::SessionPlugin { skip_menu: client::session::skip_menu() });
+    let skip_menu = client::session::skip_menu();
+    app.add_plugins(client::session::SessionPlugin { skip_menu });
+    // The menu screens (never on wasm, which keeps today's flow).
+    #[cfg(not(target_arch = "wasm32"))]
+    if !skip_menu {
+        app.add_plugins(client::frontend::FrontendPlugin);
+    }
     // The logger exists from here on: announce the perf timeline and flush the
     // events the game/netcode threads emitted while Bevy was still starting.
     game::perf::init("client");

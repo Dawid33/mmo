@@ -1,0 +1,52 @@
+import { Button, FrameFace, GraphicalSets, LabelFace, Styles, VerticalFlow } from "@widgets";
+
+// The main menu: New world / Load world / Exit, and the reason the last
+// session ended (if it did not end by the player's choice).
+export component MainMenu {
+    in property <string> title: "Labour of Love";
+    in property <bool> can-load;
+    in property <string> menu-error;
+    callback new-world();
+    callback load-world();
+    callback exit();
+
+    out property <length> new-button-x: new-btn.absolute-position.x + new-btn.width / 2;
+    out property <length> new-button-y: new-btn.absolute-position.y + new-btn.height / 2;
+    out property <length> load-button-x: load-btn.absolute-position.x + load-btn.width / 2;
+    out property <length> load-button-y: load-btn.absolute-position.y + load-btn.height / 2;
+    out property <length> exit-button-x: exit-btn.absolute-position.x + exit-btn.width / 2;
+    out property <length> exit-button-y: exit-btn.absolute-position.y + exit-btn.height / 2;
+
+    menu := FrameFace {
+        title: root.title;
+        width: max(260px, self.content-x + body.preferred-width + Styles.frame.box.padding.right
+            + GraphicalSets.inset(Styles.frame.graphics).right);
+        height: self.content-y + body.preferred-height + Styles.frame.box.padding.bottom
+            + GraphicalSets.inset(Styles.frame.graphics).bottom;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+
+        body := VerticalFlow {
+            x: menu.content-x;
+            y: menu.content-y;
+            width: menu.content-right - menu.content-x;
+
+            new-btn := Button {
+                text: "New world";
+                clicked => { root.new-world(); }
+            }
+            load-btn := Button {
+                text: "Load world";
+                enabled: root.can-load;
+                clicked => { root.load-world(); }
+            }
+            exit-btn := Button {
+                text: "Exit";
+                clicked => { root.exit(); }
+            }
+            if root.menu-error != "": LabelFace {
+                text: root.menu-error;
+            }
+        }
+    }
+}

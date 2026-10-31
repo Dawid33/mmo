@@ -57,6 +57,7 @@ use super::hud::{crosshair_visible, HudStatus};
 use super::world_map::WorldMapState;
 use super::ClientRequests;
 use crate::instance::ClientRequest;
+use crate::session::{frontend_owns, AppState, Embarked};
 
 /// Shows and hides the panel.
 pub const SLINT_PANEL_KEY: KeyCode = KeyCode::F9;
@@ -82,6 +83,16 @@ pub const GAME_LAYER_ORDER: i32 = 1_000;
 pub const HUD_LAYER_ORDER: i32 = 0;
 /// The F3 dev panel, above everything (`dev_ui`).
 pub const DEV_LAYER_ORDER: i32 = 2_000;
+/// The frontend (menu screens, starting screen) above the game UI; the dev
+/// panel stays on top.
+pub const FRONTEND_LAYER_ORDER: i32 = 1_500;
+
+/// Whether the frontend owns the screen right now: a layer built with
+/// [`SlintLayerPlugin::hidden_by_frontend`] draws nothing and takes no input
+/// then. Without the session state (headless tests, examples) it never does.
+fn frontend_hides(state: Option<&State<AppState>>, embarked: Option<&Embarked>) -> bool {
+    state.is_some_and(|s| frontend_owns(*s.get(), embarked.is_some_and(|e| e.0)))
+}
 
 fn ui_scale() -> f32 {
     std::env::var("VOXEL_UI_SCALE")
@@ -176,12 +187,13 @@ pub struct SlintLayerPlugin<C> {
     order: i32,
     passthrough: bool,
     follows_ui_scale: bool,
+    hidden_by_frontend: bool,
 }
 
 impl<C> SlintLayerPlugin<C> {
     /// `make` is the component's generated `new` (e.g. `GameUi::new`).
     pub fn new(make: fn() -> Result<C, slint_ui::slint::PlatformError>) -> Self {
-        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false, follows_ui_scale: true }
+        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false, follows_ui_scale: true, hidden_by_frontend: false }
     }
 
     /// Draw order among the layers (higher on top); [`GAME_LAYER_ORDER`] by default.
@@ -204,6 +216,13 @@ impl<C> SlintLayerPlugin<C> {
         self
     }
 
+    /// Draw nothing and take no input while the frontend owns the screen
+    /// (every state but an embarked `InWorld`): the in-world layers.
+    pub fn hidden_by_frontend(mut self) -> Self {
+        self.hidden_by_frontend = true;
+        self
+    }
+
     pub fn with_init(mut self, init: fn(&C, &mut World)) -> Self {
         self.init = init;
         self
@@ -212,7 +231,8 @@ impl<C> SlintLayerPlugin<C> {
 
 impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
     fn build(&self, app: &mut App) {
-        let (make, init, order, passthrough) = (self.make, self.init, self.order, self.passthrough);
+        let (make, init, order, passthrough, hidden) =
+            (self.make, self.init, self.order, self.passthrough, self.hidden_by_frontend);
         let ui_scale = if self.follows_ui_scale { ui_scale() } else { 1.0 };
         if !app.is_plugin_added::<SlintCompositePlugin>() {
             app.add_plugins(SlintCompositePlugin);
@@ -221,7 +241,7 @@ impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
             // PreStartup: an app's Startup systems may use the layer and
             // whatever `init` inserted.
             .add_systems(PreStartup, move |world: &mut World| {
-                setup_slint_layer(world, make, init, order, passthrough, ui_scale)
+                setup_slint_layer(world, make, init, order, passthrough, hidden, ui_scale)
             })
             .add_systems(PreUpdate, slint_input::<C>.after(bevy::input::InputSystems))
             .add_systems(PostUpdate, render_slint_layer::<C>);
@@ -239,6 +259,9 @@ pub struct SlintLayer<C: 'static> {
     pub owns_pointer: bool,
     order: i32,
     passthrough: bool,
+    hidden_by_frontend: bool,
+    /// The texture was blanked for the frontend and has not been redrawn.
+    blanked: bool,
 }
 
 /// Whether a layer takes the pointer from the view underneath.
@@ -283,7 +306,7 @@ pub struct SlintOverlayPlugin;
 
 impl Plugin for SlintOverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(SlintLayerPlugin::new(GameUi::new).with_init(connect_game_ui))
+        app.add_plugins(SlintLayerPlugin::new(GameUi::new).hidden_by_frontend().with_init(connect_game_ui))
             .init_resource::<PlayPending>()
             .add_systems(
                 Update,
@@ -342,6 +365,7 @@ impl Plugin for HudLayerPlugin {
         app.add_plugins(
             SlintLayerPlugin::new(HudUi::new)
                 .order(HUD_LAYER_ORDER)
+                .hidden_by_frontend()
                 .passthrough()
                 .window_scale_only()
                 .with_init(check_hud_config),
@@ -447,6 +471,7 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
     init: fn(&C, &mut World),
     order: i32,
     passthrough: bool,
+    hidden_by_frontend: bool,
     ui_scale: f32,
 ) {
     let overlay = match Overlay::with(make) {
@@ -475,6 +500,8 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
         owns_pointer: false,
         order,
         passthrough,
+        hidden_by_frontend,
+        blanked: false,
     });
 }
 
@@ -529,11 +556,31 @@ fn slint_input<C: ComponentHandle + 'static>(
     mut pointer: Local<PointerState>,
     mut shared: ResMut<SlintPointer>,
     policy: Option<ResMut<CursorPolicy>>,
+    state: Option<Res<State<AppState>>>,
+    embarked: Option<Res<Embarked>>,
 ) {
     let Some(mut slint) = slint else { return };
     let Ok(window) = window.single() else { return };
     let scale = window.scale_factor() * slint.ui_scale;
     slint.overlay.resize(window.physical_width(), window.physical_height(), scale);
+    if slint.hidden_by_frontend && frontend_hides(state.as_deref(), embarked.as_deref()) {
+        // The frontend has the screen: nothing of ours is under the pointer.
+        buttons.clear();
+        wheel.clear();
+        keys.clear();
+        if pointer.last.take().is_some() {
+            slint.overlay.dispatch(WindowEvent::PointerExited);
+        }
+        pointer.captured = false;
+        let order = slint.order;
+        slint.owns_pointer = false;
+        shared.set(order, false, false);
+        let owned = shared.any_owner();
+        if let Some(mut policy) = policy.filter(|p| p.ui_pointer != owned) {
+            policy.ui_pointer = owned;
+        }
+        return;
+    }
     if slint.passthrough {
         shared.set(slint.order, false, false);
         let owned = shared.any_owner();
@@ -1167,9 +1214,30 @@ fn push_ui_state(
 fn render_slint_layer<C: ComponentHandle + 'static>(
     slint: Option<NonSendMut<SlintLayer<C>>>,
     mut images: ResMut<Assets<Image>>,
+    state: Option<Res<State<AppState>>>,
+    embarked: Option<Res<Embarked>>,
 ) {
     let Some(mut slint) = slint else { return };
-    let Some(dirty) = slint.overlay.render() else { return };
+    let hidden = slint.hidden_by_frontend && frontend_hides(state.as_deref(), embarked.as_deref());
+    if hidden {
+        if !slint.blanked {
+            if let Some(mut image) = images.get_mut(&slint.target) {
+                if let Some(data) = image.data.as_mut() {
+                    data.fill(0);
+                }
+            }
+            slint.blanked = true;
+        }
+        return;
+    }
+    let mut dirty = slint.overlay.render();
+    if std::mem::take(&mut slint.blanked) {
+        // Coming back from the frontend: the overlay's buffer still holds the
+        // last frame, so upload all of it.
+        let (width, height) = slint.overlay.size();
+        dirty = Some(slint_ui::Dirty { x: 0, y: 0, width, height });
+    }
+    let Some(dirty) = dirty else { return };
     let Some(mut image) = images.get_mut(&slint.target) else { return };
     let (width, height) = slint.overlay.size();
     let size = Extent3d { width, height, depth_or_array_layers: 1 };
