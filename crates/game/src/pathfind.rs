@@ -1,0 +1,170 @@
+//! Deterministic block-scale A* over region-local tiles (`TilePos`), shared by
+//! the sim and the client. Moves are DF-like: 8 horizontal neighbours at
+//! dy in {-1, 0, +1}, landing on a standable tile; no swimming.
+//!
+//! Solid means `block_props().is_solid` (leaves are not: no collider) and not
+//! air and not water; passable means air, or a non-solid non-water block.
+//! Water is neither floor nor passable.
+//!
+//! Determinism: ordered containers only (`BinaryHeap` with a total order,
+//! `BTreeMap`), never `HashMap` iteration.
+
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
+
+use crate::orders::{TilePos, TileSource};
+use crate::{block_props, BlockId, REGION_BLOCKS};
+
+/// Default expansion budget of one search, in nodes.
+pub const MAX_PATH_NODES: u32 = 32_768;
+/// Cost of one orthogonal step.
+pub const STEP_COST: u32 = 10;
+/// Cost of one diagonal step.
+pub const DIAG_COST: u32 = 14;
+/// Extra cost of a step that changes level.
+pub const CLIMB_COST: u32 = 5;
+/// Lowest block `y` `nearest_standable` scans.
+pub const COLUMN_SCAN_Y_MIN: i32 = -256;
+/// Highest block `y` `nearest_standable` scans.
+pub const COLUMN_SCAN_Y_MAX: i32 = 512;
+
+/// The water block id (`assets/blocks/blocks.ron`).
+const WATER: BlockId = BlockId(5);
+
+fn is_water(b: BlockId) -> bool {
+    b == WATER
+}
+
+fn passable_block(b: BlockId) -> bool {
+    b == BlockId::AIR || (!is_water(b) && !block_props().is_solid(b))
+}
+
+fn solid_block(b: BlockId) -> bool {
+    b != BlockId::AIR && !is_water(b) && block_props().is_solid(b)
+}
+
+fn in_region(p: TilePos) -> bool {
+    let n = REGION_BLOCKS as i32;
+    (0..n).contains(&p[0]) && (0..n).contains(&p[2])
+}
+
+fn passable(src: &impl TileSource, p: TilePos) -> bool {
+    in_region(p) && passable_block(src.block(p))
+}
+
+/// Whether a body can stand at `p`: `p` and the tile above are passable and
+/// the tile below is solid, inside the region.
+pub fn standable(src: &impl TileSource, p: TilePos) -> bool {
+    in_region(p)
+        && passable_block(src.block(p))
+        && passable_block(src.block([p[0], p[1] + 1, p[2]]))
+        && solid_block(src.block([p[0], p[1] - 1, p[2]]))
+}
+
+fn heuristic(a: TilePos, b: TilePos) -> u32 {
+    let dx = a[0].abs_diff(b[0]);
+    let dz = a[2].abs_diff(b[2]);
+    let dy = a[1].abs_diff(b[1]);
+    let (lo, hi) = (dx.min(dz), dx.max(dz));
+    DIAG_COST * lo + STEP_COST * (hi - lo) + CLIMB_COST * dy
+}
+
+/// Neighbour offsets in a fixed order (orthogonals first).
+const DIRS: [[i32; 2]; 8] =
+    [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+
+fn successors(src: &impl TileSource, p: TilePos, out: &mut Vec<(TilePos, u32)>) {
+    out.clear();
+    for [dx, dz] in DIRS {
+        for dy in [0, 1, -1] {
+            let q = [p[0] + dx, p[1] + dy, p[2] + dz];
+            if !standable(src, q) {
+                continue;
+            }
+            if dy == 1 && !passable(src, [p[0], p[1] + 2, p[2]]) {
+                continue;
+            }
+            let diagonal = dx != 0 && dz != 0;
+            if diagonal {
+                let top = p[1].max(q[1]);
+                if !passable(src, [p[0] + dx, top, p[2]]) || !passable(src, [p[0], top, p[2] + dz]) {
+                    continue;
+                }
+            }
+            let mut cost = if diagonal { DIAG_COST } else { STEP_COST };
+            if dy != 0 {
+                cost += CLIMB_COST;
+            }
+            out.push((q, cost));
+        }
+    }
+}
+
+/// The cheapest path `from..=to` inclusive, or `None` when unreachable, an
+/// end is not standable, or more than `max_nodes` nodes would be expanded.
+pub fn find_path(src: &impl TileSource, from: TilePos, to: TilePos, max_nodes: u32) -> Option<Vec<TilePos>> {
+    if !standable(src, from) || !standable(src, to) {
+        return None;
+    }
+    if from == to {
+        return Some(vec![from]);
+    }
+    let mut g: BTreeMap<TilePos, u32> = BTreeMap::new();
+    let mut came: BTreeMap<TilePos, TilePos> = BTreeMap::new();
+    let mut open = BinaryHeap::new();
+    let h0 = heuristic(from, to);
+    g.insert(from, 0);
+    open.push((Reverse(h0), Reverse(h0), Reverse(from)));
+    let mut expanded = 0u32;
+    let mut next = Vec::with_capacity(16);
+    while let Some((Reverse(f), Reverse(h), Reverse(p))) = open.pop() {
+        let gp = f - h;
+        if g.get(&p).is_some_and(|&best| gp > best) {
+            continue;
+        }
+        if p == to {
+            let mut path = vec![p];
+            let mut cur = p;
+            while let Some(&prev) = came.get(&cur) {
+                path.push(prev);
+                cur = prev;
+            }
+            path.reverse();
+            return Some(path);
+        }
+        if expanded >= max_nodes {
+            return None;
+        }
+        expanded += 1;
+        successors(src, p, &mut next);
+        for &(q, cost) in &next {
+            let gq = gp + cost;
+            if g.get(&q).is_none_or(|&best| gq < best) {
+                g.insert(q, gq);
+                came.insert(q, p);
+                let hq = heuristic(q, to);
+                open.push((Reverse(gq + hq), Reverse(hq), Reverse(q)));
+            }
+        }
+    }
+    None
+}
+
+/// A standable tile in `column` (`[x, z]`): the one closest to `y_hint`
+/// (lower first on a tie), or the topmost when `None`.
+pub fn nearest_standable(src: &impl TileSource, column: [i32; 2], y_hint: Option<i32>) -> Option<TilePos> {
+    let at = |y: i32| [column[0], y, column[1]];
+    match y_hint {
+        None => (COLUMN_SCAN_Y_MIN..=COLUMN_SCAN_Y_MAX).rev().map(at).find(|&p| standable(src, p)),
+        Some(hint) => {
+            let span = (hint - COLUMN_SCAN_Y_MIN).max(COLUMN_SCAN_Y_MAX - hint).max(0);
+            (0..=span).find_map(|d| {
+                [hint - d, hint + d]
+                    .into_iter()
+                    .filter(|y| (COLUMN_SCAN_Y_MIN..=COLUMN_SCAN_Y_MAX).contains(y))
+                    .map(at)
+                    .find(|&p| standable(src, p))
+            })
+        }
+    }
+}
