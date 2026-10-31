@@ -26,6 +26,7 @@
 //! never turns on fps-cam mode, never walks and never edits blocks. The bridge
 //! hides it and gives it no camera ([`CameraMode::Commander`]).
 
+pub mod adventure;
 pub mod cut_entities;
 pub mod designate;
 pub mod height;
@@ -361,6 +362,8 @@ impl Plugin for CommanderPlugin {
             .init_resource::<level::WorkingLevel>()
             .init_resource::<designate::DesignateState>()
             .init_resource::<designate::DragReadout>()
+            .init_resource::<adventure::ClientPlayMode>()
+            .add_message::<adventure::ToggleModeRequest>()
             .init_gizmo_group::<designate::HiddenEdgeGizmos>()
             .add_message::<tiles::TileMirrorMsg>()
             .add_systems(
@@ -403,6 +406,13 @@ impl Plugin for CommanderPlugin {
                 )
                     .chain()
                     .after(super::interpolate::interpolate_transforms),
+            )
+            .add_systems(
+                Update,
+                (adventure::send_mode_toggle, adventure::on_mode_change, adventure::sync_body_visibility)
+                    .chain()
+                    .before(designate::designate_keys)
+                    .before(cut_entities::hide_cut_entities),
             )
             .add_systems(
                 Update,

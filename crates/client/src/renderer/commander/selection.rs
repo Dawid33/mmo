@@ -16,7 +16,8 @@ use game::{EntityKey, EntityKind, RegionId};
 use super::height::HeightGrid;
 use super::minimap::{self, MinimapPointer};
 use super::CommanderView;
-use crate::renderer::bridge::{SimEntity, SimEntityMap, SimKind};
+use super::adventure::ClientPlayMode;
+use crate::renderer::bridge::{LocalBody, SimEntity, SimEntityMap, SimKind};
 use crate::renderer::cursor::CursorPolicy;
 
 /// A click selects the nearest entity whose screen position is this close.
@@ -63,9 +64,11 @@ pub fn band_rect(press: Option<Vec2>, cursor: Option<Vec2>, held: bool) -> Optio
     }
 }
 
-/// What can be selected: everything but players (commanders have no body).
-pub fn is_selectable(kind: EntityKind) -> bool {
-    !matches!(kind, EntityKind::Player)
+/// What can be selected: everything but players (commanders have no body),
+/// except the local player's own body in Adventure — `local_player` is true
+/// only for that body while the client plays it.
+pub fn is_selectable(kind: EntityKind, local_player: bool) -> bool {
+    !matches!(kind, EntityKind::Player) || local_player
 }
 
 /// The candidate nearest `cursor` within `radius` pixels.
@@ -158,12 +161,13 @@ pub fn update_ground_pick(
 fn projected(
     camera: &Camera,
     gt: &GlobalTransform,
-    entities: &Query<(&SimEntity, &SimKind, &GlobalTransform)>,
+    entities: &Query<(&SimEntity, &SimKind, &GlobalTransform, Has<LocalBody>)>,
+    adventure: bool,
 ) -> Vec<((RegionId, EntityKey), Vec2)> {
     entities
         .iter()
-        .filter(|(_, kind, _)| is_selectable(kind.0))
-        .filter_map(|(sim, _, e)| {
+        .filter(|(_, kind, _, local)| is_selectable(kind.0, *local && adventure))
+        .filter_map(|(sim, _, e, _)| {
             let p = camera.world_to_viewport(gt, e.translation()).ok()?;
             Some(((sim.region, sim.key), p))
         })
@@ -177,7 +181,8 @@ pub fn select_input(
     keys: Res<ButtonInput<KeyCode>>,
     window: Query<&Window, With<PrimaryWindow>>,
     view: Query<(&Camera, &Transform), With<CommanderView>>,
-    entities: Query<(&SimEntity, &SimKind, &GlobalTransform)>,
+    entities: Query<(&SimEntity, &SimKind, &GlobalTransform, Has<LocalBody>)>,
+    mode: Res<ClientPlayMode>,
     policy: Res<CursorPolicy>,
     minimap_pointer: Res<MinimapPointer>,
     mut selection: ResMut<Selection>,
@@ -207,7 +212,7 @@ pub fn select_input(
     let Some(end) = cursor else { return };
     let Ok((camera, tf)) = view.single() else { return };
     let gt = GlobalTransform::from(*tf);
-    let candidates = projected(camera, &gt, &entities);
+    let candidates = projected(camera, &gt, &entities, mode.adventure());
     let picked: Vec<_> = if dragging(start, end) {
         box_pick(start, end, candidates)
     } else {
@@ -243,7 +248,11 @@ pub fn draw_selection_rings(
                 let edge = game::slime::slime_edge_units(size);
                 (edge, edge / 2.0)
             }
-            EntityKind::Player => continue,
+            // Only the adventurer's own body is ever selected.
+            EntityKind::Player => (
+                2.0 * game::movement::PLAYER_CAPSULE_RADIUS,
+                super::cut_entities::feet_offset(EntityKind::Player),
+            ),
         };
         // The sim pose is the body centre; the ring sits at the feet.
         let feet = gt.translation() - Vec3::Y * (centre_height - 1.0);
@@ -258,6 +267,14 @@ pub fn draw_selection_rings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_selectable_only_when_local_in_adventure() {
+        assert!(!is_selectable(EntityKind::Player, false), "other players, or Fortress");
+        assert!(is_selectable(EntityKind::Player, true), "the adventurer's own body");
+        assert!(is_selectable(EntityKind::Slime { size: 1 }, false));
+        assert!(is_selectable(EntityKind::Slime { size: 1 }, true));
+    }
 
     #[test]
     fn band_appears_only_past_the_drag_threshold() {

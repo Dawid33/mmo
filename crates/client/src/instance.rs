@@ -989,10 +989,14 @@ impl GameInstanceManager {
             let _ = self.ui_update_send.send(game::UiUpdate::Hotbar(hotbar.clone()));
             self.prev_hotbar = hotbar;
         }
-        if let Some(update) =
-            game::play_mode_update(&mut self.prev_play_mode, self.world.as_ref().unwrap().data(&home), client_id)
-        {
-            let _ = self.ui_update_send.send(update);
+        // Mid-handoff the client can be briefly absent from the home region's
+        // data; `play_mode_update` would read that as Fortress and flicker
+        // the body hidden, so keep the last mode until it is back.
+        let data = self.world.as_ref().unwrap().data(&home);
+        if data.clients.get(&client_id).is_some() {
+            if let Some(update) = game::play_mode_update(&mut self.prev_play_mode, data, client_id) {
+                let _ = self.ui_update_send.send(update);
+            }
         }
 
         // Cursor grab follows inventory-open: released while a menu is open.

@@ -19,6 +19,12 @@ export component GameUi inherits Window {
 
     callback clear-selection();
 
+    // Adventure mode: the client plays its one body instead of commanding
+    // (crates/client/src/renderer/commander/adventure.rs). The panel button
+    // switches; the fortress tools are off meanwhile (`tools-available`).
+    in property <bool> adventure;
+    callback toggle-mode();
+
     // Fortress tools (crates/client/src/renderer/commander/designate.rs).
     // False with no home region (not joined yet).
     in property <bool> tools-available: true;
@@ -128,6 +134,10 @@ export component GameUi inherits Window {
                     text: "Clear selection";
                     enabled: root.selected-count > 0;
                     clicked => { root.clear-selection(); }
+                }
+                Button {
+                    text: root.adventure ? "Fortress mode" : "Adventure mode";
+                    clicked => { root.toggle-mode(); }
                 }
             }
         }

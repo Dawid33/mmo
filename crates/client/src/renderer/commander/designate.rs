@@ -426,6 +426,7 @@ pub fn designate_keys(
     mirror: Res<TileMirror>,
     events: Res<GameEvents>,
     local: Res<LocalPlayer>,
+    mode: Res<super::adventure::ClientPlayMode>,
     mut state: ResMut<DesignateState>,
 ) {
     if policy.blocks_game() {
@@ -441,8 +442,9 @@ pub fn designate_keys(
     if keys.just_pressed(KeyCode::Escape) {
         state.cancel();
     }
-    // No home region (cell mode, or not joined yet): no tools.
-    if mirror.region().is_none() {
+    // No home region (cell mode, or not joined yet), or playing the body in
+    // Adventure: no tools.
+    if mirror.region().is_none() || mode.adventure() {
         if state.tool.is_some() {
             state.set_tool(None);
         }

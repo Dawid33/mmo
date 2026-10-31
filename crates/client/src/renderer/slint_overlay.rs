@@ -48,6 +48,7 @@ use super::commander::level::{focus_surface, surface_level, WorkingLevel};
 use super::commander::minimap;
 use super::commander::selection::{Selection, SelectionBand};
 use super::commander::tiles::TileMirror;
+use super::commander::adventure::{ClientPlayMode, ToggleModeRequest};
 use super::commander::CommanderCamera;
 use super::cursor::CursorPolicy;
 use super::slint_composite::{SlintCompositePlugin, SlintLayerTextures};
@@ -101,6 +102,9 @@ pub enum UiAction {
     SelectTile(i32, i32),
     /// The map's Play button: ask the server for the selected tile.
     Play,
+    /// The panel's mode button: Fortress ↔ Adventure
+    /// (`commander::adventure`).
+    ToggleMode,
 }
 
 /// The region a Play request was sent for, until we are there with its region
@@ -306,11 +310,20 @@ pub struct UiUpdates(pub Option<crossbeam::channel::Receiver<game::UiUpdate>>);
 /// Apply the sim's UI projection: the cursor grab it asks for. Its hotbar
 /// is not drawn (the HUD's hotbar strip was removed; the fortress tools are
 /// on the tool wheel).
-pub fn drain_ui_updates(updates: Res<UiUpdates>, mut cursor_policy: ResMut<CursorPolicy>) {
+pub fn drain_ui_updates(
+    updates: Res<UiUpdates>,
+    mut cursor_policy: ResMut<CursorPolicy>,
+    mut play_mode: Option<ResMut<ClientPlayMode>>,
+) {
     let Some(receiver) = updates.0.as_ref() else { return };
     while let Ok(update) = receiver.try_recv() {
         match update {
-            game::UiUpdate::Hotbar(_) | game::UiUpdate::PlayMode(_) => {}
+            game::UiUpdate::Hotbar(_) => {}
+            game::UiUpdate::PlayMode(mode) => {
+                if let Some(play_mode) = play_mode.as_mut() {
+                    play_mode.set_if_neq(ClientPlayMode(mode));
+                }
+            }
             game::UiUpdate::SetCursorGrab(grab) => cursor_policy.sim_grab = grab,
         }
     }
@@ -408,6 +421,7 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_close_map(push(UiAction::CloseMap));
     ui.on_close_menu(push(UiAction::CloseMenu));
     ui.on_play(push(UiAction::Play));
+    ui.on_toggle_mode(push(UiAction::ToggleMode));
     let queue = actions.clone();
     ui.on_select_tile(move |col, row| queue.borrow_mut().push(UiAction::SelectTile(col, row)));
     debug_assert_eq!(
@@ -731,6 +745,7 @@ fn apply_ui_actions(
     mut policy: Option<ResMut<CursorPolicy>>,
     requests: Option<Res<ClientRequests>>,
     status: Res<HudStatus>,
+    mut mode_toggles: Option<ResMut<Messages<ToggleModeRequest>>>,
 ) {
     let (Some(actions), Some(slint)) = (actions, slint) else { return };
     let ui = slint.overlay.ui();
@@ -740,6 +755,11 @@ fn apply_ui_actions(
             UiAction::ClearSelection => {
                 if let Some(selection) = selection.as_mut() {
                     selection.0.clear();
+                }
+            }
+            UiAction::ToggleMode => {
+                if let Some(toggles) = mode_toggles.as_mut() {
+                    toggles.write(ToggleModeRequest);
                 }
             }
             UiAction::OpenMap => to = Screens::open_map(),
@@ -861,6 +881,7 @@ fn tool_wheel(
     mut designate: Option<ResMut<DesignateState>>,
     mut level: Option<ResMut<WorkingLevel>>,
     mirror: Option<Res<TileMirror>>,
+    mode: Option<Res<ClientPlayMode>>,
     mut policy: Option<ResMut<CursorPolicy>>,
     mut world_map: ResMut<WorldMapState>,
     status: Res<HudStatus>,
@@ -873,8 +894,11 @@ fn tool_wheel(
         *phase = WheelPhase::Closed;
     }
     let Ok(window) = window.single() else { return };
-    // Commander mode with a home region, as for the tool hotkeys.
-    let available = designate.is_some() && mirror.as_ref().is_some_and(|m| m.region().is_some());
+    // Commander mode with a home region and not in Adventure, as for the
+    // tool hotkeys.
+    let available = designate.is_some()
+        && mirror.as_ref().is_some_and(|m| m.region().is_some())
+        && !mode.as_ref().is_some_and(|m| m.adventure());
     let free = policy.as_ref().is_none_or(|p| !p.blocks_game() && !p.ui_pointer);
     let cursor = window.cursor_position();
     let input = WheelInput {
@@ -936,6 +960,7 @@ struct ToolbarParams<'w, 's> {
     grid: Option<Res<'w, HeightGrid>>,
     cam: Option<Res<'w, CommanderCamera>>,
     mirror: Option<Res<'w, TileMirror>>,
+    mode: Option<Res<'w, ClientPlayMode>>,
     window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     /// The cut the wheel's items were last captioned for; `None` before
     /// the first set.
@@ -945,8 +970,13 @@ struct ToolbarParams<'w, 's> {
 /// The tool, priority, cut (the wheel's captions), level and drag readout
 /// → the UI, each only when changed.
 fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
-    // No home region (not joined yet): no tools, as with the hotkeys.
-    let available = p.mirror.as_ref().is_some_and(|m| m.region().is_some());
+    // No home region (not joined yet) or Adventure: no tools, as with the
+    // hotkeys.
+    let adventure = p.mode.as_ref().is_some_and(|m| m.adventure());
+    if ui.get_adventure() != adventure {
+        ui.set_adventure(adventure);
+    }
+    let available = p.mirror.as_ref().is_some_and(|m| m.region().is_some()) && !adventure;
     if ui.get_tools_available() != available {
         ui.set_tools_available(available);
     }
