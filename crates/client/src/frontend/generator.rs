@@ -80,6 +80,13 @@ pub const WORLD_CELL_KEY: &str = "world_cell";
 pub const PREVIEW_CELLS: [(f64, &str); 2] = [(64.0, "64 m"), (32.0, "32 m")];
 pub const WORLD_CELLS: [(f64, &str); 2] = [(16.0, "16 m"), (8.0, "8 m (slow)")];
 
+/// Land's non-knob row: the world's edge length (`ForgeParams::size_m`) for
+/// the preview and Play forges. [`DEFAULT_WORLD_SIZE`] is `DEFAULT_SIZE_M`.
+pub const WORLD_SIZE_KEY: &str = "world_size";
+pub const WORLD_SIZES: [(f64, &str); 3] =
+    [(8_000.0, "8 km"), (worldgen::forge::world::DEFAULT_SIZE_M, "16 km"), (32_000.0, "32 km (slow)")];
+pub const DEFAULT_WORLD_SIZE: usize = 1;
+
 /// A knob whose range is whole numbers at least this wide slides in steps of 1.
 const WHOLE_STEP_MIN_RANGE: f64 = 10.0;
 
@@ -145,7 +152,7 @@ fn strings(items: impl IntoIterator<Item = impl Into<SharedString>>) -> ModelRc<
     ModelRc::new(VecModel::from(items.into_iter().map(Into::into).collect::<Vec<SharedString>>()))
 }
 
-fn choice_row(key: &str, label: &str, help: &str, choices: &[&str], value: usize) -> KnobRow {
+fn choice_row(key: &str, label: &str, help: &str, choices: &[&str], value: usize, default: usize) -> KnobRow {
     KnobRow {
         key: key.into(),
         label: label.into(),
@@ -153,7 +160,7 @@ fn choice_row(key: &str, label: &str, help: &str, choices: &[&str], value: usize
         min: 0.0,
         max: (choices.len() - 1) as f32,
         value: value as f32,
-        default: 0.0,
+        default: default as f32,
         step: 1.0,
         is_choice: true,
         choices: strings(choices.iter().copied()),
@@ -193,6 +200,8 @@ pub struct GeneratorState {
     /// Index into [`PREVIEW_CELLS`] / [`WORLD_CELLS`].
     pub preview_cell: usize,
     pub world_cell: usize,
+    /// Index into [`WORLD_SIZES`].
+    pub world_size: usize,
     /// The latest preview request; results of older ones are dropped.
     pub generation: u64,
     /// Settings changed since the last preview request.
@@ -224,6 +233,7 @@ impl Default for GeneratorState {
             layer: 0,
             preview_cell: 0,
             world_cell: 0,
+            world_size: DEFAULT_WORLD_SIZE,
             generation: 0,
             stale: true,
             refresh_requested: false,
@@ -251,21 +261,35 @@ impl GeneratorState {
         PRESETS.get(self.preset_index()).map_or("Custom settings.", |p| p.description)
     }
 
-    /// The current tab's rows, in `SPECS` order (Advanced adds the cell sizes).
+    /// The current tab's rows, in `SPECS` order (Land starts with the world
+    /// size, Advanced adds the cell sizes).
     pub fn rows(&self) -> Vec<KnobRow> {
-        let mut rows: Vec<KnobRow> = SPECS
-            .iter()
-            .filter(|s| tab_of(s) == self.tab)
-            .map(|s| knob_row(s, self.knobs.get(s.key).unwrap_or(s.default)))
-            .collect();
+        let labels = |cells: &[(f64, &'static str)]| cells.iter().map(|c| c.1).collect::<Vec<_>>();
+        let mut rows = Vec::new();
+        if self.tab == 0 {
+            rows.push(choice_row(
+                WORLD_SIZE_KEY,
+                "World size",
+                "Edge length of the square world, ocean all round: 32 km takes about four times longer.",
+                &labels(&WORLD_SIZES),
+                self.world_size,
+                DEFAULT_WORLD_SIZE,
+            ));
+        }
+        rows.extend(
+            SPECS
+                .iter()
+                .filter(|s| tab_of(s) == self.tab)
+                .map(|s| knob_row(s, self.knobs.get(s.key).unwrap_or(s.default))),
+        );
         if self.tab == ADVANCED {
-            let labels = |cells: &[(f64, &'static str)]| cells.iter().map(|c| c.1).collect::<Vec<_>>();
             rows.push(choice_row(
                 PREVIEW_CELL_KEY,
                 "Preview cell",
                 "Cell size of the preview: 32 m is sharper and slower to refresh.",
                 &labels(&PREVIEW_CELLS),
                 self.preview_cell,
+                0,
             ));
             rows.push(choice_row(
                 WORLD_CELL_KEY,
@@ -273,13 +297,20 @@ impl GeneratorState {
                 "Cell size the world is forged at on Play: 8 m takes several times longer.",
                 &labels(&WORLD_CELLS),
                 self.world_cell,
+                0,
             ));
         }
         rows
     }
 
     pub fn params(&self, cell_m: f64) -> ForgeParams {
-        ForgeParams { cell_m, seed: self.seed, knobs: self.knobs.clone(), quiet: true, ..Default::default() }
+        ForgeParams {
+            size_m: WORLD_SIZES[self.world_size.min(WORLD_SIZES.len() - 1)].0,
+            cell_m,
+            seed: self.seed,
+            knobs: self.knobs.clone(),
+            quiet: true,
+        }
     }
 
     pub fn layer(&self) -> PreviewLayer {
@@ -312,6 +343,7 @@ impl GeneratorState {
             GeneratorAction::Reset(key) => {
                 let default = match key.as_str() {
                     PREVIEW_CELL_KEY | WORLD_CELL_KEY => 0.0,
+                    WORLD_SIZE_KEY => DEFAULT_WORLD_SIZE as f64,
                     _ => SPECS.iter().find(|s| s.key == key).map_or(0.0, |s| s.default),
                 };
                 self.set_knob(&key, default);
@@ -353,6 +385,10 @@ impl GeneratorState {
         match key {
             PREVIEW_CELL_KEY => {
                 self.preview_cell = (value.round().max(0.0) as usize).min(PREVIEW_CELLS.len() - 1);
+                self.stale = true;
+            }
+            WORLD_SIZE_KEY => {
+                self.world_size = (value.round().max(0.0) as usize).min(WORLD_SIZES.len() - 1);
                 self.stale = true;
             }
             WORLD_CELL_KEY => self.world_cell = (value.round().max(0.0) as usize).min(WORLD_CELLS.len() - 1),
@@ -530,6 +566,19 @@ impl ForgeJob {
 
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// An event as the game should take it: a `Done` that lost the race to a
+    /// Cancel pressed after the thread's last check removes the new world and
+    /// becomes `Cancelled`.
+    pub fn settle(&self, event: ForgeEvent) -> ForgeEvent {
+        match event {
+            ForgeEvent::Done(world) if self.cancel.load(Ordering::SeqCst) => {
+                let _ = std::fs::remove_dir_all(&world.entry_dir);
+                ForgeEvent::Cancelled
+            }
+            event => event,
+        }
     }
 }
 
@@ -720,7 +769,7 @@ fn poll_forge(
 ) {
     let Some(job) = job else { return };
     for event in job.events.try_iter() {
-        match event {
+        match job.settle(event) {
             ForgeEvent::Progress(p) => state.forging = Some(progress_text(p)),
             ForgeEvent::Saving => state.forging = Some((0.97, "Saving the world".into())),
             ForgeEvent::Done(world) => {
@@ -849,9 +898,10 @@ mod tests {
     fn rows_follow_the_tab() {
         let mut state = GeneratorState { seed: 1, ..Default::default() };
         let rows = state.rows();
-        assert_eq!(rows[0].key, "layout");
-        assert!(rows[0].is_choice);
-        assert_eq!(rows[0].choices.row_count(), 3);
+        assert_eq!(rows[0].key, WORLD_SIZE_KEY);
+        assert_eq!(rows[1].key, "layout");
+        assert!(rows[1].is_choice);
+        assert_eq!(rows[1].choices.row_count(), 3);
         state.tab = ADVANCED;
         let keys: Vec<String> = state.rows().iter().map(|r| r.key.to_string()).collect();
         assert_eq!(keys.last().map(String::as_str), Some(WORLD_CELL_KEY));
@@ -859,7 +909,37 @@ mod tests {
         let total: usize = (0..TABS.len())
             .map(|t| GeneratorState { tab: t, ..Default::default() }.rows().len())
             .sum();
-        assert_eq!(total, SPECS.len() + 2);
+        assert_eq!(total, SPECS.len() + 3);
+    }
+
+    #[test]
+    fn world_size_row_sets_size_m() {
+        let mut state = GeneratorState::default();
+        assert_eq!(WORLD_SIZES[DEFAULT_WORLD_SIZE].0, worldgen::forge::world::DEFAULT_SIZE_M);
+        let size_row = state.rows().into_iter().find(|r| r.key == WORLD_SIZE_KEY).unwrap();
+        assert_eq!((size_row.value, size_row.default), (1.0, 1.0));
+        assert_eq!(state.params(64.0).size_m, 16_000.0);
+        state.stale = false;
+        state.apply(GeneratorAction::Knob(WORLD_SIZE_KEY.into(), 2.0), "");
+        assert!(state.stale, "the preview re-forges");
+        assert_eq!(state.params(PREVIEW_CELLS[state.preview_cell].0).size_m, 32_000.0);
+        assert_eq!(state.params(WORLD_CELLS[state.world_cell].0).size_m, 32_000.0);
+        state.apply(GeneratorAction::Reset(WORLD_SIZE_KEY.into()), "");
+        assert_eq!(state.params(16.0).size_m, 16_000.0);
+    }
+
+    #[test]
+    fn done_after_cancel_removes_the_world() {
+        let dir = scratch("late-cancel").join("island");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_tx, events) = channel::unbounded();
+        let job = ForgeJob { cancel: Arc::new(AtomicBool::new(false)), events };
+        let done = || ForgeEvent::Done(PendingWorld { entry_dir: dir.clone(), terrain: dir.join("t"), name: "x".into() });
+        assert!(matches!(job.settle(done()), ForgeEvent::Done(_)));
+        assert!(dir.is_dir());
+        job.cancel();
+        assert!(matches!(job.settle(done()), ForgeEvent::Cancelled));
+        assert!(!dir.exists(), "late Done's world removed");
     }
 
     #[test]
