@@ -1,3 +1,10 @@
+// Binding rule for the controls: `Slider.value`, `Dropdown.selected` and
+// `Tabs.selected` are in-out because the user changes them. Assigning a
+// property inside a component breaks a parent's ONE-WAY binding (`value: x`),
+// so a parent that also wants to drive them from its own state must bind
+// TWO-WAY (`value <=> root.x`); then user changes and later outside sets both
+// flow through the same property. Never use `value: expr` on these.
+
 import { Button, ButtonFace, DropdownFace, FrameFace, ScrollPaneFace, SliderFace, Styles, TabbedPaneFace } from "@widgets";
 
 // A list box you can use: the widgets' `ListBoxFace` look (list-box items

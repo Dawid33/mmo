@@ -134,3 +134,21 @@ fn tabs_click_selects() {
     assert_eq!(*changed.borrow(), [1]);
     assert_eq!(overlay.ui().get_tab_selected(), 1);
 }
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn two_way_bound_value_keeps_following_the_parent_after_a_press() {
+    let mut overlay = overlay();
+    overlay.ui().set_slider_maximum(100.0);
+    overlay.ui().set_slider_value(10.0);
+    overlay.render();
+    press(&mut overlay, SLIDER_X + 0.5 * SLIDER_W, SLIDER_Y + 5.0);
+    release(&mut overlay, SLIDER_X + 0.5 * SLIDER_W, SLIDER_Y + 5.0);
+    assert!((overlay.ui().get_slider_value() - 50.0).abs() < 1.0);
+    overlay.ui().set_slider_value(80.0);
+    overlay.render();
+    assert_eq!(overlay.ui().get_slider_value(), 80.0);
+    // A click on the thumb's new place still edits from there.
+    press(&mut overlay, SLIDER_X + 0.2 * SLIDER_W, SLIDER_Y + 5.0);
+    assert!((overlay.ui().get_slider_value() - 20.0).abs() < 1.0);
+}

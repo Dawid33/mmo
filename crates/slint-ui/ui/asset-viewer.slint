@@ -16,7 +16,7 @@ export component AssetViewerUi inherits Window {
     in property <int> selected-clip: -1;
     // "walk — loop, 1.20 s"
     in property <string> clip-info;
-    in property <float> time;
+    in-out property <float> time;
     in property <float> length;
     in property <bool> paused;
     in property <string> speed;
@@ -95,7 +95,7 @@ export component AssetViewerUi inherits Window {
             }
             LabelFace { text: root.clip-info; }
             Slider {
-                value: root.time;
+                value <=> root.time;
                 maximum: root.length;
                 disabled: root.length <= 0;
                 edited(t) => { root.scrub(t); }
