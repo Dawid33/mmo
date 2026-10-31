@@ -593,6 +593,15 @@ pub fn apply_snapshot_voxels(
     }
 }
 
+/// The text a lost session shows on the main menu.
+pub fn session_end_reason(error: &game::GameError) -> String {
+    match error {
+        game::GameError::Disconnected(reason) => reason.clone(),
+        game::GameError::CrashedOnServerEvent => "the game crashed on a server event".into(),
+        game::GameError::QuitRequested => "the session was quit".into(),
+    }
+}
+
 pub fn drain_client_updates(
     mut commands: Commands,
     updates: Res<ClientUpdates>,
@@ -609,6 +618,7 @@ pub fn drain_client_updates(
     camera_mode: Option<Res<super::commander::CameraMode>>,
     mut tile_msgs: Option<ResMut<Messages<TileMirrorMsg>>>,
     mut world_map_msgs: Option<ResMut<Messages<super::world_map::WorldMapMsg>>>,
+    mut session_ended: Option<ResMut<Messages<crate::session::SessionEnded>>>,
 ) {
     // Unbudgeted: drains everything the game thread queued since last frame.
     let mut stall = game::perf::StallGuard::new("drain_client_updates");
@@ -692,7 +702,14 @@ pub fn drain_client_updates(
                     .pending
                     .push(lod_rings::LodEventMsg::Remove { key, near_takeover });
             }
-            ClientUpdateEvent::GameCrash(e) => error!("bridge: game thread crashed: {:?}", e),
+            ClientUpdateEvent::GameCrash(e) => {
+                // The session ended without our Quit (lost server, failed
+                // connect, crash): the session flow takes us back to the menu.
+                error!("bridge: game session ended: {:?}", e);
+                if let Some(ended) = session_ended.as_mut() {
+                    ended.write(crate::session::SessionEnded { reason: Some(session_end_reason(&e)) });
+                }
+            }
             ClientUpdateEvent::HudStatus { home_region, viewer_region, connection } => {
                 hud_status.home_region = Some(home_region);
                 hud_status.viewer_region = Some(viewer_region);

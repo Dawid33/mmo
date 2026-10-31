@@ -110,6 +110,8 @@ pub enum UiAction {
     OpenMap,
     CloseMap,
     CloseMenu,
+    /// The menu's Main menu button: leave the world (`session` flow).
+    MainMenu,
     /// A map tile clicked (column, row); Slint has already selected it.
     SelectTile(i32, i32),
     /// The map's Play button: ask the server for the selected tile.
@@ -497,6 +499,9 @@ fn connect_game_ui(ui: &GameUi, world: &mut World) {
     ui.on_open_map(push(UiAction::OpenMap));
     ui.on_close_map(push(UiAction::CloseMap));
     ui.on_close_menu(push(UiAction::CloseMenu));
+    ui.on_main_menu(push(UiAction::MainMenu));
+    // wasm has no main menu to leave to (one in-process session).
+    ui.set_can_leave(cfg!(not(target_arch = "wasm32")));
     ui.on_play(push(UiAction::Play));
     ui.on_toggle_mode(push(UiAction::ToggleMode));
     ui.on_follow_clicked(push(UiAction::ToggleFollow));
@@ -853,6 +858,7 @@ fn apply_ui_actions(
     mut mode_toggles: Option<ResMut<Messages<ToggleModeRequest>>>,
     mut follow: Option<ResMut<Follow>>,
     local_body: Query<&SimEntity, With<LocalBody>>,
+    mut session_ended: Option<ResMut<Messages<crate::session::SessionEnded>>>,
 ) {
     let (Some(actions), Some(slint)) = (actions, slint) else { return };
     let ui = slint.overlay.ui();
@@ -881,6 +887,12 @@ fn apply_ui_actions(
             UiAction::OpenMap => to = Screens::open_map(),
             UiAction::CloseMap => to.map = false,
             UiAction::CloseMenu => to.menu = false,
+            UiAction::MainMenu => {
+                to.menu = false;
+                if let Some(ended) = session_ended.as_mut() {
+                    ended.write(crate::session::SessionEnded { reason: None });
+                }
+            }
             // The selection lives in Slint; `push_ui_state` follows it.
             UiAction::SelectTile(..) => {}
             UiAction::Play => {

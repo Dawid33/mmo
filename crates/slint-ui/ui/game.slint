@@ -92,6 +92,10 @@ export component GameUi inherits Window {
 
     callback open-map();
     callback close-menu();
+    // The menu's Main menu button: leave the world.
+    callback main-menu();
+    // Whether the menu offers Main menu (false on wasm, which has no menu).
+    in property <bool> can-leave: true;
     callback close-map();
     // A tile clicked on the map (it is now `selected-col/row`).
     callback select-tile(int, int);
@@ -209,8 +213,10 @@ export component GameUi inherits Window {
     if root.menu-open: GameMenu {
         width: 100%;
         height: 100%;
+        can-leave: root.can-leave;
         open-map => { root.open-map(); }
         close-menu => { root.close-menu(); }
+        main-menu => { root.main-menu(); }
     }
 
     // Over everything else. `visible` rather than `if`, so its hit-test

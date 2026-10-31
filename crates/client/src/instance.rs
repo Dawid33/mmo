@@ -40,6 +40,11 @@ pub enum ClientRequest {
     /// Play this region: the server moves our session there (or refuses,
     /// answered as `ClientUpdateEvent::PlayRefused`).
     PlayRegion(RegionCoords),
+    /// Leaving the world (back to the main menu): tell the server now, so it
+    /// drops our session at once instead of at the connection's idle timeout.
+    /// Followed by `GameEventKind::Quit`, which sends any request still queued
+    /// before the session ends.
+    Leave,
 }
 
 /// Command sent from the client (Bevy app) to the game thread.
@@ -629,6 +634,10 @@ impl GameInstanceManager {
                 info!("[client] requesting Play in region {rc:?}");
                 let _ = self.server_game_send.send(ClientPacket::PlayRegion(rc));
             }
+            ClientRequest::Leave => {
+                info!("[client] leaving the world");
+                let _ = self.server_game_send.send(ClientPacket::Leave);
+            }
         }
     }
 
@@ -705,6 +714,17 @@ impl GameInstanceManager {
     /// should quit. Events arriving before the first region loads are
     /// dropped, matching the pre-refactor select! loop.
     fn handle_game_event(&mut self, event: GameEventKind) -> Result<bool, GameError> {
+        if let GameEventKind::Quit = event {
+            // Honoured before the first region too (leaving while the world
+            // is still loading). Requests queued before the Quit (the
+            // `Leave` the UI sends first) go out before the session ends:
+            // they arrive on another channel, so `select!` may see the Quit
+            // first.
+            while let Ok(request) = self.request_recv.try_recv() {
+                self.handle_request(request);
+            }
+            return Ok(false);
+        }
         if self.world.is_none() {
             return Ok(true);
         }

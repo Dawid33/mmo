@@ -4,6 +4,10 @@ import { Button, FrameFace, GraphicalSets, Styles, VerticalFlow } from "@widgets
 export component GameMenu {
     callback open-map();
     callback close-menu();
+    // Leave the world for the main menu (stops a local server).
+    callback main-menu();
+    // Whether this client can leave to a main menu (not on wasm).
+    in property <bool> can-leave: true;
 
     menu := FrameFace {
         title: "Menu";
@@ -22,6 +26,10 @@ export component GameMenu {
             Button {
                 text: "World Map";
                 clicked => { root.open-map(); }
+            }
+            if root.can-leave: Button {
+                text: "Main menu";
+                clicked => { root.main-menu(); }
             }
             Button {
                 text: "Close";

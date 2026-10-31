@@ -1,6 +1,7 @@
 //! Game client
 // #![deny(missing_docs)]
 use bevy::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use game::GameEventKind;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -11,8 +12,6 @@ use client::sim_driver;
 use client::world_scale::WorldScale;
 #[cfg(not(target_arch = "wasm32"))]
 use client::instance::{start_game_thread, Command};
-#[cfg(not(target_arch = "wasm32"))]
-use client::netcode::ConnectPolicy;
 
 /// Share of total cores given to the AsyncCompute task pool, which runs the
 /// background chunk-meshing jobs (`renderer/meshing.rs`). Normal clients take
@@ -139,24 +138,23 @@ fn main() {
     // Shared debug toggles: render thread (F3 dev panel) writes, game thread reads.
     let debug_flags = game::DebugFlags::default();
 
+    // The dev bypass (`VOXEL_SKIP_MENU=1`, a set `VOXEL_WORLD_FILE`,
+    // `RENDER_BENCH`, `VOXEL_AUTOPILOT`; for now also "no `VOXEL_MENU=1`")
+    // connects to 127.0.0.1:6466 at startup, as before the menu existed.
+    // Otherwise the app starts with dead channels and every world session
+    // gets fresh ones (`session::SessionFlowPlugin`).
+    let skip_menu = client::session::skip_menu();
+
     #[cfg(not(target_arch = "wasm32"))]
     let (command_send, game_send, client_recv, request_send) = {
         let command_send = start_game_thread();
-        let (game_send, game_recv) = crossbeam::channel::unbounded();
-        let (client_send, client_recv) = crossbeam::channel::unbounded();
-        let (request_send, request_recv) = crossbeam::channel::unbounded();
-        command_send
-            .send(Command::ConnectToServerAndScene(
-                game_send.clone(),
-                game_recv,
-                client_send,
-                request_recv,
-                SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466)),
-                debug_flags.clone(),
-                world_scale,
-                ConnectPolicy::default(),
-            ))
-            .unwrap();
+        let channels = client::session::SessionChannels::new();
+        let app_ends = (channels.game_send.clone(), channels.client_recv.clone(), channels.request_send.clone());
+        if skip_menu {
+            let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6466));
+            command_send.send(channels.connect(addr, debug_flags.clone(), world_scale)).unwrap();
+        }
+        let (game_send, client_recv, request_send) = app_ends;
         (command_send, game_send, client_recv, request_send)
     };
 
@@ -221,7 +219,6 @@ fn main() {
     // App states + the session reset registry + the frontend camera. Until the
     // menu is the default (Task 15), the menu is opt-in (`VOXEL_MENU=1`) and
     // everything else starts straight in the world as before.
-    let skip_menu = client::session::skip_menu();
     app.add_plugins(client::session::SessionPlugin { skip_menu });
     // The menu screens: on every native build, since a bypass session can
     // still end up in the menu (leave, lost server). `skip_menu` only picks the
@@ -241,6 +238,11 @@ fn main() {
         debug_flags: debug_flags.clone(),
         camera_mode: renderer::commander::CameraMode::from_env(),
     });
+    // Starting / leaving world sessions: the local server per world, fresh
+    // channels per session, back to the menu in-process.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.insert_resource(client::session::GameThread(command_send.clone()))
+        .add_plugins(client::session::SessionFlowPlugin);
     #[cfg(feature = "dev_ui")]
     app.add_plugins(renderer::dev_ui::DevUiPlugin);
 
@@ -256,10 +258,16 @@ fn main() {
         agent_ready.shutdown();
     }
 
-    // Window closed: shut the sim and game threads down.
+    // Window closed: shut the sim and game threads down. On native the
+    // session was already left on `AppExit` (`SessionFlowPlugin`); wait for
+    // its local server to stop so no child outlives the client.
+    #[cfg(target_arch = "wasm32")]
     let _ = game_send.send(GameEventKind::Quit);
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = command_send.send(Command::Quit);
+    {
+        client::session::join_server_stops();
+        let _ = command_send.send(Command::Quit);
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     {

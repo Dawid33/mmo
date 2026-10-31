@@ -331,6 +331,276 @@ fn frontend_camera_bundle() -> impl Bundle {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use flow::{
+    install_dead_channels, join_server_stops, leave_session, GameThread, SessionChannels, SessionFlowPlugin,
+    SERVER_LOG_TAIL_LINES,
+};
+
+/// Starting and leaving a world session (native only; wasm keeps today's
+/// single in-process session).
+///
+/// - `OnEnter(Starting)` ([`start_session`](flow::start_session)): start the
+///   [`PendingWorld`]'s server ([`LocalHost`](crate::local_host::LocalHost)),
+///   swap in a fresh set of [`SessionChannels`], send the game thread its
+///   connect. The first `SetPlayer` moves on to `InWorld`.
+/// - [`SessionEnded`] while `Starting` / `InWorld` (the Esc menu's Main menu,
+///   a lost server, the child exiting) records why in [`LastSessionError`] and
+///   goes to `MainMenu`; the transition out runs [`leave_session`].
+/// - App exit (window close, the menu's Exit) runs [`leave_session`] at once,
+///   so the child server is stopped.
+#[cfg(not(target_arch = "wasm32"))]
+mod flow {
+    use std::sync::Mutex;
+    use std::thread::JoinHandle;
+
+    use bevy::app::AppExit;
+    use bevy::prelude::*;
+    use crossbeam::channel::{unbounded, Receiver, Sender};
+    use game::{ClientUpdateEvent, GameEventKind};
+
+    use super::{end_session, AppState, Embarked, LastSessionError, PendingWorld, SessionEnded};
+    use crate::instance::{ClientRequest, Command};
+    use crate::local_host::{server_log_path, LocalHost, STOP_GRACE};
+    use crate::renderer::collider_debug::DebugFlagsRes;
+    use crate::renderer::{ClientRequests, ClientUpdates, GameEvents, LocalPlayer};
+    use crate::world_scale::WorldScale;
+
+    /// Lines of the server log shown under a lost session's reason.
+    pub const SERVER_LOG_TAIL_LINES: usize = 20;
+
+    /// The game thread's command channel (`instance::start_game_thread`).
+    #[derive(Resource, Clone)]
+    pub struct GameThread(pub Sender<Command>);
+
+    /// One session's channels: the app's ends go into the [`ClientUpdates`] /
+    /// [`GameEvents`] / [`ClientRequests`] resources, the game thread's into
+    /// its connect command.
+    pub struct SessionChannels {
+        pub game_send: Sender<GameEventKind>,
+        pub game_recv: Receiver<GameEventKind>,
+        pub client_send: Sender<ClientUpdateEvent>,
+        pub client_recv: Receiver<ClientUpdateEvent>,
+        pub request_send: Sender<ClientRequest>,
+        pub request_recv: Receiver<ClientRequest>,
+    }
+
+    impl SessionChannels {
+        pub fn new() -> Self {
+            let (game_send, game_recv) = unbounded();
+            let (client_send, client_recv) = unbounded();
+            let (request_send, request_recv) = unbounded();
+            Self { game_send, game_recv, client_send, client_recv, request_send, request_recv }
+        }
+
+        /// Make these the app's session channels.
+        pub fn install(&self, world: &mut World) {
+            world.insert_resource(ClientUpdates(self.client_recv.clone()));
+            world.insert_resource(GameEvents(self.game_send.clone()));
+            world.insert_resource(ClientRequests(self.request_send.clone()));
+        }
+
+        /// The game thread's connect command for these channels.
+        pub fn connect(
+            self,
+            addr: std::net::SocketAddr,
+            debug_flags: game::DebugFlags,
+            world_scale: WorldScale,
+        ) -> Command {
+            Command::ConnectToServerAndScene(
+                self.game_send,
+                self.game_recv,
+                self.client_send,
+                self.request_recv,
+                addr,
+                debug_flags,
+                world_scale,
+                crate::netcode::ConnectPolicy::default(),
+            )
+        }
+    }
+
+    impl Default for SessionChannels {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// Channels to nowhere: what the app holds while no session runs, so a
+    /// late message of an old session can't reach the next one.
+    pub fn install_dead_channels(world: &mut World) {
+        SessionChannels::new().install(world); // the other ends drop here
+    }
+
+    /// Server stops still running in the background (each waits up to
+    /// [`STOP_GRACE`]).
+    static SERVER_STOPS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
+
+    fn stop_in_background(host: LocalHost) {
+        let handle = std::thread::Builder::new()
+            .name("local-server-stop".into())
+            .spawn(move || match host.stop(STOP_GRACE) {
+                Some(status) => info!("[session] local server stopped: {status}"),
+                None => warn!("[session] local server could not be reaped"),
+            })
+            .expect("spawn the server stop thread");
+        SERVER_STOPS.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
+    }
+
+    /// Wait for every background server stop (the next server needs the
+    /// port; the process must not exit with a child still running).
+    pub fn join_server_stops() {
+        let stops = std::mem::take(&mut *SERVER_STOPS.lock().unwrap_or_else(|e| e.into_inner()));
+        for stop in stops {
+            let _ = stop.join();
+        }
+    }
+
+    /// Tear the current session down: tell the server and the game thread,
+    /// swap the channels to dead ones (BEFORE `end_session`, so nothing of
+    /// the old session re-spawns from the old receiver), `end_session`, stop
+    /// the local server in the background. A lost session's
+    /// [`LastSessionError`] gets the server log's tail. Safe to run twice.
+    pub fn leave_session(world: &mut World) {
+        if let Some(requests) = world.get_resource::<ClientRequests>() {
+            let _ = requests.0.send(ClientRequest::Leave);
+        }
+        if let Some(events) = world.get_resource::<GameEvents>() {
+            let _ = events.0.send(GameEventKind::Quit);
+        }
+        install_dead_channels(world);
+        end_session(world);
+        if let Some(host) = world.remove_resource::<LocalHost>() {
+            let tail = host.log_tail(SERVER_LOG_TAIL_LINES);
+            if let Some(mut error) = world.get_resource_mut::<LastSessionError>() {
+                if let Some(reason) = error.0.as_mut() {
+                    if !tail.is_empty() {
+                        reason.push_str(&format!("\n\nServer log ({}):\n{tail}", host.log_path().display()));
+                    }
+                }
+            }
+            stop_in_background(host);
+        }
+    }
+
+    /// `OnEnter(Starting)`: start the pending world's server and connect to it.
+    pub(super) fn start_session(world: &mut World) {
+        world.resource_mut::<LastSessionError>().0 = None;
+        let Some(pending) = world.remove_resource::<PendingWorld>() else {
+            fail_start(world, "no world was chosen to play".into());
+            return;
+        };
+        // A previous server may still be on its way out, holding the port.
+        join_server_stops();
+        let log = server_log_path(&pending.entry_dir, &pending.terrain);
+        let host = match LocalHost::start(&pending.terrain, &log) {
+            Ok(host) => host,
+            Err(e) => {
+                fail_start(world, format!("Could not start the server for {:?}: {e}", pending.name));
+                return;
+            }
+        };
+        info!(
+            "[session] starting {:?}: server pid {} on {}, log {}",
+            pending.name,
+            host.pid(),
+            host.addr,
+            log.display()
+        );
+        let addr = host.addr;
+        world.insert_resource(host);
+        let channels = SessionChannels::new();
+        channels.install(world);
+        let debug_flags = world.resource::<DebugFlagsRes>().0.clone();
+        let scale = *world.resource::<WorldScale>();
+        let command = channels.connect(addr, debug_flags, scale);
+        if world.resource::<GameThread>().0.send(command).is_err() {
+            world.resource_mut::<LastSessionError>().0 = Some("the game thread is gone".into());
+            world.resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+        }
+    }
+
+    fn fail_start(world: &mut World, why: String) {
+        error!("[session] {why}");
+        world.resource_mut::<LastSessionError>().0 = Some(why);
+        world.resource_mut::<NextState<AppState>>().set(AppState::MainMenu);
+    }
+
+    /// The first `SetPlayer` of a session: we are in.
+    fn enter_world_on_player(
+        player: Res<LocalPlayer>,
+        mut next: ResMut<NextState<AppState>>,
+        mut embarked: ResMut<Embarked>,
+    ) {
+        if player.0.is_some() {
+            next.set(AppState::InWorld);
+            // TODO(Task 14): the arrival map sets Embarked once dismissed;
+            // until it exists the world takes the screen at once.
+            embarked.0 = true;
+        }
+    }
+
+    /// The local server exiting ends the session.
+    fn watch_local_host(host: Option<ResMut<LocalHost>>, mut ended: MessageWriter<SessionEnded>) {
+        let Some(mut host) = host else { return };
+        if let Some(status) = host.try_exited() {
+            ended.write(SessionEnded { reason: Some(format!("The server exited ({status}).")) });
+        }
+    }
+
+    /// [`SessionEnded`] while a session runs: record why, go to the menu (the
+    /// transition runs [`leave_session`]).
+    fn end_on_session_ended(
+        mut ended: MessageReader<SessionEnded>,
+        state: Res<State<AppState>>,
+        mut next: ResMut<NextState<AppState>>,
+        mut error: ResMut<LastSessionError>,
+    ) {
+        let Some(last) = ended.read().last() else { return };
+        if !matches!(state.get(), AppState::Starting | AppState::InWorld) {
+            return;
+        }
+        info!("[session] session ended: {}", last.reason.as_deref().unwrap_or("left by the player"));
+        error.0 = last.reason.clone();
+        next.set(AppState::MainMenu);
+    }
+
+    /// The app is exiting: leave the session first (stops the child server).
+    fn leave_on_app_exit(mut exits: MessageReader<AppExit>, mut commands: Commands) {
+        if exits.read().last().is_some() {
+            commands.queue(|world: &mut World| leave_session(world));
+        }
+    }
+
+    /// The session flow; needs [`SessionPlugin`](super::SessionPlugin),
+    /// the session channel resources and (to start sessions) [`GameThread`].
+    pub struct SessionFlowPlugin;
+
+    impl Plugin for SessionFlowPlugin {
+        fn build(&self, app: &mut App) {
+            app.add_systems(OnEnter(AppState::Starting), start_session)
+                .add_systems(
+                    OnTransition { exited: AppState::Starting, entered: AppState::MainMenu },
+                    leave_session,
+                )
+                .add_systems(
+                    OnTransition { exited: AppState::InWorld, entered: AppState::MainMenu },
+                    leave_session,
+                )
+                .add_systems(
+                    Update,
+                    (
+                        enter_world_on_player.run_if(in_state(AppState::Starting)),
+                        watch_local_host,
+                        end_on_session_ended,
+                    )
+                        .chain(),
+                )
+                .add_systems(Last, leave_on_app_exit);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,6 +757,69 @@ mod tests {
         assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::InWorld);
         assert_eq!(*app.world().resource::<Embarked>(), Embarked(true));
         assert!(frontend_cameras(&mut app).is_empty());
+    }
+
+    /// Stand-in for the bridge: one `SessionScoped` entity per update read
+    /// from whatever `ClientUpdates` currently holds. Not gated, so it would
+    /// re-spawn the old session's world if the old receiver survived.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_per_update(mut commands: Commands, updates: Res<crate::renderer::ClientUpdates>) {
+        for _ in updates.0.try_iter() {
+            commands.spawn(SessionScoped);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn scoped(app: &mut App) -> usize {
+        app.world_mut().query_filtered::<(), With<SessionScoped>>().iter(app.world()).count()
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn leave_swaps_channels_before_end_session() {
+        use crate::instance::ClientRequest;
+        let mut app = app(true);
+        app.init_resource::<crate::renderer::LocalPlayer>()
+            .add_plugins(SessionFlowPlugin)
+            .add_systems(Update, spawn_per_update);
+        let old = SessionChannels::new();
+        old.install(app.world_mut());
+        old.client_send.send(game::ClientUpdateEvent::SetPlayer(1)).unwrap();
+        app.update();
+        assert_eq!(scoped(&mut app), 1, "the session's world");
+
+        app.world_mut().write_message(SessionEnded { reason: Some("server gone".into()) });
+        app.update(); // Update: the menu is next
+        old.client_send.send(game::ClientUpdateEvent::SetPlayer(1)).unwrap();
+        app.update(); // StateTransition: leave_session
+
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::MainMenu);
+        assert_eq!(scoped(&mut app), 0, "a late update of the old session spawned into the menu");
+        assert_eq!(app.world().resource::<LastSessionError>().0.as_deref(), Some("server gone"));
+        assert!(matches!(old.request_recv.try_recv(), Ok(ClientRequest::Leave)), "no Leave sent");
+        assert!(matches!(old.game_recv.try_iter().last(), Some(game::GameEventKind::Quit)), "no Quit sent");
+
+        old.client_send.send(game::ClientUpdateEvent::SetPlayer(1)).unwrap();
+        app.update();
+        app.update();
+        assert_eq!(scoped(&mut app), 0, "the old receiver is still read");
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn main_menu_leave_clears_the_last_error() {
+        let mut app = app(true);
+        app.init_resource::<crate::renderer::LocalPlayer>().add_plugins(SessionFlowPlugin);
+        SessionChannels::new().install(app.world_mut());
+        app.world_mut().resource_mut::<LastSessionError>().0 = Some("old".into());
+        app.world_mut().write_message(SessionEnded { reason: None });
+        app.update();
+        app.update();
+        assert_eq!(*app.world().resource::<State<AppState>>().get(), AppState::MainMenu);
+        assert_eq!(app.world().resource::<LastSessionError>().0, None);
+        assert_eq!(*app.world().resource::<Embarked>(), Embarked(false));
     }
 
     #[test]
