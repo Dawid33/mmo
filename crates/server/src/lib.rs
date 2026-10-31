@@ -15,6 +15,15 @@ use quinn::{
     ConnectionError, Endpoint, TransportConfig,
 };
 
+/// Set to `1` by the client that launched this server for one world: once a
+/// client has connected and the last one has left, the server exits.
+pub const SINGLE_PLAYER_ENV: &str = "VOXEL_SINGLE_PLAYER";
+
+/// Whether a single-player server should exit now.
+fn should_exit_single_player(enabled: bool, ever_connected: bool, sessions: usize) -> bool {
+    enabled && ever_connected && sessions == 0
+}
+
 const DEFAULT_SERVER_WORKER_THREADS: usize = 4;
 
 /// How long the shared writer task waits on one client send before dropping
@@ -373,6 +382,8 @@ pub fn run() {
 
     let start = std::time::Instant::now();
     let mut report = perf::ServerReport::new();
+    let single_player = std::env::var(SINGLE_PLAYER_ENV).is_ok_and(|v| v == "1");
+    let mut ever_connected = false;
     'main: loop {
         let now_ms = start.elapsed().as_millis() as u64;
         crossbeam::channel::select! {
@@ -390,6 +401,12 @@ pub fn run() {
                 }
             },
             default(std::time::Duration::from_millis(200)) => {}
+        }
+        let sessions = manager.depths().sessions;
+        ever_connected |= sessions > 0;
+        if should_exit_single_player(single_player, ever_connected, sessions) {
+            info!("[server] single-player: last client left, exiting");
+            break 'main;
         }
         manager.maintain(now_ms);
         manager.pump_lod_results();
@@ -459,6 +476,14 @@ async fn handle_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_player_exits_only_after_last_client_leaves() {
+        assert!(!should_exit_single_player(false, true, 0));
+        assert!(!should_exit_single_player(true, false, 0));
+        assert!(!should_exit_single_player(true, true, 1));
+        assert!(should_exit_single_player(true, true, 0));
+    }
 
     #[test]
     fn server_worker_threads_default_runtime_has_four_workers() {

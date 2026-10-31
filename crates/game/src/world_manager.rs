@@ -473,25 +473,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                     let _ = self.out.send((Some(id), ServerPacket::WorldMap(map.clone())));
                 }
             }
-            ServerEvent::ClientDisconnected(id) => {
-                if let Some(session) = self.sessions.remove(&id) {
-                    for rc in session.subscribed {
-                        self.unsubscribe_link(id, rc, now_ms);
-                    }
-                    for key in session.lod_subscribed {
-                        if let Some(set) = self.lod_subscribers.get_mut(&key) {
-                            set.remove(&id);
-                            if set.is_empty() {
-                                self.lod_subscribers.remove(&key);
-                            }
-                        }
-                    }
-                }
-                // The home region may have just lost its keep-alive reason.
-                if let Some(home) = self.homes.get(&id).copied() {
-                    self.refresh_keepalive(home, now_ms);
-                }
-            }
+            ServerEvent::ClientDisconnected(id) => self.client_disconnected(id, now_ms),
             ServerEvent::ClientPacket(packet, id) => match packet {
                 ClientPacket::RequestPlayerRegion => {
                     let home = self.homes.get(&id).copied();
@@ -502,6 +484,7 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::RequestLod(key) => self.lod_subscribe(id, key, now_ms),
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
                 ClientPacket::PlayRegion(rc) => self.play_region(id, rc, now_ms),
+                ClientPacket::Leave => self.client_disconnected(id, now_ms),
                 packet @ (ClientPacket::GameEvent(_) | ClientPacket::GameEventAfterTick(..)) => {
                     let (event, after_tick) = match packet {
                         ClientPacket::GameEventAfterTick(event, tick) => (event, Some(tick)),
@@ -727,6 +710,28 @@ impl<S: RegionSpawner> WorldManager<S> {
     /// Counters accumulated since the previous call; resets them.
     pub fn take_perf_counters(&mut self) -> ManagerPerfCounters {
         std::mem::take(&mut self.perf)
+    }
+
+    /// Drop a client's session and subscriptions. Idempotent: a second call
+    /// (e.g. `Leave` then the transport closing) finds no session.
+    fn client_disconnected(&mut self, id: ClientId, now_ms: u64) {
+        if let Some(session) = self.sessions.remove(&id) {
+            for rc in session.subscribed {
+                self.unsubscribe_link(id, rc, now_ms);
+            }
+            for key in session.lod_subscribed {
+                if let Some(set) = self.lod_subscribers.get_mut(&key) {
+                    set.remove(&id);
+                    if set.is_empty() {
+                        self.lod_subscribers.remove(&key);
+                    }
+                }
+            }
+        }
+        // The home region may have just lost its keep-alive reason.
+        if let Some(home) = self.homes.get(&id).copied() {
+            self.refresh_keepalive(home, now_ms);
+        }
     }
 
     pub fn depths(&self) -> ManagerDepths {

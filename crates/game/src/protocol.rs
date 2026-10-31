@@ -347,6 +347,8 @@ pub enum ClientPacket {
     /// Start playing this region (picked on the world map): the server moves
     /// the player's home there or answers `ServerPacket::PlayRefused`.
     PlayRegion(RegionCoords),
+    /// The client is leaving this world; treat as disconnected now.
+    Leave,
 }
 
 /// One LOD response: (key-local cell group, RLE grid) pairs.

@@ -475,3 +475,16 @@ fn order_event_routes_to_the_home_region() {
     h.manager.spawner_mut().with_region(SPAWN_REGION, |r| designations = r.data().designations().len());
     assert_eq!(designations, 4);
 }
+
+#[test]
+fn leave_packet_removes_the_session() {
+    let mut h = harness();
+    h.event(ServerEvent::ClientConnected(0), 0);
+    let before = h.manager.depths().sessions;
+    assert_eq!(before, 1);
+    h.event(ServerEvent::ClientPacket(ClientPacket::Leave, 0), 10);
+    assert_eq!(h.manager.depths().sessions, before - 1);
+    // The transport closing afterwards is a no-op.
+    h.event(ServerEvent::ClientDisconnected(0), 20);
+    assert_eq!(h.manager.depths().sessions, before - 1);
+}
