@@ -1061,7 +1061,7 @@ tracy-client detailed="":
 # distorts hot loops ~2.5x, so debug captures don't represent production.
 perf:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --bin client --profile profiling
-    sudo perf script record -F9997 --call-graph dwarf,16384 -e cpu-clock ./target/profiling/client
+    sudo env VOXEL_SKIP_MENU=1 perf script record -F9997 --call-graph dwarf,16384 -e cpu-clock ./target/profiling/client
     sudo chmod +r perf.data
     hotspot
 
@@ -1102,6 +1102,7 @@ perf-server:
     export VOXEL_REGION_BLOCKS={{play_blocks}}
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server --profile profiling
+    export VOXEL_SKIP_MENU=1
     RUST_BACKTRACE=1 ./target/profiling/client &
     client_pid=$!
     trap 'kill "$client_pid" 2>/dev/null || true' EXIT
