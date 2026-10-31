@@ -1,0 +1,245 @@
+import { Button, ButtonFace, DropdownFace, FrameFace, ScrollPaneFace, SliderFace, Styles, TabbedPaneFace } from "@widgets";
+
+// A list box you can use: the widgets' `ListBoxFace` look (list-box items
+// down a list-box scroll pane), with clickable items and wheel scrolling.
+export component PickList inherits TouchArea {
+    in property <[string]> items;
+    in property <int> selected: -1;
+    callback picked(int);
+    // Tall enough for every item: a height to cap, since flows give their
+    // children their preferred size.
+    // Show at most this many items' worth in `natural-height`.
+    in property <int> max-visible: 100000;
+    out property <length> natural-height: min(items.length, max-visible) * item-height + Styles.list-box.scroll-pane.box.padding.top
+        + Styles.list-box.scroll-pane.box.padding.bottom + Styles.list-box.scroll-pane.vertical-flow.box.padding.top
+        + Styles.list-box.scroll-pane.vertical-flow.box.padding.bottom;
+
+    property <length> offset;
+    property <length> item-height: probe.preferred-height;
+    property <length> content-height: items.length * item-height;
+    property <length> max-offset: max(0px, content-height - (pane.content-bottom - pane.content-y));
+
+    // The children get a scroll first; the items don't take it, so it ends here.
+    scroll-event(e) => {
+        root.offset = clamp(root.offset - e.delta-y, 0px, root.max-offset);
+        accept
+    }
+
+    probe := ButtonFace {
+        visible: false;
+        style: Styles.list-box.item;
+    }
+    pane := ScrollPaneFace {
+        width: 100%;
+        height: 100%;
+        style: Styles.list-box.scroll-pane;
+        content-height: root.content-height;
+        activated: root.content-height > root.height - self.style.box.padding.top - self.style.box.padding.bottom;
+        offset: min(root.offset, root.max-offset);
+        for item[i] in root.items: Button {
+            x: 0;
+            y: i * root.item-height;
+            width: pane.content-width - pane.style.vertical-flow.box.padding.left - pane.style.vertical-flow.box.padding.right;
+            height: root.item-height;
+            style: Styles.list-box.item;
+            text: item;
+            toggled: i == root.selected;
+            clicked => { root.picked(i); }
+        }
+    }
+}
+
+// A slider: a press on the track jumps the thumb there, a drag follows, the
+// wheel steps by `step` (a hundredth of the range when 0). `edited` fires
+// for changes the user makes, never for `value` set from outside.
+export component Slider inherits TouchArea {
+    in property <float> minimum: 0;
+    in property <float> maximum: 1;
+    in property <float> step: 0;
+    in-out property <float> value;
+    in property <bool> disabled;
+    callback edited(float);
+
+    preferred-height: face.preferred-height;
+    min-width: face.min-width;
+    enabled: !root.disabled;
+
+    function snap(v: float) -> float {
+        root.step > 0
+            ? clamp(root.minimum + round((v - root.minimum) / root.step) * root.step, root.minimum, root.maximum)
+            : clamp(v, root.minimum, root.maximum)
+    }
+    function set(v: float) {
+        root.value = root.snap(v);
+        root.edited(root.value);
+    }
+    function at(x: length) -> float {
+        root.minimum + (root.maximum - root.minimum) * clamp(x / max(1px, root.width), 0, 1)
+    }
+    pointer-event(e) => {
+        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+            root.set(root.at(self.mouse-x));
+        }
+    }
+    moved => {
+        if self.pressed { root.set(root.at(self.mouse-x)); }
+    }
+    scroll-event(e) => {
+        if root.disabled || e.delta-y == 0px { return reject; }
+        root.set(root.value + (e.delta-y > 0px ? 1 : -1) * (root.step > 0 ? root.step : (root.maximum - root.minimum) / 100));
+        accept
+    }
+
+    face := SliderFace {
+        width: 100%;
+        height: 100%;
+        minimum: root.minimum;
+        maximum: root.maximum;
+        step: root.step;
+        value: root.value;
+        disabled: root.disabled || root.maximum <= root.minimum;
+    }
+}
+
+// A closed drop-down showing the selected item; a click opens the list
+// under it, picking an item sets `selected` and fires `chosen`, a click
+// outside (or Esc) closes it.
+export component Dropdown inherits TouchArea {
+    in property <[string]> items;
+    in-out property <int> selected: -1;
+    callback chosen(int);
+
+    preferred-height: face.preferred-height;
+    min-width: face.min-width;
+
+    clicked => { popup.show(); }
+
+    face := DropdownFace {
+        width: 100%;
+        height: 100%;
+        text: root.selected >= 0 && root.selected < root.items.length ? root.items[root.selected] : "";
+        state: root.pressed ? Styles.dropdown.button.clicked : root.has-hover ? Styles.dropdown.button.hovered : Styles.dropdown.button.default;
+    }
+    popup := PopupWindow {
+        x: 0;
+        y: root.height;
+        width: root.width;
+        height: list.natural-height;
+        close-policy: close-on-click-outside;
+        list := PickList {
+            width: 100%;
+            height: 100%;
+            items: root.items;
+            selected: root.selected;
+            max-visible: 8;
+            picked(i) => {
+                root.selected = i;
+                root.chosen(i);
+                popup.close();
+            }
+        }
+    }
+}
+
+// A row of tabs over a frame; `@children` is the page, inside the frame.
+export component Tabs inherits Rectangle {
+    in property <[string]> tabs;
+    in-out property <int> selected: 0;
+    callback changed(int);
+
+    property <int> hovered: -1;
+    property <length> tab-height: clamp(Styles.tab.button.font.line-height + Styles.tab.button.box.padding.top
+        + Styles.tab.button.box.padding.bottom, Styles.tab.button.box.min-height, Styles.tab.button.box.max-height);
+    property <length> row-height: Styles.tabbed-pane.container.box.padding.top + tab-height
+        + Styles.tabbed-pane.container.box.padding.bottom + Styles.tabbed-pane.vertical-spacing;
+    property <length> tab-width: probe.preferred-width;
+    property <length> tab-pitch: tab-width + Styles.tabbed-pane.container.h-spacing;
+    property <length> pad: Styles.tabbed-pane.content-frame.box.padding.left;
+
+    function index-at(x: length, y: length) -> int {
+        if y < Styles.tabbed-pane.container.box.padding.top || y > root.row-height { return -1; }
+        // Position along the row, past the container's left padding.
+        let i = floor((x - Styles.tabbed-pane.container.box.padding.left) / root.tab-pitch);
+        (i >= 0 && i < root.tabs.length) ? i : -1
+    }
+
+    probe := ButtonFace {
+        visible: false;
+        style: Styles.tab.button;
+    }
+    TabbedPaneFace {
+        width: 100%;
+        height: 100%;
+        tabs: root.tabs;
+        selected: root.selected;
+        hovered: root.hovered;
+    }
+    Rectangle {
+        x: root.pad;
+        y: root.row-height + Styles.tabbed-pane.content-frame.box.padding.top;
+        width: root.width - 2 * root.pad;
+        height: root.height - self.y - Styles.tabbed-pane.content-frame.box.padding.bottom;
+        @children
+    }
+    // Only the tab row takes the pointer; the page's children keep theirs.
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.row-height;
+        pointer-event(e) => {
+            root.hovered = root.index-at(self.mouse-x, self.mouse-y);
+        }
+        clicked => {
+            let i = root.index-at(self.mouse-x, self.mouse-y);
+            if i >= 0 && i != root.selected {
+                root.selected = i;
+                root.changed(i);
+            }
+        }
+    }
+}
+
+// Test-only: one of each control at a fixed place (`tests/controls.rs`).
+export component ControlsHarness inherits Window {
+    background: transparent;
+    in property <float> slider-minimum: 0;
+    in property <float> slider-maximum: 1;
+    in-out property <float> slider-value;
+    in property <[string]> items;
+    in-out property <int> dropdown-selected: -1;
+    in property <[string]> tabs;
+    in-out property <int> tab-selected: 0;
+    callback slider-edited(float);
+    callback dropdown-chosen(int);
+    callback tab-changed(int);
+
+    Slider {
+        x: 20px;
+        y: 20px;
+        width: 300px;
+        height: self.preferred-height;
+        minimum: root.slider-minimum;
+        maximum: root.slider-maximum;
+        value <=> root.slider-value;
+        edited(v) => { root.slider-edited(v); }
+    }
+    Dropdown {
+        x: 20px;
+        y: 100px;
+        width: 200px;
+        height: self.preferred-height;
+        items: root.items;
+        selected <=> root.dropdown-selected;
+        chosen(i) => { root.dropdown-chosen(i); }
+    }
+    Tabs {
+        x: 20px;
+        y: 300px;
+        width: 400px;
+        height: 200px;
+        tabs: root.tabs;
+        selected <=> root.tab-selected;
+        changed(i) => { root.tab-changed(i); }
+    }
+}
