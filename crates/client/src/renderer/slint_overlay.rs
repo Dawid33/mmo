@@ -277,8 +277,10 @@ fn rebuild_slint_layer<C: ComponentHandle + 'static>(world: &mut World) {
     if let Some(mut layer) = world.get_non_send_mut::<SlintLayer<C>>() {
         layer.overlay = overlay;
         layer.owns_pointer = false;
-        // Whatever the old component drew goes on the next upload.
-        layer.blanked = true;
+        // Not blanked: a hidden layer (the frontend has the screen) zero-fills
+        // its texture next frame, so the old world's pixels never show under
+        // the menu; a visible one uploads the new component's full first frame.
+        layer.blanked = false;
     }
 }
 
@@ -299,6 +301,13 @@ pub struct SlintLayer<C: 'static> {
     hidden_by_frontend: bool,
     /// The texture was blanked for the frontend and has not been redrawn.
     blanked: bool,
+}
+
+impl<C: 'static> SlintLayer<C> {
+    /// The texture the layer is drawn into.
+    pub fn target(&self) -> &Handle<Image> {
+        &self.target
+    }
 }
 
 /// Whether a layer takes the pointer from the view underneath.

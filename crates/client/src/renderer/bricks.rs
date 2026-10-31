@@ -201,9 +201,12 @@ fn record_skipped(world: &mut World, chunk: Entity, buried: Vec<([u8; 3], VoxelD
     let keyed: Vec<([i32; 3], VoxelData)> =
         buried.into_iter().filter_map(|(l, v)| Some((brick_grid_key(world, chunk, l)?, v))).collect();
     let keys: Vec<[i32; 3]> = keyed.iter().map(|(k, _)| *k).collect();
-    let mut skipped = world.get_resource_or_insert_with(SkippedBricks::default);
-    for (k, v) in keyed {
-        skipped.0.insert(k, (chunk, v));
+    // Registered by the bridge plugin (session-reset); an app without it
+    // does not track buried bricks.
+    if let Some(mut skipped) = world.get_resource_mut::<SkippedBricks>() {
+        for (k, v) in keyed {
+            skipped.0.insert(k, (chunk, v));
+        }
     }
     world.entity_mut(chunk).insert(SkippedBrickKeys(keys));
 }
@@ -684,6 +687,7 @@ mod tests {
     #[test]
     fn skipped_bricks_follow_their_chunk_and_region() {
         let mut world = World::new();
+        world.init_resource::<SkippedBricks>(); // registered by the bridge plugin
         let chunk = chunk_world(&mut world);
         let derived = DerivedBricks { spawn: vec![([0, 0, 0], solid())], buried: vec![([1, 0, 0], solid()), ([0, 1, 0], solid())] };
         land_chunk_bricks(&mut world, chunk, Chunk::default(), derived);

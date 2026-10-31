@@ -103,7 +103,7 @@ pub fn forward_input(
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
     coalesce_window: Res<MouseCoalesceWindow>,
-    mut coalescer: Local<MouseCoalescer>,
+    mut coalescer: crate::session::SessionLocal<MouseCoalescer>,
     window: Query<(&Window, &CursorOptions), With<PrimaryWindow>>,
     // Per session: a new world's sim has not been told the window size.
     mut last_size: crate::session::SessionLocal<Option<(u32, u32)>>,
@@ -113,6 +113,7 @@ pub fn forward_input(
     mode: Option<Res<super::commander::CameraMode>>,
 ) {
     let last_size = last_size.get();
+    let coalescer = coalescer.get();
     let Some(player) = player.0 else { return };
     // The commander drives no body: its keys, clicks and mouse travel are
     // client-local (camera, minimap, selection) and must not walk the inert
@@ -127,7 +128,7 @@ pub fn forward_input(
     };
 
     if !commander {
-        forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, &mut coalescer, &window, overlay_open, &send);
+        forward_body_input(&keys, &buttons, &motion, &time, &coalesce_window, coalescer, &window, overlay_open, &send);
     }
     if let Ok((w, _)) = window.single() {
         let size = (w.physical_width(), w.physical_height());

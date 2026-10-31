@@ -200,14 +200,14 @@ its default after `end_session` (`session::SessionLocal`, keyed on `SessionGener
 | `HeightGrid` (water id from the block registry) | with |
 | `CursorPolicy`: the world's fields (`sim_grab`, `ui_modal`, `orbit`, `ui_pointer`); `overlay_open` (dev panel) kept | with (`cursor::reset_session_grab`) |
 | far voxel: fresh `FarVoxelResidency` (same limits, batch ids keep counting), `FarBrickRevisions`, `FarDeferredRemovals`; `FarUploadChannel::request_reset` drops queued batches/results and the render world empties `GpuFarBuffers` wholesale | with (`far_voxel::lifecycle::reset_far_voxel`) |
-| `GameUi` and `HudUi` Slint components (menu/map open, map image/zoom/pan, selected and home tile, adventure, following, active tool, level text, wheel, band, minimap, …) | with: `SlintLayerPlugin::session_scoped()` rebuilds the component (`rebuild_slint_layer`), so every property is a fresh one |
+| `GameUi` and `HudUi` Slint components (menu/map open, map image/zoom/pan, selected and home tile, adventure, following, active tool, level text, wheel, band, minimap, …) | with: `SlintLayerPlugin::session_scoped()` rebuilds the component (`rebuild_slint_layer`), so every property is a fresh one; the rebuilt layer is left un-blanked, so while the frontend has the screen its texture is zero-filled the next frame |
 | `WorldMapMsg`, `TileMirrorMsg`, `ToggleModeRequest` | clear |
-| Locals: join timeline, overlay built, minimap built, designate preview/ghosts/right-travel, follow last, selection press, level was-cut/held, move-order pending, orbit anchor, LOD hold, `GridCache`, mesh rank cache, awaiting-ground epoch, the three motion probes, `forward_input` last window size, wheel phase / wheel captions / `MapShown`, Slint pointer state | SessionLocal |
+| Locals: join timeline, overlay built, minimap built, designate preview/ghosts/right-travel, follow last, selection press, level was-cut/held, move-order pending, orbit anchor, LOD hold, `GridCache`, mesh rank cache, awaiting-ground epoch, the three motion probes, `forward_input` last window size and mouse coalescer, wheel phase / wheel captions / `MapShown`, Slint pointer state | SessionLocal |
 | `Embarked` | reset (Task 7) |
 
 Kept on purpose (preferences, startup assets, process state): `XraySettings`, `CullingConfig`,
 `BoundaryOverlay`, `GridDebug`/`TerrainDebug`, `TerrainRenderConfig`, `MeshBudgets`/`MeshBudgetPolicy`,
-`MouseCoalesceWindow`, `DebugFlagsRes`, `DevUiOpen` and the dev panel, block textures/materials,
+`MouseCoalesceWindow`, `DebugFlagsRes`, `DevUiOpen` and the dev panel, the minimap's rate-limit `since` timers and its draw `scratch` buffer (plain `Local`s: the next session's first rebuild is forced by the reset `built` key and `MinimapPixels`), block textures/materials,
 skybox cubemaps, `AvatarAssets`, `GlobalAmbientLight` and the commander's `surface_ambient` Local
 (the startup brightness; the first underground check of the next session restores the surface
 lighting), the commander camera entity (re-placed from the reset `CommanderCamera`), the slice plane

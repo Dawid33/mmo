@@ -219,6 +219,15 @@ fn assert_no_world_state(app: &mut App, fresh_ui: &[(&'static str, String)], fre
     assert!(!w.resource::<CommanderCamera>().placed, "CommanderCamera");
     assert_eq!(live_game_ui(app), fresh_ui, "GameUi properties");
     assert_eq!(live_hud(app), fresh_hud, "HudUi properties");
+    // And nothing the old components drew is left in the textures that are
+    // composited under the menu screens.
+    let game_target = app.world().get_non_send::<SlintLayer<slint_ui::GameUi>>().unwrap().target().clone();
+    let hud_target = app.world().get_non_send::<SlintLayer<slint_ui::HudUi>>().unwrap().target().clone();
+    for (name, handle) in [("GameUi", game_target), ("HudUi", hud_target)] {
+        let images = app.world().resource::<Assets<Image>>();
+        let data = images.get(&handle).and_then(|i| i.data.as_ref()).expect("layer texture data");
+        assert!(data.iter().all(|&b| b == 0), "{name} texture still holds the old world's pixels");
+    }
 }
 
 /// The cameras that render and carry `UiCamera`: (frontend?, commander?).
