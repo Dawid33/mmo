@@ -3,6 +3,7 @@
 // `HudLayerPlugin`), so the view underneath keeps the pointer even over
 // these pixels. Sizes the client also uses are in `HudConfig`; the client
 // asserts they match its constants.
+import { GameTheme } from "theme.slint";
 
 export global HudConfig {
     out property <length> crosshair-arm: 16px;
@@ -14,6 +15,9 @@ export global HudConfig {
 }
 
 export component HudUi inherits Window {
+    init => {
+        GameTheme.apply();
+    }
     background: transparent;
 
     // First person, while the cursor is locked for mouse look.

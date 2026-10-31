@@ -1,6 +1,7 @@
 import { Button, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, RadialItem, RadialMenu, Styles, VerticalFlow } from "@widgets";
 import { GameMenu } from "menu.slint";
 import { WorldMap, WorldMapConfig } from "world-map.slint";
+import { GameTheme } from "theme.slint";
 
 export { RadialItem, WorldMapConfig }
 
@@ -8,6 +9,9 @@ export { RadialItem, WorldMapConfig }
 // draws over the 3D view (crates/client/src/renderer/slint_overlay.rs).
 // Transparent pixels let the pointer through to the game.
 export component GameUi inherits Window {
+    init => {
+        GameTheme.apply();
+    }
     background: transparent;
 
     in-out property <bool> panel-open: true;

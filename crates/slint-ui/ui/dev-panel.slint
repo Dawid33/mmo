@@ -1,4 +1,5 @@
 import { Button, Checkbox, FrameFace, GraphicalSets, LabelFace, Styles } from "@widgets";
+import { GameTheme } from "theme.slint";
 
 // One stats row: "FPS" · "60".
 export struct DevStat {
@@ -17,6 +18,9 @@ export struct DevToggle {
 // UI, in both camera modes (crates/client/src/renderer/dev_ui.rs). Hidden
 // (not removed) while closed, so the test probes below stay valid.
 export component DevPanelUi inherits Window {
+    init => {
+        GameTheme.apply();
+    }
     background: transparent;
 
     in-out property <bool> open;

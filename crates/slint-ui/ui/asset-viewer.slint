@@ -1,11 +1,15 @@
 import { Button, Checkbox, FrameFace, GraphicalSets, HorizontalFlow, LabelFace, Styles, VerticalFlow } from "@widgets";
 import { PickList, Slider } from "controls.slint";
+import { GameTheme } from "theme.slint";
 
 // The asset viewer (`crates/client/examples/asset_viewer.rs`): every
 // Blockbench model on the left, the picked one's animations on the right,
 // the model itself in the 3D view between them. Transparent elsewhere, so
 // the pointer reaches the view (orbit, zoom).
 export component AssetViewerUi inherits Window {
+    init => {
+        GameTheme.apply();
+    }
     background: transparent;
 
     // Paths of every .bbmodel found, relative to the repo root.

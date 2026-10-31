@@ -1,0 +1,13 @@
+import { ActiveTheme, Theme } from "@widgets";
+
+// The widget theme the game's screens use (`~/Projects/ui`'s themes:
+// `factorio`, or `fortress`, its Dwarf Fortress palette). Slint keeps one
+// `ActiveTheme` per root component, so every root calls `apply()` from
+// its `init`.
+export global GameTheme {
+    out property <Theme> theme: Theme.fortress;
+
+    public function apply() {
+        ActiveTheme.theme = self.theme;
+    }
+}

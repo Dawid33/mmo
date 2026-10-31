@@ -2,6 +2,7 @@ import { MainMenu } from "main-menu.slint";
 import { KnobRow, MapGenerator } from "map-generator.slint";
 import { LoadWorld, WorldRow } from "load-world.slint";
 import { Starting } from "starting.slint";
+import { GameTheme } from "theme.slint";
 
 export { KnobRow, WorldRow }
 
@@ -9,6 +10,9 @@ export { KnobRow, WorldRow }
 // list and the starting screen. Drawn at FRONTEND_LAYER_ORDER over the
 // frontend camera's plain backdrop; `shown: false` draws nothing at all.
 export component FrontendUi inherits Window {
+    init => {
+        GameTheme.apply();
+    }
     background: transparent;
 
     // 0 menu, 1 generator, 2 load, 3 starting.
