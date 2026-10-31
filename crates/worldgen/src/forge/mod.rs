@@ -29,6 +29,7 @@ pub mod hydrology;
 pub mod knobs;
 pub mod post;
 pub mod presets;
+pub mod render;
 pub mod spawn;
 pub mod world;
 

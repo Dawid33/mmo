@@ -23,6 +23,7 @@ use worldgen::forge::knobs::{CHOICES, SPECS};
 use crate::Params;
 use worldgen::forge::{forge, ForgeParams, Forged};
 use crate::{render, search};
+use worldgen::forge::render::PreviewLayer;
 
 const PAGE: &str = include_str!("ui.html");
 /// Forged worlds kept for /image (each holds a few rasters; 64 m worlds are tiny).
@@ -104,7 +105,7 @@ fn route(server: &Server, path: &str, query: &str) -> (u16, &'static str, Vec<u8
             };
             let world = server.worlds.lock().unwrap().iter().find(|(k, _)| k == id).map(|(_, w)| w.clone());
             match world {
-                Some(f) => (200, "image/png", render::png_bytes(&view_image(&f, view))),
+                Some(f) => (200, "image/png", render::png_bytes(&f, view_layer(view))),
                 None => (404, "text/plain", b"that render is gone; forge again".to_vec()),
             }
         }
@@ -112,13 +113,13 @@ fn route(server: &Server, path: &str, query: &str) -> (u16, &'static str, Vec<u8
     }
 }
 
-fn view_image(f: &Forged, view: &str) -> render::Image {
+fn view_layer(view: &str) -> PreviewLayer {
     match view {
-        "relief" => render::relief_image(&f.world, None),
-        "geology" => render::geology_image(&f.world, &f.analysis),
-        "rain" => render::rainfall_image(&f.world, &f.analysis, &f.rain),
-        "initial" => render::relief_image(&f.initial, None),
-        _ => render::relief_image(&f.world, Some(&f.analysis)),
+        "relief" => PreviewLayer::Relief,
+        "geology" => PreviewLayer::Geology,
+        "rain" => PreviewLayer::Rain,
+        "initial" => PreviewLayer::BeforeErosion,
+        _ => PreviewLayer::Rivers,
     }
 }
 

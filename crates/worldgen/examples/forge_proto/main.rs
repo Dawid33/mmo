@@ -34,6 +34,7 @@
 //! the forge's output is a stored artifact, not a function both sides evaluate.
 
 mod render;
+use worldgen::forge::render::PreviewLayer;
 mod search;
 mod serve;
 
@@ -156,11 +157,15 @@ fn main() {
     }
 
     let stem = p.out.to_string_lossy().to_string();
-    render::relief(&forged.initial, None, &format!("{stem}-initial.png"), false);
-    render::relief(w, None, &format!("{stem}-relief.png"), false);
-    render::relief(w, Some(a), &format!("{stem}-rivers.png"), false);
-    render::geology(w, a, &format!("{stem}-geology.png"));
-    render::rainfall(w, a, &forged.rain, &format!("{stem}-rain.png"));
+    for (suffix, which) in [
+        ("initial", PreviewLayer::BeforeErosion),
+        ("relief", PreviewLayer::Relief),
+        ("rivers", PreviewLayer::Rivers),
+        ("geology", PreviewLayer::Geology),
+        ("rain", PreviewLayer::Rain),
+    ] {
+        render::layer(&forged, which, &format!("{stem}-{suffix}.png"));
+    }
     render::heightmap(w, &format!("{stem}-height.png"));
     let objects = format!("{stem}-water.json");
     std::fs::write(&objects, hydrology::objects_json(w, a)).expect("write water objects");

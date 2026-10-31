@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+image = { workspace = true }
 game = { workspace = true }
 bincode = { workspace = true }
 crc32fast = { workspace = true }
@@ -16,7 +17,6 @@ crossbeam = { workspace = true }
 rapier3d = { workspace = true, features = ["profiler"] }
 slotmapd = { workspace = true }
 block-mesh = { workspace = true }
-image = { workspace = true }
 
 [[bin]]
 path = "src/main.rs"

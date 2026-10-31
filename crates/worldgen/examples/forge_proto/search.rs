@@ -114,7 +114,7 @@ pub fn run(base: &Params) {
         let p = ForgeParams { seed: *seed, cell_m: SEARCH_CELL_M, quiet: true, ..base.forge.clone() };
         let forged = forge(&p);
         let path = format!("{stem}-search-{}-{seed:X}.png", rank + 1);
-        render::relief(&forged.world, Some(&forged.analysis), &path, false);
+        render::layer(&forged, worldgen::forge::render::PreviewLayer::Rivers, &path);
     }
     if let Some((_, seed, ..)) = results.first() {
         println!("forge the winner at full resolution: just forge-proto --seed {seed:X}");
