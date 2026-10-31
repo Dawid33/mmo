@@ -280,12 +280,7 @@ pub fn skip_menu_from_env(get: impl Fn(&str) -> Option<String>) -> bool {
         || non_empty("VOXEL_WORLD_FILE")
         || switched_on("RENDER_BENCH")
         || switched_on("VOXEL_AUTOPILOT");
-    if bypass {
-        return true;
-    }
-    // TODO(Task 15): menu becomes the default — return false here and drop
-    // VOXEL_MENU. Until the frontend exists the menu is opt-in.
-    get("VOXEL_MENU").as_deref() != Some("1")
+    bypass
 }
 
 /// [`skip_menu_from_env`] on the process environment; always true on wasm,
@@ -1030,18 +1025,15 @@ mod tests {
     #[test]
     fn skip_menu_env_table() {
         let cases: &[(&[(&str, &str)], bool)] = &[
-            // TODO(Task 15): with nothing set the menu becomes the default (false).
-            (&[], true),
-            (&[("VOXEL_MENU", "1")], false),
-            (&[("VOXEL_MENU", "0")], true),
-            (&[("VOXEL_MENU", "1"), ("VOXEL_WORLD_FILE", "")], false),
-            (&[("VOXEL_MENU", "1"), ("VOXEL_WORLD_FILE", "worlds/a.world")], true),
-            (&[("VOXEL_MENU", "1"), ("VOXEL_SKIP_MENU", "1")], true),
-            (&[("VOXEL_MENU", "1"), ("VOXEL_SKIP_MENU", "0")], false),
-            (&[("VOXEL_MENU", "1"), ("RENDER_BENCH", "1")], true),
-            (&[("VOXEL_MENU", "1"), ("RENDER_BENCH", "0")], false),
-            (&[("VOXEL_MENU", "1"), ("VOXEL_AUTOPILOT", "shuttle")], true),
-            (&[("VOXEL_MENU", "1"), ("VOXEL_AUTOPILOT", "")], false),
+            (&[], false),
+            (&[("VOXEL_WORLD_FILE", "")], false),
+            (&[("VOXEL_WORLD_FILE", "worlds/a.world")], true),
+            (&[("VOXEL_SKIP_MENU", "1")], true),
+            (&[("VOXEL_SKIP_MENU", "0")], false),
+            (&[("RENDER_BENCH", "1")], true),
+            (&[("RENDER_BENCH", "0")], false),
+            (&[("VOXEL_AUTOPILOT", "shuttle")], true),
+            (&[("VOXEL_AUTOPILOT", "")], false),
         ];
         for (vars, want) in cases {
             let env: HashMap<&str, &str> = vars.iter().copied().collect();

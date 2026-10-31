@@ -10,6 +10,8 @@
 export VOXEL_REGION_BLOCKS="${VOXEL_REGION_BLOCKS:-512}"
 # Pin the client to the RX 6700 XT eGPU (unpinned, wgpu picks the ~30x slower
 # NVK T600). An exported WGPU_ADAPTER_NAME or VOXEL_ADAPTER wins.
+# This script starts the server itself, so skip the main menu (`just play` has it).
+export VOXEL_SKIP_MENU=1
 export WGPU_ADAPTER_NAME="${WGPU_ADAPTER_NAME:-${VOXEL_ADAPTER:-6700}}"
 {
 # Server first: it takes the build lock first and is listening by the time the

@@ -159,6 +159,7 @@ client:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client
 
@@ -169,12 +170,33 @@ run:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server
     RUST_BACKTRACE=1 ./target/debug/server &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     RUST_BACKTRACE=1 ./target/debug/client
+
+# The game with its main menu: build client + server (the client spawns the
+# server per world from next to its own executable, so both need the same
+# region/chunk dials) and run only the client. `just adapter=6700 play`.
+play:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    {{cap}} {{cargo}} build --bin client --bin server
+    RUST_BACKTRACE=1 ./target/debug/client
+
+# Same as `play`, release mode.
+play-release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export VOXEL_REGION_BLOCKS={{play_blocks}}
+    if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
+    {{cap}} {{cargo}} build --release --bin client --bin server
+    RUST_BACKTRACE=1 ./target/release/client
 
 # Release-mode variants: production performance. Undo verification defaults to
 # Delta in every build; set HASH_MODE=full (or off) on any recipe to override,
@@ -190,6 +212,7 @@ client-release:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --release --bin client
 
@@ -198,6 +221,7 @@ run-release:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --release --bin client --bin server
     RUST_BACKTRACE=1 ./target/release/server &
@@ -222,6 +246,7 @@ fly-probe seconds="45":
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     out="target/fly-probe"; mkdir -p "$out"
     {{cap}} {{cargo}} build --release --bin server
@@ -251,6 +276,7 @@ shuttle-probe boundary="region" seconds="45" overshoot="":
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     if [ -n "{{overshoot}}" ]; then export VOXEL_AUTOPILOT_OVERSHOOT_M="{{overshoot}}"; fi
     out="target/shuttle-probe"; mkdir -p "$out"
@@ -273,6 +299,7 @@ play-test:
     #!/usr/bin/env bash
     set -uo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     log_dir="target/play-test"
     mkdir -p "$log_dir"
@@ -860,6 +887,7 @@ diag:
     #!/usr/bin/env bash
     set -uo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/diag
     log=target/diag/client.log
@@ -894,7 +922,7 @@ diag:
 # One-directory release perf capture (logs + manifest + RSS + verdict) -> target/perf-capture/.
 perf-capture:
     VOXEL_REGION_BLOCKS={{play_blocks}} {{cap}} {{cargo}} build --release --bin client --bin server
-    VOXEL_REGION_BLOCKS={{play_blocks}} scripts/perf_capture.sh "{{adapter}}" "{{world}}"
+    VOXEL_SKIP_MENU=1 VOXEL_REGION_BLOCKS={{play_blocks}} scripts/perf_capture.sh "{{adapter}}" "{{world}}"
 
 # The independent check on `just diag`'s GPU numbers, measured from outside the process,
 # and it needs no rebuild. Sustained Graphics-Pipe ~100% => GPU-bound; low while a core is
@@ -923,6 +951,7 @@ trace-chrome:
     #!/usr/bin/env bash
     set -uo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/trace
     json=target/trace/client.json
@@ -955,6 +984,7 @@ trace-join:
     #!/usr/bin/env bash
     set -uo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     mkdir -p target/trace
     json=target/trace/client.json
@@ -983,6 +1013,7 @@ profile-client:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin server &
     server_pid=$!
@@ -994,6 +1025,7 @@ profile-server:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     RUST_BACKTRACE=1 {{cargo}} run --bin client &
     client_pid=$!
@@ -1014,6 +1046,7 @@ tracy-client detailed="":
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     feat="tracy"
     if [ -n "{{detailed}}" ]; then feat="tracy-detailed"; fi
@@ -1049,6 +1082,7 @@ perf-client:
     #!/usr/bin/env bash
     set -euo pipefail
     export VOXEL_REGION_BLOCKS={{play_blocks}}
+    export VOXEL_SKIP_MENU=1
     if [ -n "{{adapter}}" ]; then export WGPU_ADAPTER_NAME="{{adapter}}"; fi
     {{cap}} {{cargo}} build --bin client --bin server --profile profiling
     RUST_BACKTRACE=1 ./target/profiling/server &

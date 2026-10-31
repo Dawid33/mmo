@@ -139,7 +139,7 @@ fn main() {
     let debug_flags = game::DebugFlags::default();
 
     // The dev bypass (`VOXEL_SKIP_MENU=1`, a set `VOXEL_WORLD_FILE`,
-    // `RENDER_BENCH`, `VOXEL_AUTOPILOT`; for now also "no `VOXEL_MENU=1`")
+    // `RENDER_BENCH`, `VOXEL_AUTOPILOT`)
     // connects to 127.0.0.1:6466 at startup, as before the menu existed.
     // Otherwise the app starts with dead channels and every world session
     // gets fresh ones (`session::SessionFlowPlugin`).
@@ -216,9 +216,8 @@ fn main() {
             .set(renderer::render_plugin()),
     )
     .insert_resource(world_scale);
-    // App states + the session reset registry + the frontend camera. Until the
-    // menu is the default (Task 15), the menu is opt-in (`VOXEL_MENU=1`) and
-    // everything else starts straight in the world as before.
+    // App states + the session reset registry + the frontend camera. The menu
+    // is the default; the dev bypass starts straight in the world.
     app.add_plugins(client::session::SessionPlugin { skip_menu });
     // The menu screens: on every native build, since a bypass session can
     // still end up in the menu (leave, lost server). `skip_menu` only picks the
