@@ -164,8 +164,9 @@ pub fn track_camera_level(
     tiles: Res<TileMirror>,
     mut cam: ResMut<CommanderCamera>,
     mut level: ResMut<WorkingLevel>,
-    mut was_cut: Local<Option<bool>>,
+    mut was_cut: crate::session::SessionLocal<Option<bool>>,
 ) {
+    let was_cut = was_cut.get();
     let surface = super::focus_ground_target(&grid, cam.focus);
     if was_cut.replace(level.cut) == Some(true) && !level.cut {
         if let Some((floor, underground)) = uncut_camera(level.level, tiles.region(), surface) {
@@ -196,8 +197,9 @@ pub fn level_input(
     time: Res<Time>,
     mut cam: ResMut<CommanderCamera>,
     mut level: ResMut<WorkingLevel>,
-    mut held: Local<Option<[f32; 2]>>,
+    mut held: crate::session::SessionLocal<Option<[f32; 2]>>,
 ) {
+    let held = held.get();
     let held = held.get_or_insert([-1.0; 2]);
     if policy.blocks_game() {
         *held = [-1.0; 2];

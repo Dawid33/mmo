@@ -265,8 +265,9 @@ pub fn spawn_mesh_tasks(
     skipped: Option<Res<super::super::bricks::SkippedBricks>>,
     loaded: Option<Res<super::super::commander::height::HeightGrid>>,
     ground: Option<Res<super::super::commander::tiles::TileMirror>>,
-    mut rank_cache: Local<RankCache>,
+    mut rank_cache: crate::session::SessionLocal<RankCache>,
 ) {
+    let rank_cache = rank_cache.get();
     if queue.dirty.is_empty() {
         rank_cache.clear();
         return;
@@ -281,7 +282,7 @@ pub fn spawn_mesh_tasks(
         return;
     }
     let cam = camera.iter().next();
-    let picked = pick_nearest(&mut queue, &mut rank_cache, capacity, |e| chunks.contains(e), |key| {
+    let picked = pick_nearest(&mut queue, rank_cache, capacity, |e| chunks.contains(e), |key| {
         chunk_rank(key, cam)
     });
 
@@ -353,8 +354,9 @@ pub fn remesh_awaiting_ground(
     mirror: Option<Res<super::super::commander::tiles::TileMirror>>,
     waiting: Query<(Entity, &AwaitingGround)>,
     mut queue: ResMut<RemeshQueue>,
-    mut seen: Local<u64>,
+    mut seen: crate::session::SessionLocal<u64>,
 ) {
+    let seen = seen.get();
     let Some(mirror) = mirror else { return };
     if mirror.ground_epoch() == *seen || !mirror.has_home_ground() {
         return;

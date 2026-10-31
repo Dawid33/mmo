@@ -656,7 +656,8 @@ impl Plugin for RenderBenchmarkPlugin {
                     .after(super::lod_rings::apply_lod_events)
                     .after(super::meshing::lod::apply_lod_meshes)
                     .after(super::far_voxel::gpu::publish_far_uploads)
-                    .after(super::interpolate::interpolate_transforms),
+                    .after(super::interpolate::interpolate_transforms)
+                    .run_if(crate::session::world_systems_enabled()),
             );
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {

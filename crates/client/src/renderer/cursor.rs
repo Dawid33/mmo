@@ -49,6 +49,16 @@ impl CursorPolicy {
     }
 }
 
+/// Session reset: the world's grab requests go (the sim's grab, the menu or
+/// map being open, an orbit or a UI press in flight), so the next screen gets
+/// a free pointer. The client-local `overlay_open` (the dev panel) is not the
+/// world's and stays.
+pub fn reset_session_grab(world: &mut World) {
+    if let Some(mut policy) = world.get_resource_mut::<CursorPolicy>() {
+        *policy = CursorPolicy { overlay_open: policy.overlay_open, ..CursorPolicy::default() };
+    }
+}
+
 /// Apply the policy to the window. Idempotent: writing `CursorOptions` trips
 /// change detection, which re-issues the winit grab — an X11 re-grab loop when
 /// the grab is contended — so only a real change is written.

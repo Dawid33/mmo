@@ -56,6 +56,7 @@ use bevy::window::PrimaryWindow;
 use game::movement::UNITS_PER_METER;
 
 use super::cursor::CursorPolicy;
+use crate::session::{world_systems_enabled, SessionResetExt};
 use height::HeightGrid;
 
 /// Which view the client renders from.
@@ -463,27 +464,34 @@ pub struct CommanderPlugin;
 
 impl Plugin for CommanderPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CommanderCamera>()
-            .insert_resource(HeightGrid::new(
-                crate::blocks::load_registry().id_of("water").unwrap_or(game::BlockId::AIR),
-            ))
-            .init_resource::<minimap::MinimapPointer>()
-            .init_resource::<minimap::MinimapPixels>()
-            .init_resource::<selection::Selection>()
-            .init_resource::<selection::GroundPick>()
-            .init_resource::<selection::SelectionBand>()
-            .init_resource::<tiles::TileMirror>()
-            .init_resource::<level::WorkingLevel>()
-            .init_resource::<designate::DesignateState>()
-            .init_resource::<designate::DragReadout>()
-            .init_resource::<adventure::ClientPlayMode>()
-            .init_resource::<follow::Follow>()
-            .init_resource::<RightPress>()
-            .init_resource::<move_order::PathPreview>()
-            .init_resource::<move_order::SentPath>()
+        // Everything here but the gizmo group is the session's: it goes back
+        // to its fresh value in `end_session`.
+        app.add_session_reset::<CommanderCamera>()
+            .insert_resource(fresh_height_grid())
+            .add_session_reset_with(|world| {
+                world.insert_resource(fresh_height_grid());
+            })
+            .add_session_reset::<minimap::MinimapPointer>()
+            .add_session_reset::<minimap::MinimapPixels>()
+            .add_session_reset::<selection::Selection>()
+            .add_session_reset::<selection::GroundPick>()
+            .add_session_reset::<selection::SelectionBand>()
+            .add_session_reset::<tiles::TileMirror>()
+            .add_session_reset::<level::WorkingLevel>()
+            .add_session_reset::<designate::DesignateState>()
+            .add_session_reset::<designate::DragReadout>()
+            .add_session_reset::<adventure::ClientPlayMode>()
+            .add_session_reset::<follow::Follow>()
+            .add_session_reset::<RightPress>()
+            .add_session_reset::<move_order::PathPreview>()
+            .add_session_reset::<move_order::SentPath>()
             .add_message::<adventure::ToggleModeRequest>()
+            .add_session_message_clear::<adventure::ToggleModeRequest>()
             .init_gizmo_group::<designate::HiddenEdgeGizmos>()
             .add_message::<tiles::TileMirrorMsg>()
+            .add_session_message_clear::<tiles::TileMirrorMsg>()
+            // Ungated: hands the screen to the frontend and back.
+            .add_systems(PreUpdate, yield_commander_camera)
             .add_systems(
                 Startup,
                 (
@@ -530,29 +538,65 @@ impl Plugin for CommanderPlugin {
                     (minimap::rebuild_minimap_base, minimap::draw_minimap_overlay).chain(),
                 )
                     .chain()
-                    .after(super::interpolate::interpolate_transforms),
+                    .after(super::interpolate::interpolate_transforms)
+                    .run_if(world_systems_enabled()),
             )
             .add_systems(
                 Update,
                 (adventure::send_mode_toggle, adventure::on_mode_change, adventure::sync_body_visibility)
                     .chain()
                     .before(designate::designate_keys)
-                    .before(cut_entities::hide_cut_entities),
+                    .before(cut_entities::hide_cut_entities)
+                    .run_if(world_systems_enabled()),
             )
             .add_systems(
                 Update,
                 cut_entities::hide_cut_entities
                     .after(super::interpolate::interpolate_transforms)
                     .after(level::track_camera_level)
-                    .after(tiles::update_tile_mirror),
+                    .after(tiles::update_tile_mirror)
+                    .run_if(world_systems_enabled()),
             )
             .add_systems(
                 Update,
                 (super::fortress_view::update_overlay_grid, super::fortress_view::update_fortress_view)
                     .after(level::track_camera_level)
                     .after(tiles::update_tile_mirror)
-                    .after(designate::update_drag_preview),
+                    .after(designate::update_drag_preview)
+                    .run_if(world_systems_enabled()),
             );
+    }
+}
+
+/// The height grid a session starts with.
+fn fresh_height_grid() -> HeightGrid {
+    HeightGrid::new(crate::blocks::load_registry().id_of("water").unwrap_or(game::BlockId::AIR))
+}
+
+/// The commander camera gives the screen to the frontend (menu, starting
+/// screen, arrival map) and takes it back: inactive and without `UiCamera`
+/// while [`frontend_has_screen`](crate::session::frontend_has_screen), the
+/// active `UiCamera` otherwise.
+pub fn yield_commander_camera(
+    mut commands: Commands,
+    state: Option<Res<State<crate::session::AppState>>>,
+    embarked: Option<Res<crate::session::Embarked>>,
+    mut cams: Query<(Entity, &mut Camera, Has<crate::renderer::UiCamera>), With<CommanderView>>,
+) {
+    let world_owns = !crate::session::frontend_has_screen(state.as_deref(), embarked.as_deref());
+    for (e, mut cam, has_marker) in &mut cams {
+        if cam.is_active != world_owns {
+            cam.is_active = world_owns;
+        }
+        match (world_owns, has_marker) {
+            (true, false) => {
+                commands.entity(e).insert(crate::renderer::UiCamera);
+            }
+            (false, true) => {
+                commands.entity(e).remove::<crate::renderer::UiCamera>();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -662,8 +706,9 @@ fn hold_pointer_while_orbiting(
     mut window: Query<&mut Window, With<PrimaryWindow>>,
     mut policy: ResMut<CursorPolicy>,
     mut press: ResMut<RightPress>,
-    mut anchor: Local<Option<Vec2>>,
+    mut anchor: crate::session::SessionLocal<Option<Vec2>>,
 ) {
+    let anchor = anchor.get();
     if press.released.is_some() {
         press.released = None;
     }

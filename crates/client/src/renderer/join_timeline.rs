@@ -88,7 +88,8 @@ impl LoadDepths {
 
 #[allow(clippy::too_many_arguments)]
 pub fn track_join_timeline(
-    mut state: Local<JoinTimelineState>,
+    // Per session: a second world gets its own join timeline.
+    mut state: crate::session::SessionLocal<JoinTimelineState>,
     // Paired: the function is at Bevy's 16-parameter limit.
     (time, mut world_ready): (Res<Time<Real>>, ResMut<WorldReady>),
     scale: Option<Res<WorldScale>>,
@@ -113,6 +114,7 @@ pub fn track_join_timeline(
     )>,
     names: Query<&Name>,
 ) {
+    let state = state.get();
     if state.done {
         return;
     }

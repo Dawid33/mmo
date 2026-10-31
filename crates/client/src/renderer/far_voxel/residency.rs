@@ -435,6 +435,18 @@ impl FarVoxelResidency {
         }
     }
 
+    /// The same limits with nothing resident, for a new world session
+    /// (`lifecycle::reset_far_voxel`). Batch ids keep counting up, so an
+    /// acknowledgement of a batch from before the reset matches nothing.
+    pub fn restarted(&self) -> Self {
+        Self { next_batch_id: self.next_batch_id, ..Self::new(self.limits) }
+    }
+
+    /// Cells with a resident slot.
+    pub fn resident_count(&self) -> usize {
+        self.resident.len()
+    }
+
     pub fn stage_refresh(
         &mut self,
         entity: Entity,

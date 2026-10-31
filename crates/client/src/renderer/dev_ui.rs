@@ -90,8 +90,20 @@ pub struct DevUiPlugin;
 impl Plugin for DevUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DevUiOpen>()
-            .add_plugins(SlintLayerPlugin::new(DevPanelUi::new).order(DEV_LAYER_ORDER).with_init(connect_dev_panel))
-            .add_systems(Update, (toggle_dev_ui, apply_dev_actions, push_dev_panel).chain());
+            // Hidden under the menu screens: it is the world's dev panel.
+            // Its toggles are preferences, so it is not session-scoped.
+            .add_plugins(
+                SlintLayerPlugin::new(DevPanelUi::new)
+                    .order(DEV_LAYER_ORDER)
+                    .hidden_by_frontend()
+                    .with_init(connect_dev_panel),
+            )
+            .add_systems(
+                Update,
+                (toggle_dev_ui, apply_dev_actions, push_dev_panel)
+                    .chain()
+                    .run_if(crate::session::world_systems_enabled()),
+            );
     }
 }
 

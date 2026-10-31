@@ -294,9 +294,10 @@ pub fn send_move_order(
     mirror: Res<TileMirror>,
     events: Res<GameEvents>,
     local: Res<LocalPlayer>,
-    mut pending: Local<Option<PressedHover>>,
+    mut pending: crate::session::SessionLocal<Option<PressedHover>>,
     mut sent: ResMut<SentPath>,
 ) {
+    let pending = pending.get();
     if buttons.just_pressed(MouseButton::Right) && press.at.is_some() {
         *pending = match (preview.key, preview.goal) {
             (Some(key), Some(goal)) if !preview.unreachable => {

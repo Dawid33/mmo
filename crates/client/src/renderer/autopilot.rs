@@ -123,7 +123,8 @@ impl Autopilot {
 
 pub fn plugin(app: &mut App, autopilot: Autopilot) {
     info!("autopilot: {:?} once the world is ready", autopilot.mode);
-    app.insert_resource(autopilot).add_systems(Update, drive_autopilot);
+    app.insert_resource(autopilot)
+        .add_systems(Update, drive_autopilot.run_if(crate::session::world_systems_enabled()));
 }
 
 fn drive_autopilot(

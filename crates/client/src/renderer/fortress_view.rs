@@ -234,8 +234,9 @@ pub fn update_overlay_grid(
     tiles: Res<TileMirror>,
     preview: Res<DragPreview>,
     mut grid: ResMut<OverlayGrid>,
-    mut built: Local<OverlayBuilt>,
+    mut built: crate::session::SessionLocal<OverlayBuilt>,
 ) {
+    let built = built.get();
     // Last frame's box has been extracted by now.
     if grid.dirty.is_some() {
         grid.dirty = None;
@@ -328,8 +329,11 @@ pub struct FortressOverlayPlugin;
 
 impl Plugin for FortressOverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<OverlayGrid>()
-            .init_resource::<DragPreview>()
+        use crate::session::SessionResetExt;
+        // A new session's first rebuild is a full one (`OverlayBuilt` is a
+        // `SessionLocal`), so the texture needs no reset of its own.
+        app.add_session_reset::<OverlayGrid>()
+            .add_session_reset::<DragPreview>()
             .init_resource::<OverlayTexture>()
             .add_plugins(ExtractResourcePlugin::<OverlayTexture>::default());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };

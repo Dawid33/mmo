@@ -228,7 +228,7 @@ impl Plugin for VoxelPullPlugin {
         // Main-world tally driving the `[pull-mem]` headline log in
         // `apply_meshed_chunks`. Registered here (not in `renderer/mod.rs`) so
         // the pull path owns its own accounting resource.
-        app.init_resource::<super::meshing::PullMemStats>();
+        crate::session::SessionResetExt::add_session_reset::<super::meshing::PullMemStats>(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };

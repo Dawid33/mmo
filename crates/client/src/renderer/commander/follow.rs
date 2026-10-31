@@ -80,8 +80,9 @@ pub fn follow_camera(
 pub fn rekey_local_player(
     body: Query<&SimEntity, With<LocalBody>>,
     mut selection: ResMut<Selection>,
-    mut last: Local<Option<(RegionId, EntityKey)>>,
+    mut last: crate::session::SessionLocal<Option<(RegionId, EntityKey)>>,
 ) {
+    let last = last.get();
     let Some(now) = body.iter().next().map(|s| (s.region, s.key)) else { return };
     if let Some(old) = last.replace(now) {
         if old != now && selection.0.remove(&old) {

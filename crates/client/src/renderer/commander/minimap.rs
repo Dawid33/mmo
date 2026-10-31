@@ -173,9 +173,10 @@ pub fn rebuild_minimap_base(
     cam: Res<CommanderCamera>,
     mut pixels: ResMut<MinimapPixels>,
     time: Res<Time>,
-    mut built: Local<Option<(u64, Option<Rect>)>>,
+    mut built: crate::session::SessionLocal<Option<(u64, Option<Rect>)>>,
     mut since: Local<f32>,
 ) {
+    let built = built.get();
     *since += time.delta_secs();
     let key = (grid.version, cam.bounds);
     if *built == Some(key) || *since < BASE_REBUILD_S {

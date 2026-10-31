@@ -102,6 +102,35 @@ pub const FRONTEND_CAMERA_ORDER: isize = 100;
 /// The frontend's backdrop behind the Slint screens.
 pub const FRONTEND_CLEAR_COLOR: Color = Color::srgb(0.035, 0.035, 0.045);
 
+/// Bumped by [`end_session`]: how many sessions have ended. [`SessionLocal`]
+/// compares against it to drop a system's per-session memory.
+#[derive(Resource, Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct SessionGeneration(pub u64);
+
+/// A system `Local` that belongs to the world session: it is back at
+/// `T::default()` the first time the system runs after [`end_session`].
+/// Read it through [`SessionLocal::get`] (typically
+/// `let state = state.get();` at the top of the system). Without
+/// [`SessionGeneration`] (headless tests without the session plugin) it is
+/// an ordinary `Local`.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct SessionLocal<'w, 's, T: Default + Send + 'static> {
+    generation: Option<Res<'w, SessionGeneration>>,
+    state: Local<'s, (u64, T)>,
+}
+
+impl<T: Default + Send + 'static> SessionLocal<'_, '_, T> {
+    /// The current session's value (reset first if a session ended since
+    /// the last call).
+    pub fn get(&mut self) -> &mut T {
+        let now = self.generation.as_ref().map_or(0, |g| g.0);
+        if self.state.0 != now {
+            *self.state = (now, T::default());
+        }
+        &mut self.state.1
+    }
+}
+
 /// Registered per-session resets, run by [`end_session`] in registration order.
 #[derive(Resource, Default)]
 pub struct SessionResets(pub Vec<fn(&mut World)>);
@@ -171,11 +200,22 @@ pub fn end_session(world: &mut World) {
     for clear in clears {
         clear(world);
     }
+    world.get_resource_or_init::<SessionGeneration>().0 += 1;
 }
 
-/// The run condition for every per-world system: a session is starting or running.
+/// The run condition for every per-world system: a session is starting or
+/// running. Without the session state (headless tests that build a plugin
+/// without [`SessionPlugin`]) the world is all there is, so it holds.
 pub fn world_systems_enabled() -> impl SystemCondition<()> {
-    in_state(AppState::InWorld).or_else(in_state(AppState::Starting))
+    IntoSystem::into_system(|state: Option<Res<State<AppState>>>| {
+        state.is_none_or(|s| matches!(s.get(), AppState::InWorld | AppState::Starting))
+    })
+}
+
+/// [`frontend_owns`] over optional resources: without the session state
+/// (headless tests, examples) the frontend never owns the screen.
+pub fn frontend_has_screen(state: Option<&State<AppState>>, embarked: Option<&Embarked>) -> bool {
+    state.is_some_and(|s| frontend_owns(*s.get(), embarked.is_some_and(|e| e.0)))
 }
 
 /// Whether the frontend (menu screens, starting screen, arrival map) owns the screen.
@@ -243,6 +283,7 @@ impl Plugin for SessionPlugin {
             .insert_state(initial_state(self.skip_menu))
             .init_resource::<SessionResets>()
             .init_resource::<SessionMessageClears>()
+            .init_resource::<SessionGeneration>()
             .insert_resource(Embarked(self.skip_menu))
             .add_session_reset::<Embarked>()
             .init_resource::<LastSessionError>()
@@ -346,6 +387,26 @@ mod tests {
         assert_eq!(app.world().resource::<Counter>().0, 100);
         assert_eq!(*app.world().resource::<Untouched>(), Untouched(7));
         assert_eq!(*app.world().resource::<Embarked>(), Embarked(false));
+    }
+
+    #[derive(Resource, Default)]
+    struct Seen(Vec<u32>);
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn session_local_starts_over_after_end_session() {
+        let mut app = app(true);
+        app.init_resource::<Seen>().add_systems(Update, |mut n: SessionLocal<u32>, mut seen: ResMut<Seen>| {
+            let n = n.get();
+            *n += 1;
+            seen.0.push(*n);
+        });
+        app.update();
+        app.update();
+        end_session(app.world_mut());
+        app.update();
+        assert_eq!(app.world().resource::<Seen>().0, vec![1, 2, 1], "back at its default after end_session");
+        assert_eq!(*app.world().resource::<SessionGeneration>(), SessionGeneration(1));
     }
 
     #[test]

@@ -289,6 +289,19 @@ impl GpuFarBuffers {
         }
     }
 
+    /// Every slot empty, as a new session starts (the buffers are dropped;
+    /// the next upload allocates again).
+    pub fn reset(&mut self) {
+        let limit = self.binding_limit;
+        self.mixed_pages = [
+            GpuSlotBuffer::new("far_voxel_mixed_page_0", limit),
+            GpuSlotBuffer::new("far_voxel_mixed_page_1", limit),
+        ];
+        self.roots = GpuSlotBuffer::new("far_voxel_roots", limit);
+        self.cells = GpuSlotBuffer::new("far_voxel_cells", limit);
+        self.last_error = None;
+    }
+
     pub fn reserved_bytes(&self) -> usize {
         saturating_sum(
             self.mixed_pages
@@ -534,12 +547,18 @@ impl FromWorld for GpuFarBuffers {
 }
 
 #[derive(Resource, Default)]
-pub struct ExtractedFarUploads(pub Vec<FarUploadBatch>);
+pub struct ExtractedFarUploads {
+    pub batches: Vec<FarUploadBatch>,
+    /// Start the buffers over before applying `batches`
+    /// ([`FarUploadChannel::request_reset`]).
+    pub reset: bool,
+}
 
 #[derive(Default)]
 struct FarUploadQueues {
     batches: Vec<FarUploadBatch>,
     results: Vec<FarUploadResult>,
+    reset: bool,
 }
 
 #[derive(Resource, Clone, Default)]
@@ -560,6 +579,20 @@ impl FarUploadChannel {
 
     pub fn drain_results(&self) -> Vec<FarUploadResult> {
         std::mem::take(&mut self.lock().results)
+    }
+
+    /// A world session ended: drop what is queued both ways and have the
+    /// render world empty [`GpuFarBuffers`] wholesale on its next frame
+    /// (the per-cell removal path would stage one removal per frame).
+    pub fn request_reset(&self) {
+        let mut queues = self.lock();
+        queues.batches.clear();
+        queues.results.clear();
+        queues.reset = true;
+    }
+
+    fn take_reset(&self) -> bool {
+        std::mem::take(&mut self.lock().reset)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, FarUploadQueues> {
@@ -595,9 +628,11 @@ pub fn publish_far_uploads(
 
 pub fn extract_far_uploads(mut commands: Commands, channel: Extract<Res<FarUploadChannel>>) {
     let channel = (*channel).clone();
+    // Reset first: a batch in the queue now was sent after the reset.
+    let reset = channel.take_reset();
     let batches = channel.drain_batches();
     commands.insert_resource(channel);
-    commands.insert_resource(ExtractedFarUploads(batches));
+    commands.insert_resource(ExtractedFarUploads { batches, reset });
 }
 
 pub fn apply_far_uploads(
@@ -608,7 +643,10 @@ pub fn apply_far_uploads(
     channel: Res<FarUploadChannel>,
 ) {
     buffers.last_error = None;
-    for batch in &uploads.0 {
+    if uploads.reset {
+        buffers.reset();
+    }
+    for batch in &uploads.batches {
         if let Err(error) = buffers.prevalidate_batch(batch) {
             error!("far voxel GPU batch {} rejected: {error:?}", batch.id);
             buffers.last_error = Some(error);

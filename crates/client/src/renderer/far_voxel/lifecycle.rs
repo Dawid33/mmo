@@ -552,6 +552,22 @@ pub fn remove_far_voxel_cells(
     }
 }
 
+/// Session reset: far residency starts over wholesale — a fresh
+/// [`FarVoxelResidency`] with the same limits, no revisions or deferred
+/// removals — and the render world empties `GpuFarBuffers` through the
+/// upload channel, instead of draining every cell through the one-per-frame
+/// removal path.
+pub fn reset_far_voxel(world: &mut World) {
+    if let Some(fresh) = world.get_resource::<FarVoxelResidency>().map(FarVoxelResidency::restarted) {
+        world.insert_resource(fresh);
+    }
+    world.insert_resource(FarBrickRevisions::default());
+    world.insert_resource(FarDeferredRemovals::default());
+    if let Some(channel) = world.get_resource::<super::gpu::FarUploadChannel>() {
+        channel.request_reset();
+    }
+}
+
 pub struct FarVoxelPlugin;
 
 impl Plugin for FarVoxelPlugin {
@@ -562,6 +578,7 @@ impl Plugin for FarVoxelPlugin {
             .init_resource::<FarDeferredRemovals>()
             .init_resource::<FarPassReadiness>()
             .init_resource::<super::gpu::FarUploadChannel>();
+        crate::session::SessionResetExt::add_session_reset_with(app, reset_far_voxel);
         #[cfg(not(target_arch = "wasm32"))]
         app.init_resource::<super::pass::FarPassStatusChannel>();
     }

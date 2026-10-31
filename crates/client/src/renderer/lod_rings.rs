@@ -198,6 +198,7 @@ fn spawn_lod_root(commands: &mut Commands, key: LodKey, payload: &LodPayload) ->
             Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2])),
             Visibility::default(),
             Name::new(format!("lod {:?} x{}", key.coords, factor)),
+            crate::session::SessionScoped,
         ))
         .id();
 
@@ -284,8 +285,9 @@ pub fn retire_lod_roots(
     children: Query<&Children>,
     meshed: Query<(), ReadyLodCellFilter>,
     unmeshed_near: Query<&ChildOf, UnmeshedNearChunkFilter>,
-    mut hold: Local<BTreeMap<RegionCoords, (Entity, u32)>>,
+    mut hold: crate::session::SessionLocal<BTreeMap<RegionCoords, (Entity, u32)>>,
 ) {
+    let hold = hold.get();
     if rings.retired.is_empty() && rings.roots.values().all(|s| s.retiring.is_none()) {
         hold.clear();
         return;
@@ -320,7 +322,7 @@ pub fn retire_lod_roots(
     // it walks every unmeshed near chunk, which is the whole backlog while
     // flying (~100k), so skip it when nobody needs the answer.
     let near_ready = if rings.retired.iter().any(|r| r.near_takeover) {
-        near_regions_meshed(&near, &unmeshed_near, &mut hold)
+        near_regions_meshed(&near, &unmeshed_near, hold)
     } else {
         // Unwatched frames break a stability streak.
         hold.clear();

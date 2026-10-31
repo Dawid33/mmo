@@ -232,9 +232,10 @@ pub fn select_input(
     policy: Res<CursorPolicy>,
     minimap_pointer: Res<MinimapPointer>,
     mut selection: ResMut<Selection>,
-    mut press: Local<Option<Vec2>>,
+    mut press: crate::session::SessionLocal<Option<Vec2>>,
     mut band: ResMut<SelectionBand>,
 ) {
+    let press = press.get();
     let Ok(window) = window.single() else { return };
     let cursor = window.cursor_position();
     if buttons.just_pressed(MouseButton::Left) {

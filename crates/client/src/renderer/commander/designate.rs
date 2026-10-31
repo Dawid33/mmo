@@ -547,8 +547,9 @@ pub fn drag_input(
     mut state: ResMut<DesignateState>,
     // Mouse travel since the right press; `None` while the button is up or
     // the press was not ours (UI / overlay).
-    mut right_travel: Local<Option<f32>>,
+    mut right_travel: crate::session::SessionLocal<Option<f32>>,
 ) {
+    let right_travel = right_travel.get();
     let Ok(window) = window.single() else { return };
     // A right press is a click unless the mouse travels: orbiting holds the
     // pointer still, so the travel is the raw motion, not the cursor.
@@ -629,8 +630,9 @@ pub fn update_drag_preview(
     mirror: Res<TileMirror>,
     mut preview: ResMut<DragPreview>,
     mut readout: ResMut<DragReadout>,
-    mut built: Local<PreviewBuilt>,
+    mut built: crate::session::SessionLocal<PreviewBuilt>,
 ) {
+    let built = built.get();
     let Some((tool, area, erase)) = state.drag_area() else {
         if built.key.is_some() {
             *built = PreviewBuilt::default();
@@ -702,8 +704,9 @@ pub fn draw_designate_gizmos(
     working: Res<WorkingLevel>,
     mut gizmos: Gizmos,
     mut hidden: Gizmos<HiddenEdgeGizmos>,
-    mut ghosts: Local<GhostCache>,
+    mut ghosts: crate::session::SessionLocal<GhostCache>,
 ) {
+    let ghosts = ghosts.get();
     let Some(region) = mirror.region() else { return };
     if let Some(level) = working.level {
         let key = Some((mirror.version(), level));

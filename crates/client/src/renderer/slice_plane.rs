@@ -151,14 +151,16 @@ pub struct SlicePlanePlugin;
 
 impl Plugin for SlicePlanePlugin {
     fn build(&self, app: &mut App) {
+        use crate::session::SessionResetExt;
         app.add_plugins(MaterialPlugin::<SlicePlaneMaterial>::default())
-            .init_resource::<SliceState>()
+            .add_session_reset::<SliceState>()
             .add_systems(
                 Update,
                 (spawn_slice_plane, update_slice_plane)
                     .chain()
                     .after(super::commander::level::track_camera_level)
-                    .after(super::commander::tiles::update_tile_mirror),
+                    .after(super::commander::tiles::update_tile_mirror)
+                    .run_if(crate::session::world_systems_enabled()),
             );
     }
 }

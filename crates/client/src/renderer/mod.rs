@@ -8,6 +8,8 @@ use bevy::render::render_resource::{
 use crossbeam::channel::{Receiver, Sender};
 use game::{ClientId, ClientUpdateEvent, GameEventKind};
 
+use crate::session::{world_systems_enabled, SessionResetExt};
+
 mod atmosphere;
 #[cfg(not(target_arch = "wasm32"))]
 mod autopilot;
@@ -28,13 +30,13 @@ pub mod convert;
 pub(crate) mod diag;
 pub mod far_voxel;
 pub(crate) mod grid_debug;
-pub(crate) mod hud;
+pub mod hud;
 pub(crate) mod input;
 mod interpolate;
 mod look;
 mod motion_probe;
-pub(crate) mod join_timeline;
-pub(crate) mod lod_rings;
+pub mod join_timeline;
+pub mod lod_rings;
 pub mod meshing;
 pub mod model;
 #[cfg(not(target_arch = "wasm32"))]
@@ -104,56 +106,72 @@ impl Plugin for SimBridgePlugin {
         .insert_resource(ClientUpdates(self.client_recv.clone()))
         .insert_resource(GameEvents(self.game_send.clone()))
         .insert_resource(ClientRequests(self.requests.clone()))
-        .init_resource::<world_map::WorldMapState>()
-        .init_resource::<world_map::PendingPlay>()
+        // Per-session state goes back to its fresh value in `end_session`
+        // (`add_session_reset`); preferences, startup assets and render
+        // config are plain `init_resource` and survive it.
+        .add_session_reset::<world_map::WorldMapState>()
+        .add_session_reset::<world_map::PendingPlay>()
         .add_message::<world_map::WorldMapMsg>()
-        .init_resource::<LocalPlayer>()
-        .init_resource::<bridge::Regions>()
-        .init_resource::<bridge::RegionRoots>()
-        .init_resource::<bridge::SimEntityMap>()
-        .init_resource::<bridge::SnapshotVoxelQueue>()
-        .init_resource::<bridge::RetiredRegionRoots>()
-        .init_resource::<hud::HudStatus>()
+        .add_session_message_clear::<world_map::WorldMapMsg>()
+        .add_session_reset::<LocalPlayer>()
+        .add_session_reset::<bridge::Regions>()
+        .add_session_reset::<bridge::RegionRoots>()
+        .add_session_reset::<bridge::SimEntityMap>()
+        .add_session_reset::<bridge::SnapshotVoxelQueue>()
+        .add_session_reset::<bridge::RetiredRegionRoots>()
+        .add_session_reset::<hud::HudStatus>()
         .init_resource::<boundaries::BoundaryOverlay>()
-        .init_resource::<boundaries::BoundaryUniform>()
-        .init_resource::<fortress_view::FortressViewUniform>()
+        .add_session_reset::<boundaries::BoundaryUniform>()
+        .add_session_reset::<fortress_view::FortressViewUniform>()
         .init_resource::<avatar::AvatarAssets>()
-        .init_resource::<slint_overlay::UiUpdates>()
+        .add_session_reset::<slint_overlay::UiUpdates>()
         .insert_resource(collider_debug::DebugFlagsRes(self.debug_flags.clone()))
-        .init_resource::<collider_debug::DebugColliderLines>()
+        .add_session_reset::<collider_debug::DebugColliderLines>()
         .init_resource::<grid_debug::GridDebug>()
         .init_resource::<cursor::CursorPolicy>()
-        .init_resource::<meshing::queue::ChunkGrid>()
-        .init_resource::<meshing::queue::RemeshQueue>()
+        .add_session_reset_with(cursor::reset_session_grab)
+        .add_session_reset::<meshing::queue::ChunkGrid>()
+        .add_session_reset::<meshing::queue::RemeshQueue>()
         .init_resource::<meshing::queue::MeshBudgets>()
         .init_resource::<meshing::queue::MeshBudgetPolicy>()
-        .init_resource::<meshing::queue::FrameUploads>()
-        .init_resource::<meshing::lod::LodBuildQueue>()
-        .init_resource::<meshing::lod::FarFrameUploads>()
+        .add_session_reset::<meshing::queue::FrameUploads>()
+        .add_session_reset::<meshing::lod::LodBuildQueue>()
+        .add_session_reset::<meshing::lod::FarFrameUploads>()
+        .add_session_reset::<bricks::SkippedBricks>()
         // Cave culling starts OFF: the world has no caves yet, and the flood
         // cost 5-8.5 ms per turning frame at the 5x5 window (2026-09-23
         // bench) for nothing to hide. F4 / the F3 dev panel turn it on.
         .insert_resource(meshing::visibility::CullingConfig { graph_enabled: false })
         .init_resource::<config::TerrainRenderConfig>()
         .init_resource::<input::MouseCoalesceWindow>()
-        .init_resource::<look::LocalLook>()
-        .init_resource::<lod_rings::LodRings>()
+        .add_session_reset::<look::LocalLook>()
+        .add_session_reset::<lod_rings::LodRings>()
         .init_resource::<grid_debug::TerrainDebug>()
-        .init_resource::<join_timeline::WorldReady>()
+        .add_session_reset::<join_timeline::WorldReady>()
         .insert_resource(self.camera_mode)
         .add_systems(
             PreUpdate,
             (
-                input::forward_input.after(bevy::input::InputSystems),
-                look::integrate_local_look.after(bevy::input::InputSystems),
+                input::forward_input
+                    .after(bevy::input::InputSystems)
+                    .run_if(world_systems_enabled()),
+                look::integrate_local_look
+                    .after(bevy::input::InputSystems)
+                    .run_if(world_systems_enabled()),
                 (
-                    bridge::drain_client_updates,
-                    bridge::despawn_retired_regions,
-                    bridge::drain_region_updates,
-                    bridge::apply_snapshot_voxels,
-                    bridge::dedupe_ghosts,
+                    (
+                        bridge::drain_client_updates,
+                        bridge::despawn_retired_regions,
+                        bridge::drain_region_updates,
+                        bridge::apply_snapshot_voxels,
+                        bridge::dedupe_ghosts,
+                    )
+                        .chain()
+                        .run_if(world_systems_enabled()),
+                    // Ungated: they also hand the screen and the pointer to
+                    // the frontend (menu) when no world is running.
                     bridge::enforce_single_active_camera,
-                    slint_overlay::drain_ui_updates,
+                    slint_overlay::drain_ui_updates.run_if(world_systems_enabled()),
                     cursor::apply_cursor_policy,
                 )
                     .chain(),
@@ -207,19 +225,22 @@ impl Plugin for SimBridgePlugin {
                 join_timeline::track_join_timeline,
                 avatar::attach_avatars,
                 avatar::squish_slimes.after(interpolate::interpolate_transforms),
-                skybox::attach_skybox,
-                atmosphere::attach_fog,
                 meshing::visibility::toggle_culling,
                 collider_debug::draw_collider_wireframes,
                 (boundaries::toggle_boundary_overlay, boundaries::update_boundary_uniform).chain(),
                 grid_debug::toggle_grid_debug,
                 grid_debug::draw_grid_debug.after(grid_debug::toggle_grid_debug),
                 (grid_debug::toggle_terrain_debug, grid_debug::apply_terrain_debug).chain(),
-            ),
+            )
+                .run_if(world_systems_enabled()),
         );
+        // Every camera, the frontend's included (which brings its own).
+        app.add_systems(Update, (skybox::attach_skybox, atmosphere::attach_fog));
         app.add_systems(
             Update,
-            motion_probe::probe_region_crossing.after(interpolate::interpolate_transforms),
+            motion_probe::probe_region_crossing
+                .after(interpolate::interpolate_transforms)
+                .run_if(world_systems_enabled()),
         );
         // Sim-animated entities (`game::anim`): model child, then the pose
         // from the sim state over the interpolated body.
@@ -232,7 +253,8 @@ impl Plugin for SimBridgePlugin {
                     .after(interpolate::interpolate_transforms)
                     .after(model::spawn_bbmodels),
             )
-                .chain(),
+                .chain()
+                .run_if(world_systems_enabled()),
         );
         app.add_plugins(slint_overlay::HudLayerPlugin);
         if self.camera_mode == commander::CameraMode::Commander {

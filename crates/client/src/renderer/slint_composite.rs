@@ -46,6 +46,17 @@ pub fn wants_composite(is_ui_camera: bool, layers: usize) -> bool {
     is_ui_camera && layers > 0
 }
 
+/// The one view that gets the composite when several carry `UiCamera` (a
+/// world camera that has not yet yielded to the frontend camera): the
+/// highest camera order — the frontend camera's is above every world
+/// camera's — ties to the lowest entity index, so the UI is never drawn twice.
+pub fn pick_ui_view(candidates: impl IntoIterator<Item = (Entity, isize)>) -> Option<Entity> {
+    candidates
+        .into_iter()
+        .max_by(|(ea, oa), (eb, ob)| oa.cmp(ob).then(eb.index_u32().cmp(&ea.index_u32())))
+        .map(|(e, _)| e)
+}
+
 /// Render world: the layers to draw this frame, in order.
 #[derive(Resource, Default)]
 struct ExtractedSlintLayers(Vec<AssetId<Image>>);
@@ -89,10 +100,13 @@ fn prepare_slint_composite(
     mut pipelines: ResMut<SpecializedRenderPipelines<BlitPipeline>>,
     blit_pipeline: Res<BlitPipeline>,
     layers: Res<ExtractedSlintLayers>,
-    views: Query<(Entity, &ViewTarget, Has<UiCamera>, Option<&ViewSlintComposite>)>,
+    views: Query<(Entity, &ViewTarget, Has<UiCamera>, Option<&ViewSlintComposite>, Option<&ExtractedCamera>)>,
 ) {
-    for (entity, target, is_ui_camera, current) in &views {
-        if !wants_composite(is_ui_camera, layers.0.len()) {
+    let ui_view = pick_ui_view(
+        views.iter().filter(|v| v.2).map(|(e, _, _, _, camera)| (e, camera.map_or(0, |c| c.order))),
+    );
+    for (entity, target, _, current, _) in &views {
+        if !wants_composite(ui_view == Some(entity), layers.0.len()) {
             if current.is_some() {
                 commands.entity(entity).remove::<ViewSlintComposite>();
             }
@@ -170,6 +184,15 @@ mod tests {
     fn layers_draw_in_ascending_order_stable_on_ties() {
         let (a, b, c) = (id(1), id(2), id(3));
         assert_eq!(sorted_layers(&[(1000, a), (0, b), (0, c)]), vec![b, c, a]);
+    }
+
+    #[test]
+    fn two_ui_cameras_composite_once_on_the_higher_order() {
+        let (a, b, c) = (Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap(), Entity::from_raw_u32(3).unwrap());
+        assert_eq!(pick_ui_view([(a, 0), (b, 100)]), Some(b), "frontend camera above the world's");
+        assert_eq!(pick_ui_view([(b, 100), (a, 0)]), Some(b));
+        assert_eq!(pick_ui_view([(c, 0), (a, 0)]), Some(a), "a tie goes to the lowest entity");
+        assert_eq!(pick_ui_view([]), None);
     }
 
     #[test]

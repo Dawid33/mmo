@@ -633,9 +633,11 @@ pub fn cull_chunks(
     mut removed_masks: RemovedComponents<ChunkConnectivity>,
     mut chunks: Query<&mut Visibility, With<ChunkKey>>,
     mut scratch: Local<CullingScratch>,
-    mut cache: Local<GridCache>,
+    // Holds entity ids: per session.
+    mut cache: crate::session::SessionLocal<GridCache>,
     mut stats: Option<ResMut<CullingStats>>,
 ) {
+    let cache = cache.get();
     // Always drain the removal events, or they pile up across skipped frames.
     // A grid change rebuilds the whole cache below, so patching is only for a
     // still-valid cache. Removals first: a remove + re-add in one frame shows
@@ -806,11 +808,13 @@ fn frustum_planes(frustum: &Frustum) -> [[f32; 4]; 6] {
 /// headless pipeline tests so the schedules cannot drift apart.
 pub fn cull_plugin(app: &mut App) {
     use bevy::camera::visibility::VisibilitySystems;
-    app.init_resource::<CullingStats>().add_systems(
+    use crate::session::{world_systems_enabled, SessionResetExt};
+    app.add_session_reset::<CullingStats>().add_systems(
         PostUpdate,
         cull_chunks
             .after(VisibilitySystems::UpdateFrusta)
-            .before(VisibilitySystems::VisibilityPropagate),
+            .before(VisibilitySystems::VisibilityPropagate)
+            .run_if(world_systems_enabled()),
     );
 }
 

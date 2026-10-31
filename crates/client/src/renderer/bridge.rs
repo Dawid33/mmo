@@ -12,6 +12,7 @@ use super::commander::tiles::TileMirrorMsg;
 use super::hud::HudStatus;
 use super::lod_rings;
 use super::{ClientUpdates, LocalPlayer};
+use crate::session::SessionScoped;
 
 #[derive(Resource, Default)]
 pub struct Regions(pub BTreeMap<RegionId, Receiver<GameDataUpdate>>);
@@ -68,10 +69,18 @@ fn spawn_region_roots(commands: &mut Commands, id: RegionId) -> (Entity, Entity)
     let offset = id.world_offset();
     let at = Transform::from_translation(Vec3::new(offset[0], offset[1], offset[2]));
     let root = commands
-        .spawn((at, Visibility::default(), Name::new(format!("region {:?}", id))))
+        .spawn((at, Visibility::default(), Name::new(format!("region {:?}", id)), SessionScoped))
         .id();
+    // Scoped too, though it goes with its region root: nothing of a
+    // session may outlive it, whatever the relationship does.
     let bodies = commands
-        .spawn((at, Visibility::default(), Name::new(format!("region {:?} bodies", id)), BodiesOf(root)))
+        .spawn((
+            at,
+            Visibility::default(),
+            Name::new(format!("region {:?} bodies", id)),
+            BodiesOf(root),
+            SessionScoped,
+        ))
         .id();
     (root, bodies)
 }
@@ -1149,11 +1158,28 @@ pub fn dedupe_ghosts(
 /// (the bridge never gives another player a `Camera3d`), so no ownership filter
 /// is needed. Falls back to a deterministic keeper if no camera sits in the
 /// home region yet (handoff mid-flight) to avoid a black screen or flicker.
+///
+/// While the frontend has the screen (`session::frontend_has_screen`: menu,
+/// starting screen, arrival map) no body camera is active or carries
+/// `UiCamera` — the frontend camera does.
 pub fn enforce_single_active_camera(
     mut commands: Commands,
     hud_status: Res<HudStatus>,
+    state: Option<Res<State<crate::session::AppState>>>,
+    embarked: Option<Res<crate::session::Embarked>>,
     mut cams: Query<(Entity, &SimEntity, &mut Camera, Has<super::UiCamera>), With<Camera3d>>,
 ) {
+    if crate::session::frontend_has_screen(state.as_deref(), embarked.as_deref()) {
+        for (e, _, mut cam, has_marker) in &mut cams {
+            if cam.is_active {
+                cam.is_active = false;
+            }
+            if has_marker {
+                commands.entity(e).remove::<super::UiCamera>();
+            }
+        }
+        return;
+    }
     let home = hud_status.home_region;
     // Choose the single keeper: the home-region camera if one exists, else a
     // deterministic fallback (lowest Entity) so the pick doesn't flip frame to
@@ -2008,6 +2034,41 @@ mod tests {
             Visibility::Hidden,
             "upgraded (owned) entity is never deduped"
         );
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
+    fn body_camera_yields_to_the_frontend() {
+        use crate::session::{AppState, Embarked, SessionPlugin};
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin, SessionPlugin { skip_menu: false }))
+            .init_resource::<HudStatus>()
+            .add_systems(PreUpdate, enforce_single_active_camera);
+        let cam = app
+            .world_mut()
+            .spawn((
+                SimEntity { region: RegionCoords::new(0, 0), key: key(1) },
+                Camera3d::default(),
+                Camera { is_active: true, ..default() },
+                crate::renderer::UiCamera,
+            ))
+            .id();
+        let state = |app: &App| {
+            let e = app.world().entity(cam);
+            (e.get::<Camera>().unwrap().is_active, e.contains::<crate::renderer::UiCamera>())
+        };
+
+        app.update();
+        assert_eq!(state(&app), (false, false), "menu: the body camera neither renders nor has the UI");
+
+        app.world_mut().resource_mut::<NextState<AppState>>().set(AppState::InWorld);
+        app.update();
+        app.update();
+        assert_eq!(state(&app), (false, false), "in world but not embarked: still the frontend's");
+
+        app.world_mut().resource_mut::<Embarked>().0 = true;
+        app.update();
+        assert_eq!(state(&app), (true, true), "embarked: the body camera has the screen again");
     }
 
     #[test]

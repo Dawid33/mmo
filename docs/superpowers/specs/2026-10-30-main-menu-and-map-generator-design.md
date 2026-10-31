@@ -178,6 +178,52 @@ The design:
   `SessionScoped` entity, no registered resource's non-default state, and no far-buffer slot
   survives the first session, and that the second session reaches world-ready.
 
+#### Per-world inventory as built (Task 8, 2026-10-31)
+
+Mechanisms: **reset** = `add_session_reset::<R>()` (back to `FromWorld`), **with** =
+`add_session_reset_with(fn)`, **clear** = `add_session_message_clear::<T>()`, **scoped** =
+`SessionScoped` root (despawned with its tree), **SessionLocal** = a system `Local` that is back at
+its default after `end_session` (`session::SessionLocal`, keyed on `SessionGeneration`), **gate** =
+`run_if(world_systems_enabled())` (true without the session state, so headless tests that skip
+`SessionPlugin` are unaffected).
+
+| Item | Mechanism |
+|---|---|
+| region root + bodies root (`bridge::spawn_region_roots`; chunks, bricks, snapshot voxel tasks, sim entities, voxel bodies, rig models, avatars are their descendants) | scoped |
+| LOD roots (`lod_rings::spawn_lod_root`; retired roots are the same entities) | scoped |
+| `Regions`, `RegionRoots`, `RetiredRegionRoots`, `SimEntityMap`, `SnapshotVoxelQueue`, `LocalPlayer`, `HudStatus`, `UiUpdates`, `DebugColliderLines`, `LocalLook` | reset |
+| `ChunkGrid`, `RemeshQueue`, `FrameUploads`, `LodBuildQueue`, `FarFrameUploads`, `PullMemStats`, `SkippedBricks` (now registered in `build`), `CullingStats` | reset |
+| `LodRings` (roots, retired, pending), `WorldReady` | reset |
+| `WorldMapState`, `world_map::PendingPlay`, `slint_overlay::PlayPending` | reset |
+| `BoundaryUniform`, `FortressViewUniform`, `OverlayGrid`, `DragPreview`, `SliceState` | reset |
+| commander `CommanderCamera`, `MinimapPointer`, `MinimapPixels`, `Selection`, `GroundPick`, `SelectionBand`, `TileMirror`, `WorkingLevel`, `DesignateState`, `DragReadout`, `ClientPlayMode`, `Follow`, `RightPress`, `PathPreview`, `SentPath` | reset |
+| `HeightGrid` (water id from the block registry) | with |
+| `CursorPolicy`: the world's fields (`sim_grab`, `ui_modal`, `orbit`, `ui_pointer`); `overlay_open` (dev panel) kept | with (`cursor::reset_session_grab`) |
+| far voxel: fresh `FarVoxelResidency` (same limits, batch ids keep counting), `FarBrickRevisions`, `FarDeferredRemovals`; `FarUploadChannel::request_reset` drops queued batches/results and the render world empties `GpuFarBuffers` wholesale | with (`far_voxel::lifecycle::reset_far_voxel`) |
+| `GameUi` and `HudUi` Slint components (menu/map open, map image/zoom/pan, selected and home tile, adventure, following, active tool, level text, wheel, band, minimap, …) | with: `SlintLayerPlugin::session_scoped()` rebuilds the component (`rebuild_slint_layer`), so every property is a fresh one |
+| `WorldMapMsg`, `TileMirrorMsg`, `ToggleModeRequest` | clear |
+| Locals: join timeline, overlay built, minimap built, designate preview/ghosts/right-travel, follow last, selection press, level was-cut/held, move-order pending, orbit anchor, LOD hold, `GridCache`, mesh rank cache, awaiting-ground epoch, the three motion probes, `forward_input` last window size, wheel phase / wheel captions / `MapShown`, Slint pointer state | SessionLocal |
+| `Embarked` | reset (Task 7) |
+
+Kept on purpose (preferences, startup assets, process state): `XraySettings`, `CullingConfig`,
+`BoundaryOverlay`, `GridDebug`/`TerrainDebug`, `TerrainRenderConfig`, `MeshBudgets`/`MeshBudgetPolicy`,
+`MouseCoalesceWindow`, `DebugFlagsRes`, `DevUiOpen` and the dev panel, block textures/materials,
+skybox cubemaps, `AvatarAssets`, `GlobalAmbientLight` and the commander's `surface_ambient` Local
+(the startup brightness; the first underground check of the next session restores the surface
+lighting), the commander camera entity (re-placed from the reset `CommanderCamera`), the slice plane
+entity (hidden until a home region exists), render-world `GpuQuadArena` (frees by entity removal)
+and `xray::InteriorChunks` (self-pruning), the autopilot and render-benchmark state (bypass-only
+one-shot runs).
+
+Cameras: while the frontend has the screen, `bridge::enforce_single_active_camera` (body cameras)
+and `commander::yield_commander_camera` (ungated) leave every world camera inactive and without
+`UiCamera`; `slint_composite` composites onto exactly one `UiCamera` view (the highest camera order,
+`pick_ui_view`). The dev panel (`DevPanelUi`) is `hidden_by_frontend`.
+
+Ordering contract for Task 9: swap the session channels (`ClientUpdates`, `GameEvents`,
+`ClientRequests`) BEFORE `end_session`, or the next frame's drain re-spawns the old world from the
+old receiver.
+
 ### Dev bypass
 
 If `VOXEL_WORLD_FILE` is set, or `RENDER_BENCH` / `VOXEL_AUTOPILOT` is set, or a new

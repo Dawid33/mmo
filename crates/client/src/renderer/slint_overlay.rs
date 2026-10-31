@@ -57,7 +57,7 @@ use super::hud::{crosshair_visible, HudStatus};
 use super::world_map::WorldMapState;
 use super::ClientRequests;
 use crate::instance::ClientRequest;
-use crate::session::{frontend_owns, AppState, Embarked};
+use crate::session::{frontend_owns, world_systems_enabled, AppState, Embarked, SessionResetExt};
 
 /// Shows and hides the panel.
 pub const SLINT_PANEL_KEY: KeyCode = KeyCode::F9;
@@ -188,12 +188,13 @@ pub struct SlintLayerPlugin<C> {
     passthrough: bool,
     follows_ui_scale: bool,
     hidden_by_frontend: bool,
+    session_scoped: bool,
 }
 
 impl<C> SlintLayerPlugin<C> {
     /// `make` is the component's generated `new` (e.g. `GameUi::new`).
     pub fn new(make: fn() -> Result<C, slint_ui::slint::PlatformError>) -> Self {
-        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false, follows_ui_scale: true, hidden_by_frontend: false }
+        Self { make, init: |_, _| {}, order: GAME_LAYER_ORDER, passthrough: false, follows_ui_scale: true, hidden_by_frontend: false, session_scoped: false }
     }
 
     /// Draw order among the layers (higher on top); [`GAME_LAYER_ORDER`] by default.
@@ -223,6 +224,14 @@ impl<C> SlintLayerPlugin<C> {
         self
     }
 
+    /// The component shows the world session: `end_session` replaces it
+    /// with a fresh one (every property back at its default, `init` run
+    /// again), so nothing it held of one world shows in the next.
+    pub fn session_scoped(mut self) -> Self {
+        self.session_scoped = true;
+        self
+    }
+
     pub fn with_init(mut self, init: fn(&C, &mut World)) -> Self {
         self.init = init;
         self
@@ -245,12 +254,40 @@ impl<C: ComponentHandle + 'static> Plugin for SlintLayerPlugin<C> {
             })
             .add_systems(PreUpdate, slint_input::<C>.after(bevy::input::InputSystems))
             .add_systems(PostUpdate, render_slint_layer::<C>);
+        if self.session_scoped {
+            app.add_session_reset_with(rebuild_slint_layer::<C>);
+        }
+    }
+}
+
+/// Session reset of a [`SlintLayerPlugin::session_scoped`] layer: a fresh
+/// component in place of the old one, so every per-world property (menu and
+/// map open, the map, selection, tool, level, wheel, band, minimap…) is back
+/// at its default without listing them. The layer's texture and order stay.
+fn rebuild_slint_layer<C: ComponentHandle + 'static>(world: &mut World) {
+    let Some((make, init)) = world.get_non_send::<SlintLayer<C>>().map(|l| (l.make, l.init)) else { return };
+    let overlay = match Overlay::with(make) {
+        Ok(overlay) => overlay,
+        Err(e) => {
+            error!("[slint] could not rebuild {}: {e}", std::any::type_name::<C>());
+            return;
+        }
+    };
+    init(overlay.ui(), world);
+    if let Some(mut layer) = world.get_non_send_mut::<SlintLayer<C>>() {
+        layer.overlay = overlay;
+        layer.owns_pointer = false;
+        // Whatever the old component drew goes on the next upload.
+        layer.blanked = true;
     }
 }
 
 /// One component's layer, `!Send` (a non-send resource on the main thread).
 pub struct SlintLayer<C: 'static> {
     pub overlay: Overlay<C>,
+    /// How the component was made, to make it again ([`rebuild_slint_layer`]).
+    make: fn() -> Result<C, slint_ui::slint::PlatformError>,
+    init: fn(&C, &mut World),
     ui_scale: f32,
     /// The texture the overlay is drawn into.
     target: Handle<Image>,
@@ -306,8 +343,10 @@ pub struct SlintOverlayPlugin;
 
 impl Plugin for SlintOverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(SlintLayerPlugin::new(GameUi::new).hidden_by_frontend().with_init(connect_game_ui))
-            .init_resource::<PlayPending>()
+        app.add_plugins(
+            SlintLayerPlugin::new(GameUi::new).hidden_by_frontend().session_scoped().with_init(connect_game_ui),
+        )
+            .add_session_reset::<PlayPending>()
             .add_systems(
                 Update,
                 (
@@ -323,7 +362,8 @@ impl Plugin for SlintOverlayPlugin {
                     tool_wheel.before(minimap::minimap_pointer),
                     push_ui_state,
                 )
-                    .chain(),
+                    .chain()
+                    .run_if(world_systems_enabled()),
             );
     }
 }
@@ -366,11 +406,12 @@ impl Plugin for HudLayerPlugin {
             SlintLayerPlugin::new(HudUi::new)
                 .order(HUD_LAYER_ORDER)
                 .hidden_by_frontend()
+                .session_scoped()
                 .passthrough()
                 .window_scale_only()
                 .with_init(check_hud_config),
         )
-        .add_systems(Update, push_hud_state);
+        .add_systems(Update, push_hud_state.run_if(world_systems_enabled()));
     }
 }
 
@@ -495,6 +536,8 @@ fn setup_slint_layer<C: ComponentHandle + 'static>(
     world.get_resource_or_init::<SlintLayerTextures>().0.push((order, target.clone()));
     world.insert_non_send(SlintLayer {
         overlay,
+        make,
+        init,
         ui_scale,
         target,
         owns_pointer: false,
@@ -553,12 +596,13 @@ fn slint_input<C: ComponentHandle + 'static>(
     mut wheel: MessageReader<MouseWheel>,
     mut keys: MessageReader<KeyboardInput>,
     mouse: Res<ButtonInput<MouseButton>>,
-    mut pointer: Local<PointerState>,
+    mut pointer: crate::session::SessionLocal<PointerState>,
     mut shared: ResMut<SlintPointer>,
     policy: Option<ResMut<CursorPolicy>>,
     state: Option<Res<State<AppState>>>,
     embarked: Option<Res<Embarked>>,
 ) {
+    let pointer = pointer.get();
     let Some(mut slint) = slint else { return };
     let Ok(window) = window.single() else { return };
     let scale = window.scale_factor() * slint.ui_scale;
@@ -949,8 +993,9 @@ fn tool_wheel(
     mut policy: Option<ResMut<CursorPolicy>>,
     mut world_map: ResMut<WorldMapState>,
     status: Res<HudStatus>,
-    mut phase: Local<WheelPhase>,
+    mut phase: crate::session::SessionLocal<WheelPhase>,
 ) {
+    let phase = phase.get();
     let Some(slint) = slint else { return };
     let ui = slint.overlay.ui();
     // Esc or the map closed it.
@@ -1029,7 +1074,7 @@ struct ToolbarParams<'w, 's> {
     window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     /// The cut the wheel's items were last captioned for; `None` before
     /// the first set.
-    wheel_cut: Local<'s, Option<bool>>,
+    wheel_cut: crate::session::SessionLocal<'w, 's, Option<bool>>,
 }
 
 /// The tool, priority, cut (the wheel's captions), level and drag readout
@@ -1051,13 +1096,13 @@ fn sync_toolbar(ui: &slint_ui::GameUi, ui_scale: f32, p: &mut ToolbarParams) {
     }
     // The cut is on by default; without a working level it shows as on.
     let cut = p.level.as_ref().is_none_or(|l| l.cut);
-    if *p.wheel_cut != Some(cut) {
+    if *p.wheel_cut.get() != Some(cut) {
         let items: Vec<slint_ui::RadialItem> = wheel_labels(cut)
             .into_iter()
             .map(|text| slint_ui::RadialItem { text: text.into(), enabled: true, ..Default::default() })
             .collect();
         ui.set_wheel_items(ModelRc::new(VecModel::from(items)));
-        *p.wheel_cut = Some(cut);
+        *p.wheel_cut.get() = Some(cut);
     }
     let Some(state) = p.designate.as_mut() else { return };
     let active = tool_index(state.tool);
@@ -1111,13 +1156,14 @@ struct MapParams<'w, 's> {
     time: Res<'w, Time>,
     pending: ResMut<'w, PlayPending>,
     cam: Option<Res<'w, CommanderCamera>>,
-    shown: Local<'s, MapShown>,
+    shown: crate::session::SessionLocal<'w, 's, MapShown>,
 }
 
 /// The map picture, home and selected tile, tile info, Play state and
 /// status line → the UI, each only when changed.
 fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
-    if p.world_map.is_changed() && p.shown.map.as_ref() != p.world_map.map.as_ref() {
+    let shown = p.shown.get();
+    if p.world_map.is_changed() && shown.map.as_ref() != p.world_map.map.as_ref() {
         match &p.world_map.map {
             Some(map) => {
                 let (width, height, pixels) = rasterize(map);
@@ -1129,8 +1175,8 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
             None => ui.set_map_image(SlintImage::default()),
         }
         ui.set_map_available(p.world_map.map.is_some());
-        p.shown.map = p.world_map.map.clone();
-        p.shown.generation += 1;
+        shown.map = p.world_map.map.clone();
+        shown.generation += 1;
     }
     let map = p.world_map.map.as_ref();
 
@@ -1153,9 +1199,9 @@ fn sync_world_map(ui: &GameUi, home: Option<RegionCoords>, p: &mut MapParams) {
 
     let (col, row) = (ui.get_selected_col(), ui.get_selected_row());
     let pending = p.pending.0.is_some();
-    let info_for = Some((p.shown.generation, col, row, home, pending));
-    if p.shown.info_for != info_for {
-        p.shown.info_for = info_for;
+    let info_for = Some((shown.generation, col, row, home, pending));
+    if shown.info_for != info_for {
+        shown.info_for = info_for;
         let picked = map.and_then(|map| Some((map, tile_region(map, col, row)?)));
         let lines: Vec<SharedString> = picked
             .map_or_else(Vec::new, |(map, rc)| tile_info_lines(map, rc))

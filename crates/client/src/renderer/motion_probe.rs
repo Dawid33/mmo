@@ -71,13 +71,13 @@ pub struct ProbeState {
 pub fn probe_camera_motion(
     time: Res<Time>,
     cameras: Query<(&Transform, &SimTarget), With<Camera3d>>,
-    mut state: Local<ProbeState>,
+    mut state: crate::session::SessionLocal<ProbeState>,
 ) {
     let Some((tf, target)) = cameras.iter().next() else {
         return;
     };
     let now = Instant::now();
-    let s = &mut *state;
+    let s = state.get();
     let start = *s.window_start.get_or_insert(now);
 
     let cell = (target.goal() / CHUNK).floor().as_ivec3();
@@ -179,13 +179,13 @@ type LodRenderChanged = Or<(
 pub fn probe_still_frames(
     cameras: Query<&GlobalTransform, (With<Camera3d>, With<SimTarget>)>,
     lod_changed: Query<(), (With<super::meshing::lod::LodChunk>, LodRenderChanged)>,
-    mut state: Local<StillProbe>,
+    mut state: crate::session::SessionLocal<StillProbe>,
 ) {
     let Some(cam) = cameras.iter().next() else {
         return;
     };
     let now = Instant::now();
-    let s = &mut *state;
+    let s = state.get();
     let start = *s.window_start.get_or_insert(now);
     let (_, rot, pos) = cam.to_scale_rotation_translation();
     s.frames += 1;
@@ -258,13 +258,13 @@ pub fn probe_region_crossing(
     time: Res<Time<Real>>,
     hud: Res<super::hud::HudStatus>,
     cameras: Query<(&Camera, &SimTarget), With<Camera3d>>,
-    mut state: Local<RegionCrossingProbe>,
+    mut state: crate::session::SessionLocal<RegionCrossingProbe>,
 ) {
     let Some(target) = cameras.iter().find(|(c, _)| c.is_active).map(|(_, t)| t) else {
         return;
     };
     let now = Instant::now();
-    let s = &mut *state;
+    let s = state.get();
     let goal = target.goal();
 
     if let (Some(home), Some(prev)) = (hud.home_region, s.home) {
