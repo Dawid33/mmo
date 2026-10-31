@@ -105,6 +105,7 @@ impl Plugin for SimBridgePlugin {
         .insert_resource(GameEvents(self.game_send.clone()))
         .insert_resource(ClientRequests(self.requests.clone()))
         .init_resource::<world_map::WorldMapState>()
+        .init_resource::<world_map::PendingPlay>()
         .add_message::<world_map::WorldMapMsg>()
         .init_resource::<LocalPlayer>()
         .init_resource::<bridge::Regions>()

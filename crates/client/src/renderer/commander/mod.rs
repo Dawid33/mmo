@@ -27,6 +27,7 @@
 //! hides it and gives it no camera ([`CameraMode::Commander`]).
 
 pub mod adventure;
+pub mod bounds;
 pub mod cut_entities;
 pub mod designate;
 pub mod follow;
@@ -388,7 +389,7 @@ impl Plugin for CommanderPlugin {
                     level::init_level,
                     level::step_level_input,
                     pan_and_zoom,
-                    (follow_terrain, follow::follow_camera).chain(),
+                    (follow_terrain, follow::follow_camera, bounds::clamp_to_window).chain(),
                     apply_camera_transform,
                     draw_orbit_pivot,
                     (
@@ -453,16 +454,29 @@ fn spawn_commander_camera(mut commands: Commands, cam: Res<CommanderCamera>) {
 
 /// The home region bounds the focus. When it changes (the body travelled),
 /// the focus is pulled into the new region.
-fn track_home_region(status: Res<super::hud::HudStatus>, mut cam: ResMut<CommanderCamera>) {
+fn track_home_region(
+    status: Res<super::hud::HudStatus>,
+    mut pending_play: ResMut<crate::renderer::world_map::PendingPlay>,
+    mut cam: ResMut<CommanderCamera>,
+) {
     let bounds = status.home_region.map(region_rect);
     if cam.bounds != bounds {
-        // A Play (or any later home change) re-places the camera over the new
-        // region's body; the very first home keeps the normal first placement.
-        if cam.bounds.is_some() && bounds.is_some() {
-            cam.placed = false;
+        let change = cam.bounds.is_some() && bounds.is_some();
+        // Only a Play re-places the camera over the new region's body; a
+        // walking home change (a seam crossing) keeps the focus where it is
+        // (Adventure's `bounds::clamp_to_window` confines it). The very first
+        // home keeps the normal first placement.
+        let walked = change && !pending_play.0;
+        if change {
+            if pending_play.0 {
+                cam.placed = false;
+            }
+            pending_play.0 = false;
         }
         cam.bounds = bounds;
-        cam.focus = home_change_focus(cam.focus, bounds, cam.placed);
+        if !walked {
+            cam.focus = home_change_focus(cam.focus, bounds, cam.placed);
+        }
     }
 }
 

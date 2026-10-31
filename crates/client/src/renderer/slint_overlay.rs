@@ -746,6 +746,7 @@ fn apply_ui_actions(
     mut selection: Option<ResMut<Selection>>,
     mut world_map: ResMut<WorldMapState>,
     mut pending: ResMut<PlayPending>,
+    mut pending_play: ResMut<super::world_map::PendingPlay>,
     mut policy: Option<ResMut<CursorPolicy>>,
     requests: Option<Res<ClientRequests>>,
     status: Res<HudStatus>,
@@ -799,6 +800,7 @@ fn apply_ui_actions(
                     continue;
                 }
                 pending.0 = Some(rc);
+                pending_play.0 = true;
                 world_map.refused = None;
                 to.map = false;
             }
