@@ -59,6 +59,15 @@ impl Rollback {
     /// spawn column when there is none; with no `at` the body stays where it
     /// is. Fortress leaves the body where it stands.
     pub fn set_play_mode_safe(&mut self, client: ClientId, mode: PlayMode, at: Option<TilePos>) -> bool {
+        // `at` comes off the wire: a tile outside the region is refused
+        // before anything changes; its level is clamped to the scan range.
+        let at = match at {
+            Some(t) => match clamp_tile(t) {
+                Some(t) => Some(t),
+                None => return false,
+            },
+            None => None,
+        };
         let Some(old) = self.data.clients.get(&client).map(|c| c.mode) else { return false };
         if old == mode {
             return true;
@@ -120,6 +129,7 @@ impl Rollback {
         if self.data.clients.get(&client).map(|c| c.mode) != Some(PlayMode::Adventure) {
             return false;
         }
+        let Some(goal) = clamp_goal(goal) else { return false };
         let Some(key) = self.data.player_entites.get(&client).copied() else { return false };
         let Some(feet) = self.body_feet(key) else { return false };
         let Some(from) = current_tile(self, feet) else { return false };
@@ -297,10 +307,25 @@ fn reached(p: TilePos, feet: Vector) -> bool {
     dx * dx + dz * dz <= r * r && (feet.y / bv - p[1] as f32).abs() < 0.5
 }
 
+/// `t` with its level clamped to the pathfinder's scan range; `None` when its
+/// column lies outside the region (untrusted input).
+fn clamp_tile(t: TilePos) -> Option<TilePos> {
+    let n = REGION_BLOCKS as i32;
+    ((0..n).contains(&t[0]) && (0..n).contains(&t[2]))
+        .then(|| [t[0], t[1].clamp(crate::COLUMN_SCAN_Y_MIN, crate::COLUMN_SCAN_Y_MAX), t[2]])
+}
+
+/// `goal` with its level clamped to the scan range; `None` when its column
+/// lies outside the region (untrusted input).
+fn clamp_goal(goal: Goal) -> Option<Goal> {
+    let t = clamp_tile([goal.column[0], goal.y.unwrap_or(0), goal.column[1]])?;
+    Some(Goal { y: goal.y.map(|_| t[1]), ..goal })
+}
+
 /// `goal.region - here`, when within [`MAX_GOAL_REGION_STEP`].
 fn region_step(goal: &Goal, here: RegionCoords) -> Option<[i32; 2]> {
-    let d = [goal.region.x - here.x, goal.region.z - here.z];
-    (d[0].abs().max(d[1].abs()) <= MAX_GOAL_REGION_STEP).then_some(d)
+    let d = [goal.region.x.saturating_sub(here.x), goal.region.z.saturating_sub(here.z)];
+    (d[0].unsigned_abs().max(d[1].unsigned_abs()) <= MAX_GOAL_REGION_STEP as u32).then_some(d)
 }
 
 /// The path (and exit step) from `from` toward `goal`, as `move_to_safe`

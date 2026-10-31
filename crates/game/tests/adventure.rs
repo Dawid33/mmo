@@ -241,6 +241,37 @@ fn move_to_refuses_goal_two_regions_away() {
 }
 
 #[test]
+fn extreme_untrusted_coordinates_are_refused_without_panic() {
+    let (mut region, e) = adventure_at([4, 1, 4]);
+    let before = state_hash(region.data());
+    for v in [i32::MAX, i32::MIN, -1, REGION_BLOCKS as i32] {
+        for goal in [
+            here_goal([v, 5], None),
+            here_goal([5, v], Some(1)),
+            Goal { region: RegionCoords::new(i32::MIN, i32::MAX), column: [5, 5], y: None },
+        ] {
+            let mut accepted = true;
+            region.with_data(|d| accepted = d.move_to_safe(CLIENT, goal, RegionCoords::new(0, 0)));
+            assert!(!accepted, "{goal:?}");
+        }
+        let order = Order::SetMode { mode: PlayMode::Adventure, at: Some([v, 1, 5]) };
+        let mut ok = true;
+        region.with_data(|d| ok = d.apply_order_safe(CLIENT, order));
+        assert!(!ok);
+        let order = Order::SetMode { mode: PlayMode::Fortress, at: Some([5, 1, v]) };
+        region.with_data(|d| ok = d.apply_order_safe(CLIENT, order));
+        assert!(!ok);
+    }
+    assert_eq!(before, state_hash(region.data()), "refused orders must change no state");
+    assert!(walker(&region, e).is_none());
+    // An in-region column with an extreme level is clamped, not a panic.
+    region.with_data(|d| {
+        d.move_to_safe(CLIENT, here_goal([6, 6], Some(i32::MAX)), RegionCoords::new(0, 0));
+        d.move_to_safe(CLIENT, here_goal([6, 6], Some(i32::MIN)), RegionCoords::new(0, 0));
+    });
+}
+
+#[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn move_to_climbs_step() {
     let (mut region, e) = adventure_at([4, 1, 10]);

@@ -157,6 +157,7 @@ pub fn nearest_standable(src: &impl TileSource, column: [i32; 2], y_hint: Option
     match y_hint {
         None => (COLUMN_SCAN_Y_MIN..=COLUMN_SCAN_Y_MAX).rev().map(at).find(|&p| standable(src, p)),
         Some(hint) => {
+            let hint = hint.clamp(COLUMN_SCAN_Y_MIN, COLUMN_SCAN_Y_MAX);
             let span = (hint - COLUMN_SCAN_Y_MIN).max(COLUMN_SCAN_Y_MAX - hint).max(0);
             (0..=span).find_map(|d| {
                 [hint - d, hint + d]
