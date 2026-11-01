@@ -23,13 +23,21 @@ impl History {
         }
         p.died = Some((now, cause));
         let spouse = p.spouse;
-        let site = p.site;
+        let on_journey = match p.location {
+            Location::Journey(j) => Some(j),
+            _ => None,
+        };
+        // A traveller is not a member of any site; the site has nothing to abandon.
+        let site = if on_journey.is_some() { None } else { p.site };
         if let Some(sp) = spouse.and_then(|s| self.people.get_mut(&s)) {
             if sp.spouse == Some(person) {
                 sp.spouse = None;
             }
         }
         self.log_event(LogKind::Died { person, cause });
+        if let Some(j) = on_journey {
+            self.remove_traveller(j, person);
+        }
         if let Some(sid) = site {
             let empty = match self.sites.get_mut(&sid) {
                 Some(s) => {

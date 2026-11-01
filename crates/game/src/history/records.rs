@@ -131,7 +131,10 @@ pub struct Journey {
     pub purpose: Purpose,
     pub route: Vec<crate::RegionCoords>,
     pub departed: CalendarTick,
+    /// Base ticks to cross one region at cost 1000 (`walk_ticks_per_region`).
     pub leg_ticks: u64,
+    /// `arrivals[i]`: ticks after `departed` at which the party reaches `route[i + 1]`.
+    pub arrivals: Vec<u64>,
     /// Index into `route` of the current region.
     pub leg: u32,
 }

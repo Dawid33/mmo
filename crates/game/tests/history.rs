@@ -261,3 +261,99 @@ fn unplaced_founder_until_found_site() {
     let site = h.found_site(civ, RegionCoords::new(1, 1), &[p], None, false);
     assert_eq!(h.person(p).unwrap().location, Location::AtSite(site));
 }
+
+// ---- Task 4: journeys ----
+
+fn leg() -> u64 {
+    walk_ticks_per_region()
+}
+
+fn two_site_world(sea: impl Fn(i32, i32) -> bool) -> (History, Vec<PersonId>, Vec<PersonId>) {
+    let s = start();
+    let mut h = History::new(5, s, SocietyGrid::from_world_map(&test_map(8, 3, sea)));
+    let civ = h.add_civ(Race::Dwarf);
+    let a: Vec<_> = (0..3).map(|_| h.add_founder(Sex::Female, years_before(s, 20))).collect();
+    let b: Vec<_> = (0..2).map(|_| h.add_founder(Sex::Male, years_before(s, 20))).collect();
+    h.found_site(civ, RegionCoords::new(0, 0), &a, None, false);
+    h.found_site(civ, RegionCoords::new(6, 0), &b, None, false);
+    (h, a, b)
+}
+
+#[test]
+fn migrants_arrive_after_travel_time() {
+    let (mut h, a, _) = two_site_world(|_, _| false);
+    let departed = h.now();
+    let party = vec![a[0], a[1]];
+    let j = h
+        .start_journey(party.clone(), SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) })
+        .unwrap();
+    assert!(!h.site(SiteId(0)).unwrap().members.contains(&a[0]));
+    assert_eq!(h.person(a[0]).unwrap().location, Location::Journey(j));
+    let route = h.journey(j).unwrap().route.clone();
+    assert_eq!(h.journey_region_at(j, departed), Some(route[0]));
+    assert_eq!(h.journey_region_at(j, CalendarTick(departed.0 + 3 * leg())), Some(route[3]));
+    assert_eq!(h.journey_progress_in_leg(j, CalendarTick(departed.0 + 3 * leg() + leg() / 2)), 500);
+    h.advance(CalendarTick(departed.0 + 7 * leg()));
+    for p in party {
+        assert!(h.site(SiteId(1)).unwrap().members.contains(&p));
+        assert_eq!(h.person(p).unwrap().site, Some(SiteId(1)));
+        assert_eq!(h.person(p).unwrap().location, Location::AtSite(SiteId(1)));
+    }
+    assert!(h.journey(j).is_none());
+    let dep = h.log().iter().position(|e| matches!(e.kind, LogKind::Departed { .. })).unwrap();
+    let arr = h.log().iter().position(|e| matches!(e.kind, LogKind::Arrived { .. })).unwrap();
+    assert!(dep < arr);
+}
+
+#[test]
+fn journey_without_route_is_refused() {
+    let (mut h, a, _) = two_site_world(|x, _| x == 3);
+    let before = bincode::serialize(&h).unwrap();
+    let r = h.start_journey(vec![a[0]], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) });
+    assert!(r.is_none());
+    assert_eq!(bincode::serialize(&h).unwrap(), before);
+    assert!(h.site(SiteId(0)).unwrap().members.contains(&a[0]));
+}
+
+#[test]
+fn death_on_journey() {
+    let s = start();
+    let (mut h, a, _) = two_site_world(|_, _| false);
+    let old = h.add_founder(Sex::Male, years_before(s, 170));
+    let departed = h.now();
+    let j = h
+        .start_journey(vec![old, a[0]], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) })
+        .unwrap();
+    h.advance(CalendarTick(departed.0 + 1));
+    assert!(!h.person(old).unwrap().alive());
+    assert_eq!(h.journey(j).unwrap().people, vec![a[0]]);
+    h.advance(CalendarTick(departed.0 + 7 * leg()));
+    assert!(h.site(SiteId(1)).unwrap().members.contains(&a[0]));
+    assert!(!h.site(SiteId(1)).unwrap().members.contains(&old));
+    assert!(h.journey(j).is_none());
+}
+
+#[test]
+fn emptied_journey_is_removed_and_leg_is_noop() {
+    let s = start();
+    let (mut h, _, _) = two_site_world(|_, _| false);
+    let old = h.add_founder(Sex::Male, years_before(s, 170));
+    let departed = h.now();
+    let j = h
+        .start_journey(vec![old], SiteId(0), RegionCoords::new(6, 0), Purpose::Migrate { to: SiteId(1) })
+        .unwrap();
+    h.advance(CalendarTick(departed.0 + 10 * leg()));
+    assert!(h.journey(j).is_none());
+    assert!(h.pending_journey_legs() == 0);
+}
+
+#[test]
+fn same_region_journey_arrives_next_step() {
+    let (mut h, a, _) = two_site_world(|_, _| false);
+    let j = h
+        .start_journey(vec![a[0]], SiteId(0), RegionCoords::new(0, 0), Purpose::Migrate { to: SiteId(0) })
+        .unwrap();
+    h.advance(h.now());
+    assert!(h.journey(j).is_none());
+    assert!(h.site(SiteId(0)).unwrap().members.contains(&a[0]));
+}

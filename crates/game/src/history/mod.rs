@@ -1,6 +1,7 @@
 //! Deterministic, threadless world history: people, sites, civs and journeys on one calendar.
 
 mod chain;
+mod journey;
 pub mod calendar;
 pub mod grid;
 pub mod log;
@@ -154,7 +155,7 @@ impl History {
             match step {
                 Step::SiteMonth(s) => self.on_site_month(s),
                 Step::Death(p) => self.on_death(p),
-                Step::JourneyLeg(_) => {}
+                Step::JourneyLeg(j) => self.on_journey_leg(j),
             }
         }
         self.now = self.now.max(to);
