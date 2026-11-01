@@ -52,8 +52,11 @@ fn check_terrain(terrain: &Path) -> Result<(), String> {
     }
     match crate::forged::read_artifact_version(terrain) {
         Ok(v) if v == crate::forged::ARTIFACT_VERSION => Ok(()),
+        Ok(v) if v < crate::forged::ARTIFACT_VERSION => {
+            Err(format!("needs re-forge: {}", crate::forged::ArtifactError::OldVersion { found: v }))
+        }
         Ok(v) => Err(format!(
-            "world file version {v}, this build reads {} — re-forge it",
+            "world file version {v} is newer than the {} this build reads",
             crate::forged::ARTIFACT_VERSION
         )),
         Err(e) => Err(e.to_string()),
@@ -140,6 +143,7 @@ pub fn slug_for(root: &Path, name: &str) -> String {
 }
 
 /// Writes the world into `root/.<slug>.tmp/`, then renames it to `root/<slug>/`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn create(root: &Path, meta: &WorldMeta, artifact: &WorldArtifact, preview_png: &[u8]) -> io::Result<PathBuf> {
     let tmp = root.join(format!(".{}.tmp", meta.slug));
     let fin = root.join(&meta.slug);
@@ -185,7 +189,7 @@ pub fn knobs_map(knobs: &Knobs) -> BTreeMap<String, f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forged::ARTIFACT_VERSION;
+    use crate::forged::{QRaster, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, RAIN_STEP};
 
     fn scratch(name: &str) -> PathBuf {
         let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/world-store-tests").join(name);
@@ -201,12 +205,10 @@ mod tests {
             size_m: 128.0,
             cell_m: 64.0,
             n: 2,
-            height: vec![0.0; 4],
-            lake_level: vec![f32::NAN; 4],
-            uplifted: vec![0.0; 4],
-            bedding: vec![0.0; 4],
-            rain: vec![1.0; 4],
-            coast_dist_m: vec![0.0; 4],
+            height: QRaster::fit(&[0.0; 4], HEIGHT_STEP_M),
+            uplifted: QRaster::fit(&[0.0; 4], GEO_STEP_M),
+            bedding: QRaster::fit(&[0.0; 4], GEO_STEP_M),
+            rain: QRaster::fit(&[1.0; 4], RAIN_STEP),
             column: vec![(0.0, 0)],
             rock_names: vec!["granite".into()],
             rivers: vec![],
@@ -295,7 +297,8 @@ mod tests {
         m.artifact_version = a.version;
         create(&root, &m, &a, b"png").unwrap();
         let e = list(&root).remove(0).loadable.unwrap_err();
-        assert!(e.contains(&format!("world file version {}, this build reads {ARTIFACT_VERSION}", a.version)), "{e}");
+        assert!(e.starts_with("needs re-forge"), "{e}");
+        assert!(e.contains(&format!("world file version {} is older than {ARTIFACT_VERSION}", a.version)), "{e}");
     }
 
     #[test]

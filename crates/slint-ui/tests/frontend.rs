@@ -245,7 +245,7 @@ fn world_row(name: &str, loadable: bool, legacy: bool) -> WorldRow {
         detail: "seed 0x2F1A, 16 km, 2026-10-30".into(),
         thumb: Default::default(),
         loadable,
-        reason: if loadable { "".into() } else { "world file version 1, this build reads 2 — re-forge it".into() },
+        reason: if loadable { "".into() } else { "needs re-forge: world file version 2 is older than 3: re-forge this world".into() },
         legacy,
     }
 }

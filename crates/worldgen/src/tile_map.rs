@@ -109,7 +109,7 @@ pub fn summarize_tile(world: &ForgedWorld, rc: RegionCoords) -> TileSummary {
     let (xs, zs) = (range(tile_min[0], min[0]), range(tile_min[1], min[1]));
     let inside = |ix: i64, iz: i64| (0..n).contains(&ix) && (0..n).contains(&iz);
     let height = |ix: i64, iz: i64| {
-        if inside(ix, iz) { f64::from(a.height[(iz * n + ix) as usize]) } else { OUTSIDE_HEIGHT_M }
+        if inside(ix, iz) { f64::from(a.height.get((iz * n + ix) as usize)) } else { OUTSIDE_HEIGHT_M }
     };
     let cells: Vec<Cell> = zs
         .flat_map(|iz| xs.clone().map(move |ix| (ix, iz)))
@@ -139,8 +139,7 @@ pub fn summarize_tile(world: &ForgedWorld, rc: RegionCoords) -> TileSummary {
     let lake_levels: Vec<f32> = cells
         .iter()
         .filter(|c| c.inside)
-        .map(|c| a.lake_level[(c.iz * n + c.ix) as usize])
-        .filter(|l| !l.is_nan())
+        .filter_map(|c| world.lake_level_of((c.iz * n + c.ix) as usize))
         .collect();
 
     // Rivers: reaches with a point inside the footprint (artifact metres).

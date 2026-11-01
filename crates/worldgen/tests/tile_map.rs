@@ -280,7 +280,7 @@ fn play_blocker_rules() {
 }
 
 /// The shipped default world summarises into a non-empty map with landings.
-/// Skipped when `worlds/default.world` has not been forged yet.
+/// Skipped when `worlds/default.world` has not been forged yet (or is an older format).
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn default_world_map_builds() {
@@ -289,7 +289,13 @@ fn default_world_map_builds() {
         println!("{} missing: skipping", path.display());
         return;
     }
-    let world = ForgedWorld::load(&path).expect("load default world");
+    let world = match ForgedWorld::load(&path) {
+        Err(e @ worldgen::forged::ArtifactError::OldVersion { .. }) => {
+            println!("{}: {e}; skipping", path.display());
+            return;
+        }
+        loaded => loaded.expect("load default world"),
+    };
     let started = std::time::Instant::now();
     let map = build_world_map(&world);
     println!("{}x{} tiles in {} ms", map.width, map.height, started.elapsed().as_millis());

@@ -19,6 +19,8 @@ lz4_flex = { workspace = true }
 # The world forge's erosion step runs on all cores natively; serial on wasm.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1"
+# World files: zstd over the quantised, row-delta rasters (native only; wasm never reads one).
+zstd = "0.13"
 
 [dev-dependencies]
 crossbeam = { workspace = true }

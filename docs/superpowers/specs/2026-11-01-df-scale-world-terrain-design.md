@@ -270,9 +270,21 @@ New format:
 - **Compression**: row-delta the smooth rasters, then **zstd** instead of lz4. zstd is a new
   dependency, `worldgen` only; approved by the user.
 - **New tables**: regions (id, type, area, good/evil), volcano sites.
-- **Estimate** (not measured): ~3–4 B/cell on disk → a 100 km / 16 m world ≈ 120–160 MB;
-  in-memory ~10 B/cell ≈ 400 MB. Builder: measure on the 16 km world first and record it.
-- Header/version as today; an old version is refused with a re-forge message.
+- **Built (v3, Task 6)**: height / uplifted / bedding / rain are `QRaster`s (`u16`, `min + k * step`;
+  min = floor of the data minimum, step 0.0625 m, widened to `span / 65535` when the span exceeds
+  4095.9 m; rain step 0.001), lakes are bodies with run-length `(start, len)` cell runs (sparse,
+  no NaN raster), coast distance is recomputed on load, and the body is zstd level 19 over
+  bincode with every raster row-delta encoded. zstd is native-only; file read/write is
+  `#[cfg(not(target_arch = "wasm32"))]`.
+- **Measured** (16 km / 16 m = 1000 x 1000 cells, `just forge-proto --cell 16`, seed default):
+  file 1,131,754 B = **1.13 B/cell** on disk (target was <= 4), so a 100 km / 16 m world
+  (39 M cells) is ~44 MB. `ForgedWorld::load` of it takes 31 ms; process RSS delta around the
+  load (a temporary example reading `/proc/self/status` VmRSS before/after, release build;
+  includes the transient decompressed body) is 18.7 MB = **~19 B/cell**, i.e. ~0.75 GB at
+  100 km / 16 m. Steady state is lower (8 B of `u16` rasters + 4 B decoded height + 4 B coast
+  distance = 16 B/cell, ~0.62 GB at 100 km); `uplifted`/`bedding`/`rain` could be dropped to
+  one copy later if memory presses.
+- Header/version as today; an older version is refused (`ArtifactError::OldVersion`) with a re-forge message, which the main menu's world list shows as "needs re-forge: ...".
 
 ### 7. Engine changes for kilometre-plus terrain (from the 2026-11-01 code audit)
 Hard limits:

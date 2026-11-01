@@ -4,7 +4,7 @@
 #![allow(dead_code)] // each test binary uses its own subset
 
 use game::BlockId;
-use worldgen::forged::{Lake, RiverPoint, RiverReach, WorldArtifact, ARTIFACT_VERSION};
+use worldgen::forged::{GEO_STEP_M, HEIGHT_STEP_M, Lake, QRaster, RAIN_STEP, RiverPoint, RiverReach, WorldArtifact, ARTIFACT_VERSION};
 
 pub const N: usize = 64;
 pub const CELL_M: f64 = 16.0;
@@ -41,7 +41,7 @@ pub fn mats() -> worldgen::material::Materials {
 
 pub fn synthetic() -> WorldArtifact {
     let mut height = vec![0f32; N * N];
-    let mut lake_level = vec![f32::NAN; N * N];
+    let mut lake_cells = Vec::new();
     for iz in 0..N {
         for ix in 0..N {
             let ax = (ix as f64 + 0.5) * CELL_M;
@@ -49,7 +49,7 @@ pub fn synthetic() -> WorldArtifact {
             height[i] = if ix < 4 { -5.0 } else { plain(ax) as f32 };
             if LAKE_CELLS.0.contains(&ix) && LAKE_CELLS.1.contains(&iz) {
                 height[i] -= 5.0; // the basin
-                lake_level[i] = LAKE_LEVEL;
+                lake_cells.push((i as u32, 1));
             }
         }
     }
@@ -68,16 +68,14 @@ pub fn synthetic() -> WorldArtifact {
         size_m: N as f64 * CELL_M,
         cell_m: CELL_M,
         n: N as u32,
-        height,
-        lake_level,
-        uplifted: vec![0.0; N * N],
-        bedding: vec![0.0; N * N],
-        rain: vec![1.0; N * N],
-        coast_dist_m: vec![0.0; N * N],
+        height: QRaster::fit(&height, HEIGHT_STEP_M),
+        uplifted: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
+        bedding: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
+        rain: QRaster::fit(&vec![1.0; N * N], RAIN_STEP),
         column: vec![(-5.0, SANDSTONE), (-25.0, SHALE)],
         rock_names: worldgen::forge::geology::ROCKS.iter().map(|r| r.name.to_string()).collect(),
         rivers: vec![RiverReach { order: 1, discharge_m2: 2.0e6, width_m: RIVER_WIDTH_M, points }],
-        lakes: vec![Lake { level: LAKE_LEVEL, area_m2: 36.0 * 256.0, max_depth: 5.0, outlet: [480.0, 200.0] }],
+        lakes: vec![Lake { level: LAKE_LEVEL, area_m2: 36.0 * 256.0, max_depth: 5.0, outlet: [480.0, 200.0], cells: lake_cells }],
         spawn: SPAWN,
     }
 }

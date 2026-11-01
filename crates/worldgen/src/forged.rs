@@ -30,7 +30,18 @@ use crate::pipeline::{ColumnProfile, ProfileGrid, SEA_LEVEL, SEA_TOP_BLOCK};
 
 /// Environment variable naming the world file to serve.
 pub const WORLD_FILE_ENV: &str = "VOXEL_WORLD_FILE";
-pub const ARTIFACT_VERSION: u32 = 2;
+/// v3: quantised `u16` rasters (`QRaster`), sparse lakes, row-delta + zstd,
+/// coast distance recomputed on load.
+pub const ARTIFACT_VERSION: u32 = 3;
+/// zstd level of the world file body (offline writer; reading cost is level-independent).
+#[cfg(not(target_arch = "wasm32"))]
+const ZSTD_LEVEL: i32 = 19;
+/// Height raster quantisation step (m): ~3 cm worst-case error, 16-bit span of 4095.9 m.
+pub const HEIGHT_STEP_M: f32 = 0.0625;
+/// Uplift / bedding raster step (m).
+pub const GEO_STEP_M: f32 = 0.0625;
+/// Rain raster step (relative to the land mean).
+pub const RAIN_STEP: f32 = 0.001;
 const MAGIC: &[u8; 4] = b"VXWF";
 
 /// Engine column the artifact's spawn point lands on: block (8, 8) of region
@@ -89,12 +100,115 @@ pub struct RiverReach {
     pub points: Vec<RiverPoint>,
 }
 
+/// One lake body: every cell in `cells` holds water at `level`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Lake {
     pub level: f32,
     pub area_m2: f32,
     pub max_depth: f32,
     pub outlet: [f32; 2],
+    /// Raster cells as row-major `(start_index, len)` runs, ascending.
+    pub cells: Vec<(u32, u32)>,
+}
+
+/// A raster stored as `u16` steps: value `i` is `min + data[i] * step`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct QRaster {
+    pub min: f32,
+    pub step: f32,
+    pub data: Vec<u16>,
+}
+
+impl QRaster {
+    /// Quantises `v` onto `min + k * step`; values clamp into the 16-bit range.
+    /// NaN is not allowed.
+    pub fn from_f32(v: &[f32], min: f32, step: f32) -> QRaster {
+        let inv = 1.0 / step as f64;
+        let data = v
+            .iter()
+            .map(|&x| {
+                debug_assert!(!x.is_nan(), "QRaster: NaN");
+                ((x as f64 - min as f64) * inv).round().clamp(0.0, u16::MAX as f64) as u16
+            })
+            .collect();
+        QRaster { min, step, data }
+    }
+
+    /// `(min, step)` covering all of `v`: `min` is the floor of the data
+    /// minimum and `step` is `preferred_step` unless the span would not fit
+    /// 16 bits, in which case it widens to `span / 65535`.
+    pub fn range_for(v: &[f32], preferred_step: f32) -> (f32, f32) {
+        let (lo, hi) = v.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+        if lo > hi {
+            return (0.0, preferred_step); // empty
+        }
+        let min = lo.floor();
+        let span = (hi - min) as f64;
+        let step = if span > u16::MAX as f64 * preferred_step as f64 { (span / u16::MAX as f64) as f32 } else { preferred_step };
+        (min, step)
+    }
+
+    /// [`QRaster::from_f32`] over [`QRaster::range_for`].
+    pub fn fit(v: &[f32], preferred_step: f32) -> QRaster {
+        let (min, step) = Self::range_for(v, preferred_step);
+        Self::from_f32(v, min, step)
+    }
+
+    pub fn get(&self, i: usize) -> f32 {
+        self.min + self.data[i] as f32 * self.step
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn to_f32(&self) -> Vec<f32> {
+        (0..self.data.len()).map(|i| self.get(i)).collect()
+    }
+}
+
+/// Raster cell reads shared by `f32` slices and quantised rasters.
+pub trait RasterRead {
+    fn value(&self, i: usize) -> f32;
+}
+impl RasterRead for [f32] {
+    fn value(&self, i: usize) -> f32 {
+        self[i]
+    }
+}
+impl RasterRead for Vec<f32> {
+    fn value(&self, i: usize) -> f32 {
+        self[i]
+    }
+}
+impl RasterRead for QRaster {
+    fn value(&self, i: usize) -> f32 {
+        self.get(i)
+    }
+}
+
+/// Row-delta encode: every value but the first of each `n`-wide row becomes
+/// its (wrapping) difference to the left neighbour. Smooth rasters turn into
+/// small numbers zstd squeezes well.
+pub fn delta_rows(data: &mut [u16], n: usize) {
+    for row in data.chunks_mut(n.max(1)) {
+        for i in (1..row.len()).rev() {
+            row[i] = row[i].wrapping_sub(row[i - 1]);
+        }
+    }
+}
+
+/// Inverse of [`delta_rows`].
+pub fn undelta_rows(data: &mut [u16], n: usize) {
+    for row in data.chunks_mut(n.max(1)) {
+        for i in 1..row.len() {
+            row[i] = row[i].wrapping_add(row[i - 1]);
+        }
+    }
 }
 
 /// The stored world. Rasters are `n * n`, row-major (z rows, x columns), one
@@ -107,25 +221,21 @@ pub struct WorldArtifact {
     pub cell_m: f64,
     pub n: u32,
     /// Ground (land > 0) and sea floor (< 0).
-    pub height: Vec<f32>,
-    /// Lake water surface per cell; NaN where there is no lake.
-    pub lake_level: Vec<f32>,
+    pub height: QRaster,
     /// Geology: rock at (x, y, z) is `column` looked up at
     /// `s = (y - uplifted) - bedding` (meters relative to sea level); regions
     /// carry it in their ground recipes (`geo_offset_blocks`, `strata_blocks`).
-    pub uplifted: Vec<f32>,
-    pub bedding: Vec<f32>,
+    pub uplifted: QRaster,
+    pub bedding: QRaster,
     /// Rain per cell relative to the land mean (1.0 = average), as
     /// `forge::climate::rainfall` returns it.
-    pub rain: Vec<f32>,
-    /// Distance (m) from the nearest sea cell (height <= 0); 0 at sea
-    /// (`habitat::coast_distance_m`).
-    pub coast_dist_m: Vec<f32>,
+    pub rain: QRaster,
     /// Formations from the top down: (top s, index into `rock_names`).
     pub column: Vec<(f32, u8)>,
     /// Names from `forge::geology::ROCKS`; an unknown one fails the load.
     pub rock_names: Vec<String>,
     pub rivers: Vec<RiverReach>,
+    /// Lake bodies with their cells (the per-cell water level is derived on load).
     pub lakes: Vec<Lake>,
     /// Where players start, artifact meters. Maps to engine block (8, 8) of region (0, 0).
     pub spawn: [f64; 2],
@@ -148,8 +258,10 @@ pub fn read_artifact_version(path: &Path) -> Result<u32, ArtifactError> {
 #[derive(Debug)]
 pub enum ArtifactError {
     Io(std::io::Error),
-    /// Not a world file, or one written by a different format version.
+    /// Not a world file, or corrupt / newer than this build.
     Format(String),
+    /// Written by an older format version: the world has to be forged again.
+    OldVersion { found: u32 },
 }
 
 impl std::fmt::Display for ArtifactError {
@@ -157,34 +269,63 @@ impl std::fmt::Display for ArtifactError {
         match self {
             ArtifactError::Io(e) => write!(f, "world file: {e}"),
             ArtifactError::Format(m) => write!(f, "world file: {m}"),
+            ArtifactError::OldVersion { found } => {
+                write!(f, "world file version {found} is older than {ARTIFACT_VERSION}: re-forge this world")
+            }
         }
     }
 }
 
 impl WorldArtifact {
+    /// Every quantised raster, for the codec and for `validate`. A new
+    /// raster is one line here (plus its field).
+    fn qrasters_mut(&mut self) -> [&mut QRaster; 4] {
+        [&mut self.height, &mut self.uplifted, &mut self.bedding, &mut self.rain]
+    }
+
+    fn qrasters(&self) -> [&QRaster; 4] {
+        [&self.height, &self.uplifted, &self.bedding, &self.rain]
+    }
+
+    /// File bytes: `VXWF`, the version (u32 LE), then zstd over bincode with
+    /// every raster row-delta encoded.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let body = bincode::serialize(self).expect("artifact serializes");
+        let mut wire = self.clone();
+        let n = wire.n as usize;
+        for raster in wire.qrasters_mut() {
+            delta_rows(&mut raster.data, n);
+        }
+        let body = bincode::serialize(&wire).expect("artifact serializes");
         let mut out = MAGIC.to_vec();
         out.extend_from_slice(&self.version.to_le_bytes());
-        out.extend_from_slice(&lz4_flex::compress_prepend_size(&body));
+        out.extend_from_slice(&zstd::bulk::compress(&body, ZSTD_LEVEL).expect("zstd compresses"));
         out
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_bytes(bytes: &[u8]) -> Result<WorldArtifact, ArtifactError> {
         if bytes.len() < 8 || &bytes[..4] != MAGIC {
             return Err(ArtifactError::Format("missing VXWF header".into()));
         }
         let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        if version != ARTIFACT_VERSION {
+        if version < ARTIFACT_VERSION {
+            return Err(ArtifactError::OldVersion { found: version });
+        }
+        if version > ARTIFACT_VERSION {
             return Err(ArtifactError::Format(format!(
-                "version {version}, this build reads {ARTIFACT_VERSION} — re-forge the world"
+                "version {version} is newer than the {ARTIFACT_VERSION} this build reads"
             )));
         }
-        let body = lz4_flex::decompress_size_prepended(&bytes[8..])
+        let body = zstd::stream::decode_all(&bytes[8..])
             .map_err(|e| ArtifactError::Format(format!("corrupt body: {e}")))?;
-        let artifact: WorldArtifact =
+        let mut artifact: WorldArtifact =
             bincode::deserialize(&body).map_err(|e| ArtifactError::Format(format!("corrupt body: {e}")))?;
         artifact.validate()?;
+        let n = artifact.n as usize;
+        for raster in artifact.qrasters_mut() {
+            undelta_rows(&mut raster.data, n);
+        }
         Ok(artifact)
     }
 
@@ -195,18 +336,12 @@ impl WorldArtifact {
     pub fn validate(&self) -> Result<(), ArtifactError> {
         let artifact = self;
         let cells = artifact.n as usize * artifact.n as usize;
-        if [
-            &artifact.height,
-            &artifact.lake_level,
-            &artifact.uplifted,
-            &artifact.bedding,
-            &artifact.rain,
-            &artifact.coast_dist_m,
-        ]
-            .iter()
-            .any(|raster| raster.len() != cells)
-        {
+        if artifact.qrasters().iter().any(|raster| raster.len() != cells) {
             return Err(ArtifactError::Format("raster size does not match n".into()));
+        }
+        let run_ok = |&(start, len): &(u32, u32)| start as usize + len as usize <= cells;
+        if artifact.lakes.iter().any(|lake| !lake.cells.iter().all(run_ok) || lake.level.is_nan()) {
+            return Err(ArtifactError::Format("lake cells outside the raster".into()));
         }
         // Every rock must be one this build has a block for: an unknown name
         // would otherwise quietly become some other stone.
@@ -230,6 +365,7 @@ impl WorldArtifact {
     /// Writes the world file atomically: the bytes go to a temp file next to
     /// `path`, then a rename puts it in place, so an interrupted save never
     /// leaves a truncated world behind (a stale temp file at worst).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save(&self, path: &Path) -> Result<(), ArtifactError> {
         let tmp = save_temp_path(path);
         let written = std::fs::write(&tmp, self.to_bytes()).and_then(|()| std::fs::rename(&tmp, path));
@@ -242,6 +378,7 @@ impl WorldArtifact {
 
 /// The temp file [`WorldArtifact::save`] writes before renaming it to `path`:
 /// same directory (so the rename stays on one filesystem), `.<name>.tmp`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_temp_path(path: &Path) -> PathBuf {
     let name = path.file_name().map_or_else(|| "world".into(), |n| n.to_string_lossy().into_owned());
     path.with_file_name(format!(".{name}.tmp"))
@@ -266,6 +403,14 @@ pub struct ForgedWorld {
     buckets: Vec<Vec<u32>>,
     buckets_per_side: usize,
     detail: OctaveNoise,
+    /// Height decoded to meters (the sampler's hot raster).
+    height: Vec<f32>,
+    /// Distance (m) from the nearest sea cell (height <= 0), from `height`
+    /// at load (`habitat::coast_distance_m`).
+    coast_dist_m: Vec<f32>,
+    /// Lake water per cell as sorted, non-overlapping `(start, end, level)`
+    /// runs of raster indices (`end` exclusive), from `artifact.lakes`.
+    lake_runs: Vec<(u32, u32, f32)>,
 }
 
 /// What stands at one point of a forged world (engine world y, meters).
@@ -285,10 +430,14 @@ impl ForgedWorld {
         if let Err(e) = artifact.validate() {
             panic!("ForgedWorld::new: {e}");
         }
+        #[cfg(not(target_arch = "wasm32"))]
         let content_crc = crc32fast::hash(&artifact.to_bytes());
+        #[cfg(target_arch = "wasm32")]
+        let content_crc = 0; // no world files on wasm: nothing keys a cache by it
         Self::with_crc(artifact, content_crc)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load(path: &Path) -> Result<ForgedWorld, ArtifactError> {
         let bytes = std::fs::read(path).map_err(ArtifactError::Io)?;
         let artifact = WorldArtifact::from_bytes(&bytes)?;
@@ -328,7 +477,15 @@ impl ForgedWorld {
             }
         }
         let detail = OctaveNoise::new(artifact.seed ^ 0xDE7A_11, DETAIL_FIRST_OCTAVE, vec![1.0, 0.6]);
-        ForgedWorld { artifact, content_crc, segments, buckets, buckets_per_side, detail }
+        let height = artifact.height.to_f32();
+        let coast_dist_m = crate::habitat::coast_distance_m(&height, artifact.n as usize, artifact.cell_m);
+        let mut lake_runs: Vec<(u32, u32, f32)> = artifact
+            .lakes
+            .iter()
+            .flat_map(|lake| lake.cells.iter().map(move |&(start, len)| (start, start + len, lake.level)))
+            .collect();
+        lake_runs.sort_by_key(|run| run.0);
+        ForgedWorld { artifact, content_crc, segments, buckets, buckets_per_side, detail, height, coast_dist_m, lake_runs }
     }
 
     pub fn artifact(&self) -> &WorldArtifact {
@@ -345,14 +502,27 @@ impl ForgedWorld {
     }
 
     fn cell(&self, ix: i64, iz: i64) -> f64 {
-        Self::raster_cell(&self.artifact.height, self.artifact.n, ix, iz)
+        Self::raster_cell(&self.height, self.artifact.n, ix, iz)
     }
 
     /// One cell of an `n * n` raster, clamped to the edge.
-    fn raster_cell(raster: &[f32], n: u32, ix: i64, iz: i64) -> f64 {
+    fn raster_cell<R: RasterRead + ?Sized>(raster: &R, n: u32, ix: i64, iz: i64) -> f64 {
         let n = n as i64;
         let (ix, iz) = (ix.clamp(0, n - 1), iz.clamp(0, n - 1));
-        raster[(iz * n + ix) as usize] as f64
+        raster.value((iz * n + ix) as usize) as f64
+    }
+
+    /// Distance (m) to the sea per raster cell.
+    pub(crate) fn coast_dist_m(&self) -> &[f32] {
+        &self.coast_dist_m
+    }
+
+    /// Water level of raster cell `i` if it is lake.
+    pub(crate) fn lake_level_of(&self, i: usize) -> Option<f32> {
+        let i = i as u32;
+        let k = self.lake_runs.partition_point(|run| run.0 <= i);
+        let &(_, end, level) = self.lake_runs.get(k.checked_sub(1)?)?;
+        (i < end).then_some(level)
     }
 
     /// Bilinear interpolation of `uplifted + bedding` between cell centers
@@ -376,7 +546,7 @@ impl ForgedWorld {
 
     /// Bilinear interpolation of one of the artifact's `n * n` rasters at
     /// artifact meters (same lattice as `geo_offset_m`, edge-clamped).
-    pub(crate) fn bilinear(&self, raster: &[f32], ax: f64, az: f64) -> f64 {
+    pub(crate) fn bilinear<R: RasterRead + ?Sized>(&self, raster: &R, ax: f64, az: f64) -> f64 {
         let a = &self.artifact;
         let at = |ix: i64, iz: i64| Self::raster_cell(raster, a.n, ix, iz);
         let (u, v) = (ax / a.cell_m - 0.5, az / a.cell_m - 0.5);
@@ -495,8 +665,7 @@ impl ForgedWorld {
         if ix < 0 || iz < 0 || ix >= n || iz >= n {
             return None;
         }
-        let level = self.artifact.lake_level[(iz * n + ix) as usize];
-        (!level.is_nan()).then_some(level as f64)
+        self.lake_level_of((iz * n + ix) as usize).map(f64::from)
     }
 
     /// Water features applied to an already-interpolated ground height `g`
@@ -636,7 +805,7 @@ impl ForgedWorld {
         let ((x0, x1), (z0, z1)) = (range(a0.0, a1.0), range(a0.1, a1.1));
         let inside = a1.0 >= 0.0 && a1.1 >= 0.0 && a0.0 < self.artifact.size_m && a0.1 < self.artifact.size_m;
         let lakes = inside
-            && (z0..=z1).any(|iz| (x0..=x1).any(|ix| !self.artifact.lake_level[(iz * n + ix) as usize].is_nan()));
+            && (z0..=z1).any(|iz| (x0..=x1).any(|ix| self.lake_level_of((iz * n + ix) as usize).is_some()));
         ForgedPatch { world: self, grid, origin: a0, cells, cells_per_side, lakes }
     }
 }
@@ -725,21 +894,28 @@ pub fn install(world: Option<ForgedWorld>) {
 /// set-but-unreadable file is fatal: silently falling back to procedural
 /// terrain would mix two worlds in one save.
 pub fn active() -> Option<&'static ForgedWorld> {
-    ACTIVE
-        .get_or_init(|| {
-            let file = world_file_path(std::env::var(WORLD_FILE_ENV).ok().as_deref())?;
-            let path = file.display();
-            match ForgedWorld::load(&file) {
-                Ok(world) => {
-                    let a = world.artifact();
-                    log::info!(
-                        "worldgen: serving forged world {path} (seed {:#X}, {} m, {} m cells, {} river reaches, {} lakes)",
-                        a.seed, a.size_m, a.cell_m, a.rivers.len(), a.lakes.len()
-                    );
-                    Some(world)
-                }
-                Err(e) => panic!("{WORLD_FILE_ENV}={path}: {e}"),
-            }
-        })
-        .as_ref()
+    ACTIVE.get_or_init(load_env_world).as_ref()
+}
+
+/// The browser has no world files: procedural unless a world was installed.
+#[cfg(target_arch = "wasm32")]
+fn load_env_world() -> Option<ForgedWorld> {
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_env_world() -> Option<ForgedWorld> {
+    let file = world_file_path(std::env::var(WORLD_FILE_ENV).ok().as_deref())?;
+    let path = file.display();
+    match ForgedWorld::load(&file) {
+        Ok(world) => {
+            let a = world.artifact();
+            log::info!(
+                "worldgen: serving forged world {path} (seed {:#X}, {} m, {} m cells, {} river reaches, {} lakes)",
+                a.seed, a.size_m, a.cell_m, a.rivers.len(), a.lakes.len()
+            );
+            Some(world)
+        }
+        Err(e) => panic!("{WORLD_FILE_ENV}={path}: {e}"),
+    }
 }

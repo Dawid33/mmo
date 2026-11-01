@@ -4,7 +4,9 @@
 //! world whose right answers are known.
 
 use game::{BlockId, BlockPos, Column, ColumnCoords, ReadVol, RegionCoords};
-use worldgen::forged::{ForgedWorld, WorldArtifact, ARTIFACT_VERSION};
+use worldgen::forged::{
+    delta_rows, undelta_rows, ArtifactError, ForgedWorld, QRaster, WorldArtifact, ARTIFACT_VERSION, HEIGHT_STEP_M,
+};
 
 mod common;
 use common::*;
@@ -13,14 +15,14 @@ use common::*;
 fn world_file_round_trips_and_rejects_foreign_bytes() {
     let artifact = synthetic();
     let bytes = artifact.to_bytes();
-    // Byte-level comparison: the lake raster is full of NaN, which != itself.
+    assert_eq!(WorldArtifact::from_bytes(&bytes).unwrap(), artifact);
     assert_eq!(WorldArtifact::from_bytes(&bytes).unwrap().to_bytes(), bytes);
 
     assert!(WorldArtifact::from_bytes(b"not a world").is_err());
     let mut wrong_version = bytes.clone();
     wrong_version[4] = 99;
     let err = WorldArtifact::from_bytes(&wrong_version).unwrap_err().to_string();
-    assert!(err.contains("re-forge"), "{err}");
+    assert!(err.contains("newer"), "{err}");
     assert!(WorldArtifact::from_bytes(&bytes[..bytes.len() / 2]).is_err(), "truncated file");
 }
 
@@ -232,6 +234,87 @@ fn old_artifact_version_fails_loudly() {
     artifact.version = ARTIFACT_VERSION - 1;
     let err = WorldArtifact::from_bytes(&artifact.to_bytes()).unwrap_err().to_string();
     assert!(err.contains("re-forge"), "{err}");
+}
+
+#[test]
+fn v2_file_is_refused_with_reforge_message() {
+    // A v2 file: header only matters, the body is never read.
+    let mut bytes = b"VXWF".to_vec();
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(b"whatever the old body was");
+    let err = WorldArtifact::from_bytes(&bytes).unwrap_err();
+    assert!(matches!(err, ArtifactError::OldVersion { found: 2 }), "{err:?}");
+    assert!(err.to_string().contains("re-forge"), "{err}");
+
+    let path = std::env::temp_dir().join(format!("mmo-v2-{}.world", std::process::id()));
+    std::fs::write(&path, &bytes).unwrap();
+    let loaded = ForgedWorld::load(&path);
+    let _ = std::fs::remove_file(&path);
+    assert!(matches!(loaded, Err(ArtifactError::OldVersion { found: 2 })));
+}
+
+/// xorshift: deterministic pseudo-random floats without a dependency.
+fn rng(state: &mut u64) -> f64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    (*state >> 11) as f64 / (1u64 << 53) as f64
+}
+
+#[test]
+fn qraster_round_trip_within_half_step() {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    // Fits at the preferred step: within half of 0.0625 m.
+    let low: Vec<f32> = (0..20_000).map(|_| (-900.0 + rng(&mut state) * 4000.0) as f32).collect();
+    let q = QRaster::fit(&low, HEIGHT_STEP_M);
+    assert_eq!(q.step, HEIGHT_STEP_M);
+    assert!(low.iter().enumerate().all(|(i, &v)| (q.get(i) - v).abs() <= HEIGHT_STEP_M / 2.0 + 1e-4));
+    // Peaks to 3400 m overflow 65535 steps of 0.0625 m: the step widens to
+    // span / 65535 and the error bound follows it.
+    let high: Vec<f32> = (0..20_000).map(|_| (-900.0 + rng(&mut state) * 4300.0) as f32).collect();
+    let q = QRaster::fit(&high, HEIGHT_STEP_M);
+    assert!(q.step > HEIGHT_STEP_M && q.step < 0.07, "{}", q.step);
+    assert!(high.iter().enumerate().all(|(i, &v)| (q.get(i) - v).abs() <= q.step / 2.0 + 1e-4));
+    // Out-of-range values clamp instead of wrapping.
+    let clamped = QRaster::from_f32(&[-5000.0, 5000.0], -1000.0, 0.0625);
+    assert_eq!(clamped.data, vec![0, u16::MAX]);
+}
+
+#[test]
+fn row_delta_inverts() {
+    let mut state = 7u64;
+    let original: Vec<u16> = (0..64 * 64).map(|_| (rng(&mut state) * 65535.0) as u16).collect();
+    let mut data = original.clone();
+    delta_rows(&mut data, 64);
+    assert_ne!(data, original);
+    undelta_rows(&mut data, 64);
+    assert_eq!(data, original);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn artifact_v3_round_trip_preserves_samples() {
+    // Seed 4: most seeds drown a small world's every flat dry site (spawn::pick panics).
+    let p = worldgen::forge::ForgeParams { size_m: 4096.0, cell_m: 64.0, seed: 4, ..Default::default() };
+    let artifact = worldgen::forge::forge(&p).artifact(&p);
+    let before = ForgedWorld::new(artifact.clone());
+    let path = std::env::temp_dir().join(format!("mmo-v3-{}.world", std::process::id()));
+    artifact.save(&path).unwrap();
+    let after = ForgedWorld::load(&path);
+    let _ = std::fs::remove_file(&path);
+    let after = after.unwrap();
+    assert_eq!(after.artifact(), &artifact);
+    let mut state = 42u64;
+    for _ in 0..200 {
+        // Engine meters of a random point inside the artifact.
+        let (x, z) = (
+            rng(&mut state) * 4096.0 - artifact.spawn[0] + 8.5,
+            rng(&mut state) * 4096.0 - artifact.spawn[1] + 8.5,
+        );
+        let (a, b) = (before.sample(x, z), after.sample(x, z));
+        assert!((a.ground_y - b.ground_y).abs() <= 0.07, "{x},{z}: {} vs {}", a.ground_y, b.ground_y);
+        assert_eq!(a.water_y.is_some(), b.water_y.is_some(), "{x},{z}");
+    }
 }
 
 #[test]

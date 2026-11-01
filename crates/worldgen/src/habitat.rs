@@ -82,7 +82,7 @@ impl HabitatSource for ForgedWorld {
         let (ax, az) = self.to_artifact_m(x_m, z_m);
         let a = self.artifact();
         let rain = self.bilinear(&a.rain, ax, az).max(0.0) as f32;
-        let coast = self.bilinear(&a.coast_dist_m, ax, az) as f32;
+        let coast = self.bilinear(self.coast_dist_m(), ax, az) as f32;
         let slope = gradient_magnitude(|x, z| self.ground_engine_m(x, z), x_m, z_m);
         assemble(rain, slope, 1.0 - coast / SALT_REACH_M, surface_block)
     }
@@ -159,7 +159,7 @@ pub fn coast_distance_m<T: Copy + Into<f64>>(height: &[T], n: usize, cell_m: f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forged::{WorldArtifact, ARTIFACT_VERSION};
+    use crate::forged::{QRaster, WorldArtifact, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, RAIN_STEP};
 
     const N: usize = 64;
     const CELL_M: f64 = 4.0;
@@ -176,12 +176,10 @@ mod tests {
             size_m: N as f64 * CELL_M,
             cell_m: CELL_M,
             n: N as u32,
-            coast_dist_m: coast_distance_m(&height, N, CELL_M),
-            height,
-            lake_level: vec![f32::NAN; N * N],
-            uplifted: vec![0.0; N * N],
-            bedding: vec![0.0; N * N],
-            rain: vec![1.0; N * N],
+            height: QRaster::fit(&height, HEIGHT_STEP_M),
+            uplifted: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
+            bedding: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
+            rain: QRaster::fit(&vec![1.0; N * N], RAIN_STEP),
             column: vec![(700.0, 0)],
             rock_names: vec!["sandstone".into()],
             rivers: vec![],
@@ -215,11 +213,11 @@ mod tests {
     #[test]
     fn artifact_round_trips_rain_and_coast() {
         let mut artifact = coast_world().artifact().clone();
-        artifact.rain[5] = 1.75;
+        artifact.rain.data[5] = 1750;
         let back = WorldArtifact::from_bytes(&artifact.to_bytes()).expect("loads");
         assert_eq!(back.rain, artifact.rain);
-        assert_eq!(back.coast_dist_m, artifact.coast_dist_m);
-        // (`lake_level` is NaN-filled, so no whole-struct equality.)
+        // Coast distance is not stored: it is recomputed from the height.
+        assert_eq!(ForgedWorld::new(back.clone()).coast_dist_m(), coast_world().coast_dist_m());
         assert_eq!(back.height, artifact.height);
         assert_eq!(back.version, ARTIFACT_VERSION);
     }

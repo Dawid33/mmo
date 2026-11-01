@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use game::{
     BlockId, BlockIndex, Column, ColumnCoords, RegionCoords, SubChunk, CHUNK_BLOCKS, UNDERGROUND_DEPTH,
 };
-use worldgen::forged::{ForgedWorld, WorldArtifact, ARTIFACT_VERSION};
+use worldgen::forged::{
+    ForgedWorld, QRaster, WorldArtifact, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, RAIN_STEP,
+};
 
 const STONE: BlockId = BlockId(2);
 const WATER: BlockId = BlockId(5);
@@ -142,7 +144,7 @@ const SPAWN: [f64; 2] = [STEP_IX as f64 * CELL_M - 22.0, 128.0];
 
 /// A dry plateau north-south, with a cliff of `STEP_M` facing west.
 fn cliff_world() -> ForgedWorld {
-    let height = (0..N * N)
+    let height: Vec<f32> = (0..N * N)
         .map(|i| if i % N < STEP_IX { 6.0 } else { 6.0 + STEP_M })
         .collect();
     ForgedWorld::new(WorldArtifact {
@@ -151,12 +153,10 @@ fn cliff_world() -> ForgedWorld {
         size_m: N as f64 * CELL_M,
         cell_m: CELL_M,
         n: N as u32,
-        height,
-        lake_level: vec![f32::NAN; N * N],
-        uplifted: vec![0.0; N * N],
-        bedding: vec![0.0; N * N],
-        rain: vec![1.0; N * N],
-        coast_dist_m: vec![0.0; N * N],
+        height: QRaster::fit(&height, HEIGHT_STEP_M),
+        uplifted: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
+        bedding: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
+        rain: QRaster::fit(&vec![1.0; N * N], RAIN_STEP),
         column: vec![(700.0, 0)],
         rock_names: vec!["sandstone".into()],
         rivers: vec![],

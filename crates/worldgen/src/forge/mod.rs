@@ -64,16 +64,13 @@ pub struct Forged {
 impl Forged {
     /// The world file the engine serves (`VOXEL_WORLD_FILE`, worldgen::forged).
     pub fn artifact(&self, p: &ForgeParams) -> crate::forged::WorldArtifact {
-        use crate::forged::{Lake, RiverPoint, RiverReach, WorldArtifact, ARTIFACT_VERSION};
+        use crate::forged::{
+            RiverPoint, RiverReach, WorldArtifact, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, RAIN_STEP,
+        };
         let (w, a) = (&self.world, &self.analysis);
         // Lake water surface per cell, from the lake bodies' own levels.
         let level = erosion::route(w, 0.0).filled;
-        let lake_level = (0..w.n * w.n)
-            .map(|i| {
-                let lake = !w.ocean[i] && a.lake_depth[i] >= hydrology::LAKE_MIN_DEPTH_M;
-                if lake { level[i] as f32 } else { f32::NAN }
-            })
-            .collect();
+        let lakes = self.lake_bodies(&level);
         let spawn = spawn::pick(w, a, p.seed);
         WorldArtifact {
             version: ARTIFACT_VERSION,
@@ -81,12 +78,10 @@ impl Forged {
             size_m: p.size_m,
             cell_m: w.dx,
             n: w.n as u32,
-            height: w.h.iter().map(|&h| h as f32).collect(),
-            lake_level,
-            uplifted: w.uplifted.iter().map(|&u| u as f32).collect(),
-            bedding: self.geology.bedding.iter().map(|&b| b as f32).collect(),
-            rain: self.rain.iter().map(|&r| r as f32).collect(),
-            coast_dist_m: crate::habitat::coast_distance_m(&w.h, w.n, w.dx),
+            height: quantise(&w.h, HEIGHT_STEP_M),
+            uplifted: quantise(&w.uplifted, GEO_STEP_M),
+            bedding: quantise(&self.geology.bedding, GEO_STEP_M),
+            rain: quantise(&self.rain, RAIN_STEP),
             column: self.geology.column().iter().map(|&(top, rock)| (top as f32, rock)).collect(),
             rock_names: geology::ROCKS.iter().map(|r| r.name.to_string()).collect(),
             rivers: a
@@ -109,18 +104,79 @@ impl Forged {
                         .collect(),
                 })
                 .collect(),
-            lakes: a
-                .lakes
-                .iter()
-                .map(|l| Lake {
-                    level: l.level as f32,
-                    area_m2: l.area_m2 as f32,
-                    max_depth: l.max_depth as f32,
-                    outlet: [l.outlet.0 as f32, l.outlet.1 as f32],
-                })
-                .collect(),
+            lakes,
             spawn: [spawn.0, spawn.1],
         }
+    }
+}
+
+/// `v` as an `f32` raster quantised over its own range (`QRaster::fit`).
+fn quantise(v: &[f64], preferred_step: f32) -> crate::forged::QRaster {
+    let v: Vec<f32> = v.iter().map(|&x| x as f32).collect();
+    crate::forged::QRaster::fit(&v, preferred_step)
+}
+
+impl Forged {
+    /// The lake bodies as stored in the world file: 4-connected groups of
+    /// lake cells (final flood at least `LAKE_MIN_DEPTH_M` deep, not ocean)
+    /// that stand at one water level, each with its cells as row-major runs.
+    /// `level` is the final flood surface per cell. Outlets come from the
+    /// hydrology lake of the same level nearest the body.
+    fn lake_bodies(&self, level: &[f64]) -> Vec<crate::forged::Lake> {
+        let (w, a) = (&self.world, &self.analysis);
+        let n = w.n;
+        let is_lake = |i: usize| !w.ocean[i] && a.lake_depth[i] >= hydrology::LAKE_MIN_DEPTH_M;
+        let mut seen = vec![false; n * n];
+        let mut lakes = Vec::new();
+        for start in 0..n * n {
+            if seen[start] || !is_lake(start) {
+                continue;
+            }
+            let water = level[start] as f32;
+            let (mut stack, mut cells) = (vec![start], Vec::new());
+            seen[start] = true;
+            while let Some(i) = stack.pop() {
+                cells.push(i);
+                let (x, z) = (i % n, i / n);
+                let mut visit = |j: usize| {
+                    if !seen[j] && is_lake(j) && level[j] as f32 == water {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                };
+                if x > 0 { visit(i - 1); }
+                if x + 1 < n { visit(i + 1); }
+                if z > 0 { visit(i - n); }
+                if z + 1 < n { visit(i + n); }
+            }
+            cells.sort_unstable();
+            let mut runs: Vec<(u32, u32)> = Vec::new();
+            for &i in &cells {
+                match runs.last_mut() {
+                    Some((s, len)) if (*s + *len) as usize == i => *len += 1,
+                    _ => runs.push((i as u32, 1)),
+                }
+            }
+            let centre = w.center(cells[0]);
+            let outlet = a
+                .lakes
+                .iter()
+                .filter(|l| (l.level as f32 - water).abs() < 0.01)
+                .map(|l| l.outlet)
+                .min_by(|p, q| {
+                    let d = |o: &(f64, f64)| (o.0 - centre.0).powi(2) + (o.1 - centre.1).powi(2);
+                    d(p).total_cmp(&d(q))
+                })
+                .unwrap_or(centre);
+            lakes.push(crate::forged::Lake {
+                level: water,
+                area_m2: (cells.len() as f64 * w.dx * w.dx) as f32,
+                max_depth: cells.iter().map(|&i| a.lake_depth[i]).fold(0.0, f64::max) as f32,
+                outlet: [outlet.0 as f32, outlet.1 as f32],
+                cells: runs,
+            });
+        }
+        lakes
     }
 }
 
