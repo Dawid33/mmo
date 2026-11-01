@@ -4,6 +4,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use crate::forge::geology::Geology;
+use crate::forge::par;
 use crate::forge::routing_fast::route_fast;
 use crate::forge::world::{ForgeParams, World};
 
@@ -32,6 +33,10 @@ pub struct Routing {
     pub receiver_dist: Vec<f64>,
     /// Land cells, downstream-first: a cell always comes after its receiver.
     pub order: Vec<u32>,
+    /// Where each outlet tree starts in `order`, when `order` is a
+    /// concatenation of whole trees (`route_fast`); empty when it is not
+    /// (`route_into`), and the trees can't be told apart.
+    pub tree_starts: Vec<u32>,
     /// Priority-Flood working set, kept so `route_into` reuses its capacity.
     closed: Vec<bool>,
     heap: BinaryHeap<Reverse<(u64, u32)>>,
@@ -45,6 +50,9 @@ pub struct StepScratch {
     q: Vec<f64>,
     /// Copy of `h` for the diffusion sub-steps.
     diffuse: Vec<f64>,
+    /// Ranges of `order` holding whole outlet trees: the parallel work items
+    /// of discharge and incision.
+    groups: Vec<std::ops::Range<usize>>,
     /// `routing_fast::route_fast`'s working buffers.
     pub(super) fast: crate::forge::routing_fast::FastScratch,
     /// `step` has run with this scratch: later steps route with `route_fast`.
@@ -63,7 +71,8 @@ pub fn route(w: &World, epsilon: f64) -> Routing {
 /// `route` into reusable buffers (cleared and resized, not reallocated).
 pub fn route_into(w: &World, epsilon: f64, out: &mut Routing) {
     let cells = w.n * w.n;
-    let Routing { filled, receiver, receiver_dist, order, closed, heap } = out;
+    let Routing { filled, receiver, receiver_dist, order, tree_starts, closed, heap } = out;
+    tree_starts.clear();
     filled.clear();
     filled.extend_from_slice(&w.h);
     closed.clear();
@@ -161,48 +170,109 @@ pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch
 }
 
 /// `step` after routing: incision along `routing`, silting, diffusion.
+///
+/// Discharge and incision run in parallel over groups of whole outlet trees
+/// (each tree owns its cells and its sums run in the same order as a serial
+/// pass), diffusion over rows: the result is the same for any thread count.
 fn evolve(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], routing: &Routing, scratch: &mut StepScratch) -> usize {
-    let StepScratch { q, diffuse, .. } = scratch;
-    discharge_into(w, routing, rain, q);
+    let StepScratch { q, diffuse, groups, .. } = scratch;
     let (k, dt) = (&p.knobs, p.knobs.dt_years);
-    let mut drowned = 0;
-    for &i in &routing.order {
-        let i = i as usize;
-        let depth = routing.filled[i] - w.h[i];
-        if depth > 1.0e-3 {
-            // Under a lake: no incision; it silts up instead.
-            drowned += 1;
-            w.h[i] += dt * w.uplift[i] + k.depression_fill * depth;
-            w.uplifted[i] += dt * w.uplift[i];
-            continue;
-        }
-        let rc = routing.receiver[i] as usize;
-        let base = if w.ocean[rc] { 0.0 } else { w.h[rc] }; // already updated: downstream-first
-        let erodibility = k.erodibility * geo.erodibility(w, i);
-        let f = dt * erodibility * q[i].max(k.hillslope_area_m2 * rain[i]).sqrt() / routing.receiver_dist[i];
-        w.h[i] = ((w.h[i] + dt * w.uplift[i] + f * base) / (1.0 + f)).max(0.05);
-        w.uplifted[i] += dt * w.uplift[i];
+    let (n, cell_area) = (w.n, w.dx * w.dx);
+    if routing.tree_starts.is_empty() {
+        groups.clear();
+        groups.push(0..routing.order.len());
+    } else {
+        par::group_trees(&routing.tree_starts, routing.order.len(), groups);
     }
+
+    // Discharge (`discharge_into`, tree by tree): m^2 of average rain.
+    q.clear();
+    q.resize(n * n, 0.0);
+    par::for_rows(q, n, &mut Vec::new(), |z0, rows, _| {
+        for (j, qi) in rows.iter_mut().enumerate() {
+            let i = z0 * n + j;
+            if !w.ocean[i] {
+                *qi = cell_area * rain[i];
+            }
+        }
+    });
+    {
+        let q = par::Disjoint::new(q);
+        par::for_ranges(groups, |range| {
+            for &i in routing.order[range].iter().rev() {
+                let rc = routing.receiver[i as usize] as usize;
+                if !w.ocean[rc] {
+                    // SAFETY: a cell and its land receiver are in one tree,
+                    // and every tree is in exactly one group.
+                    unsafe { q.set(rc, q.get(rc) + q.get(i as usize)) };
+                }
+            }
+        });
+    }
+
+    // Implicit incision downstream-first, silting under lakes.
+    let drowned: usize = {
+        let World { h, uplifted, ocean, uplift, .. } = w;
+        let (q, ocean, uplift) = (&*q, &*ocean, &*uplift);
+        let (h, uplifted) = (par::Disjoint::new(h), par::Disjoint::new(uplifted));
+        par::map(groups, |range| {
+            let mut drowned = 0;
+            for &i in &routing.order[range.clone()] {
+                let i = i as usize;
+                // SAFETY: as above — this worker owns cell i's tree, and its
+                // land receiver is in the same tree.
+                unsafe {
+                    let hi = h.get(i);
+                    let depth = routing.filled[i] - hi;
+                    let lift = dt * uplift[i];
+                    let before = uplifted.get(i);
+                    uplifted.set(i, before + lift);
+                    if depth > 1.0e-3 {
+                        // Under a lake: no incision; it silts up instead.
+                        drowned += 1;
+                        h.set(i, hi + (lift + k.depression_fill * depth));
+                        continue;
+                    }
+                    let rc = routing.receiver[i] as usize;
+                    let base = if ocean[rc] { 0.0 } else { h.get(rc) }; // already updated: downstream-first
+                    let erodibility = k.erodibility * geo.erodibility_at(i, hi, before);
+                    let f = dt * erodibility * q[i].max(k.hillslope_area_m2 * rain[i]).sqrt() / routing.receiver_dist[i];
+                    h.set(i, ((hi + lift + f * base) / (1.0 + f)).max(0.05));
+                }
+            }
+            drowned
+        })
+        .into_iter()
+        .sum()
+    };
 
     // Explicit diffusion, sub-stepped to stay stable (coefficient <= 0.2).
     let coeff = k.diffusivity * dt / (w.dx * w.dx);
     let substeps = (coeff / 0.2).ceil().max(1.0) as usize;
     let c = coeff / substeps as f64;
-    let n = w.n;
+    let World { h, ocean, .. } = w;
+    let ocean = &*ocean;
     for _ in 0..substeps {
-        diffuse.clone_from(&w.h);
-        for z in 1..n - 1 {
-            for x in 1..n - 1 {
-                let i = z * n + x;
-                if w.ocean[i] {
+        diffuse.clone_from(h);
+        let diffuse = &*diffuse;
+        par::for_rows(h, n, &mut Vec::new(), |z0, rows, _| {
+            for (dz, row) in rows.chunks_mut(n).enumerate() {
+                let z = z0 + dz;
+                if z == 0 || z == n - 1 {
                     continue;
                 }
-                // The sea holds sea level at the shore, not its floor depth.
-                let s = |j: usize| if w.ocean[j] { 0.0 } else { diffuse[j] };
-                let lap = s(i - 1) + s(i + 1) + s(i - n) + s(i + n) - 4.0 * diffuse[i];
-                w.h[i] = (diffuse[i] + c * lap).max(0.05);
+                for x in 1..n - 1 {
+                    let i = z * n + x;
+                    if ocean[i] {
+                        continue;
+                    }
+                    // The sea holds sea level at the shore, not its floor depth.
+                    let s = |j: usize| if ocean[j] { 0.0 } else { diffuse[j] };
+                    let lap = s(i - 1) + s(i + 1) + s(i - n) + s(i + n) - 4.0 * diffuse[i];
+                    row[x] = (diffuse[i] + c * lap).max(0.05);
+                }
             }
-        }
+        });
     }
     drowned
 }
@@ -227,5 +297,29 @@ mod tests {
         }
         assert_eq!(a.h, b.h);
         assert_eq!(a.uplifted, b.uplifted);
+    }
+
+    /// The parallel passes split work by rows and by outlet trees only, so
+    /// the result must not depend on the thread count, bit for bit.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_step_matches_serial() {
+        let p = ForgeParams { size_m: 4096.0, cell_m: 32.0, ..Default::default() };
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("thread pool");
+            pool.install(|| {
+                let mut w = World::new(&p);
+                let geo = Geology::new(&p, &w);
+                let rain = crate::forge::climate::rainfall(&w, &p);
+                let mut scratch = StepScratch::default();
+                for _ in 0..20 {
+                    step(&mut w, &p, &geo, &rain, &mut scratch);
+                }
+                w
+            })
+        };
+        let (serial, parallel) = (run(1), run(8));
+        assert_eq!(serial.h, parallel.h);
+        assert_eq!(serial.uplifted, parallel.uplifted);
     }
 }

@@ -11,6 +11,7 @@
 //! deepest rock — for free, no "alpha" fudge needed. Erosion cuts the surface
 //! through the column; hard bands stand proud, soft ones floor the valleys.
 
+use crate::forge::par;
 use crate::noise::OctaveNoise;
 use crate::forge::world::{hash01, ForgeParams, World};
 
@@ -67,12 +68,10 @@ impl Geology {
         let basement_top = k.basement_top_s;
         let (thin, thick) = (k.formation_min_m, k.formation_max_m.max(k.formation_min_m));
         let half = p.size_m * 0.5;
-        let bedding = (0..w.n * w.n)
-            .map(|i| {
-                let (x, z) = w.center(i);
-                dip_x * (x - half) + dip_z * (z - half) + k.fold_amplitude_m * 2.0 * folds.sample2(x, z)
-            })
-            .collect();
+        let bedding = par::map_range(w.n * w.n, |i| {
+            let (x, z) = w.center(i);
+            dip_x * (x - half) + dip_z * (z - half) + k.fold_amplitude_m * 2.0 * folds.sample2(x, z)
+        });
 
         let mut column = Vec::new();
         let (mut s, mut n, mut previous) = (COLUMN_TOP_S, 0u64, u8::MAX);
@@ -128,7 +127,14 @@ impl Geology {
 
     /// Erodibility multiplier of the rock at the surface of cell `i`.
     pub fn erodibility(&self, w: &World, i: usize) -> f64 {
-        self.erodibility[self.surface_rock(w, i) as usize]
+        self.erodibility_at(i, w.h[i], w.uplifted[i])
+    }
+
+    /// `erodibility` of cell `i` at surface height `h` after `uplifted` m of
+    /// uplift — for callers that hold the world's columns apart (the
+    /// parallel erosion step).
+    pub fn erodibility_at(&self, i: usize, h: f64, uplifted: f64) -> f64 {
+        self.erodibility[self.rock_at_s(h - uplifted - self.bedding[i]) as usize]
     }
 }
 

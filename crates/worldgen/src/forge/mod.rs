@@ -29,6 +29,7 @@ pub mod erosion;
 pub mod geology;
 pub mod hydrology;
 pub mod knobs;
+mod par;
 pub mod post;
 pub mod presets;
 pub mod quality;
