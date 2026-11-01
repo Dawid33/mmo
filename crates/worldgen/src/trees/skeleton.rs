@@ -74,6 +74,9 @@ pub const MIN_GROWTH: f64 = 0.08;
 /// (nothing is floored above its full-grown size).
 pub const MIN_TRUNK_RADIUS: i32 = 2;
 pub const MIN_LEAF_RADIUS: i32 = 12;
+/// Height over which a `base_flare_pct` buttress fades out (quadratically),
+/// voxels of the full-grown tree.
+pub const FLARE_HEIGHT_VOXELS: f64 = 64.0;
 
 /// The crown envelope: limb length by height in the crown (Weber & Penn's shape).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +141,15 @@ pub struct ShapeParams {
     /// Limbs facing a random side of the tree are up to this % longer (and the
     /// opposite side shorter): a lopsided, one-sided crown.
     pub asymmetry_pct: i32,
+    /// No leaves at all (a cactus): the skeleton's leaf clusters are dropped.
+    pub leafless: bool,
+    /// A branch's tip radius, % of its base radius; 0 = `TIP_RADIUS_FRAC`
+    /// (thick, blunt arms for a cactus).
+    pub tip_radius_pct: i32,
+    /// Buttressed base: the trunk's radius at the ground is this % wider,
+    /// the extra fading out over `FLARE_HEIGHT_VOXELS` (and growing in late:
+    /// × growth³, so a sapling is still a stick). 0 = a plain taper.
+    pub base_flare_pct: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -259,6 +271,8 @@ struct Proto {
     radius: f64,
     level: u8,
     birth: i32,
+    /// Buttress radius on top of `radius` (`base_flare_pct`), grown in × growth³.
+    flare: f64,
 }
 
 struct ProtoLeaf {
@@ -290,7 +304,7 @@ fn lerp3(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
 
 impl Builder<'_> {
     fn push(&mut self, parent: Option<usize>, pos: [f64; 3], radius: f64, level: u8, birth: i32) -> usize {
-        self.nodes.push(Proto { parent, pos, radius, level, birth });
+        self.nodes.push(Proto { parent, pos, radius, level, birth, flare: 0.0 });
         self.nodes.len() - 1
     }
 
@@ -345,7 +359,8 @@ impl Builder<'_> {
         let sp = self.sp;
         let n = ((len / SEGMENT_VOXELS).ceil() as usize).clamp(1, MAX_SEGMENTS);
         let step = len / n as f64;
-        let r_tip = (r0 * TIP_RADIUS_FRAC).max(r0.min(MIN_BRANCH_TIP_RADIUS));
+        let tip_frac = if sp.tip_radius_pct > 0 { sp.tip_radius_pct as f64 / 100.0 } else { TIP_RADIUS_FRAC };
+        let r_tip = (r0 * tip_frac).max(r0.min(MIN_BRANCH_TIP_RADIUS));
         let mut chain = vec![self.push(Some(parent), start, r0, level, birth)];
         let mut heads = Vec::with_capacity(n);
         let (mut az, mut el) = (az, el);
@@ -416,6 +431,14 @@ impl Builder<'_> {
             let prev = *trunk.last().unwrap();
             trunk.push(self.push(Some(prev), pos, r, 0, 0));
         }
+        if sp.base_flare_pct > 0 {
+            // No RNG: the other species' trees are untouched.
+            let extra = r_base * sp.base_flare_pct as f64 / 100.0;
+            for &i in &trunk {
+                let fade = (1.0 - self.nodes[i].pos[1] / FLARE_HEIGHT_VOXELS).max(0.0);
+                self.nodes[i].flare = extra * fade * fade;
+            }
+        }
         self.tip_leaf(*trunk.last().unwrap(), 0.4 + 0.7 * crown_ratio(sp.crown, 1.0));
         let start = sp.limb_start_pct as f64 / 100.0;
         // Lopsidedness: limbs towards `bias_az` grow longer.
@@ -485,8 +508,8 @@ pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
     // Wood and leaf clusters keep their size (only growth scales them): the fit
     // pulls the nodes in.
     for n in &b.nodes {
-        sh = sh.min((lim_h - n.radius) / reach(n.pos).max(1.0));
-        sv = sv.min((lim_v - n.radius) / n.pos[1].max(1.0));
+        sh = sh.min((lim_h - n.radius - n.flare) / reach(n.pos).max(1.0));
+        sv = sv.min((lim_v - n.radius - n.flare) / n.pos[1].max(1.0));
     }
     for l in &b.leaves {
         // A leaf block counts if its centre is within `r + LEAF_DITHER_VOXELS`
@@ -520,7 +543,8 @@ pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
         .iter()
         .map(|&i| {
             let n = &b.nodes[i];
-            let mut radius = (n.radius * g + 0.5).floor() as i32;
+            // `flare` is 0 for most species: `+ 0.0` leaves the radius exact.
+            let mut radius = (n.radius * g + n.flare * g * g * g + 0.5).floor() as i32;
             if n.level == 0 {
                 radius = radius.max(MIN_TRUNK_RADIUS.min((n.radius + 0.5).floor() as i32));
             }
@@ -540,6 +564,9 @@ pub fn skeleton(species: &Species, seed: u64, age: u16) -> TreeSkeleton {
             ([c[0] + shift(0), c[1] + shift(1), c[2] + shift(2)], r)
         })
         .collect();
+    if sp.leafless {
+        return TreeSkeleton { nodes, leaves: Vec::new(), leaf_nodes: Vec::new() };
+    }
     TreeSkeleton { nodes, leaves, leaf_nodes }
 }
 
@@ -591,7 +618,7 @@ mod tests {
     fn skeleton_is_deterministic() {
         for sp in &SPECIES {
             let a = skeleton(sp, 42, 70);
-            assert!(a.nodes.len() > 10 && !a.leaves.is_empty());
+            assert!(a.nodes.len() > 10 && a.leaves.is_empty() == sp.shape.leafless, "{}", sp.name);
             assert_eq!(a, skeleton(sp, 42, 70));
             assert_ne!(a, skeleton(sp, 43, 70));
         }
@@ -633,7 +660,21 @@ mod tests {
             let top = |s: &TreeSkeleton| s.nodes.iter().map(|n| n.pos[1]).max().unwrap();
             assert!(top(&young) * 3 < top(&old), "{}", sp.name);
             assert!(young.nodes.iter().filter(|n| n.level == 0).all(|n| n.radius <= MIN_TRUNK_RADIUS + 1));
-            assert!(young.leaves.len() < old.leaves.len() / 4);
+            assert!(young.leaves.len() < old.leaves.len() / 4 || sp.shape.leafless, "{}", sp.name);
         }
+    }
+
+    /// A buttress widens the base of a grown tree only; no other species
+    /// has one.
+    #[test]
+    fn jungle_base_is_buttressed() {
+        let jungle = SPECIES.iter().find(|s| s.name == "jungle").unwrap();
+        let old = skeleton(jungle, 3, MAX_AGE);
+        let trunk: Vec<&Node> = old.nodes.iter().filter(|n| n.level == 0).collect();
+        let mid = trunk.iter().find(|n| n.pos[1] >= 100).unwrap();
+        assert!(trunk[0].radius as f64 >= 1.5 * mid.radius as f64, "base {} mid {}", trunk[0].radius, mid.radius);
+        let young = skeleton(jungle, 3, 5);
+        assert!(young.nodes[0].radius <= MIN_TRUNK_RADIUS + 1, "sapling base {}", young.nodes[0].radius);
+        assert!(SPECIES.iter().filter(|s| s.shape.base_flare_pct > 0).all(|s| s.name == "jungle"));
     }
 }

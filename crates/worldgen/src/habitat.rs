@@ -8,6 +8,7 @@
 //! Only + - * /, floor and sqrt are used (the `noise.rs` determinism policy).
 
 use crate::forged::ForgedWorld;
+use game::Biome;
 use crate::noise::OctaveNoise;
 use crate::pipeline::{TerrainPipeline, SEA_TOP_BLOCK};
 
@@ -34,6 +35,12 @@ pub const FLAT_MOISTURE_BONUS: f32 = 0.5;
 /// species niches (tuned on rain relative to the land mean) keep their meaning.
 pub const REFERENCE_PRECIP_MM: f32 = 900.0;
 
+/// Forged worlds: moisture saturates here. Ground wetter than this is no
+/// wetter for a tree (waterlogging is the biome's drainage — swamp, marsh),
+/// so a very rainy temperate forest keeps its oaks and birches instead of
+/// falling off their niches' wet ends. Procedural moisture is not capped.
+pub const FORGED_MOISTURE_SATURATION: f32 = 2.5;
+
 /// Procedural rain: `1 + RAIN_NOISE_AMPLITUDE * noise` at a ~2 km wavelength.
 pub const PROCEDURAL_RAIN_FIRST_OCTAVE: i32 = -11;
 pub const PROCEDURAL_RAIN_AMPLITUDE: f64 = 0.5;
@@ -55,6 +62,10 @@ pub struct Habitat {
     pub soil_depth: f32,
     /// 0 (fresh) .. 1 (at the shore).
     pub salinity: f32,
+    /// The column's biome: a forged world's dithered biome
+    /// (`ForgedWorld::biome_at`, the one its ground cover uses); `None` in
+    /// the procedural world, which has none.
+    pub biome: Option<Biome>,
 }
 
 pub trait HabitatSource {
@@ -68,9 +79,10 @@ fn procedural_temperature_c(surface_block: i32) -> f32 {
     BASE_TEMPERATURE_C - LAPSE_C_PER_M * (surface_block - SEA_TOP_BLOCK) as f32
 }
 
-fn assemble(rain: f32, temperature_c: f32, slope: f32, salinity: f32) -> Habitat {
+fn assemble(rain: f32, temperature_c: f32, slope: f32, salinity: f32, biome: Option<Biome>) -> Habitat {
     let flatness = (1.0 - slope / FLATNESS_SLOPE_LIMIT).clamp(0.0, 1.0);
     Habitat {
+        biome,
         rain,
         temperature_c,
         moisture: rain * (1.0 + FLAT_MOISTURE_BONUS * flatness),
@@ -89,7 +101,7 @@ fn gradient_magnitude(f: impl Fn(f64, f64) -> f64, x: f64, z: f64) -> f32 {
 impl HabitatSource for ForgedWorld {
     /// Temperature comes from the stored field (latitude and the raster's
     /// ground height), so the tree line follows the climate; `surface_block`
-    /// is not used.
+    /// is not used. The biome is the column's dithered one.
     fn habitat(&self, x_m: f64, z_m: f64, _surface_block: i32) -> Habitat {
         let (ax, az) = self.to_artifact_m(x_m, z_m);
         let a = self.artifact();
@@ -97,7 +109,8 @@ impl HabitatSource for ForgedWorld {
         let temperature_c = self.bilinear(&a.temperature_c, ax, az) as f32;
         let coast = self.bilinear(self.coast_dist_m(), ax, az) as f32;
         let slope = gradient_magnitude(|x, z| self.ground_engine_m(x, z), x_m, z_m);
-        assemble(rain, temperature_c, slope, 1.0 - coast / SALT_REACH_M)
+        let h = assemble(rain, temperature_c, slope, 1.0 - coast / SALT_REACH_M, Some(self.biome_at(x_m, z_m)));
+        Habitat { moisture: h.moisture.min(FORGED_MOISTURE_SATURATION), ..h }
     }
 }
 
@@ -127,7 +140,7 @@ impl HabitatSource for ProceduralHabitat {
         let rain = (1.0 + PROCEDURAL_RAIN_AMPLITUDE * self.rain_noise.sample2(x_m, z_m)).max(0.0) as f32;
         let slope = gradient_magnitude(|x, z| self.pipeline.column(x, z).surface_y(), x_m, z_m);
         let salinity = 1.0 - (surface_block - SEA_TOP_BLOCK) as f32 / PROCEDURAL_SALT_BLOCKS;
-        assemble(rain, procedural_temperature_c(surface_block), slope, salinity)
+        assemble(rain, procedural_temperature_c(surface_block), slope, salinity, None)
     }
 }
 
@@ -229,6 +242,20 @@ mod tests {
         assert_eq!(world.habitat(122.0, 120.0, SEA_TOP_BLOCK + 900), h);
         let east = world.habitat(202.0, 120.0, SEA_TOP_BLOCK + 10);
         assert!((h.temperature_c - east.temperature_c - 2.0).abs() < 0.06);
+    }
+
+    /// Forged: the biome is the column's dithered one, and moisture
+    /// saturates at `FORGED_MOISTURE_SATURATION` however wet the climate.
+    #[test]
+    fn forged_habitat_carries_the_biome_and_saturates_moisture() {
+        let world = coast_world();
+        let h = world.habitat(122.0, 120.0, SEA_TOP_BLOCK + 10);
+        assert_eq!(h.biome, Some(world.biome_at(122.0, 120.0)));
+        let mut a = world.artifact().clone();
+        a.precip_mm = QRaster::fit(&vec![6_000.0; N * N], PRECIP_STEP_MM);
+        let wet = ForgedWorld::new(a).habitat(122.0, 120.0, SEA_TOP_BLOCK + 10);
+        assert!(wet.rain > 6.0 && wet.moisture == FORGED_MOISTURE_SATURATION, "{wet:?}");
+        assert_eq!(ProceduralHabitat::new(9).habitat(120.0, 120.0, SEA_TOP_BLOCK).biome, None);
     }
 
     /// Procedural: a fixed lapse from `BASE_TEMPERATURE_C`.

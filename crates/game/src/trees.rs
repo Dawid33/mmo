@@ -17,13 +17,12 @@ use crate::orders::{TilePos, TileSource};
 use crate::slime::roll;
 use crate::{block_props, BLOCK_VOXELS, REGION_BLOCKS};
 
-/// Most blocks one tree flood visits. The widest species box (oak: crown
-/// radius 8 blocks + 1 block of leaf reach, 20 blocks tall) is 19 × 20 × 19 =
-/// 7220 blocks (pine, the tallest at 24, is 11 × 24 × 11), so this bounds any
-/// generated tree with room to spare (pinned by worldgen's
-/// `mature_trees_fit_the_flood_bound`). A tree that overflows it cannot be
-/// chopped.
-pub const MAX_TREE_BLOCKS: usize = 8192;
+/// Most blocks one tree flood visits. The biggest species box (jungle: crown
+/// radius 8 blocks + 1 block of leaf reach, 32 blocks tall) is 19 × 32 × 19 =
+/// 11552 blocks, so this bounds any generated tree with room to spare (pinned
+/// by worldgen's `mature_trees_fit_the_flood_bound`). A tree that overflows
+/// it cannot be chopped.
+pub const MAX_TREE_BLOCKS: usize = 16384;
 /// A trunk cut takes the trunk logs of the cut block's layer out to this
 /// many blocks (in x and in z) from it.
 pub const TRUNK_CUT_RADIUS_BLOCKS: i32 = 4;

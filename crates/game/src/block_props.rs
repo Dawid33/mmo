@@ -61,7 +61,8 @@ impl BlockProps {
         self.cutout.iter().map(|&id| BlockId(id))
     }
 
-    /// Whether the block is tree trunk wood (a `<species>_log`): a chop on
+    /// Whether the block is tree trunk wood (a `<species>_log`, or a
+    /// one-block species' block — `registry::SINGLE_BLOCK_TREES`): a chop on
     /// it cuts the trunk's cross-section (`trees::cut_blocks`).
     pub fn is_trunk(&self, id: BlockId) -> bool {
         self.trunk.contains(&id.0)

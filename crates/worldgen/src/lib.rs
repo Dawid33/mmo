@@ -179,15 +179,12 @@ fn point_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> ColSampl
     }
 }
 
-/// Biomes that never carry trees: their cover is not soil (desert sand,
-/// wasteland gravel, badland red sand, frozen tundra, glacier) or is an open
-/// mud flat (marsh). Swamps and mangrove swamps are forested wetland (DF)
-/// and keep their trees on mud.
+/// Biomes that never carry trees: frozen tundra, glacier, or an open mud
+/// flat (marsh). Swamps and mangrove swamps are forested wetland (DF) and
+/// keep their trees on mud. Deserts, wastelands and badlands carry only
+/// their sparse cacti (`trees::NATIVE_ONLY_BIOMES`, `BIOME_TREE_DENSITY`).
 fn treeless(b: Biome) -> bool {
-    matches!(
-        b,
-        Biome::SandDesert | Biome::RockyWasteland | Biome::Badlands | Biome::Marsh | Biome::Tundra | Biome::Glacier
-    )
+    matches!(b, Biome::Marsh | Biome::Tundra | Biome::Glacier)
 }
 
 /// Forest biomes: trees stand on their snow (a boreal forest floor), where

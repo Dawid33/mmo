@@ -383,6 +383,79 @@ mod tests {
         }
     }
 
+    /// Extent (blocks, inclusive) of `blocks` passing `keep` along axis `i`.
+    fn extent(blocks: &[TreeBlock], i: usize, keep: impl Fn(&TreeBlock) -> bool) -> (i32, i32) {
+        let v: Vec<i32> = blocks.iter().filter(|b| keep(b)).map(|b| b.offset[i]).collect();
+        (*v.iter().min().unwrap(), *v.iter().max().unwrap())
+    }
+
+    /// The new species fit their crown radius and height (the `skeleton`
+    /// fit), and each reads as its kind: spruce a narrow cone with leaves to
+    /// the ground, acacia a flat crown wider than tall on a bare trunk, palm
+    /// a bare trunk under a fan, jungle the tallest with a buttressed base,
+    /// cactus a leafless column with arms.
+    #[test]
+    fn each_new_species_skeleton_fits_its_crown() {
+        let by = |n: &str| SPECIES.iter().find(|s| s.name == n).unwrap_or_else(|| panic!("no species {n}"));
+        let leaves = |b: &TreeBlock| b.part == TreePart::Leaves;
+        let wood = |b: &TreeBlock| b.part != TreePart::Leaves;
+        for name in ["spruce", "acacia", "palm", "jungle", "cactus"] {
+            let sp = by(name);
+            for seed in 0..12 {
+                let blocks = rasterize(&skeleton(sp, seed, MAX_AGE));
+                for b in &blocks {
+                    let [x, y, z] = b.offset;
+                    let r = sp.crown_radius_blocks + if leaves(b) { 1 } else { 0 };
+                    assert!((0..sp.max_height_blocks).contains(&y), "{name} seed {seed}: {:?}", b.offset);
+                    assert!(x.abs() <= r && z.abs() <= r, "{name} seed {seed}: {:?} {:?}", b.offset, b.part);
+                }
+                let (_, top) = extent(&blocks, 1, |_| true);
+                match name {
+                    "spruce" => {
+                        let (x0, x1) = extent(&blocks, 0, |_| true);
+                        assert!(2 * (top + 1) > 3 * (x1 - x0 + 1), "{name} seed {seed}: {top} tall, {} wide", x1 - x0 + 1);
+                        assert!(extent(&blocks, 1, leaves).0 <= 2, "{name} seed {seed}: leaves to the ground");
+                        // A cone: the top third is narrower than the bottom third.
+                        let width = |lo: i32, hi: i32| {
+                            let (a, b) = extent(&blocks, 0, |b| (lo..hi).contains(&b.offset[1]));
+                            b - a + 1
+                        };
+                        let third = (top + 1) / 3;
+                        assert!(width(top + 1 - third, top + 1) < width(0, third), "{name} seed {seed}: not conical");
+                    }
+                    "acacia" => {
+                        let (ly0, ly1) = extent(&blocks, 1, leaves);
+                        let (lx0, lx1) = extent(&blocks, 0, leaves);
+                        let (lz0, lz1) = extent(&blocks, 2, leaves);
+                        let wide = (lx1 - lx0).max(lz1 - lz0) + 1;
+                        assert!(wide >= 2 * (ly1 - ly0 + 1), "{name} seed {seed}: crown {wide} wide, {} deep", ly1 - ly0 + 1);
+                        assert!(ly0 * 5 >= top * 2, "{name} seed {seed}: bare trunk to {ly0} of {top}");
+                    }
+                    "palm" => {
+                        let (ly0, _) = extent(&blocks, 1, leaves);
+                        assert!(ly0 * 3 >= top * 2, "{name} seed {seed}: leaves from {ly0} of {top}");
+                        assert!(top >= 10, "{name} seed {seed}: {top} tall");
+                    }
+                    "jungle" => {
+                        assert!(top >= 26, "{name} seed {seed}: {top} tall");
+                        let layer = |y: i32| blocks.iter().filter(|b| wood(b) && b.offset[1] == y).count();
+                        assert!(layer(0) > layer(8), "{name} seed {seed}: base {} vs {}", layer(0), layer(8));
+                    }
+                    "cactus" => {
+                        assert!(blocks.iter().all(wood), "{name} seed {seed}: leaves");
+                        assert!(top >= 5, "{name} seed {seed}: {top} tall");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            // At least one arm somewhere over the seeds.
+            if name == "cactus" {
+                let arms = (0..12).any(|seed| rasterize(&skeleton(sp, seed, MAX_AGE)).iter().any(|b| b.limb > 0));
+                assert!(arms, "cactus arms");
+            }
+        }
+    }
+
     #[test]
     fn pine_is_taller_than_wide() {
         let pine = SPECIES.iter().find(|s| s.name == "pine").unwrap();
@@ -422,7 +495,8 @@ mod tests {
             assert_eq!(blocks.iter().find(|b| b.offset == [0, 0, 0]).map(|b| b.limb), Some(0), "{name}: the base is trunk");
             if age == MAX_AGE {
                 assert!(blocks.iter().any(|b| b.limb > 0 && b.part != TreePart::Leaves), "{name} seed {seed}: limb wood");
-                assert!(blocks.iter().any(|b| b.limb > 0 && b.part == TreePart::Leaves), "{name} seed {seed}: limb leaves");
+                let leafy = blocks.iter().any(|b| b.limb > 0 && b.part == TreePart::Leaves);
+                assert_eq!(leafy, !SPECIES[s].shape.leafless, "{name} seed {seed}: limb leaves");
             }
         }
     }

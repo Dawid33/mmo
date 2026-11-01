@@ -363,3 +363,33 @@ fn tip_near_edge_points_inward() {
         assert!(d.x > 0.5 && d.z > 0.5, "tick {tick}: {d:?}");
     }
 }
+
+/// A cactus is one block (`cactus`) for trunk and arms, no leaves: a cut on
+/// its column is a trunk cut (`SINGLE_BLOCK_TREES`), so the column above
+/// falls with any arm rooted at or above the cut, and an arm rooted below
+/// stays on the stump.
+#[test]
+fn cactus_column_cut_fells_the_top_and_its_arms() {
+    let reg = BlockRegistry::from_ron(MANIFEST).unwrap();
+    install_block_props(reg.props());
+    let cactus = reg.id_of("cactus").unwrap();
+    assert!(game::block_props().is_trunk(cactus));
+    let mut region = region();
+    let x0 = x0();
+    // Column (x0, 1..=7, Z0), limb 0; arm 1 out +x at y 2 rising to y 3
+    // (under the cut layer); arm 2 out −x at y 5 rising to y 6.
+    let mut blocks: Vec<(TilePos, u8)> = (1..=7).map(|y| ([x0, y, Z0], 0)).collect();
+    blocks.extend([([x0 + 1, 2, Z0], 1), ([x0 + 2, 2, Z0], 1), ([x0 + 2, 3, Z0], 1)]);
+    blocks.extend([([x0 - 1, 5, Z0], 2), ([x0 - 2, 5, Z0], 2), ([x0 - 2, 6, Z0], 2)]);
+    region.with_data(|r| {
+        for &(p, limb) in &blocks {
+            assert!(r.set_block_safe(p, Block::with_tree(cactus, TREE, limb)), "place {p:?}");
+        }
+    });
+    let sets = falling_sets(region.data(), [x0, 4, Z0]);
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    let mut want: Vec<TilePos> =
+        blocks.iter().map(|&(p, _)| p).filter(|p| (p[0] == x0 && p[1] > 4) || p[0] < x0).collect();
+    want.sort_unstable();
+    assert_eq!(sets[0], want, "the column above and the upper arm; the lower arm stays");
+}

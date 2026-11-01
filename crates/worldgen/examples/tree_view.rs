@@ -3,7 +3,7 @@
 //! by depth. `--grid` instead writes 3×3 sheets (front and top) of nine seeds;
 //! `--time N` prints the generation cost per tree over N seeds.
 //!
-//! `just tree-view --species oak|pine|birch --seed N --age N [--out <stem>] [--scale N] [--grid] [--time N]`
+//! `just tree-view --species oak|pine|birch|spruce|acacia|palm|jungle|cactus --seed N --age N [--out <stem>] [--scale N] [--grid] [--time N]`
 //! Output: `target/tree-view/<species>-s<seed>-a<age>-{front,side,top}.png` (or `-grid.png`, `-grid-top.png`).
 
 use std::collections::HashMap;
@@ -32,6 +32,11 @@ fn palette(species: &str) -> Palette {
         "birch" => {
             Palette { log: [228, 225, 214], branch: [200, 196, 185], leaves: [124, 170, 66], marks: Some([40, 38, 36]) }
         }
+        "spruce" => Palette { log: [88, 58, 40], branch: [104, 70, 48], leaves: [30, 66, 48], marks: None },
+        "acacia" => Palette { log: [120, 96, 72], branch: [134, 108, 80], leaves: [112, 132, 52], marks: None },
+        "palm" => Palette { log: [150, 124, 88], branch: [120, 140, 60], leaves: [70, 140, 50], marks: None },
+        "jungle" => Palette { log: [96, 84, 62], branch: [110, 96, 70], leaves: [34, 104, 38], marks: None },
+        "cactus" => Palette { log: [70, 120, 60], branch: [80, 132, 66], leaves: [70, 120, 60], marks: None },
         _ => Palette { log: [92, 68, 44], branch: [112, 84, 56], leaves: [62, 112, 44], marks: None },
     }
 }
@@ -163,7 +168,7 @@ fn main() {
             "--grid" => grid = true,
             "--time" => time = Some(val().parse::<u64>().expect("--time N").max(1)),
             _ => panic!(
-                "unknown flag {a}; flags: --species oak|pine|birch --seed N --age N --out <stem> --scale N --grid --time N"
+                "unknown flag {a}; flags: --species <name in SPECIES> --seed N --age N --out <stem> --scale N --grid --time N"
             ),
         }
     }

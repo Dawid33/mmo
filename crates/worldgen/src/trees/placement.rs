@@ -8,6 +8,7 @@
 use super::species::SPECIES;
 use crate::habitat::HabitatSource;
 use crate::REGION_BLOCKS;
+use game::Biome;
 
 /// Side of one placement cell, blocks.
 pub const TREE_LATTICE_BLOCKS: i32 = 8;
@@ -16,7 +17,53 @@ pub const MAX_AGE: u16 = 100;
 /// Widest crown over all species (checked against the table in a test).
 pub const MAX_CROWN_RADIUS_BLOCKS: i32 = 8;
 /// Tallest tree over all species (checked against the table in a test).
-pub const MAX_TREE_HEIGHT_BLOCKS: i32 = 24;
+pub const MAX_TREE_HEIGHT_BLOCKS: i32 = 32;
+
+/// Tree density per biome (forged worlds): multiplies every species'
+/// placement chance on a column of that biome. Forests 1, jungle denser,
+/// open land sparse, deserts a cactus here and there; biomes whose ground
+/// carries no trees (`lib.rs` `treeless`) 0. Every biome is listed once.
+pub const BIOME_TREE_DENSITY: [(Biome, f32); 20] = [
+    (Biome::Ocean, 0.0),
+    (Biome::FrozenOcean, 0.0),
+    (Biome::Lake, 0.0),
+    (Biome::Glacier, 0.0),
+    (Biome::Tundra, 0.0),
+    (Biome::Taiga, 1.0),
+    (Biome::ConiferForest, 1.0),
+    (Biome::BroadleafForest, 1.0),
+    (Biome::TropicalConiferForest, 1.0),
+    (Biome::TropicalBroadleafForest, 1.4),
+    (Biome::Grassland, 0.05),
+    (Biome::Savanna, 0.15),
+    (Biome::Shrubland, 0.1),
+    (Biome::SandDesert, 0.02),
+    (Biome::RockyWasteland, 0.02),
+    (Biome::Badlands, 0.02),
+    (Biome::Marsh, 0.0),
+    (Biome::Swamp, 0.8),
+    (Biome::MangroveSwamp, 1.0),
+    (Biome::Mountain, 0.6),
+];
+
+/// Biomes that grow only the species listing them (`Species::biomes`), not
+/// the any-biome ones (oak, pine, birch): deserts grow cactus, jungle and
+/// mangrove their tropical trees.
+pub const NATIVE_ONLY_BIOMES: [Biome; 5] =
+    [Biome::SandDesert, Biome::RockyWasteland, Biome::Badlands, Biome::TropicalBroadleafForest, Biome::MangroveSwamp];
+
+/// `BIOME_TREE_DENSITY` of `biome`; 1 with no biome (the procedural world).
+pub fn biome_tree_density(biome: Option<Biome>) -> f32 {
+    biome.map_or(1.0, |b| BIOME_TREE_DENSITY.iter().find(|(x, _)| *x == b).map_or(0.0, |&(_, d)| d))
+}
+
+/// Whether species `s` may grow on a column of `biome`.
+fn eligible(s: &super::Species, biome: Option<Biome>) -> bool {
+    match biome {
+        Some(b) if NATIVE_ONLY_BIOMES.contains(&b) => s.biomes.contains(&b),
+        _ => s.grows_in(biome),
+    }
+}
 
 /// Blocks a tree's leaves may reach past its crown radius (raster's leaf
 /// dither); the seam rule keeps those inside the region too.
@@ -92,14 +139,32 @@ fn candidate(
     let sy = surface(x, z)?;
     let h = habitat.habitat(x as f64 + 0.5, z as f64 + 0.5, sy);
     let mut pick = hash01(seed, lx, lz, SALT_EXISTS) as f32;
-    let mut chosen = None;
-    for (i, s) in SPECIES.iter().enumerate() {
+    // Each species' chance; 0 where it may not grow.
+    let density = biome_tree_density(h.biome);
+    let chance = SPECIES.map(|s| {
+        if !eligible(&s, h.biome) {
+            return 0.0;
+        }
         let p = s.max_density
             * s.temperature_c.response(h.temperature_c)
             * s.moisture.response(h.moisture)
             * s.slope.response(h.slope)
             * s.soil_depth.response(h.soil_depth)
             * s.salinity.response(h.salinity);
+        if h.biome.is_some() { p * density } else { p }
+    });
+    // Forged worlds: where the chances sum past 1 the cell always holds a
+    // tree, and the species is picked in proportion to them (so a species
+    // late in the table is not crowded out by earlier ones). The procedural
+    // world keeps first-come order, bit for bit.
+    if h.biome.is_some() {
+        let total: f32 = chance.iter().sum();
+        if total > 1.0 {
+            pick *= total;
+        }
+    }
+    let mut chosen = None;
+    for (i, &p) in chance.iter().enumerate() {
         if pick < p {
             chosen = Some(i as u8);
             break;
@@ -178,6 +243,7 @@ pub fn trees_in(
 mod tests {
     use super::*;
     use crate::habitat::Habitat;
+    use game::Biome;
 
     struct Stub(Habitat);
     impl HabitatSource for Stub {
@@ -185,8 +251,15 @@ mod tests {
             self.0
         }
     }
-    const GOOD: Habitat =
-        Habitat { rain: 1.5, temperature_c: 8.0, moisture: 1.5, slope: 0.1, soil_depth: 3.0, salinity: 0.0 };
+    const GOOD: Habitat = Habitat {
+        rain: 1.5,
+        temperature_c: 8.0,
+        moisture: 1.5,
+        slope: 0.1,
+        soil_depth: 3.0,
+        salinity: 0.0,
+        biome: None,
+    };
     fn land(_: i32, _: i32) -> Option<i32> {
         Some(100)
     }
@@ -201,14 +274,125 @@ mod tests {
         assert_eq!(MAX_TREE_HEIGHT_BLOCKS, SPECIES.iter().map(|s| s.max_height_blocks).max().unwrap());
     }
 
+    fn species(name: &str) -> u8 {
+        SPECIES.iter().position(|s| s.name == name).unwrap_or_else(|| panic!("no species {name}")) as u8
+    }
+    /// Trees per species of `t`, by name.
+    fn census(t: &[TreeSeed]) -> std::collections::BTreeMap<&'static str, usize> {
+        let mut out = std::collections::BTreeMap::new();
+        for tr in t {
+            *out.entry(SPECIES[tr.species as usize].name).or_insert(0) += 1;
+        }
+        out
+    }
+    /// A window of several regions, so seams don't dominate.
+    const W: i32 = 4 * REGION_BLOCKS;
+    /// Lattice cells in the `W` × `W` window.
+    const CELLS: usize = ((W / TREE_LATTICE_BLOCKS) * (W / TREE_LATTICE_BLOCKS)) as usize;
+
+    #[test]
+    fn biome_density_table_covers_every_biome_once() {
+        for b in Biome::ALL {
+            assert_eq!(BIOME_TREE_DENSITY.iter().filter(|(x, _)| *x == b).count(), 1, "{b:?}");
+        }
+        assert_eq!(biome_tree_density(None), 1.0, "procedural: unscaled");
+        assert_eq!(biome_tree_density(Some(Biome::BroadleafForest)), 1.0);
+        assert_eq!(biome_tree_density(Some(Biome::Taiga)), 1.0);
+        assert_eq!(biome_tree_density(Some(Biome::TropicalBroadleafForest)), 1.4);
+        assert_eq!(biome_tree_density(Some(Biome::Grassland)), 0.05);
+        assert_eq!(biome_tree_density(Some(Biome::SandDesert)), 0.02);
+        // Every biome some species may grow in has a density, and the
+        // biomes only listed species grow in all have one listing them.
+        for b in NATIVE_ONLY_BIOMES {
+            assert!(SPECIES.iter().any(|s| s.biomes.contains(&b)), "{b:?}");
+        }
+    }
+
+    /// The procedural world (no biome) only ever grows the first three.
+    #[test]
+    fn procedural_world_grows_only_oak_pine_birch() {
+        for (t, rain) in [(8.0, 1.5), (-1.0, 1.0), (14.0, 0.4)] {
+            let h = Stub(Habitat { temperature_c: t, rain, moisture: rain, ..GOOD });
+            let trees = trees_in(-W, -W, W, W, 4, &h, &land);
+            assert!(!trees.is_empty());
+            assert!(trees.iter().all(|t| t.species < 3), "{:?}", census(&trees));
+        }
+    }
+
+    #[test]
+    fn taiga_grows_spruce_not_oak() {
+        let taiga = Habitat { temperature_c: -1.0, rain: 1.0, moisture: 1.4, biome: Some(Biome::Taiga), ..GOOD };
+        let trees = trees_in(0, 0, W, W, 11, &Stub(taiga), &land);
+        let c = census(&trees);
+        assert_eq!(c.get("oak"), None, "{c:?}");
+        let spruce = c.get("spruce").copied().unwrap_or(0);
+        assert!(spruce > 0 && spruce >= c.get("pine").copied().unwrap_or(0), "spruce leads: {c:?}");
+        assert!(trees.iter().all(|t| ["spruce", "pine", "birch"].contains(&SPECIES[t.species as usize].name)), "{c:?}");
+        // The same climate with no biome (procedural) grows no spruce.
+        let procedural = Habitat { biome: None, ..taiga };
+        assert!(trees_in(0, 0, W, W, 11, &Stub(procedural), &land).iter().all(|t| t.species != species("spruce")));
+    }
+
+    #[test]
+    fn savanna_grows_scattered_acacia() {
+        let savanna = Habitat { temperature_c: 26.0, rain: 0.6, moisture: 0.8, biome: Some(Biome::Savanna), ..GOOD };
+        let trees = trees_in(0, 0, W, W, 12, &Stub(savanna), &land);
+        let c = census(&trees);
+        assert!(trees.iter().all(|t| t.species == species("acacia")), "{c:?}");
+        // Scattered: a few % of the lattice cells, far below a forest's.
+        assert!(!trees.is_empty() && trees.len() * 10 < CELLS, "{} trees in {CELLS} cells", trees.len());
+        let forest = Habitat { biome: Some(Biome::BroadleafForest), ..GOOD };
+        let n_forest = trees_in(0, 0, W, W, 12, &Stub(forest), &land).len();
+        assert!(trees.len() * 4 < n_forest, "savanna {} vs forest {n_forest}", trees.len());
+    }
+
+    #[test]
+    fn hot_desert_grows_sparse_cactus_only() {
+        let desert = Habitat { temperature_c: 28.0, rain: 0.1, moisture: 0.15, biome: Some(Biome::SandDesert), ..GOOD };
+        let trees = trees_in(-W, -W, W, W, 13, &Stub(desert), &land);
+        let c = census(&trees);
+        assert!(trees.iter().all(|t| t.species == species("cactus")), "{c:?}");
+        assert!(!trees.is_empty() && trees.len() * 25 < 4 * CELLS, "{} cacti in {} cells", trees.len(), 4 * CELLS);
+        // A temperate tree's climate in the desert still grows only cactus.
+        let lush = Habitat { biome: Some(Biome::SandDesert), ..GOOD };
+        assert!(trees_in(-W, -W, W, W, 13, &Stub(lush), &land).iter().all(|t| t.species == species("cactus")));
+    }
+
+    #[test]
+    fn jungle_is_denser_than_grassland() {
+        let hot = Habitat { temperature_c: 26.0, rain: 2.0, moisture: 2.5, ..GOOD };
+        let n = |b: Biome| trees_in(0, 0, W, W, 14, &Stub(Habitat { biome: Some(b), ..hot }), &land);
+        let jungle = n(Biome::TropicalBroadleafForest);
+        assert!(jungle.iter().any(|t| t.species == species("jungle")), "{:?}", census(&jungle));
+        assert!(jungle.iter().all(|t| t.species != species("oak")), "{:?}", census(&jungle));
+        assert!(jungle.len() > 10 * n(Biome::Grassland).len().max(1), "{:?}", census(&jungle));
+    }
+
+    #[test]
+    fn palms_grow_on_the_tropical_coast_only() {
+        let coast = Habitat {
+            temperature_c: 27.0,
+            rain: 1.4,
+            moisture: 1.8,
+            salinity: 0.8,
+            biome: Some(Biome::TropicalBroadleafForest),
+            ..GOOD
+        };
+        let trees = trees_in(0, 0, W, W, 15, &Stub(coast), &land);
+        assert!(trees.iter().all(|t| t.species == species("palm")), "{:?}", census(&trees));
+        assert!(!trees.is_empty());
+        let inland = Habitat { salinity: 0.0, ..coast };
+        assert!(trees_in(0, 0, W, W, 15, &Stub(inland), &land).iter().all(|t| t.species != species("palm")));
+    }
+
     #[test]
     fn niche_is_a_trapezoid() {
-        let n = SPECIES[0].temperature_c; // 4, 10, 20, 28
+        let n = SPECIES[0].temperature_c; // 4, 10, 20, 24
         assert_eq!(n.response(3.9), 0.0);
         assert_eq!(n.response(7.0), 0.5);
         assert_eq!(n.response(15.0), 1.0);
-        assert_eq!(n.response(24.0), 0.5);
-        assert_eq!(n.response(28.1), 0.0);
+        assert_eq!(n.response(22.0), 0.5);
+        assert_eq!(n.response(24.1), 0.0);
         assert_eq!(SPECIES[0].slope.response(0.0), 1.0);
     }
 

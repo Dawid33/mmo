@@ -44,7 +44,13 @@ impl Tree {
         let reg = BlockRegistry::from_ron(MANIFEST).unwrap();
         install_block_props(reg.props());
         let id = |part: &str| reg.id_of(&format!("{}_{part}", sp.name)).unwrap();
-        let (log, branch, leaves) = (id("log"), id("branch"), id("leaves"));
+        // A one-block species (cactus) is all its one block, leafless.
+        let (log, branch, leaves) = if sp.single_block {
+            let b = reg.id_of(sp.name).unwrap();
+            (b, b, BlockId::AIR)
+        } else {
+            (id("log"), id("branch"), id("leaves"))
+        };
         let blocks = rasterize(&skeleton(sp, seed, age))
             .into_iter()
             .map(|b| {

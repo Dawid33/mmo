@@ -128,26 +128,37 @@ pub struct SpeciesBlocks {
 /// Tree blocks per species, indexed like `trees::SPECIES`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TreeBlocks {
-    pub species: [SpeciesBlocks; 3],
+    pub species: [SpeciesBlocks; crate::trees::SPECIES.len()],
 }
 
 impl TreeBlocks {
     /// Trees disabled (every block air).
     pub const NONE: TreeBlocks = TreeBlocks {
-        species: [SpeciesBlocks { log: BlockId::AIR, branch: BlockId::AIR, leaves: BlockId::AIR }; 3],
+        species: [SpeciesBlocks { log: BlockId::AIR, branch: BlockId::AIR, leaves: BlockId::AIR };
+            crate::trees::SPECIES.len()],
     };
 
     pub fn enabled(&self) -> bool {
         *self != TreeBlocks::NONE
     }
 
-    /// Resolve `<species>_log` / `_branch` / `_leaves` for every species.
+    /// Resolve `<species>_log` / `_branch` / `_leaves` for every species;
+    /// a `single_block` species (cactus) is its one block `<species>` for
+    /// every part (it has no leaves).
     pub fn from_names(resolve: impl Fn(&str) -> BlockId) -> TreeBlocks {
         TreeBlocks {
-            species: crate::trees::SPECIES.map(|s| SpeciesBlocks {
-                log: resolve(&format!("{}_log", s.name)),
-                branch: resolve(&format!("{}_branch", s.name)),
-                leaves: resolve(&format!("{}_leaves", s.name)),
+            species: crate::trees::SPECIES.map(|s| {
+                if s.single_block {
+                    // Leafless: `leaves` is never placed; the block itself
+                    // (not air) keeps "a species' blocks" free of air.
+                    let b = resolve(s.name);
+                    return SpeciesBlocks { log: b, branch: b, leaves: b };
+                }
+                SpeciesBlocks {
+                    log: resolve(&format!("{}_log", s.name)),
+                    branch: resolve(&format!("{}_branch", s.name)),
+                    leaves: resolve(&format!("{}_leaves", s.name)),
+                }
             }),
         }
     }

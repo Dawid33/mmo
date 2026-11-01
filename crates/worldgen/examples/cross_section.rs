@@ -129,6 +129,8 @@ fn main() {
             [128, 128, 128]
         } else if let Some(rgb) = biome_colour(&mats.biome, id) {
             rgb
+        } else if let Some(rgb) = tree_colour(&mats.trees, id) {
+            rgb
         } else {
             [255, 0, 255]
         }
@@ -220,4 +222,17 @@ fn region_biomes(w: &worldgen::forged::ForgedWorld, coords: RegionCoords, n: usi
     let mut v: Vec<_> = count.into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));
     v.iter().map(|(name, k)| format!("{name} {:.0}%", 100.0 * *k as f64 / total as f64)).collect::<Vec<_>>().join(", ")
+}
+
+/// Tree blocks: wood brown, leaves green; a one-block (leafless) species
+/// such as the cactus is its own green.
+fn tree_colour(trees: &worldgen::material::TreeBlocks, id: BlockId) -> Option<[u8; 3]> {
+    let s = trees.species.iter().find(|s| [s.log, s.branch, s.leaves].contains(&id))?;
+    Some(if s.log == s.leaves {
+        [70, 130, 60]
+    } else if id == s.leaves {
+        [40, 104, 44]
+    } else {
+        [104, 74, 46]
+    })
 }

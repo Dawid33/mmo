@@ -36,6 +36,13 @@ fn manifest_tree_blocks_parse() {
             assert!(!props.is_cutout(id(&format!("{sp}_{part}"))));
         }
     }
+    // Trunks: every `_log`, and the one-block cactus; never branches or leaves.
+    for sp in ["oak", "pine", "birch", "spruce", "acacia", "palm", "jungle"] {
+        assert!(props.is_trunk(id(&format!("{sp}_log"))), "{sp}");
+        assert!(!props.is_trunk(id(&format!("{sp}_branch"))) && !props.is_trunk(id(&format!("{sp}_leaves"))), "{sp}");
+    }
+    assert!(props.is_trunk(id("cactus")) && props.is_solid(id("cactus")));
+    assert!(!props.is_trunk(id("stone")));
     assert!(props.is_solid(id("stone")) && !props.is_cutout(id("stone")));
     assert!(props.is_solid(BlockId(9999)) && !props.is_cutout(BlockId(9999)), "unknown = solid, opaque");
     assert_eq!(props, BlockRegistry::from_ron(MANIFEST).unwrap().props(), "equal manifests, equal props");

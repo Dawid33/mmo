@@ -477,7 +477,7 @@ cross-section *args:
 
 # Front / side / top orthographic PNGs of one generated tree (one pixel per
 # voxel, coloured by part) into target/tree-view/. Flags: --species
-# oak|pine|birch --seed N --age N (0..=100) --out <path stem> --scale N; --grid
+# oak|pine|birch|spruce|acacia|palm|jungle|cactus --seed N --age N (0..=100) --out <path stem> --scale N; --grid
 # writes 3×3 sheets (front + top) of seeds N..N+8 instead; --time N prints the
 # skeleton + rasterise cost per tree over N seeds.
 tree-view *args:

@@ -77,6 +77,11 @@ impl std::fmt::Display for RegistryError {
 
 impl std::error::Error for RegistryError {}
 
+/// Tree species made of one block named after the species, not
+/// `<species>_log` / `_branch` / `_leaves` (worldgen's `Species::single_block`):
+/// their limb-0 blocks are trunk wood (`BlockProps::is_trunk`).
+pub const SINGLE_BLOCK_TREES: &[&str] = &["cactus"];
+
 /// Parsed, validated registry. Indexed by ascending `BlockId`.
 #[derive(Debug, Clone, Default)]
 pub struct BlockRegistry {
@@ -128,8 +133,9 @@ impl BlockRegistry {
             if def.collider == crate::ColliderScale::Half {
                 p.half_collider.insert(id.0);
             }
-            // Tree trunks are named `<species>_log` (worldgen's `TreeBlocks`).
-            if def.name.ends_with("_log") {
+            // Tree trunks are named `<species>_log` (worldgen's `TreeBlocks`),
+            // or are a one-block species' block (a cactus is all trunk wood).
+            if def.name.ends_with("_log") || SINGLE_BLOCK_TREES.contains(&def.name.as_str()) {
                 p.trunk.insert(id.0);
             }
         }

@@ -628,6 +628,49 @@ fn two_biome_world() -> ForgedWorld {
     ForgedWorld::new(a.with_regions())
 }
 
+/// The cactus block of `m` (the `single_block` species' wood).
+fn cactus(m: &worldgen::material::Materials) -> BlockId {
+    let i = worldgen::trees::SPECIES.iter().position(|s| s.name == "cactus").unwrap();
+    m.trees.species[i].log
+}
+
+/// The hot sand desert grows scattered cacti and no other tree (no leaves,
+/// no `_log` of another species): `NATIVE_ONLY_BIOMES` + the 0.02 density.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn desert_grows_only_scattered_cacti() {
+    let world = two_biome_world();
+    let m = biome_mats();
+    let cactus = cactus(&m);
+    let other_tree: std::collections::BTreeSet<BlockId> = m
+        .trees
+        .species
+        .iter()
+        .flat_map(|s| [s.log, s.branch, s.leaves])
+        .filter(|&b| b != cactus && b != BlockId::AIR)
+        .collect();
+    let (mut ids, mut regions) = (std::collections::BTreeSet::new(), 0);
+    for (ax, az) in [(100.0, 300.0), (100.0, 600.0), (300.0, 300.0), (300.0, 600.0), (200.0, 450.0), (100.0, 800.0)] {
+        regions += 1;
+        for (_, col) in worldgen::generate_region_forged(&world, region_at(ax, az), m) {
+            for (_, sub) in (col.base_sub_y()..).zip(col.sub_chunks()) {
+                let game::SubChunk::Dense(chunk) = sub else { continue };
+                for (_, b) in chunk.blocks.iter() {
+                    assert!(!other_tree.contains(&b.id), "a {:?} in the desert", b.id);
+                    if b.id == cactus {
+                        assert_ne!(b.tree_id(), 0, "cactus blocks carry their tree");
+                        ids.insert(b.tree_id());
+                    }
+                }
+            }
+        }
+    }
+    let per_region = ids.len() as f64 / regions as f64;
+    println!("{} cacti in {regions} desert regions", ids.len());
+    // A 64-block region has 64 lattice cells: about one cactus each.
+    assert!(!ids.is_empty() && per_region < 4.0, "{per_region} cacti per region");
+}
+
 /// Region (test size, 64 blocks) holding artifact point `(ax, az)`.
 fn region_at(ax: f64, az: f64) -> RegionCoords {
     let (x, z) = engine(ax, az);
@@ -665,7 +708,9 @@ fn desert_region_surface_is_sand() {
                 for d in 0..6 {
                     assert_eq!(block_at_y(col, lx, lz, s - d), m.sand, "desert sand {d} below the surface {s}");
                 }
-                assert_eq!(block_at_y(col, lx, lz, s + 1), BlockId::AIR);
+                // Air, or a cactus (the desert's only tree).
+                let above = block_at_y(col, lx, lz, s + 1);
+                assert!(above == BlockId::AIR || above == cactus(&m), "{above:?} on the sand");
                 checked += 1;
             }
         }
