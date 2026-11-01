@@ -8,8 +8,9 @@ use std::collections::VecDeque;
 use crate::forge::hydrology::{Analysis, LAKE_MIN_DEPTH_M};
 use crate::forge::world::{hash01, smoothstep, World};
 
-/// Height band for a spawn site (m above sea).
-const SPAWN_HEIGHT_M: (f64, f64) = (3.0, 45.0);
+/// Height band for a spawn site (m above sea): the coastal lowlands below
+/// kilometre-plus ranges reach a hundred metres and more.
+const SPAWN_HEIGHT_M: (f64, f64) = (3.0, 120.0);
 /// The ground within this many cells must be this flat (max - min, m).
 const FLAT_RADIUS_CELLS: i64 = 3;
 const FLAT_MAX_RELIEF_M: f64 = 4.0;
@@ -41,8 +42,9 @@ fn distance_field(w: &World, source: impl Fn(usize) -> bool) -> Vec<f64> {
     dist
 }
 
-/// Best spawn site in world meters, or the highest-scoring fallback if nothing
-/// meets every criterion.
+/// Best spawn site in world meters. If no site meets every criterion (a
+/// rugged world: no patch flat enough in the height band), the flattest dry
+/// patch of land at least `SPAWN_HEIGHT_M.0` above the sea instead.
 pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
     let n = w.n as i64;
     let peak = w.h.iter().copied().fold(f64::MIN, f64::max);
@@ -51,10 +53,12 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
     let to_mountain = distance_field(w, |i| w.h[i] >= MOUNTAIN_SHARE_OF_PEAK * peak);
 
     let mut best = (f64::MIN, 0usize);
+    // Flattest dry patch (its relief, cell) for when no site qualifies.
+    let mut flattest = (f64::MAX, None);
     for z in FLAT_RADIUS_CELLS..n - FLAT_RADIUS_CELLS {
         for x in FLAT_RADIUS_CELLS..n - FLAT_RADIUS_CELLS {
             let i = (z * n + x) as usize;
-            if w.ocean[i] || !(SPAWN_HEIGHT_M.0..=SPAWN_HEIGHT_M.1).contains(&w.h[i]) {
+            if w.ocean[i] || w.h[i] < SPAWN_HEIGHT_M.0 {
                 continue;
             }
             let (mut lo, mut hi, mut dry) = (f64::MAX, f64::MIN, true);
@@ -66,7 +70,13 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
                     dry &= !w.ocean[j] && a.lake_depth[j] < LAKE_MIN_DEPTH_M && a.q[j] < RIVER_DISCHARGE_M2;
                 }
             }
-            if !dry || hi - lo > FLAT_MAX_RELIEF_M {
+            if !dry {
+                continue;
+            }
+            if hi - lo < flattest.0 {
+                flattest = (hi - lo, Some(i));
+            }
+            if hi - lo > FLAT_MAX_RELIEF_M || w.h[i] > SPAWN_HEIGHT_M.1 {
                 continue;
             }
             // Near, not in: a river 60-300 m away, the sea within ~1.5 km,
@@ -80,6 +90,8 @@ pub fn pick(w: &World, a: &Analysis, seed: u64) -> (f64, f64) {
             }
         }
     }
-    assert!(best.0 > f64::MIN, "no flat dry land for a spawn site");
-    w.center(best.1)
+    if best.0 > f64::MIN {
+        return w.center(best.1);
+    }
+    w.center(flattest.1.expect("no dry land for a spawn site"))
 }

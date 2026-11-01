@@ -37,9 +37,11 @@ const BASALT: u8 = 4;
 const GRANITE: u8 = 5;
 
 /// The column covers this stratigraphic range (m). Surface rock starts near
-/// s = 0 +- bedding relief and ends as deep as the total uplift (~800 m).
+/// s = 0 +- bedding relief and goes as deep as the erosion exhumes: the
+/// valleys of a kilometre-plus range cut ~4 km below where they started. The
+/// granite basement continues from `basement_top_s` down to the bottom.
 const COLUMN_TOP_S: f64 = 700.0;
-const COLUMN_BOTTOM_S: f64 = -1_800.0;
+pub const COLUMN_BOTTOM_S: f64 = -5_000.0;
 /// Chance that a formation boundary carries a thin basalt sill, and its thickness.
 const SILL_CHANCE: f64 = 0.10;
 const SILL_THICKNESS_M: (f64, f64) = (6.0, 12.0);

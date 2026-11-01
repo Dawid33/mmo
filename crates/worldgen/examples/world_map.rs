@@ -30,9 +30,15 @@ use worldgen::pipeline::{ColumnProfile, SEA_LEVEL, SEA_TOP_BLOCK, TerrainPipelin
 // Topmost solid block / "dry" — the same rules the world map's landing search uses.
 use worldgen::tile_map::{is_dry, lake_color, land_color, sea_color, sun_dir, surface_block};
 
-// The world band the density ramp spans (pipeline.rs RAMP_FROM_Y/RAMP_TO_Y).
-const HEIGHT_MIN_M: f64 = -64.0;
-const HEIGHT_MAX_M: f64 = 320.0;
+// The height band of the tools (world metres): a forged world's deepest sea
+// floor to its tallest peak (`max_peak_m` tops out at 3,500 m above the sea)
+// plus headroom. The procedural density ramp (pipeline.rs RAMP_FROM_Y /
+// RAMP_TO_Y) sits well inside it. Shared with forge_proto/render.rs and
+// seed_scan.rs.
+const HEIGHT_MIN_M: f64 = -1_000.0;
+const HEIGHT_MAX_M: f64 = 3_600.0;
+/// Bisection steps for the surface: 4,600 m / 2^20 is ~4 mm.
+const SURFACE_BISECTIONS: usize = 20;
 
 const DEFAULT_SPAN_M: f64 = 8192.0;
 const DEFAULT_SIZE_PX: usize = 1024;
@@ -46,7 +52,7 @@ const CORE_SHARE: f64 = 0.8;
 
 /// Continuous surface height in meters: the zero crossing of the column's
 /// density. Density falls monotonically with y (the factor spline is strictly
-/// positive), so bisection finds it; 16 halvings of the 384 m band is ~6 mm.
+/// positive), so bisection finds it (`SURFACE_BISECTIONS` halvings of the band).
 fn surface_m(prof: &ColumnProfile) -> f64 {
     if prof.density_at(HEIGHT_MIN_M) <= 0.0 {
         return HEIGHT_MIN_M;
@@ -55,7 +61,7 @@ fn surface_m(prof: &ColumnProfile) -> f64 {
         return HEIGHT_MAX_M;
     }
     let (mut lo, mut hi) = (HEIGHT_MIN_M, HEIGHT_MAX_M);
-    for _ in 0..16 {
+    for _ in 0..SURFACE_BISECTIONS {
         let mid = 0.5 * (lo + hi);
         if prof.density_at(mid) > 0.0 {
             lo = mid;

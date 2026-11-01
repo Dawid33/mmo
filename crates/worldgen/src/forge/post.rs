@@ -26,10 +26,11 @@ const LAKE_SITE_MIN_HEIGHT_M: f64 = 6.0;
 const LAKE_BASIN_MIN_RADIUS_M: f64 = 140.0;
 const LAKE_BASIN_MIN_DEPTH_M: f64 = 5.0;
 
-// `Knobs::max_peak_m`: the tallest peak the engine's height band comfortably
-// holds (the band ends at +256 m and the surface needs headroom for detail).
+// `Knobs::max_peak_m`: the tallest peak allowed (default 2,800 m, at most
+// 3,500 m: forged terrain is generated up to block 4096, and the map colour
+// ramps and tool height scales end at 3,500 / 3,600 m).
 
-/// Scale land heights down if the simulated relief overshoots the engine band.
+/// Scale land heights down if the simulated relief overshoots `max_peak_m`.
 /// Simulated relief is only predictable to ~30% (it depends on which rock the
 /// ranges happen to exhume, and on grid resolution), so the forge FITS it
 /// rather than hoping. A uniform vertical scale keeps every drainage path,

@@ -116,8 +116,9 @@ pub fn minimap_pointer(
 }
 
 /// Colour of one map column (port of `worldgen/examples/world_map.rs`
-/// `base_color`): water darkens with depth, sand at the shore, grass tinted
-/// by elevation above the sea. Heights in metres; NaN = not loaded.
+/// `base_color`): water darkens with depth, sand at the shore, land by the
+/// shared elevation ramp `worldgen::tile_map::height_color`. Heights in
+/// metres; NaN = not loaded.
 pub fn column_color(surface_m: f32, ground_m: f32) -> [u8; 4] {
     if surface_m.is_nan() {
         return [0, 0, 0, 0];
@@ -137,17 +138,7 @@ pub fn column_color(surface_m: f32, ground_m: f32) -> [u8; 4] {
     } else if ground_m <= sea + 1.0 {
         [222.0, 205.0, 150.0]
     } else {
-        ramp(
-            &[
-                (0.0, [96.0, 168.0, 84.0]),
-                (30.0, [70.0, 140.0, 66.0]),
-                (80.0, [120.0, 130.0, 80.0]),
-                (140.0, [140.0, 120.0, 100.0]),
-                (200.0, [170.0, 165.0, 160.0]),
-                (250.0, [245.0, 245.0, 250.0]),
-            ],
-            ground_m - sea,
-        )
+        worldgen::tile_map::height_color(f64::from(ground_m - sea)).map(|c| c as f32)
     };
     [rgb[0] as u8, rgb[1] as u8, rgb[2] as u8, 255]
 }

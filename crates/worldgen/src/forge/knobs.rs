@@ -55,18 +55,18 @@ knobs! {
         ocean_margin_start: 0.84, [0.55, 0.95], "Ocean margin", "Land is forced under the sea beyond this share of the half-width; guarantees ocean all round.";
     }
     "Uplift" {
-        uplift: 4.6e-4, [5.0e-5, 1.5e-3], "Uplift rate (m/yr)", "Peak rock uplift in the mountain belts. Relief scales with uplift / erodibility.";
-        lowland_uplift_share: 0.10, [0.0, 0.6], "Lowland uplift share", "Uplift outside the belts as a share of the peak rate: rolling lowlands vs flat ones.";
+        uplift: 5.0e-3, [5.0e-5, 6.0e-3], "Uplift rate (m/yr)", "Peak rock uplift in the mountain belts. Relief scales with uplift / erodibility: the default builds 2-2.5 km ranges on a 16 km island.";
+        lowland_uplift_share: 0.04, [0.0, 0.6], "Lowland uplift share", "Uplift outside the belts as a share of the peak rate: rolling lowlands vs flat ones.";
         belt_width: 0.22, [0.04, 0.7], "Belt width", "How far from the belt noise's zero contour the mountains reach: ribbons vs broad ranges.";
         belt_scale: 1.0, [0.3, 3.0], "Belt frequency", "Spatial frequency of the belt noise (1 = 4 km wavelength): few long ranges vs many short ones.";
         inland_gate: 0.30, [0.08, 0.7], "Mountains inland by", "Landness by which belts reach full strength: keeps ranges off the coast.";
     }
     "Erosion" {
         erodibility: 2.5e-5, [4.0e-6, 1.2e-4], "Erodibility K", "Stream-power erodibility of a rock of hardness 1. Higher = lower, more dissected land.";
-        diffusivity: 0.012, [0.0, 0.06], "Hillslope diffusion (m²/yr)", "Rounds ridges and valley walls. 0 = knife edges.";
+        diffusivity: 0.05, [0.0, 0.06], "Hillslope diffusion (m²/yr)", "Rounds ridges and valley walls. 0 = knife edges.";
         hillslope_area_m2: 6_000.0, [500.0, 40_000.0], "Channel head area (m²)", "Drainage area below which a cell is hillslope, not channel: spacing of the finest valleys.";
         depression_fill: 0.15, [0.0, 1.0], "Depression silting", "Share of a depression's depth that sediment fills per iteration.";
-        iters: 500.0, [50.0, 1000.0], "Iterations", "Time steps. Relief approaches steady state around 450 at the default rates.";
+        iters: 200.0, [50.0, 1000.0], "Iterations", "Time steps of the coarsest level. At the default rates relief is ~80% of steady state by 200; the belts exhume ~1.7 km of rock per 100, and past ~250 the valleys cut below the geology column's 5 km.";
         dt_years: 2_500.0, [500.0, 10_000.0], "Years per iteration", "The incision step is implicit, so this is limited by routing refresh, not stability.";
     }
     "Schedule" {
@@ -79,7 +79,7 @@ knobs! {
         fold_amplitude_m: 45.0, [0.0, 160.0], "Fold amplitude (m)", "Height of the 2 km folds in the strata.";
         formation_min_m: 18.0, [4.0, 80.0], "Thinnest formation (m)", "Sedimentary formations are between this and the thickest.";
         formation_max_m: 64.0, [10.0, 200.0], "Thickest formation (m)", "Sedimentary formations are between the thinnest and this.";
-        basement_top_s: -520.0, [-1_500.0, -80.0], "Basement depth (m)", "Stratigraphic level of the crystalline basement: shallower = more granite in the range cores.";
+        basement_top_s: -1_500.0, [-4_500.0, -80.0], "Basement depth (m)", "Stratigraphic level of the crystalline basement: shallower = more granite in the range cores.";
         hard_sandstone: 1.0, [0.2, 3.0], "Sandstone erodibility", "Erodibility multiplier; below 1 resists (steeper, higher), above 1 weathers away.";
         hard_shale: 1.7, [0.2, 3.0], "Shale erodibility", "Erodibility multiplier; shale is the soft one that floors valleys.";
         hard_limestone: 0.75, [0.2, 3.0], "Limestone erodibility", "Erodibility multiplier.";
@@ -96,7 +96,7 @@ knobs! {
         rain_max: 3.0, [1.0, 6.0], "Wettest rain", "Upper bound of rain relative to the land mean.";
     }
     "Shaping" {
-        max_peak_m: 236.0, [80.0, 256.0], "Tallest peak allowed (m)", "Land is scaled down if the simulated relief overshoots this (engine band ends at +256 m).";
+        max_peak_m: 2_800.0, [80.0, 3_500.0], "Tallest peak allowed (m)", "Land is scaled down if the simulated relief overshoots this (forged terrain is generated up to block 4096; the map ramps end at 3,500 m).";
         floodplain_m_per_sqrt_km2: 28.0, [0.0, 90.0], "Valley floor width", "Half-width of the planed valley floor per sqrt(km²) of discharge.";
         floodplain_max_m: 180.0, [0.0, 500.0], "Widest valley floor (m)", "Cap on the valley-floor half-width.";
         lake_basins: 9.0, [0.0, 40.0], "Lake basins", "How many overdeepened basins are excavated on valley floors.";

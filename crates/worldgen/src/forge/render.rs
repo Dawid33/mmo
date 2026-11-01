@@ -124,7 +124,11 @@ fn sea_color(depth: f64) -> [f64; 3] {
     )
 }
 
-/// Hillshade factor for a land cell: lit from the north-west, relief x2.
+/// Vertical exaggeration of the preview hillshade. True slopes: kilometre
+/// relief shaded at x2 turns every lee flank black and hides the valleys.
+const HILLSHADE_RELIEF: f64 = 1.0;
+
+/// Hillshade factor for a land cell: lit from the north-west, relief x`HILLSHADE_RELIEF`.
 fn shade(w: &World, x: usize, z: usize) -> f64 {
     let n = w.n;
     let sun = [-0.5f64, std::f64::consts::FRAC_1_SQRT_2, -0.5];
@@ -133,7 +137,7 @@ fn shade(w: &World, x: usize, z: usize) -> f64 {
     let (zu, zd) = (z.saturating_sub(1), (z + 1).min(n - 1));
     let dhdx = (at(xr, z) - at(xl, z)) / ((xr - xl) as f64 * w.dx);
     let dhdz = (at(x, zd) - at(x, zu)) / ((zd - zu) as f64 * w.dx);
-    let nrm = [-dhdx * 2.0, 1.0, -dhdz * 2.0];
+    let nrm = [-dhdx * HILLSHADE_RELIEF, 1.0, -dhdz * HILLSHADE_RELIEF];
     let len = (nrm[0] * nrm[0] + 1.0 + nrm[2] * nrm[2]).sqrt();
     let lambert = (nrm[0] * sun[0] + sun[1] + nrm[2] * sun[2]) / len;
     (0.35 + 0.65 * lambert.max(0.0) / sun[1]).min(1.35)
@@ -154,21 +158,14 @@ fn shaded(w: &World, land_color: impl Fn(usize) -> [f64; 3]) -> Image {
     img
 }
 
+/// The shared map ramp (`tile_map::height_color`); the forge keeps its own
+/// shore on purpose — sand below 1.5 m of raw height, since the forge has no
+/// block grid to round to.
 fn relief_color(h: f64) -> [f64; 3] {
     if h < 1.5 {
         return [222.0, 205.0, 150.0];
     }
-    ramp(
-        &[
-            (0.0, [96.0, 168.0, 84.0]),
-            (30.0, [70.0, 140.0, 66.0]),
-            (80.0, [120.0, 130.0, 80.0]),
-            (140.0, [140.0, 120.0, 100.0]),
-            (200.0, [170.0, 165.0, 160.0]),
-            (250.0, [245.0, 245.0, 250.0]),
-        ],
-        h,
-    )
+    crate::tile_map::height_color(h)
 }
 
 /// Lakes as cells, rivers as anti-aliased polylines sized by Strahler order.

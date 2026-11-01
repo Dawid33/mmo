@@ -33,19 +33,19 @@ pub const PRESETS: &[Preset] = &[
         name: "Highlands",
         description: "Fast uplift and hard rock raise broad, steep ranges cut by deep valleys.",
         overrides: &[
-            ("uplift", 8.0e-4),
+            ("uplift", 6.0e-3),
             ("erodibility", 1.6e-5),
             ("belt_width", 0.40),
-            ("lowland_uplift_share", 0.25),
+            ("lowland_uplift_share", 0.10),
         ],
     },
     Preset {
         name: "Lowlands",
         description: "Slow uplift and soft rock leave rolling plains with wide floodplains and many lakes.",
         overrides: &[
-            ("uplift", 1.8e-4),
+            ("uplift", 2.0e-3),
             ("erodibility", 4.0e-5),
-            ("lowland_uplift_share", 0.05),
+            ("lowland_uplift_share", 0.02),
             ("lake_basins", 24.0),
             ("floodplain_m_per_sqrt_km2", 45.0),
         ],

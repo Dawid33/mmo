@@ -214,11 +214,11 @@ pub const OCEAN_SEA_FRACTION: f32 = 0.95;
 /// Share of a tile under sea above which a (non-ocean) tile is coast.
 pub const COAST_SEA_FRACTION: f32 = 0.05;
 /// `relief_m` from which a land tile is hills.
-pub const HILLS_RELIEF_M: f32 = 25.0;
+pub const HILLS_RELIEF_M: f32 = 60.0;
 /// `relief_m` from which a land tile is mountains.
-pub const MOUNTAINS_RELIEF_M: f32 = 80.0;
+pub const MOUNTAINS_RELIEF_M: f32 = 250.0;
 /// `ground_max_m` from which a land tile is mountains whatever its relief.
-pub const MOUNTAINS_MIN_M: f32 = 150.0;
+pub const MOUNTAINS_MIN_M: f32 = 1200.0;
 
 /// What a tile looks like at a glance; provisional, from thresholds on the summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,20 +295,40 @@ pub fn lake_color(depth_m: f64) -> [f64; 3] {
 }
 
 /// Land colour (RGB 0..255) at `height_m` above sea level. Follows
-/// `Materials::material_at`: sand through one block above the sea top, grass
-/// above, tinted by elevation so height stays readable.
+/// `Materials::material_at`: sand through one block above the sea top, then
+/// the elevation ramp `height_color`.
 pub fn land_color(height_m: f64) -> [f64; 3] {
     if surface_block(SEA_LEVEL + height_m) <= SEA_TOP_BLOCK + 1 {
         return [222.0, 205.0, 150.0]; // sand
     }
+    height_color(height_m)
+}
+
+/// Height (m above sea) from which ground is drawn snow-capped on maps.
+pub const SNOW_LINE_M: f64 = 2_200.0;
+/// Height over which the colour blends from bare rock to snow above `SNOW_LINE_M`.
+pub const SNOW_BLEND_M: f64 = 150.0;
+/// Top of the elevation ramp (m above sea): the forge's highest `max_peak_m`.
+pub const HEIGHT_RAMP_TOP_M: f64 = 3_500.0;
+
+/// The one elevation ramp of every height map — the minimap, the world map and
+/// the forge previews (RGB 0..255 at `height_m` above sea level, no sand: the
+/// callers draw their shore their own way). Lowland greens through the first
+/// few hundred metres (where most land and all the detail is), olive and brown
+/// foothills, grey rock towards `SNOW_LINE_M`, then a snow cap up to
+/// `HEIGHT_RAMP_TOP_M`.
+pub fn height_color(height_m: f64) -> [f64; 3] {
     ramp(
         &[
             (0.0, [96.0, 168.0, 84.0]),
-            (30.0, [70.0, 140.0, 66.0]),
-            (80.0, [120.0, 130.0, 80.0]),
-            (140.0, [140.0, 120.0, 100.0]),
-            (200.0, [170.0, 165.0, 160.0]),
-            (250.0, [245.0, 245.0, 250.0]),
+            (60.0, [70.0, 140.0, 66.0]),
+            (250.0, [104.0, 136.0, 72.0]),
+            (600.0, [128.0, 126.0, 84.0]),
+            (1_100.0, [140.0, 116.0, 98.0]),
+            (1_700.0, [138.0, 130.0, 124.0]),
+            (SNOW_LINE_M, [168.0, 164.0, 160.0]),
+            (SNOW_LINE_M + SNOW_BLEND_M, [236.0, 238.0, 244.0]),
+            (HEIGHT_RAMP_TOP_M, [250.0, 250.0, 255.0]),
         ],
         height_m,
     )

@@ -153,6 +153,16 @@ fn main() {
     let forged = forge(&p.forge);
     let (w, a) = (&forged.world, &forged.analysis);
     hydrology::print_report("forged world", w.dx, &a.stats);
+    // The deepest stratigraphic level the surface cuts: what the geology
+    // column must reach (geology::COLUMN_BOTTOM_S).
+    let deepest_s = (0..w.n * w.n)
+        .filter(|&i| !w.ocean[i])
+        .map(|i| w.h[i] - w.uplifted[i] - forged.geology.bedding[i])
+        .fold(f64::MAX, f64::min);
+    println!(
+        "simulated peak {:.0} m (height fit x{:.3}); deepest exhumed level s = {deepest_s:.0} m",
+        forged.simulated_peak_m, forged.height_fit
+    );
     println!("world score {:.3}:", search::score(&a.stats, w.n * w.n));
     for (name, value) in search::criteria(&a.stats, w.n * w.n) {
         println!("  {name:<13} {value:.2}");

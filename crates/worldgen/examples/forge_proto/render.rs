@@ -5,10 +5,11 @@ use image::{ImageBuffer, Luma};
 use worldgen::forge::render::{encode_png, render, PreviewLayer};
 use worldgen::forge::{Forged, World};
 
-// Engine frame, for the 16-bit heightmap (same mapping as examples/world_map.rs).
+// Engine frame, for the 16-bit heightmap (same mapping as examples/world_map.rs:
+// -1,000..+3,600 m, which holds the tallest `max_peak_m` above the sea).
 const SEA_LEVEL_Y: f64 = 64.0;
-const HEIGHT_MIN_Y: f64 = -64.0;
-const HEIGHT_MAX_Y: f64 = 320.0;
+const HEIGHT_MIN_Y: f64 = -1_000.0;
+const HEIGHT_MAX_Y: f64 = 3_600.0;
 
 pub fn png_bytes(forged: &Forged, layer: PreviewLayer) -> Vec<u8> {
     encode_png(&render(forged, layer))

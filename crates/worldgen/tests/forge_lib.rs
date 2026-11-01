@@ -8,7 +8,8 @@ use worldgen::forged::WorldArtifact;
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn forge_small_world_round_trips() {
-    // Seed 4: most seeds drown a 2 km world's every flat dry site (spawn::pick panics).
+    // Seed 4: a 2 km world with dry land for a spawn site (kilometre relief
+    // leaves no flat one: spawn::pick falls back to the flattest dry patch).
     let p = ForgeParams { size_m: 2048.0, cell_m: 64.0, seed: 4, ..ForgeParams::default() };
     let artifact = forge(&p).artifact(&p);
     let n = (p.size_m / p.cell_m).round() as usize;
@@ -55,4 +56,20 @@ fn forge_quality_matches_baseline() {
     if let Err(e) = within(&q, &baseline, &QualityTolerance::DEFAULT) {
         panic!("{e}");
     }
+}
+
+/// The default knobs build kilometre-plus relief (spec §3): a 16 km / 32 m
+/// forge of the default layout reaches a 1.5 km peak, and the geology column
+/// is deep enough for every level the erosion exhumes (`rock_at_s` debug-
+/// asserts it, and test builds keep debug assertions).
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn default_forge_reaches_kilometre_peaks() {
+    use worldgen::forge::quality::quality;
+
+    let p = ForgeParams { size_m: 16_000.0, cell_m: 32.0, ..ForgeParams::default() };
+    let forged = forge(&p);
+    let q = quality(&forged);
+    assert!(q.max_peak_m >= 1_500.0, "tallest peak {:.0} m, want >= 1,500 m", q.max_peak_m);
+    assert!(q.max_peak_m <= p.knobs.max_peak_m + 1.0e-6, "peak {:.0} m over the cap", q.max_peak_m);
 }

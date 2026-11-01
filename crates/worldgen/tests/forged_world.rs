@@ -294,7 +294,7 @@ fn row_delta_inverts() {
 #[test]
 #[ignore = "slow: >100ms — run via just test-full"]
 fn artifact_v3_round_trip_preserves_samples() {
-    // Seed 4: most seeds drown a small world's every flat dry site (spawn::pick panics).
+    // Seed 4: a small world with dry land for a spawn site.
     let p = worldgen::forge::ForgeParams { size_m: 4096.0, cell_m: 64.0, seed: 4, ..Default::default() };
     let artifact = worldgen::forge::forge(&p).artifact(&p);
     let before = ForgedWorld::new(artifact.clone());

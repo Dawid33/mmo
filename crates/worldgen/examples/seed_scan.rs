@@ -13,16 +13,34 @@ const VIEW_STEP_M: f64 = 100.0;
 /// A peak this far above the sea must stand inside that window.
 const MIN_PEAK_ABOVE_SEA: i32 = 110;
 
+/// The height band scanned for the surface (blocks), shared with the other
+/// height tools (examples/world_map.rs, forge_proto/render.rs).
+const HEIGHT_MIN_Y: i32 = -1_000;
+const HEIGHT_MAX_Y: i32 = 3_600;
+
+/// Topmost solid block of the column (`HEIGHT_MIN_Y - 1` if none). Density
+/// falls monotonically with y, so an integer bisection finds the same block a
+/// top-down scan would, in ~13 probes instead of thousands.
 fn surface_y(p: &TerrainPipeline, wx: f64, wz: f64) -> i32 {
     let prof = p.column(wx, wz);
-    let mut by = 320;
-    while by >= -64 {
-        if prof.density_at(by as f64 + 0.5) > 0.0 {
-            return by;
-        }
-        by -= 1;
+    let solid = |by: i32| prof.density_at(by as f64 + 0.5) > 0.0;
+    if !solid(HEIGHT_MIN_Y) {
+        return HEIGHT_MIN_Y - 1;
     }
-    -65
+    if solid(HEIGHT_MAX_Y) {
+        return HEIGHT_MAX_Y;
+    }
+    // Invariant: solid(lo), !solid(hi).
+    let (mut lo, mut hi) = (HEIGHT_MIN_Y, HEIGHT_MAX_Y);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if solid(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 fn main() {
