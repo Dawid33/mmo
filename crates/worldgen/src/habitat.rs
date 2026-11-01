@@ -205,6 +205,10 @@ mod tests {
             lakes: vec![],
             spawn: [8.5, 8.5],
             edges: [crate::forged::EdgeKind::Sea; 4],
+            drainage: vec![50; N * N],
+            volcanism: vec![0; N * N],
+            salinity: vec![0; N * N],
+            volcanoes: vec![],
         })
     }
 

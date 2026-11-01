@@ -79,6 +79,10 @@ pub fn synthetic() -> WorldArtifact {
         lakes: vec![Lake { level: LAKE_LEVEL, area_m2: 36.0 * 256.0, max_depth: 5.0, outlet: [480.0, 200.0], cells: lake_cells }],
         spawn: SPAWN,
         edges: [worldgen::forged::EdgeKind::Sea; 4],
+        drainage: vec![50; N * N],
+        volcanism: vec![0; N * N],
+        salinity: vec![0; N * N],
+        volcanoes: vec![],
     }
 }
 

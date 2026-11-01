@@ -3,6 +3,7 @@
 use crate::forge::knobs::{
     Knobs, LAYOUT_ARC, LAYOUT_ARCHIPELAGO, LAYOUT_CONTINENT, LAYOUT_CONTINENTS, LAYOUT_INLAND, LAYOUT_ONE_ISLAND,
 };
+use crate::forge::fields;
 use crate::forge::par;
 use crate::forge::plates;
 use crate::noise::OctaveNoise;
@@ -166,6 +167,79 @@ impl ContinentalMass {
             }
         }
     }
+}
+
+/// A continental layout's landness at any point: the layout's mass plus the
+/// coast noises (scaled with the world), less the ocean margin along the sea
+/// edges. `World::new` and `volcano_sites` share it.
+struct ContinentalShape {
+    edges: [EdgeKind; 4],
+    mass: ContinentalMass,
+    shape_lo: OctaveNoise,
+    shape_hi: OctaveNoise,
+    half: f64,
+    size_m: f64,
+    scale: f64,
+    coast_noise: (f64, f64),
+    margin: (f64, f64),
+}
+
+impl ContinentalShape {
+    fn new(p: &ForgeParams) -> ContinentalShape {
+        let k = &p.knobs;
+        let edges = edges(p.seed, k);
+        ContinentalShape {
+            edges,
+            mass: ContinentalMass::new(p.seed, k, &edges),
+            // Same noises as the island layouts, sampled at the world's scale.
+            shape_lo: OctaveNoise::new(p.seed ^ 0xF001, -13, vec![1.0, 0.6, 0.3]), // 8 km at the reference size
+            shape_hi: OctaveNoise::new(p.seed ^ 0xF002, -10, vec![1.0, 0.5]), // 1 km
+            half: p.size_m * 0.5,
+            size_m: p.size_m,
+            scale: p.size_m / REFERENCE_SIZE_M,
+            coast_noise: (k.coast_noise_lo, k.coast_noise_hi),
+            margin: (k.ocean_margin_start, (k.ocean_margin_start + OCEAN_MARGIN_RAMP).min(0.99)),
+        }
+    }
+
+    /// (shape, landness) at (mx, mz) m: landness > 0 is land; shape < 0 is
+    /// the sea's own (not the margin's) — shelf and abyss.
+    fn at(&self, mx: f64, mz: f64) -> (f64, f64) {
+        let (rx, rz) = ((mx - self.half) / self.half, (mz - self.half) / self.half);
+        let (sx, sz) = (mx / self.scale, mz / self.scale);
+        let shape = self.mass.at(rx, rz)
+            + self.coast_noise.0 * self.shape_lo.sample2(sx, sz)
+            + self.coast_noise.1 * self.shape_hi.sample2(sx, sz);
+        let prox = edge_proximity(rx, rz);
+        let sea_prox = (0..4).filter(|&e| self.edges[e] == EdgeKind::Sea).map(|e| prox[e]).fold(-1.0, f64::max);
+        (shape, shape - 2.0 * smoothstep(self.margin.0, self.margin.1, sea_prox))
+    }
+
+    /// Distance (m) to the nearest land edge; infinite without one.
+    fn to_land_edge(&self, mx: f64, mz: f64) -> f64 {
+        // In `edges` order.
+        let to_edge = [mz, self.size_m - mx, self.size_m - mz, mx];
+        (0..4).filter(|&e| self.edges[e] == EdgeKind::Land).map(|e| to_edge[e]).fold(f64::INFINITY, f64::min)
+    }
+}
+
+/// The volcano sites of a world (`fields::volcano_sites_on`): continental
+/// layouts only (the island layouts have no plates, and their terrain stays
+/// as it was), on land at least `fields::VOLCANO_MIN_LANDNESS` inland and so
+/// far from any land edge that the cone ends before the edge's belt taper
+/// starts. From the seed and knobs only — not the cell size — so every level
+/// of the erosion schedule raises the same cones, and the world file stores
+/// the same list.
+pub fn volcano_sites(p: &ForgeParams) -> Vec<[f32; 2]> {
+    if !p.knobs.is_continental() {
+        return Vec::new();
+    }
+    let shape = ContinentalShape::new(p);
+    let clearance = LAND_EDGE_TAPER_M.min(LAND_EDGE_TAPER_MAX_SHARE * p.size_m) * (1.0 + LAND_EDGE_TAPER_VARIATION)
+        + fields::VOLCANO_CONE_RADIUS_M;
+    fields::volcano_sites_on(p, &|mx, mz| {
+        shape.at(mx, mz).1 > fields::VOLCANO_MIN_LANDNESS && shape.to_land_edge(mx, mz) >= clearance
+    })
 }
 
 /// The ocean margin ramps from fully open to fully drowned over this share of
@@ -477,22 +551,20 @@ impl World {
     /// Continent / continents / inland: the layout's landness plus coast
     /// noise (wavelengths scaled with the world), an ocean margin along the
     /// sea edges only, and uplift belts along convergent plate boundaries
-    /// (`plates`) tapering to 0 toward the land edges.
+    /// (`plates`) tapering to 0 toward the land edges, plus a cone of uplift
+    /// at each volcano (`volcano_sites`).
     fn new_continental(p: &ForgeParams) -> World {
         let n = (p.size_m / p.cell_m).round() as usize;
-        let (half, k) = (p.size_m * 0.5, &p.knobs);
-        // Same noises as the island layouts, sampled at the world's scale.
+        let k = &p.knobs;
         let scale = p.size_m / REFERENCE_SIZE_M;
-        let shape_lo = OctaveNoise::new(p.seed ^ 0xF001, -13, vec![1.0, 0.6, 0.3]); // 8 km at the reference size
-        let shape_hi = OctaveNoise::new(p.seed ^ 0xF002, -10, vec![1.0, 0.5]); // 1 km
         let rough = OctaveNoise::new(p.seed ^ 0xF004, -8, vec![1.0, 1.0, 1.0]); // 256 m
         let taper_noise = OctaveNoise::new(p.seed ^ 0xF005, -12, vec![1.0, 0.5]); // 4 km
-        let edges = edges(p.seed, k);
-        let mass = ContinentalMass::new(p.seed, k, &edges);
+        let shape_of = ContinentalShape::new(p);
+        let edges = shape_of.edges;
         let field = plates::plate_field(p.seed, p.size_m, n, k);
         let ranges = plates::interior_ranges(p.seed, p.size_m, k);
         let taper_m = LAND_EDGE_TAPER_M.min(LAND_EDGE_TAPER_MAX_SHARE * p.size_m);
-        let margin_end = (k.ocean_margin_start + OCEAN_MARGIN_RAMP).min(0.99);
+        let volcanoes = volcano_sites(p);
 
         let mut w = World {
             n,
@@ -508,14 +580,8 @@ impl World {
         for z in 0..n {
             for x in 0..n {
                 let (mx, mz) = ((x as f64 + 0.5) * p.cell_m, (z as f64 + 0.5) * p.cell_m);
-                let (rx, rz) = ((mx - half) / half, (mz - half) / half);
                 let (sx, sz) = (mx / scale, mz / scale);
-                let shape = mass.at(rx, rz)
-                    + k.coast_noise_lo * shape_lo.sample2(sx, sz)
-                    + k.coast_noise_hi * shape_hi.sample2(sx, sz);
-                let prox = edge_proximity(rx, rz);
-                let sea_prox = (0..4).filter(|&e| edges[e] == EdgeKind::Sea).map(|e| prox[e]).fold(-1.0, f64::max);
-                let land = shape - 2.0 * smoothstep(k.ocean_margin_start, margin_end, sea_prox);
+                let (shape, land) = shape_of.at(mx, mz);
 
                 let i = z * n + x;
                 if land <= 0.0 {
@@ -530,10 +596,7 @@ impl World {
                 }
                 w.h[i] = (1.0 + 45.0 * smoothstep(0.0, 0.5, land) + 3.0 * rough.sample2(sx, sz)).max(0.5);
                 let belt = (field.convergence[i] as f64).max(plates::interior_strength(&ranges, mx, mz, p.size_m, k));
-                // Distance to the nearest land edge (m), in `edges` order.
-                let to_edge = [mz, p.size_m - mx, p.size_m - mz, mx];
-                let to_land_edge =
-                    (0..4).filter(|&e| edges[e] == EdgeKind::Land).map(|e| to_edge[e]).fold(f64::INFINITY, f64::min);
+                let to_land_edge = shape_of.to_land_edge(mx, mz);
                 // Only the belts taper: the lowland share runs on to the edge,
                 // so the land near it neither sinks below the edge nor rises
                 // into a divide where a uniform taper would end.
@@ -542,7 +605,9 @@ impl World {
                 let coast_taper = smoothstep(0.0, 0.05, land);
                 w.uplift[i] = k.uplift
                     * coast_taper
-                    * (k.lowland_uplift_share + (k.belt_uplift - k.lowland_uplift_share).max(0.0) * belt * edge_taper);
+                    * (k.lowland_uplift_share
+                        + (k.belt_uplift - k.lowland_uplift_share).max(0.0)
+                            * (belt * edge_taper).max(fields::cone(&volcanoes, mx, mz)));
             }
         }
         w.outlet.clone_from(&w.ocean);

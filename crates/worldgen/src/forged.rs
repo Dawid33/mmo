@@ -34,8 +34,9 @@ pub const WORLD_FILE_ENV: &str = "VOXEL_WORLD_FILE";
 /// v3: quantised `u16` rasters (`QRaster`), sparse lakes, row-delta + zstd,
 /// coast distance recomputed on load. v4: `edges` (what lies past each side).
 /// v5: the latitude climate — `temperature_c` and `precip_mm` replace the
-/// relative `rain`.
-pub const ARTIFACT_VERSION: u32 = 5;
+/// relative `rain`. v6: derived `drainage`, `volcanism`, `salinity` (`u8`
+/// 0..100 rasters, `forge::fields`) and the volcano sites.
+pub const ARTIFACT_VERSION: u32 = 6;
 /// zstd level of the world file body (offline writer; reading cost is level-independent).
 #[cfg(not(target_arch = "wasm32"))]
 const ZSTD_LEVEL: i32 = 19;
@@ -218,6 +219,24 @@ pub fn undelta_rows(data: &mut [u16], n: usize) {
     }
 }
 
+/// [`delta_rows`] for `u8` rasters.
+pub fn delta_rows_u8(data: &mut [u8], n: usize) {
+    for row in data.chunks_mut(n.max(1)) {
+        for i in (1..row.len()).rev() {
+            row[i] = row[i].wrapping_sub(row[i - 1]);
+        }
+    }
+}
+
+/// Inverse of [`delta_rows_u8`].
+pub fn undelta_rows_u8(data: &mut [u8], n: usize) {
+    for row in data.chunks_mut(n.max(1)) {
+        for i in 1..row.len() {
+            row[i] = row[i].wrapping_add(row[i - 1]);
+        }
+    }
+}
+
 /// The stored world. Rasters are `n * n`, row-major (z rows, x columns), one
 /// value per `cell_m` cell CENTER; heights are meters relative to sea level.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -252,6 +271,14 @@ pub struct WorldArtifact {
     /// edge the sampler continues the edge's ground; past a sea edge it is
     /// ocean.
     pub edges: [EdgeKind; 4],
+    /// Drainage 0..100 (`forge::fields::drainage`): low = waterlogged.
+    pub drainage: Vec<u8>,
+    /// Volcanism 0..100 (`forge::fields::volcanism`).
+    pub volcanism: Vec<u8>,
+    /// Salinity 0..100 (`forge::fields::salinity`): sea and closed lakes 100.
+    pub salinity: Vec<u8>,
+    /// Volcano sites, artifact metres (each the summit of a cone of uplift).
+    pub volcanoes: Vec<[f32; 2]>,
 }
 
 /// The format version in a world file's 8-byte header, without loading the
@@ -300,6 +327,15 @@ impl WorldArtifact {
         [&self.height, &self.uplifted, &self.bedding, &self.temperature_c, &self.precip_mm]
     }
 
+    /// Every `u8` (0..100) raster, likewise.
+    fn byte_rasters_mut(&mut self) -> [&mut Vec<u8>; 3] {
+        [&mut self.drainage, &mut self.volcanism, &mut self.salinity]
+    }
+
+    fn byte_rasters(&self) -> [&Vec<u8>; 3] {
+        [&self.drainage, &self.volcanism, &self.salinity]
+    }
+
     /// File bytes: `VXWF`, the version (u32 LE), then zstd over bincode with
     /// every raster row-delta encoded.
     #[cfg(not(target_arch = "wasm32"))]
@@ -308,6 +344,9 @@ impl WorldArtifact {
         let n = wire.n as usize;
         for raster in wire.qrasters_mut() {
             delta_rows(&mut raster.data, n);
+        }
+        for raster in wire.byte_rasters_mut() {
+            delta_rows_u8(raster, n);
         }
         let body = bincode::serialize(&wire).expect("artifact serializes");
         let mut out = MAGIC.to_vec();
@@ -339,6 +378,9 @@ impl WorldArtifact {
         for raster in artifact.qrasters_mut() {
             undelta_rows(&mut raster.data, n);
         }
+        for raster in artifact.byte_rasters_mut() {
+            undelta_rows_u8(raster, n);
+        }
         Ok(artifact)
     }
 
@@ -349,7 +391,9 @@ impl WorldArtifact {
     pub fn validate(&self) -> Result<(), ArtifactError> {
         let artifact = self;
         let cells = artifact.n as usize * artifact.n as usize;
-        if artifact.qrasters().iter().any(|raster| raster.len() != cells) {
+        if artifact.qrasters().iter().any(|raster| raster.len() != cells)
+            || artifact.byte_rasters().iter().any(|raster| raster.len() != cells)
+        {
             return Err(ArtifactError::Format("raster size does not match n".into()));
         }
         let run_ok = |&(start, len): &(u32, u32)| start as usize + len as usize <= cells;

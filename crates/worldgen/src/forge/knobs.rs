@@ -67,6 +67,8 @@ knobs! {
         belt_uplift: 1.4, [0.3, 2.5], "Belt uplift", "Continental layouts: rock uplift on a fully convergent belt, as a multiple of the uplift rate. Linear belts drain out sideways in a few km, so they need more than an island's broad massifs for the same peaks.";
         belt_length_km: 8.0, [2.0, 60.0], "Interior range length (km)", "Length of each interior range (capped at 60% of the world's size).";
         interior_ranges: 2.0, [0.0, 8.0], "Interior ranges", "Ranges away from any plate boundary (old belts inside a plate), at about a third of a boundary belt's uplift.";
+        volcano_count_max: 6.0, [0.0, 24.0], "Volcanoes", "Continental layouts: at most this many volcanoes, each a cone of uplift where volcanism is at its peak (hot spots on the flanks of convergent belts), at least 8 km apart.";
+        volcanism_strength: 1.0, [0.0, 2.0], "Volcanism", "Continental layouts: scales the volcanism field (continental-scale noise plus hot spots along convergent belts). 0 = none and no volcanoes; higher = more ground at the peak.";
     }
     "Uplift" {
         uplift: 5.0e-3, [5.0e-5, 6.0e-3], "Uplift rate (m/yr)", "Peak rock uplift in the mountain belts. Relief scales with uplift / erodibility: the default builds 2-2.5 km ranges on a 16 km island.";

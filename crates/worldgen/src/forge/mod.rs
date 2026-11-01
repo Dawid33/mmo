@@ -28,7 +28,9 @@
 //!   5. post       valley floors planed beside rivers; overdeepened basins
 //!                 flooded to their spill level = lakes;
 //!   6. hydrology  lakes and rivers as objects + statistics;
-//!   7. spawn      a flat dry coastal site.
+//!   7. fields     drainage, volcanism, salinity (0..100 per cell) and the
+//!                 volcano sites, whose cones `World::new` already raised;
+//!   8. spawn      a flat dry coastal site.
 //! `knobs` holds every tunable.
 //!
 //! Not bit-reproducible across machines by design (sqrt/ln/sin used freely):
@@ -36,6 +38,7 @@
 
 pub mod climate;
 pub mod erosion;
+pub mod fields;
 pub mod geology;
 pub mod hydrology;
 pub mod knobs;
@@ -67,6 +70,8 @@ pub struct Forged {
     /// Discharge weights from the final climate (`climate::discharge_weight`).
     pub rain: Vec<f64>,
     pub analysis: Analysis,
+    /// Drainage, volcanism, salinity and the volcano sites (stored).
+    pub fields: fields::Fields,
     /// Highest point the simulation built, before the height-band fit (m).
     pub simulated_peak_m: f64,
     /// Factor the fit applied to land heights (1.0 = relief was in band).
@@ -121,6 +126,10 @@ impl Forged {
             lakes,
             spawn: [spawn.0, spawn.1],
             edges: w.edges,
+            drainage: self.fields.drainage.clone(),
+            volcanism: self.fields.volcanism.clone(),
+            salinity: self.fields.salinity.clone(),
+            volcanoes: self.fields.volcanoes.clone(),
         }
     }
 }
@@ -369,7 +378,8 @@ pub fn forge_with(
     let climate = climate::compute(&w, p);
     let rain = climate::discharge_weight(&climate, &w);
     let analysis = hydrology::analyze(&w, &geo, &rain, k);
-    Some(Forged { world: w, initial, geology: geo, climate, rain, analysis, simulated_peak_m, height_fit })
+    let fields = fields::compute(p, &w, &analysis, &geo);
+    Some(Forged { world: w, initial, geology: geo, climate, rain, analysis, fields, simulated_peak_m, height_fit })
 }
 
 #[cfg(test)]
