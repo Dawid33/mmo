@@ -502,6 +502,13 @@ model-census *paths="target/test-models":
 forge-proto *args:
     {{cap}} {{cargo}} run --release -p worldgen --example forge_proto -- {{args}}
 
+# Forge speed benchmark: one forge at `size` m / `cell` m, printing wall time and
+# max RSS (needs /usr/bin/time). Output goes to target/forge-bench/. Timing
+# run: ask before launching the default 16 km / 16 m. e.g. `just forge-bench 4096 64`.
+forge-bench size="16000" cell="16":
+    mkdir -p target/forge-bench
+    {{cap}} /usr/bin/time -f 'forge-bench: wall %e s, max RSS %M KiB' {{cargo}} run --release -p worldgen --example forge_proto -- --size {{size}} --cell {{cell}} --out target/forge-bench/w
+
 # Tuning page for the world forge: every knob (crates/worldgen/src/forge/knobs.rs) as
 # a slider with a live map preview, on http://127.0.0.1:<port>/. A change
 # re-forges at a coarse preview cell size (64 m is about a second); "Save world

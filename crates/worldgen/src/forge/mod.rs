@@ -166,7 +166,7 @@ pub fn forge_with(
     let initial = World { h: w.h.clone(), ocean: w.ocean.clone(), uplift: Vec::new(), uplifted: Vec::new(), ..w };
     let geo = Geology::new(p, &w);
     let started = std::time::Instant::now();
-    let mut scratch = Vec::new();
+    let mut scratch = erosion::StepScratch::default();
     let mut rain = climate::rainfall(&w, p);
     let k = &p.knobs;
     for iter in 1..=iters {

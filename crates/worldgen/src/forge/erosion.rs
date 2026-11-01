@@ -21,6 +21,7 @@ pub const FLOOD_EPSILON: f64 = 1.0e-5;
 pub const NO_RECEIVER: u32 = u32::MAX;
 
 /// Depression-free routing over the land, from one Priority-Flood pass.
+#[derive(Default)]
 pub struct Routing {
     /// Flooded surface: `h` raised so every land cell has a falling path to
     /// sea. It is also the water surface: flat over lakes, the bed elsewhere.
@@ -30,21 +31,46 @@ pub struct Routing {
     pub receiver_dist: Vec<f64>,
     /// Land cells, downstream-first: a cell always comes after its receiver.
     pub order: Vec<u32>,
+    /// Priority-Flood working set, kept so `route_into` reuses its capacity.
+    closed: Vec<bool>,
+    heap: BinaryHeap<Reverse<(u64, u32)>>,
+}
+
+/// Every per-iteration buffer of `step`, reused across iterations.
+#[derive(Default)]
+pub struct StepScratch {
+    routing: Routing,
+    /// Discharge per cell.
+    q: Vec<f64>,
+    /// Copy of `h` for the diffusion sub-steps.
+    diffuse: Vec<f64>,
 }
 
 /// Priority-Flood(+epsilon) seeded from the coast (Barnes et al. 2014). Cells
 /// pop in nondecreasing flooded height, so pop order is a valid
 /// downstream-first order for ANY receiver with a strictly lower flooded height.
 pub fn route(w: &World, epsilon: f64) -> Routing {
+    let mut out = Routing::default();
+    route_into(w, epsilon, &mut out);
+    out
+}
+
+/// `route` into reusable buffers (cleared and resized, not reallocated).
+pub fn route_into(w: &World, epsilon: f64, out: &mut Routing) {
     let cells = w.n * w.n;
-    let mut filled = w.h.clone();
-    let mut closed = w.ocean.clone();
-    let mut receiver = vec![NO_RECEIVER; cells];
-    let mut receiver_dist = vec![0.0; cells];
-    let mut order = Vec::with_capacity(cells);
-    // Key = flooded height as order-preserving bits (offset keeps it positive).
+    let Routing { filled, receiver, receiver_dist, order, closed, heap } = out;
+    filled.clear();
+    filled.extend_from_slice(&w.h);
+    closed.clear();
+    closed.extend_from_slice(&w.ocean);
+    receiver.clear();
+    receiver.resize(cells, NO_RECEIVER);
+    receiver_dist.clear();
+    receiver_dist.resize(cells, 0.0);
+    order.clear();
+    order.reserve(cells);
+    heap.clear();
     let key = |height: f64| (height + 100_000.0).to_bits();
-    let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
     for i in 0..cells {
         if w.ocean[i] && w.neighbors(i).any(|(nb, _)| !w.ocean[nb]) {
             // Sea level, not the sea floor, is the base level.
@@ -71,7 +97,7 @@ pub fn route(w: &World, epsilon: f64) -> Routing {
     // The flood's receiver is the LOWEST neighbor; prefer the STEEPEST one
     // (diagonals are longer), which is still strictly lower, so order holds.
     if epsilon > 0.0 {
-        for &i in &order {
+        for &i in order.iter() {
             let i = i as usize;
             let mut best = (filled[i] - filled[receiver[i] as usize]) / receiver_dist[i];
             for (nb, dist) in w.neighbors(i) {
@@ -84,13 +110,20 @@ pub fn route(w: &World, epsilon: f64) -> Routing {
             }
         }
     }
-    Routing { filled, receiver, receiver_dist, order }
 }
 
 /// Discharge through each land cell, itself included: drained land area (m^2)
 /// weighted by relative rainfall — "m^2 of average rain".
 pub fn discharge(w: &World, r: &Routing, rain: &[f64]) -> Vec<f64> {
-    let mut q = vec![0.0; w.n * w.n];
+    let mut q = Vec::new();
+    discharge_into(w, r, rain, &mut q);
+    q
+}
+
+/// `discharge` into a reusable buffer.
+pub fn discharge_into(w: &World, r: &Routing, rain: &[f64], q: &mut Vec<f64>) {
+    q.clear();
+    q.resize(w.n * w.n, 0.0);
     for &i in &r.order {
         q[i as usize] = w.dx * w.dx * rain[i as usize];
     }
@@ -100,15 +133,15 @@ pub fn discharge(w: &World, r: &Routing, rain: &[f64]) -> Vec<f64> {
             q[rc] += q[i as usize];
         }
     }
-    q
 }
 
 /// One time step: uplift + implicit stream-power incision dh/dt = U - K*sqrt(Q)*S
 /// along the routing tree (Braun & Willett 2013, n = 1), sediment into
 /// depressions, then hillslope diffusion. Returns the cells under depressions.
-pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch: &mut Vec<f64>) -> usize {
-    let routing = route(w, FLOOD_EPSILON);
-    let q = discharge(w, &routing, rain);
+pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch: &mut StepScratch) -> usize {
+    let StepScratch { routing, q, diffuse } = scratch;
+    route_into(w, FLOOD_EPSILON, routing);
+    discharge_into(w, routing, rain, q);
     let (k, dt) = (&p.knobs, p.knobs.dt_years);
     let mut drowned = 0;
     for &i in &routing.order {
@@ -135,7 +168,7 @@ pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch
     let c = coeff / substeps as f64;
     let n = w.n;
     for _ in 0..substeps {
-        scratch.clone_from(&w.h);
+        diffuse.clone_from(&w.h);
         for z in 1..n - 1 {
             for x in 1..n - 1 {
                 let i = z * n + x;
@@ -143,11 +176,32 @@ pub fn step(w: &mut World, p: &ForgeParams, geo: &Geology, rain: &[f64], scratch
                     continue;
                 }
                 // The sea holds sea level at the shore, not its floor depth.
-                let s = |j: usize| if w.ocean[j] { 0.0 } else { scratch[j] };
-                let lap = s(i - 1) + s(i + 1) + s(i - n) + s(i + n) - 4.0 * scratch[i];
-                w.h[i] = (scratch[i] + c * lap).max(0.05);
+                let s = |j: usize| if w.ocean[j] { 0.0 } else { diffuse[j] };
+                let lap = s(i - 1) + s(i + 1) + s(i - n) + s(i + n) - 4.0 * diffuse[i];
+                w.h[i] = (diffuse[i] + c * lap).max(0.05);
             }
         }
     }
     drowned
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_with_reused_scratch_matches_fresh() {
+        let p = ForgeParams { size_m: 4096.0, cell_m: 64.0, ..Default::default() };
+        let mut a = World::new(&p);
+        let mut b = World { h: a.h.clone(), ocean: a.ocean.clone(), uplift: a.uplift.clone(), uplifted: a.uplifted.clone(), ..a };
+        let geo = Geology::new(&p, &a);
+        let rain = vec![1.0; a.n * a.n];
+        let mut reused = StepScratch::default();
+        for _ in 0..20 {
+            step(&mut a, &p, &geo, &rain, &mut reused);
+            step(&mut b, &p, &geo, &rain, &mut StepScratch::default());
+        }
+        assert_eq!(a.h, b.h);
+        assert_eq!(a.uplifted, b.uplifted);
+    }
 }
