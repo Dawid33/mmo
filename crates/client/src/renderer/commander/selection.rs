@@ -77,7 +77,7 @@ pub fn band_rect(press: Option<Vec2>, cursor: Option<Vec2>, held: bool) -> Optio
 /// except the local player's own body in Adventure — `local_player` is true
 /// only for that body while the client plays it.
 pub fn is_selectable(kind: EntityKind, local_player: bool) -> bool {
-    !matches!(kind, EntityKind::Player) || local_player
+    !matches!(kind, EntityKind::Player) || local_player // people and slimes always
 }
 
 /// The candidate nearest `cursor` within `radius` pixels.
@@ -296,9 +296,9 @@ pub fn draw_selection_rings(
                 (edge, edge / 2.0)
             }
             // Only the adventurer's own body is ever selected.
-            EntityKind::Player => (
+            EntityKind::Player | EntityKind::Person { .. } => (
                 2.0 * game::movement::PLAYER_CAPSULE_RADIUS,
-                super::cut_entities::feet_offset(EntityKind::Player),
+                super::cut_entities::feet_offset(kind.0),
             ),
         };
         // The sim pose is the body centre; the ring sits at the feet.

@@ -36,6 +36,8 @@ pub fn attach_avatars(
         match kind.0 {
             // A rigged player is drawn by `rigs` (its model), not a capsule.
             EntityKind::Player if rigged => {}
+            // A person is always drawn by `rigs` (the dwarf), never a capsule.
+            EntityKind::Person { .. } => {}
             EntityKind::Player => {
                 let (mesh, material) = assets
                     .player

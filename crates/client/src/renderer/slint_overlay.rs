@@ -1091,6 +1091,7 @@ fn kind_label(kind: game::EntityKind) -> String {
     match kind {
         game::EntityKind::Player => "Player".into(),
         game::EntityKind::Slime { size } => format!("Slime (size {size})"),
+        game::EntityKind::Person { .. } => "Dwarf".into(),
     }
 }
 

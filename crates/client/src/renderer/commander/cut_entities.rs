@@ -37,7 +37,7 @@ pub struct CutHidden(pub Visibility);
 /// Body centre → feet, in world units.
 pub fn feet_offset(kind: EntityKind) -> f32 {
     match kind {
-        EntityKind::Player => game::movement::PLAYER_CAPSULE_HALF_HEIGHT + game::movement::PLAYER_CAPSULE_RADIUS,
+        EntityKind::Player | EntityKind::Person { .. } => game::movement::PLAYER_CAPSULE_HALF_HEIGHT + game::movement::PLAYER_CAPSULE_RADIUS,
         EntityKind::Slime { size } => game::slime::slime_edge_units(size) / 2.0,
     }
 }

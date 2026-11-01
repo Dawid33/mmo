@@ -171,6 +171,10 @@ pub enum EntityKind {
     /// it never changes, so it lives in the kind, which also carries it to
     /// the renderer and onto ghosts.
     Slime { size: u8 },
+    /// One of the world's people (`people.rs`, `history`): a dwarf-rigged
+    /// body with no camera and no client. The id ties the body to its
+    /// history record.
+    Person { person: crate::history::PersonId },
 }
 
 /// A live ghost mirror in this region, keyed in `GameData::ghosts` by its
@@ -233,6 +237,9 @@ mod game_data {
         /// take down).
         #[undo(map)]
         constructed: BTreeMap<crate::TilePos, ()>,
+        /// The body each history person has in this region (`people.rs`).
+        #[undo(map)]
+        person_entities: BTreeMap<crate::history::PersonId, EntityKey>,
     }
 
     pub struct Ecs {
@@ -1270,6 +1277,13 @@ impl Rollback {
     pub fn apply_arrival(&mut self, bundle: EntityBundle) -> Option<EntityKey> {
         let identity = (bundle.source_region, bundle.source_key);
 
+        // A person already embodied here: the duplicate arrival is ignored.
+        if let EntityKind::Person { person } = bundle.kind {
+            if self.data.person_entities.contains_key(&person) {
+                return None;
+            }
+        }
+
         // Idempotency: a respawn-resnapshot replay must not duplicate.
         if let Some(&e) = self.data.arrivals.get(&identity) {
             if self.data.ecs.entities.contains_key(e) {
@@ -1358,6 +1372,9 @@ impl Rollback {
             self.data.player_entites.insert(client_id, e);
         }
 
+        if let EntityKind::Person { person } = bundle.kind {
+            self.data.person_entities.insert(person, e);
+        }
         self.data.arrivals.insert(identity, e);
         Some(e)
     }
@@ -1507,6 +1524,9 @@ impl Rollback {
             source_region: region,
             source_key: key,
         };
+        if let EntityKind::Person { person } = kind {
+            self.data.person_entities.remove(&person);
+        }
         if let Some(c) = client_id {
             self.data.player_entites.remove(&c);
             self.data.clients.remove(&c);

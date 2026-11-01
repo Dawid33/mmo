@@ -35,6 +35,7 @@ pub mod protocol;
 mod region;
 pub mod region_runner;
 pub mod registry;
+pub mod people;
 pub mod slime;
 pub mod state;
 pub mod trees;

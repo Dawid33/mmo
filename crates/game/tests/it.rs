@@ -38,6 +38,7 @@ mod multi_client;
 mod orders;
 mod packet_codec;
 mod pathfind;
+mod people;
 mod physics_goldens;
 mod play_region;
 mod random_ops;

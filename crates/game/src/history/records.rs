@@ -9,7 +9,7 @@ use crate::StateHash;
 macro_rules! id_type {
     ($($(#[$m:meta])* $name:ident),*) => {$(
         $(#[$m])*
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, StateHash)]
+        #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, StateHash)]
         pub struct $name(pub u32);
     )*};
 }
