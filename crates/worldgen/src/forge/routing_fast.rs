@@ -43,16 +43,24 @@ const OUTLET_LEVEL_M: f64 = 0.0;
 /// Basin of every outlet and of all land that descends straight to one.
 const SEA: u32 = 0;
 const NO_BASIN: u32 = u32::MAX;
+/// `down` of a cell with no lower neighbour (an outlet or a local minimum).
+const NO_DIR: u8 = 8;
+/// For each neighbour direction, the direction that leads back.
+const OPPOSITE: [u8; 8] = [1, 0, 3, 2, 7, 6, 5, 4];
 
 /// `route_fast`'s working buffers, kept in `StepScratch` across iterations.
 #[derive(Default)]
 pub struct FastScratch {
-    /// Steepest-descent receiver on `h` (NO_RECEIVER at outlets and minima).
-    down: Vec<u32>,
+    /// Steepest-descent direction on `h` (NO_DIR at outlets and minima).
+    down: Vec<u8>,
+    /// Bit k set: the neighbour in direction k drains into this cell.
+    donors: Vec<u8>,
     /// Basin per cell (SEA, or one per local minimum).
     basin: Vec<u32>,
     /// Cells walked while labelling a basin.
     path: Vec<u32>,
+    /// Cells of the depression basins (every basin but SEA).
+    depressed: Vec<u32>,
     /// Basin graph edges: (pass height key, lower basin, higher basin).
     edges: Vec<(u64, u32, u32)>,
     /// Union-find over basins: parent, size, circular member list, holds SEA.
@@ -64,8 +72,8 @@ pub struct FastScratch {
     spill: Vec<f64>,
     /// Land cells with no lower neighbour on the depression-free surface.
     flats: Vec<u32>,
-    /// (flat cell, exit) pairs that start the breadth-first flat routing.
-    seeds: Vec<(u32, u32)>,
+    /// (flat cell, direction of its exit) pairs that start the flat routing.
+    seeds: Vec<(u32, u8)>,
     queue: VecDeque<u32>,
     stack: Vec<u32>,
 }
@@ -92,11 +100,41 @@ fn height_from_key(k: u64) -> f64 {
     f64::from_bits(if k >> 63 == 1 { k & !(1 << 63) } else { !k })
 }
 
-/// Distance between neighbouring cells `i` and `j`, exactly as `World::neighbors` gives it.
+/// The 8 neighbours as index offsets, in `World::neighbors` order, with
+/// their distances (the same f64s `neighbors` gives). Valid off the map edge
+/// only: `route_fast` checks the edge is all outlets, so every land cell it
+/// expands is interior.
+struct Steps {
+    off: [isize; 8],
+    dist: [f64; 8],
+    inv_dist: [f64; 8],
+}
+
+impl Steps {
+    fn new(w: &World) -> Steps {
+        let n = w.n as isize;
+        let (o, d) = (w.dx, std::f64::consts::SQRT_2 * w.dx);
+        let dist = [o, o, o, o, d, d, d, d];
+        Steps {
+            off: [1, -1, n, -n, n + 1, -n + 1, n - 1, -n - 1],
+            dist,
+            inv_dist: dist.map(|d| 1.0 / d),
+        }
+    }
+
+    #[inline]
+    fn at(&self, i: usize, k: usize) -> usize {
+        i.wrapping_add_signed(self.off[k])
+    }
+}
+
+/// Cell `i` drains to its neighbour in direction `k`.
 #[inline]
-fn step_dist(w: &World, i: usize, j: usize) -> f64 {
-    let d = i.abs_diff(j);
-    if d == 1 || d == w.n { w.dx } else { std::f64::consts::SQRT_2 * w.dx }
+fn link(s: &Steps, receiver: &mut [u32], receiver_dist: &mut [f64], donors: &mut [u8], i: usize, k: usize) {
+    let r = s.at(i, k);
+    receiver[i] = r as u32;
+    receiver_dist[i] = s.dist[k];
+    donors[r] |= 1 << OPPOSITE[k];
 }
 
 fn find(parent: &mut [u32], mut x: usize) -> usize {
@@ -112,9 +150,30 @@ fn find(parent: &mut [u32], mut x: usize) -> usize {
 /// `erosion::route_into` (filled surface with the epsilon gradient, receivers
 /// strictly downhill on it, downstream-first order) in linear time.
 pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut Routing) {
-    let cells = w.n * w.n;
-    let FastScratch { down, basin, path, edges, uf_parent, uf_size, uf_next, uf_sea, spill, flats, seeds, queue, stack } =
-        &mut scratch.fast;
+    let (n, cells) = (w.n, w.n * w.n);
+    for k in 0..n {
+        for i in [k, (n - 1) * n + k, k * n, k * n + n - 1] {
+            assert!(is_outlet(w, i), "route_fast: the map edge must be outlets (cell {i} is not)");
+        }
+    }
+    let s = Steps::new(w);
+    let FastScratch {
+        down,
+        donors,
+        basin,
+        path,
+        depressed,
+        edges,
+        uf_parent,
+        uf_size,
+        uf_next,
+        uf_sea,
+        spill,
+        flats,
+        seeds,
+        queue,
+        stack,
+    } = &mut scratch.fast;
     let Routing { filled, receiver, receiver_dist, order, .. } = out;
 
     // 1. Steepest descent on h. Outlets next to land sit at sea level in
@@ -122,35 +181,37 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     filled.clear();
     filled.extend_from_slice(&w.h);
     down.clear();
-    down.resize(cells, NO_RECEIVER);
+    down.resize(cells, NO_DIR);
+    basin.clear();
+    basin.resize(cells, NO_BASIN);
     let mut land = 0;
     for i in 0..cells {
         if is_outlet(w, i) {
+            basin[i] = SEA;
             continue;
         }
         land += 1;
         let hi = w.h[i];
-        let mut best = 0.0;
-        for (nb, dist) in w.neighbors(i) {
-            if is_outlet(w, nb) {
+        let (mut best, mut dir) = (0.0, NO_DIR);
+        for k in 0..8 {
+            let nb = s.at(i, k);
+            let lower = if is_outlet(w, nb) {
                 filled[nb] = OUTLET_LEVEL_M;
-            }
-            let slope = (hi - surface(w, nb)) / dist;
+                OUTLET_LEVEL_M
+            } else {
+                w.h[nb]
+            };
+            let slope = (hi - lower) * s.inv_dist[k];
             if slope > best {
                 best = slope;
-                down[i] = nb as u32;
+                dir = k as u8;
             }
         }
+        down[i] = dir;
     }
 
     // 2. Basins: label each cell with the root of its descent.
-    basin.clear();
-    basin.resize(cells, NO_BASIN);
-    for i in 0..cells {
-        if is_outlet(w, i) {
-            basin[i] = SEA;
-        }
-    }
+    depressed.clear();
     let mut basins = SEA + 1;
     for i in 0..cells {
         if basin[i] != NO_BASIN {
@@ -160,50 +221,39 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
         let mut c = i;
         while basin[c] == NO_BASIN {
             path.push(c as u32);
-            if down[c] == NO_RECEIVER {
+            let k = down[c];
+            if k == NO_DIR {
                 basin[c] = basins;
                 basins += 1;
                 break;
             }
-            c = down[c] as usize;
+            c = s.at(c, k as usize);
         }
         let b = basin[c];
         for &p in path.iter() {
             basin[p as usize] = b;
         }
+        if b != SEA {
+            depressed.extend_from_slice(path);
+        }
     }
 
-    // 3. Basin graph: every neighbouring pair across a basin boundary, once.
+    // 3. Basin graph: every neighbouring pair across a depression basin's
+    // boundary, once (from the depression side; from the higher index when
+    // both sides are depressions).
     edges.clear();
-    if basins > SEA + 1 {
-        let n = w.n;
-        for z in 0..n {
-            for x in 0..n {
-                let i = z * n + x;
-                let bi = basin[i];
-                let mut pair = |j: usize| {
-                    let bj = basin[j];
-                    if bj != bi {
-                        let pass = surface(w, i).max(surface(w, j));
-                        edges.push((height_key(pass), bi.min(bj), bi.max(bj)));
-                    }
-                };
-                if x + 1 < n {
-                    pair(i + 1);
-                }
-                if z + 1 < n {
-                    if x > 0 {
-                        pair(i + n - 1);
-                    }
-                    pair(i + n);
-                    if x + 1 < n {
-                        pair(i + n + 1);
-                    }
-                }
+    for &i in depressed.iter() {
+        let (i, bi) = (i as usize, basin[i as usize]);
+        for k in 0..8 {
+            let j = s.at(i, k);
+            let bj = basin[j];
+            if bj != bi && (bj == SEA || j > i) {
+                let pass = w.h[i].max(surface(w, j));
+                edges.push((height_key(pass), bi.min(bj), bi.max(bj)));
             }
         }
-        edges.sort_unstable();
     }
+    edges.sort_unstable();
 
     // 4. Kruskal from the sea: a basin's spill level is the pass at which its
     // tree joins the sea's.
@@ -250,42 +300,47 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     }
     assert_eq!(unresolved, 0, "route_fast: {unresolved} basins have no way to an outlet");
 
-    // 5. Depression-free surface and steepest descent on it.
+    // 5. Depression-free surface (only depression cells can rise) and
+    // steepest descent on it.
+    for &i in depressed.iter() {
+        let i = i as usize;
+        filled[i] = w.h[i].max(spill[basin[i] as usize]);
+    }
     receiver.clear();
     receiver.resize(cells, NO_RECEIVER);
     receiver_dist.clear();
     receiver_dist.resize(cells, 0.0);
-    for i in 0..cells {
-        if !is_outlet(w, i) {
-            filled[i] = w.h[i].max(spill[basin[i] as usize]);
-        }
-    }
+    donors.clear();
+    donors.resize(cells, 0);
     flats.clear();
     for i in 0..cells {
         if is_outlet(w, i) {
             continue;
         }
         let fi = filled[i];
-        let d = down[i];
+        let k = down[i];
         // Neither the cell nor its descent on h was raised: no neighbour can be
         // steeper on the raised surface (raising only lowers slopes toward it),
         // and ties resolve the same way.
-        if d != NO_RECEIVER && fi == w.h[i] && filled[d as usize] == surface(w, d as usize) {
-            receiver[i] = d;
-            receiver_dist[i] = step_dist(w, i, d as usize);
-            continue;
-        }
-        let mut best = 0.0;
-        for (nb, dist) in w.neighbors(i) {
-            let slope = (fi - filled[nb]) / dist;
-            if slope > best {
-                best = slope;
-                receiver[i] = nb as u32;
-                receiver_dist[i] = dist;
+        if k != NO_DIR {
+            let d = s.at(i, k as usize);
+            if fi == w.h[i] && filled[d] == surface(w, d) {
+                link(&s, receiver, receiver_dist, donors, i, k as usize);
+                continue;
             }
         }
-        if receiver[i] == NO_RECEIVER {
+        let (mut best, mut dir) = (0.0, NO_DIR);
+        for k in 0..8 {
+            let slope = (fi - filled[s.at(i, k)]) * s.inv_dist[k];
+            if slope > best {
+                best = slope;
+                dir = k as u8;
+            }
+        }
+        if dir == NO_DIR {
             flats.push(i as u32);
+        } else {
+            link(&s, receiver, receiver_dist, donors, i, dir as usize);
         }
     }
 
@@ -295,25 +350,25 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
     seeds.clear();
     for &i in flats.iter() {
         let i = i as usize;
-        if let Some((exit, _)) = w
-            .neighbors(i)
-            .find(|&(nb, _)| filled[nb] == filled[i] && (is_outlet(w, nb) || receiver[nb] != NO_RECEIVER))
-        {
-            seeds.push((i as u32, exit as u32));
+        let exit = (0..8).find(|&k| {
+            let nb = s.at(i, k);
+            filled[nb] == filled[i] && (is_outlet(w, nb) || receiver[nb] != NO_RECEIVER)
+        });
+        if let Some(k) = exit {
+            seeds.push((i as u32, k as u8));
         }
     }
     queue.clear();
-    for &(i, exit) in seeds.iter() {
-        receiver[i as usize] = exit;
-        receiver_dist[i as usize] = step_dist(w, i as usize, exit as usize);
+    for &(i, k) in seeds.iter() {
+        link(&s, receiver, receiver_dist, donors, i as usize, k as usize);
         queue.push_back(i);
     }
     while let Some(c) = queue.pop_front() {
         let c = c as usize;
-        for (nb, dist) in w.neighbors(c) {
+        for (k, &back) in OPPOSITE.iter().enumerate() {
+            let nb = s.at(c, k);
             if receiver[nb] == NO_RECEIVER && !is_outlet(w, nb) && filled[nb] == filled[c] {
-                receiver[nb] = c as u32;
-                receiver_dist[nb] = dist;
+                link(&s, receiver, receiver_dist, donors, nb, back as usize);
                 queue.push_back(nb as u32);
             }
         }
@@ -336,13 +391,12 @@ pub fn route_fast(w: &World, epsilon: f64, scratch: &mut StepScratch, out: &mut 
         stack.push(i as u32);
         while let Some(c) = stack.pop() {
             let c = c as usize;
-            let r = receiver[c] as usize;
-            filled[c] = filled[c].max(filled[r] + epsilon * receiver_dist[c]);
+            filled[c] = filled[c].max(filled[receiver[c] as usize] + epsilon * receiver_dist[c]);
             order.push(c as u32);
-            for (nb, _) in w.neighbors(c) {
-                if receiver[nb] == c as u32 {
-                    stack.push(nb as u32);
-                }
+            let mut m = donors[c];
+            while m != 0 {
+                stack.push(s.at(c, m.trailing_zeros() as usize) as u32);
+                m &= m - 1;
             }
         }
     }
