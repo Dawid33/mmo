@@ -25,6 +25,8 @@ pub const EMBARK_PER_MILLE_MONTHLY: u32 = 60;
 pub const EMBARK_BASE_PER_MILLE_MONTHLY: u32 = 2;
 pub const EMBARK_PARTY_MIN: u32 = 7;
 pub const EMBARK_PARTY_MAX: u32 = 20;
+/// The player's embark party: 1 up to this many (DF's seven).
+pub const EMBARK_PLAYER_PARTY_MAX: u32 = 7;
 /// Chebyshev distance, for AI and player embarks.
 pub const EMBARK_MIN_DISTANCE_REGIONS: u32 = 4;
 pub const EMBARK_MAX_SEARCH_REGIONS: u32 = 16;

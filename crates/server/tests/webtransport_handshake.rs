@@ -99,7 +99,12 @@ async fn webtransport_client_full_handshake() {
                     ClientPacket::RequestLod(_)
                     | ClientPacket::ReleaseLod(_)
                     | ClientPacket::PlayRegion(_)
-                    | ClientPacket::Leave => {}
+                    | ClientPacket::Leave
+                    | ClientPacket::RequestEmbarkOptions
+                    | ClientPacket::Embark(_)
+                    | ClientPacket::Retire
+                    | ClientPacket::ReturnTo(_)
+                    | ClientPacket::RequestPersonInfo(_) => {}
                 },
                 ServerEvent::ClientConnected(client_id) => {
                     if world.find_player(&client_id).is_none() {

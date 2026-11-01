@@ -9,14 +9,19 @@ use std::time::Duration;
 
 use crossbeam::channel::{unbounded, Receiver, Sender};
 
-use crate::history::{CalendarTick, History};
+use crate::history::{CalendarTick, EmbarkRefusal, History, SiteId, TICKS_PER_DAY};
 use crate::{
     Chunk, ChunkCoords, ClientId, ClientPacket, Column, ColumnCoords, EntityKind, TerrainSnapshot, GameEventKind,
     LodBuildJob, LodBuilder, LodKey, LodPayload, LodResult, Region, RegionCoords, RegionInput,
-    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap,
+    RegionOutput, RegionRunner, RegionSeed, SerializedRegion, ServerPacket, PlayRefusal, WorldMap, EmbarkRequest,
 };
 
 pub const SPAWN_REGION: RegionCoords = RegionCoords { x: 0, z: 0 };
+
+/// The sites as last broadcast, bucketed (see `WorldManager::sites_key`).
+fn sites_key(history: &History) -> Vec<(SiteId, bool, u32, bool)> {
+    history.site_markers().into_iter().map(|m| (m.site, m.abandoned, m.population / 10, m.returnable)).collect()
+}
 pub const UNLOAD_GRACE_MS: u64 = 5000;
 /// LRU cap on `lod_cache`; subscribed keys are pinned past this (see
 /// `evict_lod_cache`).
@@ -335,6 +340,16 @@ pub struct WorldManager<S: RegionSpawner> {
     history: Option<History>,
     /// `(now_ms, calendar tick)` the calendar was anchored at by [`Self::set_history`].
     calendar_anchor: (u64, CalendarTick),
+    /// The fortress each client plays (embarked or returned to, not retired). Not
+    /// persisted: a fortress is played only while its player is connected; on disconnect
+    /// the entry stays (like `homes`) so a reconnect resumes it, but it no longer keeps
+    /// anyone else from returning there (see [`Self::return_to`]).
+    fortress_of: BTreeMap<ClientId, SiteId>,
+    /// The calendar day last broadcast (`ServerPacket::Calendar`).
+    calendar_day: Option<u64>,
+    /// What clients were last told of the sites, bucketed: (site, abandoned, population
+    /// / 10, returnable). A change is broadcast at the next day's turn.
+    sites_key: Vec<(SiteId, bool, u32, bool)>,
     out: Sender<(Option<ClientId>, ServerPacket)>,
     region_out_send: Sender<(RegionCoords, RegionOutput)>,
     /// LOD subscriptions per key, and the reverse map for disconnects.
@@ -385,6 +400,9 @@ impl<S: RegionSpawner> WorldManager<S> {
             pending_events: BTreeMap::new(),
             history: None,
             calendar_anchor: (0, CalendarTick(0)),
+            fortress_of: BTreeMap::new(),
+            calendar_day: None,
+            sites_key: Vec::new(),
             out,
             region_out_send,
             lod_subscribers: BTreeMap::new(),
@@ -420,6 +438,8 @@ impl<S: RegionSpawner> WorldManager<S> {
     pub fn set_history(&mut self, history: History, now_ms: u64) {
         debug_assert!(self.history.is_none(), "a history is already installed");
         self.calendar_anchor = (now_ms, history.now());
+        self.calendar_day = Some(history.now().0 / TICKS_PER_DAY);
+        self.sites_key = sites_key(&history);
         self.history = Some(history);
         let running: Vec<RegionCoords> =
             self.regions.iter().filter(|(_, l)| !l.stopping).map(|(rc, _)| *rc).collect();
@@ -510,6 +530,25 @@ impl<S: RegionSpawner> WorldManager<S> {
             Some(l) if l[0] < edge && l[1] < edge => l,
             _ => return refuse(self, PlayRefusal::NoDryLand),
         };
+        self.move_client(id, target, landing, now_ms);
+        let from = home.map_or("none".to_string(), |h| format!("{},{}", h.x, h.z));
+        crate::perf_event!(
+            "play_region",
+            "client={id} from={from} to={},{}",
+            target.x,
+            target.z
+        );
+    }
+
+    /// Move the client's player from its home (if any) to `landing` in `target`: it
+    /// leaves the old home, is created in `target` (woken if parked — after any history
+    /// catch-up, so a fortress's people are there first), and `target` becomes its home.
+    fn move_client(&mut self, id: ClientId, target: RegionCoords, landing: [u32; 2], now_ms: u64) {
+        let home = self.homes.get(&id).copied();
+        if home == Some(target) {
+            let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(Some(target), id)));
+            return;
+        }
         if let Some(home) = home {
             self.send_play_event(home, GameEventKind::ClientLeft(id));
         }
@@ -520,13 +559,125 @@ impl<S: RegionSpawner> WorldManager<S> {
             self.refresh_keepalive(home, now_ms);
         }
         self.refresh_keepalive(target, now_ms);
-        let from = home.map_or("none".to_string(), |h| format!("{},{}", h.x, h.z));
+    }
+
+    /// Where a player lands in `rc`: the world map tile's dry landing, else the society
+    /// grid's, else the region's centre.
+    fn landing_in(&self, rc: RegionCoords) -> [u32; 2] {
+        let edge = crate::REGION_BLOCKS as u32;
+        let on_map = self.world_map.as_ref().and_then(|m| m.tile(rc)).and_then(|t| t.landing);
+        let on_grid = self.history.as_ref().and_then(|h| h.grid().landing(rc));
+        on_map
+            .or(on_grid)
+            .filter(|l| l[0] < edge && l[1] < edge)
+            .unwrap_or([edge / 2, edge / 2])
+    }
+
+    fn embark_result(&self, id: ClientId, r: Result<SiteId, EmbarkRefusal>) {
+        let _ = self.out.send((Some(id), ServerPacket::EmbarkResult(r)));
+    }
+
+    /// The player's embark: one fortress per player; the history validates and founds
+    /// the site at once, then the player moves in (the region's catch-up, or the
+    /// founding itself when it already runs, spawns the party).
+    fn embark(&mut self, id: ClientId, req: EmbarkRequest, now_ms: u64) {
+        if self.fortress_of.contains_key(&id) && self.history.is_some() {
+            return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
+        }
+        let Some(history) = self.history.as_mut() else {
+            return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
+        };
+        let site = match history.player_embark(&req) {
+            Ok(site) => site,
+            Err(e) => return self.embark_result(id, Err(e)),
+        };
+        let landing = self.landing_in(req.region);
+        self.move_client(id, req.region, landing, now_ms);
+        self.fortress_of.insert(id, site);
+        self.embark_result(id, Ok(site));
         crate::perf_event!(
-            "play_region",
-            "client={id} from={from} to={},{}",
-            target.x,
-            target.z
+            "embark",
+            "client={id} site={} people={} to={},{}",
+            site.0,
+            req.people.len(),
+            req.region.x,
+            req.region.z
         );
+    }
+
+    /// Retire: the player stops playing its fortress and leaves its home region, which
+    /// parks by the usual grace rule (its people go back to the abstract history).
+    fn retire(&mut self, id: ClientId, now_ms: u64) {
+        self.fortress_of.remove(&id);
+        if let Some(home) = self.homes.remove(&id) {
+            self.send_play_event(home, GameEventKind::ClientLeft(id));
+            self.refresh_keepalive(home, now_ms);
+        }
+        let _ = self.out.send((Some(id), ServerPacket::PlayerRegion(None, id)));
+        if let Some(history) = &self.history {
+            let _ = self.out.send((Some(id), ServerPacket::Sites(history.site_markers())));
+        }
+    }
+
+    /// Return to a retired fortress.
+    ///
+    /// Player identity: there are no accounts and a `ClientId` is one connection, so
+    /// "return only to a fortress you founded" is implemented as "only to a
+    /// **player-founded** site no other *connected* player is playing" — the same in
+    /// single player. A disconnected player's claim is dropped when someone returns.
+    fn return_to(&mut self, id: ClientId, site: SiteId, now_ms: u64) {
+        let Some(history) = &self.history else {
+            return self.embark_result(id, Err(EmbarkRefusal::NoHistory));
+        };
+        if self.fortress_of.contains_key(&id) {
+            return self.embark_result(id, Err(EmbarkRefusal::AlreadyHasFortress));
+        }
+        if !history.returnable(site) {
+            return self.embark_result(id, Err(EmbarkRefusal::NotPlayerFounded));
+        }
+        let in_use = self
+            .fortress_of
+            .iter()
+            .any(|(c, s)| *s == site && *c != id && self.sessions.contains_key(c));
+        if in_use {
+            return self.embark_result(id, Err(EmbarkRefusal::InUse));
+        }
+        let region = history.site(site).expect("returnable").region;
+        self.fortress_of.retain(|_, s| *s != site);
+        let landing = self.landing_in(region);
+        self.move_client(id, region, landing, now_ms);
+        self.fortress_of.insert(id, site);
+        self.embark_result(id, Ok(site));
+    }
+
+    /// Send each notice the history made to the connected clients whose home is its region.
+    fn route_notices(&mut self) {
+        let Some(history) = self.history.as_mut() else { return };
+        for (rc, line) in history.take_notices() {
+            for c in self.sessions.keys().filter(|c| self.homes.get(c) == Some(&rc)) {
+                let _ = self.out.send((Some(*c), ServerPacket::Notice(line.clone())));
+            }
+        }
+    }
+
+    /// At a calendar day's turn: the calendar to every connected client, and the sites
+    /// if they changed (founded, abandoned, a population crossing a multiple of 10).
+    fn broadcast_daily(&mut self, now: CalendarTick) {
+        let Some(history) = &self.history else { return };
+        let day = now.0 / TICKS_PER_DAY;
+        if self.calendar_day == Some(day) {
+            return;
+        }
+        self.calendar_day = Some(day);
+        let key = sites_key(history);
+        let sites = (key != self.sites_key).then(|| history.site_markers());
+        self.sites_key = key;
+        for c in self.sessions.keys() {
+            let _ = self.out.send((Some(*c), ServerPacket::Calendar(now)));
+            if let Some(sites) = &sites {
+                let _ = self.out.send((Some(*c), ServerPacket::Sites(sites.clone())));
+            }
+        }
     }
 
     /// Deliver a server-authored Play event to `rc`, waking it if parked. A
@@ -563,6 +714,10 @@ impl<S: RegionSpawner> WorldManager<S> {
                 if let Some(map) = &self.world_map {
                     let _ = self.out.send((Some(id), ServerPacket::WorldMap(map.clone())));
                 }
+                if let (Some(history), Some(now)) = (&self.history, self.calendar_now(now_ms)) {
+                    let _ = self.out.send((Some(id), ServerPacket::Calendar(now)));
+                    let _ = self.out.send((Some(id), ServerPacket::Sites(history.site_markers())));
+                }
             }
             ServerEvent::ClientDisconnected(id) => self.client_disconnected(id, now_ms),
             ServerEvent::ClientPacket(packet, id) => match packet {
@@ -576,6 +731,18 @@ impl<S: RegionSpawner> WorldManager<S> {
                 ClientPacket::ReleaseLod(key) => self.lod_unsubscribe(id, key),
                 ClientPacket::PlayRegion(rc) => self.play_region(id, rc, now_ms),
                 ClientPacket::Leave => self.client_disconnected(id, now_ms),
+                ClientPacket::RequestEmbarkOptions => {
+                    let options = self.history.as_ref().map(History::embark_options).unwrap_or_default();
+                    let _ = self.out.send((Some(id), ServerPacket::EmbarkOptions(options)));
+                }
+                ClientPacket::Embark(req) => self.embark(id, req, now_ms),
+                ClientPacket::Retire => self.retire(id, now_ms),
+                ClientPacket::ReturnTo(site) => self.return_to(id, site, now_ms),
+                ClientPacket::RequestPersonInfo(person) => {
+                    if let Some(info) = self.history.as_ref().and_then(|h| h.person_info(person)) {
+                        let _ = self.out.send((Some(id), ServerPacket::PersonInfo(info)));
+                    }
+                }
                 packet @ (ClientPacket::GameEvent(_) | ClientPacket::GameEventAfterTick(..)) => {
                     let (event, after_tick) = match packet {
                         ClientPacket::GameEventAfterTick(event, tick) => (event, Some(tick)),
@@ -640,6 +807,7 @@ impl<S: RegionSpawner> WorldManager<S> {
             },
         }
         self.deliver_directives();
+        self.route_notices();
         true
     }
 
@@ -782,6 +950,8 @@ impl<S: RegionSpawner> WorldManager<S> {
         if let Some(to) = self.calendar_now(now_ms) {
             self.history.as_mut().unwrap().advance(to);
             self.deliver_directives();
+            self.broadcast_daily(to);
+            self.route_notices();
         }
         let connected_homes: BTreeSet<RegionCoords> = self
             .sessions

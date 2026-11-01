@@ -352,6 +352,84 @@ pub enum ClientPacket {
     PlayRegion(RegionCoords),
     /// The client is leaving this world; treat as disconnected now.
     Leave,
+    /// Ask for the people who may embark: answered by `ServerPacket::EmbarkOptions`.
+    RequestEmbarkOptions,
+    /// Embark: found a fortress with these people in this region; answered by
+    /// `ServerPacket::EmbarkResult` (and, on success, `PlayerRegion`).
+    Embark(EmbarkRequest),
+    /// Stop playing the fortress: the player leaves it, it parks as usual.
+    Retire,
+    /// Play a retired fortress again; answered by `ServerPacket::EmbarkResult`.
+    ReturnTo(crate::history::SiteId),
+    /// Answered by `ServerPacket::PersonInfo`; ignored for an unknown person.
+    RequestPersonInfo(crate::history::PersonId),
+}
+
+/// The player's embark: a civ, people of that civ's sites, and the region to found in.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EmbarkRequest {
+    pub civ: crate::history::CivId,
+    pub people: Vec<crate::history::PersonId>,
+    pub region: RegionCoords,
+}
+
+/// A site as the world map shows it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SiteMarker {
+    pub site: crate::history::SiteId,
+    pub civ: crate::history::CivId,
+    pub region: RegionCoords,
+    pub name: String,
+    /// Living members.
+    pub population: u32,
+    pub abandoned: bool,
+    /// Player-founded and not abandoned: a player may return to it.
+    pub returnable: bool,
+}
+
+/// Who may embark: per civ, per site, its people free to leave.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EmbarkOptions {
+    pub civs: Vec<CivOption>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CivOption {
+    pub civ: crate::history::CivId,
+    pub name: String,
+    pub sites: Vec<SiteOption>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SiteOption {
+    pub site: crate::history::SiteId,
+    pub name: String,
+    pub region: RegionCoords,
+    pub people: Vec<PersonOption>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersonOption {
+    pub person: crate::history::PersonId,
+    pub name: String,
+    pub age_years: u32,
+    pub sex: crate::history::Sex,
+    pub spouse: Option<crate::history::PersonId>,
+}
+
+/// One person, for the inspector: names rather than ids.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersonInfo {
+    pub person: crate::history::PersonId,
+    pub name: String,
+    /// Now, or at death.
+    pub age_years: u32,
+    pub alive: bool,
+    /// The site they are a citizen of.
+    pub site: Option<String>,
+    pub spouse: Option<String>,
+    pub parents: Vec<String>,
+    pub children: Vec<String>,
 }
 
 /// One LOD response: (key-local cell group, RLE grid) pairs.
@@ -375,6 +453,17 @@ pub enum ServerPacket {
     WorldMap(crate::world_map::WorldMap),
     /// A `ClientPacket::PlayRegion` for this region was refused.
     PlayRefused(RegionCoords, crate::world_map::PlayRefusal),
+    /// Every site of the history: on connect, and when the set or a population bucket
+    /// changes (at most once per calendar day).
+    Sites(Vec<SiteMarker>),
+    /// The world calendar: on connect and once per calendar day.
+    Calendar(crate::history::CalendarTick),
+    /// A history log line about the site of the client's home region.
+    Notice(String),
+    EmbarkOptions(EmbarkOptions),
+    /// The answer to `ClientPacket::Embark` and `ClientPacket::ReturnTo`: the site played.
+    EmbarkResult(Result<crate::history::SiteId, crate::history::EmbarkRefusal>),
+    PersonInfo(PersonInfo),
 }
 
 /// A Game event

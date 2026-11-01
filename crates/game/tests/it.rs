@@ -30,6 +30,7 @@ mod handoff_schedule;
 mod handoff_state;
 mod history;
 mod history_handover;
+mod history_play;
 mod hash_restore;
 mod jump_arc;
 mod kinematic;

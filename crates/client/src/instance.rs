@@ -1543,6 +1543,15 @@ impl GameInstanceManager {
                     .client_event_send
                     .send(ClientUpdateEvent::LodData(key, payload));
             }
+            // World history: plumbed to the views by plan 3 Task 2.
+            packet @ (game::ServerPacket::Sites(_)
+            | game::ServerPacket::Calendar(_)
+            | game::ServerPacket::Notice(_)
+            | game::ServerPacket::EmbarkOptions(_)
+            | game::ServerPacket::EmbarkResult(_)
+            | game::ServerPacket::PersonInfo(_)) => {
+                log::debug!("[client] history packet not handled yet: {packet:?}");
+            }
         }
         Ok(())
     }

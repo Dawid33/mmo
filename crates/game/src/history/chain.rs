@@ -8,13 +8,27 @@ use super::rules::*;
 use super::grid::{route, ROUTE_MAX_NODES};
 use super::History;
 
-/// Why a region cannot take a new site.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Why a region cannot take a new site, or (the player's embark and return) why the
+/// request is refused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum EmbarkRefusal {
     OffMap,
     NotHabitable,
     Occupied,
     TooClose { site: SiteId },
+    /// The world has no history.
+    NoHistory,
+    /// The player already plays a fortress: retire it first.
+    AlreadyHasFortress,
+    /// The party is empty or bigger than `EMBARK_PLAYER_PARTY_MAX`.
+    PartySize,
+    /// Dead, unknown, of another civ, travelling, embodied in a running region, or
+    /// listed twice.
+    UnavailablePerson(PersonId),
+    /// Return: not a living player-founded site.
+    NotPlayerFounded,
+    /// Return: another connected player plays it.
+    InUse,
 }
 
 fn chebyshev(a: crate::RegionCoords, b: crate::RegionCoords) -> u32 {

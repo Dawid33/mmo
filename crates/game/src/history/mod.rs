@@ -2,6 +2,7 @@
 
 mod chain;
 mod handover;
+mod play;
 pub mod bootstrap;
 pub mod stats;
 mod journey;
@@ -68,6 +69,11 @@ pub struct History {
     /// [`rules::HELD_TIMEOUT_LEGS`]. Not saved: a load releases every hold.
     #[serde(skip)]
     held_since: BTreeMap<JourneyId, CalendarTick>,
+    /// Log lines about sites in live regions, for the clients playing there; drained by
+    /// [`History::take_notices`]. Nothing is kept for regions not running (nobody plays
+    /// them), so an unwatched history never builds these up.
+    #[serde(skip)]
+    notices: Vec<(crate::RegionCoords, String)>,
 }
 
 impl History {
@@ -89,6 +95,7 @@ impl History {
             directives: Vec::new(),
             stray_candidates: BTreeSet::new(),
             held_since: BTreeMap::new(),
+            notices: Vec::new(),
         }
     }
 
@@ -123,7 +130,13 @@ impl History {
     }
 
     pub(crate) fn log_event(&mut self, kind: LogKind) {
-        self.log.push(LogEntry { at: self.now, kind });
+        let regions = self.notice_regions(&kind);
+        let entry = LogEntry { at: self.now, kind };
+        if !regions.is_empty() {
+            let line = entry.describe(self);
+            self.notices.extend(regions.into_iter().map(|r| (r, line.clone())));
+        }
+        self.log.push(entry);
     }
 
     pub fn add_civ(&mut self, race: Race) -> CivId {
