@@ -209,7 +209,12 @@ mod tests {
             volcanism: vec![0; N * N],
             salinity: vec![0; N * N],
             volcanoes: vec![],
-        })
+            biome: vec![],
+            region: vec![],
+            regions: vec![],
+            savagery: vec![],
+        }
+        .with_regions())
     }
 
     /// Forged: temperature and rain are the stored climate's, at the

@@ -21,9 +21,10 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use game::BlockId;
+use game::{Biome, BlockId, CellClimate};
 
 use crate::forge::geology::rock_index;
+pub use crate::forge::regions::RegionRecord;
 pub use crate::forge::world::EdgeKind;
 use crate::material::Materials;
 use crate::noise::OctaveNoise;
@@ -35,8 +36,10 @@ pub const WORLD_FILE_ENV: &str = "VOXEL_WORLD_FILE";
 /// coast distance recomputed on load. v4: `edges` (what lies past each side).
 /// v5: the latitude climate — `temperature_c` and `precip_mm` replace the
 /// relative `rain`. v6: derived `drainage`, `volcanism`, `salinity` (`u8`
-/// 0..100 rasters, `forge::fields`) and the volcano sites.
-pub const ARTIFACT_VERSION: u32 = 6;
+/// 0..100 rasters, `forge::fields`) and the volcano sites. v7: `biome`
+/// (`game::Biome` per cell), `region` ids + `regions`, `savagery`
+/// (`forge::regions`).
+pub const ARTIFACT_VERSION: u32 = 7;
 /// zstd level of the world file body (offline writer; reading cost is level-independent).
 #[cfg(not(target_arch = "wasm32"))]
 const ZSTD_LEVEL: i32 = 19;
@@ -279,6 +282,14 @@ pub struct WorldArtifact {
     pub salinity: Vec<u8>,
     /// Volcano sites, artifact metres (each the summit of a cone of uplift).
     pub volcanoes: Vec<[f32; 2]>,
+    /// `game::Biome` per cell (as `u8`): `game::classify` of this file's own
+    /// fields (`cell_climate_at`), so a reader re-classifying gets the same.
+    pub biome: Vec<u8>,
+    /// Region id per cell: an index into `regions` (`forge::regions::flood`).
+    pub region: Vec<u16>,
+    pub regions: Vec<RegionRecord>,
+    /// Savagery 0..100 (`forge::regions::savagery`).
+    pub savagery: Vec<u8>,
 }
 
 /// The format version in a world file's 8-byte header, without loading the
@@ -328,12 +339,34 @@ impl WorldArtifact {
     }
 
     /// Every `u8` (0..100) raster, likewise.
-    fn byte_rasters_mut(&mut self) -> [&mut Vec<u8>; 3] {
-        [&mut self.drainage, &mut self.volcanism, &mut self.salinity]
+    fn byte_rasters_mut(&mut self) -> [&mut Vec<u8>; 5] {
+        [&mut self.drainage, &mut self.volcanism, &mut self.salinity, &mut self.biome, &mut self.savagery]
     }
 
-    fn byte_rasters(&self) -> [&Vec<u8>; 3] {
-        [&self.drainage, &self.volcanism, &self.salinity]
+    fn byte_rasters(&self) -> [&Vec<u8>; 5] {
+        [&self.drainage, &self.volcanism, &self.salinity, &self.biome, &self.savagery]
+    }
+
+    /// The fields `game::classify` reads for raster cell `i`; `is_lake` from
+    /// the caller (the lake runs).
+    pub fn cell_climate_at(&self, i: usize, is_lake: bool) -> CellClimate {
+        CellClimate {
+            height_m: self.height.get(i),
+            temperature_c: self.temperature_c.get(i),
+            precip_mm: self.precip_mm.get(i),
+            drainage: self.drainage[i],
+            salinity: self.salinity[i],
+            is_lake,
+        }
+    }
+
+    /// This artifact with its biome, regions and savagery derived from its
+    /// other fields at the default good / evil shares (`forge::regions::derive`;
+    /// test worlds and tools that build an artifact by hand).
+    pub fn with_regions(mut self) -> WorldArtifact {
+        let k = crate::forge::Knobs::default();
+        crate::forge::regions::derive(&mut self, k.good_share, k.evil_share);
+        self
     }
 
     /// File bytes: `VXWF`, the version (u32 LE), then zstd over bincode with
@@ -348,6 +381,7 @@ impl WorldArtifact {
         for raster in wire.byte_rasters_mut() {
             delta_rows_u8(raster, n);
         }
+        delta_rows(&mut wire.region, n);
         let body = bincode::serialize(&wire).expect("artifact serializes");
         let mut out = MAGIC.to_vec();
         out.extend_from_slice(&self.version.to_le_bytes());
@@ -381,6 +415,8 @@ impl WorldArtifact {
         for raster in artifact.byte_rasters_mut() {
             undelta_rows_u8(raster, n);
         }
+        undelta_rows(&mut artifact.region, n);
+        artifact.validate_regions()?;
         Ok(artifact)
     }
 
@@ -393,6 +429,7 @@ impl WorldArtifact {
         let cells = artifact.n as usize * artifact.n as usize;
         if artifact.qrasters().iter().any(|raster| raster.len() != cells)
             || artifact.byte_rasters().iter().any(|raster| raster.len() != cells)
+            || artifact.region.len() != cells
         {
             return Err(ArtifactError::Format("raster size does not match n".into()));
         }
@@ -415,6 +452,24 @@ impl WorldArtifact {
         // `!(a >= b)` also rejects a NaN top.
         if artifact.column.windows(2).any(|w| !(w[0].0 >= w[1].0)) {
             return Err(ArtifactError::Format("rock column not sorted by descending top".into()));
+        }
+        if artifact.regions.len() > crate::forge::regions::MAX_REGIONS
+            || artifact.regions.iter().enumerate().any(|(i, r)| r.id as usize != i)
+        {
+            return Err(ArtifactError::Format("region records are not numbered 0..".into()));
+        }
+        Ok(())
+    }
+
+    /// Value checks on the biome and region rasters (`validate` checks their
+    /// sizes; on the wire the region ids are row-delta encoded, so the ids are
+    /// checked once decoded).
+    pub fn validate_regions(&self) -> Result<(), ArtifactError> {
+        if self.biome.iter().any(|&b| Biome::from_u8(b).is_none()) {
+            return Err(ArtifactError::Format("unknown biome".into()));
+        }
+        if self.region.iter().any(|&r| r as usize >= self.regions.len()) {
+            return Err(ArtifactError::Format("region id out of range".into()));
         }
         Ok(())
     }
@@ -484,7 +539,7 @@ impl ForgedWorld {
     /// If `artifact` breaks an invariant [`WorldArtifact::validate`] checks
     /// (the same ones a loaded file must pass).
     pub fn new(artifact: WorldArtifact) -> ForgedWorld {
-        if let Err(e) = artifact.validate() {
+        if let Err(e) = artifact.validate().and_then(|()| artifact.validate_regions()) {
             panic!("ForgedWorld::new: {e}");
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -669,6 +724,28 @@ impl ForgedWorld {
         let s = self.bicubic(ax, az) - self.geo_offset_m(ax, az);
         let column = &self.artifact.column;
         column.iter().rev().find(|&&(top, _)| f64::from(top) > s).or(column.first()).map(|&(_, rock)| rock)
+    }
+
+    /// Raster cell nearest engine world metres `(x, z)` (clamped to the map).
+    fn nearest_cell(&self, x_m: f64, z_m: f64) -> usize {
+        let (ax, az) = self.to_artifact(x_m, z_m);
+        let n = i64::from(self.artifact.n);
+        let at = |v: f64| ((v / self.artifact.cell_m).floor() as i64).clamp(0, n - 1);
+        (at(az) * n + at(ax)) as usize
+    }
+
+    /// The classification inputs of the raster cell nearest engine world
+    /// metres `(x, z)` (clamped to the map).
+    pub fn cell_climate(&self, x_m: f64, z_m: f64) -> CellClimate {
+        let i = self.nearest_cell(x_m, z_m);
+        self.artifact.cell_climate_at(i, self.lake_level_of(i).is_some())
+    }
+
+    /// The stored biome of the raster cell nearest engine world metres
+    /// `(x, z)` (clamped to the map); no dither.
+    pub fn biome_cell(&self, x_m: f64, z_m: f64) -> Biome {
+        let b = self.artifact.biome[self.nearest_cell(x_m, z_m)];
+        Biome::from_u8(b).expect("validated biome raster")
     }
 
     /// Where artifact point `(ax, az)` lies: inside, past a land edge (the

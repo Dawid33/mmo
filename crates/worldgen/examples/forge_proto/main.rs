@@ -189,6 +189,7 @@ fn main() {
     println!("wrote {objects} ({} lakes, {} river reaches)", a.lakes.len(), a.rivers.len());
 
     let artifact = forged.artifact(&p.forge);
+    print_biomes(&artifact);
     let world_file = format!("{stem}.world");
     artifact.save(std::path::Path::new(&world_file)).expect("write world file");
     let bytes = std::fs::metadata(&world_file).map(|m| m.len()).unwrap_or(0);
@@ -233,4 +234,33 @@ fn print_climate(forged: &worldgen::forge::Forged, p: &worldgen::forge::ForgePar
             mean(&c.temperature_c), t.0, t.1, mean(&c.precip_mm), r.0, r.1
         );
     }
+}
+
+/// Biome shares (of all cells, and of land), region counts per type, and
+/// the alignment and savagery split.
+fn print_biomes(a: &worldgen::forged::WorldArtifact) {
+    use worldgen::forge::regions::{biome_shares, region_counts};
+    use game::Biome;
+    let water = |b: Biome| matches!(b, Biome::Ocean | Biome::FrozenOcean | Biome::Lake);
+    let land_cells = a.biome.iter().filter(|&&b| !Biome::from_u8(b).is_some_and(water)).count().max(1) as f64;
+    let total = a.biome.len() as f64;
+    println!("biomes (share of all cells / of land):");
+    for (b, share) in biome_shares(&a.biome) {
+        let land = if water(b) { String::from("     -") } else { format!("{:5.1}%", 100.0 * share * total / land_cells) };
+        println!("  {:<26} {:5.1}%  {land}", b.name(), 100.0 * share);
+    }
+    let counts = region_counts(&a.regions);
+    let list: Vec<String> = counts.iter().map(|(t, c)| format!("{} {c}", t.name())).collect();
+    println!("regions: {} ({})", a.regions.len(), list.join(", "));
+    let cells = |al: i8| a.regions.iter().filter(|r| r.alignment == al).map(|r| r.cells as f64).sum::<f64>();
+    let aligned: f64 = a.regions.iter().filter(|r| r.kind != game::RegionType::Ocean).map(|r| r.cells as f64).sum::<f64>().max(1.0);
+    println!(
+        "alignment (share of non-ocean cells): good {:.1}% ({} regions), evil {:.1}% ({} regions)",
+        100.0 * cells(1) / aligned,
+        a.regions.iter().filter(|r| r.alignment == 1).count(),
+        100.0 * cells(-1) / aligned,
+        a.regions.iter().filter(|r| r.alignment == -1).count(),
+    );
+    let third = |lo: u8, hi: u8| 100.0 * a.savagery.iter().filter(|&&s| (lo..=hi).contains(&s)).count() as f64 / total;
+    println!("savagery: calm {:.0}%, neutral {:.0}%, savage {:.0}%", third(0, 32), third(33, 66), third(67, 100));
 }

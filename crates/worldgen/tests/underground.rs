@@ -168,7 +168,12 @@ fn cliff_world() -> ForgedWorld {
         volcanism: vec![0; N * N],
         salinity: vec![0; N * N],
         volcanoes: vec![],
-    })
+        biome: vec![],
+        region: vec![],
+        regions: vec![],
+        savagery: vec![],
+    }
+    .with_regions())
 }
 
 #[test]

@@ -83,7 +83,12 @@ pub fn synthetic() -> WorldArtifact {
         volcanism: vec![0; N * N],
         salinity: vec![0; N * N],
         volcanoes: vec![],
+        biome: vec![],
+        region: vec![],
+        regions: vec![],
+        savagery: vec![],
     }
+    .with_regions()
 }
 
 /// Artifact meters -> engine world meters (spawn lands on engine (8.5, 8.5)).

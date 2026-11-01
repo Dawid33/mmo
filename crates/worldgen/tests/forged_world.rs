@@ -3,7 +3,7 @@
 //! its banks actually hold, lakes at one flat level — on a small synthetic
 //! world whose right answers are known.
 
-use game::{BlockId, BlockPos, Column, ColumnCoords, ReadVol, RegionCoords};
+use game::{classify, Biome, BlockId, BlockPos, Column, ColumnCoords, ReadVol, RegionCoords};
 use worldgen::forged::{
     delta_rows, undelta_rows, ArtifactError, EdgeKind, ForgedWorld, QRaster, WorldArtifact, ARTIFACT_VERSION, HEIGHT_STEP_M,
 };
@@ -271,6 +271,46 @@ fn shaft_crosses_soil_then_layers_then_bedrock() {
     }
 }
 
+/// The stored biome of a cell is `classify` of what `cell_climate` reads
+/// there: sea, lake and plain of the synthetic world.
+#[test]
+fn biome_cell_is_classify_of_cell_climate() {
+    let world = ForgedWorld::new(synthetic());
+    let cell = |ix: usize, iz: usize| engine((ix as f64 + 0.5) * CELL_M, (iz as f64 + 0.5) * CELL_M);
+    let at = |(x, z): (f64, f64)| (world.biome_cell(x, z), world.cell_climate(x, z));
+    let (sea, sea_climate) = at(cell(1, 40));
+    assert_eq!(sea, Biome::Ocean, "{sea_climate:?}");
+    let (lake, lake_climate) = at(cell(LAKE_CELLS.0.start + 1, LAKE_CELLS.1.start + 1));
+    assert!(lake_climate.is_lake);
+    assert_eq!(lake, Biome::Lake);
+    // 14 C, 900 mm/yr (rain index 56), drainage 50: shrubland.
+    let (plain_biome, plain_climate) = at(cell(50, 40));
+    assert_eq!(plain_biome, Biome::Shrubland, "{plain_climate:?}");
+    for iz in 0..N {
+        for ix in 0..N {
+            let (b, c) = at(cell(ix, iz));
+            assert_eq!(b, classify(&c), "cell {ix},{iz}");
+        }
+    }
+    // Clamped outside the map.
+    assert_eq!(world.biome_cell(-1.0e6, -1.0e6), world.biome_cell(cell(0, 0).0, cell(0, 0).1));
+    let a = world.artifact();
+    assert_eq!(a.regions.iter().map(|r| r.cells as usize).sum::<usize>(), N * N);
+    assert!(a.region.iter().all(|&r| (r as usize) < a.regions.len()));
+}
+
+#[test]
+fn bad_region_or_biome_values_fail_loudly() {
+    let mut artifact = synthetic();
+    artifact.region[5] = artifact.regions.len() as u16;
+    let err = WorldArtifact::from_bytes(&artifact.to_bytes()).unwrap_err().to_string();
+    assert!(err.contains("region id out of range"), "{err}");
+    let mut artifact = synthetic();
+    artifact.biome[5] = 200;
+    let err = WorldArtifact::from_bytes(&artifact.to_bytes()).unwrap_err().to_string();
+    assert!(err.contains("unknown biome"), "{err}");
+}
+
 #[test]
 fn unknown_rock_name_fails_loudly() {
     let mut artifact = synthetic();
@@ -365,6 +405,7 @@ fn artifact_v3_round_trip_preserves_samples() {
         let (a, b) = (before.sample(x, z), after.sample(x, z));
         assert!((a.ground_y - b.ground_y).abs() <= 0.07, "{x},{z}: {} vs {}", a.ground_y, b.ground_y);
         assert_eq!(a.water_y.is_some(), b.water_y.is_some(), "{x},{z}");
+        assert_eq!(after.biome_cell(x, z), classify(&after.cell_climate(x, z)), "{x},{z}");
     }
 }
 

@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 
 pub mod adventure;
 pub mod anim;
+pub mod biome;
 pub mod block;
 pub mod block_props;
 pub mod camera;
@@ -56,6 +57,7 @@ pub use state_hash::StateHash;
 // The #[rollback] macro expansion in `state` and the borrow::Partial derives
 // rely on these items being reachable at the crate root (`crate::...`).
 pub use adventure::*;
+pub use biome::*;
 pub use block::*;
 pub use block_props::*;
 pub use camera::*;

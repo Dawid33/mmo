@@ -30,7 +30,9 @@
 //!   6. hydrology  lakes and rivers as objects + statistics;
 //!   7. fields     drainage, volcanism, salinity (0..100 per cell) and the
 //!                 volcano sites, whose cones `World::new` already raised;
-//!   8. spawn      a flat dry coastal site.
+//!   8. spawn      a flat dry coastal site;
+//!   9. regions    (in `Forged::artifact`) biome per cell, named regions by
+//!                 flood fill, good / evil per region, savagery.
 //! `knobs` holds every tunable.
 //!
 //! Not bit-reproducible across machines by design (sqrt/ln/sin used freely):
@@ -47,6 +49,7 @@ pub mod plates;
 pub mod post;
 pub mod presets;
 pub mod quality;
+pub mod regions;
 pub mod render;
 pub mod routing_fast;
 pub mod spawn;
@@ -90,7 +93,7 @@ impl Forged {
         let level = erosion::route(w, 0.0).filled;
         let lakes = self.lake_bodies(&level);
         let spawn = spawn::pick(w, a, p.seed);
-        WorldArtifact {
+        let mut artifact = WorldArtifact {
             version: ARTIFACT_VERSION,
             seed: p.seed,
             size_m: p.size_m,
@@ -130,7 +133,15 @@ impl Forged {
             volcanism: self.fields.volcanism.clone(),
             salinity: self.fields.salinity.clone(),
             volcanoes: self.fields.volcanoes.clone(),
-        }
+            biome: Vec::new(),
+            region: Vec::new(),
+            regions: Vec::new(),
+            savagery: Vec::new(),
+        };
+        // Classified from the stored (quantised) fields, so a reader that
+        // re-classifies a cell gets the stored biome.
+        regions::derive(&mut artifact, p.knobs.good_share, p.knobs.evil_share);
+        artifact
     }
 }
 

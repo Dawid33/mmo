@@ -128,6 +128,10 @@ knobs! {
         lake_radius_max_m: 420.0, [150.0, 1_200.0], "Largest lake radius (m)", "Basin radii run from 140 m to this.";
         lake_depth_max_m: 14.0, [5.0, 40.0], "Deepest lake basin (m)", "Basin depths run from 5 m to this.";
     }
+    "Regions" {
+        good_share: 0.1, [0.0, 0.5], "Good share", "Share of the land (by area) whose regions are good, assigned whole region by whole region per size class (DF's rule).";
+        evil_share: 0.1, [0.0, 0.5], "Evil share", "Share of the land (by area) whose regions are evil, assigned like good.";
+    }
     "Rivers" {
         river_min_discharge_m2: 400_000.0, [50_000.0, 4_000_000.0], "River threshold (m²)", "A cell is a river once this much rain-weighted land drains through it.";
         river_width_m: 5.5, [1.0, 20.0], "River width factor", "Channel width in meters per sqrt(km²) of discharge.";

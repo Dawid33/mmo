@@ -220,7 +220,12 @@ mod tests {
             volcanism: vec![0; 4],
             salinity: vec![0; 4],
             volcanoes: vec![],
+            biome: vec![],
+            region: vec![],
+            regions: vec![],
+            savagery: vec![],
         }
+        .with_regions()
     }
 
     fn meta(name: &str, slug: &str, created: &str) -> WorldMeta {
