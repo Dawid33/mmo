@@ -533,3 +533,78 @@ fn embark_party_with_nowhere_to_go_wanders() {
     }
     assert_eq!(h.pending_journey_legs(), 0);
 }
+
+// ---- Task 6: bootstrap, fast-forward, statistics ----
+use game::history::bootstrap::*;
+
+fn big_land() -> WorldMap {
+    test_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46)
+}
+
+fn params(years: u32) -> BootstrapParams {
+    BootstrapParams { seed: 5, years, ..BootstrapParams::default() }
+}
+
+#[test]
+fn bootstrap_places_spaced_civs() {
+    let h = bootstrap(&big_land(), &params(0)).unwrap();
+    assert_eq!(h.now(), start());
+    assert_eq!(h.civs().count(), 4);
+    let sites: Vec<&Site> = h.sites().collect();
+    assert_eq!(sites.len(), 4);
+    for (i, a) in sites.iter().enumerate() {
+        assert_eq!(a.members.len(), 30);
+        for b in &sites[i + 1..] {
+            assert!(cheb(a.region, b.region) >= 10, "{:?} {:?}", a.region, b.region);
+        }
+    }
+    for p in h.people() {
+        for parent in [p.mother, p.father].into_iter().flatten() {
+            assert_eq!(h.person(parent).unwrap().site, p.site);
+        }
+        assert!(p.born <= start());
+    }
+}
+
+#[test]
+fn fast_forward_spreads_civs() {
+    let h = bootstrap(&big_land(), &params(100)).unwrap();
+    let stats = h.stats();
+    println!("{stats}");
+    assert!(stats.civs_alive >= 1);
+    assert!(stats.sites > 4, "{stats}");
+    assert!(h.sites().any(|s| s.from.is_some()));
+    assert_eq!(h.now(), CalendarTick(start().0 + 100 * DAYS_PER_YEAR * TICKS_PER_DAY));
+    for (civ, alive, sites_alive) in &stats.per_civ {
+        if *alive > 0 {
+            assert!((3..=8).contains(sites_alive), "civ {civ:?}: {sites_alive} sites\n{stats}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn fast_forward_respects_civ_cap() {
+    let p = BootstrapParams { founders_per_civ: 200, ..params(0) };
+    let mut h = bootstrap(&big_land(), &p).unwrap();
+    for _ in 0..300 {
+        let to = CalendarTick(h.now().0 + DAYS_PER_YEAR * TICKS_PER_DAY);
+        h.advance(to);
+        for (civ, alive, _) in h.stats().per_civ {
+            assert!(alive <= CIV_POPULATION_CAP, "civ {civ:?} has {alive} at {}", h.now().date());
+        }
+    }
+}
+
+#[test]
+fn bootstrap_is_deterministic() {
+    let a = bootstrap(&big_land(), &params(30)).unwrap();
+    let b = bootstrap(&big_land(), &params(30)).unwrap();
+    assert_eq!(bincode::serialize(&a).unwrap(), bincode::serialize(&b).unwrap());
+}
+
+#[test]
+fn bootstrap_no_land() {
+    let sea = test_map(10, 10, |_, _| true);
+    assert_eq!(bootstrap(&sea, &params(0)).unwrap_err(), BootstrapError::NoHabitableLand);
+}

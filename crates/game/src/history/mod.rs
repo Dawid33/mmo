@@ -1,6 +1,8 @@
 //! Deterministic, threadless world history: people, sites, civs and journeys on one calendar.
 
 mod chain;
+pub mod bootstrap;
+pub mod stats;
 mod journey;
 pub mod calendar;
 pub mod grid;
