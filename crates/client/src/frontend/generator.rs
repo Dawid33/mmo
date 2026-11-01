@@ -1,7 +1,11 @@
 //! The map generator screen (New world, `ui/map-generator.slint`): preset,
-//! seed and name, the forge's knobs in five tabs, a live preview forged in the
-//! background at a coarse cell, and Play, which forges the world at full
-//! resolution, writes `worlds/<slug>/` and starts a session on it.
+//! seed and name, the forge's knobs in six tabs, a live preview forged in the
+//! background at a coarse cell (picked from the world size,
+//! `forge::play::preview_cell_for`), and Play, which forges the world at full
+//! resolution (default 100 km / 16 m; the estimated time and memory show
+//! before it starts), writes `worlds/<slug>/` and starts a session on it.
+//! Cancel stops the forge within one erosion iteration and leaves nothing on
+//! disk (`forge::play::forge_to_file` + `world_store::finish_staged`).
 //!
 //! Every row comes from `worldgen::forge::knobs::SPECS` / `CHOICES` at
 //! runtime: the only table here is which tab a knob GROUP goes in
@@ -28,6 +32,7 @@ use slint_ui::{FrontendUi, KnobRow};
 use worldgen::forge::knobs::{Knobs, Spec, CHOICES, SPECS};
 use worldgen::forge::presets::{self, CUSTOM, PRESETS};
 use worldgen::forge::render::{self, PreviewLayer, PreviewStats, Rgba};
+use worldgen::forge::play::{self, forge_estimate, forge_to_file, panic_message, ForgeEstimate, ForgeFileError};
 use worldgen::forge::{forge_with, ForgeParams, ForgeProgress, ForgeStage};
 use worldgen::{forged, world_store};
 
@@ -35,10 +40,11 @@ use crate::renderer::slint_overlay::SlintLayer;
 use crate::session::{AppState, PendingWorld};
 
 /// The tabs, each with the knob GROUPS it shows (`Spec::group`).
-pub const TABS: [(&str, &[&str]); 5] = [
+pub const TABS: [(&str, &[&str]); 6] = [
     ("Land", &["Island", "Continent"]),
     ("Mountains", &["Uplift", "Plates"]),
-    ("Water", &["Rivers", "Climate"]),
+    ("Climate", &["Climate", "Regions"]),
+    ("Water", &["Rivers"]),
     ("Geology", &["Geology"]),
     ("Advanced", &["Erosion", "Schedule"]),
 ];
@@ -55,8 +61,8 @@ const TAB_KEY_OVERRIDES: &[(&str, &str)] = &[
     ("lake_depth_max_m", "Water"),
 ];
 
-/// Where a knob nobody placed goes.
-const ADVANCED: usize = 4;
+/// Where a knob nobody placed goes (the last tab).
+const ADVANCED: usize = TABS.len() - 1;
 
 /// The tab a knob is shown in: its key's override, else its group's tab,
 /// else Advanced.
@@ -74,18 +80,25 @@ pub fn tab_of(spec: &Spec) -> usize {
 pub const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// Advanced's two rows that are not forge knobs: the preview's and the
-/// saved world's cell size, as choices (index 0 is the default).
+/// saved world's cell size, as choices (index 0 is the default). The
+/// preview's [`PREVIEW_AUTO`] follows the world size
+/// (`forge::play::preview_cell_for`); the others override it.
 pub const PREVIEW_CELL_KEY: &str = "preview_cell";
 pub const WORLD_CELL_KEY: &str = "world_cell";
-pub const PREVIEW_CELLS: [(f64, &str); 2] = [(64.0, "64 m"), (32.0, "32 m")];
-pub const WORLD_CELLS: [(f64, &str); 2] = [(16.0, "16 m"), (8.0, "8 m (slow)")];
+pub const PREVIEW_AUTO: f64 = 0.0;
+pub const PREVIEW_CELLS: [(f64, &str); 5] =
+    [(PREVIEW_AUTO, "Auto"), (32.0, "32 m"), (64.0, "64 m"), (128.0, "128 m"), (256.0, "256 m")];
+pub const WORLD_CELLS: [(f64, &str); 3] = [(16.0, "16 m"), (32.0, "32 m (coarse, fast)"), (8.0, "8 m (slow)")];
 
 /// Land's non-knob row: the world's edge length (`ForgeParams::size_m`) for
-/// the preview and Play forges. [`DEFAULT_WORLD_SIZE`] is `DEFAULT_SIZE_M`.
+/// the preview and Play forges. The row's labels add the Play forge's
+/// estimated time at the chosen world cell (`forge::play::forge_estimate`).
+/// The default is Dwarf Fortress's medium world (196 tiles of 512 m);
+/// `ForgeParams::default()` (server auto-forge, tests) stays 16 km / 32 m.
 pub const WORLD_SIZE_KEY: &str = "world_size";
-pub const WORLD_SIZES: [(f64, &str); 3] =
-    [(8_000.0, "8 km"), (worldgen::forge::world::DEFAULT_SIZE_M, "16 km"), (32_000.0, "32 km (slow)")];
-pub const DEFAULT_WORLD_SIZE: usize = 1;
+pub const WORLD_SIZES: [(f64, &str); 4] =
+    [(16_000.0, "16 km"), (32_000.0, "32 km"), (64_000.0, "64 km"), (100_352.0, "100 km (DF Medium)")];
+pub const DEFAULT_WORLD_SIZE: usize = 3;
 
 /// A knob whose range is whole numbers at least this wide slides in steps of 1.
 const WHOLE_STEP_MIN_RANGE: f64 = 10.0;
@@ -121,7 +134,7 @@ pub fn shuffle_seed() -> u64 {
 
 /// The name a world gets unless the player types one.
 pub fn default_name(seed: u64) -> String {
-    format!("Island {:04X}", seed & 0xFFFF)
+    format!("World {:04X}", seed & 0xFFFF)
 }
 
 /// RFC 3339 UTC to the second, e.g. `2023-11-14T22:13:20Z`.
@@ -152,7 +165,7 @@ fn strings(items: impl IntoIterator<Item = impl Into<SharedString>>) -> ModelRc<
     ModelRc::new(VecModel::from(items.into_iter().map(Into::into).collect::<Vec<SharedString>>()))
 }
 
-fn choice_row(key: &str, label: &str, help: &str, choices: &[&str], value: usize, default: usize) -> KnobRow {
+fn choice_row(key: &str, label: &str, help: &str, choices: &[impl AsRef<str>], value: usize, default: usize) -> KnobRow {
     KnobRow {
         key: key.into(),
         label: label.into(),
@@ -163,7 +176,7 @@ fn choice_row(key: &str, label: &str, help: &str, choices: &[&str], value: usize
         default: default as f32,
         step: 1.0,
         is_choice: true,
-        choices: strings(choices.iter().copied()),
+        choices: strings(choices.iter().map(|c| c.as_ref())),
     }
 }
 
@@ -197,7 +210,7 @@ pub struct GeneratorState {
     pub tab: usize,
     /// Index into `PreviewLayer::ALL`.
     pub layer: usize,
-    /// Index into [`PREVIEW_CELLS`] / [`WORLD_CELLS`].
+    /// Index into [`PREVIEW_CELLS`] (0 = auto) / [`WORLD_CELLS`].
     pub preview_cell: usize,
     pub world_cell: usize,
     /// Index into [`WORLD_SIZES`].
@@ -267,11 +280,15 @@ impl GeneratorState {
         let labels = |cells: &[(f64, &'static str)]| cells.iter().map(|c| c.1).collect::<Vec<_>>();
         let mut rows = Vec::new();
         if self.tab == 0 {
+            let sizes: Vec<String> = WORLD_SIZES
+                .iter()
+                .map(|&(size_m, label)| format!("{label} · {}", forge_estimate(size_m, self.world_cell_m()).time_text()))
+                .collect();
             rows.push(choice_row(
                 WORLD_SIZE_KEY,
                 "World size",
-                "Edge length of the square world, ocean all round: 32 km takes about four times longer.",
-                &labels(&WORLD_SIZES),
+                "Edge length of the square world, with the estimated Play forge time at the World cell (Advanced). 100 km is Dwarf Fortress's medium world.",
+                &sizes,
                 self.world_size,
                 DEFAULT_WORLD_SIZE,
             ));
@@ -286,7 +303,7 @@ impl GeneratorState {
             rows.push(choice_row(
                 PREVIEW_CELL_KEY,
                 "Preview cell",
-                "Cell size of the preview: 32 m is sharper and slower to refresh.",
+                "Cell size of the preview. Auto keeps it near 512 x 512 cells (about a second) for the world size; finer is sharper and slower to refresh.",
                 &labels(&PREVIEW_CELLS),
                 self.preview_cell,
                 0,
@@ -294,7 +311,7 @@ impl GeneratorState {
             rows.push(choice_row(
                 WORLD_CELL_KEY,
                 "World cell",
-                "Cell size the world is forged at on Play: 8 m takes several times longer.",
+                "Cell size the world is forged at on Play: 32 m takes about a quarter of the time, 8 m four times longer and four times the memory.",
                 &labels(&WORLD_CELLS),
                 self.world_cell,
                 0,
@@ -303,9 +320,36 @@ impl GeneratorState {
         rows
     }
 
+    pub fn size_m(&self) -> f64 {
+        WORLD_SIZES[self.world_size.min(WORLD_SIZES.len() - 1)].0
+    }
+
+    /// The preview's cell: the override, or auto for the world size.
+    pub fn preview_cell_m(&self) -> f64 {
+        match PREVIEW_CELLS[self.preview_cell.min(PREVIEW_CELLS.len() - 1)].0 {
+            PREVIEW_AUTO => play::preview_cell_for(self.size_m()),
+            cell => cell,
+        }
+    }
+
+    /// The cell Play forges at.
+    pub fn world_cell_m(&self) -> f64 {
+        WORLD_CELLS[self.world_cell.min(WORLD_CELLS.len() - 1)].0
+    }
+
+    /// What Play is expected to cost at the current size and world cell.
+    pub fn play_estimate(&self) -> ForgeEstimate {
+        forge_estimate(self.size_m(), self.world_cell_m())
+    }
+
+    /// The line beside Play, e.g. "100 km at 16 m: ≈ 8 min, ≈ 8 GB RAM (est.)".
+    pub fn play_estimate_text(&self) -> String {
+        format!("{:.0} km at {:.0} m: {}", self.size_m() / 1_000.0, self.world_cell_m(), self.play_estimate().text())
+    }
+
     pub fn params(&self, cell_m: f64) -> ForgeParams {
         ForgeParams {
-            size_m: WORLD_SIZES[self.world_size.min(WORLD_SIZES.len() - 1)].0,
+            size_m: self.size_m(),
             cell_m,
             seed: self.seed,
             knobs: self.knobs.clone(),
@@ -391,7 +435,11 @@ impl GeneratorState {
                 self.world_size = (value.round().max(0.0) as usize).min(WORLD_SIZES.len() - 1);
                 self.stale = true;
             }
-            WORLD_CELL_KEY => self.world_cell = (value.round().max(0.0) as usize).min(WORLD_CELLS.len() - 1),
+            WORLD_CELL_KEY => {
+                self.world_cell = (value.round().max(0.0) as usize).min(WORLD_CELLS.len() - 1);
+                // The size row's labels carry the estimate at this cell.
+                self.rows_dirty = true;
+            }
             _ => {
                 if self.knobs.get(key) == Some(value) || !self.knobs.set(key, value) {
                     return;
@@ -442,6 +490,10 @@ struct PreviewRequest {
     generation: u64,
 }
 
+/// A finished preview: its image and numbers, or why the forge failed (a
+/// panic, caught so the worker keeps serving later requests).
+pub type PreviewResult = Result<(Rgba, PreviewStats), String>;
+
 /// One background thread forging previews. Requests are coalesced: it waits
 /// [`PREVIEW_DEBOUNCE`] after the last one, then forges the newest; a newer
 /// request abandons a forge in progress. The last forge is kept, so a layer
@@ -450,8 +502,8 @@ struct PreviewRequest {
 pub struct PreviewWorker {
     requests: Option<Sender<PreviewRequest>>,
     latest: Arc<AtomicU64>,
-    /// `(generation, image, stats)` of finished previews.
-    pub results: Receiver<(u64, Rgba, PreviewStats)>,
+    /// `(generation, result)` of finished previews.
+    pub results: Receiver<(u64, PreviewResult)>,
 }
 
 impl PreviewWorker {
@@ -487,7 +539,7 @@ impl Drop for PreviewWorker {
 /// terrain) and its result, reused when only the layer or view changes.
 type LastForge = ((u64, u64, u64, Vec<u64>), worldgen::forge::Forged);
 
-fn preview_loop(inbox: Receiver<PreviewRequest>, latest: Arc<AtomicU64>, outbox: Sender<(u64, Rgba, PreviewStats)>) {
+fn preview_loop(inbox: Receiver<PreviewRequest>, latest: Arc<AtomicU64>, outbox: Sender<(u64, PreviewResult)>) {
     let mut last: Option<LastForge> = None;
     while let Ok(mut request) = inbox.recv() {
         loop {
@@ -501,19 +553,32 @@ fn preview_loop(inbox: Receiver<PreviewRequest>, latest: Arc<AtomicU64>, outbox:
         let key = forge_key(&request.params);
         if last.as_ref().is_none_or(|(k, _)| *k != key) {
             last = None;
-            let forged = forge_with(&request.params, &mut |_| {
-                if latest.load(Ordering::SeqCst) == generation { ControlFlow::Continue(()) } else { ControlFlow::Break(()) }
-            });
+            let forged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                forge_with(&request.params, &mut |_| {
+                    if latest.load(Ordering::SeqCst) == generation { ControlFlow::Continue(()) } else { ControlFlow::Break(()) }
+                })
+            }));
             match forged {
-                Some(forged) => last = Some((key, forged)),
-                None => continue,
+                Ok(Some(forged)) => last = Some((key, forged)),
+                Ok(None) => continue,
+                Err(panic) => {
+                    let why = format!("Preview failed: {}", panic_message(panic.as_ref()));
+                    if outbox.send((generation, Err(why))).is_err() {
+                        return;
+                    }
+                    continue;
+                }
             }
         }
         if latest.load(Ordering::SeqCst) != generation {
             continue;
         }
         let forged = &last.as_ref().expect("forged above").1;
-        if outbox.send((generation, render::render(forged, request.layer), render::stats(forged))).is_err() {
+        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (render::render(forged, request.layer), render::stats(forged))
+        }))
+        .map_err(|panic| format!("Preview failed: {}", panic_message(panic.as_ref())));
+        if outbox.send((generation, rendered)).is_err() {
             return;
         }
     }
@@ -524,9 +589,8 @@ fn preview_loop(inbox: Receiver<PreviewRequest>, latest: Arc<AtomicU64>, outbox:
 /// What the Play forge reports.
 #[derive(Debug)]
 pub enum ForgeEvent {
+    /// Every erosion iteration and stage, ending with `ForgeStage::Saving`.
     Progress(ForgeProgress),
-    /// Forged; writing the world directory.
-    Saving,
     Done(PendingWorld),
     Failed(String),
     /// Cancelled; nothing was left on disk.
@@ -542,11 +606,14 @@ pub fn progress_text(p: ForgeProgress) -> (f32, String) {
         }
         ForgeStage::Shaping => (0.92, p.stage.label().to_string()),
         ForgeStage::Hydrology => (0.95, p.stage.label().to_string()),
+        ForgeStage::Saving => (0.97, p.stage.label().to_string()),
     }
 }
 
-/// Play's forge on its own thread: forge, then `world_store::create` under
-/// `root`. Cancel stops it and removes anything it wrote.
+/// Play's forge on its own thread: `forge_to_file` into the world's staging
+/// directory, then `world_store::finish_staged` under `root`. Cancel stops it
+/// within one erosion iteration and removes anything it wrote; a panic
+/// anywhere in it ends as `Failed`, never a silent hang.
 #[derive(Resource)]
 pub struct ForgeJob {
     cancel: Arc<AtomicBool>,
@@ -561,7 +628,10 @@ impl ForgeJob {
         std::thread::Builder::new()
             .name("world-forge".into())
             .spawn(move || {
-                let end = forge_world(&root, &params, name, &flag, &tx);
+                let end = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    forge_world(&root, &params, name, &flag, &tx)
+                }))
+                .unwrap_or_else(|panic| ForgeEvent::Failed(format!("The forge failed: {}", panic_message(panic.as_ref()))));
                 let _ = tx.send(end);
             })
             .expect("spawn the forge thread");
@@ -589,28 +659,35 @@ impl ForgeJob {
 fn forge_world(root: &Path, params: &ForgeParams, name: String, cancel: &AtomicBool, tx: &Sender<ForgeEvent>) -> ForgeEvent {
     let started = Instant::now();
     let cancelled = || cancel.load(Ordering::SeqCst);
-    let forged = forge_with(params, &mut |p| {
+    let slug = world_store::slug_for(root, &name);
+    let staging = world_store::staging_dir(root, &slug);
+    let _ = std::fs::remove_dir_all(&staging);
+    // Removes the staging directory (and so the terrain file) on every way out
+    // but success.
+    let fail = |end: ForgeEvent| {
+        let _ = std::fs::remove_dir_all(&staging);
+        end
+    };
+    let forged = match forge_to_file(params, &staging.join(world_store::TERRAIN_FILE), cancel, &mut |p| {
         let _ = tx.send(ForgeEvent::Progress(p));
-        if cancelled() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
-    });
-    let Some(forged) = forged else { return ForgeEvent::Cancelled };
-    let _ = tx.send(ForgeEvent::Saving);
-    // `artifact` panics only when the world has no dry land at all for a spawn
-    // (`spawn::pick` falls back to the flattest dry patch otherwise).
-    let artifact = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| forged.artifact(params))) {
-        Ok(a) => a,
-        Err(_) => return ForgeEvent::Failed("This world has no dry land to start on; try other settings.".into()),
+    }) {
+        Ok(forged) => forged,
+        Err(ForgeFileError::Cancelled) => return fail(ForgeEvent::Cancelled),
+        // `artifact` panics when the world has no dry land at all for a spawn
+        // (`spawn::pick` falls back to the flattest dry patch otherwise).
+        Err(ForgeFileError::Failed(why)) if why.contains("no dry land") => {
+            return fail(ForgeEvent::Failed("This world has no dry land to start on; try other settings.".into()))
+        }
+        Err(ForgeFileError::Failed(why)) => return fail(ForgeEvent::Failed(format!("Could not create the world: {why}"))),
     };
     if cancelled() {
-        return ForgeEvent::Cancelled;
+        return fail(ForgeEvent::Cancelled);
     }
     let png = render::encode_png(&render::render(&forged, PreviewLayer::Relief));
-    if let Err(e) = std::fs::create_dir_all(root) {
-        return ForgeEvent::Failed(format!("Could not create {}: {e}", root.display()));
-    }
+    drop(forged);
     let meta = world_store::WorldMeta {
         format_version: world_store::META_FORMAT,
-        slug: world_store::slug_for(root, &name),
+        slug,
         name: name.clone(),
         created_utc: rfc3339_utc(SystemTime::now()),
         seed: params.seed,
@@ -623,9 +700,9 @@ fn forge_world(root: &Path, params: &ForgeParams, name: String, cancel: &AtomicB
         chunk_blocks: game::CHUNK_BLOCKS as u32,
         artifact_version: forged::ARTIFACT_VERSION,
     };
-    let dir = match world_store::create(root, &meta, &artifact, &png) {
+    let dir = match world_store::finish_staged(root, &meta, &png) {
         Ok(dir) => dir,
-        Err(e) => return ForgeEvent::Failed(format!("Could not save the world: {e}")),
+        Err(e) => return fail(ForgeEvent::Failed(format!("Could not save the world: {e}"))),
     };
     if cancelled() {
         let _ = std::fs::remove_dir_all(&dir);
@@ -720,7 +797,7 @@ fn apply_generator_actions(
             GeneratorAction::Play if job.is_none() && state.forging.is_none() => {
                 let name = if name.trim().is_empty() { default_name(state.seed) } else { name.trim().to_string() };
                 let root = forged::from_repo_root(Path::new(world_store::WORLDS_DIR));
-                let params = state.params(WORLD_CELLS[state.world_cell].0);
+                let params = state.params(state.world_cell_m());
                 commands.insert_resource(ForgeJob::start(root, params, name));
                 state.forging = Some((0.0, ForgeStage::Setup.label().to_string()));
                 state.play_error.clear();
@@ -749,7 +826,8 @@ fn request_preview(
     state.refresh_requested = false;
     state.generation += 1;
     state.preview_busy = true;
-    worker.request(state.params(PREVIEW_CELLS[state.preview_cell].0), state.layer(), state.generation);
+    let cell_m = state.preview_cell_m();
+    worker.request(state.params(cell_m), state.layer(), state.generation);
 }
 
 fn receive_preview(
@@ -759,10 +837,15 @@ fn receive_preview(
 ) {
     let (Some(layer), Some(worker)) = (layer, worker) else { return };
     let newest = worker.results.try_iter().filter(|(generation, ..)| *generation == state.generation).last();
-    let Some((_, image, stats)) = newest else { return };
-    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&image.pixels, image.width, image.height);
-    layer.overlay.ui().set_gen_preview(SlintImage::from_rgba8(buffer));
-    state.stats_lines = stats_lines(&stats);
+    let Some((_, result)) = newest else { return };
+    match result {
+        Ok((image, stats)) => {
+            let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&image.pixels, image.width, image.height);
+            layer.overlay.ui().set_gen_preview(SlintImage::from_rgba8(buffer));
+            state.stats_lines = stats_lines(&stats);
+        }
+        Err(why) => state.stats_lines = vec![why],
+    }
     state.preview_busy = false;
 }
 
@@ -776,7 +859,6 @@ fn poll_forge(
     for event in job.events.try_iter() {
         match job.settle(event) {
             ForgeEvent::Progress(p) => state.forging = Some(progress_text(p)),
-            ForgeEvent::Saving => state.forging = Some((0.97, "Saving the world".into())),
             ForgeEvent::Done(world) => {
                 info!("created world {:?} in {}", world.name, world.entry_dir.display());
                 commands.remove_resource::<ForgeJob>();
@@ -863,6 +945,10 @@ fn push_generator_state(
     if ui.get_gen_play_error() != state.play_error.as_str() {
         ui.set_gen_play_error(state.play_error.as_str().into());
     }
+    let estimate = state.play_estimate_text();
+    if ui.get_gen_play_estimate() != estimate.as_str() {
+        ui.set_gen_play_estimate(estimate.into());
+    }
 }
 
 #[cfg(test)]
@@ -885,16 +971,18 @@ mod tests {
             assert_eq!(tab(key), 1, "{key}");
         }
         for key in ["lake_basins", "lake_spacing_m", "lake_radius_max_m", "lake_depth_max_m"] {
-            assert_eq!(tab(key), 2, "{key}");
+            assert_eq!(tab(key), 3, "{key}");
         }
         assert_eq!(tab("layout"), 0);
         assert_eq!(tab("uplift"), 1);
         assert_eq!(tab("sea_edges"), 0);
         assert_eq!(tab("plate_count"), 1);
         assert_eq!(tab("rain_max"), 2);
-        assert_eq!(tab("river_width_m"), 2);
-        assert_eq!(tab("hard_granite"), 3);
-        assert_eq!(tab("iters"), 4);
+        assert_eq!(tab("pole"), 2);
+        assert_eq!(tab("good_share"), 2);
+        assert_eq!(tab("river_width_m"), 3);
+        assert_eq!(tab("hard_granite"), 4);
+        assert_eq!(tab("iters"), 5);
         // Every Shaping knob has an override.
         for spec in SPECS.iter().filter(|s| s.group == "Shaping") {
             assert!(TAB_KEY_OVERRIDES.iter().any(|(k, _)| *k == spec.key), "{}", spec.key);
@@ -922,17 +1010,38 @@ mod tests {
     #[test]
     fn world_size_row_sets_size_m() {
         let mut state = GeneratorState::default();
-        assert_eq!(WORLD_SIZES[DEFAULT_WORLD_SIZE].0, worldgen::forge::world::DEFAULT_SIZE_M);
+        // The generator defaults to DF's medium world at 16 m; the quick dev
+        // default (`ForgeParams::default()`) stays 16 km / 32 m.
+        assert_eq!(WORLD_SIZES[DEFAULT_WORLD_SIZE].0, 100_352.0);
+        assert_eq!(state.world_cell_m(), 16.0);
+        assert_eq!(worldgen::forge::world::DEFAULT_SIZE_M, 16_000.0);
         let size_row = state.rows().into_iter().find(|r| r.key == WORLD_SIZE_KEY).unwrap();
-        assert_eq!((size_row.value, size_row.default), (1.0, 1.0));
-        assert_eq!(state.params(64.0).size_m, 16_000.0);
+        assert_eq!((size_row.value, size_row.default), (3.0, 3.0));
+        let label = size_row.choices.row_data(3).unwrap();
+        assert!(label.starts_with("100 km (DF Medium) · ≈ ") && label.ends_with(" min"), "{label}");
+        assert_eq!(state.params(64.0).size_m, 100_352.0);
+        assert_eq!(state.preview_cell_m(), 256.0, "auto preview cell for 100 km");
         state.stale = false;
-        state.apply(GeneratorAction::Knob(WORLD_SIZE_KEY.into(), 2.0), "");
+        state.apply(GeneratorAction::Knob(WORLD_SIZE_KEY.into(), 1.0), "");
         assert!(state.stale, "the preview re-forges");
-        assert_eq!(state.params(PREVIEW_CELLS[state.preview_cell].0).size_m, 32_000.0);
-        assert_eq!(state.params(WORLD_CELLS[state.world_cell].0).size_m, 32_000.0);
+        assert_eq!(state.preview_cell_m(), 64.0);
+        assert_eq!(state.params(state.world_cell_m()).size_m, 32_000.0);
+        state.apply(GeneratorAction::Knob(PREVIEW_CELL_KEY.into(), 1.0), "");
+        assert_eq!(state.preview_cell_m(), 32.0, "the Advanced override wins");
         state.apply(GeneratorAction::Reset(WORLD_SIZE_KEY.into()), "");
-        assert_eq!(state.params(16.0).size_m, 16_000.0);
+        assert_eq!(state.params(16.0).size_m, 100_352.0);
+    }
+
+    #[test]
+    fn play_estimate_follows_size_and_cell() {
+        let mut state = GeneratorState::default();
+        let text = state.play_estimate_text();
+        assert!(text.starts_with("100 km at 16 m: ≈ ") && text.ends_with("RAM (est.)"), "{text}");
+        let at_16 = state.play_estimate().secs;
+        state.apply(GeneratorAction::Knob(WORLD_CELL_KEY.into(), 1.0), "");
+        assert_eq!(state.world_cell_m(), 32.0);
+        assert!(state.play_estimate().secs < at_16 / 3.0);
+        assert!(state.play_estimate_text().starts_with("100 km at 32 m"));
     }
 
     #[test]
@@ -958,13 +1067,13 @@ mod tests {
         assert_eq!(parse_seed("xyz"), None);
         assert_eq!(parse_seed(""), None);
         let mut state = GeneratorState { seed: 0x2F1A, ..Default::default() };
-        state.apply(GeneratorAction::Seed("nope".into()), "Island 2F1A");
+        state.apply(GeneratorAction::Seed("nope".into()), "World 2F1A");
         assert!(state.seed_invalid);
         assert_eq!(state.seed, 0x2F1A);
-        state.apply(GeneratorAction::Seed("0xBEEF".into()), "Island 2F1A");
+        state.apply(GeneratorAction::Seed("0xBEEF".into()), "World 2F1A");
         assert!(!state.seed_invalid);
         assert_eq!(state.seed, 0xBEEF);
-        assert_eq!(state.name_update.as_deref(), Some("Island BEEF"), "default name follows the seed");
+        assert_eq!(state.name_update.as_deref(), Some("World BEEF"), "default name follows the seed");
         state.name_update = None;
         state.apply(GeneratorAction::Seed("0x1234".into()), "My island");
         assert_eq!(state.name_update, None, "a typed name stays");
@@ -1019,7 +1128,8 @@ mod tests {
             worker.request(p.clone(), PreviewLayer::Relief, generation);
             std::thread::sleep(Duration::from_millis(3));
         }
-        let (generation, image, _) = worker.results.recv_timeout(Duration::from_secs(60)).expect("a preview");
+        let (generation, result) = worker.results.recv_timeout(Duration::from_secs(60)).expect("a preview");
+        let (image, _) = result.expect("the preview forged");
         assert_eq!(generation, 3);
         assert_eq!(image.pixels.len(), (image.width * image.height * 4) as usize);
         assert!(worker.results.recv_timeout(Duration::from_secs(1)).is_err(), "exactly one result");
@@ -1028,7 +1138,7 @@ mod tests {
     fn finish(job: &ForgeJob) -> ForgeEvent {
         loop {
             match job.events.recv_timeout(Duration::from_secs(120)).expect("forge event") {
-                ForgeEvent::Progress(_) | ForgeEvent::Saving => {}
+                ForgeEvent::Progress(_) => {}
                 end => return end,
             }
         }
@@ -1054,6 +1164,26 @@ mod tests {
 
     #[test]
     #[ignore = "slow: >100ms — run via just test-full"]
+    fn play_cancel_while_saving_leaves_no_world_dir() {
+        let root = scratch("cancel-saving");
+        let job = ForgeJob::start(root.clone(), small(128.0), "Cancelled".into());
+        loop {
+            if let ForgeEvent::Progress(p) = job.events.recv_timeout(Duration::from_secs(60)).expect("progress") {
+                if p.stage == ForgeStage::Saving {
+                    break;
+                }
+            }
+        }
+        job.cancel();
+        // Either the thread saw the flag, or its Done lost the race (settle).
+        let end = job.settle(finish(&job));
+        assert!(matches!(end, ForgeEvent::Cancelled), "{end:?}");
+        let left = std::fs::read_dir(&root).map(|d| d.count()).unwrap_or(0);
+        assert_eq!(left, 0, "nothing left under {}", root.display());
+    }
+
+    #[test]
+    #[ignore = "slow: >100ms — run via just test-full"]
     fn play_writes_a_loadable_world() {
         let root = scratch("play");
         let job = ForgeJob::start(root.clone(), small(128.0), "Test Island".into());
@@ -1065,7 +1195,7 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].loadable, Ok(()));
         let meta = listed[0].meta.as_ref().unwrap();
-        assert_eq!(meta.preset, "Default");
+        assert_eq!(meta.preset, "Continent");
         assert_eq!(meta.cell_m, 128.0);
     }
 }

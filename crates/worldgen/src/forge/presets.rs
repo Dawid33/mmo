@@ -1,6 +1,7 @@
 //! Named starting points for the map generator: a preset is a list of knob
 //! overrides on top of `Knobs::default()`. The UI shows [`CUSTOM`] when the
-//! knobs match none of them.
+//! knobs match none of them. The first is the defaults (Continent);
+//! Highlands / Lowlands / Dry / Wet apply on top of it.
 
 use super::knobs::{Knobs, SPECS};
 
@@ -15,24 +16,82 @@ pub const CUSTOM: &str = "Custom";
 
 pub const PRESETS: &[Preset] = &[
     Preset {
-        name: "Default",
-        description: "Normal settings: a continent with sea on some edges, ranges along plate boundaries, rivers to the sea or off the land edges.",
+        name: "Continent",
+        description: "One continent with sea on some edges and land running off the others, a pole to the north, ranges along plate boundaries.",
         overrides: &[],
     },
     Preset {
-        name: "One island",
-        description: "A single island in open sea, ranges inland, rivers to the sea.",
-        overrides: &[("layout", 0.0)],
+        name: "Continents",
+        description: "Several landmasses with seas between them, ranges where their plates meet.",
+        overrides: &[("layout", 4.0)],
+    },
+    Preset {
+        name: "Inland",
+        description: "Land on every edge around an inland sea; drier, with closed basins whose lakes turn salty.",
+        overrides: &[("layout", 5.0), ("rain_max", 2.0), ("land_depletion_m", 5_000.0), ("lake_basins", 14.0)],
+    },
+    Preset {
+        name: "Temperate band",
+        description: "No pole: the whole map lies in the mid-latitude westerlies, mostly forest and grassland.",
+        overrides: &[("pole", 0.0), ("latitude_center_deg", 48.0)],
+    },
+    Preset {
+        name: "Frozen north",
+        description: "The far north from the pole down to 60 degrees: tundra, taiga and glaciers.",
+        overrides: &[("latitude_span_deg", 30.0), ("pole_temp_c", -30.0)],
+    },
+    Preset {
+        name: "Tropical",
+        description: "No pole, near the equator: jungle, savanna and wetlands.",
+        overrides: &[("pole", 0.0), ("latitude_center_deg", 16.0)],
+    },
+    Preset {
+        name: "Great ranges",
+        description: "Taller, broader mountain belts of harder rock.",
+        overrides: &[
+            ("uplift", 6.0e-3),
+            ("belt_uplift", 2.0),
+            ("plate_belt_width", 0.2),
+            ("max_peak_m", 3_400.0),
+            ("hard_granite", 0.4),
+            ("geology_strength", 1.3),
+        ],
+    },
+    Preset {
+        name: "Island",
+        description: "A single island in open sea at one latitude, ranges inland, rivers to the sea (the pre-continent look).",
+        overrides: &[
+            ("layout", 0.0),
+            ("pole", 0.0),
+            ("latitude_center_deg", 45.0),
+            ("sea_edges", 4.0),
+            ("max_peak_m", 236.0),
+            ("meander_amplitude_deg", 0.0),
+        ],
     },
     Preset {
         name: "Archipelago",
         description: "Several islands scattered across the sea, each with its own short rivers.",
-        overrides: &[("layout", 1.0)],
+        overrides: &[
+            ("layout", 1.0),
+            ("pole", 0.0),
+            ("latitude_center_deg", 45.0),
+            ("sea_edges", 4.0),
+            ("max_peak_m", 236.0),
+            ("meander_amplitude_deg", 0.0),
+        ],
     },
     Preset {
         name: "Island arc",
         description: "A chain of islands strung along a curve, the largest in the middle.",
-        overrides: &[("layout", 2.0)],
+        overrides: &[
+            ("layout", 2.0),
+            ("pole", 0.0),
+            ("latitude_center_deg", 45.0),
+            ("sea_edges", 4.0),
+            ("max_peak_m", 236.0),
+            ("meander_amplitude_deg", 0.0),
+        ],
     },
     Preset {
         name: "Highlands",
@@ -119,13 +178,50 @@ mod tests {
 
     #[test]
     fn default_preset_has_no_overrides() {
-        assert_eq!(PRESETS[0].name, "Default");
+        assert_eq!(PRESETS[0].name, "Continent");
         assert!(PRESETS[0].overrides.is_empty());
         let names: Vec<_> = PRESETS.iter().map(|p| p.name).collect();
         assert_eq!(
             names,
-            ["Default", "One island", "Archipelago", "Island arc", "Highlands", "Lowlands", "Dry", "Wet"]
+            [
+                "Continent",
+                "Continents",
+                "Inland",
+                "Temperate band",
+                "Frozen north",
+                "Tropical",
+                "Great ranges",
+                "Island",
+                "Archipelago",
+                "Island arc",
+                "Highlands",
+                "Lowlands",
+                "Dry",
+                "Wet",
+            ]
         );
+    }
+
+    #[test]
+    fn island_presets_keep_todays_look() {
+        use super::super::knobs::{LAYOUT_ARC, LAYOUT_ARCHIPELAGO, LAYOUT_ONE_ISLAND};
+        for (name, layout) in [("Island", LAYOUT_ONE_ISLAND), ("Archipelago", LAYOUT_ARCHIPELAGO), ("Island arc", LAYOUT_ARC)] {
+            let k = apply(PRESETS.iter().find(|p| p.name == name).unwrap());
+            assert_eq!(k.layout(), layout, "{name}");
+            assert_eq!(k.pole_choice(), super::super::climate::POLE_NONE, "{name}");
+            assert_eq!(
+                (k.latitude_center_deg, k.sea_edges, k.max_peak_m, k.meander_amplitude_deg),
+                (45.0, 4.0, 236.0, 0.0),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn continental_presets_are_continental() {
+        for p in PRESETS.iter().filter(|p| !["Island", "Archipelago", "Island arc"].contains(&p.name)) {
+            assert!(apply(p).is_continental(), "{}", p.name);
+        }
     }
 
     #[test]

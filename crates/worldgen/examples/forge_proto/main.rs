@@ -104,6 +104,16 @@ impl Params {
                 "--no-climate" => p.knobs.climate_strength = 0.0,
                 "--search" => p.search = value().parse().expect("--search <seed count>"),
                 "--serve" => p.serve = Some(value().parse().expect("--serve <port>")),
+                // A generator preset's knobs (forge::presets, by name, any
+                // case): replaces every knob, so give it before any --set.
+                "--preset" => {
+                    let name = value();
+                    let preset = worldgen::forge::presets::PRESETS
+                        .iter()
+                        .find(|p| p.name.eq_ignore_ascii_case(&name))
+                        .unwrap_or_else(|| panic!("--preset: no preset named {name} (see forge/presets.rs)"));
+                    p.knobs = worldgen::forge::presets::apply(preset);
+                }
                 // Any knob by its key (knobs.rs; the tuning page's "Copy as flags").
                 "--set" => {
                     let v = value();
@@ -113,7 +123,7 @@ impl Params {
                 }
                 other => panic!(
                     "unknown argument {other}; flags: --size --cell --iters --seed --out --dt \
-                     --uplift --k --diffusivity --no-geology --no-climate --set <knob>=<value> \
+                     --uplift --k --diffusivity --no-geology --no-climate --preset <name> --set <knob>=<value> \
                      --search <n> --serve <port>"
                 ),
             }

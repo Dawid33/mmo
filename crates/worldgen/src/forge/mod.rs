@@ -46,6 +46,7 @@ pub mod hydrology;
 pub mod knobs;
 mod par;
 pub mod plates;
+pub mod play;
 pub mod post;
 pub mod presets;
 pub mod quality;
@@ -222,6 +223,9 @@ pub enum ForgeStage {
     Eroding,
     Shaping,
     Hydrology,
+    /// Building and writing the world file (`play::forge_to_file`; never
+    /// reported by `forge_with`).
+    Saving,
 }
 
 impl ForgeStage {
@@ -231,6 +235,7 @@ impl ForgeStage {
             ForgeStage::Eroding => "Eroding",
             ForgeStage::Shaping => "Shaping valleys",
             ForgeStage::Hydrology => "Rivers and lakes",
+            ForgeStage::Saving => "Saving the world",
         }
     }
 }

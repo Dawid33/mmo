@@ -182,6 +182,9 @@ run:
 # The game with its main menu: build client + server (the client spawns the
 # server per world from next to its own executable, so both need the same
 # region/chunk dials) and run only the client. `just adapter=6700 play`.
+# New world's generator defaults to a 100 km / 16 m world: its Play forge runs
+# in-process for minutes and several GB (the estimate shows beside Play);
+# pick 16 km or a 32 m World cell for a quick one.
 play:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -500,7 +503,9 @@ model-census *paths="target/test-models":
 # statistics and the WORLD FILE `<stem>.world` into target/world-forge/ (serve it
 # with `just world_file=<path> run`). Never changes procedural output. Flags:
 # --cell <m> --iters <n> --seed <hex> --out <stem> --size --dt --uplift --k
-# --diffusivity --no-geology --no-climate, --set <knob>=<value>, and --search <n>
+# --diffusivity --no-geology --no-climate, --preset <name> (a map-generator preset
+# from forge/presets.rs, e.g. "Frozen north"; give it before any --set),
+# --set <knob>=<value>, and --search <n>
 # to forge n seeds at 32 m cells and rank them (generate-and-test). e.g.
 # `just forge-proto --cell 16` for the full-detail world, `just forge-proto
 # --cell 64 --size 100352` for a quick look at a ~100 km continent,

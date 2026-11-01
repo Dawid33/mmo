@@ -142,20 +142,43 @@ pub fn slug_for(root: &Path, name: &str) -> String {
     slug
 }
 
-/// Writes the world into `root/.<slug>.tmp/`, then renames it to `root/<slug>/`.
+/// Where a new world is assembled before it is renamed into place:
+/// `root/.<slug>.tmp/` (`list` skips dot-directories).
+pub fn staging_dir(root: &Path, slug: &str) -> PathBuf {
+    root.join(format!(".{slug}.tmp"))
+}
+
+/// Writes the world into [`staging_dir`], then renames it to `root/<slug>/`.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn create(root: &Path, meta: &WorldMeta, artifact: &WorldArtifact, preview_png: &[u8]) -> io::Result<PathBuf> {
-    let tmp = root.join(format!(".{}.tmp", meta.slug));
-    let fin = root.join(&meta.slug);
-    if fin.exists() {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists", fin.display())));
+    let tmp = staging_dir(root, &meta.slug);
+    if root.join(&meta.slug).exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists", root.join(&meta.slug).display())));
     }
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
+    if let Err(e) = artifact.save(&tmp.join(TERRAIN_FILE)) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(io::Error::other(e.to_string()));
+    }
+    finish_staged(root, meta, preview_png)
+}
+
+/// Completes a world whose [`staging_dir`] already holds its
+/// [`TERRAIN_FILE`] (written by `forge::play::forge_to_file`): writes the
+/// preview and the meta next to it and renames the directory to
+/// `root/<slug>/`. On any error the staging directory is removed.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn finish_staged(root: &Path, meta: &WorldMeta, preview_png: &[u8]) -> io::Result<PathBuf> {
+    let tmp = staging_dir(root, &meta.slug);
+    let fin = root.join(&meta.slug);
     let written = (|| {
-        artifact
-            .save(&tmp.join(TERRAIN_FILE))
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        if fin.exists() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists", fin.display())));
+        }
+        if !tmp.join(TERRAIN_FILE).is_file() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} has no terrain", tmp.display())));
+        }
         std::fs::write(tmp.join(PREVIEW_FILE), preview_png)?;
         let json = serde_json::to_vec_pretty(meta).map_err(io::Error::other)?;
         std::fs::write(tmp.join(META_FILE), json)?;
@@ -253,6 +276,23 @@ mod tests {
         create(&root, &meta("My Island!", "my-island", "2026-01-01T00:00:00Z"), &artifact(), b"png").unwrap();
         assert_eq!(slug_for(&root, "my island"), "my-island-2");
         assert_eq!(slug_for(&root, ""), "world");
+    }
+
+    #[test]
+    fn finish_staged_moves_a_staged_terrain_into_place() {
+        let root = scratch("staged");
+        let m = meta("B", "b", "2026-01-01T00:00:00Z");
+        let staging = staging_dir(&root, "b");
+        // No terrain yet: refused, and the staging directory is cleaned up.
+        std::fs::create_dir_all(&staging).unwrap();
+        assert!(finish_staged(&root, &m, b"png").is_err());
+        assert!(!staging.exists() && !root.join("b").exists());
+        std::fs::create_dir_all(&staging).unwrap();
+        artifact().save(&staging.join(TERRAIN_FILE)).unwrap();
+        assert_eq!(finish_staged(&root, &m, b"png").unwrap(), root.join("b"));
+        assert!(!staging.exists());
+        let l = list(&root);
+        assert_eq!((l.len(), l[0].loadable.clone()), (1, Ok(())));
     }
 
     #[test]

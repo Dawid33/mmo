@@ -116,6 +116,9 @@ export component MapGenerator {
     in property <string> forge-label;
     // Why the last Play failed; "" when it did not.
     in property <string> play-error;
+    // What Play will cost, shown beside it before it is pressed, e.g.
+    // "100 km at 16 m: ≈ 8 min, ≈ 8 GB RAM (est.)".
+    in property <string> play-estimate;
 
     callback preset-chosen(int);
     callback seed-edited(string);
@@ -150,6 +153,7 @@ export component MapGenerator {
     property <length> label-width: 210px;
     property <length> value-width: 70px;
     property <length> reset-width: 60px;
+    property <length> estimate-width: 380px;
     property <string> hover-help;
 
     changed seed-text => { root.seed-edited(root.seed-text); }
@@ -344,7 +348,7 @@ export component MapGenerator {
             text: line;
         }
 
-        // Bottom: Back, the last Play error, Play.
+        // Bottom: Back, the last Play error, Play's estimate, Play.
         back-btn := Button {
             x: frame.left;
             y: frame.bottom - root.bar-height;
@@ -357,10 +361,17 @@ export component MapGenerator {
         LabelFace {
             x: frame.left + 160px;
             y: frame.bottom - root.bar-height;
-            width: max(0px, frame.right - frame.left - 160px - 260px - root.gap);
+            width: max(0px, frame.right - frame.left - 160px - 260px - root.estimate-width - 2 * root.gap);
             height: root.bar-height;
             style: Styles.bold-red-label;
             text: root.play-error;
+        }
+        LabelFace {
+            x: frame.right - 260px - root.gap - root.estimate-width;
+            y: frame.bottom - root.bar-height;
+            width: root.estimate-width;
+            height: root.bar-height;
+            text: root.play-estimate;
         }
         play-btn := Button {
             x: frame.right - 260px;
