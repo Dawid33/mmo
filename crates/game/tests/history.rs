@@ -608,3 +608,82 @@ fn bootstrap_no_land() {
     let sea = test_map(10, 10, |_, _| true);
     assert_eq!(bootstrap(&sea, &params(0)).unwrap_err(), BootstrapError::NoHabitableLand);
 }
+
+// ---- Task 7: persistence ----
+use game::history::persist::*;
+
+fn temp_dir(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("mmo-history-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn ser(h: &History) -> Vec<u8> {
+    bincode::serialize(h).unwrap()
+}
+
+#[test]
+fn history_roundtrip() {
+    let map = big_land();
+    let mut a = bootstrap(&map, &params(20)).unwrap();
+    let mut b = decode(&encode(&a), SocietyGrid::from_world_map(&map)).unwrap();
+    assert_eq!(ser(&a), ser(&b));
+    let to = CalendarTick(a.now().0 + 10 * DAYS_PER_YEAR * TICKS_PER_DAY);
+    a.advance(to);
+    b.advance(to);
+    assert_eq!(ser(&a), ser(&b));
+}
+
+#[test]
+fn load_refuses_other_version() {
+    let map = big_land();
+    let mut bytes = encode(&bootstrap(&map, &params(0)).unwrap());
+    bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
+    let err = decode(&bytes, SocietyGrid::from_world_map(&map)).unwrap_err();
+    assert!(matches!(err, HistoryLoadError::OldVersion { found: 99 }), "{err:?}");
+}
+
+#[test]
+fn load_refuses_other_world() {
+    let map = big_land();
+    let bytes = encode(&bootstrap(&map, &params(0)).unwrap());
+    let other = test_map(48, 48, |x, z| x < 3 || z < 2 || x >= 46 || z >= 46);
+    let err = decode(&bytes, SocietyGrid::from_world_map(&other)).unwrap_err();
+    assert!(matches!(err, HistoryLoadError::OtherWorld), "{err:?}");
+}
+
+#[test]
+fn garbage_is_not_a_history() {
+    let grid = SocietyGrid::from_world_map(&big_land());
+    let err = decode(b"definitely not a history file", grid.clone()).unwrap_err();
+    assert!(matches!(err, HistoryLoadError::NotAHistory), "{err:?}");
+    let mut bytes = encode(&bootstrap(&big_land(), &params(0)).unwrap());
+    bytes.truncate(bytes.len() / 2);
+    let err = decode(&bytes, grid).unwrap_err();
+    assert!(matches!(err, HistoryLoadError::Corrupt(_)), "{err:?}");
+}
+
+#[test]
+fn save_is_atomic() {
+    let map = big_land();
+    let h = bootstrap(&map, &params(5)).unwrap();
+    let dir = temp_dir("save_is_atomic");
+    let path = dir.join("terrain.history");
+    save(&h, &path).unwrap();
+    save(&h, &path).unwrap();
+    let names: Vec<String> =
+        std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, vec!["terrain.history".to_string()]);
+    let back = load(&path, SocietyGrid::from_world_map(&map)).unwrap();
+    assert_eq!(ser(&h), ser(&back));
+    assert!(matches!(load(&dir.join("missing.history"), SocietyGrid::from_world_map(&map)), Err(HistoryLoadError::Io(_))));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn history_path_for_world_files() {
+    use std::path::Path;
+    assert_eq!(history_path_for(Path::new("worlds/a/terrain.world")), Path::new("worlds/a/terrain.history"));
+    assert_eq!(history_path_for(Path::new("worlds/default.world")), Path::new("worlds/default.history"));
+}

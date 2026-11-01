@@ -7,6 +7,7 @@ mod journey;
 pub mod calendar;
 pub mod grid;
 pub mod log;
+pub mod persist;
 pub mod records;
 pub mod rng;
 pub mod rules;
