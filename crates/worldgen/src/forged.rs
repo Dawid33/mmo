@@ -33,7 +33,9 @@ use crate::pipeline::{ColumnProfile, ProfileGrid, SEA_LEVEL, SEA_TOP_BLOCK};
 pub const WORLD_FILE_ENV: &str = "VOXEL_WORLD_FILE";
 /// v3: quantised `u16` rasters (`QRaster`), sparse lakes, row-delta + zstd,
 /// coast distance recomputed on load. v4: `edges` (what lies past each side).
-pub const ARTIFACT_VERSION: u32 = 4;
+/// v5: the latitude climate — `temperature_c` and `precip_mm` replace the
+/// relative `rain`.
+pub const ARTIFACT_VERSION: u32 = 5;
 /// zstd level of the world file body (offline writer; reading cost is level-independent).
 #[cfg(not(target_arch = "wasm32"))]
 const ZSTD_LEVEL: i32 = 19;
@@ -41,8 +43,10 @@ const ZSTD_LEVEL: i32 = 19;
 pub const HEIGHT_STEP_M: f32 = 0.0625;
 /// Uplift / bedding raster step (m).
 pub const GEO_STEP_M: f32 = 0.0625;
-/// Rain raster step (relative to the land mean).
-pub const RAIN_STEP: f32 = 0.001;
+/// Temperature raster step (deg C).
+pub const TEMPERATURE_STEP_C: f32 = 0.1;
+/// Precipitation raster step (mm/yr).
+pub const PRECIP_STEP_MM: f32 = 1.0;
 const MAGIC: &[u8; 4] = b"VXWF";
 
 /// Engine column the artifact's spawn point lands on: block (8, 8) of region
@@ -230,9 +234,10 @@ pub struct WorldArtifact {
     /// carry it in their ground recipes (`geo_offset_blocks`, `strata_blocks`).
     pub uplifted: QRaster,
     pub bedding: QRaster,
-    /// Rain per cell relative to the land mean (1.0 = average), as
-    /// `forge::climate::rainfall` returns it.
-    pub rain: QRaster,
+    /// Mean annual temperature at the ground, deg C (`forge::climate`).
+    pub temperature_c: QRaster,
+    /// Annual precipitation, mm/yr (`forge::climate`).
+    pub precip_mm: QRaster,
     /// Formations from the top down: (top s, index into `rock_names`).
     pub column: Vec<(f32, u8)>,
     /// Names from `forge::geology::ROCKS`; an unknown one fails the load.
@@ -287,12 +292,12 @@ impl std::fmt::Display for ArtifactError {
 impl WorldArtifact {
     /// Every quantised raster, for the codec and for `validate`. A new
     /// raster is one line here (plus its field).
-    fn qrasters_mut(&mut self) -> [&mut QRaster; 4] {
-        [&mut self.height, &mut self.uplifted, &mut self.bedding, &mut self.rain]
+    fn qrasters_mut(&mut self) -> [&mut QRaster; 5] {
+        [&mut self.height, &mut self.uplifted, &mut self.bedding, &mut self.temperature_c, &mut self.precip_mm]
     }
 
-    fn qrasters(&self) -> [&QRaster; 4] {
-        [&self.height, &self.uplifted, &self.bedding, &self.rain]
+    fn qrasters(&self) -> [&QRaster; 5] {
+        [&self.height, &self.uplifted, &self.bedding, &self.temperature_c, &self.precip_mm]
     }
 
     /// File bytes: `VXWF`, the version (u32 LE), then zstd over bincode with

@@ -9,7 +9,7 @@ use game::{
     BlockId, BlockIndex, Column, ColumnCoords, RegionCoords, SubChunk, CHUNK_BLOCKS, UNDERGROUND_DEPTH,
 };
 use worldgen::forged::{
-    ForgedWorld, QRaster, WorldArtifact, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, RAIN_STEP,
+    ForgedWorld, QRaster, WorldArtifact, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, PRECIP_STEP_MM, TEMPERATURE_STEP_C,
 };
 
 const STONE: BlockId = BlockId(2);
@@ -156,7 +156,8 @@ fn cliff_world() -> ForgedWorld {
         height: QRaster::fit(&height, HEIGHT_STEP_M),
         uplifted: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
         bedding: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
-        rain: QRaster::fit(&vec![1.0; N * N], RAIN_STEP),
+        temperature_c: QRaster::fit(&vec![14.0; N * N], TEMPERATURE_STEP_C),
+        precip_mm: QRaster::fit(&vec![900.0; N * N], PRECIP_STEP_MM),
         column: vec![(700.0, 0)],
         rock_names: vec!["sandstone".into()],
         rivers: vec![],

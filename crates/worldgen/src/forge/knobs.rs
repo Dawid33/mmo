@@ -102,12 +102,20 @@ knobs! {
         hard_granite: 0.6, [0.2, 3.0], "Granite erodibility", "Erodibility multiplier of the basement.";
     }
     "Climate" {
-        climate_strength: 1.0, [0.0, 1.0], "Rain shadow strength", "0 = uniform rain; 1 = full orographic rain from the west.";
+        pole: 1.0, [0.0, 3.0], "Pole", "Where the cold is. None: the whole map lies at one latitude (Center latitude). North / south: a pole on that edge, the latitude falling across the map by Latitude span. Both: poles on both edges, the middle of the map Latitude span away from them.";
+        latitude_span_deg: 90.0, [5.0, 180.0], "Latitude span (deg)", "Degrees of latitude from a pole edge to the far side of the map (both poles: to the middle). 90 = pole to equator.";
+        latitude_center_deg: 45.0, [0.0, 90.0], "Center latitude (deg)", "Latitude of the whole map when Pole is none. 45 sits in the westerlies.";
+        equator_temp_c: 27.0, [10.0, 40.0], "Equator temperature (C)", "Mean sea-level temperature at the equator.";
+        pole_temp_c: -25.0, [-50.0, 5.0], "Pole temperature (C)", "Mean sea-level temperature at a pole; between, temperature follows the cosine of latitude.";
+        lapse_c_per_km: 6.5, [3.0, 10.0], "Lapse rate (C/km)", "Cooling per kilometre of height above the sea.";
+        trade_wind_edge_deg: 30.0, [5.0, 45.0], "Trade winds to (deg)", "Below this latitude the wind blows from the east (trade winds); above it the westerlies.";
+        polar_edge_deg: 60.0, [45.0, 85.0], "Polar easterlies from (deg)", "Above this latitude the wind blows from the east again (polar easterlies).";
+        climate_strength: 1.0, [0.0, 1.0], "Rain shadow strength", "0 = precipitation follows latitude only; 1 = full orographic rain and rain shadows along the prevailing wind.";
         land_depletion_m: 9_000.0, [1_500.0, 60_000.0], "Rain-out distance (m)", "How far moist air travels over flat land before it has rained out.";
         orographic_scale_m: 650.0, [100.0, 3_000.0], "Orographic scale (m)", "Rise that rains out about two thirds of the air's moisture: lower = sharper wet/dry contrast.";
         sea_recharge_m: 5_000.0, [500.0, 20_000.0], "Sea recharge (m)", "Distance over open sea in which the air regains its moisture.";
-        rain_min: 0.4, [0.05, 1.0], "Driest rain", "Lower bound of rain relative to the land mean.";
-        rain_max: 3.0, [1.0, 6.0], "Wettest rain", "Upper bound of rain relative to the land mean.";
+        rain_min: 0.4, [0.05, 1.0], "Driest rain", "Lower bound of precipitation relative to its latitude's base (the latitude table).";
+        rain_max: 3.0, [1.0, 6.0], "Wettest rain", "Upper bound of precipitation relative to its latitude's base (the latitude table).";
     }
     "Shaping" {
         max_peak_m: 2_800.0, [80.0, 3_500.0], "Tallest peak allowed (m)", "Land is scaled down if the simulated relief overshoots this (forged terrain is generated up to block 4096; the map ramps end at 3,500 m).";
@@ -126,8 +134,10 @@ knobs! {
 
 /// Knobs that are a choice, not a quantity: the page shows a list, and the
 /// value is the index.
-pub const CHOICES: &[(&str, &[&str])] =
-    &[("layout", &["One island", "Archipelago", "Island arc", "Continent", "Continents", "Inland"])];
+pub const CHOICES: &[(&str, &[&str])] = &[
+    ("layout", &["One island", "Archipelago", "Island arc", "Continent", "Continents", "Inland"]),
+    ("pole", &["None", "North", "South", "Both"]),
+];
 
 pub const LAYOUT_ONE_ISLAND: u32 = 0;
 pub const LAYOUT_ARCHIPELAGO: u32 = 1;
@@ -154,6 +164,11 @@ impl Knobs {
     /// Requested sea edges (0-4); `world::edges` forces 0 for inland.
     pub fn sea_edge_count(&self) -> usize {
         self.sea_edges.round().clamp(0.0, 4.0) as usize
+    }
+
+    /// `climate::POLE_*`: none, north, south or both.
+    pub fn pole_choice(&self) -> u32 {
+        self.pole.round().clamp(0.0, 3.0) as u32
     }
 
     pub fn plate_total(&self) -> usize {

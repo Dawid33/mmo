@@ -4,7 +4,7 @@
 #![allow(dead_code)] // each test binary uses its own subset
 
 use game::BlockId;
-use worldgen::forged::{GEO_STEP_M, HEIGHT_STEP_M, Lake, QRaster, RAIN_STEP, RiverPoint, RiverReach, WorldArtifact, ARTIFACT_VERSION};
+use worldgen::forged::{GEO_STEP_M, HEIGHT_STEP_M, Lake, QRaster, PRECIP_STEP_MM, TEMPERATURE_STEP_C, RiverPoint, RiverReach, WorldArtifact, ARTIFACT_VERSION};
 
 pub const N: usize = 64;
 pub const CELL_M: f64 = 16.0;
@@ -71,7 +71,8 @@ pub fn synthetic() -> WorldArtifact {
         height: QRaster::fit(&height, HEIGHT_STEP_M),
         uplifted: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
         bedding: QRaster::fit(&vec![0.0; N * N], GEO_STEP_M),
-        rain: QRaster::fit(&vec![1.0; N * N], RAIN_STEP),
+        temperature_c: QRaster::fit(&vec![14.0; N * N], TEMPERATURE_STEP_C),
+        precip_mm: QRaster::fit(&vec![900.0; N * N], PRECIP_STEP_MM),
         column: vec![(-5.0, SANDSTONE), (-25.0, SHALE)],
         rock_names: worldgen::forge::geology::ROCKS.iter().map(|r| r.name.to_string()).collect(),
         rivers: vec![RiverReach { order: 1, discharge_m2: 2.0e6, width_m: RIVER_WIDTH_M, points }],

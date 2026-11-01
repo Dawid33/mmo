@@ -17,7 +17,8 @@
 //!                 continental layouts);
 //!   2. geology    rock column in a stratigraphic coordinate -> erodibility of
 //!                 whatever rock the surface currently cuts;
-//!   3. climate    orographic rain on the current heights -> discharge weights;
+//!   3. climate    latitude, temperature and banded-wind precipitation (mm/yr)
+//!                 on the current heights -> discharge weights;
 //!   4. erosion    drainage routing (a Priority-Flood on the first iteration,
 //!                 then the linear-time depression graph of `routing_fast`),
 //!                 stream-power incision, depression silting, hillslope
@@ -54,13 +55,16 @@ pub use world::{ForgeParams, World};
 use geology::Geology;
 use hydrology::Analysis;
 
-/// Iterations between refreshes of the rain field (it follows the relief).
+/// Iterations between refreshes of the climate (its rain follows the relief).
 const RAIN_REFRESH_ITERS: usize = 25;
 
 pub struct Forged {
     pub world: World,
     pub initial: World,
     pub geology: Geology,
+    /// The final climate (stored in the world file).
+    pub climate: climate::Climate,
+    /// Discharge weights from the final climate (`climate::discharge_weight`).
     pub rain: Vec<f64>,
     pub analysis: Analysis,
     /// Highest point the simulation built, before the height-band fit (m).
@@ -73,7 +77,8 @@ impl Forged {
     /// The world file the engine serves (`VOXEL_WORLD_FILE`, worldgen::forged).
     pub fn artifact(&self, p: &ForgeParams) -> crate::forged::WorldArtifact {
         use crate::forged::{
-            RiverPoint, RiverReach, WorldArtifact, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, RAIN_STEP,
+            RiverPoint, RiverReach, WorldArtifact, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, PRECIP_STEP_MM,
+            TEMPERATURE_STEP_C,
         };
         let (w, a) = (&self.world, &self.analysis);
         // Lake water surface per cell, from the lake bodies' own levels.
@@ -89,7 +94,8 @@ impl Forged {
             height: quantise(&w.h, HEIGHT_STEP_M),
             uplifted: quantise(&w.uplifted, GEO_STEP_M),
             bedding: quantise(&self.geology.bedding, GEO_STEP_M),
-            rain: quantise(&self.rain, RAIN_STEP),
+            temperature_c: crate::forged::QRaster::fit(&self.climate.temperature_c, TEMPERATURE_STEP_C),
+            precip_mm: crate::forged::QRaster::fit(&self.climate.precip_mm, PRECIP_STEP_MM),
             column: self.geology.column().iter().map(|&(top, rock)| (top as f32, rock)).collect(),
             rock_names: geology::ROCKS.iter().map(|r| r.name.to_string()).collect(),
             rivers: a
@@ -308,14 +314,19 @@ pub fn forge_with(
         // first step floods the upsampled surface with the full Priority-Flood.
         let level_geo = Geology::new(&lp, &lw);
         let mut scratch = erosion::StepScratch::default();
-        let mut rain = climate::rainfall(&lw, &lp);
+        let mut rain = climate::discharge_weight(&climate::compute(&lw, &lp), &lw);
         if !p.quiet && levels.len() > 1 {
             let (number, n) = (level + 1, lw.n);
             println!("  level {number}: {cell_m} m cells ({n}x{n}), {level_iters} iterations");
         }
         for iter in 1..=level_iters {
             if iter % RAIN_REFRESH_ITERS == 0 {
-                rain = climate::rainfall(&lw, &lp);
+                // Lakes from the last step's routing: no extra flood.
+                let lakes = match scratch.filled() {
+                    Some(filled) => climate::lakes_from_filled(&lw, filled),
+                    None => vec![false; lw.n * lw.n],
+                };
+                rain = climate::discharge_weight(&climate::compute_with_lakes(&lw, &lp, &lakes), &lw);
             }
             let drowned = erosion::step(&mut lw, &lp, &level_geo, &rain, &mut scratch);
             done += 1;
@@ -343,7 +354,7 @@ pub fn forge_with(
     if !p.quiet && height_fit < 1.0 {
         println!("relief overshot the height band: land heights scaled by {height_fit:.3}");
     }
-    let rain = climate::rainfall(&w, p);
+    let rain = climate::discharge_weight(&climate::compute(&w, p), &w);
     post::carve_floodplains(&mut w, &rain, k);
     let basins = post::carve_lake_basins(&mut w, &rain, p.seed, k);
     // The shaping may have lowered the land inside a land edge.
@@ -354,8 +365,11 @@ pub fn forge_with(
     if report(ForgeStage::Hydrology, 0) {
         return None;
     }
+    // The stored climate sees the final heights and lakes.
+    let climate = climate::compute(&w, p);
+    let rain = climate::discharge_weight(&climate, &w);
     let analysis = hydrology::analyze(&w, &geo, &rain, k);
-    Some(Forged { world: w, initial, geology: geo, rain, analysis, simulated_peak_m, height_fit })
+    Some(Forged { world: w, initial, geology: geo, climate, rain, analysis, simulated_peak_m, height_fit })
 }
 
 #[cfg(test)]

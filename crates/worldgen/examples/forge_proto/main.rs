@@ -22,7 +22,8 @@
 //!   2. geology.rs  rock column in a stratigraphic coordinate (tilt + folds,
 //!                  domed by the uplift) -> erodibility of whatever rock the
 //!                  surface currently cuts: geology BEFORE erosion;
-//!   3. climate.rs  orographic rain on the current heights -> discharge weights;
+//!   3. climate.rs  latitude, temperature, banded-wind precipitation (mm/yr)
+//!                  on the current heights -> discharge weights;
 //!   4. erosion.rs  per iteration: Priority-Flood routing, discharge, implicit
 //!                  stream-power incision, depression silting, hillslope diffusion;
 //!   5. post.rs     valley floors planed beside rivers; overdeepened basins
@@ -166,6 +167,7 @@ fn main() {
         "simulated peak {:.0} m (height fit x{:.3}); deepest exhumed level s = {deepest_s:.0} m",
         forged.simulated_peak_m, forged.height_fit
     );
+    print_climate(&forged, &p.forge);
     println!("world score {:.3}:", search::score(&a.stats, w.n * w.n));
     for (name, value) in search::criteria(&a.stats, w.n * w.n) {
         println!("  {name:<13} {value:.2}");
@@ -197,4 +199,38 @@ fn main() {
         artifact.spawn[1],
         worldgen::forged::WORLD_FILE_ENV
     );
+}
+
+/// The climate in eight latitude bands (north to south): wind, land
+/// temperature and precipitation ranges.
+fn print_climate(forged: &worldgen::forge::Forged, p: &worldgen::forge::ForgeParams) {
+    use worldgen::forge::climate::{wind, Wind};
+    let (w, c) = (&forged.world, &forged.climate);
+    let n = w.n;
+    let land: Vec<usize> = (0..n * n).filter(|&i| !w.ocean[i]).collect();
+    let range = |v: &[f32], cells: &[usize]| {
+        cells.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &i| (lo.min(v[i]), hi.max(v[i])))
+    };
+    let (t, r) = (range(&c.temperature_c, &land), range(&c.precip_mm, &land));
+    println!(
+        "climate: land temperature {:.1}..{:.1} C, precipitation {:.0}..{:.0} mm/yr",
+        t.0, t.1, r.0, r.1
+    );
+    const BANDS: usize = 8;
+    for b in 0..BANDS {
+        let rows = b * n / BANDS..(b + 1) * n / BANDS;
+        let lat = c.latitude_deg[(rows.start + rows.end) / 2];
+        let cells: Vec<usize> = land.iter().copied().filter(|i| rows.contains(&(i / n))).collect();
+        let dir = if wind(lat as f64, p) == Wind::FromWest { "W" } else { "E" };
+        if cells.is_empty() {
+            println!("  lat {lat:5.1}  wind from {dir}  (sea)");
+            continue;
+        }
+        let mean = |v: &[f32]| cells.iter().map(|&i| v[i] as f64).sum::<f64>() / cells.len() as f64;
+        let (t, r) = (range(&c.temperature_c, &cells), range(&c.precip_mm, &cells));
+        println!(
+            "  lat {lat:5.1}  wind from {dir}  land T {:5.1} ({:5.1}..{:5.1}) C  precip {:5.0} ({:4.0}..{:4.0}) mm/yr",
+            mean(&c.temperature_c), t.0, t.1, mean(&c.precip_mm), r.0, r.1
+        );
+    }
 }

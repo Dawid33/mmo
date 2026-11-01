@@ -32,7 +32,9 @@ fn forge_small_world_round_trips() {
 /// recorded baseline (`tests/fixtures/forge_quality_16k_32m.ron`). Output-
 /// changing forge speed-ups must pass it. The layout is pinned to the
 /// one-island layout explicitly so the gate keeps measuring the same world
-/// when the default layout changes. Re-bless with `FORGE_QUALITY_BLESS=1`
+/// when the default layout changes, and the climate to the island presets'
+/// (no pole, the whole map at 45 deg: westerlies, like the old west-only
+/// rain sweep). Re-bless with `FORGE_QUALITY_BLESS=1`
 /// ONLY on purpose (a deliberate change of the world), never to make a
 /// failure go away.
 #[test]
@@ -44,6 +46,8 @@ fn forge_quality_matches_baseline() {
 
     let mut p = ForgeParams { size_m: 16_000.0, cell_m: 32.0, seed: DEFAULT_SEED, ..ForgeParams::default() };
     p.knobs.layout = LAYOUT_ONE_ISLAND as f64;
+    p.knobs.pole = worldgen::forge::climate::POLE_NONE as f64;
+    p.knobs.latitude_center_deg = 45.0;
     let q = quality(&forge(&p));
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/forge_quality_16k_32m.ron");
     if std::env::var_os("FORGE_QUALITY_BLESS").is_some() {

@@ -189,7 +189,7 @@ pub fn knobs_map(knobs: &Knobs) -> BTreeMap<String, f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forged::{QRaster, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, RAIN_STEP};
+    use crate::forged::{QRaster, ARTIFACT_VERSION, GEO_STEP_M, HEIGHT_STEP_M, PRECIP_STEP_MM, TEMPERATURE_STEP_C};
 
     fn scratch(name: &str) -> PathBuf {
         let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/world-store-tests").join(name);
@@ -208,7 +208,8 @@ mod tests {
             height: QRaster::fit(&[0.0; 4], HEIGHT_STEP_M),
             uplifted: QRaster::fit(&[0.0; 4], GEO_STEP_M),
             bedding: QRaster::fit(&[0.0; 4], GEO_STEP_M),
-            rain: QRaster::fit(&[1.0; 4], RAIN_STEP),
+            temperature_c: QRaster::fit(&[14.0; 4], TEMPERATURE_STEP_C),
+            precip_mm: QRaster::fit(&[900.0; 4], PRECIP_STEP_MM),
             column: vec![(0.0, 0)],
             rock_names: vec!["granite".into()],
             rivers: vec![],

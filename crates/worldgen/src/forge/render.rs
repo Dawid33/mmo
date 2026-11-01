@@ -75,7 +75,7 @@ pub fn render(forged: &Forged, layer: PreviewLayer) -> Rgba {
         PreviewLayer::Relief => relief_image(w, None),
         PreviewLayer::Rivers => relief_image(w, Some(a)),
         PreviewLayer::Geology => geology_image(w, a),
-        PreviewLayer::Rain => rainfall_image(w, a, &forged.rain),
+        PreviewLayer::Rain => rainfall_image(w, a, &forged.climate.precip_mm),
         PreviewLayer::BeforeErosion => relief_image(&forged.initial, None),
     };
     let (width, height) = img.dimensions();
@@ -233,17 +233,18 @@ fn geology_image(w: &World, a: &Analysis) -> Image {
     img
 }
 
-fn rainfall_image(w: &World, a: &Analysis, rain: &[f64]) -> Image {
+/// Precipitation, desert tan (< 200 mm/yr) to rainforest blue (> 3,000).
+fn rainfall_image(w: &World, a: &Analysis, precip_mm: &[f32]) -> Image {
     let mut img = shaded(w, |i| {
         ramp(
             &[
-                (0.2, [226.0, 200.0, 140.0]),
-                (0.7, [190.0, 200.0, 120.0]),
-                (1.2, [90.0, 170.0, 90.0]),
-                (2.2, [30.0, 120.0, 110.0]),
-                (3.5, [20.0, 70.0, 120.0]),
+                (150.0, [226.0, 200.0, 140.0]),
+                (500.0, [190.0, 200.0, 120.0]),
+                (1_000.0, [90.0, 170.0, 90.0]),
+                (2_000.0, [30.0, 120.0, 110.0]),
+                (3_200.0, [20.0, 70.0, 120.0]),
             ],
-            rain[i],
+            precip_mm[i] as f64,
         )
     });
     draw_water(&mut img, w, a);

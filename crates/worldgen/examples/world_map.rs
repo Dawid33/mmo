@@ -120,8 +120,8 @@ impl Layer {
     /// The field's value and the range mapped onto black..white.
     fn value(self, h: &Habitat) -> (f32, f32, f32) {
         match self {
-            Layer::Rain => (h.rain, 0.0, 2.0),
-            Layer::Temperature => (h.temperature_c, -10.0, 20.0),
+            Layer::Rain => (h.rain, 0.0, 3.0),
+            Layer::Temperature => (h.temperature_c, -25.0, 30.0),
             Layer::Moisture => (h.moisture, 0.0, 3.0),
             Layer::Salinity => (h.salinity, 0.0, 1.0),
             Layer::Trees => unreachable!("the trees layer is drawn by write_trees"),

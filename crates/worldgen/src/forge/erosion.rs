@@ -62,6 +62,14 @@ pub struct StepScratch {
     routed_once: bool,
 }
 
+impl StepScratch {
+    /// The water surface of the last `step`'s routing (`Routing::filled`), or
+    /// `None` before the first step.
+    pub fn filled(&self) -> Option<&[f64]> {
+        self.routed_once.then_some(&self.routing.filled[..])
+    }
+}
+
 /// Priority-Flood(+epsilon) seeded from the coast (Barnes et al. 2014). Cells
 /// pop in nondecreasing flooded height, so pop order is a valid
 /// downstream-first order for ANY receiver with a strictly lower flooded height.
@@ -331,7 +339,7 @@ mod tests {
             pool.install(|| {
                 let mut w = World::new(&p);
                 let geo = Geology::new(&p, &w);
-                let rain = crate::forge::climate::rainfall(&w, &p);
+                let rain = crate::forge::climate::discharge_weight(&crate::forge::climate::compute(&w, &p), &w);
                 let mut scratch = StepScratch::default();
                 for _ in 0..20 {
                     step(&mut w, &p, &geo, &rain, &mut scratch);

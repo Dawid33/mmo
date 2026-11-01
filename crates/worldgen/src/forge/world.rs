@@ -786,7 +786,7 @@ mod tests {
         let land_outlets = (0..w.n * w.n).filter(|&i| w.outlet[i] && !w.ocean[i]).count();
         assert!(land_outlets > w.n, "land edges give outlets: {land_outlets}");
         let geo = crate::forge::geology::Geology::new(&p, &w);
-        let rain = crate::forge::climate::rainfall(&w, &p);
+        let rain = crate::forge::climate::discharge_weight(&crate::forge::climate::compute(&w, &p), &w);
         let mut scratch = StepScratch::default();
         for _ in 0..12 {
             step(&mut w, &p, &geo, &rain, &mut scratch);
@@ -874,14 +874,19 @@ mod tests {
             assert_eq!(w.outlet, w.ocean);
             assert_eq!((crc(&w.h), crc(&w.uplift)), (h, uplift), "{size} m / {cell} m");
         }
-        let p = continental(LAYOUT_ONE_ISLAND, DEFAULT_SEED, 8_192.0, 64.0);
+        // The island presets' climate: one latitude in the westerlies.
+        let mut p = continental(LAYOUT_ONE_ISLAND, DEFAULT_SEED, 8_192.0, 64.0);
+        p.knobs.pole = crate::forge::climate::POLE_NONE as f64;
+        p.knobs.latitude_center_deg = 45.0;
         let mut w = World::new(&p);
         let geo = crate::forge::geology::Geology::new(&p, &w);
-        let rain = crate::forge::climate::rainfall(&w, &p);
+        let rain = crate::forge::climate::discharge_weight(&crate::forge::climate::compute(&w, &p), &w);
         let mut scratch = crate::forge::erosion::StepScratch::default();
         for _ in 0..15 {
             crate::forge::erosion::step(&mut w, &p, &geo, &rain, &mut scratch);
         }
-        assert_eq!(crc(&w.h), 0xFB40_8372, "eroded island");
+        // Re-recorded with the latitude climate (Task 12): the rain field is
+        // now blurred over land only and renormalised after its clamp.
+        assert_eq!(crc(&w.h), 0xA406_2A1A, "eroded island");
     }
 }
