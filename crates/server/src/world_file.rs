@@ -61,21 +61,50 @@ pub fn ensure_forged(path: &Path, params: &ForgeParams) -> Result<(), String> {
     Ok(())
 }
 
+/// Where [`ensure_history`] moves a history file it cannot use: `<path>.bak`.
+pub fn set_aside_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
 /// The world's history, next to the world file: loaded if it exists, otherwise
-/// bootstrapped from the world map and saved. A file that will not load is
-/// never replaced (it holds the world's people) — the error says to delete it.
+/// bootstrapped from the world map and saved. A file of another world or an
+/// older version (the world id is derived from code-built map summaries, so a
+/// code change can orphan a file) is moved aside to [`set_aside_path`] —
+/// replacing an older one there — with a warning, and a new history is
+/// bootstrapped. Any other file that will not load is never replaced (it holds
+/// the world's people) — the error says to delete it.
 pub fn ensure_history(
     world_path: &Path,
     map: &game::WorldMap,
 ) -> Result<Option<game::history::History>, String> {
     use game::history::bootstrap::{self, BootstrapParams};
-    use game::history::{persist, SocietyGrid};
+    use game::history::persist::{self, HistoryLoadError};
+    use game::history::SocietyGrid;
     let path = persist::history_path_for(world_path);
     let grid = SocietyGrid::from_world_map(map);
     if path.exists() {
-        return persist::load(&path, grid)
-            .map(Some)
-            .map_err(|e| format!("{}: {e} — delete {} to re-create this world's history", path.display(), path.display()));
+        match persist::load(&path, grid.clone()) {
+            Ok(h) => return Ok(Some(h)),
+            Err(e @ (HistoryLoadError::OtherWorld | HistoryLoadError::OldVersion { .. })) => {
+                let bak = set_aside_path(&path);
+                std::fs::rename(&path, &bak)
+                    .map_err(|io| format!("{}: {e}; cannot move it to {}: {io}", path.display(), bak.display()))?;
+                log::warn!(
+                    "[server] {}: {e} — set aside as {}; bootstrapping a new history",
+                    path.display(),
+                    bak.display()
+                );
+            }
+            Err(e) => {
+                return Err(format!(
+                    "{}: {e} — delete {} to re-create this world's history",
+                    path.display(),
+                    path.display()
+                ))
+            }
+        }
     }
     let started = Instant::now();
     let params = BootstrapParams { seed: u64::from(grid.world_id()), ..BootstrapParams::default() };
@@ -250,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_history_refuses_other_world() {
+    fn ensure_history_sets_aside_other_world() {
         let dir = scratch("history-other");
         std::fs::create_dir_all(&dir).unwrap();
         let world = dir.join("w.world");
@@ -258,10 +287,50 @@ mod tests {
         ensure_history(&world, &map).unwrap();
         let file = game::history::persist::history_path_for(&world);
         let before = std::fs::read(&file).unwrap();
+        // An older set-aside file is replaced.
+        std::fs::write(set_aside_path(&file), b"older").unwrap();
         let other = land_map(48, 48, |x, z| x < 3 || z < 2 || x >= 46 || z >= 46);
-        let err = ensure_history(&world, &other).unwrap_err();
+        let fresh = ensure_history(&world, &other).unwrap().expect("a new history for the other world");
+        assert_eq!(std::fs::read(set_aside_path(&file)).unwrap(), before, "the old file is kept as .bak");
+        assert!(dir.join("w.history.bak").exists());
+        let saved = game::history::persist::load(&file, game::history::SocietyGrid::from_world_map(&other))
+            .expect("the new history was saved for the other world");
+        assert_eq!(bincode::serialize(&saved).unwrap(), bincode::serialize(&fresh).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_history_sets_aside_old_version() {
+        let dir = scratch("history-old");
+        std::fs::create_dir_all(&dir).unwrap();
+        let world = dir.join("w.world");
+        let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
+        ensure_history(&world, &map).unwrap();
+        let file = game::history::persist::history_path_for(&world);
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(ensure_history(&world, &map).unwrap().is_some());
+        assert_eq!(std::fs::read(set_aside_path(&file)).unwrap(), bytes);
+        assert!(game::history::persist::load(&file, game::history::SocietyGrid::from_world_map(&map)).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensure_history_refuses_corrupt_file() {
+        let dir = scratch("history-corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let world = dir.join("w.world");
+        let map = land_map(48, 48, |x, z| x < 2 || z < 2 || x >= 46 || z >= 46);
+        ensure_history(&world, &map).unwrap();
+        let file = game::history::persist::history_path_for(&world);
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes.truncate(bytes.len() / 2);
+        std::fs::write(&file, &bytes).unwrap();
+        let err = ensure_history(&world, &map).unwrap_err();
         assert!(err.contains("delete") && err.contains("w.history"), "{err}");
-        assert_eq!(std::fs::read(&file).unwrap(), before, "the file is left alone");
+        assert_eq!(std::fs::read(&file).unwrap(), bytes, "the file is left alone");
+        assert!(!set_aside_path(&file).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
