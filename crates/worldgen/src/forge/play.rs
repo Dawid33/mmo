@@ -81,6 +81,72 @@ impl ForgeEstimate {
     }
 }
 
+/// The generator's world sizes (edge length, label). The default is
+/// [`DEFAULT_WORLD_SIZE`], Dwarf Fortress's medium world (196 tiles of 512 m);
+/// `ForgeParams::default()` (server auto-forge, tests) stays 16 km / 32 m.
+pub const WORLD_SIZES: [(f64, &str); 4] =
+    [(16_000.0, "16 km"), (32_000.0, "32 km"), (64_000.0, "64 km"), (100_352.0, "100 km (DF Medium)")];
+pub const DEFAULT_WORLD_SIZE: usize = 3;
+
+/// The cells Play may forge at (cell, label), the default first. Which are
+/// offered depends on the size: [`offered_cells`].
+pub const WORLD_CELLS: [(f64, &str); 3] = [(16.0, "16 m"), (32.0, "32 m (coarse, fast)"), (8.0, "8 m (slow)")];
+
+/// The Play forge runs inside the game client: no size / cell whose
+/// estimated peak memory is above this is offered or forged.
+pub const MAX_PLAY_FORGE_RAM_BYTES: f64 = 12.0 * 1024.0 * 1024.0 * 1024.0;
+
+/// Indices into [`WORLD_CELLS`] whose forge at `size_m` is estimated within
+/// [`MAX_PLAY_FORGE_RAM_BYTES`] (100 km: 16 m and 32 m, not 8 m).
+pub fn offered_cells(size_m: f64) -> Vec<usize> {
+    (0..WORLD_CELLS.len())
+        .filter(|&i| forge_estimate(size_m, WORLD_CELLS[i].0).peak_ram_bytes <= MAX_PLAY_FORGE_RAM_BYTES)
+        .collect()
+}
+
+/// The most a Play forge may use: [`MAX_PLAY_FORGE_RAM_BYTES`], or half the
+/// machine's memory when that is smaller (`physical` unknown: the cap).
+pub fn play_ram_limit_bytes(physical: Option<f64>) -> f64 {
+    physical.map_or(MAX_PLAY_FORGE_RAM_BYTES, |m| (m / 2.0).min(MAX_PLAY_FORGE_RAM_BYTES))
+}
+
+/// Play's backstop: `Err(status line)` when the forge's estimated peak
+/// memory is over [`play_ram_limit_bytes`].
+pub fn check_play_ram(size_m: f64, cell_m: f64, physical: Option<f64>) -> Result<(), String> {
+    let need = forge_estimate(size_m, cell_m).peak_ram_bytes;
+    let limit = play_ram_limit_bytes(physical);
+    if need <= limit {
+        return Ok(());
+    }
+    let why = if limit < MAX_PLAY_FORGE_RAM_BYTES { "half of this machine's memory" } else { "the forge's memory cap" };
+    Err(format!(
+        "{:.0} km at {cell_m:.0} m needs ≈ {:.0} GB to forge (est.), over {why} ({:.0} GB): pick a coarser World cell or a smaller size.",
+        size_m / 1_000.0,
+        (need / 1.0e9).ceil(),
+        limit / 1.0e9
+    ))
+}
+
+/// `MemTotal` of a /proc/meminfo text, in bytes.
+pub fn parse_meminfo_total(meminfo: &str) -> Option<f64> {
+    let line = meminfo.lines().find(|l| l.starts_with("MemTotal:"))?;
+    let kb: f64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024.0)
+}
+
+/// The machine's physical memory where it can be read without a dependency
+/// (Linux `/proc/meminfo`); `None` elsewhere.
+pub fn physical_memory_bytes() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/meminfo").ok().as_deref().and_then(parse_meminfo_total)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// A panic payload as text (`panic!` with a literal or a format string).
 pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     payload
@@ -264,6 +330,42 @@ mod tests {
         let result = forge_to_file(&tiny(), &path, &cancel, &mut |_| {});
         assert!(matches!(result, Err(ForgeFileError::Failed(_))));
         assert!(!path.exists() && !crate::forged::save_temp_path(&path).exists());
+    }
+
+    #[test]
+    fn no_offered_cell_exceeds_the_ram_cap() {
+        for &(size_m, label) in &WORLD_SIZES {
+            let offered = offered_cells(size_m);
+            assert!(offered.contains(&0), "{label}: the default 16 m cell is offered");
+            for &i in &offered {
+                let ram = forge_estimate(size_m, WORLD_CELLS[i].0).peak_ram_bytes;
+                assert!(ram <= MAX_PLAY_FORGE_RAM_BYTES, "{label} at {}: {ram}", WORLD_CELLS[i].1);
+            }
+        }
+        let cells = |size_m| offered_cells(size_m).iter().map(|&i| WORLD_CELLS[i].0).collect::<Vec<_>>();
+        assert_eq!(cells(32_000.0), [16.0, 32.0, 8.0]);
+        assert_eq!(cells(100_352.0), [16.0, 32.0], "100 km keeps 16 m, loses 8 m");
+    }
+
+    #[test]
+    fn play_refused_above_ram_cap() {
+        let gib = 1024.0 * 1024.0 * 1024.0;
+        assert_eq!(check_play_ram(100_352.0, 16.0, Some(31.0 * gib)), Ok(()));
+        assert_eq!(check_play_ram(100_352.0, 16.0, None), Ok(()), "unknown memory: the cap alone");
+        let over_cap = check_play_ram(100_352.0, 8.0, Some(64.0 * gib)).unwrap_err();
+        assert!(over_cap.contains("GB") && over_cap.contains("8 m"), "{over_cap}");
+        // Half of physical memory is the other limit: 16 m at 100 km on an 8 GiB box.
+        let small_box = check_play_ram(100_352.0, 16.0, Some(8.0 * gib)).unwrap_err();
+        assert!(small_box.contains("memory"), "{small_box}");
+        assert_eq!(check_play_ram(16_000.0, 16.0, Some(8.0 * gib)), Ok(()));
+        assert!(play_ram_limit_bytes(Some(8.0 * gib)) == 4.0 * gib);
+        assert!(play_ram_limit_bytes(None) == MAX_PLAY_FORGE_RAM_BYTES);
+    }
+
+    #[test]
+    fn meminfo_total_parses() {
+        assert_eq!(parse_meminfo_total("MemTotal:       32617140 kB\nMemFree: 1 kB\n"), Some(32_617_140.0 * 1024.0));
+        assert_eq!(parse_meminfo_total("nothing"), None);
     }
 
     #[test]

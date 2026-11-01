@@ -88,17 +88,16 @@ pub const WORLD_CELL_KEY: &str = "world_cell";
 pub const PREVIEW_AUTO: f64 = 0.0;
 pub const PREVIEW_CELLS: [(f64, &str); 5] =
     [(PREVIEW_AUTO, "Auto"), (32.0, "32 m"), (64.0, "64 m"), (128.0, "128 m"), (256.0, "256 m")];
-pub const WORLD_CELLS: [(f64, &str); 3] = [(16.0, "16 m"), (32.0, "32 m (coarse, fast)"), (8.0, "8 m (slow)")];
+/// The world cells; the row offers only those within the forge's memory cap
+/// at the chosen size (`play::offered_cells`).
+pub use worldgen::forge::play::WORLD_CELLS;
 
 /// Land's non-knob row: the world's edge length (`ForgeParams::size_m`) for
 /// the preview and Play forges. The row's labels add the Play forge's
 /// estimated time at the chosen world cell (`forge::play::forge_estimate`).
-/// The default is Dwarf Fortress's medium world (196 tiles of 512 m);
-/// `ForgeParams::default()` (server auto-forge, tests) stays 16 km / 32 m.
+/// The sizes live in `forge::play` (default 100 km, DF's medium world).
 pub const WORLD_SIZE_KEY: &str = "world_size";
-pub const WORLD_SIZES: [(f64, &str); 4] =
-    [(16_000.0, "16 km"), (32_000.0, "32 km"), (64_000.0, "64 km"), (100_352.0, "100 km (DF Medium)")];
-pub const DEFAULT_WORLD_SIZE: usize = 3;
+pub use worldgen::forge::play::{DEFAULT_WORLD_SIZE, WORLD_SIZES};
 
 /// A knob whose range is whole numbers at least this wide slides in steps of 1.
 const WHOLE_STEP_MIN_RANGE: f64 = 10.0;
@@ -308,12 +307,13 @@ impl GeneratorState {
                 self.preview_cell,
                 0,
             ));
+            let offered = play::offered_cells(self.size_m());
             rows.push(choice_row(
                 WORLD_CELL_KEY,
                 "World cell",
-                "Cell size the world is forged at on Play: 32 m takes about a quarter of the time, 8 m four times longer and four times the memory.",
-                &labels(&WORLD_CELLS),
-                self.world_cell,
+                "Cell size the world is forged at on Play: 32 m takes about a quarter of the time, 8 m four times longer and four times the memory (offered only where that fits the forge's memory cap).",
+                &offered.iter().map(|&i| WORLD_CELLS[i].1).collect::<Vec<_>>(),
+                offered.iter().position(|&i| i == self.world_cell).unwrap_or(0),
                 0,
             ));
         }
@@ -434,9 +434,17 @@ impl GeneratorState {
             WORLD_SIZE_KEY => {
                 self.world_size = (value.round().max(0.0) as usize).min(WORLD_SIZES.len() - 1);
                 self.stale = true;
+                // A cell over the memory cap at the new size falls back to the default.
+                if !play::offered_cells(self.size_m()).contains(&self.world_cell) {
+                    self.world_cell = 0;
+                    self.row_updates.push(WORLD_CELL_KEY.to_string());
+                }
             }
             WORLD_CELL_KEY => {
-                self.world_cell = (value.round().max(0.0) as usize).min(WORLD_CELLS.len() - 1);
+                // The row lists only the offered cells: its value indexes them.
+                let offered = play::offered_cells(self.size_m());
+                let pick = (value.round().max(0.0) as usize).min(offered.len().saturating_sub(1));
+                self.world_cell = offered.get(pick).copied().unwrap_or(0);
                 // The size row's labels carry the estimate at this cell.
                 self.rows_dirty = true;
             }
@@ -628,10 +636,17 @@ impl ForgeJob {
         std::thread::Builder::new()
             .name("world-forge".into())
             .spawn(move || {
+                let slug = world_store::slug_for(&root, &name);
+                let staging = world_store::staging_dir(&root, &slug);
                 let end = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    forge_world(&root, &params, name, &flag, &tx)
+                    forge_world(&root, &params, name, slug, &staging, &flag, &tx)
                 }))
-                .unwrap_or_else(|panic| ForgeEvent::Failed(format!("The forge failed: {}", panic_message(panic.as_ref()))));
+                .unwrap_or_else(|panic| {
+                    // A panic after the terrain was written (PNG render,
+                    // finish_staged) must not leave the staged world behind.
+                    let _ = std::fs::remove_dir_all(&staging);
+                    ForgeEvent::Failed(format!("The forge failed: {}", panic_message(panic.as_ref())))
+                });
                 let _ = tx.send(end);
             })
             .expect("spawn the forge thread");
@@ -656,12 +671,19 @@ impl ForgeJob {
     }
 }
 
-fn forge_world(root: &Path, params: &ForgeParams, name: String, cancel: &AtomicBool, tx: &Sender<ForgeEvent>) -> ForgeEvent {
+/// `staging` is `world_store::staging_dir(root, &slug)`.
+fn forge_world(
+    root: &Path,
+    params: &ForgeParams,
+    name: String,
+    slug: String,
+    staging: &Path,
+    cancel: &AtomicBool,
+    tx: &Sender<ForgeEvent>,
+) -> ForgeEvent {
     let started = Instant::now();
     let cancelled = || cancel.load(Ordering::SeqCst);
-    let slug = world_store::slug_for(root, &name);
-    let staging = world_store::staging_dir(root, &slug);
-    let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_dir_all(staging);
     // Removes the staging directory (and so the terrain file) on every way out
     // but success.
     let fail = |end: ForgeEvent| {
@@ -795,6 +817,12 @@ fn apply_generator_actions(
     for action in queued {
         match action {
             GeneratorAction::Play if job.is_none() && state.forging.is_none() => {
+                // Backstop for the offered cells: never start a forge the
+                // machine is not expected to hold.
+                if let Err(why) = play::check_play_ram(state.size_m(), state.world_cell_m(), play::physical_memory_bytes()) {
+                    state.play_error = why;
+                    continue;
+                }
                 let name = if name.trim().is_empty() { default_name(state.seed) } else { name.trim().to_string() };
                 let root = forged::from_repo_root(Path::new(world_store::WORLDS_DIR));
                 let params = state.params(state.world_cell_m());
@@ -1030,6 +1058,19 @@ mod tests {
         assert_eq!(state.preview_cell_m(), 32.0, "the Advanced override wins");
         state.apply(GeneratorAction::Reset(WORLD_SIZE_KEY.into()), "");
         assert_eq!(state.params(16.0).size_m, 100_352.0);
+    }
+
+    #[test]
+    fn world_cell_row_offers_only_cells_within_the_ram_cap() {
+        let mut state = GeneratorState { tab: ADVANCED, ..Default::default() };
+        let cell_row = |s: &GeneratorState| s.rows().into_iter().find(|r| r.key == WORLD_CELL_KEY).unwrap();
+        assert_eq!(cell_row(&state).choices.row_count(), 2, "100 km: 16 m and 32 m, no 8 m");
+        state.apply(GeneratorAction::Knob(WORLD_SIZE_KEY.into(), 1.0), "");
+        assert_eq!(cell_row(&state).choices.row_count(), 3);
+        state.apply(GeneratorAction::Knob(WORLD_CELL_KEY.into(), 2.0), "");
+        assert_eq!(state.world_cell_m(), 8.0);
+        state.apply(GeneratorAction::Knob(WORLD_SIZE_KEY.into(), 3.0), "");
+        assert_eq!(state.world_cell_m(), 16.0, "8 m falls back at 100 km");
     }
 
     #[test]
