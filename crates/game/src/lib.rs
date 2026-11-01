@@ -22,6 +22,7 @@ pub mod camera;
 pub mod debug_render;
 pub mod edit;
 pub mod ground;
+pub mod history;
 pub mod input;
 pub mod lod;
 pub mod lod_builder;
