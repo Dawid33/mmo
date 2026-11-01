@@ -68,13 +68,15 @@ fn main() {
     let reg = game::BlockRegistry::from_ron(manifest).expect("valid block manifest");
     let mats = Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")));
     let coords = RegionCoords { x: region.0, z: region.1 };
-    let (label, columns) = match &world {
-        Some(path) => {
-            let w = worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let forged = world
+        .as_ref()
+        .map(|path| worldgen::forged::ForgedWorld::load(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())));
+    let (label, columns) = match (&world, &forged) {
+        (Some(path), Some(w)) => {
             let stem = path.file_stem().map_or("world".into(), |s| s.to_string_lossy().into_owned());
-            (stem, worldgen::generate_region_forged(&w, coords, mats))
+            (stem, worldgen::generate_region_forged(w, coords, mats))
         }
-        None => ("procedural".to_string(), worldgen::generate_region(coords, seed, mats)),
+        _ => ("procedural".to_string(), worldgen::generate_region(coords, seed, mats)),
     };
     let by_coords: BTreeMap<(usize, usize), &Column> = columns.iter().map(|(c, col)| ((c.x, c.z), col)).collect();
 
@@ -125,6 +127,8 @@ fn main() {
             ROCKS[r].rgb
         } else if id == mats.stone {
             [128, 128, 128]
+        } else if let Some(rgb) = biome_colour(&mats.biome, id) {
+            rgb
         } else {
             [255, 0, 255]
         }
@@ -151,6 +155,18 @@ fn main() {
 
     // Stratum sequence of the centre block column of the slice.
     let u = n / 2;
+    if let Some(w) = &forged {
+        let (bx, bz) = block_xz(u);
+        let (x, z) = ((coords.x * n as i32 + bx as i32) as f64 + 0.5, (coords.z * n as i32 + bz as i32) as f64 + 0.5);
+        let c = w.column_climate(x, z);
+        println!(
+            "centre column biome {} ({:.1} C, snow line {:.0} m); region biomes: {}",
+            c.biome.name(),
+            c.temperature_c,
+            c.snow_line_m,
+            region_biomes(w, coords, n)
+        );
+    }
     let name = |id: BlockId| -> String {
         reg.def(id).map_or_else(|| format!("#{}", id.0), |d| d.name.to_string())
     };
@@ -170,4 +186,38 @@ fn main() {
     if let Some((rid, ry)) = run {
         println!("  {:<14} {ry:>5} {bottom:>5}", name(rid));
     }
+}
+
+/// Colours of the biome cover and ice blocks (`None` for any other block).
+fn biome_colour(b: &worldgen::material::BiomeBlocks, id: BlockId) -> Option<[u8; 3]> {
+    let table = [
+        (b.snow, [244, 246, 250]),
+        (b.ice, [150, 200, 240]),
+        (b.glacier_ice, [96, 214, 214]),
+        (b.mud, [92, 72, 50]),
+        (b.peat, [60, 44, 32]),
+        (b.gravel, [150, 144, 136]),
+        (b.red_sand, [200, 104, 52]),
+        (b.dry_grass, [176, 168, 84]),
+        (b.podzol, [96, 76, 44]),
+        (b.frozen_dirt, [132, 120, 112]),
+        (b.salt, [236, 236, 228]),
+    ];
+    table.iter().find(|(block, _)| *block == id && id != BlockId::AIR).map(|&(_, rgb)| rgb)
+}
+
+/// The dithered biomes of region `coords` (every 8th block column), by share.
+fn region_biomes(w: &worldgen::forged::ForgedWorld, coords: RegionCoords, n: usize) -> String {
+    let mut count: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut total = 0;
+    for bx in (0..n).step_by(8) {
+        for bz in (0..n).step_by(8) {
+            let (x, z) = ((coords.x * n as i32 + bx as i32) as f64 + 0.5, (coords.z * n as i32 + bz as i32) as f64 + 0.5);
+            *count.entry(w.biome_at(x, z).name()).or_default() += 1;
+            total += 1;
+        }
+    }
+    let mut v: Vec<_> = count.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.iter().map(|(name, k)| format!("{name} {:.0}%", 100.0 * *k as f64 / total as f64)).collect::<Vec<_>>().join(", ")
 }

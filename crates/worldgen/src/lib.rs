@@ -29,11 +29,12 @@ pub const WORLD_SEED: u64 = 0x00D5_C0DE_007B;
 use std::collections::BTreeMap;
 
 use game::{
-    Block, BlockId, BlockIndex, ChiselData, Chunk, ChunkBlocks, Column, ColumnCoords, RegionCoords, SubChunk,
+    Biome, Block, BlockId, BlockIndex, ChiselData, Chunk, ChunkBlocks, Column, ColumnCoords, RegionCoords, SubChunk,
     BLOCK_VOXELS, HALF_BLOCK_VOXELS, CHUNK_BLOCKS, CHUNK_BLOCK_COUNT, BRICK_VOXELS, BRICK_VOXEL_COUNT, REGION_CHUNKS,
 };
 
-use crate::material::Materials;
+use crate::forged::ColumnClimate;
+use crate::material::{GroundCover, Materials};
 use crate::pipeline::{ProfileGrid, TerrainPipeline, PROFILE_LATTICE_BLOCKS, SEA_TOP_BLOCK};
 
 // Region span in blocks (the game's dial, as i32 for coordinate math).
@@ -131,23 +132,144 @@ fn surface_is_full(prof: &crate::pipeline::ColumnProfile, surface: i32) -> bool 
     prof.density_at(surface as f64 + FULL_TEST_M) > 0.0
 }
 
-/// World block column `(bx, bz)` of `patch`: its surface block, whether that
-/// block is whole (else a half block) and its water top.
-fn column_sample(patch: &dyn Patch, bx: i32, bz: i32) -> (i32, bool, i32) {
-    let (prof, water_top) = patch.sample(block_center_m(bx), block_center_m(bz));
+/// One block column as generation builds it (`column_sample`).
+#[derive(Clone, Copy)]
+struct ColSample {
+    /// The ground's surface block (soil over rock).
+    s: i32,
+    /// Whether `s` is whole (else a half block).
+    full: bool,
+    /// Topmost water block (`SEA_TOP_BLOCK` where the sea is all there is).
+    water_top: i32,
+    /// Topmost solid block: `s`, or the top of the glacier ice over it.
+    top: i32,
+    /// Lowest water block that is ice; above `water_top` when none is.
+    ice_from: i32,
+    /// Biome ground cover (forged worlds with biome blocks); `None` keeps
+    /// `solid_material` (the procedural world, bit-identical).
+    cover: Option<GroundCover>,
+    /// Whether the cover lets a tree stand on it.
+    trees: bool,
+    /// Whether the profile is a forged (unbounded) one.
+    unbounded: bool,
+}
+
+/// World block column `(bx, bz)` of `patch`.
+fn column_sample(patch: &dyn Patch, mats: &Materials, bx: i32, bz: i32) -> ColSample {
+    point_sample(patch, mats, block_center_m(bx), block_center_m(bz))
+}
+
+/// The column at world metres `(x, z)` of `patch` (a block centre, or a
+/// coarse LOD cell's).
+fn point_sample(patch: &dyn Patch, mats: &Materials, x: f64, z: f64) -> ColSample {
+    let (prof, water_top, lake) = patch.sample(x, z);
     let s = surface_from_profile(&prof);
-    debug_assert!(s >= scan_band(&prof).1, "surface below the scan at block ({bx}, {bz})");
+    debug_assert!(s >= scan_band(&prof).1, "surface below the scan at ({x}, {z})");
     // Under water the surface block is always whole: a half block's empty
     // upper half would be an air pocket.
     let full = surface_is_full(&prof, s) || s <= water_top;
-    (s, full, water_top)
+    let unbounded = prof.is_unbounded();
+    let plain = ColSample { s, full, water_top, top: s, ice_from: water_top + 1, cover: None, trees: true, unbounded };
+    if !mats.biome.enabled() {
+        return plain;
+    }
+    match patch.climate(x, z) {
+        None => plain,
+        Some(c) => biome_column(mats, &c, plain, lake),
+    }
 }
 
-/// The surface a tree may stand on, from a `column_sample`: dry and whole
-/// (a trunk on a half block would hang half a block above it). `None` = no
-/// tree.
-fn tree_ground((s, full, water_top): (i32, bool, i32)) -> Option<i32> {
-    (full && s >= water_top).then_some(s)
+/// Biomes that never carry trees: their cover is not soil (desert sand,
+/// wasteland gravel, badland red sand, marsh mud, frozen tundra, glacier).
+fn treeless(b: Biome) -> bool {
+    matches!(
+        b,
+        Biome::SandDesert | Biome::RockyWasteland | Biome::Badlands | Biome::Marsh | Biome::Tundra | Biome::Glacier
+    )
+}
+
+/// Forest biomes: trees stand on their snow (a boreal forest floor), where
+/// snow elsewhere — alpine meadows, snowy grassland — is treeless.
+fn forest(b: Biome) -> bool {
+    matches!(
+        b,
+        Biome::Taiga
+            | Biome::ConiferForest
+            | Biome::BroadleafForest
+            | Biome::TropicalConiferForest
+            | Biome::TropicalBroadleafForest
+            | Biome::Swamp
+            | Biome::MangroveSwamp
+    )
+}
+
+/// `plain` (a forged column's ground and water) dressed by its climate:
+/// ground cover per biome, snow above the snow line (patches in tundra),
+/// salt flats, glacier ice over dry glacier ground, ice on cold lake and sea
+/// water (`lake` = the water is a lake's; above the sea and not a lake it is
+/// a river, which stays liquid).
+fn biome_column(mats: &Materials, c: &ColumnClimate, plain: ColSample, lake: bool) -> ColSample {
+    let ColSample { s, water_top, .. } = plain;
+    let dry = s >= water_top;
+    let ground_m = (s - SEA_TOP_BLOCK) as f32; // top of block `s`, m above sea
+    let snowy = match c.biome {
+        Biome::Tundra => c.snow_patch,
+        Biome::Glacier => false,
+        _ => ground_m > c.snow_line_m,
+    };
+    let salt_flat = dry && c.salt_flat && !snowy;
+    let cover = if salt_flat { mats.salt_flat() } else { mats.ground_cover(c.biome, snowy, s) };
+    let glacier = if dry { c.glacier_blocks() } else { 0 };
+    let frozen = lake || water_top == SEA_TOP_BLOCK;
+    let ice = if !dry && frozen { c.ice_blocks() } else { 0 };
+    ColSample {
+        // Ice stands on whole blocks only (no air pocket under it).
+        full: plain.full || glacier > 0,
+        top: s + glacier,
+        ice_from: if ice > 0 { (water_top - ice + 1).max(s + 1) } else { water_top + 1 },
+        cover: Some(cover),
+        trees: glacier == 0 && !salt_flat && !treeless(c.biome) && (!snowy || forest(c.biome)),
+        ..plain
+    }
+}
+
+/// Material of the solid block at `by` (at or under `c.top`) of column `c`:
+/// glacier ice over the ground, else the cover (or `solid_material` without
+/// one). `BlockId::AIR` = bare rock: the column's ground-recipe rock.
+fn column_material(mats: &Materials, c: &ColSample, by: i32) -> BlockId {
+    if by > c.s {
+        return mats.biome.glacier_ice;
+    }
+    let depth = c.s - by;
+    let Some(cover) = c.cover else {
+        return solid_material(mats, depth, by, c.s, c.water_top);
+    };
+    if depth <= MAX_SOIL_DEPTH && c.s < c.water_top && c.water_top > SEA_TOP_BLOCK {
+        mats.sand // lake and river beds
+    } else if depth == 0 {
+        cover.surface
+    } else if depth <= cover.soil_depth {
+        cover.soil
+    } else {
+        BlockId::AIR
+    }
+}
+
+/// Deepest soil (blocks) of column `c`: the band reaches below it.
+fn soil_depth(c: &ColSample) -> i32 {
+    c.cover.map_or(MAX_SOIL_DEPTH, |cover| cover.soil_depth.max(MAX_SOIL_DEPTH))
+}
+
+/// The water block at `by` (at or under `c.water_top`): ice from `ice_from` up.
+fn water_material(mats: &Materials, c: &ColSample, by: i32) -> BlockId {
+    if by >= c.ice_from { mats.biome.ice } else { mats.water }
+}
+
+/// The surface a tree may stand on, from a `column_sample`: dry, whole (a
+/// trunk on a half block would hang half a block above it) and a cover that
+/// grows trees. `None` = no tree.
+fn tree_ground(c: ColSample) -> Option<i32> {
+    (c.full && c.s >= c.water_top && c.trees).then_some(c.s)
 }
 
 /// Where trees come from: the habitat and the placement seed.
@@ -206,10 +328,17 @@ fn in_region(coords: RegionCoords, x: i32, z: i32) -> bool {
 /// The terrain of one region- or LOD-tile-sized window, whatever it comes
 /// from: the noise pipeline, or a forged world file (`forged.rs`).
 pub(crate) trait Patch {
-    /// Column profile at world meters (x, z), and the topmost WATER block of
-    /// that column: `SEA_TOP_BLOCK` everywhere in a procedural world, higher
-    /// over a forged world's lakes and rivers.
-    fn sample(&self, x: f64, z: f64) -> (crate::pipeline::ColumnProfile, i32);
+    /// Column profile at world meters (x, z), the topmost WATER block of
+    /// that column — `SEA_TOP_BLOCK` everywhere in a procedural world, higher
+    /// over a forged world's lakes and rivers — and whether that water is a
+    /// lake's.
+    fn sample(&self, x: f64, z: f64) -> (crate::pipeline::ColumnProfile, i32, bool);
+
+    /// The climate behind the ground cover at world meters (x, z): `None` in
+    /// the procedural world, which keeps `material_at`.
+    fn climate(&self, _x: f64, _z: f64) -> Option<ColumnClimate> {
+        None
+    }
 
     /// Stratigraphic offset (blocks) at world meters (x, z): the ground
     /// recipe reads rock at block Y `y` from `strata` at `s = y - geo`.
@@ -224,6 +353,14 @@ pub(crate) trait Patch {
     }
 }
 
+/// The rock of `strata` (top-down) at block Y `y` of a column with
+/// stratigraphic offset `geo`: `game::ColumnGround::block_at`'s rule without
+/// bedrock (coarse LOD shows bare rock with it).
+fn strata_rock(strata: &[(i16, BlockId)], geo: i16, y: i32) -> BlockId {
+    let s = y - i32::from(geo);
+    strata.iter().rev().find(|(top, _)| i32::from(*top) > s).or(strata.first()).map_or(BlockId::AIR, |&(_, id)| id)
+}
+
 /// The formations of `strata` (top-down) that `s` in `lo_s..=hi_s` can hit
 /// under `ColumnGround::block_at`'s rule, plus one more above and below.
 fn footprint_strata(strata: &[(i16, BlockId)], lo_s: i32, hi_s: i32) -> Vec<(i16, BlockId)> {
@@ -236,8 +373,8 @@ fn footprint_strata(strata: &[(i16, BlockId)], lo_s: i32, hi_s: i32) -> Vec<(i16
 struct ProceduralPatch(ProfileGrid);
 
 impl Patch for ProceduralPatch {
-    fn sample(&self, x: f64, z: f64) -> (crate::pipeline::ColumnProfile, i32) {
-        (self.0.profile_at(x, z), SEA_TOP_BLOCK)
+    fn sample(&self, x: f64, z: f64) -> (crate::pipeline::ColumnProfile, i32, bool) {
+        (self.0.profile_at(x, z), SEA_TOP_BLOCK, false)
     }
 }
 
@@ -391,10 +528,10 @@ fn columns_from_patch(
     let (wx, wz) = (coords.x * REGION_BLOCKS + xs.start as i32 * cb, coords.z * REGION_BLOCKS + zs.start as i32 * cb);
     let (ww, wd) = (xs.len() as i32 * cb, zs.len() as i32 * cb);
     let (nx, nz) = ((ww + 2 * ring) as usize, (wd + 2 * ring) as usize);
-    let mut samples = vec![(0i32, true, 0i32); nx * nz];
+    let mut samples = Vec::with_capacity(nx * nz);
     for i in 0..nx {
         for j in 0..nz {
-            samples[i * nz + j] = column_sample(patch, wx + i as i32 - ring, wz + j as i32 - ring);
+            samples.push(column_sample(patch, &mats, wx + i as i32 - ring, wz + j as i32 - ring));
         }
     }
     let at = |bx: i32, bz: i32| samples[(bx + ring) as usize * nz + (bz + ring) as usize];
@@ -434,16 +571,18 @@ fn columns_from_patch(
             let mut lo = i32::MAX;
             let mut hi = i32::MIN;
             let mut open_lo = i32::MAX;
+            let mut soil_max = MAX_SOIL_DEPTH;
             for lx in 0..cb {
                 for lz in 0..cb {
-                    let (s, _, water_top) = at(fx + lx, fz + lz);
-                    lo = lo.min(s);
-                    hi = hi.max(s.max(water_top)); // include the water column up to its surface
+                    let c = at(fx + lx, fz + lz);
+                    lo = lo.min(c.s);
+                    hi = hi.max(c.top.max(c.water_top)); // include the water column up to its surface
+                    soil_max = soil_max.max(soil_depth(&c));
                     // Cliff rule: the lowest block a face neighbour leaves open
                     // (its half block's empty upper half included).
                     for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        let (ns, nfull, _) = at(fx + lx + dx, fz + lz + dz);
-                        open_lo = open_lo.min(if nfull { ns + 1 } else { ns });
+                        let n = at(fx + lx + dx, fz + lz + dz);
+                        open_lo = open_lo.min(if n.full { n.top + 1 } else { n.top });
                     }
                 }
             }
@@ -452,7 +591,7 @@ fn columns_from_patch(
             // Extend the band bottom past the shallowest surface in the footprint
             // so the deepest soil (dirt/sand) of the lowest column is still
             // materialized, and down to every open neighbour block.
-            lo = (lo - MAX_SOIL_DEPTH).min(open_lo);
+            lo = (lo - soil_max).min(open_lo);
 
             // Materialize whole sub-chunks [base_sub_y ..= top_sub_y]; below is
             // the ground recipe, above air. Whole blocks, and a half-block
@@ -470,7 +609,9 @@ fn columns_from_patch(
             for lx in 0..CHUNK_BLOCKS {
                 for lz in 0..CHUNK_BLOCKS {
                     let (bx, bz) = (fx + lx as i32, fz + lz as i32);
-                    surface[lx * CHUNK_BLOCKS + lz] = at(bx, bz).0 as i16;
+                    // The visible top: a glacier's ice counts as ground
+                    // (digging, implied ground and pathing see the ice top).
+                    surface[lx * CHUNK_BLOCKS + lz] = at(bx, bz).top as i16;
                     geo[lx * CHUNK_BLOCKS + lz] = patch.geo(block_center_m(wx + bx), block_center_m(wz + bz));
                 }
             }
@@ -490,27 +631,33 @@ fn columns_from_patch(
 
             for lx in 0..CHUNK_BLOCKS {
                 for lz in 0..CHUNK_BLOCKS {
-                    let (surface, full, water_top) = at(fx + lx as i32, fz + lz as i32);
+                    let c = at(fx + lx as i32, fz + lz as i32);
+                    let soil = soil_depth(&c);
                     for by in base_sub_y * cb..=hi {
                         let sub_i = (by.div_euclid(cb) - base_sub_y) as usize;
                         let local_by = by.rem_euclid(cb) as usize;
                         let bi = BlockIndex::from_xyz(lx, local_by, lz);
                         let (blocks, chisel) = &mut chunks[sub_i];
-                        let depth = surface - by;
-                        if depth > MAX_SOIL_DEPTH {
+                        let depth = c.s - by;
+                        if depth > soil {
                             // Below the soil: the recipe's rock (or bedrock).
                             blocks[bi.linear()] = ground.block_at(lx, lz, by);
-                        } else if by <= surface {
-                            // Solid: whole blocks, topped by a whole or half block.
-                            let mat = solid_material(&mats, depth, by, surface, water_top);
-                            blocks[bi.linear()] = Block::new(mat);
-                            if by == surface && !full {
+                        } else if by <= c.top {
+                            // Solid: whole blocks, topped by a whole or half
+                            // block; bare rock is the recipe's.
+                            let block = match column_material(&mats, &c, by) {
+                                BlockId::AIR => ground.block_at(lx, lz, by),
+                                mat => Block::new(mat),
+                            };
+                            blocks[bi.linear()] = block;
+                            if by == c.s && !c.full {
                                 let top = [BLOCK_VOXELS, HALF_BLOCK_VOXELS, BLOCK_VOXELS];
-                                chisel.insert(bi, ChiselData::cuboid(mat, [0, 0, 0], top));
+                                chisel.insert(bi, ChiselData::cuboid(block.id, [0, 0, 0], top));
                             }
-                        } else if by <= water_top {
-                            // Above ground, below the water surface -> water.
-                            blocks[bi.linear()] = Block::new(mats.water);
+                        } else if by <= c.water_top {
+                            // Above ground, below the water surface -> water
+                            // (its top frozen where it is cold).
+                            blocks[bi.linear()] = Block::new(water_material(&mats, &c, by));
                         }
                         // else: air (the grid starts all air).
                     }
@@ -518,8 +665,8 @@ fn columns_from_patch(
             }
             // Trees, into the air above the ground and any water only.
             for (lx, lz, by, placed) in col_trees {
-                let (surface, _, water_top) = at(fx + lx as i32, fz + lz as i32);
-                if by <= surface || by <= water_top {
+                let c = at(fx + lx as i32, fz + lz as i32);
+                if by <= c.top || by <= c.water_top {
                     continue;
                 }
                 let bi = BlockIndex::from_xyz(lx, by.rem_euclid(cb) as usize, lz);
@@ -640,28 +787,33 @@ fn coarse_from_patch(
 
     let (ox, oz, _) = coarse_window(key);
 
-    // (surface block, water top, unbounded) of cell column (cx, cz), sampled
-    // at its centre; cell columns just outside the key are sampled too.
-    let cell_sample = |cx: i32, cz: i32| {
-        let mx = (ox + cx * cb) as f64 + cb as f64 * 0.5;
-        let mz = (oz + cz * cb) as f64 + cb as f64 * 0.5;
-        let (prof, water_top) = patch.sample(mx, mz);
-        (surface_from_profile(&prof), water_top, prof.is_unbounded())
+    // Centre (world metres) of cell column (cx, cz).
+    let centre = |cx: i32, cz: i32| {
+        ((ox + cx * cb) as f64 + cb as f64 * 0.5, (oz + cz * cb) as f64 + cb as f64 * 0.5)
     };
-    let samples: Vec<(i32, i32, bool)> =
+    // The column of cell column (cx, cz), sampled at its centre (with
+    // whether it is unbounded); cell columns just outside the key are
+    // sampled too.
+    let cell_sample = |cx: i32, cz: i32| {
+        let (mx, mz) = centre(cx, cz);
+        point_sample(patch, &mats, mx, mz)
+    };
+    let samples: Vec<ColSample> =
         (0..cells).flat_map(|cz| (0..cells).map(move |cx| (cx, cz))).map(|(cx, cz)| cell_sample(cx, cz)).collect();
     let surface_of = |cx: i32, cz: i32| {
         if (0..cells).contains(&cx) && (0..cells).contains(&cz) {
-            samples[(cz * cells + cx) as usize].0
+            samples[(cz * cells + cx) as usize].top
         } else {
-            cell_sample(cx, cz).0
+            cell_sample(cx, cz).top
         }
     };
+    let strata = patch.strata(&mats);
 
     let mut grids: std::collections::BTreeMap<[i32; 3], Vec<Voxel>> = Default::default();
     for cz in 0..cells {
         for cx in 0..cells {
-            let (surface, water_top, unbounded) = samples[(cz * cells + cx) as usize];
+            let c = samples[(cz * cells + cx) as usize];
+            let (surface, water_top, unbounded) = (c.s, c.water_top, c.unbounded);
 
             // Under the soil band; a forged column also reaches down to its
             // lowest face neighbour's surface, so a steep face (forged
@@ -674,8 +826,8 @@ fn coarse_from_patch(
                 }
             }
             let solid_lo = solid_lo_block.div_euclid(cb);
-            let solid_hi = surface.div_euclid(cb);
-            let top_cell = surface.max(water_top).div_euclid(cb);
+            let solid_hi = c.top.div_euclid(cb);
+            let top_cell = c.top.max(water_top).div_euclid(cb);
             for cy in solid_lo..=top_cell {
                 let is_solid = cy <= solid_hi;
                 // Water only where the cell's bottom block is at/below the surface.
@@ -685,10 +837,17 @@ fn coarse_from_patch(
                 let mat = if is_solid {
                     // The cell's topmost block of terrain — what shows from
                     // above, matching `game::lod::merge_group`.
-                    let top = surface.min(cy * cb + cb - 1);
-                    solid_material(&mats, surface - top, top, surface, water_top)
+                    let top = c.top.min(cy * cb + cb - 1);
+                    match column_material(&mats, &c, top) {
+                        BlockId::AIR => {
+                            let (mx, mz) = centre(cx, cz);
+                            strata_rock(&strata, patch.geo(mx, mz), top)
+                        }
+                        mat => mat,
+                    }
                 } else {
-                    mats.water
+                    // Likewise the cell's topmost water block.
+                    water_material(&mats, &c, water_top.min(cy * cb + cb - 1))
                 };
                 let group = [cx.div_euclid(G), cy.div_euclid(G), cz.div_euclid(G)];
                 let (lx, ly, lz) = ((cx % G) as usize, cy.rem_euclid(G) as usize, (cz % G) as usize);
@@ -710,7 +869,7 @@ fn coarse_from_patch(
                 (ox - m..ox + span_blocks + m).contains(&x) && (oz - m..oz + span_blocks + m).contains(&z),
                 "tree placement read the surface at ({x}, {z}), outside the coarse patch"
             );
-            *memo.borrow_mut().entry((x, z)).or_insert_with(|| tree_ground(column_sample(patch, x, z)))
+            *memo.borrow_mut().entry((x, z)).or_insert_with(|| tree_ground(column_sample(patch, &mats, x, z)))
         };
         let memo_habitat = MemoHabitat { inner: trees_from.habitat, memo: Default::default() };
         let (x1, z1) = (ox + span_blocks, oz + span_blocks);
@@ -766,6 +925,7 @@ mod tests {
             bedrock: game::BlockId(6),
             rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
             trees: crate::material::TreeBlocks::NONE,
+            biome: crate::material::BiomeBlocks::NONE,
         }
     }
 

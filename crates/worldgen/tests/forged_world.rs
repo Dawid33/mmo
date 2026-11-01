@@ -573,3 +573,362 @@ fn coarse_lod_steep_face_has_no_gaps() {
     assert!(steep > 100, "the flank must be steep enough to open gaps: {steep} of {checked} steep cells");
     assert!(top(n / 2, n / 2) > 320, "the flank stands above the old band top");
 }
+
+// ---- Biomes at walking scale (ground cover, dithered borders, ice) ----
+
+/// Real block ids, biome blocks on.
+fn biome_mats() -> worldgen::material::Materials {
+    let manifest = include_str!("../../../assets/blocks/blocks.ron");
+    let reg = game::BlockRegistry::from_ron(manifest).expect("valid manifest");
+    worldgen::material::Materials::from_names(|n| reg.id_of(n).unwrap_or_else(|| panic!("missing block {n}")))
+}
+
+/// Ground of the two-biome world (m above sea).
+const TWO_BIOME_GROUND_M: f32 = 20.0;
+/// The desert / glacier border, artifact metres (x).
+const BORDER_AX: f64 = 512.0;
+/// Glacier temperature (deg C): -20 gives 20 blocks of glacier ice and 4 of lake ice.
+const GLACIER_T: f32 = -20.0;
+/// A frozen lake in the glacier half (artifact cells), level 1 m under the ground.
+const FROZEN_LAKE_CELLS: (std::ops::Range<usize>, std::ops::Range<usize>) = (42..52, 8..20);
+const FROZEN_LAKE_LEVEL: f32 = 19.0;
+/// East of this cell column the glacier half is sea (against the east sea edge).
+const EAST_SEA_FROM: usize = 60;
+
+/// A 1 km world: a hot sand desert west of `BORDER_AX`, a glacier east of it
+/// holding a frozen lake, a frozen sea strip along the east (sea) edge.
+fn two_biome_world() -> ForgedWorld {
+    let mut a = synthetic();
+    a.rivers.clear();
+    let (mut height, mut temp, mut precip, mut drainage) = (vec![0f32; N * N], vec![0f32; N * N], vec![0f32; N * N], vec![0u8; N * N]);
+    let mut lake_cells = Vec::new();
+    for iz in 0..N {
+        for ix in 0..N {
+            let i = iz * N + ix;
+            let desert = ((ix as f64 + 0.5) * CELL_M) < BORDER_AX;
+            height[i] = if ix >= EAST_SEA_FROM { -6.0 } else { TWO_BIOME_GROUND_M };
+            (temp[i], precip[i], drainage[i]) = if desert { (25.0, 100.0, 20) } else { (GLACIER_T, 300.0, 50) };
+            if FROZEN_LAKE_CELLS.0.contains(&ix) && FROZEN_LAKE_CELLS.1.contains(&iz) {
+                height[i] = 10.0;
+                lake_cells.push((i as u32, 1));
+            }
+        }
+    }
+    a.height = QRaster::fit(&height, HEIGHT_STEP_M);
+    a.temperature_c = QRaster::fit(&temp, worldgen::forged::TEMPERATURE_STEP_C);
+    a.precip_mm = QRaster::fit(&precip, worldgen::forged::PRECIP_STEP_MM);
+    a.drainage = drainage;
+    a.lakes = vec![worldgen::forged::Lake {
+        level: FROZEN_LAKE_LEVEL,
+        area_m2: 120.0 * 256.0,
+        max_depth: 9.0,
+        outlet: [672.0, 128.0],
+        cells: lake_cells,
+    }];
+    ForgedWorld::new(a.with_regions())
+}
+
+/// Region (test size, 64 blocks) holding artifact point `(ax, az)`.
+fn region_at(ax: f64, az: f64) -> RegionCoords {
+    let (x, z) = engine(ax, az);
+    let rb = game::REGION_BLOCKS as f64;
+    RegionCoords::new((x / rb).floor() as i32, (z / rb).floor() as i32)
+}
+
+/// Block at world block Y `y` of block column `(lx, lz)` (band or recipe).
+fn block_at_y(col: &Column, lx: usize, lz: usize, y: i32) -> BlockId {
+    block_in(col, lx, lz, y)
+}
+
+#[test]
+fn two_biome_world_classifies_as_desert_and_glacier() {
+    let world = two_biome_world();
+    let (dx, dz) = engine(200.0, 600.0);
+    let (gx, gz) = engine(800.0, 600.0);
+    assert_eq!(world.biome_cell(dx, dz), Biome::SandDesert, "{:?}", world.cell_climate(dx, dz));
+    assert_eq!(world.biome_cell(gx, gz), Biome::Glacier, "{:?}", world.cell_climate(gx, gz));
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn desert_region_surface_is_sand() {
+    let world = two_biome_world();
+    let m = biome_mats();
+    let columns = worldgen::generate_region_forged(&world, region_at(200.0, 600.0), m);
+    let per = game::CHUNK_BLOCKS;
+    let mut checked = 0;
+    for (_, col) in &columns {
+        let ground = col.ground().unwrap();
+        for lx in 0..per {
+            for lz in 0..per {
+                let s = i32::from(ground.surface[lx * per + lz]);
+                for d in 0..6 {
+                    assert_eq!(block_at_y(col, lx, lz, s - d), m.sand, "desert sand {d} below the surface {s}");
+                }
+                assert_eq!(block_at_y(col, lx, lz, s + 1), BlockId::AIR);
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, (game::REGION_BLOCKS * game::REGION_BLOCKS) as usize);
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn glacier_region_has_ice_over_rock() {
+    let world = two_biome_world();
+    let m = biome_mats();
+    let columns = worldgen::generate_region_forged(&world, region_at(800.0, 600.0), m);
+    let per = game::CHUNK_BLOCKS;
+    let thickness = (-GLACIER_T).round() as i32;
+    let ground_top = SEA_TOP_BLOCK + TWO_BIOME_GROUND_M as i32;
+    for (_, col) in &columns {
+        let ground = col.ground().unwrap();
+        for lx in 0..per {
+            for lz in 0..per {
+                // The recipe's surface is the visible top: the ice.
+                let top = i32::from(ground.surface[lx * per + lz]);
+                assert_eq!(block_at_y(col, lx, lz, top + 1), BlockId::AIR, "surface {top} is the top");
+                let mut ice = 0;
+                while block_at_y(col, lx, lz, top - ice) == m.biome.glacier_ice {
+                    ice += 1;
+                }
+                assert_eq!(ice, thickness, "glacier ice at ({lx}, {lz}), top {top}");
+                // Straight onto rock (no soil, no snow), and on the plain's ground.
+                let rock = block_at_y(col, lx, lz, top - ice);
+                assert!(m.rocks.contains(&rock), "rock under the ice: {rock:?}");
+                assert!((top - ice - ground_top).abs() <= 2, "ground {} vs plain {ground_top}", top - ice);
+                // Digging down through the ice reaches rock long before bedrock.
+                for y in top - ice - 10..top - ice {
+                    assert!(m.rocks.contains(&block_at_y(col, lx, lz, y)), "rock at y {y} under a glacier");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn frozen_lake_has_ice_on_top() {
+    let world = two_biome_world();
+    let m = biome_mats();
+    let rc = region_at(752.0, 224.0);
+    let columns = worldgen::generate_region_forged(&world, rc, m);
+    let level_top = SEA_TOP_BLOCK + FROZEN_LAKE_LEVEL as i32; // topmost water block
+    let ice_blocks = 4; // clamp(round(20 / 4), 1, 4)
+    let per = game::CHUNK_BLOCKS;
+    let mut frozen = 0;
+    for (_, col) in &columns {
+        for lx in 0..per {
+            for lz in 0..per {
+                if block_at_y(col, lx, lz, level_top) != m.biome.ice {
+                    continue;
+                }
+                frozen += 1;
+                assert_eq!(block_at_y(col, lx, lz, level_top + 1), BlockId::AIR, "ice is the lake's top");
+                for y in level_top - ice_blocks + 1..=level_top {
+                    assert_eq!(block_at_y(col, lx, lz, y), m.biome.ice, "ice at y {y}");
+                }
+                assert_eq!(block_at_y(col, lx, lz, level_top - ice_blocks), m.water, "water under the ice");
+            }
+        }
+    }
+    assert_eq!(frozen, (game::REGION_BLOCKS * game::REGION_BLOCKS) as usize, "the whole region is frozen lake");
+}
+
+#[test]
+fn biome_border_is_dithered_not_straight() {
+    let world = two_biome_world();
+    let dither = worldgen::forged::BIOME_DITHER_M;
+    assert_eq!(dither, 24.0);
+    let (mut west_other, mut east_other, mut west, mut east) = (0, 0, 0, 0);
+    let mut crossings = std::collections::BTreeSet::new();
+    for k in 0..600 {
+        let az = 200.0 + k as f64;
+        // Where the border falls on this row (first glacier column from the west).
+        let mut first_glacier = None;
+        for d in 0..2 * dither as i32 {
+            let ax = BORDER_AX - dither + d as f64 + 0.5;
+            let (x, z) = engine(ax, az);
+            let b = world.biome_at(x, z);
+            assert!(matches!(b, Biome::SandDesert | Biome::Glacier), "{b:?}");
+            if ax < BORDER_AX {
+                west += 1;
+                west_other += (b == Biome::Glacier) as usize;
+            } else {
+                east += 1;
+                east_other += (b == Biome::SandDesert) as usize;
+            }
+            if b == Biome::Glacier && first_glacier.is_none() {
+                first_glacier = Some(d);
+            }
+        }
+        crossings.insert(first_glacier);
+    }
+    let (w, e) = (west_other as f64 / west as f64, east_other as f64 / east as f64);
+    println!("other biome within {dither} m: west {w:.3}, east {e:.3}; {} border positions", crossings.len());
+    assert!(w >= 0.2 && e >= 0.2, "dithered on both sides: west {w:.3}, east {e:.3}");
+    assert!(crossings.len() > 10, "the border wanders: {crossings:?}");
+    // Deterministic and thread-independent: a pure function of the point.
+    let (x, z) = engine(BORDER_AX + 3.5, 333.5);
+    assert_eq!(world.biome_at(x, z), world.biome_at(x, z));
+    // Far from any border the nearest cell's biome stands.
+    let (dx, dz) = engine(200.0, 600.0);
+    assert_eq!(world.biome_at(dx, dz), Biome::SandDesert);
+}
+
+#[test]
+fn snow_line_follows_temperature() {
+    let world = two_biome_world();
+    // Warm desert: far above the ground; glacier at -20 C: below the ground.
+    let (dx, dz) = engine(200.0, 600.0);
+    let (gx, gz) = engine(800.0, 600.0);
+    let lapse = worldgen::forge::Knobs::default().lapse_c_per_km / 1000.0;
+    let want_desert = TWO_BIOME_GROUND_M + (25.0 - worldgen::forged::SNOW_LINE_C) / lapse as f32;
+    assert!((world.snow_line_m(dx, dz) - want_desert).abs() < 1.0, "{} vs {want_desert}", world.snow_line_m(dx, dz));
+    assert!(world.snow_line_m(gx, gz) < TWO_BIOME_GROUND_M);
+}
+
+/// A frozen sea reaching the map's sea edge freezes past it too: the same
+/// flat ice top on both sides, in regions and in coarse LOD.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn frozen_sea_continues_past_the_sea_edge_without_a_step() {
+    let world = two_biome_world();
+    let m = biome_mats();
+    let rc = region_at(N as f64 * CELL_M, 600.0); // straddles the east (sea) edge
+    let tops = tops(&worldgen::generate_region_forged(&world, rc, m));
+    // `tops` reports (top, is water): every column here is sea with ice on top.
+    assert!(tops.values().all(|&(top, water)| top == SEA_TOP_BLOCK && !water), "flat ice at the sea top");
+    let key = game::lod::LodKey::for_region(16, rc);
+    let mut per_column: std::collections::BTreeMap<(i32, i32), (i32, BlockId)> = Default::default();
+    for cell in worldgen::coarse_tile_forged(&world, &key, m) {
+        for (k, v) in cell.grid.iter().enumerate() {
+            if v.block == BlockId::AIR {
+                continue;
+            }
+            let (lx, ly, lz) = ((k % 32) as i32, ((k / 32) % 32) as i32, (k / (32 * 32)) as i32);
+            let col = (cell.group[0] * 32 + lx, cell.group[2] * 32 + lz);
+            let y = cell.group[1] * 32 + ly;
+            let e = per_column.entry(col).or_insert((y, v.block));
+            if y > e.0 {
+                *e = (y, v.block);
+            }
+        }
+    }
+    assert_eq!(per_column.len(), (game::REGION_BLOCKS * game::REGION_BLOCKS) as usize);
+    assert!(per_column.values().all(|&(y, b)| y == SEA_TOP_BLOCK && b == m.biome.ice), "LOD: flat sea ice across the edge");
+}
+
+/// A flat 20 m world of one climate, no water but the sea past its edges.
+fn one_climate_world(temperature_c: f32, precip_mm: f32, drainage: u8) -> ForgedWorld {
+    let mut a = synthetic();
+    a.rivers.clear();
+    a.lakes.clear();
+    a.height = QRaster::fit(&vec![TWO_BIOME_GROUND_M; N * N], HEIGHT_STEP_M);
+    a.temperature_c = QRaster::fit(&vec![temperature_c; N * N], worldgen::forged::TEMPERATURE_STEP_C);
+    a.precip_mm = QRaster::fit(&vec![precip_mm; N * N], worldgen::forged::PRECIP_STEP_MM);
+    a.drainage = vec![drainage; N * N];
+    ForgedWorld::new(a.with_regions())
+}
+
+/// Tree blocks (any block carrying a tree id) in the spawn region.
+fn tree_blocks(world: &ForgedWorld) -> usize {
+    let columns = worldgen::generate_region_forged(world, RegionCoords::new(0, 0), biome_mats());
+    columns
+        .iter()
+        .flat_map(|(_, col)| col.sub_chunks().iter())
+        .filter_map(|sub| match sub {
+            game::SubChunk::Dense(c) => Some(c.blocks.iter().filter(|(_, b)| b.tree_id() != 0).count()),
+            game::SubChunk::Air => None,
+        })
+        .sum()
+}
+
+/// Trees grow on soil only: a marsh (mud) stays treeless
+/// where the same rain on drained ground (shrubland) grows trees.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn trees_keep_off_mud_and_snow() {
+    let (x, z) = engine(SPAWN[0], SPAWN[1]);
+    let shrubland = one_climate_world(12.0, 700.0, 60);
+    assert_eq!(shrubland.biome_cell(x, z), Biome::Shrubland);
+    let marsh = one_climate_world(12.0, 700.0, 20);
+    assert_eq!(marsh.biome_cell(x, z), Biome::Marsh);
+    let (with, without) = (tree_blocks(&shrubland), tree_blocks(&marsh));
+    println!("tree blocks: shrubland {with}, marsh {without}");
+    assert!(with > 0, "the shrubland control grows trees");
+    assert_eq!(without, 0, "no trees on marsh mud");
+    // Snow over alpine-cold grassland: no trees either; a snowy boreal
+    // forest floor keeps its trees.
+    let snowy_grass = one_climate_world(-3.0, 350.0, 60);
+    assert_eq!(snowy_grass.biome_cell(x, z), Biome::Grassland);
+    assert!(snowy_grass.snow_line_m(x, z) < TWO_BIOME_GROUND_M);
+    assert_eq!(tree_blocks(&snowy_grass), 0, "no trees on snow-covered grassland");
+}
+
+/// The glacier's dithered edge (region (0, 0) straddles the desert / glacier
+/// border): ice stands on ground (nothing floats), the band's deep solids are
+/// the recipe's, and no open block faces implied ground — ice cliffs
+/// included.
+#[test]
+#[ignore = "slow: >100ms — run via just test-full"]
+fn glacier_edge_is_grounded_and_closed() {
+    let world = two_biome_world();
+    let m = biome_mats();
+    let rc = region_at(BORDER_AX, 600.0);
+    assert_eq!(rc, RegionCoords::new(0, 0));
+    let cols = worldgen::generate_region_forged(&world, rc, m);
+    let cb = game::CHUNK_BLOCKS as i32;
+    let by_coords: std::collections::BTreeMap<(i32, i32), &Column> =
+        cols.iter().map(|(c, col)| ((c.x as i32, c.z as i32), col)).collect();
+    let block = |x: i32, y: i32, z: i32| -> Option<(BlockId, bool)> {
+        let col = by_coords.get(&(x.div_euclid(cb), z.div_euclid(cb)))?;
+        let (lx, lz) = (x.rem_euclid(cb) as usize, z.rem_euclid(cb) as usize);
+        let g = col.ground().unwrap();
+        Some(if g.is_implied(y.div_euclid(cb)) { (g.block_at(lx, lz, y).id, true) } else { (block_in(col, lx, lz, y), false) })
+    };
+    let (mut ice_columns, mut bare, mut glacier_tops) = (0, 0, std::collections::BTreeSet::new());
+    for (c, col) in &cols {
+        let g = col.ground().unwrap();
+        for lx in 0..cb {
+            for lz in 0..cb {
+                let (x, z) = (c.x as i32 * cb + lx, c.z as i32 * cb + lz);
+                let top = i32::from(g.surface[(lx * cb + lz) as usize]);
+                assert_eq!(block(x, top + 1, z).unwrap().0, BlockId::AIR, "({x}, {z}) top {top}");
+                let mut y = top;
+                while block(x, y, z).unwrap().0 == m.biome.glacier_ice {
+                    y -= 1;
+                }
+                if y < top {
+                    ice_columns += 1;
+                    glacier_tops.insert(top - y);
+                    let under = block(x, y, z).unwrap().0;
+                    assert!(m.rocks.contains(&under), "glacier ice at ({x}, {z}) stands on {under:?}");
+                } else {
+                    bare += 1;
+                }
+                // Band solids under the soil agree with the recipe.
+                let ground = y;
+                for y in (ground - 30)..(ground - 8) {
+                    let (id, implied) = block(x, y, z).unwrap();
+                    if !implied {
+                        assert_eq!(id, g.block_at(lx as usize, lz as usize, y).id, "band vs recipe at ({x}, {y}, {z})");
+                    }
+                }
+                // Open blocks (air above the top, down to the lowest
+                // neighbour's top) never face an implied chunk.
+                for y in top + 1..top + 45 {
+                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        if let Some((_, implied)) = block(x + dx, y, z + dz) {
+                            assert!(!implied, "air at ({x}, {y}, {z}) faces implied ground");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!("glacier edge: {ice_columns} ice columns ({} thicknesses {:?}), {bare} desert", glacier_tops.len(), glacier_tops);
+    assert!(ice_columns > 500 && bare > 500, "the region holds both sides of the border");
+    assert!(glacier_tops.len() > 5, "the glacier thins towards its edge");
+}

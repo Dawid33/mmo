@@ -24,6 +24,7 @@ fn main() {
         bedrock: game::BlockId(6),
         rocks: [7, 8, 9, 10, 11, 12].map(game::BlockId),
         trees: worldgen::material::TreeBlocks::NONE,
+        biome: worldgen::material::BiomeBlocks::NONE,
     };
     let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
 

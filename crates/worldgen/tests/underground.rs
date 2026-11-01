@@ -29,6 +29,7 @@ fn mats() -> worldgen::material::Materials {
         bedrock: BEDROCK,
         rocks: [7, 8, 9, 10, 11, 12].map(BlockId),
         trees: worldgen::material::TreeBlocks::NONE,
+        biome: worldgen::material::BiomeBlocks::NONE,
     }
 }
 

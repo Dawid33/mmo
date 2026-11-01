@@ -91,6 +91,38 @@ const BUCKET_M: f64 = 64.0;
 /// of generation.
 const PATCH_CELL_M: f64 = 8.0;
 
+/// Biome borders at block scale (DF's "pick a neighbouring tile"): each block
+/// column takes the biome of the raster cell nearest to its point displaced
+/// by up to this many metres on each axis, so borders are irregular rather
+/// than stepped along cell edges or blurred.
+pub const BIOME_DITHER_M: f64 = 24.0;
+/// The displacement noise: two octaves, first wavelength 2^5 = 32 m.
+const BIOME_DITHER_FIRST_OCTAVE: i32 = -5;
+/// Gain on the displacement noise (standard deviation ~0.5) before it is
+/// clamped to +-1: most displacements reach well into the 24 m band.
+const BIOME_DITHER_GAIN: f64 = 3.0;
+/// The snow line is the height where the mean annual temperature reaches
+/// this (deg C): ground above it is snow-covered.
+pub const SNOW_LINE_C: f32 = -2.0;
+/// Lake and sea ice: one whole block per this many degrees of mean
+/// temperature below 0 C, `1..=ICE_MAX_BLOCKS` blocks.
+pub const ICE_C_PER_BLOCK: f32 = 4.0;
+pub const ICE_MAX_BLOCKS: i32 = 4;
+/// Glacier ice above the ground: one block per degree below 0 C, clamped to
+/// `GLACIER_MIN_BLOCKS..=GLACIER_MAX_BLOCKS`, thinning towards the glacier's
+/// edge with the share of glacier cells around the point (no ice cliffs at
+/// full height along every dithered border).
+pub const GLACIER_MIN_BLOCKS: i32 = 4;
+pub const GLACIER_MAX_BLOCKS: i32 = 40;
+/// Tundra snow patches: a noise of this first octave (32 m) above
+/// `TUNDRA_SNOW_PATCH_MIN` is snow.
+const TUNDRA_SNOW_FIRST_OCTAVE: i32 = -5;
+pub const TUNDRA_SNOW_PATCH_MIN: f64 = 0.25;
+/// Salt flats: dry ground at least this salty (forge salinity, 0..100) and
+/// farther than `habitat::SALT_REACH_M` from the sea — the salt of a closed
+/// lake, not sea spray.
+pub const SALT_FLAT_MIN_SALINITY: f64 = 40.0;
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct RiverPoint {
     /// Artifact meters.
@@ -523,6 +555,50 @@ pub struct ForgedWorld {
     /// Lake water per cell as sorted, non-overlapping `(start, end, level)`
     /// runs of raster indices (`end` exclusive), from `artifact.lakes`.
     lake_runs: Vec<(u32, u32, f32)>,
+    /// Biome border displacement noise, x and z (`BIOME_DITHER_M`).
+    dither: [OctaveNoise; 2],
+    /// Tundra snow patches.
+    snow_patch: OctaveNoise,
+    /// Cooling per metre of height (deg C / m): the forge's default lapse
+    /// (the world file does not store the knob it was forged with).
+    lapse_c_per_m: f64,
+}
+
+/// What a forged block column's ground cover, snow and ice come from
+/// (`ForgedWorld::column_climate`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColumnClimate {
+    /// The dithered biome (`ForgedWorld::biome_at`).
+    pub biome: Biome,
+    /// Snow line, m above sea (`ForgedWorld::snow_line_m`).
+    pub snow_line_m: f32,
+    /// Mean annual temperature at the point (deg C).
+    pub temperature_c: f32,
+    /// Share (0..1) of glacier cells around the point, bilinear.
+    pub glacier_share: f32,
+    /// Dry ground here is a salt flat (`SALT_FLAT_MIN_SALINITY`).
+    pub salt_flat: bool,
+    /// A tundra snow patch.
+    pub snow_patch: bool,
+}
+
+impl ColumnClimate {
+    /// Blocks of ice on lake or sea water here (0 = liquid).
+    pub fn ice_blocks(&self) -> i32 {
+        if self.temperature_c >= 0.0 {
+            return 0;
+        }
+        ((-self.temperature_c / ICE_C_PER_BLOCK).round() as i32).clamp(1, ICE_MAX_BLOCKS)
+    }
+
+    /// Blocks of glacier ice over dry ground here (0 = none).
+    pub fn glacier_blocks(&self) -> i32 {
+        if self.biome != Biome::Glacier {
+            return 0;
+        }
+        let full = (-self.temperature_c).round().clamp(GLACIER_MIN_BLOCKS as f32, GLACIER_MAX_BLOCKS as f32);
+        ((full * self.glacier_share).round() as i32).max(1)
+    }
 }
 
 /// What stands at one point of a forged world (engine world y, meters).
@@ -597,7 +673,26 @@ impl ForgedWorld {
             .flat_map(|lake| lake.cells.iter().map(move |&(start, len)| (start, start + len, lake.level)))
             .collect();
         lake_runs.sort_by_key(|run| run.0);
-        ForgedWorld { artifact, content_crc, segments, buckets, buckets_per_side, detail, height, coast_dist_m, lake_runs }
+        let dither = [
+            OctaveNoise::new(artifact.seed ^ 0xB10E_D17A, BIOME_DITHER_FIRST_OCTAVE, vec![1.0, 1.0]),
+            OctaveNoise::new(artifact.seed ^ 0xB10E_D17B, BIOME_DITHER_FIRST_OCTAVE, vec![1.0, 1.0]),
+        ];
+        let snow_patch = OctaveNoise::new(artifact.seed ^ 0x5_0B47, TUNDRA_SNOW_FIRST_OCTAVE, vec![1.0, 0.6]);
+        let lapse_c_per_m = crate::forge::Knobs::default().lapse_c_per_km / 1000.0;
+        ForgedWorld {
+            artifact,
+            content_crc,
+            segments,
+            buckets,
+            buckets_per_side,
+            detail,
+            height,
+            coast_dist_m,
+            lake_runs,
+            dither,
+            snow_patch,
+            lapse_c_per_m,
+        }
     }
 
     pub fn artifact(&self) -> &WorldArtifact {
@@ -748,6 +843,76 @@ impl ForgedWorld {
         Biome::from_u8(b).expect("validated biome raster")
     }
 
+    /// Bilinear interpolation (artifact metres, cell-centre lattice,
+    /// edge-clamped) of `f` over raster cell indices.
+    fn bilinear_cells(&self, ax: f64, az: f64, f: impl Fn(usize) -> f64) -> f64 {
+        let a = &self.artifact;
+        let n = i64::from(a.n);
+        let at = |ix: i64, iz: i64| f((iz.clamp(0, n - 1) * n + ix.clamp(0, n - 1)) as usize);
+        let (u, v) = (ax / a.cell_m - 0.5, az / a.cell_m - 0.5);
+        let (iu, iv) = (u.floor(), v.floor());
+        let (tu, tv) = (u - iu, v - iv);
+        let (iu, iv) = (iu as i64, iv as i64);
+        let row = |iz: i64| at(iu, iz) + tu * (at(iu + 1, iz) - at(iu, iz));
+        row(iv) + tv * (row(iv + 1) - row(iv))
+    }
+
+    /// The point a block column reads its biome at: engine metres `(x, z)`
+    /// displaced by up to `BIOME_DITHER_M` on each axis.
+    fn dithered(&self, x_m: f64, z_m: f64) -> (f64, f64) {
+        let d = |k: usize| BIOME_DITHER_M * (BIOME_DITHER_GAIN * self.dither[k].sample2(x_m, z_m)).clamp(-1.0, 1.0);
+        (x_m + d(0), z_m + d(1))
+    }
+
+    /// The biome of the block column at engine metres `(x, z)`: the stored
+    /// biome of the cell nearest the dithered point (`BIOME_DITHER_M`), so
+    /// borders between biomes are irregular at block scale. A pure function
+    /// of the point.
+    pub fn biome_at(&self, x_m: f64, z_m: f64) -> Biome {
+        let (x, z) = self.dithered(x_m, z_m);
+        self.biome_cell(x, z)
+    }
+
+    /// Snow line (m above sea) at engine metres `(x, z)`: the height where
+    /// the mean annual temperature reaches `SNOW_LINE_C`, from each cell's
+    /// stored temperature and ground (the sea's at 0) and the forge's lapse,
+    /// bilinear between cells.
+    pub fn snow_line_m(&self, x_m: f64, z_m: f64) -> f32 {
+        let (ax, az) = self.to_artifact(x_m, z_m);
+        let a = &self.artifact;
+        let line = |i: usize| {
+            let ground = f64::from(self.height[i]).max(0.0);
+            ground + f64::from(a.temperature_c.get(i) - SNOW_LINE_C) / self.lapse_c_per_m
+        };
+        self.bilinear_cells(ax, az, line) as f32
+    }
+
+    /// Everything a block column's ground cover, snow and ice depend on, at
+    /// engine metres `(x, z)` (edge-clamped past the map).
+    pub fn column_climate(&self, x_m: f64, z_m: f64) -> ColumnClimate {
+        let (dx, dz) = self.dithered(x_m, z_m);
+        let biome = self.biome_cell(dx, dz); // = biome_at(x_m, z_m)
+        let (ax, az) = self.to_artifact(x_m, z_m);
+        let a = &self.artifact;
+        let temperature_c = self.bilinear(&a.temperature_c, ax, az) as f32;
+        let glacier = Biome::Glacier as u8;
+        let glacier_share = self.bilinear_cells(ax, az, |i| f64::from(u8::from(a.biome[i] == glacier))) as f32;
+        let salt_flat = {
+            let (dax, daz) = self.to_artifact(dx, dz);
+            self.bilinear_cells(dax, daz, |i| f64::from(a.salinity[i])) >= SALT_FLAT_MIN_SALINITY
+                && self.bilinear(self.coast_dist_m(), ax, az) > f64::from(crate::habitat::SALT_REACH_M)
+        };
+        let snow_patch = biome == Biome::Tundra && self.snow_patch.sample2(x_m, z_m) > TUNDRA_SNOW_PATCH_MIN;
+        ColumnClimate {
+            biome,
+            snow_line_m: self.snow_line_m(x_m, z_m),
+            temperature_c,
+            glacier_share,
+            salt_flat,
+            snow_patch,
+        }
+    }
+
     /// Where artifact point `(ax, az)` lies: inside, past a land edge (the
     /// point clamped onto the map's border, whose ground continues outward),
     /// or past a sea edge. A point past two edges (a corner) is sea if
@@ -839,7 +1004,8 @@ impl ForgedWorld {
     /// Water features applied to an already-interpolated ground height `g`
     /// (meters relative to sea; artifact coordinates). `segments` are the
     /// candidates near this point.
-    fn refine(&self, ax: f64, az: f64, mut g: f64, segments: &[u32], lakes: bool) -> (f64, Option<f64>) {
+    /// The third value says whether the water is a lake's (else a river's).
+    fn refine(&self, ax: f64, az: f64, mut g: f64, segments: &[u32], lakes: bool) -> (f64, Option<f64>, bool) {
         // Water surfaces sit on whole blocks (sea level is one), so every
         // level is snapped BEFORE banks are measured against it: a bank built
         // to the raw level could end up under a surface that rounded up.
@@ -862,6 +1028,8 @@ impl ForgedWorld {
                 }
             }
         }
+
+        let lake = water.is_some();
 
         // Rivers: nearest centerline decides. Inside the channel the bed is
         // cut below the water surface; a levee ring outside it stands above
@@ -902,7 +1070,8 @@ impl ForgedWorld {
             }
         }
         // Water at or below the sea is just the sea.
-        (g, water.filter(|&w| w > 0.0))
+        let water = water.filter(|&w| w > 0.0);
+        (g, water, lake && water.is_some())
     }
 
     fn bucket_segments(&self, ax: f64, az: f64) -> &[u32] {
@@ -921,7 +1090,7 @@ impl ForgedWorld {
         if self.place(ax, az) != Place::Inside {
             return PointSample { ground_y: SEA_LEVEL + self.ground(ax, az), water_y: None };
         }
-        let (g, water) = self.refine(ax, az, self.ground(ax, az), self.bucket_segments(ax, az), true);
+        let (g, water, _) = self.refine(ax, az, self.ground(ax, az), self.bucket_segments(ax, az), true);
         PointSample { ground_y: SEA_LEVEL + g, water_y: water.map(|w| SEA_LEVEL + w) }
     }
 
@@ -1015,12 +1184,16 @@ impl crate::Patch for ForgedPatch<'_> {
         self.world.strata_blocks(mats)
     }
 
-    fn sample(&self, x: f64, z: f64) -> (ColumnProfile, i32) {
+    fn climate(&self, x: f64, z: f64) -> Option<ColumnClimate> {
+        Some(self.world.column_climate(x, z))
+    }
+
+    fn sample(&self, x: f64, z: f64) -> (ColumnProfile, i32, bool) {
         let prof = self.grid.profile_at(x, z);
         let (ax, az) = self.world.to_artifact(x, z);
         if self.world.place(ax, az) != Place::Inside {
             // No rivers or lakes off the map: they stop at its edge.
-            return (ColumnProfile::from_surface(prof.surface_y()), SEA_TOP_BLOCK);
+            return (ColumnProfile::from_surface(prof.surface_y()), SEA_TOP_BLOCK, false);
         }
         let segments: &[u32] = if self.cells.is_empty() {
             &[]
@@ -1030,11 +1203,11 @@ impl crate::Patch for ForgedPatch<'_> {
             };
             &self.cells[cell(az, self.origin.1) * self.cells_per_side + cell(ax, self.origin.0)]
         };
-        let (g, water) = self.world.refine(ax, az, prof.surface_y() - SEA_LEVEL, segments, self.lakes);
+        let (g, water, lake) = self.world.refine(ax, az, prof.surface_y() - SEA_LEVEL, segments, self.lakes);
         // `refine` snapped the surface to a whole block: the topmost water
         // block is the one just under it.
         let water_top = water.map_or(SEA_TOP_BLOCK, |w| ((SEA_LEVEL + w) as i32 - 1).max(SEA_TOP_BLOCK));
-        (ColumnProfile::from_surface(SEA_LEVEL + g), water_top)
+        (ColumnProfile::from_surface(SEA_LEVEL + g), water_top, lake)
     }
 }
 
