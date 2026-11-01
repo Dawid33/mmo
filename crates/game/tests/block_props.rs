@@ -306,3 +306,42 @@ fn edit_ray_hits_and_breaks_a_leaf() {
     }
     assert_eq!(leaf_count(&r), 2, "the ray hit exactly one leaf and broke it");
 }
+
+/// Biome ground, ice and the new tree species (ids 22+): every name resolves
+/// and every texture file the manifest names exists on disk.
+#[test]
+fn manifest_has_biome_blocks() {
+    let reg = registry();
+    let mut names: Vec<String> = [
+        "snow", "ice", "glacier_ice", "mud", "peat", "gravel", "red_sand", "dry_grass", "podzol",
+        "frozen_dirt", "salt", "cactus",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    for sp in ["spruce", "acacia", "palm", "jungle"] {
+        for part in ["log", "branch", "leaves"] {
+            names.push(format!("{sp}_{part}"));
+        }
+    }
+    let props = reg.props();
+    for n in &names {
+        let id = reg.id_of(n).unwrap_or_else(|| panic!("{n} missing"));
+        assert_ne!(id, BlockId(0), "{n} is air");
+        if n.ends_with("_leaves") {
+            assert!(!props.is_solid(id) && props.is_cutout(id), "{n}");
+        } else {
+            assert!(props.is_solid(id), "{n}");
+        }
+    }
+    // Every texture file named in the manifest exists.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/blocks");
+    let mut files = 0;
+    for tok in MANIFEST.split('"').skip(1).step_by(2) {
+        if tok.ends_with(".png") {
+            assert!(dir.join(tok).is_file(), "texture {tok} missing");
+            files += 1;
+        }
+    }
+    assert!(files > 30);
+}
